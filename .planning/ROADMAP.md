@@ -1896,14 +1896,34 @@ Plans:
 
 ### Phase 164.5.1.4: SYNCCURSOR — the sync cursor is per-KEY while stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies trade window (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** Stop a partial fan-out in `cron_sync` from permanently stranding the trade window of the strategies whose `sync_trades` RPC failed, by persisting the per-strategy breakdown the code already computes and reading it back when the fetch window is chosen — while `should_advance_cursor` and the key-level `api_keys.last_sync_at` write stay byte-identical.
+
+⛔ **PRE-EXISTING AND DELIBERATE — never report this as a regression.** `_sync_single_key` stores per STRATEGY (one RPC per linked id) but resumes from a cursor held per KEY. On a key backing N strategies where one RPC succeeds and another raises, `synced_count > 0` holds, the cursor advances, and the failed strategy's window is never seen again. Phase 164.5.1.2 neither introduced nor widened it; its D-03 fix is a different cause and stands.
+
+⛔ **NOT fixable by tweaking the key-level gate.** Holding the whole key's cursor on any partial failure starves the SUCCEEDING strategies into permanent re-fetch — the symmetric defect, and exactly why C-0198 chose to advance. Both candidate existing homes were MEASURED and rejected: `api_keys.last_fetched_trade_timestamp` (migration 045) is per-KEY, which is the granularity that causes this defect; `advance_sync_cursor` is per-KEY and fenced to a job — right mechanism, wrong axis. No per-strategy sync state exists anywhere in the schema, so the remedy is new state keyed on `strategy_id` alone.
+
+⭐ **This phase is the gate in front of Phase 164.5.1.3 SYNCADMIT**, which is queued immediately behind it. If this phase ships only a partial remedy it must say plainly that SYNCADMIT stays blocked rather than letting the next phase discover it.
+
+**Requirements**: TODOS entry `SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01` (the whole entry; this phase is its named owner) + seven phase-local success criteria, derived from `164.5.1.4-CONTEXT.md` because no `REQUIREMENTS.md` entry exists for a defect-fix phase inserted directly into the roadmap:
+
+- **SYNCCURSOR-C1** — a recorded verdict on whether the per-KEY cursor is replaced, supplemented, or deliberately kept, with evidence.
+- **SYNCCURSOR-C2** — a calibrated gate proving a partial fan-out no longer strands, pinning the CONSEQUENCE (the next tick's fetch window) and not the implementation's own formula: neuter → observe RED → restore → `cmp` byte-identical → record the OBSERVED failure text. ⛔ Anti-vacuity blocks here; this is data integrity.
+- **SYNCCURSOR-C3** — all three `TestC0198CursorOnlyAdvancesWhenStored` members pass with their bodies unchanged.
+- **SYNCCURSOR-C4** — the recompute-enqueue stranding path is covered, on its own injected failure axis. The advance condition is NOT a per-strategy mirror of the key-level formula: a strategy advances only when the tick was idle, or when it stored AND its `derive_broker_dailies` enqueue did not fail — computed AFTER both loops.
+- **SYNCCURSOR-C5** — `SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01` ends ACCURATE: closed by making the claim TRUE, or re-scoped with a named owner. ⛔ Never a false closure.
+- **SYNCCURSOR-C6** — nothing widens a ceiling, relaxes a floor, or adds an exemption.
+- **SYNCCURSOR-C7** — a stated verdict on whether Phase 164.5.1.3 SYNCADMIT is unblocked, and on what measured evidence.
+
+⛔ **OUT of scope, by CONTEXT decision:** harmonising the two sync-cursor disciplines (`job_worker`'s fenced advance vs `cron.py`'s direct write) — named deliberately and NOT absorbed; admitting `private` to `ALLOWED_STRATEGY_STATUSES` (that is 164.5.1.3, blocked on this); `enqueue_ledger_composite_refresh`.
 **Depends on:** Phase 164.5.1
-**Plans:** 0 plans
+**Plans:** 4/4 plans complete
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.5.1.4 to break down)
+- [x] 164.5.1.4-01-PLAN.md — wave 1 · the migration: a `strategy_sync_cursors` table keyed on `strategy_id` alone (no `api_key_id`, which is mutable and `ON DELETE SET NULL`), deny-all RLS on the `compute_jobs` precedent rather than a column on the publicly-readable `strategies`, and a catalog-only self-verify block — proven by applying it TWICE on the disposable pg-lane cluster. Records the two shape decisions the brief left open: the RLS form, and why no dedicated `supabase/tests/*.sql` gate.
+- [x] 164.5.1.4-02-PLAN.md — wave 2 · **TRACER** · the per-strategy resume path end to end, table to fetch window, gated by a TWO-TICK test that reads the `since_ms` the next tick actually asks the venue for, with a control proving the window does advance on full success. ⭐ A held strategy's PRE-TICK resume point is PERSISTED, and absent-row is told from present-NULL by membership — without both, the fix is inert on the first failure, because the failed strategy would fall back to the key cursor that just advanced past it. Calibrated by neutering the marker READ while leaving the WRITE intact.
+- [x] 164.5.1.4-03-PLAN.md — wave 3 · criterion 4 on its own failure axis (the enqueue RPC raises while BOTH storage RPCs succeed), calibrated by deleting the recompute conjunct and recording that plan 02's gate stayed green; the shared `cron_sync` mock helper extended to SERVE the marker table, so the production wiring stops being green-and-unexercised behind its own fail-open branch; a named `strategy_cursors_held` signal for the accepted, precedented fetch-window growth; and the three measured pieces of stale prose corrected.
+- [x] 164.5.1.4-04-PLAN.md — wave 4 · the closure: `SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01` disposed of accurately with its own stale migration-045 question answered rather than left open, both verdicts recorded (C1, and C7 with the condition that decides it — the fix is inert until the migration has APPLIED to PROD, because both new Supabase paths fail open), a mechanical check that no floor, ceiling, waiver or baseline moved, and the three-reviewer handoff in front of the merge.
 
 ### Phase 164.5.1.3: SYNCADMIT — admit the owner-only status to the trade-sync constant, or prove it must not be: 5 of 5 private keys are never synced and their trades are never stored (INSERTED)
 

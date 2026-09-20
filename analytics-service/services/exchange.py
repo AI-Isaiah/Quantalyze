@@ -1917,6 +1917,33 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     "exc_class=%s scrubbed=%s",
                     type(exc).__name__, scrub_freeform_string(str(exc)),
                 )
+                # 164.5.1.4 SYNCCURSOR round-2 WR-01 — STAMP THE DQ FLAG HERE,
+                # BECAUSE THE OUTER HANDLER NEVER RUNS FOR THIS BRANCH.
+                #
+                # The comment above says "the outer handler already covers
+                # propagated errors". Nothing propagates: this handler swallows
+                # everything except `RateLimitExceeded`, so `fetch_daily_pnl`
+                # returns `[]` with NO `daily_pnl_fetch_error` set. MEASURED
+                # against the real function, one venue-level NetworkError each:
+                #
+                #     okx      rows=0 daily_pnl_fetch_error=True
+                #     binance  rows=0 daily_pnl_fetch_error=True
+                #     bybit    rows=0 daily_pnl_fetch_error=False
+                #
+                # ⛔ WHY IT IS A DATA-INTEGRITY DEFECT AND NOT A LOGGING ONE.
+                # The cron sync reads this flag as `fetch_degraded`. On Bybit a
+                # 502 therefore presents as "the venue genuinely had nothing":
+                # `fetch_degraded` is False, `not trades` is True, and EVERY
+                # held per-strategy marker on that key advances to now — the
+                # same permanent loss of the outstanding window the marker
+                # exists to preserve, arriving by another road, on a venue the
+                # cron path syncs.
+                #
+                # ⚠️ `_LAST_DQ_FLAGS` is reset at this function's entry seam, so
+                # stamping here cannot leak into another caller's view.
+                # `RateLimitExceeded` keeps re-raising above, unchanged, so the
+                # `_stamp_429` path is untouched.
+                _record_dq_flag("daily_pnl_fetch_error", True)
 
     except Exception as e:
         # NEW-C13-07: stamp a DQ flag before returning the partial series.

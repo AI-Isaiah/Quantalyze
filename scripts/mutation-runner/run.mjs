@@ -890,7 +890,36 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //                FAILS; FILES_FLOOR=46 (the stale-low direction) gives
 //                `RATCHET STALE: 47 of 74 gate files are now annotated but
 //                FILES_FLOOR is still 46` and FAILS; FILES_FLOOR=47 PASSES.
-export const FILES_FLOOR = 47;
+// ⚠️ CURRENCY 2026-09-19 (Phase 164.5.1.4 SYNCCURSOR, review WR-05): 47 -> 48.
+//                ONE new annotated gate,
+//                supabase/tests/test_strategy_sync_cursors_rls.sql — the
+//                behavioural RLS gate over public.strategy_sync_cursors (nine
+//                arms: SEED 1, GRANT 1, RLS 1-2, POLICY 1-4, RESTORE 1; see that
+//                file's own header). The paired ARMS_FLOOR move (402 -> 411) is
+//                in the block below.
+//                ⛔ THIS ENTRY IS SEPARATED ON THE FAST VITEST RE-DERIVATION
+//                ONLY, not on a full-corpus lane run — the gate's own
+//                calibration (`9/9 RED (identity ok)`, `biting: 9`,
+//                `lane-invocations: 9`, restore leg exit 0, `No defects`) was
+//                measured by the plan that ADDED the file, and this edit only
+//                absorbs it into the ratchet. Said plainly rather than implied,
+//                because every entry above this one cites a lane run and a
+//                reader would otherwise assume one here too.
+//                MEASURED over `scanCorpus` at this commit: `filesTotal 75`,
+//                `annotated 48`, `totalAnchored 411`, `waivers 0`; and
+//                `--parse-only` exits 0 with `✅ No static defects`.
+//                SEPARATED in both directions on
+//                `src/__tests__/mutation-runner-floors.test.ts`'s fast
+//                re-derivation (no lane needed — that test statically re-scans
+//                the corpus): FILES_FLOOR=49 gives `REGRESSION: 48 of 75 gate
+//                files are annotated, below the pinned floor of 49. Annotations
+//                were removed.` and FAILS; FILES_FLOOR=47 (the stale-low
+//                direction, i.e. this constant's PRE-EDIT value) gives `RATCHET
+//                STALE: 48 of 75 gate files are now annotated but FILES_FLOOR is
+//                still 47. Raise FILES_FLOOR in scripts/mutation-runner/run.mjs
+//                to 48.` and FAILS; FILES_FLOOR=48 PASSES. WAIVED_CEILING stays
+//                0 (0 waivers, corpus-wide).
+export const FILES_FLOOR = 48;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -1976,7 +2005,59 @@ export const FILES_FLOOR = 47;
 //                value) gives `✅ No defects` and exit 0, with
 //                arms/biting/lane-invocations all reading 402. WAIVED_CEILING
 //                stays 0 (0 waivers, corpus-wide).
-export const ARMS_FLOOR = 402;
+// ⚠️ CURRENCY 2026-09-19 (Phase 164.5.1.4 SYNCCURSOR, review WR-05 +
+//                round 2): 402 -> 412. TEN new arms, all in ONE NEW annotated
+//                gate, supabase/tests/test_strategy_sync_cursors_rls.sql --
+//                SEED 1 (the cursor row the other arms observe), GRANT 1 (the
+//                migration's REVOKE deleted), RLS 1 and RLS 2 (the only two
+//                `sql`-step arms: `DISABLE ROW LEVEL SECURITY` on the lane, and
+//                the deny-all policy re-created `FOR SELECT` instead of
+//                `FOR ALL`), POLICY 1-4 (the SAME deny-all qualifier opened from
+//                four different observation points -- `USING (false)` ->
+//                `USING (true)` for 1-3 and `WITH CHECK (false)` ->
+//                `WITH CHECK (true)` for 4), POLICY 4 PRECONDITION (the positive
+//                control proving POLICY 4 observes the POLICY and not a missing
+//                GRANT) and RESTORE 1 (the gate's own trailing REVOKE deleted).
+//                FILES_FLOOR DOES move with it, 47 -> 48, and the denominator
+//                74 -> 75 -- see the block above. That is the difference from the
+//                2026-09-18 plan-02 entry directly above, which added arms to a
+//                file already in the set.
+//                ⛔ THIS ENTRY SHIPPED INVERTED AND THE CORRECTION IS THE POINT.
+//                It was written at 9 arms / 411 by `41e45047`, and `4919f892`
+//                then added the POLICY 4 precondition arm and bumped 411 -> 412
+//                WITHOUT touching this comment. The result asserted that
+//                ARMS_FLOOR=412 FAILS and 411 PASSES -- the exact inverse of the
+//                shipped constant -- so a reader trusting it would have LOWERED
+//                the floor to 411. Lowering a floor is the one move this repo's
+//                C6 rule forbids outright, and the prose beside the constant was
+//                pointing at it. `[164.7-CITATION-DRIFT-01]`, recurring inside
+//                the ratchet file itself.
+//                ⛔ SO: NO CENSUS IS RESTATED HERE ANY MORE. A twin count, an
+//                apply-step count and a needle count are RUN OUTPUTS that move
+//                whenever any gate changes, and a number written beside the
+//                constant it describes has now drifted from it twice. Re-derive
+//                instead -- `src/__tests__/mutation-runner-floors.test.ts` prints
+//                the corpus census on every run, and its failure text names the
+//                value to raise the floor TO. The constant below is the only
+//                authority in this file.
+//                ⚠️ SEPARATION was taken on that fast vitest re-derivation,
+//                NOT on a full-corpus lane run, which is a weaker reading than
+//                the entry above it. The arms were calibrated ON A LANE by the
+//                plan that added the file (restore leg exit 0); this edit
+//                absorbs that measurement into the ratchet rather than re-taking
+//                it. WAIVED_CEILING stays 0.
+// ⚠️ CURRENCY 2026-09-20 (same phase, round 3): 412 -> 413. ONE further arm in
+//                the same gate file: arm "0", the applied-ness gate. The gate
+//                briefly shipped a `RAISE NOTICE 'SKIP:'; RETURN;` there, CI's
+//                anti-skip arm refused it, and the revert to the house form
+//                (RAISE EXCEPTION on the absent object) created a new SECTION
+//                that mutation-annotation-parser.test.ts correctly flagged as
+//                carrying no twin — an assertion never proven able to fail.
+//                The twin is a `sql` DROP step, not a migration edit, because
+//                the migration's own self-verify would abort on a renamed
+//                CREATE and the gate would never run. Re-derived over the
+//                corpus: 413 twins across 48 annotated files of 75, 0 waivers.
+export const ARMS_FLOOR = 413;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

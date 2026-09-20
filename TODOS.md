@@ -3698,7 +3698,7 @@ relying on the stale comment.
 `enqueue_poll_positions_for_all_strategies`'s migration is genuinely touched for another reason
 — never as a standalone migration.
 
-### SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01 — the resume cursor is per-KEY but stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies (booked 2026-09-19)
+### SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01 — the resume cursor is per-KEY but stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies (booked 2026-09-19) — ✅ CLOSED IN CODE 2026-09-19 by Phase 164.5.1.4 SYNCCURSOR; ⚠️ NOT live in production until its migration applies there
 
 **MEASURED at `ed1b7d92`, by two independent reviewers during Phase 164.5.1.2's review round and
 confirmed by the orchestrator tracing the code.** `analytics-service/routers/cron.py::_sync_single_key`
@@ -3725,20 +3725,89 @@ advance from the SUCCEEDING strategy's side and never names the cost to the fail
 
 ⛔ **NOT fixable by tweaking `should_advance_cursor`.** Holding the whole key's cursor on any partial
 failure would starve the SUCCEEDING strategies into permanent re-fetch — the symmetric defect, and
-exactly why C-0198 chose to advance. The remedy is a per-strategy resume marker. ⚠️ Migration `045`
-already added a `last_fetched_trade_timestamp` partial-success checkpoint that
-`parse_since_ms(preferred=...)` reads — establish whether that is the intended home before designing
-anything new.
+exactly why C-0198 chose to advance. The remedy is a per-strategy resume marker.
+✅ **CONFIRMED BY CONSTRUCTION rather than merely inherited:** Phase 164.5.1.4 shipped the remedy
+BESIDE that expression and left the expression alone. MEASURED at that phase's head against
+`origin/main`: `should_advance_cursor = (not trades) or synced_count > 0` is byte-identical, and
+**0** removed lines in the whole branch diff of `cron.py` touch `should_advance_cursor`,
+`synced_count` or the `api_keys` UPDATE payload.
 
-**TRIGGER — the condition that says this entry has come due:** Phase 164.5.1.3 SYNCADMIT admitting the
-owner-only status into `ALLOWED_STRATEGY_STATUSES`. Today the five `private` production keys carry
-`strategy_ids == []` every tick, so the fan-out loop never runs and this path is UNREACHABLE on them.
-The moment that constant widens, those keys begin fanning out to multiple strategies and this path
-goes LIVE on precisely the keys the whole 164.5.1.x line was opened to protect.
-✅ **Destination: Phase 164.5.1.4 SYNCCURSOR** — booked into the ROADMAP 2026-09-19 (`99314336`),
-derived as the next free sibling under 164.5.1, renumbering nothing. Owner: that phase.
-⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
-(founder rule 2026-09-08).
+✅ **ANSWERED — migration `045`'s `last_fetched_trade_timestamp` is NOT the home. This question is
+closed, not open.** MEASURED during the phase's discussion: `045` is an
+`ALTER TABLE api_keys ADD COLUMN`, so the checkpoint it adds is **per-KEY** — the very granularity
+that causes this defect. It splits the checkpoint by PURPOSE (fetched vs stored), never by STRATEGY,
+so re-using it would reproduce this bug in a second column. The same answer disposes of the fenced
+`advance_sync_cursor` RPC: its first parameter is `p_api_key_id`, so it is the right MECHANISM
+(monotonic, claim-token fenced) on the WRONG AXIS. Both findings are carried in the shipped
+migration's own header so they survive outside this file. ⛔ Do not re-run this search.
+
+✅ **CLOSED IN CODE 2026-09-19 — Phase 164.5.1.4 SYNCCURSOR.** Each part below is supported by that
+phase's plan SUMMARYs and its `164.5.1.4-CALIBRATION.md`:
+
+- **`strategy_sync_cursors`** — a new per-STRATEGY resume table: `strategy_id` as the WHOLE primary
+  key, `ON DELETE CASCADE` to `strategies`, nullable `last_sync_at`, writer-set `updated_at`,
+  deny-all RLS plus `REVOKE ALL ... FROM PUBLIC, anon, authenticated`, a `GRANT ALL ... TO
+  service_role` (BYPASSRLS is a ROW-level exemption and confers no object-level privilege, so
+  without the GRANT the sole writer cannot reach the table at all), and an 8-arm catalog-only
+  self-verify that runs on every apply.
+- **A MEMBERSHIP-based read.** `_strategy_resume_point` resolves a strategy's resume point by
+  `strategy_id in strategy_cursors`, never by `.get()` — a lookup returning `None` collapses "no row,
+  fall back to the key cursor" into "re-fetch from the start of history", a different behaviour.
+  `_resume_floor_ms` takes the EARLIEST resume point across a key's eligible strategies, because one
+  `fetch_all_trades` call serves the whole key.
+- **A marker write for EVERY strategy in the fan-out, held or advancing**, placed as the LAST write
+  in `_sync_single_key`. The advance condition is
+  `((not trades) and not fetch_degraded) or (stored > 0 and sid not in recompute_enqueue_errors)`.
+  The `recompute_enqueue_errors` conjunct stops a strategy whose trades stored but whose
+  `derive_broker_dailies` enqueue raised from advancing past the window whose recompute never fired.
+  ⚠️ The `not fetch_degraded` conjunct was added in round 2 (WR-01) and is equally load-bearing:
+  without it a CRASHED venue fetch returns no trades and therefore reads as an IDLE tick, which
+  clears a hold that should have been kept. It is calibrated — removing the single
+  `_record_dq_flag("daily_pnl_fetch_error", True)` stamp from Bybit's inner handler in
+  `services/exchange.py` reds two arms in `tests/test_cron_router.py`.
+- **Two calibrated gates, each neutered and observed RED before being trusted.**
+  `TestSyncCursorPerStrategyResume` pins the `since_ms` the NEXT tick asks the venue for (neuter: the
+  marker READ, with the WRITE left fully intact), and
+  `test_failed_recompute_enqueue_holds_that_strategys_marker` pins the recompute conjunct on its own
+  failure axis (neuter: that conjunct alone). Recorded either way: under the second neuter the first
+  gate's tests stayed GREEN, so the two measure different things rather than one riding on the other.
+- **The accepted cost is surfaced, not deferred:** `strategy_cursors_held` in the per-key envelope
+  plus one warning per key naming the consequence — the fetch is per-KEY while the marker is
+  per-STRATEGY, so a persistently-held strategy pins the whole key's window and the re-fetched range
+  grows every tick until the hold clears.
+  ⛔ **THIS BULLET USED TO END "the re-fetch is idempotent, so this is an efficiency cost and not a
+  loss", AND THAT UNDERSTATEMENT WAS ITSELF THE BUG** — `cron.py`'s own WR-04 block says so in those
+  words. The growth is UNBOUNDED, and `_sync_key_with_timeout` cancels the key at
+  `KEY_SYNC_TIMEOUT`, so an unclearing hold eventually stops EVERY strategy on the key: a
+  correctness loss with a WIDER blast radius than the defect this entry was opened for.
+  **The bound that fixes it is `MAX_MARKER_LOOKBACK_MS` (30 days)**, which clamps how far back a
+  marker-derived resume floor may pin the window. ⚠️ The clamp is a real LOSS, not a deferral —
+  trades older than the cap are fetched by no tick — and it is accepted deliberately over wedging
+  the key. Three things keep it narrow and visible: it applies ONLY to a marker-derived floor and
+  NEVER to the key-cursor fallback (so the migration's inert-on-arrival property survives and the
+  clamp cannot fire on a strategy that never held); the loss reaches the response envelope as
+  `strategy_cursor_window_clamped`, not only the log; and the warning states that a hold this old
+  needs a human. See Phase 164.5.1.4's SECURITY.md accepted-risk R-03.
+
+⚠️ **WHAT IS NOT CLOSED, stated plainly: the migration has not applied to any database.** At closure
+it had reached only a disposable local PostgreSQL lane. Both new Supabase paths FAIL OPEN by design —
+a marker read that fails treats every marker as absent, and a marker write that fails leaves markers
+behind — so while the table is absent, every strategy falls back to the key cursor, and **that
+fall-back state IS this defect**. The code is inert on arrival deliberately; it is not a fix in
+production until the table is there.
+
+**TRIGGER — the condition that says this entry is still live:** the migration
+`20260919120000_strategy_sync_cursors.sql` has not applied to PROD. Confirm from the `Supabase
+Migrate` workflow run for the merge commit — `apply-test` green against shared TEST, then `apply`
+green behind the `Production` environment's human reviewer — and never from the presence of the file
+in the repo tree. A merged branch with no successful migration run means the deployed service is
+still running in fall-back mode and this entry still describes production.
+✅ **Owner: Phase 164.5.1.4 SYNCCURSOR** — disposed by its plan 04 on 2026-09-19. The original
+destination booking (ROADMAP 2026-09-19, `99314336`, the next free sibling under 164.5.1, renumbering
+nothing) stands.
+⭐ This entry keeps an OWNER, a TRIGGER and a PHASE even in closure, because a closed line carrying
+none of the three tells the next reader nothing about whether the fix is actually live (founder rule
+2026-09-08).
 
 ### SYNC-DRIFT-PAYLOAD-LOGGED-VERBATIM-01 — the contract-drift log renders the unknown RPC return verbatim with `%r` (booked 2026-09-19)
 

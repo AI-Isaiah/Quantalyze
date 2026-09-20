@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -11,7 +12,7 @@ from pydantic import BaseModel
 
 from services.db import get_supabase, rows
 from services.encryption import decrypt_credentials, get_kek
-from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions, EXCHANGE_CLASSES
+from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions, get_and_clear_last_dq_flags, EXCHANGE_CLASSES
 
 router = APIRouter(prefix="/api", tags=["cron"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -191,6 +192,462 @@ CREDENTIAL_REJECTION_CODES = {
 # its approval-gate verdict between Submit and Approve.
 ALLOWED_STRATEGY_STATUSES = {"draft", "pending_review", "published"}
 
+# 164.5.1.4 SYNCCURSOR — the per-STRATEGY trade-sync resume marker.
+#
+# `_sync_single_key` STORES per strategy (`per_strategy_stored[sid]`) but
+# historically RESUMED per key, from `api_keys.last_sync_at`. On a two-strategy
+# key where A stores and B raises, the key cursor still advances — past the very
+# window B failed on — and B's trades are stranded permanently rather than
+# transiently. `supabase/migrations/20260919120000_strategy_sync_cursors.sql`
+# ships the container; the two helpers below are the only place its three states
+# are interpreted.
+#
+# ⛔ The key-level cursor and its `should_advance_cursor` gate are NOT touched by
+# any of this. Holding the whole key's cursor on a partial failure would starve
+# the SUCCEEDING strategies into permanent re-fetch — the symmetric defect, and
+# the reason C-0198 chose to advance. This marker is purely ADDITIVE.
+_STRATEGY_SYNC_CURSOR_TABLE = "strategy_sync_cursors"
+
+# 164.5.1.4 SYNCCURSOR / WR-04 — THE OLDEST A HELD MARKER MAY PIN THE KEY'S
+# FETCH WINDOW AT.
+#
+# ⛔ THE REGRESSION THIS CLOSES, AND IT IS A REGRESSION IN BLAST RADIUS.
+# `fetch_all_trades` runs ONCE PER KEY, and `_resume_floor_ms` pins that one
+# window at the EARLIEST resume point across the key's strategies. So a single
+# strategy whose `sync_trades` (or whose recompute enqueue) keeps failing holds
+# its marker forever and the key's window grows by one tick interval every
+# tick, WITHOUT BOUND. `_sync_key_with_timeout` cancels at KEY_SYNC_TIMEOUT, and
+# once the growing fetch crosses it NO strategy on that key syncs, NEITHER
+# cursor advances, and the key is WEDGED — permanently, since the next tick
+# asks for an even larger window and fails sooner.
+#
+# Pre-phase, that same failure stranded ONE strategy and left the key healthy.
+# So the marker, unbounded, converts a per-strategy degradation into a
+# whole-key outage. That is strictly worse than what it replaced, which is the
+# one thing a purely-additive fix may not be.
+#
+# ⭐ THE DECISION (taken here, autonomously, and this is the reasoning).
+# Clamp the marker-driven lookback to a fixed maximum age. The choice is
+# between two losses and there is no third option:
+#
+#   * UNCAPPED — worst case: EVERY strategy on the key stops syncing, forever,
+#     and no cursor advances. Unbounded, and it takes down healthy siblings.
+#   * CAPPED   — worst case: the held strategy's outstanding window OLDER than
+#     the cap is abandoned. Bounded, confined to the one strategy that was
+#     already failing, and NO WORSE THAN PRE-PHASE, where that strategy was
+#     stranded in full.
+#
+# The capped worst case is a strict subset of the pre-phase worst case while
+# the uncapped one is a superset, so the cap is taken.
+#
+# ⚠️ THE ACCEPTED COST, STATED PLAINLY: a hold that never clears LOSES that
+# strategy's trades older than the cap. Not "re-fetches them later" — loses
+# them. That is tolerable only because a hold of this age is no longer a
+# transient failure; it is a bug that needs a human, and the clamp logs a
+# warning naming the strategy and the age every tick it bites so the human
+# hears about it. Thirty days is chosen to sit far above any plausible venue
+# or database outage (hours, not weeks) while staying well inside the fetch
+# volume one key can drain within KEY_SYNC_TIMEOUT.
+#
+# ⛔ APPLIED ONLY TO A FLOOR THAT CAME FROM A MARKER. `_resume_floor_ms` falls
+# back to the KEY cursor for any strategy ABSENT from the marker mapping, and
+# that value is not a held resume point — it is pre-phase behaviour, which had
+# no cap at all. Clamping it would abandon history no strategy was ever holding
+# and would falsify both halves of the derivation above: the loss would NOT be
+# confined to the strategy that was already failing, and the capped worst case
+# would NOT be a strict subset of the pre-phase one. The read path tracks the
+# provenance explicitly; see `_resume_floor_ms`.
+#
+# ⛔ NOT APPLIED to the full-history (`None`) resume point, deliberately. A
+# marker PRESENT WITH A NULL means "this strategy has no resume point at all,
+# re-fetch everything", which is the three-state contract the read path is
+# built on and the correct reading for a brand-new key. Clamping it would
+# silently convert "get everything" into "get the last 30 days" and lose the
+# older history it was asking for. Nor is it applied to the no-eligible-
+# strategies branch, which parses the KEY cursor and is pre-phase behaviour
+# this phase does not touch.
+MAX_MARKER_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000
+
+# 164.5.1.4 SYNCCURSOR / WR-06 — how many rows the per-row marker-write fallback
+# will retry individually when the BATCHED upsert fails.
+#
+# The batch is one statement, so one bad row (a 23503 from a strategy deleted
+# mid-tick, say) discards the marker write for EVERY strategy on the key — and
+# any of those with no row yet then falls back to the key cursor and
+# UNDER-fetches. The fallback re-issues the rows one at a time so a single bad
+# row costs only itself.
+#
+# ⚠️ WHY IT IS BOUNDED AT ALL. The fallback runs inside the key's
+# `KEY_SYNC_TIMEOUT` budget, on a path that is ALREADY failing. A key with a
+# large fan-out could otherwise turn one batch failure into that many serial
+# round-trips and convert a marker-write problem into a key-sync timeout — the
+# same whole-key escalation WR-04 exists to prevent, arriving by a different
+# road. Rows past the limit are NOT silently dropped: each is recorded in the
+# envelope error field naming the limit, so the condition is visible.
+#
+# The realistic fan-out is one API key's linked strategies, typically one to
+# three, so this bound is not expected to bind in practice.
+_STRATEGY_CURSOR_ROW_RETRY_LIMIT = 25
+
+# 164.5.1.4 SYNCCURSOR / WR-03 — THE ROLLOUT WINDOW IS A KNOWN, EXPECTED,
+# INDEFINITE CONDITION, AND `logger.exception` IS THE WRONG VERB FOR ONE.
+#
+# Railway deploys this service on main CI going green. The PROD migration apply
+# sits behind the `Production` environment's HUMAN reviewer gate. Between those
+# two events — minutes or days, nobody controls which — the code below is live
+# and `strategy_sync_cursors` DOES NOT EXIST. Every 15-minute tick then emits
+# one `logger.exception` for the lookup plus one per key for the upsert, each
+# with a full traceback, each landing in Sentry as a new error event.
+#
+# ⛔ FAIL-OPEN IS AND STAYS CORRECT — the tick degrades to the key-level cursor,
+# which is exactly pre-phase behaviour. What is wrong is the NOISE: a Sentry
+# feed drowned in a condition that is neither a surprise nor actionable trains
+# the operator to ignore the very channel the REAL failures arrive on. So a
+# missing relation is latched to ONE `logger.warning` per process naming the
+# window; every other exception keeps its `logger.exception` and its traceback.
+#
+# ⛔ THE ENVELOPE FIELD IS NOT SUPPRESSED. `strategy_cursor_write_error` /
+# `strategy_cursor_lookup_error` are still populated on EVERY affected tick, so
+# the summary alarm sees the condition for as long as it lasts even though the
+# log line is emitted once. Quietening the log is not the same as hiding the
+# fact, and only the first is intended here.
+_UNDEFINED_TABLE_SQLSTATE = "42P01"
+# PostgREST answers a relation missing from its schema cache with its own
+# PGRST205 rather than the raw SQLSTATE, so both spellings are ONE condition.
+_UNDEFINED_TABLE_POSTGREST_CODE = "PGRST205"
+
+# Module-level latch for the one-shot warning above. Rebound (not mutated) so a
+# test can reset it with a plain assignment on the module.
+_missing_cursor_table_warned = False
+
+
+def _is_missing_cursor_table(exc: BaseException) -> bool:
+    """True when `exc` says `strategy_sync_cursors` is not in the database.
+
+    Three probes, widest-to-narrowest, because supabase-py surfaces PostgREST
+    errors inconsistently across versions — sometimes a typed `APIError` with
+    `.code`, sometimes a dict-ish payload whose text is all that survives:
+
+      1. a `.code` attribute equal to the SQLSTATE or the PostgREST code;
+      2. either code appearing anywhere in the error's text;
+      3. the TABLE NAME beside a "does not exist" / "schema cache" phrase.
+
+    ⚠️ Probe 3 is deliberately conjunctive. Matching the table name ALONE would
+    classify a genuine permission denial or a constraint violation on this very
+    table as "the table is missing" and downgrade a real, actionable fault to a
+    one-shot warning — the exact failure this whole helper must not cause.
+
+    ⛔ TWO EXCLUSIONS RUN FIRST, AND THEY ARE NOT LOG FIDELITY. This predicate
+    is also the branch condition deciding whether WR-06's per-row fallback runs
+    AT ALL: a `True` here skips it, on the sound reasoning that a missing
+    relation is not a row-scoped fault. So a MIS-classification consumes the
+    recovery mechanism as well as latching the log, and every strategy whose
+    marker row the batch dropped then falls back to the key cursor and
+    UNDER-fetches its outstanding window.
+
+    Probed against the shipped predicate with 11 payloads. It rejects every
+    permission fault correctly (42501, RLS violation, 23505). Three over-matches
+    survived, all classified as "the table does not exist yet":
+
+      * `42703` — `column "x" of relation "strategy_sync_cursors" does not
+        exist`: the table name AND "does not exist", both present, both about a
+        COLUMN.
+      * `PGRST204` — "could not find the 'x' column of 'strategy_sync_cursors'
+        in the schema cache": the most common post-apply condition there is,
+        because PostgREST's schema-cache reload is asynchronous. The operator
+        was told the migration had not landed when it HAD and a column was
+        drifting.
+      * a `42P01` naming an UNRELATED relation (a view or trigger this table
+        depends on): the code probe never looked at which relation.
+
+    A COLUMN fault is a schema-DRIFT fault, which is actionable, row-scoped and
+    exactly what the per-row fallback and the traceback exist for. Excluding it
+    fails in the LOUD direction, which is the one this helper is allowed to
+    fail in.
+    """
+    blob = " ".join(
+        str(part)
+        for part in (
+            getattr(exc, "message", None),
+            getattr(exc, "details", None),
+            str(exc),
+        )
+        if part
+    ).lower()
+
+    # EXCLUSION 1 — a COLUMN fault is never a missing table, whatever the code
+    # says. 42703 and PGRST204 both satisfy probe 3's conjunct while being
+    # about a column of a table that plainly EXISTS.
+    if "column" in blob:
+        return False
+
+    # EXCLUSION 2 — a message that positively names a DIFFERENT relation is
+    # about that relation. Deliberately narrow: it only bites when the text
+    # identifies the relation, so a bare code with no text (which is why the
+    # code probes exist at all) still latches the rollout-window warning and
+    # WR-03 is untouched.
+    named_relation = re.search(r'relation "([^"]+)" does not exist', blob)
+    if named_relation and named_relation.group(1) != _STRATEGY_SYNC_CURSOR_TABLE:
+        return False
+
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.strip().upper() in (
+        _UNDEFINED_TABLE_SQLSTATE,
+        _UNDEFINED_TABLE_POSTGREST_CODE,
+    ):
+        return True
+
+    if (
+        _UNDEFINED_TABLE_SQLSTATE.lower() in blob
+        or _UNDEFINED_TABLE_POSTGREST_CODE.lower() in blob
+    ):
+        return True
+    return _STRATEGY_SYNC_CURSOR_TABLE in blob and (
+        "does not exist" in blob or "schema cache" in blob
+    )
+
+
+def _log_strategy_cursor_exc(exc: BaseException, msg: str, *args: Any) -> None:
+    """Log a marker-table failure at the severity the CONDITION deserves.
+
+    Missing relation -> ONE `logger.warning` per process, naming the rollout
+    window. Anything else -> `logger.exception` with `msg % args`, unchanged.
+
+    ⚠️ MUST BE CALLED FROM INSIDE AN `except` BLOCK. `logger.exception` reads
+    the ACTIVE exception from `sys.exc_info()`, not from the `exc` argument, so
+    calling this anywhere else would log a traceback of None (or, worse, of an
+    unrelated exception still being handled further up the stack).
+    """
+    global _missing_cursor_table_warned
+
+    if _is_missing_cursor_table(exc):
+        if _missing_cursor_table_warned:
+            return
+        _missing_cursor_table_warned = True
+        logger.warning(
+            "cron_sync: table %s is not present in the database yet (%s) — "
+            "this is the ROLLOUT WINDOW: the service deploys on CI green while "
+            "the migration apply waits behind the production reviewer gate, so "
+            "until the apply lands every tick falls back to the key-level "
+            "cursor (pre-phase behaviour, no data loss). Logged ONCE per "
+            "process; the per-tick envelope still carries the error field "
+            "every time. If this outlives the migration apply it is a REAL "
+            "fault and the envelope field is where to see it",
+            _STRATEGY_SYNC_CURSOR_TABLE,
+            type(exc).__name__,
+        )
+        return
+
+    logger.exception(msg, *args)
+
+
+def _strategy_resume_point(
+    strategy_id: str,
+    strategy_cursors: dict[str, str | None],
+    key_cursor: str | None,
+) -> str | None:
+    """Resolve where ONE strategy should resume its trade fetch from.
+
+    ⛔ THE MEMBERSHIP RULE, AND WHY A `.get()` IS WRONG HERE. The marker has
+    THREE states and the first two are DIFFERENT (the migration says so in the
+    column comment, in the database itself):
+
+      * `strategy_id` ABSENT from the mapping -> there is no per-strategy
+        information for it yet, so fall back to the KEY's own cursor. This is
+        what makes the migration inert the moment it lands: no rows exist, every
+        strategy falls back, and behaviour is today's byte for byte.
+      * `strategy_id` PRESENT with a null value -> this strategy has no resume
+        point at all and must re-fetch from the START OF HISTORY.
+      * `strategy_id` PRESENT with a timestamp -> resume from there.
+
+    A `strategy_cursors.get(strategy_id)` returns the same `None` for the first
+    two, and collapsing them is not a cosmetic slip — it makes the whole fix
+    INERT ON THE FIRST FAILURE, which is the common case. Trace it: strat-B's
+    RPC raises, so under a `.get()`-shaped design it is given no row; the KEY
+    cursor advances anyway (correctly — a sibling succeeded); the next tick
+    finds no row for strat-B and falls back to that ALREADY-ADVANCED key cursor;
+    strat-B is stranded exactly as before, while every "a row was written"
+    assertion stays green.
+
+    This resolver is shared by BOTH the read floor and the hold-write below, so
+    the two sites cannot drift apart. Neither re-implements it.
+    """
+    if strategy_id in strategy_cursors:
+        return strategy_cursors[strategy_id]
+    return key_cursor
+
+
+def _resume_floor_ms(
+    strategy_ids: list[str],
+    strategy_cursors: dict[str, str | None],
+    key_cursor: str | None,
+    *,
+    now_ms: int | None = None,
+    clamp_report: dict[str, Any] | None = None,
+) -> int | None:
+    """The single per-key fetch window: the EARLIEST resume point across the
+    eligible strategies, in epoch milliseconds, or None for "start of history".
+
+    One `fetch_all_trades` call serves the whole key, so the window must cover
+    the SLOWEST linked strategy's outstanding span — anything later silently
+    drops the trades a held strategy is still owed. Over-fetching costs a
+    re-store and is idempotent (`sync_trades` deletes payload-window-scoped
+    before re-inserting); under-fetching loses data permanently. Every decision
+    here is deliberately biased toward the first.
+
+    With no eligible strategies the key's own cursor is parsed, preserving
+    today's behaviour on a key whose fan-out is empty. A null resume point
+    ANYWHERE in the set collapses the whole window to a full-history fetch, and
+    an unparseable value is treated the same way as a null.
+
+    ⚠️ `parse_since_ms` is called as the MODULE GLOBAL, by name. Existing tests
+    intercept it with `patch.object(cron_mod, "parse_since_ms", ...)`; a local
+    re-import or an alias would silently escape that patch.
+
+    ⛔ WR-04: a MARKER-DERIVED floor is CLAMPED to `MAX_MARKER_LOOKBACK_MS`.
+    Without it a permanently-held strategy grows this window every tick until
+    the key crosses `KEY_SYNC_TIMEOUT`, at which point EVERY strategy on the key
+    stops syncing — see the constant's own derivation for why a bounded loss
+    confined to the already-failing strategy is taken over an unbounded
+    whole-key one. `now_ms` is injectable so the clamp can be measured against a
+    fixed clock; production passes nothing and reads the wall clock.
+
+    ⛔ "MARKER-DERIVED" IS THE WHOLE OF IT, AND IT WAS NOT ALWAYS. The clamp
+    was first written after the loop, unconditionally, so it clamped whatever
+    the loop produced — INCLUDING the key-cursor value `_strategy_resume_point`
+    falls back to for a strategy with no marker row, i.e. a strategy that has
+    never held anything. MEASURED against that shape (fixed `now`, a key cursor
+    200 days old, `strategy_cursors={}` — the exact state the migration lands
+    in): the window was clamped to the cap and the warning named an innocent
+    strategy as "holding" it, while the no-eligible-strategies branch two lines
+    above returned the same key cursor UNCLAMPED. Two branches written to be
+    identical pre-phase behaviour disagreed, and the clamped one was the common
+    one. It is reachable in production with nothing failing anywhere:
+    `reconnect_allocator_api_key` preserves `last_sync_at` across a
+    disconnect/reconnect and the credential-failure `is_active=False` path
+    preserves it too, so a key dormant for longer than the cap used to catch up
+    in full and would have silently dropped everything older than it. The
+    provenance flag is therefore load-bearing, not bookkeeping.
+
+    ⛔ `clamp_report` IS THE CLAMP'S ONLY STRUCTURAL OUTPUT, AND IT EXISTS
+    BECAUSE A LOG LINE IS NOT ONE. Every other degradation this phase can
+    produce reaches the response envelope — `strategy_cursors_held`,
+    `strategy_cursor_write_error`, `strategy_cursor_lookup_error`. The clamp is
+    the only one that causes PERMANENT, UNRECOVERABLE loss ("fetched by no
+    tick", by its own derivation) and it used to produce a `logger.warning` and
+    nothing else: the tick returned success, the envelope was clean, and the
+    only evidence was a line nobody greps. That is the canonical silent-failure
+    shape this phase avoids everywhere else. An out-param rather than a changed
+    return type, deliberately: the return value is the fetch window and every
+    caller and gate reads it as `int | None`; widening it would churn them all
+    to carry a field only one caller consumes. Passing nothing keeps the old
+    behaviour, so the parameter cannot break a caller that does not care.
+    """
+    if not strategy_ids:
+        return parse_since_ms(key_cursor)
+
+    floor: int | None = None
+    # Which strategy PRODUCED the floor, so a clamp warning can name it. The
+    # operator's next question after "the window was clamped" is always "by
+    # whom", and reconstructing that from the marker table after the fact is
+    # exactly the forensics this file surfaces error fields to avoid.
+    floor_sid: str | None = None
+    # ⛔ WHERE THE FLOOR CAME FROM, AND THE CLAMP BELOW TURNS ON IT.
+    # `_strategy_resume_point` returns either the strategy's OWN marker value
+    # or, for a strategy ABSENT from the mapping, the KEY's cursor. Those are
+    # different facts and only the first one may be clamped — see the clamp
+    # itself for the derivation. Recorded with the SAME membership rule the
+    # resolver uses (`sid in strategy_cursors`, never a `.get()`), so the two
+    # readings cannot drift apart: a present-with-NULL marker has already
+    # returned from inside this loop, so membership here means "this strategy
+    # holds a marker timestamp".
+    floor_from_marker = False
+    # Every MARKER-held resume point, not just the winning one. The clamp
+    # truncates the KEY's single window, so it costs every strategy holding a
+    # point older than the cap — not only the one that produced the floor. The
+    # warning and the envelope field both name that set, and it can only be
+    # named if it is collected here. Bounded by the key's fan-out (one API
+    # key's linked strategies, typically one to three), which this loop already
+    # walks.
+    marker_floors: dict[str, int] = {}
+    for sid in strategy_ids:
+        resume_point = _strategy_resume_point(sid, strategy_cursors, key_cursor)
+        if resume_point is None:
+            return None
+        parsed = parse_since_ms(resume_point)
+        if parsed is None:
+            # Either a genuine null or an unparseable value — `parse_since_ms`
+            # already logs the latter. Both mean "no trustworthy resume point",
+            # and the safe direction is a full-history fetch.
+            return None
+        if sid in strategy_cursors:
+            marker_floors[sid] = parsed
+        if floor is None or parsed < floor:
+            floor = parsed
+            floor_sid = sid
+            floor_from_marker = sid in strategy_cursors
+
+    # ⚠️ NO `if floor is None: return None` GUARD HERE, deliberately. An earlier
+    # draft had one and it was DEAD CODE: every path that would leave `floor`
+    # unset has already returned from inside the loop, and `strategy_ids` was
+    # checked non-empty above. MEASURED — mutating that guard's body produced no
+    # test failure at all, which is how it was found. The `is not None` below
+    # carries the type narrowing instead, on a branch that is genuinely live.
+    if not floor_from_marker:
+        # ⛔ THE FLOOR CAME FROM THE KEY CURSOR, SO IT IS RETURNED UNTOUCHED.
+        # Every strategy here is ABSENT from the mapping, which is the state
+        # the migration lands in and the state its "inert on arrival" claim is
+        # about: pre-phase this path parsed the key cursor and had NO cap at
+        # all. Clamping it would silently drop history no marker ever held —
+        # reachable with nothing failing anywhere, because
+        # `reconnect_allocator_api_key` and the credential-failure
+        # deactivation both PRESERVE `last_sync_at`, so a key disconnected or
+        # deactivated for longer than the cap and then reconnected used to
+        # catch up in full. It would also name an innocent strategy in the
+        # warning as "holding" a resume point it never held.
+        return floor
+    if now_ms is None:
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    oldest_allowed_ms = now_ms - MAX_MARKER_LOOKBACK_MS
+    if floor is not None and floor < oldest_allowed_ms:
+        # ⛔ WHO ACTUALLY PAYS, AND IT IS NOT ONLY THE FLOOR-HOLDER. One
+        # `fetch_all_trades` serves the whole key, so raising the window's floor
+        # to the cap truncates the span of EVERY strategy whose marker sits
+        # older than it. The previous wording said "that strategy's trades",
+        # which under-states the loss and sends an operator looking at one row.
+        truncated_sids = sorted(
+            sid for sid, ms in marker_floors.items() if ms < oldest_allowed_ms
+        )
+        if clamp_report is not None:
+            clamp_report.update(
+                {
+                    "cap_days": MAX_MARKER_LOOKBACK_MS / 86_400_000,
+                    "floor_strategy_id": floor_sid,
+                    "floor_age_days": round((now_ms - floor) / 86_400_000, 1),
+                    "oldest_allowed_ms": oldest_allowed_ms,
+                    "truncated_strategy_ids": truncated_sids,
+                }
+            )
+        logger.warning(
+            "cron_sync: the key's fetch window has been CLAMPED to the "
+            "%.0f-day cap. The EARLIEST marker on this key is strategy %s's, "
+            "%.1f day(s) old, and the window was growing every tick toward "
+            "KEY_SYNC_TIMEOUT (%ds), which would have stopped EVERY strategy "
+            "on this key. ⛔ The truncation is per-KEY: one fetch serves the "
+            "whole key, so EVERY strategy holding a marker older than the cap "
+            "loses that span — here %s. The cost is real and it is a LOSS, not "
+            "a deferral: those trades will be fetched by no tick. A hold this "
+            "old is not transient, it needs a human, and the same facts are in "
+            "the envelope under strategy_cursor_window_clamped",
+            MAX_MARKER_LOOKBACK_MS / 86_400_000,
+            floor_sid,
+            (now_ms - floor) / 86_400_000,
+            KEY_SYNC_TIMEOUT,
+            ", ".join(truncated_sids),
+        )
+        return oldest_allowed_ms
+    return floor
+
 
 async def _sync_single_key(
     key_row: dict[str, Any],
@@ -209,6 +666,15 @@ async def _sync_single_key(
     # result-payload back-compat.
     strategy_ids: list[str] = list(key_row.get("strategy_ids") or [])
     strategy_id = strategy_ids[0] if strategy_ids else None
+    # 164.5.1.4 SYNCCURSOR — capture the key's PRE-TICK cursor and the
+    # per-strategy marker mapping BEFORE anything runs. The `api_keys` UPDATE
+    # below overwrites the stored `last_sync_at`, and the hold-write at the foot
+    # of this function needs the value the tick STARTED from, not the one it
+    # produced. An ABSENT `strategy_cursors` key becomes an empty mapping, which
+    # under `_strategy_resume_point`'s membership rule means "every strategy
+    # falls back to the key cursor" — today's behaviour exactly.
+    key_cursor_at_tick_start: str | None = key_row.get("last_sync_at")
+    strategy_cursors: dict[str, str | None] = dict(key_row.get("strategy_cursors") or {})
     start = time.monotonic()
 
     try:
@@ -262,6 +728,14 @@ async def _sync_single_key(
                 "status": "error",
                 "error": "missing_credentials",
             }
+
+        # 164.5.1.4 SYNCCURSOR round-2 — the clamp's structural channel. Filled
+        # by `_resume_floor_ms` ONLY when `MAX_MARKER_LOOKBACK_MS` actually
+        # truncates the window; stays empty on every healthy tick, so the
+        # envelope field below is genuinely conditional. Declared out here
+        # because the fetch runs inside a `try` whose `finally` closes the
+        # exchange, while the envelope is built after it.
+        strategy_cursor_window_clamped: dict[str, Any] = {}
 
         # Decrypt credentials
         api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
@@ -383,8 +857,32 @@ async def _sync_single_key(
             # TTL window can skip the exchange round-trip (C-0193).
             _record_validation_success(key_id)
 
-            since_ms = parse_since_ms(key_row.get("last_sync_at"))
+            # 164.5.1.4 SYNCCURSOR — the window is the EARLIEST per-strategy
+            # resume point, not the key cursor alone. With no marker rows (the
+            # state the migration lands in) every strategy falls back to the key
+            # cursor and the floor is exactly `parse_since_ms(last_sync_at)`.
+            since_ms = _resume_floor_ms(
+                strategy_ids,
+                strategy_cursors,
+                key_cursor_at_tick_start,
+                clamp_report=strategy_cursor_window_clamped,
+            )
             trades = await fetch_all_trades(exchange, since_ms=since_ms)
+            # ⛔ DRAIN THE DQ FLAGS IMMEDIATELY AFTER THE AWAIT — the buffer is
+            #    a per-task ContextVar and a later call on the same task would
+            #    otherwise read stale flags. `services/job_worker.py` drains at
+            #    the same point; the cron path never did, which is the defect
+            #    below.
+            #
+            # ⭐ WHY THIS IS READ AT ALL. `fetch_daily_pnl`'s OUTERMOST
+            #    `except Exception` logs, stamps `daily_pnl_fetch_error` and
+            #    then RETURNS the partially-built list — frequently EMPTY. So
+            #    an empty `trades` conflates "the venue has nothing in this
+            #    window" with "the venue call crashed". That function's own
+            #    comment says the flag exists precisely so a caller can tell
+            #    those apart; until now this caller never looked.
+            fetch_dq_flags = get_and_clear_last_dq_flags()
+            fetch_degraded = bool(fetch_dq_flags.get("daily_pnl_fetch_error"))
             account_balance = await fetch_usdt_balance(exchange)
         finally:
             await aclose_exchange(exchange)
@@ -522,9 +1020,29 @@ async def _sync_single_key(
         synced_count = sum(per_strategy_stored.values())
         should_advance_cursor = (not trades) or synced_count > 0
 
+        # 164.5.1.4 SYNCCURSOR / WR-01 — ONE instant for BOTH cursor writes.
+        #
+        # ⛔ THE SAMPLING POINT IS THE FIX, NOT A TIDY-UP. Until this line the
+        # key cursor was stamped here and the per-strategy marker was stamped
+        # AFTER the recompute-enqueue loop below, so the marker was later than
+        # the key cursor by the wall-clock duration of N `enqueue_compute_job`
+        # round-trips. Pre-phase that skew did not exist because there was only
+        # one cursor; once markers exist they DOMINATE the resume floor
+        # (`_resume_floor_ms` reads them in preference to the key cursor), so
+        # the next tick would resume LATER than main would have, and anything
+        # the venue booked inside that gap would be fetched by no tick, ever.
+        # The gap is small but it is a permanent LOSS, not a re-fetch, which is
+        # the direction this file refuses everywhere else.
+        #
+        # Sampling before the `api_keys` UPDATE keeps that write semantically
+        # what it always was — the same instant, taken microseconds earlier —
+        # while giving the marker write at the foot of this function an instant
+        # that cannot drift past it.
+        tick_now = datetime.now(timezone.utc).isoformat()
+
         update_data: dict[str, Any] = {}
         if should_advance_cursor:
-            update_data["last_sync_at"] = datetime.now(timezone.utc).isoformat()
+            update_data["last_sync_at"] = tick_now
         if account_balance is not None:
             update_data["account_balance_usdt"] = account_balance
         if update_data:
@@ -577,11 +1095,25 @@ async def _sync_single_key(
         # already persisted. Failures are logged to Sentry AND surfaced in
         # the result envelope below (`recompute_enqueue_errors`) so the
         # cron_sync summary alarm sees them rather than the failure living
-        # only in Sentry. NOTE: a failed enqueue is NOT re-driven by the next
-        # sync tick — `last_sync_at` has already advanced, so the next tick
-        # fetches no new trades for this strategy and recomputes nothing.
-        # Recovery then relies on the daily/portfolio recompute cascade or a
-        # user-triggered recompute.
+        # only in Sentry.
+        #
+        # 164.5.1.4 SYNCCURSOR (shipped) — A FAILED ENQUEUE *IS* RE-DRIVEN BY
+        # THE NEXT SYNC TICK ON THIS PATH NOW, and this note used to say the
+        # opposite. What used to be true: `last_sync_at` is per-KEY and had
+        # already advanced, so the next tick fetched no new trades for this
+        # strategy and recomputed nothing — recovery then depended on the
+        # daily/portfolio recompute cascade or a user-triggered recompute. That
+        # is the Phase-18 shape described above, where cron-synced strategies
+        # were never recomputed and their dashboard KPIs froze, and it is kept
+        # here because it is the REASON the protection below exists.
+        # What ships now: the per-strategy marker write at the foot of this
+        # function carries a `sid not in recompute_enqueue_errors` conjunct, so
+        # a strategy whose enqueue raised does NOT advance its own marker. Its
+        # resume point holds, `_resume_floor_ms` keeps the next tick's fetch
+        # window covering that span, and the enqueue is re-attempted. Both
+        # re-drives are safe: `sync_trades` deletes payload-window-scoped before
+        # re-inserting, and `enqueue_compute_job` is dedup-safe via the partial
+        # unique index named above.
         recompute_strategy_ids = [
             sid for sid, stored in per_strategy_stored.items() if stored > 0
         ]
@@ -611,6 +1143,271 @@ async def _sync_single_key(
                     sid,
                     key_id,
                 )
+
+        # 164.5.1.4 SYNCCURSOR — persist the PER-STRATEGY resume point.
+        #
+        # ⛔ ORDERING IS A CONSTRAINT, NOT A STYLE CHOICE. This block reads
+        # `recompute_enqueue_errors`, which only exists once the enqueue loop
+        # above has finished. It therefore cannot move up beside the storage
+        # loop; doing so would read a half-filled input and silently lose the
+        # recompute-stranding half of the fix. It is the LAST write in this
+        # function for that reason.
+        #
+        # ⭐ THE ADVANCE CONDITION IS *NOT* A PER-STRATEGY MIRROR OF
+        # `should_advance_cursor`. A naive mirror (`stored > 0`) closes the
+        # trade-stranding path and looks correct while leaving the
+        # recompute-stranding path wide open: a strategy whose trades stored but
+        # whose `derive_broker_dailies` job never got queued would advance past
+        # the very window whose recompute never fired, and nothing would ever
+        # re-drive it — the Phase-18 shape the enqueue loop's own comment above
+        # describes, where cron-synced strategies were never recomputed and
+        # their dashboard KPIs froze. The extra `sid not in
+        # recompute_enqueue_errors` conjunct is what makes that re-drivable.
+        #
+        # ⛔ EVERY strategy in the fan-out gets a row, HELD OR ADVANCING. Writing
+        # only for the strategies that advance is the single most likely way to
+        # ship a change that passes a row-was-written assertion and fixes
+        # nothing: the failed strategy would have no row, the next tick would
+        # fall back to the key cursor that just advanced past its window, and it
+        # would be stranded exactly as before. A held strategy therefore has its
+        # PRE-TICK resume point written down THIS tick, resolved through the
+        # same `_strategy_resume_point` the read floor uses so the two cannot
+        # drift.
+        #
+        # One instant for every advancing strategy in a tick, so the markers a
+        # single tick writes are mutually comparable — and it is the SAME
+        # instant the key cursor above was stamped with (WR-01), so a marker can
+        # never resume later than the key cursor it is meant to survive.
+        marker_now = tick_now
+        strategy_cursor_rows: list[dict[str, Any]] = []
+        held_strategy_ids: list[str] = []
+        for sid in strategy_ids:
+            # ⛔ THE IDLE DISJUNCT IS EVIDENCE-BASED, AND IT MUST STAY THAT WAY.
+            #    `not trades` is only proof that nothing is outstanding when the
+            #    fetch actually SUCCEEDED and returned nothing. When
+            #    `fetch_daily_pnl` swallows an exception it returns an empty
+            #    list with `daily_pnl_fetch_error` set, and a bare `not trades`
+            #    would then read a crashed fetch as an idle tick.
+            #
+            #    THE CONSEQUENCE IF THIS CONJUNCT IS DROPPED, and it is the
+            #    exact loss this phase exists to close, re-entered through the
+            #    new advance rule: tick 1 holds strat-B at T0 because its
+            #    `sync_trades` raised. Tick 2 correctly pins the window at T0,
+            #    the venue call crashes, `trades == []`, `not trades` is True,
+            #    and strat-B's marker ADVANCES to now — discarding a hold of
+            #    arbitrary age. Its `[T0, now)` window is then fetched by no
+            #    later tick, permanently.
+            #
+            # ⚠️ The KEY-level `should_advance_cursor` deliberately keeps the
+            #    bare `(not trades)` form and is byte-identical to main. That
+            #    is not an inconsistency: the key cursor advancing is C-0198's
+            #    accepted behaviour, and the whole point of the marker is to
+            #    SURVIVE that advance. A marker that clears itself on the same
+            #    evidence would be no marker at all.
+            strategy_advances = ((not trades) and not fetch_degraded) or (
+                per_strategy_stored.get(sid, 0) > 0
+                and sid not in recompute_enqueue_errors
+            )
+            if not strategy_advances:
+                held_strategy_ids.append(sid)
+            strategy_cursor_rows.append(
+                {
+                    "strategy_id": sid,
+                    "last_sync_at": (
+                        marker_now
+                        if strategy_advances
+                        else _strategy_resume_point(
+                            sid, strategy_cursors, key_cursor_at_tick_start
+                        )
+                    ),
+                    # No trigger on this table by design (single writer), so the
+                    # writer sets `updated_at` in its own payload.
+                    "updated_at": marker_now,
+                }
+            )
+
+        # 164.5.1.4 SYNCCURSOR — NAME the held strategies and what holding them
+        # costs, once per key.
+        #
+        # ⭐ THIS IS AN ACCEPTED TRADEOFF MADE VISIBLE, NOT A DEFECT LEFT OPEN.
+        # The marker is per-STRATEGY but `fetch_all_trades` is per-KEY and runs
+        # once, so `_resume_floor_ms` takes the EARLIEST resume point across the
+        # key's eligible strategies: one persistently-held strategy pins the
+        # whole key's fetch window at its resume point, and the range re-fetched
+        # grows every tick until the hold clears. What WOULD be a defect is the
+        # degradation being invisible, inferable only from the ABSENCE of an
+        # advancing row. So it is surfaced: `strategy_cursors_held` in the
+        # envelope for the summary alarm, and one WARNING per key here.
+        #
+        # ⛔ WR-04 CORRECTION — THIS COMMENT USED TO UNDERSTATE THE COST AND THE
+        # UNDERSTATEMENT WAS THE BUG. It called the growth "an efficiency cost
+        # on a re-fetch that is idempotent, not a correctness or user-facing
+        # loss", and cited the key-level `held` growth as precedent. Both halves
+        # were wrong. The growth is UNBOUNDED, and `_sync_key_with_timeout`
+        # cancels the key at KEY_SYNC_TIMEOUT, so a hold that never clears
+        # eventually stops EVERY strategy on the key — a whole-key outage, which
+        # is a correctness loss and a strictly WIDER blast radius than the
+        # pre-phase behaviour where one strategy was stranded and the key stayed
+        # healthy. It is not precedented by the key-level `held` case either:
+        # that one clears as soon as any strategy becomes eligible again,
+        # whereas this one has no self-clearing condition at all.
+        #
+        # `MAX_MARKER_LOOKBACK_MS` bounds it. The residual accepted cost is
+        # therefore the honest one: a hold that never clears LOSES that
+        # strategy's trades older than the cap. The hold itself is still correct
+        # and still what makes a TRANSIENT failure re-drivable.
+        #
+        # ⛔ Deliberately NOT a new `SyncStatus` value. That vocabulary is a
+        # registry the summary counters are DERIVED from, it describes the KEY's
+        # outcome, and this is orthogonal to it: a key whose trades all landed
+        # while one strategy's recompute enqueue failed is correctly `ok`, and a
+        # key with a genuine storage failure is correctly `partial`.
+        if held_strategy_ids:
+            logger.warning(
+                "cron_sync: key %s held the per-strategy resume point for "
+                "%d of %d strategy(ies) (%s) — their windows are re-drivable "
+                "next tick, and because the fetch is per-key the whole key's "
+                "window stays pinned at the earliest held resume point, so the "
+                "range re-fetched grows every tick until the hold clears. A "
+                "hold that NEVER clears would otherwise grow the window past "
+                "KEY_SYNC_TIMEOUT and wedge the WHOLE key; it is bounded by "
+                "MAX_MARKER_LOOKBACK_MS, at the cost of losing that strategy's "
+                "trades older than the cap",
+                key_id,
+                len(held_strategy_ids),
+                len(strategy_ids),
+                ", ".join(held_strategy_ids),
+            )
+
+        strategy_cursor_write_error: str | None = None
+        if strategy_cursor_rows:
+            # Plain direct-write upsert, matching the style this file already
+            # uses for `api_keys` and the convention in
+            # `services/job_worker.py`. ⛔ Deliberately NOT the fenced
+            # `advance_sync_cursor` RPC style from that same file — CONTEXT
+            # Area 2 rules it out, and harmonising the two sync-cursor
+            # disciplines is a much larger change than this phase.
+            try:
+                supabase.table(_STRATEGY_SYNC_CURSOR_TABLE).upsert(
+                    strategy_cursor_rows,
+                    on_conflict="strategy_id",
+                ).execute()
+            except Exception as cursor_exc:
+                # Never abort the tick and never discard the sync results
+                # already collected.
+                #
+                # ⚠️ BE PRECISE ABOUT THE DIRECTION — a failed marker write is
+                # NOT uniformly safe, and an early draft of this comment claimed
+                # it was.
+                #   * Strategy ALREADY HAS a marker row: the row stays BEHIND,
+                #     the next tick over-fetches, and over-fetching is
+                #     idempotent because `sync_trades` deletes scoped to the
+                #     incoming payload's own timestamp range before
+                #     re-inserting. Safe, as claimed.
+                #   * Strategy has NO row yet (first tick after rollout, or a
+                #     23503 from a concurrently-deleted sibling): the read path
+                #     finds nothing, falls back to `api_keys.last_sync_at` —
+                #     which THIS tick's epilogue may have just advanced past the
+                #     failed window — and UNDER-fetches. That is the per-key
+                #     stranding this phase exists to remove, re-entering through
+                #     the error path.
+                #
+                # ⛔ WR-06 — ONE BAD ROW MUST NOT VOID THE REST. A multi-row
+                # upsert is a single statement: a 23503 raised by ONE strategy
+                # deleted mid-tick discards the marker write for EVERY strategy
+                # on the key, and each of those with no row yet then UNDER-
+                # fetches per the second bullet. The blast radius of an
+                # unrelated sibling's deletion was the whole key.
+                #
+                # The previous note here said a per-strategy write "is larger
+                # than this phase". That was an overstatement: the fan-out is
+                # one API key's linked strategies — typically one to three — so
+                # the fallback is a short bounded loop, not an architecture.
+                batch_error = f"{type(cursor_exc).__name__}: {cursor_exc}"
+                # WR-03: `logger.exception` for a genuine fault, ONE latched
+                # `logger.warning` while the table simply has not been migrated
+                # yet — otherwise the rollout window emits one traceback PER KEY
+                # PER TICK for a condition nobody can act on. The envelope field
+                # is populated either way.
+                _log_strategy_cursor_exc(
+                    cursor_exc,
+                    "cron_sync: batched per-strategy sync-cursor upsert failed "
+                    "for key %s (%d row(s)) — retrying row by row so one bad "
+                    "row cannot void the rest",
+                    key_id,
+                    len(strategy_cursor_rows),
+                )
+
+                if _is_missing_cursor_table(cursor_exc):
+                    # ⛔ NO PER-ROW RETRY FOR A MISSING RELATION, and this is
+                    # not an optimisation. A missing table is not a per-ROW
+                    # condition — every single retry would fail identically —
+                    # so retrying would multiply the rollout window's wasted
+                    # round-trips by the fan-out size on every key on every
+                    # tick, inside a budget bounded by KEY_SYNC_TIMEOUT. The
+                    # per-row loop exists for row-scoped faults; this is not
+                    # one.
+                    strategy_cursor_write_error = batch_error
+                else:
+                    per_row_errors: dict[str, str] = {}
+                    attempted = strategy_cursor_rows[
+                        :_STRATEGY_CURSOR_ROW_RETRY_LIMIT
+                    ]
+                    skipped = strategy_cursor_rows[
+                        _STRATEGY_CURSOR_ROW_RETRY_LIMIT:
+                    ]
+                    for row in attempted:
+                        try:
+                            supabase.table(_STRATEGY_SYNC_CURSOR_TABLE).upsert(
+                                row,
+                                on_conflict="strategy_id",
+                            ).execute()
+                        except Exception as row_exc:
+                            per_row_errors[row["strategy_id"]] = (
+                                f"{type(row_exc).__name__}: {row_exc}"
+                            )
+                            _log_strategy_cursor_exc(
+                                row_exc,
+                                "cron_sync: per-row sync-cursor upsert failed "
+                                "for key %s strategy %s — this strategy's "
+                                "resume point is stale; if it had no row yet it "
+                                "falls back to the key cursor and may "
+                                "UNDER-fetch its outstanding window",
+                                key_id,
+                                row["strategy_id"],
+                            )
+                    for row in skipped:
+                        per_row_errors[row["strategy_id"]] = (
+                            "not retried: per-row fallback limit "
+                            f"({_STRATEGY_CURSOR_ROW_RETRY_LIMIT}) reached"
+                        )
+
+                    # ⛔ THE FIELD IS POPULATED EVEN WHEN EVERY ROW RECOVERED.
+                    # A batch that failed and was rescued row by row is still a
+                    # degraded tick the summary alarm must be able to see —
+                    # reporting only the unrecovered rows would make a
+                    # persistent, worsening fault look like a healthy key right
+                    # up until it stopped being recoverable.
+                    recovered = len(
+                        [
+                            row
+                            for row in attempted
+                            if row["strategy_id"] not in per_row_errors
+                        ]
+                    )
+                    if per_row_errors:
+                        strategy_cursor_write_error = (
+                            f"batch upsert failed ({batch_error}); per-row "
+                            f"fallback recovered {recovered}/"
+                            f"{len(strategy_cursor_rows)} row(s), still "
+                            f"failing: {per_row_errors}"
+                        )
+                    else:
+                        strategy_cursor_write_error = (
+                            f"batch upsert failed ({batch_error}); per-row "
+                            f"fallback recovered all "
+                            f"{len(strategy_cursor_rows)} row(s)"
+                        )
 
         duration = time.monotonic() - start
         # `partial` means *some* strategies landed AND *some* failed.
@@ -668,6 +1465,32 @@ async def _sync_single_key(
         # trades did land; only the fire-and-forget recompute trigger failed.
         if recompute_enqueue_errors:
             result["recompute_enqueue_errors"] = recompute_enqueue_errors
+        # 164.5.1.4: surface a failed marker write in the envelope for the same
+        # reason `recompute_enqueue_errors` is surfaced — otherwise the failure
+        # lives only in Sentry and the summary alarm cannot see that this key's
+        # per-strategy resume points are stale. Does NOT change the status,
+        # which reflects trade PERSISTENCE: the trades did land.
+        if strategy_cursor_write_error:
+            result["strategy_cursor_write_error"] = strategy_cursor_write_error
+        # 164.5.1.4 SYNCCURSOR — the held set, CONDITIONALLY, in the same style
+        # as `recompute_enqueue_errors` above. A tick that holds nothing adds no
+        # key at all: a "conditional" field that is always present is not
+        # conditional, and an always-empty list in every healthy tick's envelope
+        # is noise the summary alarm would learn to ignore.
+        if held_strategy_ids:
+            result["strategy_cursors_held"] = held_strategy_ids
+        # 164.5.1.4 SYNCCURSOR round-2 — THE CLAMP IN THE ENVELOPE, and it is
+        # the finding that matters most of the three the field answers. Every
+        # other degradation here is structural; the clamp is the ONLY one whose
+        # loss is permanent and unrecoverable, and it was the only one visible
+        # solely as a log line. A tick that clamps returns success with a clean
+        # envelope otherwise — exactly the silent-failure shape this phase
+        # closes everywhere else. Conditional in the same style as the fields
+        # above: a healthy tick adds no key at all.
+        if strategy_cursor_window_clamped:
+            result["strategy_cursor_window_clamped"] = (
+                strategy_cursor_window_clamped
+            )
         return result
 
     except Exception as e:
@@ -796,6 +1619,97 @@ async def cron_sync() -> dict[str, Any]:
         return {"synced": 0, "failed": 0, "total_keys": 0, "duration_s": 0}
 
     logger.info("cron_sync: found %d active API keys", len(keys))
+
+    # 164.5.1.4 SYNCCURSOR — attach each key's PER-STRATEGY resume markers.
+    #
+    # This is the production source of the mapping `_sync_single_key` reads
+    # through `_strategy_resume_point`. Chunked at `_CRON_IN_LIST_PAGE_SIZE`
+    # using the same `in_` idiom as the portfolio lookup below: the id list is
+    # unbounded (it grows 1:1 with active keys x strategies) and PostgREST
+    # serialises it into the URL, so an unchunked walk risks a 414 or a silent
+    # truncation — and a truncated marker read would quietly hand a strategy the
+    # wrong window.
+    #
+    # ⭐ MEMBERSHIP IS PRESERVED THROUGH BOTH STEPS. `_cursor_by_strategy` gets an
+    # entry for every row RETURNED and for no other strategy, and each key's
+    # sub-mapping is restricted to its own eligible strategies the same way. A
+    # strategy with no row must be ABSENT, never present-with-a-null: the two
+    # mean different things (fall back to the key cursor vs re-fetch all
+    # history) and only absence keeps this change inert on arrival.
+    strategy_cursor_lookup_error: str | None = None
+    _cursor_by_strategy: dict[str, str | None] = {}
+    _marker_strategy_ids = list(
+        {sid for row in keys for sid in row["strategy_ids"]}
+    )
+    if _marker_strategy_ids:
+        try:
+            for _page_start in range(
+                0, len(_marker_strategy_ids), _CRON_IN_LIST_PAGE_SIZE
+            ):
+                _chunk = _marker_strategy_ids[
+                    _page_start:_page_start + _CRON_IN_LIST_PAGE_SIZE
+                ]
+                _page = (
+                    supabase.table(_STRATEGY_SYNC_CURSOR_TABLE)
+                    .select("strategy_id, last_sync_at")
+                    .in_("strategy_id", _chunk)
+                    .execute()
+                )
+                for _marker in rows(_page):
+                    _cursor_by_strategy[_marker["strategy_id"]] = _marker.get(
+                        "last_sync_at"
+                    )
+        except Exception as exc:
+            # FAIL OPEN, in the same posture as the recompute lookup below: a
+            # Supabase blip here must NOT abort the tick. Every key gets an
+            # empty mapping, which IS the absent-row semantics, so the tick
+            # degrades to today's key-cursor-only behaviour rather than to a
+            # wrong window. The error is recorded in the response body instead
+            # of being raised.
+            # WR-03: `logger.exception` for a genuine fault, ONE latched
+            # `logger.warning` while the table simply has not been migrated
+            # yet. The error field below is populated either way.
+            _log_strategy_cursor_exc(
+                exc,
+                "cron_sync: per-strategy sync-cursor lookup failed (%s) over "
+                "%d strategy id(s) — every key falls back to its key-level "
+                "cursor for this tick",
+                type(exc).__name__,
+                len(_marker_strategy_ids),
+            )
+            strategy_cursor_lookup_error = f"{type(exc).__name__}: {exc}"
+            _cursor_by_strategy = {}
+        else:
+            # ⛔ A ZERO-ROW RESULT DOES NOT RAISE, so the branch above never
+            # runs for it. If SUPABASE_SERVICE_KEY ever degrades to an anon or
+            # authenticated key, this table's deny-all policy answers 200 with
+            # an EMPTY list rather than an error — and an empty mapping IS the
+            # absent-row semantics, so every strategy silently reverts to the
+            # key-level cursor. That is byte for byte the stranding defect this
+            # phase exists to remove, arriving with a green tick and, without
+            # the line below, no operator signal whatsoever.
+            #
+            # ⚠️ Zero rows is NOT by itself a fault: it is also the correct
+            # reading during rollout, before any marker has been written. So
+            # this reports the MEASUREMENT (requested vs returned) and does not
+            # claim a diagnosis.
+            if not _cursor_by_strategy:
+                logger.warning(
+                    "cron_sync: per-strategy sync-cursor lookup returned 0 "
+                    "marker(s) for %d requested strategy id(s). Expected while "
+                    "the table is still filling; once it is in service this is "
+                    "also what a service-role credential degraded to anon or "
+                    "authenticated looks like, since deny-all RLS answers 200 "
+                    "with an empty list and raises nothing",
+                    len(_marker_strategy_ids),
+                )
+
+    for row in keys:
+        row["strategy_cursors"] = {
+            sid: _cursor_by_strategy[sid]
+            for sid in row["strategy_ids"]
+            if sid in _cursor_by_strategy
+        }
 
     # Group by exchange for rate-limit awareness
     exchange_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1220,7 +2134,7 @@ async def cron_sync() -> dict[str, Any]:
         capped_results = all_results
         results_truncated = False
 
-    return {
+    response: dict[str, Any] = {
         **status_counts,
         "total_keys": len(keys),
         "total_trades": total_trades,
@@ -1230,6 +2144,13 @@ async def cron_sync() -> dict[str, Any]:
         "results": capped_results,
         "portfolio_recomputes": portfolio_recomputes,
     }
+    # 164.5.1.4: the marker lookup failed open, so the tick ran on key-level
+    # cursors alone. Record it beside the recompute lookup error rather than
+    # raising — but record it, or a whole tick of key-only resumption looks
+    # identical to a healthy one.
+    if strategy_cursor_lookup_error:
+        response["strategy_cursor_lookup_error"] = strategy_cursor_lookup_error
+    return response
 
 
 # ---------------------------------------------------------------------------
