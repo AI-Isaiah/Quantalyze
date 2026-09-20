@@ -523,6 +523,13 @@ const EXPECTED_ROUTE_BUDGETS: Record<
     expectedMaxDurationS: 300,
     budgets: [{ key: "keys-permissions", calls: 1 }],
   },
+  // Phase 164.5.3 / D-04 — the credential-rotation route. Single leg, no
+  // venue branching (D-03 scopes the route to MT5 only, so every request
+  // spends the same serialized-lease budget).
+  "src/app/api/keys/[id]/rotate-secret/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "keys-rotate-secret", calls: 1 }],
+  },
 };
 
 /**
@@ -791,13 +798,15 @@ function readMaxDurationFromDisk(routePath: string): number {
 }
 
 describe("SEAM-02 — seam budget invariant (SC-4)", () => {
-  it("scans every route declared in SEAM_ROUTE_BUDGETS (14 routes)", () => {
+  it("scans every route declared in SEAM_ROUTE_BUDGETS (15 routes)", () => {
     // Guards against the table being silently emptied, which would make every
     // it.each below vacuous — zero cases is a passing suite.
     // 15 → 14 at Phase 145: strategies/csv-finalize left the seam (direct
     // fold RPC on the SSR client; its table row was deleted deliberately with
     // the EXPECTED twin in the same commit).
-    expect(ROUTE_ENTRIES.length).toBe(14);
+    // 14 → 15 at Phase 164.5.3: keys/[id]/rotate-secret joined the seam
+    // (D-04's credential-rotation route).
+    expect(ROUTE_ENTRIES.length).toBe(15);
   });
 
   it("SC-4d / D-10 — every route row's CONTENTS match the hand-typed map", () => {

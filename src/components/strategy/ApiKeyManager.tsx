@@ -8,6 +8,7 @@ import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "./ApiKeyForm";
 import { SyncProgress, type SyncStatus } from "./SyncProgress";
+import { UpdateMt5SecretDialog } from "./UpdateMt5SecretDialog";
 import type { ApiKey } from "@/lib/types";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 
@@ -119,6 +120,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // Phase 164.5.3 / MT5CREDS Plan 05 — the id of the MT5 key whose password
+  // is being corrected. Distinct from Reconnect: this key's credential is
+  // WRONG and needs re-validation, not merely "try the stored one again".
+  const [updatingKeyId, setUpdatingKeyId] = useState<string | null>(null);
   const router = useRouter();
 
   const loadKeys = useCallback(async (opts?: { lastSyncedKeyId?: string }) => {
@@ -496,6 +501,11 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
                   {key.exchange.charAt(0).toUpperCase() + key.exchange.slice(1)}
                   {key.last_sync_at && ` · Last synced ${new Date(key.last_sync_at).toLocaleDateString()}`}
                 </p>
+                {key.exchange === "mt5" && (
+                  <p className="text-xs text-text-muted font-metric mt-0.5">
+                    MT5 account {key.venue_account_id ?? "—"}
+                  </p>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -516,6 +526,15 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
                   disabled={!!syncingKeyId}
                 >
                   {syncingKeyId === key.id ? "Syncing\u2026" : "Use & Sync"}
+                </Button>
+              )}
+              {key.exchange === "mt5" && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setUpdatingKeyId(key.id)}
+                >
+                  Update password
                 </Button>
               )}
               <Button
@@ -555,6 +574,13 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           <Button variant="danger" onClick={() => confirmDelete && handleDeleteKey(confirmDelete)}>Delete</Button>
         </div>
       </Modal>
+
+      <UpdateMt5SecretDialog
+        open={!!updatingKeyId}
+        apiKeyId={updatingKeyId ?? ""}
+        onClose={() => setUpdatingKeyId(null)}
+        onUpdated={() => loadKeys()}
+      />
 
       {error && !showForm && syncStatus !== "error" && <p className="text-sm text-negative">{error}</p>}
     </div>

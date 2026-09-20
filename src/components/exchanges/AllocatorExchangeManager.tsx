@@ -34,6 +34,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "@/components/strategy/ApiKeyForm";
+import { UpdateMt5SecretDialog } from "@/components/strategy/UpdateMt5SecretDialog";
 import { createClient } from "@/lib/supabase/client";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 import { computeRetryAtSeconds } from "@/lib/allocator-cooldowns";
@@ -63,6 +64,12 @@ interface ExchangeConnection {
   // (renders in the "Disconnected keys" section with a Reconnect button;
   // workers skip the key on the next cron tick).
   disconnected_at: string | null;
+  // Migration 20260920120000 (Phase 164.5.3 / MT5CREDS), exposing the
+  // column added by migration 20260812083206 (Phase 154/WIZCONT-02). The
+  // non-secret MT5 account identity the credential in this row was
+  // connected with; NULL for every ccxt venue. Rendered in both the active
+  // and disconnected sections for exchange === "mt5" only.
+  venue_account_id: string | null;
   // f8 (client-only — NOT persisted to DB): captured from the sync route's
   // `already_inflight` response. When syncing AND ≥30s out, the pill renders
   // the Queued helper via AllocatorSyncStatus.
@@ -90,12 +97,14 @@ type InitialKey = Omit<
   | "sync_error"
   | "last_429_at"
   | "disconnected_at"
+  | "venue_account_id"
   | "queued_next_attempt_at"
   | "helper_override"
 > & {
   sync_error?: string | null;
   last_429_at?: string | null;
   disconnected_at?: string | null;
+  venue_account_id?: string | null;
 };
 
 interface Props {
@@ -202,6 +211,7 @@ function normalizeInitialKey(
     last_429_at: k.last_429_at ?? null,
     // M1: preserve local null (reconnect in-flight) against stale server snapshot.
     disconnected_at: isReconnectInFlight ? null : (k.disconnected_at ?? null),
+    venue_account_id: k.venue_account_id ?? null,
     // Landmine 8 + f8/f4 preservation: client-only fields carry over across
     // router.refresh() server-state cycles when the row id matches.
     queued_next_attempt_at: prev?.queued_next_attempt_at ?? null,
@@ -228,6 +238,12 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
     null,
   );
   const [cascadeHoldings, setCascadeHoldings] = useState(false);
+  // Phase 164.5.3 / MT5CREDS Plan 05 — the id of the MT5 key whose password
+  // is being corrected. Shared dialog with ApiKeyManager (cross-directory
+  // import is fine — the dialog belongs to neither card exclusively).
+  // Distinct from Reconnect: this credential is WRONG and needs
+  // re-validation, not a retry of the stored one.
+  const [updatingKeyId, setUpdatingKeyId] = useState<string | null>(null);
   const [, startTransition] = useTransition();
 
   const supabase = createClient();
@@ -778,6 +794,11 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                       {key.exchange} · Read-only · Balance{" "}
                       {formatUsd(key.account_balance_usdt)}
                     </p>
+                    {key.exchange === "mt5" && (
+                      <p className="text-xs text-text-secondary font-metric mt-0.5">
+                        MT5 account {key.venue_account_id ?? "—"}
+                      </p>
+                    )}
                   </div>
                   <div className="text-right">
                     <p className="text-fixed-10 uppercase tracking-wider text-text-muted font-semibold">
@@ -812,6 +833,15 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                   >
                     Sync now
                   </Button>
+                  {key.exchange === "mt5" && (
+                    <Button
+                      variant="secondary"
+                      aria-label={`Update password for ${key.exchange} key`}
+                      onClick={() => setUpdatingKeyId(key.id)}
+                    >
+                      Update password
+                    </Button>
+                  )}
                   <Button
                     variant="secondary"
                     aria-label={`Disconnect ${key.exchange} key`}
@@ -865,6 +895,11 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                       {key.exchange} · Disconnected{" "}
                       {formatRelative(key.disconnected_at)}
                     </p>
+                    {key.exchange === "mt5" && (
+                      <p className="text-xs text-text-secondary font-metric mt-0.5">
+                        MT5 account {key.venue_account_id ?? "—"}
+                      </p>
+                    )}
                   </div>
                   <div className="text-right">
                     <p className="text-fixed-10 uppercase tracking-wider text-text-muted font-semibold">
@@ -892,6 +927,15 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                   >
                     Reconnect
                   </Button>
+                  {key.exchange === "mt5" && (
+                    <Button
+                      variant="secondary"
+                      aria-label={`Update password for ${key.exchange} key`}
+                      onClick={() => setUpdatingKeyId(key.id)}
+                    >
+                      Update password
+                    </Button>
+                  )}
                 </div>
               );
             })}
@@ -1048,6 +1092,13 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
           </Modal>
         );
       })()}
+
+      <UpdateMt5SecretDialog
+        open={!!updatingKeyId}
+        apiKeyId={updatingKeyId ?? ""}
+        onClose={() => setUpdatingKeyId(null)}
+        onUpdated={() => startTransition(() => router.refresh())}
+      />
     </div>
   );
 }

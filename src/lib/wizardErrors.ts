@@ -362,6 +362,55 @@ export type WizardErrorCode =
   // ⛔ NOT `clear_and_retry`: re-posting the same `reuse_api_key_id` is refused
   // identically, because the key it names still does not exist.
   | "KEY_REUSE_UNAVAILABLE"
+  // 164.5.3-02 — THE FOURTH ENTRY OF THE VENUE-FENCE FAMILY, and the first
+  // that fires off a route none of the other three touch: the standalone "Add
+  // Key" persist arm of `keys/validate-and-encrypt/route.ts`
+  // (`ApiKeyManager.tsx` and `AllocatorExchangeManager.tsx`, both POST with
+  // `persist: true`), not a wizard connect step. Phase 164.5.3 plan 02 made
+  // this route stamp `venue_account_id` on INSERT for the first time, which
+  // made the partial UNIQUE index (`api_keys_user_exchange_venue_account_uniq`,
+  // migration 20260812083206) reachable here for the first time too: a 23505
+  // naming that constraint means the login the caller just submitted already
+  // identifies a DIFFERENT live `api_keys` row of theirs.
+  //
+  // ⛔ NOT AN ALIAS IN `SEAM_CODE_TO_WIZARD_CODE`, on `STALE_CLIENT`'s rule
+  // above: that table translates codes ANOTHER service put on the wire. This
+  // one is minted by our own route's own INSERT-error branch, so it is a
+  // wizard member outright.
+  //
+  // ⚠️ AND THE INCUMBENT COULD NOT TAKE IT, READ AT THE EMITTER RATHER THAN
+  // MATCHED ON ITS NAME:
+  //   · `VENUE_ALREADY_CONNECTED` — "already backs a strategy of yours", first
+  //     remedy "open the strategy that already uses this account". FALSE here
+  //     for a real, reachable population of this arm's callers:
+  //     `AllocatorExchangeManager.tsx` never writes to `strategies` at all
+  //     (measured — zero references to that table in the file), so a key added
+  //     there has no strategy behind it, ever. And on `ApiKeyManager.tsx`'s
+  //     per-strategy edit page, the pre-existing row this new attempt COLLIDES
+  //     WITH may itself be one of those strategy-less allocator rows — this
+  //     arm has no way to tell. The sentence cannot be asserted for every
+  //     caller who can trip it, so it is not this arm's code.
+  //
+  // ⭐ THE COPY BELOW IS DELIBERATELY THINNER THAN `VENUE_ALREADY_CONNECTED`'s
+  // FOR THAT REASON. It names only the fact true of every reachable caller — a
+  // live key of yours already carries this account's identity — and promises
+  // neither a strategy to open nor a specific screen to act from, both of
+  // which `VENUE_ALREADY_CONNECTED`'s copy can promise only because its one
+  // emitter (the wizard connect flow) guarantees a strategy exists.
+  //
+  // ⚠️ NON-RECOVERABLE, ON THE SAME GROUND `VENUE_ALREADY_CONNECTED` IS: a
+  // Retry that resubmits the identical credentials trips the identical unique
+  // index and fails identically. `actions` carries neither member of
+  // `RECOVERABLE_ACTIONS` (`clear_and_retry`, `try_another_key`), so
+  // `buildEnvelope` would derive `recoverable: false` if this code ever
+  // reached it. ⚠️ Moot in practice today, and said so rather than assumed:
+  // `KNOWN_VALIDATE_AND_ENCRYPT_CODES`' own docblock records that none of this
+  // route's three consumers reads the `code` channel at all — all three throw
+  // `err.error`'s prose sentence — so this entry buys "typed, and has copy",
+  // the same thing every other row on that roster buys. The field is still
+  // authored honestly rather than left to whatever `actions` happened to
+  // default to.
+  | "KEY_VENUE_ALREADY_CONNECTED"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
   | "SYNC_TIMEOUT"
   | "SYNC_FAILED"
@@ -2301,6 +2350,35 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // keeps this entry outside the destructive-action population the
     // `[140.3-10 / TRAP-4]` scan walks.
     actions: ["try_another_key", "expand_log"],
+  },
+
+  // 164.5.3-02 — see the union member's docblock for why this mints rather
+  // than reusing `VENUE_ALREADY_CONNECTED`, and for the near-miss it was
+  // measured against.
+  //
+  // ⚠️ WHAT THIS COPY MAY CLAIM, read at the arm rather than assumed. The
+  // 23505 is caught on the `.insert().select().single()` call itself
+  // (`route.ts`), so the row this request tried to write was never created —
+  // "Your new key was not saved" is knowable, not hoped for. ⛔ It says
+  // NOTHING about which surface the colliding key lives on (a strategy, the
+  // allocator's Exchanges list, or nothing at all) — the union member's
+  // docblock is the record of why no such claim survives every reachable
+  // caller.
+  KEY_VENUE_ALREADY_CONNECTED: {
+    title: "You already have a connected key for this account.",
+    cause:
+      "The login you just entered already identifies a key on your account, and one account can only back one connected key at a time. Your new key was not saved.",
+    fix: [
+      "Use the key you already have connected for this account instead of adding a new one.",
+      "To connect a second strategy or exchange link, use a different account — a separate broker account, or a different login on the same broker.",
+      "If you believe this account should be free to connect fresh, email security@quantalyze.com with the correlation id below before disconnecting anything — the existing key keeps working until you do.",
+    ],
+    docsHref: "/security",
+    // ⛔ NEITHER member of `RECOVERABLE_ACTIONS` (`clear_and_retry`,
+    // `try_another_key`) — see the union member's docblock: resubmitting the
+    // same credentials trips the same unique index and fails identically, the
+    // same ground `VENUE_ALREADY_CONNECTED` is non-recoverable on.
+    actions: ["request_call", "expand_log"],
   },
 
   SYNC_TIMEOUT: {
@@ -4412,6 +4490,27 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   ["EXCHANGE_PROBE_FAILED", { code: "KEY_PROBE_FAILED", status: 503 }],
   ["ADAPTER_INIT_FAILED", { code: "SEAM_INTERNAL_FAULT", status: 500 }],
   ["INTERNAL", { code: "SEAM_INTERNAL_FAULT", status: 500 }],
+  // 164.5.3 / MT5CREDS review follow-up — 500, `retryable=False`, raised by
+  // `rotate_key_secret` (analytics-service/routers/internal.py) when
+  // `_validate_mt5_key` returns a shape that is neither the success
+  // `{valid, read_only}` nor a raise. A REACHABLE row, not an exemption:
+  // `src/app/api/keys/[id]/rotate-secret/route.ts` calls
+  // `classifyKeyValidationError` and now attaches `seamCode`, so the
+  // machine-code branch fires here before the substring cascade.
+  // `SEAM_INTERNAL_FAULT` on `ADAPTER_INIT_FAILED`'s exact reasoning: this is a
+  // CODE FAULT, not a setting, so ⛔ NOT `SEAM_MISCONFIGURED` (which
+  // `KEK_UNAVAILABLE` takes because an operator really can fix an unset key).
+  // ⛔ NOT `KEY_PROBE_FAILED`: it is recoverable and would render a Retry
+  // against a fault that fails identically on every attempt.
+  // ⭐ WHY THIS ROW EXISTS AT ALL, recorded because it is the second-order
+  // lesson: the code was minted by this phase's own hardening, and without a
+  // disposition that hardening would have surfaced to the founder as "we could
+  // not classify this failure" — the exact defect the cross-language roster
+  // gate was built to catch, caught by it.
+  [
+    "MT5_VALIDATE_INVARIANT_VIOLATION",
+    { code: "SEAM_INTERNAL_FAULT", status: 500 },
+  ],
 ]);
 
 /**
@@ -5147,7 +5246,9 @@ export function recogniseSeamErrorCode(
 export type DashboardDialogRoute =
   | "strategies/[id]/name"
   | "strategies/[id]/ownership"
-  | "portfolio-strategies/allocation";
+  | "portfolio-strategies/allocation"
+  // Phase 164.5.3 / MT5CREDS Plan 05 — UpdateMt5SecretDialog's route.
+  | "keys/[id]/rotate-secret";
 
 /**
  * The `WizardErrorCode`s each dashboard write route can put on the wire.
@@ -5177,7 +5278,7 @@ export type DashboardDialogRoute =
  *
  * ── WHAT IS DELIBERATELY ABSENT ─────────────────────────────────────────────
  *
- * Three wire codes these routes emit are NOT `WizardErrorCode`s and must not be
+ * Wire codes these routes emit that are NOT `WizardErrorCode`s and must not be
  * added here or minted as members. They never reach `buildEnvelope`:
  *
  *   · `NAME_REQUIRED` / `NAME_TOO_LONG` — the name route's two field-level
@@ -5193,10 +5294,20 @@ export type DashboardDialogRoute =
  *     answers it by swapping in its confirmation body with the amount at risk,
  *     not by rendering an error at all. It is a QUESTION, not a refusal the
  *     user must read and leave.
+ *   · `NEW_SECRET_REQUIRED` — `keys/[id]/rotate-secret`'s one field-level
+ *     refusal (mirrors `NAME_REQUIRED` above). `UpdateMt5SecretDialog` also
+ *     disables its submit button while the field is empty, so this arm is a
+ *     defence-in-depth backstop rather than a reachable UX path — never an
+ *     envelope either way.
+ *   · `KEY_UPDATE_UNSUPPORTED_VENUE` — the same route's 400 for a non-MT5 key.
+ *     Unreachable from `UpdateMt5SecretDialog` in practice (both host cards
+ *     gate the "Update password" affordance to `exchange === "mt5"` rows), so
+ *     it is not worth a copy entry; recorded as a disposition rather than a
+ *     silent gap.
  *
- * Each of the three is asserted as an explicit disposition by the coverage law,
- * so its absence is a recorded decision rather than an omission — an omission
- * being indistinguishable from the defect.
+ * Each is asserted as an explicit disposition by the coverage law, so its
+ * absence is a recorded decision rather than an omission — an omission being
+ * indistinguishable from the defect.
  */
 const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
   DashboardDialogRoute,
@@ -5245,6 +5356,66 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       // The allocate surface's one actionable refusal, emitted by both the
       // pre-check and the D-03-A trigger arm.
       "ALLOCATION_NOT_ALLOCATABLE",
+    ]),
+  ],
+  [
+    // Phase 164.5.3 / MT5CREDS Plan 05 — UpdateMt5SecretDialog.
+    "keys/[id]/rotate-secret",
+    new Set<WizardErrorCode>([
+      "DASHBOARD_SIGNED_OUT",
+      "DASHBOARD_REQUEST_INVALID",
+      // 161-REVIEW / CR-01's indeterminate half — this route has three arms
+      // that fail AFTER an UPDATE was sent (see route.ts's own PERSIST ARM
+      // docblock).
+      "DASHBOARD_WRITE_INDETERMINATE",
+      "DASHBOARD_ROW_STALE",
+      // route.ts's persist-arm-unavailable posture (no service credential).
+      "SEAM_MISCONFIGURED",
+      // Pitfall 1's venue-identity 23505 backstop.
+      "KEY_VENUE_ALREADY_CONNECTED",
+      // Realistic broker-validation outcomes this route's own seam call can
+      // produce (route.ts's docblock: "the classifier's existing substring
+      // cascade already recognises AUTH_FAILED_DETAIL /
+      // MT5_MASTER_PASSWORD_DETAIL / MT5_WRONG_SERVER_DETAIL"). Rostering
+      // all three, not just the master-password case D-04's own test names,
+      // so a founder who submits a login-shaped credential change or a wrong
+      // broker server sees the SPECIFIC guidance rather than the generic
+      // UNKNOWN card — the same reasoning D-01 D-06 applies to the display
+      // side of this phase.
+      "KEY_AUTH_FAILED",
+      "KEY_MT5_MASTER_PASSWORD",
+      "KEY_MT5_WRONG_SERVER",
+      // 164.5.3 review / CR-03 — this route's OWN rate limit
+      // (`userActionLimiter`, keyed `keys-rotate-secret:<uid>`), now carrying
+      // a `code` on its 429 body (route.ts's `rateLimitDenyJson` call) instead
+      // of rendering the false "we cannot tell whether your last action took
+      // effect" UNKNOWN envelope for a cap we imposed ourselves.
+      "RATE_LIMITED",
+      // 164.5.3 review / WR-01 — route.ts now carries the seam's `seamCode`
+      // forward, so these three `VENUE_WIRE_CODE_TO_VERDICT` verdicts (already
+      // rows in that table) can actually be REACHED from this route instead of
+      // falling to the terminal UNKNOWN:
+      //   KEY_RATE_LIMIT — wire RATE_LIMITED, Python's OWN per-key
+      //     secret-rotation throttle (`_consume_rate_limit` in
+      //     internal.py::rotate_key_secret) — distinct from the `RATE_LIMITED`
+      //     row above, which is THIS route's Next-side limiter. Two
+      //     vocabularies, two meanings, same duality this table's own
+      //     docblock already records for the wire code.
+      //   SEAM_INTERNAL_FAULT — wire MT5_GATEWAY_UNCONFIGURED, an operator
+      //     misconfiguration (unset/malformed MT5_GATEWAY_HOST/PORT), never
+      //     the caller's fault.
+      "KEY_RATE_LIMIT",
+      "SEAM_INTERNAL_FAULT",
+      // KEK_UNAVAILABLE (wire) already resolves to `SEAM_MISCONFIGURED`
+      // (rostered above for the persist-arm-unavailable posture), so the
+      // classifier now reaching it via `seamCode` needs no new roster row.
+      //
+      // ⚠️ NOT rostered: `KEY_UNDECRYPTABLE`. It has no row in
+      // `VENUE_WIRE_CODE_TO_VERDICT`, route.ts never puts it on the wire as a
+      // literal (so the dialog-envelope law's ARRIVAL check cannot see it
+      // either), and minting a member for it is out of this fix's scope — see
+      // route.ts's own WR-01 comment for the reachability gap this leaves
+      // open, flagged for follow-up rather than silently closed.
     ]),
   ],
 ]);
@@ -5320,6 +5491,17 @@ export { DASHBOARD_DIALOG_ROUTE_CODES };
  * gains wizard copy, it becomes a recognized code arriving on a 5xx carrying a
  * remedy that was authored for a 4xx arm — the WIZERR-06 W1 hazard. If you add
  * such a row, re-run that inventory and roster the code here.
+ *
+ * ⚠️ 164.5.3-02 ADDED AN EIGHTH MEMBER (`KEY_VENUE_ALREADY_CONNECTED`, a new
+ * local 409 emitter — see the roster below and the union member's own
+ * docblock), and this paragraph's "Six members" / "roughly 21 emittable"
+ * arithmetic was already stale by one before that (164.2-05 minted the
+ * SEVENTH, `RATE_LIMITED`, without re-running this count). Both counts are
+ * PRE-EXISTING drift, flagged here rather than silently re-derived: neither
+ * figure is guarded by a test, so re-stating a number nobody has re-measured
+ * against the >=500 forwarded-code inventory would be exactly the fabrication
+ * this docblock warns against elsewhere. Re-run the 161-08 W1 inventory before
+ * trusting either number again.
  */
 export const KNOWN_VALIDATE_AND_ENCRYPT_CODES: ReadonlySet<WizardErrorCode> =
   new Set<WizardErrorCode>([
@@ -5373,6 +5555,14 @@ export const KNOWN_VALIDATE_AND_ENCRYPT_CODES: ReadonlySet<WizardErrorCode> =
     // never emitted it from the classifier — it has no `classifyKeyValidationError`
     // call at all — so its only producer was the arm that just moved.
     "RATE_LIMITED",
+    // 164.5.3-02 — THE EIGHTH MEMBER. The venue-identity 23505 branch on the
+    // persist-INSERT arm (see the union member's own docblock for why this
+    // mints rather than reusing `VENUE_ALREADY_CONNECTED`). Read against this
+    // roster's own coverage law: the route's three consumers still read only
+    // `err.error`, never `code` (unchanged by this addition), so this row buys
+    // "typed, and has copy" exactly like every other row here — not "a client
+    // renders it".
+    "KEY_VENUE_ALREADY_CONNECTED",
     "UNKNOWN",
   ]);
 

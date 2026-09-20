@@ -292,6 +292,7 @@ describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", (
           sync_error: null,
           last_429_at: null,
           disconnected_at: null,
+          venue_account_id: null,
         },
       ],
       error: null,
@@ -337,6 +338,7 @@ describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", (
           sync_error: null,
           last_429_at: null,
           disconnected_at: null,
+          venue_account_id: null,
         },
       ],
       error: null,
@@ -376,6 +378,7 @@ describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", (
           sync_error: null,
           last_429_at: null,
           disconnected_at: null,
+          venue_account_id: null,
         },
       ],
       error: null,
@@ -415,6 +418,7 @@ describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", (
           sync_error: null,
           last_429_at: null,
           disconnected_at: null,
+          venue_account_id: null,
         },
       ],
       error: null,
@@ -431,6 +435,291 @@ describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", (
     expect(screen.getByText("MT5")).toBeInTheDocument();
     // … and the degraded "?" fallback does NOT.
     expect(screen.queryByText("?")).not.toBeInTheDocument();
+  });
+
+  // Phase 164.5.3 (MT5CREDS) — venue_account_id (migration 20260920120000)
+  // renders on the MT5 card so a founder can tell which MT5 account a key
+  // belongs to. Synthetic placeholder id per the phase's non-negotiable
+  // (never a real-looking MT5 login/account number).
+  it("renders the MT5 account identifier in .font-metric, un-separated, for an mt5 row with a value", async () => {
+    selectResultMock.mockReturnValue({
+      data: [
+        {
+          id: "key-mt5-id",
+          user_id: "user-a",
+          exchange: "mt5",
+          label: "My MT5",
+          is_active: true,
+          sync_status: "complete",
+          last_sync_at: "2026-04-19T11:58:00Z",
+          account_balance_usdt: 1000,
+          created_at: "2026-01-01T00:00:00Z",
+          sync_error: null,
+          last_429_at: null,
+          disconnected_at: null,
+          venue_account_id: "synth1234",
+        },
+      ],
+      error: null,
+    });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    const identifier = await screen.findByText("MT5 account synth1234");
+    expect(identifier).toBeInTheDocument();
+    expect(identifier).toHaveClass("font-metric");
+    // Never comma-grouped — this is an identifier, not a quantity (D-06).
+    expect(identifier.textContent).not.toMatch(/,/);
+  });
+
+  it("renders an em-dash for an mt5 row with a NULL venue_account_id (never 0, never blank)", async () => {
+    selectResultMock.mockReturnValue({
+      data: [
+        {
+          id: "key-mt5-null",
+          user_id: "user-a",
+          exchange: "mt5",
+          label: "My MT5",
+          is_active: true,
+          sync_status: "complete",
+          last_sync_at: "2026-04-19T11:58:00Z",
+          account_balance_usdt: 1000,
+          created_at: "2026-01-01T00:00:00Z",
+          sync_error: null,
+          last_429_at: null,
+          disconnected_at: null,
+          venue_account_id: null,
+        },
+      ],
+      error: null,
+    });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    expect(await screen.findByText("MT5 account —")).toBeInTheDocument();
+    expect(screen.queryByText("MT5 account 0")).not.toBeInTheDocument();
+  });
+
+  it("renders NO account-identifier line for a non-MT5 row", async () => {
+    selectResultMock.mockReturnValue({
+      data: [
+        {
+          id: "key-binance-2",
+          user_id: "user-a",
+          exchange: "binance",
+          label: "My Binance",
+          is_active: true,
+          sync_status: "complete",
+          last_sync_at: "2026-04-19T11:58:00Z",
+          account_balance_usdt: 1000,
+          created_at: "2026-01-01T00:00:00Z",
+          sync_error: null,
+          last_429_at: null,
+          disconnected_at: null,
+          venue_account_id: null,
+        },
+      ],
+      error: null,
+    });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("My Binance")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/MT5 account/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Phase 164.5.3 / MT5CREDS Plan 05 — the "Update password" affordance on
+ * ApiKeyManager's card. Distinct action from Delete: it opens
+ * UpdateMt5SecretDialog rather than mutating anything directly, and is
+ * gated to `exchange === "mt5"` rows only (this component has no
+ * disconnected-state concept of its own, so it always renders for MT5).
+ */
+describe("ApiKeyManager — Update password affordance (Phase 164.5.3 Plan 05)", () => {
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function mt5Row(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      id: "key-mt5-update",
+      user_id: "user-a",
+      exchange: "mt5",
+      label: "My MT5",
+      is_active: true,
+      sync_status: "complete",
+      last_sync_at: "2026-04-19T11:58:00Z",
+      account_balance_usdt: 1000,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+      venue_account_id: "synth1234",
+      ...overrides,
+    };
+  }
+
+  function binanceRow() {
+    return {
+      id: "key-binance-update",
+      user_id: "user-a",
+      exchange: "binance",
+      label: "My Binance",
+      is_active: true,
+      sync_status: "complete",
+      last_sync_at: "2026-04-19T11:58:00Z",
+      account_balance_usdt: 1000,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+      venue_account_id: null,
+    };
+  }
+
+  it("shows Update password for an MT5 row and clicking it opens the dialog for that row's id", async () => {
+    selectResultMock.mockReturnValue({ data: [mt5Row()], error: null });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("My MT5")).toBeInTheDocument();
+    });
+
+    const updateButton = screen.getByRole("button", {
+      name: /Update password/i,
+    });
+    expect(updateButton).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(updateButton);
+    });
+
+    // The dialog OPENED (its <dialog> now carries `open`) for THIS row's id
+    // — not merely present in the DOM, which the Modal always renders.
+    const updateDialog = Array.from(document.querySelectorAll("dialog")).find(
+      (d) => d.textContent?.includes("New password"),
+    );
+    expect(updateDialog).toHaveAttribute("open");
+    // Submitting reaches THIS row's id.
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    fireEvent.change(screen.getByLabelText("New password"), {
+      target: { value: "new-investor-password" },
+    });
+    await act(async () => {
+      const matches = screen.getAllByRole("button", {
+        name: "Update password",
+      });
+      fireEvent.click(matches[matches.length - 1]);
+    });
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/keys/key-mt5-update/rotate-secret",
+        expect.objectContaining({ method: "PATCH" }),
+      );
+    });
+  });
+
+  it("shows NO Update password button for a non-MT5 row", async () => {
+    selectResultMock.mockReturnValue({ data: [binanceRow()], error: null });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("My Binance")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.queryByRole("button", { name: /Update password/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a successful password update calls loadKeys() (re-fetches api_keys) and closes the dialog", async () => {
+    selectResultMock.mockReturnValue({ data: [mt5Row()], error: null });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("My MT5")).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Update password/i }));
+    });
+    fireEvent.change(screen.getByLabelText("New password"), {
+      target: { value: "new-investor-password" },
+    });
+
+    const callsBeforeSubmit = selectResultMock.mock.calls.length;
+
+    // Two "Update password" buttons now match — the row's own ghost button
+    // AND the now-open dialog's submit button. Scope to the dialog: it is
+    // the LAST match in DOM order (rendered after the card list + delete
+    // Modal).
+    await act(async () => {
+      const matches = screen.getAllByRole("button", {
+        name: "Update password",
+      });
+      fireEvent.click(matches[matches.length - 1]);
+    });
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/keys/key-mt5-update/rotate-secret",
+        expect.objectContaining({ method: "PATCH" }),
+      );
+    });
+
+    // onUpdated -> loadKeys() re-ran the api_keys SELECT.
+    await waitFor(() => {
+      expect(selectResultMock.mock.calls.length).toBeGreaterThan(
+        callsBeforeSubmit,
+      );
+    });
+
+    // Dialog closed — the Modal's <dialog> element no longer carries `open`,
+    // and the secret was scrubbed from state on the success path.
+    await waitFor(() => {
+      const dialogs = document.querySelectorAll("dialog");
+      const updateDialog = Array.from(dialogs).find((d) =>
+        d.textContent?.includes("New password"),
+      );
+      expect(updateDialog).not.toHaveAttribute("open");
+    });
+    expect(screen.getByLabelText("New password")).toHaveValue("");
   });
 });
 
@@ -475,6 +764,7 @@ describe("ApiKeyManager — complete_with_warnings is terminal (mig 202607071200
           sync_error: null,
           last_429_at: null,
           disconnected_at: null,
+          venue_account_id: null,
         },
       ],
       error: null,
@@ -812,6 +1102,7 @@ describe("ApiKeyManager — SEAMUX-05: both sync call sites observe the HTTP out
       sync_error: null,
       last_429_at: null,
       disconnected_at: null,
+      venue_account_id: null,
     };
   }
 

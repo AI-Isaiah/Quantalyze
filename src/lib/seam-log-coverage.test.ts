@@ -223,6 +223,8 @@ const EXPECTED_SEAM_FILES: readonly string[] = [
   "src/app/api/admin/match/recompute/route.ts",
   "src/app/api/bridge/route.ts",
   "src/app/api/keys/[id]/permissions/route.ts",
+  // Phase 164.5.3 / D-04 — the credential-rotation route joined the seam.
+  "src/app/api/keys/[id]/rotate-secret/route.ts",
   "src/app/api/keys/sync/route.ts",
   "src/app/api/keys/validate-and-encrypt/route.ts",
   "src/app/api/portfolio-optimizer/route.ts",

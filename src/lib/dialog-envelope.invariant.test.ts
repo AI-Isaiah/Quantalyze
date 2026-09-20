@@ -137,18 +137,24 @@ function derivePopulation(): string[] {
 
 /**
  * HAND-TYPED. Re-measured at HEAD by running `derivePopulation()` and counting
- * the three paths it printed:
+ * the four paths it printed:
  *
  *   src/app/(dashboard)/allocations/components/AllocateDialog.tsx
  *   src/components/strategy/MarkOwnershipDialog.tsx
  *   src/components/strategy/RenameStrategyDialog.tsx
+ *   src/components/strategy/UpdateMt5SecretDialog.tsx
  *
- * ⛔ If a fourth dashboard dialog builds an envelope, this literal is the thing
+ * Phase 164.5.3 / MT5CREDS Plan 05 added the fourth — the class this law
+ * exists to catch regrowing was closed IN THE SAME COMMIT: a roster row in
+ * `DASHBOARD_DIALOG_ROUTE_CODES` and a row in `DIALOGS` below, both added
+ * alongside the dialog itself.
+ *
+ * ⛔ If a FIFTH dashboard dialog builds an envelope, this literal is the thing
  * that reds — and the correct response is to give it a roster row in
  * `DASHBOARD_DIALOG_ROUTE_CODES` and a row in `DIALOGS` below, in the SAME
  * commit, not to bump the number.
  */
-const EXPECTED_DIALOG_COUNT = 3;
+const EXPECTED_DIALOG_COUNT = 4;
 
 /**
  * ⭐ 161-REVIEW / WR-02 — THE ARRIVAL POPULATION IS READ FROM THE ROUTE.
@@ -208,6 +214,10 @@ const ROUTE_PATHS: Readonly<Record<DashboardDialogRoute, string>> = {
   "portfolio-strategies/allocation": join(
     REPO,
     "src/app/api/portfolio-strategies/allocation/route.ts",
+  ),
+  "keys/[id]/rotate-secret": join(
+    REPO,
+    "src/app/api/keys/[id]/rotate-secret/route.ts",
   ),
 };
 
@@ -388,6 +398,47 @@ const DIALOGS: readonly DialogUnderTest[] = [
     // D-03-A trigger arm), indeterminate ×6. 2+5+2+3+3+2+6 = 23.
     expectedEmitterSites: 23,
     deliberatelyNotEnvelope: {},
+  },
+  {
+    label: "UpdateMt5SecretDialog",
+    file: "src/components/strategy/UpdateMt5SecretDialog.tsx",
+    route: "keys/[id]/rotate-secret",
+    // Only the LITERAL `{code: "X", error: "y"}` sites the predicate can see
+    // — the classifier-driven codes (KEY_AUTH_FAILED, KEY_MT5_MASTER_PASSWORD,
+    // KEY_MT5_WRONG_SERVER) reach the wire via `NextResponse.json(envelope,
+    // …)` with `envelope` a variable, not an object literal, so this scanner
+    // does not (and structurally cannot) see them — they are rostered in
+    // DASHBOARD_DIALOG_ROUTE_CODES anyway, on purpose, per that roster's own
+    // "a roster admitting a code its route does not currently emit costs
+    // nothing" rule.
+    emittedCodes: [
+      "DASHBOARD_SIGNED_OUT",
+      "DASHBOARD_REQUEST_INVALID",
+      "NEW_SECRET_REQUIRED",
+      "DASHBOARD_WRITE_INDETERMINATE",
+      "DASHBOARD_ROW_STALE",
+      "KEY_UPDATE_UNSUPPORTED_VENUE",
+      "SEAM_MISCONFIGURED",
+      "KEY_VENUE_ALREADY_CONNECTED",
+    ],
+    // 11 sites, counted by hand off the route at HEAD: signed-out ×1,
+    // request-invalid ×2 (bad uuid, unparseable json), NEW_SECRET_REQUIRED
+    // ×1, write-indeterminate ×3 (ownership-lookup error, zero-rows TOCTOU,
+    // genuine updateErr), row-stale ×1, unsupported-venue ×1,
+    // seam-misconfigured ×1, venue-already-connected ×1.
+    expectedEmitterSites: 11,
+    deliberatelyNotEnvelope: {
+      NEW_SECRET_REQUIRED:
+        "FIELD-LEVEL, mirrors NAME_REQUIRED. UpdateMt5SecretDialog also " +
+        "disables its submit button while the field is empty, so this arm " +
+        "is a defence-in-depth backstop rather than a reachable UX path — " +
+        "never an envelope either way.",
+      KEY_UPDATE_UNSUPPORTED_VENUE:
+        "Both host cards (ApiKeyManager, AllocatorExchangeManager) gate the " +
+        "Update-password affordance to exchange === 'mt5' rows, so this " +
+        "arm is unreachable from this dialog in practice — the route's own " +
+        "defence-in-depth for a shape neither card can produce.",
+    },
   },
 ];
 
@@ -677,7 +728,9 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
       }
     }
     // Hand-typed: NAME_REQUIRED + NAME_TOO_LONG + LIVE_ALLOCATION.
-    expect(checked).toBe(3);
+    // 3 -> 5 at Phase 164.5.3 / MT5CREDS Plan 05: NEW_SECRET_REQUIRED +
+    // KEY_UPDATE_UNSUPPORTED_VENUE on keys/[id]/rotate-secret.
+    expect(checked).toBe(5);
   });
 
   it("A. every TERMINAL-UNKNOWN arm is a listed disposition with a reason", () => {
@@ -722,11 +775,20 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
     }
 
     expect(offenders, offenders.join("\n")).toEqual([]);
-    // NON-VACUITY: 6 + 6 + 7 across the three rosters, hand-counted at HEAD.
-    // 16 -> 19 at 161-REVIEW / CR-01: `DASHBOARD_WRITE_INDETERMINATE` joined
-    // all three rosters, because all three routes have at least one arm that
-    // fails AFTER a data-modifying statement was sent.
-    expect(checked).toBe(19);
+    // NON-VACUITY: 6 + 6 + 7 across the original three rosters, hand-counted
+    // at HEAD. 16 -> 19 at 161-REVIEW / CR-01: `DASHBOARD_WRITE_INDETERMINATE`
+    // joined all three rosters, because all three routes have at least one
+    // arm that fails AFTER a data-modifying statement was sent.
+    // 19 -> 28 at Phase 164.5.3 / MT5CREDS Plan 05: `keys/[id]/rotate-secret`
+    // added a fourth roster of 9 (DASHBOARD_SIGNED_OUT,
+    // DASHBOARD_REQUEST_INVALID, DASHBOARD_WRITE_INDETERMINATE,
+    // DASHBOARD_ROW_STALE, SEAM_MISCONFIGURED, KEY_VENUE_ALREADY_CONNECTED,
+    // KEY_AUTH_FAILED, KEY_MT5_MASTER_PASSWORD, KEY_MT5_WRONG_SERVER).
+    // 28 -> 31 at 164.5.3 review fixes (CR-03 / WR-01): the rotate-secret
+    // roster gained RATE_LIMITED (this route's OWN 429, CR-03), KEY_RATE_LIMIT
+    // and SEAM_INTERNAL_FAULT (both reached via the carried `seamCode`,
+    // WR-01) — 9 -> 12 on that one roster, 28 -> 31 overall.
+    expect(checked).toBe(31);
   });
 
   it("B. no rostered code is the generic terminal — that would defeat the roster", () => {

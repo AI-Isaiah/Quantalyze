@@ -164,11 +164,18 @@ export const API_KEY_USER_COLUMNS_ARR = [
   // AllocatorExchangeManager uses it to split keys into active vs
   // disconnected sections and render the Reconnect affordance.
   "disconnected_at",
+  // Migration 20260920120000 (Phase 164.5.3 / MT5CREDS) — GRANT SELECT
+  // (venue_account_id) ON api_keys TO authenticated. The column itself is
+  // migration 20260812083206 (Phase 154/WIZCONT-02) and is MT5-only today —
+  // ccxt's ValidationResult carries no account-identity field, so ccxt
+  // venues stay NULL. Both key cards (ApiKeyManager, AllocatorExchangeManager)
+  // render it for exchange === "mt5" only, in .font-metric, em-dash on NULL.
+  "venue_account_id",
 ] as const;
 
 /** PostgREST projection string derived from the allowlist tuple. */
 export const API_KEY_USER_COLUMNS = API_KEY_USER_COLUMNS_ARR.join(", ") as
-  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error, last_429_at, disconnected_at";
+  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error, last_429_at, disconnected_at, venue_account_id";
 
 /** Single api_keys column name as a narrow string literal union type. */
 export type ApiKeyUserColumn = (typeof API_KEY_USER_COLUMNS_ARR)[number];

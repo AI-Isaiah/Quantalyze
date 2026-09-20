@@ -169,6 +169,7 @@ function makeKey(overrides: Partial<Record<string, unknown>> = {}) {
     created_at: "2026-04-01T00:00:00Z",
     sync_error: null,
     last_429_at: null as string | null,
+    venue_account_id: null as string | null,
     ...overrides,
   };
 }
@@ -244,6 +245,58 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
     expect(mt5Tag).toHaveStyle({ color: "#0F172A", backgroundColor: "#F1F5F9" });
     // Existing venue is byte-unchanged.
     expect(screen.getByText("BNB")).toBeInTheDocument();
+  });
+
+  // Phase 164.5.3 (MT5CREDS) — venue_account_id (migration 20260920120000)
+  // renders in the active-keys section so a founder can tell which MT5
+  // account a key belongs to. Synthetic placeholder id per the phase's
+  // non-negotiable (never a real-looking MT5 login/account number).
+  it("renders the MT5 account identifier in .font-metric, un-separated, for an active mt5 row with a value", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-active",
+            exchange: "mt5",
+            label: "My MT5",
+            venue_account_id: "synth1234",
+          }),
+        ]}
+      />,
+    );
+    const identifier = screen.getByText("MT5 account synth1234");
+    expect(identifier).toBeInTheDocument();
+    expect(identifier).toHaveClass("font-metric");
+    expect(identifier.textContent).not.toMatch(/,/);
+  });
+
+  it("renders an em-dash for an active mt5 row with a NULL venue_account_id (never 0, never blank)", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-active-null",
+            exchange: "mt5",
+            label: "My MT5",
+            venue_account_id: null,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("MT5 account —")).toBeInTheDocument();
+    expect(screen.queryByText("MT5 account 0")).not.toBeInTheDocument();
+  });
+
+  it("renders NO account-identifier line for an active non-MT5 row", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[makeKey({ id: "key-bnb-active", exchange: "binance" })]}
+      />,
+    );
+    expect(screen.queryByText(/MT5 account/)).not.toBeInTheDocument();
   });
 
   it("clicking Sync now POSTs to /api/allocator/holdings/sync with { api_key_id }", async () => {
@@ -1101,6 +1154,196 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
     expect(
       screen.queryByRole("heading", { name: /Disconnected/i }),
     ).not.toBeInTheDocument();
+  });
+
+  // Phase 164.5.3 (MT5CREDS) — venue_account_id (migration 20260920120000)
+  // renders in the DISCONNECTED section too, same idiom as active — D-06
+  // requires the card to identify the account regardless of connection
+  // state. Synthetic placeholder id per the phase's non-negotiable.
+  it("renders the MT5 account identifier in .font-metric, un-separated, for a disconnected mt5 row with a value", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-disc",
+            exchange: "mt5",
+            label: "My MT5",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+            venue_account_id: "synth5678",
+          }),
+        ]}
+      />,
+    );
+    const identifier = screen.getByText("MT5 account synth5678");
+    expect(identifier).toBeInTheDocument();
+    expect(identifier).toHaveClass("font-metric");
+    expect(identifier.textContent).not.toMatch(/,/);
+  });
+
+  it("renders an em-dash for a disconnected mt5 row with a NULL venue_account_id (never 0, never blank)", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-disc-null",
+            exchange: "mt5",
+            label: "My MT5",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+            venue_account_id: null,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("MT5 account —")).toBeInTheDocument();
+    expect(screen.queryByText("MT5 account 0")).not.toBeInTheDocument();
+  });
+
+  it("renders NO account-identifier line for a disconnected non-MT5 row", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-bnb-disc",
+            exchange: "binance",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.queryByText(/MT5 account/)).not.toBeInTheDocument();
+  });
+
+  // Phase 164.5.3 (MT5CREDS) Plan 05 — the "Update password" affordance,
+  // distinct from Reconnect everywhere it appears (RESEARCH.md Open
+  // Question 4): available on EVERY mt5 row regardless of connection state,
+  // never gated to the disconnected/error section.
+  it("an active mt5 row shows Update password alongside Sync now/Disconnect, distinct from Reconnect", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-mt5-active", exchange: "mt5", label: "My MT5" }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Update password for mt5 key" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Sync mt5 now/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Disconnect mt5 key/i }),
+    ).toBeInTheDocument();
+    // Reconnect never appears on an active (non-disconnected) row.
+    expect(
+      screen.queryByRole("button", { name: /Reconnect mt5 key/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a disconnected mt5 row shows Update password alongside Reconnect — clicking Update password does NOT call the reconnect RPC", async () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-disc-update",
+            exchange: "mt5",
+            label: "My MT5",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    const updateButton = screen.getByRole("button", {
+      name: "Update password for mt5 key",
+    });
+    expect(updateButton).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Reconnect mt5 key/i }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(updateButton);
+    });
+
+    // Update password never touches disconnected_at directly (D-05 is the
+    // route's job) — the reconnect RPC must not have fired.
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("shows NO Update password button for a non-MT5 row, in either section", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-bnb-active", exchange: "binance" }),
+          makeKey({
+            id: "key-bnb-disc-2",
+            exchange: "binance",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /Update password/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opening the dialog from a DISCONNECTED row and completing a successful update triggers router.refresh() (callback wiring, not the route's own DB behavior)", async () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-disc-refresh",
+            exchange: "mt5",
+            label: "My MT5",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Update password for mt5 key" }),
+      );
+    });
+    fireEvent.change(screen.getByLabelText("New password"), {
+      target: { value: "corrected-investor-password" },
+    });
+
+    const refreshCallsBefore = routerRefreshMock.mock.calls.length;
+
+    await act(async () => {
+      const matches = screen.getAllByRole("button", {
+        name: "Update password",
+      });
+      fireEvent.click(matches[matches.length - 1]);
+    });
+
+    await waitFor(() => {
+      expect(fetchMockReconnect).toHaveBeenCalledWith(
+        "/api/keys/key-mt5-disc-refresh/rotate-secret",
+        expect.objectContaining({ method: "PATCH" }),
+      );
+    });
+    await waitFor(() => {
+      expect(routerRefreshMock.mock.calls.length).toBeGreaterThan(
+        refreshCallsBefore,
+      );
+    });
   });
 });
 

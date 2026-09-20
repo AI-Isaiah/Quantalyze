@@ -66,6 +66,11 @@ const CANONICAL = new Set([
   "intro/route.ts",
   "intro-response/route.ts",
   "keys/[id]/permissions/route.ts",
+  // Phase 164.5.3 / MT5CREDS (D-04) — CANONICAL, measured not assumed: the
+  // PATCH handler reads and shape-checks the body BEFORE `checkLimit`, so a
+  // malformed rotation request 400s without burning a token (B15
+  // validate-then-limit), exactly like its sibling validate-and-encrypt below.
+  "keys/[id]/rotate-secret/route.ts",
   "keys/sync/route.ts",
   "keys/validate-and-encrypt/route.ts",
   "notes/route.ts",

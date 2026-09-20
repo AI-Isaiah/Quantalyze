@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.5.1.3
-current_phase_name: SYNCADMIT
-status: "Phase 164.5.1.3 shipped — PR #830"
-stopped_at: PR #830 open — CI running (2 runs bound to head 8b8a5864). Next is /land-and-deploy. ⭐ No migration in this PR: merging starts NO apply-test and engages NO Production gate.
-last_updated: "2026-09-20T06:11:42.607Z"
+current_phase: 164.5.3
+current_phase_name: MT5CREDS — show the MT5 account number on the key card and add a credential-update path
+status: executing
+stopped_at: "Executing 164.5.3 MT5CREDS wave 1 (plans 01-04 in parallel worktrees). ⚠️ This phase SHIPS A MIGRATION, so landing it will engage the Production human reviewer gate."
+last_updated: "2026-09-20T13:47:30.775Z"
 last_activity: 2026-09-20
-last_activity_desc: Phase 164.5.1.3 SYNCADMIT admitted the owner-only status `private` to ALLOWED_STRATEGY_STATUSES in analytics-service/routers/cron.py, so five production API keys whose trades were NEVER stored begin syncing. PROD 2026-09-19: 6 private strategies, 5 with an API key, 0 sharing that key with an in-set sibling — the sibling hypothesis is FALSE and all 5 were never synced (a 6th is keyless and unsyncable by any widening). The ledger precedent 20260917120000 turned out to SUPPORT the widening rather than bar it. Security headline: the change creates NO NEW CODE PATH — every mechanism a newly-admitted strategy reaches is status-agnostic, and draft/pending_review (both already non-public) have exercised that same pipeline all along; this constant is the ONLY lifecycle gate in the pipeline. Four consequence gates assert fan-out MEMBERSHIP BY STRATEGY ID, never membership in the constant, which would be vacuous. Verification passed 5/5, SECURITY 3/3 closed 0 open, both reviewers 0 findings so NO fix round ran. Two fabricated citations struck from the plan before execution. No migration; no floor, ceiling or census touched. Shipped v0.82.0.0 as PR #830.
-state_head: 8b8a58645369d433b1fcaed32c05d45cde6af98d
+last_activity_desc: Phase 164.5.3 execution started
+state_head: 436988df5d2dc0f3bf99eba4109f61550bb18fe4
 progress:
   total_phases: 45
-  completed_phases: 29
-  total_plans: 215
-  completed_plans: 211
-  percent: 62
+  completed_phases: 31
+  total_plans: 221
+  completed_plans: 213
+  percent: 69
 ---
 
 ## ⭐ STATE lineage
@@ -179,9 +179,14 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.8.4 (GATERESIDUE) — READY TO EXECUTE
-fixture) — EXECUTING (2/2 plans done, verification not yet run)
-Plan: 2 of 2 DONE (`164.1.1.1-02-SUMMARY.md`, commits `0d9d2408` (test, `LANE_ONLY_SITES`
+Phase: 164.5.3 (MT5CREDS — show the MT5 account number on the key card and add a credential-update path) — EXECUTING
+Plan: 1 of 5
+      ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
+      until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
+      so a future handler cannot match them again; their continuation prose follows unbroken.
+      Phase: 164.8.4 (GATERESIDUE) — READY TO EXECUTE
+      fixture) — EXECUTING (2/2 plans done, verification not yet run)
+      Plan: 2 of 2 DONE (`164.1.1.1-02-SUMMARY.md`, commits `0d9d2408` (test, `LANE_ONLY_SITES`
 register pinned as SITES-not-a-count, re-derived from the corpus with a named failure mode on a
 malformed or key-less marker) and `11f46389` (test, FORWARD/REVERSE object-binding cross-checks
 plus the vault near-miss guard) on branch `chore/164.1.1.1-laneonlygates`). Task 3 (four
@@ -475,7 +480,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Phase 164.5.1.3 shipped — PR #830
+Status: Executing Phase 164.5.3
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -491,7 +496,7 @@ Status: Phase 164.5.1.3 shipped — PR #830
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-20 — Phase 164.5.1.3 SYNCADMIT shipped as PR #830 (v0.82.0.0). Admitted the owner-only status `private` to ALLOWED_STRATEGY_STATUSES, so five production keys whose trades were never stored begin syncing. Decide-with-evidence outcome: the ledger precedent SUPPORTED the widening rather than barring it. No migration, so merging starts no apply-test and engages no Production gate. Verification passed 5/5, SECURITY 3/3 closed 0 open, both reviewers 0 findings.
+Last activity: 2026-09-20 — Phase 164.5.3 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -949,7 +954,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [██████░░░░] 62%
+Progress: [███████░░░] 69%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1264,6 +1269,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.4.2 inserted after Phase 164.4: Owner phase for TODOS [REDUNDER-SUBSET-SPLIT], unowned since 2026-09-05. sql-mutation timeout-minutes has taken its ONE allowed raise; 20 is a declared CEILING and the next escalation is a subset split, never a third value. Inserted 2026-09-18 while Phase 164.1.1 was mid-execution — the STATE current-phase pointer was deliberately NOT repointed.
 - Phase 164.1.1.1 inserted after Phase 164.1.1: LANEONLYGATES — sql-tests runs a pg-lane-only gate against shared TEST and is permanently red, blocking the analytics-service deploy (URGENT)
 - Phase 164.5.1.4 inserted after Phase 164.5.1: SYNCCURSOR - per-KEY cursor vs per-STRATEGY stores strands failed strategies' window (URGENT)
+- Phase 164.5.4 edited: added defect (3) KEY_UNDECRYPTABLE routed from 164.5.3; corrected the stale independent-of-164.5.3 clause
 
 ### Decisions
 

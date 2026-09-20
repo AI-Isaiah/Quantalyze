@@ -475,6 +475,7 @@ export type SeamBudgetKey =
   | "process-key-enqueue"
   | "process-key-sync"
   | "keys-permissions"
+  | "keys-rotate-secret"
   | "process-key-unified-dormant";
 
 /**
@@ -784,6 +785,22 @@ export const SEAM_BUDGETS: Record<
     notes:
       "The third Railway seam (/internal/keys/{id}/permissions). Replaces two duplicated AbortSignal.timeout(15_000) constants in keys/[id]/permissions/route.ts and finalize-wizard's fetchLivePermissions.",
   },
+  "keys-rotate-secret": {
+    timeoutMs: 120_000,
+    // Phase 164.5.3 / D-04 — the credential-rotation seam
+    // (PATCH /api/keys/[id]/rotate-secret). Shares validate-key-serialized's
+    // exact budget, dependency and retry values because it calls the IDENTICAL
+    // `_validate_mt5_key` probe behind the IDENTICAL MT5 terminal lease: same
+    // 120s serialized-lease worst case, same `mt5-gateway` dependency (the
+    // probe's own MT5_GATEWAY_UNREACHABLE 503), same non-idempotent-live-probe
+    // no-retry reasoning (D-07's standing prohibition applies here verbatim —
+    // a retry would double the wall-clock SC-4b charge against this route's
+    // Vercel ceiling for the identical reason).
+    dependencies: ["mt5-gateway"],
+    retries: SEAM_RETRIES,
+    notes:
+      "D-04's credential-rotation seam — decrypts the stored MT5 credential, re-validates the NEW password against the live broker, re-encrypts on success. Shares validate-key-serialized's budget/dependency/retry values verbatim; see the row comment above for why.",
+  },
   "process-key-unified-dormant": {
     timeoutMs: 60_000,
     dependencies: [],
@@ -962,6 +979,10 @@ export const SEAM_ROUTE_BUDGETS: Record<
   "src/app/api/keys/[id]/permissions/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [{ key: "keys-permissions", calls: 1 }],
+  },
+  "src/app/api/keys/[id]/rotate-secret/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "keys-rotate-secret", calls: 1 }],
   },
 };
 
