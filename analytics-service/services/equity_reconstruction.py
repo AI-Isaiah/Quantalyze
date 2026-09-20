@@ -26,7 +26,7 @@ import os
 from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import ccxt.async_support as ccxt
 import httpx
@@ -2083,6 +2083,156 @@ async def _fetch_current_equity(
 # Entrypoints
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# MT5 — the deal-ledger backfill branch (Phase 164.5.4 / D-01)
+# ---------------------------------------------------------------------------
+# ⛔ WHY A VENUE BRANCH AND NOT A WIDER `except`. ``Mt5Session`` carries NONE of
+# the six ccxt methods ``_fetch_and_price_window`` reaches for — a measured 0/6 —
+# so an MT5 allocator that falls into the generic crawl dies on
+# ``exchange.fetch_my_trades(...)`` with ``'Mt5Session' object has no attribute
+# 'fetch_my_trades'``. That is an ``AttributeError``, which the crawl's
+# ``except ccxt.NotSupported`` arms cannot see, so it surfaced as an unclassified
+# ``failed (unknown)`` — MEASURED IN PROD on 2026-09-16, the defect this branch
+# closes. Widening an `except` to catch ``AttributeError`` would HIDE the class
+# instead of closing it AND would leave the other five methods waiting for the
+# next caller; CONTEXT.md's defect (1) forbids it in writing. The branch below
+# makes the whole ccxt crawl UNREACHABLE for mt5 BY CONSTRUCTION.
+#
+# The branch replaces the FETCH step only. It produces the same
+# ``(rows, hit_terminus, telemetry)`` triple ``_fetch_and_price_window``
+# produces, so the depth resolution, the sibling check, the atomic sole-key
+# replace / multi-key upsert and the audit emit are all INHERITED unchanged —
+# including the ``replace_equity_snapshots`` docblock's SIGKILL-between-DELETE-
+# and-INSERT window. ⛔ None of that half is duplicated here.
+
+
+def _mt5_telemetry() -> dict[str, Any]:
+    """The observability signals ``run_reconstruct_allocator_history_job``'s
+    SHARED audit emit reads, answered honestly for MT5.
+
+    ⚠️ The four lists are STRUCTURALLY REQUIRED, not padding: the audit emit
+    INDEXES them directly (``telemetry["inverse_perp_symbols"][:50]`` and its
+    three siblings) and ``inverse_only_zero_curve`` reads one of them, so a
+    smaller dict would raise ``KeyError`` inside the shared persist half. They
+    are empty because MT5 HAS NO SUCH CONCEPT — the deal ledger is single-
+    currency with no per-symbol pricing, no perp contract-size table and no
+    CoinGecko fallback — so an empty list is the honest encoding of "no such
+    items exist", never of "a check ran and returned nothing".
+
+    ⛔ The four ``anchor_*`` keys are DELIBERATELY ABSENT. The emit reads those
+    through ``.get()`` with a default, and MT5 performs no anchor step at all:
+    ``reconstruct_mt5_nav_levels`` is anchored to the account's own realized
+    balance by construction, so there is no offset to spread and no skip verdict
+    to report. Emitting ``anchor_offset_skipped_usd: 0.0`` would imply an anchor
+    was attempted and declined. Omission says the truth: it was never attempted.
+    """
+    return {
+        "skipped_symbols": [],
+        "unknown_perp_symbols": [],
+        "inverse_perp_symbols": [],
+        "ctval_drift_warnings": [],
+        # `history_deals_get` is a FULL-HISTORY fetch with no retention terminus
+        # (the same fact that lets `combine_mt5_deal_ledger` stamp
+        # `ledger_complete`), so no row was reconstructed against an unknown
+        # baseline and the dashboard must NOT suppress absolute levels.
+        "pre_terminus_balance_unknown": False,
+    }
+
+
+def _mt5_rows_from_levels(nav: "pd.Series") -> list[dict[str, Any]]:
+    """Turn an MT5 NAV-LEVEL series into ``allocator_equity_snapshots`` rows.
+
+    ⛔ ``value_usd`` is an ABSOLUTE DOLLAR BALANCE. ``nav`` MUST come from
+    ``broker_dailies.reconstruct_mt5_nav_levels`` — the LEVELS sibling — never
+    from ``combine_mt5_deal_ledger``, whose first element is a RETURN series.
+    Writing daily percentage changes into this dollar-balance column is a silent
+    money bug with no exception and no red test, on a number a founder publishes.
+
+    The row shape is the ccxt builder's, measured from it and from both persist
+    functions:
+
+    * ``source`` is CHECK-constrained to
+      ``'exchange_primary' | 'coingecko_fallback' | 'mixed'``. MT5's deal ledger
+      IS the venue's own primary record, so ``'exchange_primary'`` is the only
+      honest member.
+    * ``breakdown`` is nullable JSONB and NULL here: MT5 is single-currency with
+      no per-symbol decomposition. ⛔ Do not fabricate a single-key breakdown.
+    * ``pre_terminus_balance_unknown`` is False — see ``_mt5_telemetry``.
+    """
+    rows: list[dict[str, Any]] = []
+    for day, value in nav.items():
+        rows.append({
+            "asof": pd.Timestamp(day).date().isoformat(),
+            "value_usd": round(float(value), 2),
+            "breakdown": None,
+            "source": "exchange_primary",
+            "pre_terminus_balance_unknown": False,
+        })
+    return rows
+
+
+async def _mt5_fetch_window(
+    exchange: Any,
+) -> tuple[list[dict[str, Any]], bool, dict[str, Any]]:
+    """The MT5 half of the backfill fetch: read the deal ledger, reconstruct the
+    per-day dollar levels, and return the ccxt path's own
+    ``(rows, hit_terminus, telemetry)`` triple.
+
+    ``hit_terminus`` is ALWAYS False: ``history_deals_get`` fetches the full
+    history and has no retention terminus to clamp against, so the caller's
+    depth resolution correctly leaves ``history_depth_months`` NULL for mt5
+    (``VENUE_HISTORY_DEPTH_MONTHS`` has no mt5 key) and the terminus warning is
+    never logged.
+
+    ⛔ THE DISPOSITIONS ARE NOT HERE YET — see the caller. This function lets its
+    exceptions out unchanged.
+    """
+    # Imported at call time, mirroring the sibling derive branch in
+    # `job_worker.py`: these are the mt5 leaf modules, and keeping the import
+    # inside the branch keeps "importing this module does not require an MT5
+    # stack" true for every non-mt5 caller.
+    from services.broker_dailies import reconstruct_mt5_nav_levels
+    from services.mt5_client import Mt5Session
+    from services.mt5_concurrency import (
+        _MT5_DERIVE_READ_TIMEOUT_S,
+        mt5_terminal_lease,
+    )
+    from services.mt5_read import read_mt5_deal_ledger
+
+    # venue == "mt5" ⇒ `_allocator_key_preflight` built an Mt5Session. The cast
+    # narrows the ccxt.Exchange | SfoxClient | Mt5Session union for the
+    # .client/.login accesses below the way the derive branch does — mypy
+    # --strict, no `# type: ignore`.
+    session = cast(Mt5Session, exchange)
+    now = datetime.now(timezone.utc)
+
+    # MT5CONC-02 / WIZFORM-ABANDON: serialize the ENTIRE terminal-IPC region
+    # against the ONE shared Wine terminal through the LEASE (not the raw lock —
+    # only the lease's epoch bump can fence a `to_thread` body that outlived the
+    # `wait_for` below). ⛔ The bound, the lease and the dispositions are the
+    # CALLER'S to supply: `read_mt5_deal_ledger` is synchronous, blocking and
+    # deliberately unbounded, and plan 04's SUMMARY says in writing that nothing
+    # about calling it inherits any of the three.
+    async with mt5_terminal_lease(session.client.terminal_key):
+        info, deals = await asyncio.wait_for(
+            asyncio.to_thread(read_mt5_deal_ledger, session, now=now),
+            timeout=_MT5_DERIVE_READ_TIMEOUT_S,
+        )
+
+    # The post-read computation stays OUTSIDE the lease: it does no terminal IPC,
+    # and holding the one shared terminal through it would needlessly serialize
+    # work that needs no terminal.
+    equity = float(info["equity"])
+    balance = float(info["balance"])
+    nav, _meta = reconstruct_mt5_nav_levels(
+        deals,
+        equity,
+        balance,
+        server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+    )
+    return _mt5_rows_from_levels(nav), False, _mt5_telemetry()
+
+
 async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> DispatchResult:
     """Full backfill on first key connect. One-time per (allocator, api_key).
 
@@ -2144,15 +2294,29 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
 
     try:
         try:
-            # FLIPRETRY-01 (defensive): the orchestrating window crawl is HARD-BOUNDED
-            # so a hang becomes a classified transient (the except asyncio.TimeoutError
-            # arm below), never an unbounded await that wedges the worker loop.
-            rows, hit_terminus, telemetry = await asyncio.wait_for(
-                _fetch_and_price_window(
-                    ctx.exchange, venue, ctx.supabase, start_date, end_date,
-                ),
-                timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
-            )
+            if venue == "mt5":
+                # ⭐ 164.5.4 / D-01 — THE VENUE BRANCH. Placed like the `deribit`
+                # arm above (an explicit venue check ahead of the generic crawl)
+                # so `_fetch_and_price_window` — and with it every
+                # `exchange.fetch_my_trades` / `fetch_deposits` /
+                # `fetch_withdrawals` / `fetch_ohlcv` / `fetch_balance` /
+                # `fetch_positions` call an `Mt5Session` does not have — is
+                # UNREACHABLE for mt5 by construction, not by a caught crash.
+                # ⛔ Unlike `deribit`, mt5 RECONSTRUCTS: the branch returns real
+                # rows and falls through to the SHARED persist half below.
+                rows, hit_terminus, telemetry = await _mt5_fetch_window(
+                    ctx.exchange,
+                )
+            else:
+                # FLIPRETRY-01 (defensive): the orchestrating window crawl is HARD-BOUNDED
+                # so a hang becomes a classified transient (the except asyncio.TimeoutError
+                # arm below), never an unbounded await that wedges the worker loop.
+                rows, hit_terminus, telemetry = await asyncio.wait_for(
+                    _fetch_and_price_window(
+                        ctx.exchange, venue, ctx.supabase, start_date, end_date,
+                    ),
+                    timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
+                )
         except ccxt.RateLimitExceeded as exc:
             await _stamp_429(ctx.supabase, ctx.key_row, exc)
             error_kind, msg = classify_exception(exc)

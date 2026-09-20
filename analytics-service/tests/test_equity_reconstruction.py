@@ -5149,3 +5149,268 @@ async def test_equity_reconstruction_byte_identical_across_transfers_promotion(
     assert telemetry["unknown_perp_symbols"] == []
     assert telemetry["inverse_perp_symbols"] == []
     assert telemetry["ctval_drift_warnings"] == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.5.4 / D-01 — the `venue == "mt5"` backfill branch.
+#
+# ⭐ THESE ARE WIRING TESTS, NOT HELPER UNIT TESTS. They drive the WHOLE
+# `run_reconstruct_allocator_history_job` through an OFFLINE MT5 transport double
+# and assert on the PERSISTED ROWS, so deleting the branch — or handing the
+# dollar-balance column a RETURN series — turns one of them RED. A test that only
+# proved `_mt5_fetch_window` exists could never fail usefully.
+#
+# ⛔ NO live MT5 login, NO network, NO database, NO `uvicorn`. The fake transport
+# and `FakeSupabaseClient` are the only clients, and every credential-shaped value
+# below is SYNTHETIC; the repo is public.
+# ---------------------------------------------------------------------------
+
+# The transport double is IMPORTED from the derive-branch suite that owns it, never
+# re-implemented — plan 04's own discipline. A second copy is a second thing to
+# drift, and this one already encodes the load-bearing MT5 distinctions (None →
+# `_raise_last`, `()` → honest empty, the second `account_info()` being the POST
+# login bracket).
+from tests.test_mt5_derive_branch import _FakeMt5Transport  # noqa: E402
+
+import services.mt5_concurrency as _mt5_conc  # noqa: E402
+from services.mt5_client import Mt5Client, Mt5Session  # noqa: E402
+
+
+_MT5_SYNTHETIC_LOGIN = 424242
+_MT5_SYNTHETIC_SERVER = "Synthetic-Server"
+# The fixture's own settled balance. Every money assertion below is tied to THIS
+# literal, never read back from the SUT.
+_MT5_FIXTURE_BALANCE = 110_500.0
+
+
+@pytest.fixture
+def _mt5_terminal_state():
+    """MT5CONC-02: clear the per-terminal lock AND epoch registries around each mt5
+    case so a lock created here can never leak into another test and mask a
+    regression (the derive suite's own autouse fixture, scoped to these cases)."""
+    _mt5_conc.reset_terminal_state_for_tests()
+    yield
+    _mt5_conc.reset_terminal_state_for_tests()
+
+
+def _mt5_session(transport: _FakeMt5Transport) -> Mt5Session:
+    """An Mt5Session over the offline transport double.
+
+    ⭐ THE UNREACHABILITY PIN. A real `Mt5Session` has NO `fetch_my_trades` — that
+    absence IS the PROD defect (`'Mt5Session' object has no attribute
+    'fetch_my_trades'`, job `failed (unknown)`, measured 2026-09-16). Asserting on
+    absence would therefore assert the bug. Instead this session is given a
+    booby-trapped `fetch_my_trades` — and the other five ccxt methods the crawl
+    reaches for — that RAISE if touched, so the test fails on REACHABILITY: if the
+    venue branch is deleted and mt5 falls back into the generic crawl, the crawl
+    now FINDS the attribute, calls it, and the AssertionError names exactly which
+    method it reached.
+    """
+    def _connect(*, host, port, timeout):  # noqa: ANN001
+        return transport
+
+    client = Mt5Client("h", 1, _connect=_connect)
+    session = Mt5Session(
+        client=client,
+        login=_MT5_SYNTHETIC_LOGIN,
+        investor_password="synthetic-pw",
+        server=_MT5_SYNTHETIC_SERVER,
+    )
+    for _method in (
+        "fetch_my_trades",
+        "fetch_deposits",
+        "fetch_withdrawals",
+        "fetch_ohlcv",
+        "fetch_balance",
+        "fetch_positions",
+    ):
+        def _booby(*_a, _name=_method, **_kw):
+            raise AssertionError(
+                f"the ccxt crawl was REACHED for an mt5 allocator: {_name}() was "
+                "called on an Mt5Session. The venue branch is what makes this "
+                "unreachable (164.5.4 / D-01)."
+            )
+
+        setattr(session, _method, _booby)
+    return session
+
+
+def _mt5_epoch(day: date, hour: int = 12) -> int:
+    return int(
+        datetime(day.year, day.month, day.day, hour, tzinfo=timezone.utc).timestamp()
+    )
+
+
+def _mt5_canonical_ledger(today: date) -> tuple[list[dict], dict[str, float]]:
+    """The canonical hand fixture, dated RELATIVE to today so it can never drift out
+    of the [today − BACKFILL_CAP_DAYS, today] window and rot the suite.
+
+    Deals (identical arithmetic to the derive suite's `_canonical_deals`):
+      today−10  trading  profit 500, commission −100  → cash effect +400
+      today−8   BALANCE  +10_000                      → external flow
+      today−8   trading  profit +300
+      today−7   trading  profit −200
+
+    HAND-DERIVED LEVELS (never read back from the SUT). terminal_nav = balance =
+    110_500 (equity == balance, no open positions), rolled BACKWARD by
+    NAV_{t−1} = NAV_t − pnl_t − F_t over the pnl ∪ flow index:
+      today−7 : 110_500                              (the anchor)
+      today−8 : 110_500 − (−200) − 0       = 110_700
+      today−10: 110_700 −   300  − 10_000  = 100_400
+    """
+    d10 = today - timedelta(days=10)
+    d8 = today - timedelta(days=8)
+    d7 = today - timedelta(days=7)
+    deals = [
+        {"type": 0, "entry": 1, "profit": 500.0, "swap": 0.0,
+         "commission": -100.0, "fee": 0.0, "time": _mt5_epoch(d10)},
+        {"type": 2, "profit": 10_000.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _mt5_epoch(d8)},
+        {"type": 1, "entry": 1, "profit": 300.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _mt5_epoch(d8)},
+        {"type": 1, "entry": 1, "profit": -200.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _mt5_epoch(d7)},
+    ]
+    expected = {
+        d10.isoformat(): 100_400.0,
+        d8.isoformat(): 110_700.0,
+        d7.isoformat(): 110_500.0,
+    }
+    return deals, expected
+
+
+def _mt5_account(
+    equity: float = _MT5_FIXTURE_BALANCE,
+    balance: float = _MT5_FIXTURE_BALANCE,
+) -> dict:
+    return {"equity": equity, "balance": balance, "login": _MT5_SYNTHETIC_LOGIN}
+
+
+def _mt5_job() -> dict:
+    return {
+        "id": "job-mt5",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    }
+
+
+def _persisted_by_asof(fake_supabase: FakeSupabaseClient) -> dict[str, float]:
+    return {
+        r["asof"]: float(r["value_usd"])
+        for r in fake_supabase.rows_for("allocator_equity_snapshots")
+    }
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_persists_dollar_levels_end_to_end(
+    monkeypatch, _mt5_terminal_state,
+):
+    """⭐ THE TRACER: an mt5 allocator's first backfill runs the whole way —
+    preflight → lease → shared deal read → shared NAV-levels combiner → row build →
+    the SHARED persist pair → audit — and lands REAL DOLLAR EQUITY ROWS.
+
+    Before the branch existed this job fell into the generic ccxt crawl and died on
+    `exchange.fetch_my_trades(...)`, ending `failed (unknown)`.
+    """
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setenv("MT5_SERVER_UTC_OFFSET_S", "0")
+    today = datetime.now(timezone.utc).date()
+    deals, expected_levels = _mt5_canonical_ledger(today)
+    transport = _FakeMt5Transport(account=_mt5_account(), deals=deals)
+    session = _mt5_session(transport)
+
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_preflight(monkeypatch, "mt5", fake_supabase, session)
+    _install_fake_audit(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    from services.job_worker import DispatchOutcome
+
+    assert result.outcome == DispatchOutcome.DONE, (
+        f"mt5 backfill did not complete: {result.error_kind} / "
+        f"{result.error_message}"
+    )
+
+    persisted = _persisted_by_asof(fake_supabase)
+    assert persisted, "the mt5 backfill persisted ZERO rows"
+
+    # (1) The hand-derived levels landed, day for day.
+    for iso, want in expected_levels.items():
+        assert persisted[iso] == pytest.approx(want, abs=0.01), (
+            f"{iso}: persisted {persisted[iso]}, hand oracle {want}"
+        )
+
+    # (2) ⛔ THE SILENT MONEY BUG PIN (Pitfall 1 / T-164.5.4-25). Every persisted
+    # value must be a DOLLAR BALANCE in the region of the account's own settled
+    # balance. A returns-shaped series lands in [-1, 1] and reddens here loudly.
+    floor = 0.5 * _MT5_FIXTURE_BALANCE
+    assert min(persisted.values()) > floor, (
+        "persisted value_usd values are not dollar balances — the smallest is "
+        f"{min(persisted.values())}, below the {floor} floor tied to the fixture's "
+        "own balance. A RETURN series (values in [-1, 1]) looks exactly like this."
+    )
+
+    # (3) The read really happened at the JOB level, through the ONE shared helper,
+    # with BOTH MT5CONC-02 login brackets intact (login → account_info →
+    # history_deals_get → account_info) and the shared `finally: aclose_exchange`
+    # closing the transport afterwards — the ccxt path's own cleanup, INHERITED.
+    assert transport.calls == [
+        "initialize", "login", "account_info", "history_deals_get", "execute",
+        "account_info", "transport_close",
+    ], transport.calls
+
+    # (4) The rows reached persistence through the SHARED sole-key atomic replace —
+    # observed on the fake supabase, not read off the source.
+    assert [name for name, _p in fake_supabase.rpc_calls] == [
+        "replace_allocator_equity_snapshots"
+    ], fake_supabase.rpc_calls
+
+    # (5) The inherited row contract: MT5 has no per-symbol decomposition and no
+    # retention terminus.
+    for row in fake_supabase.rows_for("allocator_equity_snapshots"):
+        assert row["source"] == "exchange_primary"
+        assert row["breakdown"] is None
+        assert row["pre_terminus_balance_unknown"] is False
+        # history_depth_months_for_venue("mt5") is None — mt5 has no entry in
+        # VENUE_HISTORY_DEPTH_MONTHS, which is correct for a full-history fetch.
+        assert row["history_depth_months"] is None
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_never_reaches_the_ccxt_crawl(
+    monkeypatch, _mt5_terminal_state,
+):
+    """⛔ UNREACHABILITY, asserted AS unreachability. `_fetch_and_price_window` — the
+    ONLY door to `exchange.fetch_my_trades(...)` — is replaced by a landmine. If the
+    `venue == "mt5"` branch is deleted or moved below the crawl, this test fails
+    with the landmine's message rather than passing on an absent call."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setenv("MT5_SERVER_UTC_OFFSET_S", "0")
+    from services import equity_reconstruction as er
+
+    async def _landmine(*_a, **_kw):
+        raise AssertionError(
+            "_fetch_and_price_window (the generic ccxt crawl) was REACHED for an "
+            "mt5 allocator — this is the 2026-09-16 PROD path that ended "
+            "failed (unknown) on 'Mt5Session' object has no attribute "
+            "'fetch_my_trades' (164.5.4 / D-01)."
+        )
+
+    monkeypatch.setattr(er, "_fetch_and_price_window", _landmine)
+
+    today = datetime.now(timezone.utc).date()
+    deals, _expected = _mt5_canonical_ledger(today)
+    transport = _FakeMt5Transport(account=_mt5_account(), deals=deals)
+    session = _mt5_session(transport)
+
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_preflight(monkeypatch, "mt5", fake_supabase, session)
+    _install_fake_audit(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    from services.job_worker import DispatchOutcome
+
+    assert result.outcome == DispatchOutcome.DONE
+    assert fake_supabase.rows_for("allocator_equity_snapshots")
