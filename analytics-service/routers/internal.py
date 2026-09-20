@@ -31,6 +31,7 @@ hits the exchange.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -39,6 +40,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import sentry_sdk
+from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
@@ -576,6 +578,20 @@ async def get_key_permissions(
 
 class RotateSecretRequest(BaseModel):
     new_secret: str
+    # 164.5.3 fix-python (review finding 1, 2026-09-20) — OPTIONAL,
+    # BACKWARD-COMPATIBLE owner-scoping field. Defense-in-depth: without it, a
+    # holder of INTERNAL_API_TOKEN can use this endpoint as a rate-limited
+    # password oracle against an arbitrary key_id (an attacker-supplied
+    # candidate password, with a live broker login disclosed on success) — a
+    # materially worse primitive than the read-only sibling `get_key_permissions`.
+    # The primary control stays the session-scoped ownership check at the
+    # Next.js caller (`src/app/api/keys/[id]/rotate-secret/route.ts`); this is
+    # depth, not the control. Optional so either half can land first without a
+    # broken window: when absent, behavior is UNCHANGED (no owner filter).
+    # ⛔ CALLER CONTRACT — not wired here (a sibling owns that file): the
+    # Next.js route must be updated to pass the session `user_id` in this
+    # field for the depth to take effect.
+    user_id: str | None = None
 
 
 @router.post("/keys/{key_id}/rotate-secret")
@@ -600,13 +616,20 @@ async def rotate_key_secret(
          ``get_key_permissions`` already uses, keyed on ``key_id`` — this is
          defense-in-depth mirroring the sibling endpoint's posture, not a new
          mechanism).
-      3. Load the row; 404 if absent — BEFORE any decrypt.
+      3. Load the row; 404 if absent — BEFORE any decrypt. Optionally scoped
+         to ``req.user_id`` when the caller supplies it (defense-in-depth
+         owner check, review finding 1, 164.5.3 fix-python) — a mismatched
+         owner also reads 404, never disclosing that the key_id exists under
+         a different account.
       4. Venue-scope gate: 422 if the row's ``exchange`` is not ``mt5`` —
          BEFORE any decrypt. Defense-in-depth; the Next.js side (plan 04)
          enforces the same gate as the primary control.
       5. Load the KEK; 500 ``KEK_UNAVAILABLE`` if unconfigured.
       6. ``decrypt_credentials`` the row to recover ``(login, OLD password
-         [discarded], broker_server)``; 500 ``KEY_UNDECRYPTABLE`` on failure.
+         [discarded], broker_server)``; 500 ``KEY_UNDECRYPTABLE`` on a genuine
+         decrypt failure (``InvalidToken`` / ``JSONDecodeError`` / ``KeyError``
+         only — narrowed per review finding 3; an unrelated bug propagates as
+         an unhandled 500 instead of being mislabeled as a broken key).
       7. Call ``_validate_mt5_key(login, req.new_secret, broker_server)`` —
          the SAME gateway probe MT5 create already uses, with the SAME
          three-argument credential-slot order (login -> api_key position, new
@@ -617,13 +640,16 @@ async def rotate_key_secret(
          ``service_error``) PROPAGATE UNCAUGHT — this lets the Next.js
          caller's existing ``classifyKeyValidationError`` cascade recognise
          them byte-identically, with zero new TS vocabulary. Nothing is
-         re-encrypted or returned on any of these paths (D-04).
-      8. On success (``_validate_mt5_key`` returned ``{"valid": True,
-         "read_only": True}`` without raising), ``encrypt_credentials`` the
-         UNCHANGED login/server with the NEW password and return its six
-         ciphertext fields plus ``venue_account_id``. ``login`` is the ONLY
-         plaintext value in the response — never the password, never the
-         broker server (T-164.5.3-06).
+         re-encrypted or returned on any of these paths (D-04). The returned
+         result is captured and asserted to be the success shape ``{"valid":
+         True, "read_only": True}`` (review finding 2) — its only non-raising
+         exit — before proceeding, rather than trusting that invariant blindly
+         across the module boundary.
+      8. On success, ``encrypt_credentials`` the UNCHANGED login/server with
+         the NEW password and return its six ciphertext fields plus
+         ``venue_account_id``. ``login`` is the ONLY plaintext value in the
+         response — never the password, never the broker server
+         (T-164.5.3-06).
 
     ⛔ No line in this function logs, echoes, or otherwise surfaces
     ``req.new_secret``, the decrypted old password, or the broker server.
@@ -635,7 +661,10 @@ async def rotate_key_secret(
       429 — per-key rate limit hit.
       400 — the broker rejected the new credential (three distinguishable
             detail strings, propagated from ``_validate_mt5_key`` uncaught).
-      500 — KEK unavailable, or the stored key is undecryptable.
+      500 — KEK unavailable, the stored key is undecryptable, or
+            ``_validate_mt5_key`` returned a non-success shape without
+            raising (``MT5_VALIDATE_INVARIANT_VIOLATION`` — should be
+            unreachable; see review finding 2).
     """
     _verify_internal_token(request)
 
@@ -650,9 +679,15 @@ async def rotate_key_secret(
 
     supabase = get_supabase()
 
-    key_data = one(
-        supabase.table("api_keys").select("*").eq("id", key_id).maybe_single().execute()
-    )
+    # Finding 1 (defense-in-depth): scope the row load to the caller's own
+    # key when `req.user_id` is supplied. A mismatched owner reads as
+    # "not found" (404), not 403 — this must not disclose that a key_id
+    # exists under a different account. Absent `req.user_id` (old/existing
+    # callers), the query is byte-identical to before this fix.
+    query = supabase.table("api_keys").select("*").eq("id", key_id)
+    if req.user_id:
+        query = query.eq("user_id", req.user_id)
+    key_data = one(query.maybe_single().execute())
     if not key_data:
         raise HTTPException(status_code=404, detail="API key not found")
 
@@ -675,8 +710,22 @@ async def rotate_key_secret(
 
     try:
         login, _old_password, broker_server = decrypt_credentials(key_data, kek)
-    except Exception:
-        logger.error("Failed to decrypt API key %s for secret rotation", key_id)
+    except (InvalidToken, json.JSONDecodeError, KeyError):
+        # Finding 3: narrowed from a bare `except Exception:` to the exception
+        # types `decrypt_credentials` actually raises for a genuine decrypt
+        # failure — InvalidToken (bad KEK/DEK, malformed/missing ciphertext
+        # columns), JSONDecodeError (corrupted decrypted payload), KeyError
+        # (payload missing an expected credential slot). A bug elsewhere (e.g.
+        # a TypeError from a future signature change) now propagates as an
+        # unhandled 500 instead of being mislabeled "reconnected" advice that
+        # would instruct the founder to delete a perfectly good key.
+        # `exc_info=True` records the type + traceback on the operator side —
+        # the prior bare `logger.error` recorded neither. Never the credential
+        # itself: decrypt_credentials raises before any plaintext is bound to
+        # a local the log statement could reach.
+        logger.error(
+            "Failed to decrypt API key %s for secret rotation", key_id, exc_info=True
+        )
         raise service_error(
             500,
             "KEY_UNDECRYPTABLE",
@@ -687,7 +736,28 @@ async def rotate_key_secret(
 
     # D-04: validate BEFORE persisting. A failed validation's exceptions
     # propagate uncaught — nothing below this line runs on that path.
-    await _validate_mt5_key(login, req.new_secret, broker_server)
+    validate_result = await _validate_mt5_key(login, req.new_secret, broker_server)
+    # Finding 2: capture and assert the probe's result rather than discarding
+    # it. `_validate_mt5_key`'s only non-raising exit is the success shape
+    # `{"valid": True, "read_only": True}` — an invariant that lives in
+    # routers/exchange.py, not here. Make the guarantee local so a future
+    # change to that invariant fails loudly at the one call site in this
+    # phase that persists a credential, rather than silently re-encrypting
+    # and returning ciphertext for a probe that did not actually succeed.
+    if not (
+        validate_result.get("valid") is True
+        and validate_result.get("read_only") is True
+    ):
+        logger.error(
+            "rotate_key_secret: _validate_mt5_key returned a non-success shape "
+            "without raising for key=%s (invariant violation)", key_id,
+        )
+        raise service_error(
+            500,
+            "MT5_VALIDATE_INVARIANT_VIOLATION",
+            retryable=False,
+            detail="Credential validation returned an unexpected result. Nothing was changed.",
+        )
 
     encrypted = encrypt_credentials(login, req.new_secret, broker_server, kek)
     return {**encrypted, "venue_account_id": login}

@@ -38,6 +38,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from cryptography.fernet import InvalidToken
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
@@ -79,6 +80,28 @@ def _supabase_with_row(row: dict | None) -> MagicMock:
 
 def _mt5_row(key_id: str = "key-mt5") -> dict:
     return {"id": key_id, "exchange": "mt5", "is_active": True}
+
+
+def _supabase_with_row_owner_scoped(
+    row_without_filter: dict | None, row_with_filter: dict | None
+) -> MagicMock:
+    """164.5.3 fix-python (review finding 1) — a supabase mock that
+    distinguishes the id-only query chain (`.eq("id", ...).maybe_single()`)
+    from the id+user_id-scoped chain (`.eq("id", ...).eq("user_id",
+    ...).maybe_single()`), so a test can prove the owner filter is actually
+    applied rather than merely present in the source. `row_without_filter` is
+    what an UNFILTERED query would return (used to catch a mutant that drops
+    the filter silently); `row_with_filter` is what the real, owner-scoped
+    query returns."""
+    fake = MagicMock()
+    id_chain = fake.table.return_value.select.return_value.eq.return_value
+    id_chain.maybe_single.return_value.execute.return_value = MagicMock(
+        data=row_without_filter
+    )
+    id_chain.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
+        data=row_with_filter
+    )
+    return fake
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +160,110 @@ def test_rotate_secret_happy_path_returns_ciphertext_and_login_never_passwords(c
         _SYNTH_LOGIN, _SYNTH_NEW_PASSWORD, _SYNTH_BROKER_SERVER, b"kek"
     )
     mock_decrypt.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 164.5.3 fix-python (review finding 1): optional, backward-compatible owner
+# scoping. `test_rotate_secret_happy_path_...` above already proves the
+# absent-user_id (old-caller) path is unchanged — these two prove the
+# present-user_id path actually filters, in both directions.
+# ---------------------------------------------------------------------------
+
+
+def test_rotate_secret_with_matching_user_id_succeeds(client):
+    encrypted_fields = {
+        "api_key_encrypted": "ciphertext-blob",
+        "api_secret_encrypted": None,
+        "passphrase_encrypted": None,
+        "dek_encrypted": "ciphertext-dek",
+        "nonce": None,
+        "kek_version": 1,
+    }
+    # row_without_filter=None: if the owner filter were somehow SKIPPED, the
+    # id-only chain would answer with no row and this would wrongly 404 —
+    # the mock cannot accidentally pass by falling back to the wrong branch.
+    with patch(
+        "routers.internal.get_supabase",
+        return_value=_supabase_with_row_owner_scoped(
+            row_without_filter=None, row_with_filter=_mt5_row()
+        ),
+    ), \
+         patch("routers.internal.get_kek", return_value=b"kek"), \
+         patch(
+             "routers.internal.decrypt_credentials",
+             return_value=(_SYNTH_LOGIN, _SYNTH_OLD_PASSWORD, _SYNTH_BROKER_SERVER),
+         ), \
+         patch(
+             "routers.internal._validate_mt5_key",
+             new=AsyncMock(return_value={"valid": True, "read_only": True}),
+         ), \
+         patch("routers.internal.encrypt_credentials", return_value=dict(encrypted_fields)):
+        res = client.post(
+            "/internal/keys/key-mt5/rotate-secret",
+            headers=_headers(),
+            json={"new_secret": _SYNTH_NEW_PASSWORD, "user_id": "owner-uuid"},
+        )
+
+    assert res.status_code == 200, res.text
+    assert res.json()["venue_account_id"] == _SYNTH_LOGIN
+
+
+def test_rotate_secret_with_mismatched_user_id_returns_404_before_any_decrypt(client):
+    """Anti-vacuity for the owner filter: `row_without_filter` is a REAL row
+    (what an unfiltered `.eq("id", ...)` query alone would return);
+    `row_with_filter` is None (what the real, owner-scoped query returns for
+    a caller who does not own the key). If the `if req.user_id: query =
+    query.eq("user_id", ...)` line in the handler were neutered/deleted, the
+    code would read the id-only chain instead, find a row, and NOT 404 —
+    making the mutation observable rather than vacuous."""
+    with patch(
+        "routers.internal.get_supabase",
+        return_value=_supabase_with_row_owner_scoped(
+            row_without_filter=_mt5_row(), row_with_filter=None
+        ),
+    ), patch("routers.internal.decrypt_credentials") as mock_decrypt:
+        res = client.post(
+            "/internal/keys/key-mt5/rotate-secret",
+            headers=_headers(),
+            json={"new_secret": _SYNTH_NEW_PASSWORD, "user_id": "someone-elses-uuid"},
+        )
+
+    assert res.status_code == 404, res.text
+    mock_decrypt.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 164.5.3 fix-python (review finding 2): the probe's result is captured and
+# asserted rather than discarded.
+# ---------------------------------------------------------------------------
+
+
+def test_rotate_secret_validate_non_success_shape_without_raising_never_encrypts(client):
+    """If `_validate_mt5_key` returns without raising but NOT the success
+    shape (an invariant violation this endpoint has no control over but must
+    not silently trust), the handler must reject rather than proceed to
+    encrypt+persist. Deleting the finding-2 guard would make this observe 200
+    instead of 500 — a genuine RED, not a vacuous one."""
+    with patch("routers.internal.get_supabase", return_value=_supabase_with_row(_mt5_row())), \
+         patch("routers.internal.get_kek", return_value=b"kek"), \
+         patch(
+             "routers.internal.decrypt_credentials",
+             return_value=(_SYNTH_LOGIN, _SYNTH_OLD_PASSWORD, _SYNTH_BROKER_SERVER),
+         ), \
+         patch(
+             "routers.internal._validate_mt5_key",
+             new=AsyncMock(return_value={"valid": False, "read_only": True}),
+         ), \
+         patch("routers.internal.encrypt_credentials") as mock_encrypt:
+        res = client.post(
+            "/internal/keys/key-mt5/rotate-secret",
+            headers=_headers(),
+            json={"new_secret": _SYNTH_NEW_PASSWORD},
+        )
+
+    assert res.status_code == 500, res.text
+    assert res.json()["detail"]["code"] == "MT5_VALIDATE_INVARIANT_VIOLATION"
+    mock_encrypt.assert_not_called()
 
 
 def test_rotate_secret_missing_token_returns_403_before_any_decrypt(client):
@@ -263,10 +390,19 @@ def test_rotate_secret_kek_unavailable_never_reaches_validate(client):
 
 
 def test_rotate_secret_undecryptable_never_reaches_validate(client):
+    # 164.5.3 fix-python (review finding 3): the except in the handler was
+    # narrowed from a bare `except Exception:` to the exception types
+    # `decrypt_credentials` actually raises for a genuine decrypt failure.
+    # `InvalidToken` (cryptography's own — raised both explicitly for a
+    # malformed row and from a Fernet.decrypt failure) is the representative
+    # one; a raw `Exception("bad blob")` no longer exercises this arm, since
+    # it is exactly the kind of unrelated-bug shape the narrowing means to
+    # let propagate instead of mislabeling as "reconnect your key".
     with patch("routers.internal.get_supabase", return_value=_supabase_with_row(_mt5_row())), \
          patch("routers.internal.get_kek", return_value=b"kek"), \
          patch(
-             "routers.internal.decrypt_credentials", side_effect=Exception("bad blob")
+             "routers.internal.decrypt_credentials",
+             side_effect=InvalidToken("bad blob"),
          ), \
          patch("routers.internal._validate_mt5_key", new=AsyncMock()) as mock_validate:
         res = client.post(
@@ -277,4 +413,28 @@ def test_rotate_secret_undecryptable_never_reaches_validate(client):
 
     assert res.status_code == 500, res.text
     assert res.json()["detail"]["code"] == "KEY_UNDECRYPTABLE"
+    mock_validate.assert_not_awaited()
+
+
+def test_rotate_secret_undecryptable_narrowed_except_lets_unrelated_bug_propagate(client):
+    """Anti-vacuity companion to the case above: a bug shape the narrowed
+    except does NOT claim (e.g. a TypeError from some future signature
+    mismatch) must surface as an unhandled 500, not the misleading
+    KEY_UNDECRYPTABLE/"reconnect your key" envelope. Proves the narrowing in
+    review finding 3 actually narrowed something, rather than merely
+    reformatting the same catch-all."""
+    with patch("routers.internal.get_supabase", return_value=_supabase_with_row(_mt5_row())), \
+         patch("routers.internal.get_kek", return_value=b"kek"), \
+         patch(
+             "routers.internal.decrypt_credentials",
+             side_effect=TypeError("unrelated bug, not a decrypt failure"),
+         ), \
+         patch("routers.internal._validate_mt5_key", new=AsyncMock()) as mock_validate:
+        with pytest.raises(TypeError):
+            client.post(
+                "/internal/keys/key-mt5/rotate-secret",
+                headers=_headers(),
+                json={"new_secret": _SYNTH_NEW_PASSWORD},
+            )
+
     mock_validate.assert_not_awaited()
