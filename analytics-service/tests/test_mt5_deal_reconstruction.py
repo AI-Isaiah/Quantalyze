@@ -36,7 +36,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from services.broker_dailies import combine_mt5_deal_ledger
+from services.allocator_equity_derive import _SELF_CHECK_ABS, _SELF_CHECK_REL
+from services.broker_dailies import (
+    combine_mt5_deal_ledger,
+    reconstruct_mt5_nav_levels,
+)
 from services.closed_sets import CRYPTO_VENUES
 from services.metrics import compute_all_metrics, periods_per_year_for_asset_class
 from services.mt5_deals import (
@@ -518,3 +522,267 @@ def test_flow_channel_rejects_bool_profit_like_trading_channel() -> None:
         combine_mt5_deal_ledger(
             deals, account_equity=110_500.0, account_balance=110_500.0
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.5.4 A-01 — reconstruct_mt5_nav_levels: the NAV-LEVELS sibling
+#
+# WHY THESE EXIST. ``combine_mt5_deal_ledger`` emits a RETURN series;
+# ``allocator_equity_snapshots.value_usd`` is a LEVELS column. The backfill job needs
+# dollar balances, and writing daily percentage changes into a dollar-balance field is a
+# silent money bug with no exception and no red test. These oracles pin the LEVELS.
+#
+# ORACLE DISCIPLINE, unchanged from the top of this file: every expected level below is
+# a HAND-DERIVED literal with the paper arithmetic shown, never regenerated from the SUT.
+#
+# ⚠️ THE LEVEL INDEX IS THE UNION OF PNL DAYS AND FLOW DAYS AND IS SPARSE. For the
+# canonical fixture that is 06-02 / 06-04 / 06-05 — day3 (06-03) carries neither a deal
+# nor a flow and is therefore ABSENT, where the RETURNS series gap-fills it to 0.0.
+#
+# The canonical backward roll (NAV_{t−1} = NAV_t − pnl_t − F_t), anchored to the REALIZED
+# terminal (equity − open uPnL wedge):
+#   pnl  = {06-02: +400, 06-04: +300, 06-05: −200}
+#   flow = {06-04: +10_000}
+#   06-05 = terminal
+#   06-04 = terminal − (−200) − 0        = terminal + 200
+#   06-02 = 06-04 − 300 − 10_000         = terminal − 10_100
+# ---------------------------------------------------------------------------
+
+# The repo's OWN self-check band, imported BY SYMBOL from
+# ``allocator_equity_derive`` (``_SELF_CHECK_ABS`` + ``_SELF_CHECK_REL``) rather than
+# restated as literals here, so a future tightening moves this gate with it. A looser
+# tolerance would let a real roll bug pass as rounding, which is the whole hazard.
+def _assert_band(actual: float, expected: float, what: str) -> None:
+    """Assert ``actual`` equals ``expected`` inside the repo's self-check band
+    ``_SELF_CHECK_ABS + _SELF_CHECK_REL·|expected|`` — the same band
+    ``allocator_equity_derive`` holds its own forward/backward roll to."""
+    tol = _SELF_CHECK_ABS + _SELF_CHECK_REL * abs(expected)
+    assert abs(actual - expected) <= tol, (
+        f"{what}: {actual!r} is outside the self-check band around {expected!r} "
+        f"(tolerance {tol!r})"
+    )
+
+
+def test_levels_terminal_anchors_to_the_realized_balance() -> None:
+    """THE ANCHOR PIN. The last level is the REALIZED terminal — the account BALANCE —
+    never the live equity, because the open-position uPnL wedge is subtracted BEFORE the
+    backward roll. Every interior day is therefore realized-basis too, so no
+    reconstructed day carries floating uPnL and there is no step discontinuity at the
+    anchor day.
+
+    This fixture deliberately carries a NON-ZERO wedge (equity 111_000, balance 110_500 ⇒
+    uPnL 500) — with equity == balance the distinction is unobservable and anchoring to
+    the wrong one would be absorbed silently. Hand arithmetic:
+      terminal = 111_000 − (111_000 − 110_500) = 110_500
+      06-04    = 110_500 + 200                 = 110_700
+      06-02    = 110_700 − 300 − 10_000        = 100_400
+    """
+    nav, _meta = reconstruct_mt5_nav_levels(
+        _canonical_deposit_deals(),
+        account_equity=111_000.0,
+        account_balance=110_500.0,
+    )
+    _assert_band(float(nav.iloc[-1]), 110_500.0, "terminal level")
+    # ⛔ The wrong anchor: the live equity, uPnL still inside it.
+    assert float(nav.iloc[-1]) != pytest.approx(111_000.0, abs=1.0)
+    _assert_band(float(nav.loc[pd.Timestamp("2025-06-04")]), 110_700.0, "06-04 level")
+    _assert_band(float(nav.loc[pd.Timestamp("2025-06-02")]), 100_400.0, "06-02 level")
+
+
+def test_levels_and_returns_agree_under_forward_replay() -> None:
+    """⭐ THE AGREEMENT PIN — levels and returns describe ONE account, proven rather
+    than assumed.
+
+    WHY THIS HAS TEETH: it does NOT compare the roll to itself. It drives the FORWARD
+    chain-link identity
+
+        NAV_t = NAV_{t−1} · (1 + r_t) + F_t
+
+    with ``combine_mt5_deal_ledger``'s INDEPENDENTLY-PRODUCED return series, and requires
+    the result to land on ``reconstruct_mt5_nav_levels``' levels day by day. The two
+    functions are driven through different code paths from the shared fold — one
+    chain-links, the other rolls backward — so a roll-vs-identity divergence in EITHER
+    reddens this. The flows are hand literals from the fixture, not read back from the
+    system under test.
+
+    Hand-derived levels (equity == balance == 110_500 ⇒ terminal 110_500):
+      06-02 = 100_400 · 06-04 = 110_700 · 06-05 = 110_500
+    """
+    deals = _canonical_deposit_deals()
+    nav, _nav_meta = reconstruct_mt5_nav_levels(
+        deals, account_equity=110_500.0, account_balance=110_500.0
+    )
+    returns, _r_meta = combine_mt5_deal_ledger(
+        deals, account_equity=110_500.0, account_balance=110_500.0
+    )
+
+    # The fixture's external flows, written as hand literals (deposit +, withdrawal −).
+    flows_by_day = {pd.Timestamp("2025-06-04"): 10_000.0}
+
+    assert list(nav.index) == [
+        pd.Timestamp("2025-06-02"),
+        pd.Timestamp("2025-06-04"),
+        pd.Timestamp("2025-06-05"),
+    ]
+    _assert_band(float(nav.iloc[0]), 100_400.0, "06-02 level")
+
+    replayed = float(nav.iloc[0])  # the only value taken from the level series
+    for day in nav.index[1:]:
+        r_t = float(returns.loc[day])  # the RETURNS combiner's own output
+        assert math.isfinite(r_t), f"{day}: the fixture has no guard-broken day"
+        replayed = replayed * (1.0 + r_t) + flows_by_day.get(day, 0.0)
+        _assert_band(
+            replayed, float(nav.loc[day]), f"forward replay disagrees with the level on {day}"
+        )
+
+    # And the replay lands on the hand-derived terminal, not merely on itself.
+    _assert_band(replayed, 110_500.0, "replayed terminal")
+
+
+def test_levels_index_is_sparse_and_never_zero_filled() -> None:
+    """⛔ ``gap_fill_daily_returns`` must NEVER be applied to a level series: it fills a
+    no-activity day with 0.0, which is right for a RETURN and would write a **$0 equity
+    day** for a LEVEL.
+
+    Day3 (06-03) carries neither a deal nor a flow. In the RETURNS series it is a
+    gap-filled 0.0; in the LEVEL series it must be ABSENT, and no level may be 0.0.
+    Making the calendar dense is the persistence layer's concern and is a forward-fill of
+    the last known balance, never a zero-fill."""
+    deals = _canonical_deposit_deals()
+    nav, _meta = reconstruct_mt5_nav_levels(
+        deals, account_equity=110_500.0, account_balance=110_500.0
+    )
+    returns, _r_meta = combine_mt5_deal_ledger(
+        deals, account_equity=110_500.0, account_balance=110_500.0
+    )
+    day3 = pd.Timestamp("2025-06-03")
+    assert day3 in returns.index and returns.loc[day3] == pytest.approx(0.0, abs=1e-12)
+    assert day3 not in nav.index, "a no-activity day must not appear in the LEVEL series"
+    assert not (nav == 0.0).any(), "a $0 level is a zero-fill, never a real balance"
+
+
+def test_quiet_day_deposit_is_its_own_level_day() -> None:
+    """THE FLOW-UNION PIN. A deposit on a day with NO trading deal is dated outside the
+    pnl index. ``_union_flow_days`` must place it there BEFORE the roll (the HIGH-1
+    precedent) — otherwise it reaches ``_align_flows`` as an ORPHAN and the whole
+    reconstruction refuses. Realized cash is never lost and never silently dropped.
+
+    Fixture: the canonical deals plus a +5_000 BALANCE deposit on 06-03, a day with no
+    trading deal. Anchor equity == balance == 115_500 ⇒ terminal 115_500.
+      pnl  = {06-02: +400, 06-04: +300, 06-05: −200}   (06-03 unions in at pnl 0)
+      flow = {06-03: +5_000, 06-04: +10_000}
+      06-05 = 115_500
+      06-04 = 115_500 + 200                  = 115_700
+      06-03 = 115_700 − 300 − 10_000         = 105_400
+      06-02 = 105_400 − 0 − 5_000            = 100_400
+    Cross-check on the pre-history capital: 100_400 − 400 − 0 = 100_000, and
+    100_000 + Σpnl(500) + Σflow(15_000) = 115_500 ✓
+    """
+    deals = _canonical_deposit_deals()
+    deals.append(
+        {"type": 2, "profit": 5_000.0, "swap": 0.0, "commission": 0.0,
+         "fee": 0.0, "time": _epoch(2025, 6, 3)}
+    )
+    nav, _meta = reconstruct_mt5_nav_levels(
+        deals, account_equity=115_500.0, account_balance=115_500.0
+    )
+    day3 = pd.Timestamp("2025-06-03")
+    assert day3 in nav.index, (
+        "a quiet-day deposit must union into the level index, never be an orphan"
+    )
+    _assert_band(float(nav.loc[day3]), 105_400.0, "06-03 quiet-day-deposit level")
+    _assert_band(float(nav.loc[pd.Timestamp("2025-06-02")]), 100_400.0, "06-02 level")
+    _assert_band(float(nav.iloc[-1]), 115_500.0, "terminal level")
+
+
+def test_empty_ledger_yields_an_empty_level_series_never_a_flat_curve() -> None:
+    """A deposit-only account has NO track record. The levels sibling must take the SAME
+    early return the returns combiner takes, for the SAME reason: an equity curve
+    fabricated out of pure capital flows would assert a track record that does not exist,
+    and stamping a completeness verdict on it would be worse still.
+
+    The meta must match the returns combiner's own empty-path meta EXACTLY — including
+    the deliberate ABSENCE of ``series_completeness`` (the MT5-12 exemption)."""
+    flow_only = [
+        {"type": 2, "profit": 50_000.0, "swap": 0.0, "commission": 0.0,
+         "fee": 0.0, "time": _epoch(2025, 6, 2)},
+        {"type": 2, "profit": 10_000.0, "swap": 0.0, "commission": 0.0,
+         "fee": 0.0, "time": _epoch(2025, 6, 4)},
+    ]
+    nav, nav_meta = reconstruct_mt5_nav_levels(
+        flow_only, account_equity=60_000.0, account_balance=60_000.0
+    )
+    _returns, returns_meta = combine_mt5_deal_ledger(
+        flow_only, account_equity=60_000.0, account_balance=60_000.0
+    )
+    assert nav.empty
+    assert str(nav.dtype) == "float64"
+    assert nav_meta == returns_meta
+    assert "series_completeness" not in nav_meta
+
+
+def test_levels_sibling_fails_loud_on_an_unclassifiable_deal() -> None:
+    """The fold is SHARED, so the fail-loud contract is shared too: a single
+    unclassifiable deal (CORRECTION=5) raises BEFORE any level series exists. Nothing
+    partial, never a silently dropped row (the deribit-``correction`` lesson)."""
+    deals = _canonical_deposit_deals()
+    deals.append(
+        {"type": 5, "profit": 1.23, "swap": 0.0, "commission": 0.0,
+         "fee": 0.0, "time": _epoch(2025, 6, 5)}
+    )
+    with pytest.raises(Mt5DealClassificationError):
+        reconstruct_mt5_nav_levels(
+            deals, account_equity=110_500.0, account_balance=110_500.0
+        )
+
+
+def test_guard_broken_day_still_has_an_honest_level() -> None:
+    """A DQ-01 guard-broken day has NO interpretable RETURN (NaN) but DOES have an honest
+    LEVEL — because the roll is PnL-based (``NAV_{t−1} = NAV_t − pnl_t − F_t``) with no
+    ``(1 + r_t)`` denominator to break. This is the measured reason A-01 rejected
+    inverting the returns: an inversion refuses a non-finite return, i.e. refuses exactly
+    the days the guards exist to MARK.
+
+    Fixture — a flow-dominated day (``|F| ≥ FLOW_DOM_RATIO · NAV_{t−1}``):
+      06-01: BUY +400                                     → pnl +400
+      06-02: BALANCE +200_000 AND SELL +300                → pnl +300, flow +200_000
+      06-03: SELL −200                                     → pnl −200
+    Anchor equity == balance == 300_100 ⇒ terminal 300_100.
+      06-03 = 300_100
+      06-02 = 300_100 + 200                  = 300_300
+      06-01 = 300_300 − 300 − 200_000        = 100_000
+    On 06-02 the chain-link denominator is NAV(06-01) = 100_000 while F = 200_000, so
+    ``flow_dominated_guard`` breaks that day's return to NaN — and the $300_300 level
+    stands regardless."""
+    deals = [
+        {"type": 0, "entry": 1, "profit": 400.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 1)},
+        {"type": 2, "profit": 200_000.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 2)},
+        {"type": 1, "entry": 1, "profit": 300.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 2)},
+        {"type": 1, "entry": 1, "profit": -200.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 3)},
+    ]
+    nav, nav_meta = reconstruct_mt5_nav_levels(
+        deals, account_equity=300_100.0, account_balance=300_100.0
+    )
+    returns, _r_meta = combine_mt5_deal_ledger(
+        deals, account_equity=300_100.0, account_balance=300_100.0
+    )
+    broken = pd.Timestamp("2025-06-02")
+
+    # The RETURN is unusable on that day...
+    assert math.isnan(float(returns.loc[broken]))
+    # ...while the LEVEL is present, finite and hand-derived.
+    assert broken in nav.index
+    assert math.isfinite(float(nav.loc[broken]))
+    _assert_band(float(nav.loc[broken]), 300_300.0, "guard-broken-day level")
+    _assert_band(float(nav.loc[pd.Timestamp("2025-06-01")]), 100_000.0, "06-01 level")
+    _assert_band(float(nav.iloc[-1]), 300_100.0, "terminal level")
+
+    # ONE reconstruction, one set of facts: the guard that broke the RETURN is reported
+    # in the LEVELS meta too, rather than being a second independently-derived opinion.
+    assert nav_meta.get("flow_dominated_guard") is True
+    assert nav_meta["computation_status_hint"] == "complete_with_warnings"
+    assert nav_meta["series_completeness"] == "ledger_complete"
