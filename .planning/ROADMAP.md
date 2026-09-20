@@ -1985,15 +1985,15 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1)* — shares `test_ledger_refresh_fanout.sql` and `scripts/mutation-runner/run.mjs` with plan 01, and its arm must come SECOND or plan 01's twin reports a wrong first failure.
 
-- [ ] 164.5.1.1-02-PLAN.md — wave 2. The cohort-agreement arm, deriving the status domain from `pg_get_constraintdef` and the admitted set from a comment-stripped `pg_get_functiondef` so neither can rot the way the literal being repaired did; the real status-domain migration added to the lane's apply list so the class neuter can ride a mutable file; neuter-verified against a genuinely NEW sixth status.
+- [x] 164.5.1.1-02-PLAN.md — wave 2. The cohort-agreement arm, deriving the status domain from `pg_get_constraintdef` and the admitted set from a comment-stripped `pg_get_functiondef` so neither can rot the way the literal being repaired did; the real status-domain migration added to the lane's apply list so the class neuter can ride a mutable file; neuter-verified against a genuinely NEW sixth status.
 
 **Wave 3** *(blocked on Wave 2)* — ⚠️ NOT forced by a `files_modified` overlap (02 ∩ 03 = ∅). It is forced one level down: plans 01 and 02 both assert `git diff --quiet -- supabase/tests/test_ledger_refresh_composite_arm.sql`, and plan 03 edits exactly that file, so running them together false-fails plan 02's verify. Re-slicing this phase by file disjointness alone would dissolve a real constraint.
 
-- [ ] 164.5.1.1-03-PLAN.md — wave 3. Enumerate every production site of the literal and every reader of `ALLOWED_STRATEGY_STATUSES` without changing either; annotate — never widen — the composite gate's precondition; book the three sibling-cohort findings with an owner, a trigger and a destination phase.
+- [x] 164.5.1.1-03-PLAN.md — wave 3. Enumerate every production site of the literal and every reader of `ALLOWED_STRATEGY_STATUSES` without changing either; annotate — never widen — the composite gate's precondition; book the three sibling-cohort findings with an owner, a trigger and a destination phase.
 
 **Wave 4** *(blocked on Waves 1-3)* — `autonomous: false`; carries the one-way door (the PROD apply) behind a blocking-human checkpoint.
 
-- [ ] 164.5.1.1-04-PLAN.md — wave 4, checkpoints (`autonomous: false`). Three reviewers before any apply is requested; the ship and the apply via `apply-test` then the PROD `apply` behind the human reviewer; then the NATURAL `25 * * * *` tick measured against the BEFORE census, and `T-164.5.1-09-07` exercised by plan 08's already-recorded mechanism.
+- [x] 164.5.1.1-04-PLAN.md — wave 4, checkpoints (`autonomous: false`). Three reviewers before any apply is requested; the ship and the apply via `apply-test` then the PROD `apply` behind the human reviewer; then the NATURAL `25 * * * *` tick measured against the BEFORE census, and `T-164.5.1-09-07` exercised by plan 08's already-recorded mechanism.
 
 **Cross-cutting constraints** — locked decisions cited by two or more plans, so a change to any one of them reaches more than the plan that names it first:
 
