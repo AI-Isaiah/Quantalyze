@@ -139,6 +139,55 @@ and both returned clean at threshold.
   passed, never what the venue confirmed. The card's copy says only that it is the login the key is
   connected with, and does not imply otherwise.
 
+## [0.82.1.1] - 2026-09-20 — FANOUTCOHORT: plan 04's closing paperwork, finished honestly
+
+⭐ **No behaviour change of any kind.** This is a ledger and record closure: no migration, no
+source file, no test. The engineering it documents shipped on 2026-09-17.
+
+### Why
+
+Phase 164.5.1.1's verification scored **12/15** and returned `gaps_found` — not because the work was
+wrong, but because plan 04's closing paperwork was never written. ⭐ The verifier found it by
+**executing plan 04's own verify commands** rather than reading the session file's prose, which is
+the only reason it was caught: `164.5.1.1-PROD-SESSION.md` had honestly said *"the requirement is
+now reachable and still outstanding. Do not record it as met."* and nothing downstream had acted on
+its own warning. A phase whose engineering is sound can still fail on its record, and that is the
+gate working rather than being pedantic.
+
+### Fixed
+
+- **Plan 03's handed-over question is ANSWERED, and the answer is NO.** A `private` strategy does
+  not share an `api_key_id` with an in-set sibling — **falsified 5 of 5**, measured on PROD in Phase
+  164.5.1.2's own session, whose wording names this phase explicitly. So five live key-bearing
+  strategies had their trades never synced and no sibling rescued them. ⭐ Closed by citation rather
+  than by re-opening production to re-ask a settled question.
+- **`FANOUT-COHORT-PRIVATE-01` is closed** in `TODOS.md` against tick `11231`: two
+  `derive_broker_dailies` rows created on the tick's own millisecond, stale census **6 → 4**, avg
+  days 52.50 → 56.75. ⭐ The average RISING is the tell — the two freshest rows left the set. ⛔ The
+  `return_message: "1 row"` field is deliberately not cited: it carries the row count and never the
+  value, which is precisely the misreading that entry already warned about twice.
+- **`164.5.1.1-04-SUMMARY.md` now exists**, per plan 04's own output contract, labelled as written
+  after the fact.
+- The ROADMAP checkboxes for plans 02, 03 and 04 are corrected — the verifier flagged them for a
+  human because it does not edit the roadmap itself.
+
+### Notes
+
+- ⚠️ **`T-164.5.1-09-07` closes by SUBSTITUTION, and the distinction is load-bearing.** The
+  all-candidates-failed branch was never exercised: both of the tick's jobs succeeded, so it stayed
+  unreached. What closed the risk is **mutation-gate arm R**, merged as PR #810 during Phase
+  **164.5.1's** closure. A permanent gate re-proves the branch every run where a one-off exercise
+  proves it once, so it is arguably stronger — but it shipped in a different phase by a different
+  mechanism, and ⛔ it must never be cited as compliance with plan 04's literal requirement. Recorded
+  as an `overrides:` entry with the founder's acceptance, not by editing the gap away.
+- ⚠️ **One item is DISCLOSED rather than closed, deliberately.** Plan 04 task 3's session record
+  carries no database-marker output of its own, and no note can retroactively produce a read that
+  was not taken. Measured: that session performed **no writes** — it observed a tick that fired on
+  its own schedule, then read three tables — and the marker rule is scoped to statements that write,
+  with the session that *did* write carrying its marker. So the miss is against the literal
+  acceptance criterion with **zero safety consequence**. ⛔ No override is claimed for it; it is
+  surfaced for a founder decision rather than graded away.
+
 ## [0.82.1.0] - 2026-09-20 — MT5CREDS part 1 of 2: the GRANT, shipped alone on purpose
 
 ⭐ **This release ships ONE migration and NOTHING that reads it.** No `constants.ts`, no
