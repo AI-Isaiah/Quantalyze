@@ -1425,6 +1425,40 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     expect(PERSIST_STATE.inserts[0].attested_venue).toBe("mt5");
   });
 
+  // ── (2b) 164.5.3-02 — venue_account_id: populated for MT5, null otherwise ──
+  //
+  // Phase 154/WIZCONT-02's `venue_account_id` column was populated ONLY by the
+  // wizard's `create_wizard_strategy` RPC before this plan — this route's own
+  // persist arm (the one both founder-visible "Add Key" surfaces call) never
+  // stamped it, so every MT5 key connected here stayed permanently NULL on the
+  // card. These two cases pin the fix at the one place it can be observed: the
+  // literal row this route hands to `.insert()`.
+  it("stamps venue_account_id with the TRIMMED MT5 login on the INSERT row", async () => {
+    process.env.MT5_ENABLED = "true";
+    const { POST } = await import("./route");
+    // Padded deliberately: proves the route trims rather than forwarding the
+    // raw body value, mirroring create-with-key/route.ts's exact derivation
+    // (`const venueAccountId = isMt5 ? api_key.trim() : null;`). "5001234" is
+    // a synthetic placeholder login, never a real MT5 account number.
+    const res = await POST(
+      makeReq({ ...MT5_BODY, api_key: "  5001234  ", persist: true, label: "Broker" }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe("5001234");
+  });
+
+  it("leaves venue_account_id NULL for a non-MT5 (ccxt) persist — byte-unchanged from before this plan", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ exchange: "okx" })));
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(PERSIST_STATE.inserts[0].exchange).toBe("okx");
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBeNull();
+  });
+
   // ── (3) NO CIPHERTEXT LEAVES THE SERVER ON THE PERSIST PATH ───────────────
   it("returns api_key_id and NO ciphertext-named field of any kind", async () => {
     const { POST } = await import("./route");
