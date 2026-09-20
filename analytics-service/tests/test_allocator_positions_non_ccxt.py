@@ -1044,7 +1044,7 @@ async def test_mt5_read_timeout_restarts_and_raises_transient(
 
     restarts: list[object] = []
 
-    async def _fake_restart(client):
+    async def _fake_restart(client, *, log_prefix="derive_broker_dailies"):
         restarts.append(client)
 
     monkeypatch.setattr(ap, "_MT5_DERIVE_READ_TIMEOUT_S", 0.05)
@@ -1167,7 +1167,7 @@ async def test_mt5_login_mismatch_never_emits_a_wrong_account_row(
 
     restarts: list[object] = []
 
-    async def _fake_restart(client):
+    async def _fake_restart(client, *, log_prefix="derive_broker_dailies"):
         restarts.append(client)
 
     monkeypatch.setattr(ap, "_mt5_bounded_restart", _fake_restart)
@@ -1189,7 +1189,7 @@ async def test_mt5_missing_login_field_fails_loud(mt5_enabled, monkeypatch):
     default-match this guard exists to prevent."""
     from services.allocator_positions import AllocatorHoldingsSyncTransientError
 
-    async def _fake_restart(client):
+    async def _fake_restart(client, *, log_prefix="derive_broker_dailies"):
         return None
 
     monkeypatch.setattr(ap, "_mt5_bounded_restart", _fake_restart)
@@ -1218,7 +1218,7 @@ async def test_mt5_poisoned_equity_is_refused(mt5_enabled, monkeypatch, override
     guard as a silently poisoned AUM figure. Refuse it — no row."""
     from services.allocator_positions import AllocatorHoldingsSyncTransientError
 
-    async def _fake_restart(client):
+    async def _fake_restart(client, *, log_prefix="derive_broker_dailies"):
         return None
 
     monkeypatch.setattr(ap, "_mt5_bounded_restart", _fake_restart)
@@ -1283,7 +1283,7 @@ async def test_mt5_abandoned_session_raises_the_transient_with_the_fixed_copy(
 
     restarts: list[object] = []
 
-    async def _spy_restart(client):
+    async def _spy_restart(client, *, log_prefix="derive_broker_dailies"):
         restarts.append(client)
 
     monkeypatch.setattr(ap, "_mt5_bounded_restart", _spy_restart)

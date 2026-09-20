@@ -688,7 +688,7 @@ async def _fetch_mt5_account_rows(
                 "wall-clock bound — classified transient, restarting the "
                 "terminal (FLIPRETRY-01 / MT5CONC-01)"
             )
-            await _mt5_bounded_restart(session.client)
+            await _mt5_bounded_restart(session.client, log_prefix="refresh_allocator_positions")
             raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
         except Mt5SessionAbandoned as exc:
             # ⭐ WIZFORM-ABANDON / D-40. `Mt5SessionAbandoned` is a plain
@@ -727,7 +727,7 @@ async def _fetch_mt5_account_rows(
                 "restarting the terminal; NO row emitted (MT5CONC-02)",
                 str(exc),
             )
-            await _mt5_bounded_restart(session.client)
+            await _mt5_bounded_restart(session.client, log_prefix="refresh_allocator_positions")
             raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
         except Mt5ClientError as exc:
             # The key already validated at connect, so a read-time client error

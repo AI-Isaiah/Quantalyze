@@ -118,7 +118,9 @@ _MT5_LEASE_WAIT_S: Final[float] = float(os.getenv("MT5_LEASE_WAIT_S", "20.0"))
 _MT5_LEASE_WAIT_LOG_THRESHOLD_S: Final[float] = 0.5
 
 
-async def _mt5_bounded_restart(client: "Mt5Client") -> None:
+async def _mt5_bounded_restart(
+    client: "Mt5Client", *, log_prefix: str = "derive_broker_dailies"
+) -> None:
     """MT5CONC-01 — ACTIVELY restart a wedged MT5 terminal, bounded so it can never
     itself nest-wedge the SEQUENTIAL worker.
 
@@ -149,10 +151,16 @@ async def _mt5_bounded_restart(client: "Mt5Client") -> None:
             asyncio.to_thread(client.restart), timeout=_MT5_RESTART_TIMEOUT_S
         )
     except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — best-effort recovery
+        # SF-M1 — the job name was HARDCODED here while three different jobs call
+        # this helper, so a failed restart named the wrong job during incident
+        # triage. `mt5_probe.read_terminal` already takes a prefix; this now
+        # matches it. The default preserves the historical string for any caller
+        # that does not pass one.
         logger.warning(
-            "derive_broker_dailies: bounded mt5 terminal restart did not complete "
+            "%s: bounded mt5 terminal restart did not complete "
             "within its wall-clock bound — abandoning it; the transient retry will "
-            "reconnect on the next attempt (MT5CONC-01)"
+            "reconnect on the next attempt (MT5CONC-01)",
+            log_prefix,
         )
 
 

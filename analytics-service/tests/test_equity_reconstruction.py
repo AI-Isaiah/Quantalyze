@@ -5432,7 +5432,13 @@ def _mt5_failed_run(monkeypatch, transport, *, restart_spy=None):
     _install_fake_preflight(monkeypatch, "mt5", fake_supabase, session)
     _install_fake_audit(monkeypatch)
     if restart_spy is not None:
-        async def _spy(client):
+        # Mirrors `_mt5_bounded_restart`'s real signature (SF-M1 added the
+        # keyword). Deliberately NOT `**kwargs` — a double that swallows any
+        # signature cannot fail when production drifts, and this one already
+        # failed silently once: the stale `(client)` form raised a TypeError that
+        # the caller's broad handler turned into error_kind='unknown' rather than
+        # a loud signature error.
+        async def _spy(client, *, log_prefix="derive_broker_dailies"):
             restart_spy.append(client)
 
         monkeypatch.setattr(_mt5_conc, "_mt5_bounded_restart", _spy)
@@ -5816,6 +5822,59 @@ async def test_mt5_backfill_non_finite_anchor_is_refused(
 
     assert result.outcome == DispatchOutcome.FAILED
     assert result.error_kind == "permanent"
+    _assert_nothing_persisted(fake_supabase)
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_negative_reconstructed_nav_is_refused(
+    monkeypatch, _mt5_terminal_state,
+):
+    """⛔ SF-H1 — a NEGATIVE reconstructed balance is refused, not published.
+
+    The backward roll ``NAV_{t-1} = NAV_t - pnl_t - F_t`` is exactly as good as
+    ``deal_cash_effect``'s field set. A broker that books a cost BOTH as a field on
+    the trade deal AND as its own deal row overstates cumulative P&L, and the
+    EARLIEST reconstructed days roll arbitrarily low. Nothing else refuses that:
+    ``_mt5_rows_from_levels`` does no plausibility check, the column is NUMERIC NOT
+    NULL with no CHECK constraint, and the one existing zero-curve alarm is
+    structurally unreachable for MT5 because its list is always empty.
+
+    HAND-DERIVED, never read back from the SUT. Anchor = balance = 1_000 at the
+    LATEST pnl day, rolled BACKWARD (each step subtracts the LATER day's pnl+flow):
+      today-7 :  1_000                        (the anchor; pnl 0)
+      today-8 :  1_000 -      0 - 0 =  1_000
+      today-10:  1_000 - 50_000 - 0 = -49_000  <- cannot be true, so refuse
+    """
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    from services.job_worker import DispatchOutcome
+
+    today = datetime.now(timezone.utc).date()
+    d10 = today - timedelta(days=10)
+    d8 = today - timedelta(days=8)
+    d7 = today - timedelta(days=7)
+    deals = [
+        {"type": 1, "entry": 1, "profit": 10.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _mt5_epoch(d10)},
+        {"type": 1, "entry": 1, "profit": 50_000.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _mt5_epoch(d8)},
+        {"type": 1, "entry": 1, "profit": 0.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _mt5_epoch(d7)},
+    ]
+    transport = _FakeMt5Transport(
+        account={"equity": 1_000.0, "balance": 1_000.0,
+                 "login": _MT5_SYNTHETIC_LOGIN},
+        deals=deals,
+    )
+    _session, fake_supabase = _mt5_failed_run(monkeypatch, transport)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    # ⛔ Pin the DISPOSITION, not merely "it failed" — every other refusal arm in
+    # this job also yields FAILED/permanent, so without this the case would pass
+    # for the wrong reason (e.g. an unrelated structural refusal).
+    assert "went negative" in (result.error_message or ""), result.error_message
     _assert_nothing_persisted(fake_supabase)
 
 

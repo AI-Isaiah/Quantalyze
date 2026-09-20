@@ -22,6 +22,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+# WR-01 — `math.isfinite` guards the MT5 NAV anchor in `_mt5_fetch_window`. This
+# lived ~700 lines below, beside an unrelated class; it bound correctly at import
+# time, so the guard worked — but a cleanup of that unrelated block would have
+# turned the guard into a NameError swallowed by the generic handler, i.e. a
+# non-finite anchor published as a complete series. Top-level, where it is read.
+import math
 import os
 from bisect import bisect_right
 from dataclasses import dataclass
@@ -2174,6 +2180,18 @@ _MT5_BACKFILL_MESSAGES: dict[str, str] = {
         "reconstruct_allocator_history: the MT5 NAV reconstruction refused a "
         "structural input (an undatable deal or a non-finite amount)"
     ),
+    # SF-H1 — the backward roll NAV_{t-1} = NAV_t - pnl_t - F_t is exactly as good
+    # as `deal_cash_effect`'s field set. A broker that books a cost BOTH as a field
+    # on the trade deal AND as its own deal row overstates cumulative P&L, and the
+    # earliest reconstructed days roll arbitrarily low or negative. Nothing else
+    # refuses that: `_mt5_rows_from_levels` does no plausibility check, the column
+    # is NUMERIC NOT NULL with no CHECK, and the one zero-curve alarm is
+    # structurally unreachable for MT5 (its list is always empty). A negative
+    # published balance is never an honest answer, so refuse rather than publish.
+    "negative_nav": (
+        "reconstruct_allocator_history: the reconstructed MT5 NAV went negative — "
+        "refusing to publish a balance that cannot be true"
+    ),
 }
 
 
@@ -2428,7 +2446,7 @@ async def _mt5_fetch_window(
                 "the terminal (FLIPRETRY-01, MT5CONC-01)",
                 allocator_id, api_key_id,
             )
-            await _mt5_bounded_restart(session.client)
+            await _mt5_bounded_restart(session.client, log_prefix="reconstruct_allocator_history")
             return _fail("timeout", "transient")
         except Mt5SessionAbandoned:
             # ⭐ WIZFORM-ABANDON / D-40. ⛔ NO restart — and this is the deliberate
@@ -2460,7 +2478,7 @@ async def _mt5_fetch_window(
                 "mismatched terminal account (allocator=%s key=%s) — %s",
                 allocator_id, api_key_id, scrub_freeform_string(str(exc)),
             )
-            await _mt5_bounded_restart(session.client)
+            await _mt5_bounded_restart(session.client, log_prefix="reconstruct_allocator_history")
             return _fail(
                 "mismatch", "transient",
                 detail=str(scrub_freeform_string(str(exc))),
@@ -2550,7 +2568,7 @@ async def _mt5_fetch_window(
         return _fail("non_finite", "permanent")
 
     try:
-        nav, _meta = reconstruct_mt5_nav_levels(
+        nav, meta = reconstruct_mt5_nav_levels(
             deals,
             equity,
             balance,
@@ -2573,6 +2591,41 @@ async def _mt5_fetch_window(
             allocator_id, api_key_id, scrub_freeform_string(str(exc)),
         )
         return _fail("nav_structural", "permanent")
+
+    # ⭐ SF-H1 — the meta is JUDGEMENT, not decoration, and this call site used to
+    # drop it on the floor (`nav, _meta = ...`). The sibling derive branch in
+    # `job_worker.py` reads the same guard flags and gates on them; this branch
+    # inherited the persist half and not the judgement half, so the published curve
+    # carried no quality signal and NO ARM COULD REFUSE ON ONE.
+    #
+    # ⛔ The refusal is deliberately a FLOOR, not a full port of the derive branch's
+    # judgement: a negative balance cannot be true, so it is refused outright rather
+    # than published with a warning flag.
+    if len(nav) and float(nav.min()) < 0.0:
+        return _fail("negative_nav", "permanent")
+
+    # ⚠️ Recorded as a LOG, deliberately, and NOT as a new audit event. Two reasons,
+    # both measured rather than assumed: (a) the shared persist half INDEXES
+    # `_mt5_telemetry()` by four fixed keys and never iterates it, so an extra key
+    # there is silently inert; (b) the audit vocabulary is a CROSS-RUNTIME census —
+    # `AuditAction` (services/audit.py), `AllocatorEquityAction` (job_worker.py) and
+    # a TypeScript union, pinned together by
+    # `test_audit.py::test_action_literal_matches_ts_union` — so minting an event
+    # name is a three-roster, two-language change. ⛔ That is not a fix-round-sized
+    # edit, and a fix round is where regressions enter. The REFUSAL above is the
+    # load-bearing half of SF-H1; this line stops the remaining facts being
+    # discarded silently. Promoting it to an audit row is a follow-up, not a
+    # prerequisite.
+    _guards_fired = sorted(k for k, v in meta.items() if v is True)
+    if _guards_fired or meta.get("computation_status_hint") != "complete":
+        logger.warning(
+            "reconstruct_allocator_history: mt5 NAV quality flags "
+            "(allocator=%s key=%s) — completeness=%s status_hint=%s guards=%s",
+            allocator_id, api_key_id,
+            meta.get("series_completeness"),
+            meta.get("computation_status_hint"),
+            ",".join(_guards_fired) or "none",
+        )
 
     return (
         _mt5_rows_from_levels(nav, start_date, end_date),
@@ -3247,8 +3300,6 @@ def reconstruct_symbol_returns(
 #   the DB-side tested primitive).
 
 from collections import defaultdict
-
-import math
 
 
 class EquityCurveBuilder:
