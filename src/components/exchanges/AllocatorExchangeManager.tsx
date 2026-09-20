@@ -34,6 +34,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "@/components/strategy/ApiKeyForm";
+import { UpdateMt5SecretDialog } from "@/components/strategy/UpdateMt5SecretDialog";
 import { createClient } from "@/lib/supabase/client";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 import { computeRetryAtSeconds } from "@/lib/allocator-cooldowns";
@@ -237,6 +238,12 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
     null,
   );
   const [cascadeHoldings, setCascadeHoldings] = useState(false);
+  // Phase 164.5.3 / MT5CREDS Plan 05 — the id of the MT5 key whose password
+  // is being corrected. Shared dialog with ApiKeyManager (cross-directory
+  // import is fine — the dialog belongs to neither card exclusively).
+  // Distinct from Reconnect: this credential is WRONG and needs
+  // re-validation, not a retry of the stored one.
+  const [updatingKeyId, setUpdatingKeyId] = useState<string | null>(null);
   const [, startTransition] = useTransition();
 
   const supabase = createClient();
@@ -826,6 +833,15 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                   >
                     Sync now
                   </Button>
+                  {key.exchange === "mt5" && (
+                    <Button
+                      variant="secondary"
+                      aria-label={`Update password for ${key.exchange} key`}
+                      onClick={() => setUpdatingKeyId(key.id)}
+                    >
+                      Update password
+                    </Button>
+                  )}
                   <Button
                     variant="secondary"
                     aria-label={`Disconnect ${key.exchange} key`}
@@ -911,6 +927,15 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                   >
                     Reconnect
                   </Button>
+                  {key.exchange === "mt5" && (
+                    <Button
+                      variant="secondary"
+                      aria-label={`Update password for ${key.exchange} key`}
+                      onClick={() => setUpdatingKeyId(key.id)}
+                    >
+                      Update password
+                    </Button>
+                  )}
                 </div>
               );
             })}
@@ -1067,6 +1092,13 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
           </Modal>
         );
       })()}
+
+      <UpdateMt5SecretDialog
+        open={!!updatingKeyId}
+        apiKeyId={updatingKeyId ?? ""}
+        onClose={() => setUpdatingKeyId(null)}
+        onUpdated={() => startTransition(() => router.refresh())}
+      />
     </div>
   );
 }

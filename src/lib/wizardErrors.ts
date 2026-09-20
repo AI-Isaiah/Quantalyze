@@ -5225,7 +5225,9 @@ export function recogniseSeamErrorCode(
 export type DashboardDialogRoute =
   | "strategies/[id]/name"
   | "strategies/[id]/ownership"
-  | "portfolio-strategies/allocation";
+  | "portfolio-strategies/allocation"
+  // Phase 164.5.3 / MT5CREDS Plan 05 — UpdateMt5SecretDialog's route.
+  | "keys/[id]/rotate-secret";
 
 /**
  * The `WizardErrorCode`s each dashboard write route can put on the wire.
@@ -5255,7 +5257,7 @@ export type DashboardDialogRoute =
  *
  * ── WHAT IS DELIBERATELY ABSENT ─────────────────────────────────────────────
  *
- * Three wire codes these routes emit are NOT `WizardErrorCode`s and must not be
+ * Wire codes these routes emit that are NOT `WizardErrorCode`s and must not be
  * added here or minted as members. They never reach `buildEnvelope`:
  *
  *   · `NAME_REQUIRED` / `NAME_TOO_LONG` — the name route's two field-level
@@ -5271,10 +5273,20 @@ export type DashboardDialogRoute =
  *     answers it by swapping in its confirmation body with the amount at risk,
  *     not by rendering an error at all. It is a QUESTION, not a refusal the
  *     user must read and leave.
+ *   · `NEW_SECRET_REQUIRED` — `keys/[id]/rotate-secret`'s one field-level
+ *     refusal (mirrors `NAME_REQUIRED` above). `UpdateMt5SecretDialog` also
+ *     disables its submit button while the field is empty, so this arm is a
+ *     defence-in-depth backstop rather than a reachable UX path — never an
+ *     envelope either way.
+ *   · `KEY_UPDATE_UNSUPPORTED_VENUE` — the same route's 400 for a non-MT5 key.
+ *     Unreachable from `UpdateMt5SecretDialog` in practice (both host cards
+ *     gate the "Update password" affordance to `exchange === "mt5"` rows), so
+ *     it is not worth a copy entry; recorded as a disposition rather than a
+ *     silent gap.
  *
- * Each of the three is asserted as an explicit disposition by the coverage law,
- * so its absence is a recorded decision rather than an omission — an omission
- * being indistinguishable from the defect.
+ * Each is asserted as an explicit disposition by the coverage law, so its
+ * absence is a recorded decision rather than an omission — an omission being
+ * indistinguishable from the defect.
  */
 const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
   DashboardDialogRoute,
@@ -5323,6 +5335,35 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       // The allocate surface's one actionable refusal, emitted by both the
       // pre-check and the D-03-A trigger arm.
       "ALLOCATION_NOT_ALLOCATABLE",
+    ]),
+  ],
+  [
+    // Phase 164.5.3 / MT5CREDS Plan 05 — UpdateMt5SecretDialog.
+    "keys/[id]/rotate-secret",
+    new Set<WizardErrorCode>([
+      "DASHBOARD_SIGNED_OUT",
+      "DASHBOARD_REQUEST_INVALID",
+      // 161-REVIEW / CR-01's indeterminate half — this route has three arms
+      // that fail AFTER an UPDATE was sent (see route.ts's own PERSIST ARM
+      // docblock).
+      "DASHBOARD_WRITE_INDETERMINATE",
+      "DASHBOARD_ROW_STALE",
+      // route.ts's persist-arm-unavailable posture (no service credential).
+      "SEAM_MISCONFIGURED",
+      // Pitfall 1's venue-identity 23505 backstop.
+      "KEY_VENUE_ALREADY_CONNECTED",
+      // Realistic broker-validation outcomes this route's own seam call can
+      // produce (route.ts's docblock: "the classifier's existing substring
+      // cascade already recognises AUTH_FAILED_DETAIL /
+      // MT5_MASTER_PASSWORD_DETAIL / MT5_WRONG_SERVER_DETAIL"). Rostering
+      // all three, not just the master-password case D-04's own test names,
+      // so a founder who submits a login-shaped credential change or a wrong
+      // broker server sees the SPECIFIC guidance rather than the generic
+      // UNKNOWN card — the same reasoning D-01 D-06 applies to the display
+      // side of this phase.
+      "KEY_AUTH_FAILED",
+      "KEY_MT5_MASTER_PASSWORD",
+      "KEY_MT5_WRONG_SERVER",
     ]),
   ],
 ]);
