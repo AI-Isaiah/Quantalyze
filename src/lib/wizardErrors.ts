@@ -362,6 +362,55 @@ export type WizardErrorCode =
   // ⛔ NOT `clear_and_retry`: re-posting the same `reuse_api_key_id` is refused
   // identically, because the key it names still does not exist.
   | "KEY_REUSE_UNAVAILABLE"
+  // 164.5.3-02 — THE FOURTH ENTRY OF THE VENUE-FENCE FAMILY, and the first
+  // that fires off a route none of the other three touch: the standalone "Add
+  // Key" persist arm of `keys/validate-and-encrypt/route.ts`
+  // (`ApiKeyManager.tsx` and `AllocatorExchangeManager.tsx`, both POST with
+  // `persist: true`), not a wizard connect step. Phase 164.5.3 plan 02 made
+  // this route stamp `venue_account_id` on INSERT for the first time, which
+  // made the partial UNIQUE index (`api_keys_user_exchange_venue_account_uniq`,
+  // migration 20260812083206) reachable here for the first time too: a 23505
+  // naming that constraint means the login the caller just submitted already
+  // identifies a DIFFERENT live `api_keys` row of theirs.
+  //
+  // ⛔ NOT AN ALIAS IN `SEAM_CODE_TO_WIZARD_CODE`, on `STALE_CLIENT`'s rule
+  // above: that table translates codes ANOTHER service put on the wire. This
+  // one is minted by our own route's own INSERT-error branch, so it is a
+  // wizard member outright.
+  //
+  // ⚠️ AND THE INCUMBENT COULD NOT TAKE IT, READ AT THE EMITTER RATHER THAN
+  // MATCHED ON ITS NAME:
+  //   · `VENUE_ALREADY_CONNECTED` — "already backs a strategy of yours", first
+  //     remedy "open the strategy that already uses this account". FALSE here
+  //     for a real, reachable population of this arm's callers:
+  //     `AllocatorExchangeManager.tsx` never writes to `strategies` at all
+  //     (measured — zero references to that table in the file), so a key added
+  //     there has no strategy behind it, ever. And on `ApiKeyManager.tsx`'s
+  //     per-strategy edit page, the pre-existing row this new attempt COLLIDES
+  //     WITH may itself be one of those strategy-less allocator rows — this
+  //     arm has no way to tell. The sentence cannot be asserted for every
+  //     caller who can trip it, so it is not this arm's code.
+  //
+  // ⭐ THE COPY BELOW IS DELIBERATELY THINNER THAN `VENUE_ALREADY_CONNECTED`'s
+  // FOR THAT REASON. It names only the fact true of every reachable caller — a
+  // live key of yours already carries this account's identity — and promises
+  // neither a strategy to open nor a specific screen to act from, both of
+  // which `VENUE_ALREADY_CONNECTED`'s copy can promise only because its one
+  // emitter (the wizard connect flow) guarantees a strategy exists.
+  //
+  // ⚠️ NON-RECOVERABLE, ON THE SAME GROUND `VENUE_ALREADY_CONNECTED` IS: a
+  // Retry that resubmits the identical credentials trips the identical unique
+  // index and fails identically. `actions` carries neither member of
+  // `RECOVERABLE_ACTIONS` (`clear_and_retry`, `try_another_key`), so
+  // `buildEnvelope` would derive `recoverable: false` if this code ever
+  // reached it. ⚠️ Moot in practice today, and said so rather than assumed:
+  // `KNOWN_VALIDATE_AND_ENCRYPT_CODES`' own docblock records that none of this
+  // route's three consumers reads the `code` channel at all — all three throw
+  // `err.error`'s prose sentence — so this entry buys "typed, and has copy",
+  // the same thing every other row on that roster buys. The field is still
+  // authored honestly rather than left to whatever `actions` happened to
+  // default to.
+  | "KEY_VENUE_ALREADY_CONNECTED"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
   | "SYNC_TIMEOUT"
   | "SYNC_FAILED"
@@ -2301,6 +2350,35 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // keeps this entry outside the destructive-action population the
     // `[140.3-10 / TRAP-4]` scan walks.
     actions: ["try_another_key", "expand_log"],
+  },
+
+  // 164.5.3-02 — see the union member's docblock for why this mints rather
+  // than reusing `VENUE_ALREADY_CONNECTED`, and for the near-miss it was
+  // measured against.
+  //
+  // ⚠️ WHAT THIS COPY MAY CLAIM, read at the arm rather than assumed. The
+  // 23505 is caught on the `.insert().select().single()` call itself
+  // (`route.ts`), so the row this request tried to write was never created —
+  // "Your new key was not saved" is knowable, not hoped for. ⛔ It says
+  // NOTHING about which surface the colliding key lives on (a strategy, the
+  // allocator's Exchanges list, or nothing at all) — the union member's
+  // docblock is the record of why no such claim survives every reachable
+  // caller.
+  KEY_VENUE_ALREADY_CONNECTED: {
+    title: "You already have a connected key for this account.",
+    cause:
+      "The login you just entered already identifies a key on your account, and one account can only back one connected key at a time. Your new key was not saved.",
+    fix: [
+      "Use the key you already have connected for this account instead of adding a new one.",
+      "To connect a second strategy or exchange link, use a different account — a separate broker account, or a different login on the same broker.",
+      "If you believe this account should be free to connect fresh, email security@quantalyze.com with the correlation id below before disconnecting anything — the existing key keeps working until you do.",
+    ],
+    docsHref: "/security",
+    // ⛔ NEITHER member of `RECOVERABLE_ACTIONS` (`clear_and_retry`,
+    // `try_another_key`) — see the union member's docblock: resubmitting the
+    // same credentials trips the same unique index and fails identically, the
+    // same ground `VENUE_ALREADY_CONNECTED` is non-recoverable on.
+    actions: ["request_call", "expand_log"],
   },
 
   SYNC_TIMEOUT: {
@@ -5320,6 +5398,17 @@ export { DASHBOARD_DIALOG_ROUTE_CODES };
  * gains wizard copy, it becomes a recognized code arriving on a 5xx carrying a
  * remedy that was authored for a 4xx arm — the WIZERR-06 W1 hazard. If you add
  * such a row, re-run that inventory and roster the code here.
+ *
+ * ⚠️ 164.5.3-02 ADDED AN EIGHTH MEMBER (`KEY_VENUE_ALREADY_CONNECTED`, a new
+ * local 409 emitter — see the roster below and the union member's own
+ * docblock), and this paragraph's "Six members" / "roughly 21 emittable"
+ * arithmetic was already stale by one before that (164.2-05 minted the
+ * SEVENTH, `RATE_LIMITED`, without re-running this count). Both counts are
+ * PRE-EXISTING drift, flagged here rather than silently re-derived: neither
+ * figure is guarded by a test, so re-stating a number nobody has re-measured
+ * against the >=500 forwarded-code inventory would be exactly the fabrication
+ * this docblock warns against elsewhere. Re-run the 161-08 W1 inventory before
+ * trusting either number again.
  */
 export const KNOWN_VALIDATE_AND_ENCRYPT_CODES: ReadonlySet<WizardErrorCode> =
   new Set<WizardErrorCode>([
@@ -5373,6 +5462,14 @@ export const KNOWN_VALIDATE_AND_ENCRYPT_CODES: ReadonlySet<WizardErrorCode> =
     // never emitted it from the classifier — it has no `classifyKeyValidationError`
     // call at all — so its only producer was the arm that just moved.
     "RATE_LIMITED",
+    // 164.5.3-02 — THE EIGHTH MEMBER. The venue-identity 23505 branch on the
+    // persist-INSERT arm (see the union member's own docblock for why this
+    // mints rather than reusing `VENUE_ALREADY_CONNECTED`). Read against this
+    // roster's own coverage law: the route's three consumers still read only
+    // `err.error`, never `code` (unchanged by this addition), so this row buys
+    // "typed, and has copy" exactly like every other row here — not "a client
+    // renders it".
+    "KEY_VENUE_ALREADY_CONNECTED",
     "UNKNOWN",
   ]);
 

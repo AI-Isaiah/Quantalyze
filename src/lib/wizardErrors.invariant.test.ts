@@ -216,11 +216,13 @@ interface RouteUnderTest {
    * room. `KNOWN_VALIDATE_AND_ENCRYPT_CODES` is far smaller — SEVEN members as
    * of 164.2-05 (it was SIX until this route's `userActionLimiter` deny arm
    * stopped answering `KEY_RATE_LIMIT` and started answering `RATE_LIMITED`,
-   * which the roster then had to admit) — and seven is simply how many codes
-   * that route declares, not a roster that parsed short. A shared 10 would fail
-   * on a correct roster, and the two ways to keep one literal (lower it for
-   * everyone, or drop the assertion) both weaken the guard on three routes to
-   * admit a fourth.
+   * which the roster then had to admit), EIGHT as of 164.5.3-02
+   * (`KEY_VENUE_ALREADY_CONNECTED`, the route's persist-INSERT arm's own
+   * venue-identity 23505 branch) — and eight is simply how many codes that
+   * route declares today, not a roster that parsed short. A shared 10 would
+   * fail on a correct roster, and the two ways to keep one literal (lower it
+   * for everyone, or drop the assertion) both weaken the guard on three routes
+   * to admit a fourth.
    *
    * ⛔ THIS IS NOT A LICENCE TO LOWER A FLOOR SO A ROUTE FITS. The guard's own
    * docblock states its job: catch a roster that parsed as `[]` or nearly so —
@@ -386,14 +388,17 @@ const ROUTES: readonly RouteUnderTest[] = [
     // keeps a lowercase or interpolated code VISIBLE as a defect.
     //
     // ⚠️⚠️ 161-REVIEW / IN-04 — DO NOT READ `rosterFloor: 4` OR
-    // `KNOWN_VALIDATE_AND_ENCRYPT_CODES`' SEVEN MEMBERS AS THIS ROUTE'S
-    // EMITTABLE SET. They are its DECLARED vocabulary — the literal-coded arms
-    // this row can see — and the gap between that and what the route can
-    // actually put on the wire is large, deliberate, and easy to misread as
-    // completeness. (SIX until 164.2-05; `RATE_LIMITED` is the seventh, and it
-    // is a member this row CANNOT see for a reason stated at the `[164.2-05]`
-    // describe below: the deny body rides `rateLimitDenyJson`, not a
-    // `NextResponse.json` literal, so widening the count is not the remedy.)
+    // `KNOWN_VALIDATE_AND_ENCRYPT_CODES`' EIGHT MEMBERS (SEVEN until
+    // 164.5.3-02) AS THIS ROUTE'S EMITTABLE SET. They are its DECLARED
+    // vocabulary — the literal-coded arms this row can see — and the gap
+    // between that and what the route can actually put on the wire is large,
+    // deliberate, and easy to misread as completeness. (SIX until 164.2-05;
+    // `RATE_LIMITED` is the seventh, and it is a member this row CANNOT see
+    // for a reason stated at the `[164.2-05]` describe below: the deny body
+    // rides `rateLimitDenyJson`, not a `NextResponse.json` literal, so
+    // widening the count is not the remedy. `KEY_VENUE_ALREADY_CONNECTED` is
+    // the eighth, 164.5.3-02, and unlike `RATE_LIMITED` it IS visible to this
+    // row's own scanner — see the count note below.)
     //
     // The twelfth arm excluded above is not merely one more code: it is an
     // OPEN CHANNEL. 161-08 widened it to forward the upstream's own `seamCode`
@@ -444,6 +449,20 @@ const ROUTES: readonly RouteUnderTest[] = [
     // are wire codes the alias table translates and are deliberately NOT roster
     // members — see the roster's own docblock.
     //
+    // ⚠️ 11 → 12 (164.5.3-02). RE-MEASURED under the same predicate, printed
+    // rather than assumed: `["KEY_VENUE_NOT_ENABLED"×2, "KEY_MISSING_REQUIRED_
+    // FIELD"×2, "STALE_CLIENT", "SEAM_MISCONFIGURED"×2, "KEY_NOT_READ_ONLY",
+    // "KEY_VENUE_ALREADY_CONNECTED", "UNKNOWN", "CIRCUIT_OPEN",
+    // "UPSTREAM_TIMEOUT"]` — 12 emitters over 9 distinct codes, one new site
+    // for one new code. The guard ADDED is the persist-INSERT arm's
+    // venue-identity 23505 branch (`route.ts`), which answers `{ code:
+    // "KEY_VENUE_ALREADY_CONNECTED", error: … }` at 409 — `{ code, error }`
+    // order, inside `EMITTER_BODY_MAX_CHARS`, so it is VISIBLE to this
+    // predicate rather than silently excluded the way `RATE_LIMITED`'s
+    // `rateLimitDenyJson` arm is (see the roster's own note on that). The new
+    // code is a real `WizardErrorCode` union member with its own copy entry —
+    // see the union member's docblock — not an alias.
+    //
     // ⚠️⚠️ AND READ THE ROSTER'S DOCBLOCK BEFORE READING THIS ROW AS PROOF THAT
     // A USER SEES ANY OF IT. Measured at HEAD: none of the route's three
     // consumers reads its `code` field — all three render the prose sentence.
@@ -455,13 +474,13 @@ const ROUTES: readonly RouteUnderTest[] = [
     rosterFile: join(REPO, "src", "lib", "wizardErrors.ts"),
     rosterName: "KNOWN_VALIDATE_AND_ENCRYPT_CODES",
     statusRe: "[45]\\d\\d",
-    expectedSites: 11,
-    // 7 measured members (6 until 164.2-05 admitted `RATE_LIMITED`); ~60% is
-    // 4.2, so 4 — the same ratio DERIVED_FLOOR is sized at, and the SAME
-    // literal it was already pinned at. It is deliberately NOT raised in step
-    // with the membership: this floor's job is to catch a roster that parsed as
-    // `[]`, 1 or 2, and a floor that tracks the size becomes a second, weaker
-    // copy of a size pin — the thing this docblock says it must not be.
+    expectedSites: 12,
+    // 8 measured members as of 164.5.3-02 (7 until then; 6 until 164.2-05
+    // admitted `RATE_LIMITED`); ~60% of 8 is 4.8, which still floors at 4 — the
+    // SAME literal this row was already pinned at, unmoved on purpose. This
+    // floor's job is to catch a roster that parsed as `[]`, 1 or 2, and a floor
+    // that tracks the size becomes a second, weaker copy of a size pin — the
+    // thing this docblock says it must not be.
     rosterFloor: 4,
   },
 ];
