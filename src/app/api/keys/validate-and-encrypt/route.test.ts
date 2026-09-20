@@ -1823,6 +1823,71 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
     consoleErr.mockRestore();
   });
 
+  // ── Test 3b: 164.5.3-02 Task 2 — the newly-reachable venue-identity 23505 ──
+  //
+  // Before this plan, this route's INSERT never wrote `venue_account_id`, so
+  // `api_keys_user_exchange_venue_account_uniq` (migration 20260812083206)
+  // could never fire here — Task 1 makes it reachable for the first time.
+  // The constraint name is hand-typed (never imported from
+  // `@/lib/api/pgConstraintName`), matching the sibling fixture in
+  // `composite/add-key/route.test.ts`: an oracle that imports the constant it
+  // is asserting about cannot fail if that constant silently changes.
+  it("a 23505 naming the venue-identity constraint answers a distinct KEY_VENUE_ALREADY_CONNECTED/409, not the generic fallback", async () => {
+    const RAW_PG =
+      'duplicate key value violates unique constraint ' +
+      '"api_keys_user_exchange_venue_account_uniq" (SQLSTATE 23505) ' +
+      "DETAIL: Key (user_id, exchange, venue_account_id)=(…, mt5, 5551234) already exists.";
+    PERSIST_STATE.insertResult = {
+      data: null,
+      error: { message: RAW_PG, code: "23505" },
+    };
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody()));
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    // code FIRST, per this route's own load-bearing key-order rule
+    // (Pitfall 4) — the coverage laws derive their population with a
+    // `code:`-first predicate.
+    expect(body).toEqual({
+      code: "KEY_VENUE_ALREADY_CONNECTED",
+      error: "You already have a connected key for this account.",
+    });
+    // Never the generic fallback this same PERSIST_STATE shape answers one
+    // test above for a DIFFERENT constraint name.
+    expect(body.code).not.toBe("UNKNOWN");
+    expect(Object.keys(body).filter((k) => CIPHERTEXT_KEY_PATTERN.test(k))).toEqual([]);
+    // Never captureToSentry — this is an expected, user-actionable fact (the
+    // founder already connected this account), not an anomaly.
+    expect(captureSpy).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  it("a 23505 naming a DIFFERENT/unparseable constraint keeps the existing generic UNKNOWN/500 fallback, unchanged", async () => {
+    const RAW_PG =
+      'duplicate key value violates unique constraint ' +
+      '"strategies_user_wizard_session_source_uniq" (SQLSTATE 23505)';
+    PERSIST_STATE.insertResult = {
+      data: null,
+      error: { message: RAW_PG, code: "23505" },
+    };
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody()));
+
+    // Byte-identical to the pre-existing generic INSERT-failure arm.
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body).toEqual({
+      code: "UNKNOWN",
+      error: "Your key was verified but couldn't be saved. Please try again.",
+    });
+    consoleErr.mockRestore();
+  });
+
   it("an INSERT that returns no row (no error either) is still a failure, not a silent success", async () => {
     // The shape that makes a false success possible: PostgREST answered without
     // an error but handed back nothing. Reporting 200 here would tell the user

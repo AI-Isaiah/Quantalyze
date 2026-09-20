@@ -789,6 +789,39 @@ async function legacyValidateAndEncryptHandler(args: {
       .single();
 
     if (insertError || typeof inserted?.id !== "string") {
+      // 164.5.3-02 / Pitfall 1 — the venue-identity unique index
+      // (`api_keys_user_exchange_venue_account_uniq`, migration
+      // 20260812083206) becomes reachable on THIS path for the first time now
+      // that the derivation above stamps `venue_account_id` here: before this
+      // plan the column was always NULL on this route's INSERT, so the
+      // partial index (which only fires when `venue_account_id IS NOT NULL`)
+      // could never trip. A 23505 naming it means the founder already has a
+      // live MT5 key connected for this exact login — an honest, distinct
+      // fact, not the generic "couldn't be saved" the fallback below answers
+      // for every other insert failure. Mirrors `composite/add-key/route.ts`'s
+      // own "discriminate by constraint name, fall through for everything
+      // else" shape, adapted to this direct-INSERT route.
+      //
+      // ⛔ ABOVE the generic fallback, deliberately — every other 23505
+      // (including one on a null/unparseable constraint) falls through
+      // unchanged.
+      if (
+        insertError?.code === "23505" &&
+        pgConstraintName(insertError) === VENUE_IDENTITY_CONSTRAINT
+      ) {
+        console.error(
+          "[keys/validate-and-encrypt] persist INSERT failed — venue-identity collision:",
+          scrubSeamError(insertError, [api_key, api_secret, passphrase]),
+        );
+        return NextResponse.json(
+          {
+            code: "KEY_VENUE_ALREADY_CONNECTED",
+            error: "You already have a connected key for this account.",
+          },
+          { status: 409, headers: NO_STORE_HEADERS },
+        );
+      }
+
       // Rule 12 / Pitfall 3: the fault is surfaced, and the raw PostgREST
       // message — which can echo SQLSTATE text and the offending values back —
       // is scrubbed at BOTH sinks and NEVER placed in the response body. The
