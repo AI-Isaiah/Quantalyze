@@ -490,6 +490,36 @@ describe("PATCH /api/keys/[id]/rotate-secret — the happy path end-to-end", () 
     expect(path).toBe(`/internal/keys/${KEY_ID}/rotate-secret`);
     expect(init).toMatchObject({ method: "POST", retriesOverride: 0 });
   });
+
+  // 164.5.3 review follow-up — the OWNER-SCOPING half of the seam's
+  // defense-in-depth. `rotate_key_secret` accepts `user_id` as an OPTIONAL
+  // field and, when present, filters its row load by it so a mismatched owner
+  // 404s BEFORE any decrypt. Because the field is optional on the Python side,
+  // dropping it here would NOT fail anything over there — the endpoint would
+  // simply revert to its unscoped behaviour and every Python test would stay
+  // green. This route is the seam's only caller, so THIS assertion is the only
+  // thing standing between that hardening and silent inertness.
+  // ⛔ It is not the primary control: ownership is proven by the user-scoped
+  // pre-read and re-asserted by the admin UPDATE's own `.eq("user_id", ...)`.
+  it("forwards the session user_id so the seam's owner scope is not inert", async () => {
+    await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(mockResilientFetch).toHaveBeenCalledTimes(1);
+    const [, , init] = mockResilientFetch.mock.calls[0];
+    const sent = JSON.parse(String((init as { body: string }).body)) as Record<
+      string,
+      unknown
+    >;
+    expect(sent.user_id).toBe(OWNER.id);
+    // The password still rides the body — pinned here so a future "stop
+    // sending secrets to the seam" refactor cannot quietly break rotation.
+    expect(sent.new_secret).toBe(SYNTHETIC_NEW_SECRET);
+    // ⛔ D-03: the login and broker server are NEVER sent. The seam derives
+    // both by decrypting the row's own ciphertext. A body that carried them
+    // would make the account identity caller-controlled, which is exactly
+    // what Delete + Add Key exists for.
+    expect(sent).not.toHaveProperty("venue_account_id");
+    expect(sent).not.toHaveProperty("broker_server");
+  });
 });
 
 describe("PATCH /api/keys/[id]/rotate-secret — seam registration (D-04)", () => {

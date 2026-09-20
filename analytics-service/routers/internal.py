@@ -760,4 +760,15 @@ async def rotate_key_secret(
         )
 
     encrypted = encrypt_credentials(login, req.new_secret, broker_server, kek)
-    return {**encrypted, "venue_account_id": login}
+    # WR-04 (164.5.3 review) — normalise the identifier the caller may
+    # BACKFILL from this response, matching every other writer of this
+    # column: create-with-key and validate-and-encrypt both `.trim()`, and
+    # create_wizard_strategy stamps `NULLIF(btrim(...), '')`. An untrimmed
+    # value renders with a stray space on the key card AND does not collide
+    # with its own trimmed twin in the partial UNIQUE index
+    # `api_keys_user_exchange_venue_account_uniq`, which is the index that
+    # exists to stop one broker account being connected twice.
+    # ⛔ The ciphertext is built from the UNTRIMMED `login` on purpose: it
+    # must stay byte-identical to what the broker authenticated. Only the
+    # returned display/identity value is normalised.
+    return {**encrypted, "venue_account_id": (login or "").strip() or None}

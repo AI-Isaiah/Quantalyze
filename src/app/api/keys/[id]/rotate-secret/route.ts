@@ -285,7 +285,18 @@ export async function PATCH(
           "X-Internal-Token": process.env.INTERNAL_API_TOKEN!,
           "X-Correlation-Id": correlationId,
         },
-        body: JSON.stringify({ new_secret: newSecret }),
+        // 164.5.3 review follow-up — `user_id` is the OWNER-SCOPING half of
+        // the seam's defense-in-depth. The Python endpoint
+        // (`rotate_key_secret`) accepts it as an OPTIONAL field and, when
+        // present, filters its row load by it so a mismatched owner 404s
+        // BEFORE any decrypt. Without this line that hardening is inert:
+        // the field only helps once a caller sends it, and this route is
+        // its only caller. ⛔ It is NOT the primary control — ownership is
+        // already proven above by the user-scoped pre-read and re-asserted
+        // by the admin UPDATE's own `.eq("user_id", ...)`. It exists so a
+        // holder of INTERNAL_API_TOKEN cannot use the seam as a
+        // rate-limited password oracle against an arbitrary key id.
+        body: JSON.stringify({ new_secret: newSecret, user_id: user.id }),
         // Non-idempotent live-credential probe, same reasoning as
         // validate-key-serialized (D-07 in resilient-fetch.ts): a retry would
         // double the wall-clock SC-4b charge against this route's ceiling for
