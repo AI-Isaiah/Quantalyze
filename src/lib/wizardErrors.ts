@@ -4490,6 +4490,27 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   ["EXCHANGE_PROBE_FAILED", { code: "KEY_PROBE_FAILED", status: 503 }],
   ["ADAPTER_INIT_FAILED", { code: "SEAM_INTERNAL_FAULT", status: 500 }],
   ["INTERNAL", { code: "SEAM_INTERNAL_FAULT", status: 500 }],
+  // 164.5.3 / MT5CREDS review follow-up — 500, `retryable=False`, raised by
+  // `rotate_key_secret` (analytics-service/routers/internal.py) when
+  // `_validate_mt5_key` returns a shape that is neither the success
+  // `{valid, read_only}` nor a raise. A REACHABLE row, not an exemption:
+  // `src/app/api/keys/[id]/rotate-secret/route.ts` calls
+  // `classifyKeyValidationError` and now attaches `seamCode`, so the
+  // machine-code branch fires here before the substring cascade.
+  // `SEAM_INTERNAL_FAULT` on `ADAPTER_INIT_FAILED`'s exact reasoning: this is a
+  // CODE FAULT, not a setting, so ⛔ NOT `SEAM_MISCONFIGURED` (which
+  // `KEK_UNAVAILABLE` takes because an operator really can fix an unset key).
+  // ⛔ NOT `KEY_PROBE_FAILED`: it is recoverable and would render a Retry
+  // against a fault that fails identically on every attempt.
+  // ⭐ WHY THIS ROW EXISTS AT ALL, recorded because it is the second-order
+  // lesson: the code was minted by this phase's own hardening, and without a
+  // disposition that hardening would have surfaced to the founder as "we could
+  // not classify this failure" — the exact defect the cross-language roster
+  // gate was built to catch, caught by it.
+  [
+    "MT5_VALIDATE_INVARIANT_VIOLATION",
+    { code: "SEAM_INTERNAL_FAULT", status: 500 },
+  ],
 ]);
 
 /**

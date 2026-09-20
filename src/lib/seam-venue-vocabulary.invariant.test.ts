@@ -762,6 +762,12 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   "MT5_GATEWAY_UNCONFIGURED",
   "MT5_GATEWAY_UNREACHABLE",
   "MT5_MASTER_PASSWORD",
+  // 164.5.3 / MT5CREDS — minted by `rotate_key_secret`'s probe-invariant
+  // assertion; takes a SEAM_INTERNAL_FAULT verdict row (a code fault, not a
+  // setting). Added here because this roster is the ARRIVAL gate: a new
+  // Python error_code with no TypeScript disposition falls through the
+  // substring cascade, which is what this file exists to prevent.
+  "MT5_VALIDATE_INVARIANT_VIOLATION",
   "MT5_WRONG_SERVER",
   "NETWORK_UNAVAILABLE",
   "PERMISSION_DENIED",
