@@ -94,7 +94,7 @@ import {
  */
 
 /**
- * The 14 budgets, typed HERE as literals and never derived from `SEAM_BUDGETS`.
+ * The 15 budgets, typed HERE as literals and never derived from `SEAM_BUDGETS`.
  *
  * `it.each` below iterates THIS map, not the table's own keys: a table row that
  * is DELETED then produces a failing lookup, whereas iterating the table would
@@ -122,6 +122,7 @@ const EXPECTED_TIMEOUT_MS: Record<string, number> = {
   "process-key-enqueue": 15_000,
   "process-key-sync": 60_000,
   "keys-permissions": 15_000,
+  "keys-rotate-secret": 120_000,
   "process-key-unified-dormant": 60_000,
 };
 
@@ -151,6 +152,7 @@ const EXPECTED_BUDGET_KEYS: string[] = [
   "process-key-enqueue",
   "process-key-sync",
   "keys-permissions",
+  "keys-rotate-secret",
   "process-key-unified-dormant",
 ];
 
@@ -195,6 +197,7 @@ const EXPECTED_DEPENDENCIES: Record<string, string[]> = {
   "process-key-enqueue": [],
   "process-key-sync": [],
   "keys-permissions": [],
+  "keys-rotate-secret": ["mt5-gateway"],
   "process-key-unified-dormant": [],
 };
 
@@ -234,6 +237,7 @@ const EXPECTED_RETRIES: Record<string, number> = {
   "process-key-enqueue": 1,
   "process-key-sync": 0,
   "keys-permissions": 0,
+  "keys-rotate-secret": 0,
   "process-key-unified-dormant": 0,
 };
 
@@ -299,12 +303,14 @@ function durationToMs(duration: string): number {
 }
 
 describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => {
-  it("declares exactly the 14 pinned budget keys (SET equality, not length)", () => {
+  it("declares exactly the 15 pinned budget keys (SET equality, not length)", () => {
     // Sorted SET equality. A length assertion is green under a rename, which is
     // how a call site quietly loses the budget it was supposed to spend.
+    // 14 → 15 at Phase 164.5.3: "keys-rotate-secret" added (D-04's
+    // credential-rotation seam).
     expect(
       Object.keys(SEAM_BUDGETS).sort(),
-      "The SeamBudgetKey set drifted from the pinned 14. A key was ADDED, " +
+      "The SeamBudgetKey set drifted from the pinned 15. A key was ADDED, " +
         "REMOVED or RENAMED. Adding one is fine — pin it here in the same " +
         "commit, together with its timeoutMs, so the new call site's budget is " +
         "reviewable as a value rather than inferred from a diff.",

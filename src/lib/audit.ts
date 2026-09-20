@@ -456,6 +456,13 @@ export type AuditAction =
   // the union-s first semicolon.)
   | "strategy.csv_finalize"
   | "api_key.revoke"
+  // Phase 164.5.3 / MT5CREDS D-04+D-05: the owner corrected an MT5 key's
+  // stored password in place (validated against the live broker before
+  // persisting -- entity_id = api_keys.id). TS-only call site (the route is
+  // a Next.js write) -- kept in the Python Literal too so the TS<->Python
+  // AuditAction parity test stays green (test_action_literal_matches_ts_union
+  // in test_audit.py).
+  | "api_key.rotate_secret"
   | "trades.upload"
   | "admin.partner_import"
   // --- /review follow-up (T4-C1 + T4-M6) ------------------------------
@@ -676,6 +683,9 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP = {
   // anchor the other two hang off.
   "strategy.csv_finalize": "strategy",
   "api_key.revoke": "api_key",
+  // Phase 164.5.3 / MT5CREDS — the credential-rotation route anchors on the
+  // key row it corrected, same as api_key.decrypt / api_key.revoke above.
+  "api_key.rotate_secret": "api_key",
   // B4c reconciliation: ADR-0023 L149 + the call site both anchor on
   // strategy (entity_id = strategies.id; "trades.upload is a bulk insert,
   // strategy is the ownership anchor"). The prior map value "trades_upload"

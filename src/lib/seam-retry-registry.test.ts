@@ -103,20 +103,24 @@ const _flowVerdictExhaustiveness: _MissingFlowVerdict extends never
 void _flowVerdictExhaustiveness;
 
 /**
- * The FOUR `SeamBudgetKey`s that are ROUTE budgets, not analytics-seam-function
+ * The FIVE `SeamBudgetKey`s that are ROUTE budgets, not analytics-seam-function
  * verdicts, and are therefore DELIBERATELY absent from the analytics maps —
  * registry §(c). Hand-typed here so the `Exclude` below cannot quietly absorb a
- * new key: a 15th `SeamBudgetKey` must be classified as an analytics wrapper
+ * new key: a 16th `SeamBudgetKey` must be classified as an analytics wrapper
  * (→ a verdict) or as a route budget (→ this list), and doing NEITHER is a
  * compile error rather than a silent exclusion.
  *
- * ⚠️ THAT FENCE HAS NOW FIRED ONCE, IN ANGER. Phase 153.4 / D-26 landed the
+ * ⚠️ THAT FENCE HAS NOW FIRED TWICE, IN ANGER. Phase 153.4 / D-26 landed the
  * 14th key (`validate-key-serialized`) and `npx tsc --noEmit` refused the repo
- * until it was classified — which is the whole point: an unclassified budget
- * would otherwise carry NO retry audit verdict at all and nothing would say so.
+ * until it was classified. Phase 164.5.3 / D-04 landed the 15th
+ * (`keys-rotate-secret` — the credential-rotation route, protected the same way
+ * `keys-permissions` is: its `SEAM_BUDGETS` row stays `retries: 0`) and the
+ * fence refused again — which is the whole point: an unclassified budget would
+ * otherwise carry NO retry audit verdict at all and nothing would say so.
  */
 type RouteBudgetKey =
   | "keys-permissions"
+  | "keys-rotate-secret"
   | "process-key-enqueue"
   | "process-key-sync"
   | "process-key-unified-dormant";
