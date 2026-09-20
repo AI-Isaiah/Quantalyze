@@ -784,7 +784,11 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
     // DASHBOARD_REQUEST_INVALID, DASHBOARD_WRITE_INDETERMINATE,
     // DASHBOARD_ROW_STALE, SEAM_MISCONFIGURED, KEY_VENUE_ALREADY_CONNECTED,
     // KEY_AUTH_FAILED, KEY_MT5_MASTER_PASSWORD, KEY_MT5_WRONG_SERVER).
-    expect(checked).toBe(28);
+    // 28 -> 31 at 164.5.3 review fixes (CR-03 / WR-01): the rotate-secret
+    // roster gained RATE_LIMITED (this route's OWN 429, CR-03), KEY_RATE_LIMIT
+    // and SEAM_INTERNAL_FAULT (both reached via the carried `seamCode`,
+    // WR-01) — 9 -> 12 on that one roster, 28 -> 31 overall.
+    expect(checked).toBe(31);
   });
 
   it("B. no rostered code is the generic terminal — that would defeat the roster", () => {
