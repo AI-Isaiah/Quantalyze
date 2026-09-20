@@ -788,7 +788,15 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
     // roster gained RATE_LIMITED (this route's OWN 429, CR-03), KEY_RATE_LIMIT
     // and SEAM_INTERNAL_FAULT (both reached via the carried `seamCode`,
     // WR-01) — 9 -> 12 on that one roster, 28 -> 31 overall.
-    expect(checked).toBe(31);
+    // 31 -> 32 at 164.5.4-02 (D-03): the rotate-secret roster gained
+    // KEY_MUST_BE_RECONNECTED — wire KEY_UNDECRYPTABLE, reached via the same
+    // carried `seamCode` the WR-01 pair above arrives on, now that the wire
+    // code holds a `VENUE_WIRE_CODE_TO_VERDICT` row instead of an exemption.
+    // 12 -> 13 on that one roster, 31 -> 32 overall. ⚠️ This pin is a THIRD
+    // census the mint moves, beside the two `EXPECTED_TABLE_SIZE` literals in
+    // `wizardErrors.test.ts` — recorded here because clearing only those two
+    // reads as a complete fix while this assertion is the one still red.
+    expect(checked).toBe(32);
   });
 
   it("B. no rostered code is the generic terminal — that would defeat the roster", () => {
