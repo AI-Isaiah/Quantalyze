@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.5.1.4
-current_phase_name: SYNCCURSOR
-status: "Phase 164.5.1.4 shipped — PR #829 (v0.81.0.0)"
-stopped_at: PR #829 open — next is /land-and-deploy (merge starts apply-test, then the PROD apply behind the Production human reviewer gate)
-last_updated: "2026-09-20T00:30:00.000Z"
+current_phase: 164.5.1.3
+current_phase_name: SYNCADMIT
+status: "Phase 164.5.1.3 shipped — PR #830"
+stopped_at: PR #830 open — CI running (2 runs bound to head 8b8a5864). Next is /land-and-deploy. ⭐ No migration in this PR: merging starts NO apply-test and engages NO Production gate.
+last_updated: "2026-09-20T06:11:42.607Z"
 last_activity: 2026-09-20
-last_activity_desc: Phase 164.5.1.4 SYNCCURSOR closed permanent per-strategy trade loss — _sync_single_key stored per STRATEGY but resumed per KEY, so a partial fan-out stranded the failed strategies' windows forever. Ships a new strategy_sync_cursors table (migration 20260919120000), a membership-based read floor that tells an ABSENT row from a NULL one, and a persist-on-hold write giving every fan-out strategy a row. should_advance_cursor stays BYTE-IDENTICAL. Two full review rounds; round 2 found round 1 fixes had NOT all held — the lookback clamp was hitting the key-cursor fallback, its loss never reached the response envelope, and the missing-table classifier over-matched and skipped the per-row fallback. Verified 7/7 (four independent mutants, incl. one proving persist-on-hold load-bearing); SECURED 23 threats, 0 open, with the clamp recorded as accepted risk R-03. Floors RAISED 47->48 and 402->412 (tightening). ⛔ NOT live until the migration APPLIES to PROD — both new Supabase paths fail open, so a deployed service without the table runs in exactly the fall-back mode that IS the defect. 164.5.1.3 SYNCADMIT is unblocked by that apply, not by this merge.
-state_head: 4d71155c8c2e33c581986eb3de85599ae7accb48
+last_activity_desc: Phase 164.5.1.3 SYNCADMIT admitted the owner-only status `private` to ALLOWED_STRATEGY_STATUSES in analytics-service/routers/cron.py, so five production API keys whose trades were NEVER stored begin syncing. PROD 2026-09-19: 6 private strategies, 5 with an API key, 0 sharing that key with an in-set sibling — the sibling hypothesis is FALSE and all 5 were never synced (a 6th is keyless and unsyncable by any widening). The ledger precedent 20260917120000 turned out to SUPPORT the widening rather than bar it. Security headline: the change creates NO NEW CODE PATH — every mechanism a newly-admitted strategy reaches is status-agnostic, and draft/pending_review (both already non-public) have exercised that same pipeline all along; this constant is the ONLY lifecycle gate in the pipeline. Four consequence gates assert fan-out MEMBERSHIP BY STRATEGY ID, never membership in the constant, which would be vacuous. Verification passed 5/5, SECURITY 3/3 closed 0 open, both reviewers 0 findings so NO fix round ran. Two fabricated citations struck from the plan before execution. No migration; no floor, ceiling or census touched. Shipped v0.82.0.0 as PR #830.
+state_head: 8b8a58645369d433b1fcaed32c05d45cde6af98d
 progress:
   total_phases: 45
   completed_phases: 29
@@ -475,7 +475,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Phase 164.5.1.2 shipped — PR #827
+Status: Phase 164.5.1.3 shipped — PR #830
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -491,7 +491,7 @@ Status: Phase 164.5.1.2 shipped — PR #827
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-19 — Phase 164.5.1.2 FANOUTSIBLINGS shipped as PR #827 (v0.80.0.0) — a decide-with-evidence phase whose headline outcome is a REFUSAL: the poll-positions widening was refused as inert because production shows the five pending_review strategies already pass that conjunct and have still never been polled, so the predicate is deliberately unchanged. Shipped the D-03 data-integrity fix (the cursor no longer advances over trades it never stored), a new held status so a stalled key stops reporting itself healthy, and a contract-drift fallback that records the drift instead of fabricating a success count. Two review rounds; round 2 caught a HIGH that round 1's own fix introduced. Verified 5/5 at the ship SHA, SECURED 13/13 (threats_open 0). No migration. Booked 164.5.1.3 SYNCADMIT and 164.5.1.4 SYNCCURSOR plus three TODOS entries.
+Last activity: 2026-09-20 — Phase 164.5.1.3 SYNCADMIT shipped as PR #830 (v0.82.0.0). Admitted the owner-only status `private` to ALLOWED_STRATEGY_STATUSES, so five production keys whose trades were never stored begin syncing. Decide-with-evidence outcome: the ledger precedent SUPPORTED the widening rather than barring it. No migration, so merging starts no apply-test and engages no Production gate. Verification passed 5/5, SECURITY 3/3 closed 0 open, both reviewers 0 findings.
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
