@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.9
+current_phase: "164.9"
 current_phase_name: TESTISOLATION — a run’s assertions against the shared TEST project
-status: planning
+status: "Phase 164.5.4 shipped — PR #835"
 stopped_at: "Phase 164.5.4 MT5RECON-GAP COMPLETE — verification passed 15/15, security 32 threats / 0 open, two review rounds. Next per the founder’s ordering: 164.9 TESTISOLATION (needs a plan). ⚠️ phase.complete advanced this to Phase 159, which is already complete (159-VERIFICATION.md status: passed) — corrected by hand."
-last_updated: "2026-09-20T21:49:59.910Z"
+last_updated: "2026-09-20T21:55:14.573Z"
 last_activity: 2026-09-20
-last_activity_desc: "Phase 164.5.4 complete; state pointed at 164.9 per the founder ordering"
-state_head: 42a035ca338d5c815f8e53fd7a8c77b97224c8f8
+last_activity_desc: Phase 164.5.4 complete; state pointed at 164.9 per the founder ordering
+state_head: 4bd415918e423bbee8eb9d1a8b09cafceb08b9eb
 progress:
   total_phases: 45
   completed_phases: 32
@@ -482,7 +482,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Ready to plan
+Status: Phase 164.5.4 shipped — PR #835
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
