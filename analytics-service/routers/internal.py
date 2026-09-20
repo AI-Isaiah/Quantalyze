@@ -40,14 +40,19 @@ from typing import Any, Optional
 
 import sentry_sdk
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from services.db import get_supabase, one
-from services.encryption import decrypt_credentials, get_kek
+from services.encryption import decrypt_credentials, encrypt_credentials, get_kek
 # PYAPI-05 — the status-attributability contract. Every deliberate 5xx/424 in
 # this file goes through service_error. Contract: docs/STATUS_CONTRACT.md.
 from services.error_contract import service_error
 from services.exchange import aclose_exchange, create_exchange
 from services.key_permissions import detect_permissions
+# D-04 (164.5.3 / MT5CREDS) — the SAME live-broker probe /validate-key's MT5
+# branch uses, reused verbatim rather than re-implemented. exchange.py imports
+# nothing from routers.*, so this is not a cycle.
+from routers.exchange import _validate_mt5_key
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -562,3 +567,127 @@ async def get_key_permissions(
         "probe_error": bool(perms.get("probe_error", False)),
         "detected_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /internal/keys/{key_id}/rotate-secret
+# ---------------------------------------------------------------------------
+
+
+class RotateSecretRequest(BaseModel):
+    new_secret: str
+
+
+@router.post("/keys/{key_id}/rotate-secret")
+async def rotate_key_secret(
+    key_id: str, request: Request, req: RotateSecretRequest
+) -> dict[str, Any]:
+    """Re-validate a corrected MT5 investor password against the live broker
+    and, only on success, re-encrypt and return fresh ciphertext.
+
+    164.5.3 / MT5CREDS, D-04 (founder decision, 2026-09-20). This is the ONLY
+    place in the phase that touches a live credential in plaintext — mirrors
+    ``get_key_permissions``'s posture exactly: plaintext never leaves this
+    service. The caller (a new Next.js route, plan 04 of this phase) supplies
+    only the new password; the login and broker server the credential is
+    checked against come from THIS SERVICE's own decrypt of the stored row,
+    never from the browser or from Next.js (D-03: login/server cannot change
+    via this path — that is what Delete + Add Key means).
+
+    Flow, mirroring ``get_key_permissions``'s own ordering:
+      1. Auth via ``X-Internal-Token`` (constant-time compare, reused verbatim).
+      2. Per-key rate limit (the SAME ``_consume_rate_limit`` bucket
+         ``get_key_permissions`` already uses, keyed on ``key_id`` — this is
+         defense-in-depth mirroring the sibling endpoint's posture, not a new
+         mechanism).
+      3. Load the row; 404 if absent — BEFORE any decrypt.
+      4. Venue-scope gate: 422 if the row's ``exchange`` is not ``mt5`` —
+         BEFORE any decrypt. Defense-in-depth; the Next.js side (plan 04)
+         enforces the same gate as the primary control.
+      5. Load the KEK; 500 ``KEK_UNAVAILABLE`` if unconfigured.
+      6. ``decrypt_credentials`` the row to recover ``(login, OLD password
+         [discarded], broker_server)``; 500 ``KEY_UNDECRYPTABLE`` on failure.
+      7. Call ``_validate_mt5_key(login, req.new_secret, broker_server)`` —
+         the SAME gateway probe MT5 create already uses, with the SAME
+         three-argument credential-slot order (login -> api_key position, new
+         password -> api_secret position, broker_server -> passphrase
+         position). Its exceptions (``AUTH_FAILED_DETAIL`` /
+         ``MT5_MASTER_PASSWORD_DETAIL`` / ``MT5_WRONG_SERVER_DETAIL``, a
+         ``VenueTransientHTTPException``, or a gateway-unconfigured
+         ``service_error``) PROPAGATE UNCAUGHT — this lets the Next.js
+         caller's existing ``classifyKeyValidationError`` cascade recognise
+         them byte-identically, with zero new TS vocabulary. Nothing is
+         re-encrypted or returned on any of these paths (D-04).
+      8. On success (``_validate_mt5_key`` returned ``{"valid": True,
+         "read_only": True}`` without raising), ``encrypt_credentials`` the
+         UNCHANGED login/server with the NEW password and return its six
+         ciphertext fields plus ``venue_account_id``. ``login`` is the ONLY
+         plaintext value in the response — never the password, never the
+         broker server (T-164.5.3-06).
+
+    ⛔ No line in this function logs, echoes, or otherwise surfaces
+    ``req.new_secret``, the decrypted old password, or the broker server.
+
+    Errors:
+      403 — bad/missing X-Internal-Token, or INTERNAL_API_TOKEN unconfigured.
+      404 — key_id not found.
+      422 — the row's exchange is not ``mt5``.
+      429 — per-key rate limit hit.
+      400 — the broker rejected the new credential (three distinguishable
+            detail strings, propagated from ``_validate_mt5_key`` uncaught).
+      500 — KEK unavailable, or the stored key is undecryptable.
+    """
+    _verify_internal_token(request)
+
+    if not _consume_rate_limit(key_id):
+        raise service_error(
+            429,
+            "RATE_LIMITED",
+            retryable=True,
+            retry_after=int(_RATE_LIMIT_WINDOW_S),
+            detail="Too many secret-rotation attempts for this key. Try again in a moment.",
+        )
+
+    supabase = get_supabase()
+
+    key_data = one(
+        supabase.table("api_keys").select("*").eq("id", key_id).maybe_single().execute()
+    )
+    if not key_data:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    if key_data.get("exchange") != "mt5":
+        raise HTTPException(
+            status_code=422,
+            detail="This endpoint only rotates MT5 credentials.",
+        )
+
+    try:
+        kek = get_kek()
+    except RuntimeError:
+        raise service_error(
+            500,
+            "KEK_UNAVAILABLE",
+            dependency="kek",
+            retryable=False,
+            detail="Credential encryption is not configured. This needs an operator, not a retry.",
+        )
+
+    try:
+        login, _old_password, broker_server = decrypt_credentials(key_data, kek)
+    except Exception:
+        logger.error("Failed to decrypt API key %s for secret rotation", key_id)
+        raise service_error(
+            500,
+            "KEY_UNDECRYPTABLE",
+            dependency="kek",
+            retryable=False,
+            detail="This stored key could not be decrypted. It must be reconnected.",
+        )
+
+    # D-04: validate BEFORE persisting. A failed validation's exceptions
+    # propagate uncaught — nothing below this line runs on that path.
+    await _validate_mt5_key(login, req.new_secret, broker_server)
+
+    encrypted = encrypt_credentials(login, req.new_secret, broker_server, kek)
+    return {**encrypted, "venue_account_id": login}
