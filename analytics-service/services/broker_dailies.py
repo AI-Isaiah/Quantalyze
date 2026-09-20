@@ -542,6 +542,71 @@ def combine_sfox_balance_history(
     return returns, meta
 
 
+def _fold_mt5_deals(
+    deals: Sequence[Mapping[str, Any]],
+    server_utc_offset_s: int,
+) -> tuple[pd.Series, list[ExternalFlow]]:
+    """The ONE MT5 deal fold — classify, bucket per UTC day, shape.
+
+    Returns ``(daily_pnl_series, flows)``: the per-day TRADING PnL as an ascending
+    daily float Series (``DatetimeIndex``, unit ``[us]``) and the per-day external
+    capital movements as dated ``ExternalFlow`` entries.
+
+    WHY THIS IS A SHARED HELPER AND NOT AN INLINE LOOP (A-01). Two public functions
+    in this module need these SAME two objects: ``combine_mt5_deal_ledger`` chain-links
+    them into a RETURN series, and ``reconstruct_mt5_nav_levels`` rolls them into a NAV
+    LEVEL series. Re-running ``classify_deal`` / ``deal_utc_day`` / ``deal_cash_effect``
+    at a second site would be a PARALLEL IMPLEMENTATION of the hardened, fail-loud,
+    security-relevant half of this path — precisely where a drift between two copies is
+    a money bug. One fold, two consumers; the deal semantics can only be changed once.
+
+    ⚠️ This helper is PURE and RAISES rather than returning anything partial: an
+    unclassifiable / ambiguous ``DEAL_TYPE`` raises ``Mt5DealClassificationError`` out
+    of the loop BEFORE any series exists (the deribit-``correction`` fail-loud lesson),
+    and so does a non-finite / non-numeric / bool money field.
+    """
+    trading_by_day: dict[str, float] = {}
+    flow_by_day: dict[str, float] = {}
+    for deal in deals:
+        # classify_deal raises on an unknown/ambiguous type — it propagates so the
+        # whole combine fails loud (nothing partial), never a silent drop/coerce.
+        kind = classify_deal(deal)
+        day = deal_utc_day(deal.get("time"), server_utc_offset_s)
+        if kind == "trading":
+            trading_by_day[day] = trading_by_day.get(day, 0.0) + deal_cash_effect(deal)
+        else:  # external_flow — capital in/out, subtracted from the return numerator
+            # WR-01: route the flow amount through the SAME bool-rejecting money
+            # coercer the trading fold uses (``mt5_deals._coerce_money``, via
+            # ``deal_cash_effect``), NOT ``nav_twr._coerce_float``. ``_coerce_float``
+            # accepts ``bool`` (``float(True) == 1.0`` is finite), so a schema-drifted
+            # bool ``profit`` on a BALANCE/CREDIT/BONUS deal would be silently folded
+            # as a $1 capital flow instead of failing loud like the trading path. Both
+            # channels now share ONE fail-loud contract (the mt5_deals module's whole
+            # reason to exist). A missing field defaults to 0.0, mirroring
+            # ``deal_cash_effect``'s None-skip.
+            raw = deal.get("profit", 0.0)
+            amount = 0.0 if raw is None else _coerce_money(raw, field="mt5_flow_profit")
+            flow_by_day[day] = flow_by_day.get(day, 0.0) + amount
+
+    # Per-day trading PnL as an ascending daily Series (unit ``[us]``, the canonical
+    # analytics unit) — the DIRECT input to the honest core, not the CSV-shaped
+    # ``daily_pnl`` records the dust-gated combiner consumes.
+    trading_days = sorted(trading_by_day)
+    daily_pnl_series = pd.Series(
+        [trading_by_day[day] for day in trading_days],
+        index=pd.DatetimeIndex(
+            [pd.Timestamp(day) for day in trading_days]
+        ).as_unit("us"),
+        name="daily_pnl",
+    )
+    # Dated external flows (deposit +, withdrawal −); USD-family so quantity == usd.
+    flows = [
+        ExternalFlow(utc_day_iso=day, usd_signed=amount)
+        for day, amount in sorted(flow_by_day.items())
+    ]
+    return daily_pnl_series, flows
+
+
 def combine_mt5_deal_ledger(
     deals: Sequence[Mapping[str, Any]],
     account_equity: float,
@@ -607,46 +672,13 @@ def combine_mt5_deal_ledger(
     honestly — never a silent rescale (mirrors how ``combine_native_ledger`` /
     ``combine_sfox_balance_history`` anchor to their real venue NAV). The two
     existing siblings are NEVER touched.
-    """
-    trading_by_day: dict[str, float] = {}
-    flow_by_day: dict[str, float] = {}
-    for deal in deals:
-        # classify_deal raises on an unknown/ambiguous type — it propagates so the
-        # whole combine fails loud (nothing partial), never a silent drop/coerce.
-        kind = classify_deal(deal)
-        day = deal_utc_day(deal.get("time"), server_utc_offset_s)
-        if kind == "trading":
-            trading_by_day[day] = trading_by_day.get(day, 0.0) + deal_cash_effect(deal)
-        else:  # external_flow — capital in/out, subtracted from the return numerator
-            # WR-01: route the flow amount through the SAME bool-rejecting money
-            # coercer the trading fold uses (``mt5_deals._coerce_money``, via
-            # ``deal_cash_effect``), NOT ``nav_twr._coerce_float``. ``_coerce_float``
-            # accepts ``bool`` (``float(True) == 1.0`` is finite), so a schema-drifted
-            # bool ``profit`` on a BALANCE/CREDIT/BONUS deal would be silently folded
-            # as a $1 capital flow instead of failing loud like the trading path. Both
-            # channels now share ONE fail-loud contract (the mt5_deals module's whole
-            # reason to exist). A missing field defaults to 0.0, mirroring
-            # ``deal_cash_effect``'s None-skip.
-            raw = deal.get("profit", 0.0)
-            amount = 0.0 if raw is None else _coerce_money(raw, field="mt5_flow_profit")
-            flow_by_day[day] = flow_by_day.get(day, 0.0) + amount
 
-    # Per-day trading PnL as an ascending daily Series (unit ``[us]``, the canonical
-    # analytics unit) — the DIRECT input to the honest core (below), not the
-    # CSV-shaped ``daily_pnl`` records the dust-gated combiner consumes.
-    trading_days = sorted(trading_by_day)
-    daily_pnl_series = pd.Series(
-        [trading_by_day[day] for day in trading_days],
-        index=pd.DatetimeIndex(
-            [pd.Timestamp(day) for day in trading_days]
-        ).as_unit("us"),
-        name="daily_pnl",
-    )
-    # Dated external flows (deposit +, withdrawal −); USD-family so quantity == usd.
-    flows = [
-        ExternalFlow(utc_day_iso=day, usd_signed=amount)
-        for day, amount in sorted(flow_by_day.items())
-    ]
+    The deal fold (steps 1–3 above) is SHARED — it lives in ``_fold_mt5_deals`` so the
+    NAV-LEVELS sibling ``reconstruct_mt5_nav_levels`` folds the ledger through the very
+    same classification loop rather than a second copy of it (A-01). Nothing about this
+    function's signature, return shape or values changed when the fold moved.
+    """
+    daily_pnl_series, flows = _fold_mt5_deals(deals, server_utc_offset_s)
 
     # CR-01: reconstruct DIRECTLY against the authoritative live-equity anchor via
     # the honest core, BYPASSING ``combine_realized_and_funding`` →
