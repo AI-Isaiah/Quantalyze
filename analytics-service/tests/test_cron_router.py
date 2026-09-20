@@ -638,7 +638,9 @@ class TestStrategyLifecycleFilter:
         """Behavioural: drive `cron_sync` end-to-end with a single key
         whose embedded strategies span every lifecycle status. Assert
         the resulting `sync_trades` RPC fan-out only fires for the
-        three live statuses — the rest are silently dropped.
+        live statuses — the rest are silently dropped. Also proves the
+        Area 2 verdict (164.5.1.3 SYNCADMIT): the owner-only terminal
+        `private` status is admitted alongside the other three.
 
         Replaces the prior local-replay test that re-implemented the
         filter inline (a refactor that dropped the cron.py filter would
@@ -652,6 +654,7 @@ class TestStrategyLifecycleFilter:
             {"id": "s-pub", "status": "published"},
             {"id": "s-draft", "status": "draft"},
             {"id": "s-review", "status": "pending_review"},
+            {"id": "s-private", "status": "private"},
             {"id": "s-archived", "status": "archived"},
             {"id": "s-suspended", "status": "suspended"},
             {"id": "s-deleted", "status": "deleted"},
@@ -699,10 +702,10 @@ class TestStrategyLifecycleFilter:
             for call in mock_supabase.rpc.call_args_list
             if call.args and call.args[0] == "sync_trades"
         )
-        assert rpc_strategy_ids == ["s-draft", "s-pub", "s-review"]
+        assert rpc_strategy_ids == ["s-draft", "s-private", "s-pub", "s-review"]
         # Result payload mirrors the filter
         result_strategy_ids = sorted(response["results"][0]["strategy_ids"])
-        assert result_strategy_ids == ["s-draft", "s-pub", "s-review"]
+        assert result_strategy_ids == ["s-draft", "s-private", "s-pub", "s-review"]
 
     @pytest.mark.asyncio
     async def test_strategy_missing_status_field_is_dropped(self):
