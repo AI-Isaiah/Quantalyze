@@ -6,15 +6,15 @@ current_phase: 164.5.4
 current_phase_name: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently
 status: executing
 stopped_at: "Phase 164.5.4 MT5RECON-GAP planned — 6 plans across 3 waves. Plan-checker PASSED (round 2: 0 blockers, 0 warnings). Ready to execute wave 1 (plans 01, 02, 03, 05 — file-disjoint)."
-last_updated: "2026-09-20T17:36:51.675Z"
+last_updated: "2026-09-20T17:40:19.147Z"
 last_activity: 2026-09-20
-last_activity_desc: Phase 164.5.3 execution started
-state_head: 64d112463b533341aafc2ec95bb0e8a96fc3c4f9
+last_activity_desc: Phase 164.5.4 execution started
+state_head: 6a6cecdc95024d6850c5b6d4bc26341b62e3f820
 progress:
   total_phases: 45
   completed_phases: 31
   total_plans: 227
-  completed_plans: 213
+  completed_plans: 214
   percent: 69
 ---
 
@@ -179,8 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.5.4 (MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently) — READY TO EXECUTE
-Plan: 1 of 5
+Phase: 164.5.4 (MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently) — EXECUTING
+Plan: 1 of 6
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
@@ -482,7 +482,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Ready to execute
+Status: Executing Phase 164.5.4
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -498,7 +498,7 @@ Status: Ready to execute
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-20 — Phase 164.5.3 execution started
+Last activity: 2026-09-20 — Phase 164.5.4 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
