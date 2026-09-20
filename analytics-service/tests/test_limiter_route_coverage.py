@@ -368,6 +368,18 @@ NO_LIMITER_QUARANTINE: frozenset[str] = frozenset(
         # entry becomes a lie — the reason is written here so a reader can check
         # it, which a bare exemption list could not support.
         "routers.internal.get_key_permissions",
+        # Phase 164.5.3 / MT5CREDS (D-04) — NOT unprotected, and quarantined
+        # for exactly the reason its sibling above is: it consumes the SAME
+        # hand-rolled per-`key_id` token bucket (`_consume_rate_limit`,
+        # defined beside `get_key_permissions`'s own consumption and
+        # consumed by this handler before any decrypt), so its ceiling lives
+        # in a different mechanism than the slowapi registries this file
+        # probes — not in no mechanism at all. ⚠️ If that bespoke bucket is
+        # ever deleted, this entry becomes a lie, and on THIS route the lie
+        # is worse than on its sibling: an unlimited endpoint that drives a
+        # live broker credential probe is an online password-guessing
+        # oracle. Re-read the handler before trusting this line.
+        "routers.internal.rotate_key_secret",
     }
 )
 

@@ -967,6 +967,16 @@ const EXPECTED_BINDINGS: ReadonlyArray<{
   // point of the change and exactly what this roster exists to make visible.
   { id: "B-14", family: "i", key: "validate-key-serialized",
     sites: [{ site: `${ANALYTICS_CLIENT}::validateKey`, path: "/api/validate-key", retry: ANALYTICS_RETRY }] },
+  // Phase 164.5.3 / MT5CREDS (D-04) — the credential-rotation route calls the
+  // Python service's rotate-secret endpoint. Family (iii) and retry "0" for the
+  // same reason B-12 and B-13 are: the call is made from a Next.js route, and
+  // the deadline is the chokepoint's, not a client wrapper's. ⛔ The retry
+  // expression stays 0 DELIBERATELY and must not drift: the call drives a LIVE
+  // broker credential probe, so a silent retry would turn one user-initiated
+  // password correction into several authentication attempts against the
+  // broker — the same non-idempotency reason validate-key-serialized states.
+  { id: "B-15", family: "iii", key: "keys-rotate-secret",
+    sites: [{ site: "src/app/api/keys/[id]/rotate-secret/route.ts", path: "/internal/keys/{}/rotate-secret", retry: "0" }] },
 ];
 
 /**
@@ -980,6 +990,7 @@ const EXPECTED_BINDINGS: ReadonlyArray<{
  */
 const EXPECTED_SEAM_CALL_FILES: string[] = [
   "src/app/api/keys/[id]/permissions/route.ts",
+  "src/app/api/keys/[id]/rotate-secret/route.ts",
   "src/app/api/keys/validate-and-encrypt/route.ts",
   "src/app/api/strategies/finalize-wizard/route.ts",
   "src/lib/analytics-client.ts",
@@ -987,11 +998,12 @@ const EXPECTED_SEAM_CALL_FILES: string[] = [
   "src/lib/resilient-fetch.ts",
 ];
 
-/** The 14 budget keys these bindings cover — no orphan key, no unbound key. */
+/** The 15 budget keys these bindings cover — no orphan key, no unbound key. */
 const EXPECTED_BOUND_KEYS: string[] = [
   "bridge",
   "encrypt-key",
   "keys-permissions",
+  "keys-rotate-secret",
   "match-eval",
   "match-recompute",
   "optimize-weights",
@@ -1114,7 +1126,7 @@ describe("SC6 / SEAMCORE-08 — the budget-key binding class stays closed", () =
     ).toEqual([]);
   });
 
-  it("the roster covers exactly the 14 budget keys (no orphan key, no unbound key)", () => {
+  it("the roster covers exactly the 15 budget keys (no orphan key, no unbound key)", () => {
     const boundKeys = [...new Set(discovered.map((b) => b.key))].sort();
     expect(
       boundKeys,

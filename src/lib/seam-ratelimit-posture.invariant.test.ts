@@ -210,6 +210,8 @@ const EXPECTED_LIMITER_ROUTES: readonly string[] = [
   "src/app/api/admin/match/recompute/route.ts",
   "src/app/api/bridge/route.ts",
   "src/app/api/keys/[id]/permissions/route.ts",
+  // Phase 164.5.3 / MT5CREDS (D-04) — the credential-rotation route.
+  "src/app/api/keys/[id]/rotate-secret/route.ts",
   "src/app/api/keys/sync/route.ts",
   "src/app/api/keys/validate-and-encrypt/route.ts",
   "src/app/api/portfolio-optimizer/route.ts",
@@ -280,6 +282,12 @@ const EXPECTED_ROUTE_LIMITERS: ReadonlyArray<readonly [string, string[]]> = [
   // replica); see the limiter's docblock in `src/lib/ratelimit.ts`.
   ["src/app/api/bridge/route.ts", ["bridgeComputeLimiter"]],
   ["src/app/api/keys/[id]/permissions/route.ts", ["userActionLimiter"]],
+  // Phase 164.5.3 / MT5CREDS (D-04). `userActionLimiter` is the same bucket
+  // its two sibling key routes consume, and it is the right one: this route
+  // is a per-user interactive correction, not a sync or a compute job. The
+  // bucket size therefore tells the truth about the backend budget behind it
+  // — one live broker probe per attempt, same shape as validate-and-encrypt.
+  ["src/app/api/keys/[id]/rotate-secret/route.ts", ["userActionLimiter"]],
   // TWO arms, TWO different limiters — the per-(user,strategy) fairness bucket
   // and the per-user aggregate ceiling. Order is source order.
   ["src/app/api/keys/sync/route.ts", ["keysSyncUserLimiter", "userActionLimiter"]],
