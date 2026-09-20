@@ -3877,16 +3877,24 @@ predicate was REFUSED as inert on production evidence and is deliberately unchan
 The code fix (admitting `private` into `ALLOWED_STRATEGY_STATUSES`,
 `analytics-service/routers/cron.py`, commits `1d5266bc`/`15f02f32`) has SHIPPED in this phase's
 commits on this branch. That structurally ENDS the held state for the five measured keys ONCE
-DEPLOYED. It cannot be marked CLOSED here, because none of the three closure conditions are met
-yet:
+DEPLOYED. It cannot be marked CLOSED here: of the three closure conditions, (a) is now MET and
+(b) and (c) are not.
 
-- **(a) 164.5.1.4's PROD-apply job has not reported `success`.** Live re-check, Task 3 Part A,
-  performed 2026-09-20: `gh run view 35478916418` (headSha `60b8ed1b`, the 164.5.1.4 merge commit
-  that touched `cron.py`) — job `apply-test`: `status: completed`, `conclusion: success` (applied
-  to shared TEST). Job `plan` (the PROD-apply gate): `status: waiting`, `conclusion: ""` — i.e.
-  still awaiting the `Production` environment's human reviewer approval, identical to the
-  planning-time reading in CONTEXT.md. No `apply` job exists yet in this run because it is gated
-  behind `plan`.
+- **(a) 164.5.1.4's PROD-apply job has reported `success` — ✅ MET 2026-09-20.** ⚠️ The two
+  readings below are BOTH real and the second SUPERSEDES the first; they are kept together
+  because the gap between them is the whole point of this condition.
+  - **Execution-time reading (Task 3 Part A, 2026-09-20):** `gh run view 35478916418` (headSha
+    `60b8ed1b`, the 164.5.1.4 merge commit that touched `cron.py`) — job `apply-test`:
+    `completed`/`success` (applied to shared TEST). Job `plan` (the PROD-apply gate):
+    `status: waiting`, `conclusion: ""`, awaiting the `Production` environment's human reviewer.
+    No `apply` job existed yet, being gated behind `plan`.
+  - **⭐ SUPERSEDING reading, same run, after the founder approved the `Production` gate:** run
+    `35478916418` is `completed`/`success` overall, and every job now reports `success` —
+    `apply-test`, `plan`, `apply-test-verdict`, **`apply`**, and
+    `prod-credential-divergence-verdict` (`dispatch-ref-guard` skipped, as designed).
+    `strategy_sync_cursors` therefore EXISTS ON PROD, so 164.5.1.4's two fail-open Supabase
+    paths resolve against a real table instead of degrading into the per-KEY fallback that IS
+    the defect. ⛔ This is the condition that gated this phase's merge; it no longer does.
 - **(b) This phase's own PR has not merged or deployed.** Execution does not merge, push, or open
   a PR (see this plan's own non-negotiables).
 - **(c) No post-deploy tick has measured the held counter dropping for the five known keys.** That
