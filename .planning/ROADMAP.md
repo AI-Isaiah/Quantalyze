@@ -1958,11 +1958,11 @@ Plans:
 
 **Requirements**: `TODOS.md` `FANOUT-COHORT-SYNC-CONSTANT-01` (widening half; routed here by Phase 164.5.1.2 on the founder's `leave-book-future-phase` decision, 2026-09-19).
 **Depends on:** Phase 164.5.1.2 FANOUTSIBLINGS — which supplied the production measurement above and deliberately left the change unshipped.
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
 
-- [ ] 164.5.1.3-01-PLAN.md — widen `ALLOWED_STRATEGY_STATUSES` to admit `private` (RED→GREEN, calibrated), prove it composes with 164.5.1.4's SYNCCURSOR marker without reopening `SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01`, add the mechanical ordering gate, and close/re-scope the TODOS ledger against a live PROD-apply re-check.
+- [x] 164.5.1.3-01-PLAN.md — widen `ALLOWED_STRATEGY_STATUSES` to admit `private` (RED→GREEN, calibrated), prove it composes with 164.5.1.4's SYNCCURSOR marker without reopening `SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01`, add the mechanical ordering gate, and close/re-scope the TODOS ledger against a live PROD-apply re-check. ⛔ Code-complete on branch `feat/164.5.1.3-syncadmit` (SUMMARY: `.planning/phases/164.5.1.3-syncadmit-admit-the-owner-only-status-to-the-trade-sync-cons/164.5.1.3-01-SUMMARY.md`) — NOT yet merged; 164.5.1.4's PROD-apply gate was still `waiting` on live re-check 2026-09-20 (run 35478916418), which is this phase's own merge precondition.
 
 ### Phase 164.5.1.1: FANOUTCOHORT — the ledger-refresh fan-out admits the `private` status, so it stops enqueuing nothing for every strategy that exists (INSERTED)
 
