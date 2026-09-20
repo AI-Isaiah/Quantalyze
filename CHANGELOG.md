@@ -1,5 +1,116 @@
 # Changelog
 
+## [0.82.0.0] - 2026-09-20 — SYNCADMIT: five live keys stop being invisible to the trade sync
+
+⭐ **This release has NO migration.** Merging it starts NO `apply-test`, touches shared TEST not at
+all, and engages NO `Production` reviewer gate. That is the opposite of 0.81.0.0 immediately below,
+which did ship one — worth stating plainly, because the last two releases said the opposite of each
+other and a reviewer reading only the previous entry would guess wrong.
+
+⭐ **It is, however, the release that makes 0.81.0.0 matter.** SYNCCURSOR built the per-strategy
+resume marker; those five keys never reached it, because they never fanned out at all.
+
+### Root cause
+
+`ALLOWED_STRATEGY_STATUSES` in `analytics-service/routers/cron.py` listed three lifecycle statuses
+and omitted `private`, the owner-only status the contribution wizard finalizes to. That constant has
+exactly one reader — the `/cron-sync` fan-out conjunct `e.get("status") in ALLOWED_STRATEGY_STATUSES`
+— so a key backing only `private` strategies produced `strategy_ids == []` on every single tick. The
+loop that syncs trades never executed for it. Not slowly, not partially: never.
+
+Measured in production 2026-09-19: **6** `private` strategies, **5** carrying an API key, and **0**
+of those five sharing that key with a strategy already in the admitted set. So the hypothesis that a
+sibling strategy would drag the key into the fan-out anyway is **false** — all five sat on a key with
+no in-set sibling, and their trades were never stored. (The sixth carries no key and is unsyncable by
+any widening; it is not counted against the harm.)
+
+### Fixed
+
+- **`private` is admitted to `ALLOWED_STRATEGY_STATUSES`.** One member, one set literal. Those five
+  production keys now fan out and their trades reach `sync_trades` on the next tick. Closes the
+  widening half of `FANOUT-COHORT-SYNC-CONSTANT-01`.
+- **The guard comment beside the constant now states the ledger divergence correctly.** It had named
+  the wrong set and then subtracted from it. Measured against
+  `supabase/migrations/20260917120000_ledger_fanout_admit_private.sql`: the ledger fan-out admits
+  `('published', 'pending_review', 'private')`, so after this change the two sets differ by exactly
+  one value — `draft`.
+
+### Why the two sets are allowed to differ
+
+⭐ **Deliberately, and the comment now says so at the point of change.** The ledger fan-out excludes
+`draft` because a draft strategy has no factsheet to refresh, so every job enqueued for one is worker
+time spent on nothing. That reasoning is ledger-specific and does not transfer to trade sync, where a
+draft strategy's trades still need storing. The ledger migration's own checks 9 and 10 already refuse
+a re-base that mirrors the trade-sync set into the ledger; this comment is the other half of the same
+fence, pointed the other way.
+
+### Security
+
+- **Three threats, all closed, none accepted** (`164.5.1.3-SECURITY.md`, `threats_open: 0`).
+- ⭐ **The finding worth carrying forward: the widening creates no new code path.** Everything a
+  newly-admitted strategy now reaches — `sync_trades`, the per-strategy marker and its write,
+  `enqueue_compute_job`, `derive_broker_dailies`, `strategy_analytics`, the portfolio recompute
+  cascade, the status-bucket accounting — is **status-agnostic**. None of it branches on lifecycle
+  status, and two already-non-public statuses (`draft`, `pending_review`) have been exercising that
+  identical pipeline all along. More traffic through a hardened path, not a newly-lit one.
+- ⚠️ **Corollary:** `ALLOWED_STRATEGY_STATUSES` is the **only** lifecycle gate in the whole pipeline.
+  Both RPCs it feeds were checked and carry no status gate of their own. That concentration is what
+  makes the guard comment a control rather than documentation.
+- **The deploy-ordering threat (critical) was live for most of this phase and is closed, not
+  accepted.** Both of SYNCCURSOR's Supabase paths fail open, so shipping this widening before
+  `20260919120000` reached PROD would have run the per-KEY fallback that *is* the defect — silently
+  re-opening permanent per-strategy trade loss on precisely these five keys. The window was held open
+  until run `35478916418`'s `apply` job reported `success`, then measured shut. Nothing was tolerated.
+
+### Tests
+
+- Four consequence gates, all driving `cron_sync()` end to end and asserting fan-out **membership by
+  strategy id** — never membership in the constant, which would pass against a constant nothing reads.
+  This codebase already learned that once and recorded it in the docstring of the very test extended
+  here.
+  - `TestStrategyLifecycleFilter::test_only_live_statuses_receive_sync_trades_rpc` — extended with a
+    `private` case. Calibrated RED: a strategy-id list diff missing `'s-private'`.
+  - `TestHeldStatusBucketForStalledKeys::test_private_only_key_no_longer_held_once_admitted` — asserts
+    the **full** bucket vector, not just the one counter that moved, so a key cannot quietly vanish
+    from the accounting instead of syncing.
+  - `TestPrivateAdmissionComposesWithSyncCursor` — a mixed-success key: the `private` strategy fails,
+    its `published` sibling succeeds. Asserts the failed strategy's per-strategy marker HOLDS while
+    the key cursor still advances, proving `SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01` does not reopen.
+    Calibrated RED: `assert 'ok' == 'partial'`, because the private strategy was filtered out before
+    reaching the RPC at all — the defect's exact mechanism.
+  - `TestPrivateAdmissionOrderingGate` — a permanent tripwire: if a future edit strips SYNCCURSOR's
+    marker machinery while `private` stays admitted, CI fails instead of production degrading.
+    Calibrated with `monkeypatch.delattr` on a real symbol, so it is proven able to fail.
+- Suite **5932 passed, 89 skipped** (baseline 5928); `mypy --strict` clean over 95 source files.
+- ⛔ `should_advance_cursor` is byte-identical to the fork point — 0 diff lines. 0.81.0.0 shipped it
+  that way deliberately and this release does not touch it.
+
+### Notes
+
+- **Two fabricated citations were struck from the phase plan before execution ran.** The plan
+  justified a correct conclusion — that 0.81.0.0 had already closed the recompute-enqueue stranding
+  path — with a `cron.py` sentence reading "this note used to say the opposite" and a `TODOS.md` id
+  `SYNCCURSOR-C4`. Neither exists: 0 hits each, and `TODOS.md` carries no `SYNCCURSOR-*` id at all.
+  The conclusion is true and is now cited to the real evidence, the `sid not in
+  recompute_enqueue_errors` conjunct gating the per-strategy marker write. ⭐ Recorded rather than
+  quietly fixed: a right answer resting on invented evidence is still a defect, and in a repo that
+  cites by symbol precisely because line numbers rot, a plausible fake citation is the expensive kind.
+- **`SYNC-HELD-CURSOR-REFETCH-COST-01` is RE-SCOPED, not closed.** Of its three closure conditions,
+  (a) the PROD apply is now met; (b) merge and (c) a post-deploy PROD read confirming the `held`
+  counter drops to 0 for the five measured keys remain open, the latter founder-only. Both PROD-apply
+  readings are kept in the ledger with the second marked superseding — the gap between them is what
+  the condition exists to measure, so collapsing it would discard the evidence that the control worked.
+- **One deferral candidate was DROPPED, not routed to a phase:** the general unbounded-refetch-window
+  behaviour for any future key with zero eligible strategies. It has no live instance once these five
+  are fixed, is lossless by design, and cannot be addressed without touching the frozen
+  `should_advance_cursor` — so it fails this repo's own gate for what earns a phase.
+- Research, plan, pattern-map, summary, security and verification artifacts all land under
+  `.planning/phases/164.5.1.3-syncadmit-.../`. Verification `passed`, 5/5 must-haves, 0 gaps, 0 human
+  items. Both reviewers (`gsd-code-reviewer`, `silent-failure-hunter`) returned zero findings, so no
+  fix round ran — which matters, because a fix round is where regressions enter: a new code path is
+  outside every existing gate by default while the suite stays green.
+- ⛔ No floor, ceiling, census, waiver or exemption was touched anywhere in this release.
+
 ## [0.81.0.0] - 2026-09-20 — SYNCCURSOR: the trade-sync cursor stops being per-KEY while the stores are per-STRATEGY
 
 ⚠️ **THIS RELEASE ADDS A MIGRATION** — `supabase/migrations/20260919120000_strategy_sync_cursors.sql`,
