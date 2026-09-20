@@ -5414,3 +5414,462 @@ async def test_mt5_backfill_never_reaches_the_ccxt_crawl(
 
     assert result.outcome == DispatchOutcome.DONE
     assert fake_supabase.rows_for("allocator_equity_snapshots")
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.5.4 / A-03 + A-04 — the kill switch and the failure dispositions.
+#
+# ⛔ EVERY case below asserts that ZERO rows reached EITHER persist function. A
+# branch that fails loudly but still writes a partial curve would be worse than
+# the defect it replaces (T-164.5.4-30).
+# ---------------------------------------------------------------------------
+
+
+def _mt5_failed_run(monkeypatch, transport, *, restart_spy=None):
+    """Drive the job over `transport` and return `(result, fake_supabase)`."""
+    session = _mt5_session(transport)
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_preflight(monkeypatch, "mt5", fake_supabase, session)
+    _install_fake_audit(monkeypatch)
+    if restart_spy is not None:
+        async def _spy(client):
+            restart_spy.append(client)
+
+        monkeypatch.setattr(_mt5_conc, "_mt5_bounded_restart", _spy)
+    return session, fake_supabase
+
+
+def _assert_nothing_persisted(fake_supabase: FakeSupabaseClient) -> None:
+    """⛔ The zero-partial-curve guarantee, observed on the fake supabase rather
+    than read off the source. Covers BOTH persist paths: the sole-key atomic
+    replace RPC and the multi-key upsert."""
+    assert fake_supabase.rows_for("allocator_equity_snapshots") == [], (
+        "a failing mt5 backfill persisted rows — a partial curve is worse than "
+        "the defect (T-164.5.4-30)"
+    )
+    assert fake_supabase.rpc_calls == [], (
+        f"replace_allocator_equity_snapshots was reached: {fake_supabase.rpc_calls}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_kill_switch_refuses_before_any_terminal_read(
+    monkeypatch, _mt5_terminal_state,
+):
+    """A-03 — the branch takes `mt5_enabled_server()` ITSELF. Nothing about adding
+    a venue branch inherits the go-dark gate: `equity_reconstruction.py` did not
+    import it at all before this plan.
+
+    ⚠️ HONEST SCOPE (the 151-review WR-08 correction): the credentials are already
+    decrypted and the session already built by the time control reaches the gate.
+    What it stops is every terminal READ — login / account_info /
+    history_deals_get — NOT the transport connect. So the only terminal call this
+    case may observe is the SHARED `finally: aclose_exchange` teardown.
+    """
+    monkeypatch.delenv("MT5_ENABLED", raising=False)
+    from services.closed_sets import MT5_DISABLED_DETAIL
+    from services.job_worker import DispatchOutcome
+
+    today = datetime.now(timezone.utc).date()
+    deals, _expected = _mt5_canonical_ledger(today)
+    transport = _FakeMt5Transport(account=_mt5_account(), deals=deals)
+    _session, fake_supabase = _mt5_failed_run(monkeypatch, transport)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent", (
+        "the founder disabled MT5 deliberately — retrying is wrong"
+    )
+    assert MT5_DISABLED_DETAIL in (result.error_message or "")
+    assert [c for c in transport.calls if c != "transport_close"] == [], (
+        f"a disabled mt5 backfill performed a terminal READ: {transport.calls}"
+    )
+    _assert_nothing_persisted(fake_supabase)
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_auth_rejection_is_permanent(
+    monkeypatch, _mt5_terminal_state,
+):
+    """Only a genuine `auth` signal may be PERMANENT and user-attributed."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    from services.job_worker import DispatchOutcome
+
+    transport = _FakeMt5Transport(
+        account=_mt5_account(),
+        deals=[],
+        login_ok=False,
+        last_error=(0, "Invalid account or password"),
+    )
+    _session, fake_supabase = _mt5_failed_run(monkeypatch, transport)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    _assert_nothing_persisted(fake_supabase)
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_wrong_server_is_transient_not_permanent(
+    monkeypatch, _mt5_terminal_state,
+):
+    """⭐ THE A-04 PIN, and the planner settled it AGAINST the researcher's
+    recommendation on measured evidence: at BACKFILL time `wrong_server` is
+    TRANSIENT.
+
+    The job only runs against an already-active `api_keys` row, which exists only
+    because `validate_key`'s MT5 arm accepted the login AND the server at connect
+    — so "no prior READ" is not "no prior PROOF". The sibling derive branch chose
+    the same, for the same reason, and CONTEXT.md's D-01 forbids this path
+    stamping permanent-and-blamed. A wrong user-blame stamp on a job that runs
+    ONCE per key strands a working account; a transient exhausts the DB backoff to
+    `failed_final` — a verdict, just later.
+    """
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    from services.job_worker import DispatchOutcome
+    from services.mt5_client import Mt5ClientError
+    from services.mt5_validation import classify_mt5_login_error
+
+    # The classifier really does read this text as `wrong_server` — asserted here
+    # so the case cannot silently degrade into "an unrecognised message" and pass
+    # for the wrong reason.
+    assert classify_mt5_login_error(
+        Mt5ClientError(0, "Trade server not found")
+    ) == "wrong_server"
+
+    transport = _FakeMt5Transport(
+        account=_mt5_account(),
+        deals=[],
+        login_ok=False,
+        last_error=(0, "Trade server not found"),
+    )
+    _session, fake_supabase = _mt5_failed_run(monkeypatch, transport)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient", (
+        "a wrong-server signal at backfill time must NOT be permanent — see "
+        "<decision_a04>; permanent here blames a credential validate already "
+        "proved correct"
+    )
+    _assert_nothing_persisted(fake_supabase)
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_unrecognised_client_error_is_transient(
+    monkeypatch, _mt5_terminal_state,
+):
+    """THE REFUSAL RULE reaching this branch: an unrecognised message degrades to
+    transient, never to a user-attributed permanent stamp."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    from services.job_worker import DispatchOutcome
+
+    transport = _FakeMt5Transport(
+        account=_mt5_account(),
+        deals=[],
+        login_ok=False,
+        last_error=(0, "the bridge answered in a shape nobody has catalogued"),
+    )
+    _session, fake_supabase = _mt5_failed_run(monkeypatch, transport)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    _assert_nothing_persisted(fake_supabase)
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_account_mismatch_is_transient_and_restarts(
+    monkeypatch, _mt5_terminal_state,
+):
+    """MT5CONC-02 — the terminal presented a DIFFERENT account. A mis-routed /
+    stale terminal is an INFRA fault, never user blame: transient, nothing
+    persisted, and the stale pipe actively restarted."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    from services.job_worker import DispatchOutcome
+
+    restarts: list[object] = []
+    transport = _FakeMt5Transport(
+        # A DIFFERENT synthetic login than the session's — the PRE bracket refuses
+        # before the deal fetch.
+        account={"equity": _MT5_FIXTURE_BALANCE, "balance": _MT5_FIXTURE_BALANCE,
+                 "login": 999_001},
+        deals=[],
+    )
+    _session, fake_supabase = _mt5_failed_run(
+        monkeypatch, transport, restart_spy=restarts
+    )
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert restarts, "a mis-routed terminal is the stale pipe a restart heals"
+    assert "history_deals_get" not in transport.calls, (
+        "the PRE login bracket must refuse BEFORE the deal fetch"
+    )
+    _assert_nothing_persisted(fake_supabase)
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_post_read_blip_is_transient_without_restart(
+    monkeypatch, _mt5_terminal_state,
+):
+    """IN-01 — the ASSERTION-ONLY POST re-read hit a transport blip AFTER the
+    correct account's deals were already fetched. A failure to RE-CONFIRM is a
+    retry-worthy verification gap, never a credential fault — and no restart,
+    because nothing about the pipe is wedged."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    from services.job_worker import DispatchOutcome
+    from services.mt5_client import Mt5ClientError
+
+    restarts: list[object] = []
+    today = datetime.now(timezone.utc).date()
+    deals, _expected = _mt5_canonical_ledger(today)
+    transport = _FakeMt5Transport(
+        account=_mt5_account(),
+        deals=deals,
+        post_read_exc=Mt5ClientError(0, "the re-read round trip did not land"),
+    )
+    _session, fake_supabase = _mt5_failed_run(
+        monkeypatch, transport, restart_spy=restarts
+    )
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert restarts == [], (
+        "a POST-read verification blip is not a wedged pipe — restarting would "
+        "seize a terminal for no reason"
+    )
+    _assert_nothing_persisted(fake_supabase)
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_abandoned_session_is_transient_without_restart(
+    monkeypatch, _mt5_terminal_state,
+):
+    """WIZFORM-ABANDON / D-40, driven by the SHIPPED fence rather than a
+    hand-thrown stand-in. ⛔ NO restart: the refusal means the terminal has been
+    HANDED ON, so a restart here would fire `shutdown()` on whoever holds it
+    now — precisely what the fence exists to prevent."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    from services.job_worker import DispatchOutcome
+    from tests.test_mt5_derive_branch import _EpochBumpingTransport
+
+    restarts: list[object] = []
+    today = datetime.now(timezone.utc).date()
+    deals, _expected = _mt5_canonical_ledger(today)
+    transport = _EpochBumpingTransport(
+        terminal_key="h:1",  # matches `_mt5_session`'s Mt5Client("h", 1, ...)
+        account=_mt5_account(),
+        deals=deals,
+    )
+    session, fake_supabase = _mt5_failed_run(
+        monkeypatch, transport, restart_spy=restarts
+    )
+    # Derived from the shipped property so a drifted literal cannot bump an
+    # unrelated registry slot and make the case vacuous.
+    assert session.client.terminal_key == "h:1"
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    # "transport_close" is the SHARED `finally: aclose_exchange` teardown, which
+    # runs on every failure arm too.
+    assert transport.calls == ["initialize", "login", "transport_close"], (
+        f"the fence did not refuse the PRE-read account_info: {transport.calls}"
+    )
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert restarts == []
+    _assert_nothing_persisted(fake_supabase)
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_read_timeout_is_transient_with_bounded_restart(
+    monkeypatch, _mt5_terminal_state,
+):
+    """FLIPRETRY-01 / MT5CONC-01 — a hang is a CLASSIFIED transient, never an
+    unbounded wedge. A blocked RPyC/Wine pipe will not self-unblock, so the
+    terminal is ACTIVELY restarted before the transient return."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    from services.job_worker import DispatchOutcome
+
+    # The branch resolves the bound from `services.mt5_concurrency` at CALL time,
+    # so patching the module attribute really moves it (a patch aimed anywhere
+    # else would be a silent no-op and this case would measure nothing).
+    monkeypatch.setattr(_mt5_conc, "_MT5_DERIVE_READ_TIMEOUT_S", 0.05)
+    restarts: list[object] = []
+    today = datetime.now(timezone.utc).date()
+    deals, _expected = _mt5_canonical_ledger(today)
+    transport = _FakeMt5Transport(
+        account=_mt5_account(), deals=deals, hang_s=1.0,
+    )
+    _session, fake_supabase = _mt5_failed_run(
+        monkeypatch, transport, restart_spy=restarts
+    )
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert restarts, (
+        "a wedged pipe must be restarted so the next DB-backoff retry hits a "
+        "FRESH terminal instead of inheriting the same wedge to failed_final"
+    )
+    _assert_nothing_persisted(fake_supabase)
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_unclassifiable_deal_is_permanent(
+    monkeypatch, _mt5_terminal_state,
+):
+    """The deribit-'correction' fail-loud lesson: never retry an unknown DEAL_TYPE
+    forever, and never reconstruct from a partially-understood ledger."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setenv("MT5_SERVER_UTC_OFFSET_S", "0")
+    from services.job_worker import DispatchOutcome
+
+    today = datetime.now(timezone.utc).date()
+    deals, _expected = _mt5_canonical_ledger(today)
+    # A CORRECTION deal (type=5).
+    deals.append({
+        "type": 5, "profit": 42.0, "swap": 0.0, "commission": 0.0, "fee": 0.0,
+        "time": _mt5_epoch(today - timedelta(days=7)),
+    })
+    transport = _FakeMt5Transport(account=_mt5_account(), deals=deals)
+    _session, fake_supabase = _mt5_failed_run(monkeypatch, transport)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    # Leak-safety: the verdict never carries the raw USD amount.
+    assert "42" not in (result.error_message or "")
+    _assert_nothing_persisted(fake_supabase)
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_structural_nav_refusal_is_permanent(
+    monkeypatch, _mt5_terminal_state,
+):
+    """A structural NAV refusal from the levels combiner is PERMANENT.
+
+    ⚠️ The refusal is INJECTED at the combiner rather than provoked from a deal
+    ledger, and that is deliberate: every ledger-shaped input that could reach
+    `NavReconstructionError` (a non-finite amount, an undatable deal) is caught
+    EARLIER and more specifically by `Mt5DealClassificationError`, so a "natural"
+    fixture would exercise the previous arm and measure nothing about this one.
+    What is under test here is the DISPOSITION, and the exception injected is the
+    exact type `nav_twr` raises.
+    """
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setenv("MT5_SERVER_UTC_OFFSET_S", "0")
+    from services import broker_dailies as bd
+    from services.job_worker import DispatchOutcome
+    from services.nav_twr import NavReconstructionError
+
+    def _refuse(*_a, **_kw):
+        raise NavReconstructionError(
+            "nav_twr flow(s) dated outside the return window"
+        )
+
+    monkeypatch.setattr(bd, "reconstruct_mt5_nav_levels", _refuse)
+
+    today = datetime.now(timezone.utc).date()
+    deals, _expected = _mt5_canonical_ledger(today)
+    transport = _FakeMt5Transport(account=_mt5_account(), deals=deals)
+    _session, fake_supabase = _mt5_failed_run(monkeypatch, transport)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    _assert_nothing_persisted(fake_supabase)
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_non_finite_anchor_is_refused(
+    monkeypatch, _mt5_terminal_state,
+):
+    """⛔ A NaN/Inf anchor would sail past every downstream NAV-denominator guard
+    as a silent-NaN 'complete' series — a published equity curve of NaN. Refuse
+    the poisoned anchor loudly instead (the sibling derive branch's own guard)."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    from services.job_worker import DispatchOutcome
+
+    today = datetime.now(timezone.utc).date()
+    deals, _expected = _mt5_canonical_ledger(today)
+    transport = _FakeMt5Transport(
+        account={"equity": float("nan"), "balance": float("nan"),
+                 "login": _MT5_SYNTHETIC_LOGIN},
+        deals=deals,
+    )
+    _session, fake_supabase = _mt5_failed_run(monkeypatch, transport)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    _assert_nothing_persisted(fake_supabase)
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_account_snapshot_missing_field_is_refused(
+    monkeypatch, _mt5_terminal_state,
+):
+    """A missing / non-numeric equity or balance is refused rather than coerced."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    from services.job_worker import DispatchOutcome
+
+    today = datetime.now(timezone.utc).date()
+    deals, _expected = _mt5_canonical_ledger(today)
+    transport = _FakeMt5Transport(
+        account={"equity": _MT5_FIXTURE_BALANCE, "login": _MT5_SYNTHETIC_LOGIN},
+        deals=deals,
+    )
+    _session, fake_supabase = _mt5_failed_run(monkeypatch, transport)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    _assert_nothing_persisted(fake_supabase)
+
+
+def test_no_mt5_backfill_message_is_classifier_matchable():
+    """⛔ CLASSIFIER-TOKEN FREEDOM, proven by RUNNING the real classifier over the
+    branch's ENTIRE constructible message set — ⛔ never by grep.
+
+    `compute_jobs.error_message` is re-classifiable text. `_WRONG_SERVER_PHRASES`
+    and `_AUTH_PHRASES` (`services/mt5_validation.py`) are SUBSTRING-matched and
+    are `[ASSUMED]` tables that GAIN members as the live spike measures pairs, so
+    a sentence that is safe today can start matching later. This gate runs the
+    SHIPPED classifier, so a future table edit that would make one of these
+    messages read as a credential accusation reds HERE.
+
+    ⭐ WHY THE SET IS EXHAUSTIVE AND NOT A SAMPLE. Every message this branch can
+    write into `compute_jobs.error_message` is a FIXED member of
+    `_MT5_BACKFILL_MESSAGES`; no arm concatenates broker-supplied text into it.
+    The scrubbed broker detail lives in the audit event's `sanitized_message` and
+    in the warning log — neither of which is ever re-classified — so the operator
+    keeps the detail while the re-classifiable field stays bounded and provably
+    blame-free.
+    """
+    from services.equity_reconstruction import _MT5_BACKFILL_MESSAGES
+    from services.mt5_client import Mt5ClientError
+    from services.mt5_validation import classify_mt5_login_error
+
+    assert _MT5_BACKFILL_MESSAGES, "the message table is empty — nothing measured"
+    for key, message in _MT5_BACKFILL_MESSAGES.items():
+        verdict = classify_mt5_login_error(Mt5ClientError(0, message))
+        assert verdict == "transient", (
+            f"_MT5_BACKFILL_MESSAGES[{key!r}] re-classifies as {verdict!r}: "
+            f"{message!r}. A message this branch writes must never be readable "
+            "as a credential accusation."
+        )

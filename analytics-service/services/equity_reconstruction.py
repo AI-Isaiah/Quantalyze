@@ -26,7 +26,7 @@ import os
 from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import ccxt.async_support as ccxt
 import httpx
@@ -34,10 +34,16 @@ import pandas as pd
 
 from services.ccxt_flow_fetch import _rate_limit_sleep, fetch_ccxt_transfers
 from services.closed_sets import (
+    # A-03 — the MT5 go-dark gate. Added HERE, in the block this module already
+    # had, and single-sourced from the same place `job_worker.py` reads it: the
+    # kill switch is NOT inherited by adding a venue branch, and before 164.5.4
+    # this module did not import it at all.
+    MT5_DISABLED_DETAIL,
     STABLECOINS,
     STABLECOIN_SPLIT_SUFFIXES as _EXTRA_STABLECOIN_SUFFIXES,
     STABLECOINS_LONGEST_FIRST as _STABLECOINS_LONGEST_FIRST,
     TRADE_SIDES,
+    mt5_enabled_server,
     perp_quote,
 )
 from services.dateday import epoch_ms_to_iso_day, sort_events_stable
@@ -2106,6 +2112,71 @@ async def _fetch_current_equity(
 # and-INSERT window. ⛔ None of that half is duplicated here.
 
 
+# ⛔ EVERY message this branch can write into `compute_jobs.error_message` lives
+# HERE, as a FIXED constant, and that is a decision rather than a style.
+#
+# `compute_jobs.error_message` is RE-CLASSIFIABLE text, and
+# `classify_mt5_login_error`'s `_WRONG_SERVER_PHRASES` / `_AUTH_PHRASES`
+# (`services/mt5_validation.py`) are SUBSTRING-matched `[ASSUMED]` tables that
+# GAIN members as the live spike measures real broker pairs. So a sentence that
+# is safe today can start matching later — the hazard plan 01 NARROWED and did
+# not remove, recorded at `services/mt5_probe.py` and
+# `services/mt5_concurrency.py`.
+#
+# ⛔ NO arm concatenates broker-supplied text into `error_message`. The scrubbed
+# broker detail goes to the audit event's `sanitized_message` and to the warning
+# log — neither is ever re-classified — so an operator keeps the detail while the
+# re-classifiable field stays BOUNDED. Bounded is what makes
+# `test_no_mt5_backfill_message_is_classifier_matchable` an EXHAUSTIVE proof over
+# the constructible set rather than a sample of it.
+_MT5_BACKFILL_MESSAGES: dict[str, str] = {
+    "kill_switch": f"reconstruct_allocator_history: {MT5_DISABLED_DETAIL}",
+    "auth": (
+        "reconstruct_allocator_history: the MT5 terminal refused the stored "
+        "sign-in for this key — reconnect the key with a current read-only "
+        "investor credential"
+    ),
+    "client_transient": (
+        "reconstruct_allocator_history: the MT5 terminal read hit a recoverable "
+        "fault — retrying"
+    ),
+    "mismatch": (
+        "reconstruct_allocator_history: the MT5 terminal presented a different "
+        "trading identity than the one connected — nothing was written; retrying"
+    ),
+    "post_read": (
+        "reconstruct_allocator_history: the MT5 post-read re-check could not be "
+        "completed; the economic read itself already succeeded — retrying"
+    ),
+    "abandoned": (
+        "reconstruct_allocator_history: the MT5 read was refused because the "
+        "lease it began under had already ended — retrying"
+    ),
+    "timeout": (
+        "reconstruct_allocator_history: the MT5 read exceeded the per-read "
+        "wall-clock bound — retrying rather than wedging the worker "
+        "(FLIPRETRY-01)"
+    ),
+    "account_snapshot": (
+        "reconstruct_allocator_history: the MT5 balance snapshot was missing or "
+        "non-numeric — refusing to reconstruct from it"
+    ),
+    "non_finite": (
+        "reconstruct_allocator_history: the MT5 balance snapshot was non-finite "
+        "(NaN/Inf) — refusing a poisoned anchor"
+    ),
+    "deal_unclassifiable": (
+        "reconstruct_allocator_history: the MT5 deal ledger carried a deal type "
+        "that could not be classified — refusing to reconstruct from a "
+        "partially-understood ledger"
+    ),
+    "nav_structural": (
+        "reconstruct_allocator_history: the MT5 NAV reconstruction refused a "
+        "structural input (an undatable deal or a non-finite amount)"
+    ),
+}
+
+
 def _mt5_telemetry() -> dict[str, Any]:
     """The observability signals ``run_reconstruct_allocator_history_job``'s
     SHARED audit emit reads, answered honestly for MT5.
@@ -2173,31 +2244,90 @@ def _mt5_rows_from_levels(nav: "pd.Series") -> list[dict[str, Any]]:
 
 async def _mt5_fetch_window(
     exchange: Any,
-) -> tuple[list[dict[str, Any]], bool, dict[str, Any]]:
+    *,
+    allocator_id: str,
+    api_key_id: str,
+) -> DispatchResult | tuple[list[dict[str, Any]], bool, dict[str, Any]]:
     """The MT5 half of the backfill fetch: read the deal ledger, reconstruct the
     per-day dollar levels, and return the ccxt path's own
-    ``(rows, hit_terminus, telemetry)`` triple.
+    ``(rows, hit_terminus, telemetry)`` triple — or a ``DispatchResult`` carrying
+    this branch's own disposition for the failure that occurred.
 
     ``hit_terminus`` is ALWAYS False: ``history_deals_get`` fetches the full
-    history and has no retention terminus to clamp against, so the caller's
-    depth resolution correctly leaves ``history_depth_months`` NULL for mt5
+    history and has no retention terminus to clamp against, so the caller's depth
+    resolution correctly leaves ``history_depth_months`` NULL for mt5
     (``VENUE_HISTORY_DEPTH_MONTHS`` has no mt5 key) and the terminus warning is
     never logged.
 
-    ⛔ THE DISPOSITIONS ARE NOT HERE YET — see the caller. This function lets its
-    exceptions out unchanged.
+    ⛔ EVERY failure path returns BEFORE any row exists, so nothing partial can
+    reach ``persist_equity_snapshots`` / ``replace_equity_snapshots``
+    (T-164.5.4-30). The caller's ``finally: aclose_exchange`` still runs on every
+    one of them — the close is inherited, never duplicated here.
     """
     # Imported at call time, mirroring the sibling derive branch in
     # `job_worker.py`: these are the mt5 leaf modules, and keeping the import
     # inside the branch keeps "importing this module does not require an MT5
-    # stack" true for every non-mt5 caller.
+    # stack" true for every non-mt5 caller. It ALSO keeps the bound and the
+    # restart resolvable at call time, which is what lets a test move them.
     from services.broker_dailies import reconstruct_mt5_nav_levels
-    from services.mt5_client import Mt5Session
+    from services.mt5_client import (
+        Mt5AccountMismatchError,
+        Mt5ClientError,
+        Mt5SessionAbandoned,
+        Mt5Session,
+    )
+    from services import mt5_concurrency as _mt5_conc
     from services.mt5_concurrency import (
-        _MT5_DERIVE_READ_TIMEOUT_S,
+        _Mt5PostReadVerificationError,
+        _mt5_bounded_restart,
         mt5_terminal_lease,
     )
+    from services.mt5_deals import Mt5DealClassificationError
     from services.mt5_read import read_mt5_deal_ledger
+    from services.mt5_validation import classify_mt5_login_error
+    from services.nav_twr import NavReconstructionError
+
+    def _fail(
+        key: str,
+        kind: Literal["transient", "permanent"],
+        *,
+        detail: str | None = None,
+    ) -> DispatchResult:
+        """Emit the SAME ``reconstruct_failed`` audit event every other arm of this
+        job emits, then return the fixed, classifier-safe verdict."""
+        _emit_audit(
+            allocator_id, api_key_id,
+            "allocator.equity.reconstruct_failed",
+            {
+                "error_kind": kind,
+                # The broker-supplied detail lives HERE, scrubbed — not in
+                # `error_message`. See `_MT5_BACKFILL_MESSAGES`.
+                "sanitized_message": (detail or _MT5_BACKFILL_MESSAGES[key])[:500],
+                "venue": "mt5",
+            },
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=_MT5_BACKFILL_MESSAGES[key],
+            error_kind=kind,
+        )
+
+    # ── A-03: the go-dark gate, taken by this branch ITSELF ──────────────────
+    # The DB CHECK admits 'mt5' unconditionally, so after MT5_ENABLED is turned
+    # off (an incident rollback) a stored mt5 key would otherwise keep firing
+    # live RPyC deal reads here on every first-connect. PERMANENT: the founder
+    # disabled it deliberately, so retrying is wrong.
+    #
+    # ⚠️ HONEST SCOPE — the 151-review WR-08 correction, written the same way here
+    # because an operator makes an incident-response decision on this sentence.
+    # `_allocator_key_preflight` has ALREADY decrypted the credentials and built
+    # the session (`_make_exchange_client` → `_make_mt5_session` → `Mt5Client`,
+    # whose `__init__` opens the RPyC transport) by the time control reaches this
+    # line. What this gate stops is every terminal READ — login / account_info /
+    # history_deals_get — NOT the transport connect. ⛔ Do not write a stronger
+    # claim; `job_worker.py` already carries the correction of an earlier one.
+    if not mt5_enabled_server():
+        return _fail("kill_switch", "permanent")
 
     # venue == "mt5" ⇒ `_allocator_key_preflight` built an Mt5Session. The cast
     # narrows the ccxt.Exchange | SfoxClient | Mt5Session union for the
@@ -2206,30 +2336,179 @@ async def _mt5_fetch_window(
     session = cast(Mt5Session, exchange)
     now = datetime.now(timezone.utc)
 
-    # MT5CONC-02 / WIZFORM-ABANDON: serialize the ENTIRE terminal-IPC region
-    # against the ONE shared Wine terminal through the LEASE (not the raw lock —
-    # only the lease's epoch bump can fence a `to_thread` body that outlived the
+    # MT5CONC-02 / WIZFORM-ABANDON: serialize the ENTIRE terminal-IPC region —
+    # the bounded read AND every arm's terminal touch — against the ONE shared
+    # Wine terminal through the LEASE (not the raw lock: only the lease's epoch
+    # bump in its `finally` can fence a `to_thread` body that outlived the
     # `wait_for` below). ⛔ The bound, the lease and the dispositions are the
     # CALLER'S to supply: `read_mt5_deal_ledger` is synchronous, blocking and
     # deliberately unbounded, and plan 04's SUMMARY says in writing that nothing
     # about calling it inherits any of the three.
     async with mt5_terminal_lease(session.client.terminal_key):
-        info, deals = await asyncio.wait_for(
-            asyncio.to_thread(read_mt5_deal_ledger, session, now=now),
-            timeout=_MT5_DERIVE_READ_TIMEOUT_S,
-        )
+        try:
+            info, deals = await asyncio.wait_for(
+                asyncio.to_thread(read_mt5_deal_ledger, session, now=now),
+                # Read through the module so the bound stays ONE constant shared
+                # with the derive branch rather than a second one that can drift.
+                timeout=_mt5_conc._MT5_DERIVE_READ_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            # FLIPRETRY-01 / MT5CONC-01. A blocked RPyC/Wine pipe will NOT
+            # self-unblock, so ACTIVELY restart the terminal (itself bounded —
+            # never a nested wedge) so the next DB-backoff retry hits a FRESH
+            # terminal instead of inheriting the same wedge to failed_final.
+            logger.warning(
+                "reconstruct_allocator_history: mt5 read exceeded its wall-clock "
+                "bound (allocator=%s key=%s) — classified transient, restarting "
+                "the terminal (FLIPRETRY-01, MT5CONC-01)",
+                allocator_id, api_key_id,
+            )
+            await _mt5_bounded_restart(session.client)
+            return _fail("timeout", "transient")
+        except Mt5SessionAbandoned:
+            # ⭐ WIZFORM-ABANDON / D-40. ⛔ NO restart — and this is the deliberate
+            # OPPOSITE of the timeout arm above. A timeout means OUR pipe is
+            # wedged and healing it is right; a fence refusal means the terminal
+            # has been HANDED ON, so a restart would fire `shutdown()` on the
+            # session of whoever holds it now (one ThreadedServer, one MetaTrader5
+            # instance, one IPC pipe) — exactly what the fence exists to stop.
+            logger.warning(
+                "reconstruct_allocator_history: mt5 read was refused by the "
+                "abandoned-session fence (allocator=%s key=%s) — classified "
+                "transient; NOT restarting, another holder owns the hardware now",
+                allocator_id, api_key_id,
+            )
+            return _fail("abandoned", "transient")
+        except Mt5AccountMismatchError as exc:
+            # MT5CONC-02 — THE structural trust guarantee. The live terminal
+            # presented a DIFFERENT account (or omitted the login field) than the
+            # connected key: a mis-routed / stale-terminal INFRA fault, NEVER user
+            # blame. Nothing is persisted, so a reconstructed curve can never be
+            # written from the wrong account's numbers. Transient + bounded
+            # restart (a mis-routed terminal is exactly the stale pipe a restart
+            # heals); a genuinely persistent mis-map exhausts the DB backoff to
+            # failed_final without ever persisting. Because
+            # Mt5AccountMismatchError is NOT an Mt5ClientError, the classify arm
+            # below cannot absorb it into a credential verdict.
+            logger.warning(
+                "reconstruct_allocator_history: mt5 login bracket rejected a "
+                "mismatched terminal account (allocator=%s key=%s) — %s",
+                allocator_id, api_key_id, scrub_freeform_string(str(exc)),
+            )
+            await _mt5_bounded_restart(session.client)
+            return _fail(
+                "mismatch", "transient",
+                detail=str(scrub_freeform_string(str(exc))),
+            )
+        except _Mt5PostReadVerificationError as exc:
+            # IN-01 — a transport blip on the ASSERTION-ONLY POST re-read. The
+            # economic read of the CORRECT account already succeeded (login + PRE
+            # bracket + deal fetch all passed), so failing to RE-CONFIRM is a
+            # retry-worthy verification gap, never a credential fault. NO restart:
+            # nothing about the pipe is wedged. A genuine wrong-account POST read
+            # is Mt5AccountMismatchError (above), never this — the trust guarantee
+            # is intact.
+            logger.warning(
+                "reconstruct_allocator_history: mt5 POST-read re-assertion hit a "
+                "transient client error (allocator=%s key=%s) — %s",
+                allocator_id, api_key_id, scrub_freeform_string(str(exc)),
+            )
+            return _fail(
+                "post_read", "transient",
+                detail=str(scrub_freeform_string(str(exc))),
+            )
+        except Mt5ClientError as exc:
+            # ⭐ A-04, SETTLED — and settled AGAINST the phase researcher's
+            # recommendation, so the reasoning is written HERE rather than left
+            # for a future reader to rediscover in `164.5.4-RESEARCH.md` and
+            # "fix" this back to permanent. ONLY a genuine `auth` signal is
+            # PERMANENT and user-attributed. `wrong_server` and EVERY
+            # unrecognised signal are TRANSIENT. Three measurements:
+            #
+            #  1. VALIDATE ALREADY PROVED THE SERVER. This job is enqueued by
+            #     `request_allocator_holdings_sync(p_api_key_id)` against an
+            #     EXISTING `api_keys` row, and `_allocator_key_preflight` refuses
+            #     a row that is not `is_active`. An MT5 row only exists because
+            #     `routers/exchange.py`'s `validate_key` MT5 arm accepted the
+            #     login AND the server at connect. "No prior READ" is not "no
+            #     prior PROOF" — which is exactly what the contrary
+            #     recommendation mistook it for.
+            #  2. THE SIBLING DERIVE BRANCH CHOSE THE SAME, on the same reasoning,
+            #     and its shipped comment names the failure mode of the other
+            #     choice: the [ASSUMED] token set can fold network/bridge faults
+            #     into `wrong_server`, so a routine gateway redeploy mid-run would
+            #     PERMANENTLY fail a valid account and falsely blame the user's
+            #     credentials with no retry. Plan 01 narrowed those tokens to
+            #     anchored phrases; it did not eliminate the hazard, because the
+            #     classifier still decides from broker-supplied text.
+            #  3. CONTEXT.md's D-01 IS BINDING: "An MT5 fetch failure routes
+            #     through the SAME classifier, so the backfill path cannot stamp
+            #     permanent-and-blamed either." Permanent here would re-create, on
+            #     a NEW code path, the precise defect this phase's other half
+            #     removes.
+            #
+            # The cost is asymmetric and terminating: transient exhausts the DB
+            # backoff to failed_final — a verdict, just later — while permanent
+            # strands a working account immediately with a credential-blaming
+            # message, on a job that runs ONCE per key.
+            kind = classify_mt5_login_error(exc)
+            scrubbed = str(scrub_freeform_string(str(exc)))
+            if kind == "auth":
+                return _fail("auth", "permanent", detail=scrubbed)
+            logger.warning(
+                "reconstruct_allocator_history: mt5 read hit a recoverable client "
+                "error (kind=%s allocator=%s key=%s) — retrying; the key was "
+                "already validated at connect",
+                kind, allocator_id, api_key_id,
+            )
+            return _fail("client_transient", "transient", detail=scrubbed)
 
     # The post-read computation stays OUTSIDE the lease: it does no terminal IPC,
     # and holding the one shared terminal through it would needlessly serialize
     # work that needs no terminal.
-    equity = float(info["equity"])
-    balance = float(info["balance"])
-    nav, _meta = reconstruct_mt5_nav_levels(
-        deals,
-        equity,
-        balance,
-        server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
-    )
+    #
+    # ⭐ [Rule 2 — missing critical functionality] The equity/balance guards below
+    # are NOT in the plan's `<behavior>` block. They are added because a NaN/Inf
+    # anchor sails past every downstream NAV-denominator guard as a silent-NaN
+    # "complete" series — a PUBLISHED equity curve of NaN with no exception and no
+    # red test. The sibling derive branch carries the identical pair for the
+    # identical reason.
+    try:
+        equity = float(info["equity"])
+        balance = float(info["balance"])
+    except (KeyError, TypeError, ValueError) as exc:
+        return _fail(
+            "account_snapshot", "permanent",
+            detail=str(scrub_freeform_string(str(exc))),
+        )
+    if not (math.isfinite(equity) and math.isfinite(balance)):
+        return _fail("non_finite", "permanent")
+
+    try:
+        nav, _meta = reconstruct_mt5_nav_levels(
+            deals,
+            equity,
+            balance,
+            server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+        )
+    except Mt5DealClassificationError as exc:
+        # The deribit-'correction' fail-loud lesson: never retry an unknown
+        # DEAL_TYPE forever, and never reconstruct a curve from a ledger that was
+        # only partially understood. ⛔ The verdict carries no USD amount.
+        logger.warning(
+            "reconstruct_allocator_history: mt5 deal unclassifiable "
+            "(allocator=%s key=%s) — %s",
+            allocator_id, api_key_id, scrub_freeform_string(str(exc)),
+        )
+        return _fail("deal_unclassifiable", "permanent")
+    except NavReconstructionError as exc:
+        logger.warning(
+            "reconstruct_allocator_history: mt5 NAV reconstruction refused a "
+            "structural input (allocator=%s key=%s) — %s",
+            allocator_id, api_key_id, scrub_freeform_string(str(exc)),
+        )
+        return _fail("nav_structural", "permanent")
+
     return _mt5_rows_from_levels(nav), False, _mt5_telemetry()
 
 
@@ -2304,9 +2583,19 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 # UNREACHABLE for mt5 by construction, not by a caught crash.
                 # ⛔ Unlike `deribit`, mt5 RECONSTRUCTS: the branch returns real
                 # rows and falls through to the SHARED persist half below.
-                rows, hit_terminus, telemetry = await _mt5_fetch_window(
+                _mt5_outcome = await _mt5_fetch_window(
                     ctx.exchange,
+                    allocator_id=allocator_id,
+                    api_key_id=api_key_id,
                 )
+                if isinstance(_mt5_outcome, DispatchResult):
+                    # A failure arm already emitted its `reconstruct_failed`
+                    # audit event and settled its own disposition. Returning
+                    # from inside this `try` still runs the SHARED
+                    # `finally: aclose_exchange` below — the close is inherited,
+                    # never duplicated — and NOTHING has been persisted.
+                    return _mt5_outcome
+                rows, hit_terminus, telemetry = _mt5_outcome
             else:
                 # FLIPRETRY-01 (defensive): the orchestrating window crawl is HARD-BOUNDED
                 # so a hang becomes a classified transient (the except asyncio.TimeoutError

@@ -863,8 +863,39 @@ _LEASE_VERB = "mt5_terminal_lease"
 #: `services/` modules are actually IN `_production_python_files()`' output. The
 #: `>=` floor cannot do that job: MEASURED 2026-09-15 the walk returns 95 files
 #: against a floor of 40, i.e. 55 files of headroom, so a walk that silently
-#: stopped seeing exactly these two would leave this roster reading SIX and every
+#: stopped seeing exactly these two would leave this roster unchanged and every
 #: lease assertion in this file green while measuring nothing about them.
+#:
+#: ⭐ RE-CUT 2026-09-20 (Phase 164.5.4 / D-01), AND THE ROSTER'S OWN QUESTION IS
+#: ANSWERED HERE RATHER THAN ASSUMED — that question is the ONLY reason this
+#: literal exists, so a re-cut that skips it is a re-cut that measured nothing.
+#:
+#: The new entry is `services/equity_reconstruction.py::_mt5_fetch_window`, the
+#: MT5 arm of the full-backfill job. Before it, an MT5 allocator's first connect
+#: fell into the generic ccxt crawl and died on `fetch_my_trades` — measured in
+#: PROD, job `failed (unknown)`.
+#:
+#: ⭐ *Does the new site touch an `Mt5Client` that was ALREADY touched under a
+#: DIFFERENT lease?* **NO, and by construction rather than by inspection.**
+#: `run_reconstruct_allocator_history_job` takes NO lease of its own and contains
+#: no other acquisition; the client is built once by `_allocator_key_preflight`
+#: (`_make_exchange_client` → `_make_mt5_session`) and every terminal touch it
+#: ever receives on this path — the bounded read AND the timeout/mismatch
+#: `_mt5_bounded_restart` calls, which are INSIDE the `async with` — happens under
+#: this ONE acquisition. The lazy bind therefore never has to rebind, so the
+#: `Mt5SessionAbandoned`-while-legitimately-holding-the-lease refusal (D-36
+#: AMENDED) is unreachable here.
+#:
+#: ⚠️ The distinctness half is satisfied too: `_mt5_fetch_window` appears ONCE,
+#: and the post-read computation (equity extraction, the NAV-levels combine, the
+#: row build) sits deliberately OUTSIDE the lease because it does no terminal IPC.
+#:
+#: ⛔ THE COUNT IS NOT RESTATED IN PROSE ANY MORE, and that is deliberate. The
+#: live sentences below used to say "SIX"; this re-cut made every one of them
+#: false at once, which is the `[164.7-CITATION-DRIFT-01]` class this repo keeps
+#: booking. The lineage notes ABOVE keep their numbers — they describe what was
+#: true when they were written — but a LIVE claim now names the roster, never its
+#: size. Read the size off the literal.
 _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
     {
         ("services/allocator_positions.py", "_fetch_mt5_account_rows"),
@@ -874,6 +905,9 @@ _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
         ("routers/exchange.py", "_validate_mt5_key_probe"),
         # Phase 164.6.2 / D-08 — the boot heal. See the re-cut note above.
         ("services/mt5_relogin.py", "heal_mt5_terminal_session"),
+        # Phase 164.5.4 / D-01 — the MT5 full-backfill arm. See the 2026-09-20
+        # re-cut note above, which answers the roster's own question.
+        ("services/equity_reconstruction.py", "_mt5_fetch_window"),
     }
 )
 
@@ -943,12 +977,12 @@ def test_no_production_function_holds_two_terminal_leases() -> None:
 
     One `Mt5Client` per lease acquisition. The reachable way to break it is a
     function that takes the lease TWICE with one client spanning both — so this
-    asserts the roster of lease sites is exactly the SIX on the hand-typed
-    literal above (five measured at 153.5, one added by 164.6.2) AND
-    that their enclosing functions are all distinct.
+    asserts the roster of lease sites is exactly the membership of the hand-typed
+    literal above (five measured at 153.5, one added by 164.6.2, one added by
+    164.5.4) AND that their enclosing functions are all distinct.
 
     Reds in both directions, and both reds are useful:
-      * a SIXTH site, or a lease that MOVED, reds the equality — read as "check
+      * an ADDITIONAL site, or a lease that MOVED, reds the equality — read as "check
         whether the client this lease touches was already touched under an earlier
         one"; then re-cut this roster deliberately.
       * a function holding TWO leases reds the distinctness assertion — that is the
@@ -1638,10 +1672,10 @@ async def test_CRITERION_4_a_monitor_tick_cannot_land_inside_a_live_jobs_termina
 # 164.6.4 / CRITERION 4's INHERITED HALF — ZERO NEW LEASE SITES, ASSERTED
 # POSITIVELY RATHER THAN READ OFF AN UNCHANGED ROSTER.
 #
-# The `==` pin on `_PRODUCTION_LEASE_SITES` already reds if a SEVENTH site
+# The `==` pin on `_PRODUCTION_LEASE_SITES` already reds if an ADDITIONAL site
 # appears. But "the roster did not change" is ALSO what a BROKEN WALK looks like,
 # and the two new `services/` modules carry no lease — so a walk that stopped
-# seeing them would leave the roster reading exactly SIX and every lease
+# seeing them would leave the roster reading its shipped membership and every lease
 # assertion in this file green while measuring nothing about them. These two
 # cases close that, from the two independent directions: the MODULE holds no
 # lease (AST, by name, synthetically calibrated), and the WALK can SEE it.
@@ -1672,9 +1706,9 @@ def test_the_session_monitor_module_holds_NO_lease_and_NO_raw_lock() -> None:
 
     It delegates: `run_mt5_session_monitor_tick` reads the kill switch and awaits
     `heal_mt5_terminal_session`, which constructs its client INSIDE its own single
-    bounded lease and closes it before that lease releases. That is why
-    `_PRODUCTION_LEASE_SITES` stays at SIX (the reasoning is recorded beside the
-    roster itself), and it is why criterion 4's "must not steal the terminal" is
+    bounded lease and closes it before that lease releases. That is why the
+    monitor added NO entry to `_PRODUCTION_LEASE_SITES` (the reasoning is recorded
+    beside the roster itself), and it is why criterion 4's "must not steal the terminal" is
     INHERITED rather than re-argued — the heal's acquire is bounded, so a busy
     terminal means SKIP.
 
@@ -1751,8 +1785,9 @@ def test_both_new_session_modules_are_MEMBERS_of_the_production_lease_walk() -> 
     returns 95 files against a floor of 40 — 55 files of headroom. A walk that
     silently truncated to 41 files would still clear the floor; and because the
     two NEW `services/` modules carry NO lease, a walk that stopped seeing THEM
-    specifically would leave `_PRODUCTION_LEASE_SITES` reading exactly SIX and
-    every lease assertion in this file green while measuring nothing about them.
+    specifically would leave `_PRODUCTION_LEASE_SITES` reading its shipped
+    membership and every lease assertion in this file green while measuring
+    nothing about them.
 
     ⚠️ The sibling test above reads the monitor module directly BY PATH, so it
     proves the MODULE holds no lease and says nothing whatever about the WALK.
@@ -1769,7 +1804,7 @@ def test_both_new_session_modules_are_MEMBERS_of_the_production_lease_walk() -> 
         f"{_SESSION_MONITOR_REL} is NOT in the production walk the lease roster "
         f"derives from. It is the module Phase 164.6.4 added to drive the "
         f"terminal ON A CADENCE, so a lease taken there would be invisible to the "
-        f"`==` roster — which would stay green at SIX over a roster that had "
+        f"`==` roster — which would stay green at its shipped membership over a roster that had "
         f"silently stopped being complete (the IN-05 hole, re-opened)."
     )
     assert _SESSION_EPISODES_REL in walked, (
