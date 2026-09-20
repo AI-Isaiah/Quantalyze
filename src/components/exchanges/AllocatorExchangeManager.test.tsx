@@ -1218,6 +1218,133 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
     );
     expect(screen.queryByText(/MT5 account/)).not.toBeInTheDocument();
   });
+
+  // Phase 164.5.3 (MT5CREDS) Plan 05 — the "Update password" affordance,
+  // distinct from Reconnect everywhere it appears (RESEARCH.md Open
+  // Question 4): available on EVERY mt5 row regardless of connection state,
+  // never gated to the disconnected/error section.
+  it("an active mt5 row shows Update password alongside Sync now/Disconnect, distinct from Reconnect", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-mt5-active", exchange: "mt5", label: "My MT5" }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Update password for mt5 key" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Sync mt5 now/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Disconnect mt5 key/i }),
+    ).toBeInTheDocument();
+    // Reconnect never appears on an active (non-disconnected) row.
+    expect(
+      screen.queryByRole("button", { name: /Reconnect mt5 key/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a disconnected mt5 row shows Update password alongside Reconnect — clicking Update password does NOT call the reconnect RPC", async () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-disc-update",
+            exchange: "mt5",
+            label: "My MT5",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    const updateButton = screen.getByRole("button", {
+      name: "Update password for mt5 key",
+    });
+    expect(updateButton).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Reconnect mt5 key/i }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(updateButton);
+    });
+
+    // Update password never touches disconnected_at directly (D-05 is the
+    // route's job) — the reconnect RPC must not have fired.
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("shows NO Update password button for a non-MT5 row, in either section", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-bnb-active", exchange: "binance" }),
+          makeKey({
+            id: "key-bnb-disc-2",
+            exchange: "binance",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /Update password/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opening the dialog from a DISCONNECTED row and completing a successful update triggers router.refresh() (callback wiring, not the route's own DB behavior)", async () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-mt5-disc-refresh",
+            exchange: "mt5",
+            label: "My MT5",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Update password for mt5 key" }),
+      );
+    });
+    fireEvent.change(screen.getByLabelText("New password"), {
+      target: { value: "corrected-investor-password" },
+    });
+
+    const refreshCallsBefore = routerRefreshMock.mock.calls.length;
+
+    await act(async () => {
+      const matches = screen.getAllByRole("button", {
+        name: "Update password",
+      });
+      fireEvent.click(matches[matches.length - 1]);
+    });
+
+    await waitFor(() => {
+      expect(fetchMockReconnect).toHaveBeenCalledWith(
+        "/api/keys/key-mt5-disc-refresh/rotate-secret",
+        expect.objectContaining({ method: "PATCH" }),
+      );
+    });
+    await waitFor(() => {
+      expect(routerRefreshMock.mock.calls.length).toBeGreaterThan(
+        refreshCallsBefore,
+      );
+    });
+  });
 });
 
 describe("AllocatorExchangeManager — initialKeys prop→state merge (Landmine 8)", () => {
