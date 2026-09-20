@@ -153,6 +153,25 @@ from services.mt5_probe import (
     Mt5GatewayMisconfigured,
     curated_gateway_detail,
 )
+# 164.5.4 / D-01: the MT5 deal-ledger READ (login → PRE bracket →
+# history_deals_get → POST bracket) moved to services/mt5_read.py (leaf) so the
+# full-backfill job in equity_reconstruction.py can share the ONE read instead of
+# hand-writing a second copy of it. Same shape as the Phase 151 move above: a leaf
+# module plus a re-import, so no call site here changes.
+#
+# ⚠️ The two WR-02 margin constants MOVED WITH IT and are RE-IMPORTED here
+# deliberately — `tests/test_mt5_derive_branch.py` reads them as
+# `jw._MT5_DEAL_FETCH_MARGIN_S` / `jw._MT5_MAX_SERVER_UTC_OFFSET_S` through this
+# module's alias, and leaving them behind would have made `mt5_read` import from
+# `job_worker` while `job_worker` imports `mt5_read` — the cycle. Nothing in THIS
+# module reads either constant any more (the 151 review-E2 rule applies: a
+# monkeypatch aimed at `jw` on a name only re-exported here binds nothing the
+# reader resolves — the reader is `services.mt5_read`).
+from services.mt5_read import (  # noqa: F401 — re-export for the derive regression
+    _MT5_DEAL_FETCH_MARGIN_S,
+    _MT5_MAX_SERVER_UTC_OFFSET_S,
+    read_mt5_deal_ledger,
+)
 from services.sfox_factory import make_sfox_client
 from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
 from services.strategy_analytics_provenance import (
@@ -323,24 +342,6 @@ _SFOX_FAR_PAST_EPOCH_MS: Final[int] = 1_420_070_400_000
 # ccxt combine would run on empty realized/funding streams and CLOBBER the
 # reconstructed mt5 TWR with a flat series.
 _NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox", "mt5"})
-
-# WR-02 — MT5 deal-fetch upper-bound margin. ``history_deals_get``'s upper bound is
-# built from UTC ``now``, but MT5 deal ``time`` values are in the broker's SERVER
-# timezone (``mt5_deals.deal_utc_day`` is the ONE server-time→UTC correction seam).
-# A server AHEAD of UTC stamps a just-happened deal with an epoch LATER than UTC
-# ``now``, so without a margin that same-day deal would fall past the upper bound
-# and be silently CLIPPED from the ledger → under-counted terminal PnL → a wrong
-# (but plausible) series. The margin MUST cover the maximum plausible
-# server-ahead-of-UTC offset; real MT5 brokers sit within ±13h of UTC. The assert
-# ties the (deliberately generous, one full day) margin to that offset bound so a
-# future edit that tightens the window to "avoid fetching the future" can never
-# silently make it too tight to survive a same-day deal on an ahead-of-UTC server.
-_MT5_MAX_SERVER_UTC_OFFSET_S: Final[int] = 13 * 3600  # ±13h — the real-broker bound
-_MT5_DEAL_FETCH_MARGIN_S: Final[int] = 86_400  # one full day
-assert _MT5_DEAL_FETCH_MARGIN_S >= _MT5_MAX_SERVER_UTC_OFFSET_S, (
-    "MT5 deal-fetch margin must cover the max server-UTC offset so a same-day "
-    "server-time deal is never clipped by the UTC-based upper bound (WR-02)"
-)
 
 logger = logging.getLogger("quantalyze.analytics.job_worker")
 
@@ -4142,54 +4143,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # history (epoch 0 → now + one day margin so a same-day deal near the
             # boundary is never clipped). Each round-trip is already rpyc-bounded
             # inside Mt5Client; this bound catches a hang OUTSIDE a bounded call.
-            def _assert_expected_login(info: dict[str, Any]) -> None:
-                # MT5CONC-02 login bracket: the live terminal's account MUST be the
-                # connected key's account (mt5_session.login is the parsed api_key
-                # slot, mt5_validation.py:75). STRICT equality; a MISSING "login"
-                # field (info.get → None) must FAIL LOUD, never default-match
-                # (Pitfall 3). A mismatch is a mis-routed/stale-terminal INFRA fault
-                # → Mt5AccountMismatchError (NOT an Mt5ClientError, so the classify/
-                # stamp arm can never absorb it) → the dedicated no-stamp/no-persist
-                # transient+restart branch below.
-                _actual_login = info.get("login")
-                if _actual_login != _mt5_session.login:
-                    raise Mt5AccountMismatchError(_mt5_session.login, _actual_login)
-
-            def _mt5_read() -> tuple[dict[str, Any], list[dict[str, Any]]]:
-                _mt5_session.client.login(
-                    _mt5_session.login,
-                    _mt5_session.investor_password,
-                    _mt5_session.server,
-                )
-                _info = _mt5_session.client.account_info()  # None→typed raise
-                # None (error) is a typed raise inside the client; () → [] honest
-                # empty. NO fabricated flat account can enter here.
-                # PRE-read login bracket (MT5CONC-02): refuse the read before the
-                # deal fetch if the terminal is on the wrong account.
-                _assert_expected_login(_info)
-                _deals = _mt5_session.client.history_deals_get(
-                    0, int(_mt5_now.timestamp()) + _MT5_DEAL_FETCH_MARGIN_S
-                )
-                # POST-read login bracket (MT5CONC-02): re-read account_info and
-                # re-assert, catching a mid-read terminal re-login by another actor
-                # (the cross-process net for the module-level lock's documented
-                # cross-replica gap). The PRE _info stays the returned economic
-                # anchor (equity/balance byte-preserved from 136); this POST read is
-                # assertion-only and its dict is discarded.
-                # IN-01: the re-read is ASSERTION-ONLY — the correct account's deals
-                # were already fetched. A transient transport blip HERE
-                # (Mt5ClientError) is a retry-worthy verification gap, NOT a
-                # credential fault, so re-signal it as a distinct transient-only type
-                # rather than let it flow into the permanent-stamp classify arm. Only
-                # the account_info() CALL is wrapped; a real mismatch still raises
-                # Mt5AccountMismatchError from _assert_expected_login below, so the
-                # never-stamp-the-wrong-account guarantee is untouched.
-                try:
-                    _post_info = _mt5_session.client.account_info()
-                except Mt5ClientError as exc:
-                    raise _Mt5PostReadVerificationError(str(exc)) from exc
-                _assert_expected_login(_post_info)
-                return _info, _deals
+            #
+            # ⭐ 164.5.4 / D-01 — the read body itself is now
+            # `services.mt5_read.read_mt5_deal_ledger`, the ONE copy the full-backfill
+            # job shares. What it does is unchanged to the byte, INCLUDING both
+            # MT5CONC-02 login brackets and the IN-01 assertion-only POST re-read; its
+            # PRE `_assert_expected_login` closure is gone because the helper calls the
+            # SHARED `mt5_probe.assert_expected_login` (identical contract: STRICT
+            # equality, a missing "login" field FAILS LOUD, `Mt5AccountMismatchError`
+            # which is NOT an `Mt5ClientError`).
+            #
+            # ⛔ The helper decides NOTHING about what a failure means. The lease, this
+            # `wait_for` bound and ALL FIVE `except` arms below stay HERE, because the
+            # backfill job answers some of the same exceptions differently.
 
             # MT5CONC-02: serialize the ENTIRE terminal-IPC region (the bounded read
             # AND every except branch's terminal touch — the 137-01 TimeoutError
@@ -4213,7 +4179,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             async with mt5_terminal_lease(_mt5_session.client.terminal_key):
                 try:
                     _mt5_info, _mt5_deals = await asyncio.wait_for(
-                        asyncio.to_thread(_mt5_read),
+                        asyncio.to_thread(
+                            read_mt5_deal_ledger, _mt5_session, now=_mt5_now
+                        ),
                         timeout=_MT5_DERIVE_READ_TIMEOUT_S,
                     )
                 except asyncio.TimeoutError:
