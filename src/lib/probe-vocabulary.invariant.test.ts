@@ -97,6 +97,18 @@ import { CIRCUIT_OPEN_COPY } from "./seam-copy";
 
 const ROUTE_REL = "src/app/api/keys/[id]/permissions/route.ts";
 
+/**
+ * 164.5.4-D3 / A-02 — the CONSUMER of the roster's `retryClearsIt` judgement.
+ *
+ * Until this phase that field was a judgement nothing acted on: measured, ZERO
+ * non-test references. It shaped the sentence check below and nothing else,
+ * while the card rendering that sentence offered a "Re-check" control gated on
+ * `loading` alone — so the route said "retrying will not help" directly above a
+ * button inviting exactly that. This constant is what lets the law reach the
+ * component and hold the two together.
+ */
+const RECHECK_COMPONENT_REL = "src/components/connect/KeyPermissionBadge.tsx";
+
 // ---------------------------------------------------------------------------
 // PART 0 — the scanner. One comment handler (140.5-01's `source-scan.ts`), so a
 // tokenizer fix reaches this law too.
@@ -123,6 +135,27 @@ const CODE_ASSIGNMENT = /\bconst\s+code\s*=\s*([^;]*);/g;
 /** An UPPER_SNAKE string literal, used only INSIDE an already-matched shape. */
 const UPPER_SNAKE_LITERAL = /"([A-Z][A-Z0-9_]*)"/g;
 
+/**
+ * 164.5.4-D3 — a JSX `disabled={…}` expression, which is the AFFORDANCE GATE.
+ *
+ * ⚠️ SCOPED TO THE GATE, NEVER A WHOLE-FILE SUBSTRING SEARCH, and the reason is
+ * measured rather than fastidious: the component's own docblock on that gate
+ * NAMES `KEY_UNDECRYPTABLE` in prose. A whole-file `includes(code)` would be
+ * satisfied by that comment, so the law would go green over a component whose
+ * gate had been deleted and whose explanation survived — certifying the exact
+ * defect it exists to catch. Comment-stripping (below) removes the prose; this
+ * anchor additionally refuses a mention anywhere else in the live source.
+ *
+ * `[^}]*` is right for this shape: a `disabled` expression contains no `}` (a
+ * gate needing one would be an object or a nested template, which is not a
+ * shape this component uses and would be worth failing loudly on).
+ */
+const JSX_DISABLED_EXPRESSION = /\bdisabled=\{([^}]*)\}/g;
+
+function scanDisabledExpressions(src: string): string[] {
+  return [...src.matchAll(JSX_DISABLED_EXPRESSION)].map((m) => m[1]);
+}
+
 function scanShapeA(src: string): string[] {
   return [...src.matchAll(CODE_PROPERTY)].map((m) => m[1]);
 }
@@ -147,6 +180,17 @@ const ROUTE_SRC_RAW = readFileSync(join(process.cwd(), ROUTE_REL), "utf8");
 const SHAPE_A_CODES = scanShapeA(ROUTE_SRC);
 const SHAPE_B_CODES = scanShapeB(ROUTE_SRC);
 const EMITTED_CODES = scanEmittedCodes(ROUTE_SRC);
+
+// 164.5.4-D3 — the component that renders the sentences above, read through
+// the SAME comment-stripping helper for the same DEF-16-2 reason.
+const RECHECK_COMPONENT_SRC = readStripped(RECHECK_COMPONENT_REL);
+const RECHECK_COMPONENT_SRC_RAW = readFileSync(
+  join(process.cwd(), RECHECK_COMPONENT_REL),
+  "utf8",
+);
+const RECHECK_GATE_EXPRESSIONS = scanDisabledExpressions(
+  RECHECK_COMPONENT_SRC,
+);
 
 /**
  * HAND-TYPED MEASURED COUNTS. Never `EMITTED_CODES.length` — that is the
@@ -381,13 +425,21 @@ describe("[161-01 / WIZERR-04] REMEDY HONESTY — no arm tells the user to retry
 
   it("the irrecoverable sub-population is NON-EMPTY", () => {
     // The sub-population gets its own vacuity fence. If every roster entry were
-    // marked `retryClearsIt: true`, the assertion below would iterate an empty
+    // marked `retryClearsIt: true`, the assertions below would iterate an empty
     // list and pass forever while asserting nothing — the same trivially-true
     // failure mode as an empty population, one level down.
+    //
+    // ⚠️ 164.5.4-D3 — THIS FENCE'S REACH, stated so nobody adds a second,
+    // weaker one beside it. It guards EVERY assertion in this describe that
+    // iterates `IRRECOVERABLE`, which is now two: the retry-framing check on
+    // the SENTENCE, and the affordance-gate check on the COMPONENT. Both are
+    // derived from the same const, so one fence covers both and a new
+    // assertion over `IRRECOVERABLE` inherits it automatically.
     expect(
       IRRECOVERABLE.length,
-      "no roster entry is marked `retryClearsIt: false`, so the retry-framing " +
-        "check below runs over an empty list and cannot fail. At HEAD exactly " +
+      "no roster entry is marked `retryClearsIt: false`, so both the " +
+        "retry-framing check and the affordance-gate check below run over an " +
+        "empty list and cannot fail. At HEAD exactly " +
         "one arm (KEY_UNDECRYPTABLE) carries a fault a retry cannot clear; if " +
         "that arm was removed, this law's whole reason for existing went with it.",
     ).toBeGreaterThan(0);
@@ -402,6 +454,67 @@ describe("[161-01 / WIZERR-04] REMEDY HONESTY — no arm tells the user to retry
         "user's situation, and it routes them into an unbounded loop while " +
         "hiding the action that would actually work. Name the real remedy " +
         `instead. Offending codes: ${lying.map(([c]) => c).join(", ")}`,
+    ).toEqual([]);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 164.5.4-D3 / A-02 — THE SENTENCE WAS NEVER THE WHOLE CLAIM.
+  //
+  // Everything above this point asks whether the WORDS are honest. A live
+  // control is a claim too — "press this and the answer may change" — and for
+  // `retryClearsIt: false` it is the same false claim the prose was corrected
+  // for in 161-01. The card offering that control gated it on `loading` alone
+  // for four further phases, so the two halves of one screen disagreed: the
+  // route's own "retrying will not help" sat directly above a button inviting
+  // exactly that.
+  //
+  // ⚠️ WHY THIS BINDING EXISTS AT ALL. Before this assertion, `retryClearsIt`
+  // was a judgement with NO consumer — zero non-test references, measured. The
+  // component now acts on it, but by CONVENTION only, which is precisely how a
+  // roster and a component drift apart. This is the mechanism that stops the
+  // SEVENTH code — irrecoverable, rostered honestly, and shipped with a live
+  // control because nobody remembered the second half — from being the same
+  // defect one member later.
+  // ─────────────────────────────────────────────────────────────────────────
+  it("every irrecoverable code is named in the re-check control's own gate", () => {
+    // Fence 1 — the file was really read. Without it, a moved path would make
+    // every read below an empty string and the scan would find no gate at all,
+    // which fails for a confusing reason rather than a clear one.
+    expect(
+      RECHECK_COMPONENT_SRC_RAW.length,
+      `${RECHECK_COMPONENT_REL} read as fewer than 1000 characters. The path ` +
+        "moved or the read failed, so this binding is measuring an empty string.",
+    ).toBeGreaterThan(1000);
+
+    // Fence 2 — the ANCHOR still matches something. A `disabled` prop
+    // refactored into a variable or a helper would leave zero gate regions,
+    // and "no region contains the code" is then true for a reason that has
+    // nothing to do with the property. Say so explicitly.
+    expect(
+      RECHECK_GATE_EXPRESSIONS.length,
+      `no \`disabled={…}\` expression was found in ${RECHECK_COMPONENT_REL}. ` +
+        "The anchor this law reads through is gone — either the control lost " +
+        "its gate entirely, or the gate moved somewhere this scan cannot see " +
+        "(a hoisted variable, a helper, a spread). Both need a human: the " +
+        "second is fine and must be re-anchored, the first is the defect.",
+    ).toBeGreaterThan(0);
+
+    const ungated = IRRECOVERABLE.filter(
+      ([code]) => !RECHECK_GATE_EXPRESSIONS.some((e) => e.includes(code)),
+    ).map(([code]) => code);
+
+    expect(
+      ungated,
+      "A code this roster judges IRRECOVERABLE (`retryClearsIt: false`) does " +
+        `not appear in any \`disabled={…}\` expression in ` +
+        `${RECHECK_COMPONENT_REL}. The card therefore offers the user a live ` +
+        '"Re-check" against a fault re-checking can never clear — an ' +
+        "affordance that contradicts the very sentence this file already " +
+        "forced the route to write. A retry control is a claim that pressing " +
+        "it can help; for these codes that claim is false and permanent. " +
+        "Gate the control on the code, or re-judge `retryClearsIt` " +
+        "deliberately — but do not leave the two disagreeing. " +
+        `Ungated: ${ungated.join(", ")}`,
     ).toEqual([]);
   });
 

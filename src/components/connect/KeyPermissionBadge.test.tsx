@@ -164,34 +164,60 @@ describe("KeyPermissionBadge", () => {
     code: string;
     status: number;
     prose: string;
+    /**
+     * 164.5.4-D3 / A-02 — does this refusal leave the "Re-check" control
+     * PRESSABLE? It is the same question the probe-vocabulary roster answers as
+     * `retryClearsIt`, asked of the AFFORDANCE rather than of the sentence: a
+     * usable control is itself a claim that pressing it can help, so a fault a
+     * retry cannot clear must not offer one.
+     *
+     * ⚠️ The `true` rows carry the real weight here. A gate that disabled the
+     * control for EVERY refusal would satisfy a single-code test and would be a
+     * REGRESSION on the outage and throttle paths, where re-checking is exactly
+     * the right thing to do.
+     */
+    recheckStaysUsable: boolean;
   }> = [
     {
       code: "CIRCUIT_OPEN",
       status: 503,
       prose:
         "The analytics service is temporarily unavailable. Please try again in a moment.",
+      recheckStaysUsable: true,
     },
-    { code: "PROBE_RATE_LIMITED", status: 429, prose: "Too many requests" },
+    {
+      code: "PROBE_RATE_LIMITED",
+      status: 429,
+      prose: "Too many requests",
+      recheckStaysUsable: true,
+    },
     {
       code: "KEY_UNDECRYPTABLE",
       status: 500,
       prose:
         "This stored key can no longer be decrypted. Reconnect the key — retrying will not help.",
+      // The ONE irrecoverable member of this route's vocabulary. The stored
+      // ciphertext stays unreadable until the key is reconnected, so no number
+      // of re-checks can change the answer.
+      recheckStaysUsable: false,
     },
     {
       code: "PROBE_BACKEND_UNAVAILABLE",
       status: 502,
       prose: "Could not reach the permissions service. Try again shortly.",
+      recheckStaysUsable: true,
     },
     {
       code: "PROBE_TIMEOUT",
       status: 502,
       prose: "Permissions probe timed out. Try again.",
+      recheckStaysUsable: true,
     },
     {
       code: "PROBE_FAILED",
       status: 502,
       prose: "Could not check key scopes. Try again.",
+      recheckStaysUsable: true,
     },
   ];
 
@@ -311,6 +337,165 @@ describe("KeyPermissionBadge", () => {
         ).toBeInTheDocument(),
       );
       expect(vi.mocked(addSentryBreadcrumb)).not.toHaveBeenCalled();
+    });
+
+    // ── THE AFFORDANCE HALF ─────────────────────────────────────────────────
+    //
+    // 164.5.4-D3 / A-02 — THE THIRD AUDIENCE OF THE SAME CODE.
+    //
+    // The two halves above settle WHERE the code's text goes: the curated
+    // prose to the user, the machine code to the console and the breadcrumb.
+    // Neither asks what the code should do to the CONTROL rendered beside that
+    // prose, and the answer was "nothing" — `disabled` was gated on `loading`
+    // alone, so a key whose stored ciphertext can no longer be decrypted still
+    // offered a "Re-check" that could never succeed. The route's own sentence
+    // said "retrying will not help" directly above a button inviting exactly
+    // that. The sentence and the affordance contradicted each other on one
+    // screen, which is the 162-09 / HONEST-02 class this component has already
+    // been through once.
+    //
+    // ⚠️ The assertion is on the `disabled` ATTRIBUTE, not on the control's
+    // ABSENCE, and that is deliberate. A removed control with no explanation is
+    // worse for the user than a dead one sitting beside a sentence that says
+    // why it is dead — and an absence assertion also passes when the whole
+    // component fails to render, which is not the property we mean.
+    it.each(ROUTE_REFUSALS)(
+      "$code: the re-check control's usability matches the fault (usable=$recheckStaysUsable)",
+      async ({ code, status, prose, recheckStaysUsable }) => {
+        mockRefusal(code, status, prose);
+        render(<KeyPermissionBadge apiKeyId="key-1" />);
+
+        await waitFor(() =>
+          expect(screen.getByText(prose)).toBeInTheDocument(),
+        );
+
+        const recheck = screen.getByTestId("key-permission-recheck");
+        if (recheckStaysUsable) {
+          expect(
+            recheck,
+            `${code} is a fault a re-check CAN clear, but the control is ` +
+              "disabled. The gate has stopped being narrow: it is now " +
+              "refusing a retry during an outage or a throttle, where " +
+              "retrying is the correct and only remedy.",
+          ).not.toBeDisabled();
+        } else {
+          expect(
+            recheck,
+            `${code} is a fault a re-check can NEVER clear, but the control ` +
+              "is still pressable. The route's own sentence tells the user " +
+              "retrying will not help while the button beside it invites " +
+              "exactly that — the contradiction 164.5.4-D3 exists to close.",
+          ).toBeDisabled();
+        }
+      },
+    );
+
+    // The happy path — the parametrised table above is refusals only, so
+    // nothing in it would notice a gate that disabled the control on success.
+    it("a SUCCESSFUL probe leaves the re-check control usable", async () => {
+      mockFetchOnce({
+        read: true,
+        trade: false,
+        withdraw: false,
+        detected_at: new Date().toISOString(),
+        probe_error: false,
+      });
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+
+      await waitFor(() =>
+        expect(screen.getByTestId("key-perm-pill-read")).toBeInTheDocument(),
+      );
+      expect(
+        screen.getByTestId("key-permission-recheck"),
+        "The gate disabled the control on a successful probe. It must key on " +
+          "the route's refusal code, not on the mere completion of a load.",
+      ).not.toBeDisabled();
+    });
+
+    // THE GATE IS NOT STICKY. The retained code must be cleared by the next
+    // attempt's invalidation, exactly as `error` and `perms` already are — a
+    // gate that outlives the fact it was decided on is a second defect wearing
+    // the first one's clothes.
+    it("a successful load AFTER an undecryptable one re-enables the control", async () => {
+      const undecryptable = ROUTE_REFUSALS.find(
+        (r) => r.code === "KEY_UNDECRYPTABLE",
+      )!;
+      global.fetch = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: undecryptable.status,
+          statusText: "Refused",
+          json: async () => ({
+            error: undecryptable.prose,
+            code: undecryptable.code,
+          }),
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            read: true,
+            trade: false,
+            withdraw: false,
+            detected_at: new Date().toISOString(),
+            probe_error: false,
+          }),
+        } as Response) as unknown as typeof fetch;
+
+      const { rerender } = render(<KeyPermissionBadge apiKeyId="key-1" />);
+      // ⚠️ WAIT ON THE SETTLED STATE, NOT ON `toBeDisabled` DIRECTLY. The
+      // control is ALSO disabled while `loading` is true, so a
+      // `waitFor(…toBeDisabled())` here is satisfied by the in-flight render
+      // and passes with NO gate implemented at all — measured, 164.5.4-03
+      // RED run 1. The refusal prose renders only once `!loading && error`,
+      // so waiting on it pins the assertion to the state we actually mean.
+      await waitFor(() =>
+        expect(screen.getByText(undecryptable.prose)).toBeInTheDocument(),
+      );
+      expect(
+        screen.getByTestId("key-permission-recheck"),
+        "The control is pressable on the undecryptable answer, so the " +
+          "re-enable half below would be measuring nothing.",
+      ).toBeDisabled();
+
+      // The control is dead, so the re-load cannot come from a click. Changing
+      // `apiKeyId` re-runs `load` through the effect — the real path by which a
+      // card is pointed at a freshly reconnected key.
+      rerender(<KeyPermissionBadge apiKeyId="key-2" />);
+
+      await waitFor(() =>
+        expect(screen.getByTestId("key-perm-pill-read")).toBeInTheDocument(),
+      );
+      expect(
+        screen.getByTestId("key-permission-recheck"),
+        "The re-check control stayed disabled after a SUCCESSFUL load. The " +
+          "retained code is not being cleared by the next attempt's " +
+          "invalidation, so one undecryptable answer permanently kills the " +
+          "control on a card that is now working.",
+      ).not.toBeDisabled();
+    });
+
+    // A response with NO parseable JSON body carries no code at all, so there
+    // is nothing to gate on and the control must behave exactly as it did
+    // before this phase.
+    it("an unparseable error body leaves the re-check control usable", async () => {
+      global.fetch = vi.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: "Bad Gateway",
+        json: async () => {
+          throw new SyntaxError("Unexpected token < in JSON at position 0");
+        },
+      } as unknown as Response) as unknown as typeof fetch;
+
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      await waitFor(() =>
+        expect(screen.getByText(/HTTP 502/)).toBeInTheDocument(),
+      );
+      expect(
+        screen.getByTestId("key-permission-recheck"),
+      ).not.toBeDisabled();
     });
   });
 
