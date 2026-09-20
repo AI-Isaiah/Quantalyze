@@ -211,3 +211,81 @@ the desync is pre-existing; the tool's own message forbids hand-editing the tabl
 a SHARED cross-phase ledger being read by wave siblings executing concurrently in other worktrees,
 so reconciling it from here invites a conflict on a ledger whose whole value is that it is
 trustworthy. It needs one owner on a quiet tree, not a drive-by fix from a parallel executor.
+
+---
+
+## From plan 06 (D-01, the `venue == "mt5"` backfill branch)
+
+### D-164.5.4-06-1 — `test_feedback_engine::test_lazy_import_not_triggered_at_module_load` is a subprocess-spawn TIMEOUT, in the same class already booked above
+
+**Found during:** plan 06's FULL-suite baseline and its FULL-suite re-run
+(`pytest tests/ -q -p no:randomly`, from `analytics-service/`).
+**Status:** open, NOT fixed, NOT caused by plan 06.
+
+**MEASURED on this tree, both sides of the change:**
+
+| run | verdict |
+|---|---|
+| BASELINE, taken before any edit | **2 failed**, 5966 passed, 90 skipped |
+| after plan 06 | **1 failed**, 5988 passed, 90 skipped |
+
+The surviving failure is the same one in both, and its error is not an assertion:
+
+```
+subprocess.TimeoutExpired: Command '[... python, -c, "import sys\nimport routers.match\n..."]'
+timed out after 15 seconds
+```
+
+It spawns a child interpreter to prove `services.feedback_engine` is NOT imported at
+`routers.match` module load, and the child does not finish inside a 15 s budget on a box
+where several executors are running full suites concurrently. **Zero assertion failures.**
+
+**Not caused by plan 06, measured rather than assumed:** neither `services/feedback_engine.py`
+nor `routers/match.py` reaches `equity_reconstruction`, `mt5_read`, `broker_dailies` or
+`mt5_concurrency` — this plan's only changed modules — and a timeout in a spawned
+`import routers.match` cannot be produced by a branch added to a job that file never loads.
+
+**Same class as `[164.5.4-SUITE-TIMEOUT-CONTENTION]` / `D-164.5.4-02-1` above**, which
+recorded 56 of 58 frontend failures as subprocess-spawn timeouts with zero assertion
+failures. This is the Python half of the identical story. ⛔ Do NOT "fix" it by raising the
+15 s budget: that trades a loud environmental signal for a quiet one, on a gate this plan
+has no mandate over. The durable fix is a budget the test controls rather than one it races
+against a shared box.
+
+⭐ The OTHER baseline failure —
+`test_mt5_session_monitor.py::test_CRITERION_2_a_dark_reading_drives_the_heal_with_no_human_and_no_restart`,
+already booked above as `[164.5.4-SESSIONMONITOR-ORDER-FLAKE]` — **failed in the baseline and
+PASSES after this plan's change.** It flipped to green with nothing about it touched, which
+is further evidence it is load-dependent rather than a verdict on any SHA.
+
+**Not appended to `.planning/WINDOWS.md`:** that ledger still refuses every append for the
+row-61 desync recorded directly above. For whoever routes it post-merge from a quiet tree:
+
+```
+gsd-tools windows append --kind unrun-verify --phase 164.5.4 \
+  --file analytics-service/tests/test_feedback_engine.py \
+  --description "test_lazy_import_not_triggered_at_module_load spawns a child interpreter to prove a lazy import and races a 15s budget; it fails under concurrent-executor load with zero assertion failures. Observed red in the 164.5.4-06 baseline AND after, on a tree whose only changes are in modules routers.match never loads."
+```
+
+### D-164.5.4-06-2 — the MT5 telemetry's omitted anchor keys are flattened by the SHARED audit emit
+
+**Found during:** plan 06, task 3.
+**Status:** recorded, NOT fixed, and deliberately NOT routed to a phase.
+
+`_mt5_telemetry` omits `anchor_partial_ticker_symbols`, `anchor_offset_implausible`,
+`anchor_replay_unreliable` and `anchor_offset_skipped_usd` because MT5 attempts **no anchor
+step at all** — `reconstruct_mt5_nav_levels` is anchored to the account's own realized
+balance by construction, so there is no offset to spread and no skip verdict to report.
+Emitting `anchor_offset_skipped_usd: 0.0` would imply an anchor was attempted and declined.
+
+⚠️ The SHARED audit emit in `run_reconstruct_allocator_history_job` reads all four through
+`.get(..., default)`, so the emitted `reconstruct_complete` metadata carries the defaults
+anyway. An operator therefore cannot distinguish "no anchor attempted" (mt5) from "anchor
+attempted and clean" (a healthy ccxt account) by reading that event.
+
+**Why it is recorded rather than filed as work:** fixing it means changing the ccxt path's
+own emit, which is outside this plan's files, and the consequence is an observability
+nuance with **no data-integrity and no user-facing effect** — no persisted row, no verdict
+and no user-visible copy depends on it. Under the standing rule that a deferral must name a
+phase only for data-integrity or user-facing items, this is fix-or-drop. Recorded so the
+residual is visible rather than smuggled.
