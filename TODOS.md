@@ -3676,6 +3676,14 @@ without rerunning the full `TestC0198CursorOnlyAdvancesWhenStored` class.
 164.5.1.2 plan 01, above) and this D-03 cursor-advance half are present and distinct, per
 CONTEXT.md D-03's instruction that the two causes never share one closure.
 
+**ADDENDUM, dated 2026-09-20 (Phase 164.5.1.3 SYNCADMIT plan 01) — implementation landed.** The
+widening this entry's verdict promised (`private` admitted into `ALLOWED_STRATEGY_STATUSES`) has
+now actually SHIPPED in code, not merely decided: `analytics-service/routers/cron.py`, RED test
+commit `1d5266bc`, GREEN implementation commit `15f02f32`, on branch
+`feat/164.5.1.3-syncadmit`. Merge/deploy is separately gated on 164.5.1.4's PROD-apply job — see
+the addendum on `SYNC-HELD-CURSOR-REFETCH-COST-01` above for the live re-check and the real
+closure trigger.
+
 ---
 
 **Advisory-lock comment finding (measured 2026-09-19, Phase 164.5.1.2 plan 03) — recorded,
@@ -3864,6 +3872,42 @@ ships, which ends the condition outright by making `strategy_ids` non-empty on t
 decision and raises that phase from a tidy-up to an operational necessity.
 ⚠️ ⛔ Do NOT close this by reverting the D-03 gate or by re-widening anything: the poll-positions
 predicate was REFUSED as inert on production evidence and is deliberately unchanged.
+
+**ADDENDUM, dated 2026-09-20 (Phase 164.5.1.3 SYNCADMIT plan 01) — RE-SCOPED, NOT CLOSED.**
+The code fix (admitting `private` into `ALLOWED_STRATEGY_STATUSES`,
+`analytics-service/routers/cron.py`, commits `1d5266bc`/`15f02f32`) has SHIPPED in this phase's
+commits on this branch. That structurally ENDS the held state for the five measured keys ONCE
+DEPLOYED. It cannot be marked CLOSED here, because none of the three closure conditions are met
+yet:
+
+- **(a) 164.5.1.4's PROD-apply job has not reported `success`.** Live re-check, Task 3 Part A,
+  performed 2026-09-20: `gh run view 35478916418` (headSha `60b8ed1b`, the 164.5.1.4 merge commit
+  that touched `cron.py`) — job `apply-test`: `status: completed`, `conclusion: success` (applied
+  to shared TEST). Job `plan` (the PROD-apply gate): `status: waiting`, `conclusion: ""` — i.e.
+  still awaiting the `Production` environment's human reviewer approval, identical to the
+  planning-time reading in CONTEXT.md. No `apply` job exists yet in this run because it is gated
+  behind `plan`.
+- **(b) This phase's own PR has not merged or deployed.** Execution does not merge, push, or open
+  a PR (see this plan's own non-negotiables).
+- **(c) No post-deploy tick has measured the held counter dropping for the five known keys.** That
+  measurement can only happen after (a) and (b), against PROD.
+
+**Real trigger for closure:** this phase's PR merges, AND 164.5.1.4's PROD-apply job reports
+`success`, AND a subsequent PROD read confirms the `held` counter for the five previously-measured
+keys is 0. **Owner:** the next post-deploy verification step for this phase — a
+`checkpoint:human-action` PROD read (the founder enters credentials; no agent, ever).
+
+**Separately, and explicitly DROPPED rather than routed:** the GENERAL unbounded-refetch-window
+defect (a hypothetical FUTURE key with zero eligible strategies for some OTHER reason, unrelated to
+the five `private` keys this phase addresses) is out of this phase's scope and is NOT being routed
+to a new phase. It cannot be fixed without touching `should_advance_cursor` or the key-cursor
+fallback path, both of which this phase is explicitly forbidden from modifying (see invariants);
+it has no currently known live instance now that the five measured keys are addressed by the
+widening above; and it is not itself a data-integrity or user-facing defect — the hold is lossless
+by design, it only costs re-fetch work. Per this repo's own deferral-gating rule (only
+data-integrity/user-facing items get a phase — `feedback_every_deferral_must_land_in_a_phase.md`),
+it is intentionally DROPPED here rather than kept open or given a phase. Recorded so a future
+reader does not "complete" a fix that was never promised.
 
 ### VERIFICATION-STALE-OWED-01 — two phases verified code that has since moved, and their verdicts are honestly out of date (booked 2026-09-18)
 
