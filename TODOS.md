@@ -3437,13 +3437,37 @@ from a comment-stripped `pg_get_functiondef` so the pair cannot silently diverge
 `ARMS_FLOOR` raised **392 → 394** with the three coupled pins in
 `src/__tests__/mutation-runner-floors.test.ts`, read off the runner's own printed biting count.
 
-⛔ **THE ENTRY IS NOT CLOSED, and the BLOCKS clause above is NOT lifted.** Nothing has been applied
-to any database: the migration is written and unapplied, and the apply path is merge →
-`apply-test` → the PROD `apply` behind the `Production` environment's human reviewer gate. The
-block on `T-164.5.1-09-07` lifts only when the fan-out's NATURAL `25 * * * *` tick is measured
-selecting a non-empty candidate set against the BEFORE census.
-**Owner of that half: Phase 164.5.1.1 plan 04** — `autonomous: false`, the one-way door behind a
-blocking-human checkpoint.
+✅ **CLOSED 2026-09-20 by Phase 164.5.1.1 plan 04, on the NATURAL tick.** The paragraph that stood
+here said *"THE ENTRY IS NOT CLOSED, and the BLOCKS clause above is NOT lifted"*, and it was correct
+when written: the migration was written and unapplied, and the block lifted only when the fan-out's
+natural `25 * * * *` tick was measured selecting a non-empty candidate set against the BEFORE
+census. That measurement has now been taken.
+
+**The reading that closes it — tick `11231`, jobid 40, 2026-09-17 17:25:00.229704Z, `succeeded`.**
+TWO `derive_broker_dailies` rows in `compute_jobs`, created on the tick's own millisecond, both
+completed, no `last_error`; stale census **6 → 4**, avg days 52.50 → 56.75. ⭐ The average RISING is
+the tell: the two freshest rows left the set and the older ones remain. A FALLING average would have
+been the suspicious reading. ⛔ `return_message: "1 row"` proves nothing and is not cited here — the
+function returns INTEGER and `SELECT f()` always returns one row, the same misreading this entry
+already warned about twice. The verdict lives in `compute_jobs`, and that is where it was taken.
+Recorded in `164.5.1.1-PROD-SESSION.md` § B.
+
+⚠️ **The `T-164.5.1-09-07` clause closes by SUBSTITUTION, and the distinction is load-bearing.**
+The all-candidates-failed branch was NEVER exercised — the tick's two jobs both SUCCEEDED, so the
+branch stayed unreached. What closed the risk is **mutation-gate arm R** in
+`supabase/tests/test_ledger_refresh_fanout.sql`, merged as PR #810 during Phase **164.5.1's** own
+closure — a different phase and a different mechanism from the one plan 04 specified. ⭐ A permanent
+gate is arguably stronger than a one-off exercise, since it re-proves the branch every run rather
+than once; `164.5.1-SECURITY.md` recorded it as a disclosed substitution at `medium`, below the
+blocking threshold, and the founder accepted it for this truth. ⛔ It is NOT compliance with plan
+04's literal mechanism and must never be cited as though it were.
+
+⚠️ **One item is disclosed rather than closed:** plan 04 task 3's session record (§ B) carries no
+database-marker output of its own. Measured: **§ B performed no writes** — it observed a tick that
+fired on its own schedule and then read three tables — and the marker rule is scoped to statements
+that write, with § A (the apply, which did write) carrying its marker. So the miss is against the
+plan's literal acceptance criterion with zero safety consequence. It is surfaced for a founder
+decision, not graded away. See `164.5.1.1-PROD-SESSION.md` § C-3.
 ⛔ And it did NOT fix the 141-day composite — see `FANOUT-COHORT-SIBLING-COMPOSITE-01` immediately
 below, which carries the measurement and the destination for that decision.
 
