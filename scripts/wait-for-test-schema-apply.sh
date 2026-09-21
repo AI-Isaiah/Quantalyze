@@ -100,8 +100,21 @@ RUNBOOK="docs/runbooks/shared-test-db-mutex.md"
 # apply in" — never as "clear".
 probe_inflight_flag() {
   if [ -n "${TEST_INFLIGHT_PROBE_CMD:-}" ]; then
+    # ⛔ THE SEAM'S EXIT STATUS AND ITS EMPTY ANSWER BOTH LAND ON `unknown`,
+    # DELIBERATELY. This used to be `$CMD; return 0`, which discarded both: a
+    # seam that failed or printed nothing yielded an EMPTY answer, and an empty
+    # answer matches no `case` arm in the wait loop, so the run degraded
+    # silently into a full-budget `wait-exhausted` that blamed congestion. An
+    # unmeasurable probe is `unknown` — the conservative token this function
+    # already has a name for — never an empty string.
+    local seam_rc=0 seam_out=""
     # shellcheck disable=SC2086
-    $TEST_INFLIGHT_PROBE_CMD
+    seam_out="$($TEST_INFLIGHT_PROBE_CMD)" || seam_rc=$?
+    if [ "${seam_rc}" -ne 0 ] || [ -z "${seam_out}" ]; then
+      printf '%s' "unknown"
+    else
+      printf '%s' "${seam_out}"
+    fi
     return 0
   fi
   local dsn="${TEST_SUPABASE_DB_URL:-}" answer=""
@@ -129,8 +142,17 @@ probe_inflight_flag() {
 # ⛔ The API's bytes never reach a log line. Only the derived token does.
 probe_apply_state() {
   if [ -n "${TEST_APPLY_STATE_CMD:-}" ]; then
+    # ⛔ SAME BOUNDARY, SAME REASON as probe_inflight_flag's seam: a failing or
+    # silent seam answers `unreadable`, the token this function already uses for
+    # "could not measure", instead of an empty string that matches no arm.
+    local seam_rc=0 seam_out=""
     # shellcheck disable=SC2086
-    $TEST_APPLY_STATE_CMD
+    seam_out="$($TEST_APPLY_STATE_CMD)" || seam_rc=$?
+    if [ "${seam_rc}" -ne 0 ] || [ -z "${seam_out}" ]; then
+      printf '%s' "unreadable"
+    else
+      printf '%s' "${seam_out}"
+    fi
     return 0
   fi
   local rc=0 runs_json ids id jobs_json st cc
@@ -274,6 +296,40 @@ self_test() {
   # apply concluded on the same commit let the reader straight through.
   arm "concluded apply but flag HELD is NOT apply-concluded" 1 "wait-outcome: wait-exhausted" held concluded-ok
   arm "concluded apply with flag UNKNOWN is NOT apply-concluded" 1 "wait-outcome: wait-exhausted" unknown concluded-ok
+
+  # ── THE SEAM BOUNDARY ITSELF ────────────────────────────────────────────
+  # ⭐ A SEAM THAT FAILS OR SAYS NOTHING MUST NAME ITS OWN UNMEASURABILITY.
+  # These arms pass the seam a raw command instead of a canned answer, so the
+  # thing under test is the seam's error handling rather than the dispatcher.
+  # Before the boundary was fixed, both of these produced an EMPTY answer that
+  # matched no `case` arm, and the run degraded into an exhaustion whose message
+  # blamed a schema apply — for a probe that had simply not run.
+  seam_arm() {  # label want_rc needle flag_cmd apply_cmd
+    local label="$1" want_rc="$2" needle="$3" flag_cmd="$4" apply_cmd="$5"
+    rc=0
+    out="$(TEST_INFLIGHT_PROBE_CMD="${flag_cmd}" \
+           TEST_APPLY_STATE_CMD="${apply_cmd}" \
+           WAIT_BUDGET_SECONDS=0 APPEAR_GRACE_SECONDS=0 WAIT_POLL_SECONDS=1 \
+           bash "${BASH_SOURCE[0]}" 2>&1)" || rc=$?
+    checks=$((checks + 1))
+    if [ "${rc}" -ne "${want_rc}" ]; then
+      echo "SELF-TEST FAIL: ${label} exited ${rc}, expected ${want_rc}. Output: ${out}" >&2
+      exit 1
+    fi
+    checks=$((checks + 1))
+    case "${out}" in
+      *"${needle}"*) : ;;
+      *)
+        echo "SELF-TEST FAIL: ${label} did not NAME '${needle}'. A seam that failed or printed nothing degraded silently instead. Output: ${out}" >&2
+        exit 1
+        ;;
+    esac
+  }
+
+  seam_arm "flag seam EXITS NON-ZERO answers unknown"  1 "in-flight flag 'unknown'"  "false" "printf %s absent"
+  seam_arm "flag seam PRINTS NOTHING answers unknown"  1 "in-flight flag 'unknown'"  "true"  "printf %s absent"
+  seam_arm "apply seam EXITS NON-ZERO answers unreadable" 1 "apply state 'unreadable'" "printf %s clear" "false"
+  seam_arm "apply seam PRINTS NOTHING answers unreadable" 1 "apply state 'unreadable'" "printf %s clear" "true"
 
   echo "wait-for-test-schema-apply self-test OK (${checks} checks) — all three outcomes named, and a held flag beats an absent run."
 }
