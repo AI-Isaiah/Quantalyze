@@ -79,6 +79,7 @@ no new package.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Callable, TypeVar
 
@@ -94,6 +95,8 @@ __all__ = [
     "RETRY_BACKOFF_BASE_SECONDS",
     "TransportRetryExhausted",
     "is_transient_transport_fault",
+    "reset_retry_stats",
+    "retry_stats",
     "retry_transport",
     "wrap_live_db_client",
 ]
@@ -144,6 +147,40 @@ _TRANSIENT_GATEWAY_STATUS_CODES = frozenset({502, 503, 504})
 _NON_IDEMPOTENT_BUILDER_METHODS = frozenset(
     {"insert", "upsert", "update", "delete", "rpc"}
 )
+
+
+# WHY A COUNTER AND NOT JUST THE WARNING (dated 2026-09-21, Phase 164.9 plan 05
+# review). The WARNING below is CAPTURED by pytest and rendered only in the report
+# of a FAILING test. On the one run where it matters — a shared-TEST transport
+# fault absorbed by attempt 2, the suite then GREEN — it prints nothing at all, and
+# the degrading gateway this module exists to keep visible is laundered into a slow
+# pass. Asserting through `caplog` proves the RECORD IS CREATED; it does not prove
+# anyone ever SEES it, and those are different claims.
+#
+# So the retries are also counted here, and `tests/conftest.py` prints the total
+# from `pytest_terminal_summary` UNCONDITIONALLY — a line that survives a green
+# run. Narrower than switching `log_cli` on in `pytest.ini`, which would change the
+# output of the whole suite for one module's benefit.
+#
+# A lock because `test_compute_jobs_fencing.py` drives the wrapped client from a
+# ThreadPoolExecutor; xdist workers are separate PROCESSES, so cross-worker
+# aggregation is conftest's job, not this lock's.
+_RETRY_STATS_LOCK = threading.Lock()
+_RETRY_STATS = {"retries": 0, "calls": 0}
+
+
+def retry_stats() -> tuple[int, int]:
+    """Return `(retries, calls)` for THIS process: the number of retry attempts
+    made, and the number of `retry_transport` calls that needed at least one."""
+    with _RETRY_STATS_LOCK:
+        return (_RETRY_STATS["retries"], _RETRY_STATS["calls"])
+
+
+def reset_retry_stats() -> None:
+    """Zero the process-local counters. For tests of the counter itself."""
+    with _RETRY_STATS_LOCK:
+        _RETRY_STATS["retries"] = 0
+        _RETRY_STATS["calls"] = 0
 
 
 class TransportRetryExhausted(RuntimeError):
@@ -204,13 +241,17 @@ def retry_transport(
     if attempts < 1:
         raise ValueError(f"attempts must be >= 1, got {attempts}")
     last_exc: BaseException | None = None
+    retried = False
     for attempt in range(1, attempts + 1):
         try:
-            return fn()
+            result = fn()
         except Exception as exc:  # noqa: BLE001 — every exception must be classified
             if not is_transient_transport_fault(exc):
                 raise
             last_exc = exc
+            retried = True
+            with _RETRY_STATS_LOCK:
+                _RETRY_STATS["retries"] += 1
             # T-164.9-05-05: this line, not the module name in the record, is what
             # makes a retried run distinguishable — the logger's own %(name)s
             # already carries module identity, so this string is deliberately
@@ -225,6 +266,13 @@ def retry_transport(
             )
             if attempt < attempts:
                 sleep(backoff_base * attempt)
+        else:
+            if retried:
+                with _RETRY_STATS_LOCK:
+                    _RETRY_STATS["calls"] += 1
+            return result
+    with _RETRY_STATS_LOCK:
+        _RETRY_STATS["calls"] += 1
     assert last_exc is not None  # every loop iteration above sets it before falling through
     raise TransportRetryExhausted(attempts=attempts, last_exc_type=type(last_exc)) from last_exc
 

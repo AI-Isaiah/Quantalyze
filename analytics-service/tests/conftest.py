@@ -241,3 +241,72 @@ def golden_252d_input() -> dict:
 def golden_252d_expected() -> dict:
     """Read the committed expected metrics output (metrics_json + sibling kinds)."""
     return json.loads((FIXTURES_DIR / "golden_252d_expected.json").read_text())
+
+
+# ── live-DB transport retries: visible on a GREEN run ────────────────────────
+#
+# Phase 164.9 plan 05 review. `tests/live_db_transport.py`'s bounded retry logs a
+# WARNING per retry, and its stated contract is that "a run that retried is
+# DISTINGUISHABLE from one that did not" — the whole justification for a retry
+# over a bare re-run. But pytest CAPTURES log records and renders them only in the
+# report of a FAILING test, and this repo's `pytest.ini` sets no `log_cli`. So on
+# exactly the run where it matters — a shared-TEST transport fault absorbed by
+# attempt 2, suite GREEN — the warning printed nothing and the degrading gateway
+# was laundered into a slow pass.
+#
+# The summary line below is emitted UNCONDITIONALLY, including the "0" case, so
+# the absence of retries is itself a measurement rather than an absence of output.
+# Chosen over turning `log_cli` on in `pytest.ini`, which would change the
+# rendering of the whole ~6k-test suite for one module's benefit.
+#
+# xdist: retries happen in WORKER processes, whose terminal writes are never
+# shown. Each worker ships its counters through `config.workeroutput` at
+# sessionfinish; the controller accumulates them as each node goes down. In a
+# serial run `pytest_testnodedown` never fires and the controller's own counters
+# are the whole story, so the two paths never double-count.
+_LIVE_DB_RETRY_FROM_WORKERS = {"retries": 0, "calls": 0}
+
+
+def pytest_sessionfinish(session, exitstatus):
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is None:
+        return  # controller (or a serial run): counted in the summary hook below
+    from tests.live_db_transport import retry_stats
+
+    retries, calls = retry_stats()
+    workeroutput["live_db_retries"] = retries
+    workeroutput["live_db_retry_calls"] = calls
+
+
+class _LiveDbRetryNodeCollector:
+    """`pytest_testnodedown` is an XDIST hookspec. Declaring it unconditionally in
+    a conftest makes pluggy raise `PluginValidationError: unknown hook` whenever
+    xdist is absent or switched off (`-p no:xdist`), so it is registered only when
+    xdist is actually active."""
+
+    def pytest_testnodedown(self, node, error):
+        workeroutput = getattr(node, "workeroutput", None) or {}
+        _LIVE_DB_RETRY_FROM_WORKERS["retries"] += workeroutput.get("live_db_retries", 0)
+        _LIVE_DB_RETRY_FROM_WORKERS["calls"] += workeroutput.get(
+            "live_db_retry_calls", 0
+        )
+
+
+def pytest_configure(config):
+    if config.pluginmanager.hasplugin("xdist"):
+        config.pluginmanager.register(_LiveDbRetryNodeCollector(), "live-db-retry-nodes")
+
+
+def live_db_retry_summary_line() -> str:
+    """The exact line `pytest_terminal_summary` writes. Split out so it can be
+    asserted against a REAL run's stdout rather than re-spelled in a test."""
+    from tests.live_db_transport import retry_stats
+
+    retries, calls = retry_stats()
+    retries += _LIVE_DB_RETRY_FROM_WORKERS["retries"]
+    calls += _LIVE_DB_RETRY_FROM_WORKERS["calls"]
+    return f"live-db transport: {retries} retry/retries across {calls} call(s)"
+
+
+def pytest_terminal_summary(terminalreporter):
+    terminalreporter.write_line(live_db_retry_summary_line())

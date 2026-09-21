@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -353,6 +355,50 @@ def test_a_mutating_method_taints_only_the_rest_of_its_own_chain():
     assert read_proxy.table("compute_jobs").select("*").execute() == {"data": [{"id": 1}]}
     assert read_client._execute_calls == 2  # the read DID retry
     assert len(sleeps) == 1
+
+
+# ── Operator visibility on a GREEN run ───────────────────────────────────────
+
+
+def test_retry_is_visible_in_the_terminal_summary_of_a_PASSING_run():
+    """The claim under test is OPERATOR-VISIBLE, not record-created.
+
+    Behaviour 1 above asserts through `caplog`, which proves only that the
+    WARNING record exists. pytest CAPTURES log records and renders them in the
+    report of a FAILING test, so on the one run that matters — a transport fault
+    absorbed by a retry, suite GREEN — the warning printed nothing. This drives a
+    REAL pytest subprocess over a test that genuinely retries, asserts it PASSED,
+    and asserts the count reached stdout anyway.
+
+    The `"retry attempt" not in stdout` assertion is not decoration: it pins the
+    PREMISE. If a future pytest.ini switches `log_cli` on, that line starts
+    appearing and this test says so rather than silently duplicating the signal.
+    """
+    analytics_service_dir = Path(__file__).resolve().parents[1]
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_live_db_transport.py::test_recovery_returns_underlying_result_with_correct_attempt_count",
+            "-q",
+            "-p",
+            "no:xdist",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=analytics_service_dir,
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr  # the run was GREEN
+    assert "1 passed" in proc.stdout
+    assert re.search(
+        r"live-db transport: [1-9]\d* retry/retries across [1-9]\d* call\(s\)",
+        proc.stdout,
+    ), f"no non-zero retry summary on a passing run; stdout was:\n{proc.stdout}"
+    assert "retry attempt" not in proc.stdout  # the WARNING itself is still captured
 
 
 # ── Proxy special-method delegation ──────────────────────────────────────────
