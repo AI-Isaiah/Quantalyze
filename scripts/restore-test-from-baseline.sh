@@ -1082,13 +1082,18 @@ census_class_lines() { awk -v k="$2" 'index($0, k "=") == 1' "$1" | LC_ALL=C sor
 # commits. That limit is real and is not closed by this change.
 check_extension_guard() {
   local pre_file="$1" post_file="$2"
-  local pre_ext_lines post_ext_lines ext_lost ext_gained
+  local pre_ext_lines post_ext_lines pre_ext_names post_ext_names ext_lost ext_gained
   pre_ext_lines=$(census_class_lines "$pre_file" extensions)
   post_ext_lines=$(census_class_lines "$post_file" extensions)
+  # Display form only — the comparison above already ran on the full "extensions="
+  # lines; this just strips the repeated key for a readable message, the same way
+  # ext_lost/ext_gained are stripped below.
+  pre_ext_names="${pre_ext_lines//extensions=/}"
+  post_ext_names="${post_ext_lines//extensions=/}"
   ext_lost=$(comm -23 <(printf '%s\n' "$pre_ext_lines") <(printf '%s\n' "$post_ext_lines") | sed '/^$/d')
   ext_gained=$(comm -13 <(printf '%s\n' "$pre_ext_lines") <(printf '%s\n' "$post_ext_lines") | sed '/^$/d')
-  [ -z "$ext_lost" ] || fail "post-census extensions=${post_ext_lines:-<none>}, pre-census had ${pre_ext_lines:-<none>}. LOST from public: ${ext_lost//extensions=/}. An extension that lived in public was CASCADE-dropped and the dump did not put it back."
-  [ -z "$ext_gained" ] || fail "post-census extensions=${post_ext_lines:-<none>}, pre-census had ${pre_ext_lines:-<none>}. GAINED in public: ${ext_gained//extensions=/}. An extension now lives in public that did not before the restore — a DIFFERENT fault from something lost, and the dump did not intend to put anything there."
+  [ -z "$ext_lost" ] || fail "post-census extensions=${post_ext_names:-<none>}, pre-census had ${pre_ext_names:-<none>}. LOST from public: ${ext_lost//extensions=/}. An extension that lived in public was CASCADE-dropped and the dump did not put it back."
+  [ -z "$ext_gained" ] || fail "post-census extensions=${post_ext_names:-<none>}, pre-census had ${pre_ext_names:-<none>}. GAINED in public: ${ext_gained//extensions=/}. An extension now lives in public that did not before the restore — a DIFFERENT fault from something lost, and the dump did not intend to put anything there."
 }
 
 # ⛔ A7 — `grep -c … || true` SWALLOWED EXIT 2. grep exits 1 for "no matches" (a
