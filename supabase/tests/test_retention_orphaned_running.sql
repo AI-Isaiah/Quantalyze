@@ -1255,6 +1255,18 @@ BEGIN
   IF v_status_2 IS DISTINCT FROM 'failed_final' THEN
     RAISE EXCEPTION 'TEST FAILED (4/FANOUT-GLOBAL-01): this run''s own less-dominant claimed-and-stale row was not terminalized under the deployed arm-A budget (got %). Either the budget was narrowed below what this run''s own rows need, or a foreign row crowded it out -- both are the failure this calibration exists to catch.', v_status_2;
   END IF;
+  -- RED-UNDER: the own-1 check above cannot be broken by narrowing LIMIT
+  --            alone -- v_own_1 is the MOST dominant row under the deployed
+  --            ASC sort, so any budget >= 1 keeps it in. Reversing the sort
+  --            direction flips ranking to v_own_2 (newest) first, v_foreign
+  --            second, v_own_1 (oldest) LAST, so v_own_1 is the one excluded
+  --            at LIMIT 2 -- while v_own_2 and v_foreign both stay included
+  --            and their own checks stay green, so THIS assertion is the
+  --            first (and only) thing to redden. Same Part-1/Part-3
+  --            interference and same seven-entry neuter as arm
+  --            `4/FANOUT-GLOBAL-01` above -- this mutation narrows the same
+  --            migration's same LIMIT, just with the direction also flipped.
+  -- RED-UNDER-M: {"arm":"4/FANOUT-GLOBAL-01/own-1","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"         ORDER BY claimed_at ASC\n         LIMIT 100","replace":"         ORDER BY claimed_at DESC\n         LIMIT 2","occurrences":1}],"neuter":[{"arm":"1/JOB-05/D-19"},{"arm":"1/JOB-05/D-19"},{"arm":"1/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"}]}
   IF v_status_1 IS DISTINCT FROM 'failed_final' THEN
     RAISE EXCEPTION 'TEST FAILED (4/FANOUT-GLOBAL-01/own-1): this run''s own MOST-dominant claimed-and-stale row was not terminalized (got %). It should win a slot at any budget >= 1; if it did not, the seed itself is broken and this calibration proves nothing.', v_status_1;
   END IF;
@@ -1265,6 +1277,17 @@ BEGIN
   -- auth.users row). Under the file's REAL LIMIT-100 budget it is also
   -- terminalized here -- proof it genuinely competed for the budget rather
   -- than sitting inert.
+  -- RED-UNDER: v_foreign ranks SECOND under the deployed ASC sort (between
+  --            v_own_1 and v_own_2), sandwiched, so no LIMIT/direction
+  --            mutation can exclude it alone while keeping both neighbors.
+  --            Narrowing to LIMIT 1 instead excludes BOTH v_foreign and
+  --            v_own_2, which would otherwise redden `4/FANOUT-GLOBAL-01`
+  --            (the own-2 check above) FIRST since it runs earlier in
+  --            program order; that identity is neutered for this arm only
+  --            so the foreign check below becomes the live failure. v_own_1
+  --            stays included at LIMIT 1 (it is always rank 1), so its own
+  --            check stays green.
+  -- RED-UNDER-M: {"arm":"4/FANOUT-GLOBAL-01/foreign","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"         ORDER BY claimed_at ASC\n         LIMIT 100","replace":"         ORDER BY claimed_at ASC\n         LIMIT 1","occurrences":1}],"neuter":[{"arm":"1/JOB-05/D-19"},{"arm":"1/JOB-05/D-19"},{"arm":"1/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"4/FANOUT-GLOBAL-01"}]}
   IF v_fstatus IS DISTINCT FROM 'failed_final' THEN
     RAISE EXCEPTION 'TEST FAILED (4/FANOUT-GLOBAL-01/foreign): the foreign competitor row was not terminalized under the deployed budget (got %). A foreign row that never enters the sweep is a token, not a competitor, and this calibration would prove nothing about isolation under real contention.', v_fstatus;
   END IF;

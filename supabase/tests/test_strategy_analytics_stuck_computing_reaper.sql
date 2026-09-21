@@ -1524,6 +1524,19 @@ BEGIN
   IF v_status_2 IS DISTINCT FROM 'failed' THEN
     RAISE EXCEPTION 'TEST FAILED (7/FANOUT-GLOBAL-01): this run''s own less-dominant stranded row was not reaped under the deployed reap budget (got %). Either the budget was narrowed below what this run''s own rows need, or a foreign row crowded it out -- both are the failure this calibration exists to catch.', v_status_2;
   END IF;
+  -- RED-UNDER: the own-1 check above ("v_own_1 always wins a slot at any
+  --            budget >= 1") cannot be broken by narrowing LIMIT alone --
+  --            v_own_1 is the MOST dominant row under the deployed ASC sort,
+  --            so any budget >= 1 keeps it in. It CAN be broken by reversing
+  --            the sort direction: under DESC, ranking flips to v_own_2
+  --            (newest) first, v_foreign second, v_own_1 (oldest) LAST, so
+  --            v_own_1 is the one excluded at LIMIT 2 -- while v_own_2 and
+  --            v_foreign both stay included and their own checks stay green,
+  --            so THIS assertion is the first (and only) thing to redden.
+  --            Same Part-3 interference and same 4x neuter as arm
+  --            `7/FANOUT-GLOBAL-01` above -- this mutation narrows the same
+  --            migration's same LIMIT, just with the direction also flipped.
+  -- RED-UNDER-M: {"arm":"7/FANOUT-GLOBAL-01/own-1","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"       ORDER BY s.computing_started_at ASC\n       LIMIT 25","replace":"       ORDER BY s.computing_started_at DESC\n       LIMIT 2","occurrences":1}],"neuter":[{"arm":"3/arm E/JOB-02"},{"arm":"3/arm E/JOB-02"},{"arm":"3/arm E/JOB-02"},{"arm":"3/arm E/JOB-02"}]}
   IF v_status_1 IS DISTINCT FROM 'failed' THEN
     RAISE EXCEPTION 'TEST FAILED (7/FANOUT-GLOBAL-01/own-1): this run''s own MOST-dominant stranded row was not reaped (got %). It should win a slot at any budget >= 1; if it did not, the seed itself is broken and this calibration proves nothing.', v_status_1;
   END IF;
@@ -1533,6 +1546,17 @@ BEGIN
   -- DIFFERENT synthetic owner. Under the file's REAL LIMIT-25 budget it is
   -- also reaped here -- proof it genuinely competed for the budget rather
   -- than sitting inert.
+  -- RED-UNDER: v_foreign ranks SECOND under the deployed ASC sort (between
+  --            v_own_1 and v_own_2), so no LIMIT/direction mutation can
+  --            exclude it alone while keeping both neighbors -- it is
+  --            sandwiched. Narrowing to LIMIT 1 instead excludes BOTH
+  --            v_foreign and v_own_2, which would otherwise redden
+  --            `7/FANOUT-GLOBAL-01` (the own-2 check above) FIRST since it
+  --            runs earlier in program order; that identity is neutered for
+  --            this arm only so the foreign check below becomes the live
+  --            failure. v_own_1 stays included at LIMIT 1 (it is always
+  --            rank 1), so its own check stays green.
+  -- RED-UNDER-M: {"arm":"7/FANOUT-GLOBAL-01/foreign","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"       ORDER BY s.computing_started_at ASC\n       LIMIT 25","replace":"       ORDER BY s.computing_started_at ASC\n       LIMIT 1","occurrences":1}],"neuter":[{"arm":"3/arm E/JOB-02"},{"arm":"3/arm E/JOB-02"},{"arm":"3/arm E/JOB-02"},{"arm":"3/arm E/JOB-02"},{"arm":"7/FANOUT-GLOBAL-01"}]}
   IF v_fstatus IS DISTINCT FROM 'failed' THEN
     RAISE EXCEPTION 'TEST FAILED (7/FANOUT-GLOBAL-01/foreign): the foreign competitor row was not reaped under the deployed budget (got %). A foreign row that never enters the sweep is a token, not a competitor, and this calibration would prove nothing about isolation under real contention.', v_fstatus;
   END IF;

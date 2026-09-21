@@ -2088,7 +2088,40 @@ export const FILES_FLOOR = 48;
 //                `arms: 25/25/0` (retention, was 24/24/0),
 //                `arms: 38/38/0` (reconcile, was 37/37/0) -- 0 defects each.
 //                WAIVED_CEILING stays 0 (0 waivers, this move).
-export const ARMS_FLOOR = 416;
+// ⭐ CURRENCY 2026-09-21 (Phase 164.9 plan 04, fix round -- section-coverage
+//                gate found six sections with no twin): 416 -> 422. SIX new
+//                arms, one per uncovered `TEST FAILED (...)` identity, all in
+//                already-annotated files -- FILES_FLOOR does not move.
+//                `7/FANOUT-GLOBAL-01/own-1` (reaper) and
+//                `4/FANOUT-GLOBAL-01/own-1` (retention): reverse the deployed
+//                sweep's ORDER BY from ASC to DESC at the same narrowed
+//                budget, which excludes the most-dominant own row instead of
+//                the least-dominant one. `7/FANOUT-GLOBAL-01/foreign`
+//                (reaper) and `4/FANOUT-GLOBAL-01/foreign` (retention):
+//                narrow the budget to 1 (ASC unchanged), excluding the
+//                foreign row alongside the least-dominant own row, neutering
+//                the less-dominant-own identity that would otherwise fire
+//                first. `5/FANOUT-GLOBAL-01/own` and
+//                `5/FANOUT-GLOBAL-01/foreign` (reconcile): the foreign row
+//                there is sandwiched between two own ranks at EVERY LIMIT/
+//                direction pair a budget >= 4 allows (budget < 4 is unsafe --
+//                Part 2's own four simultaneously-tied candidates need it,
+//                MEASURED: a first attempt at LIMIT 3 produced
+//                WRONG-ARM(2/arm C5b/...), an unrelated Part-2 tie loser). A
+//                sixth own row (a pure rank-shifter, no assertion of its own)
+//                was added so the SAME LIMIT-4 mutation the base arm already
+//                uses excludes the foreign row too, differentiated from the
+//                base arm only by which identity is neutered.
+//                MEASURED on real pg-lane runs, each arm in isolation
+//                (`--file <gate> --arm <arm>`): all six score
+//                `RED (identity ok)`, exit 2, `No defects in the narrowed
+//                scope.` (the reconcile pair re-run twice each to confirm no
+//                flakiness against Part 2's own nondeterminism). Full-file
+//                re-runs (no `--arm` filter): `arms: 31/31/0` (reaper, was
+//                29/29/0), `arms: 27/27/0` (retention, was 25/25/0),
+//                `arms: 40/40/0` (reconcile, was 38/38/0, re-run twice) -- 0
+//                defects each. WAIVED_CEILING stays 0 (0 waivers, this move).
+export const ARMS_FLOOR = 422;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
