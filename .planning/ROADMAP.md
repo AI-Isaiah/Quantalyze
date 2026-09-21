@@ -2219,6 +2219,142 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.6 to break down)
 
+### Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals (INSERTED)
+
+**Goal:** A client can add an MT5 key, repeatedly, without taking MT5 validation down for
+everyone — and if the terminal does wedge, it recovers WITHOUT a human.
+**Requirements**: TBD
+**Depends on:** Phase 164.6 (nothing blocking; the fault is live in PROD today)
+**Plans:** 0 plans
+
+⛔ **BOOKED FROM A LIVE PRODUCTION INCIDENT, measured end-to-end 2026-09-21 by the founder and the
+orchestrator together.** Everything below is a reading, not an inference. Founder's words:
+*"This should really get fixed."*
+
+⭐ **THE DEFECT, REPRODUCED TWICE — a validate against a HEALTHY terminal FAILS AND WEDGES IT.**
+One shared MT5 terminal (`mt5-gateway`) serves every client's key validation, and a validate makes
+it drop its current broker session and log in as the client being validated.
+- **#1** — session monitor `already_authorized` at 10:14 / 10:24 / 10:34 / 10:44 / 10:54 (healthy
+  ~50 min) → validate 11:02:38 → the terminal's OWN Journal logs `disconnected` at 11:02:38.263 and
+  **nothing after** → analytics `login` stage **45,335 ms** → `-10005` IPC timeout →
+  `outcome="transient"`, HTTP 424.
+- **#2, after a successful manual recovery** — monitor `already_authorized` 12:48:12 in **33 ms** →
+  validate ~12:52 → `-10005` → monitor `not_healed:ipc_fault` 12:58:32. ⭐ Between healthy and
+  wedged the ONLY event was a validate.
+
+⭐ **MECHANISM — THE ACCOUNT SWITCH, not a bad password.** The monitor calls
+`initialize_with_credentials` every 10 min against the HOUSE account and returns
+`already_authorized` in 33 ms because nothing must change. A validate calls the SAME verb against a
+CLIENT account, forcing a session tear-down and re-login. That tear-down is where it dies.
+⛔ **THE WRONG-PASSWORD THEORY IS REFUTED — do not re-adopt it.** Correct credentials failed
+identically (`duration_ms=55514`, same `-10005`), and MT5 writes a Journal line for EVERY login
+attempt INCLUDING failures; there were none. ⛔ `classify_mt5_login_error` is NOT at fault and this
+is NOT the Phase 167 CREDTRUST residual — the classifier correctly refused to blame a credential for
+an answer the broker never gave (the D-02 refusal rule working as designed): no rejection, because
+no answer.
+**Once wedged, EVERYTHING fails until a human intervenes** — correct credentials, any client, any
+attempt. ⭐ **MT5 onboarding is currently self-inflicted-broken: the act of adding a key breaks the
+thing needed to add a key.**
+
+**RECOVERY, PROVEN:** restart `terminal64.exe` under the SAME Wine prefix, container and volume →
+Journal `12:41:44 started` → `12:41:46 authorized` (2.0 s, UNATTENDED) → analytics `12:48:12
+already_authorized` in 33 ms. **Outage 11:02:38Z → 12:41:46Z = 1h39m.**
+
+⛔ **FOUR CORRECTIONS TO RECORDED BELIEF, each measured, each changes a remedy:**
+1. **The wedge is PROCESS state, not PERSISTED state.** `MT5-WEDGE-OBS-01` says a redeploy cannot
+   fix `-10005` because the Wine prefix lives on the persistent volume — TRUE for its modal-dialog
+   cause, FALSE for this one. `-10005` has at least TWO causes with DIFFERENT remedies.
+   ⛔ Cross-link and refine that entry; do NOT reopen it — its mechanism is proven to work.
+2. **It is NOT a modal dialog here.** Live VNC console: no dialog, Alerts tab empty. ⭐ And the
+   terminal could not log in BY HAND — the founder clicked OK on its own Login dialog three ways
+   and the Journal wrote NOTHING each time. A responsive UI proves only that the window loop is alive.
+3. **The terminal DOES auto-login after a restart** when the password is saved (2.0 s, unattended).
+   The recorded expectation that a restart lands on `-10004` needing an operator is wrong here, and
+   that belief is what makes this fault look operator-only.
+4. ⭐⭐ **`terminal64.exe` IS NOT SUPERVISED — this is why a 2-second recovery took 1h39m.** s6
+   supervises the desktop, VNC, nginx, cron and audio (`/run/service/`); the terminal is started
+   ONCE by `/Metatrader/start.sh` from the openbox session autostart and NOTHING watches it.
+
+**Success criteria (to be derived properly at planning; these are the measured subjects):**
+1. ⭐ The root cause of the switch wedge is **found and named**, not worked around. ⛔ Sleeping or
+   retrying around it is not a fix. ⚠️ A switch DID succeed cleanly the same day (`04:08:06
+   disconnected` → `04:08:07 authorized`, ~1 s), so the switch is not universally broken — the phase
+   must explain what differs.
+2. `terminal64.exe` runs under supervision with a liveness check, so an unresponsive terminal
+   restarts without a human. ⚠️ The restart must preserve the auto-login proven today.
+3. The heal **acts** on `ipc_fault` instead of reporting `not_healed`. ⭐ This is Phase 164.6.2's
+   heal finally getting a production verdict and it is NEGATIVE: five consecutive
+   `not_healed:ipc_fault`, because it cannot drive a terminal whose IPC is dead — it never reaches a
+   login attempt.
+4. ⚠️ The prod-prober's MT5 arm **actually measures the terminal**. It reported `mt5-ssh-transport`
+   ("the terminal was never reached and nothing about it was measured") while `railway ssh` into the
+   same container worked fine with a WORKSPACE-scoped token — so `mt5-ipc-timeout`, the
+   classification `MT5-WEDGE-OBS-01` was closed on, has **never once fired in production**.
+   ⛔ REQUIRED HERE, not deferred: without it this phase cannot honestly prove criterion 1 held.
+   Calibrate against a REAL wedge, not only a fixture.
+5. The wizard stops telling the user to retry when retry cannot work. Shipped copy claims a
+   *"temporary exchange issue or a network blip"* and says *"Try again in a moment"* — measured
+   false across two retries 45 s and 55 s apart, one with correct credentials. ⭐ The server already
+   knows (`ipc_fault`). ⛔ Do NOT delete the honest `KEY_NETWORK_TIMEOUT` arm — it is correct for a
+   genuine transport failure; mint a DISTINCT arm, the pattern `KEY_SCOPE_CHECK_UNREADABLE` exists for.
+6. ⚠️ `correlation_id` is minted PER WIZARD SESSION, not per request — measured identical across
+   attempts HOURS apart, so two different failures are indistinguishable in support. That undercuts
+   the "email us with the correlation id" instruction in the same copy.
+
+⚠️ **PIN, DO NOT FIX — a settings landmine:** the terminal's Experts tab has *"Disable algorithmic
+trading when the account has been changed"* UNCHECKED. Validation IS an account change, so ticking
+it would silently disable algo trading on the shared terminal. Correct today only by default;
+nothing in the repo asserts it.
+
+⛔ **THIS PHASE DOES NOT FIX THE EVICTION** — that is Phase 164.6.6. Do not let "MT5 is back" read
+as "the finding is closed": the outage was the symptom, the shared mutable terminal is the defect.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.6.5 to break down)
+
+### Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session (INSERTED)
+
+**Goal:** A client's key validation cannot evict, disturb or expose another client's broker session
+on the shared terminal — and a shared-terminal outage reaches a human without one clicking a button.
+**Requirements**: TBD
+**Depends on:** Phase 164.6.5 (availability first: this phase changes the terminal's ownership model,
+which is only safe once validation stops wedging it)
+**Plans:** 0 plans
+
+⛔ **SAME INCIDENT AS 164.6.5, DIFFERENT DEFECT.** 164.6.5 makes validation stop breaking the
+terminal; this phase makes the terminal stop being a shared mutable resource. 164.6.5 is
+independently shippable; this is the architecture.
+
+**Success criteria (to be derived properly at planning):**
+1. ⭐⭐ **THE EVICTION — and the NORMAL path is the defect, not the failure path.** Measured
+   2026-09-21: `04:08:06 '<account A>': disconnected` → `04:08:07 '<account B>': authorized` — a
+   clean ONE-SECOND handover. Account A was serving a live session with **11 open positions** and
+   was evicted by an unrelated client's onboarding, with no error, no signal and no record against
+   it. ⛔ The outage in 164.6.5 must not overshadow this: a validate that SUCCEEDS still silently
+   destroys another client's session.
+2. ⚠️ **CLIENT ACCOUNTS ACCUMULATE IN THE SHARED TERMINAL, and that is a DISCLOSURE surface.** Its
+   Navigator tree holds registered accounts across SEVERAL broker servers — one per client who has
+   ever validated. Anyone with VNC access to the gateway container can read the full list of client
+   account numbers and their brokers. ⛔ This does NOT go away by fixing the wedge.
+3. **A shared-terminal outage reaches a human.** Measured across the 1h39m total outage: `/health`
+   returned `"status":"ok"` throughout; the escalation at `consecutive_not_measured=6` flipped log
+   level INFO→WARNING and set `blind=True`, which NOTHING outside its own module reads; the
+   prod-prober run concluded `success` BY DESIGN (status-class defects exit 0 so Railway's
+   wait-for-CI does not skip the deploy). ⭐ **Detection and filing DID work** — the prober filed on
+   the P1 issue within 80 seconds — so this is a **SALIENCE** problem, not a detection one: the
+   issue dedups by label so its title still carries a defect date from 2026-09-10, and the Actions
+   view reads green. ⛔ Do NOT reopen `MT5-WEDGE-OBS-01`; cross-link instead.
+   ⭐ **The way this incident was actually found was a founder clicking a button.** That is the
+   finding this criterion exists to answer.
+4. ⚠️ **A founder decision, not to be taken silently:** per-validation isolation (ephemeral or
+   pooled terminals) vs serialize-and-restore on one terminal. Both have real cost; record the
+   reasoning wherever this repo tracks decisions.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.6.6 to break down)
+
 ### Phase 164.6.1: MYPYSTRICT — the strict gate claims to cover all running-service code and does not cover the module that IS the service (INSERTED)
 
 **Goal:** `analytics-service/main.py` is **930 lines of RUNNING-SERVICE code** (`uvicorn main:app`) sitting OUTSIDE the `mypy --strict` gate, while that gate's own comment at `ci.yml:3209-3216` states the strict floor *"now covers ALL running-service code — `services/` (part g), `routers/` (part h), and `models/` (part i)"*. ⭐ **THE FALSE COMMENT IS THE ITEM, not the five annotations.** Nothing under those three packages imports `main.py`, so `--follow-imports=silent` never reaches it, and `python3 -m mypy --strict main.py` reports 5 errors: `:255` `lifespan(_app: FastAPI)`, `:309` `_crash_handler` (missing `Task[None]`), `:741` ×2 `verify_service_key(request, call_next)`, `:891` `health()`. ⚠️ MEASURED on BOTH sides of Phase 164.1-02 — the identical five, one line number shifted by the +34 lines that plan added — and recorded in that phase's `deferred-items.md`. ⚠️ **TWO of the five sit on the service-key middleware Phase 164.1 hardened for PYAPI-06, and one on the `/health` endpoint 164.1's own prober arm polls**, so the untyped surface is exactly where this milestone has been working. A gate that ASSERTS complete coverage while blind to the service's entry module is this milestone's named defect class, which is why it is a phase rather than a typing backlog item. DELIVERABLE: annotate the three functions, add `main.py` to the `ci.yml` mypy invocation, and CORRECT the comment to name the real surface. ⛔ NOT in scope: `analytics-service/tests/` (5,439 strict errors across 182 files) — `TODOS.md:3263` and `:5197` already hold that as an OPEN POLICY question ("B-mypy part j, or record tests/ as permanently out of strict scope"), and folding it in would smuggle a milestone-sized decision into a hygiene item.
