@@ -24,7 +24,17 @@ import { resolve } from "node:path";
 
 const CENSUS_SCRIPT = "scripts/live-db-fixture-drift-census.mjs";
 const BASELINE_FILE = "scripts/live-db-fixture-drift-baseline.txt";
-const CORPUS_FLOOR = 40;
+// ⛔ RATCHETED 40 → 48 on 2026-09-21 (Phase 164.9 review round). MEASURED: this census
+// walks 51 files, so a floor of 40 left ELEVEN files of silent narrowing headroom — the
+// same stale-low shape the review round found in the lane corpus, in a second place.
+//
+// ⛔ THIS IS NOT `CORPUS_FLOOR` FROM `scripts/live-db-lane-corpus.mjs`, AND THE TWO MUST NOT
+// BE UNIFIED. They guard DIFFERENT corpora and were measured on the same day at different
+// sizes: the fixture-drift census walks 51 files, the live-DB LANE corpus walks 49. A review
+// round recommended raising one "to match" the other on the assumption they were two spellings
+// of one number; they are not. Merging them would make an honest change to either corpus red
+// for a reason that has nothing to do with it.
+const CORPUS_FLOOR = 48;
 
 function runCensus(args: string[] = []) {
   const res = spawnSync("node", [CENSUS_SCRIPT, ...args], {
@@ -48,7 +58,7 @@ describe("live-db-fixture-drift census — blocking gate", () => {
     expect(status, out).toBe(0);
   });
 
-  it("anti-vacuity floor: the reported corpus size is at least 40 (separate from the allowlist check)", () => {
+  it(`anti-vacuity floor: the reported corpus size is at least ${CORPUS_FLOOR} (separate from the allowlist check)`, () => {
     // Deliberately does NOT assert on `status` — the summary line (and the corpus size it
     // carries) prints whether the run found zero findings or several. This test's ONLY job is
     // proving the corpus itself did not collapse; coupling it to exit status would make it
