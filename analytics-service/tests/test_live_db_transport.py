@@ -36,7 +36,17 @@ def _postgrest_gateway_error(status_code: int) -> APIError:
             "message": "JSON could not be generated",
             "code": status_code,
             "hint": "Refer to full message for details",
-            "details": "SUPER SECRET body postgres://user:pw@host:5432/db",
+            "details": (
+                # The sentinel is "SUPER SECRET" and NOTHING ELSE here is
+                # load-bearing: the only assertion over this value is
+                # `"SUPER SECRET" not in message`. ⛔ Do NOT make this literal
+                # credential-SHAPED (a DSN, a key, a token). This repository is
+                # PUBLIC, the secret scanner reads one squash commit on a merge
+                # to the default branch, and a credential-shaped fixture literal
+                # becomes a latent finding that outlives the test. It was one
+                # until the pre-push guardrail refused it.
+                "SUPER SECRET body <opaque-upstream-body-placeholder>"
+            ),
         }
     )
 
