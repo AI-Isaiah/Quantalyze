@@ -7438,6 +7438,29 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       max rather than a cached count. Upstream in the GSD toolchain, not this repo's source —
       but the corrupted artifact is tracked here.
 
+- [ ] **`[164.9-CALIBRATION-NARROWS-NOT-REPLACES]` the three foreign-row calibrations NARROW
+      the global assertions and MEASURE THE MARGIN; they do NOT caller-scope the deployed sweep
+      (recorded 2026-09-21, Phase 164.9 review round)** — ⭐ **RECORDED AS A KNOWN LIMIT, AND IT
+      DELIBERATELY CARRIES NO PHASE.** Founder decision 2026-09-21, taken against the standing
+      rule that only a data-integrity or user-facing gap earns its own phase. This is neither:
+      nothing a user sees changes, and no row is written wrongly.
+      **What is PROVEN, by execution:** a FOREIGN row is seeded and the new assertion stays GREEN
+      where the old one would have gone RED for someone else's work. Armed, and observed failing
+      before it was observed passing.
+      **What is NOT proven:** that the deployed sweep is caller-scoped. It is not. All three
+      calibration parts disclose this in their own headers, in their own words — *"it is not, and
+      cannot be without a production migration adding a run discriminator column."* No arm
+      exercises the OLD assertion to show it would have reddened.
+      **If it is ever closed**, the shape is a PROD migration adding a run discriminator column,
+      after which the calibrations assert SCOPING rather than margin. ⛔ That authors a migration,
+      so it goes through `migration-reviewer` + `rls-policy-auditor` + `silent-failure-hunter`
+      before any apply, and its self-verify must be CATALOG-ONLY — a data-reading `RAISE
+      EXCEPTION` applies to PROD and REFUSES on TEST, and a refused TEST apply blocks the PROD
+      apply (`[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`).
+      ⛔ **Forbidden closure: re-wording ROADMAP criterion 2 to match whatever ships.** The
+      criterion carries a dated amendment naming exactly this gap; a silent re-word would erase
+      the only record that the replacement half was never measured.
+
 ---
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
