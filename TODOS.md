@@ -3179,6 +3179,8 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       item. MEASURED 2026-09-10: `grep -rn` over `TODOS.md` and `.planning/ROADMAP.md` → **0 hits**.
       It existed only as `T-164.8-22` in `164.8-05-PLAN.md`'s threat table: no owner, no date, no
       gate. Same shape CLAUDE.md records for `FANOUT-GLOBAL-01`.
+      ⛔ (2026-09-21: `FANOUT-GLOBAL-01` now has its own entry in this file's
+      `## 🟡 FIX MID-TERM` section — this citation is retro-linked to it.)
       **THE UNDERLYING GAP IS REAL.** The psql redaction shared by `ci.yml` and
       `test-restore-from-baseline.yml` masks THREE expressions; four other psql sites in that
       workflow can still print a DNS-failure HOSTNAME into a public log.
@@ -3220,6 +3222,28 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       ⛔ **Do not "fix" it with a bare `2>/dev/null`.** That trades a credential leak for a blind
       gate, which is the defect class this whole phase family exists to remove. Capture, count,
       withhold.
+
+- [ ] **`FANOUT-GLOBAL-01` a GLOBAL assertion against shared TEST measured other people's CI
+      rows as well as this run's own, and the failure-mode FAMILY naming that defect had no
+      `TODOS.md` entry, no owner, no date and no trigger (booked 2026-09-21, Phase 164.9
+      TESTISOLATION)** — TEST is shared with other people's CI, so a GLOBAL assertion there
+      ("no stuck jobs exist", "the table is empty") is measuring other people's rows as well as
+      ours and is unreliable by construction. The fix this family exists to force is per-run
+      isolation: a run asserts about its OWN rows and nothing else — definition carried verbatim
+      from the `### Phase 164.9` `ROADMAP.md` Goal paragraph.
+      **MEASURED 2026-09-21 over this file, as a verdict:** before this entry, `FANOUT-GLOBAL-01`
+      had exactly three hits, and all three were PROSE references to it as a failure-mode FAMILY
+      ("same shape", "this failure mode") — no entry carried it as an id, so it had no owner, no
+      date and no gate.
+      **Naming decision:** the id is KEPT, not retired, because it is cited by name in
+      `CLAUDE.md`, in the `### Phase 164.9` `ROADMAP.md` entry, and in at least two other
+      `TODOS.md` entries as a family label; retiring it would orphan those citations for no gain.
+      **Family membership — the ids that are instances of this defect:** `[164.8-PUSH-RACE-VAC08]`,
+      `[164.8.2-VAC08-FATAL-ON-TRANSIENT]`, `[164.9-SHARED-TEST-TRANSPORT-FLAKE]`,
+      `[164.9-MUTEX-HOLDER-DIED-UNSERIALIZED]`, `[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]`.
+      **Trigger:** any new assertion written against the shared TEST project, and any new job or
+      script that takes a shared-TEST lock.
+      **Owner:** Phase 164.9 TESTISOLATION.
 
 - [ ] **`[164.8.2-VAC08-FATAL-ON-TRANSIENT]` an unreadable ledger row count now reds the WHOLE
       VAC-08 gate, where it used to cost only the absurdity floor (booked 2026-09-10, Phase
@@ -3302,6 +3326,8 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       routing block is already written at `.planning/ROADMAP.md` under Phase 164.9
       (`ROUTED HERE 2026-09-09`); this entry is the EVIDENCE half and that block is the ROUTING
       half, deliberately not copies of each other.
+      ⛔ (2026-09-21: `FANOUT-GLOBAL-01` now has its own entry in this file's
+      `## 🟡 FIX MID-TERM` section — this citation is retro-linked to it.)
 
 - [ ] **`[164.8-TEST-DATA-RESEEDED]` The restore destroyed every row in shared TEST's `public`
       schema and that is NOT reversible; what TEST holds now is whatever CI has written since
@@ -4193,6 +4219,8 @@ Both come out of Phase 164.5.1's verification and its plan-09 security re-audit.
 ONLY as prose inside `.planning/` until this entry, which is exactly the `FANOUT-GLOBAL-01`
 failure mode this milestone already records: an item with no `TODOS.md` id has no owner, no
 trigger and no phase.
+⛔ (2026-09-21: `FANOUT-GLOBAL-01` now has its own entry in this file's `## 🟡 FIX MID-TERM`
+section — this citation is retro-linked to it.)
 
 - [ ] **`[FANOUT-FAILBRANCH-UNEXERCISED-01]` The ledger fan-out's all-candidates-failed branch
       has still never run in PRODUCTION. It is gated, not exercised — and those are not the
