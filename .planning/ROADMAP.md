@@ -2234,6 +2234,7 @@ orchestrator together.** Everything below is a reading, not an inference. Founde
 ⭐ **THE DEFECT, REPRODUCED TWICE — a validate against a HEALTHY terminal FAILS AND WEDGES IT.**
 One shared MT5 terminal (`mt5-gateway`) serves every client's key validation, and a validate makes
 it drop its current broker session and log in as the client being validated.
+
 - **#1** — session monitor `already_authorized` at 10:14 / 10:24 / 10:34 / 10:44 / 10:54 (healthy
   ~50 min) → validate 11:02:38 → the terminal's OWN Journal logs `disconnected` at 11:02:38.263 and
   **nothing after** → analytics `login` stage **45,335 ms** → `-10005` IPC timeout →
@@ -2261,6 +2262,7 @@ Journal `12:41:44 started` → `12:41:46 authorized` (2.0 s, UNATTENDED) → ana
 already_authorized` in 33 ms. **Outage 11:02:38Z → 12:41:46Z = 1h39m.**
 
 ⛔ **FOUR CORRECTIONS TO RECORDED BELIEF, each measured, each changes a remedy:**
+
 1. **The wedge is PROCESS state, not PERSISTED state.** `MT5-WEDGE-OBS-01` says a redeploy cannot
    fix `-10005` because the Wine prefix lives on the persistent volume — TRUE for its modal-dialog
    cause, FALSE for this one. `-10005` has at least TWO causes with DIFFERENT remedies.
@@ -2276,6 +2278,7 @@ already_authorized` in 33 ms. **Outage 11:02:38Z → 12:41:46Z = 1h39m.**
    ONCE by `/Metatrader/start.sh` from the openbox session autostart and NOTHING watches it.
 
 **Success criteria (to be derived properly at planning; these are the measured subjects):**
+
 1. ⭐ The root cause of the switch wedge is **found and named**, not worked around. ⛔ Sleeping or
    retrying around it is not a fix. ⚠️ A switch DID succeed cleanly the same day (`04:08:06
    disconnected` → `04:08:07 authorized`, ~1 s), so the switch is not universally broken — the phase
@@ -2327,6 +2330,7 @@ terminal; this phase makes the terminal stop being a shared mutable resource. 16
 independently shippable; this is the architecture.
 
 **Success criteria (to be derived properly at planning):**
+
 1. ⭐⭐ **THE EVICTION — and the NORMAL path is the defect, not the failure path.** Measured
    2026-09-21: `04:08:06 '<account A>': disconnected` → `04:08:07 '<account B>': authorized` — a
    clean ONE-SECOND handover. Account A was serving a live session with **11 open positions** and
@@ -2710,6 +2714,49 @@ silence VAC-04 — the detector worked; what it found is benign, which is a diff
 **Plans:** 0 plans
 
 Plans:
+
+### Phase 164.9.1: JOBRPCTRUTH — the compute-job RPC surface does what its own comments say (INSERTED)
+
+**Goal:** The compute-job RPC surface does what its own comments and migrations say it does — a fan-in job actually reaches the fan-in state, and an in-flight collision is distinguishable from a fresh enqueue.
+
+⛔ **A CONFIRMED PRODUCTION DEFECT, DATA INTEGRITY. Verified by the orchestrator at HEAD 2026-09-21, not merely reported by an agent.**
+`enqueue_compute_job` routes all three modes to the **TEN-ARG** `_enqueue_compute_job_internal`. That function's `INSERT` names `strategy_id, portfolio_id, allocator_id, api_key_id, kind, parent_job_ids, idempotency_key, exchange, metadata, next_attempt_at` — **`status` is not among them**, so the row takes the column DEFAULT `'pending'`. Only the **SEVEN-ARG** overload carries migration 109's `done_pending_children` branch, and nothing reaches it.
+⭐ **CONSEQUENCE: a job enqueued through the public wrapper with `parent_job_ids` NEVER ENTERS THE FAN-IN STATE IN PRODUCTION.**
+⭐ **The ten-param migration's OWN COMMENT says the function "computes the status ('done_pending_children' when p_parent_job_ids is non-empty) and INSERTs it."** The code does not. Every other live mention of that status in the file is a read predicate (`status IN (...)`), never a write. The documentation and the behaviour disagree, and the documentation is the one that is right about the intent.
+
+⚠️ **WHY IT SURVIVED THIS LONG, which is the part worth designing against.** It is invisible to a static census BY CONSTRUCTION — a missing column in an `INSERT`, inside one of two same-named overloads — and it was masked by an error raised earlier in the same call. It survived a green suite, `mypy --strict` and a purpose-built fixture-drift census. It was found only when Phase 164.9's live-DB lane enqueued a LIVE kind and execution reached the statement. ⛔ A fix proven by reading is not proven.
+
+## ⛔ SECOND ITEM, SAME SURFACE — `[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]`
+1. **The `already_inflight` branch is UNREACHABLE.** `_enqueue_compute_job_internal` RETURNS the existing in-flight id instead of raising `unique_violation`, so a caller cannot tell a collision from a fresh enqueue. That is an RPC change, not a test change. ⛔ Do NOT close it by teaching the test to accept the current return.
+2. **An INTENT question, not fixture drift.** `match-decisions-xor-rls` asserts `bridge_outcomes_unique_per_strategy_holding`, which migration **081 replaced** with a per-decision key — the catalogue's own `COMMENT` says so. The phase must decide what the arm should assert under the CURRENT invariant. ⛔ Deleting the assertion is not an answer.
+
+## ⛔ FOLDED IN 2026-09-21 — `[164.9-TEST-ANALYTICS-URL-REARM]`
+Phase 164.9 plan 10 normalised shared TEST's `analytics_service_url` row to a loopback discard sink — run by the founder 2026-09-21, confirmed on two independent connections (shape: 54 chars `https` -> 18 chars `http`, sink true). ⛔ **NOTHING RE-ARMS IT.** A future restore rebuilds `public` from the baseline and the row silently returns to whatever the migration seeds, after which a tick on that database POSTs the Vault-held service key to a real host again. The recorded remedy is a post-restore step in `test-restore-from-baseline.yml`.
+⚠️ **This was briefly booked as its own phase (RESTOREFIDELITY) and that was over-booking** — it is one step in a workflow, not a phase. Folded here by founder decision, against the standing rule that only a data-integrity or user-facing item earns a phase.
+⚠️ Its sibling, `[164.9-BASELINE-PRIVILEGES-ABSENT]`, was deliberately NOT folded in and is NOT a phase: it is CI fidelity on TEST, invisible to any user, and its 15 failures are already held honestly by the live-DB lane's shrink-only execution ledger. ⛔ Do not promote it to a phase without a new argument.
+
+## Success Criteria
+1. ⭐ **THE HARM IS PROVEN OR THE PHASE SHRINKS.** Before any fix, enqueue a job through the public wrapper WITH `parent_job_ids` against a real database and observe what actually happens to the parent. The DEFECT is confirmed (the `INSERT` omits `status`; the migration's own comment says it must not); the HARM — a parent claimed and run before its children finish — is INFERRED and has not been observed. ⛔ If no harm is observable, this drops to fix-or-drop and stops being a phase. Do not skip this to get to the fix.
+2. **A job enqueued through the public wrapper with `parent_job_ids` lands in the fan-in state**, proven by EXECUTION against a real database in the live-DB lane — not by reading the migration.
+3. **The two overloads agree, or one of them stops existing.** ⚠️ Name them BY SYMBOL AND ARITY; a fix that edits the wrong arity changes nothing and reads as done.
+4. **An in-flight collision is distinguishable from a fresh enqueue** at the caller.
+5. **The migration-081 invariant question is answered in writing** and the arm asserts the current invariant.
+6. ⭐ **A regression gate that would have caught this**, living where the defect was found — the live-DB lane — and calibrated by neutering it and watching it go red.
+
+## ⛔ Constraints
+- ⛔ **This phase AUTHORS MIGRATIONS. THREE REVIEWERS BEFORE ANY APPLY:** `migration-reviewer`, `rls-policy-auditor`, `silent-failure-hunter`.
+- ⛔ **Re-base before `CREATE OR REPLACE`** — grep ALL of `supabase/migrations/**` and re-base on the LATEST definition.
+- ⛔ **Never a data-reading `RAISE EXCEPTION` in a migration** (`[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`): TEST holds PROD's CATALOGUE and never its DATA, so such a migration applies to PROD and REFUSES on TEST, and a refused TEST apply BLOCKS the PROD apply. Self-verify must be CATALOG-ONLY. ⚠️ Phase 164.9 shipped a linter that refuses this shape at author time — conform to it, do not exempt yourself from it.
+- ⛔ `cron.schedule(...)` is a LIVE OP, never in a migration.
+- ⛔ This checkout's Supabase CLI is linked to PRODUCTION — the disposable pg-lane and the local stack are the only permitted DB paths.
+
+**Requirements**: `[164.9-FANIN-STATUS-NEVER-SET]` (`TODOS.md`, `## FIX NOW`), `[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]`, `[164.9-TEST-ANALYTICS-URL-REARM]`
+**Depends on:** Phase 164.9
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.9.1 to break down)
 
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
