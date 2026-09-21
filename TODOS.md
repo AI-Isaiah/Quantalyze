@@ -1702,6 +1702,40 @@ true for 146 and half of 142–145, and **false for 141**.
       behind one, so verify at the SERVICE, not at the cron row. (ii) The `COMMENT ON DATABASE`
       marker check confirms which DATABASE you are connected to; it says nothing about which
       SERVICE the tick calls. They are different questions and only the first has a guard.
+      ⭐ **UPDATE 2026-09-21 (Phase 164.9 TESTISOLATION, plan 10) — the MEASUREMENT half has
+      landed and the remediation exists; the WRITE is a founder action and is pending.** Arm D1 in
+      `supabase/tests/test_analytics_service_settings_and_vault_tick.sql` now reads the LIVE row on
+      every gate run where the database marker names TEST (and measures the allow-list constraint
+      where nobody has hand-set a marker), so this stops being a claim about the migration and
+      becomes a claim about the database. The TEST-only remediation is
+      `scripts/test-only-normalize-analytics-url.sh`, runbook
+      `docs/runbooks/test-analytics-url.md`. Both traps above are restated in the runbook verbatim,
+      because they are the two ways a green reading here means nothing.
+
+- [ ] **`[164.9-TEST-ANALYTICS-URL-REARM]` A RESTORE RE-ARMS the hazard above, by design, so
+      closing it once does not close it (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 10).**
+      Owner: Phase 164.9 TESTISOLATION.
+      **Trigger:** any dispatch of `test-restore-from-baseline.yml`. Its reference-data replay
+      reseeds `system_settings.analytics_service_url` FAITHFULLY — an explicit founder decision
+      (`[164.8.1-TEST-ANALYTICS-URL-PROD]` above, L-03), because omitting the row would leave TEST
+      missing a setting its own ledger claims applied.
+      **Detection:** arm D1 of `supabase/tests/test_analytics_service_settings_and_vault_tick.sql`.
+      It reads the LIVE row and goes RED, by name, on the first `sql-tests` run after the restore.
+      That red IS the report; it is not a gate defect.
+      **Remedy:** re-run `docs/runbooks/test-analytics-url.md` — dry run, read the marker verdict,
+      commit, then confirm via the follow-up dry run REFUSING on an already-correct value.
+      ⛔ **NOT closed by editing `scripts/restore-test-refdata-allowlist.txt`.** Dropping the entry
+      would make the restore silently normalise the hazard, which is the exact failure class Phase
+      164.8.1 exists to remove. ⛔ **NOT closed by a migration:** every merge touching
+      `supabase/migrations/**` auto-applies to PRODUCTION and would repoint the live match engine
+      at a closed local port.
+      **What would actually close it:** a post-restore step in `test-restore-from-baseline.yml`
+      that runs the remediation inside the held shared-TEST mutex, after the replay. Plan 10 did
+      NOT do that — it is a restore-workflow change and plan 10 touched no workflow.
+      ⚠️ **If Phase 164.9 closes without that step, RE-ROUTE this entry to a named successor with
+      `/gsd-phase --edit` in the same session.** ⛔ Do not let it decay into a prose id with no
+      owner, no date and no gate — that is `FANOUT-GLOBAL-01`'s own defect, and this phase exists
+      to remove it, not to reproduce it one entry further down.
 
 - [ ] **`[164.8.5-MANIFEST-SIDE-LOOP-DEAD]` ◆ **IN PROGRESS 2026-09-12 — the ORDERING half is code-complete on `phase-164.8.6-proberhygiene` but NOT MERGED, and carries a known defect.** The manifest-side loop now runs above every early return, with three one-lever controls each observed RED against the pre-hoist file. ⛔ The hoist introduced a regression the review caught: a `null` element in `manifest.jobs` THROWS at the new position, and because the loop is above every return the throw DISCARDS section (0)'s already-collected live PROD credential findings — a SUBSTITUTIVE refusal, the exact invariant this phase exists to enforce. Reproduced independently; under fix. ⚠️ `164.5.1` still owns the re-capture half.
   ↳ ORIGINAL ENTRY: `compareManifest`'s MANIFEST-side hygiene loop sits
