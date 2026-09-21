@@ -226,6 +226,49 @@ EOF
   log "loading baseline into local database from ${BASELINE_FILE}"
   "$psql" "$db_url" -v ON_ERROR_STOP=1 -q -f "$BASELINE_FILE"
   log "baseline loaded from ${BASELINE_FILE}"
+
+  load_reference_data "$psql" "$db_url"
+}
+
+# ── Reference-data replay (Phase 164.9 plan 08) ───────────────────────────────
+#
+# WHY THIS EXISTS, and it was MEASURED rather than anticipated. The baseline is
+# SCHEMA-ONLY — zero data statements, by design — so every table comes back
+# EMPTY, INCLUDING the small reference tables that other tables carry FOREIGN
+# KEYS to. `compute_jobs.kind` REFERENCES `compute_job_kinds(name)`, and with
+# that table empty EVERY insert of a compute job fails 23503. Measured on the
+# first real run of the live-DB lane: 29 of 50 failures were that one constraint.
+#
+# ⛔ THIS IS NOT A TEST FIXTURE AND MUST NOT BECOME ONE. The rows come from
+# `scripts/extract-reference-inserts.mjs`, which slices the ORIGINAL BYTES of
+# allowlisted migration statements — the same generator, the same
+# `scripts/restore-test-refdata-allowlist.txt`, and the same audited mechanism
+# the shared-project restore uses. Hand-written seed rows here would be a second,
+# unaudited source of truth for what the reference tables contain, and it would
+# drift from the migrations silently.
+#
+# ⛔ AND A GENERATOR FAILURE IS FATAL, never a warning. A lane that booted with
+# an empty reference table would not skip — it would fail 29 specs with a foreign
+# key error that says nothing about the real cause, which is how a whole class of
+# specs gets written off as "flaky".
+load_reference_data() {
+  local psql="$1" db_url="$2" tmp
+  tmp="$(mktemp)"
+  if ! node "${REPO_ROOT}/scripts/extract-reference-inserts.mjs" >"$tmp"; then
+    rm -f "$tmp"
+    echo "FATAL: scripts/extract-reference-inserts.mjs failed. The lane's reference" >&2
+    echo "       tables would be EMPTY and every FK into them would raise 23503." >&2
+    exit 1
+  fi
+  if [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    echo "FATAL: the reference-data generator emitted NOTHING. 'measured zero' and" >&2
+    echo "       'could not measure' are different answers; refusing to continue." >&2
+    exit 1
+  fi
+  "$psql" "$db_url" -v ON_ERROR_STOP=1 -q -f "$tmp"
+  rm -f "$tmp"
+  log "reference data replayed from the allowlisted migration statements"
 }
 
 # Prints the psql path, or nothing. Never exits — it runs in a command
