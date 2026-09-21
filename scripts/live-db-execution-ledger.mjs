@@ -600,7 +600,7 @@ function main(argv) {
   }
 
   if (!existsSync(ledgerPath)) {
-    console.error(`[live-db-ledger] FATAL: no ledger at ${ledgerPath}.`);
+    console.error(`[live-db-ledger] FATAL: no ledger at ${relPrintable(ledgerPath)}.`);
     return 1;
   }
   const ledger = parseLedger(readFileSync(ledgerPath, "utf8"));
@@ -615,7 +615,7 @@ function main(argv) {
 
   for (const note of verdict.notes) console.log(`[live-db-ledger] ${note}`);
   console.log(
-    `[live-db-ledger] ledger: ${ledger.entries.length} entr(y/ies) (see ${ledgerPath.replace(REPO_ROOT + "/", "")})`,
+    `[live-db-ledger] ledger: ${ledger.entries.length} entr(y/ies) (see ${relPrintable(ledgerPath)})`,
   );
 
   if (verdict.ok) {

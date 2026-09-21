@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, relative, resolve } from "node:path";
 
 /**
  * THE LIVE-DB LANE'S PRE-BOOT REFUSALS (Phase 164.9 plan 08).
@@ -25,6 +25,18 @@ import { resolve } from "node:path";
  */
 
 const REPO_ROOT = __dirname;
+
+/**
+ * ⛔ A path printed into a CI log is PUBLISHED - this repository is public and
+ * the Actions log is world-readable. On a developer box an absolute path under
+ * the home directory carries the LOCAL USERNAME, so every diagnostic that names
+ * a file names it RELATIVE to the repo, or not at all. Same idiom, same phase,
+ * as the three `.mjs` gates that carry their own copy of this helper.
+ */
+const relPrintable = (p: string): string => {
+  const r = relative(REPO_ROOT, p);
+  return !r || r.startsWith("..") ? `<outside the repository>/${basename(p)}` : r;
+};
 const RUN_SH = resolve(REPO_ROOT, "scripts/local-stack/run.sh");
 const REPO_SUPABASE_DIR = resolve(REPO_ROOT, "supabase");
 
@@ -136,7 +148,7 @@ export function setup(): void {
   const lane = readLaneEnvOrNull();
   if (!lane) {
     throw new Error(
-      `LIVE-DB LANE ABSENT: ${LANE_ENV_PATH} is missing or incomplete, so the Supabase stack ` +
+      `LIVE-DB LANE ABSENT: ${relPrintable(LANE_ENV_PATH)} is missing or incomplete, so the Supabase stack ` +
         `this lane needs is not running (or was torn down mid-write). ${BOOT_HINT}`,
     );
   }
