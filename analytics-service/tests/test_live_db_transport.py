@@ -355,6 +355,68 @@ def test_a_mutating_method_taints_only_the_rest_of_its_own_chain():
     assert len(sleeps) == 1
 
 
+# ── Proxy special-method delegation ──────────────────────────────────────────
+
+
+def test_wrapped_empty_container_is_falsy_not_silently_truthy():
+    """The QUIET failure mode of a `__getattr__`-only proxy: special-method
+    lookup bypasses `__getattr__`, and a class with neither `__bool__` nor
+    `__len__` is ALWAYS TRUTHY. A wrapped EMPTY result would then satisfy
+    `if rows:` and fail `if not rows:` — a wrong answer with no exception, which
+    is worse than the loud `TypeError` the other dunders give.
+    """
+    empty = wrap_live_db_client([], attempts=2, backoff_base=0.01, sleep=lambda _: None)
+    nonempty = wrap_live_db_client([1, 2], attempts=2, backoff_base=0.01, sleep=lambda _: None)
+
+    assert not empty
+    assert bool(empty) is False
+    assert bool(nonempty) is True
+    assert len(empty) == 0
+    assert len(nonempty) == 2
+
+
+def test_wrapped_container_delegates_iteration_membership_and_indexing():
+    proxy = wrap_live_db_client(
+        [{"id": 1}, {"id": 2}], attempts=2, backoff_base=0.01, sleep=lambda _: None
+    )
+
+    assert list(proxy) == [{"id": 1}, {"id": 2}]
+    assert proxy[0] == {"id": 1}
+    assert {"id": 2} in proxy
+
+
+def test_wrapped_objects_compare_and_repr_by_target():
+    a = wrap_live_db_client({"k": 1}, attempts=2, backoff_base=0.01, sleep=lambda _: None)
+    b = wrap_live_db_client({"k": 1}, attempts=2, backoff_base=0.01, sleep=lambda _: None)
+
+    assert a == b  # proxy vs proxy compares the two TARGETS
+    assert a == {"k": 1}  # proxy vs raw
+    assert not (a != {"k": 1})
+    assert repr(a) == repr({"k": 1})  # not "<_RetryingClientProxy object at 0x...>"
+
+
+def test_attribute_assignment_through_the_proxy_reaches_the_target():
+    """`__slots__` + no `__setattr__` makes assignment through the proxy an
+    AttributeError. A live-DB fixture that rebuilds a transport session AFTER
+    wrapping — the ordering `test_compute_jobs_fencing.py` happens to avoid
+    today — would hit exactly that."""
+
+    class _Client:
+        def __init__(self):
+            self.session = "original"
+
+    target = _Client()
+    proxy = wrap_live_db_client(target, attempts=2, backoff_base=0.01, sleep=lambda _: None)
+
+    proxy.session = "rebuilt"
+
+    assert target.session == "rebuilt"  # the assignment landed on the TARGET
+    assert proxy.session == "rebuilt"
+
+    del proxy.session
+    assert not hasattr(target, "session")
+
+
 # ── Task 2's derived factory-coverage pin ────────────────────────────────────
 
 

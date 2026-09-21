@@ -236,6 +236,24 @@ class _RetryingClientProxy:
     `retry_transport`. A callable attribute's return value is wrapped again so a
     chain like `client.table(...).select(...).eq(...).execute()` stays covered end
     to end without the call site needing to know about the proxy.
+
+    SPECIAL-METHOD LOOKUP BYPASSES `__getattr__` (dated 2026-09-21, Phase 164.9
+    plan 05 review). CPython resolves `len(p)`, `bool(p)`, `iter(p)`, `p[k]`,
+    `p == q`, `repr(p)` and attribute ASSIGNMENT on the TYPE, never through
+    `__getattr__`, so a proxy that defines only `__getattr__` does not forward
+    them. Most of those fail loudly with a `TypeError`. `bool()` is the QUIET one:
+    a class with neither `__bool__` nor `__len__` is ALWAYS TRUTHY, so a wrapped
+    empty list would satisfy `if results:` and fail `if not results:` — a silent
+    wrong answer, not an error. The dunders below are therefore delegated
+    explicitly. `__iter__`/`__getitem__` hand back the TARGET's own objects
+    unwrapped: past a terminal call those are data rows, not chainable builders,
+    and re-wrapping them would be the surprising behaviour.
+
+    ⚠️ MEASURED, not assumed: no live-DB fixture assigns through a proxy today.
+    `test_compute_jobs_fencing.py`'s `admin` fixture does rebuild
+    `client.postgrest.session`, but it does so on the RAW client and wraps
+    afterwards, so the assignment never reaches `__setattr__`. `__setattr__` is
+    delegated so that ordering stops being load-bearing.
     """
 
     __slots__ = ("_target", "_attempts", "_backoff_base", "_sleep", "_retry_safe")
@@ -305,6 +323,49 @@ class _RetryingClientProxy:
             sleep=sleep,
             retry_safe=child_retry_safe,
         )
+
+    # ── delegated special methods (see the class docstring) ──────────────────
+
+    def __setattr__(self, name: str, value: object) -> None:
+        setattr(object.__getattribute__(self, "_target"), name, value)
+
+    def __delattr__(self, name: str) -> None:
+        delattr(object.__getattribute__(self, "_target"), name)
+
+    def __repr__(self) -> str:
+        return repr(object.__getattribute__(self, "_target"))
+
+    def __bool__(self) -> bool:
+        return bool(object.__getattribute__(self, "_target"))
+
+    def __len__(self) -> int:
+        return len(object.__getattribute__(self, "_target"))  # type: ignore[arg-type]
+
+    def __iter__(self):
+        return iter(object.__getattribute__(self, "_target"))  # type: ignore[call-overload]
+
+    def __contains__(self, item: object) -> bool:
+        return item in object.__getattribute__(self, "_target")  # type: ignore[operator]
+
+    def __getitem__(self, key: object):
+        return object.__getattribute__(self, "_target")[key]  # type: ignore[index]
+
+    def __eq__(self, other: object) -> bool:
+        return object.__getattribute__(self, "_target") == _unwrap(other)
+
+    def __ne__(self, other: object) -> bool:
+        return object.__getattribute__(self, "_target") != _unwrap(other)
+
+    def __hash__(self) -> int:
+        return hash(object.__getattribute__(self, "_target"))
+
+
+def _unwrap(obj: object) -> object:
+    """Return the target behind a proxy, or `obj` itself. Keeps `proxy == proxy`
+    comparing the two TARGETS rather than a proxy against a proxy."""
+    if isinstance(obj, _RetryingClientProxy):
+        return object.__getattribute__(obj, "_target")
+    return obj
 
 
 def _wrap(

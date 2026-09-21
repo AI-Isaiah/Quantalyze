@@ -924,7 +924,25 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/live-db-lane-corpus.mjs | tee /tmp/live-db-lane-corpus.txt
-          files=$(grep -c '\.test\.tsx\?$' /tmp/live-db-lane-corpus.txt || true)
+          # ⛔ `grep -c` EXITS 1 ON A ZERO COUNT, so the count needs `|| true` to
+          # survive the legitimate zero — but `|| true` ALSO swallows the case
+          # where grep printed NOTHING at all (file absent or unreadable). That
+          # leaves `files` EMPTY, and `[ "" -eq 0 ]` is a bash syntax error
+          # (`integer expression expected`, status 2) which, inside an `if`
+          # CONDITION, does not trip `set -e` — control falls through to the
+          # success path and "could not count" passes as "counted zero". That is
+          # the [164.8.2-VAC08-FATAL-ON-TRANSIENT] shape, in the very step whose
+          # comment above says a green job that ran nothing must be impossible.
+          # So: capture the status, and REFUSE a non-numeric answer by name
+          # rather than restoring a fallback.
+          rc=0
+          files=$(grep -c '\.test\.tsx\?$' /tmp/live-db-lane-corpus.txt) || rc=$?
+          case "${files}" in
+            ''|*[!0-9]*)
+              echo "::error::could not COUNT the derived live-DB corpus (grep exited ${rc}, answer '${files}'). Unmeasured is not zero, and it is not a pass either."
+              exit 1
+              ;;
+          esac
           if [ "$files" -eq 0 ]; then
             echo "::error::The derived live-DB corpus is EMPTY — this job must never pass vacuously."
             exit 1
