@@ -28,16 +28,33 @@
  * already decided against.
  *
  * -- WHAT IS REFUSED, stated precisely --------------------------------------
- * Within a migration file, an ANONYMOUS BLOCK (`DO $tag$ ... $tag$` - the thing
+ * Within a migration file, an ANONYMOUS BLOCK (`DO $tag$ ... $tag$`, or the
+ * standard's other spelling `DO LANGUAGE plpgsql $tag$ ... $tag$` - the thing
  * that EXECUTES at apply time, as opposed to a `CREATE FUNCTION` body, which is
  * merely stored) whose body BOTH
  *   (a) reads from a relation in the APPLICATION schema - as opposed to a
  *       system catalogue or the information schema - AND
- *   (b) raises an exception under a condition derived from that read.
+ *   (b) REFUSES under a condition derived from that read.
  * Either half alone is fine. It is the CONJUNCTION that makes the migration's
  * success depend on data TEST does not have. A block that reads rows to drive a
  * conditional WRITE is allowed; a block that raises on a CATALOGUE condition is
  * allowed; `RAISE NOTICE` is not an exception.
+ *
+ * (b) IS FOUR SPELLINGS, NOT ONE, because a refusal that knew only the first is
+ * routed around by the others without anyone intending to route around it:
+ *   R1  `RAISE EXCEPTION` under a condition mentioning a variable the read
+ *       filled - and the taint travels through `v_total := v_n` as well;
+ *   R2  the same, with the read inline in the condition and no variable at all;
+ *   R3  `SELECT ... INTO STRICT`, where the row count IS the assertion and
+ *       PostgreSQL raises P0002/P0003 with no `RAISE` in the block at all;
+ *   R4  `IF NOT FOUND THEN RAISE`, which names neither a variable nor a
+ *       subquery and rides the implicit flag the preceding read left behind;
+ *   R5  `ASSERT`, which is a raise under a different keyword.
+ * EVERY ONE OF THEM NAMES A GUARD THAT FIRES WHEN THE TABLE IS EMPTY, and that
+ * is the charter rather than an accident: TEST holds the catalogue and no rows,
+ * so an empty-table refusal is what withholds the production apply. The inverse
+ * polarity - `IF FOUND THEN RAISE` - is deliberately NOT refused: it is false on
+ * an empty table, so it cannot withhold anything through TEST.
  *
  * -- THE REMEDY FOR SOMETHING ALREADY MERGED IS UNCHANGED -------------------
  * REVERT THE MERGE. Never an edit to `.github/workflows/supabase-migrate.yml`:
@@ -78,6 +95,13 @@
  * 3. A raise inside a `FOR ... LOOP` body with no enclosing conditional is NOT
  *    refused unless the condition mentions the loop variable. On an empty table
  *    the loop body never runs, so that shape cannot withhold an apply.
+ * 4. `IF FOUND THEN ... ELSE RAISE` reaches its raise on the empty branch, and
+ *    the conditional stack does not model `ELSE`. Not refused. Like (3) it
+ *    biases toward ALLOWING, which is the right direction for a gate whose
+ *    false positive blocks a legitimate deploy.
+ * 5. `UPDATE`/`INSERT` set `FOUND` too and are attributed by their target
+ *    relation; an `EXECUTE` of dynamic SQL hides its relation in a literal, so
+ *    it clears the attribution rather than carrying one (see 1).
  *
  * The EXACT commands CI runs, and the exact commands a developer runs locally:
  *
@@ -124,6 +148,24 @@ export const REFUSALS = [
     why:
       "the read sits directly in the condition that controls the raise, with no variable in between. Same dependence on rows TEST does not have; a refusal that only saw the variable spelling would be routed around by this one.",
   },
+  {
+    id: "R3-into-strict-over-application-relation",
+    title: "a `SELECT ... INTO STRICT` over an application relation",
+    why:
+      "`STRICT` makes the row count itself the assertion: PostgreSQL raises P0002 (no rows) or P0003 (too many) on a mismatch, with NO `RAISE` statement anywhere in the block. A refusal that looked only for the `RAISE` keyword cannot see this one at all, and it withholds an apply exactly the same way.",
+  },
+  {
+    id: "R4-not-found-conditioned-raise",
+    title: "a raise conditioned on `NOT FOUND` after an application read",
+    why:
+      "`IF NOT FOUND THEN RAISE EXCEPTION` names no variable and holds no subquery, so neither half of the variable/subquery detector fires - yet `FOUND` carries exactly the row-count answer the preceding read produced, and on a data-empty TEST it is true and the guard refuses. The POSITIVE polarity is deliberately not refused: `IF FOUND THEN RAISE` is false on an empty table, so it cannot withhold an apply through TEST.",
+  },
+  {
+    id: "R5-assert-over-application-data",
+    title: "an `ASSERT` whose expression depends on an application read",
+    why:
+      "`ASSERT` raises assert_failure on a false expression. It is the same refusal in a different keyword, and a gate that only knew `RAISE` would be routed around by a single word.",
+  },
 ];
 
 /**
@@ -137,7 +179,7 @@ export const REFUSALS = [
  *
  * Raise it when the table grows durably. Never lower it to clear a red.
  */
-export const REFUSALS_FLOOR = 2;
+export const REFUSALS_FLOOR = 5;
 
 /**
  * The self-test corpus. A leg names a fixture basename and what it proves. Every
@@ -211,6 +253,45 @@ export const SELF_TEST_LEGS = [
     colour: "green",
     rule: "R1-variable-conditioned-raise",
     why: "the same leading-clause spelling over the catalogue - recognising the clause must make the block SCANNED, not refused.",
+  },
+  {
+    fixture: "r3-into-strict.red.sql",
+    colour: "red",
+    rule: "R3-into-strict-over-application-relation",
+    expect: "public.fx_ledger",
+    why: "there is NO `RAISE` anywhere in the block. `INTO STRICT` makes the row count the assertion and PostgreSQL raises P0002/P0003 itself, so a detector hunting the `RAISE` keyword cannot see this shape at all.",
+  },
+  {
+    fixture: "r3-into-strict.green.sql",
+    colour: "green",
+    rule: "R3-into-strict-over-application-relation",
+    why: "the same `INTO STRICT` over the catalogue - the refused property is the relation, never the keyword.",
+  },
+  {
+    fixture: "r4-not-found-raise.red.sql",
+    colour: "red",
+    rule: "R4-not-found-conditioned-raise",
+    expect: "public.fx_ledger",
+    why: "no declared variable and no subquery: `FOUND` is the implicit flag the preceding application read left behind, which is neither half of the variable/subquery detector.",
+  },
+  {
+    fixture: "r4-not-found-raise.green.sql",
+    colour: "green",
+    rule: "R4-not-found-conditioned-raise",
+    why: "`NOT FOUND` after a catalogue read; `NOT FOUND` after an application read an intervening catalogue read has CLEARED; and the POSITIVE polarity over an application relation, which is false on an empty table and therefore outside this gate's charter.",
+  },
+  {
+    fixture: "r5-assert.red.sql",
+    colour: "red",
+    rule: "R5-assert-over-application-data",
+    expect: "public.fx_ledger",
+    why: "`ASSERT` raises assert_failure on a false expression - the same refusal in a different keyword, and a gate that knew only `RAISE` would be routed around by one word.",
+  },
+  {
+    fixture: "r5-assert.green.sql",
+    colour: "green",
+    rule: "R5-assert-over-application-data",
+    why: "the same `ASSERT` over the catalogue, which is the prescribed self-verification shape written with a different keyword.",
   },
   {
     fixture: "read-without-raise.green.sql",
@@ -520,6 +601,97 @@ export function variableAssignments(body, locals) {
   return out;
 }
 
+/** The relation an `UPDATE` or `INSERT INTO` writes, which also sets `FOUND`. */
+const DML_TARGET_RE =
+  /\b(?:UPDATE\s+(?:ONLY\s+)?|INSERT\s+INTO\s+)((?:[A-Za-z_][A-Za-z0-9_$]*|"[^"\n]+")(?:\s*\.\s*(?:[A-Za-z_][A-Za-z0-9_$]*|"[^"\n]+"))?)/i;
+
+/**
+ * Every statement in the block that PERFORMS A READ, in source order, each
+ * carrying the application relation it read (or `null` when it read only the
+ * catalogue, or read nothing nameable).
+ *
+ * This is what resolves `FOUND`. `FOUND` is set by the LAST SQL statement to
+ * run, so a catalogue read or a plain DML statement standing between an
+ * application read and the test CLEARS the attribution - recorded as a `null`
+ * relation rather than skipped, for the same reason `variableAssignments`
+ * records its untainted assignments: an entry that is skipped lets an older read
+ * reach forward and condemn a guard that no longer depends on it.
+ *
+ * @returns {Array<{at:number, relation:string|null}>} sorted by `at`
+ */
+export function statementReads(body, locals) {
+  const out = [];
+  let offset = 0;
+  for (const chunk of body.split(";")) {
+    const base = offset;
+    offset += chunk.length + 1;
+    if (!/\b(?:SELECT|INSERT|UPDATE|DELETE|PERFORM|EXECUTE)\b/i.test(chunk)) continue;
+    const rels = appRelationsIn(chunk, locals);
+    // `UPDATE rel` and `INSERT INTO rel` set FOUND too, and name their relation
+    // where no FROM/JOIN clause does. `DELETE FROM rel` is already a FROM.
+    let relation = rels[0] ?? null;
+    if (relation === null) {
+      const dml = DML_TARGET_RE.exec(chunk);
+      if (dml) {
+        const raw = dml[1].replace(/\s+/g, "");
+        const lower = raw.replace(/"/g, "").toLowerCase();
+        if (!locals.has(lower) && !isCatalogueRelation(raw)) relation = lower;
+      }
+    }
+    out.push({ at: base + chunk.length, relation });
+  }
+  return out;
+}
+
+/**
+ * Every `SELECT ... INTO STRICT` over an APPLICATION relation, in source order.
+ *
+ * `STRICT` turns the row count into the assertion itself: PostgreSQL raises
+ * P0002 on no rows and P0003 on more than one, and the block need not contain a
+ * `RAISE` at all. The same statement over the catalogue is not refused - it
+ * answers the same way on TEST as on production.
+ *
+ * @returns {Array<{off:number, relation:string}>}
+ */
+export function strictIntoReads(body, locals) {
+  const out = [];
+  let offset = 0;
+  for (const chunk of body.split(";")) {
+    const base = offset;
+    offset += chunk.length + 1;
+    const m = /\bINTO\s+STRICT\b/i.exec(chunk);
+    if (!m) continue;
+    const rels = appRelationsIn(chunk, locals);
+    if (rels.length === 0) continue;
+    out.push({ off: base + m.index, relation: rels[0] });
+  }
+  return out;
+}
+
+/**
+ * Every `ASSERT <expression>` in the block, each carrying the expression as a
+ * condition the caller resolves exactly as it resolves an `IF` condition.
+ *
+ * The optional `, <message>` is a literal whose interior `maskSql` has already
+ * blanked, so leaving it in the text costs nothing and removing it would need a
+ * comma scan that string literals make unreliable.
+ *
+ * @returns {Array<{off:number, condition:{text:string, at:number}}>}
+ */
+export function assertSites(body) {
+  const out = [];
+  for (const m of body.matchAll(/(?:^|[^A-Za-z0-9_$.])ASSERT\s/gi)) {
+    const at = m.index + m[0].length;
+    const rest = body.slice(at);
+    const end = rest.indexOf(";");
+    out.push({
+      off: m.index,
+      condition: { text: end === -1 ? rest : rest.slice(0, end), at },
+    });
+  }
+  return out;
+}
+
 const RAISE_LEVELS_THAT_ARE_NOT_EXCEPTIONS = new Set([
   "NOTICE",
   "WARNING",
@@ -604,6 +776,68 @@ export function raiseSites(body) {
 }
 
 /**
+ * Resolve ONE condition against the block's reads: does its answer depend on
+ * rows? Three mechanisms, tried in the order that gives the most informative
+ * attribution, and each is a separate refusal id because each is a separate
+ * spelling a future author can reach for.
+ *
+ * @returns {{mechanism:"variable"|"subquery"|"found", relation:string, via:string}|null}
+ */
+function resolveCondition(cond, ctx) {
+  for (const name of ctx.names) {
+    if (!new RegExp(`\\b${name}\\b`, "i").test(cond.text)) continue;
+    // The assignment IN FORCE where the condition is evaluated - an overwrite
+    // clears a taint exactly as it clears a value.
+    const inForce = ctx.assigns.filter((a) => a.name === name && a.at < cond.at).pop();
+    if (!inForce || !inForce.relation) continue;
+    return { mechanism: "variable", relation: inForce.relation, via: `variable \`${name}\`` };
+  }
+  if (/\bSELECT\b/i.test(cond.text)) {
+    const rels = appRelationsIn(cond.text, ctx.locals);
+    if (rels.length > 0) {
+      return {
+        mechanism: "subquery",
+        relation: rels[0],
+        via: "an inline subquery in the condition",
+      };
+    }
+  }
+  // POLARITY IS PART OF THIS RULE, and narrowing to the negative one is a
+  // decision rather than a convenience. Every other refusal here names a guard
+  // that fires when the table is EMPTY - that is the whole charter: TEST has the
+  // catalogue and no rows, so an empty-table refusal is what withholds the
+  // production apply. `IF NOT FOUND THEN RAISE` fires on empty. `IF FOUND THEN
+  // RAISE` is its inverse: on a data-empty TEST it is false and the apply
+  // proceeds, so it cannot withhold anything through TEST. Refusing it would be
+  // this gate refusing a shape outside its own charter.
+  // ⚠️ STATED LIMITATION: `IF FOUND THEN ... ELSE RAISE` reaches the raise on
+  // the empty branch, and `raiseSites` does not model ELSE, so that spelling is
+  // not refused. It biases toward allowing, which is the right direction for a
+  // gate whose false positive blocks a legitimate deploy.
+  if (/\bNOT\s+FOUND\b|\bFOUND\s+IS\s+(?:NOT\s+TRUE|FALSE)\b/i.test(cond.text)) {
+    const last = ctx.reads.filter((r) => r.at <= cond.at).pop();
+    if (last && last.relation) {
+      return {
+        mechanism: "found",
+        relation: last.relation,
+        via: "the implicit `FOUND` flag left by the preceding read",
+      };
+    }
+  }
+  return null;
+}
+
+const RULE_FOR_MECHANISM = {
+  variable: "R1-variable-conditioned-raise",
+  subquery: "R2-subquery-conditioned-raise",
+  found: "R4-not-found-conditioned-raise",
+};
+
+const REASON_TAIL =
+  "TEST carries production's CATALOGUE and none of its ROWS, so this guard can refuse on TEST while applying cleanly on production - and a refused TEST apply WITHHOLDS the production apply. " +
+  "Make the self-verification CATALOGUE-ONLY, or make the read tolerant of an empty table. Do not relax this linter and do not widen its ledger";
+
+/**
  * Classify one migration's source.
  *
  * @returns {{blocks:number, refusals:Array<{rule:string,line:number,relation:string,via:string,reason:string}>} | {error:string, line:number}}
@@ -617,53 +851,70 @@ export function classifySource(src) {
   for (const block of scanned.blocks) {
     const locals = localNames(block.body);
     const assigns = variableAssignments(block.body, locals);
-    const names = [...new Set(assigns.map((a) => a.name))];
+    const ctx = {
+      locals,
+      assigns,
+      names: [...new Set(assigns.map((a) => a.name))],
+      reads: statementReads(block.body, locals),
+    };
+
+    /** One refusal, deduplicated per (rule, relation) across the whole file. */
+    const record = (rule, off, relation, via, what) => {
+      const key = `${rule}|${relation}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      refusals.push({
+        rule,
+        line: scanned.lineOf(block.start + off),
+        relation,
+        via,
+        reason:
+          `the anonymous block opened at line ${block.line} ${what} the APPLICATION relation \`${relation}\` (via ${via}). ` +
+          REASON_TAIL,
+      });
+      return true;
+    };
+
+    // R3. `SELECT ... INTO STRICT` makes the row count the assertion; there
+    // need be no `RAISE` anywhere in the block.
+    for (const s of strictIntoReads(block.body, locals)) {
+      record(
+        "R3-into-strict-over-application-relation",
+        s.off,
+        s.relation,
+        "`INTO STRICT`, which raises P0002/P0003 on a row-count mismatch with no `RAISE` statement present",
+        "asserts a row count against",
+      );
+    }
 
     for (const site of raiseSites(block.body)) {
       // Innermost condition first: the nearest data-derived condition is the
       // most informative one to report.
       for (let i = site.conditions.length - 1; i >= 0; i--) {
-        const cond = site.conditions[i];
-        let rule = null;
-        let relation = null;
-        let via = null;
-
-        for (const name of names) {
-          if (!new RegExp(`\\b${name}\\b`, "i").test(cond.text)) continue;
-          // The assignment IN FORCE where the condition is evaluated - an
-          // overwrite clears a taint exactly as it clears a value.
-          const inForce = assigns.filter((a) => a.name === name && a.at < cond.at).pop();
-          if (!inForce || !inForce.relation) continue;
-          rule = "R1-variable-conditioned-raise";
-          relation = inForce.relation;
-          via = `variable \`${name}\``;
-          break;
-        }
-        if (rule === null && /\bSELECT\b/i.test(cond.text)) {
-          const rels = appRelationsIn(cond.text, locals);
-          if (rels.length > 0) {
-            rule = "R2-subquery-conditioned-raise";
-            relation = rels[0];
-            via = "an inline subquery in the condition";
-          }
-        }
-        if (rule === null) continue;
-
-        const key = `${rule}|${relation}`;
-        if (seen.has(key)) break;
-        seen.add(key);
-        refusals.push({
-          rule,
-          line: scanned.lineOf(block.start + site.off),
-          relation,
-          via,
-          reason:
-            `the anonymous block opened at line ${block.line} raises an exception on a condition derived from a read of the APPLICATION relation \`${relation}\` (via ${via}). ` +
-            "TEST carries production's CATALOGUE and none of its ROWS, so this guard can refuse on TEST while applying cleanly on production - and a refused TEST apply WITHHOLDS the production apply. " +
-            "Make the self-verification CATALOGUE-ONLY, or make the read tolerant of an empty table. Do not relax this linter and do not widen its ledger",
-        });
+        const hit = resolveCondition(site.conditions[i], ctx);
+        if (!hit) continue;
+        record(
+          RULE_FOR_MECHANISM[hit.mechanism],
+          site.off,
+          hit.relation,
+          hit.via,
+          "raises an exception on a condition derived from a read of",
+        );
         break;
       }
+    }
+
+    // R5. The same refusal in a different keyword.
+    for (const site of assertSites(block.body)) {
+      const hit = resolveCondition(site.condition, ctx);
+      if (!hit) continue;
+      record(
+        "R5-assert-over-application-data",
+        site.off,
+        hit.relation,
+        hit.via,
+        "raises assert_failure on an expression derived from a read of",
+      );
     }
   }
   return { blocks: scanned.blocks.length, refusals };
