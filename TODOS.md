@@ -1280,6 +1280,40 @@ true for 146 and half of 142–145, and **false for 141**.
       rather than trusted at face value by a later reader.
       Owner: Phase 164.5.1 CRONREPOINT.
 
+- [ ] ⛔ **`[164.9-FANIN-STATUS-NEVER-SET]` a job enqueued through the PUBLIC wrapper with
+      `parent_job_ids` NEVER enters the fan-in state in production — a confirmed production
+      defect, data integrity (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 11, surfaced by
+      the live-DB lane in the plan 08 fix round and VERIFIED INDEPENDENTLY by the orchestrator
+      rather than merely reported).**
+      **THE MECHANISM, named by SYMBOL because line numbers drift
+      (`[164.7-CITATION-DRIFT-01]`):** `enqueue_compute_job` routes all three of its modes to the
+      **TEN-ARG** `_enqueue_compute_job_internal`, whose `INSERT` column list OMITS `status`, so
+      the row takes the column DEFAULT `'pending'`. Only the older **SEVEN-ARG** overload of the
+      same name still carries migration 109's `done_pending_children` branch for a row with
+      parents, and nothing reaches it.
+      **CONSEQUENCE:** `mark_compute_job_done`'s fan-in advance can never see such a row, so the
+      fan-in invariant is SILENTLY ABSENT in production. ⚠️ The ten-parameter migration's own
+      comment says the function "computes the status … and INSERTs it". The code does not — the
+      comment and the column list disagree, and the comment is the one that reads as true.
+      **WHY IT WAS INVISIBLE UNTIL NOW:** a missing column in an `INSERT` inside ONE of TWO
+      same-named overloads is invisible to a static census by construction, and it was masked by
+      an error raised earlier in the same call (a retired job kind) until the fix round removed
+      that mask. This is the live-DB execution lane doing the thing it was built to do.
+      **DELIVERABLE: a MIGRATION.** ⛔ Not this phase's work and none was authored here.
+      ⛔ **A fix RE-BASES on the LATEST definition after grepping ALL of `supabase/migrations/**`
+      for BOTH overloads** — this repo's standing rule, and there are demonstrably two live
+      definitions to reconcile, not one.
+      ⛔ **THREE REVIEWERS BEFORE ANY APPLY** — `migration-reviewer` + `rls-policy-auditor` +
+      `silent-failure-hunter`, findings fixed first. Merging anything under
+      `supabase/migrations/**` auto-applies to PRODUCTION.
+      ⛔ **NOT closed by** teaching the assertion to accept the current behaviour (that encodes
+      the defect as the contract), by deleting the arm, or by skipping it: the arm is left RED on
+      purpose with its derivation written at the assertion.
+      **Owner / destination: a NEW phase, proposed JOBRPCTRUTH, surfaced in
+      `164.9-11-SUMMARY.md` for `/gsd-phase --insert` — it also owns
+      `[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]`, which is the same surface. ⚠️ Until that phase
+      exists the owner is THE FOUNDER, who inserts it. Never a blank destination.**
+
 ---
 
 ## 🟡 FIX MID-TERM
@@ -1715,6 +1749,15 @@ true for 146 and half of 142–145, and **false for 141**.
 - [ ] **`[164.9-TEST-ANALYTICS-URL-REARM]` A RESTORE RE-ARMS the hazard above, by design, so
       closing it once does not close it (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 10).**
       Owner: Phase 164.9 TESTISOLATION.
+      ⭐ **RE-HOMED 2026-09-21 — THE `Owner:` LINE ABOVE IS SUPERSEDED, kept only as lineage.**
+      Phase 164.9 TESTISOLATION is CLOSING and did not build the post-restore step, so leaving it
+      owned by that phase is exactly what the warning at the foot of this entry forbids. Its real
+      subject is RESTORE-WORKFLOW HARDENING. **New destination: a new phase, proposed
+      RESTOREFIDELITY, surfaced in `164.9-11-SUMMARY.md` for `/gsd-phase --insert` together with
+      `[164.9-BASELINE-PRIVILEGES-ABSENT]`, which is the same subject — what the restore leaves
+      shared TEST in.** ⚠️ Until that phase exists the owner is **the founder**, who inserts it;
+      the destination is never blank and never a prose id. Everything below this line — trigger,
+      detection, remedy, forbidden closures — is unchanged and still binding.
       **Trigger:** any dispatch of `test-restore-from-baseline.yml`. Its reference-data replay
       reseeds `system_settings.analytics_service_url` FAITHFULLY — an explicit founder decision
       (`[164.8.1-TEST-ANALYTICS-URL-PROD]` above, L-03), because omitting the row would leave TEST
@@ -9621,3 +9664,124 @@ re-measured at HEAD on the branch rather than carried over as dated claims.
       mechanism for saying so explicitly, not a reason to leave it uncovered.
       ⚠️ The phase's in-file scope comment states this gap. If the gap is closed, that comment
       becomes false and must move with it.
+
+---
+
+## Phase 164.9 (TESTISOLATION) — closing residue (logged 2026-09-21, plan 11)
+
+⚠️ **Booked as the phase CLOSES, because the phase's own standing rule applies to its own
+residue first: an item two places disagree about is owned by NEITHER until someone decides, and a
+destination left blank is not a destination.** The matching statements live in the
+`### Phase 164.9` ROADMAP entry's CLOSING RESIDUE block; the two ledgers are meant to say the same
+thing, and a divergence between them is a defect in whichever was edited last.
+⛔ Three of the four entries below name a PROPOSED phase rather than a numbered one, because the
+executor is not permitted to number a phase. `/gsd-phase --insert` is the act that turns each
+proposal into a real destination; **until it runs the owner is the founder** — never blank, never
+a prose id. The fourth is owned by the founder outright and needs no phase.
+⚠️ **`[164.9-FANIN-STATUS-NEVER-SET]`, the confirmed PRODUCTION defect this phase surfaced, is
+deliberately NOT here — it is in `## 🔴 FIX NOW`**, because a live data-integrity defect filed in
+a tail residual section is the same disappearance this residue exists to prevent.
+
+- [ ] **`[164.9-CRIT8-RESTORE-DISPATCH-RECORD]` the ROADMAP criterion 8 restore dispatch is
+      POST-MERGE BY CONSTRUCTION, and the act of RECORDING its result is what makes the founder's
+      Option A honest (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 11).**
+      Owner: **THE FOUNDER — the human who merges this phase.** Not a phase. Not an agent.
+      **WHY IT EXISTS:** `test-restore-from-baseline.yml` carries a HARD ref guard and refuses any
+      dispatch that is not from the default branch, because a branch dispatch would restore shared
+      TEST from an unreviewed dump. So this phase's new restore guards cannot be exercised against
+      shared TEST until the phase has merged. The founder took Option A (ship, then dispatch, then
+      record) over Option B (re-home criterion 8) **on the explicit condition that this recording
+      act be booked with a named owner BEFORE the merge.** This entry is that condition.
+      **Trigger:** this phase's restore-script changes reaching the default branch.
+      **The act, in order:** (1) confirm the changes are on the default branch — if they are not,
+      STOP, because the dispatch would run the OLD script, prove nothing about this phase's
+      guards, and still destroy and rebuild a shared schema; (2) derive the confirm token at
+      dispatch time from the tracked baseline record AT THAT REF, never from a value copied out of
+      a planning document, because it moves with that file; (3) dispatch `mode=preflight` FIRST
+      and read its verdict; (4) only if the preflight is green, dispatch the committing mode with
+      the token; (5) read the run's own printed summary line and the guards' output.
+      **What closes it:** both run ids, both conclusions, the committing run's printed summary
+      line VERBATIM, and evidence the two new guards actually ran — written into
+      `164.9-11-SUMMARY.md` and the ROADMAP criterion 8 block, which currently reads PENDING.
+      ⛔ **NOT closed by a run id alone.** A dispatch that concluded successfully without
+      exercising the guards it was run to exercise has discharged NOTHING, and recording it as a
+      discharge would be the green-that-is-not-measuring-what-it-claims defect this entire phase
+      exists to remove.
+      ⚠️ **MEASURED by plan 11 while preparing the recipe, and it changes what a preflight
+      proves:** `check_extension_guard` is NOT REACHED in `mode=preflight` at all — the preflight
+      branch returns at its byte-for-byte rollback comparison, which covers the extension class
+      incidentally and never names the guard. A green preflight therefore does not evidence that
+      guard; only the committing run does. The value-pinning leg, by contrast, runs inside the
+      transaction in BOTH modes — but it is SILENT when clean, so neither guard prints a line on a
+      healthy run, and "the guard reported" must be read as "the run reached the point past it",
+      never as "a line appeared".
+      ⛔ **NOT closed by** relaxing, working around or dispatching around the ref guard; nor by an
+      agent running the dispatch. A committing restore drops and rebuilds the `public` schema of a
+      database other people's CI uses, and it is a human act.
+      ⛔ **What a green run will still NOT claim:** the extension guard runs AFTER its transaction
+      commits, so in committing mode it LABELS an outcome rather than PREVENTING one. That limit
+      is unchanged by any dispatch and must not be implied away by a green run id.
+
+- [ ] **`[164.9-BASELINE-PRIVILEGES-ABSENT]` the F1 live-DB residue — 15 lane failures that no
+      fixture can close, and the correction that splits them 9 / 6 (booked 2026-09-21, Phase 164.9
+      TESTISOLATION plan 11, out of the plan 08 fix round).**
+      **WHAT WAS RECORDED, AND WHERE IT IS WRONG.** Plan 08 read all 15 as one class — the
+      schema-only `supabase/schema/baseline.sql` does not reproduce column- and function-level
+      privileges, so tests asserting a REVOKE/GRANT holds fail on a stack built from it. For NINE
+      of them that reading stands. For `wizard-rpcs-live-db` — **6 of the 15 and the largest
+      single file** — the MEASURED message is the FUNCTION BODY's own role gate, not an EXECUTE
+      denial, and the baseline DOES carry the REVOKE/GRANT pair for that function. **So a baseline
+      re-dump may NOT close those six**, and whoever takes this must treat them as a SEPARATE
+      QUESTION rather than as more of the same. Reaching the body at all points at the
+      `pg_default_acl` re-grant the column comment itself warns about; the arms also assert a
+      happy path "as `authenticated`" under a grant a migration withdrew, which is
+      self-contradictory on its face and is part of what must be decided.
+      **Affected (the nine):** `audit-log-rls` (2), `audit-log-cold-archive` (2),
+      `sec-005-live-probe` (1), `update-allocator-mandates-rpc` (1), `sanitize-user` (1),
+      `sanitize-user-rpc` (1), `log-audit-event-service-rpc` (1). **Plus `wizard-rpcs-live-db`
+      (6), which is the separate question.**
+      ⚠️ **THIS IS NOT AN AGENT-CLOSEABLE ITEM.** Changing how the baseline is DUMPED is a
+      HUMAN-RUN command against PRODUCTION per `supabase/schema/BASELINE.md`, and `baseline.sql`
+      is what `test-restore-from-baseline.yml` rebuilds shared TEST from — so a change here
+      propagates into every future restore of a database other people's CI uses.
+      ⛔ **THE THREE-REVIEWER RULE APPLIES IN FULL:** `migration-reviewer` + `rls-policy-auditor` +
+      `silent-failure-hunter`, findings fixed, before anything is applied or dumped.
+      ⛔ **NOT closed by** weakening a REVOKE assertion, skipping the arms, narrowing the lane's
+      derived corpus, or making `frontend-live-db-lane`'s aggregator row advisory — all four are
+      inherited verbatim from `[164.9-LIVEDB-LANE-EXECUTION-CENSUS]` and are still binding.
+      ⚠️ **OPERATIONAL CONSEQUENCE, unchanged:** `frontend-live-db-lane` is wired BLOCKING and is
+      still measured RED, so until the residue is answered the `frontend` aggregate is red on
+      merge, and a red main CI makes Railway SKIP the analytics deploy.
+      **Owner / destination: a NEW phase, proposed RESTOREFIDELITY — what the restore leaves
+      shared TEST in — surfaced in `164.9-11-SUMMARY.md` for `/gsd-phase --insert`; it also owns
+      the re-homed `[164.9-TEST-ANALYTICS-URL-REARM]`. ⚠️ Until that phase exists the owner is
+      THE FOUNDER, who inserts it.**
+
+- [ ] **`[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]` two lane failures that need a PRODUCTION change or
+      an INTENT decision — distinct from F1 and from each other (booked 2026-09-21, Phase 164.9
+      TESTISOLATION plan 11, out of the plan 08 fix round).**
+      **(a) AN UNREACHABLE BRANCH — needs an RPC change.**
+      `request_allocator_holdings_sync` returns its `{already_inflight, next_attempt_at}` shape
+      ONLY from an `EXCEPTION WHEN unique_violation` handler around `enqueue_compute_job`. But
+      `_enqueue_compute_job_internal` performs an optimistic look-up FIRST and **RETURNS the
+      existing in-flight id instead of raising**, so the handler never fires and the RPC answers
+      the ok/job_id shape. The arm's own title calls this "the previously-unreachable Queued
+      shape"; it is still unreachable. Closing it needs a change to the RPC — a migration — or a
+      decision that the Queued shape is retired. Neither is a fixture fix. ⚠️ Same function as
+      `[164.9-FANIN-STATUS-NEVER-SET]`, which is why they share a destination.
+      **(b) AN ASSERTION ABOUT A RETIRED UNIQUE INDEX — needs an INTENT decision.**
+      `match-decisions-xor-rls` expects a second `bridge_outcomes` row for the same
+      (allocator, strategy) to collide, i.e. it asserts
+      `bridge_outcomes_unique_per_strategy_holding` (migration 072). Migration **081 REPLACED**
+      that index with `bridge_outcomes_allocator_match_decision_unique` — in the catalogue's own
+      words, a "natural per-decision key now that voluntary kinds … exist. Every bridge_outcome
+      FKs to one match_decision; one outcome per decision is the invariant" — so two different
+      match_decisions legitimately get two outcomes and the old index is not in the baseline at
+      all. ⛔ This is a question about WHICH UNIQUENESS CONTRACT IS CURRENT, not fixture drift,
+      and rewriting the assertion to match observed behaviour is the one move that must not be
+      made: it would encode the loss of the invariant as the contract.
+      ⛔ **NOT closed by** deleting either arm or skipping it. Both are left RED on purpose with
+      their root causes derived and written at the assertion.
+      **Owner / destination: the same NEW phase as `[164.9-FANIN-STATUS-NEVER-SET]`, proposed
+      JOBRPCTRUTH, surfaced in `164.9-11-SUMMARY.md` for `/gsd-phase --insert`. ⚠️ Until that
+      phase exists the owner is THE FOUNDER, who inserts it.**
