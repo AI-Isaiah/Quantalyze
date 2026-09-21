@@ -2080,6 +2080,28 @@ jobs:
           ls -l /usr/lib/postgresql/*/bin/initdb /usr/lib/postgresql/*/bin/pg_ctl 2>/dev/null \
             || echo "(no initdb/pg_ctl under the glob)"
 
+      # [164.9 R2/CR-01] ⛔ A FOURTH RECURRENCE OF THE SAME DEFECT, and this one
+      # was CREATED by the round that fixed the third. The dead-holder drill was
+      # rewritten to stop being a paraphrase - it now EXTRACTS and executes the
+      # release step's own `run:` body out of this file and derives both the
+      # pidfile and the marker path from it - and was then left with ZERO call
+      # sites. `grep -ra "mutex-dead-holder-lane" .github package.json` returned
+      # nothing. Its header claims "a ci.yml that stops writing a marker makes
+      # this drill FAIL LOUD"; that was true only for someone running it by hand.
+      #
+      # WHAT IT PROVES that the static gate cannot. `mutex-dead-holder-verdict.test.ts`
+      # pins the WIRING - step pairing, `if: always()`, the marker path agreeing
+      # across the two files. This drill kills a REAL holder on a throwaway
+      # cluster and requires the verdict to go RED and then GREEN, which is the
+      # only thing that can show the detection still fires end to end.
+      #
+      # It belongs in THIS job because the job already provisions PostgreSQL
+      # server binaries and is in the `frontend` aggregator's needs, and it sits
+      # before the long mutation run so a broken drill reds in seconds rather
+      # than after ten minutes of arms.
+      - name: Dead-holder drill - kill a real holder and require the verdict to bite
+        run: bash scripts/pg-lane/mutex-dead-holder-lane.sh
+
       - name: Preflight - reject psql meta-commands in every file the runner executes
         # SAME REFUSAL AS `sql-tests`' Finding 6 preflight, WIDENED TO THE FILE
         # SET THIS JOB ACTUALLY EXECUTES. That job scans only
