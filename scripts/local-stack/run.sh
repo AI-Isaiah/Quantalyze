@@ -39,6 +39,7 @@
 # Diagnostic / assertion seams (no daemon, no stack, no side effects):
 #   scripts/local-stack/run.sh --assert-teardown       # run ONLY the teardown assertion
 #   scripts/local-stack/run.sh --print-baseline-path   # print the RESOLVED BASELINE_FILE
+#   scripts/local-stack/run.sh --print-workdir         # print the RESOLVED STACK_DIR
 #
 # ⚠️ R2-I03: these were dispatched but absent from this block, which is the
 # block `usage()` prints — so `run.sh` with no argument documented neither.
@@ -417,5 +418,18 @@ case "${1:-}" in
   # substring match, which would let a test enforce a now-false claim while
   # staying green.
   --print-baseline-path) printf '%s\n' "$BASELINE_FILE" ;;
+  # Prints the RESOLVED lane WORKDIR and exits. Same argument as
+  # `--print-baseline-path` above, applied to the other half of the lane's
+  # safety story: `sb()` passes this directory to `supabase --workdir`, and the
+  # whole reason it is DERIVED (see STACK_DIR's comment) is that starting at the
+  # repo root would apply supabase/migrations/ unconditionally against a
+  # directory that ALSO governs production deploys.
+  #
+  # ⭐ Phase 164.9 plan 08 — `vitest.livedb.config.ts` ASKS the lane where it
+  # would start, and REFUSES to boot when the answer is this repository's own
+  # `supabase/` directory. Asking beats pattern-matching the assignment line:
+  # any ordinary re-spelling of STACK_DIR reads as "unwired" to a substring
+  # match, which would let the check stay green while measuring nothing.
+  --print-workdir) printf '%s\n' "$STACK_DIR" ;;
   *)           usage; exit 2 ;;
 esac
