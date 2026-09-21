@@ -170,6 +170,81 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────
+  // Test 6: THE PAIRING IS NOTHING WITHOUT THE MARKER. Tests 1-4 pin the
+  // step NAMES, the `if:`, the annotation and the never-redden invariant —
+  // every one of which survives the deletion of ONE line: the release step's
+  // `: > "${RUNNER_TEMP}/<marker>"` write. Delete it and every gate stays
+  // green while the verdict step goes PERMANENTLY green, because the verdict
+  // script reads a marker file and nothing else.
+  //
+  // ⛔ BOTH SIDES ARE DERIVED. The marker's name is read out of
+  // scripts/mutex-dead-holder-verdict.sh's own MARKER_PATH assignment and
+  // out of each release step's own write line — never spelled here. A
+  // hard-coded name would go stale on a rename and would itself be the
+  // "hand-copied literal wearing a claim that it is not a paraphrase" this
+  // test exists to make impossible.
+  // ─────────────────────────────────────────────────────────────────────
+  describe("Test 6: every dead-holder release step WRITES the marker, at the path the verdict script READS", () => {
+    const VERDICT_SH = "scripts/mutex-dead-holder-verdict.sh";
+    /** The marker basename the verdict script computes, derived from its source. */
+    const verdictMarkerName = (() => {
+      const src = readText(VERDICT_SH);
+      const lines = src.split("\n").filter((l) => /^\s*MARKER_PATH=/.test(l));
+      expect(
+        lines.length,
+        `${VERDICT_SH}: expected exactly ONE MARKER_PATH assignment, found ${lines.length}. ` +
+          `This test derives the marker name from that line; two of them means the script no ` +
+          `longer has one answer to "which file do I read".`,
+      ).toBe(1);
+      const m = /\}\/([A-Za-z0-9._-]+)"\s*$/.exec(lines[0]);
+      expect(
+        m,
+        `${VERDICT_SH}: could not derive a marker basename from its MARKER_PATH line:\n${lines[0]}`,
+      ).not.toBeNull();
+      return m![1];
+    })();
+
+    it(`the verdict script's marker name parsed as a non-empty basename`, () => {
+      // Anti-vacuity: an empty name would make every comparison below trivially
+      // agree with an empty capture on the ci.yml side.
+      expect(verdictMarkerName.length).toBeGreaterThan(0);
+    });
+
+    for (const rel of TARGET_FILES) {
+      it(`${rel} — each dead-holder release step writes exactly one marker, named "${verdictMarkerName}"`, () => {
+        const steps = extractSteps(readText(rel)).filter(
+          (s) => s.name === RELEASE_STEP_NAME && s.body.includes(DEAD_HOLDER_ANNOTATION),
+        );
+        expect(
+          steps.length,
+          `${rel}: no "${RELEASE_STEP_NAME}" step carries the dead-holder annotation — Test 1 would ` +
+            `pair 0 with 0 and this test would assert nothing.`,
+        ).toBeGreaterThan(0);
+        for (const step of steps) {
+          const writes = step.body
+            .split("\n")
+            .map((l) => /^\s*: > "\$\{RUNNER_TEMP\}\/([A-Za-z0-9._-]+)"\s*$/.exec(l))
+            .filter((m): m is RegExpExecArray => m !== null);
+          expect(
+            writes.length,
+            `${rel}: a "${RELEASE_STEP_NAME}" step carrying "${DEAD_HOLDER_ANNOTATION}" contains ` +
+              `${writes.length} marker-write line(s); expected exactly 1. With ZERO, the annotation ` +
+              `still prints and every other arm of this file still passes, while ` +
+              `"${VERDICT_STEP_NAME}" reads a file nobody writes and goes green forever — the ` +
+              `detection survives and the CONSEQUENCE silently does not.\n${step.body}`,
+          ).toBe(1);
+          expect(
+            writes[0][1],
+            `${rel}: the release step writes its dead-holder marker as "${writes[0][1]}" while ` +
+              `${VERDICT_SH} reads "${verdictMarkerName}". Both files stay individually sensible ` +
+              `and the verdict can never fire again. Rename both in the same commit.`,
+          ).toBe(verdictMarkerName);
+        }
+      });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
   // Test 5: the verdict script's own self-test proves both directions and
   // reports a derived check count.
   // ─────────────────────────────────────────────────────────────────────
