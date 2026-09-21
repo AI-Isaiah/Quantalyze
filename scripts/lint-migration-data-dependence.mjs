@@ -187,6 +187,19 @@ export const SELF_TEST_LEGS = [
     why: "the same nesting with a catalogue-derived outer condition - nesting is not the refused property.",
   },
   {
+    fixture: "r1-assignment-taint.red.sql",
+    colour: "red",
+    rule: "R1-variable-conditioned-raise",
+    expect: "public.fx_ledger",
+    why: "the count is COPIED into a second variable with `:=` before it is tested. No read appears on the right-hand side, so a detector that looked only there treated the copy as a clearing assignment and the guard walked through.",
+  },
+  {
+    fixture: "r1-assignment-taint.green.sql",
+    colour: "green",
+    rule: "R1-variable-conditioned-raise",
+    why: "the CLEARING direction: an overwrite with a literal, and a copy from a catalogue-derived variable. A taint that could never be cleared would condemn most of this corpus.",
+  },
+  {
     fixture: "r1-do-language-clause.red.sql",
     colour: "red",
     rule: "R1-variable-conditioned-raise",
@@ -417,10 +430,30 @@ export function localNames(body) {
  * never toward refusing, which is the right direction for a gate whose false
  * positive would block a legitimate deploy.
  *
- * @returns {Array<{name:string, at:number, relation:string|null}>} sorted by `at`
+ * ⛔ TAINT TRAVELS THROUGH A PLAIN ASSIGNMENT, and it must. `v_total := v_n;`
+ * reads no relation of its own, so a detector that only looked at the right-hand
+ * side's `FROM` clause treated it as a CLEARING assignment - and a guard that
+ * copied its count into a second variable before testing it walked straight
+ * through the refusal. That is ordinary PL/pgSQL, not a contrived evasion. Each
+ * assignment therefore records the DECLARED LOCALS its right-hand side mentions,
+ * and a propagation pass in source order inherits the relation in force for the
+ * first tainted one. An assignment that mentions no tainted local still CLEARS,
+ * exactly as before.
+ *
+ * @returns {Array<{name:string, at:number, relation:string|null, refs:Set<string>}>} sorted by `at`
  */
 export function variableAssignments(body, locals) {
   const out = [];
+
+  /** The declared locals a right-hand side mentions, excluding its own targets. */
+  const refsIn = (expr, exclude) => {
+    const refs = new Set();
+    for (const m of expr.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+      const w = m[0].toLowerCase();
+      if (locals.has(w) && !exclude.has(w)) refs.add(w);
+    }
+    return refs;
+  };
 
   // `SELECT ... INTO [STRICT] v[, v2] ... FROM rel`
   let offset = 0;
@@ -436,26 +469,54 @@ export function variableAssignments(body, locals) {
     if (!into) continue;
     const rels = appRelationsIn(after, locals);
     const at = base + sel.index + into.index + into[0].length;
-    for (const n of into[1].split(",")) {
-      const name = n.trim().toLowerCase();
-      if (name) out.push({ name, at, relation: rels[0] ?? null });
-    }
+    const targets = new Set(into[1].split(",").map((n) => n.trim().toLowerCase()).filter(Boolean));
+    const refs = refsIn(after, targets);
+    for (const name of targets) out.push({ name, at, relation: rels[0] ?? null, refs });
   }
 
   // `v := <expression>` - including the ones that read nothing, because those
   // are what clear a prior taint.
   for (const m of body.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*:=([^;]*)/g)) {
     const rels = /\bSELECT\b/i.test(m[2]) ? appRelationsIn(m[2], locals) : [];
-    out.push({ name: m[1].toLowerCase(), at: m.index + m[0].length, relation: rels[0] ?? null });
+    out.push({
+      name: m[1].toLowerCase(),
+      at: m.index + m[0].length,
+      relation: rels[0] ?? null,
+      refs: refsIn(m[2], new Set()),
+    });
   }
 
   // `FOR rec IN SELECT ... FROM rel ... LOOP`
   for (const m of body.matchAll(/\bFOR\s+([A-Za-z_][A-Za-z0-9_]*)\s+IN\b([\s\S]*?)\bLOOP\b/gi)) {
     const rels = /\bSELECT\b/i.test(m[2]) ? appRelationsIn(m[2], locals) : [];
-    out.push({ name: m[1].toLowerCase(), at: m.index + m[0].length, relation: rels[0] ?? null });
+    out.push({
+      name: m[1].toLowerCase(),
+      at: m.index + m[0].length,
+      relation: rels[0] ?? null,
+      refs: refsIn(m[2], new Set([m[1].toLowerCase()])),
+    });
   }
 
   out.sort((a, b) => a.at - b.at);
+
+  // THE PROPAGATION PASS. Source order, one variable's taint at a time: an
+  // assignment that read no relation of its own inherits the relation in force
+  // for the first tainted local its right-hand side mentions. Mentioning none
+  // still clears, so an overwrite with a literal or a catalogue read remains a
+  // clearing assignment.
+  const inForce = new Map();
+  for (const a of out) {
+    if (a.relation === null) {
+      for (const r of a.refs) {
+        const inherited = inForce.get(r);
+        if (inherited) {
+          a.relation = inherited;
+          break;
+        }
+      }
+    }
+    inForce.set(a.name, a.relation);
+  }
   return out;
 }
 
