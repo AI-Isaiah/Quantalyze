@@ -1105,3 +1105,200 @@ BEGIN
 END
 $$;
 ROLLBACK;
+
+-- ==========================================================================
+-- Part 4 -- FANOUT-GLOBAL-01 foreign-row calibration (ROADMAP criterion 2).
+-- The same calibration shape as the reaper gate's Part 7, written against
+-- THIS gate's own deployed body, ordering key (claimed_at, arm A only) and
+-- budget (LIMIT 100). Proves this file's own-row assertions survive a
+-- GENUINE competing row this run did not create, and that the survival is
+-- not vacuous: observed to go RED when arm A's row budget is narrowed
+-- enough for the competitor to win a slot instead.
+--
+-- SEEDING SHAPE, identical in structure to the reaper's Part 7: two of this
+-- run's own rows (v_own_1, v_own_2) at the file's established century-old
+-- claimed_at epoch, staggered by a minute, PLUS one FOREIGN row (a synthetic
+-- owner this run did not create) seeded BETWEEN them -- more dominant than
+-- v_own_2, less dominant than v_own_1. Under the file's REAL LIMIT-100
+-- budget all three fit with room to spare, so this run's own rows dominate
+-- the ordering, and the foreign row is a real participant (it too gets
+-- terminalized), not a token. The calibration is proven non-vacuous by
+-- narrowing arm A's SAME deployed budget to 2: the foreign row's position
+-- between v_own_1 and v_own_2 means it wins the second of two slots and
+-- v_own_2 -- one of this run's OWN rows -- is crowded out.
+--
+-- WHAT THIS PROVES, stated honestly per this plan's own requirement: it
+-- proves the seeding discipline dominates a PLAUSIBLE, order-competitive
+-- foreign row under arm A's REAL, currently-deployed LIMIT-100 budget, and
+-- that the survival is falsifiable rather than assumed. It does NOT prove
+-- the deployed sweep is caller-scoped -- it is not, and cannot be without a
+-- production migration adding a run discriminator column. The header's own
+-- RESIDUAL note (correctness rests on isolation by construction against the
+-- 402 real foreign rows measured on TEST) is unchanged by this part; this
+-- part measures how much margin that isolation currently has.
+--
+-- Every seed is api_key-scoped with kind derive_broker_dailies, matching
+-- this file's own established shape (compute_jobs_one_inflight_per_kind_api_key
+-- requires a DISTINCT api_key per in-flight row).
+--
+-- Rolls back unconditionally, like every other part in this file.
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+DO $$
+DECLARE
+  v_user         UUID := gen_random_uuid();
+  v_foreign_user UUID := gen_random_uuid();
+  key_own_1      UUID;
+  key_own_2      UUID;
+  key_foreign    UUID;
+  id_own_1       UUID;   -- MOST dominant of this run's own rows -> MUST reap
+  id_own_2       UUID;   -- LEAST dominant of this run's own rows -> the one
+                          -- the foreign row can crowd out under a narrow budget
+  id_foreign     UUID;   -- a synthetic owner this run did NOT create
+  v_command      TEXT;
+  v_status_1     TEXT;
+  v_status_2     TEXT;
+  v_fstatus      TEXT;
+  v_fresh        TIMESTAMPTZ := now();
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    RAISE NOTICE 'SKIP Part 4: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only). Part 1 already reddened on this condition.';
+    RETURN;
+  END IF;
+
+  SELECT command INTO v_command
+    FROM cron.job WHERE jobname = 'retention_compute_jobs_orphaned_running';
+  IF v_command IS NULL THEN
+    RAISE EXCEPTION 'INVARIANT (Part 4 precondition): retention_compute_jobs_orphaned_running is missing while pg_cron is installed, but Part 1 and Part 2 both already passed. The registration assertions live there.';
+  END IF;
+
+  -- This run's own tenant.
+  INSERT INTO auth.users (id, email)
+    VALUES (v_user, 'job05-foreign-calib-' || v_user || '@invalid.local');
+  INSERT INTO public.profiles (id, display_name)
+    VALUES (v_user, 'job05-foreign-calib') ON CONFLICT (id) DO NOTHING;
+
+  -- A DIFFERENT tenant -- a synthetic owner this run did not create.
+  INSERT INTO auth.users (id, email)
+    VALUES (v_foreign_user, 'job05-foreign-calib-competitor-' || v_foreign_user || '@invalid.local');
+  INSERT INTO public.profiles (id, display_name)
+    VALUES (v_foreign_user, 'job05-foreign-calib-competitor') ON CONFLICT (id) DO NOTHING;
+
+  INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted)
+    VALUES (v_user, 'binance', 'job05-foreign-calib-own-1', 'not-a-real-ciphertext') RETURNING id INTO key_own_1;
+  INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted)
+    VALUES (v_user, 'binance', 'job05-foreign-calib-own-2', 'not-a-real-ciphertext') RETURNING id INTO key_own_2;
+  INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted)
+    VALUES (v_foreign_user, 'binance', 'job05-foreign-calib-foreign', 'not-a-real-ciphertext') RETURNING id INTO key_foreign;
+
+  -- v_own_1: MOST dominant -- always wins a slot, at any budget >= 1.
+  INSERT INTO public.compute_jobs (api_key_id, kind, status, claimed_at, claim_token, claimed_by, attempts, next_attempt_at)
+    VALUES (key_own_1, 'derive_broker_dailies', 'running', v_fresh - interval '100 years' - interval '2 minutes', gen_random_uuid(), 'job05-foreign-calib-worker', 1, v_fresh - interval '100 years')
+    RETURNING id INTO id_own_1;
+
+  -- v_foreign: seeded BETWEEN the two own rows -- more dominant than v_own_2,
+  -- less dominant than v_own_1. A real competitor, not a token: it
+  -- independently satisfies arm A's predicate (claimed_at IS NOT NULL and
+  -- past the 4-hour window).
+  INSERT INTO public.compute_jobs (api_key_id, kind, status, claimed_at, claim_token, claimed_by, attempts, next_attempt_at)
+    VALUES (key_foreign, 'derive_broker_dailies', 'running', v_fresh - interval '100 years' - interval '90 seconds', gen_random_uuid(), 'job05-foreign-calib-worker', 1, v_fresh - interval '100 years')
+    RETURNING id INTO id_foreign;
+
+  -- v_own_2: LEAST dominant of this run's own rows -- the one a narrowed
+  -- budget can hand to the foreign row instead.
+  INSERT INTO public.compute_jobs (api_key_id, kind, status, claimed_at, claim_token, claimed_by, attempts, next_attempt_at)
+    VALUES (key_own_2, 'derive_broker_dailies', 'running', v_fresh - interval '100 years' - interval '1 minute', gen_random_uuid(), 'job05-foreign-calib-worker', 1, v_fresh - interval '100 years')
+    RETURNING id INTO id_own_2;
+
+  -- ----- THE ORACLE: run the REAL deployed body, exactly as Parts 2 and 3 do.
+  EXECUTE v_command;
+
+  SELECT status INTO v_status_1 FROM public.compute_jobs WHERE id = id_own_1;
+  SELECT status INTO v_status_2 FROM public.compute_jobs WHERE id = id_own_2;
+  SELECT status INTO v_fstatus  FROM public.compute_jobs WHERE id = id_foreign;
+
+  -- RED-UNDER: narrow arm A's own bound in migration 20260826140000 from
+  --            `LIMIT 100` to `LIMIT 2` (the needle takes the ORDER BY line
+  --            with it, which is what picks arm A's LIMIT out of the two
+  --            byte-identical `LIMIT 100` lines in this migration -- arm B's
+  --            needle reads `ORDER BY created_at ASC`, not `claimed_at`).
+  --            Under this run's own three-row seed, the two most dominant
+  --            rows are v_own_1 and the FOREIGN row -- v_own_2, this run's
+  --            OWN least-dominant row, is crowded out of the narrowed budget
+  --            by the foreign competitor. v_own_1 still reaps (it is always
+  --            the most dominant row at any budget >= 1), so THIS assertion
+  --            -- about v_own_2 -- is the first thing to redden.
+  --            ⚠️ LAYERED: Part 3's arm (3/JOB-05/D-19, four raise sites for
+  --            one identity) asserts the SAME arm A terminalizes exactly 100
+  --            of its own 101 seeded rows per tick, which a budget of 2
+  --            cannot satisfy -- Part 3 would abort the whole script first
+  --            (`-v ON_ERROR_STOP=1`) and this part would never run. All
+  --            four raise sites are neutered, the same precedent this file's
+  --            arm `2/JOB-05` already sets against `1/JOB-05` (five entries)
+  --            and `1/JOB-05/D-19` (three entries), and Part 3's own
+  --            conservation arm already sets against this exact identity
+  --            (four entries). Part 2's arm A is NOT neutered: it is the
+  --            sole claimed-and-stale candidate in its own isolated,
+  --            rolled-back transaction, so any budget >= 1 reaps it
+  --            regardless of this mutation. MEASURED.
+  --            ⚠️ SEVEN neuter entries, not four. Narrowing arm A's LIMIT
+  --            also moves Part 1's own word-bounded LIMIT-100 COUNT (still
+  --            satisfied by arm B alone, so the presence check at line ~549
+  --            stays silent, but the count check goes from 2 to 1) -- both
+  --            share identity `1/JOB-05/D-19` with the MATERIALIZED count
+  --            check ahead of them, three raise sites total, and Part 1 runs
+  --            BEFORE this part. MEASURED on the lane: with only the four
+  --            `3/JOB-05/D-19` entries this arm's FIRST failure was
+  --            `1/JOB-05/D-19` (the count check), not this arm.
+  -- RED-UNDER-M: {"arm":"4/FANOUT-GLOBAL-01","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"         ORDER BY claimed_at ASC\n         LIMIT 100","replace":"         ORDER BY claimed_at ASC\n         LIMIT 2","occurrences":1}],"neuter":[{"arm":"1/JOB-05/D-19"},{"arm":"1/JOB-05/D-19"},{"arm":"1/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"}]}
+  IF v_status_2 IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'TEST FAILED (4/FANOUT-GLOBAL-01): this run''s own less-dominant claimed-and-stale row was not terminalized under the deployed arm-A budget (got %). Either the budget was narrowed below what this run''s own rows need, or a foreign row crowded it out -- both are the failure this calibration exists to catch.', v_status_2;
+  END IF;
+  -- RED-UNDER: the own-1 check above cannot be broken by narrowing LIMIT
+  --            alone -- v_own_1 is the MOST dominant row under the deployed
+  --            ASC sort, so any budget >= 1 keeps it in. Reversing the sort
+  --            direction flips ranking to v_own_2 (newest) first, v_foreign
+  --            second, v_own_1 (oldest) LAST, so v_own_1 is the one excluded
+  --            at LIMIT 2 -- while v_own_2 and v_foreign both stay included
+  --            and their own checks stay green, so THIS assertion is the
+  --            first (and only) thing to redden. Same Part-1/Part-3
+  --            interference and same seven-entry neuter as arm
+  --            `4/FANOUT-GLOBAL-01` above -- this mutation narrows the same
+  --            migration's same LIMIT, just with the direction also flipped.
+  -- RED-UNDER-M: {"arm":"4/FANOUT-GLOBAL-01/own-1","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"         ORDER BY claimed_at ASC\n         LIMIT 100","replace":"         ORDER BY claimed_at DESC\n         LIMIT 2","occurrences":1}],"neuter":[{"arm":"1/JOB-05/D-19"},{"arm":"1/JOB-05/D-19"},{"arm":"1/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"}]}
+  IF v_status_1 IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'TEST FAILED (4/FANOUT-GLOBAL-01/own-1): this run''s own MOST-dominant claimed-and-stale row was not terminalized (got %). It should win a slot at any budget >= 1; if it did not, the seed itself is broken and this calibration proves nothing.', v_status_1;
+  END IF;
+
+  -- The foreign row is a real, distinguishable participant, not a token: it
+  -- independently satisfies the SAME arm-A predicate and is attributed to a
+  -- DIFFERENT synthetic owner (a different api_key under a different
+  -- auth.users row). Under the file's REAL LIMIT-100 budget it is also
+  -- terminalized here -- proof it genuinely competed for the budget rather
+  -- than sitting inert.
+  -- RED-UNDER: v_foreign ranks SECOND under the deployed ASC sort (between
+  --            v_own_1 and v_own_2), sandwiched, so no LIMIT/direction
+  --            mutation can exclude it alone while keeping both neighbors.
+  --            Narrowing to LIMIT 1 instead excludes BOTH v_foreign and
+  --            v_own_2, which would otherwise redden `4/FANOUT-GLOBAL-01`
+  --            (the own-2 check above) FIRST since it runs earlier in
+  --            program order; that identity is neutered for this arm only
+  --            so the foreign check below becomes the live failure. v_own_1
+  --            stays included at LIMIT 1 (it is always rank 1), so its own
+  --            check stays green.
+  -- RED-UNDER-M: {"arm":"4/FANOUT-GLOBAL-01/foreign","apply":[{"kind":"edit","file":"supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql","find":"         ORDER BY claimed_at ASC\n         LIMIT 100","replace":"         ORDER BY claimed_at ASC\n         LIMIT 1","occurrences":1}],"neuter":[{"arm":"1/JOB-05/D-19"},{"arm":"1/JOB-05/D-19"},{"arm":"1/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"3/JOB-05/D-19"},{"arm":"4/FANOUT-GLOBAL-01"}]}
+  IF v_fstatus IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'TEST FAILED (4/FANOUT-GLOBAL-01/foreign): the foreign competitor row was not terminalized under the deployed budget (got %). A foreign row that never enters the sweep is a token, not a competitor, and this calibration would prove nothing about isolation under real contention.', v_fstatus;
+  END IF;
+  IF id_foreign = id_own_1 OR id_foreign = id_own_2 THEN
+    RAISE EXCEPTION 'TEST FAILED (4/FANOUT-GLOBAL-01/foreign): the foreign row and one of this run''s own rows resolved to the same compute_jobs id -- the seeds are not distinguishable, and this calibration is vacuous.';
+  END IF;
+
+  RAISE NOTICE 'Part 4 OK: this run''s own claimed-and-stale rows survive a genuine, order-competitive foreign row under arm A''s deployed budget, and the foreign row is a real, distinguishable participant rather than a token.';
+
+  DELETE FROM auth.users WHERE id = v_user;
+  DELETE FROM auth.users WHERE id = v_foreign_user;
+END
+$$;
+ROLLBACK;
