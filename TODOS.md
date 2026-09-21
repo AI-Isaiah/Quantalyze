@@ -1702,7 +1702,7 @@ true for 146 and half of 142–145, and **false for 141**.
       candidate shapes. Phase 164.10 BODYDRIFT was checked and rejected as the home: it is
       function-body scope only.
 
-- [ ] **`[164.8.1-TEST-ANALYTICS-URL-PROD]` Shared TEST's cron can POST to the PRODUCTION
+- [x] **`[164.8.1-TEST-ANALYTICS-URL-PROD]` Shared TEST's cron can POST to the PRODUCTION
       analytics service: `system_settings.analytics_service_url` is seeded with the PROD Railway
       host and that row feeds `public.match_engine_cron_tick()`, a `pg_net` tick (booked
       2026-09-09, founder decision in Phase 164.8.1's `CONTEXT.md` `<specifics>`).**
@@ -1737,7 +1737,20 @@ true for 146 and half of 142–145, and **false for 141**.
       marker check confirms which DATABASE you are connected to; it says nothing about which
       SERVICE the tick calls. They are different questions and only the first has a guard.
       ⭐ **UPDATE 2026-09-21 (Phase 164.9 TESTISOLATION, plan 10) — the MEASUREMENT half has
-      landed and the remediation exists; the WRITE is a founder action and is pending.** Arm D1 in
+      landed and the remediation exists; the WRITE is a founder action and is pending.**
+      ⛔ **CLOSED 2026-09-21, LATER THE SAME DAY — the sentence above is kept as lineage and is no
+      longer true. THE FOUNDER RAN THE WRITE.** The committing run reported `COMMITTED: the
+      analytics_service_url row now holds the loopback discard sink`, and the resulting shape was
+      re-read through a second, independent connection that never sees the DSN — two unrelated
+      clients, the same reading. ⛔ Verdict recorded, specimen not: the record is a SHAPE (length,
+      scheme, is-the-sink), never the value. The discharge is written up at the tail of
+      `164.9-10-SUMMARY.md`. ⚠️ This entry stayed unchecked for the rest of that day while the
+      phase's own summary said the opposite — found by the verifier, not by two review rounds, and
+      it is the same three-records-disagree class the phase exists to remove.
+      ⚠️ **Closing this does NOT close the re-arm risk**, which is booked separately as
+      `[164.9-TEST-ANALYTICS-URL-REARM]`: a future restore or a re-applied migration can put the
+      PROD-shaped value back, and Arm D1 is what notices.
+      Arm D1 in
       `supabase/tests/test_analytics_service_settings_and_vault_tick.sql` now reads the LIVE row on
       every gate run where the database marker names TEST (and measures the allow-list constraint
       where nobody has hand-set a marker), so this stops being a claim about the migration and
@@ -7437,6 +7450,34 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       `O_EXCL` temp + rename with a re-read/retry loop), and derive the next id from the JSON
       max rather than a cached count. Upstream in the GSD toolchain, not this repo's source —
       but the corrupted artifact is tracked here.
+
+- [ ] **`[164.9-LEDGER-CEILING-COORDINATED-EDIT]` the live-DB execution ledger's `ENTRY_CEILING`
+      makes growth IMPOSSIBLE TO DO SILENTLY, not impossible (recorded 2026-09-21, Phase 164.9
+      security audit)** — ⭐ **RECORDED AS A KNOWN LIMIT, AND IT DELIBERATELY CARRIES NO PHASE**,
+      against the standing rule that only a data-integrity or user-facing gap earns one. Nothing a
+      user sees changes and no row is written wrongly; what is at stake is how loudly a gate can be
+      widened.
+      **Owner:** whoever next edits `scripts/live-db-execution-ledger.txt` or its ceiling.
+      **What is PROVEN:** the ledger is bounded from ABOVE by `ENTRY_CEILING` in
+      `scripts/live-db-execution-ledger.mjs`, and bounded from BELOW by the staleness arm in
+      `src/__tests__/live-db-execution-ledger.contract.test.ts`, which uses `toBe(entries)` and so
+      transitively pins the exact total. A ledger that correctly shrank cannot leave the ceiling
+      above it handing back room to grow.
+      **What is NOT prevented:** growth itself. Appending a ledger line, bumping `# ENTRY_COUNT`
+      and bumping `ENTRY_CEILING` in ONE commit passes every arm, and a real live-DB regression can
+      be silenced that way. No in-repo constant can stop a determined edit. What changed is the
+      COST: three coordinated, individually named lines in a diff a reviewer reads, where before it
+      took one.
+      **Trigger to revisit:** any commit that RAISES `ENTRY_CEILING`. A raise is the shape this
+      entry exists to make visible, and the ledger is SHRINK-ONLY by design — a new failing arm is
+      FIXED, not ledgered.
+      ⛔ **Forbidden closure: describing this as "the ledger cannot grow".** The contract test's own
+      header carries a dated correction saying exactly that, because two paragraphs in it once
+      overclaimed in opposite directions. Describe it as "cannot grow by accident, and cannot grow
+      without saying so".
+      ⛔ **Forbidden closure: deleting the staleness arm to remove the transitive pin.** The pin is
+      what makes a shrink honest; removing it re-opens the direction a bound-only-from-above control
+      cannot see about itself.
 
 - [ ] **`[164.9-CALIBRATION-NARROWS-NOT-REPLACES]` the three foreign-row calibrations NARROW
       the global assertions and MEASURE THE MARGIN; they do NOT caller-scope the deployed sweep
