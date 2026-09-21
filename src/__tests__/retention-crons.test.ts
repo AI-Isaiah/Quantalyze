@@ -78,37 +78,59 @@ const EXPECTED_CRON_JOBS: Array<{ name: string; schedule: string }> = [
   { name: "api_key_rotation_reminder", schedule: "0 4 * * *" },
 ];
 
-async function fetchCronJob(
-  admin: ReturnType<typeof createLiveAdminClient>,
-  jobname: string,
-): Promise<{
+async function fetchCronJob(jobname: string): Promise<{
   jobname: string;
   schedule: string;
   command: string;
   active: boolean;
 } | null> {
-  // cron.job lives in the `cron` schema. supabase-js can target
-  // cross-schema via the `schema()` modifier on PostgREST.
-  // H-0030: select `active` too — a job that is registered but disabled
-  // (active=false) would silently never fire. The schedule/command
-  // substring checks alone cannot catch that.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const schemaScoped = (admin as any).schema("cron");
-  const { data, error } = await schemaScoped
-    .from("job")
-    .select("jobname, schedule, command, active")
-    .eq("jobname", jobname)
-    .maybeSingle();
-  if (error) {
-    // pg_cron not installed — the migration's DO block logs a RAISE
-    // NOTICE and skips registration. Surface that path as "null" so
-    // the test can report the skip cleanly.
-    if (/schema "cron"|relation .* does not exist/i.test(error.message)) {
-      return null;
-    }
-    throw new Error(`cron.job fetch failed for ${jobname}: ${error.message}`);
+  // ⚠️ Phase 164.9 plan 08 — THIS CALL SITE WAS MOVED OFF THE REST SURFACE, and
+  // the reason is that it never worked and could not be seen to fail.
+  //
+  // It used to read `cron.job` through PostgREST via supabase-js's `schema()`
+  // modifier. `supabase/config.toml` sets `[api].schemas = ["public",
+  // "graphql_public"]`, so `cron` is outside PostgREST on EVERY host — the
+  // shared project, a local stack, anything built from this repo's config. The
+  // request therefore answered `Invalid schema: cron` unconditionally... and the
+  // error branch below matched that message and returned `null`, which every one
+  // of the seven arms downstream reads as "pg_cron is not installed" and treats
+  // as a clean skip. Seven assertions about production cron registration that
+  // could not fail, reading green. That is this phase's entire subject, sitting
+  // inside a test.
+  //
+  // ⛔ THE REPAIR IS NOT TO EXPOSE THE SCHEMA. Adding `cron` to `[api].schemas`
+  // would widen the public REST surface of every deployment to a scheduler's
+  // internals to make a test pass — a real change with its own review burden,
+  // and explicitly not the default repair. Instead this reads the same rows
+  // through the Management API, the raw-SQL path `fetchRegisteredCommand` in
+  // this same file already uses for exactly this table.
+  //
+  // THE COST, stated rather than discovered: the seven arms now need
+  // HAS_INTROSPECTION on top of the live-DB gate, so they do not run on a host
+  // without a Management API token. That is a NARROWER gate than before in
+  // appearance only — before, they ran and asserted NOTHING.
+  //
+  // H-0030: `active` is selected too — a job registered but disabled would
+  // silently never fire, and the schedule/command substring checks cannot see it.
+  if (!/^[a-z0-9_]+$/.test(jobname)) {
+    throw new Error(
+      `fetchCronJob: refusing to interpolate a non-identifier jobname (${jobname})`,
+    );
   }
-  return data;
+  const rows = await runIntrospectionSql<{
+    jobname: string;
+    schedule: string;
+    command: string;
+    active: boolean;
+  }>(
+    `SELECT jobname, schedule, command, active FROM cron.job WHERE jobname = '${jobname}' LIMIT 1;`,
+  );
+  // pg_cron not installed — the migration's DO block logs a RAISE NOTICE and
+  // skips registration, so the row is simply absent. `runIntrospectionSql`
+  // THROWS when the `cron` schema itself does not exist, so "extension absent"
+  // and "job unregistered" stay distinguishable rather than collapsing into one
+  // quiet `null` the way the PostgREST path collapsed them.
+  return rows.length > 0 ? rows[0] : null;
 }
 
 /**
@@ -144,14 +166,13 @@ async function fireCronBodyAndRollback(body: string): Promise<void> {
 }
 
 describe("Migration 056 — retention cron job registration", () => {
-  it.skipIf(!HAS_LIVE_DB)(
+  it.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
     "all 6 retention/reminder cron jobs are registered in cron.job",
     async () => {
-      const admin = createLiveAdminClient();
 
       // First probe: is pg_cron installed? If not, every fetch returns
       // null; report that up front rather than reporting 6 missing jobs.
-      const probe = await fetchCronJob(admin, EXPECTED_CRON_JOBS[0].name);
+      const probe = await fetchCronJob(EXPECTED_CRON_JOBS[0].name);
       if (probe === null) {
         console.warn(
           "[retention-crons] pg_cron not installed on this database. " +
@@ -176,7 +197,7 @@ describe("Migration 056 — retention cron job registration", () => {
       const disabled: string[] = [];
 
       for (const expected of EXPECTED_CRON_JOBS) {
-        const row = await fetchCronJob(admin, expected.name);
+        const row = await fetchCronJob(expected.name);
         if (!row) {
           missing.push(expected.name);
           continue;
@@ -201,7 +222,7 @@ describe("Migration 056 — retention cron job registration", () => {
     30_000,
   );
 
-  it.skipIf(!HAS_LIVE_DB)(
+  it.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
     "audit_log_hot_to_cold cron body is the CTE move, not a bare DELETE",
     async () => {
       // The plan's CTE-move invariant: the DELETE's RETURNING must be
@@ -209,8 +230,7 @@ describe("Migration 056 — retention cron job registration", () => {
       // the INSERT-SELECT and the DELETE can be deleted-without-archive.
       // We assert the command string contains `RETURNING`, `INSERT INTO
       // audit_log_cold`, and the `2 years` threshold.
-      const admin = createLiveAdminClient();
-      const row = await fetchCronJob(admin, "audit_log_hot_to_cold");
+      const row = await fetchCronJob("audit_log_hot_to_cold");
       if (row === null) {
         console.warn("[retention-crons] pg_cron not installed; skipping CTE-shape arm.");
         return;
@@ -223,33 +243,30 @@ describe("Migration 056 — retention cron job registration", () => {
     15_000,
   );
 
-  it.skipIf(!HAS_LIVE_DB)(
+  it.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
     "audit_log_cold_purge cron targets 7y threshold",
     async () => {
-      const admin = createLiveAdminClient();
-      const row = await fetchCronJob(admin, "audit_log_cold_purge");
+      const row = await fetchCronJob("audit_log_cold_purge");
       if (row === null) return;
       expect(row.command.toLowerCase()).toContain("7 years");
     },
     15_000,
   );
 
-  it.skipIf(!HAS_LIVE_DB)(
+  it.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
     "retention_notification_dispatches cron targets 180d threshold",
     async () => {
-      const admin = createLiveAdminClient();
-      const row = await fetchCronJob(admin, "retention_notification_dispatches");
+      const row = await fetchCronJob("retention_notification_dispatches");
       if (row === null) return;
       expect(row.command.toLowerCase()).toContain("180 days");
     },
     15_000,
   );
 
-  it.skipIf(!HAS_LIVE_DB)(
+  it.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
     "retention_compute_jobs_done cron targets 30d threshold",
     async () => {
-      const admin = createLiveAdminClient();
-      const row = await fetchCronJob(admin, "retention_compute_jobs_done");
+      const row = await fetchCronJob("retention_compute_jobs_done");
       if (row === null) return;
       expect(row.command.toLowerCase()).toContain("30 days");
       expect(row.command.toLowerCase()).toContain("'done'");
@@ -257,11 +274,10 @@ describe("Migration 056 — retention cron job registration", () => {
     15_000,
   );
 
-  it.skipIf(!HAS_LIVE_DB)(
+  it.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
     "retention_compute_jobs_failed cron targets 90d threshold",
     async () => {
-      const admin = createLiveAdminClient();
-      const row = await fetchCronJob(admin, "retention_compute_jobs_failed");
+      const row = await fetchCronJob("retention_compute_jobs_failed");
       if (row === null) return;
       expect(row.command.toLowerCase()).toContain("90 days");
       // failed_final + failed_retry per the migration body's comment.
@@ -270,11 +286,10 @@ describe("Migration 056 — retention cron job registration", () => {
     15_000,
   );
 
-  it.skipIf(!HAS_LIVE_DB)(
+  it.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
     "api_key_rotation_reminder cron targets 90d threshold + recipient email",
     async () => {
-      const admin = createLiveAdminClient();
-      const row = await fetchCronJob(admin, "api_key_rotation_reminder");
+      const row = await fetchCronJob("api_key_rotation_reminder");
       if (row === null) return;
       const cmd = row.command.toLowerCase();
       expect(cmd).toContain("90 days");

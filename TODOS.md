@@ -3287,6 +3287,61 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       own documented best-effort invariant rather than fixing the missing verdict.
       **Owner:** Phase 164.9 TESTISOLATION.
 
+- [ ] **`[164.9-LIVEDB-LANE-EXECUTION-CENSUS]` the live-DB class now EXECUTES, and 35 of its 397
+      non-skipped tests fail on the local-stack baseline — four families, only three of them
+      fixable test-side (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 08)** — MEASURED by
+      running the lane this plan built, twice, against a booted local Supabase stack. This is the
+      per-file census `[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]` records as OWED, produced by
+      execution rather than static reading, exactly as that entry and the fixture-drift ledger's
+      own header say it must be.
+      **First run:** `Test Files 17 failed | 31 passed`, `Tests 50 failed | 347 passed | 80
+      skipped`. **After the reference-data replay landed in the same plan:** `Test Files 16
+      failed | 32 passed | 1 skipped (49)`, `Tests 35 failed | 362 passed | 80 skipped (477)`.
+      ⭐ The 362 passes are the point: that whole class asserted NOTHING in CI before this.
+      **THE FOUR FAMILIES, with the fix each needs:**
+      **F1 — PRIVILEGE STATE IS ABSENT FROM THE SCHEMA-ONLY BASELINE (~14 failures, and the ONE
+      family that is NOT a test-side fix).** Tests that assert a REVOKE/GRANT holds fail because
+      the committed `supabase/schema/baseline.sql` does not reproduce that state. Two of them say
+      so in their own words: *"Encrypted column api_key_encrypted was readable by authenticated
+      client — migration 027 REVOKE is not holding"* and *"Anon reached the function BODY …
+      proving REVOKE ALL FROM anon in mig 061 regressed"*. ⛔ Read those as a statement about the
+      BASELINE, not about production — they are the local stack reporting that the dump omits
+      column- and function-level privileges. Affected: `sec-005-live-probe`, `sanitize-user`,
+      `sanitize-user-rpc`, `log-audit-event-service-rpc`, `update-allocator-mandates-rpc`,
+      `audit-log-rls`, `audit-log-cold-archive`, most of `wizard-rpcs-live-db`.
+      ⚠️ Fixing it means changing how the baseline is DUMPED, and `BASELINE.md` makes that a
+      human-run command against production. No agent can close this one alone.
+      **F2 — THE post-mig-117 CLAIM-TOKEN FENCE (~14 failures, fixture drift, repairable).**
+      `mark_compute_job_failed` / `mark_compute_job_done` now REQUIRE `p_claim_token` and raise
+      `22023` without it; the call sites predate the fence. ⚠️ The static census cannot see this
+      class by construction — it models parameter NAMES, not required-ness — which is precisely
+      why the execution lane was worth building. Affected:
+      `compute-jobs-audit-2026-05-07-g10b`, `compute-jobs-audit-2026-05-07-residual`,
+      `claim-failed-retry-dedupe-migrations`. Several downstream status assertions
+      (`'running'` vs `'failed_final'`) are consequences of the same raise, not separate defects.
+      **F3 — NOT-NULL COLUMNS THE FIXTURE OMITS (3 failures, repairable).**
+      `user_notes.scope_kind` and `match_decisions.decided_by`. Same class as the `api_keys`
+      repair this plan already made, and equally invisible to a static reader that checks whether
+      a supplied column EXISTS rather than whether a required one is MISSING. Affected:
+      `gdpr-export`, `outcomes-join-rls`, `match-decisions-xor-rls`.
+      **F4 — TWO ONE-OFFS.** A protocol-relative URL the test harness cannot parse
+      (`match-decisions-holding-endpoint-rls`), and one `PGRST205` schema-cache failure
+      (`request-allocator-holdings-sync-queued`) — ⭐ the signature the static census recorded as
+      NOT reproducible from tracked text, now reproduced by execution.
+      ⛔ **Forbidden closures, inherited verbatim from the parent entry and still binding:**
+      deleting the tests; skipping them permanently; narrowing the lane's derived corpus so the
+      failures fall outside it; and adding a tolerance arm to `frontend-live-db-lane`'s row in
+      the `frontend` aggregator.
+      ⚠️ **OPERATIONAL CONSEQUENCE, stated because it is not optional.** `frontend-live-db-lane`
+      is wired BLOCKING, so until F1–F4 are closed the `frontend` aggregate is RED — and a red
+      main CI makes Railway SKIP the analytics deploy. Whoever picks this up decides FIRST
+      between closing F2/F3/F4 and shipping F1 behind a dated, shrink-only execution ledger of
+      the `scripts/vac08-ledger-baseline.txt` kind (every test still EXECUTES, a failure outside
+      the ledger still reddens, and a ledger entry that stops failing reddens too). ⛔ Not a skip
+      list, and not a reason to make the row advisory.
+      **Owner:** Phase 164.9 TESTISOLATION (this phase, remaining plans) — and if F1 outlives it,
+      a named successor phase, never a blank destination.
+
 - [ ] **`[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]` the live-DB vitest class that runs ONLY
       when TEST credentials are present is RED, and establishing whether any CI gate can see it
       comes before any remedy (booked 2026-09-21, Phase 164.9 TESTISOLATION)** — MEASURED at

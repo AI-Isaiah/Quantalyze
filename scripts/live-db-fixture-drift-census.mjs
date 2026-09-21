@@ -90,7 +90,16 @@ const DEFAULT_CORPUS_DIR = "src";
 const DEFAULT_CATALOGUE = "supabase/schema/baseline.sql";
 const DEFAULT_CONFIG = "supabase/config.toml";
 const DEFAULT_ALLOWLIST = "scripts/live-db-fixture-drift-baseline.txt";
-const LIVE_DB_GATE_SYMBOL = "HAS_LIVE_DB";
+/**
+ * The live-DB gate symbol from `src/lib/test-helpers/live-db.ts`.
+ *
+ * ⭐ EXPORTED (Phase 164.9 plan 08) so `scripts/live-db-lane-corpus.mjs` — which
+ * decides what the `frontend-live-db-lane` job actually RUNS — derives its corpus
+ * from the very same symbol this census MEASURES. One declaration, two consumers:
+ * the thing measured and the thing executed cannot drift apart into two different
+ * populations that each look complete on their own.
+ */
+export const LIVE_DB_GATE_SYMBOL = "HAS_LIVE_DB";
 
 export const CLASSES = ["absent-table", "absent-column", "unexposed-schema", "ambiguous-overload"];
 
@@ -705,7 +714,13 @@ export function classifySource(src, filePath, catalogue, exposedSchemas) {
 
 const SKIP_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage"]);
 
-function walkCorpus(dirAbs) {
+/**
+ * ⭐ EXPORTED (Phase 164.9 plan 08) for the same reason as `LIVE_DB_GATE_SYMBOL`
+ * above: `scripts/live-db-lane-corpus.mjs` calls THIS walk rather than
+ * re-implementing it, so the lane's population is the census's population by
+ * construction rather than by two regexes that happen to agree today.
+ */
+export function walkCorpus(dirAbs) {
   const out = [];
   function walk(d) {
     let entries;

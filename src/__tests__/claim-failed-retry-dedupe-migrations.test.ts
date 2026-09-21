@@ -394,9 +394,28 @@ describe("Migration 089/090 — live-DB runtime semantics", () => {
       cleanupJobIds.push(jobId);
 
       // Claim it — must increment attempts 2 → 3.
+      // ⚠️ Phase 164.9 plan 08 — CALL-SITE DISAMBIGUATION, not a schema change.
+      // `claim_compute_jobs_with_priority` is declared TWICE in the committed
+      // catalogue: a 2-arg (p_batch_size, p_worker_id) and a 5-arg that adds
+      // p_unified_backbone_active / p_kind_include / p_kind_exclude, all three
+      // DEFAULTed. A payload of only the first two keys is a subset of BOTH
+      // declarations, so PostgREST cannot choose and answers PGRST203 — the
+      // ROADMAP's first recorded failure signature. Naming
+      // `p_unified_backbone_active` selects exactly one declaration.
+      // Passing it NULL is behaviour-neutral: the 5-arg body filters only on
+      // `p_kind_include` / `p_kind_exclude`, each guarded by `IS NULL OR …`, so
+      // with all three absent-or-null it claims exactly what the 2-arg claims.
+      // ⛔ Dropping the stale 2-arg overload is the ROOT-CAUSE fix and it is a
+      // PROD-affecting migration — out of this phase's scope by decision, not by
+      // oversight (CONTEXT Area 4; this milestone's gate work is ordered ahead
+      // of every remaining production apply).
       const { data: claimed, error: claimErr } = await admin.rpc(
         "claim_compute_jobs_with_priority",
-        { p_batch_size: 5, p_worker_id: "g21-max-attempts" },
+        {
+          p_batch_size: 5,
+          p_worker_id: "g21-max-attempts",
+          p_unified_backbone_active: null,
+        },
       );
       expect(claimErr, `claim RPC: ${claimErr?.message}`).toBeNull();
       const claimedRow = (claimed as ComputeJobRow[] | null)?.find(
