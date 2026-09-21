@@ -652,6 +652,7 @@ export function runCheck(
     }
     filesScanned += 1;
     violations.push(...findStructuralViolations(rel, contents));
+    violations.push(...findNulViolations(rel, contents));
     usernameHits.push(...findUsernameHits(rel, contents, derived.username));
   }
 
@@ -680,6 +681,56 @@ export function runCheck(
   }
 
   return { violations, filesScanned, usernameRule };
+}
+
+/**
+ * RULE 4 — a raw NUL byte in a tracked TEXT file.
+ *
+ * WHY THIS IS A GATE AND NOT A ONE-OFF SWEEP. `grep` classifies a file
+ * containing a NUL as binary, prints nothing and exits 1 — a result that reads
+ * as "clean". Every grep-based audit over such a file silently scans an empty
+ * file and scores it green. MEASURED 2026-09-21: FIVE instances in this repo —
+ * three `.planning/` documents, one script, and one code-review report that was
+ * committed FOUR COMMITS AFTER the sweep that found the other four. That last
+ * one is the argument for this rule: a sweep is a measurement at a point in
+ * time, and the class came back within the same session because nothing stopped
+ * it.
+ *
+ * ⭐ ALL FIVE ARRIVED THE SAME WAY: the file QUOTES a code snippet that uses a
+ * NUL separator and embeds the byte RAW instead of writing the two-character
+ * escape. Writing ABOUT the hazard is how the hazard gets committed.
+ *
+ * ⛔ Binary files are NOT flagged — they legitimately contain NULs — so this
+ * rule is scoped to extensions that are text by definition.
+ */
+const NUL_TEXT_EXTENSIONS = new Set([
+  ".md", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".json", ".sql",
+  ".sh", ".yml", ".yaml", ".txt", ".py", ".css", ".html",
+]);
+
+/**
+ * The ONE deliberate NUL in this repository. It is load-bearing: the file uses
+ * it as a phrase-boundary delimiter, and removing it would change behaviour.
+ * ⛔ Do not "fix" it, and do not widen this map to clear a red — a new entry
+ * here is a decision to make a file permanently invisible to grep.
+ */
+const NUL_EXEMPT = new Map<string, string>([
+  [
+    "src/lib/wizardErrors.test.ts",
+    "load-bearing: a deliberate NUL used as a phrase-boundary delimiter",
+  ],
+]);
+
+function findNulViolations(rel: string, contents: string): string[] {
+  const dot = rel.lastIndexOf(".");
+  const ext = dot === -1 ? "" : rel.slice(dot).toLowerCase();
+  if (!NUL_TEXT_EXTENSIONS.has(ext)) return [];
+  if (!contents.includes("\u0000")) return [];
+  if (NUL_EXEMPT.has(rel)) return [];
+  const count = contents.split("\u0000").length - 1;
+  return [
+    `RAW-NUL (rule 4): ${rel} contains ${count} raw NUL byte(s). grep treats this file as BINARY - it prints nothing and exits 1, which reads as "clean", so every grep-based audit over it silently scans an empty file. Write the two-character escape instead of the byte. (If the NUL is load-bearing, it needs a named entry in NUL_EXEMPT with its reason - never a silent pass.)`,
+  ];
 }
 
 function main(): void {
