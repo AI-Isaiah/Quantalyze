@@ -854,9 +854,9 @@ function tolerancePostureOver(
  *
  * ⛔ WHY A PARTITION AND NOT ONE WIDENED TOTAL. "Tolerated" is no longer one
  * claim. Some rows may skip because of the EVENT (a fork PR has no test-DB
- * secret); eleven more may skip because the DOCS-ONLY path filter did not
+ * secret); twelve more may skip because the DOCS-ONLY path filter did not
  * invoke them. A single flat count cannot say "only when the detector fired",
- * so collapsing the two halves would silently accept the eleven — which is the
+ * so collapsing the two halves would silently accept the twelve — which is the
  * `[164.6.3-MW02-DOCSONLY-BLIND]` defect re-committed one layer up.
  *
  * Throws when `guardExpr` is not among the expressions actually enumerated: a
@@ -992,7 +992,7 @@ const RESULT_LOOP_CONDITION_FLOOR = 8;
  * Phase 164.6.3 gave the loop a SECOND, independent reason a row may be absent,
  * so there are now three classes and one flat set can no longer express them:
  * "tolerated" is not one claim, and a set that answers it as one silently
- * accepts eleven rows it was never asked about. ⛔ Do NOT collapse these back
+ * accepts twelve rows it was never asked about. ⛔ Do NOT collapse these back
  * into one widened set to make an assertion pass.
  *
  * Pinned exactly TWICE, as the retired constant was: by the `if`/`elif` parser
@@ -1020,14 +1020,14 @@ const RESULT_LOOP_CONDITION_FLOOR = 8;
 const EVENT_TOLERANT_JOBS = ["e2e-seeded", "plan-anchor-verify", "sql-tests"] as const;
 
 /**
- * Rows whose skip the DOCS-ONLY PATH FILTER excuses (11) — Phase 164.6.3 /
+ * Rows whose skip the DOCS-ONLY PATH FILTER excuses (12) — Phase 164.6.3 /
  * CI-DOCSPATH-01. These are exactly the rows the loop iterates that are NOT on
  * the aggregator's declared always-on shell list, and what excuses them is ONE
- * predicate, not eleven per-row arms: the detector must have said exactly
+ * predicate, not twelve per-row arms: the detector must have said exactly
  * `true`, the row must not be always-on, and the result must be exactly
  * `skipped`.
  *
- * ⭐ THE UNIFORMITY IS THE LEGITIMACY. A per-row tolerance would be eleven
+ * ⭐ THE UNIFORMITY IS THE LEGITIMACY. A per-row tolerance would be twelve
  * separate decisions, each able to drift on its own; one predicate over a
  * declared exclusion list is a single reviewable claim. The uniformity arm
  * below measures it: every member here that is not ALSO event-tolerant is
@@ -1043,6 +1043,7 @@ const DOCS_ONLY_TOLERANT_JOBS = [
   "e2e-seeded",
   "frontend-build",
   "frontend-coverage",
+  "frontend-live-db-lane",
   "frontend-local-stack",
   "frontend-policy",
   "frontend-seam-redis",

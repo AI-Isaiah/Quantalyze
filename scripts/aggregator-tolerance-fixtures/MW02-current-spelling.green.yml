@@ -61,6 +61,7 @@
             "frontend-coverage=${{ needs.frontend-coverage.result }}" \
             "frontend-seam-redis=${{ needs.frontend-seam-redis.result }}" \
             "frontend-local-stack=${{ needs.frontend-local-stack.result }}" \
+            "frontend-live-db-lane=${{ needs.frontend-live-db-lane.result }}" \
             "frontend-policy=${{ needs.frontend-policy.result }}" \
             "frontend-build=${{ needs.frontend-build.result }}" \
             "e2e-seeded=${{ needs.e2e-seeded.result }}" \
