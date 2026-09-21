@@ -2028,33 +2028,49 @@ def test_session_abandoned_cannot_be_absorbed_into_a_credential_verdict():
     ],
 )
 def test_session_abandoned_message_carries_no_classifier_token(stage):
-    """D-42 — the refusal message must be DISJOINT from the classifier's substring
-    tables, for EVERY stage name the fence can carry.
+    """D-42 — the refusal message must classify BLAME-FREE through
+    `classify_mt5_login_error`, for EVERY stage name the fence can carry.
 
-    `classify_mt5_login_error` matches by SUBSTRING, and the fenced stage names are
-    themselves members of those tables: `terminal_info`/`connect` contain
-    `terminal`/`connect`, `login`/`account_info` contain `login`/`account`. So an
-    exception message that interpolated its stage — the obvious, natural way to
-    write it — would re-run the documented `routers/exchange.py:678-684` incident,
-    where an operator-side refusal became a 400 telling the user their BROKER
-    SERVER was wrong.
+    A message the classifier RECOGNISES becomes a permanent user-attributed
+    verdict, and the fenced stage names are the natural near-misses: before
+    164.5.4 the tables held bare words and `terminal_info`/`connect`/`login`/
+    `account_info` were literally members. An exception message that interpolated
+    its stage — the obvious, natural way to write it — would re-run the documented
+    `routers/exchange.py:678-684` incident, where an operator-side refusal became
+    a 400 telling the user their BROKER SERVER was wrong.
 
-    ⚠️ The tables are imported LIVE from `services/mt5_validation.py` on purpose.
-    The invariant is disjointness from whatever the classifier actually matches on
+    ⚠️ The verdict is taken from the LIVE seam in `services/mt5_validation.py` on
+    purpose. The invariant is safety against whatever the classifier actually does
     TODAY; a hand-copied table would go stale and stay green while the real
-    classifier gained a token. It is not self-referential — the table lives in a
-    DIFFERENT module from the one under test.
-    """
-    from services.mt5_validation import _AUTH_TOKENS, _WRONG_SERVER_TOKENS
+    classifier changed. It is not self-referential — the seam lives in a DIFFERENT
+    module from the one under test.
 
-    message = str(Mt5SessionAbandoned(stage)).lower()
-    for token in (*_WRONG_SERVER_TOKENS, *_AUTH_TOKENS):
-        assert token not in message, (
-            f"the refusal message for stage {stage!r} contains the classifier "
-            f"token {token!r} — a fenced zombie would be classified as the USER's "
-            "credential failure and a working key blamed for our abandoned thread "
-            "(the routers/exchange.py:678-684 incident)"
-        )
+    ⭐ 164.5.4 — this asserted SUBSTRING-ABSENCE from the live tables until the
+    anchored-phrase rewrite, which would have left the loop trivially green while
+    measuring nothing. It now runs the real seam and demands `"transient"`, the
+    only class that carries no blame. Strictly stronger, and it cannot be
+    vacuated by a future reshape of the tables.
+    """
+    from services.mt5_client import Mt5ClientError
+    from services.mt5_validation import (
+        _AUTH_PHRASES,
+        _WRONG_SERVER_PHRASES,
+        classify_mt5_login_error,
+    )
+
+    # Non-empty tables, or a "transient" verdict proves only that the classifier
+    # had nothing to match on.
+    assert _WRONG_SERVER_PHRASES and _AUTH_PHRASES
+    message = str(Mt5SessionAbandoned(stage))
+    assert len(message) > 40, "the refusal message is too short to be the real copy"
+    # Code 0 so `_IPC_TRANSPORT_CODES` cannot answer for the text.
+    verdict = classify_mt5_login_error(Mt5ClientError(0, message))
+    assert verdict == "transient", (
+        f"the refusal message for stage {stage!r} classifies {verdict!r} — a "
+        "fenced zombie would be classified as the USER's credential failure and a "
+        "working key blamed for our abandoned thread (the "
+        "routers/exchange.py:678-684 incident)"
+    )
 
 
 # --------------------------------------------------------------------------- #

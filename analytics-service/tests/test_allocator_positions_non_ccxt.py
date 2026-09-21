@@ -1043,9 +1043,17 @@ async def test_mt5_read_timeout_restarts_and_raises_transient(
     )
 
     restarts: list[object] = []
+    # R2/WR-01 — capture the PREFIX PRODUCTION PASSES, not merely that the keyword
+    # is accepted. Every double in this file takes `log_prefix` WITH A DEFAULT, so a
+    # wrong production value was invisible to all of them: round 1 shipped an
+    # INVENTED `refresh_allocator_positions` — a job kind that exists nowhere in the
+    # tree — into the one log line whose whole purpose is naming the job correctly
+    # during a wedged-terminal triage.
+    restart_prefixes: list[str] = []
 
-    async def _fake_restart(client):
+    async def _fake_restart(client, *, log_prefix="derive_broker_dailies"):
         restarts.append(client)
+        restart_prefixes.append(log_prefix)
 
     monkeypatch.setattr(ap, "_MT5_DERIVE_READ_TIMEOUT_S", 0.05)
     monkeypatch.setattr(ap, "_mt5_bounded_restart", _fake_restart)
@@ -1059,6 +1067,12 @@ async def test_mt5_read_timeout_restarts_and_raises_transient(
 
     assert str(excinfo.value) == MT5_UNREACHABLE_NOTE
     assert restarts, "a timed-out read must actively restart the terminal"
+    # ⛔ R2/WR-01 — the prefix must be THIS job's real dispatcher kind: the string
+    # `job_worker`'s dispatch branch matches on, and the one the ~10 sibling
+    # `logger.warning` calls in this function already use. A literal naming no real
+    # job sends incident triage to the wrong handler, which is the very defect the
+    # `log_prefix` parameter was added to remove.
+    assert restart_prefixes == ["poll_allocator_positions"], restart_prefixes
 
 
 # ---------------------------------------------------------------------------
@@ -1167,7 +1181,7 @@ async def test_mt5_login_mismatch_never_emits_a_wrong_account_row(
 
     restarts: list[object] = []
 
-    async def _fake_restart(client):
+    async def _fake_restart(client, *, log_prefix="derive_broker_dailies"):
         restarts.append(client)
 
     monkeypatch.setattr(ap, "_mt5_bounded_restart", _fake_restart)
@@ -1189,7 +1203,7 @@ async def test_mt5_missing_login_field_fails_loud(mt5_enabled, monkeypatch):
     default-match this guard exists to prevent."""
     from services.allocator_positions import AllocatorHoldingsSyncTransientError
 
-    async def _fake_restart(client):
+    async def _fake_restart(client, *, log_prefix="derive_broker_dailies"):
         return None
 
     monkeypatch.setattr(ap, "_mt5_bounded_restart", _fake_restart)
@@ -1218,7 +1232,7 @@ async def test_mt5_poisoned_equity_is_refused(mt5_enabled, monkeypatch, override
     guard as a silently poisoned AUM figure. Refuse it — no row."""
     from services.allocator_positions import AllocatorHoldingsSyncTransientError
 
-    async def _fake_restart(client):
+    async def _fake_restart(client, *, log_prefix="derive_broker_dailies"):
         return None
 
     monkeypatch.setattr(ap, "_mt5_bounded_restart", _fake_restart)
@@ -1283,7 +1297,7 @@ async def test_mt5_abandoned_session_raises_the_transient_with_the_fixed_copy(
 
     restarts: list[object] = []
 
-    async def _spy_restart(client):
+    async def _spy_restart(client, *, log_prefix="derive_broker_dailies"):
         restarts.append(client)
 
     monkeypatch.setattr(ap, "_mt5_bounded_restart", _spy_restart)

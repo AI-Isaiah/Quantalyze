@@ -1,5 +1,117 @@
 # Changelog
 
+## [0.84.0.0] - 2026-09-20 — MT5RECON-GAP: the MT5 backfill runs, and the login error stops blaming you
+
+⭐ **What changed for whoever reads this next.** Three MT5 defects, all MEASURED in PROD on
+2026-09-16, all of one class: MT5 was routed down a path that did not know about it, and the failure
+degraded to a silent retry instead of a verdict anyone could read.
+
+### Fixed
+
+- **The full-backfill job had no MT5 branch at all.** `run_reconstruct_allocator_history_job`
+  branched on `venue == "deribit"` and otherwise fell into the generic ccxt crawl. `Mt5Session` has
+  **NONE of the six** ccxt methods that module calls (measured 0/6 — its deal-ledger equivalent is
+  `history_deals_get`), so the crawl raised an `AttributeError` that the existing
+  `except ccxt.NotSupported` cannot catch, and the job ended `failed (unknown)`. It now has a
+  `venue == "mt5"` arm ahead of the crawl, wired end to end.
+- **The login classifier blamed the user for a credential that works.** `classify_mt5_login_error`'s
+  token tables were marked `[ASSUMED]` and never validated. The broker text observed live for a
+  connected account on the CORRECT server matched `_AUTH_TOKENS` TWICE (two separate bare tokens), so
+  it could never reach the `transient` default — producing a PERMANENT, user-attributed `failed`
+  stamp telling a founder with a working password that their credentials are bad. The tables are now
+  anchored multi-word phrases, and an unrecognised message REFUSES TO GUESS rather than defaulting to
+  blame.
+- **`KEY_UNDECRYPTABLE` was discarded at the Python/TypeScript seam.** Python raised it with the real
+  remedy; TypeScript had no verdict row, so it fell through to `UNKNOWN`/500 and rendered a Retry
+  control — on a ciphertext that will never decrypt. Closed on BOTH sides.
+- **A negative reconstructed balance could be published.** The backward roll is exactly as good as
+  the deal cash-effect field set; a broker booking a cost both as a deal field and as its own deal row
+  overstates cumulative P&L and rolls the earliest days negative. Nothing refused it — no plausibility
+  check, no CHECK constraint, and the one zero-curve alarm is structurally unreachable for MT5.
+- **A failed terminal restart named the wrong job during triage.** `_mt5_bounded_restart` hardcoded
+  one job name while three jobs call it; it now takes a `log_prefix` and all six call sites name their
+  real dispatcher kind. Two of the six were already wrong before this phase.
+- **`import math` sat ~700 lines from the guard that uses it**, beside an unrelated class. It bound
+  correctly, but a cleanup of that block would have turned the NAV non-finite guard into a `NameError`
+  swallowed by the generic handler — a poisoned anchor published as a complete series.
+
+### Added
+
+- `services/mt5_read.py` — the ONE MT5 deal-ledger read, extracted as a leaf module so the derive and
+  backfill paths cannot drift apart. Login brackets went 3 → 1.
+- A NAV-**levels** sibling in `services/broker_dailies.py` (`reconstruct_mt5_nav_levels`) on a shared
+  private fold (`_fold_mt5_deals`), resolving decision A-01: the existing combiner returns a RETURN
+  series while the backfill persists dollar LEVELS.
+- `KEY_MUST_BE_RECONNECTED` as a real wizard error code, with its `VENUE_WIRE_CODE_TO_VERDICT` row.
+  ⛔ The row is the routing mechanism, not decoration — without it a minted code reaches the `UNKNOWN`
+  terminal and closes nothing.
+- A kill-switch gate on the new venue branch. It is **not** inherited (decision A-03) and fires before
+  any terminal read.
+
+### Changed
+
+- The MT5 failure dispositions are twelve fixed members; no arm concatenates broker-supplied text into
+  `error_message`. Scrubbed broker detail goes only to the audit event and a warning log.
+- `KeyPermissionBadge`'s re-check control is disabled on one specific error code — narrow, not a
+  blanket disable — and reset at the top of every load.
+
+### Root cause
+
+⭐ **Three separate times in this phase, a GREEN SUITE PROVED NOTHING about the thing that was
+wrong.** This is the most useful thing in the entry.
+
+1. A NAV quality meta was bound to `_` and dropped, so the published curve carried no quality signal
+   and no arm could refuse on one.
+2. A signature change met test doubles with a stale signature; the resulting `TypeError` was swallowed
+   by a broad handler and surfaced as a MISCLASSIFIED job outcome four call sites from the cause.
+3. A fix intended to name the job correctly passed an INVENTED job kind — a string that exists nowhere
+   in the dispatcher — into the one log line whose entire purpose is naming the job during triage.
+
+None was visible to `mypy --strict`, to the linter, or to a full passing suite. Each was closed only
+by a gate written to fail on that specific mistake, then calibrated by neutering it and observing red.
+⚠️ The third has a named lesson: the parameter had been gated for EXISTENCE and never for VALUE.
+
+### Tests
+
+- The anti-vacuity work is the highest-value part. Four test files iterate the classifier's token
+  rosters and had teeth ONLY because the members were short common words; the anchored-phrase rewrite
+  would have left all four trivially green while measuring nothing unless re-pointed in the same
+  commit. Every one now runs the REAL classifier and asserts a verdict rather than substring-absence.
+- Every neuter was OBSERVED red — mutation confirmed applied by grep, then restored from a `cp` byte
+  backup verified `cmp`-identical. ⛔ No `git checkout --` in any harness.
+- Both hand-typed copy-table size pins were moved together, and a production lease-site census was
+  RE-CUT (one member added, equality assertion preserved) rather than blanket-bumped.
+
+### Security
+
+32 threats, **0 open** — 24 mitigated, 6 not applicable (no dependency manifest touched), 1 accepted,
+1 transferred to a caller that was checked. ⭐ This phase adds **NO route, NO RLS policy, NO migration
+and NO grant**; its surface is credential handling and error-text leakage. The live-spike fixture was
+verified synthetic and carries zero observations — recorded as a verdict, never a specimen.
+
+### Notes
+
+- ⛔ **This phase ships NO migration.** There is no `apply-test` run and no PROD apply gate on it,
+  unlike the previous release.
+- ⚠️ **Defect 2 is NOT fully closed, and this is deliberate.** The over-matching is gone, but genuine
+  credential rejections now land on the pre-existing transient arm, whose copy asserts the network is
+  unavailable and offers a Retry that cannot succeed. That residual is ROUTED to **Phase 167
+  CREDTRUST**, which already owned it verbatim and carries an unmet hard dependency on Phase 164.7.
+  A Python-side message change would be user-invisible — the wizard renders its own copy table.
+- Two review rounds ran, each finding a real defect; the second found a defect in the first's own fix.
+- The live broker spike remains founder-only; nothing in this phase blocks on it.
+- Planning artifacts travel with the code: the phase's CONTEXT carries an AMENDMENT section that
+  SUPERSEDES three of its own body decisions (A-01 returns-vs-levels, A-02 "defect 3 is two tasks in
+  two languages", A-05 "the verdict row is required"), and two plan-mechanics defects were fixed
+  before execution — 21 XML-escaped ampersands that made every `cd … && …` verify command unrunnable,
+  and a stale-prose sweep that was not inside the task owning it. Work landed through three
+  worktree-isolated waves, merged back in dependency order.
+- Also carries a repo-infrastructure fix unrelated to the phase: the broken-windows ledger had refused
+  EVERY append since 2026-09-16. Root cause was 19 literal newlines pasted into one entry's
+  description, splitting its rendered row across 20 physical lines where the renderer emits one, so
+  the table could never round-trip to its JSON source of truth. Verified by an append that was refused
+  before and succeeds now.
+
 ## [0.83.0.0] - 2026-09-20 — MT5CREDS part 2 of 2: a wrong MT5 password stops costing you the key
 
 ⭐ **What you can now do.** Tell which MT5 account a key card belongs to, and fix a wrong password

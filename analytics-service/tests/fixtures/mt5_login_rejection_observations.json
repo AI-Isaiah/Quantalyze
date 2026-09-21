@@ -1,0 +1,28 @@
+[
+  {
+    "_protocol": {
+      "aim": "Retire the [ASSUMED] markers on _WRONG_SERVER_PHRASES / _AUTH_PHRASES in analytics-service/services/mt5_validation.py by recording MEASURED MT5 login-rejection strings. No authoritative MT5 error-text table exists, so a phrase invented from memory is a fabrication and a measured pair is the only evidence that retires a marker.",
+      "shape": "This file is a JSON array. The FIRST element is this header (JSON carries no comments). Every OTHER element is one observation: {\"account\": <synthetic label>, \"code\": <int>, \"text\": <rejection text>, \"expected\": \"auth\" | \"wrong_server\" | \"transient\"}.",
+      "consumed_by": "analytics-service/tests/test_mt5_validate.py — test_each_measured_login_rejection_classifies_as_recorded parametrizes over the observations, and test_the_live_spike_fixture_exists_and_carries_its_capture_protocol asserts this header UNCONDITIONALLY so an empty array cannot make the gate vanish.",
+      "clauses": [
+        "founder_enters_credentials_no_agent_ever_does",
+        "capture_code_and_text_from_login_rejections_only",
+        "never_an_account_identifier",
+        "never_a_broker_server_name",
+        "never_a_password",
+        "accounts_are_synthetic_labels_substituted_before_writing",
+        "partial_sets_land_each_pair_retires_one_assumed_marker",
+        "nothing_in_this_phase_blocks_on_it"
+      ],
+      "founder_enters_credentials_no_agent_ever_does": "The live spike is FOUNDER-ONLY. No agent drives it and no agent enters, reads, decrypts, logs or echoes a credential at any point.",
+      "capture_code_and_text_from_login_rejections_only": "Capture the (code, text) pair from a login REJECTION and nothing else. Not a session transcript, not a terminal dump, not a log excerpt.",
+      "never_an_account_identifier": "A real MT5 account number is NEVER written here, in any field, in any form.",
+      "never_a_broker_server_name": "A real broker server name is NEVER written here. If the rejection text itself contains one, replace it with a synthetic placeholder before writing the entry.",
+      "never_a_password": "A password is NEVER written here, and never appears in a captured text field.",
+      "accounts_are_synthetic_labels_substituted_before_writing": "The \"account\" field is a synthetic label (\"acct-a\", \"acct-b\") chosen by the founder and substituted BEFORE anything is written. It identifies which capture session a pair came from, never which account.",
+      "partial_sets_land_each_pair_retires_one_assumed_marker": "Partial sets LAND. One measured pair is worth appending on its own; there is no all-or-nothing gate and no minimum count.",
+      "nothing_in_this_phase_blocks_on_it": "The refusal rule shipped WITHOUT the spike and is independently correct. This table is an additive follow-up and blocks nothing.",
+      "why_this_file_is_safe_to_commit": "The repo is PUBLIC and this is tracked source. It holds VERDICTS and synthetic labels — never specimens, never a credential, never the pattern searched for. A capture that cannot be written under the clauses above is not written at all."
+    }
+  }
+]

@@ -536,13 +536,21 @@ async def test_read_error_fails_whole_job(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_wrong_server_at_derive_is_transient_not_permanent(monkeypatch) -> None:
-    """RED-TEAM: at DERIVE the key ALREADY validated, so a connection/bridge error —
-    which classify_mt5_login_error folds into 'wrong_server' via its 'connect'/
-    'network'/'terminal' tokens — must be TRANSIENT (retry, NO user-blame stamp),
-    NOT a permanent 'bad credentials or wrong broker server' failure. A routine
-    gateway redeploy mid-derive must never permanently kill a valid strategy and
-    blame the user's creds. Reddens against the old `_kind in ('auth','wrong_server')
-    -> permanent` classification."""
+    """RED-TEAM: at DERIVE the key ALREADY validated, so a connection/bridge error
+    must be TRANSIENT (retry, NO user-blame stamp), NOT a permanent 'bad
+    credentials or wrong broker server' failure. A routine gateway redeploy
+    mid-derive must never permanently kill a valid strategy and blame the user's
+    creds. Reddens against the old `_kind in ('auth','wrong_server') -> permanent`
+    classification.
+
+    ⚠️ 164.5.4: the classifier itself used to MANUFACTURE the 'wrong_server' this
+    arm has to absorb — its table carried the bare tokens 'connect', 'network' and
+    'terminal', so any bridge error matched. `_WRONG_SERVER_PHRASES` is anchored
+    now and such text degrades to 'transient' by the refusal rule. ⛔ The ROUTING
+    is still what this case pins and it must not be relaxed: the derive arm must
+    absorb a 'wrong_server' verdict whatever text produced it, because a genuine
+    broker-server rejection at derive time is still OUR problem to retry, not the
+    user's to be blamed for."""
     monkeypatch.setenv("MT5_ENABLED", "true")
     transport = _FakeMt5Transport(
         account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
@@ -1302,10 +1310,17 @@ async def test_mt5_login_field_missing_fails_loud(monkeypatch) -> None:
 async def test_mt5_post_read_transient_blip_is_not_permanent(monkeypatch) -> None:
     """The PRE bracket + login + deal fetch all succeed on the CORRECT account; the
     POST re-read then hits a transient transport blip ("connection reset ...") that
-    ``classify_mt5_login_error`` would read as ``wrong_server`` (the "connect" token)
-    → PERMANENT + user-blame stamp under the old shared-arm routing. IN-01 reroutes
-    it: a failure to RE-CONFIRM the already-verified account is a retry-worthy
-    verification gap, so the job is TRANSIENT with NOTHING stamped.
+    ``classify_mt5_login_error`` read as ``wrong_server`` while its table carried
+    the bare "connect" token → PERMANENT + user-blame stamp under the old
+    shared-arm routing. IN-01 reroutes it: a failure to RE-CONFIRM the
+    already-verified account is a retry-worthy verification gap, so the job is
+    TRANSIENT with NOTHING stamped.
+
+    ⚠️ 164.5.4 narrowed the OTHER half: `_WRONG_SERVER_PHRASES` is anchored on the
+    broker-server lookup, so this blip's text now degrades to ``transient`` at the
+    classifier too. ⛔ That is belt AND braces, not a reason to drop the reroute —
+    the reroute must hold for a message that genuinely IS recognised, and the
+    refusal rule governs only the ones that are not.
 
     Reds against the pre-fix code (error_kind == "permanent" and a strategy_analytics
     'failed' stamp present). Trust is untouched: a genuine wrong-account POST read
@@ -1376,10 +1391,17 @@ def test_deal_fetch_margin_covers_server_utc_offset_bound() -> None:
 def test_classify_no_ipc_connection_is_transient_not_wrong_server():
     """Regression (red-team FABLE, 2026-07-25): -10004 'No IPC connection' means the
     terminal bridge isn't attached (gateway down / mid-redeploy) — a TRANSIENT infra
-    fault, NOT a wrong broker server. Its 'ipc' text matches _WRONG_SERVER_TOKENS, so
-    without the code-gate it classified as 'wrong_server' → a PERMANENT user-blame
-    rejection of a VALID key during a gateway outage (more likely now that login()
-    calls initialize() first, making -10004 the canonical first-touch bridge error)."""
+    fault, NOT a wrong broker server. Its 'ipc' text matched the pre-164.5.4
+    wrong-server table, which carried the bare token 'ipc', so without the
+    code-gate it classified as 'wrong_server' → a PERMANENT user-blame rejection of
+    a VALID key during a gateway outage (more likely now that login() calls
+    initialize() first, making -10004 the canonical first-touch bridge error).
+
+    ⚠️ 164.5.4: `_WRONG_SERVER_PHRASES` is anchored now ('trade server not found')
+    and carries no 'ipc' member, so the TEXT alone would already degrade to
+    'transient' by the refusal rule. The code-gate is still what this case pins,
+    and it still runs FIRST: a transport verdict must not depend on broker-supplied
+    text, which a future phrase could always start matching."""
     from services.mt5_validation import classify_mt5_login_error
 
     err = Mt5ClientError(-10004, "No IPC connection")
@@ -1491,19 +1513,34 @@ async def test_the_abandoned_derive_error_message_carries_no_classifier_token(
 ) -> None:
     """⭐ T-153.5-13 — the text that lands in `compute_jobs.error_message`.
 
-    `_WRONG_SERVER_TOKENS` / `_AUTH_TOKENS` are SUBSTRING-matched, and the words
-    an author would naturally reach for here — "terminal", "session", "connect",
-    "login" — are members. The documented incident is
-    `routers/exchange.py:678-684`, where an operator-side refusal became a 400
-    telling the user their BROKER SERVER was wrong.
+    That text is operator-visible AND re-classifiable, so it must come back
+    BLAME-FREE from `classify_mt5_login_error`. Before 164.5.4 the tables were
+    substring-matched bare words and the ones an author would naturally reach for
+    here — "terminal", "session", "connect", "login" — were literally members.
+    The documented incident is `routers/exchange.py:678-684`, where an
+    operator-side refusal became a 400 telling the user their BROKER SERVER was
+    wrong. The tables are anchored phrases now, so the hazard is NARROWER — a
+    message must name the broker-server lookup or the credential outright — but it
+    is not gone, and an unrecognised message degrades to `transient` by the
+    refusal rule rather than to a guess.
 
-    ⚠️ The tables are imported LIVE from `services/mt5_validation.py`, deliberately.
-    The invariant is disjointness from whatever the classifier matches on TODAY; a
-    hand-copied table would go stale and stay green while the real classifier
-    gained a token. It is not self-referential — the table lives in a DIFFERENT
+    ⚠️ The verdict comes from the LIVE seam in `services/mt5_validation.py`,
+    deliberately. The invariant is safety against whatever the classifier does
+    TODAY; a hand-copied table would go stale and stay green while the real
+    classifier changed. It is not self-referential — the seam lives in a DIFFERENT
     module from the one under test.
+
+    ⭐ 164.5.4 — the assertion moved from substring-absence to the classifier
+    itself. The old loop had teeth only because the members were short common
+    words; anchored phrases would have left it trivially green while measuring
+    nothing.
     """
-    from services.mt5_validation import _AUTH_TOKENS, _WRONG_SERVER_TOKENS
+    from services.mt5_client import Mt5ClientError
+    from services.mt5_validation import (
+        _AUTH_PHRASES,
+        _WRONG_SERVER_PHRASES,
+        classify_mt5_login_error,
+    )
 
     monkeypatch.setenv("MT5_ENABLED", "true")
 
@@ -1522,12 +1559,16 @@ async def test_the_abandoned_derive_error_message_carries_no_classifier_token(
         result = await run_derive_broker_dailies_job(_job())
 
     assert result.error_kind == "transient"
-    message = (result.error_message or "").lower()
+    message = result.error_message or ""
     assert message, "the transient arm wrote no error_message at all"
-    for token in (*_WRONG_SERVER_TOKENS, *_AUTH_TOKENS):
-        assert token not in message, (
-            f"the derive arm's error_message contains the classifier token "
-            f"{token!r} — this text is operator-visible in compute_jobs and, if it "
-            "is ever fed to classify_mt5_login_error, a working key gets blamed "
-            "for our own abandoned thread (D-42)"
-        )
+    # Non-empty tables, or a "transient" verdict proves only that the classifier
+    # had nothing to match on.
+    assert _WRONG_SERVER_PHRASES and _AUTH_PHRASES
+    # Code 0 so `_IPC_TRANSPORT_CODES` cannot answer for the text.
+    verdict = classify_mt5_login_error(Mt5ClientError(0, message))
+    assert verdict == "transient", (
+        f"the derive arm's error_message classifies {verdict!r} — this text is "
+        "operator-visible in compute_jobs and, when it is fed to "
+        "classify_mt5_login_error, a working key gets blamed for our own "
+        "abandoned thread (D-42)"
+    )

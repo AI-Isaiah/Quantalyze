@@ -2042,8 +2042,37 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * and the destructive class below is still four members. The baseline was
    * re-measured at HEAD before it moved — 92 is what 164.2-04 left and
    * nothing between it and this plan minted a member.
+   *
+   * ⚠️ 93 → 94 (164.5.4-02 / D-03). ONE entry — `KEY_MUST_BE_RECONNECTED`, the
+   * honest answer to the wire code a decrypt failure raises on
+   * `keys/[id]/rotate-secret`, which until now had no verdict row and reached
+   * the founder as the `UNKNOWN` terminal with a Retry control.
+   *
+   * THIS GUARD IS THE DESTRUCTIVE-ACTION SCAN, so its question is "does the new
+   * entry fall INSIDE the population this scan walks?", and the reasoning was
+   * re-run over the entry BEFORE the number moved:
+   *   · the new entry's `actions` are `["request_call", "expand_log"]`;
+   *   · `DESTRUCTIVE_ACTIONS` above holds exactly ONE member, `start_fresh`;
+   *   · neither action is that member, so the entry sits OUTSIDE the scanned
+   *     population by construction and the destructive class below is
+   *     UNCHANGED at four members.
+   *
+   * ⛔ THE EXCLUSION IS LOAD-BEARING, not incidental, and on a sharper ground
+   * than most of its neighbours. `start_fresh` DELETEs a draft; the condition
+   * here is that a CREDENTIAL WE ALREADY HOLD cannot be read back. A user
+   * reaching this card is on a key-management surface that may have no draft at
+   * all, and the one thing they must not be nudged into is destroying the row
+   * whose synced history is the reason the in-place fix exists. The entry's own
+   * third fix line says as much in the other direction.
+   *
+   * ⚠️ AND THE BASELINE WAS RE-MEASURED AT HEAD BEFORE IT MOVED — 93 is what
+   * 164.5.3-02 left, nothing between it and this plan minted a member, and 94
+   * was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 94 to be 93"),
+   * never counted off the table. The comment at the head of this file argues
+   * why at length: an expectation built by reading the subject is an oracle
+   * that cannot fail.
    */
-  const EXPECTED_TABLE_SIZE = 93;
+  const EXPECTED_TABLE_SIZE = 94;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2549,8 +2578,46 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * tried to write was never created. It names no internal field, claims no
    * notification, asserts nothing about a fetch stage, and does not say "data
    * is unchanged" — it carries none of the four FORBIDDEN fragments.
+   *
+   * ⚠️ 93 → 94 (164.5.4-02 / D-03), for `KEY_MUST_BE_RECONNECTED`. THIS guard
+   * is the banned-claims honesty scan, so its question is a different one from
+   * its twin's, and the entry was walked against all four FORBIDDEN fragments
+   * by hand — title, cause and every fix line — BEFORE the number moved:
+   *   · "been notified" — ABSENT. The third fix line asks the user to email
+   *     security@quantalyze.com, which is the opposite claim: it says nobody
+   *     has been told yet and names who to tell.
+   *   · "we fetched your trades" — ABSENT. The entry says nothing about any
+   *     fetch stage; the fault it describes fires before a venue is reached.
+   *   · "wizard_session_id idempotency" — ABSENT, and the near-misses were
+   *     checked rather than assumed: the entry names no column, no env
+   *     variable, no function and no key-management subsystem. The one
+   *     mechanism sentence it carries ("we hold your key encrypted") is a fact
+   *     about the user's key, not an internal identifier.
+   *   · "data is unchanged" — ABSENT, and this is the fragment that needed the
+   *     care. ⭐ THE ENTRY MAKES NO WRITE CLAIM IN EITHER DIRECTION, and that
+   *     is deliberate rather than an omission. At today's ONE reachable
+   *     emitter the reassuring "nothing was saved" would in fact be TRUE — the
+   *     decrypt failure fires before the broker probe and long before the
+   *     Next-side UPDATE — but this table is keyed on a WIRE code, so the
+   *     sentence would be inherited by any future emitter of the same code,
+   *     and `DASHBOARD_WRITE_INDETERMINATE` three paragraphs up is this file's
+   *     record of what it costs to publish a write claim a later emitter makes
+   *     false. The entry claims only what is true of the STORED KEY.
+   *
+   * ⚠️ THE CLAUSE TO RE-READ if this entry is ever edited is the ONE prediction
+   * it does make: "every attempt reads the same stored copy". That is not a
+   * guess about a retry, it is a property of the emitter — the rotation path
+   * decrypts the stored row on every call, before it touches anything the user
+   * just typed — and it is what licenses the absent Retry control. An edit that
+   * softens it into "this may not work" would leave a non-recoverable envelope
+   * with no stated reason for being one; an edit that strengthens it into a
+   * claim about the ACCOUNT would assert something the broker never told us.
+   *
+   * ⚠️ AND THE BASELINE WAS RE-MEASURED AT HEAD BEFORE IT MOVED — 93 is what
+   * 164.5.3-02 left, and 94 was READ OFF THE TWIN GUARD'S FAILURE MESSAGE
+   * ("expected 94 to be 93") rather than counted off the table.
    */
-  const EXPECTED_TABLE_SIZE = 93;
+  const EXPECTED_TABLE_SIZE = 94;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -5661,5 +5728,125 @@ describe("[161-REVIEW / IN-02] `expand_log` is a declaration, not a Principle-4 
       "wizardErrors.ts has reintroduced: " + CLAIM_B + ". Nothing in this file " +
         "decides what ErrorEnvelope renders.",
     ).toBe(0);
+  });
+});
+
+/**
+ * ⭐ 164.5.4-02 / D-03 — THE TWO FACTS THIS PHASE EXISTS FOR, each pinned by the
+ * MECHANISM that produces it rather than by restating a table.
+ *
+ * THE DEFECT, measured before the fix. `analytics-service`'s secret-rotation
+ * endpoint already knew the answer: it raises wire `KEY_UNDECRYPTABLE` with
+ * `retryable=False` and the sentence "This stored key could not be decrypted.
+ * It must be reconnected." TypeScript threw both away. The wire code had no row
+ * in `VENUE_WIRE_CODE_TO_VERDICT`, the substring cascade has no decrypt branch,
+ * and so the founder read the `UNKNOWN` terminal — "we could not classify this
+ * failure" — beside a Retry control that could never work, because every press
+ * re-reads the same unreadable stored copy.
+ *
+ * ⛔ WHY THE ROW AND THE MINT ARE BOTH PINNED, AND SEPARATELY. A minted member
+ * with no row is unreachable; a row pointing at a recoverable member still
+ * renders the useless Retry. Either one alone closes nothing, so each case
+ * below deletes ITS OWN subject to check it can fail — the row test was
+ * observed RED naming `UNKNOWN` with the row removed, and the envelope test was
+ * observed RED with `try_another_key` added to the entry's `actions`.
+ *
+ * ⛔ AND THE RECOVERABILITY HALF IS DERIVED THROUGH `buildEnvelope`, never read
+ * off `actions`, matching this file's standing rule: asserting the array would
+ * restate what the table says about itself and would stay green if the
+ * derivation rule in `envelope.ts` ever changed.
+ */
+describe("[164.5.4-02 / D-03] an unreadable stored key routes to a remedy, with no Retry", () => {
+  /**
+   * The EXACT shape `keys/[id]/rotate-secret/route.ts` throws: a plain `Error`
+   * carrying `seamCode` as an own data property. Never an
+   * `AnalyticsUpstreamError` — the classifier reads this with `typeof`, not
+   * `instanceof`, precisely so it survives the wholesale seam mocks, and a
+   * fixture built from the class would test a path the route does not take.
+   */
+  function rotateSecretThrow(message: string, seamCode: string): Error {
+    return Object.assign(new Error(message), { seamCode });
+  }
+
+  /**
+   * Byte-identical to the `detail=` argument at the Python emitter
+   * (`rotate_key_secret`, analytics-service/routers/internal.py). Typed here as
+   * a literal so the "without the row this lands somewhere else" control below
+   * is a measurement rather than a claim.
+   */
+  const DECRYPT_FAILURE_DETAIL =
+    "This stored key could not be decrypted. It must be reconnected.";
+
+  it("the wire code routes to the minted member — NOT the UNKNOWN terminal, and NOT KEY_PROBE_FAILED", () => {
+    const verdict = classifyKeyValidationError(
+      rotateSecretThrow(DECRYPT_FAILURE_DETAIL, "KEY_UNDECRYPTABLE"),
+    );
+
+    expect(verdict).toEqual({
+      code: "KEY_MUST_BE_RECONNECTED",
+      status: 500,
+    });
+
+    // ⭐ THE TWO WRONG ANSWERS, NAMED. Both were live candidates and both are
+    // asserted against rather than merely not-produced, because a reader
+    // arriving at this case months from now needs to know WHICH failures it
+    // stands between — and because this phase's own CONTEXT.md carries a
+    // superseded bullet that, taken literally, would have produced the first.
+    expect(
+      verdict.code,
+      "the decrypt failure fell back to the terminal that admits knowing " +
+        "nothing, for a fault the service had classified precisely",
+    ).not.toBe("UNKNOWN");
+    expect(
+      verdict.code,
+      "KEY_PROBE_FAILED is RECOVERABLE, so routing here would render the same " +
+        "useless Retry control the fix exists to remove",
+    ).not.toBe("KEY_PROBE_FAILED");
+  });
+
+  it("it is the ROW that moved the verdict — the same sentence with no wire code still lands on UNKNOWN", () => {
+    // The control that makes the case above falsifiable. The substring cascade
+    // has no decrypt/reconnect branch, so the identical human sentence carrying
+    // NO machine code is exactly what the founder used to get. If this ever
+    // starts answering the minted member, someone added a cascade branch and
+    // the case above stopped measuring the row.
+    expect(
+      classifyKeyValidationError(new Error(DECRYPT_FAILURE_DETAIL)),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("the envelope the browser receives is NOT recoverable, so no Retry control renders", () => {
+    const envelope = buildEnvelope("KEY_MUST_BE_RECONNECTED", "cid-164-5-4-02");
+
+    expect(
+      envelope.recoverable,
+      "a Retry was offered against a stored copy that will read identically on " +
+        "every attempt — the rotation path decrypts the stored row on every " +
+        "call, before it touches anything the user just typed, so pressing " +
+        "Retry cannot change the outcome. Offering it IS the defect.",
+    ).toBe(false);
+
+    // NON-VACUITY: the derivation really can answer `true`. Without this the
+    // assertion above would pass on a `buildEnvelope` that had stopped deriving
+    // recoverability at all.
+    expect(
+      buildEnvelope("KEY_PROBE_FAILED", "cid-164-5-4-02").recoverable,
+      "the nearest member by subject is still recoverable — if this flipped, " +
+        "the contrast the case above rests on is gone and so is the derivation",
+    ).toBe(true);
+  });
+
+  it("the copy names the remedy Python already established — reconnect this key", () => {
+    const copy = formatKeyError("KEY_MUST_BE_RECONNECTED");
+    const blob = `${copy.title} ${copy.cause} ${copy.fix.join(" ")}`.toLowerCase();
+
+    expect(blob).toContain("connect this account again");
+    // ⛔ AND IT MUST NOT INVITE THE ACTION IT CANNOT HONOUR. "Try again" on this
+    // card would contradict the absent Retry control one line up.
+    expect(
+      blob,
+      "the copy tells the user to retry while the envelope offers no control " +
+        "to do it with — the two halves of this fix have to agree",
+    ).not.toMatch(/try again/);
   });
 });

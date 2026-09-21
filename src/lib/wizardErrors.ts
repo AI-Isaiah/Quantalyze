@@ -411,6 +411,47 @@ export type WizardErrorCode =
   // authored honestly rather than left to whatever `actions` happened to
   // default to.
   | "KEY_VENUE_ALREADY_CONNECTED"
+  // 164.5.4-02 / D-03 — THE STORED CREDENTIAL CANNOT BE READ BACK, so no
+  // action taken against that stored copy can succeed until it is replaced.
+  //
+  // WHERE IT COMES FROM. `analytics-service`'s `rotate_key_secret`
+  // (`routers/internal.py`) raises wire `KEY_UNDECRYPTABLE` — 500,
+  // `retryable=False`, detail *"This stored key could not be decrypted. It must
+  // be reconnected."* — when `decrypt_credentials` fails on the row it was
+  // asked to re-secret. The raise is NARROWED at the emitter to `InvalidToken`
+  // / `JSONDecodeError` / `KeyError`, i.e. the types a genuine decrypt failure
+  // produces; an unrelated bug propagates as an unhandled 500 instead. ⭐ SO
+  // THE REMEDY IS NOT RE-DERIVED HERE — Python already established it and this
+  // member is how TypeScript CARRIES it. Before this member the code had no
+  // wizard answer at all and the founder read the `UNKNOWN` terminal, "we could
+  // not classify this failure", beside a Retry control.
+  //
+  // ⛔ NOT `KEY_PROBE_FAILED`, the nearest member by subject. Its `actions`
+  // carry `clear_and_retry`, so `buildEnvelope` derives `recoverable: true` and
+  // a Retry renders — against a stored ciphertext that will read the same way
+  // on every attempt. Offering that retry IS the defect this member closes, so
+  // reusing the member that renders it would close nothing.
+  // ⛔ NOT `SEAM_MISCONFIGURED`. Its copy promises a fault in OUR CONFIGURATION,
+  // which an operator can put right; the fault here is in ONE ROW'S stored
+  // ciphertext, and no setting an operator can change makes that row readable
+  // again. `KEK_UNAVAILABLE` is the wire code that member honestly answers —
+  // an unset key affecting every row — and the distinction between "the KEK is
+  // missing" and "this row will not decrypt under it" is the whole reason both
+  // wire codes exist.
+  // ⛔ NOT `SEAM_INTERNAL_FAULT` (164.5.3's near-miss, and the closest PRECEDENT
+  // for the SHAPE of this entry rather than for its subject). That member says
+  // "we cannot tell you whether a second attempt would get further", which is
+  // deliberately true across its three wire codes. Here we CAN tell them: the
+  // same stored copy is read every time, so a second attempt gets no further,
+  // and a member that refuses to say so would be under-claiming a fact we hold.
+  //
+  // NOT recoverable, DERIVED rather than declared: `actions` below carries
+  // neither member of `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so
+  // `buildEnvelope` derives `recoverable: false` and `ErrorEnvelope` renders NO
+  // Retry control — the same mechanism `SEAM_INTERNAL_FAULT`,
+  // `KEY_VENUE_ALREADY_CONNECTED` and `ALLOCATION_NOT_ALLOCATABLE` use. The
+  // emitter is `retryable=False` and agrees.
+  | "KEY_MUST_BE_RECONNECTED"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
   | "SYNC_TIMEOUT"
   | "SYNC_FAILED"
@@ -2378,6 +2419,52 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // `try_another_key`) — see the union member's docblock: resubmitting the
     // same credentials trips the same unique index and fails identically, the
     // same ground `VENUE_ALREADY_CONNECTED` is non-recoverable on.
+    actions: ["request_call", "expand_log"],
+  },
+
+  // 164.5.4-02 / D-03 — see the union member's docblock for why this mints
+  // rather than reusing `KEY_PROBE_FAILED`, `SEAM_MISCONFIGURED` or
+  // `SEAM_INTERNAL_FAULT`, and for the emitter the remedy is carried from.
+  //
+  // ⚠️ WHAT THIS COPY MAY CLAIM, read at the emitter rather than assumed.
+  //   · "the stored copy is what we cannot read" — `decrypt_credentials` fails
+  //     on THIS row's ciphertext, and the raise is narrowed to the three
+  //     decrypt-failure types, so the subject really is the stored copy.
+  //   · "every attempt reads the same stored copy" — `rotate_key_secret`
+  //     decrypts the stored row on EVERY call, before it touches the new
+  //     password, so a second submission re-reads the identical bytes. This is
+  //     the one prediction this entry is allowed to make, and it is why no
+  //     Retry is offered.
+  // ⛔ AND WHAT IT MAY NOT CLAIM, because the copy table is shared and the row
+  // routing to it is keyed on a WIRE code, not on a route: it says NOTHING
+  // about whether anything was saved, in either direction. It is TRUE at the
+  // rotate-secret emitter that nothing was persisted (the decrypt raise fires
+  // before `_validate_mt5_key` and long before the Next-side UPDATE), but that
+  // is a fact about ONE emitter, and `DASHBOARD_WRITE_INDETERMINATE`'s entry is
+  // the record of what it costs to publish a write claim that a later emitter
+  // makes false. The entry claims only what is true of the stored key itself.
+  // ⛔ It also asserts nothing about the ACCOUNT. `venue_account_id` is a
+  // caller-supplied value stored without venue confirmation, so no sentence
+  // here may imply the broker told us anything.
+  KEY_MUST_BE_RECONNECTED: {
+    title: "We can no longer read this stored key.",
+    cause:
+      "We hold your key encrypted, and our stored copy of this one can no longer be read back — so we cannot use it to reach the account. That is a fault on our side of the store rather than a sign that anything is wrong with the account or its password.",
+    fix: [
+      "Entering the password again here cannot clear this: every attempt reads the same stored copy.",
+      "Connect this account again from your keys list, so we hold a copy we can read.",
+      "If it will not connect, email security@quantalyze.com with the correlation id below before deleting anything — your synced history hangs off this key.",
+    ],
+    docsHref: "/security",
+    // ⛔ NEITHER member of `RECOVERABLE_ACTIONS` (`clear_and_retry`,
+    // `try_another_key`, src/lib/envelope.ts), so `buildEnvelope` derives
+    // `recoverable: false` and no Retry control renders. THE ABSENCE IS THE
+    // WHOLE POINT of this entry: the incumbent answer offered a Retry against a
+    // ciphertext that reads identically every time. ⚠️ Neither is a member of
+    // the destructive class either (`start_fresh` alone), so nothing here can
+    // destroy work from the error surface. `request_call` keeps the one route
+    // out that can actually resolve it; `expand_log` opens the correlation id
+    // the third fix line asks for.
     actions: ["request_call", "expand_log"],
   },
 
@@ -4511,6 +4598,39 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
     "MT5_VALIDATE_INVARIANT_VIOLATION",
     { code: "SEAM_INTERNAL_FAULT", status: 500 },
   ],
+  // ── 164.5.4-02 / D-03 — the decrypt failure, routed at last ───────────────
+  //
+  // 500, `retryable=False`, raised by `rotate_key_secret`
+  // (analytics-service/routers/internal.py) when `decrypt_credentials` fails on
+  // the row it was asked to re-secret. `keys/[id]/rotate-secret/route.ts` calls
+  // `classifyKeyValidationError` and carries `seamCode` forward (164.5.3 review
+  // / WR-01), so this row fires here, BEFORE the substring cascade — which is
+  // the only reason the founder sees the sentence below rather than the
+  // terminal `UNKNOWN`.
+  //
+  // ⭐ WHY THE ROW IS NOT OPTIONAL BESIDE THE MINT, recorded because a reader
+  // arriving from this phase's CONTEXT.md will find a superseded bullet saying
+  // the opposite. That bullet ("⛔ NOT a `VENUE_WIRE_CODE_TO_VERDICT` row")
+  // rejected a row pointing at an EXISTING DISHONEST member — `KEY_PROBE_FAILED`
+  // (recoverable, renders the same useless Retry) or `SEAM_MISCONFIGURED` (an
+  // operator cannot fix one row's ciphertext). It did NOT, and could not,
+  // reject a row pointing at the NEWLY MINTED honest member: the function above
+  // resolves this table BEFORE its substring cascade, and that cascade has no
+  // decrypt branch at all, so a minted member with no row here is unreachable
+  // and the founder still lands on `UNKNOWN`. The row is the ROUTING MECHANISM,
+  // not an alternative to the mint. ⛔ Do not re-litigate this from CONTEXT.md's
+  // superseded text; its own `A-05` amendment is the current record.
+  //
+  // ⚠️ AND `KEY_UNDECRYPTABLE`'S EXEMPTION ENTRY WAS REMOVED IN THE SAME COMMIT.
+  // `VENUE_WIRE_CODES_WITHOUT_VERDICT` carried it on the stated premise that "a
+  // row in this table cannot close it because that route never calls this
+  // function" — true of `keys/[id]/permissions`, which was its only consumer
+  // when the exemption was written, and FALSIFIED by 164.5.3 shipping a SECOND
+  // consumer that emits the same wire code through the same decrypt failure and
+  // DOES call this function. A code cannot honestly hold a verdict row and an
+  // exemption reason at once, and `seam-venue-vocabulary.invariant.test.ts`
+  // ("no code is BOTH mapped and exempt") reds if one ever does.
+  ["KEY_UNDECRYPTABLE", { code: "KEY_MUST_BE_RECONNECTED", status: 500 }],
 ]);
 
 /**
@@ -4756,19 +4876,20 @@ export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
         "messages fall to UNKNOWN/500, because every fault reachable there is a " +
         "proxy-infrastructure fault and this function classifies key faults.",
     ],
-    [
-      "KEY_UNDECRYPTABLE",
-      "Detail: 'This stored key could not be decrypted. It must be reconnected.', " +
-        "500 retryable:false, from `decrypt_credentials` failing inside " +
-        "`get_key_permissions`. It shares the permissions route with " +
-        "KEY_MISSING_EXCHANGE and is worth its own row because its REMEDY is " +
-        "different and is the only actionable one in the pair: the user must " +
-        "reconnect the key, and today the PROBE_FAILED envelope tells them to " +
-        "'try again' — which cannot work for a ciphertext that will never " +
-        "decrypt. That is a real gap, it belongs to the permissions route's own " +
-        "vocabulary, and a row in this table cannot close it because that route " +
-        "never calls this function.",
-    ],
+    // ⛔ `KEY_UNDECRYPTABLE`'S ENTRY WAS HERE AND IS GONE (164.5.4-02 / D-03),
+    // and it was DELETED rather than reworded because its stated premise was
+    // falsified rather than merely aged. It read "a row in this table cannot
+    // close it because that route never calls this function" — true when
+    // `keys/[id]/permissions` was the code's only TypeScript consumer, and
+    // untrue since 164.5.3 shipped `keys/[id]/rotate-secret`, which emits the
+    // SAME wire code from the SAME decrypt failure and DOES call
+    // `classifyKeyValidationError`. It now takes a verdict row
+    // (→ `KEY_MUST_BE_RECONNECTED`, 500) in `VENUE_WIRE_CODE_TO_VERDICT` above.
+    // ⚠️ The permissions route still does NOT read that row — it runs its own
+    // PROBE_* classifier with a dedicated `KEY_UNDECRYPTABLE` arm — so the old
+    // entry's OBSERVATION about that route stays true; what changed is that it
+    // is no longer the whole population, and an exemption that describes one of
+    // two consumers is a false disposition for the other.
     [
       "ADMIN_CHECK_UNAVAILABLE",
       "Detail: 'actor admin check temporarily unavailable — please retry', 503, " +
@@ -5410,12 +5531,31 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       // (rostered above for the persist-arm-unavailable posture), so the
       // classifier now reaching it via `seamCode` needs no new roster row.
       //
-      // ⚠️ NOT rostered: `KEY_UNDECRYPTABLE`. It has no row in
-      // `VENUE_WIRE_CODE_TO_VERDICT`, route.ts never puts it on the wire as a
-      // literal (so the dialog-envelope law's ARRIVAL check cannot see it
-      // either), and minting a member for it is out of this fix's scope — see
-      // route.ts's own WR-01 comment for the reachability gap this leaves
-      // open, flagged for follow-up rather than silently closed.
+      // 164.5.4-02 / D-03 — wire KEY_UNDECRYPTABLE, `decrypt_credentials`
+      // failing on the stored row inside `rotate_key_secret`. It arrives here
+      // the same way the five members above it do: through `seamCode` into
+      // `classifyKeyValidationError`, NOT as a literal in route.ts.
+      //
+      // ⚠️ THE TWO-REASON NOTE THAT STOOD HERE IS REPLACED, AND ONLY ONE OF ITS
+      // TWO REASONS IS CLOSED — the second was RE-DERIVED against route.ts at
+      // HEAD rather than assumed away:
+      //   1. CLOSED. "It has no row in `VENUE_WIRE_CODE_TO_VERDICT`" — it does
+      //      now, added in the same commit as this line and pointing at the
+      //      newly minted `KEY_MUST_BE_RECONNECTED`.
+      //   2. STILL TRUE, AND NOT A BAR. "route.ts never puts it on the wire as
+      //      a literal, so the dialog-envelope law's ARRIVAL check cannot see
+      //      it either" — still so: the only occurrence in that file is inside
+      //      a comment, and the ARRIVAL derivation reads COMMENT-STRIPPED
+      //      source for `json({ code: … }, status)` shapes. What that means is
+      //      that ARRIVAL cannot COMPEL this row, not that it forbids it:
+      //      ARRIVAL is one-directional (route → roster), and `KEY_RATE_LIMIT`,
+      //      `SEAM_INTERNAL_FAULT`, `KEY_AUTH_FAILED`,
+      //      `KEY_MT5_MASTER_PASSWORD` and `KEY_MT5_WRONG_SERVER` are all
+      //      already carried here on exactly that footing. So the row is
+      //      DELIBERATE rather than derived — and it is load-bearing: a verdict
+      //      the dialog then refuses to recognise would render the terminal
+      //      UNKNOWN anyway and close nothing.
+      "KEY_MUST_BE_RECONNECTED",
     ]),
   ],
 ]);

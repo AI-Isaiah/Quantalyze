@@ -9,7 +9,10 @@ router (the closed-set discipline this module family exists to enforce).
 
 The rules below are DEFENSIVE and fail-CLOSED: an ambiguous login error is
 NEVER classified as an auth failure (which would falsely blame the user's
-credentials) — it degrades to a wrong-server or transient outcome.
+credentials). ⭐ 164.5.4 / D-02 SHARPENED it — an UNRECOGNISED message no longer
+degrades to *"wrong-server or transient"* either, because wrong-server is itself
+a permanent user-attributed verdict. It degrades to ``"transient"`` and nothing
+else; see the refusal rule on ``classify_mt5_login_error``.
 
 The capability rule (``classify_trade_capability``) is TRI-state, not boolean:
 
@@ -71,8 +74,12 @@ _TRADE_RETCODE_TRADE_DISABLED = 10017  # [ASSUMED — documented, unverified liv
 
 # MT5's IPC-transport failure codes — the terminal bridge itself is unreachable,
 # which is OUR infrastructure, never the user's broker server and never their
-# credentials. BOTH carry "ipc" in their text, so both are code-gated in
-# ``classify_mt5_login_error`` BEFORE the token tables below (see there).
+# credentials. BOTH carry "ipc" in their text, and the pre-164.5.4 token table
+# carried the bare word "ipc" — which is WHY both are code-gated in
+# ``classify_mt5_login_error`` BEFORE any text matching (see there). ⚠️ The
+# anchored phrase tables below no longer carry "ipc" at all, so the code-gate is
+# now the ONLY thing that classifies these two. It stays FIRST regardless: a
+# transport verdict must not depend on broker-supplied text.
 #
 #   * ``-10004`` "No IPC connection" — the bridge isn't attached at all (gateway
 #     down / mid-redeploy).
@@ -82,26 +89,49 @@ _TRADE_RETCODE_TRADE_DISABLED = 10017  # [ASSUMED — documented, unverified liv
 #     broker server." for a server string that was byte-for-byte CORRECT.
 _IPC_TRANSPORT_CODES: tuple[int, ...] = (-10004, -10005)
 
-# Server / connection / terminal failure tokens — a login error carrying any of
-# these is a wrong-server / bridge problem, NOT a credential problem, so it must
-# NOT blame the user's password. [ASSUMED] token table pending the live spike.
-_WRONG_SERVER_TOKENS: tuple[str, ...] = (
-    "server",
-    "connect",
-    "ipc",
-    "network",
-    "terminal",
-    "not found",
+# Broker-server LOOKUP failures — the login named a trade server the terminal
+# could not RESOLVE. That string is the user's own wizard input, so naming it is
+# honest. [ASSUMED] phrase table pending the live spike.
+#
+# ⛔ ANCHORED PHRASES, NEVER BARE WORDS (164.5.4 / D-02). Until this rewrite the
+# table held the bare tokens "server", "connect", "ipc", "network", "terminal"
+# and "not found", substring-matched against the whole error text — and every one
+# of them OVER-matched. `Mt5ClientError(5, "terminal pipe broke")` is OUR bridge
+# dying, yet it carried "terminal" and came back as a PERMANENT 400 telling the
+# user their BROKER SERVER was wrong. That is the 2026-08-12 wedged-gateway
+# incident recorded on ``_IPC_TRANSPORT_CODES`` above, reached by a SECOND route
+# the code-gate cannot cover: a bridge fault that arrives with some other code.
+# The phrases below name the server LOOKUP explicitly, so a bridge/terminal fault
+# and a broker-server fault are no longer confusable by substring.
+#
+# ⛔ The remedy for a message this table MISSES is a measured ``(code, text)``
+# pair appended to ``tests/fixtures/mt5_login_rejection_observations.json``,
+# never a broader member. A missed message degrades to ``"transient"`` and costs
+# a retry; a broad member blames a working credential permanently.
+_WRONG_SERVER_PHRASES: tuple[str, ...] = (
+    "trade server not found",  # [ASSUMED] — the one observed corpus string
 )
 
-# Genuine authentication-failure tokens — only a clear auth signal blames the
-# credentials (fail-CLOSED honesty). [ASSUMED] token table pending the live spike.
-_AUTH_TOKENS: tuple[str, ...] = (
-    "authoriz",
-    "account",
-    "invalid",
-    "password",
-    "login",
+# Genuine authentication failures — only a rejection that NAMES the credential it
+# rejected may blame the credential (fail-CLOSED honesty). [ASSUMED] phrase table
+# pending the live spike.
+#
+# ⛔ Same rewrite, same reason (164.5.4 / D-02). This table held "authoriz",
+# "account", "invalid", "password" and "login" as bare tokens, so the ROADMAP's
+# own observed rejection — `Mt5ClientError(0, "Invalid account")` — matched TWICE
+# over and could never reach the ``"transient"`` default: a working key was
+# stamped PERMANENTLY auth-failed and the founder was sent to change a password
+# that was fine. An unattended-login TIMEOUT matched "login" the same way. Every
+# member below names the credential pair or the password rejection outright, so a
+# message that merely MENTIONS an account is no longer an accusation.
+_AUTH_PHRASES: tuple[str, ...] = (
+    "invalid account or password",  # [ASSUMED] — the observed corpus string
+    "account or password is invalid",  # [ASSUMED] — same claim, other word order
+    "invalid password",  # [ASSUMED]
+    "wrong password",  # [ASSUMED]
+    "incorrect password",  # [ASSUMED]
+    "password is invalid",  # [ASSUMED]
+    "password is incorrect",  # [ASSUMED]
 )
 
 
@@ -302,24 +332,50 @@ def classify_mt5_login_error(
 ) -> Literal["auth", "wrong_server", "transient"]:
     """Map an ``Mt5ClientError`` to a login-failure class.
 
-    Fail-CLOSED ordering: a server/connection/terminal signal wins first (never
-    blame the credentials for what looks like a bridge/server problem); only a
-    CLEAR auth token then yields ``"auth"``; anything unrecognized degrades to
-    ``"transient"`` (which the caller PROPAGATES untouched — never auth-failed,
-    never valid). The token tables are [ASSUMED] pending the live spike."""
+    ⭐ THE REFUSAL RULE (164.5.4 / D-02). Of the three classes, exactly TWO —
+    ``"auth"`` and ``"wrong_server"`` — become a PERMANENT, USER-ATTRIBUTED
+    verdict at every call site (HTTP 400 / a ``failed`` analytics stamp). Only
+    ``"transient"`` is blame-free: the caller PROPAGATES it untouched (HTTP 424
+    ``recoverable=True``), never auth-failed and never valid. So an unrecognised
+    or AMBIGUOUS message must never reach either permanent class — it degrades to
+    ``"transient"``. We refuse to guess rather than default to blame, because a
+    wrong blame sends the founder to change a credential that was fine while the
+    real cause goes uninvestigated.
+
+    Fail-CLOSED ordering, and each step is pinned by an executing test rather than
+    by this sentence:
+
+      1. ``_IPC_TRANSPORT_CODES`` by CODE — our own bridge, before any text is
+         looked at at all.
+      2. ``_WRONG_SERVER_PHRASES`` — a server/bridge signal beats an auth signal,
+         so a message matching BOTH tables classifies ``"wrong_server"``. A
+         bridge fault attributed to the user's broker server is bad; one
+         attributed to their password is worse.
+      3. ``_AUTH_PHRASES`` — only a rejection that names the credential.
+      4. ``"transient"`` — the default, i.e. the refusal.
+
+    Both tables hold ANCHORED PHRASES, not bare words, precisely so a
+    bridge/terminal fault and a broker-server fault cannot be confused: the bare
+    token "terminal" used to fold `Mt5ClientError(5, "terminal pipe broke")` into
+    ``"wrong_server"``, which is the 2026-08-12 wedged-gateway incident recorded
+    on ``_IPC_TRANSPORT_CODES`` above, where the wizard told the user "We could
+    not find that broker server." for a server string that was byte-for-byte
+    CORRECT. The phrase tables are [ASSUMED] pending the live spike."""
     # _IPC_TRANSPORT_CODES — -10004 "No IPC connection" (the terminal bridge isn't
     # attached: gateway down / mid-redeploy) and its TIMEOUT sibling -10005 "IPC
     # timeout" (the bridge is attached but the terminal stopped answering; observed
     # live on 2026-08-12 against a wedged gateway terminal). NEITHER is a wrong
-    # broker server. Code-gate them BEFORE the text tokens — their "ipc" text would
-    # otherwise classify as wrong_server and PERMANENTLY reject a valid key during a
-    # transient gateway outage. Both are infra faults → transient (the caller
-    # propagates untouched, never a user-blame stamp).
+    # broker server. Code-gate them BEFORE any text matching — this arm must stay
+    # FIRST and must keep its own branch: a code-gated verdict cannot be reached by
+    # the phrase tables, which no longer carry "ipc" at all. Both are infra faults
+    # → transient (the caller propagates untouched, never a user-blame stamp).
     if err.code in _IPC_TRANSPORT_CODES:
         return "transient"
     text = str(err).lower()
-    if any(tok in text for tok in _WRONG_SERVER_TOKENS):
+    if any(phrase in text for phrase in _WRONG_SERVER_PHRASES):
         return "wrong_server"
-    if any(tok in text for tok in _AUTH_TOKENS):
+    if any(phrase in text for phrase in _AUTH_PHRASES):
         return "auth"
+    # ⭐ THE REFUSAL. Unrecognised == transient, NEVER a permanent user-blame
+    # stamp. ⛔ Do not "improve" this into a best-guess arm.
     return "transient"

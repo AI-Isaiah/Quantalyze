@@ -344,8 +344,9 @@ def _leg4_server_time_offset(deals: list[dict], utc_now: datetime) -> dict:
     # the age term dominates and pushes the estimate out of range — a 16.5h-old
     # deal on a UTC+3 server reads as −810min, not +180. Age can't be separated
     # from offset with a single deal, but real broker offsets sit within ±13h of
-    # UTC (mirrors `_MT5_MAX_SERVER_UTC_OFFSET_S = 13 * 3600` in job_worker — the
-    # offset bound, NOT the wider `_MT5_DEAL_FETCH_MARGIN_S` 24h fetch margin), so
+    # UTC (mirrors `_MT5_MAX_SERVER_UTC_OFFSET_S = 13 * 3600` in
+    # services/mt5_read.py — the offset bound, NOT the wider
+    # `_MT5_DEAL_FETCH_MARGIN_S` 24h fetch margin), so
     # a candidate beyond that is stale-deal noise, not signal — emit no candidate
     # rather than a red herring the founder has to reason away.
     MAX_PLAUSIBLE_OFFSET_MIN = 13 * 60
