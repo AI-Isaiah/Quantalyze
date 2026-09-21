@@ -90,7 +90,10 @@ about the CLI link and the marker.
 - ⚠️ **TWO NEW COUPLINGS, both accepted at decision time, both booked as
   `[164.8-PUSH-RACE-VAC08]` and routed to Phase 164.9.** (a) On a merge push, `ci.yml`'s
   `sql-tests` and `apply-test` contend for the SAME advisory key with nothing ordering them —
-  measured 2026-09-09: key `61616158` appears 7× in `supabase-migrate.yml` and 26× in `ci.yml`.
+  measured 2026-09-21: key `61616158` appears 7× in `supabase-migrate.yml` and 27× in `ci.yml`
+  (⛔ CORRECTED, superseding the 2026-09-09 reading of 26× for `ci.yml`). ⭐ The key is ALSO
+  taken by `test-restore-from-baseline.yml`, `mutex-probe.yml` and `analytics-deploy-verify.yml`,
+  so a reader planning a key change is not working from a two-file picture.
   (b) On a PR that ADDS a migration, gates carrying applied-ness probes are RED until merge, by
   construction, because apply-on-merge was chosen over apply-on-PR. A ledger-frontier exemption
   (PR #767) narrows (b) for VAC-08's own verdict and for nothing else.
@@ -101,6 +104,15 @@ too. Assert about YOUR OWN rows.
 ⛔ `FANOUT-GLOBAL-01` is NOT a `TODOS.md` id (measured 2026-09-08: 0 hits). It exists only as
 prose here and in the ROADMAP. **Phase 164.9 TESTISOLATION owns writing the real entry** — do not
 send a planner looking for a spec that was never written.
+⛔ **CORRECTED 2026-09-21 (Phase 164.9 plan 01) — the entry now EXISTS; the sentence above is kept
+as lineage.** The "0 hits" reading was stale in the letter and correct in the substance: all three
+hits measured on 2026-09-21 were PROSE references to `FANOUT-GLOBAL-01` as a failure-mode family
+("same shape", "this failure mode"), never as an entry id, so it still had no owner, no date and
+no gate until this correction. `TODOS.md` now carries a real `FANOUT-GLOBAL-01` entry in its
+`## 🟡 FIX MID-TERM` section, with an owner, a trigger and its five family members named. **The
+name was KEPT, not retired** — it is cited by name here, in the `### Phase 164.9` `ROADMAP.md`
+entry, and in at least two other `TODOS.md` entries as a family label, and retiring it would
+orphan those citations for no gain.
 
 ## Test Coverage
 

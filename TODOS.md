@@ -2959,7 +2959,8 @@ RED until merge, by construction.** That, plus a merge-time mutex race between `
 
 **The three named hazards above, each answered by measurement:**
 1. **Shared and contended** — `apply-test` takes the same advisory key `61616158` the `sql-tests`
-   lane takes (measured 2026-09-09: 7 occurrences in `supabase-migrate.yml`, 26 in `ci.yml`), and
+   lane takes (measured 2026-09-21: 7 occurrences in `supabase-migrate.yml`, 27 in `ci.yml` —
+   ⛔ CORRECTED, superseding the 2026-09-09 reading, which recorded 26 for `ci.yml`), and
    holds it for the whole apply rather than per statement. It does not race a concurrent run; it
    QUEUES with one. What it does not do is ORDER itself against one — see the new entry.
 2. **The first bulk apply surfaces accumulated drift** — it surfaced NOTHING, because the route
@@ -3345,8 +3346,9 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       plan 05; both halves are Area 1 Q1 consequences the founder ACCEPTED at decision time, not
       defects discovered afterwards).**
       **MECHANISM (a) — the merge-time race.** Advisory key `61616158` appears **7×** in
-      `.github/workflows/supabase-migrate.yml` and **26×** in `.github/workflows/ci.yml`
-      (measured 2026-09-09 at HEAD). On a merge to `main` BOTH workflows start, both take that
+      `.github/workflows/supabase-migrate.yml` and **27×** in `.github/workflows/ci.yml`
+      (measured 2026-09-21 — ⛔ CORRECTED, superseding the 2026-09-09 reading of 26 for
+      `ci.yml`). On a merge to `main` BOTH workflows start, both take that
       key, and no `needs:` edge, concurrency group or key split orders them. `apply-test` holds
       it across marker → dry-run → push → post-verify; `sql-tests` holds it for the whole job.
       When `sql-tests` wins, it measures a TEST the merge has not yet applied to; when it loses,
@@ -3428,6 +3430,11 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       2026-09-08 restore and will not describe the next one.
       ✅ **Destination: Phase 164.9 TESTISOLATION** — the per-run seed contract. "Whose rows is a
       run asserting about" and "which rows may a run assume exist" are one question.
+      ⚠️ **ROUTING NOTE (2026-09-21, Phase 164.9 planning):** this entry names Phase 164.9
+      TESTISOLATION as its destination, but Phase 164.9's `ROADMAP.md` `**Requirements**` line
+      does not cite `[164.8-TEST-DATA-RESEEDED]`. Phase 164.9's plan 01 did NOT claim this entry
+      and leaves the routing discrepancy for a decision — its destination, disposition and scope
+      are unchanged by this note.
 
 - [ ] **`[164.8-TEST-ENVIRONMENT-KEPT]` The GitHub `Test` environment is KEPT for its Deployments
       AUDIT RECORD, explicitly NOT for access control — founder decision 2026-09-08, taken after
@@ -9172,7 +9179,7 @@ gitleaks auto-loads `.gitleaks.toml` from cwd, so omitting `-c` tests nothing.
 
 ## Phase 164.8 (TESTPREPROD) — plan 05 residuals (logged 2026-09-09)
 
-- [ ] **[164.8-PUSH-RACE-VAC08] `sql-tests` (VAC-08) and `supabase-migrate.yml`'s `apply-test` share ONE advisory lock on the merge push, so their order is undefined — the frontier exemption removed the CONSEQUENCE, not the coupling (booked 2026-09-09)** — MEASURED 2026-09-09 at this branch's HEAD: advisory key `61616158` appears 7 times in `.github/workflows/supabase-migrate.yml` and 26 times in `.github/workflows/ci.yml`. On a merge to `main` both workflows start, both take that key, and nothing orders them: if `sql-tests` wins, VAC-08 reads `supabase_migrations.schema_migrations` BEFORE `apply-test` has written the merged migration's row; if `apply-test` wins, it reads after. The two readings are of the same relation at different times and there is no mechanism making one of them the intended one.
+- [ ] **[164.8-PUSH-RACE-VAC08] `sql-tests` (VAC-08) and `supabase-migrate.yml`'s `apply-test` share ONE advisory lock on the merge push, so their order is undefined — the frontier exemption removed the CONSEQUENCE, not the coupling (booked 2026-09-09)** — MEASURED 2026-09-21 at this branch's HEAD: advisory key `61616158` appears 7 times in `.github/workflows/supabase-migrate.yml` and 27 times in `.github/workflows/ci.yml`. ⛔ CORRECTED — the 2026-09-09 reading recorded 26 for `ci.yml`; superseded by this 2026-09-21 re-measurement. On a merge to `main` both workflows start, both take that key, and nothing orders them: if `sql-tests` wins, VAC-08 reads `supabase_migrations.schema_migrations` BEFORE `apply-test` has written the merged migration's row; if `apply-test` wins, it reads after. The two readings are of the same relation at different times and there is no mechanism making one of them the intended one.
   **What plan 05 fixed, and it is only half.** `scripts/test-ledger-drift-check.sh` now EXEMPTS a measured-missing repo migration whose authoring timestamp is strictly above the ledger's frontier — the greatest authoring timestamp among migrations MEASURED PRESENT. Under apply-on-merge such a migration cannot be present, so counting it measured the pipeline's timing rather than a defect. That makes VAC-08's VERDICT order-independent (both interleavings now go green on a well-formed merge) and stops every migration-adding PR from being RED by construction. ⛔ It does not weaken the ratchet: a missing migration AT or BELOW the tip is still NEW drift and still exits 1, pinned by the `below-frontier-missing RED` and `tip-equal-missing RED` arms in the script's own `--self-test`.
   **What it did NOT fix, stated so nobody reads the exemption as closure:**
   (a) **The coupling itself remains.** Two jobs still serialise on one key, so they still queue behind each other and each still lengthens the other's wait on a SHARED database used by other people's CI. A lock-ordering defect that currently has no visible consequence is still a lock-ordering defect, and the next job added under that key will not have a frontier exemption written for it.
