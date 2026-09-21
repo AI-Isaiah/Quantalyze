@@ -1241,6 +1241,10 @@ jobs:
       # ⛔ THE FLAG IS NOT A LOCK. Nothing blocks on it. The mutual-exclusion key
       # is untouched: this job still takes it in `Acquire shared-test-db mutex`
       # and holds it across the whole act, literal for literal, as before.
+      # ⚠️ THAT IS A STATEMENT ABOUT THE KEY, NOT A LICENCE FOR THE STEP. The key
+      # blocks nobody, but ANNOUNCING is mandatory for THIS workflow: if the
+      # announcement cannot be made, the step exits 1 and the restore does not
+      # happen. The long ⛔ note on the `*)` branch below carries the reasoning.
       #
       # ⚠️ PLACED AFTER THE ACTIVITY GATE, AND THAT ORDERING IS LOAD-BEARING, NOT
       # cosmetic. The gate counts non-idle client backends and excludes exactly
@@ -1290,14 +1294,41 @@ jobs:
               -c "$(shared_test_db_inflight_acquire_sql)" \
               -c "SELECT pg_sleep(6000);" \
               >> "${log}" 2>&1 &
-          # ⛔ THE NON-HELD OUTCOMES ARE PLAIN LOG LINES, NOT `::warning::`
-          # ANNOTATIONS, AND THAT IS A GATE REQUIREMENT, NOT A STYLE CHOICE. This
-          # job carries a nine-token no-softening scan and `::warning` is one of
-          # the nine, because a warning where a verdict belongs is exactly how a
-          # failure comes to read as a pass here. Nothing this step can observe is
-          # a failure — the flag gates nothing — so the honest emission is a named,
-          # greppable line (`schema-apply-in-flight: NOT-ANNOUNCED`), never an
-          # annotation. ⛔ Do not "improve" these into warnings.
+          # ⛔ `busy` IS A PLAIN LOG LINE, NOT A `::warning::` ANNOTATION, AND THAT
+          # IS A GATE REQUIREMENT, NOT A STYLE CHOICE. This job carries a
+          # nine-token no-softening scan and `::warning` is one of the nine,
+          # because a warning where a verdict belongs is exactly how a failure
+          # comes to read as a pass here. BUSY is not a failure: it means SOMEONE
+          # ELSE holds the key, so a reader's probe answers `held` and the
+          # protection this flag exists to give is in place either way. The honest
+          # emission is a named, greppable line (`schema-apply-in-flight:
+          # NOT-ANNOUNCED`), never an annotation. ⛔ Do not "improve" it into one.
+          #
+          # ⛔ COULD-NOT-ANNOUNCE IS A DIFFERENT OUTCOME AND IT IS A HARD FAILURE.
+          # ⚠️ IT DID NOT USED TO BE, and the line it printed — near-verbatim from
+          # supabase-migrate.yml's identical branch — reassured a reader that the
+          # restore may proceed. THERE THE CLAIM IS TRUE: a reader that cannot see
+          # the apply flag still finds the apply RUN through the Actions API. HERE
+          # THERE IS NO SUCH FALLBACK. This workflow is manually dispatched and
+          # produces NO Actions run on the commit under test, so the flag is the
+          # ONLY signal that sees it — scripts/wait-for-test-schema-apply.sh's
+          # header says exactly that, and its starred `absent apply but flag HELD`
+          # calibration is built on it.
+          #
+          # What proceeding unannounced costs: a concurrent `sql-tests`, `python`
+          # or `e2e-seeded` run on a commit that touched no migration measures
+          # `flag=clear`, `apply=absent`, satisfies `no-apply-run`, prints
+          # "Nothing to order against; this is the ordinary case", and queues
+          # straight into this job's `DROP SCHEMA public CASCADE`.
+          # What failing costs: ONE re-dispatch. This restore is already gated on
+          # a confirm token, the marker query, an activity gate and the held
+          # mutex, and this step runs BEFORE the backup and long before any write
+          # — so an abort here leaves the database untouched and the mutex is
+          # released by the `if: always()` step below.
+          # ⛔ Do not soften this back into a log line to get a restore through.
+          # ⛔ Do not copy this failure into supabase-migrate.yml: there the
+          # best-effort reading is correct, and reddening would block a
+          # production apply on a signalling mechanism.
           waited=0
           outcome=""
           while [ "${waited}" -lt 60 ] && [ -z "${outcome}" ]; do
@@ -1315,10 +1346,11 @@ jobs:
               echo "schema-apply-in-flight flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) held after ${waited}s. Nothing blocks on it; the reader jobs in ci.yml READ it."
               ;;
             busy)
-              echo "schema-apply-in-flight: NOT-ANNOUNCED — the flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) was already held after ${waited}s — a previous writer's session has not yet been reaped. The restore PROCEEDS: this key is an announcement, never a lock, and it gates nothing. The gates that DO stand in front of this restore (the confirm token, the marker query, the activity gate, the held mutex) are unaffected."
+              echo "schema-apply-in-flight: NOT-ANNOUNCED — the flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) was already held after ${waited}s — a previous writer's session has not yet been reaped. The restore PROCEEDS, and unlike the could-not-announce outcome that is SAFE rather than tolerated: BUSY means the key IS held, so a reader's probe answers 'held' and orders itself behind this restore exactly as if we had taken the key ourselves. The gates that stand in front of this restore (the confirm token, the marker query, the activity gate, the held mutex) are unaffected."
               ;;
             *)
-              echo "schema-apply-in-flight: NOT-ANNOUNCED — the flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) could not be announced within ${waited}s. The restore PROCEEDS — this key is an announcement, never a lock, and it gates nothing. psql's output is WITHHELD: this log is public."
+              echo "::error::schema-apply-in-flight: NOT-ANNOUNCED — the flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) could not be announced within ${waited}s, and this restore therefore REFUSES TO PROCEED. Nothing has been written: this step runs before the backup and before every write, and the mutex is released on the way out. ⛔ THE FLAG IS NOT OPTIONAL FOR THIS WORKFLOW. It is the ONLY signal that sees a dispatched restore — this run produces no Actions run on the commit its readers are testing, so a concurrent sql-tests, python or e2e-seeded job that cannot see the flag concludes 'nothing to order against' and queues straight into the DROP SCHEMA below. (That is why supabase-migrate.yml may proceed unannounced and this may not: there the reader falls back to the Actions API.) Re-dispatch once the announcer can connect. psql's output is WITHHELD: this log is public."
+              exit 1
               ;;
           esac
 
