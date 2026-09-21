@@ -100,7 +100,7 @@ shared_test_db_keys_self_test() {
   n=$(grep -acE '^(export )?SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY=[0-9]+$' "${self}" || true)
   checks=$((checks + 1))
   if [ "${n}" != "1" ]; then
-    echo "SELF-TEST FAIL: expected exactly ONE '${0##*/}' assignment line for SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY, found ${n}. A constant that is defined twice is not a single source of truth." >&2
+    echo "SELF-TEST FAIL: expected exactly ONE assignment line for SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY, found ${n}. A constant that is defined twice is not a single source of truth." >&2
     exit 1
   fi
 
