@@ -309,6 +309,12 @@ interface ComputeJobRow {
   status: string;
   attempts: number;
   strategy_id: string | null;
+  // ⚠️ Phase 164.9 fix round (F2): `claim_compute_jobs_with_priority` RETURNS
+  // SETOF compute_jobs, so the claimed row carries the fencing token mig 117
+  // makes mandatory on `mark_compute_job_failed`. It must be projected here and
+  // threaded through, or the mark call bounces off the fence with 22023 before
+  // it reaches the failed_final transition this arm exists to pin.
+  claim_token: string | null;
 }
 
 async function seedStrategy(
@@ -426,13 +432,19 @@ describe("Migration 089/090 — live-DB runtime semantics", () => {
         claimedRow!.attempts,
         "claim must increment attempts on failed_retry re-claim (2 → 3)",
       ).toBe(3);
+      expect(
+        claimedRow!.claim_token,
+        "claim must mint the mig-117 fencing token on the claimed row",
+      ).toBeTruthy();
 
       // mark_compute_job_failed: at attempts >= max_attempts the row must
       // transition to failed_final regardless of error_kind=transient.
+      // The token comes from the claim above — the production path exactly.
       const { error: markErr } = await admin.rpc("mark_compute_job_failed", {
         p_job_id: jobId,
         p_error_kind: "transient",
         p_error: "final attempt",
+        p_claim_token: claimedRow!.claim_token,
       });
       expect(markErr, `mark_compute_job_failed: ${markErr?.message}`).toBeNull();
 

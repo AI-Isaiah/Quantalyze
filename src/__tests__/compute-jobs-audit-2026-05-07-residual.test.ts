@@ -46,9 +46,24 @@ interface ComputeJobRow {
   max_attempts: number;
   claimed_at: string | null;
   claimed_by: string | null;
+  claim_token: string | null;
   strategy_id: string | null;
   parent_job_ids: string[] | null;
   kind: string;
+}
+
+// ⚠️ Phase 164.9 fix round (F2) — THE POST-MIG-117 CLAIM-TOKEN FENCE.
+//
+// `mark_compute_job_done` / `mark_compute_job_failed` require a non-NULL
+// `p_claim_token` that MATCHES the row's own `claim_token`. Production mints
+// that token in `claim_compute_jobs[_with_priority]`; these fixtures seed a
+// `running` row by direct INSERT, so the row carried `claimed_at`/`claimed_by`
+// but no token — a state no real claim produces — and every call answered
+// 22023 before reaching the behaviour under test. The repair is at the CALL
+// SITE: mint the token a claim would have written, store it on the seeded row,
+// thread it through the RPC. No assertion was relaxed.
+function mintClaimToken(): string {
+  return crypto.randomUUID();
 }
 
 async function seedStrategy(
@@ -210,6 +225,7 @@ describe("audit-2026-05-07 residual — M-0779 forensic preservation", () => {
       const strategyId = await seedStrategy(admin, userId, "m0779-retry");
       try {
         const claimedAt = new Date().toISOString();
+        const claimToken = mintClaimToken();
         const jobId = await insertComputeJob(admin, {
           strategy_id: strategyId,
           kind: "sync_trades",
@@ -218,12 +234,14 @@ describe("audit-2026-05-07 residual — M-0779 forensic preservation", () => {
           max_attempts: 3,
           claimed_at: claimedAt,
           claimed_by: "test-worker-forensic",
+          claim_token: claimToken,
         });
 
         const { error } = await admin.rpc("mark_compute_job_failed", {
           p_job_id: jobId,
           p_error: "test-transient-forensic",
           p_error_kind: "transient",
+          p_claim_token: claimToken,
         } as never);
         expect(error).toBeNull();
 
@@ -253,6 +271,7 @@ describe("audit-2026-05-07 residual — M-0779 forensic preservation", () => {
       );
       const strategyId = await seedStrategy(admin, userId, "m0779-final");
       try {
+        const claimToken = mintClaimToken();
         const jobId = await insertComputeJob(admin, {
           strategy_id: strategyId,
           kind: "sync_trades",
@@ -261,12 +280,14 @@ describe("audit-2026-05-07 residual — M-0779 forensic preservation", () => {
           max_attempts: 3,
           claimed_at: new Date().toISOString(),
           claimed_by: "test-worker-final",
+          claim_token: claimToken,
         });
 
         await admin.rpc("mark_compute_job_failed", {
           p_job_id: jobId,
           p_error: "test-permanent-final",
           p_error_kind: "permanent",
+          p_claim_token: claimToken,
         } as never);
 
         const row = await fetchJob(admin, jobId);
@@ -317,6 +338,7 @@ describe("audit-2026-05-07 apply — M-0779 concurrent race", () => {
         // Seed: row running, claimed_at older than 10min so the
         // watchdog filter sees it.
         const stuckAt = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+        const claimToken = mintClaimToken();
         const jobId = await insertComputeJob(admin, {
           strategy_id: strategyId,
           kind: "sync_trades",
@@ -325,15 +347,20 @@ describe("audit-2026-05-07 apply — M-0779 concurrent race", () => {
           max_attempts: 3,
           claimed_at: stuckAt,
           claimed_by: "test-worker-race",
+          claim_token: claimToken,
         });
 
         // Fire both calls concurrently. The outcome we care about is
         // CONSISTENT STATE, not which path wins.
+        // ⚠️ Phase 164.9 fix round: this arm was GREEN and VACUOUS. Without a
+        // claim token `mark_compute_job_failed` raised 22023 at its entry fence,
+        // so only the watchdog branch could ever win and no race was exercised.
         await Promise.all([
           admin.rpc("mark_compute_job_failed", {
             p_job_id: jobId,
             p_error: "race-test",
             p_error_kind: "transient",
+            p_claim_token: claimToken,
           } as never),
           admin.rpc("reclaim_stuck_compute_jobs", {
             p_older_than: "10 minutes",
@@ -447,6 +474,7 @@ describe("audit-2026-05-07 residual — H-0864 set-based fan-in", () => {
       const strategyA = await seedStrategy(admin, userId, "h0864-a");
       const strategyB = await seedStrategy(admin, userId, "h0864-b");
       try {
+        const parentToken = mintClaimToken();
         const parent = await insertComputeJob(admin, {
           strategy_id: strategyA,
           kind: "sync_trades",
@@ -455,6 +483,7 @@ describe("audit-2026-05-07 residual — H-0864 set-based fan-in", () => {
           max_attempts: 3,
           claimed_at: new Date().toISOString(),
           claimed_by: "test-worker-parent",
+          claim_token: parentToken,
         });
 
         // Two children, both waiting only on `parent`. On a single
@@ -479,6 +508,7 @@ describe("audit-2026-05-07 residual — H-0864 set-based fan-in", () => {
 
         await admin.rpc("mark_compute_job_done", {
           p_job_id: parent,
+          p_claim_token: parentToken,
         } as never);
 
         const rowA = await fetchJob(admin, childA);
@@ -510,6 +540,7 @@ describe("audit-2026-05-07 residual — H-0864 set-based fan-in", () => {
       const strategyA = await seedStrategy(admin, userId, "h0864-pa");
       const strategyB = await seedStrategy(admin, userId, "h0864-pb");
       try {
+        const tokenP1 = mintClaimToken();
         const p1 = await insertComputeJob(admin, {
           strategy_id: strategyA,
           kind: "sync_trades",
@@ -518,6 +549,7 @@ describe("audit-2026-05-07 residual — H-0864 set-based fan-in", () => {
           max_attempts: 3,
           claimed_at: new Date().toISOString(),
           claimed_by: "test-worker-p1",
+          claim_token: tokenP1,
         });
         const p2 = await insertComputeJob(admin, {
           strategy_id: strategyB,
@@ -527,6 +559,7 @@ describe("audit-2026-05-07 residual — H-0864 set-based fan-in", () => {
           max_attempts: 3,
           claimed_at: new Date().toISOString(),
           claimed_by: "test-worker-p2",
+          claim_token: mintClaimToken(),
         });
         const child = await insertComputeJob(admin, {
           strategy_id: strategyA,
@@ -539,7 +572,13 @@ describe("audit-2026-05-07 residual — H-0864 set-based fan-in", () => {
 
         // Mark only p1 done; p2 still running. Child must remain in
         // done_pending_children.
-        await admin.rpc("mark_compute_job_done", { p_job_id: p1 } as never);
+        // ⚠️ Phase 164.9 fix round: this arm was GREEN and VACUOUS — the
+        // token-less call raised 22023, so nothing advanced and "does not
+        // advance" held for the wrong reason.
+        await admin.rpc("mark_compute_job_done", {
+          p_job_id: p1,
+          p_claim_token: tokenP1,
+        } as never);
         const row = await fetchJob(admin, child);
         expect(row.status).toBe("done_pending_children");
       } finally {
