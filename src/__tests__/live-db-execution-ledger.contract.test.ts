@@ -41,6 +41,21 @@
  * a bound-only-from-above control cannot notice about itself. Two layers, the
  * repo's `FILES_FLOOR` / `mutation-runner-floors.test.ts` idiom inverted.
  *
+ * ⛔ CORRECTED 2026-09-21 (review round 2) — SAY WHAT THIS ACTUALLY ENFORCES,
+ * because the two paragraphs above together overclaim. Arm 5's staleness check
+ * is `toBe(entries)`, not an inequality, so combined with the upper bound the
+ * ceiling must EQUAL the entry count: this file DOES transitively pin the exact
+ * total, which is the thing the paragraph above says it deliberately does not
+ * do. Both statements cannot be true, and the code is the one that runs.
+ *
+ * ⭐ THE HONEST CLAIM, and it is still worth having: growing the ledger is NOT
+ * prevented — no in-repo constant can stop a determined edit — it is made
+ * IMPOSSIBLE TO DO SILENTLY. A growth now takes three coordinated edits in one
+ * commit (the ledger line, `# ENTRY_COUNT`, and `ENTRY_CEILING`), each of which
+ * is a named line in a diff a reviewer reads. Before the ceiling existed it took
+ * one. ⛔ Do not describe this as "the ledger cannot grow"; describe it as "the
+ * ledger cannot grow by accident, and cannot grow without saying so".
+ *
  * ⚠️ `ARM_FLOOR` gets no staleness arm here on purpose: re-deriving the collected
  * arm count needs a BOOTED STACK and a real run, which this file has by
  * construction not got. It is bounded from below in the gate and re-pinned
