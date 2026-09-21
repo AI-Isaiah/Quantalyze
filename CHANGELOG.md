@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.85.0.1] - 2026-09-21 — the criterion 8 preflight refused, and the refusal is the record
+
+⭐ **A docs-only release, recorded because a refusal is evidence.** Phase 164.9's criterion 8
+required one post-merge `mode=restore` dispatch of `test-restore-from-baseline.yml`. The
+preflight ran from `main` at the merge commit and **refused**. The booking requires both run
+ids and both conclusions whatever the outcome, so this is recorded with the weight a green
+run would have had.
+
+### Notes
+
+- **Run `35662948549`, `mode=preflight`, conclusion failure.** The committing mode was NOT
+  dispatched: the booked act permits it only on a green preflight.
+- **The refusal is correct.** `supabase/schema/baseline.sql` is STALE against
+  `supabase/migrations` — dump taken 2026-09-18, migrations last moved 2026-09-20, with two
+  real migrations landing inside the gap. A committing run would have dropped and rebuilt the
+  `public` schema of a database other people's CI uses, from a snapshot that no longer
+  describes production.
+- ⭐ **The guard ORDER is the lesson worth keeping.** The sha256 check PASSED first — the dump
+  matches its own recorded row and is not corrupted. What bit was CURRENCY. Integrity and
+  currency are different questions, and a control checking only the hash would have reported a
+  clean baseline and proceeded into the destructive step.
+- ⚠️ **Criterion 8 stays OPEN**, blocked on a founder-owned precondition rather than a
+  decision: the remedy is a baseline re-dump against production, authenticating with the
+  production database password, and no agent enters or reads a credential.
+- ⚠️ A confirm token copied out of a planning document would have been refused — `CLAUDE.md`
+  still carries a stale baseline sha in prose while the tracked record at the merged ref
+  carries the one the check matched. The booking forbids copying it for exactly this reason,
+  and the reason is now measured rather than asserted.
+
 ## [0.85.0.0] - 2026-09-21 — TESTISOLATION: a CI run stops asserting about other people's rows
 
 ⭐ **What changed for whoever reads this next.** Shared TEST is a database other people's CI also
