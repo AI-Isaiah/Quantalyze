@@ -26,12 +26,20 @@ from pathlib import Path
 # `SUPABASE_URL`: it names the app/prod env var and appears in ~10 offline unit
 # files that never touch the shared DB — grouping them would pin the bulk to one
 # worker and defeat the parallelism.
+#
+# Phase 164.9 plan 05 (`[164.9-SHARED-TEST-TRANSPORT-FLAKE]`): "live_db_transport"
+# joins the vocabulary too. A future test module that imports ONLY the retry
+# helper (not `_need_supabase` directly, e.g. a thin module built on a shared
+# fixture) still executes RPCs against the shared TEST project through the
+# wrapped client, so it must still land on the single serialized worker — the
+# same hazard the other four sentinels above exist to catch, one layer up.
 _DB_MODULE_SENTINELS = (
     "SUPABASE_TEST_URL",
     "SUPABASE_TEST_SERVICE_KEY",
     "_need_supabase",
     "TEST_SUPABASE_DB_URL",
     "HAS_LIVE_DB",
+    "live_db_transport",
 )
 
 
