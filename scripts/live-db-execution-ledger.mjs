@@ -83,7 +83,7 @@
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CORPUS_FLOOR, liveDbLaneCorpus } from "./live-db-lane-corpus.mjs";
@@ -903,6 +903,20 @@ const samePath = (a, b) => {
     return false;
   }
 };
+/**
+ * A path fit to PRINT. This repository is public and the Actions log is
+ * world-readable, and an absolute path on a developer's machine carries the
+ * LOCAL USERNAME in it - so a path that escapes the repository is reduced to
+ * its basename rather than printed whole. Resolving a path for OPENING and
+ * rendering one for PRINTING are different jobs; this is the printing one.
+ * ⛔ Copied deliberately from `scripts/lint-migration-data-dependence.mjs`,
+ * where this leak was found and fixed first. It was fixed there and NOT here,
+ * in the same phase, from the same idiom - a point fix on a class.
+ */
+const relPrintable = (p) => {
+  const r = relative(REPO_ROOT, String(p));
+  return !r || r.startsWith("..") ? `<outside the repository>/${basename(String(p))}` : r;
+};
 const ENTRY = process.argv[1];
 if (ENTRY !== undefined) {
   const selfPath = fileURLToPath(import.meta.url);
@@ -914,8 +928,8 @@ if (ENTRY !== undefined) {
         "live-db-execution-ledger: REFUSING TO EXIT SILENTLY. This module was invoked as a program " +
           `("${basename(selfPath)}" is the entry point's own basename) but the entry point does not resolve to ` +
           "this file, so the CLI never ran and NOTHING was adjudicated.",
-        `  entry (process.argv[1]): ${ENTRY}`,
-        `  this module:             ${selfPath}`,
+        `  entry (process.argv[1]): ${relPrintable(ENTRY)}`,
+        `  this module:             ${relPrintable(selfPath)}`,
         "  Exit 0 here would be a gate reporting a clean ledger it never opened.",
       ].join("\n") + "\n",
     );
