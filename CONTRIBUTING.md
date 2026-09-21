@@ -61,6 +61,24 @@ merge *is* the apply.
   `ci.yml` and
   [`docs/runbooks/shared-test-db-mutex.md`](docs/runbooks/shared-test-db-mutex.md)
   say why.
+- **⭐ There are TWO shared-TEST advisory keys, and a job adding DB work needs
+  both.** (1) The **mutual-exclusion key `61616158`** above — its unit is *the
+  shared TEST database*, and contenders BLOCK on it. (2) The
+  **schema-apply-in-flight FLAG**, `SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY` in
+  [`scripts/shared-test-db-keys.sh`](scripts/shared-test-db-keys.sh) — its unit
+  is *"a schema apply against this project is in flight"*. ⛔ **The second is a
+  FLAG, not a lock: nothing blocks on it.** It is held by the two schema WRITERS
+  (`apply-test` in `supabase-migrate.yml`, `restore` in
+  `test-restore-from-baseline.yml`) and READ, non-blockingly, by the readers.
+  ⛔ Cite it BY SYMBOL, never by value — it is written once, in that script.
+  A mutex says two holders never overlap; it says nothing about which goes
+  FIRST, so on a merge push the three reader jobs also run
+  `Wait for the TEST schema apply to conclude (merge pushes only)`
+  ([`scripts/wait-for-test-schema-apply.sh`](scripts/wait-for-test-schema-apply.sh))
+  IMMEDIATELY BEFORE their acquire step — never while holding the key, which
+  would starve the apply they are waiting for. Its three outcomes
+  (`apply-concluded`, `no-apply-run`, `wait-exhausted`) and what to do about
+  each are in runbook §7.
 - **⛔ A migration that adds a column the frontend already `SELECT`s must be
   applied to prod BEFORE the deployment that reads it.** The auto-apply and the
   Vercel build both fire on the same merge with **no ordering between them**, so

@@ -1231,6 +1231,97 @@ jobs:
           echo "activity-gate breakdown (states and counts only): ${breakdown}"
           echo "activity-gate: 0 other active client session(s) — shared TEST is measurably quiet, inside the held mutex."
 
+      # ── THE SCHEMA-APPLY-IN-FLIGHT FLAG (Phase 164.9 plan 06) ──────────────
+      # This workflow is one of the TWO schema WRITERS against shared TEST (the
+      # other is supabase-migrate.yml's `apply-test`), so it announces its write
+      # on the same second advisory key. Without this, a reader's ordering wait
+      # in ci.yml would be blind to exactly one of the two writers — and to the
+      # more destructive one.
+      #
+      # ⛔ THE FLAG IS NOT A LOCK. Nothing blocks on it. The mutual-exclusion key
+      # is untouched: this job still takes it in `Acquire shared-test-db mutex`
+      # and holds it across the whole act, literal for literal, as before.
+      #
+      # ⚠️ PLACED AFTER THE ACTIVITY GATE, AND THAT ORDERING IS LOAD-BEARING, NOT
+      # cosmetic. The gate counts non-idle client backends and excludes exactly
+      # ONE application_name — the mutex holder's. This announcement opens a
+      # SECOND long-lived session running `pg_sleep`, which reads `active`, so
+      # announcing BEFORE the gate would make the gate count our own announcement
+      # and refuse the restore it is guarding. Announcing after it keeps the gate
+      # measuring other people's CI, which is what it is for.
+      #
+      # Scope: `mode=restore` only, matching the activity gate. A preflight rolls
+      # its transaction back and writes nothing, so there is no apply to announce.
+      - name: Announce the restore as a schema apply in flight (a FLAG, not a lock)
+        if: inputs.mode == 'restore'
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/shared-test-db-keys.sh
+          . "${GITHUB_WORKSPACE}/scripts/shared-test-db-keys.sh"
+          # The session-mode DSN derived ONCE, in `Derive the session-mode TEST DSN`.
+          # NEVER echoed: this log is public.
+          dsn="${TEST_DB_SESSION_URL}"
+          # This connection carries ZERO traffic for the length of the restore, so
+          # it needs the same libpq keepalives the mutex holder carries, for the
+          # same reason: a runner-side NAT idle expiry would otherwise zombify it.
+          keepalive_params="keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4"
+          case "${dsn}" in
+            *\?*) dsn="${dsn}&${keepalive_params}" ;;
+            *)    dsn="${dsn}?${keepalive_params}" ;;
+          esac
+          log="${RUNNER_TEMP}/schema-apply-inflight.log"
+          # `: > "${log}"` FIRST, so every `grep` below reads a file that exists.
+          # That is why none of them needs its stderr suppressed — this job's
+          # `2>/dev/null` site list is an exact allowlist and this step adds none.
+          : > "${log}"
+          # `pg_try_advisory_lock`, so an announcement can never block the restore
+          # it announces. The two session GUCs are the mutex holder's, for the same
+          # two measured reasons (158-MUTEX-01, 158-MUTEX-02) — and the second is
+          # ALSO this flag's release path: there is no release step, deliberately.
+          # Job teardown drops this session and Postgres frees the key, exactly as
+          # it does for the mutex holder, while `client_connection_check_interval`
+          # bounds an orphaned backend at ~30s. A release step would buy a shorter
+          # window on a key NOTHING BLOCKS ON, at the cost of a softening token in
+          # a job whose whole contract is that a failure can never read as a pass.
+          PGAPPNAME=ci-schema-apply-inflight PGCONNECT_TIMEOUT=15 \
+            nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+              -c "SET statement_timeout = 0;" \
+              -c "SET client_connection_check_interval = '30s';" \
+              -c "$(shared_test_db_inflight_acquire_sql)" \
+              -c "SELECT pg_sleep(6000);" \
+              >> "${log}" 2>&1 &
+          # ⛔ THE NON-HELD OUTCOMES ARE PLAIN LOG LINES, NOT `::warning::`
+          # ANNOTATIONS, AND THAT IS A GATE REQUIREMENT, NOT A STYLE CHOICE. This
+          # job carries a nine-token no-softening scan and `::warning` is one of
+          # the nine, because a warning where a verdict belongs is exactly how a
+          # failure comes to read as a pass here. Nothing this step can observe is
+          # a failure — the flag gates nothing — so the honest emission is a named,
+          # greppable line (`schema-apply-in-flight: NOT-ANNOUNCED`), never an
+          # annotation. ⛔ Do not "improve" these into warnings.
+          waited=0
+          outcome=""
+          while [ "${waited}" -lt 60 ] && [ -z "${outcome}" ]; do
+            if grep -aq 'INFLIGHT-FLAG-HELD' "${log}"; then
+              outcome=held
+            elif grep -aq 'INFLIGHT-FLAG-BUSY' "${log}"; then
+              outcome=busy
+            else
+              sleep 2
+              waited=$(( waited + 2 ))
+            fi
+          done
+          case "${outcome}" in
+            held)
+              echo "schema-apply-in-flight flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) held after ${waited}s. Nothing blocks on it; the reader jobs in ci.yml READ it."
+              ;;
+            busy)
+              echo "schema-apply-in-flight: NOT-ANNOUNCED — the flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) was already held after ${waited}s — a previous writer's session has not yet been reaped. The restore PROCEEDS: this key is an announcement, never a lock, and it gates nothing. The gates that DO stand in front of this restore (the confirm token, the marker query, the activity gate, the held mutex) are unaffected."
+              ;;
+            *)
+              echo "schema-apply-in-flight: NOT-ANNOUNCED — the flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) could not be announced within ${waited}s. The restore PROCEEDS — this key is an announcement, never a lock, and it gates nothing. psql's output is WITHHELD: this log is public."
+              ;;
+          esac
+
       # ── THE BACKUP. CONTEXT safety rule 3, and no wider than it. ────────────
       # ⛔ WHAT THIS ARTIFACT HOLDS: TEST's migration ledger (CSV) and TEST's `public`
       # schema (a supabase db dump), plus the script's pre-drop census once it runs.
