@@ -2121,7 +2121,18 @@ export const FILES_FLOOR = 48;
 //                29/29/0), `arms: 27/27/0` (retention, was 25/25/0),
 //                `arms: 40/40/0` (reconcile, was 38/38/0, re-run twice) -- 0
 //                defects each. WAIVED_CEILING stays 0 (0 waivers, this move).
-export const ARMS_FLOOR = 422;
+// ⚠️ CURRENCY 2026-09-21 (phase 164.9 TESTISOLATION, plan 10): 422 -> 423. ONE
+//    new arm, D1, in the EXISTING annotated file
+//    supabase/tests/test_analytics_service_settings_and_vault_tick.sql — a
+//    second transaction that reads the LIVE analytics destination row where the
+//    database-identity marker names TEST, and measures the allow-list constraint
+//    where no marker exists. So ARMS moves and FILES does not: FILES_FLOOR stays
+//    48 (the file was already annotated) and WAIVED_CEILING stays 0.
+//    ⚠️ Its twin is deliberately a NARROWING of the allow-list and NOT a
+//    `DROP CONSTRAINT`: the drop is arm U2's twin, U2 runs FIRST in the same
+//    file, and two arms cannot share one mutation because only one of them can
+//    be the FIRST failure.
+export const ARMS_FLOOR = 423;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
