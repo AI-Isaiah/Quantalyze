@@ -3245,6 +3245,76 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       script that takes a shared-TEST lock.
       **Owner:** Phase 164.9 TESTISOLATION.
 
+## Phase 164.9 (TESTISOLATION) — ids booked at planning time (logged 2026-09-21)
+
+- [ ] **`[164.9-SHARED-TEST-TRANSPORT-FLAKE]` a shared-TEST run needed THREE attempts to go
+      green on identical code, with two different failure signatures on two different test
+      sets — proof this is TRANSPORT, not logic (booked 2026-09-21, Phase 164.9
+      TESTISOLATION)** — MEASURED on run `34763669052` at `e64b0811` on `main`: three attempts
+      of one run at one commit. Attempt 1 RED on `tests/test_compute_jobs_fencing.py` with a
+      PostgREST `504 Gateway Timeout`. Attempt 2 RED with a DIFFERENT signature —
+      `httpx.ConnectError`, connection reset — on a DIFFERENT test set, including
+      `tests/test_drain_semantics.py`. Attempt 3 GREEN on the identical code. Non-deterministic
+      victims across attempts is the proof that this is TRANSPORT, not logic.
+      ⚠️ **NOT-THIS: it is NOT the wedged-pool mechanism.** A live probe returned three
+      sub-second successes with all PostgREST backends idle, so the recorded
+      `pg_terminate_backend` remedy was correctly NOT fired at infrastructure shared with other
+      people's CI.
+      **Deliverable:** a bounded retry at the transport boundary that keeps a transient fault
+      DISTINGUISHABLE from a clean run, and the retry must be observed to EXHAUST — neutered,
+      RED, restored from a byte backup, never assumed.
+      ⛔ **Forbidden closure: never a bare re-run.** A re-run is what made attempt 3 green and it
+      taught nothing.
+      **Owner:** Phase 164.9 TESTISOLATION.
+
+- [ ] **`[164.9-MUTEX-HOLDER-DIED-UNSERIALIZED]` a run whose advisory-lock holder dies mid-job
+      can still report GREEN on DB assertions its own harness has just declared untrustworthy
+      (booked 2026-09-21, Phase 164.9 TESTISOLATION)** — **BEFORE.** The dead-holder branch of
+      the best-effort mutex release step emits a GitHub Actions log annotation naming the
+      condition, and by the step's own documented design that annotation does not change the
+      job's exit status. MEASURED 2026-09-13 in run `34763669052`: the `python` job's release
+      step printed verbatim that the mutex holder died BEFORE this release step and the DB work
+      after its death ran UNSERIALIZED, and that the run's DB assertions should not be trusted —
+      and the job's verdict was unaffected by it.
+      **AFTER (what this phase delivers).** A separate ALWAYS-RUN verdict step that reads a
+      marker the dead-holder branch writes and exits non-zero when it is present.
+      ⚠️ **THE EXPOSURE.** Until that lands, a run can conclude GREEN on DB assertions its own
+      harness has just declared untrustworthy — the purest form of this milestone's family
+      defect: a green reading that is not measuring what it claims.
+      ⛔ **Forbidden closures:** deleting, softening or re-wording the warning; and adding an
+      inline non-zero exit to the best-effort release step itself — that regresses the step's
+      own documented best-effort invariant rather than fixing the missing verdict.
+      **Owner:** Phase 164.9 TESTISOLATION.
+
+- [ ] **`[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]` the live-DB vitest class that runs ONLY
+      when TEST credentials are present is RED, and establishing whether any CI gate can see it
+      comes before any remedy (booked 2026-09-21, Phase 164.9 TESTISOLATION)** — MEASURED at
+      `f915bf49`: 16 files / 38 tests FAILED against the SAME tree's credential-free run, which
+      reported 0 failures, with the skip-count delta from 280 to 94 being the class itself. Five
+      failure signatures, three PostgREST error codes and two non-code ones: `PGRST203` (two
+      live overloads of `claim_compute_jobs_with_priority`, a 2-arg and a 5-arg, so PostgREST
+      cannot choose), `PGRST205` (table absent from the schema cache), `PGRST204` (a column
+      absent from `api_keys`), `Invalid schema: cron`, and `42501` (permission denied).
+      ⛔ **CORRECTION carried from this phase's own CONTEXT Area 4, which changes the entry's
+      shape.** At least three of the five classes are baseline- or fixture-level and follow the
+      tests to ANY host, not just shared TEST: the `PGRST203` overload ambiguity lives in
+      `supabase/schema/baseline.sql` itself (both live definitions are there); the
+      `Invalid schema: cron` failure is set by `supabase/config.toml`'s exposed-schema list,
+      which excludes `cron` everywhere; and the `PGRST204` missing-column failure is a STALE
+      fixture for a column that has never existed in the schema. So a local stack reproduces
+      the ambiguity rather than fixing it, and picking a different host does not close this
+      entry on its own.
+      ⚠️ **Still unmeasured, and it must not be rounded up:** only 3 of the 38 failures were
+      traced. The remaining per-file census is OWED before anyone claims the class is
+      understood.
+      **Deliverable:** the class runs somewhere it can go RED, or its schema/fixture drift is
+      fixed with a gate proven to bite.
+      ⛔ **Forbidden closures:** deleting the tests; skipping them permanently; arguing the
+      credential-free green is sufficient; and adding TEST credentials to the vitest shards —
+      that un-skips the ~284 live-DB tests gated on `HAS_LIVE_DB`, shifts the coverage
+      denominator, and invalidates the ratchet baseline that a blocking CI gate rests on.
+      **Owner:** Phase 164.9 TESTISOLATION.
+
 - [ ] **`[164.8.2-VAC08-FATAL-ON-TRANSIENT]` an unreadable ledger row count now reds the WHOLE
       VAC-08 gate, where it used to cost only the absurdity floor (booked 2026-09-10, Phase
       164.8.2; routed to Phase 164.9 — ⚠️ SAME ROOT as `[164.8-PUSH-RACE-VAC08]`, plan them
