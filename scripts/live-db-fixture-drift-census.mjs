@@ -630,8 +630,11 @@ export function classifySource(src, filePath, catalogue, exposedSchemas) {
     const re = /\.from\(/g;
     let m;
     while ((m = re.exec(code)) !== null) {
-      const before = code.slice(Math.max(0, m.index - 12), m.index);
-      const recv = /([A-Za-z_$][\w$]*)$/.exec(before);
+      // Receivers can sit on the PREVIOUS line of a multi-line chain (e.g.
+      // `await schemaScoped\n  .from(...)`), so the window must be wide enough to reach
+      // back across trailing whitespace/newlines to the identifier.
+      const before = code.slice(Math.max(0, m.index - 60), m.index);
+      const recv = /([A-Za-z_$][\w$]*)\s*$/.exec(before);
       if (recv && NON_SUPABASE_FROM_RECEIVERS.has(recv[1])) continue;
 
       const openIdx = m.index + m[0].length - 1;

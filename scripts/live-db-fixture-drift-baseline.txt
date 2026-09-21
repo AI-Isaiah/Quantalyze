@@ -1,0 +1,32 @@
+# live-db-fixture-drift baseline — findings the static census MEASURES today, seeded once
+# (Phase 164.9, plan 03, ROADMAP criterion 13 / `[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]`).
+#
+# AIM: this file SHRINKS TO EMPTY. A finding is removed only once its destination plan closes
+# it (call-site fix, fixture repair, or the read-only exposure decision named below) — never to
+# make a red run green. A finding is NEVER ADDED to this file to clear a red; a NEW live-DB
+# test referencing a table, column, function or schema the tree does not have is a real defect,
+# not a candidate for this ledger.
+#
+# Every non-comment line names EXACTLY ONE finding: <class> file=<path> identifier=<id>
+# Destination: <plan or phase that closes it>. ENTRY_COUNT below is verified by the tool itself
+# against the number of non-comment lines, so a silent hand-edit that adds or drops an entry
+# without moving the count fails the run.
+#
+# DATED 2026-09-21, first seed. `node scripts/live-db-fixture-drift-census.mjs` at HEAD, corpus
+# 51 file(s), reports exactly these 4 findings and 69 `unresolved` call sites (computed
+# relation/schema/function names, or `.insert`/`.update`/`.upsert` payloads that are not a plain
+# object literal — arrays, spread, variables). The `unresolved` count is NOT zero and is NOT
+# claimed to be: it is the residue plan 08 classifies by execution in the lane it stands up, per
+# this plan's objective. RESEARCH traced only 3 of the ROADMAP's 5 failure signatures
+# statically (PGRST203 overload ambiguity, unexposed `cron` schema, stale `key_hash` fixture);
+# this seed independently REPRODUCES all 3 from the real corpus (not merely the catalogue), plus
+# the `status` column finding RESEARCH's own sample did not name. The 5th signature
+# (`42501` permission denial) is not statically decidable and is NOT represented here — see the
+# SUMMARY for that gap stated in full rather than rounded away.
+#
+# ENTRY_COUNT: 4
+
+absent-column file=src/__tests__/claim-dedupe-done-pending-children-guard.test.ts identifier=api_keys.key_hash Destination: Phase 164.9 plan 08 — fixture repair (RESEARCH Q2: the real column is api_key_encrypted; key_hash has never existed)
+absent-column file=src/__tests__/claim-dedupe-done-pending-children-guard.test.ts identifier=api_keys.status Destination: Phase 164.9 plan 08 — fixture repair alongside key_hash (api_keys has no status column; the test likely meant sync_status)
+unexposed-schema file=src/__tests__/retention-crons.test.ts identifier=cron Destination: Phase 164.9 plan 08 — decide between rewriting the call site off the REST surface and a deliberate config.toml exposure change; the exposure change is a real API-surface widening and is not the default
+ambiguous-overload file=src/__tests__/claim-failed-retry-dedupe-migrations.test.ts identifier=claim_compute_jobs_with_priority Destination: Phase 164.9 plan 08 — call-site disambiguation (name a parameter unique to the 5-arg overload); dropping the stale 2-arg overload itself is a PROD-affecting migration and is out of this phase's scope per CONTEXT Area 4
