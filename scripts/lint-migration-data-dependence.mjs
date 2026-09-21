@@ -367,20 +367,35 @@ export function localNames(body) {
 }
 
 /**
- * Variables whose value came from a read of an application relation.
- * @returns {Map<string,string>} lower-cased variable name -> relation
+ * EVERY assignment to a PL/pgSQL variable in the block body, in source order,
+ * each carrying the offset it happens at and the application relation it read
+ * (or `null` when it read the catalogue, a literal, or a function call).
+ *
+ * ⛔ THE UNTAINTED ASSIGNMENTS ARE THE POINT, and recording only the tainted
+ * ones is the bug this shape exists to avoid. A long block reuses a scratch
+ * variable: `SELECT ... INTO v_n FROM pg_class` for a catalogue assertion,
+ * then `SELECT ... INTO v_n FROM public.t` two statements later for a NOTICE.
+ * A flow-INSENSITIVE taint map lets the later data read reach back and condemn
+ * the earlier catalogue guard - the caller resolves each condition against the
+ * LAST assignment BEFORE it instead, so an overwrite CLEARS a taint exactly as
+ * it clears a value.
+ *
+ * ⚠️ STATED LIMITATION: this is position-ordered, not control-flow-ordered.
+ * Inside a `LOOP`, an assignment textually AFTER a condition does reach it on
+ * the next iteration, and that edge is not modelled. It biases toward allowing,
+ * never toward refusing, which is the right direction for a gate whose false
+ * positive would block a legitimate deploy.
+ *
+ * @returns {Array<{name:string, at:number, relation:string|null}>} sorted by `at`
  */
-export function taintedVariables(body, locals) {
-  const taint = new Map();
-  const add = (names, relation) => {
-    for (const n of names) {
-      const k = n.trim().toLowerCase();
-      if (k && !taint.has(k)) taint.set(k, relation);
-    }
-  };
+export function variableAssignments(body, locals) {
+  const out = [];
 
   // `SELECT ... INTO [STRICT] v[, v2] ... FROM rel`
+  let offset = 0;
   for (const chunk of body.split(";")) {
+    const base = offset;
+    offset += chunk.length + 1;
     const sel = /\bSELECT\b/i.exec(chunk);
     if (!sel) continue;
     const after = chunk.slice(sel.index);
@@ -389,27 +404,28 @@ export function taintedVariables(body, locals) {
     );
     if (!into) continue;
     const rels = appRelationsIn(after, locals);
-    if (rels.length === 0) continue;
-    add(into[1].split(","), rels[0]);
+    const at = base + sel.index + into.index + into[0].length;
+    for (const n of into[1].split(",")) {
+      const name = n.trim().toLowerCase();
+      if (name) out.push({ name, at, relation: rels[0] ?? null });
+    }
   }
 
-  // `v := ... (SELECT ... FROM rel ...)`
+  // `v := <expression>` - including the ones that read nothing, because those
+  // are what clear a prior taint.
   for (const m of body.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*:=([^;]*)/g)) {
-    if (!/\bSELECT\b/i.test(m[2])) continue;
-    const rels = appRelationsIn(m[2], locals);
-    if (rels.length === 0) continue;
-    add([m[1]], rels[0]);
+    const rels = /\bSELECT\b/i.test(m[2]) ? appRelationsIn(m[2], locals) : [];
+    out.push({ name: m[1].toLowerCase(), at: m.index + m[0].length, relation: rels[0] ?? null });
   }
 
   // `FOR rec IN SELECT ... FROM rel ... LOOP`
   for (const m of body.matchAll(/\bFOR\s+([A-Za-z_][A-Za-z0-9_]*)\s+IN\b([\s\S]*?)\bLOOP\b/gi)) {
-    if (!/\bSELECT\b/i.test(m[2])) continue;
-    const rels = appRelationsIn(m[2], locals);
-    if (rels.length === 0) continue;
-    add([m[1]], rels[0]);
+    const rels = /\bSELECT\b/i.test(m[2]) ? appRelationsIn(m[2], locals) : [];
+    out.push({ name: m[1].toLowerCase(), at: m.index + m[0].length, relation: rels[0] ?? null });
   }
 
-  return taint;
+  out.sort((a, b) => a.at - b.at);
+  return out;
 }
 
 const RAISE_LEVELS_THAT_ARE_NOT_EXCEPTIONS = new Set([
@@ -436,7 +452,11 @@ function wordsOf(text) {
  * block `END` are ignored by construction, which keeps the pairing correct
  * without parsing the rest of PL/pgSQL.
  *
- * @returns {Array<{off:number, conditions:string[]}>}
+ * Each condition carries the offset it STARTS at, so the caller can resolve a
+ * variable it mentions against the assignment in force at that point rather
+ * than against every assignment anywhere in the block.
+ *
+ * @returns {Array<{off:number, conditions:Array<{text:string, at:number}>}>}
  */
 export function raiseSites(body) {
   const ws = wordsOf(body);
@@ -444,6 +464,7 @@ export function raiseSites(body) {
   const sites = [];
 
   const condition = (from) => {
+    if (from >= ws.length) return { text: "", at: body.length, next: ws.length - 1 };
     let caseDepth = 0;
     for (let k = from; k < ws.length; k++) {
       if (ws[k].u === "CASE") {
@@ -455,24 +476,24 @@ export function raiseSites(body) {
         continue;
       }
       if (ws[k].u === "THEN" && caseDepth === 0) {
-        return { text: body.slice(ws[from].i, ws[k].i), next: k };
+        return { text: body.slice(ws[from].i, ws[k].i), at: ws[from].i, next: k };
       }
     }
-    return { text: body.slice(ws[from].i), next: ws.length - 1 };
+    return { text: body.slice(ws[from].i), at: ws[from].i, next: ws.length - 1 };
   };
 
   for (let k = 0; k < ws.length; k++) {
     const u = ws[k].u;
     if (u === "IF" && (k === 0 || ws[k - 1].u !== "END")) {
       const c = condition(k + 1);
-      stack.push(c.text);
+      stack.push({ text: c.text, at: c.at });
       k = c.next;
       continue;
     }
     if (u === "ELSIF" || u === "ELSEIF") {
       if (stack.length > 0) stack.pop();
       const c = condition(k + 1);
-      stack.push(c.text);
+      stack.push({ text: c.text, at: c.at });
       k = c.next;
       continue;
     }
@@ -503,7 +524,8 @@ export function classifySource(src) {
 
   for (const block of scanned.blocks) {
     const locals = localNames(block.body);
-    const taint = taintedVariables(block.body, locals);
+    const assigns = variableAssignments(block.body, locals);
+    const names = [...new Set(assigns.map((a) => a.name))];
 
     for (const site of raiseSites(block.body)) {
       // Innermost condition first: the nearest data-derived condition is the
@@ -514,16 +536,19 @@ export function classifySource(src) {
         let relation = null;
         let via = null;
 
-        for (const [name, source] of taint) {
-          if (new RegExp(`\\b${name}\\b`, "i").test(cond)) {
-            rule = "R1-variable-conditioned-raise";
-            relation = source;
-            via = `variable \`${name}\``;
-            break;
-          }
+        for (const name of names) {
+          if (!new RegExp(`\\b${name}\\b`, "i").test(cond.text)) continue;
+          // The assignment IN FORCE where the condition is evaluated - an
+          // overwrite clears a taint exactly as it clears a value.
+          const inForce = assigns.filter((a) => a.name === name && a.at < cond.at).pop();
+          if (!inForce || !inForce.relation) continue;
+          rule = "R1-variable-conditioned-raise";
+          relation = inForce.relation;
+          via = `variable \`${name}\``;
+          break;
         }
-        if (rule === null && /\bSELECT\b/i.test(cond)) {
-          const rels = appRelationsIn(cond, locals);
+        if (rule === null && /\bSELECT\b/i.test(cond.text)) {
+          const rels = appRelationsIn(cond.text, locals);
           if (rels.length > 0) {
             rule = "R2-subquery-conditioned-raise";
             relation = rels[0];

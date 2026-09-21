@@ -3342,11 +3342,11 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       **Owner:** Phase 164.9 TESTISOLATION (this phase, remaining plans) — and if F1 outlives it,
       a named successor phase, never a blank destination.
 
-- [ ] **`[164.9-DATA-DEPENDENT-GUARD-CENSUS]` 79 anonymous-block guards across 63 applied
+- [ ] **`[164.9-DATA-DEPENDENT-GUARD-CENSUS]` 83 anonymous-block guards across 63 applied
       migrations raise on data TEST does not have — the class is now REFUSED at author time, and
       the EXISTING corpus is censused rather than repaired (booked 2026-09-21, Phase 164.9
       TESTISOLATION plan 09)** — MEASURED by `node scripts/lint-migration-data-dependence.mjs`
-      over `supabase/migrations` at that date: **272 migration(s), 345 anonymous block(s), 79
+      over `supabase/migrations` at that date: **272 migration(s), 345 anonymous block(s), 83
       refusal(s) across 63 files**, seeded verbatim into the dated shrink-only ledger
       `scripts/lint-migration-data-dependence-baseline.txt`. Regenerate rather than trust these
       figures; the run prints them.
@@ -3374,7 +3374,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       marker to the linter (the escape hatch Phase 164.8 specified and deliberately did not
       build, because a hatch is something a person must remember to claim); and deleting a ledger
       line for any reason other than the scan no longer refusing it.
-      **Owner:** Phase 164.9 TESTISOLATION built the refusal. ⚠️ The REPAIR of the 79 needs a
+      **Owner:** Phase 164.9 TESTISOLATION built the refusal. ⚠️ The REPAIR of the 83 needs a
       named successor phase booked via `/gsd-phase --edit` — recorded here rather than left
       blank, and surfaced in `164.9-09-SUMMARY.md` as a routed deferral for that booking.
 

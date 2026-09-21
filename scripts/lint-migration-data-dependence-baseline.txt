@@ -3,7 +3,7 @@
 # DATED 2026-09-21, Phase 164.9 TESTISOLATION plan 09, for
 # [164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]. Every line below was MEASURED by
 # `node scripts/lint-migration-data-dependence.mjs` over supabase/migrations at
-# that date - 272 migration(s), 345 anonymous block(s), 79 refusal(s) across 63
+# that date - 272 migration(s), 345 anonymous block(s), 83 refusal(s) across 63
 # files. Nothing here was typed by hand; the file was generated from the
 # classifier and is re-verified against it on every run.
 #
@@ -27,7 +27,7 @@
 # The linter enforces both, and the recorded count below is re-derived on every
 # run - a list with no recorded cardinality can be emptied without a single red.
 #
-# ENTRY_COUNT = 79
+# ENTRY_COUNT = 83
 #
 # THE CENSUS IS NOT A TRIAGE, and saying so is the honest part. The scan refuses
 # a SHAPE. Some instances of that shape are benign on a data-empty TEST because
@@ -37,15 +37,15 @@
 # one migration at a time, is what the destination owns.
 #
 # EVERY ENTRY CARRIES THE SAME DESTINATION, and that is deliberate rather than
-# lazy: this is ONE campaign over one corpus, not 79 independent defects.
+# lazy: this is ONE campaign over one corpus, not 83 independent defects.
 # [164.9-DATA-DEPENDENT-GUARD-CENSUS] in TODOS.md carries the owner, the
 # trigger and the forbidden closures.
 #
 # WHAT THIS PLAN DID NOT DO, stated so nobody reads the ledger as a repair
 # record: NO migration was edited. Repairing an APPLIED migration is a separate
-# act with its own review posture - it re-enters the apply pipeline - and the
-# interim remedy for something already merged is unchanged and is REVERT THE
-# MERGE, never an edit to .github/workflows/supabase-migrate.yml.
+# act with its own review posture - it re-enters the apply pipeline.
+# The interim remedy for something already merged is unchanged:
+# REVERT THE MERGE. Never an edit to .github/workflows/supabase-migrate.yml.
 #
 # ⛔ A red corpus scan is NEVER cleared by relaxing the classifier, by widening
 #    this ledger, or by adding an opt-out marker to the linter. There is no
@@ -113,6 +113,10 @@
 20260624120000_csv_daily_returns_per_key_axis.sql	R2-subquery-conditioned-raise	public.csv_daily_returns	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
 20260710120000_strategy_keys.sql	R2-subquery-conditioned-raise	public.strategy_analytics	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
 20260710130000_stitch_composite_kind.sql	R2-subquery-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260713120000_cleanup_abandoned_wizard_drafts.sql	R1-variable-conditioned-raise	public.api_keys	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260713120000_cleanup_abandoned_wizard_drafts.sql	R1-variable-conditioned-raise	public.compute_jobs	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260713120000_cleanup_abandoned_wizard_drafts.sql	R1-variable-conditioned-raise	public.csv_daily_returns	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260713120000_cleanup_abandoned_wizard_drafts.sql	R1-variable-conditioned-raise	public.key_permission_audit	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
 20260713120000_cleanup_abandoned_wizard_drafts.sql	R1-variable-conditioned-raise	public.strategies	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
 20260714090000_portfolio_recompute_inflight_unique.sql	R1-variable-conditioned-raise	public.portfolio_analytics	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
 20260716130000_strategies_status_private.sql	R1-variable-conditioned-raise	strategies	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
