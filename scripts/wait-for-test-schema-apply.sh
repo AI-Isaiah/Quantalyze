@@ -173,7 +173,23 @@ wait_for_apply() {
     apply="$(probe_apply_state)"
     polls=$((polls + 1))
     case "${apply}" in
-      concluded-ok|concluded-bad) outcome="apply-concluded" ;;
+      # ⭐ THE FLAG GATES THIS ARM TOO, AND IT USED NOT TO. A concluded apply
+      # answers "the run named in the Actions API has finished"; it says NOTHING
+      # about test-restore-from-baseline.yml, which produces no Actions run on
+      # this commit and is visible ONLY through the flag. The two are
+      # CORRELATED: a migration landing on TEST is exactly when someone
+      # re-baselines it. Reading `concluded-ok` while the flag is held and
+      # proceeding is a reader walking into a `DROP SCHEMA public CASCADE`.
+      # ⚠️ NOT A CLAIM THAT THIS WAS THE ONLY DEFENCE: the shared-test-db mutex
+      # still prevents the two from actually overlapping. What this closes is the
+      # ORDERING hole — proceeding to queue for a lock behind a restore that is
+      # replacing the schema this job is about to assert against.
+      # `unknown` is deliberately NOT treated as clear: an unreadable probe
+      # cannot rule an apply IN, which is the same reading the exhaustion
+      # message already states.
+      concluded-ok|concluded-bad)
+        if [ "${flag}" = "clear" ]; then outcome="apply-concluded"; fi
+        ;;
       absent)
         if [ "${waited}" -ge "${APPEAR_GRACE_SECONDS}" ] && [ "${flag}" = "clear" ]; then
           outcome="no-apply-run"
@@ -249,6 +265,15 @@ self_test() {
   # test-restore-from-baseline.yml produces no Actions run on this commit, so
   # the flag is the only thing standing between a reader and a DROP SCHEMA.
   arm "absent apply but flag HELD is NOT no-apply-run" 1 "wait-outcome: wait-exhausted" held absent
+
+  # ⭐ THE SAME CALIBRATION AGAINST THE OTHER ARM, and it is the one the six
+  # arms above could not make: a CONCLUDED apply with a HELD flag must NOT read
+  # as `apply-concluded` either. The Actions API cannot see a dispatched
+  # restore; only the flag can. Before this arm existed the flag was consulted
+  # on the `absent` path alone, so a restore holding the flag while a migration
+  # apply concluded on the same commit let the reader straight through.
+  arm "concluded apply but flag HELD is NOT apply-concluded" 1 "wait-outcome: wait-exhausted" held concluded-ok
+  arm "concluded apply with flag UNKNOWN is NOT apply-concluded" 1 "wait-outcome: wait-exhausted" unknown concluded-ok
 
   echo "wait-for-test-schema-apply self-test OK (${checks} checks) — all three outcomes named, and a held flag beats an absent run."
 }
