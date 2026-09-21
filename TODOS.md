@@ -9816,6 +9816,17 @@ a tail residual section is the same disappearance this residue exists to prevent
       POST-MERGE BY CONSTRUCTION, and the act of RECORDING its result is what makes the founder's
       Option A honest (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 11).**
       Owner: **THE FOUNDER — the human who merges this phase.** Not a phase. Not an agent.
+      ⭐ **AMENDED 2026-09-21 — THE FOUNDER EXPLICITLY DELEGATED BOTH ACTS TO THE AGENT**, in
+      session, in these words: *"I authorize you to do this: the post-merge
+      test-restore-from-baseline.yml dispatch for criterion 8, and the baseline re-dump."*
+      ⛔ The original wording is KEPT because it records why the boundary existed, and because a
+      delegation is a dated event on ONE occasion — it is **not** a standing rule. A future
+      session finding this entry open has NOT been authorized by this line.
+      ⚠️ **WHAT THE DELEGATION DOES NOT CHANGE:** the dispatch is still POST-MERGE BY
+      CONSTRUCTION (the ref guard refuses any ref that is not the default branch), the preflight
+      still runs and is READ before the committing mode, the confirm token is still derived at
+      the MERGED ref and never copied out of a planning document, and ⛔ **DATA IS STILL NOT
+      RECOVERABLE** — the backup artifact restores schema and ledger only.
       **WHY IT EXISTS:** `test-restore-from-baseline.yml` carries a HARD ref guard and refuses any
       dispatch that is not from the default branch, because a branch dispatch would restore shared
       TEST from an unreviewed dump. So this phase's new restore guards cannot be exercised against
