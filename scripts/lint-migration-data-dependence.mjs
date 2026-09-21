@@ -129,6 +129,18 @@ const rel = (p) => {
   return r.startsWith("..") ? p : r;
 };
 
+/**
+ * A path fit to PRINT. This repository is public and the Actions log is
+ * world-readable, and an absolute path on a developer's machine carries the
+ * LOCAL USERNAME in it - so a path that escapes the repository is reduced to its
+ * basename rather than printed whole. `rel` returns the absolute path in that
+ * case, which is correct for OPENING a file and wrong for printing one.
+ */
+const relPrintable = (p) => {
+  const r = relative(REPO_ROOT, String(p));
+  return !r || r.startsWith("..") ? `<outside the repository>/${basename(String(p))}` : r;
+};
+
 // ---------------------------------------------------------------------------
 // The rule table. One entry per REFUSAL; each ships a red and a green fixture,
 // and the self-test proves both directions before any corpus is scanned.
@@ -1245,8 +1257,8 @@ if (ENTRY !== undefined) {
         "lint-migration-data-dependence: REFUSING TO EXIT SILENTLY. This module was invoked as a program " +
           `("${basename(selfPath)}" is the entry point's own basename) but the entry point does not resolve to this file, ` +
           "so the CLI never ran and NOTHING was scanned.",
-        `  entry (process.argv[1]): ${ENTRY}`,
-        `  this module:             ${selfPath}`,
+        `  entry (process.argv[1]): ${relPrintable(ENTRY)}`,
+        `  this module:             ${relPrintable(selfPath)}`,
         "  Exit 0 here would be a gate reporting a clean corpus it never opened.",
       ].join("\n") + "\n",
     );
