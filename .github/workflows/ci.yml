@@ -1528,6 +1528,100 @@ jobs:
           echo "$scanned_line"
           echo "$census"
 
+      # ── Phase 164.9, criterion 5: the data-dependent migration refusal ────
+      # A FIFTH SIBLING in this job, and — like the app-GUC gate, the baseline
+      # content-drift gate and the reference-data audit above — NOT an eighth
+      # rule of lint-sql-gates. Different corpus (supabase/migrations, not
+      # supabase/tests) and a different question: does a migration's guard raise
+      # on rows the TEST database does not have? Same hermetic contract — no
+      # database, no Docker, no secrets, no network — which is what earns it a
+      # place in the job the `frontend` aggregator gates with NO tolerance.
+      #
+      # WHAT IT CATCHES that nothing else does. The TEST restore is SCHEMA-ONLY,
+      # so TEST mirrors production's CATALOGUE and never its DATA. A migration in
+      # this repo's house style — an anonymous block that reads a populated table
+      # and RAISEs on an unexpected count — therefore applies cleanly to
+      # production and REFUSES on TEST; and because a failed TEST apply gates the
+      # production apply, that refusal WITHHOLDS A PRODUCTION DEPLOY. Nothing
+      # else in CI sees the shape: it is valid SQL, it passes review, and it is
+      # green everywhere until the merge that applies it.
+      #
+      # ⛔ IT IS A MECHANISM, NOT A PRAGMA, and there is no opt-out marker by
+      # DECISION. Phase 164.8 designed the escape hatch, specified it with a
+      # three-arm proof, and deliberately did not build it because it had zero
+      # consumers. A hatch is something a person must remember to claim under
+      # exactly the deploy pressure that makes people claim things; a refusal on
+      # the pull request cannot be forgotten and cannot be claimed.
+      #
+      # ⛔ A RED CORPUS SCAN IS CLEARED BY MAKING THE MIGRATION'S SELF-VERIFICATION
+      # CATALOGUE-ONLY, OR BY MAKING THE READ TOLERANT OF AN EMPTY TABLE — never
+      # by relaxing the classifier and never by widening
+      # scripts/lint-migration-data-dependence-baseline.txt, which only shrinks.
+      # For something ALREADY MERGED the interim remedy is unchanged and is
+      # REVERT THE MERGE, never an edit to supabase-migrate.yml.
+      #
+      # Mode identity: the two bare lines below are the EXACT commands a
+      # developer runs locally, pasted verbatim from the script's own header.
+      - name: Data-dependence gate self-test - every refusal fires on its red fixture
+        # Self-test FIRST, corpus second, for the same reason every other
+        # sibling's self-test runs first: a corpus scan reporting "0 NEW" tells
+        # you nothing unless its refusals can still fire.
+        run: node scripts/lint-migration-data-dependence.mjs --self-test
+      - name: Data-dependence gate - no unledgered data-conditioned guard in supabase/migrations
+        run: node scripts/lint-migration-data-dependence.mjs
+      # ⛔ THE EXIT CODE IS NOT THE MEASUREMENT. The bare step above asserts only
+      # that the script exited 0 — and a module whose main guard does not fire
+      # exits 0 having emitted NOTHING. This job carries a MEASURED record of
+      # exactly that for its sibling extractor (the macOS /var -> /private/var
+      # entry-point comparison, above), where a silent no-op satisfied a bare
+      # step. So the command is re-run with its stdout captured and the census
+      # line it must PRINT is asserted. Only the stdout fd differs: argv is
+      # byte-identical to the bare line above, which stays as the mode-identity
+      # pin that src/__tests__/lint-migration-data-dependence.test.ts reads.
+      #
+      # ⛔ NO SOFTENING TOKEN IN THIS BLOCK: no trailing-truth command after a
+      # pipeline, and no bare zero-status `exit`. The tokens are deliberately
+      # NOT spelled out here — the acceptance scan for these steps greps this
+      # very region for them, so a prohibition written literally would report
+      # itself as the violation. Its twin above, outside that region, spells
+      # them out; this one names the class.
+      # `set -uo pipefail` WITHOUT `-e` is what makes that possible: a
+      # non-matching `grep` yields the empty string instead of aborting the step,
+      # so an absent line reaches its own MEASURE_FAIL message rather than dying
+      # with no `::error::` at all.
+      - name: Assert the data-dependence scan PRINTED its corpus census
+        env:
+          MIGDEP_SCAN_LOG: ${{ runner.temp }}/lint-migration-data-dependence.log
+        run: |
+          set -uo pipefail
+          node scripts/lint-migration-data-dependence.mjs > "$MIGDEP_SCAN_LOG" 2>&1
+          status=$?
+          cat "$MIGDEP_SCAN_LOG"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the data-dependence corpus scan failed (exit $status). Make the migration's self-verification CATALOGUE-ONLY, or make the read tolerant of an empty table. Do NOT widen scripts/lint-migration-data-dependence-baseline.txt and do NOT relax the classifier."
+            exit "$status"
+          fi
+          census=$(grep -a -m1 -E '^lint-migration-data-dependence: corpus [0-9]+ migration\(s\), [0-9]+ anonymous block\(s\); [0-9]+ refusal\(s\), [0-9]+ allowlisted, [0-9]+ NEW\.$' "$MIGDEP_SCAN_LOG")
+          if [ -z "$census" ]; then
+            echo "::error::MEASURE_FAIL: the scan exited 0 but printed NO 'lint-migration-data-dependence: corpus ... NEW.' census line. A zero status with no output is what a main guard that never fired looks like; it is not a clean corpus."
+            exit 1
+          fi
+          scanned=$(echo "$census" | sed -E 's|^lint-migration-data-dependence: corpus ([0-9]+) migration.*|\1|')
+          case "$scanned" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the migration count out of '$census'."; exit 1;; esac
+          if [ "$scanned" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the scan read 0 migrations. An empty corpus refuses nothing BY CONSTRUCTION — a wrong path reads exactly like a repository with no data-dependent guard."
+            exit 1
+          fi
+          blocks=$(echo "$census" | sed -E 's|^.*, ([0-9]+) anonymous block\(s\);.*|\1|')
+          case "$blocks" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the anonymous-block count out of '$census'."; exit 1;; esac
+          if [ "$blocks" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the scan found 0 anonymous blocks across $scanned migrations. The refusal only ever looks inside a DO block, so a corpus with none is scanned vacuously — that is a broken block scanner, not a clean repository."
+            exit 1
+          fi
+          echo "$census"
+
   sql-mutation:
     # Phase 164.3 / VAC-01 + VAC-02 — the RED-UNDER mutation runner over the
     # annotated SQL gate corpus. THE ON-EVERY-PUSH DETECTOR THIS PHASE EXISTS

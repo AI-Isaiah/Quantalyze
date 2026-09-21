@@ -3342,6 +3342,42 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       **Owner:** Phase 164.9 TESTISOLATION (this phase, remaining plans) — and if F1 outlives it,
       a named successor phase, never a blank destination.
 
+- [ ] **`[164.9-DATA-DEPENDENT-GUARD-CENSUS]` 83 anonymous-block guards across 63 applied
+      migrations raise on data TEST does not have — the class is now REFUSED at author time, and
+      the EXISTING corpus is censused rather than repaired (booked 2026-09-21, Phase 164.9
+      TESTISOLATION plan 09)** — MEASURED by `node scripts/lint-migration-data-dependence.mjs`
+      over `supabase/migrations` at that date: **272 migration(s), 345 anonymous block(s), 83
+      refusal(s) across 63 files**, seeded verbatim into the dated shrink-only ledger
+      `scripts/lint-migration-data-dependence-baseline.txt`. Regenerate rather than trust these
+      figures; the run prints them.
+      **WHY IT EXISTS, and it is the other half of `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`.**
+      That entry asked for a MECHANISM and plan 09 built one: a hermetic refusal in
+      `sql-gate-lint` that fires on the pull request, with no opt-out marker, so a NEW guard of
+      this shape cannot merge. It deliberately did NOT touch the 79 that already merged —
+      repairing an APPLIED migration re-enters the apply pipeline and is a separate act with its
+      own review posture. This entry owns those 79.
+      ⚠️ **THE CENSUS IS NOT A TRIAGE, and the ledger's own header says so.** The scan refuses a
+      SHAPE. Some instances are benign on a data-empty TEST because the block SEEDS the row it
+      then reads back — a self-verifying probe (`20260416201929_audit_log_hardening.sql` is the
+      clearest specimen) rather than a precondition on production rows — and a static scan cannot
+      tell those from a genuine precondition without executing them. The owed work is a
+      per-entry decision: benign (delete the line), or repair the guard.
+      **TRIGGER — the condition that says this has come due, stated so a human recognises it
+      under pressure:** `apply-test` RED on a `RAISE` from a data-reading `DO` block **while
+      PROD's `plan` dry-run is CLEAN**, inherited verbatim from the parent entry. That divergence
+      is the signature; red on BOTH sides is an ordinary bad migration and is not this.
+      **INTERIM REMEDY — revert the merge.** ⛔ NOT an edit to
+      `.github/workflows/supabase-migrate.yml`. A failed TEST apply blocking the PROD apply is a
+      LOCKED decision, and editing the pipeline under deploy pressure to get a deploy out is
+      precisely the failure mode this family exists to prevent.
+      ⛔ **Forbidden closures:** relaxing the classifier; widening the ledger; adding an opt-out
+      marker to the linter (the escape hatch Phase 164.8 specified and deliberately did not
+      build, because a hatch is something a person must remember to claim); and deleting a ledger
+      line for any reason other than the scan no longer refusing it.
+      **Owner:** Phase 164.9 TESTISOLATION built the refusal. ⚠️ The REPAIR of the 83 needs a
+      named successor phase booked via `/gsd-phase --edit` — recorded here rather than left
+      blank, and surfaced in `164.9-09-SUMMARY.md` as a routed deferral for that booking.
+
 - [ ] **`[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]` the live-DB vitest class that runs ONLY
       when TEST credentials are present is RED, and establishing whether any CI gate can see it
       comes before any remedy (booked 2026-09-21, Phase 164.9 TESTISOLATION)** — MEASURED at
