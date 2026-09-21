@@ -4471,6 +4471,7 @@ jobs:
             # job whose real work passed, and `echo ::error::` does not change the
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
+            : > "${RUNNER_TEMP}/shared-test-db-mutex-dead-holder"
           fi
           # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
           # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
@@ -4508,6 +4509,21 @@ jobs:
               fi
               ;;
           esac
+      # [164.9-MUTEX-HOLDER-DIED-UNSERIALIZED] (Phase 164.9 plan 02, ROADMAP
+      # criterion 12; copy of the same verdict step at the sql-tests site
+      # above). The release step above is `if: always()` and its documented
+      # invariant is that it must NEVER redden a job whose real work passed
+      # — `echo "::error::..."` is a log annotation only and does not change
+      # exit status, by design. A dead holder is a DIFFERENT signal from an
+      # ordinary release hiccup: retroactive doubt about THIS job's OWN
+      # earlier DB assertions, made while the advisory lock was not actually
+      # held. That deserves its own gate, not a clause inside a step that can
+      # never fail. This step reads the marker the release step's
+      # dead-holder branch just wrote and turns it into a real, non-zero job
+      # verdict.
+      - name: Verdict — shared-test-db mutex holder died mid-job
+        if: always()
+        run: bash scripts/mutex-dead-holder-verdict.sh
 
   e2e:
     # Runs the PUBLIC/smoke Playwright suite against a placeholder-env
@@ -5521,6 +5537,7 @@ jobs:
             # job whose real work passed, and `echo ::error::` does not change the
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
+            : > "${RUNNER_TEMP}/shared-test-db-mutex-dead-holder"
           fi
           # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
           # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
@@ -5558,6 +5575,21 @@ jobs:
               fi
               ;;
           esac
+      # [164.9-MUTEX-HOLDER-DIED-UNSERIALIZED] (Phase 164.9 plan 02, ROADMAP
+      # criterion 12; copy of the same verdict step at the sql-tests site
+      # above). The release step above is `if: always()` and its documented
+      # invariant is that it must NEVER redden a job whose real work passed
+      # — `echo "::error::..."` is a log annotation only and does not change
+      # exit status, by design. A dead holder is a DIFFERENT signal from an
+      # ordinary release hiccup: retroactive doubt about THIS job's OWN
+      # earlier DB assertions, made while the advisory lock was not actually
+      # held. That deserves its own gate, not a clause inside a step that can
+      # never fail. This step reads the marker the release step's
+      # dead-holder branch just wrote and turns it into a real, non-zero job
+      # verdict.
+      - name: Verdict — shared-test-db mutex holder died mid-job
+        if: always()
+        run: bash scripts/mutex-dead-holder-verdict.sh
       # retro-PR179-H1 / C-0293(c): NO playwright-report upload from this
       # job, ever. Every spec here runs against the REAL-env build, and
       # Playwright's trace.zip + on-failure screenshots embed

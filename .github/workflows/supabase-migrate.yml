@@ -984,6 +984,7 @@ jobs:
             # job whose real work passed, and `echo ::error::` does not change the
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
+            : > "${RUNNER_TEMP}/shared-test-db-mutex-dead-holder"
           fi
           # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
           # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
@@ -1021,6 +1022,31 @@ jobs:
               fi
               ;;
           esac
+      # [164.9-MUTEX-HOLDER-DIED-UNSERIALIZED] (Phase 164.9 plan 02, ROADMAP
+      # criterion 12; copy of the same verdict step in .github/workflows/ci.yml's
+      # sql-tests job). The release step above is `if: always()` and its
+      # documented invariant is that it must NEVER redden a job whose real work
+      # passed — `echo "::error::..."` is a log annotation only and does not
+      # change exit status, by design. A dead holder is a DIFFERENT signal from
+      # an ordinary release hiccup: retroactive doubt about THIS job's OWN
+      # earlier writes to shared TEST, made while the advisory lock was not
+      # actually held. That deserves its own gate, not a clause inside a step
+      # that can never fail. This step reads the marker the release step's
+      # dead-holder branch just wrote and turns it into a real, non-zero job
+      # verdict.
+      #
+      # ⚠️ PLANNED ISOLATION FIX, not a red-clearing hack (CONTEXT Area 3,
+      # CLAUDE.md's standing prohibition). This step ADDS a failure mode to
+      # `apply-test` — a dead holder now reddens it — and REMOVES none. The
+      # consequence is deliberate and follows from Phase 164.8's locked Area 1
+      # decision that a failed TEST apply blocks the PROD apply
+      # (`apply-test-verdict` below, and `apply`'s
+      # `needs.apply-test.result == 'success'`): an apply that ran unserialized
+      # against shared TEST is exactly an apply whose result must not gate
+      # production.
+      - name: Verdict — shared-test-db mutex holder died mid-job
+        if: always()
+        run: bash scripts/mutex-dead-holder-verdict.sh
 
   # ── A SKIPPED OR FAILED TEST APPLY IS A NAMED RED, NOT A GREY JOB ───────
   # `apply` below is gated on `needs.apply-test.result == 'success'`, which BLOCKS
