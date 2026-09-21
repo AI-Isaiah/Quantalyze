@@ -501,12 +501,6 @@ export function classifySource(src) {
   const refusals = [];
   const seen = new Set();
 
-  // RED PHASE. The detection below is not implemented yet. The fixtures, the
-  // rule table and the self-test harness are the test; this returns no refusal
-  // so the red legs fail and the green legs pass vacuously.
-  // eslint-disable-next-line no-constant-condition
-  if (true) return { blocks: scanned.blocks.length, refusals };
-
   for (const block of scanned.blocks) {
     const locals = localNames(block.body);
     const taint = taintedVariables(block.body, locals);
