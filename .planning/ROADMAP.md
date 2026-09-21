@@ -840,12 +840,12 @@ Plans:
 
 **Requirements**: TBD — no v1.20 requirement IDs. The binding obligation is TODOS `[REDUNDER-SUBSET-SPLIT]`, booked 2026-09-05 by Phase 164.4.1 and unowned until this phase. ⛔ `WAIVED_CEILING` is 0 and has stayed 0 through two founder decisions that each took the root-cause fix over an exception — this phase must not be the one that adds a waiver.
 **Depends on:** Phase 164.4
-**Plans:** 9 plans
+**Plans:** 2/9 plans executed
 
 Plans:
 
-- [ ] 164.4.2-01-PLAN.md — Area E BEFORE: acquire-wait vs useful-work captured from >=5 concluded merge-push runs, with the refutation condition written down before the change exists
-- [ ] 164.4.2-02-PLAN.md — Area A: ONE currency implementation (`scripts/check-baseline-currency.mjs`, `--self-test` observed RED), `refuse_stale_baseline()` re-pointed at it; the gate run for real at HEAD and its refusal recorded
+- [x] 164.4.2-01-PLAN.md — Area E BEFORE: acquire-wait vs useful-work captured from >=5 concluded merge-push runs, with the refutation condition written down before the change exists
+- [x] 164.4.2-02-PLAN.md — Area A: ONE currency implementation (`scripts/check-baseline-currency.mjs`, `--self-test` observed RED), `refuse_stale_baseline()` re-pointed at it; the gate run for real at HEAD and its refusal recorded
 - [ ] 164.4.2-03-PLAN.md — Area A wiring: founder regenerates the stale baseline (blocking-human), `load_baseline()` refuses a stale dump, `fetch-depth: 0` on both lane-booting jobs
 - [ ] 164.4.2-04-PLAN.md — Area B precondition MEASURED on a real runner: corpus DEMAND vs lane SUPPLY (`pg_net`/vault/auth/roles/pg_cron), then a blocking decision — proceed, or take DECISION C on the written refutation
 - [ ] 164.4.2-05-PLAN.md — Area B tracer: `sql-tests` onto the ephemeral lane with no mutex; VAC-08 rehomed to a new `test-db-drift` job that keeps the key, the wait and the gate; aggregator arms and comment currency
