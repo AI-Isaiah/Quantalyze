@@ -1456,6 +1456,34 @@ jobs:
       - name: Restore channel derivation self-check - default-DENY holds, non-diagnostic extensions excluded
         run: bash scripts/derive-restore-channels.sh --self-check
 
+      # [164.9] ⛔ A THIRD RECURRENCE OF THE [CR-02] DEFECT ABOVE, and the worst
+      # of the three by count. `wait-for-test-schema-apply.sh --self-test` was
+      # invoked by NOTHING. Every reference to it in this repo was PROSE — three
+      # comments in this file claiming its "--self-test proves all three
+      # reachable", one in mutex-probe.yml, one in a runbook, one in a phase
+      # summary. Six written claims, zero executions.
+      #
+      # WHY IT MATTERS MORE HERE THAN FOR THE TWO SIBLINGS. This script is the
+      # ORDERING control for three DB-touching jobs on a merge push, and its
+      # only signal that sees test-restore-from-baseline.yml is an advisory
+      # flag — that workflow produces no Actions run on the commit, so the
+      # Actions-API read cannot see it at all. A defanged reader here does not
+      # fail loudly: an unreadable probe answers a token that matches no case
+      # arm, burns the full 900s budget, and then reddens three jobs with a
+      # message blaming congestion rather than itself.
+      # ⚠️ Phase 164.9's review round grew it 12 checks → 46 precisely because
+      # the original 12 injected BOTH probe seams and so certified the
+      # dispatcher while executing NEITHER read. Those 34 new arms proved
+      # nothing at all while this step did not exist.
+      #
+      # Hermetic - fixture bytes and stub commands only, no database, no
+      # credential, ~2s - so like both siblings above it runs on every PR
+      # rather than only when the ordering wait itself runs. A gate whose
+      # control only runs when the gate runs cannot catch a commit that
+      # defangs it.
+      - name: Schema-apply ordering wait self-test - the dispatcher AND the two reads
+        run: bash scripts/wait-for-test-schema-apply.sh --self-test
+
       # ── Phase 164.8.1: the reference-data allowlist audit ─────────────────
       # A FOURTH SIBLING in this job, and — like the app-GUC gate and the
       # baseline content-drift gate before it — NOT an eighth rule of
