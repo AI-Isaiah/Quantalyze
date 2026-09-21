@@ -676,11 +676,24 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
         // _enqueue_compute_job_internal is REVOKED for everyone; the
         // public wrapper enqueue_compute_job allows parent_job_ids via
         // its 4th positional. Use it.
+        //
+        // ⚠️ Phase 164.9 fix round — `compute_analytics` IS A RETIRED KIND on
+        // the ENQUEUE path. `_enqueue_compute_job_internal` raises
+        // `invalid_parameter_value` ("kind compute_analytics is retired (Phase
+        // 106) — no enqueue path remains") before it reaches the behaviour this
+        // arm pins. The registry still ADMITS the kind (45 historical rows FK
+        // it), which is why the sibling fan-in arms that seed children by direct
+        // INSERT are unaffected and are left alone — the reject is RPC-level
+        // only. `reconcile_strategy` is a live strategy-targeted kind, and being
+        // a DIFFERENT kind from the parent's it cannot trip
+        // `compute_jobs_one_inflight_per_kind_strategy`. Nothing about the
+        // assertion changed: the subject is that a row with parents starts in
+        // done_pending_children, not which kind it carries.
         const { data: newId, error } = await admin.rpc(
           "enqueue_compute_job",
           {
             p_strategy_id: strategyId,
-            p_kind: "compute_analytics",
+            p_kind: "reconcile_strategy",
             p_idempotency_key: null,
             p_parent_job_ids: [parentId],
           } as never,
@@ -691,6 +704,23 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
         const child = await fetchJob(admin, newId as unknown as string);
         // (mig 109 P12) New row with parents starts as done_pending_children
         // so the fan-in machinery is reachable.
+        //
+        // ⛔ THIS ARM IS RED ON PURPOSE AND IS LEFT RED (Phase 164.9 fix round).
+        // The retired-kind repair above stopped the enqueue bouncing off an
+        // RPC-level reject, and what it uncovered is a REAL CATALOGUE DEFECT,
+        // not fixture drift: `enqueue_compute_job` routes every mode to the
+        // TEN-ARG `_enqueue_compute_job_internal`, and that overload's INSERT
+        // omits `status` entirely, so the row takes the column DEFAULT
+        // ('pending'). Only the older SEVEN-ARG overload still carries mig 109's
+        // `v_initial_status := 'done_pending_children'` branch, and nothing
+        // reaches it. Consequence: a job enqueued through the public wrapper
+        // WITH parents never enters the fan-in state, so
+        // `mark_compute_job_done`'s fan-in advance can never see it.
+        //
+        // ⛔ Closing this needs a MIGRATION against a production catalogue,
+        // which this phase's gate work is ordered ahead of. Weakening the
+        // assertion to accept 'pending' would encode the defect as the contract.
+        // Booked under [164.9-LIVEDB-LANE-EXECUTION-CENSUS].
         expect(child.status).toBe("done_pending_children");
       } finally {
         await cleanupLiveDbRow(admin, {
