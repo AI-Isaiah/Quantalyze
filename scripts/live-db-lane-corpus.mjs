@@ -68,6 +68,30 @@ const DEFAULT_ROOT = "src";
 const SPEC_SUFFIX = /\.test\.tsx?$/;
 
 /**
+ * THE CORPUS RATCHET FLOOR. MEASURED 49 on 2026-09-21; pinned a few under, the
+ * repo's ratchet convention, so a real collapse reddens and ordinary churn does
+ * not.
+ *
+ * ⛔ WHY A FLOOR IS THE ONLY CONTROL HERE, and why it must be TIGHT. The lane's
+ * vitest `include` and the execution gate's `corpusSize` both come from THIS ONE
+ * derivation. So deleting the `HAS_LIVE_DB` reference in a failing spec drops
+ * that file from BOTH sides at once: the gate's CORPUS MISMATCH arm compares the
+ * narrowed run to the narrowed expectation, finds them equal, and the file's
+ * ledgered arms then read as STALE — a second road to a false "the failing set
+ * is EXACTLY the ledger". A single shared derivation cannot detect its own
+ * narrowing by comparison, so the only thing bounding it is how far this number
+ * sits below the measured corpus.
+ *
+ * ⛔ IT ONLY RISES. The stale-low direction — a floor left far below a grown
+ * corpus, re-opening the headroom — is caught one layer up by
+ * `src/__tests__/live-db-execution-ledger.contract.test.ts`, which re-derives
+ * the corpus and fails when this number has been allowed to drift behind it.
+ * That is the repo's two-layer floor idiom: the runner gates the lower bound,
+ * the vitest ratchet gates the staleness.
+ */
+export const CORPUS_FLOOR = 46;
+
+/**
  * Every test file under `root` whose source references the live-DB gate symbol,
  * as repo-relative POSIX-ish paths, sorted so two runs on the same tree produce
  * byte-identical output.
@@ -113,6 +137,18 @@ function main(argv) {
         `${LIVE_DB_GATE_SYMBOL}. This is a MEASURE_FAIL, not a clean run: a lane with nothing ` +
         `in it must never report a green pass. Either the gate symbol was renamed (fix the one ` +
         `declaration both this tool and the fixture-drift census import) or the walk root is wrong.`,
+    );
+    return 1;
+  }
+  // A non-empty but COLLAPSED corpus is the narrowing hazard the floor exists
+  // for; "smaller than it has ever been" is not a clean run either.
+  if (opts.root === DEFAULT_ROOT && files.length < CORPUS_FLOOR) {
+    console.error(
+      `live-db-lane-corpus: CORPUS COLLAPSED to ${files.length} file(s), below the pinned floor of ` +
+        `${CORPUS_FLOOR}. This is a MEASURE_FAIL. The lane's include list and the execution gate's ` +
+        `corpus size come from this one derivation, so a narrowing here is invisible to the gate's own ` +
+        `comparison — see CORPUS_FLOOR. Do NOT lower the floor; find the files that stopped referencing ` +
+        `the gate symbol.`,
     );
     return 1;
   }

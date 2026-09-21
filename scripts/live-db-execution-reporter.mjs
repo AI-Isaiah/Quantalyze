@@ -19,6 +19,12 @@
  * kind routing turns on exactly that distinction. A reporter that reads the
  * error object directly does not lose it.
  *
+ * ⭐ IT ALSO RECORDS WHAT NEVER RAN. A module that throws at import yields ZERO
+ *    test cases, so before this it contributed no arm and no failure while still
+ *    counting toward `counts.files` — an invisible hole the consuming gate read
+ *    as a clean corpus. `moduleFailures` / `counts.moduleErrors` carry it, and
+ *    the gate refuses on a non-zero count.
+ *
  * ⛔ THIS REPORTER CHANGES NOTHING ABOUT WHAT RUNS. It observes the run at its
  *    end and writes a file. It selects no test, skips no test, and cannot change
  *    an arm's outcome — which is the property that lets the ledger gate claim
@@ -38,6 +44,20 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Where the artifact lands when the config does not say otherwise. */
 export const DEFAULT_ARTIFACT = ".live-db-lane-execution.json";
+
+/**
+ * THE FRESHNESS NONCE. The gate sets this in the spawned lane's environment and
+ * refuses an artifact that does not carry it back.
+ *
+ * ⛔ WHY. `existsSync` is not freshness. The artifact is written ONLY from
+ * `onTestRunEnd`, so any vitest failure BEFORE run end (a config that fails to
+ * load exits 1 with `Startup Error` and writes nothing) leaves the PREVIOUS
+ * run's artifact on disk — and the gate would read it and re-issue its verdict,
+ * including a fresh "the failing set is EXACTLY the ledger" for a run in which
+ * vitest never started. CI is protected from that only by fresh checkouts, which
+ * is an accident and not a control.
+ */
+export const RUN_ID_ENV = "LIVE_DB_LANE_RUN_ID";
 
 /**
  * Remove absolute paths so the artifact never carries a home directory or a
@@ -77,6 +97,7 @@ export default class LiveDbExecutionReporter {
   onTestRunEnd(testModules, unhandledErrors, reason) {
     const modules = [];
     const failures = [];
+    const moduleFailures = [];
     let passed = 0;
     let failed = 0;
     let skipped = 0;
@@ -85,7 +106,42 @@ export default class LiveDbExecutionReporter {
     for (const testModule of testModules) {
       const file = scrub(testModule.moduleId);
       modules.push(file);
-      for (const testCase of testModule.children.allTests()) {
+
+      // ── A MODULE THAT NEVER COLLECTED, RECORDED RATHER THAN LOST ──────────
+      // ⛔ MEASURED 2026-09-21 under vitest 4.1.10 with a two-file corpus, one
+      // throwing at import: the throwing module yields ZERO test cases, so it
+      // contributes zero arms and zero failures while STILL being pushed into
+      // `modules` — `counts.files` stays at full corpus size. The artifact then
+      // reads `reason: "failed", unhandledErrorCount: 0, failed: 0, failures: []`
+      // and EVERY guard in the gate's `evaluate` is satisfied by it: the corpus
+      // count is unchanged, the vacuity arms see non-zero totals from the files
+      // that DID load, collection errors are module-attached rather than
+      // unhandled, and "failed" is on the accepted-reason list. The gate would
+      // print "no arm outside the ledger failed" — false, in the one job built
+      // to make that sentence trustworthy.
+      //
+      // The information was HERE and was being discarded. It is emitted now, and
+      // the gate REFUSES on a non-zero count: the module's arms never ran, so
+      // they can never be ledgered and no verdict about the failing set is
+      // supportable.
+      const tests = [...testModule.children.allTests()];
+      const moduleState = typeof testModule.state === "function" ? testModule.state() : undefined;
+      const moduleErrors = typeof testModule.errors === "function" ? testModule.errors() || [] : [];
+      if (moduleErrors.length > 0 || (moduleState === "failed" && tests.length === 0)) {
+        moduleFailures.push({
+          file,
+          state: scrub(moduleState || "unknown"),
+          collectedTests: tests.length,
+          // ⛔ SCRUBBED. Error text carries absolute paths and this repository is
+          // PUBLIC; the artifact is gitignored but it is also pasted into logs.
+          errors: moduleErrors.map((error) => ({
+            name: scrub((error && error.name) || "Error"),
+            message: scrub(error && error.message),
+          })),
+        });
+      }
+
+      for (const testCase of tests) {
         total += 1;
         const result = testCase.result();
         if (result.state === "passed") passed += 1;
@@ -109,6 +165,7 @@ export default class LiveDbExecutionReporter {
     }
 
     modules.sort();
+    moduleFailures.sort((a, b) => a.file.localeCompare(b.file));
     failures.sort((a, b) =>
       a.file === b.file
         ? a.fullName.localeCompare(b.fullName)
@@ -116,7 +173,11 @@ export default class LiveDbExecutionReporter {
     );
 
     const artifact = {
-      schema: 1,
+      schema: 2,
+      // Echoed back from the environment the gate spawned this run with, so the
+      // gate can tell THIS run's artifact from a stale one left by a run that
+      // died before `onTestRunEnd`. Empty when the lane was run by hand.
+      runId: scrub(process.env[RUN_ID_ENV] || ""),
       reason: reason || "unknown",
       unhandledErrorCount: (unhandledErrors || []).length,
       counts: {
@@ -125,8 +186,10 @@ export default class LiveDbExecutionReporter {
         passed,
         failed,
         skipped,
+        moduleErrors: moduleFailures.length,
       },
       modules,
+      moduleFailures,
       failures,
     };
 
