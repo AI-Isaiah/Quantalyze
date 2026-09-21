@@ -215,9 +215,18 @@ describe("Migration 055 — sanitize_user RPC", () => {
           .insert({ user_id: userId, strategy_id: strat.id });
         if (favErr) throw new Error(`user_favorites seed: ${favErr.message}`);
 
-        const { error: noteErr } = await admin
-          .from("user_notes")
-          .insert({ user_id: userId, content: "idem matrix note" });
+        // ⚠️ Phase 164.9 fix round (F3) — `user_notes.scope_kind` and
+        // `.scope_ref` are both NOT NULL with no default (`scope_kind` also
+        // CHECK-constrained), so this seed raised 23502 against a real
+        // catalogue. Supply what the catalogue declares; the `dashboard`
+        // scope's `scope_ref` is the fixed literal `allocations`, per
+        // `src/lib/notes/ownership.ts`.
+        const { error: noteErr } = await admin.from("user_notes").insert({
+          user_id: userId,
+          scope_kind: "dashboard",
+          scope_ref: "allocations",
+          content: "idem matrix note",
+        });
         if (noteErr) throw new Error(`user_notes seed: ${noteErr.message}`);
 
         const { error: attErr } = await admin

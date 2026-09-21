@@ -766,3 +766,235 @@ BEGIN
 END $$;
 
 ROLLBACK;
+
+-- ============================================================================
+-- PART 2 — ARM D1: THE LIVE DESTINATION ROW, BRANCHED ON THE DATABASE MARKER
+-- ============================================================================
+-- Phase 164.9 TESTISOLATION / plan 10, closing [164.8.1-TEST-ANALYTICS-URL-PROD].
+--
+-- WHAT THIS PART IS FOR. Every arm above measures the CALLABLE and the TABLE:
+-- who may write the destination row, what may be written into it, and what the
+-- tick does when it reads one. None of them measures WHAT THE ROW ACTUALLY
+-- HOLDS ON THE DATABASE THIS RUN IS TALKING TO — Part 1 deletes it, rewrites it
+-- four times and rolls the whole thing back, so its final state is a fixture and
+-- never an observation. On shared TEST the seeded value is the PRODUCTION
+-- analytics host, the row feeds a network tick that carries a Vault-held service
+-- key, and so a TEST tick can post to the production service. That hazard is
+-- pre-existing and it is not closed by reading the migration that seeded the row
+-- — it is closed by reading the LIVE row, which is what this part does.
+--
+-- ⛔ AND IT IS NOT CLOSED ONCE. The reference-data replay reseeds that row
+-- FAITHFULLY, by an explicit founder decision (scripts/restore-test-refdata-
+-- allowlist.txt — read it; ⛔ do NOT edit it to make the restore silently
+-- normalise the hazard). So a future restore RE-ARMS it, and the durable
+-- deliverable is therefore this MEASUREMENT rather than the one-off write.
+--
+-- ⛔ NEITHER BRANCH IS A SKIP, AND A RUN THAT TOOK NO BRANCH REDDENS. A
+-- marker-conditional part that can fall through every branch and still pass is
+-- exactly the vacuity this corpus exists to refuse — it would read GREEN on any
+-- database whose marker the author did not anticipate. `v_branch` records which
+-- branch ran and the fall-through at the foot of this block raises when none
+-- did, which is what makes the conditional structure honest rather than an
+-- escape hatch.
+--
+-- ⛔ THE MARKER CONFIRMS WHICH **DATABASE** YOU ARE ON. IT NEVER CONFIRMS WHICH
+-- **SERVICE** A TICK CALLS. The two questions are adjacent and the first does
+-- not answer the second; this part reads the destination ROW for that, and even
+-- then claims nothing about an HTTP outcome (see the next note).
+--
+-- ⛔ NO CLAIM IS MADE HERE ABOUT WHAT THE TICK DID OVER HTTP. net.http_post is
+-- fire-and-forget, so a `succeeded` scheduled-job row is evidence of NOTHING
+-- about the request — seven days of authentication failures once hid behind one
+-- (CRON-DRIFT-01, the incident this whole file exists for). The claim this arm
+-- makes is exactly "the destination row on this database holds the loopback
+-- discard sink", and no more.
+--
+-- ⛔ NO VALUE IS EVER PRINTED. This log is public and the value in question is a
+-- host. Every diagnostic below names a SHAPE — a length, a scheme, a
+-- classification — the same discipline arm C3 asserts of the callable's own
+-- refusal. A proof that the hazard is gone must not publish the hazard.
+--
+-- ⚠️ ON SHARED TEST THIS ARM IS RED BY CONSTRUCTION UNTIL THE TEST-ONLY
+-- REMEDIATION HAS BEEN RUN — scripts/test-only-normalize-analytics-url.sh, whose
+-- runbook is docs/runbooks/test-analytics-url.md. That red IS the hazard being
+-- reported, not a defect in the gate, and it is the same CLAUDE.md coupling (b)
+-- arms V2 and G1 carry. ⛔ Do NOT weaken it to make a board green; run the
+-- remediation, which is a founder action because TEST is shared.
+--
+-- ⚠️ THE UNMARKED-LOCAL BRANCH IS NOT A CONSOLATION ASSERTION. On the disposable
+-- pg-lane nobody has hand-set a COMMENT ON DATABASE and the live row is a
+-- fixture, so "what does the row hold" is meaningless there. What IS meaningful, and is
+-- the property the remediation itself depends on, is that the allow-list
+-- constraint is in force AND that the loopback discard sink is a value it
+-- ALREADY PERMITS: the remedy changes WHICH ALLOWED VALUE the row holds and
+-- never touches the constraint. A hardening pass that narrowed the allow-list to
+-- deployed hosts only would make the TEST-safe sink illegal and force shared
+-- TEST back onto a real host, silently. That is what this branch refuses.
+--
+-- ⛔ THE COMPLETION SENTINEL ABOVE STAYS AT THIRTEEN AND THIS PART ADDS NO
+-- SECOND ONE. `sql-tests` reads the FIRST `RAISE NOTICE '… ALL N ARMS EXECUTED'`
+-- in the file, and the per-file arm counts feeding that job's SENTINEL/ARMS
+-- floors are held OUTSIDE this file (in the workflow and in its two mirrors), so
+-- moving this file's sentinel is a three-file edit that belongs to whoever owns
+-- those floors. D1 is pinned by its machine-executable twin and by the mutation
+-- runner's own arm ratchet instead — a different instrument, deliberately. The
+-- notice below therefore does NOT use the `ARMS EXECUTED` phrasing: a second
+-- match would make the sentinel read ambiguous.
+--
+-- RED-UNDER: NARROW the allow-list on the live lane so it admits deployed hosts
+--            but no longer admits the loopback discard sink — one ALTER TABLE
+--            swapping the CHECK, which is the realistic regression (a hardening
+--            pass that reads "why is a loopback literal allowed here?" and
+--            removes it without reading why). ⚠️ A `sql` step and NOT an edit of
+--            the migration's allow-list literal: that literal is spelled THREE
+--            times in 20260907120000 and its own STEP 3 check 7 asserts all
+--            three are each other, so an edit to one ABORTS the apply and no arm
+--            could be the FIRST failure — the runner would score a defect rather
+--            than a bite. ⚠️ And deliberately NOT `DROP CONSTRAINT`, which is
+--            arm U2's twin: U2 runs FIRST and would be the first failure, so a
+--            drop could never redden THIS arm. A NARROWING leaves every arm of
+--            Part 1 green — U2 still gets its 23514 on a foreign host, and arm
+--            C1's loopback INSERT happens after Part 1 has dropped the
+--            constraint itself — and reddens leg (b) here alone.
+-- RED-UNDER-M: {"arm":"D1","apply":[{"kind":"sql","stmt":"ALTER TABLE public.system_settings DROP CONSTRAINT system_settings_analytics_service_url_allowed, ADD CONSTRAINT system_settings_analytics_service_url_allowed CHECK (key <> 'analytics_service_url' OR value ~ '^https://[a-z0-9][a-z0-9.-]*\\.up\\.railway\\.app$')"}]}
+
+BEGIN;
+
+DO $$
+DECLARE
+  v_marker  TEXT;
+  v_branch  TEXT := NULL;
+  v_val     TEXT;
+  v_state   TEXT;
+  v_cnt     INTEGER;
+  v_conname TEXT;
+  -- The loopback discard literal the allow-list ALREADY permits, and the value
+  -- the TEST-only remediation writes. An outbound attempt against it lands on a
+  -- closed local port and is refused harmlessly; it is not a host this project
+  -- deploys to and it cannot leave the machine. Same literal arm C1 uses.
+  c_sink    CONSTANT TEXT := 'http://127.0.0.1:9';
+  -- Marker predicates, spelled to match scripts/restore-test-from-baseline.sh's
+  -- RESTORE_EXPECT_MARKER_RE / RESTORE_REFUSE_MARKER_RE defaults so that the two
+  -- writers against this database classify it the same way.
+  c_test_re CONSTANT TEXT := '(^|[^[:alnum:]_])test([^[:alnum:]_]|$)';
+  c_prod_re CONSTANT TEXT := 'prod';
+  -- ⛔ MEASURED 2026-09-21, AND IT IS WHY THIS CONSTANT EXISTS AT ALL: "the
+  -- marker is ABSENT" is NOT how a disposable cluster presents. `initdb` ships
+  -- the `postgres` database with PostgreSQL's OWN stock COMMENT ON DATABASE, so
+  -- shobj_description comes back NON-NULL on every pg-lane and a branch keyed on
+  -- NULL alone COULD NEVER BE TAKEN — a branch that cannot be taken is the
+  -- vacuity this corpus refuses, and the fall-through below caught it on the
+  -- first real lane run rather than a reader catching it in review.
+  -- scripts/restore-test-from-baseline.sh's self-test has to `COMMENT ON
+  -- DATABASE … IS NULL` explicitly to manufacture the absent case, which is the
+  -- same fact seen from the other side. ⚠️ Matched EXACTLY, never by substring:
+  -- a hand-set project marker that happened to contain this sentence would
+  -- otherwise be read as an unmarked cluster. If a future PostgreSQL changes the
+  -- wording, the fall-through raises loudly instead of silently passing.
+  c_stock   CONSTANT TEXT := 'default administrative connection database';
+BEGIN
+  -- ⛔ THE FIRST STATEMENT OF THIS PART: WHICH DATABASE AM I ON. current_database()
+  -- is `postgres` on BOTH hosted projects and proves NOTHING (CLAUDE.md); each
+  -- project carries a hand-set COMMENT ON DATABASE naming itself, and that
+  -- description is the only thing that distinguishes them from inside a session.
+  SELECT shobj_description(d.oid, 'pg_database')
+    INTO v_marker
+    FROM pg_database d
+   WHERE d.datname = current_database();
+
+  IF v_marker IS NOT NULL AND btrim(v_marker) <> '' AND v_marker ~* c_prod_re THEN
+    -- ===== BRANCH 1 — the marker names PRODUCTION. Refuse, loudly. ==========
+    -- Checked FIRST and fail-closed: a marker that names production is a refusal
+    -- even if it also matched the TEST predicate, because the cost of the two
+    -- errors is not symmetric.
+    v_branch := 'production';
+    RAISE EXCEPTION 'TEST FAILED (D1): the database identity marker names PRODUCTION, and this gate is running against it. Nothing in supabase/tests is meant to execute there — Part 1 alone deletes a Vault secret, drops a CHECK constraint, TRUNCATEs a settings table and calls the tick, all inside a transaction whose ROLLBACK is the only thing standing between that sequence and a live system. The marker text is withheld: this log is public. Find out which connection string this run was handed before anything else.';
+
+  ELSIF v_marker IS NOT NULL AND btrim(v_marker) <> '' AND v_marker ~* c_test_re THEN
+    -- ===== BRANCH 2 — the marker names TEST. MEASURE THE LIVE ROW. ==========
+    -- Read, never written. The row is what the last restore or migration left
+    -- there, and reading it is the whole point: the migration that seeds it
+    -- cannot tell you what the database currently holds.
+    v_branch := 'shared-TEST';
+    SELECT s.value INTO v_val
+      FROM public.system_settings s
+     WHERE s.key = 'analytics_service_url';
+
+    IF v_val IS NULL THEN
+      RAISE EXCEPTION 'TEST FAILED (D1): there is no analytics_service_url row on this database at all, so this arm cannot say where a tick here would post — and neither can an operator. Arm U1 above proves the callable refuses by name in that state, which is the safe failure; this is still a REAL finding, because the row is supposed to exist and the reference-data replay is supposed to restore it. Do not read an absent row as "the hazard is gone".';
+    END IF;
+
+    IF v_val IS DISTINCT FROM c_sink THEN
+      RAISE EXCEPTION 'TEST FAILED (D1): the analytics_service_url row on this TEST database does NOT hold the loopback discard sink — it holds a value of length % character(s) whose scheme is %, and which is %. That row is the destination public.match_engine_cron_tick() POSTs the Vault-held analytics service key to, so while it names anything reachable a scheduled tick ON TEST can reach a service that is not TEST''s. ⛔ The value itself is deliberately NOT echoed: this log is public and the value is a host. Remedy: scripts/test-only-normalize-analytics-url.sh, per docs/runbooks/test-analytics-url.md — a founder action, because TEST is shared with other people''s CI. ⛔ Do NOT close this by editing the reference-data replay allowlist: that would make the restore silently normalise the hazard, and the restore replaying this row faithfully is a recorded decision, not an accident.',
+        length(v_val), split_part(v_val, ':', 1), 'not the loopback discard sink';
+    END IF;
+
+  ELSIF v_marker IS NULL OR btrim(v_marker) = '' OR v_marker = c_stock THEN
+    -- ===== BRANCH 3 — NO HAND-SET MARKER. A disposable local cluster. =======
+    -- ⛔ An unmarked database is not a TEST database, it is an UNKNOWN one, and
+    -- on a hosted project a NULL marker means the marker was LOST. Nothing here
+    -- writes outside this transaction and the terminator is ROLLBACK, so the
+    -- branch is safe to take on either; what it deliberately does NOT do is read
+    -- the live row, which would be meaningless on a cluster this run created.
+    -- ⚠️ THREE spellings of "nobody marked this database", not one — see c_stock
+    -- above for why the NULL spelling alone is a branch that never runs.
+    v_branch := 'unmarked-local';
+
+    SELECT c.conname INTO v_conname
+      FROM pg_constraint c
+     WHERE c.conrelid = 'public.system_settings'::regclass
+       AND c.conname  = 'system_settings_analytics_service_url_allowed';
+    IF v_conname IS NULL THEN
+      RAISE EXCEPTION 'TEST FAILED (D1): the allow-list CHECK constraint is not on public.system_settings, so there is no layer deciding WHICH destinations that row may hold. The TEST-only remediation this arm exists beside depends on the constraint ALREADY permitting the value it writes — with the constraint gone the remediation would appear to succeed while proving nothing about what else could be written next. ⛔ The repair is to restore the constraint, never to weaken the remediation.';
+    END IF;
+
+    -- (b) the sink the remediation writes is a value the allow-list ADMITS.
+    v_state := NULL;
+    BEGIN
+      UPDATE public.system_settings
+         SET value = c_sink
+       WHERE key = 'analytics_service_url';
+    EXCEPTION WHEN OTHERS THEN
+      GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE;
+    END;
+    SELECT count(*) INTO v_cnt
+      FROM public.system_settings
+     WHERE key = 'analytics_service_url' AND value = c_sink;
+    IF v_state IS NOT NULL OR v_cnt <> 1 THEN
+      RAISE EXCEPTION 'TEST FAILED (D1): the allow-list REFUSED the loopback discard sink — the write returned SQLSTATE % and the row now matches the sink % time(s), expected none and 1. That literal is inside the allow-list ON PURPOSE (see the migration''s ⚠️ THE ONE NON-RAILWAY VALUE note): it is what lets a non-production database hold a destination that cannot leave the host, without anybody widening the constraint to admit it. Narrow the allow-list to deployed hosts only and the TEST-only remediation becomes illegal, so shared TEST is pushed back onto a real host — silently, because nothing else measures which value that row holds. ⛔ Do NOT repair this by pointing the remediation at a reachable host.',
+        COALESCE(v_state, 'none — the write succeeded'), v_cnt;
+    END IF;
+
+    -- (c) and it still REFUSES a destination outside the allowed set. Without
+    -- this leg, leg (b) is satisfied by a constraint that admits everything.
+    v_state := NULL;
+    BEGIN
+      UPDATE public.system_settings
+         SET value = 'https://collector.attacker.example'
+       WHERE key = 'analytics_service_url';
+    EXCEPTION WHEN OTHERS THEN
+      GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE;
+    END;
+    SELECT count(*) INTO v_cnt
+      FROM public.system_settings
+     WHERE key = 'analytics_service_url' AND value = c_sink;
+    IF v_state IS DISTINCT FROM '23514' OR v_cnt <> 1 THEN
+      RAISE EXCEPTION 'TEST FAILED (D1): the allow-list did NOT refuse a destination outside the allowed set — the write returned SQLSTATE % (23514 = the constraint refusing it, which is what should have happened) and the row still matches the sink % time(s), expected 1. Leg (b) immediately above is satisfied by a constraint that admits EVERYTHING, so without this leg "the sink is permitted" would be a claim about nothing. ⛔ Do NOT clear a red here by widening the allow-list to admit the value: changing where a live secret is sent is meant to cost a migration a human reads.',
+        COALESCE(v_state, 'none — the write succeeded'), v_cnt;
+    END IF;
+
+  END IF;
+
+  -- ===== THE FALL-THROUGH. A run that took NO branch is a FAILURE. =========
+  -- ⛔ This is what stops the marker-conditional structure above from being an
+  -- escape hatch. A database whose marker is present but names NEITHER test nor
+  -- production matches no branch, and without this raise the part would exit
+  -- having measured nothing while reading exactly like a pass.
+  IF v_branch IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (D1): the database identity marker is PRESENT, is hand-set (it is not PostgreSQL''s own stock comment) and names neither TEST nor production, so none of the three branches above ran and this part measured NOTHING — which, without this raise, would be indistinguishable from a pass. The marker text is withheld: this log is public. Either this is a database nobody wrote a branch for, or a marker was re-set to wording the predicates do not recognise. ⛔ Do NOT resolve it by relaxing a predicate until it matches; decide which of the three branches this database belongs in and say so in the marker. ⚠️ This raise has already earned its keep once: it is what caught a marker-ABSENT branch that could never be taken, because initdb ships a stock comment and the branch was keyed on NULL alone.';
+  END IF;
+
+  RAISE NOTICE 'PART 2 COMPLETE — arm D1 took the % branch. Where the marker names TEST, the LIVE analytics_service_url row was READ (never written) and holds the loopback discard sink, so a scheduled tick on that database cannot reach the production analytics service — a claim about the ROW and deliberately not about any HTTP outcome, because net.http_post is fire-and-forget and a green scheduled-job row is evidence of nothing. Where nobody has hand-set a marker, the allow-list constraint was measured instead: it is in force, it ADMITS the loopback discard sink the TEST-only remediation writes, and it still REFUSES a destination outside the allowed set — the property that remedy rests on, since the remedy changes WHICH ALLOWED VALUE the row holds and never touches the constraint. Where the marker names production, this part refuses outright. No branch taken at all is a failure. Phase 164.9 TESTISOLATION plan 10, [164.8.1-TEST-ANALYTICS-URL-PROD].', v_branch;
+END $$;
+
+ROLLBACK;

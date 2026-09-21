@@ -1045,6 +1045,20 @@ const samePath = (a, b) => {
 //     That is the incident above, and there is no third reading of it. Diagnose
 //     to stderr and exit 2 — a code distinct from the `refuse()` exit 1, so a
 //     harness fault is never read as a classification refusal.
+/**
+ * A path fit to PRINT. This repository is public and the Actions log is
+ * world-readable, and an absolute path on a developer's machine carries the
+ * LOCAL USERNAME in it - so a path that escapes the repository is reduced to
+ * its basename rather than printed whole. Resolving a path for OPENING and
+ * rendering one for PRINTING are different jobs; this is the printing one.
+ * ⛔ Copied deliberately from `scripts/lint-migration-data-dependence.mjs`,
+ * where this leak was found and fixed first. It was fixed there and NOT here,
+ * in the same phase, from the same idiom - a point fix on a class.
+ */
+const relPrintable = (p) => {
+  const r = relative(REPO_ROOT, String(p));
+  return !r || r.startsWith("..") ? `<outside the repository>/${basename(String(p))}` : r;
+};
 const ENTRY = process.argv[1];
 if (ENTRY !== undefined) {
   const self = fileURLToPath(import.meta.url);
@@ -1063,8 +1077,8 @@ if (ENTRY !== undefined) {
         "extract-reference-inserts: REFUSING TO EXIT SILENTLY. This module was invoked as a program " +
           `("${basename(self)}" is the entry point's own basename) but the entry point does not resolve to this file, ` +
           "so the CLI never ran and NOTHING was emitted.",
-        `  entry (process.argv[1]): ${ENTRY}`,
-        `  this module:             ${self}`,
+        `  entry (process.argv[1]): ${relPrintable(ENTRY)}`,
+        `  this module:             ${relPrintable(self)}`,
         "  Exit 0 here would be a restore replaying an EMPTY reference-data section while every migration reads as applied.",
       ].join("\n") + "\n",
     );

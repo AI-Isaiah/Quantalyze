@@ -35,6 +35,20 @@ name: Shared-test-db mutex probe
 # real jobs `skipped`, which GitHub does not roll up into a failed check-suite)
 # instead of concluding `skipped`.
 #
+# ⭐ WHICH KEY THIS PROBE EXERCISES, AND WHICH IT DOES NOT (added 2026-09-21,
+# Phase 164.9). Since 2026-09-21 there are TWO shared-TEST advisory keys.
+#   - This probe exercises the MUTUAL-EXCLUSION key `61616158` — unit: the
+#     shared TEST database — and its claim (three simultaneous contenders
+#     serialize) is unchanged and still fully covered here.
+#   - It does NOT exercise the SCHEMA-APPLY-IN-FLIGHT FLAG
+#     (`SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY` in
+#     scripts/shared-test-db-keys.sh). ⛔ A green run here is NO evidence about
+#     that key. It is a FLAG, not a lock — nothing blocks on it, so there is no
+#     serialization for this probe to measure. Its own falsification lives in
+#     `bash scripts/shared-test-db-keys.sh --self-test` and
+#     `bash scripts/wait-for-test-schema-apply.sh --self-test`, and the two keys
+#     are described side by side in docs/runbooks/shared-test-db-mutex.md §7.
+#
 # What a GREEN run means: three contenders that started at the SAME wall-clock
 # barrier each held the lock over a window that does not overlap either other
 # window — i.e. mutual exclusion held through the pooler, on the session-mode

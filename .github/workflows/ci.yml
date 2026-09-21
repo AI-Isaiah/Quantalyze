@@ -783,6 +783,224 @@ jobs:
           bash scripts/local-stack/run.sh down
           bash scripts/local-stack/run.sh --assert-teardown
 
+  frontend-live-db-lane:
+    # Phase 164.9 plan 08 / ROADMAP criterion 13 — THE LIVE-DB LANE. The ~49 specs
+    # gated on `HAS_LIVE_DB` (`src/lib/test-helpers/live-db.ts`), run against a REAL
+    # Supabase stack booted by `scripts/local-stack/run.sh up` from the committed
+    # `supabase/schema/baseline.sql`.
+    #
+    # WHY IT EXISTS, and why it is not simply credentials on the shards. That whole
+    # class SKIPS in every vitest shard, and the `frontend-test` job below forbids
+    # fixing that in the obvious way IN ITS OWN WORDS: adding the two live-DB
+    # variables there would un-skip the class inside the shards, shift the merged
+    # report's denominator and invalidate the ratchet baseline — which was measured
+    # with those tests skipped, and which backs a BLOCKING gate. So the class gets
+    # its own INVOCATION instead. ⛔ Nothing in this plan changed `frontend-test`;
+    # its prohibition, its shard matrix and its reporting behaviour are untouched.
+    #
+    # ⭐ AND IT RUNS UNDER AN EXECUTION LEDGER (Phase 164.9, the ledger round arising
+    # from plan 08 and its fix round). 18 arms of this corpus fail against the
+    # committed schema-only baseline and NONE is closable by a fixture — the fix
+    # round already closed all 17 that were. `scripts/live-db-execution-ledger.txt`
+    # is the dated, shrink-only record of exactly those 18, and the job is GREEN iff
+    # the failing set MATCHES it and RED the moment it changes in either direction.
+    # ⛔ That is a RATCHET, not a tolerance: the row stays in the aggregator's STRICT
+    # default arm, nothing here is advisory, no test is skipped and every test still
+    # executes. Read the ledger's own header before touching it.
+    #
+    # ⭐ THE PRECEDENT, AND THE INVERSION. `frontend-seam-redis` above sets env
+    # JOB-WIDE and its own comment calls itself "the exact INVERSE of the
+    # frontend-test warning". This job is the same shape for the same reason: the
+    # live-DB variables reach these specs HERE and only here, safe because this job
+    # runs the DERIVED live-DB corpus and nothing else. ⛔ NEVER WIDEN THIS JOB'S
+    # TEST SELECTION. Widening it is the one edit that turns the sentence above from
+    # true into false, and nothing else in this file would notice.
+    #
+    # NO SECRET AND NO REPOSITORY VARIABLE is referenced anywhere in this job. Every
+    # credential it uses is minted by the stack it boots and handed over through the
+    # mode-600 `scripts/local-stack/.stack-env` written by `run.sh up`. It therefore
+    # runs identically on a fork PR, a same-repo PR, a push and a workflow_dispatch —
+    # which is what earns it the `frontend:` result loop's STRICT DEFAULT ARM with no
+    # tolerance of its own, the `frontend-seam-redis` / `sql-gate-lint` /
+    # `sql-mutation` / `frontend-local-stack` reasoning and the OPPOSITE of the
+    # `sql-tests` / `e2e-seeded` rows, whose tolerances exist only because those jobs
+    # consume a repo variable a fork cannot see.
+    #
+    # ⛔ THE LANE REFUSES TO BOOT IN THE PRODUCTION-LINKED CONTEXT, and it is asserted
+    # rather than commented. `vitest.livedb.globalsetup.ts` asks `run.sh
+    # --print-workdir` where the stack would start and throws if the answer is this
+    # repository's own `supabase/` directory — the directory this checkout's CLI
+    # context links to PRODUCTION and which governs production deploys. `run.sh` is
+    # the ONLY way this job reaches the CLI; no bare invocation appears anywhere in
+    # it.
+    #
+    # ⛔ AND THE LANE FAILS RATHER THAN SKIPS WHEN THE STACK IS ABSENT. Measured while
+    # building it: with no stack up, `npm run test:live-db` exits 1 with a named
+    # refusal and ZERO skipped tests. A quietly-skipping live-DB corpus is
+    # `src/__tests__/csv-finalize-rpc.test.ts`'s tombstone — six live-DB cases that
+    # skipped silently in every shard for months — and it is the exact condition
+    # criterion 13 exists to end.
+    #
+    # ACCEPTED COST, stated rather than discovered later: the `frontend` aggregator
+    # now waits on a SECOND container-booting job. That is wall clock spent to give a
+    # previously ungated test class a place where it can go RED, which is the trade
+    # criterion 13 exists to make. The two container jobs are independent of each
+    # other and run in parallel, so the cost is the slower of the two, not their sum.
+    #
+    # ⚠️ `timeout-minutes` — HEADROOM OVER AN UNMEASURED TERM, SAID SO, in the same
+    # words `frontend-local-stack` uses for its own. What is measured: this corpus is
+    # 49 files driving real HTTP against PostgREST and GoTrue, run with
+    # `fileParallelism: false` because they share one database. What is NOT measured:
+    # their wall clock on a cold ubuntu runner that must pull the stack images, since
+    # no SHA-bound run of this job exists yet. 30 is headroom over that, NOT a
+    # measured total. ⛔ When the first green run reports its wall clock, REPLACE this
+    # with a value derived from it rather than widening it again.
+    #
+    # ⛔ THE COST THIS LANE CANNOT COVER, named so nobody reads it as broader than it
+    # is: a local stack cannot catch drift that exists only on the shared project.
+    # That drift has its own gates — VAC-08 (a step of `sql-tests`) for repo-versus-
+    # shared-project ledger and function bodies, VAC-04 (in `migration-drift-check.yml`)
+    # for repo-versus-production bodies. This job is not a substitute for either.
+    #
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter, on ONE physical line:
+    # this changes WHEN this job is invoked (not on a `.planning/`-only PR), never
+    # WHAT it asserts. A skip caused by that `if:` is judged by the aggregator's ONE
+    # uniform docs-only arm, never by an arm of this row's own.
+    needs: [changed-paths]
+    if: needs.changed-paths.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Restore node_modules
+        id: node_modules_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+      - name: npm ci (cache miss; retry transient network failures)
+        if: steps.node_modules_cache.outputs.cache-hit != 'true'
+        run: |
+          n=0
+          until npm ci --prefer-offline --no-audit --no-fund; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "npm ci failed after $n attempts"; exit 1; fi
+            echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
+      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+        with:
+          # The SAME pin `frontend-local-stack` uses, so this file keeps ONE answer to
+          # "which CLI". ⛔ The fourth workflow that shares this pin is deliberately
+          # NOT named here, not even in prose: Phase 164.1 / D-18 requires this file to
+          # hold no reference to it so that a red production probe can never block a
+          # deploy, and the spec enforcing that is a plain SUBSTRING match over this
+          # file — a mention inside a YAML comment reddens it exactly as a real
+          # `needs:` edge would.
+          version: 2.98.2
+      - name: Install psql client (the lane loads the baseline through it)
+        # Same reason as `frontend-local-stack`: `run.sh` loads the committed baseline
+        # through `psql`, and `resolve_psql`'s only fallback is a macOS keg that does
+        # not exist on this runner. A miss is `FATAL: psql not found` and exit 1, not
+        # a skip.
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          psql --version
+      - name: Preflight - the lane must have a non-empty derived corpus
+        # A green job that ran nothing is the silent-green this lane exists to
+        # eliminate, so this fails EARLIER than vitest would and prints what would
+        # have run. It needs no stack: the corpus tool only walks the source tree.
+        # The tool ALSO exits non-zero on an empty corpus by itself, and
+        # `passWithNoTests: false` in the lane config is the third control — three
+        # independent places, because this is the failure mode that reads as success.
+        run: |
+          set -euo pipefail
+          node scripts/live-db-lane-corpus.mjs | tee /tmp/live-db-lane-corpus.txt
+          # ⛔ `grep -c` EXITS 1 ON A ZERO COUNT, so the count needs `|| true` to
+          # survive the legitimate zero — but `|| true` ALSO swallows the case
+          # where grep printed NOTHING at all (file absent or unreadable). That
+          # leaves `files` EMPTY, and `[ "" -eq 0 ]` is a bash syntax error
+          # (`integer expression expected`, status 2) which, inside an `if`
+          # CONDITION, does not trip `set -e` — control falls through to the
+          # success path and "could not count" passes as "counted zero". That is
+          # the [164.8.2-VAC08-FATAL-ON-TRANSIENT] shape, in the very step whose
+          # comment above says a green job that ran nothing must be impossible.
+          # So: capture the status, and REFUSE a non-numeric answer by name
+          # rather than restoring a fallback.
+          rc=0
+          files=$(grep -c '\.test\.tsx\?$' /tmp/live-db-lane-corpus.txt) || rc=$?
+          case "${files}" in
+            ''|*[!0-9]*)
+              echo "::error::could not COUNT the derived live-DB corpus (grep exited ${rc}, answer '${files}'). Unmeasured is not zero, and it is not a pass either."
+              exit 1
+              ;;
+          esac
+          if [ "$files" -eq 0 ]; then
+            echo "::error::The derived live-DB corpus is EMPTY — this job must never pass vacuously."
+            exit 1
+          fi
+          echo "Lane corpus: ${files} file(s)"
+      - name: Boot the local-stack lane (Supabase CLI stack + committed baseline)
+        # ⛔ Through `run.sh` ONLY — never a bare CLI invocation. `up` asserts the
+        # stack reported a 127.0.0.1/localhost API URL and refuses otherwise, the lane
+        # re-asserts it independently in `vitest.livedb.globalsetup.ts`, and that same
+        # setup refuses outright if the runner's resolved workdir is this repository's
+        # own Supabase context.
+        run: bash scripts/local-stack/run.sh up
+      - name: The execution-ledger gate must be able to FAIL (self-test first)
+        # Same discipline as `sql-gate-lint`: the gate proves it can go red before
+        # anyone is asked to trust it going green. Ten cases, a red and a green for
+        # each direction of the comparison plus the anti-vacuity guards. Needs no
+        # stack — it drives the comparison over fixtures.
+        run: node scripts/live-db-execution-ledger.mjs --self-test
+      - name: Run the live-DB lane under its EXECUTION LEDGER
+        # Phase 164.9, the ledger round arising from plan 08 and its fix round.
+        #
+        # ⭐ THE INNER RUN IS STILL `npm run test:live-db`, BYTE-IDENTICAL TO WHAT A
+        # DEVELOPER RUNS — `scripts/live-db-execution-ledger.mjs` spawns exactly that
+        # command with no added flag and no altered selection, streams its output,
+        # and then reads the artifact the lane's own reporter wrote. Every test in the
+        # 49-file corpus still EXECUTES; the gate prints the executed count and
+        # REFUSES a run that executed nothing.
+        #
+        # WHAT THE GATE DECIDES. GREEN iff the failing set is EXACTLY
+        # `scripts/live-db-execution-ledger.txt`. RED in BOTH directions: an arm that
+        # fails and is not listed, or a listed arm that has stopped failing. The
+        # ledger is DATED and SHRINK-ONLY; its header states the founder decision
+        # that seeded it and the rule for ever adding to it.
+        #
+        # ⛔ THIS IS NOT A TOLERANCE ARM AND NOT A `|| true`. There is no path through
+        # that script that exits 0 on an unexpected failure, the row stays BLOCKING in
+        # the `frontend` aggregator's STRICT default arm, and the aggregator wiring was
+        # not touched. The alternative — making this row advisory — is a forbidden
+        # closure, which is why it was refused.
+        #
+        # ⛔ No reporting flag of the merged-ratchet kind, unchanged: `frontend-coverage`
+        # merges the two `frontend-test` shards' blob reports and enforces the ratchet
+        # on the merged numbers, and a third COVERAGE blob from this lane would shift
+        # the denominator and invalidate the baseline. The lane's reporter emits no
+        # coverage of any kind. (Same rule as `frontend-seam-redis` and
+        # `frontend-local-stack`.)
+        run: npm run test:live-db:ledger
+      - name: Tear down the lane (and PROVE nothing survived)
+        # `if: always()`: `run.sh up` leaves the stack running on success by design, so
+        # a failed spec would otherwise orphan its containers. `--assert-teardown` is
+        # the control that MEASURE_FAILs rather than passing when `docker ps` cannot
+        # answer — "could not count" is not "counted zero".
+        if: always()
+        run: |
+          set -euo pipefail
+          bash scripts/local-stack/run.sh down
+          bash scripts/local-stack/run.sh --assert-teardown
+
   frontend-policy:
     # Banned-package check + GDPR export coverage. PR-C moved npm audit
     # to the nightly workflow because (a) it's a security signal, not a
@@ -1238,6 +1456,34 @@ jobs:
       - name: Restore channel derivation self-check - default-DENY holds, non-diagnostic extensions excluded
         run: bash scripts/derive-restore-channels.sh --self-check
 
+      # [164.9] ⛔ A THIRD RECURRENCE OF THE [CR-02] DEFECT ABOVE, and the worst
+      # of the three by count. `wait-for-test-schema-apply.sh --self-test` was
+      # invoked by NOTHING. Every reference to it in this repo was PROSE — three
+      # comments in this file claiming its "--self-test proves all three
+      # reachable", one in mutex-probe.yml, one in a runbook, one in a phase
+      # summary. Six written claims, zero executions.
+      #
+      # WHY IT MATTERS MORE HERE THAN FOR THE TWO SIBLINGS. This script is the
+      # ORDERING control for three DB-touching jobs on a merge push, and its
+      # only signal that sees test-restore-from-baseline.yml is an advisory
+      # flag — that workflow produces no Actions run on the commit, so the
+      # Actions-API read cannot see it at all. A defanged reader here does not
+      # fail loudly: an unreadable probe answers a token that matches no case
+      # arm, burns the full 900s budget, and then reddens three jobs with a
+      # message blaming congestion rather than itself.
+      # ⚠️ Phase 164.9's review round grew it 12 checks → 46 precisely because
+      # the original 12 injected BOTH probe seams and so certified the
+      # dispatcher while executing NEITHER read. Those 34 new arms proved
+      # nothing at all while this step did not exist.
+      #
+      # Hermetic - fixture bytes and stub commands only, no database, no
+      # credential, ~2s - so like both siblings above it runs on every PR
+      # rather than only when the ordering wait itself runs. A gate whose
+      # control only runs when the gate runs cannot catch a commit that
+      # defangs it.
+      - name: Schema-apply ordering wait self-test - the dispatcher AND the two reads
+        run: bash scripts/wait-for-test-schema-apply.sh --self-test
+
       # ── Phase 164.8.1: the reference-data allowlist audit ─────────────────
       # A FOURTH SIBLING in this job, and — like the app-GUC gate and the
       # baseline content-drift gate before it — NOT an eighth rule of
@@ -1363,6 +1609,100 @@ jobs:
             exit 1
           fi
           echo "$scanned_line"
+          echo "$census"
+
+      # ── Phase 164.9, criterion 5: the data-dependent migration refusal ────
+      # A FIFTH SIBLING in this job, and — like the app-GUC gate, the baseline
+      # content-drift gate and the reference-data audit above — NOT an eighth
+      # rule of lint-sql-gates. Different corpus (supabase/migrations, not
+      # supabase/tests) and a different question: does a migration's guard raise
+      # on rows the TEST database does not have? Same hermetic contract — no
+      # database, no Docker, no secrets, no network — which is what earns it a
+      # place in the job the `frontend` aggregator gates with NO tolerance.
+      #
+      # WHAT IT CATCHES that nothing else does. The TEST restore is SCHEMA-ONLY,
+      # so TEST mirrors production's CATALOGUE and never its DATA. A migration in
+      # this repo's house style — an anonymous block that reads a populated table
+      # and RAISEs on an unexpected count — therefore applies cleanly to
+      # production and REFUSES on TEST; and because a failed TEST apply gates the
+      # production apply, that refusal WITHHOLDS A PRODUCTION DEPLOY. Nothing
+      # else in CI sees the shape: it is valid SQL, it passes review, and it is
+      # green everywhere until the merge that applies it.
+      #
+      # ⛔ IT IS A MECHANISM, NOT A PRAGMA, and there is no opt-out marker by
+      # DECISION. Phase 164.8 designed the escape hatch, specified it with a
+      # three-arm proof, and deliberately did not build it because it had zero
+      # consumers. A hatch is something a person must remember to claim under
+      # exactly the deploy pressure that makes people claim things; a refusal on
+      # the pull request cannot be forgotten and cannot be claimed.
+      #
+      # ⛔ A RED CORPUS SCAN IS CLEARED BY MAKING THE MIGRATION'S SELF-VERIFICATION
+      # CATALOGUE-ONLY, OR BY MAKING THE READ TOLERANT OF AN EMPTY TABLE — never
+      # by relaxing the classifier and never by widening
+      # scripts/lint-migration-data-dependence-baseline.txt, which only shrinks.
+      # For something ALREADY MERGED the interim remedy is unchanged and is
+      # REVERT THE MERGE, never an edit to supabase-migrate.yml.
+      #
+      # Mode identity: the two bare lines below are the EXACT commands a
+      # developer runs locally, pasted verbatim from the script's own header.
+      - name: Data-dependence gate self-test - every refusal fires on its red fixture
+        # Self-test FIRST, corpus second, for the same reason every other
+        # sibling's self-test runs first: a corpus scan reporting "0 NEW" tells
+        # you nothing unless its refusals can still fire.
+        run: node scripts/lint-migration-data-dependence.mjs --self-test
+      - name: Data-dependence gate - no unledgered data-conditioned guard in supabase/migrations
+        run: node scripts/lint-migration-data-dependence.mjs
+      # ⛔ THE EXIT CODE IS NOT THE MEASUREMENT. The bare step above asserts only
+      # that the script exited 0 — and a module whose main guard does not fire
+      # exits 0 having emitted NOTHING. This job carries a MEASURED record of
+      # exactly that for its sibling extractor (the macOS /var -> /private/var
+      # entry-point comparison, above), where a silent no-op satisfied a bare
+      # step. So the command is re-run with its stdout captured and the census
+      # line it must PRINT is asserted. Only the stdout fd differs: argv is
+      # byte-identical to the bare line above, which stays as the mode-identity
+      # pin that src/__tests__/lint-migration-data-dependence.test.ts reads.
+      #
+      # ⛔ NO SOFTENING TOKEN IN THIS BLOCK: no trailing-truth command after a
+      # pipeline, and no bare zero-status `exit`. The tokens are deliberately
+      # NOT spelled out here — the acceptance scan for these steps greps this
+      # very region for them, so a prohibition written literally would report
+      # itself as the violation. Its twin above, outside that region, spells
+      # them out; this one names the class.
+      # `set -uo pipefail` WITHOUT `-e` is what makes that possible: a
+      # non-matching `grep` yields the empty string instead of aborting the step,
+      # so an absent line reaches its own MEASURE_FAIL message rather than dying
+      # with no `::error::` at all.
+      - name: Assert the data-dependence scan PRINTED its corpus census
+        env:
+          MIGDEP_SCAN_LOG: ${{ runner.temp }}/lint-migration-data-dependence.log
+        run: |
+          set -uo pipefail
+          node scripts/lint-migration-data-dependence.mjs > "$MIGDEP_SCAN_LOG" 2>&1
+          status=$?
+          cat "$MIGDEP_SCAN_LOG"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the data-dependence corpus scan failed (exit $status). Make the migration's self-verification CATALOGUE-ONLY, or make the read tolerant of an empty table. Do NOT widen scripts/lint-migration-data-dependence-baseline.txt and do NOT relax the classifier."
+            exit "$status"
+          fi
+          census=$(grep -a -m1 -E '^lint-migration-data-dependence: corpus [0-9]+ migration\(s\), [0-9]+ anonymous block\(s\); [0-9]+ refusal\(s\), [0-9]+ allowlisted, [0-9]+ NEW\.$' "$MIGDEP_SCAN_LOG")
+          if [ -z "$census" ]; then
+            echo "::error::MEASURE_FAIL: the scan exited 0 but printed NO 'lint-migration-data-dependence: corpus ... NEW.' census line. A zero status with no output is what a main guard that never fired looks like; it is not a clean corpus."
+            exit 1
+          fi
+          scanned=$(echo "$census" | sed -E 's|^lint-migration-data-dependence: corpus ([0-9]+) migration.*|\1|')
+          case "$scanned" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the migration count out of '$census'."; exit 1;; esac
+          if [ "$scanned" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the scan read 0 migrations. An empty corpus refuses nothing BY CONSTRUCTION — a wrong path reads exactly like a repository with no data-dependent guard."
+            exit 1
+          fi
+          blocks=$(echo "$census" | sed -E 's|^.*, ([0-9]+) anonymous block\(s\);.*|\1|')
+          case "$blocks" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the anonymous-block count out of '$census'."; exit 1;; esac
+          if [ "$blocks" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the scan found 0 anonymous blocks across $scanned migrations. The refusal only ever looks inside a DO block, so a corpus with none is scanned vacuously — that is a broken block scanner, not a clean repository."
+            exit 1
+          fi
           echo "$census"
 
   sql-mutation:
@@ -1739,6 +2079,28 @@ jobs:
           echo "--- initdb/pg_ctl under that glob ---"
           ls -l /usr/lib/postgresql/*/bin/initdb /usr/lib/postgresql/*/bin/pg_ctl 2>/dev/null \
             || echo "(no initdb/pg_ctl under the glob)"
+
+      # [164.9 R2/CR-01] ⛔ A FOURTH RECURRENCE OF THE SAME DEFECT, and this one
+      # was CREATED by the round that fixed the third. The dead-holder drill was
+      # rewritten to stop being a paraphrase - it now EXTRACTS and executes the
+      # release step's own `run:` body out of this file and derives both the
+      # pidfile and the marker path from it - and was then left with ZERO call
+      # sites. `grep -ra "mutex-dead-holder-lane" .github package.json` returned
+      # nothing. Its header claims "a ci.yml that stops writing a marker makes
+      # this drill FAIL LOUD"; that was true only for someone running it by hand.
+      #
+      # WHAT IT PROVES that the static gate cannot. `mutex-dead-holder-verdict.test.ts`
+      # pins the WIRING - step pairing, `if: always()`, the marker path agreeing
+      # across the two files. This drill kills a REAL holder on a throwaway
+      # cluster and requires the verdict to go RED and then GREEN, which is the
+      # only thing that can show the detection still fires end to end.
+      #
+      # It belongs in THIS job because the job already provisions PostgreSQL
+      # server binaries and is in the `frontend` aggregator's needs, and it sits
+      # before the long mutation run so a broken drill reds in seconds rather
+      # than after ten minutes of arms.
+      - name: Dead-holder drill - kill a real holder and require the verdict to bite
+        run: bash scripts/pg-lane/mutex-dead-holder-lane.sh
 
       - name: Preflight - reject psql meta-commands in every file the runner executes
         # SAME REFUSAL AS `sql-tests`' Finding 6 preflight, WIDENED TO THE FILE
@@ -2532,6 +2894,35 @@ jobs:
     # silently skip a dependent. This job shares no resource and waits on no mutex.
     # The full argument, including the timeout derivation, is in the job's own header.
     #
+    # Phase 164.9 plan 08 / criterion 13 (2026-09-21): `frontend-live-db-lane` is
+    # BLOCKING here, wired into BOTH places below — either one alone leaves it
+    # advisory, the trap SEAMCORE-09 recorded for `frontend-seam-redis` and VAC-07
+    # recorded again for `frontend-local-stack`.
+    # ⭐ AND LIKE THAT ROW IT IS MORE THAN ONE MORE GATE. The ~49 specs it runs are
+    # gated on `HAS_LIVE_DB` and SKIP in every vitest shard, and the `frontend-test`
+    # job forbids fixing that with credentials because doing so would invalidate the
+    # ratchet baseline a blocking gate rests on. So this job is the ONLY place that
+    # class executes. An advisory row would leave it reading as covered while
+    # asserting nothing — `csv-finalize-rpc.test.ts`'s tombstone with a new name.
+    # It takes the loop's STRICT DEFAULT ARM and must NEVER be given a tolerance arm:
+    # it consumes no secret and no repository variable (its credentials are minted by
+    # the stack it boots), and it hosts that stack in containers private to its own
+    # runner, so it runs identically on a fork PR, a same-repo PR, a push and a
+    # workflow_dispatch. It has no legitimate skip, and a `skipped` there is always a
+    # real fault — the `frontend-seam-redis` / `sql-gate-lint` / `sql-mutation` /
+    # `frontend-local-stack` reasoning, and the OPPOSITE of the `sql-tests` /
+    # `e2e-seeded` rows.
+    # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to it, for the
+    # same reason as `frontend-local-stack`: that ban exists because those jobs share
+    # the TEST advisory-lock mutex and their `if:` conditions diverge, so a chain edge
+    # can silently skip a dependent. This job shares no resource and waits on no
+    # mutex. Its only `needs:` edge is the docs-only detector, and this aggregator
+    # carries `if: always()`, so an upstream skip arrives as a RESULT to judge.
+    # Wall clock is ACCEPTED: this aggregator now waits on a SECOND container-booting
+    # job. The two are independent and run in parallel, so the cost is the slower of
+    # the two rather than their sum, and it buys a previously ungated class a place
+    # where it can go RED. The full argument is in the job's own header.
+    #
     # Phase 164.6.3 / CI-DOCSPATH-01 (2026-09-12): `changed-paths` joins `needs:`
     # below — read for its `outputs.docs_only`, NOT for its result. It gets no row
     # in the result loop; what it contributes is the one boolean the loop's uniform
@@ -2556,6 +2947,7 @@ jobs:
       - frontend-coverage
       - frontend-seam-redis
       - frontend-local-stack
+      - frontend-live-db-lane
       - frontend-policy
       - frontend-build
       - e2e-seeded
@@ -2617,6 +3009,7 @@ jobs:
             "frontend-coverage=${{ needs.frontend-coverage.result }}" \
             "frontend-seam-redis=${{ needs.frontend-seam-redis.result }}" \
             "frontend-local-stack=${{ needs.frontend-local-stack.result }}" \
+            "frontend-live-db-lane=${{ needs.frontend-live-db-lane.result }}" \
             "frontend-policy=${{ needs.frontend-policy.result }}" \
             "frontend-build=${{ needs.frontend-build.result }}" \
             "e2e-seeded=${{ needs.e2e-seeded.result }}" \
@@ -2769,6 +3162,14 @@ jobs:
     # `psql -v ON_ERROR_STOP=1` a failed assertion exits non-zero and
     # fails the job.
     runs-on: ubuntu-latest
+    # Job-level scope for the ordering wait's Actions API read (Phase 164.9
+    # plan 06). ⚠️ A job-level `permissions:` block REPLACES the workflow-level
+    # one rather than merging with it, so `contents: read` is RESTATED here —
+    # omitting it would silently break actions/checkout. No write scope is
+    # granted anywhere.
+    permissions:
+      contents: read
+      actions: read
     # TTL for the mutex below (Phase 158 / OPS-01): GitHub kills the job at 90m,
     # the psql session drops, and Postgres releases the advisory lock. That IS
     # the steal path — no reaper cron needed. Manual unlock:
@@ -2933,6 +3334,69 @@ jobs:
             exit 1
           fi
           echo "Preflight clean: ${#files[@]} test file(s) free of refused meta-commands."
+      # ── THE ORDERING WAIT (Phase 164.9 plan 06, [164.8-PUSH-RACE-VAC08]) ───
+      # On a merge push this job's DB work must not begin before the TEST schema
+      # apply for the SAME commit has concluded. The mutex below guarantees the
+      # two never OVERLAP; it guarantees nothing about which goes FIRST. This step
+      # checks that fact rather than racing for it.
+      #
+      # ⛔ IT SITS BEFORE THE ACQUIRE, DELIBERATELY. A job that waited while
+      # holding the shared-test-db key would starve every other contender on a
+      # database other people's CI writes to — including the very apply it is
+      # waiting for, which would wedge the two until the acquire cap expired.
+      #
+      # ⛔ NO `needs:` EDGE WAS ADDED, AND NONE MAY BE. These three jobs' `if:`
+      # conditions diverge and a skipped `needs:` job skips its dependents — the
+      # long ⛔ note on `sql-tests` records why. The ordering IS this wait.
+      #
+      # Three named outcomes, one log line each. The logic lives ONCE, in
+      # scripts/wait-for-test-schema-apply.sh, whose `--self-test` proves all
+      # three reachable (and proves a held flag beats an absent run):
+      #   apply-concluded  the apply for this commit finished — proceed. An
+      #                    UNSUCCESSFUL finish says so and still proceeds: it
+      #                    already carries its own red check, and reddening here
+      #                    would duplicate it under this job's name.
+      #   no-apply-run     no apply run appeared for this commit within the
+      #                    appearance grace AND the in-flight flag is clear —
+      #                    nothing to order against. The ordinary case.
+      #   wait-exhausted   the budget ran out with the flag still held or the
+      #                    apply still unfinished — RED, naming which, with the
+      #                    runbook.
+      #
+      # `github.event_name == 'push'` is conjoined onto this job's own gating,
+      # explicitly rather than inherited: on a pull request there is no apply to
+      # order against, so a wait there would buy nothing and cost every PR.
+      #
+      # ⛔ AND IT IS THE ONLY EVENT CLAUSE HERE, IN ALL THREE SITES. Each job's
+      # own `if:` carries a fork guard, and the two jobs that have one spell it
+      # DIFFERENTLY (`github.event_name == 'push' || ...` versus
+      # `github.event_name != 'pull_request' || ...`). Copied down here, those
+      # two spellings made three steps documented as one thing read as three
+      # different conditions — while the trailing `github.event_name == 'push'`
+      # already SUBSUMED both of them: on a push each parenthesised clause is
+      # unconditionally true, so `A && (push || X) && B && push` and
+      # `A && (!pr || X) && B && push` are both exactly `A && B && push`. The
+      # subsumed clause is dropped rather than reconciled. The one remaining
+      # difference between the three is `vars.E2E_TEST_DB_CONFIGURED`, present
+      # here in exactly the two jobs whose own `if:` carries it — that one IS
+      # "this job's own gating" and stays.
+      - name: Wait for the TEST schema apply to conclude (merge pushes only)
+        if: ${{ needs.changed-paths.outputs.docs_only != 'true' && vars.E2E_TEST_DB_CONFIGURED == 'true' && github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          # The acquire step below installs psql conditionally too, so this moves
+          # that cost earlier on a merge push rather than adding one.
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Workspace-rooted: the `python` job's defaults.run.working-directory is
+          # analytics-service, where a bare relative script path does not resolve.
+          bash "${GITHUB_WORKSPACE}/scripts/wait-for-test-schema-apply.sh"
+
       # Phase 158 / OPS-01 — the shared-test-db mutex, IDENTICAL in `sql-tests`,
       # `python` and `e2e-seeded`. It replaces the GitHub concurrency group those
       # three jobs used to carry (see the ⛔ note on this job for why that layer
@@ -3882,6 +4346,7 @@ jobs:
             # job whose real work passed, and `echo ::error::` does not change the
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
+            : > "${RUNNER_TEMP}/shared-test-db-mutex-dead-holder"
           fi
           # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
           # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
@@ -3919,6 +4384,20 @@ jobs:
               fi
               ;;
           esac
+      # [164.9-MUTEX-HOLDER-DIED-UNSERIALIZED] (Phase 164.9 plan 02, ROADMAP
+      # criterion 12). The release step above is `if: always()` and its
+      # documented invariant is that it must NEVER redden a job whose real work
+      # passed — `echo "::error::..."` is a log annotation only and does not
+      # change exit status, by design (see the comment above the annotation
+      # line). A dead holder is a DIFFERENT signal from an ordinary release
+      # hiccup: retroactive doubt about THIS job's OWN earlier DB assertions,
+      # made while the advisory lock was not actually held. That deserves its
+      # own gate, not a clause inside a step that can never fail. This step
+      # reads the marker the release step's dead-holder branch just wrote and
+      # turns it into a real, non-zero job verdict.
+      - name: Verdict — shared-test-db mutex holder died mid-job
+        if: always()
+        run: bash scripts/mutex-dead-holder-verdict.sh
 
   secret-scan:
     # Task 7.6: gitleaks runs against the full commit history for PRs
@@ -4083,6 +4562,14 @@ jobs:
     needs: [changed-paths]
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
+    # Job-level scope for the ordering wait's Actions API read (Phase 164.9
+    # plan 06). ⚠️ A job-level `permissions:` block REPLACES the workflow-level
+    # one rather than merging with it, so `contents: read` is RESTATED here —
+    # omitting it would silently break actions/checkout. No write scope is
+    # granted anywhere.
+    permissions:
+      contents: read
+      actions: read
     # TTL for the shared-test-db mutex (Phase 158 / OPS-01): GitHub kills the job
     # at 90m, the psql session drops, and Postgres releases the advisory lock.
     # That IS the steal path. Manual unlock:
@@ -4166,6 +4653,69 @@ jobs:
       # running service, and gating them would add a types-PyYAML dev-dep plus
       # friction for throwaway scripts. tests/ stays untyped by design.
       - run: mypy --strict --follow-imports=silent services/ routers/ models/
+      # ── THE ORDERING WAIT (Phase 164.9 plan 06, [164.8-PUSH-RACE-VAC08]) ───
+      # On a merge push this job's DB work must not begin before the TEST schema
+      # apply for the SAME commit has concluded. The mutex below guarantees the
+      # two never OVERLAP; it guarantees nothing about which goes FIRST. This step
+      # checks that fact rather than racing for it.
+      #
+      # ⛔ IT SITS BEFORE THE ACQUIRE, DELIBERATELY. A job that waited while
+      # holding the shared-test-db key would starve every other contender on a
+      # database other people's CI writes to — including the very apply it is
+      # waiting for, which would wedge the two until the acquire cap expired.
+      #
+      # ⛔ NO `needs:` EDGE WAS ADDED, AND NONE MAY BE. These three jobs' `if:`
+      # conditions diverge and a skipped `needs:` job skips its dependents — the
+      # long ⛔ note on `sql-tests` records why. The ordering IS this wait.
+      #
+      # Three named outcomes, one log line each. The logic lives ONCE, in
+      # scripts/wait-for-test-schema-apply.sh, whose `--self-test` proves all
+      # three reachable (and proves a held flag beats an absent run):
+      #   apply-concluded  the apply for this commit finished — proceed. An
+      #                    UNSUCCESSFUL finish says so and still proceeds: it
+      #                    already carries its own red check, and reddening here
+      #                    would duplicate it under this job's name.
+      #   no-apply-run     no apply run appeared for this commit within the
+      #                    appearance grace AND the in-flight flag is clear —
+      #                    nothing to order against. The ordinary case.
+      #   wait-exhausted   the budget ran out with the flag still held or the
+      #                    apply still unfinished — RED, naming which, with the
+      #                    runbook.
+      #
+      # `github.event_name == 'push'` is conjoined onto this job's own gating,
+      # explicitly rather than inherited: on a pull request there is no apply to
+      # order against, so a wait there would buy nothing and cost every PR.
+      #
+      # ⛔ AND IT IS THE ONLY EVENT CLAUSE HERE, IN ALL THREE SITES. Each job's
+      # own `if:` carries a fork guard, and the two jobs that have one spell it
+      # DIFFERENTLY (`github.event_name == 'push' || ...` versus
+      # `github.event_name != 'pull_request' || ...`). Copied down here, those
+      # two spellings made three steps documented as one thing read as three
+      # different conditions — while the trailing `github.event_name == 'push'`
+      # already SUBSUMED both of them: on a push each parenthesised clause is
+      # unconditionally true, so `A && (push || X) && B && push` and
+      # `A && (!pr || X) && B && push` are both exactly `A && B && push`. The
+      # subsumed clause is dropped rather than reconciled. The one remaining
+      # difference between the three is `vars.E2E_TEST_DB_CONFIGURED`, present
+      # here in exactly the two jobs whose own `if:` carries it — that one IS
+      # "this job's own gating" and stays.
+      - name: Wait for the TEST schema apply to conclude (merge pushes only)
+        if: ${{ needs.changed-paths.outputs.docs_only != 'true' && github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          # The acquire step below installs psql conditionally too, so this moves
+          # that cost earlier on a merge push rather than adding one.
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Workspace-rooted: the `python` job's defaults.run.working-directory is
+          # analytics-service, where a bare relative script path does not resolve.
+          bash "${GITHUB_WORKSPACE}/scripts/wait-for-test-schema-apply.sh"
+
       # PR #149 v0.22.25.3 follow-up: wire the test Supabase project into
       # the python job so the P97 fence regression tests in
       # tests/test_compute_jobs_fencing.py execute against a real DB. The
@@ -4456,6 +5006,7 @@ jobs:
             # job whose real work passed, and `echo ::error::` does not change the
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
+            : > "${RUNNER_TEMP}/shared-test-db-mutex-dead-holder"
           fi
           # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
           # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
@@ -4493,6 +5044,27 @@ jobs:
               fi
               ;;
           esac
+      # [164.9-MUTEX-HOLDER-DIED-UNSERIALIZED] (Phase 164.9 plan 02, ROADMAP
+      # criterion 12; copy of the same verdict step at the sql-tests site
+      # above). The release step above is `if: always()` and its documented
+      # invariant is that it must NEVER redden a job whose real work passed
+      # — `echo "::error::..."` is a log annotation only and does not change
+      # exit status, by design. A dead holder is a DIFFERENT signal from an
+      # ordinary release hiccup: retroactive doubt about THIS job's OWN
+      # earlier DB assertions, made while the advisory lock was not actually
+      # held. That deserves its own gate, not a clause inside a step that can
+      # never fail. This step reads the marker the release step's
+      # dead-holder branch just wrote and turns it into a real, non-zero job
+      # verdict.
+      - name: Verdict — shared-test-db mutex holder died mid-job
+        if: always()
+        # ⛔ Workspace-rooted, and it MUST stay that way: this job's
+        # defaults.run.working-directory is analytics-service, where a bare
+        # relative script path does NOT resolve — it exits 127 "No such file
+        # or directory", which is a FAILED verdict step on every run rather
+        # than a dead-holder verdict. The sibling wait step above is rooted
+        # the same way for the same reason.
+        run: bash "${GITHUB_WORKSPACE}/scripts/mutex-dead-holder-verdict.sh"
 
   e2e:
     # Runs the PUBLIC/smoke Playwright suite against a placeholder-env
@@ -4831,6 +5403,14 @@ jobs:
     # also means needs: only typecheck (F2 rationale: don't burn minutes on
     # an already-doomed PR; e2e validity depends on types, not unit tests).
     runs-on: ubuntu-latest
+    # Job-level scope for the ordering wait's Actions API read (Phase 164.9
+    # plan 06). ⚠️ A job-level `permissions:` block REPLACES the workflow-level
+    # one rather than merging with it, so `contents: read` is RESTATED here —
+    # omitting it would silently break actions/checkout. No write scope is
+    # granted anywhere.
+    permissions:
+      contents: read
+      actions: read
     # TTL for the shared-test-db mutex (Phase 158 / OPS-01): GitHub kills the job
     # at 90m, the psql session drops, and Postgres releases the advisory lock.
     # That IS the steal path. Manual unlock:
@@ -4948,6 +5528,69 @@ jobs:
           else
             npx playwright install --with-deps chromium
           fi
+      # ── THE ORDERING WAIT (Phase 164.9 plan 06, [164.8-PUSH-RACE-VAC08]) ───
+      # On a merge push this job's DB work must not begin before the TEST schema
+      # apply for the SAME commit has concluded. The mutex below guarantees the
+      # two never OVERLAP; it guarantees nothing about which goes FIRST. This step
+      # checks that fact rather than racing for it.
+      #
+      # ⛔ IT SITS BEFORE THE ACQUIRE, DELIBERATELY. A job that waited while
+      # holding the shared-test-db key would starve every other contender on a
+      # database other people's CI writes to — including the very apply it is
+      # waiting for, which would wedge the two until the acquire cap expired.
+      #
+      # ⛔ NO `needs:` EDGE WAS ADDED, AND NONE MAY BE. These three jobs' `if:`
+      # conditions diverge and a skipped `needs:` job skips its dependents — the
+      # long ⛔ note on `sql-tests` records why. The ordering IS this wait.
+      #
+      # Three named outcomes, one log line each. The logic lives ONCE, in
+      # scripts/wait-for-test-schema-apply.sh, whose `--self-test` proves all
+      # three reachable (and proves a held flag beats an absent run):
+      #   apply-concluded  the apply for this commit finished — proceed. An
+      #                    UNSUCCESSFUL finish says so and still proceeds: it
+      #                    already carries its own red check, and reddening here
+      #                    would duplicate it under this job's name.
+      #   no-apply-run     no apply run appeared for this commit within the
+      #                    appearance grace AND the in-flight flag is clear —
+      #                    nothing to order against. The ordinary case.
+      #   wait-exhausted   the budget ran out with the flag still held or the
+      #                    apply still unfinished — RED, naming which, with the
+      #                    runbook.
+      #
+      # `github.event_name == 'push'` is conjoined onto this job's own gating,
+      # explicitly rather than inherited: on a pull request there is no apply to
+      # order against, so a wait there would buy nothing and cost every PR.
+      #
+      # ⛔ AND IT IS THE ONLY EVENT CLAUSE HERE, IN ALL THREE SITES. Each job's
+      # own `if:` carries a fork guard, and the two jobs that have one spell it
+      # DIFFERENTLY (`github.event_name == 'push' || ...` versus
+      # `github.event_name != 'pull_request' || ...`). Copied down here, those
+      # two spellings made three steps documented as one thing read as three
+      # different conditions — while the trailing `github.event_name == 'push'`
+      # already SUBSUMED both of them: on a push each parenthesised clause is
+      # unconditionally true, so `A && (push || X) && B && push` and
+      # `A && (!pr || X) && B && push` are both exactly `A && B && push`. The
+      # subsumed clause is dropped rather than reconciled. The one remaining
+      # difference between the three is `vars.E2E_TEST_DB_CONFIGURED`, present
+      # here in exactly the two jobs whose own `if:` carries it — that one IS
+      # "this job's own gating" and stays.
+      - name: Wait for the TEST schema apply to conclude (merge pushes only)
+        if: ${{ needs.changed-paths.outputs.docs_only != 'true' && vars.E2E_TEST_DB_CONFIGURED == 'true' && github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          # The acquire step below installs psql conditionally too, so this moves
+          # that cost earlier on a merge push rather than adding one.
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Workspace-rooted: the `python` job's defaults.run.working-directory is
+          # analytics-service, where a bare relative script path does not resolve.
+          bash "${GITHUB_WORKSPACE}/scripts/wait-for-test-schema-apply.sh"
+
       # Phase 158 / OPS-01 — the shared-test-db mutex, byte-identical to the step
       # in `sql-tests` and `python` (see the long note on `sql-tests` for the
       # mechanism and the ⛔ constraints). Placed immediately before the seed
@@ -5506,6 +6149,7 @@ jobs:
             # job whose real work passed, and `echo ::error::` does not change the
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
+            : > "${RUNNER_TEMP}/shared-test-db-mutex-dead-holder"
           fi
           # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
           # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
@@ -5543,6 +6187,21 @@ jobs:
               fi
               ;;
           esac
+      # [164.9-MUTEX-HOLDER-DIED-UNSERIALIZED] (Phase 164.9 plan 02, ROADMAP
+      # criterion 12; copy of the same verdict step at the sql-tests site
+      # above). The release step above is `if: always()` and its documented
+      # invariant is that it must NEVER redden a job whose real work passed
+      # — `echo "::error::..."` is a log annotation only and does not change
+      # exit status, by design. A dead holder is a DIFFERENT signal from an
+      # ordinary release hiccup: retroactive doubt about THIS job's OWN
+      # earlier DB assertions, made while the advisory lock was not actually
+      # held. That deserves its own gate, not a clause inside a step that can
+      # never fail. This step reads the marker the release step's
+      # dead-holder branch just wrote and turns it into a real, non-zero job
+      # verdict.
+      - name: Verdict — shared-test-db mutex holder died mid-job
+        if: always()
+        run: bash scripts/mutex-dead-holder-verdict.sh
       # retro-PR179-H1 / C-0293(c): NO playwright-report upload from this
       # job, ever. Every spec here runs against the REAL-env build, and
       # Playwright's trace.zip + on-failure screenshots embed

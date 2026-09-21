@@ -25,6 +25,11 @@ try:
 except ImportError:  # pragma: no cover
     create_client = None  # type: ignore[assignment]
 
+# Phase 164.9 plan 05: retries transient transport faults against shared TEST
+# (`[164.9-SHARED-TEST-TRANSPORT-FLAKE]`). Wraps the client only — no skip
+# condition, env read, or assertion below changes.
+from tests.live_db_transport import wrap_live_db_client
+
 
 SUPABASE_URL = os.getenv("SUPABASE_TEST_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_TEST_SERVICE_KEY")
@@ -38,7 +43,7 @@ def _need_supabase():
 @pytest.fixture
 def admin():
     _need_supabase()
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    return wrap_live_db_client(create_client(SUPABASE_URL, SUPABASE_KEY))
 
 
 def _seed_user_id(admin) -> str:

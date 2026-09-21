@@ -309,6 +309,12 @@ interface ComputeJobRow {
   status: string;
   attempts: number;
   strategy_id: string | null;
+  // ⚠️ Phase 164.9 fix round (F2): `claim_compute_jobs_with_priority` RETURNS
+  // SETOF compute_jobs, so the claimed row carries the fencing token mig 117
+  // makes mandatory on `mark_compute_job_failed`. It must be projected here and
+  // threaded through, or the mark call bounces off the fence with 22023 before
+  // it reaches the failed_final transition this arm exists to pin.
+  claim_token: string | null;
 }
 
 async function seedStrategy(
@@ -394,9 +400,28 @@ describe("Migration 089/090 — live-DB runtime semantics", () => {
       cleanupJobIds.push(jobId);
 
       // Claim it — must increment attempts 2 → 3.
+      // ⚠️ Phase 164.9 plan 08 — CALL-SITE DISAMBIGUATION, not a schema change.
+      // `claim_compute_jobs_with_priority` is declared TWICE in the committed
+      // catalogue: a 2-arg (p_batch_size, p_worker_id) and a 5-arg that adds
+      // p_unified_backbone_active / p_kind_include / p_kind_exclude, all three
+      // DEFAULTed. A payload of only the first two keys is a subset of BOTH
+      // declarations, so PostgREST cannot choose and answers PGRST203 — the
+      // ROADMAP's first recorded failure signature. Naming
+      // `p_unified_backbone_active` selects exactly one declaration.
+      // Passing it NULL is behaviour-neutral: the 5-arg body filters only on
+      // `p_kind_include` / `p_kind_exclude`, each guarded by `IS NULL OR …`, so
+      // with all three absent-or-null it claims exactly what the 2-arg claims.
+      // ⛔ Dropping the stale 2-arg overload is the ROOT-CAUSE fix and it is a
+      // PROD-affecting migration — out of this phase's scope by decision, not by
+      // oversight (CONTEXT Area 4; this milestone's gate work is ordered ahead
+      // of every remaining production apply).
       const { data: claimed, error: claimErr } = await admin.rpc(
         "claim_compute_jobs_with_priority",
-        { p_batch_size: 5, p_worker_id: "g21-max-attempts" },
+        {
+          p_batch_size: 5,
+          p_worker_id: "g21-max-attempts",
+          p_unified_backbone_active: null,
+        },
       );
       expect(claimErr, `claim RPC: ${claimErr?.message}`).toBeNull();
       const claimedRow = (claimed as ComputeJobRow[] | null)?.find(
@@ -407,13 +432,19 @@ describe("Migration 089/090 — live-DB runtime semantics", () => {
         claimedRow!.attempts,
         "claim must increment attempts on failed_retry re-claim (2 → 3)",
       ).toBe(3);
+      expect(
+        claimedRow!.claim_token,
+        "claim must mint the mig-117 fencing token on the claimed row",
+      ).toBeTruthy();
 
       // mark_compute_job_failed: at attempts >= max_attempts the row must
       // transition to failed_final regardless of error_kind=transient.
+      // The token comes from the claim above — the production path exactly.
       const { error: markErr } = await admin.rpc("mark_compute_job_failed", {
         p_job_id: jobId,
         p_error_kind: "transient",
         p_error: "final attempt",
+        p_claim_token: claimedRow!.claim_token,
       });
       expect(markErr, `mark_compute_job_failed: ${markErr?.message}`).toBeNull();
 

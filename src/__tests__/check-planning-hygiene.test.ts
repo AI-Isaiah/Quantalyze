@@ -448,14 +448,23 @@ describe("NUL-safety — the src/lib/wizardErrors.test.ts blind spot", () => {
     );
     const { violations, filesScanned } = runCheck(fixtureRoot, ["fixture.txt"], null);
     expect(filesScanned).toBe(1);
-    expect(violations).toHaveLength(1);
+    // TWO violations, and the second one is the point of rule 4: the walk
+    // reports the post-NUL path AND refuses the raw NUL itself. Asserting a
+    // COUNT of 1 here would have made adding rule 4 look like a regression,
+    // so assert the two verdicts BY NAME instead.
+    expect(violations.some((v) => v.startsWith("ABSOLUTE-HOME-PATH"))).toBe(true);
+    expect(violations.some((v) => v.startsWith("RAW-NUL"))).toBe(true);
+    expect(violations).toHaveLength(2);
   });
 
   it("finds a username planted AFTER a NUL byte", () => {
     write("fixture.txt", `a\n${String.fromCharCode(0)}\n${SYNTHETIC_USERNAME}\n`);
     const { violations } = runCheck(fixtureRoot, ["fixture.txt"], SYNTHETIC_USERNAME);
-    expect(violations).toHaveLength(1);
-    expect(violations[0]).toContain("LOCAL-USERNAME");
+    // Same shape as the sibling above: the username AFTER the NUL is what this
+    // arm is about, and rule 4 legitimately fires on the same fixture.
+    expect(violations.some((v) => v.startsWith("LOCAL-USERNAME"))).toBe(true);
+    expect(violations.some((v) => v.startsWith("RAW-NUL"))).toBe(true);
+    expect(violations).toHaveLength(2);
   });
 });
 

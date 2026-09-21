@@ -39,6 +39,7 @@
 # Diagnostic / assertion seams (no daemon, no stack, no side effects):
 #   scripts/local-stack/run.sh --assert-teardown       # run ONLY the teardown assertion
 #   scripts/local-stack/run.sh --print-baseline-path   # print the RESOLVED BASELINE_FILE
+#   scripts/local-stack/run.sh --print-workdir         # print the RESOLVED STACK_DIR
 #
 # ⚠️ R2-I03: these were dispatched but absent from this block, which is the
 # block `usage()` prints — so `run.sh` with no argument documented neither.
@@ -225,6 +226,49 @@ EOF
   log "loading baseline into local database from ${BASELINE_FILE}"
   "$psql" "$db_url" -v ON_ERROR_STOP=1 -q -f "$BASELINE_FILE"
   log "baseline loaded from ${BASELINE_FILE}"
+
+  load_reference_data "$psql" "$db_url"
+}
+
+# ── Reference-data replay (Phase 164.9 plan 08) ───────────────────────────────
+#
+# WHY THIS EXISTS, and it was MEASURED rather than anticipated. The baseline is
+# SCHEMA-ONLY — zero data statements, by design — so every table comes back
+# EMPTY, INCLUDING the small reference tables that other tables carry FOREIGN
+# KEYS to. `compute_jobs.kind` REFERENCES `compute_job_kinds(name)`, and with
+# that table empty EVERY insert of a compute job fails 23503. Measured on the
+# first real run of the live-DB lane: 29 of 50 failures were that one constraint.
+#
+# ⛔ THIS IS NOT A TEST FIXTURE AND MUST NOT BECOME ONE. The rows come from
+# `scripts/extract-reference-inserts.mjs`, which slices the ORIGINAL BYTES of
+# allowlisted migration statements — the same generator, the same
+# `scripts/restore-test-refdata-allowlist.txt`, and the same audited mechanism
+# the shared-project restore uses. Hand-written seed rows here would be a second,
+# unaudited source of truth for what the reference tables contain, and it would
+# drift from the migrations silently.
+#
+# ⛔ AND A GENERATOR FAILURE IS FATAL, never a warning. A lane that booted with
+# an empty reference table would not skip — it would fail 29 specs with a foreign
+# key error that says nothing about the real cause, which is how a whole class of
+# specs gets written off as "flaky".
+load_reference_data() {
+  local psql="$1" db_url="$2" tmp
+  tmp="$(mktemp)"
+  if ! node "${REPO_ROOT}/scripts/extract-reference-inserts.mjs" >"$tmp"; then
+    rm -f "$tmp"
+    echo "FATAL: scripts/extract-reference-inserts.mjs failed. The lane's reference" >&2
+    echo "       tables would be EMPTY and every FK into them would raise 23503." >&2
+    exit 1
+  fi
+  if [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    echo "FATAL: the reference-data generator emitted NOTHING. 'measured zero' and" >&2
+    echo "       'could not measure' are different answers; refusing to continue." >&2
+    exit 1
+  fi
+  "$psql" "$db_url" -v ON_ERROR_STOP=1 -q -f "$tmp"
+  rm -f "$tmp"
+  log "reference data replayed from the allowlisted migration statements"
 }
 
 # Prints the psql path, or nothing. Never exits — it runs in a command
@@ -417,5 +461,18 @@ case "${1:-}" in
   # substring match, which would let a test enforce a now-false claim while
   # staying green.
   --print-baseline-path) printf '%s\n' "$BASELINE_FILE" ;;
+  # Prints the RESOLVED lane WORKDIR and exits. Same argument as
+  # `--print-baseline-path` above, applied to the other half of the lane's
+  # safety story: `sb()` passes this directory to `supabase --workdir`, and the
+  # whole reason it is DERIVED (see STACK_DIR's comment) is that starting at the
+  # repo root would apply supabase/migrations/ unconditionally against a
+  # directory that ALSO governs production deploys.
+  #
+  # ⭐ Phase 164.9 plan 08 — `vitest.livedb.config.ts` ASKS the lane where it
+  # would start, and REFUSES to boot when the answer is this repository's own
+  # `supabase/` directory. Asking beats pattern-matching the assignment line:
+  # any ordinary re-spelling of STACK_DIR reads as "unwired" to a substring
+  # match, which would let the check stay green while measuring nothing.
+  --print-workdir) printf '%s\n' "$STACK_DIR" ;;
   *)           usage; exit 2 ;;
 esac

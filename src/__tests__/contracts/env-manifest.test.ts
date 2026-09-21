@@ -53,6 +53,13 @@ const PLATFORM_KEYS = new Set([
 // parity harnesses). Operational config, not app config.
 const TEST_ONLY_KEYS = new Set([
   "BASE_URL",
+  // Added 2026-09-21 (Phase 164.9). Read ONLY by
+  // src/__tests__/match-decisions-holding-endpoint-rls.test.ts, as an override
+  // ahead of BASE_URL, so the live-DB arm can be pointed at a PostgREST that
+  // serves the schema the PGRST205 fact needs. Test wiring, never app config —
+  // no src/ runtime path reads it, which is why it belongs here and not in
+  // .env.example.
+  "MATCH_DECISIONS_BASE_URL",
   "E2E_ADMIN_EMAIL",
   "E2E_ADMIN_PASSWORD",
   "SCENARIO_COMMIT_BASE_URL",

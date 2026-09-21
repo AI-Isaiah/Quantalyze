@@ -1280,6 +1280,40 @@ true for 146 and half of 142–145, and **false for 141**.
       rather than trusted at face value by a later reader.
       Owner: Phase 164.5.1 CRONREPOINT.
 
+- [ ] ⛔ **`[164.9-FANIN-STATUS-NEVER-SET]` a job enqueued through the PUBLIC wrapper with
+      `parent_job_ids` NEVER enters the fan-in state in production — a confirmed production
+      defect, data integrity (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 11, surfaced by
+      the live-DB lane in the plan 08 fix round and VERIFIED INDEPENDENTLY by the orchestrator
+      rather than merely reported).**
+      **THE MECHANISM, named by SYMBOL because line numbers drift
+      (`[164.7-CITATION-DRIFT-01]`):** `enqueue_compute_job` routes all three of its modes to the
+      **TEN-ARG** `_enqueue_compute_job_internal`, whose `INSERT` column list OMITS `status`, so
+      the row takes the column DEFAULT `'pending'`. Only the older **SEVEN-ARG** overload of the
+      same name still carries migration 109's `done_pending_children` branch for a row with
+      parents, and nothing reaches it.
+      **CONSEQUENCE:** `mark_compute_job_done`'s fan-in advance can never see such a row, so the
+      fan-in invariant is SILENTLY ABSENT in production. ⚠️ The ten-parameter migration's own
+      comment says the function "computes the status … and INSERTs it". The code does not — the
+      comment and the column list disagree, and the comment is the one that reads as true.
+      **WHY IT WAS INVISIBLE UNTIL NOW:** a missing column in an `INSERT` inside ONE of TWO
+      same-named overloads is invisible to a static census by construction, and it was masked by
+      an error raised earlier in the same call (a retired job kind) until the fix round removed
+      that mask. This is the live-DB execution lane doing the thing it was built to do.
+      **DELIVERABLE: a MIGRATION.** ⛔ Not this phase's work and none was authored here.
+      ⛔ **A fix RE-BASES on the LATEST definition after grepping ALL of `supabase/migrations/**`
+      for BOTH overloads** — this repo's standing rule, and there are demonstrably two live
+      definitions to reconcile, not one.
+      ⛔ **THREE REVIEWERS BEFORE ANY APPLY** — `migration-reviewer` + `rls-policy-auditor` +
+      `silent-failure-hunter`, findings fixed first. Merging anything under
+      `supabase/migrations/**` auto-applies to PRODUCTION.
+      ⛔ **NOT closed by** teaching the assertion to accept the current behaviour (that encodes
+      the defect as the contract), by deleting the arm, or by skipping it: the arm is left RED on
+      purpose with its derivation written at the assertion.
+      **Owner / destination: a NEW phase, proposed JOBRPCTRUTH, surfaced in
+      `164.9-11-SUMMARY.md` for `/gsd-phase --insert` — it also owns
+      `[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]`, which is the same surface. ⚠️ Until that phase
+      exists the owner is THE FOUNDER, who inserts it. Never a blank destination.**
+
 ---
 
 ## 🟡 FIX MID-TERM
@@ -1668,7 +1702,7 @@ true for 146 and half of 142–145, and **false for 141**.
       candidate shapes. Phase 164.10 BODYDRIFT was checked and rejected as the home: it is
       function-body scope only.
 
-- [ ] **`[164.8.1-TEST-ANALYTICS-URL-PROD]` Shared TEST's cron can POST to the PRODUCTION
+- [x] **`[164.8.1-TEST-ANALYTICS-URL-PROD]` Shared TEST's cron can POST to the PRODUCTION
       analytics service: `system_settings.analytics_service_url` is seeded with the PROD Railway
       host and that row feeds `public.match_engine_cron_tick()`, a `pg_net` tick (booked
       2026-09-09, founder decision in Phase 164.8.1's `CONTEXT.md` `<specifics>`).**
@@ -1702,6 +1736,62 @@ true for 146 and half of 142–145, and **false for 141**.
       behind one, so verify at the SERVICE, not at the cron row. (ii) The `COMMENT ON DATABASE`
       marker check confirms which DATABASE you are connected to; it says nothing about which
       SERVICE the tick calls. They are different questions and only the first has a guard.
+      ⭐ **UPDATE 2026-09-21 (Phase 164.9 TESTISOLATION, plan 10) — the MEASUREMENT half has
+      landed and the remediation exists; the WRITE is a founder action and is pending.**
+      ⛔ **CLOSED 2026-09-21, LATER THE SAME DAY — the sentence above is kept as lineage and is no
+      longer true. THE FOUNDER RAN THE WRITE.** The committing run reported `COMMITTED: the
+      analytics_service_url row now holds the loopback discard sink`, and the resulting shape was
+      re-read through a second, independent connection that never sees the DSN — two unrelated
+      clients, the same reading. ⛔ Verdict recorded, specimen not: the record is a SHAPE (length,
+      scheme, is-the-sink), never the value. The discharge is written up at the tail of
+      `164.9-10-SUMMARY.md`. ⚠️ This entry stayed unchecked for the rest of that day while the
+      phase's own summary said the opposite — found by the verifier, not by two review rounds, and
+      it is the same three-records-disagree class the phase exists to remove.
+      ⚠️ **Closing this does NOT close the re-arm risk**, which is booked separately as
+      `[164.9-TEST-ANALYTICS-URL-REARM]`: a future restore or a re-applied migration can put the
+      PROD-shaped value back, and Arm D1 is what notices.
+      Arm D1 in
+      `supabase/tests/test_analytics_service_settings_and_vault_tick.sql` now reads the LIVE row on
+      every gate run where the database marker names TEST (and measures the allow-list constraint
+      where nobody has hand-set a marker), so this stops being a claim about the migration and
+      becomes a claim about the database. The TEST-only remediation is
+      `scripts/test-only-normalize-analytics-url.sh`, runbook
+      `docs/runbooks/test-analytics-url.md`. Both traps above are restated in the runbook verbatim,
+      because they are the two ways a green reading here means nothing.
+
+- [ ] **`[164.9-TEST-ANALYTICS-URL-REARM]` A RESTORE RE-ARMS the hazard above, by design, so
+      closing it once does not close it (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 10).**
+      Owner: Phase 164.9 TESTISOLATION.
+      ⭐ **RE-HOMED 2026-09-21 — THE `Owner:` LINE ABOVE IS SUPERSEDED, kept only as lineage.**
+      Phase 164.9 TESTISOLATION is CLOSING and did not build the post-restore step, so leaving it
+      owned by that phase is exactly what the warning at the foot of this entry forbids. Its real
+      subject is RESTORE-WORKFLOW HARDENING. **New destination: a new phase, proposed
+      RESTOREFIDELITY, surfaced in `164.9-11-SUMMARY.md` for `/gsd-phase --insert` together with
+      `[164.9-BASELINE-PRIVILEGES-ABSENT]`, which is the same subject — what the restore leaves
+      shared TEST in.** ⚠️ Until that phase exists the owner is **the founder**, who inserts it;
+      the destination is never blank and never a prose id. Everything below this line — trigger,
+      detection, remedy, forbidden closures — is unchanged and still binding.
+      **Trigger:** any dispatch of `test-restore-from-baseline.yml`. Its reference-data replay
+      reseeds `system_settings.analytics_service_url` FAITHFULLY — an explicit founder decision
+      (`[164.8.1-TEST-ANALYTICS-URL-PROD]` above, L-03), because omitting the row would leave TEST
+      missing a setting its own ledger claims applied.
+      **Detection:** arm D1 of `supabase/tests/test_analytics_service_settings_and_vault_tick.sql`.
+      It reads the LIVE row and goes RED, by name, on the first `sql-tests` run after the restore.
+      That red IS the report; it is not a gate defect.
+      **Remedy:** re-run `docs/runbooks/test-analytics-url.md` — dry run, read the marker verdict,
+      commit, then confirm via the follow-up dry run REFUSING on an already-correct value.
+      ⛔ **NOT closed by editing `scripts/restore-test-refdata-allowlist.txt`.** Dropping the entry
+      would make the restore silently normalise the hazard, which is the exact failure class Phase
+      164.8.1 exists to remove. ⛔ **NOT closed by a migration:** every merge touching
+      `supabase/migrations/**` auto-applies to PRODUCTION and would repoint the live match engine
+      at a closed local port.
+      **What would actually close it:** a post-restore step in `test-restore-from-baseline.yml`
+      that runs the remediation inside the held shared-TEST mutex, after the replay. Plan 10 did
+      NOT do that — it is a restore-workflow change and plan 10 touched no workflow.
+      ⚠️ **If Phase 164.9 closes without that step, RE-ROUTE this entry to a named successor with
+      `/gsd-phase --edit` in the same session.** ⛔ Do not let it decay into a prose id with no
+      owner, no date and no gate — that is `FANOUT-GLOBAL-01`'s own defect, and this phase exists
+      to remove it, not to reproduce it one entry further down.
 
 - [ ] **`[164.8.5-MANIFEST-SIDE-LOOP-DEAD]` ◆ **IN PROGRESS 2026-09-12 — the ORDERING half is code-complete on `phase-164.8.6-proberhygiene` but NOT MERGED, and carries a known defect.** The manifest-side loop now runs above every early return, with three one-lever controls each observed RED against the pre-hoist file. ⛔ The hoist introduced a regression the review caught: a `null` element in `manifest.jobs` THROWS at the new position, and because the loop is above every return the throw DISCARDS section (0)'s already-collected live PROD credential findings — a SUBSTITUTIVE refusal, the exact invariant this phase exists to enforce. Reproduced independently; under fix. ⚠️ `164.5.1` still owns the re-capture half.
   ↳ ORIGINAL ENTRY: `compareManifest`'s MANIFEST-side hygiene loop sits
@@ -2959,7 +3049,8 @@ RED until merge, by construction.** That, plus a merge-time mutex race between `
 
 **The three named hazards above, each answered by measurement:**
 1. **Shared and contended** — `apply-test` takes the same advisory key `61616158` the `sql-tests`
-   lane takes (measured 2026-09-09: 7 occurrences in `supabase-migrate.yml`, 26 in `ci.yml`), and
+   lane takes (measured 2026-09-21: 7 occurrences in `supabase-migrate.yml`, 27 in `ci.yml` —
+   ⛔ CORRECTED, superseding the 2026-09-09 reading, which recorded 26 for `ci.yml`), and
    holds it for the whole apply rather than per statement. It does not race a concurrent run; it
    QUEUES with one. What it does not do is ORDER itself against one — see the new entry.
 2. **The first bulk apply surfaces accumulated drift** — it surfaced NOTHING, because the route
@@ -3179,6 +3270,8 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       item. MEASURED 2026-09-10: `grep -rn` over `TODOS.md` and `.planning/ROADMAP.md` → **0 hits**.
       It existed only as `T-164.8-22` in `164.8-05-PLAN.md`'s threat table: no owner, no date, no
       gate. Same shape CLAUDE.md records for `FANOUT-GLOBAL-01`.
+      ⛔ (2026-09-21: `FANOUT-GLOBAL-01` now has its own entry in this file's
+      `## 🟡 FIX MID-TERM` section — this citation is retro-linked to it.)
       **THE UNDERLYING GAP IS REAL.** The psql redaction shared by `ci.yml` and
       `test-restore-from-baseline.yml` masks THREE expressions; four other psql sites in that
       workflow can still print a DNS-failure HOSTNAME into a public log.
@@ -3221,6 +3314,232 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       gate, which is the defect class this whole phase family exists to remove. Capture, count,
       withhold.
 
+- [ ] **`FANOUT-GLOBAL-01` a GLOBAL assertion against shared TEST measured other people's CI
+      rows as well as this run's own, and the failure-mode FAMILY naming that defect had no
+      `TODOS.md` entry, no owner, no date and no trigger (booked 2026-09-21, Phase 164.9
+      TESTISOLATION)** — TEST is shared with other people's CI, so a GLOBAL assertion there
+      ("no stuck jobs exist", "the table is empty") is measuring other people's rows as well as
+      ours and is unreliable by construction. The fix this family exists to force is per-run
+      isolation: a run asserts about its OWN rows and nothing else — definition carried verbatim
+      from the `### Phase 164.9` `ROADMAP.md` Goal paragraph.
+      **MEASURED 2026-09-21 over this file, as a verdict:** before this entry, `FANOUT-GLOBAL-01`
+      had exactly three hits, and all three were PROSE references to it as a failure-mode FAMILY
+      ("same shape", "this failure mode") — no entry carried it as an id, so it had no owner, no
+      date and no gate.
+      **Naming decision:** the id is KEPT, not retired, because it is cited by name in
+      `CLAUDE.md`, in the `### Phase 164.9` `ROADMAP.md` entry, and in at least two other
+      `TODOS.md` entries as a family label; retiring it would orphan those citations for no gain.
+      **Family membership — the ids that are instances of this defect:** `[164.8-PUSH-RACE-VAC08]`,
+      `[164.8.2-VAC08-FATAL-ON-TRANSIENT]`, `[164.9-SHARED-TEST-TRANSPORT-FLAKE]`,
+      `[164.9-MUTEX-HOLDER-DIED-UNSERIALIZED]`, `[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]`.
+      **Trigger:** any new assertion written against the shared TEST project, and any new job or
+      script that takes a shared-TEST lock.
+      **Owner:** Phase 164.9 TESTISOLATION.
+
+## Phase 164.9 (TESTISOLATION) — ids booked at planning time (logged 2026-09-21)
+
+- [x] **`[164.9-SHARED-TEST-TRANSPORT-FLAKE]` a shared-TEST run needed THREE attempts to go
+      green on identical code, with two different failure signatures on two different test
+      sets — proof this is TRANSPORT, not logic (booked 2026-09-21, Phase 164.9
+      TESTISOLATION)** — MEASURED on run `34763669052` at `e64b0811` on `main`: three attempts
+      of one run at one commit. Attempt 1 RED on `tests/test_compute_jobs_fencing.py` with a
+      PostgREST `504 Gateway Timeout`. Attempt 2 RED with a DIFFERENT signature —
+      `httpx.ConnectError`, connection reset — on a DIFFERENT test set, including
+      `tests/test_drain_semantics.py`. Attempt 3 GREEN on the identical code. Non-deterministic
+      victims across attempts is the proof that this is TRANSPORT, not logic.
+      ⚠️ **NOT-THIS: it is NOT the wedged-pool mechanism.** A live probe returned three
+      sub-second successes with all PostgREST backends idle, so the recorded
+      `pg_terminate_backend` remedy was correctly NOT fired at infrastructure shared with other
+      people's CI.
+      **Deliverable:** a bounded retry at the transport boundary that keeps a transient fault
+      DISTINGUISHABLE from a clean run, and the retry must be observed to EXHAUST — neutered,
+      RED, restored from a byte backup, never assumed.
+      ⛔ **Forbidden closure: never a bare re-run.** A re-run is what made attempt 3 green and it
+      taught nothing.
+      **Owner:** Phase 164.9 TESTISOLATION — ⛔ **DELIVERED AND CLOSED 2026-09-21 (criterion 11, read AS AMENDED).**
+      A retrying transport now stands behind the live-DB client and an unconditional counter prints at
+      session teardown, so a retried-but-green run is distinguishable from a clean one.
+      ⚠️ **PARTIALLY delivered, and the residue has its own entry:** the retry covers READS ONLY —
+      `rpc` sits on the idempotency boundary fail-closed — so a sustained RPC read-timeout still reaches
+      `pytest.skip`. That is `[164.9-RPC-RETRY-NARROWED-SKIP-REOPENED]`, destination Phase 164.9.1.
+      ⛔ Closing THIS entry does not close that one.
+
+- [x] **`[164.9-MUTEX-HOLDER-DIED-UNSERIALIZED]` a run whose advisory-lock holder dies mid-job
+      can still report GREEN on DB assertions its own harness has just declared untrustworthy
+      (booked 2026-09-21, Phase 164.9 TESTISOLATION)** — **BEFORE.** The dead-holder branch of
+      the best-effort mutex release step emits a GitHub Actions log annotation naming the
+      condition, and by the step's own documented design that annotation does not change the
+      job's exit status. MEASURED 2026-09-13 in run `34763669052`: the `python` job's release
+      step printed verbatim that the mutex holder died BEFORE this release step and the DB work
+      after its death ran UNSERIALIZED, and that the run's DB assertions should not be trusted —
+      and the job's verdict was unaffected by it.
+      **AFTER (what this phase delivers).** A separate ALWAYS-RUN verdict step that reads a
+      marker the dead-holder branch writes and exits non-zero when it is present.
+      ⚠️ **THE EXPOSURE.** Until that lands, a run can conclude GREEN on DB assertions its own
+      harness has just declared untrustworthy — the purest form of this milestone's family
+      defect: a green reading that is not measuring what it claims.
+      ⛔ **Forbidden closures:** deleting, softening or re-wording the warning; and adding an
+      inline non-zero exit to the best-effort release step itself — that regresses the step's
+      own documented best-effort invariant rather than fixing the missing verdict.
+      **Owner:** Phase 164.9 TESTISOLATION — ⛔ **DELIVERED AND CLOSED 2026-09-21 (criterion 12).**
+      The dead-holder condition now produces a NON-ZERO verdict rather than a log annotation nobody
+      gates on: five paired verdict sites, a vitest test pinning the pairing per file and that the marker
+      path the release step WRITES is the one the verdict script READS, and a drill that kills a real
+      holder on a disposable cluster — observed RED then GREEN, and wired to a real CI call site.
+      ⛔ The warning text was added to, never softened.
+
+- [ ] **`[164.9-LIVEDB-LANE-EXECUTION-CENSUS]` the live-DB class now EXECUTES, and 35 of its 397
+      non-skipped tests fail on the local-stack baseline — four families, only three of them
+      fixable test-side (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 08)** — MEASURED by
+      running the lane this plan built, twice, against a booted local Supabase stack. This is the
+      per-file census `[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]` records as OWED, produced by
+      execution rather than static reading, exactly as that entry and the fixture-drift ledger's
+      own header say it must be.
+      **First run:** `Test Files 17 failed | 31 passed`, `Tests 50 failed | 347 passed | 80
+      skipped`. **After the reference-data replay landed in the same plan:** `Test Files 16
+      failed | 32 passed | 1 skipped (49)`, `Tests 35 failed | 362 passed | 80 skipped (477)`.
+      ⭐ The 362 passes are the point: that whole class asserted NOTHING in CI before this.
+      **THE FOUR FAMILIES, with the fix each needs:**
+      **F1 — PRIVILEGE STATE IS ABSENT FROM THE SCHEMA-ONLY BASELINE (~14 failures, and the ONE
+      family that is NOT a test-side fix).** Tests that assert a REVOKE/GRANT holds fail because
+      the committed `supabase/schema/baseline.sql` does not reproduce that state. Two of them say
+      so in their own words: *"Encrypted column api_key_encrypted was readable by authenticated
+      client — migration 027 REVOKE is not holding"* and *"Anon reached the function BODY …
+      proving REVOKE ALL FROM anon in mig 061 regressed"*. ⛔ Read those as a statement about the
+      BASELINE, not about production — they are the local stack reporting that the dump omits
+      column- and function-level privileges. Affected: `sec-005-live-probe`, `sanitize-user`,
+      `sanitize-user-rpc`, `log-audit-event-service-rpc`, `update-allocator-mandates-rpc`,
+      `audit-log-rls`, `audit-log-cold-archive`, most of `wizard-rpcs-live-db`.
+      ⚠️ Fixing it means changing how the baseline is DUMPED, and `BASELINE.md` makes that a
+      human-run command against production. No agent can close this one alone.
+      **F2 — THE post-mig-117 CLAIM-TOKEN FENCE (~14 failures, fixture drift, repairable).**
+      `mark_compute_job_failed` / `mark_compute_job_done` now REQUIRE `p_claim_token` and raise
+      `22023` without it; the call sites predate the fence. ⚠️ The static census cannot see this
+      class by construction — it models parameter NAMES, not required-ness — which is precisely
+      why the execution lane was worth building. Affected:
+      `compute-jobs-audit-2026-05-07-g10b`, `compute-jobs-audit-2026-05-07-residual`,
+      `claim-failed-retry-dedupe-migrations`. Several downstream status assertions
+      (`'running'` vs `'failed_final'`) are consequences of the same raise, not separate defects.
+      **F3 — NOT-NULL COLUMNS THE FIXTURE OMITS (3 failures, repairable).**
+      `user_notes.scope_kind` and `match_decisions.decided_by`. Same class as the `api_keys`
+      repair this plan already made, and equally invisible to a static reader that checks whether
+      a supplied column EXISTS rather than whether a required one is MISSING. Affected:
+      `gdpr-export`, `outcomes-join-rls`, `match-decisions-xor-rls`.
+      **F4 — TWO ONE-OFFS.** A protocol-relative URL the test harness cannot parse
+      (`match-decisions-holding-endpoint-rls`), and one `PGRST205` schema-cache failure
+      (`request-allocator-holdings-sync-queued`) — ⭐ the signature the static census recorded as
+      NOT reproducible from tracked text, now reproduced by execution.
+      ⛔ **Forbidden closures, inherited verbatim from the parent entry and still binding:**
+      deleting the tests; skipping them permanently; narrowing the lane's derived corpus so the
+      failures fall outside it; and adding a tolerance arm to `frontend-live-db-lane`'s row in
+      the `frontend` aggregator.
+      ⚠️ **OPERATIONAL CONSEQUENCE, stated because it is not optional.** `frontend-live-db-lane`
+      is wired BLOCKING, so until F1–F4 are closed the `frontend` aggregate is RED — and a red
+      main CI makes Railway SKIP the analytics deploy. Whoever picks this up decides FIRST
+      between closing F2/F3/F4 and shipping F1 behind a dated, shrink-only execution ledger of
+      the `scripts/vac08-ledger-baseline.txt` kind (every test still EXECUTES, a failure outside
+      the ledger still reddens, and a ledger entry that stops failing reddens too). ⛔ Not a skip
+      list, and not a reason to make the row advisory.
+      ⭐ **DECIDED AND BUILT, 2026-09-21 — BOTH halves were taken, in that order, and the counts
+      above are SUPERSEDED.** First the fix round closed F2/F3/F4 at the call site: 35 → **18**
+      failures, 17 closed, no test deleted, no assertion relaxed, no permanent skip (one arm
+      gained a documented `BASE_URL` precondition). Then the founder chose the ledger for the
+      residue: `scripts/live-db-execution-ledger.txt`, dated, shrink-only, **ENTRY_COUNT = 18**,
+      GENERATED from a real run by `node scripts/live-db-execution-ledger.mjs --generate` rather
+      than hand-typed. `frontend-live-db-lane` now runs `npm run test:live-db:ledger`, which
+      spawns the lane VERBATIM and is GREEN only when the failing set MATCHES the ledger — RED on
+      an unledgered failure AND RED on a ledger entry that has stopped failing, both observed.
+      **The row stays BLOCKING; the aggregator wiring was not touched.**
+      ⚠️ **THE 18 ARE THREE KINDS, NOT ONE, and the ledger records them separately because they
+      close by three different acts.** **K1 (9)** — privilege state the schema-only baseline does
+      not carry; closed by a baseline RE-DUMP, which `BASELINE.md` makes a human-run command
+      against production. **K2 (6)** — all in `wizard-rpcs-live-db`, and ⛔ plan 08's SUMMARY
+      MISCLASSIFIED these as K1: the measured failure is the FUNCTION BODY's own role gate, the
+      baseline DOES carry the REVOKE/GRANT pair, so **a re-dump may not close them** — treat as a
+      separate question. **K3 (3)** — g10b P12 (a real production defect the lane surfaced: the
+      public wrapper's internal overload omits `status`, so a job enqueued WITH parents never
+      enters the fan-in state), `match-decisions-xor-rls` (asserts a unique index migration 081
+      REPLACED — an intent decision), `request-allocator-holdings-sync-queued` (an unreachable
+      exception branch). Each needs a migration or an invariant decision; none is a fixture fix,
+      and NO migration was authored here.
+      ⛔ **Forbidden closures, EXTENDED by the ledger round:** everything above, plus — adding a
+      line to the execution ledger for a NEW failure (an entry is a founder decision about a
+      specific arm; a new failure is FIXED), leaving a stale line in it, and wrapping the lane in
+      anything that swallows its exit code.
+      **Owner:** Phase 164.9 TESTISOLATION (this phase, remaining plans) — and if F1/K1 outlives
+      it, a named successor phase, never a blank destination.
+
+- [ ] **`[164.9-DATA-DEPENDENT-GUARD-CENSUS]` 83 anonymous-block guards across 63 applied
+      migrations raise on data TEST does not have — the class is now REFUSED at author time, and
+      the EXISTING corpus is censused rather than repaired (booked 2026-09-21, Phase 164.9
+      TESTISOLATION plan 09)** — MEASURED by `node scripts/lint-migration-data-dependence.mjs`
+      over `supabase/migrations` at that date: **272 migration(s), 345 anonymous block(s), 83
+      refusal(s) across 63 files**, seeded verbatim into the dated shrink-only ledger
+      `scripts/lint-migration-data-dependence-baseline.txt`. Regenerate rather than trust these
+      figures; the run prints them.
+      **WHY IT EXISTS, and it is the other half of `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`.**
+      That entry asked for a MECHANISM and plan 09 built one: a hermetic refusal in
+      `sql-gate-lint` that fires on the pull request, with no opt-out marker, so a NEW guard of
+      this shape cannot merge. It deliberately did NOT touch the 79 that already merged —
+      repairing an APPLIED migration re-enters the apply pipeline and is a separate act with its
+      own review posture. This entry owns those 79.
+      ⚠️ **THE CENSUS IS NOT A TRIAGE, and the ledger's own header says so.** The scan refuses a
+      SHAPE. Some instances are benign on a data-empty TEST because the block SEEDS the row it
+      then reads back — a self-verifying probe (`20260416201929_audit_log_hardening.sql` is the
+      clearest specimen) rather than a precondition on production rows — and a static scan cannot
+      tell those from a genuine precondition without executing them. The owed work is a
+      per-entry decision: benign (delete the line), or repair the guard.
+      **TRIGGER — the condition that says this has come due, stated so a human recognises it
+      under pressure:** `apply-test` RED on a `RAISE` from a data-reading `DO` block **while
+      PROD's `plan` dry-run is CLEAN**, inherited verbatim from the parent entry. That divergence
+      is the signature; red on BOTH sides is an ordinary bad migration and is not this.
+      **INTERIM REMEDY — revert the merge.** ⛔ NOT an edit to
+      `.github/workflows/supabase-migrate.yml`. A failed TEST apply blocking the PROD apply is a
+      LOCKED decision, and editing the pipeline under deploy pressure to get a deploy out is
+      precisely the failure mode this family exists to prevent.
+      ⛔ **Forbidden closures:** relaxing the classifier; widening the ledger; adding an opt-out
+      marker to the linter (the escape hatch Phase 164.8 specified and deliberately did not
+      build, because a hatch is something a person must remember to claim); and deleting a ledger
+      line for any reason other than the scan no longer refusing it.
+      **Owner:** Phase 164.9 TESTISOLATION built the refusal. ⚠️ The REPAIR of the 83 needs a
+      named successor phase booked via `/gsd-phase --edit` — recorded here rather than left
+      blank, and surfaced in `164.9-09-SUMMARY.md` as a routed deferral for that booking.
+
+- [x] **`[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]` the live-DB vitest class that runs ONLY
+      when TEST credentials are present is RED, and establishing whether any CI gate can see it
+      comes before any remedy (booked 2026-09-21, Phase 164.9 TESTISOLATION)** — MEASURED at
+      `f915bf49`: 16 files / 38 tests FAILED against the SAME tree's credential-free run, which
+      reported 0 failures, with the skip-count delta from 280 to 94 being the class itself. Five
+      failure signatures, three PostgREST error codes and two non-code ones: `PGRST203` (two
+      live overloads of `claim_compute_jobs_with_priority`, a 2-arg and a 5-arg, so PostgREST
+      cannot choose), `PGRST205` (table absent from the schema cache), `PGRST204` (a column
+      absent from `api_keys`), `Invalid schema: cron`, and `42501` (permission denied).
+      ⛔ **CORRECTION carried from this phase's own CONTEXT Area 4, which changes the entry's
+      shape.** At least three of the five classes are baseline- or fixture-level and follow the
+      tests to ANY host, not just shared TEST: the `PGRST203` overload ambiguity lives in
+      `supabase/schema/baseline.sql` itself (both live definitions are there); the
+      `Invalid schema: cron` failure is set by `supabase/config.toml`'s exposed-schema list,
+      which excludes `cron` everywhere; and the `PGRST204` missing-column failure is a STALE
+      fixture for a column that has never existed in the schema. So a local stack reproduces
+      the ambiguity rather than fixing it, and picking a different host does not close this
+      entry on its own.
+      ⚠️ **Still unmeasured, and it must not be rounded up:** only 3 of the 38 failures were
+      traced. The remaining per-file census is OWED before anyone claims the class is
+      understood.
+      **Deliverable:** the class runs somewhere it can go RED, or its schema/fixture drift is
+      fixed with a gate proven to bite.
+      ⛔ **Forbidden closures:** deleting the tests; skipping them permanently; arguing the
+      credential-free green is sufficient; and adding TEST credentials to the vitest shards —
+      that un-skips the ~284 live-DB tests gated on `HAS_LIVE_DB`, shifts the coverage
+      denominator, and invalidates the ratchet baseline that a blocking CI gate rests on.
+      **Owner:** Phase 164.9 TESTISOLATION — ⛔ **DELIVERED AND CLOSED 2026-09-21 (criterion 13).**
+      The class now runs somewhere it can go RED: a hermetic live-DB lane on a local stack, wired into the
+      blocking aggregator in BOTH the `needs:` list and the result loop, with a corpus DERIVED from the
+      gate symbol and three independent anti-vacuity controls. ⛔ The existing shards' credential
+      prohibition is untouched, so the coverage ratchet denominator is unaffected.
+      ⚠️ **The static census prints a non-zero unresolved residue every run and does NOT claim it is
+      zero** — that residue is routed to execution in the lane, not silently absorbed.
+
 - [ ] **`[164.8.2-VAC08-FATAL-ON-TRANSIENT]` an unreadable ledger row count now reds the WHOLE
       VAC-08 gate, where it used to cost only the absurdity floor (booked 2026-09-10, Phase
       164.8.2; routed to Phase 164.9 — ⚠️ SAME ROOT as `[164.8-PUSH-RACE-VAC08]`, plan them
@@ -3251,8 +3570,9 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       plan 05; both halves are Area 1 Q1 consequences the founder ACCEPTED at decision time, not
       defects discovered afterwards).**
       **MECHANISM (a) — the merge-time race.** Advisory key `61616158` appears **7×** in
-      `.github/workflows/supabase-migrate.yml` and **26×** in `.github/workflows/ci.yml`
-      (measured 2026-09-09 at HEAD). On a merge to `main` BOTH workflows start, both take that
+      `.github/workflows/supabase-migrate.yml` and **27×** in `.github/workflows/ci.yml`
+      (measured 2026-09-21 — ⛔ CORRECTED, superseding the 2026-09-09 reading of 26 for
+      `ci.yml`). On a merge to `main` BOTH workflows start, both take that
       key, and no `needs:` edge, concurrency group or key split orders them. `apply-test` holds
       it across marker → dry-run → push → post-verify; `sql-tests` holds it for the whole job.
       When `sql-tests` wins, it measures a TEST the merge has not yet applied to; when it loses,
@@ -3302,6 +3622,8 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       routing block is already written at `.planning/ROADMAP.md` under Phase 164.9
       (`ROUTED HERE 2026-09-09`); this entry is the EVIDENCE half and that block is the ROUTING
       half, deliberately not copies of each other.
+      ⛔ (2026-09-21: `FANOUT-GLOBAL-01` now has its own entry in this file's
+      `## 🟡 FIX MID-TERM` section — this citation is retro-linked to it.)
 
 - [ ] **`[164.8-TEST-DATA-RESEEDED]` The restore destroyed every row in shared TEST's `public`
       schema and that is NOT reversible; what TEST holds now is whatever CI has written since
@@ -3332,6 +3654,11 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       2026-09-08 restore and will not describe the next one.
       ✅ **Destination: Phase 164.9 TESTISOLATION** — the per-run seed contract. "Whose rows is a
       run asserting about" and "which rows may a run assume exist" are one question.
+      ⚠️ **ROUTING NOTE (2026-09-21, Phase 164.9 planning):** this entry names Phase 164.9
+      TESTISOLATION as its destination, but Phase 164.9's `ROADMAP.md` `**Requirements**` line
+      does not cite `[164.8-TEST-DATA-RESEEDED]`. Phase 164.9's plan 01 did NOT claim this entry
+      and leaves the routing discrepancy for a decision — its destination, disposition and scope
+      are unchanged by this note.
 
 - [ ] **`[164.8-TEST-ENVIRONMENT-KEPT]` The GitHub `Test` environment is KEPT for its Deployments
       AUDIT RECORD, explicitly NOT for access control — founder decision 2026-09-08, taken after
@@ -4193,6 +4520,8 @@ Both come out of Phase 164.5.1's verification and its plan-09 security re-audit.
 ONLY as prose inside `.planning/` until this entry, which is exactly the `FANOUT-GLOBAL-01`
 failure mode this milestone already records: an item with no `TODOS.md` id has no owner, no
 trigger and no phase.
+⛔ (2026-09-21: `FANOUT-GLOBAL-01` now has its own entry in this file's `## 🟡 FIX MID-TERM`
+section — this citation is retro-linked to it.)
 
 - [ ] **`[FANOUT-FAILBRANCH-UNEXERCISED-01]` The ledger fan-out's all-candidates-failed branch
       has still never run in PRODUCTION. It is gated, not exercised — and those are not the
@@ -7139,6 +7468,80 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       max rather than a cached count. Upstream in the GSD toolchain, not this repo's source —
       but the corrupted artifact is tracked here.
 
+- [ ] **`[164.9-LEDGER-CEILING-COORDINATED-EDIT]` the live-DB execution ledger's `ENTRY_CEILING`
+      makes growth IMPOSSIBLE TO DO SILENTLY, not impossible (recorded 2026-09-21, Phase 164.9
+      security audit)** — ⭐ **RECORDED AS A KNOWN LIMIT, AND IT DELIBERATELY CARRIES NO PHASE**,
+      against the standing rule that only a data-integrity or user-facing gap earns one. Nothing a
+      user sees changes and no row is written wrongly; what is at stake is how loudly a gate can be
+      widened.
+      **Owner:** whoever next edits `scripts/live-db-execution-ledger.txt` or its ceiling.
+      **What is PROVEN:** the ledger is bounded from ABOVE by `ENTRY_CEILING` in
+      `scripts/live-db-execution-ledger.mjs`, and bounded from BELOW by the staleness arm in
+      `src/__tests__/live-db-execution-ledger.contract.test.ts`, which uses `toBe(entries)` and so
+      transitively pins the exact total. A ledger that correctly shrank cannot leave the ceiling
+      above it handing back room to grow.
+      **What is NOT prevented:** growth itself. Appending a ledger line, bumping `# ENTRY_COUNT`
+      and bumping `ENTRY_CEILING` in ONE commit passes every arm, and a real live-DB regression can
+      be silenced that way. No in-repo constant can stop a determined edit. What changed is the
+      COST: three coordinated, individually named lines in a diff a reviewer reads, where before it
+      took one.
+      **Trigger to revisit:** any commit that RAISES `ENTRY_CEILING`. A raise is the shape this
+      entry exists to make visible, and the ledger is SHRINK-ONLY by design — a new failing arm is
+      FIXED, not ledgered.
+      ⛔ **Forbidden closure: describing this as "the ledger cannot grow".** The contract test's own
+      header carries a dated correction saying exactly that, because two paragraphs in it once
+      overclaimed in opposite directions. Describe it as "cannot grow by accident, and cannot grow
+      without saying so".
+      ⛔ **Forbidden closure: deleting the staleness arm to remove the transitive pin.** The pin is
+      what makes a shrink honest; removing it re-opens the direction a bound-only-from-above control
+      cannot see about itself.
+
+- [ ] **`[164.9-CALIBRATION-NARROWS-NOT-REPLACES]` the three foreign-row calibrations NARROW
+      the global assertions and MEASURE THE MARGIN; they do NOT caller-scope the deployed sweep
+      (recorded 2026-09-21, Phase 164.9 review round)** — ⭐ **RECORDED AS A KNOWN LIMIT, AND IT
+      DELIBERATELY CARRIES NO PHASE.** Founder decision 2026-09-21, taken against the standing
+      rule that only a data-integrity or user-facing gap earns its own phase. This is neither:
+      nothing a user sees changes, and no row is written wrongly.
+      **What is PROVEN, by execution:** a FOREIGN row is seeded and the new assertion stays GREEN
+      where the old one would have gone RED for someone else's work. Armed, and observed failing
+      before it was observed passing.
+      **What is NOT proven:** that the deployed sweep is caller-scoped. It is not. All three
+      calibration parts disclose this in their own headers, in their own words — *"it is not, and
+      cannot be without a production migration adding a run discriminator column."* No arm
+      exercises the OLD assertion to show it would have reddened.
+      **If it is ever closed**, the shape is a PROD migration adding a run discriminator column,
+      after which the calibrations assert SCOPING rather than margin. ⛔ That authors a migration,
+      so it goes through `migration-reviewer` + `rls-policy-auditor` + `silent-failure-hunter`
+      before any apply, and its self-verify must be CATALOG-ONLY — a data-reading `RAISE
+      EXCEPTION` applies to PROD and REFUSES on TEST, and a refused TEST apply blocks the PROD
+      apply (`[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`).
+      ⛔ **Forbidden closure: re-wording ROADMAP criterion 2 to match whatever ships.** The
+      criterion carries a dated amendment naming exactly this gap; a silent re-word would erase
+      the only record that the replacement half was never measured.
+
+- [ ] **`[164.9-RPC-RETRY-NARROWED-SKIP-REOPENED]` the transport retry covers READS only, so a
+      sustained RPC read-timeout reaches `pytest.skip` again on a fence assertion (recorded
+      2026-09-21, Phase 164.9 review round 2)** — ⛔ **DATA-INTEGRITY-ADJACENT: the failure mode is
+      a GREEN `python` job for a shared-TEST transport fault**, which is the exact outcome
+      criterion 11 exists to end.
+      **How it arose, and the narrowing itself is CORRECT.** The review round made the retry stop
+      at the idempotency boundary: `insert`/`upsert`/`update`/`delete`/`rpc` run their terminal
+      `.execute()` exactly once, because replaying a write that may already have committed is
+      worse than not retrying it. `rpc` is on that list **fail-closed** — the wrapper cannot read a
+      function body, so it cannot know which RPCs are read-only.
+      **Why it bites here specifically.** The victims criterion 11 measured are RPC-heavy, so the
+      narrowing lands on exactly the files whose 504s are its evidence, and
+      `_rpc_retry_timeout`'s own 2-attempt `pytest.skip` grace is reachable again.
+      **Shape of the fix:** an explicit allowlist of READ-ONLY RPC names, so a read-only RPC is
+      retried and a claim RPC is not.
+      ⛔ **Forbidden closure: putting `rpc` back on the retried side.** Replaying a claim RPC can
+      corrupt a fence SILENTLY, which is strictly worse than a visible red.
+      ⛔ **Forbidden closure: deleting or widening the `pytest.skip`.** A skip there is a green
+      reading that measured nothing — the helper's own docstring argues this.
+      **Destination:** Phase 164.9.1 JOBRPCTRUTH already owns the compute-job RPC surface and is
+      the natural home; it does NOT earn a phase of its own (founder rule: only a data-integrity
+      or user-facing gap does, and this is test-transport). Interim owner: the founder.
+
 ---
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
@@ -9074,7 +9477,7 @@ gitleaks auto-loads `.gitleaks.toml` from cwd, so omitting `-c` tests nothing.
 
 ## Phase 164.8 (TESTPREPROD) — plan 05 residuals (logged 2026-09-09)
 
-- [ ] **[164.8-PUSH-RACE-VAC08] `sql-tests` (VAC-08) and `supabase-migrate.yml`'s `apply-test` share ONE advisory lock on the merge push, so their order is undefined — the frontier exemption removed the CONSEQUENCE, not the coupling (booked 2026-09-09)** — MEASURED 2026-09-09 at this branch's HEAD: advisory key `61616158` appears 7 times in `.github/workflows/supabase-migrate.yml` and 26 times in `.github/workflows/ci.yml`. On a merge to `main` both workflows start, both take that key, and nothing orders them: if `sql-tests` wins, VAC-08 reads `supabase_migrations.schema_migrations` BEFORE `apply-test` has written the merged migration's row; if `apply-test` wins, it reads after. The two readings are of the same relation at different times and there is no mechanism making one of them the intended one.
+- [ ] **[164.8-PUSH-RACE-VAC08] `sql-tests` (VAC-08) and `supabase-migrate.yml`'s `apply-test` share ONE advisory lock on the merge push, so their order is undefined — the frontier exemption removed the CONSEQUENCE, not the coupling (booked 2026-09-09)** — MEASURED 2026-09-21 at this branch's HEAD: advisory key `61616158` appears 7 times in `.github/workflows/supabase-migrate.yml` and 27 times in `.github/workflows/ci.yml`. ⛔ CORRECTED — the 2026-09-09 reading recorded 26 for `ci.yml`; superseded by this 2026-09-21 re-measurement. On a merge to `main` both workflows start, both take that key, and nothing orders them: if `sql-tests` wins, VAC-08 reads `supabase_migrations.schema_migrations` BEFORE `apply-test` has written the merged migration's row; if `apply-test` wins, it reads after. The two readings are of the same relation at different times and there is no mechanism making one of them the intended one.
   **What plan 05 fixed, and it is only half.** `scripts/test-ledger-drift-check.sh` now EXEMPTS a measured-missing repo migration whose authoring timestamp is strictly above the ledger's frontier — the greatest authoring timestamp among migrations MEASURED PRESENT. Under apply-on-merge such a migration cannot be present, so counting it measured the pipeline's timing rather than a defect. That makes VAC-08's VERDICT order-independent (both interleavings now go green on a well-formed merge) and stops every migration-adding PR from being RED by construction. ⛔ It does not weaken the ratchet: a missing migration AT or BELOW the tip is still NEW drift and still exits 1, pinned by the `below-frontier-missing RED` and `tip-equal-missing RED` arms in the script's own `--self-test`.
   **What it did NOT fix, stated so nobody reads the exemption as closure:**
   (a) **The coupling itself remains.** Two jobs still serialise on one key, so they still queue behind each other and each still lengthens the other's wait on a SHARED database used by other people's CI. A lock-ordering defect that currently has no visible consequence is still a lock-ordering defect, and the next job added under that key will not have a frontier exemption written for it.
@@ -9391,3 +9794,135 @@ re-measured at HEAD on the branch rather than carried over as dated claims.
       mechanism for saying so explicitly, not a reason to leave it uncovered.
       ⚠️ The phase's in-file scope comment states this gap. If the gap is closed, that comment
       becomes false and must move with it.
+
+---
+
+## Phase 164.9 (TESTISOLATION) — closing residue (logged 2026-09-21, plan 11)
+
+⚠️ **Booked as the phase CLOSES, because the phase's own standing rule applies to its own
+residue first: an item two places disagree about is owned by NEITHER until someone decides, and a
+destination left blank is not a destination.** The matching statements live in the
+`### Phase 164.9` ROADMAP entry's CLOSING RESIDUE block; the two ledgers are meant to say the same
+thing, and a divergence between them is a defect in whichever was edited last.
+⛔ Three of the four entries below name a PROPOSED phase rather than a numbered one, because the
+executor is not permitted to number a phase. `/gsd-phase --insert` is the act that turns each
+proposal into a real destination; **until it runs the owner is the founder** — never blank, never
+a prose id. The fourth is owned by the founder outright and needs no phase.
+⚠️ **`[164.9-FANIN-STATUS-NEVER-SET]`, the confirmed PRODUCTION defect this phase surfaced, is
+deliberately NOT here — it is in `## 🔴 FIX NOW`**, because a live data-integrity defect filed in
+a tail residual section is the same disappearance this residue exists to prevent.
+
+- [ ] **`[164.9-CRIT8-RESTORE-DISPATCH-RECORD]` the ROADMAP criterion 8 restore dispatch is
+      POST-MERGE BY CONSTRUCTION, and the act of RECORDING its result is what makes the founder's
+      Option A honest (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 11).**
+      Owner: **THE FOUNDER — the human who merges this phase.** Not a phase. Not an agent.
+      ⭐ **AMENDED 2026-09-21 — THE FOUNDER EXPLICITLY DELEGATED BOTH ACTS TO THE AGENT**, in
+      session, in these words: *"I authorize you to do this: the post-merge
+      test-restore-from-baseline.yml dispatch for criterion 8, and the baseline re-dump."*
+      ⛔ The original wording is KEPT because it records why the boundary existed, and because a
+      delegation is a dated event on ONE occasion — it is **not** a standing rule. A future
+      session finding this entry open has NOT been authorized by this line.
+      ⚠️ **WHAT THE DELEGATION DOES NOT CHANGE:** the dispatch is still POST-MERGE BY
+      CONSTRUCTION (the ref guard refuses any ref that is not the default branch), the preflight
+      still runs and is READ before the committing mode, the confirm token is still derived at
+      the MERGED ref and never copied out of a planning document, and ⛔ **DATA IS STILL NOT
+      RECOVERABLE** — the backup artifact restores schema and ledger only.
+      **WHY IT EXISTS:** `test-restore-from-baseline.yml` carries a HARD ref guard and refuses any
+      dispatch that is not from the default branch, because a branch dispatch would restore shared
+      TEST from an unreviewed dump. So this phase's new restore guards cannot be exercised against
+      shared TEST until the phase has merged. The founder took Option A (ship, then dispatch, then
+      record) over Option B (re-home criterion 8) **on the explicit condition that this recording
+      act be booked with a named owner BEFORE the merge.** This entry is that condition.
+      **Trigger:** this phase's restore-script changes reaching the default branch.
+      **The act, in order:** (1) confirm the changes are on the default branch — if they are not,
+      STOP, because the dispatch would run the OLD script, prove nothing about this phase's
+      guards, and still destroy and rebuild a shared schema; (2) derive the confirm token at
+      dispatch time from the tracked baseline record AT THAT REF, never from a value copied out of
+      a planning document, because it moves with that file; (3) dispatch `mode=preflight` FIRST
+      and read its verdict; (4) only if the preflight is green, dispatch the committing mode with
+      the token; (5) read the run's own printed summary line and the guards' output.
+      **What closes it:** both run ids, both conclusions, the committing run's printed summary
+      line VERBATIM, and evidence the two new guards actually ran — written into
+      `164.9-11-SUMMARY.md` and the ROADMAP criterion 8 block, which currently reads PENDING.
+      ⛔ **NOT closed by a run id alone.** A dispatch that concluded successfully without
+      exercising the guards it was run to exercise has discharged NOTHING, and recording it as a
+      discharge would be the green-that-is-not-measuring-what-it-claims defect this entire phase
+      exists to remove.
+      ⚠️ **MEASURED by plan 11 while preparing the recipe, and it changes what a preflight
+      proves:** `check_extension_guard` is NOT REACHED in `mode=preflight` at all — the preflight
+      branch returns at its byte-for-byte rollback comparison, which covers the extension class
+      incidentally and never names the guard. A green preflight therefore does not evidence that
+      guard; only the committing run does. The value-pinning leg, by contrast, runs inside the
+      transaction in BOTH modes — but it is SILENT when clean, so neither guard prints a line on a
+      healthy run, and "the guard reported" must be read as "the run reached the point past it",
+      never as "a line appeared".
+      ⛔ **NOT closed by** relaxing, working around or dispatching around the ref guard; nor by an
+      agent running the dispatch. A committing restore drops and rebuilds the `public` schema of a
+      database other people's CI uses, and it is a human act.
+      ⛔ **What a green run will still NOT claim:** the extension guard runs AFTER its transaction
+      commits, so in committing mode it LABELS an outcome rather than PREVENTING one. That limit
+      is unchanged by any dispatch and must not be implied away by a green run id.
+
+- [ ] **`[164.9-BASELINE-PRIVILEGES-ABSENT]` the F1 live-DB residue — 15 lane failures that no
+      fixture can close, and the correction that splits them 9 / 6 (booked 2026-09-21, Phase 164.9
+      TESTISOLATION plan 11, out of the plan 08 fix round).**
+      **WHAT WAS RECORDED, AND WHERE IT IS WRONG.** Plan 08 read all 15 as one class — the
+      schema-only `supabase/schema/baseline.sql` does not reproduce column- and function-level
+      privileges, so tests asserting a REVOKE/GRANT holds fail on a stack built from it. For NINE
+      of them that reading stands. For `wizard-rpcs-live-db` — **6 of the 15 and the largest
+      single file** — the MEASURED message is the FUNCTION BODY's own role gate, not an EXECUTE
+      denial, and the baseline DOES carry the REVOKE/GRANT pair for that function. **So a baseline
+      re-dump may NOT close those six**, and whoever takes this must treat them as a SEPARATE
+      QUESTION rather than as more of the same. Reaching the body at all points at the
+      `pg_default_acl` re-grant the column comment itself warns about; the arms also assert a
+      happy path "as `authenticated`" under a grant a migration withdrew, which is
+      self-contradictory on its face and is part of what must be decided.
+      **Affected (the nine):** `audit-log-rls` (2), `audit-log-cold-archive` (2),
+      `sec-005-live-probe` (1), `update-allocator-mandates-rpc` (1), `sanitize-user` (1),
+      `sanitize-user-rpc` (1), `log-audit-event-service-rpc` (1). **Plus `wizard-rpcs-live-db`
+      (6), which is the separate question.**
+      ⚠️ **THIS IS NOT AN AGENT-CLOSEABLE ITEM.** Changing how the baseline is DUMPED is a
+      HUMAN-RUN command against PRODUCTION per `supabase/schema/BASELINE.md`, and `baseline.sql`
+      is what `test-restore-from-baseline.yml` rebuilds shared TEST from — so a change here
+      propagates into every future restore of a database other people's CI uses.
+      ⛔ **THE THREE-REVIEWER RULE APPLIES IN FULL:** `migration-reviewer` + `rls-policy-auditor` +
+      `silent-failure-hunter`, findings fixed, before anything is applied or dumped.
+      ⛔ **NOT closed by** weakening a REVOKE assertion, skipping the arms, narrowing the lane's
+      derived corpus, or making `frontend-live-db-lane`'s aggregator row advisory — all four are
+      inherited verbatim from `[164.9-LIVEDB-LANE-EXECUTION-CENSUS]` and are still binding.
+      ⚠️ **OPERATIONAL CONSEQUENCE, unchanged:** `frontend-live-db-lane` is wired BLOCKING and is
+      still measured RED, so until the residue is answered the `frontend` aggregate is red on
+      merge, and a red main CI makes Railway SKIP the analytics deploy.
+      **Owner / destination: a NEW phase, proposed RESTOREFIDELITY — what the restore leaves
+      shared TEST in — surfaced in `164.9-11-SUMMARY.md` for `/gsd-phase --insert`; it also owns
+      the re-homed `[164.9-TEST-ANALYTICS-URL-REARM]`. ⚠️ Until that phase exists the owner is
+      THE FOUNDER, who inserts it.**
+
+- [ ] **`[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]` two lane failures that need a PRODUCTION change or
+      an INTENT decision — distinct from F1 and from each other (booked 2026-09-21, Phase 164.9
+      TESTISOLATION plan 11, out of the plan 08 fix round).**
+      **(a) AN UNREACHABLE BRANCH — needs an RPC change.**
+      `request_allocator_holdings_sync` returns its `{already_inflight, next_attempt_at}` shape
+      ONLY from an `EXCEPTION WHEN unique_violation` handler around `enqueue_compute_job`. But
+      `_enqueue_compute_job_internal` performs an optimistic look-up FIRST and **RETURNS the
+      existing in-flight id instead of raising**, so the handler never fires and the RPC answers
+      the ok/job_id shape. The arm's own title calls this "the previously-unreachable Queued
+      shape"; it is still unreachable. Closing it needs a change to the RPC — a migration — or a
+      decision that the Queued shape is retired. Neither is a fixture fix. ⚠️ Same function as
+      `[164.9-FANIN-STATUS-NEVER-SET]`, which is why they share a destination.
+      **(b) AN ASSERTION ABOUT A RETIRED UNIQUE INDEX — needs an INTENT decision.**
+      `match-decisions-xor-rls` expects a second `bridge_outcomes` row for the same
+      (allocator, strategy) to collide, i.e. it asserts
+      `bridge_outcomes_unique_per_strategy_holding` (migration 072). Migration **081 REPLACED**
+      that index with `bridge_outcomes_allocator_match_decision_unique` — in the catalogue's own
+      words, a "natural per-decision key now that voluntary kinds … exist. Every bridge_outcome
+      FKs to one match_decision; one outcome per decision is the invariant" — so two different
+      match_decisions legitimately get two outcomes and the old index is not in the baseline at
+      all. ⛔ This is a question about WHICH UNIQUENESS CONTRACT IS CURRENT, not fixture drift,
+      and rewriting the assertion to match observed behaviour is the one move that must not be
+      made: it would encode the loss of the invariant as the contract.
+      ⛔ **NOT closed by** deleting either arm or skipping it. Both are left RED on purpose with
+      their root causes derived and written at the assertion.
+      **Owner / destination: the same NEW phase as `[164.9-FANIN-STATUS-NEVER-SET]`, proposed
+      JOBRPCTRUTH, surfaced in `164.9-11-SUMMARY.md` for `/gsd-phase --insert`. ⚠️ Until that
+      phase exists the owner is THE FOUNDER, who inserts it.**

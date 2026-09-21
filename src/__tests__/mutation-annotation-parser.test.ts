@@ -922,8 +922,39 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // This entry takes 412 -> 413 and 429 -> 429, from 412 / 429.
     // MEASURED over `scanCorpus` at this commit by replaying THIS derivation:
     // `armsSeen 413 stepsSeen 429`, `filesTotal 75`, `annotated 48`, waivers 0.
-    expect(armsSeen).toBe(413);
-    expect(stepsSeen).toBe(429);
+    // ⛔ CURRENCY 2026-09-21 (Phase 164.9 plan 04, discovered stale during a
+    // fix round -- this pin does not restate the symbol `ARMS_FLOOR`, so a
+    // grep for that literal string never finds it, and it was missed when
+    // `scripts/mutation-runner/run.mjs`'s ARMS_FLOOR and its two OTHER
+    // dependent files were moved in the same plan's Task 3): 413 -> 422 and
+    // 429 -> 441. Nine arms landed since the 412/413 entry above, not six:
+    // the three from this plan's Task 1/2 (reaper, retention, reconcile,
+    // 1+1+2=4 edit steps) were never reflected here either, plus the six
+    // added by this fix round (reaper own-1/foreign, retention own-1/foreign
+    // -- 1 edit step each -- and reconcile own/foreign -- 2 edit steps each,
+    // an edit + a self-verify re-base -- 4+8=12 edit steps total; all
+    // non-waived, none `sql`). RUN, not reasoned about: `npx vitest run
+    // src/__tests__/mutation-annotation-parser.test.ts -t "REAL CORPUS: no
+    // annotation that exists today rewrites an identity"` reported the exact
+    // actual values, which is why the totals above (413->422, +9 arms;
+    // 429->441, +12 steps) are recorded as the measurement, not derived from
+    // a hand count.
+    // ⚠️ CURRENCY 2026-09-21 (Phase 164.9 plan 10,
+    // [164.8.1-TEST-ANALYTICS-URL-PROD]): 422 -> 423, and `stepsSeen` 441 ->
+    // 441, UNMOVED. ONE new arm, D1, in the already-annotated
+    // test_analytics_service_settings_and_vault_tick.sql, carrying ONE `sql`
+    // step (an ALTER TABLE that NARROWS the destination allow-list).
+    // ⛔ THE UNMOVED HALF WAS PREDICTED WRONG AND THE RUN CORRECTED IT, which is
+    // the whole reason these pins are MEASURED and not derived: this entry was
+    // first written `441 -> 442` on the reasoning that a `sql` step is still a
+    // step, and the run answered `expected 441 to be 442`. This walk only
+    // enumerates steps it can read an identity-rewrite out of — a `sql` step
+    // carries neither a `find` nor an `anchor`, so it contributes nothing here,
+    // exactly as it contributes nothing to `needles.length` below. ⛔ Do not
+    // "restore" the +1: it is a step the CORPUS has and this DERIVATION does
+    // not, and the two are different questions. RUN, not reasoned about.
+    expect(armsSeen).toBe(423);
+    expect(stepsSeen).toBe(441);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1772,7 +1803,24 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // `stepsSeen` at this commit, `needles.length` came back 429. Recorded
     // because "it did not move" is the claim most easily asserted without
     // measuring.
-    expect(needles.length).toBe(429);
+    // ⛔ CURRENCY 2026-09-21 (Phase 164.9 plan 04, same missed-pin discovery
+    // as `stepsSeen` above -- this derivation also never restates
+    // `ARMS_FLOOR` by name, so it was missed the same way): 429 -> 441, +12
+    // needles, matching `stepsSeen`'s move exactly this time -- every one of
+    // the twelve new edit steps (across this plan's original three arms plus
+    // this fix round's six) carries a `find`, none are `insert-after`, and
+    // the corpus still carries zero waivers, so this pin (which ranges over
+    // waivers) and `stepsSeen` (which does not) agree by coincidence, not by
+    // rule -- keep running them separately. RUN, not reasoned about.
+    // ⛔ CURRENCY 2026-09-21 (Phase 164.9 plan 10): needles 441 -> 441, UNMOVED,
+    // while `armsSeen` above moved 422 -> 423 and `stepsSeen` 441 -> 442. The
+    // one new arm (D1 in test_analytics_service_settings_and_vault_tick.sql)
+    // carries a single `sql` step — an ALTER TABLE narrowing the destination
+    // allow-list — which has neither a `find` nor an `anchor`, so it contributes
+    // no needle: the same divergence the 2026-09-20 entry above records. ⛔ An
+    // UNMOVED pin is still a MEASURED one, and "it did not move" is the claim
+    // most easily asserted without measuring: RUN SEPARATELY at this commit.
+    expect(needles.length).toBe(441);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

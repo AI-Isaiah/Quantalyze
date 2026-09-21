@@ -2137,9 +2137,22 @@ describe("GDPR export — live DB integration", () => {
         }
         cleanup.strategyIds.push(strategyRow.id);
 
-        const { error: noteErr } = await admin
-          .from("user_notes")
-          .insert({ user_id: userId, content: "export-test note" });
+        // ⚠️ Phase 164.9 fix round (F3) — `user_notes.scope_kind` and
+        // `.scope_ref` are both NOT NULL with no default, and `scope_kind`
+        // carries a CHECK admitting only
+        // portfolio/holding/bridge_outcome/strategy/dashboard. The seed omitted
+        // both, so it raised 23502 the moment it met a real catalogue. Same
+        // class as plan 08's `api_keys` repair: supply what the catalogue
+        // declares. Idiom mirrors `seedNote` in
+        // `src/__tests__/user-notes-multiscope-rls.test.ts`; the `dashboard`
+        // scope's `scope_ref` is the fixed literal `allocations`, per
+        // `src/lib/notes/ownership.ts`.
+        const { error: noteErr } = await admin.from("user_notes").insert({
+          user_id: userId,
+          scope_kind: "dashboard",
+          scope_ref: "allocations",
+          content: "export-test note",
+        });
         if (noteErr) throw new Error(`user_notes seed: ${noteErr.message}`);
 
         const { error: favErr } = await admin

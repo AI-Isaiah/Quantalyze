@@ -16,7 +16,7 @@
  * psql — that is proven by the object-level measurements recorded in
  * 164.3-CONTEXT.md (VERIFIED CORRECTION 1) and by the first live run.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import {
   mkdtempSync,
@@ -44,8 +44,34 @@ import { createHash } from "node:crypto";
 // unreadable, so the trap lives in one announced function instead.
 import { degenerateNarrow } from "../test/helpers/degenerate-narrow";
 
+/**
+ * ⚠️ THIS FILE'S LEGS SPAWN REAL SHELL GATES, AND vitest's 5 s DEFAULT WAS
+ * ALREADY UNDER-SIZED BEFORE THIS PHASE TOUCHED IT. MEASURED 2026-09-21 on this
+ * machine: `bash scripts/test-ledger-drift-check.sh --self-test` took **4.93 s**
+ * at the commit BEFORE the two retry arms were added — a 70 ms margin against
+ * the default, i.e. a red that depended on scheduling luck rather than on the
+ * gate. Adding the arms took it to 5.97 s and turned that luck into a
+ * reproducible timeout, and it also starved the neighbouring VAC-04 legs, which
+ * spawn their own gate in the same worker.
+ *
+ * ⛔ THIS RAISES NO FLOOR AND WEAKENS NO ASSERTION. A test timeout is not a gate
+ * on behaviour; an under-sized one only manufactures false reds that get
+ * "fixed" by deleting coverage. Every assertion in this file is unchanged.
+ * ⚠️ It stays BOUNDED at 60 s: a genuine hang in a spawned gate must still fail
+ * the run rather than sit on a runner.
+ */
+vi.setConfig({ testTimeout: 60_000 });
+
 const PROD_GATE = "scripts/prod-body-drift-check.sh";
 const LEDGER_GATE = "scripts/test-ledger-drift-check.sh";
+/**
+ * The ledger gate's source, read ONCE. Legs that DERIVE a pin from a constant in
+ * that script (rather than restating it) read it through here — see
+ * `ledgerGateAttemptBudget`. Legs that must prove something about the FILE's own
+ * shape keep their own `readFileSync`, deliberately, so they cannot inherit a
+ * reader from the thing they are checking.
+ */
+const LEDGER_GATE_SRC = readFileSync(LEDGER_GATE, "utf8");
 
 /** Credentials the VAC-04 gate asserts the PRESENCE of. Values are never read. */
 const FAKE_CREDS = {
@@ -236,6 +262,34 @@ function ledgerGateExpectedArms(src: string): number {
   ).toBe(1);
   const n = Number(lines[0].trim().split("=")[1]);
   expect(n, "EXPECTED_ARMS did not read as a positive number").toBeGreaterThan(0);
+  return n;
+}
+
+/**
+ * The retry's ATTEMPT BUDGET, read out of the gate script (Phase 164.9 plan 06).
+ *
+ * ⚠️ DERIVED, NEVER RESTATED, and for a reason this repo has paid for: the
+ * `ledger_rows` and `missing` failure arms below assert how many lines of stderr
+ * the gate says it withheld, and that count is now ONE PER ATTEMPT because the
+ * seam is retried and NO attempt's channel is discarded. A literal `1` was right
+ * before the retry and would silently become a stale pin the moment the budget
+ * moves — which is exactly the `[164.7-CITATION-DRIFT-01]` class.
+ *
+ * ⛔ It matches a FIXED assignment (`LEDGER_QUERY_ATTEMPT_BUDGET=3`), not a
+ * `${VAR:-3}` default. The budget must not be overridable from a workflow's
+ * `env:` — that would disable the retry with nothing in the run saying so — and
+ * this reader would stop finding it if someone made it one.
+ */
+function ledgerGateAttemptBudget(src: string): number {
+  const lines = src
+    .split("\n")
+    .filter((l) => /^LEDGER_QUERY_ATTEMPT_BUDGET=\d+$/.test(l.trim()));
+  expect(
+    lines.length,
+    "LEDGER_QUERY_ATTEMPT_BUDGET is not a single live, non-overridable assignment line in the gate script — every attempt count derived from it below would be a guess, and an overridable budget could switch the retry off from a workflow env:",
+  ).toBe(1);
+  const n = Number(lines[0].trim().split("=")[1]);
+  expect(n, "LEDGER_QUERY_ATTEMPT_BUDGET did not read as a budget above 1").toBeGreaterThan(1);
   return n;
 }
 
@@ -2518,6 +2572,15 @@ function scaffoldLedgerCase(
   return {
     LEDGER_BASELINE_FILE: emptyBaseline,
     TEST_SUPABASE_DB_URL: "stub-dsn-never-used",
+    // Phase 164.9 plan 06. The bounded retry around the query seam WAITS between
+    // attempts; every arm here measures the gate's VERDICT and its MESSAGES, not
+    // its wall clock, and the real backoff would push these cases past vitest's
+    // per-test timeout. ⛔ Zeroing the backoff does NOT disable the retry — every
+    // attempt still runs, every retry line is still printed, and the same verdict
+    // is still reached. The ATTEMPT BUDGET is deliberately NOT overridable, so no
+    // arm here can accidentally test a gate with the retry switched off, and
+    // LEDGER_QUERY_RETRY_BACKOFF_ARM below pins the SHIPPED default.
+    LEDGER_QUERY_RETRY_BACKOFF_SECONDS: "0",
     LEDGER_QUERY_CMD: `bash ${writeStubLedger(
       dir,
       opts.missing ?? [],
@@ -2786,10 +2849,15 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
           const control = run(LEDGER_GATE, env);
           expect(control.status).toBe(1);
           expect(control.out).toContain("could not read the TEST ledger row count");
+          // ⚠️ ONE LINE PER ATTEMPT, DERIVED (Phase 164.9 plan 06). The seam is
+          // retried and NO attempt's stderr channel is discarded, so a read that
+          // failed every attempt captures one stub stderr line per attempt. The
+          // literal `1` that stood here was right before the retry and would be a
+          // stale pin the moment the budget moves.
           expect(
             control.out,
             "the control did not print a countable stderr, so breaking `wc` below proves nothing",
-          ).toContain("1 line(s) of stderr captured");
+          ).toContain(`${ledgerGateAttemptBudget(LEDGER_GATE_SRC)} line(s) of stderr captured`);
 
           const PATH = withPathShim(dir, "wc", [
             // Only the single-argument `wc -l` the diagnosis uses; everything else
@@ -2800,7 +2868,7 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
           expect(status).toBe(1);
           // CALIBRATION: the shim APPLIED — the control's real count is gone.
           expect(out, "the `wc` shim did not bite; the count is still the real one").not.toContain(
-            "1 line(s) of stderr captured",
+            `${ledgerGateAttemptBudget(LEDGER_GATE_SRC)} line(s) of stderr captured`,
           );
           expect(out).toContain("could not read the TEST ledger row count");
           expect(
@@ -2901,7 +2969,7 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
         expect(
           control.out,
           "the control did not print a countable stderr, so breaking `wc` below proves nothing",
-        ).toContain("1 line(s) of stderr captured");
+        ).toContain(`${ledgerGateAttemptBudget(LEDGER_GATE_SRC)} line(s) of stderr captured`);
 
         const PATH = withPathShim(dir, "wc", [
           // Only the single-argument `wc -l` the diagnosis uses; everything
@@ -2912,7 +2980,7 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
         expect(status, out).toBe(1);
         // CALIBRATION: the shim APPLIED — the control's real count is gone.
         expect(out, "the `wc` shim did not bite; the count is still the real one").not.toContain(
-          "1 line(s) of stderr captured",
+          `${ledgerGateAttemptBudget(LEDGER_GATE_SRC)} line(s) of stderr captured`,
         );
         expect(
           out,
@@ -3539,6 +3607,57 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
   // Phase 164.8.2 added three more: the harness-calibration arm (WR-03), and the
   // ceiling pair `frontier-ceiling-exceeded RED` / `frontier-ceiling-boundary
   // GREEN` (WR-02 — over the ceiling, and exactly AT it).
+  // ── Phase 164.9 plan 06 — THE RETRY'S TWO CONSTANTS, PINNED STATICALLY ─────
+  // ⛔ WHY THIS LEG EXISTS AT ALL. Every harness that drives the retry — this
+  // file's `scaffoldLedgerCase` and the gate's own `arm_env_retry` — sets
+  // `LEDGER_QUERY_RETRY_BACKOFF_SECONDS=0`, because they measure the retry's
+  // LOGIC and the real backoff would only buy them wall clock. That means NOTHING
+  // ELSE in this repo ever observes the SHIPPED default, so a typo in it (or a
+  // quiet change to 0) would ship green. This leg is the only thing standing
+  // there, and it is deliberately STATIC: it reads the constants, it does not run
+  // the gate.
+  it("the retry's budget is a FIXED assignment and its backoff default is what it claims", () => {
+    const budget = ledgerGateAttemptBudget(LEDGER_GATE_SRC);
+    expect(budget, "the attempt budget must be above 1 or there is no retry").toBeGreaterThan(1);
+
+    // ⚠️ THE TRAILING `\` EXCLUSION IS LOAD-BEARING, not tidiness. The gate's own
+    // `arm_env_retry` prefixes a child process with
+    // `LEDGER_QUERY_RETRY_BACKOFF_SECONDS=0 \`, which is an ENV PREFIX on a
+    // command, not an assignment of the shipped default. Counting it made this
+    // leg read "2 assignments" and fail for a reason that says nothing about the
+    // constant.
+    const backoffLines = LEDGER_GATE_SRC.split("\n").filter(
+      (l) =>
+        /^LEDGER_QUERY_RETRY_BACKOFF_SECONDS=/.test(l.trim()) &&
+        !l.trimEnd().endsWith("\\"),
+    );
+    expect(
+      backoffLines.length,
+      "LEDGER_QUERY_RETRY_BACKOFF_SECONDS is not a single live assignment line",
+    ).toBe(1);
+    const shipped = /^LEDGER_QUERY_RETRY_BACKOFF_SECONDS="\$\{LEDGER_QUERY_RETRY_BACKOFF_SECONDS:-(\d+)\}"$/.exec(
+      backoffLines[0].trim(),
+    );
+    expect(
+      shipped,
+      "the backoff is no longer an env-overridable assignment with a literal default — the harnesses that zero it would break, or the default became unreadable",
+    ).not.toBeNull();
+    expect(
+      Number(shipped?.[1]),
+      "the SHIPPED backoff default is 0, so a retry would hammer a fault it is supposed to wait out. Nothing else in this repo observes this value — every harness overrides it — so this leg is the only place it can be caught",
+    ).toBeGreaterThan(0);
+
+    // ⛔ THE BUDGET MUST NOT BE OVERRIDABLE. An env-overridable budget could be
+    // set to 1 from a workflow's `env:`, switching the retry off with nothing in
+    // the run saying so. `ledgerGateAttemptBudget` above only matches the fixed
+    // form, so this is a second, explicit statement of the same requirement in
+    // the words a future editor would search for.
+    expect(
+      LEDGER_GATE_SRC,
+      "the attempt budget became env-overridable — a workflow could then disable the retry silently",
+    ).not.toContain("LEDGER_QUERY_ATTEMPT_BUDGET=${LEDGER_QUERY_ATTEMPT_BUDGET");
+  });
+
   it("--self-test proves every red mode and both green paths, and exits 0", () => {
     const res = spawnSync("bash", [LEDGER_GATE, "--self-test"], {
       cwd: process.cwd(),
@@ -3556,6 +3675,13 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     expect(out).toContain("tip-equal-missing RED");
     expect(out).toContain("frontier-ceiling-exceeded RED");
     expect(out).toContain("frontier-ceiling-boundary GREEN");
+    // Phase 164.9 plan 06 — the two retry arms. Named here for the same reason
+    // as every arm above: an arm that vanished from the corpus must fail THIS
+    // leg by name, not merely move a count.
+    expect(out).toContain("retry recovers a transient ledger read (GREEN)");
+    expect(out).toContain(
+      "retry EXHAUSTS loudly, and answer-level failures are not retried RED",
+    );
     expect(out).toContain("harness calibration: run_arm can report FAIL, and the flip inverts");
   });
 

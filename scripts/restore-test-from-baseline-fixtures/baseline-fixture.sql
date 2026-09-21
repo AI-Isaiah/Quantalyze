@@ -75,6 +75,13 @@ COMMENT ON SCHEMA "public" IS 'standard public schema';
 CREATE TABLE IF NOT EXISTS "public"."fx_keep" (
     "id" integer NOT NULL,
     "label" "text",
+    -- 164.9-07: the fixture analog of `profiles.manager_status DEFAULT
+    -- 'newbie'` (supabase/schema/baseline.sql:10169) — this column, NOT a new
+    -- table, so arms 9/12/18's exact `tables=2` pin is unaffected. Row id=1's
+    -- allowlisted INSERT (20260103000000_fixture_c.sql) sets this to
+    -- 'verified' explicitly; every other row is left at this DEFAULT, the
+    -- fixture's stand-in for a row an UPDATE-only-scoped replay never revisits.
+    "status" "text" DEFAULT 'newbie'::"text" NOT NULL,
     CONSTRAINT "fx_keep_kind_check" CHECK (("label" = ANY (ARRAY['ref_a'::"text", 'ref_b'::"text", 'ref_c'::"text"])))
 );
 

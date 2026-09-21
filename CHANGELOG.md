@@ -1,5 +1,148 @@
 # Changelog
 
+## [0.85.0.0] - 2026-09-21 — TESTISOLATION: a CI run stops asserting about other people's rows
+
+⭐ **What changed for whoever reads this next.** Shared TEST is a database other people's CI also
+writes to. This repo's gates asserted globally against it — *"no stuck jobs exist"*, *"the table is
+empty"* — so they measured other people's rows too, and the answer was cheap to make green by
+waiting rather than by being right. This phase narrows those assertions to the rows a run created
+itself, gives the credentialed live-DB class somewhere it can actually go RED, and turns four
+conditions that were previously log annotations nobody gated on into verdicts that fail a job.
+
+⚠️ **Read the known limits at the bottom.** Two of the thirteen success criteria are PARTIALLY
+delivered and one ships PENDING by founder decision. They are recorded here rather than left for a
+reader to discover, because a release note that carries only wins is how a narrowing gets mistaken
+for a replacement.
+
+### Added
+
+- **`frontend-live-db-lane` — a hermetic live-DB vitest lane, blocking in the `frontend` aggregator
+  in BOTH its `needs:` list and its result loop.** The ~284-test credentialed class ran nowhere it
+  could fail: the ordinary shards deliberately run WITHOUT TEST credentials, and an in-file
+  prohibition says so, because adding them would un-skip the class and shift the coverage ratchet's
+  denominator. The lane stands the class up on a local Supabase stack instead, so the existing
+  shards' prohibition is untouched. Its corpus is DERIVED from the live-DB gate symbol
+  (`scripts/live-db-lane-corpus.mjs`), so the lane's `include` and the gate's expectation cannot
+  drift apart, and it carries three independent anti-vacuity controls — an empty-corpus exit, a
+  preflight that refuses a non-numeric count BY NAME, and `passWithNoTests: false`.
+- **`scripts/lint-migration-data-dependence.mjs` — an author-time refusal, not a pragma.** TEST holds
+  PROD's catalogue but never its data, so a migration in this repo's house style (a data-reading `DO`
+  block that `RAISE EXCEPTION`s on an unexpected count) applies cleanly to PROD and REFUSES on TEST —
+  and a refused TEST apply blocks the PROD apply. Five refusal spellings (`IF … RAISE`, subquery-
+  conditioned, `INTO STRICT`, `NOT FOUND`, `ASSERT`), each with a red AND a green fixture. ⛔ It has
+  no opt-out marker of any kind, by design. Closes `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`.
+- **`scripts/live-db-fixture-drift-census.mjs` — the same class caught statically**, four drift
+  classes each with red/green fixture pairs, plus a shrink-only baseline.
+- **`scripts/shared-test-db-keys.sh` and `scripts/wait-for-test-schema-apply.sh`.** Two units that
+  were sharing one advisory key now have two, and three reader jobs ORDER themselves behind a TEST
+  schema apply instead of racing it. The keys script's own `--self-test` FAILS if the two keys are
+  ever made equal.
+- **`scripts/mutex-dead-holder-verdict.sh` and a real drill (`scripts/pg-lane/mutex-dead-holder-lane.sh`).**
+  The drill kills an actual lock holder on a disposable cluster and requires the verdict to bite.
+- **`scripts/live-db-execution-ledger.mjs` + `-reporter.mjs`** — a dated, shrink-only ledger binding
+  each lane run to its own artifact by nonce, so a vacuous run is refused rather than counted.
+- **`analytics-service/tests/live_db_transport.py`** — a bounded retry with observed exhaustion and
+  observed discrimination, plus an unconditional retry counter at session teardown.
+- **`scripts/test-only-normalize-analytics-url.sh`** and `docs/runbooks/test-analytics-url.md`;
+  `docs/runbooks/shared-test-db-mutex.md`.
+- **Hygiene rule 4 — a raw NUL byte in a tracked text file is now a GATE.** With one named,
+  reason-carrying exemption for the single load-bearing NUL.
+- **Arm D1 of the analytics-destination SQL gate reads the LIVE row**, branching on the database
+  identity marker FIRST, with **no branch a silent skip** and a fall-through that raises. It stops
+  being a claim about the migration that seeded the row and becomes a measurement of the database.
+  ⛔ It never echoes the value — this repo is public and so is every restore log.
+
+### Changed
+
+- **Four conditions became verdicts instead of annotations.** A dead mutex holder, a schema apply in
+  flight, an unannounceable restore and an unexecuted lane each now fail a job.
+- **A restore that cannot announce itself REFUSES to run** — the abort precedes the backup and every
+  write, and the mutex release stays `if: always()`.
+- **The restore script's extension guard is a bidirectional name-set diff, not a count**, with
+  distinct LOST and GAINED messages. 32 self-test arms.
+- **Ratchets moved the right way:** `ARMS_FLOOR` 413 → 423, `WAIVED_CEILING` still **0**, and the
+  fixture-drift ledger shrank **4 → 0 by repairing every finding at the call site** rather than
+  allowlisting one. The lazy repair — widening `supabase/config.toml` to expose `cron` — was refused
+  in writing.
+
+### Fixed
+
+- ⛔ **A PRODUCTION fan-in defect, found by the new lane and previously masked.** Enqueuing a LIVE
+  kind reached a statement a retired kind never did. Invisible to a static census by construction —
+  a missing column in an `INSERT`, inside one of two same-named overloads — and masked by an error
+  raised earlier in the same call. It survived a green suite, `mypy --strict` and a purpose-built
+  drift census. Booked as `[164.9-FANIN-STATUS-NEVER-SET]`.
+- **Six gates that could PASS having measured nothing.** The ordering wait's self-test was invoked by
+  nothing; the dead-holder drill had zero call sites; the leak detector could report clean having
+  scanned no file; an absent dead-holder marker read as a green rather than an absence; a control
+  invariant `python -O` strips became a real raise; a HELD in-flight flag now beats a CONCLUDED apply.
+- **`grep` is SILENTLY BLIND to a NUL-bearing text file** — it reads as binary, prints nothing and
+  exits 1, which reads as "clean", so every grep-based audit over it scanned an empty file. Five
+  instances found and fixed; the class is now gated rather than swept.
+- **Taint analysis leaks in the new linter, both directions:** a leading `LANGUAGE` clause hid an
+  anonymous block, an overwritten variable failed to CLEAR a taint (so a reused scratch variable
+  condemned the guard above it), and taint failed to travel through plain assignment.
+- **A retrying proxy silently dropped the dunder methods that bypass `__getattr__`.**
+- **A fixture-drift corpus floor was stale-low by eleven files**, which is the direction a
+  bound-only-from-above control cannot see about itself.
+- **PGRST205 reached through a schema PostgREST does not serve**, and a protocol-relative URL.
+- **`[164.8.2-VAC08-FATAL-ON-TRANSIENT]` closed with a bounded retry whose status is RETURNED, not
+  swallowed.** ⛔ Restoring the `|| echo ""` was explicitly refused in-file: that collapse IS the
+  defect. An unreadable input still reaches its named MEASURE_FAIL rather than passing quietly.
+- **The local-stack baseline replays allowlisted migration-seeded reference data**, so the lane's
+  fixtures meet the rows their migrations claim to have seeded.
+- **An environment key this phase introduced was never classified** in the env manifest contract, so
+  the manifest test and the shipped surface disagreed.
+
+### Security
+
+- **Absolute paths carrying the LOCAL USERNAME reached printed output from five sites.** This
+  repository is public and the Actions log is world-readable, so a printed path is a published one.
+  All five now reduce to a repo-relative path or `<outside the repository>/<basename>`; each fix was
+  calibrated by triggering the branch for real, not by reading the edit. Two of the five were found
+  only by the security audit, after two review rounds had passed over them.
+- **A skip message rendered a transport exception whose text can name the HOST** — it names the
+  exception TYPE only.
+- ⭐ **A repudiation control that could not work was replaced, not reworded.** "Every retry emits a
+  log line" is vacuous when pytest renders captured logs for FAILING tests only: an absorbed retry on
+  a green run printed nothing at all, which is the exact case the control existed to make visible.
+  It is now an unconditional counter at session teardown.
+
+### Tests
+
+- Four new contract test files; hermetic self-tests across the new surface (5 / 13 / 18 / 32 / 46
+  arms and a 19-check remediation), each proven RED before being trusted GREEN.
+- Every added assertion was falsified by neutering it, observing the RED, and restoring from a byte
+  backup verified with `cmp`.
+
+### Notes — the known limits, stated so they can be checked rather than assumed
+
+- ⚠️ **`[164.9-CALIBRATION-NARROWS-NOT-REPLACES]`** — the three foreign-row calibrations NARROW the
+  global assertions and MEASURE the margin. They do **not** caller-scope the deployed sweep, and
+  cannot without a production migration adding a run discriminator column. All three files say so in
+  their own headers.
+- ⚠️ **`[164.9-RPC-RETRY-NARROWED-SKIP-REOPENED]`** — the transport retry covers **READS ONLY**.
+  `rpc` sits on the idempotency boundary fail-closed, so a sustained RPC read-timeout still reaches a
+  skip. Destination Phase 164.9.1.
+- ⚠️ **`[164.9-LEDGER-CEILING-COORDINATED-EDIT]`** — the execution ledger's ceiling makes growth
+  impossible to do **silently**, not impossible: three coordinated number edits in one commit still
+  pass. ⛔ Do not describe it as "the ledger cannot grow".
+- ⚠️ **Criterion 8 ships PENDING by founder decision (Option A: ship → dispatch → record).** The
+  restore workflow's guard refuses any dispatch that is not from the default branch, so this phase's
+  new restore guards cannot be exercised against shared TEST until this merges. The recording act is
+  booked to a named human as `[164.9-CRIT8-RESTORE-DISPATCH-RECORD]`, and a run id alone does not
+  close it.
+- ⚠️ The live-DB census prints a non-zero unresolved residue every run and does **not** claim it is
+  zero; it is routed to execution in the lane.
+
+### Root cause — why the assertions were global in the first place
+
+Each job acquired the shared-TEST lock as an early step and released it at job end, holding it
+through minutes of test execution when the genuinely exclusive work was seconds. That was not
+carelessness: while the assertions were GLOBAL, excluding everyone for the whole job was the only
+safe option. Converting them to own-row assertions is what makes shrinking the critical section
+possible — which is Phase 164.4.2's work, not this one's. ⛔ This phase did not itself shrink it.
+
 ## [0.84.0.0] - 2026-09-20 — MT5RECON-GAP: the MT5 backfill runs, and the login error stops blaming you
 
 ⭐ **What changed for whoever reads this next.** Three MT5 defects, all MEASURED in PROD on

@@ -29,6 +29,13 @@ import {
  * the backstop throws before any DB query runs. We hoist a mutable
  * `mockAuthUserId` so each call can switch its caller identity.
  */
+// ⚠️ Phase 164.9 fix round — `getMyAllocationDashboard` transitively imports
+// `server-only`, which throws outside a React Server Component. The import is
+// dynamic and inside the test body, so this file was GREEN in every vitest
+// shard purely because the arm skipped there and the module never loaded. The
+// repo's standing idiom for exactly this is a bare stub; 18 other specs use it.
+vi.mock("server-only", () => ({}));
+
 const authMock = vi.hoisted(() => ({ userId: null as string | null }));
 
 vi.mock("@/lib/supabase/server", async () => {
@@ -130,15 +137,30 @@ describe("Phase 5 outcomes fan-out + nested match_decisions join (Voice-D11)", (
       // Seed 2 strategies (orig + replacement)
       const S_ORIG_NAME = `Phase5-Orig-${stamp}`;
       const S_REPL_NAME = `Phase5-Repl-${stamp}`;
+      // ⚠️ Phase 164.9 fix round — `disclosure_tier` is what decides whether the
+      // REAL name reaches the payload. `displayStrategyName` returns the
+      // synthetic `Strategy #<id-prefix>` for anything that is not
+      // `institutional` and carries no codename, so a tier-less seed made this
+      // arm assert a label the resolver can never produce. The arm's own title
+      // is "resolves nested payload.match_decision.original_strategy.name", so
+      // the fixture must seed the tier under which a name IS resolved.
       const { data: origStrat, error: origErr } = await admin
         .from("strategies")
-        .insert({ name: S_ORIG_NAME, user_id: alloc1 })
+        .insert({
+          name: S_ORIG_NAME,
+          user_id: alloc1,
+          disclosure_tier: "institutional",
+        })
         .select("id")
         .single();
       if (origErr || !origStrat) throw origErr ?? new Error("no orig strat");
       const { data: replStrat, error: replErr } = await admin
         .from("strategies")
-        .insert({ name: S_REPL_NAME, user_id: alloc1 })
+        .insert({
+          name: S_REPL_NAME,
+          user_id: alloc1,
+          disclosure_tier: "institutional",
+        })
         .select("id")
         .single();
       if (replErr || !replStrat) throw replErr ?? new Error("no repl strat");
@@ -183,6 +205,12 @@ describe("Phase 5 outcomes fan-out + nested match_decisions join (Voice-D11)", (
             strategy_id: S_REPL_ID,
             original_strategy_id: S_ORIG_ID,
             decision: "sent_as_intro",
+            // ⚠️ Phase 164.9 fix round (F3) — `match_decisions.decided_by` is
+            // NOT NULL with no default, and this seed omitted it, so it raised
+            // 23502 against a real catalogue. The allocator is the decider;
+            // that is the same value `match-decisions-xor-rls.test.ts` already
+            // supplies at its own seeds.
+            decided_by: allocId,
             kind: "bridge_recommended",
           })
           .select("id")

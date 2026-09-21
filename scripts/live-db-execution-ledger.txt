@@ -1,0 +1,157 @@
+# The live-DB lane's EXECUTION LEDGER - the known-bad arms, and what closes each.
+#
+# DATED 2026-09-21, Phase 164.9 TESTISOLATION, the ledger round arising from plan
+# 08 and its fix round, for [164.9-LIVEDB-LANE-EXECUTION-CENSUS]. Every line below
+# was GENERATED from a real run - `bash scripts/local-stack/run.sh up` then
+# `npm run test:live-db` - by
+# `node scripts/live-db-execution-ledger.mjs --generate`, which derives the module,
+# the arm and the signature class from that run's own artifact. Nothing in the
+# entry list was typed by hand, and the gate re-derives the same set on every run.
+#
+# THE MEASUREMENT THIS FILE IS A PICTURE OF, taken twice at head cdb5a989 and
+# byte-identical both times:
+#
+#     Test Files  11 failed | 36 passed |  2 skipped (49)
+#          Tests  18 failed | 378 passed | 81 skipped (477)
+#
+# EVERY TEST STILL EXECUTES. 396 arms RAN (378 passed + 18 failed) across all 49
+# files of the derived corpus; the 81 skips are the corpus's own pre-existing
+# conditional gates and not one of them was added here. The ledger classifies a
+# failure that HAPPENED - it cannot skip, deselect or silence an arm, because it
+# reads the run's artifact after the run is over. The gate PRINTS that executed
+# count on every invocation and REFUSES a run that executed nothing.
+#
+# WHY THIS EXISTS. `frontend-live-db-lane` is wired BLOCKING and was measured RED.
+# The fix round closed 17 of the 20 in-scope failures at the call site; the 18 that
+# remain are not closable by a fixture. A blocking job that can only ever be red is
+# a job whose red says nothing - and the two obvious exits were both refused:
+# making the aggregator row advisory is a FORBIDDEN CLOSURE, and blocking this
+# phase on a production baseline re-dump is someone else's work on someone else's
+# schedule. Founder decision, 2026-09-21: seed a dated, shrink-only execution
+# ledger instead. The lane is GREEN on a tree whose known-bad set is EXACTLY this
+# file, and RED the moment that set changes IN EITHER DIRECTION.
+#
+# THE AIM IS ZERO. This is a RATCHET, not a mute button. The gate still fails loud
+# on any live-DB arm that fails and is NOT listed here. What the file does is stop
+# a KNOWN, pre-existing set from masking a NEW one - the same shape as
+# scripts/vac08-ledger-baseline.txt and
+# scripts/lint-migration-data-dependence-baseline.txt, this repository's two other
+# shrink-only ledgers, whose idiom this deliberately copies rather than invents.
+#
+# THIS FILE MUST ONLY SHRINK, and BOTH directions are a HARD FAILURE:
+#   NEW    an arm failed that this file does not carry. Regression, or a defect
+#          the lane has just surfaced. The remedy is to FIX THE ARM. It is NEVER
+#          to add a line - see the founder-decision rule below.
+#   STALE  an arm listed here no longer fails. DELETE the line, in the commit that
+#          made it stop being true. A ledger allowed to hold stale entries is a
+#          control that has quietly stopped controlling.
+# Both are enforced by `scripts/live-db-execution-ledger.mjs`, whose `--self-test`
+# ships a red and a green case for each. The count below is re-derived on every
+# run: a list with no recorded cardinality can be emptied without a single red.
+#
+# AND SHRINK-ONLY IS ITSELF A MECHANISM, NOT THIS PARAGRAPH. Set equality alone
+# cannot see GROWTH - append a line for a new regression, bump ENTRY_COUNT to
+# match, and the comparison is SATISFIED BY THE NEW LINE. So the gate also carries
+# `ENTRY_CEILING`, a dated constant this file's cardinality may never exceed, and
+# `src/__tests__/live-db-execution-ledger.contract.test.ts` catches the other
+# direction: a ceiling left standing above a ledger that correctly shrank has
+# quietly handed back room to grow. ENTRY_CEILING moves DOWN with this file, in the
+# same commit, and UP only by the founder decision described below.
+#
+# ENTRY_COUNT = 18
+#
+# HOW AN ENTRY MAY BE ADDED - FOUNDER DECISION ONLY. The 18 below were seeded by
+# the founder decision of 2026-09-21 named above. From here, a NEW failing arm is
+# fixed, not ledgered. Adding a line is a founder call about a specific arm that
+# genuinely cannot pass on this host, and it carries the same disclosure duty every
+# line here carries: which act closes it. This is the same rule
+# scripts/vac08-ledger-baseline.txt states for itself, and for the same reason.
+#
+# THREE KINDS, RECORDED SEPARATELY BECAUSE THEY CLOSE BY THREE DIFFERENT ACTS.
+# Flattening them into one undifferentiated list is exactly what this file refuses
+# to do - it would send whoever picks this up looking for one fix where there are
+# three.
+#
+#   K1-baseline-privilege-state-absent          9 entries
+#       The committed supabase/schema/baseline.sql is SCHEMA-ONLY and does not
+#       reproduce column- and function-level privilege state, so an arm asserting
+#       that a REVOKE or a GRANT holds fails on the local stack. Two of them say so
+#       in their own words. READ THESE AS A STATEMENT ABOUT THE BASELINE, NOT ABOUT
+#       PRODUCTION. CLOSED BY: changing how the baseline is DUMPED. BASELINE.md
+#       makes that a human-run command against production; no agent closes this
+#       one alone.
+#
+#   K2-function-body-role-gate                  6 entries
+#       All six in wizard-rpcs-live-db. MEASURED, and it is NOT the same failure as
+#       K1: the caller REACHED the function body and the body's own role gate
+#       refused it, with the SQLSTATE the class records. The baseline DOES carry the
+#       REVOKE/GRANT pair for that function, so A RE-DUMP MAY NOT CLOSE THESE SIX.
+#       Reaching the body at all points at the pg_default_acl re-grant the column
+#       comment itself warns about. The arms additionally assert a "happy path (as
+#       `authenticated` - grant withdrawn by 20260814120000)", which is
+#       self-contradictory on its face. CLOSED BY: a separate investigation, taken
+#       as its own question. Plan 08's SUMMARY recorded these as more K1; its fix
+#       round corrected that, and this file keeps the correction rather than the
+#       original.
+#
+#   K3-migration-or-invariant-decision          3 entries
+#       Root causes derived one at a time by the fix round and written at each
+#       assertion.
+#         * g10b P12 - a REAL production defect the lane surfaced: the public
+#           wrapper routes to an internal overload whose INSERT omits the status
+#           column, so a job enqueued WITH parents never enters the fan-in state.
+#           CLOSED BY: a migration against a production catalogue. BOOKED, NOT
+#           FIXED HERE.
+#         * match-decisions-xor-rls - asserts a unique index migration 081
+#           REPLACED. CLOSED BY: a decision about what the arm should assert under
+#           the CURRENT invariant. An intent question, not fixture drift.
+#         * request-allocator-holdings-sync-queued - the Queued shape is returned
+#           only from an exception handler the RPC's own optimistic look-up
+#           prevents from ever firing. CLOSED BY: an RPC change, or a decision that
+#           the shape is retired.
+#
+# EVERY ENTRY CARRIES THE SAME DESTINATION, deliberately rather than lazily: this
+# is ONE campaign over one corpus. [164.9-LIVEDB-LANE-EXECUTION-CENSUS] in TODOS.md
+# carries the owner, the trigger and the forbidden closures.
+#
+# WHAT IS MEASURED AND WHAT IS JUDGED, so nobody reads more into a line than it
+# says. The MODULE, the ARM and the SIGNATURE CLASS are MEASURED - derived from the
+# run by the classifier, re-derived on every run, and a drift in any of them
+# reddens the gate. The KIND is a recorded JUDGEMENT: "a re-dump will close this"
+# is not something a test run can observe. Two of the three routing rules are
+# nonetheless EVIDENCE-KEYED (see `routeKind` in the script); the third is the
+# explicit three-arm list above.
+#
+# VERDICTS, NEVER SPECIMENS. THIS REPOSITORY IS PUBLIC AND THIS FILE IS TRACKED. A
+# line carries the module, a kind, a signature class and the arm's own name - never
+# a failure message, a value, a host, a DSN, an absolute path or a username. The
+# raw measurement lives in .live-db-lane-execution.json, which is GITIGNORED for
+# exactly this reason and must stay that way.
+#
+# WHAT THIS PLAN DID NOT DO, stated so the file is not read as a repair record: NO
+# test was deleted, NO permanent skip was added, NO assertion was relaxed, the
+# corpus was NOT narrowed (49 files, unchanged), the aggregator wiring was NOT
+# touched and the row was NOT made advisory, and NO migration was authored.
+#
+# FIELDS, TAB-separated: <module>  <kind>  <signature class>  <arm>  # <destination>
+# The arm is vitest's own fullName, suite and test joined by " > ".
+# Parsed BY TAB, never by stripping from `#` onward - an arm name may legitimately
+# contain a `#`, and the sibling ledgers' sed idiom would corrupt it.
+src/__tests__/audit-log-cold-archive.test.ts	K1-baseline-privilege-state-absent	C1-expected-empty-got-rows	Migration 056 — audit_log_cold table + append-only invariant > service-role DELETE on audit_log_cold is rejected (append-only invariant)	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/audit-log-cold-archive.test.ts	K1-baseline-privilege-state-absent	C1-expected-empty-got-rows	Migration 056 — audit_log_cold table + append-only invariant > service-role UPDATE on audit_log_cold is rejected (append-only invariant)	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/audit-log-rls.test.ts	K1-baseline-privilege-state-absent	C1-expected-empty-got-rows	Migration 049 — audit_log deny policies > service-role DELETE on audit_log is rejected	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/audit-log-rls.test.ts	K1-baseline-privilege-state-absent	C1-expected-empty-got-rows	Migration 049 — audit_log deny policies > service-role UPDATE on audit_log is rejected	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/compute-jobs-audit-2026-05-07-g10b.test.ts	K3-migration-or-invariant-decision	C5-expected-value-mismatch	audit-2026-05-07 G10.B / mig 109 — fan-in chain > P12: enqueue with parent_job_ids inserts row as done_pending_children	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/log-audit-event-service-rpc.test.ts	K1-baseline-privilege-state-absent	C6-expected-message-match-missed	Migration 058 — log_audit_event_service RPC runtime gates > authenticated JWT cannot EXECUTE log_audit_event_service (attribution-spoof gate)	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/match-decisions-xor-rls.test.ts	K3-migration-or-invariant-decision	C3-expected-non-null-got-null	match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB) > bridge_outcomes widened UNIQUE: strategy-sourced rows preserve (allocator+strategy) 1-per-pair guarantee via COALESCE('')	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/request-allocator-holdings-sync-queued.test.ts	K3-migration-or-invariant-decision	C4-expected-true-got-undefined	ISSUE-008 — request_allocator_holdings_sync f8 Queued path > returns {already_inflight, next_attempt_at} when a live job exists	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/sanitize-user-rpc.test.ts	K1-baseline-privilege-state-absent	C8-thrown-error-not-assertion	Migration 120 — sanitize_user hardening > P916: sanitize_user purges auth.refresh_tokens + auth.sessions and anonymizes auth.users	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/sanitize-user.test.ts	K1-baseline-privilege-state-absent	C3-expected-non-null-got-null	Migration 055 — sanitize_user RPC > H-0031: a non-service-role (anon) caller is denied EXECUTE on sanitize_user	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/update-allocator-mandates-rpc.test.ts	K1-baseline-privilege-state-absent	C7-expected-message-nomatch-hit	MANDATE-05 / MANDATE-06: update_allocator_mandates RPC > unauthenticated anon call: RPC is rejected at the GRANT layer (42501 insufficient_privilege) — anon REVOKEd in migration 061, function body never runs	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/wizard-rpcs-live-db.test.ts	K2-function-body-role-gate	C2-expected-null-got-pgerror-42501	create_wizard_strategy RPC (Migration 031 / P474) > happy path (as `authenticated` — grant withdrawn by 20260814120000): inserts api_keys + strategies (source=wizard, status=draft) atomically	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/wizard-rpcs-live-db.test.ts	K2-function-body-role-gate	C2-expected-null-got-pgerror-42501	finalize_wizard_strategy RPC (Migration 031 / P474) > happy path: flips draft (source=wizard, status=draft) to status=pending_review	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/wizard-rpcs-live-db.test.ts	K2-function-body-role-gate	C2-expected-null-got-pgerror-42501	finalize_wizard_strategy RPC (Migration 031 / P474) > rejects finalize on someone else's draft (SQLSTATE 42501)	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/wizard-rpcs-live-db.test.ts	K2-function-body-role-gate	C2-expected-null-got-pgerror-42501	guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 126 / Issue 1 + Migration 127 / Finding 1) > blocks a direct authenticated UPDATE that would flip wizard draft status	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/wizard-rpcs-live-db.test.ts	K2-function-body-role-gate	C2-expected-null-got-pgerror-42501	guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 126 / Issue 1 + Migration 127 / Finding 1) > Migration 126: SECURITY DEFINER finalize_wizard_strategy path passes the guard	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/wizard-rpcs-live-db.test.ts	K2-function-body-role-gate	C2-expected-null-got-pgerror-42501	guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 126 / Issue 1 + Migration 127 / Finding 1) > Migration 127 (Finding 1): authenticated session cannot smuggle the wizard_rpc_active GUC	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/lib/sec-005-live-probe.test.ts	K1-baseline-privilege-state-absent	C2-expected-null-got-value	SEC-005 live probe — migration 027 ground truth > authenticated client returns NULL for encrypted columns	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]

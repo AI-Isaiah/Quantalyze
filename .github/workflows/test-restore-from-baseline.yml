@@ -1231,6 +1231,129 @@ jobs:
           echo "activity-gate breakdown (states and counts only): ${breakdown}"
           echo "activity-gate: 0 other active client session(s) — shared TEST is measurably quiet, inside the held mutex."
 
+      # ── THE SCHEMA-APPLY-IN-FLIGHT FLAG (Phase 164.9 plan 06) ──────────────
+      # This workflow is one of the TWO schema WRITERS against shared TEST (the
+      # other is supabase-migrate.yml's `apply-test`), so it announces its write
+      # on the same second advisory key. Without this, a reader's ordering wait
+      # in ci.yml would be blind to exactly one of the two writers — and to the
+      # more destructive one.
+      #
+      # ⛔ THE FLAG IS NOT A LOCK. Nothing blocks on it. The mutual-exclusion key
+      # is untouched: this job still takes it in `Acquire shared-test-db mutex`
+      # and holds it across the whole act, literal for literal, as before.
+      # ⚠️ THAT IS A STATEMENT ABOUT THE KEY, NOT A LICENCE FOR THE STEP. The key
+      # blocks nobody, but ANNOUNCING is mandatory for THIS workflow: if the
+      # announcement cannot be made, the step exits 1 and the restore does not
+      # happen. The long ⛔ note on the `*)` branch below carries the reasoning.
+      #
+      # ⚠️ PLACED AFTER THE ACTIVITY GATE, AND THAT ORDERING IS LOAD-BEARING, NOT
+      # cosmetic. The gate counts non-idle client backends and excludes exactly
+      # ONE application_name — the mutex holder's. This announcement opens a
+      # SECOND long-lived session running `pg_sleep`, which reads `active`, so
+      # announcing BEFORE the gate would make the gate count our own announcement
+      # and refuse the restore it is guarding. Announcing after it keeps the gate
+      # measuring other people's CI, which is what it is for.
+      #
+      # Scope: `mode=restore` only, matching the activity gate. A preflight rolls
+      # its transaction back and writes nothing, so there is no apply to announce.
+      - name: Announce the restore as a schema apply in flight (a FLAG, not a lock)
+        if: inputs.mode == 'restore'
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/shared-test-db-keys.sh
+          . "${GITHUB_WORKSPACE}/scripts/shared-test-db-keys.sh"
+          # The session-mode DSN derived ONCE, in `Derive the session-mode TEST DSN`.
+          # NEVER echoed: this log is public.
+          dsn="${TEST_DB_SESSION_URL}"
+          # This connection carries ZERO traffic for the length of the restore, so
+          # it needs the same libpq keepalives the mutex holder carries, for the
+          # same reason: a runner-side NAT idle expiry would otherwise zombify it.
+          keepalive_params="keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4"
+          case "${dsn}" in
+            *\?*) dsn="${dsn}&${keepalive_params}" ;;
+            *)    dsn="${dsn}?${keepalive_params}" ;;
+          esac
+          log="${RUNNER_TEMP}/schema-apply-inflight.log"
+          # `: > "${log}"` FIRST, so every `grep` below reads a file that exists.
+          # That is why none of them needs its stderr suppressed — this job's
+          # `2>/dev/null` site list is an exact allowlist and this step adds none.
+          : > "${log}"
+          # `pg_try_advisory_lock`, so an announcement can never block the restore
+          # it announces. The two session GUCs are the mutex holder's, for the same
+          # two measured reasons (158-MUTEX-01, 158-MUTEX-02) — and the second is
+          # ALSO this flag's release path: there is no release step, deliberately.
+          # Job teardown drops this session and Postgres frees the key, exactly as
+          # it does for the mutex holder, while `client_connection_check_interval`
+          # bounds an orphaned backend at ~30s. A release step would buy a shorter
+          # window on a key NOTHING BLOCKS ON, at the cost of a softening token in
+          # a job whose whole contract is that a failure can never read as a pass.
+          PGAPPNAME=ci-schema-apply-inflight PGCONNECT_TIMEOUT=15 \
+            nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+              -c "SET statement_timeout = 0;" \
+              -c "SET client_connection_check_interval = '30s';" \
+              -c "$(shared_test_db_inflight_acquire_sql)" \
+              -c "SELECT pg_sleep(6000);" \
+              >> "${log}" 2>&1 &
+          # ⛔ `busy` IS A PLAIN LOG LINE, NOT A `::warning::` ANNOTATION, AND THAT
+          # IS A GATE REQUIREMENT, NOT A STYLE CHOICE. This job carries a
+          # nine-token no-softening scan and `::warning` is one of the nine,
+          # because a warning where a verdict belongs is exactly how a failure
+          # comes to read as a pass here. BUSY is not a failure: it means SOMEONE
+          # ELSE holds the key, so a reader's probe answers `held` and the
+          # protection this flag exists to give is in place either way. The honest
+          # emission is a named, greppable line (`schema-apply-in-flight:
+          # NOT-ANNOUNCED`), never an annotation. ⛔ Do not "improve" it into one.
+          #
+          # ⛔ COULD-NOT-ANNOUNCE IS A DIFFERENT OUTCOME AND IT IS A HARD FAILURE.
+          # ⚠️ IT DID NOT USED TO BE, and the line it printed — near-verbatim from
+          # supabase-migrate.yml's identical branch — reassured a reader that the
+          # restore may proceed. THERE THE CLAIM IS TRUE: a reader that cannot see
+          # the apply flag still finds the apply RUN through the Actions API. HERE
+          # THERE IS NO SUCH FALLBACK. This workflow is manually dispatched and
+          # produces NO Actions run on the commit under test, so the flag is the
+          # ONLY signal that sees it — scripts/wait-for-test-schema-apply.sh's
+          # header says exactly that, and its starred `absent apply but flag HELD`
+          # calibration is built on it.
+          #
+          # What proceeding unannounced costs: a concurrent `sql-tests`, `python`
+          # or `e2e-seeded` run on a commit that touched no migration measures
+          # `flag=clear`, `apply=absent`, satisfies `no-apply-run`, prints
+          # "Nothing to order against; this is the ordinary case", and queues
+          # straight into this job's `DROP SCHEMA public CASCADE`.
+          # What failing costs: ONE re-dispatch. This restore is already gated on
+          # a confirm token, the marker query, an activity gate and the held
+          # mutex, and this step runs BEFORE the backup and long before any write
+          # — so an abort here leaves the database untouched and the mutex is
+          # released by the `if: always()` step below.
+          # ⛔ Do not soften this back into a log line to get a restore through.
+          # ⛔ Do not copy this failure into supabase-migrate.yml: there the
+          # best-effort reading is correct, and reddening would block a
+          # production apply on a signalling mechanism.
+          waited=0
+          outcome=""
+          while [ "${waited}" -lt 60 ] && [ -z "${outcome}" ]; do
+            if grep -aq 'INFLIGHT-FLAG-HELD' "${log}"; then
+              outcome=held
+            elif grep -aq 'INFLIGHT-FLAG-BUSY' "${log}"; then
+              outcome=busy
+            else
+              sleep 2
+              waited=$(( waited + 2 ))
+            fi
+          done
+          case "${outcome}" in
+            held)
+              echo "schema-apply-in-flight flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) held after ${waited}s. Nothing blocks on it; the reader jobs in ci.yml READ it."
+              ;;
+            busy)
+              echo "schema-apply-in-flight: NOT-ANNOUNCED — the flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) was already held after ${waited}s — a previous writer's session has not yet been reaped. The restore PROCEEDS, and unlike the could-not-announce outcome that is SAFE rather than tolerated: BUSY means the key IS held, so a reader's probe answers 'held' and orders itself behind this restore exactly as if we had taken the key ourselves. The gates that stand in front of this restore (the confirm token, the marker query, the activity gate, the held mutex) are unaffected."
+              ;;
+            *)
+              echo "::error::schema-apply-in-flight: NOT-ANNOUNCED — the flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) could not be announced within ${waited}s, and this restore therefore REFUSES TO PROCEED. Nothing has been written: this step runs before the backup and before every write, and the mutex is released on the way out. ⛔ THE FLAG IS NOT OPTIONAL FOR THIS WORKFLOW. It is the ONLY signal that sees a dispatched restore — this run produces no Actions run on the commit its readers are testing, so a concurrent sql-tests, python or e2e-seeded job that cannot see the flag concludes 'nothing to order against' and queues straight into the DROP SCHEMA below. (That is why supabase-migrate.yml may proceed unannounced and this may not: there the reader falls back to the Actions API.) Re-dispatch once the announcer can connect. psql's output is WITHHELD: this log is public."
+              exit 1
+              ;;
+          esac
+
       # ── THE BACKUP. CONTEXT safety rule 3, and no wider than it. ────────────
       # ⛔ WHAT THIS ARTIFACT HOLDS: TEST's migration ledger (CSV) and TEST's `public`
       # schema (a supabase db dump), plus the script's pre-drop census once it runs.
@@ -1795,6 +1918,7 @@ jobs:
             # job whose real work passed, and `echo ::error::` does not change the
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
+            : > "${RUNNER_TEMP}/shared-test-db-mutex-dead-holder"
           fi
           # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
           # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
@@ -1832,6 +1956,28 @@ jobs:
               fi
               ;;
           esac
+      # [164.9-MUTEX-HOLDER-DIED-UNSERIALIZED] (Phase 164.9 plan 02, ROADMAP
+      # criterion 12; copy of the same verdict step in .github/workflows/ci.yml's
+      # sql-tests job). The release step above is `if: always()` and its
+      # documented invariant is that it must NEVER redden a job whose real work
+      # passed — `echo "::error::..."` is a log annotation only and does not
+      # change exit status, by design. A dead holder is a DIFFERENT signal from
+      # an ordinary release hiccup: retroactive doubt about THIS job's OWN
+      # earlier destructive work against shared TEST, made while the advisory
+      # lock was not actually held. That deserves its own gate, not a clause
+      # inside a step that can never fail. This step reads the marker the
+      # release step's dead-holder branch just wrote and turns it into a real,
+      # non-zero job verdict.
+      #
+      # ⚠️ Ordered directly after the release step and BEFORE the redaction /
+      # artifact-staging steps below (which stay `if: always()` and still run
+      # regardless of this step's exit code — see their own id/outcome wiring).
+      # This step is a verdict about SERIALIZATION; it is not a substitute for
+      # the workflow's own confirm-token and marker guards, which already ran
+      # earlier in this job and are unaffected by it.
+      - name: Verdict — shared-test-db mutex holder died mid-job
+        if: always()
+        run: bash scripts/mutex-dead-holder-verdict.sh
 
       # psql and the CLI name the TEST pooler host, its IP and the DB user in a
       # connect/auth failure, and those files are about to become a world-readable

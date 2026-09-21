@@ -158,7 +158,7 @@ export function csvSubmissionSignature(
 ): string {
   const rows = (series ?? []).map((r) => `${r.date}=${r.daily_return}`).join("|");
   // NUL separates the two fields so no name/series boundary is ambiguous.
-  return `${strategyName} ${rows}`;
+  return `${strategyName}\0${rows}`;
 }
 ```
 Pattern to extend: more NUL-separated fields for `categoryId` + `assetClass` (D-05 default arm — evidence supports inclusion; the docblock's ":661-662 only fields that reach csv-finalize" claim is FALSE and must be corrected in the same edit). `csvSubmissionFingerprint` (:702-717) is non-cryptographic BY DESIGN (:690-696) — do not "upgrade" it. Both `WizardClient.tsx` call sites (:587, :635) pass the new args AND both dep arrays (:624, :651) gain `categoryId` (:272) / `assetClass` (:294) — stale-dep is the silent failure mode (Pitfall 7).

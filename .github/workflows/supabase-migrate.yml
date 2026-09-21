@@ -777,6 +777,96 @@ jobs:
           fi
           echo "which_database: OK — the marker names TEST and not PROD."
 
+      # ⚠️ THIS EDIT TO `supabase-migrate.yml` IS A PLANNED ISOLATION FIX, NOT A
+      # WORKFLOW EDIT MADE TO GET A DEPLOY OUT. CLAUDE.md forbids the latter by
+      # name ("⛔ Never edit `supabase-migrate.yml` to get a deploy out"), and the
+      # two acts are different: this step REMOVES no gate, RELAXES no condition
+      # and CLEARS no red. It only ANNOUNCES, on a second advisory key, that a
+      # schema apply against this project is in flight, so the reader jobs in
+      # ci.yml can order themselves behind it instead of racing it
+      # ([164.8-PUSH-RACE-VAC08], Phase 164.9 plan 06).
+      #
+      # ⛔ THE FLAG IS NOT A LOCK. Nothing blocks on it. The mutual-exclusion key
+      # is untouched — every taker still takes it, literal for literal — and this
+      # job still holds it across the apply exactly as before. See
+      # scripts/shared-test-db-keys.sh and docs/runbooks/shared-test-db-mutex.md.
+      #
+      # Placed AFTER `Which database am I on`, deliberately: the database-identity
+      # marker stays the first statement this job issues against an unidentified
+      # database, and the flag is only announced once the marker has named TEST.
+      # Its lifetime therefore spans exactly the apply and its post-verification,
+      # and it is released by job teardown, the same steal path the mutex relies on.
+      - name: Announce the schema apply as in flight (a FLAG, not a lock)
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/shared-test-db-keys.sh
+          . "${GITHUB_WORKSPACE}/scripts/shared-test-db-keys.sh"
+          # The session-mode DSN derived ONCE, in `Derive the session-mode TEST DSN`.
+          # NEVER echoed: this log is public.
+          dsn="${TEST_DB_SESSION_URL}"
+          # This connection carries ZERO traffic for the length of the apply, so it
+          # needs the same libpq keepalives the mutex holder carries, for the same
+          # reason: a runner-side NAT idle expiry would otherwise zombify it.
+          keepalive_params="keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4"
+          case "${dsn}" in
+            *\?*) dsn="${dsn}&${keepalive_params}" ;;
+            *)    dsn="${dsn}?${keepalive_params}" ;;
+          esac
+          log="${RUNNER_TEMP}/schema-apply-inflight.log"
+          # `: > "${log}"` FIRST, so every `grep` below reads a file that exists and
+          # therefore needs no stderr suppression — this job carries no softening
+          # token and this step adds none.
+          : > "${log}"
+          # `pg_try_advisory_lock`, so an announcement can never block the apply it
+          # announces. The two session GUCs are the mutex holder's, for the same two
+          # measured reasons (158-MUTEX-01: TEST's server-wide statement_timeout
+          # would kill an idle holder; 158-MUTEX-02: an orphaned backend needs the
+          # client-connection check to be reaped). The second is ALSO this flag's
+          # release path: there is NO release step, deliberately. Job teardown drops
+          # this session and Postgres frees the key, exactly as it does for the mutex
+          # holder, and the check interval bounds an orphaned backend at ~30s. A
+          # release step would buy a shorter window on a key NOTHING BLOCKS ON, at
+          # the cost of a softening token in the one job standing between a merge and
+          # a PROD apply.
+          PGAPPNAME=ci-schema-apply-inflight PGCONNECT_TIMEOUT=15 \
+            nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+              -c "SET statement_timeout = 0;" \
+              -c "SET client_connection_check_interval = '30s';" \
+              -c "$(shared_test_db_inflight_acquire_sql)" \
+              -c "SELECT pg_sleep(6000);" \
+              >> "${log}" 2>&1 &
+          # ⛔ THE NON-HELD OUTCOMES ARE PLAIN LOG LINES, NOT `::warning::`
+          # ANNOTATIONS, AND THAT IS A GATE REQUIREMENT, NOT A STYLE CHOICE. This
+          # job carries a nine-token no-softening scan and `::warning` is one of
+          # the nine, because a warning where a verdict belongs is exactly how a
+          # failure comes to read as a pass here. Nothing this step can observe is
+          # a failure — the flag gates nothing — so the honest emission is a named,
+          # greppable line (`schema-apply-in-flight: NOT-ANNOUNCED`), never an
+          # annotation. ⛔ Do not "improve" these into warnings.
+          waited=0
+          outcome=""
+          while [ "${waited}" -lt 60 ] && [ -z "${outcome}" ]; do
+            if grep -aq 'INFLIGHT-FLAG-HELD' "${log}"; then
+              outcome=held
+            elif grep -aq 'INFLIGHT-FLAG-BUSY' "${log}"; then
+              outcome=busy
+            else
+              sleep 2
+              waited=$(( waited + 2 ))
+            fi
+          done
+          case "${outcome}" in
+            held)
+              echo "schema-apply-in-flight flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) held after ${waited}s. Nothing blocks on it; the reader jobs in ci.yml READ it."
+              ;;
+            busy)
+              echo "schema-apply-in-flight: NOT-ANNOUNCED — the flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) was already held after ${waited}s — a previous writer's session has not yet been reaped. The apply PROCEEDS: this key is an announcement, never a lock, and the reader jobs' ordering wait falls back to the Actions API read. Nothing is blocked and nothing is skipped."
+              ;;
+            *)
+              echo "schema-apply-in-flight: NOT-ANNOUNCED — the flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) could not be announced within ${waited}s. The apply PROCEEDS — this key is an announcement, never a lock, and reddening here would block a production apply on a signalling mechanism. Reader jobs fall back to the Actions API read. psql's output is WITHHELD: this log is public."
+              ;;
+          esac
+
       # Command-fidelity twin of the PROD `plan` job's dry-run: the exact
       # `db push --include-all` command and flags the push step below runs, minus
       # `--dry-run`, logged first. Like PROD's, this is an audit-log record of what
@@ -984,6 +1074,7 @@ jobs:
             # job whose real work passed, and `echo ::error::` does not change the
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
+            : > "${RUNNER_TEMP}/shared-test-db-mutex-dead-holder"
           fi
           # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
           # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
@@ -1021,6 +1112,31 @@ jobs:
               fi
               ;;
           esac
+      # [164.9-MUTEX-HOLDER-DIED-UNSERIALIZED] (Phase 164.9 plan 02, ROADMAP
+      # criterion 12; copy of the same verdict step in .github/workflows/ci.yml's
+      # sql-tests job). The release step above is `if: always()` and its
+      # documented invariant is that it must NEVER redden a job whose real work
+      # passed — `echo "::error::..."` is a log annotation only and does not
+      # change exit status, by design. A dead holder is a DIFFERENT signal from
+      # an ordinary release hiccup: retroactive doubt about THIS job's OWN
+      # earlier writes to shared TEST, made while the advisory lock was not
+      # actually held. That deserves its own gate, not a clause inside a step
+      # that can never fail. This step reads the marker the release step's
+      # dead-holder branch just wrote and turns it into a real, non-zero job
+      # verdict.
+      #
+      # ⚠️ PLANNED ISOLATION FIX, not a red-clearing hack (CONTEXT Area 3,
+      # CLAUDE.md's standing prohibition). This step ADDS a failure mode to
+      # `apply-test` — a dead holder now reddens it — and REMOVES none. The
+      # consequence is deliberate and follows from Phase 164.8's locked Area 1
+      # decision that a failed TEST apply blocks the PROD apply
+      # (`apply-test-verdict` below, and `apply`'s
+      # `needs.apply-test.result == 'success'`): an apply that ran unserialized
+      # against shared TEST is exactly an apply whose result must not gate
+      # production.
+      - name: Verdict — shared-test-db mutex holder died mid-job
+        if: always()
+        run: bash scripts/mutex-dead-holder-verdict.sh
 
   # ── A SKIPPED OR FAILED TEST APPLY IS A NAMED RED, NOT A GREY JOB ───────
   # `apply` below is gated on `needs.apply-test.result == 'success'`, which BLOCKS

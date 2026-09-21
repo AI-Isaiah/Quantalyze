@@ -1718,3 +1718,269 @@ BEGIN
 END
 $$;
 ROLLBACK;
+
+-- ==========================================================================
+-- Part 5 -- FANOUT-GLOBAL-01 foreign-row calibration (ROADMAP criterion 2).
+-- The same calibration shape as the reaper gate's Part 7 and the retention
+-- gate's Part 4, written against THIS gate's own deployed body, ordering key
+-- (MAX(csv_daily_returns.created_at) ASC) and budget (LIMIT 25). Proves this
+-- file's own-row assertions survive a GENUINE competing row this run did not
+-- create, and that the survival is not vacuous: observed to go RED when the
+-- row budget is narrowed enough for the competitor to win a slot instead.
+--
+-- SEEDING SHAPE. FIVE of this run's own arm-A-shaped candidates (v_own_1
+-- .. v_own_5 -- strategy + one csv_daily_returns row, no analytics row, no
+-- compute_jobs row, no strategy_keys membership, exactly like Part 2's arm
+-- A), staggered a minute apart on the grace anchor, PLUS one FOREIGN
+-- candidate (a synthetic owner this run did not create) seeded so it is MORE
+-- dominant than v_own_4 (this run's second-least-dominant row) but LESS
+-- dominant than v_own_1 .. v_own_3. Under the file's REAL LIMIT-25 budget all
+-- six fit with room to spare, so this run's own rows dominate the ordering,
+-- and the foreign row is a real participant (it too gets healed), not a
+-- token.
+--
+-- ⚠️ FIVE own rows, not two -- deliberately more than the sibling gates'
+-- calibrations. Part 2 of THIS file seeds its OWN four simultaneously
+-- heal-eligible candidates (arms A, A2, C4, C5b) all at the SAME
+-- century-back epoch, so any budget narrowed below 4 crowds THAT part's own
+-- seeds nondeterministically -- ties have no defined tie-break order, so
+-- which of the four would lose is not something a mutation twin can pin.
+-- MEASURED on the lane: narrowing to LIMIT 2 (the sibling gates' number)
+-- reddened Part 2's arm C4 first, not this part. The budget chosen here (4)
+-- is the smallest value that keeps Part 2 whole (its four candidates fit
+-- EXACTLY) while still being narrower than this part's own SIX-candidate
+-- seed, so the crowd-out is observable here without disturbing Part 2 at
+-- all.
+--
+-- v_own_5 is a RANK-SHIFTER, not an independently asserted row: it exists
+-- only to give the `/foreign` sub-identity below (v_foreign's own assertion)
+-- a mutation that stays at budget 4 -- the SAME value the base arm already
+-- uses, and the only value proven safe against Part 2. Seeded MORE dominant
+-- than v_own_1, it pushes v_foreign from rank 4-of-5 (unreachable by any
+-- LIMIT/direction pair while budget stays >= 4 and v_own_1..v_own_3 stay in)
+-- to rank 5-of-6, where the SAME ASC + LIMIT 4 mutation the base arm already
+-- uses excludes it alongside v_own_4 (rank 6). No LIMIT number below 4 is
+-- introduced anywhere in this part.
+--
+-- The calibration is proven non-vacuous by narrowing the SAME deployed
+-- budget to 4: the foreign row's position between v_own_3 and v_own_4 means
+-- it wins the fourth of four slots and v_own_4 -- one of this run's OWN rows
+-- -- is crowded out.
+--
+-- WHAT THIS PROVES, stated honestly per this plan's own requirement: it
+-- proves the seeding discipline dominates a PLAUSIBLE, order-competitive
+-- foreign row under the file's REAL, currently-deployed LIMIT-25 budget, and
+-- that the survival is falsifiable rather than assumed. It does NOT prove
+-- the deployed sweep is caller-scoped -- it is not, and cannot be without a
+-- production migration adding a run discriminator column. The header's own
+-- RESIDUAL ASSUMPTION (no foreign row on shared TEST older than the
+-- century-back seed epoch) is unchanged by this part; this part measures how
+-- much margin that assumption currently has.
+--
+-- Rolls back unconditionally, like every other part in this file.
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+DO $$
+DECLARE
+  v_user         uuid := gen_random_uuid();
+  v_foreign_user uuid := gen_random_uuid();
+  v_own_5        uuid;   -- rank 1 (most dominant) -> MUST heal; a pure
+                          -- RANK-SHIFTER (no assertion of its own), see the
+                          -- header note on why this part needs five own rows
+  v_own_1        uuid;   -- rank 2 -> MUST heal
+  v_own_2        uuid;   -- rank 3 -> MUST heal
+  v_own_3        uuid;   -- rank 4 -> MUST heal
+  v_own_4        uuid;   -- rank 6 (LEAST dominant of this run's own rows) ->
+                          -- the one the foreign row can crowd out
+  v_foreign      uuid;   -- rank 5 -- a synthetic owner this run did NOT create
+  v_command      TEXT;
+  v_cnt_1        INTEGER;
+  v_cnt_2        INTEGER;
+  v_cnt_3        INTEGER;
+  v_cnt_4        INTEGER;
+  v_cnt_f        INTEGER;
+  v_fresh        TIMESTAMPTZ := now();
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    RAISE NOTICE 'SKIP Part 5: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only). Part 1 already reddened on this condition.';
+    RETURN;
+  END IF;
+
+  SELECT command INTO v_command
+    FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';
+  IF v_command IS NULL THEN
+    RAISE EXCEPTION 'INVARIANT (Part 5 precondition): reconcile_dropped_enqueue_sweep is missing while pg_cron is installed, but Parts 1 and 2 both already passed. The registration assertions live there.';
+  END IF;
+
+  -- This run's own tenant.
+  INSERT INTO auth.users (id, email)
+    VALUES (v_user, 'job04-foreign-calib-' || v_user || '@invalid.local');
+  INSERT INTO public.profiles (id, display_name)
+    VALUES (v_user, 'job04-foreign-calib') ON CONFLICT (id) DO NOTHING;
+
+  -- A DIFFERENT tenant -- a synthetic owner this run did not create.
+  INSERT INTO auth.users (id, email)
+    VALUES (v_foreign_user, 'job04-foreign-calib-competitor-' || v_foreign_user || '@invalid.local');
+  INSERT INTO public.profiles (id, display_name)
+    VALUES (v_foreign_user, 'job04-foreign-calib-competitor') ON CONFLICT (id) DO NOTHING;
+
+  INSERT INTO public.strategies (user_id, name)
+    VALUES (v_user, 'job04-foreign-calib-own-5') RETURNING id INTO v_own_5;
+  INSERT INTO public.strategies (user_id, name)
+    VALUES (v_user, 'job04-foreign-calib-own-1') RETURNING id INTO v_own_1;
+  INSERT INTO public.strategies (user_id, name)
+    VALUES (v_user, 'job04-foreign-calib-own-2') RETURNING id INTO v_own_2;
+  INSERT INTO public.strategies (user_id, name)
+    VALUES (v_user, 'job04-foreign-calib-own-3') RETURNING id INTO v_own_3;
+  INSERT INTO public.strategies (user_id, name)
+    VALUES (v_user, 'job04-foreign-calib-own-4') RETURNING id INTO v_own_4;
+  INSERT INTO public.strategies (user_id, name)
+    VALUES (v_foreign_user, 'job04-foreign-calib-foreign') RETURNING id INTO v_foreign;
+
+  -- Ranked by dominance, most to least: own_5 (5min) > own_1 (4min) >
+  -- own_2 (3min) > own_3 (2min) > foreign (90s) > own_4 (1min). Under budget
+  -- 4 the top four (own_5, own_1, own_2, own_3) win; foreign and own_4 are
+  -- both crowded out of the six-candidate field. own_5 carries no assertion
+  -- of its own -- see the header and DECLARE-block notes.
+  INSERT INTO public.csv_daily_returns (strategy_id, date, daily_return, created_at)
+    VALUES (v_own_5, DATE '2026-01-02', 0.001, v_fresh - interval '100 years' - interval '5 minutes');
+  INSERT INTO public.csv_daily_returns (strategy_id, date, daily_return, created_at)
+    VALUES (v_own_1, DATE '2026-01-02', 0.001, v_fresh - interval '100 years' - interval '4 minutes');
+  INSERT INTO public.csv_daily_returns (strategy_id, date, daily_return, created_at)
+    VALUES (v_own_2, DATE '2026-01-02', 0.001, v_fresh - interval '100 years' - interval '3 minutes');
+  INSERT INTO public.csv_daily_returns (strategy_id, date, daily_return, created_at)
+    VALUES (v_own_3, DATE '2026-01-02', 0.001, v_fresh - interval '100 years' - interval '2 minutes');
+
+  -- v_foreign: a real competitor, not a token: it independently satisfies the
+  -- sweep's five conjuncts (dailies past grace, no analytics row, no
+  -- compute_jobs row, no strategy_keys membership, not archived).
+  INSERT INTO public.csv_daily_returns (strategy_id, date, daily_return, created_at)
+    VALUES (v_foreign, DATE '2026-01-02', 0.001, v_fresh - interval '100 years' - interval '90 seconds');
+
+  -- v_own_4: LEAST dominant of this run's own rows -- the one a narrowed
+  -- budget can hand to the foreign row instead.
+  INSERT INTO public.csv_daily_returns (strategy_id, date, daily_return, created_at)
+    VALUES (v_own_4, DATE '2026-01-02', 0.001, v_fresh - interval '100 years' - interval '1 minute');
+
+  -- ----- THE ORACLE: run the REAL deployed body, exactly as Parts 2-4 do.
+  EXECUTE v_command;
+
+  SELECT count(*) INTO v_cnt_1
+    FROM public.compute_jobs WHERE strategy_id = v_own_1 AND metadata->>'source' = 'reconcile-sweep';
+  SELECT count(*) INTO v_cnt_2
+    FROM public.compute_jobs WHERE strategy_id = v_own_2 AND metadata->>'source' = 'reconcile-sweep';
+  SELECT count(*) INTO v_cnt_3
+    FROM public.compute_jobs WHERE strategy_id = v_own_3 AND metadata->>'source' = 'reconcile-sweep';
+  SELECT count(*) INTO v_cnt_4
+    FROM public.compute_jobs WHERE strategy_id = v_own_4 AND metadata->>'source' = 'reconcile-sweep';
+  SELECT count(*) INTO v_cnt_f
+    FROM public.compute_jobs WHERE strategy_id = v_foreign AND metadata->>'source' = 'reconcile-sweep';
+
+  -- RED-UNDER: narrow the sweep's own bound in the LAST writer of this job,
+  --            20260819150000, from `LIMIT 25` to `LIMIT 4` (the needle is the
+  --            same multi-line anchor arm `4/JOB-04/D-08` already uses, which
+  --            is what disambiguates this migration's single batch CTE from
+  --            its self-verify's own `LIMIT 25` mentions in STEP 2 prose).
+  --            Under this run's own six-row seed, the top four most
+  --            dominant candidates are v_own_5, v_own_1, v_own_2 and v_own_3
+  --            -- both the FOREIGN row and v_own_4, this run's OWN
+  --            least-dominant row, are crowded out of the narrowed budget
+  --            (v_own_5 is a pure rank-shifter with no assertion of its own;
+  --            see the header and DECLARE-block notes). v_own_1 through
+  --            v_own_3 still heal (each more dominant than the foreign row),
+  --            and the v_cnt_4 check runs BEFORE the foreign check in program
+  --            order, so THIS assertion -- about v_own_4 -- is still the
+  --            first thing to redden, exactly as it was before v_own_5 was
+  --            added (v_own_5 changes what ELSE is excluded alongside
+  --            v_own_4, not which identity fires first).
+  --            ⚠️ FIVE neuter entries, not one. Narrowing the LIMIT flips two
+  --            OTHER identities that would otherwise fire first, and BOTH sit
+  --            ahead of this part in file order:
+  --              * Part 1's `1/JOB-04/D-08` (one raise site) is a PRESENCE
+  --                test for the literal `LIMIT 25`, which `LIMIT 4` no longer
+  --                contains at all.
+  --              * Part 4's `4/JOB-04/D-08` (four raise sites, one identity)
+  --                asserts the SAME body terminalizes exactly 25 of its own
+  --                26 seeded rows per tick, which a budget of 4 cannot
+  --                satisfy -- the whole script would abort first
+  --                (`-v ON_ERROR_STOP=1`) and this part would never run.
+  --              Same precedent this file's own `2/JOB-04` already sets
+  --              against `1/JOB-04` (five entries) for the identical reason:
+  --              a dominating section ahead of the arm must be suppressed
+  --              before the intended arm can be reached. Part 2's arms are
+  --              NOT neutered: their four simultaneously heal-eligible
+  --              candidates fit EXACTLY within a budget of 4 (MEASURED --
+  --              this is the budget-4 choice's whole reason, see the note
+  --              above the seeding shape), so Part 2 stays green under this
+  --              mutation without any suppression.
+  --            ⚠️ LAYERED, and a second step is required for a different
+  --            reason than the gate-side neuters above: migration
+  --            20260819150000's OWN STEP 2 self-verify carries the identical
+  --            word-bounded `LIMIT[[:space:]]+25([^0-9]|$)` presence check
+  --            (`R3/JOB-04/D-08 verification failed`, same file), which
+  --            `LIMIT 4` also fails -- so without re-basing it the APPLY
+  --            itself aborts and the gate never runs at all. Re-based to
+  --            `IF FALSE THEN`, the exact precedent this file's own
+  --            `1/JOB-04/D-08` twin already uses for the identical check.
+  -- RED-UNDER-M: {"arm":"5/FANOUT-GLOBAL-01","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"         LIMIT 25\n         FOR UPDATE SKIP LOCKED\n","replace":"         LIMIT 4\n         FOR UPDATE SKIP LOCKED\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_command !~ 'LIMIT[[:space:]]+25([^0-9]|$)' THEN\n    RAISE EXCEPTION 'R3/JOB-04/D-08 verification failed","replace":"  IF FALSE THEN\n    RAISE EXCEPTION 'R3/JOB-04/D-08 verification failed","occurrences":1}],"neuter":[{"arm":"1/JOB-04/D-08"},{"arm":"4/JOB-04/D-08"},{"arm":"4/JOB-04/D-08"},{"arm":"4/JOB-04/D-08"},{"arm":"4/JOB-04/D-08"}]}
+  IF v_cnt_4 <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (5/FANOUT-GLOBAL-01): this run''s own least-dominant grace-past candidate was not healed under the deployed budget (% sweep-marked jobs, expected 1). Either the budget was narrowed below what this run''s own rows need, or a foreign row crowded it out -- both are the failure this calibration exists to catch.', v_cnt_4;
+  END IF;
+  -- RED-UNDER: the own check above cannot be broken by narrowing LIMIT alone
+  --            -- own_1/own_2/own_3 rank 2-4 under the deployed ASC sort
+  --            (own_5 ranks 1st, ahead of them), so any budget >= 4 keeps
+  --            them all in. Reversing the sort direction flips ranking to
+  --            own_4 (least dominant) first, foreign second, own_3 third,
+  --            own_2 fourth, own_1 fifth, own_5 (most dominant, rank-shifter
+  --            only) LAST, so own_1 is the one excluded at LIMIT 4 -- while
+  --            own_2, own_3, foreign and own_4 all stay included and their
+  --            own checks (identity `5/FANOUT-GLOBAL-01` above) stay green,
+  --            so THIS assertion is the first (and only) thing to redden.
+  --            own_5 is also excluded (rank 6) but carries no assertion.
+  --            Same Part-1/Part-4 interference and self-verify re-base as
+  --            arm `5/FANOUT-GLOBAL-01` above -- this mutation narrows the
+  --            same migration's same LIMIT, just with the direction also
+  --            flipped.
+  -- RED-UNDER-M: {"arm":"5/FANOUT-GLOBAL-01/own","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"               ) ASC\n         LIMIT 25\n         FOR UPDATE SKIP LOCKED\n","replace":"               ) DESC\n         LIMIT 4\n         FOR UPDATE SKIP LOCKED\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_command !~ 'LIMIT[[:space:]]+25([^0-9]|$)' THEN\n    RAISE EXCEPTION 'R3/JOB-04/D-08 verification failed","replace":"  IF FALSE THEN\n    RAISE EXCEPTION 'R3/JOB-04/D-08 verification failed","occurrences":1}],"neuter":[{"arm":"1/JOB-04/D-08"},{"arm":"4/JOB-04/D-08"},{"arm":"4/JOB-04/D-08"},{"arm":"4/JOB-04/D-08"},{"arm":"4/JOB-04/D-08"}]}
+  IF v_cnt_1 <> 1 OR v_cnt_2 <> 1 OR v_cnt_3 <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (5/FANOUT-GLOBAL-01/own): one of this run''s own MORE-dominant grace-past candidates was not healed (got %, %, % sweep-marked jobs for own_1/own_2/own_3, expected 1 each). Each should win a slot at any budget >= 3; if one did not, the seed itself is broken and this calibration proves nothing.', v_cnt_1, v_cnt_2, v_cnt_3;
+  END IF;
+
+  -- The foreign row is a real, distinguishable participant, not a token: it
+  -- independently satisfies the SAME five conjuncts and is attributed to a
+  -- DIFFERENT synthetic owner. Under the file's REAL LIMIT-25 budget it is
+  -- also healed here -- proof it genuinely competed for the budget rather
+  -- than sitting inert.
+  -- RED-UNDER: v_foreign ranks FIFTH of six under the deployed ASC sort
+  --            (between own_3 and own_4), sandwiched, so no LIMIT/direction
+  --            mutation on a budget >= 4 can exclude it ALONE while keeping
+  --            every own row in -- and a budget < 4 is unsafe here (Part 2's
+  --            own four simultaneously-tied heal-eligible candidates need
+  --            budget >= 4; MEASURED going below it: WRONG-ARM(2/arm C5b/...)
+  --            fired first, an unrelated Part-2 tie loser). own_5 exists
+  --            precisely to resolve this: it is seeded MORE dominant than
+  --            own_1, so the SAME ASC + LIMIT 4 mutation the base arm above
+  --            already uses excludes v_foreign alongside own_4 (own_5 backfills
+  --            the fourth surviving slot own_4 vacated) -- no new LIMIT value
+  --            is introduced. That mutation would otherwise redden
+  --            `5/FANOUT-GLOBAL-01` (the own_4 check above) FIRST since it
+  --            runs earlier in program order; that identity is neutered for
+  --            this arm only so the foreign check below becomes the live
+  --            failure. own_1/own_2/own_3 stay included (they are always
+  --            ranks 2-4), so the own check above stays green too.
+  -- RED-UNDER-M: {"arm":"5/FANOUT-GLOBAL-01/foreign","apply":[{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"         LIMIT 25\n         FOR UPDATE SKIP LOCKED\n","replace":"         LIMIT 4\n         FOR UPDATE SKIP LOCKED\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql","find":"  IF v_command !~ 'LIMIT[[:space:]]+25([^0-9]|$)' THEN\n    RAISE EXCEPTION 'R3/JOB-04/D-08 verification failed","replace":"  IF FALSE THEN\n    RAISE EXCEPTION 'R3/JOB-04/D-08 verification failed","occurrences":1}],"neuter":[{"arm":"1/JOB-04/D-08"},{"arm":"4/JOB-04/D-08"},{"arm":"4/JOB-04/D-08"},{"arm":"4/JOB-04/D-08"},{"arm":"4/JOB-04/D-08"},{"arm":"5/FANOUT-GLOBAL-01"}]}
+  IF v_cnt_f <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (5/FANOUT-GLOBAL-01/foreign): the foreign competitor row was not healed under the deployed budget (% sweep-marked jobs, expected 1). A foreign row that never enters the sweep is a token, not a competitor, and this calibration would prove nothing about isolation under real contention.', v_cnt_f;
+  END IF;
+  IF v_foreign IN (v_own_1, v_own_2, v_own_3, v_own_4, v_own_5) THEN
+    RAISE EXCEPTION 'TEST FAILED (5/FANOUT-GLOBAL-01/foreign): the foreign row and one of this run''s own rows resolved to the same strategy id -- the seeds are not distinguishable, and this calibration is vacuous.';
+  END IF;
+
+  RAISE NOTICE 'Part 5 OK: this run''s own grace-past candidates survive a genuine, order-competitive foreign row under the deployed budget, and the foreign row is a real, distinguishable participant rather than a token.';
+
+  DELETE FROM auth.users WHERE id = v_user;
+  DELETE FROM auth.users WHERE id = v_foreign_user;
+END
+$$;
+ROLLBACK;

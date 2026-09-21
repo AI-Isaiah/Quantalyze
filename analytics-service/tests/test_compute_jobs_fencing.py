@@ -549,6 +549,11 @@ try:
 except ImportError:  # pragma: no cover
     create_client = None  # type: ignore[assignment]
 
+# Phase 164.9 plan 05: retries transient transport faults against shared TEST
+# (`[164.9-SHARED-TEST-TRANSPORT-FLAKE]`). Wraps the client only — no skip
+# condition, env read, or assertion below changes.
+from tests.live_db_transport import wrap_live_db_client
+
 
 SUPABASE_URL = os.getenv("SUPABASE_TEST_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_TEST_SERVICE_KEY")
@@ -612,7 +617,7 @@ def admin():
         follow_redirects=True,
         http2=False,
     )
-    return client
+    return wrap_live_db_client(client)
 
 
 def _rpc_retry_timeout(fn, attempts: int = 2):
@@ -629,7 +634,43 @@ def _rpc_retry_timeout(fn, attempts: int = 2):
     including the serialization_failure these tests assert — re-raises
     immediately so the assertion still observes it. pytest.skip raises
     Skipped (a BaseException), so an enclosing pytest.raises(Exception) does
-    NOT swallow it — the skip propagates and marks the test skipped."""
+    NOT swallow it — the skip propagates and marks the test skipped.
+
+    ⛔ SUPERSEDED IN PART, Phase 164.9 plan 05 — the skip path above is now
+    UNREACHABLE for the read-timeout case, and this note exists so the
+    docstring does not promise behaviour that can no longer happen.
+    `admin` now returns through `wrap_live_db_client`, whose bounded retry
+    absorbs the transient timeout one layer down. When that inner retry
+    exhausts it raises `TransportRetryExhausted`, whose message names only
+    the exception TYPE and the attempt count (T-164.9-05-01 forbids echoing
+    the original message), so `"timed out" not in str(exc).lower()` is TRUE
+    and this helper re-raises instead of skipping. MEASURED, not inferred:
+    the rendered message is "live-DB transport retry exhausted after N
+    attempt(s); last exception type: ReadTimeout".
+
+    ⭐ That is the intended direction, not a regression. The momentary
+    contention this skip was written for is what the inner retry now handles;
+    an EXHAUSTED budget is a sustained shared-TEST outage, and reddening on
+    one is the whole point of Phase 164.9 — a skip there would be a green
+    reading that measures nothing. The non-timeout re-raise below is
+    unchanged, so the serialization_failure these tests assert still lands.
+
+    ⛔ CORRECTED 2026-09-21 (Phase 164.9 review round) — THE "UNREACHABLE"
+    CLAIM ABOVE IS NO LONGER TRUE FOR THIS HELPER, AND THIS HELPER IS THE
+    RPC PATH. The review round made the transport retry stop at the
+    idempotency boundary: `insert`/`upsert`/`update`/`delete`/`rpc` taint the
+    rest of their own chain and their terminal `.execute()` runs EXACTLY
+    ONCE, because replaying a write that may already have committed is worse
+    than not retrying it. `rpc` is on that list FAIL-CLOSED — the wrapper
+    cannot read a function body, so it cannot know which RPCs are read-only.
+    CONSEQUENCE: the inner retry no longer absorbs a read-timeout on an RPC,
+    so the skip path above is REACHABLE AGAIN for exactly the case this
+    docstring said it could no longer happen in. The paragraphs above are
+    kept as lineage because their reasoning still holds for READ paths, which
+    are still retried.
+    ⚠️ Do not resolve this by putting `rpc` back on the retried side. The
+    open follow-up, deliberately not taken as speculative scope, is an
+    explicit allowlist of read-only RPC names."""
     last: Exception | None = None
     for attempt in range(attempts):
         try:
@@ -642,7 +683,13 @@ def _rpc_retry_timeout(fn, attempts: int = 2):
     pytest.skip(
         f"defer_compute_job live-DB RPC timed out {attempts}x under shared "
         f"test-project contention (python+e2e concurrent); fence verified by "
-        f"the migration self-verify DO block + live DO-block. Last: {last}"
+        # ⛔ TYPE ONLY, never the rendered exception. This log is public and an
+        # httpx/postgrest transport error's str() can carry the HOST. Same rule
+        # T-164.9-05-01 put on TransportRetryExhausted, which names only the
+        # exception type and the attempt count - this line was re-introducing
+        # exactly what that class was built to withhold.
+        f"the migration self-verify DO block + live DO-block. "
+        f"Last exception type: {type(last).__name__}"
     )
 
 

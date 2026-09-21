@@ -4,18 +4,18 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "164.9"
 current_phase_name: TESTISOLATION — a run’s assertions against the shared TEST project
-status: "Phase 164.5.4 shipped — PR #835"
-stopped_at: "Phase 164.5.4 MT5RECON-GAP COMPLETE — verification passed 15/15, security 32 threats / 0 open, two review rounds. Next per the founder’s ordering: 164.9 TESTISOLATION (needs a plan). ⚠️ phase.complete advanced this to Phase 159, which is already complete (159-VERIFICATION.md status: passed) — corrected by hand."
-last_updated: "2026-09-20T21:55:14.573Z"
-last_activity: 2026-09-20
-last_activity_desc: Phase 164.5.4 complete; state pointed at 164.9 per the founder ordering
-state_head: 4bd415918e423bbee8eb9d1a8b09cafceb08b9eb
+status: "Phase 164.9 shipped — PR #837"
+stopped_at: "Phase 164.9 TESTISOLATION SHIPPED as PR #837 (v0.85.0.0) — verification passed, security SECURED 66/66 threats_open 0, UAT 2 passed / 0 issues / 1 resolved skip, two review rounds. ⛔ NOT marked complete, deliberately: criterion 8 (the mode=restore dispatch) is POST-MERGE BY CONSTRUCTION and ships PENDING under the founder's Option A, booked as [164.9-CRIT8-RESTORE-DISPATCH-RECORD], owner THE FOUNDER. Next per the founder ordering: land PR #837, then 164.4.2."
+last_updated: "2026-09-21T21:05:25.243Z"
+last_activity: 2026-09-21
+last_activity_desc: Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction
+state_head: 26e88718e709eb5237c879b89872aa9abe86ed17
 progress:
-  total_phases: 45
+  total_phases: 48
   completed_phases: 32
-  total_plans: 227
-  completed_plans: 220
-  percent: 27
+  total_plans: 238
+  completed_plans: 231
+  percent: 67
 ---
 
 ## ⭐ STATE lineage
@@ -498,7 +498,7 @@ Status: Phase 164.5.4 shipped — PR #835
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-20 — Phase 164.5.4 complete, transitioned to Phase 159
+Last activity: 2026-09-21 — Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete (criterion 8 is post-merge by construction)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -956,7 +956,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███░░░░░░░] 27%
+Progress: [███████░░░] 67%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1272,6 +1272,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.1.1.1 inserted after Phase 164.1.1: LANEONLYGATES — sql-tests runs a pg-lane-only gate against shared TEST and is permanently red, blocking the analytics-service deploy (URGENT)
 - Phase 164.5.1.4 inserted after Phase 164.5.1: SYNCCURSOR - per-KEY cursor vs per-STRATEGY stores strands failed strategies' window (URGENT)
 - Phase 164.5.4 edited: added defect (3) KEY_UNDECRYPTABLE routed from 164.5.3; corrected the stale independent-of-164.5.3 clause
+- Phase 164.4.2 edited: scope: also owns the shared-TEST mutex contention (founder 2026-09-21); corrected two stale restated floors
 
 ### Decisions
 

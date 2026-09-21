@@ -2057,7 +2057,82 @@ export const FILES_FLOOR = 48;
 //                the migration's own self-verify would abort on a renamed
 //                CREATE and the gate would never run. Re-derived over the
 //                corpus: 413 twins across 48 annotated files of 75, 0 waivers.
-export const ARMS_FLOOR = 413;
+// ⭐ CURRENCY 2026-09-21 (Phase 164.9 plan 04, FANOUT-GLOBAL-01 closure): 413
+//                -> 416. THREE new arms, each a foreign-row calibration in a
+//                gate that already annotates -- FILES_FLOOR does not move.
+//                `7/FANOUT-GLOBAL-01` in
+//                supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql
+//                (narrows the reap arm's LIMIT-25 budget to 2, neutering Part
+//                3's `3/arm E/JOB-02` four times); `4/FANOUT-GLOBAL-01` in
+//                supabase/tests/test_retention_orphaned_running.sql (narrows
+//                arm A's LIMIT-100 budget to 2, neutering Part 1's
+//                `1/JOB-05/D-19` three times and Part 3's `3/JOB-05/D-19`
+//                four times); `5/FANOUT-GLOBAL-01` in
+//                supabase/tests/test_reconcile_dropped_enqueue_sweep.sql
+//                (narrows the sweep's LIMIT-25 budget to 4 -- not 2, because
+//                this file's own Part 2 seeds four simultaneously
+//                heal-eligible tied candidates that a budget below 4 would
+//                crowd nondeterministically -- neutering Part 1's
+//                `1/JOB-04/D-08` once and Part 4's `4/JOB-04/D-08` four
+//                times, plus re-basing the migration's own STEP 2 self-verify
+//                so the apply itself does not abort first).
+//                `supabase/tests/test_prod_prober_cadence.sql` is
+//                DELIBERATELY untouched: it asserts about the cron schedule
+//                itself, a global singleton, never multi-tenant data, so
+//                per-run isolation is a category error there.
+//                MEASURED on real pg-lane runs, each arm in isolation
+//                (`--file <gate> --arm <arm>`): all three score
+//                `RED (identity ok)`, exit 2, `No defects in the narrowed
+//                scope.` Full-file re-runs (no `--arm` filter) on all three
+//                gates: `arms: 29/29/0` (reaper, was 28/28/0),
+//                `arms: 25/25/0` (retention, was 24/24/0),
+//                `arms: 38/38/0` (reconcile, was 37/37/0) -- 0 defects each.
+//                WAIVED_CEILING stays 0 (0 waivers, this move).
+// ⭐ CURRENCY 2026-09-21 (Phase 164.9 plan 04, fix round -- section-coverage
+//                gate found six sections with no twin): 416 -> 422. SIX new
+//                arms, one per uncovered `TEST FAILED (...)` identity, all in
+//                already-annotated files -- FILES_FLOOR does not move.
+//                `7/FANOUT-GLOBAL-01/own-1` (reaper) and
+//                `4/FANOUT-GLOBAL-01/own-1` (retention): reverse the deployed
+//                sweep's ORDER BY from ASC to DESC at the same narrowed
+//                budget, which excludes the most-dominant own row instead of
+//                the least-dominant one. `7/FANOUT-GLOBAL-01/foreign`
+//                (reaper) and `4/FANOUT-GLOBAL-01/foreign` (retention):
+//                narrow the budget to 1 (ASC unchanged), excluding the
+//                foreign row alongside the least-dominant own row, neutering
+//                the less-dominant-own identity that would otherwise fire
+//                first. `5/FANOUT-GLOBAL-01/own` and
+//                `5/FANOUT-GLOBAL-01/foreign` (reconcile): the foreign row
+//                there is sandwiched between two own ranks at EVERY LIMIT/
+//                direction pair a budget >= 4 allows (budget < 4 is unsafe --
+//                Part 2's own four simultaneously-tied candidates need it,
+//                MEASURED: a first attempt at LIMIT 3 produced
+//                WRONG-ARM(2/arm C5b/...), an unrelated Part-2 tie loser). A
+//                sixth own row (a pure rank-shifter, no assertion of its own)
+//                was added so the SAME LIMIT-4 mutation the base arm already
+//                uses excludes the foreign row too, differentiated from the
+//                base arm only by which identity is neutered.
+//                MEASURED on real pg-lane runs, each arm in isolation
+//                (`--file <gate> --arm <arm>`): all six score
+//                `RED (identity ok)`, exit 2, `No defects in the narrowed
+//                scope.` (the reconcile pair re-run twice each to confirm no
+//                flakiness against Part 2's own nondeterminism). Full-file
+//                re-runs (no `--arm` filter): `arms: 31/31/0` (reaper, was
+//                29/29/0), `arms: 27/27/0` (retention, was 25/25/0),
+//                `arms: 40/40/0` (reconcile, was 38/38/0, re-run twice) -- 0
+//                defects each. WAIVED_CEILING stays 0 (0 waivers, this move).
+// ⚠️ CURRENCY 2026-09-21 (phase 164.9 TESTISOLATION, plan 10): 422 -> 423. ONE
+//    new arm, D1, in the EXISTING annotated file
+//    supabase/tests/test_analytics_service_settings_and_vault_tick.sql — a
+//    second transaction that reads the LIVE analytics destination row where the
+//    database-identity marker names TEST, and measures the allow-list constraint
+//    where no marker exists. So ARMS moves and FILES does not: FILES_FLOOR stays
+//    48 (the file was already annotated) and WAIVED_CEILING stays 0.
+//    ⚠️ Its twin is deliberately a NARROWING of the allow-list and NOT a
+//    `DROP CONSTRAINT`: the drop is arm U2's twin, U2 runs FIRST in the same
+//    file, and two arms cannot share one mutation because only one of them can
+//    be the FIRST failure.
+export const ARMS_FLOOR = 423;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
