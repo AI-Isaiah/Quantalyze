@@ -1,0 +1,140 @@
+# Data-dependent migration guards - the CENSUS of what the corpus already carries.
+#
+# DATED 2026-09-21, Phase 164.9 TESTISOLATION plan 09, for
+# [164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]. Every line below was MEASURED by
+# `node scripts/lint-migration-data-dependence.mjs` over supabase/migrations at
+# that date - 272 migration(s), 345 anonymous block(s), 79 refusal(s) across 63
+# files. Nothing here was typed by hand; the file was generated from the
+# classifier and is re-verified against it on every run.
+#
+# WHAT A LINE MEANS. The named migration carries an anonymous block that reads
+# the named APPLICATION relation and raises an exception on a condition derived
+# from that read. TEST mirrors production's CATALOGUE and never its DATA, so
+# such a guard can refuse on TEST while applying cleanly on production - and a
+# refused TEST apply WITHHOLDS the production apply.
+#
+# THE AIM IS ZERO. This is a RATCHET, not a mute button: the gate still fails
+# loud on any data-dependent guard that is NOT listed here. What the file does
+# is stop a KNOWN, pre-existing corpus from masking a NEW one.
+#
+# THIS FILE MUST ONLY SHRINK, and both directions are a hard failure:
+#   GREW   - a NEW data-dependent guard was authored. The remedy is an edit to
+#            the MIGRATION - make its self-verification catalogue-only, or make
+#            the read tolerant of an empty table. Never an entry here.
+#   STALE  - a line the scan no longer refuses. Delete it, in the commit that
+#            made it stop being true. A ledger allowed to hold stale entries is
+#            a control that has quietly stopped controlling.
+# The linter enforces both, and the recorded count below is re-derived on every
+# run - a list with no recorded cardinality can be emptied without a single red.
+#
+# ENTRY_COUNT = 79
+#
+# THE CENSUS IS NOT A TRIAGE, and saying so is the honest part. The scan refuses
+# a SHAPE. Some instances of that shape are benign on a data-empty TEST because
+# the block SEEDS the row it then reads back - a self-verifying probe rather
+# than a precondition on production data - and the scan cannot tell those apart
+# from a genuine precondition without executing them. Deciding which is which,
+# one migration at a time, is what the destination owns.
+#
+# EVERY ENTRY CARRIES THE SAME DESTINATION, and that is deliberate rather than
+# lazy: this is ONE campaign over one corpus, not 79 independent defects.
+# [164.9-DATA-DEPENDENT-GUARD-CENSUS] in TODOS.md carries the owner, the
+# trigger and the forbidden closures.
+#
+# WHAT THIS PLAN DID NOT DO, stated so nobody reads the ledger as a repair
+# record: NO migration was edited. Repairing an APPLIED migration is a separate
+# act with its own review posture - it re-enters the apply pipeline - and the
+# interim remedy for something already merged is unchanged and is REVERT THE
+# MERGE, never an edit to .github/workflows/supabase-migrate.yml.
+#
+# ⛔ A red corpus scan is NEVER cleared by relaxing the classifier, by widening
+#    this ledger, or by adding an opt-out marker to the linter. There is no
+#    opt-out marker, by decision: Phase 164.8 designed the escape hatch, proved
+#    it out, and deliberately did not build it because a hatch is something a
+#    person must remember to claim under exactly the deploy pressure that makes
+#    people claim things.
+#
+# ⚠️ THIS REPOSITORY IS PUBLIC. A line records a VERDICT - the file, the rule
+#    and the relation - and never a specimen: no statement text, no value, no
+#    dollar-quote tag.
+#
+# FIELDS, TAB-separated: <migration basename>  <rule id>  <relation>  # <destination>
+20260409202756_portfolios_is_test.sql	R1-variable-conditioned-raise	public.portfolios	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260410225610_sec005_follow_ups.sql	R1-variable-conditioned-raise	strategies	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260411144407_compute_jobs_queue.sql	R1-variable-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260412094452_poll_positions_kind.sql	R1-variable-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260416081039_funding_fees.sql	R2-subquery-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260416125429_reconciliation.sql	R2-subquery-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260416125430_contact_request_metadata.sql	R2-subquery-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260416201929_audit_log_hardening.sql	R1-variable-conditioned-raise	audit_log	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260417031851_user_app_roles.sql	R1-variable-conditioned-raise	profiles	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260417110538_sanitize_user.sql	R1-variable-conditioned-raise	storage.buckets	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260418074935_bridge_outcome_cron.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260418194206_scoring_weight_overrides.sql	R1-variable-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260418194206_scoring_weight_overrides.sql	R1-variable-conditioned-raise	compute_jobs	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260419140917_match_decisions_original_strategy_notnull.sql	R1-variable-conditioned-raise	match_decisions	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260420073003_allocator_holdings.sql	R1-variable-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260420073003_allocator_holdings.sql	R1-variable-conditioned-raise	compute_jobs	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260420073003_allocator_holdings.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260420073003_allocator_holdings.sql	R2-subquery-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260420213754_allocator_equity_snapshots.sql	R1-variable-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260420213754_allocator_equity_snapshots.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260420213754_allocator_equity_snapshots.sql	R2-subquery-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260421060316_user_notes_multiscope.sql	R2-subquery-conditioned-raise	user_notes	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260421154029_match_decisions_original_holding_ref.sql	R1-variable-conditioned-raise	match_decisions	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260421160102_match_decisions_widen_unique_holding.sql	R2-subquery-conditioned-raise	match_decisions	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260426131718_match_decisions_kind_enum.sql	R1-variable-conditioned-raise	match_decisions	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260509082818_verification_requests_view_shim.sql	R1-variable-conditioned-raise	strategy_verifications	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260510172412_partner_tag_check_constraint.sql	R1-variable-conditioned-raise	profiles	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260510173005_process_key_long_idempotency_drain.sql	R1-variable-conditioned-raise	compute_jobs	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260510173005_process_key_long_idempotency_drain.sql	R1-variable-conditioned-raise	feature_flags	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260510173005_process_key_long_idempotency_drain.sql	R1-variable-conditioned-raise	strategy_verifications	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260510173005_process_key_long_idempotency_drain.sql	R2-subquery-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260510175507_process_key_long_compute_job_kinds_repair.sql	R2-subquery-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260515095804_teaser_anchor_strategy.sql	R2-subquery-conditioned-raise	auth.users	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260515095804_teaser_anchor_strategy.sql	R2-subquery-conditioned-raise	public.profiles	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260515095804_teaser_anchor_strategy.sql	R2-subquery-conditioned-raise	public.strategies	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260515113853_retention_crons_safe.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260515210000_compute_jobs_high_hardening.sql	R1-variable-conditioned-raise	compute_jobs	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260515210200_retention_crons_high_hardening.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260516131500_compute_jobs_residual_apply.sql	R1-variable-conditioned-raise	compute_jobs	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260516160600_match_decisions_drop_kind_default.sql	R1-variable-conditioned-raise	match_decisions	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260516170200_match_decisions_constraint_validate.sql	R1-variable-conditioned-raise	match_decisions	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260522111858_compute_analytics_from_csv_kind.sql	R2-subquery-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260527102050_replace_allocator_equity_snapshots.sql	R1-variable-conditioned-raise	public.allocator_equity_snapshots	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260527102050_replace_allocator_equity_snapshots.sql	R2-subquery-conditioned-raise	public.allocator_equity_snapshots	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260529160000_allocator_equity_pre_terminus_flag.sql	R1-variable-conditioned-raise	public.allocator_equity_snapshots	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260530120000_admin_role_mutate.sql	R1-variable-conditioned-raise	profiles	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260602180000_funding_fees_exchange_check.sql	R1-variable-conditioned-raise	funding_fees	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260602183000_b5b_api_key_delete_atomicity.sql	R1-variable-conditioned-raise	public.api_keys	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260614120000_derive_broker_dailies_kind.sql	R2-subquery-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260620120000_verification_requests_view_shim_apply.sql	R1-variable-conditioned-raise	feature_flags	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260620120000_verification_requests_view_shim_apply.sql	R1-variable-conditioned-raise	strategy_verifications	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260624120000_csv_daily_returns_per_key_axis.sql	R2-subquery-conditioned-raise	public.csv_daily_returns	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260710120000_strategy_keys.sql	R2-subquery-conditioned-raise	public.strategy_analytics	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260710130000_stitch_composite_kind.sql	R2-subquery-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260713120000_cleanup_abandoned_wizard_drafts.sql	R1-variable-conditioned-raise	public.strategies	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260714090000_portfolio_recompute_inflight_unique.sql	R1-variable-conditioned-raise	public.portfolio_analytics	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260716130000_strategies_status_private.sql	R1-variable-conditioned-raise	strategies	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260717233529_allocator_equity_derived_surface.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260717233529_allocator_equity_derived_surface.sql	R2-subquery-conditioned-raise	compute_job_kinds	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260717233529_allocator_equity_derived_surface.sql	R2-subquery-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260719120000_retention_orphaned_running_compute_jobs.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260720120000_retention_orphaned_running_window_4h.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260726000225_strategy_verifications_tenant_scope_uniq.sql	R1-variable-conditioned-raise	strategy_verifications	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260728120000_csv_finalize_double_submit_idempotency.sql	R1-variable-conditioned-raise	public.strategies	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260802120000_strategy_analytics_stuck_computing_reaper.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260803130000_reaper_limit_bound_materialized_cte.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260806120000_strategies_capital_ownership.sql	R1-variable-conditioned-raise	public.strategies	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260811210000_api_keys_attested_venue.sql	R1-variable-conditioned-raise	public.api_keys	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260812083206_api_keys_venue_account_id.sql	R1-variable-conditioned-raise	public.api_keys	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260816140000_reconcile_dropped_enqueue_sweep.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260817120000_retention_orphaned_running_terminalize.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260819130500_reconcile_sweep_readmit_terminalized_orphans.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260823120000_revoke_api_keys_insert.sql	R1-variable-conditioned-raise	public.api_keys	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260826140000_compute_jobs_error_kind_orphaned.sql	R1-variable-conditioned-raise	cron.job	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260826140000_compute_jobs_error_kind_orphaned.sql	R1-variable-conditioned-raise	public.compute_jobs	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260907120000_analytics_service_settings_and_vault_tick.sql	R1-variable-conditioned-raise	public.system_settings	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
+20260907130000_ledger_refresh_switch_to_system_flags.sql	R1-variable-conditioned-raise	public.system_flags	# [164.9-DATA-DEPENDENT-GUARD-CENSUS]
