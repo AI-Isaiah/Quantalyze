@@ -452,11 +452,33 @@ self_test() {
   st_row_is already-correct-wrote-nothing "$NORMALIZE_SINK"
 
   # ── 11. nothing this script printed carries a DSN ────────────────────────
+  # ⛔ THE CORPUS IS ASSERTED TO EXIST BEFORE IT IS SCANNED, AND THAT IS THE
+  # WHOLE CHECK. It used to read `grep -arhoE … "$ST_TMPD"/*.out 2>/dev/null`:
+  # if the glob matched NO file — an arm renamed its output, an `st_case`
+  # returned early before any `.out` existed, `$ST_TMPD` not what this line
+  # assumed — bash passed the LITERAL pattern, grep's "No such file" went to
+  # /dev/null, the pipeline came back empty and the check reported `ok` while
+  # `checks` still incremented. A clean count having read nothing. This is the
+  # same class that already bit THIS FILE once (the EXIT-trap leak, whose
+  # failure path published what its success path protected) — this time in the
+  # DETECTION half, which is worse: a detector that cannot fire is indistinguishable
+  # from an absence of the thing it detects.
+  # ⚠️ `holder.log` IS IN SCOPE NOW. It carries the mutex holder's own psql
+  # stderr and was never inspected; the cluster's `pg.log` lives under
+  # "$ST_PGD" and is deliberately still out of scope — it is the SERVER's log,
+  # not this script's captured output.
+  shopt -s nullglob
+  local scan=( "$ST_TMPD"/*.out "$ST_TMPD"/*.log )
+  shopt -u nullglob
   checks=$((checks + 1))
-  if grep -arhoE 'postgres(ql)?://[^[:space:]]+' "$ST_TMPD"/*.out 2>/dev/null | grep -aq .; then
+  if [ "${#scan[@]}" -eq 0 ]; then
+    results+=("  FAIL output-carries-no-dsn: NOTHING to scan — this check would report clean having read no file"); fails=$((fails + 1))
+  elif grep -arhoE 'postgres(ql)?://[^[:space:]]+' "${scan[@]}" | grep -aq .; then
+    # ⛔ A VERDICT, NEVER A SPECIMEN. What matched is not printed and not
+    # counted: a proof-of-absence that quotes what it found publishes it.
     results+=("  FAIL output-carries-no-dsn: a connection string appears in this script's captured output"); fails=$((fails + 1))
   else
-    results+=("  ok   output-carries-no-dsn")
+    results+=("  ok   output-carries-no-dsn (${#scan[@]} captured file(s) read)")
   fi
 
   printf '%s\n' "${results[@]}"
