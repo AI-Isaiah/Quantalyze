@@ -3316,8 +3316,22 @@ jobs:
       # `github.event_name == 'push'` is conjoined onto this job's own gating,
       # explicitly rather than inherited: on a pull request there is no apply to
       # order against, so a wait there would buy nothing and cost every PR.
+      #
+      # ⛔ AND IT IS THE ONLY EVENT CLAUSE HERE, IN ALL THREE SITES. Each job's
+      # own `if:` carries a fork guard, and the two jobs that have one spell it
+      # DIFFERENTLY (`github.event_name == 'push' || ...` versus
+      # `github.event_name != 'pull_request' || ...`). Copied down here, those
+      # two spellings made three steps documented as one thing read as three
+      # different conditions — while the trailing `github.event_name == 'push'`
+      # already SUBSUMED both of them: on a push each parenthesised clause is
+      # unconditionally true, so `A && (push || X) && B && push` and
+      # `A && (!pr || X) && B && push` are both exactly `A && B && push`. The
+      # subsumed clause is dropped rather than reconciled. The one remaining
+      # difference between the three is `vars.E2E_TEST_DB_CONFIGURED`, present
+      # here in exactly the two jobs whose own `if:` carries it — that one IS
+      # "this job's own gating" and stays.
       - name: Wait for the TEST schema apply to conclude (merge pushes only)
-        if: ${{ needs.changed-paths.outputs.docs_only != 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true' && github.event_name == 'push' }}
+        if: ${{ needs.changed-paths.outputs.docs_only != 'true' && vars.E2E_TEST_DB_CONFIGURED == 'true' && github.event_name == 'push' }}
         env:
           GH_TOKEN: ${{ github.token }}
           TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
@@ -4621,6 +4635,20 @@ jobs:
       # `github.event_name == 'push'` is conjoined onto this job's own gating,
       # explicitly rather than inherited: on a pull request there is no apply to
       # order against, so a wait there would buy nothing and cost every PR.
+      #
+      # ⛔ AND IT IS THE ONLY EVENT CLAUSE HERE, IN ALL THREE SITES. Each job's
+      # own `if:` carries a fork guard, and the two jobs that have one spell it
+      # DIFFERENTLY (`github.event_name == 'push' || ...` versus
+      # `github.event_name != 'pull_request' || ...`). Copied down here, those
+      # two spellings made three steps documented as one thing read as three
+      # different conditions — while the trailing `github.event_name == 'push'`
+      # already SUBSUMED both of them: on a push each parenthesised clause is
+      # unconditionally true, so `A && (push || X) && B && push` and
+      # `A && (!pr || X) && B && push` are both exactly `A && B && push`. The
+      # subsumed clause is dropped rather than reconciled. The one remaining
+      # difference between the three is `vars.E2E_TEST_DB_CONFIGURED`, present
+      # here in exactly the two jobs whose own `if:` carries it — that one IS
+      # "this job's own gating" and stays.
       - name: Wait for the TEST schema apply to conclude (merge pushes only)
         if: ${{ needs.changed-paths.outputs.docs_only != 'true' && github.event_name == 'push' }}
         env:
@@ -5476,8 +5504,22 @@ jobs:
       # `github.event_name == 'push'` is conjoined onto this job's own gating,
       # explicitly rather than inherited: on a pull request there is no apply to
       # order against, so a wait there would buy nothing and cost every PR.
+      #
+      # ⛔ AND IT IS THE ONLY EVENT CLAUSE HERE, IN ALL THREE SITES. Each job's
+      # own `if:` carries a fork guard, and the two jobs that have one spell it
+      # DIFFERENTLY (`github.event_name == 'push' || ...` versus
+      # `github.event_name != 'pull_request' || ...`). Copied down here, those
+      # two spellings made three steps documented as one thing read as three
+      # different conditions — while the trailing `github.event_name == 'push'`
+      # already SUBSUMED both of them: on a push each parenthesised clause is
+      # unconditionally true, so `A && (push || X) && B && push` and
+      # `A && (!pr || X) && B && push` are both exactly `A && B && push`. The
+      # subsumed clause is dropped rather than reconciled. The one remaining
+      # difference between the three is `vars.E2E_TEST_DB_CONFIGURED`, present
+      # here in exactly the two jobs whose own `if:` carries it — that one IS
+      # "this job's own gating" and stays.
       - name: Wait for the TEST schema apply to conclude (merge pushes only)
-        if: ${{ needs.changed-paths.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true' && github.event_name == 'push' }}
+        if: ${{ needs.changed-paths.outputs.docs_only != 'true' && vars.E2E_TEST_DB_CONFIGURED == 'true' && github.event_name == 'push' }}
         env:
           GH_TOKEN: ${{ github.token }}
           TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
