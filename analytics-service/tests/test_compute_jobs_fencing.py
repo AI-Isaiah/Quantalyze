@@ -634,7 +634,26 @@ def _rpc_retry_timeout(fn, attempts: int = 2):
     including the serialization_failure these tests assert — re-raises
     immediately so the assertion still observes it. pytest.skip raises
     Skipped (a BaseException), so an enclosing pytest.raises(Exception) does
-    NOT swallow it — the skip propagates and marks the test skipped."""
+    NOT swallow it — the skip propagates and marks the test skipped.
+
+    ⛔ SUPERSEDED IN PART, Phase 164.9 plan 05 — the skip path above is now
+    UNREACHABLE for the read-timeout case, and this note exists so the
+    docstring does not promise behaviour that can no longer happen.
+    `admin` now returns through `wrap_live_db_client`, whose bounded retry
+    absorbs the transient timeout one layer down. When that inner retry
+    exhausts it raises `TransportRetryExhausted`, whose message names only
+    the exception TYPE and the attempt count (T-164.9-05-01 forbids echoing
+    the original message), so `"timed out" not in str(exc).lower()` is TRUE
+    and this helper re-raises instead of skipping. MEASURED, not inferred:
+    the rendered message is "live-DB transport retry exhausted after N
+    attempt(s); last exception type: ReadTimeout".
+
+    ⭐ That is the intended direction, not a regression. The momentary
+    contention this skip was written for is what the inner retry now handles;
+    an EXHAUSTED budget is a sustained shared-TEST outage, and reddening on
+    one is the whole point of Phase 164.9 — a skip there would be a green
+    reading that measures nothing. The non-timeout re-raise below is
+    unchanged, so the serialization_failure these tests assert still lands."""
     last: Exception | None = None
     for attempt in range(attempts):
         try:
