@@ -158,3 +158,9 @@ scripts/local-stack/.stack/
 
 # GSD research tool fetch cache — regenerable, not an artifact
 .planning/research/.cache/
+
+# Phase 164.9 — the live-DB lane execution artifact, written by
+# scripts/live-db-execution-reporter.mjs on every `npm run test:live-db`. It is
+# the RAW measurement the committed execution ledger is derived from and carries
+# verbatim failure text; the ledger carries verdicts only. Never commit it.
+.live-db-lane-execution.json

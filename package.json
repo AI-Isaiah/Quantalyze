@@ -16,6 +16,7 @@
     "test:redis": "vitest run --config vitest.redis.config.ts",
     "test:local-stack": "vitest run --config vitest.local-stack.config.ts",
     "test:live-db": "vitest run --config vitest.livedb.config.ts",
+    "test:live-db:ledger": "node scripts/live-db-execution-ledger.mjs",
     "test:e2e": "playwright test",
     "verify:phase18": "tsx scripts/verify-phase18-artifacts.ts",
     "check:founder-lp-readiness": "tsx scripts/check-founder-lp-readiness.ts",

@@ -3416,8 +3416,34 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       the `scripts/vac08-ledger-baseline.txt` kind (every test still EXECUTES, a failure outside
       the ledger still reddens, and a ledger entry that stops failing reddens too). ⛔ Not a skip
       list, and not a reason to make the row advisory.
-      **Owner:** Phase 164.9 TESTISOLATION (this phase, remaining plans) — and if F1 outlives it,
-      a named successor phase, never a blank destination.
+      ⭐ **DECIDED AND BUILT, 2026-09-21 — BOTH halves were taken, in that order, and the counts
+      above are SUPERSEDED.** First the fix round closed F2/F3/F4 at the call site: 35 → **18**
+      failures, 17 closed, no test deleted, no assertion relaxed, no permanent skip (one arm
+      gained a documented `BASE_URL` precondition). Then the founder chose the ledger for the
+      residue: `scripts/live-db-execution-ledger.txt`, dated, shrink-only, **ENTRY_COUNT = 18**,
+      GENERATED from a real run by `node scripts/live-db-execution-ledger.mjs --generate` rather
+      than hand-typed. `frontend-live-db-lane` now runs `npm run test:live-db:ledger`, which
+      spawns the lane VERBATIM and is GREEN only when the failing set MATCHES the ledger — RED on
+      an unledgered failure AND RED on a ledger entry that has stopped failing, both observed.
+      **The row stays BLOCKING; the aggregator wiring was not touched.**
+      ⚠️ **THE 18 ARE THREE KINDS, NOT ONE, and the ledger records them separately because they
+      close by three different acts.** **K1 (9)** — privilege state the schema-only baseline does
+      not carry; closed by a baseline RE-DUMP, which `BASELINE.md` makes a human-run command
+      against production. **K2 (6)** — all in `wizard-rpcs-live-db`, and ⛔ plan 08's SUMMARY
+      MISCLASSIFIED these as K1: the measured failure is the FUNCTION BODY's own role gate, the
+      baseline DOES carry the REVOKE/GRANT pair, so **a re-dump may not close them** — treat as a
+      separate question. **K3 (3)** — g10b P12 (a real production defect the lane surfaced: the
+      public wrapper's internal overload omits `status`, so a job enqueued WITH parents never
+      enters the fan-in state), `match-decisions-xor-rls` (asserts a unique index migration 081
+      REPLACED — an intent decision), `request-allocator-holdings-sync-queued` (an unreachable
+      exception branch). Each needs a migration or an invariant decision; none is a fixture fix,
+      and NO migration was authored here.
+      ⛔ **Forbidden closures, EXTENDED by the ledger round:** everything above, plus — adding a
+      line to the execution ledger for a NEW failure (an entry is a founder decision about a
+      specific arm; a new failure is FIXED), leaving a stale line in it, and wrapping the lane in
+      anything that swallows its exit code.
+      **Owner:** Phase 164.9 TESTISOLATION (this phase, remaining plans) — and if F1/K1 outlives
+      it, a named successor phase, never a blank destination.
 
 - [ ] **`[164.9-DATA-DEPENDENT-GUARD-CENSUS]` 83 anonymous-block guards across 63 applied
       migrations raise on data TEST does not have — the class is now REFUSED at author time, and
