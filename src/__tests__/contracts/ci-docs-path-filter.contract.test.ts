@@ -213,6 +213,7 @@ const ROSTER_FILTERED = [
   "frontend-coverage",
   "frontend-seam-redis",
   "frontend-local-stack",
+  "frontend-live-db-lane",
   "frontend-policy",
   "knip",
   "frontend-build",
@@ -623,7 +624,7 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
     expect(sorted([...classified]), "a classified name is not a job key in ci.yml").toEqual(sorted(JOB_KEYS));
   });
 
-  it("the FILTERED set equals its roster of sixteen, in both directions", () => {
+  it("the FILTERED set equals its roster of seventeen, in both directions", () => {
     const gained = DERIVED_FILTERED.filter((k) => !ROSTER_FILTERED.includes(k));
     const lost = ROSTER_FILTERED.filter((k) => !DERIVED_FILTERED.includes(k));
     expect(
@@ -638,7 +639,7 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
         `job that now runs on every docs-only PR (harmless) or — if its \`needs:\` edge also went — ` +
         `a job whose classification is no longer readable in the run log.`,
     ).toEqual([]);
-    expect(DERIVED_FILTERED.length).toBe(16);
+    expect(DERIVED_FILTERED.length).toBe(17);
   });
 
   it("every filtered job ALSO carries the `changed-paths` needs: edge", () => {

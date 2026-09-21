@@ -783,6 +783,169 @@ jobs:
           bash scripts/local-stack/run.sh down
           bash scripts/local-stack/run.sh --assert-teardown
 
+  frontend-live-db-lane:
+    # Phase 164.9 plan 08 / ROADMAP criterion 13 — THE LIVE-DB LANE. The ~49 specs
+    # gated on `HAS_LIVE_DB` (`src/lib/test-helpers/live-db.ts`), run against a REAL
+    # Supabase stack booted by `scripts/local-stack/run.sh up` from the committed
+    # `supabase/schema/baseline.sql`.
+    #
+    # WHY IT EXISTS, and why it is not simply credentials on the shards. That whole
+    # class SKIPS in every vitest shard, and the `frontend-test` job below forbids
+    # fixing that in the obvious way IN ITS OWN WORDS: adding the two live-DB
+    # variables there would un-skip the class inside the shards, shift the merged
+    # report's denominator and invalidate the ratchet baseline — which was measured
+    # with those tests skipped, and which backs a BLOCKING gate. So the class gets
+    # its own INVOCATION instead. ⛔ Nothing in this plan changed `frontend-test`;
+    # its prohibition, its shard matrix and its reporting behaviour are untouched.
+    #
+    # ⭐ THE PRECEDENT, AND THE INVERSION. `frontend-seam-redis` above sets env
+    # JOB-WIDE and its own comment calls itself "the exact INVERSE of the
+    # frontend-test warning". This job is the same shape for the same reason: the
+    # live-DB variables reach these specs HERE and only here, safe because this job
+    # runs the DERIVED live-DB corpus and nothing else. ⛔ NEVER WIDEN THIS JOB'S
+    # TEST SELECTION. Widening it is the one edit that turns the sentence above from
+    # true into false, and nothing else in this file would notice.
+    #
+    # NO SECRET AND NO REPOSITORY VARIABLE is referenced anywhere in this job. Every
+    # credential it uses is minted by the stack it boots and handed over through the
+    # mode-600 `scripts/local-stack/.stack-env` written by `run.sh up`. It therefore
+    # runs identically on a fork PR, a same-repo PR, a push and a workflow_dispatch —
+    # which is what earns it the `frontend:` result loop's STRICT DEFAULT ARM with no
+    # tolerance of its own, the `frontend-seam-redis` / `sql-gate-lint` /
+    # `sql-mutation` / `frontend-local-stack` reasoning and the OPPOSITE of the
+    # `sql-tests` / `e2e-seeded` rows, whose tolerances exist only because those jobs
+    # consume a repo variable a fork cannot see.
+    #
+    # ⛔ THE LANE REFUSES TO BOOT IN THE PRODUCTION-LINKED CONTEXT, and it is asserted
+    # rather than commented. `vitest.livedb.globalsetup.ts` asks `run.sh
+    # --print-workdir` where the stack would start and throws if the answer is this
+    # repository's own `supabase/` directory — the directory this checkout's CLI
+    # context links to PRODUCTION and which governs production deploys. `run.sh` is
+    # the ONLY way this job reaches the CLI; no bare invocation appears anywhere in
+    # it.
+    #
+    # ⛔ AND THE LANE FAILS RATHER THAN SKIPS WHEN THE STACK IS ABSENT. Measured while
+    # building it: with no stack up, `npm run test:live-db` exits 1 with a named
+    # refusal and ZERO skipped tests. A quietly-skipping live-DB corpus is
+    # `src/__tests__/csv-finalize-rpc.test.ts`'s tombstone — six live-DB cases that
+    # skipped silently in every shard for months — and it is the exact condition
+    # criterion 13 exists to end.
+    #
+    # ACCEPTED COST, stated rather than discovered later: the `frontend` aggregator
+    # now waits on a SECOND container-booting job. That is wall clock spent to give a
+    # previously ungated test class a place where it can go RED, which is the trade
+    # criterion 13 exists to make. The two container jobs are independent of each
+    # other and run in parallel, so the cost is the slower of the two, not their sum.
+    #
+    # ⚠️ `timeout-minutes` — HEADROOM OVER AN UNMEASURED TERM, SAID SO, in the same
+    # words `frontend-local-stack` uses for its own. What is measured: this corpus is
+    # 49 files driving real HTTP against PostgREST and GoTrue, run with
+    # `fileParallelism: false` because they share one database. What is NOT measured:
+    # their wall clock on a cold ubuntu runner that must pull the stack images, since
+    # no SHA-bound run of this job exists yet. 30 is headroom over that, NOT a
+    # measured total. ⛔ When the first green run reports its wall clock, REPLACE this
+    # with a value derived from it rather than widening it again.
+    #
+    # ⛔ THE COST THIS LANE CANNOT COVER, named so nobody reads it as broader than it
+    # is: a local stack cannot catch drift that exists only on the shared project.
+    # That drift has its own gates — VAC-08 (a step of `sql-tests`) for repo-versus-
+    # shared-project ledger and function bodies, VAC-04 (in `migration-drift-check.yml`)
+    # for repo-versus-production bodies. This job is not a substitute for either.
+    #
+    # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter, on ONE physical line:
+    # this changes WHEN this job is invoked (not on a `.planning/`-only PR), never
+    # WHAT it asserts. A skip caused by that `if:` is judged by the aggregator's ONE
+    # uniform docs-only arm, never by an arm of this row's own.
+    needs: [changed-paths]
+    if: needs.changed-paths.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Restore node_modules
+        id: node_modules_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+      - name: npm ci (cache miss; retry transient network failures)
+        if: steps.node_modules_cache.outputs.cache-hit != 'true'
+        run: |
+          n=0
+          until npm ci --prefer-offline --no-audit --no-fund; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "npm ci failed after $n attempts"; exit 1; fi
+            echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
+      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+        with:
+          # The SAME pin `frontend-local-stack` uses, so this file keeps ONE answer to
+          # "which CLI". ⛔ The fourth workflow that shares this pin is deliberately
+          # NOT named here, not even in prose: Phase 164.1 / D-18 requires this file to
+          # hold no reference to it so that a red production probe can never block a
+          # deploy, and the spec enforcing that is a plain SUBSTRING match over this
+          # file — a mention inside a YAML comment reddens it exactly as a real
+          # `needs:` edge would.
+          version: 2.98.2
+      - name: Install psql client (the lane loads the baseline through it)
+        # Same reason as `frontend-local-stack`: `run.sh` loads the committed baseline
+        # through `psql`, and `resolve_psql`'s only fallback is a macOS keg that does
+        # not exist on this runner. A miss is `FATAL: psql not found` and exit 1, not
+        # a skip.
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          psql --version
+      - name: Preflight - the lane must have a non-empty derived corpus
+        # A green job that ran nothing is the silent-green this lane exists to
+        # eliminate, so this fails EARLIER than vitest would and prints what would
+        # have run. It needs no stack: the corpus tool only walks the source tree.
+        # The tool ALSO exits non-zero on an empty corpus by itself, and
+        # `passWithNoTests: false` in the lane config is the third control — three
+        # independent places, because this is the failure mode that reads as success.
+        run: |
+          set -euo pipefail
+          node scripts/live-db-lane-corpus.mjs | tee /tmp/live-db-lane-corpus.txt
+          files=$(grep -c '\.test\.tsx\?$' /tmp/live-db-lane-corpus.txt || true)
+          if [ "$files" -eq 0 ]; then
+            echo "::error::The derived live-DB corpus is EMPTY — this job must never pass vacuously."
+            exit 1
+          fi
+          echo "Lane corpus: ${files} file(s)"
+      - name: Boot the local-stack lane (Supabase CLI stack + committed baseline)
+        # ⛔ Through `run.sh` ONLY — never a bare CLI invocation. `up` asserts the
+        # stack reported a 127.0.0.1/localhost API URL and refuses otherwise, the lane
+        # re-asserts it independently in `vitest.livedb.globalsetup.ts`, and that same
+        # setup refuses outright if the runner's resolved workdir is this repository's
+        # own Supabase context.
+        run: bash scripts/local-stack/run.sh up
+      - name: Run the live-DB lane
+        # Byte-identical to what a developer runs. ⛔ No reporting flag of the
+        # merged-ratchet kind, deliberately: `frontend-coverage` merges the two
+        # `frontend-test` shards' blob reports and enforces the ratchet on the merged
+        # numbers, and a third blob from this lane would shift the denominator and
+        # invalidate the baseline. (Same rule as `frontend-seam-redis` and
+        # `frontend-local-stack`.)
+        run: npm run test:live-db
+      - name: Tear down the lane (and PROVE nothing survived)
+        # `if: always()`: `run.sh up` leaves the stack running on success by design, so
+        # a failed spec would otherwise orphan its containers. `--assert-teardown` is
+        # the control that MEASURE_FAILs rather than passing when `docker ps` cannot
+        # answer — "could not count" is not "counted zero".
+        if: always()
+        run: |
+          set -euo pipefail
+          bash scripts/local-stack/run.sh down
+          bash scripts/local-stack/run.sh --assert-teardown
+
   frontend-policy:
     # Banned-package check + GDPR export coverage. PR-C moved npm audit
     # to the nightly workflow because (a) it's a security signal, not a
@@ -2532,6 +2695,35 @@ jobs:
     # silently skip a dependent. This job shares no resource and waits on no mutex.
     # The full argument, including the timeout derivation, is in the job's own header.
     #
+    # Phase 164.9 plan 08 / criterion 13 (2026-09-21): `frontend-live-db-lane` is
+    # BLOCKING here, wired into BOTH places below — either one alone leaves it
+    # advisory, the trap SEAMCORE-09 recorded for `frontend-seam-redis` and VAC-07
+    # recorded again for `frontend-local-stack`.
+    # ⭐ AND LIKE THAT ROW IT IS MORE THAN ONE MORE GATE. The ~49 specs it runs are
+    # gated on `HAS_LIVE_DB` and SKIP in every vitest shard, and the `frontend-test`
+    # job forbids fixing that with credentials because doing so would invalidate the
+    # ratchet baseline a blocking gate rests on. So this job is the ONLY place that
+    # class executes. An advisory row would leave it reading as covered while
+    # asserting nothing — `csv-finalize-rpc.test.ts`'s tombstone with a new name.
+    # It takes the loop's STRICT DEFAULT ARM and must NEVER be given a tolerance arm:
+    # it consumes no secret and no repository variable (its credentials are minted by
+    # the stack it boots), and it hosts that stack in containers private to its own
+    # runner, so it runs identically on a fork PR, a same-repo PR, a push and a
+    # workflow_dispatch. It has no legitimate skip, and a `skipped` there is always a
+    # real fault — the `frontend-seam-redis` / `sql-gate-lint` / `sql-mutation` /
+    # `frontend-local-stack` reasoning, and the OPPOSITE of the `sql-tests` /
+    # `e2e-seeded` rows.
+    # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to it, for the
+    # same reason as `frontend-local-stack`: that ban exists because those jobs share
+    # the TEST advisory-lock mutex and their `if:` conditions diverge, so a chain edge
+    # can silently skip a dependent. This job shares no resource and waits on no
+    # mutex. Its only `needs:` edge is the docs-only detector, and this aggregator
+    # carries `if: always()`, so an upstream skip arrives as a RESULT to judge.
+    # Wall clock is ACCEPTED: this aggregator now waits on a SECOND container-booting
+    # job. The two are independent and run in parallel, so the cost is the slower of
+    # the two rather than their sum, and it buys a previously ungated class a place
+    # where it can go RED. The full argument is in the job's own header.
+    #
     # Phase 164.6.3 / CI-DOCSPATH-01 (2026-09-12): `changed-paths` joins `needs:`
     # below — read for its `outputs.docs_only`, NOT for its result. It gets no row
     # in the result loop; what it contributes is the one boolean the loop's uniform
@@ -2556,6 +2748,7 @@ jobs:
       - frontend-coverage
       - frontend-seam-redis
       - frontend-local-stack
+      - frontend-live-db-lane
       - frontend-policy
       - frontend-build
       - e2e-seeded
@@ -2617,6 +2810,7 @@ jobs:
             "frontend-coverage=${{ needs.frontend-coverage.result }}" \
             "frontend-seam-redis=${{ needs.frontend-seam-redis.result }}" \
             "frontend-local-stack=${{ needs.frontend-local-stack.result }}" \
+            "frontend-live-db-lane=${{ needs.frontend-live-db-lane.result }}" \
             "frontend-policy=${{ needs.frontend-policy.result }}" \
             "frontend-build=${{ needs.frontend-build.result }}" \
             "e2e-seeded=${{ needs.e2e-seeded.result }}" \
