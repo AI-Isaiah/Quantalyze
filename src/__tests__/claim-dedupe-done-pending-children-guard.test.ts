@@ -296,14 +296,35 @@ describe("C39 / NEW-C39-01 — live-DB runtime: done_pending_children coexistenc
       cleanupUserIds.push(userId);
 
       // Insert an api_key row for the test user.
+      //
+      // ⚠️ Phase 164.9 plan 08 — FIXTURE-versus-SCHEMA drift, repaired at the
+      // CALL SITE. This payload used to name `key_hash` and `status`, and
+      // NEITHER COLUMN HAS EVER EXISTED on `api_keys`: the committed catalogue
+      // declares `api_key_encrypted` (19 occurrences across the migrations) and
+      // `is_active`, and `key_hash` appears ZERO times in
+      // `supabase/schema/baseline.sql` and ZERO times across
+      // `supabase/migrations/`. So this is NOT the forbidden act of rewriting a
+      // test to match a drifted schema — there is no drift to match. It is a
+      // fixture that could never have inserted a row, sitting behind a live-DB
+      // gate that nothing in CI was running. `label` and `api_key_encrypted`
+      // are additionally NOT NULL with no default, so an insert omitting them
+      // fails 23502 regardless of the two phantom keys.
+      // ⛔ Every value here is a SYNTHETIC PLACEHOLDER on a PUBLIC repo — not a
+      // key, not a key-shaped literal, and nothing derived from one.
+      // `sync_status` is `"idle"` because `api_keys_sync_status_check` admits
+      // only idle/syncing/computing/complete/complete_with_warnings/error/
+      // revoked/rate_limited — the previous `"ok"` was a third defect in the
+      // same payload, invisible to the static census (a CHECK is not a column)
+      // and a guaranteed 23514 the first time this insert ever executed.
       const { data: apiKey, error: akErr } = await admin
         .from("api_keys")
         .insert({
           user_id: userId,
           exchange: "okx",
-          key_hash: `c39test${ts}`,
-          status: "active",
-          sync_status: "ok",
+          label: `c39test${ts}`,
+          api_key_encrypted: "test-encrypted-placeholder",
+          is_active: true,
+          sync_status: "idle",
         })
         .select("id")
         .single<{ id: string }>();

@@ -24,9 +24,26 @@
 # (`42501` permission denial) is not statically decidable and is NOT represented here — see the
 # SUMMARY for that gap stated in full rather than rounded away.
 #
-# ENTRY_COUNT: 4
+# ENTRY_COUNT: 0
+#
+# DATED 2026-09-21, SECOND AND (so far) FINAL READING — Phase 164.9 plan 08. All FOUR seeded
+# findings were REPAIRED AT THE CALL SITE, so the ledger is now EMPTY and ENTRY_COUNT is 0.
+# Nothing was retargeted to a later phase, and no entry was added. What changed, per class:
+#   * absent-column x2 (api_keys.key_hash, api_keys.status) — the insert now names the columns
+#     the committed catalogue declares and supplies every NOT NULL column without a default.
+#   * unexposed-schema x1 (cron) — the `cron` call site was moved OFF the REST surface onto the
+#     Management-API path the same file already uses. `supabase/config.toml` was NOT widened:
+#     exposing `cron` would be a real REST-surface widening with its own review burden, and it
+#     is explicitly not the default repair.
+#   * ambiguous-overload x1 (claim_compute_jobs_with_priority) — the CALL SITE now names a
+#     parameter unique to the 5-arg declaration, so PostgREST can choose. The root-cause fix
+#     (dropping the stale 2-arg overload) is a PROD-affecting migration and remains OUT of this
+#     phase's scope, unchanged from the first seed's reading.
+# ⛔ An EMPTY ledger is not a licence to add to it. The AIM paragraph above still governs: a new
+# live-DB test naming a relation, column, function or schema the tree does not have is a real
+# defect and is fixed, never allowlisted.
+# ⚠️ The `unresolved` count is NOT zero and is still not claimed to be. Measured at this commit:
+# 69 call sites the static reader cannot decide (computed names, non-object-literal payloads).
+# They are residue for EXECUTION to classify — which is what the `frontend-live-db-lane` job
+# this plan stands up exists to do.
 
-absent-column file=src/__tests__/claim-dedupe-done-pending-children-guard.test.ts identifier=api_keys.key_hash Destination: Phase 164.9 plan 08 — fixture repair (RESEARCH Q2: the real column is api_key_encrypted; key_hash has never existed)
-absent-column file=src/__tests__/claim-dedupe-done-pending-children-guard.test.ts identifier=api_keys.status Destination: Phase 164.9 plan 08 — fixture repair alongside key_hash (api_keys has no status column; the test likely meant sync_status)
-unexposed-schema file=src/__tests__/retention-crons.test.ts identifier=cron Destination: Phase 164.9 plan 08 — decide between rewriting the call site off the REST surface and a deliberate config.toml exposure change; the exposure change is a real API-surface widening and is not the default
-ambiguous-overload file=src/__tests__/claim-failed-retry-dedupe-migrations.test.ts identifier=claim_compute_jobs_with_priority Destination: Phase 164.9 plan 08 — call-site disambiguation (name a parameter unique to the 5-arg overload); dropping the stale 2-arg overload itself is a PROD-affecting migration and is out of this phase's scope per CONTEXT Area 4
