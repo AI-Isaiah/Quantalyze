@@ -7461,6 +7461,29 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       criterion carries a dated amendment naming exactly this gap; a silent re-word would erase
       the only record that the replacement half was never measured.
 
+- [ ] **`[164.9-RPC-RETRY-NARROWED-SKIP-REOPENED]` the transport retry covers READS only, so a
+      sustained RPC read-timeout reaches `pytest.skip` again on a fence assertion (recorded
+      2026-09-21, Phase 164.9 review round 2)** — ⛔ **DATA-INTEGRITY-ADJACENT: the failure mode is
+      a GREEN `python` job for a shared-TEST transport fault**, which is the exact outcome
+      criterion 11 exists to end.
+      **How it arose, and the narrowing itself is CORRECT.** The review round made the retry stop
+      at the idempotency boundary: `insert`/`upsert`/`update`/`delete`/`rpc` run their terminal
+      `.execute()` exactly once, because replaying a write that may already have committed is
+      worse than not retrying it. `rpc` is on that list **fail-closed** — the wrapper cannot read a
+      function body, so it cannot know which RPCs are read-only.
+      **Why it bites here specifically.** The victims criterion 11 measured are RPC-heavy, so the
+      narrowing lands on exactly the files whose 504s are its evidence, and
+      `_rpc_retry_timeout`'s own 2-attempt `pytest.skip` grace is reachable again.
+      **Shape of the fix:** an explicit allowlist of READ-ONLY RPC names, so a read-only RPC is
+      retried and a claim RPC is not.
+      ⛔ **Forbidden closure: putting `rpc` back on the retried side.** Replaying a claim RPC can
+      corrupt a fence SILENTLY, which is strictly worse than a visible red.
+      ⛔ **Forbidden closure: deleting or widening the `pytest.skip`.** A skip there is a green
+      reading that measured nothing — the helper's own docstring argues this.
+      **Destination:** Phase 164.9.1 JOBRPCTRUTH already owns the compute-job RPC surface and is
+      the natural home; it does NOT earn a phase of its own (founder rule: only a data-integrity
+      or user-facing gap does, and this is test-transport). Interim owner: the founder.
+
 ---
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound

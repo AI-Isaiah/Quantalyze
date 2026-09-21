@@ -683,7 +683,13 @@ def _rpc_retry_timeout(fn, attempts: int = 2):
     pytest.skip(
         f"defer_compute_job live-DB RPC timed out {attempts}x under shared "
         f"test-project contention (python+e2e concurrent); fence verified by "
-        f"the migration self-verify DO block + live DO-block. Last: {last}"
+        # ⛔ TYPE ONLY, never the rendered exception. This log is public and an
+        # httpx/postgrest transport error's str() can carry the HOST. Same rule
+        # T-164.9-05-01 put on TransportRetryExhausted, which names only the
+        # exception type and the attempt count - this line was re-introducing
+        # exactly what that class was built to withhold.
+        f"the migration self-verify DO block + live DO-block. "
+        f"Last exception type: {type(last).__name__}"
     )
 
 
