@@ -128,6 +128,25 @@ export default defineConfig({
     // include list ever resolves to nothing, vitest must say so rather than
     // exit 0. (The derivation above throws first; this is the second control.)
     passWithNoTests: false,
+    // ⭐ THE EXECUTION ARTIFACT (Phase 164.9, the ledger round arising from plan
+    // 08 and its fix round). `default` first, so the output a developer reads is
+    // unchanged; the second reporter ADDITIONALLY writes
+    // `.live-db-lane-execution.json`, which `scripts/live-db-execution-ledger.mjs`
+    // compares against the committed execution ledger. It observes the run at its
+    // end — it selects no test, skips no test, and cannot change an outcome.
+    //
+    // ⛔ THIS IS NOT THE REPORTING CONFIGURATION THE HEADER ABOVE REFUSES. That
+    // refusal is about COVERAGE: a third coverage blob would shift the merged
+    // ratchet's denominator and invalidate a baseline backing a BLOCKING gate.
+    // This reporter emits no coverage of any kind. Coverage stays undeclared in
+    // this file, so a search for THAT concept over it still returns zero.
+    reporters: [
+      "default",
+      [
+        "./scripts/live-db-execution-reporter.mjs",
+        { outputFile: ".live-db-lane-execution.json" },
+      ],
+    ],
   },
   resolve: {
     // Same `@` -> src alias as vitest.config.ts.

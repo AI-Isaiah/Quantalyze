@@ -798,6 +798,16 @@ jobs:
     # its own INVOCATION instead. ⛔ Nothing in this plan changed `frontend-test`;
     # its prohibition, its shard matrix and its reporting behaviour are untouched.
     #
+    # ⭐ AND IT RUNS UNDER AN EXECUTION LEDGER (Phase 164.9, the ledger round arising
+    # from plan 08 and its fix round). 18 arms of this corpus fail against the
+    # committed schema-only baseline and NONE is closable by a fixture — the fix
+    # round already closed all 17 that were. `scripts/live-db-execution-ledger.txt`
+    # is the dated, shrink-only record of exactly those 18, and the job is GREEN iff
+    # the failing set MATCHES it and RED the moment it changes in either direction.
+    # ⛔ That is a RATCHET, not a tolerance: the row stays in the aggregator's STRICT
+    # default arm, nothing here is advisory, no test is skipped and every test still
+    # executes. Read the ledger's own header before touching it.
+    #
     # ⭐ THE PRECEDENT, AND THE INVERSION. `frontend-seam-redis` above sets env
     # JOB-WIDE and its own comment calls itself "the exact INVERSE of the
     # frontend-test warning". This job is the same shape for the same reason: the
@@ -927,14 +937,41 @@ jobs:
         # setup refuses outright if the runner's resolved workdir is this repository's
         # own Supabase context.
         run: bash scripts/local-stack/run.sh up
-      - name: Run the live-DB lane
-        # Byte-identical to what a developer runs. ⛔ No reporting flag of the
-        # merged-ratchet kind, deliberately: `frontend-coverage` merges the two
-        # `frontend-test` shards' blob reports and enforces the ratchet on the merged
-        # numbers, and a third blob from this lane would shift the denominator and
-        # invalidate the baseline. (Same rule as `frontend-seam-redis` and
+      - name: The execution-ledger gate must be able to FAIL (self-test first)
+        # Same discipline as `sql-gate-lint`: the gate proves it can go red before
+        # anyone is asked to trust it going green. Ten cases, a red and a green for
+        # each direction of the comparison plus the anti-vacuity guards. Needs no
+        # stack — it drives the comparison over fixtures.
+        run: node scripts/live-db-execution-ledger.mjs --self-test
+      - name: Run the live-DB lane under its EXECUTION LEDGER
+        # Phase 164.9, the ledger round arising from plan 08 and its fix round.
+        #
+        # ⭐ THE INNER RUN IS STILL `npm run test:live-db`, BYTE-IDENTICAL TO WHAT A
+        # DEVELOPER RUNS — `scripts/live-db-execution-ledger.mjs` spawns exactly that
+        # command with no added flag and no altered selection, streams its output,
+        # and then reads the artifact the lane's own reporter wrote. Every test in the
+        # 49-file corpus still EXECUTES; the gate prints the executed count and
+        # REFUSES a run that executed nothing.
+        #
+        # WHAT THE GATE DECIDES. GREEN iff the failing set is EXACTLY
+        # `scripts/live-db-execution-ledger.txt`. RED in BOTH directions: an arm that
+        # fails and is not listed, or a listed arm that has stopped failing. The
+        # ledger is DATED and SHRINK-ONLY; its header states the founder decision
+        # that seeded it and the rule for ever adding to it.
+        #
+        # ⛔ THIS IS NOT A TOLERANCE ARM AND NOT A `|| true`. There is no path through
+        # that script that exits 0 on an unexpected failure, the row stays BLOCKING in
+        # the `frontend` aggregator's STRICT default arm, and the aggregator wiring was
+        # not touched. The alternative — making this row advisory — is a forbidden
+        # closure, which is why it was refused.
+        #
+        # ⛔ No reporting flag of the merged-ratchet kind, unchanged: `frontend-coverage`
+        # merges the two `frontend-test` shards' blob reports and enforces the ratchet
+        # on the merged numbers, and a third COVERAGE blob from this lane would shift
+        # the denominator and invalidate the baseline. The lane's reporter emits no
+        # coverage of any kind. (Same rule as `frontend-seam-redis` and
         # `frontend-local-stack`.)
-        run: npm run test:live-db
+        run: npm run test:live-db:ledger
       - name: Tear down the lane (and PROVE nothing survived)
         # `if: always()`: `run.sh up` leaves the stack running on success by design, so
         # a failed spec would otherwise orphan its containers. `--assert-teardown` is
