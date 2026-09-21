@@ -2483,11 +2483,21 @@ All three were found by RUNNING a merge, not by review, which is why they carry 
 ⛔ **Do not close criterion 11 with a re-run, criterion 12 by softening the warning, or criterion 13 by deleting tests.** Each of those is the tolerance-instead-of-isolation move this phase exists to replace.
 
 **Depends on:** Phase 164.8 (its restore settles the schema and ledger this phase isolates against).
-**Plans:** 0 plans
+**Plans:** 11 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9 to break down)
+- [ ] 164.9-01-PLAN.md — wave 1 — Book the four backlog ids (`FANOUT-GLOBAL-01` + the three `164.9-*`) and correct the two drifted facts in `CLAUDE.md` (criterion 1)
+- [ ] 164.9-02-PLAN.md — wave 2 — TRACER: the dead-holder condition becomes a job-reddening verdict, falsified by killing a real holder on the disposable lane (criterion 12)
+- [ ] 164.9-03-PLAN.md — wave 2 — Measure the credentialed live-DB class as a credential-free static census gate, with a dated shrink-only ledger (criterion 13, first half)
+- [ ] 164.9-04-PLAN.md — wave 2 — Foreign-row calibration for the three cron-body-sweep gates, each armed and proven able to fail (criterion 2)
+- [ ] 164.9-05-PLAN.md — wave 2 — Python transport boundary: census the call sites, add a bounded retry observed to EXHAUST and to discriminate (criterion 11, Python half)
+- [ ] 164.9-06-PLAN.md — wave 3 — Two keys for two units + an explicit cross-workflow ordering wait + the bash bounded retry (criteria 3, 4, 11 bash half)
+- [ ] 164.9-07-PLAN.md — wave 2 — Restore gates: two-directional schema-scoped extension guard + the third refdata leg pinning column VALUES (criterion 7)
+- [ ] 164.9-08-PLAN.md — wave 4 — Repair the census findings and stand up the credentialed-test lane on the local stack, blocking in both aggregator places (criterion 13, second half)
+- [ ] 164.9-09-PLAN.md — wave 5 — `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`: an author-time refusal over the migration corpus — a mechanism, not a pragma (criterion 5)
+- [ ] 164.9-10-PLAN.md — wave 5 — `[164.8.1-TEST-ANALYTICS-URL-PROD]` closed by measuring the LIVE row, plus a TEST-only remediation that refuses everywhere else (criterion 6)
+- [ ] 164.9-11-PLAN.md — wave 6 — The single restore dispatch, its post-merge sequencing constraint surfaced as a founder decision, and the ledgers reconciled (criterion 8)
 
 ### 📜 Phase 164.10 (ORIGINAL ENTRY, superseded): BODYDRIFT — PROD runs an EARLIER revision of three function bodies than the migration chain renders (INSERTED)
 
