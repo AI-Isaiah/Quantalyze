@@ -85,6 +85,34 @@
 #                             and why they are seams at all: an invariant no arm
 #                             exercises is decorative, so the self-test points them
 #                             at `fx_keep_kind_check` over `public.fx_keep`.`label`.
+#   REFDATA_WRONGSTATE_TABLE  default public.profiles — 164.9-07's third
+#                             reference-data leg, [164.8.1-REPLAY-INSERT-ONLY-SCOPE]:
+#                             pins ONE row's ONE column against its
+#                             POST-migration value, because the replay reproduces
+#                             INSERT effects only and neither of the two legs
+#                             above (both count(*)) can see a row restored at
+#                             the right count in the wrong state. Bounded to the
+#                             teaser trio (CONTEXT Area 6). public.profiles does
+#                             not exist on the throwaway lane, so the self-test
+#                             points this at public.fx_keep's `status` column
+#                             (arms 31/32).
+#   REFDATA_WRONGSTATE_ID     default 00000000-0000-0000-0000-000000000000 (the
+#                             teaser sentinel row's id); compared as ::text so
+#                             both a uuid and the fixture's integer id resolve
+#                             the same way.
+#   REFDATA_WRONGSTATE_COL    default manager_status
+#   REFDATA_WRONGSTATE_EXPECTED default verified — the value
+#                             20260521150000_universal_signup_approval_gate.sql
+#                             :28-31 sets and the INSERT-only replay never
+#                             re-applies.
+#                             ⛔ ALL FOUR REACH SQL — TABLE and COL as bare
+#                             identifiers, ID and EXPECTED inside a string
+#                             literal — so each is CHARSET-REFUSED before any
+#                             interpolation and `sql_lit`-quoted at its literal
+#                             site, the same W1 posture as the REFDATA_KIND_*
+#                             trio above. The raise names the row and the
+#                             column and the two values' SHAPES, never the
+#                             values themselves.
 #   PGBIN                     (self-test only) server binaries for the throwaway lane
 #
 # ⚠️ psql's STDERR IS printed for the transaction — and it does NOT only name SQL
@@ -326,6 +354,25 @@ REFDATA_KIND_REGISTRY="${REFDATA_KIND_REGISTRY:-public.compute_job_kinds}"
 REFDATA_KIND_REGISTRY_COL="${REFDATA_KIND_REGISTRY_COL:-name}"
 REFDATA_KIND_CHECK="${REFDATA_KIND_CHECK:-compute_jobs_kind_check}"
 
+# ⛔ 164.9-07 — THE THIRD REFERENCE-DATA LEG, SEAMS FOR THE SAME REASON THE
+# THREE ABOVE ARE: a check no arm can exercise is decorative. `[164.8.1-REPLAY-
+# INSERT-ONLY-SCOPE]` (TODOS.md): the replay reproduces INSERT effects only, so
+# a row a LATER migration UPDATEd is present at the right count but not the
+# value a real restore should carry. Bounded to the teaser trio (CONTEXT Area
+# 6): the one worked case is `public.profiles` id
+# 00000000-0000-0000-0000-000000000000 (20260515095804_teaser_anchor_strategy.sql
+# :60-73, role='manager'), whose `manager_status` 20260521150000_universal_
+# signup_approval_gate.sql:28-31 sets to 'verified' and the replay never
+# reapplies — the row comes back at the INSERT-time default 'newbie' instead.
+# `public.profiles` does not exist on the throwaway lane, so pointed at its
+# default the leg would be a permanent no-op there; the self-test points it at
+# `public.fx_keep`'s new `status` column, which baseline-fixture.sql and its
+# allowlisted replay carry for exactly this reason (arms 31/32).
+REFDATA_WRONGSTATE_TABLE="${REFDATA_WRONGSTATE_TABLE:-public.profiles}"
+REFDATA_WRONGSTATE_ID="${REFDATA_WRONGSTATE_ID:-00000000-0000-0000-0000-000000000000}"
+REFDATA_WRONGSTATE_COL="${REFDATA_WRONGSTATE_COL:-manager_status}"
+REFDATA_WRONGSTATE_EXPECTED="${REFDATA_WRONGSTATE_EXPECTED:-verified}"
+
 OWNED_OUT_DIR=""
 cleanup_out_dir() {
   status=$?
@@ -378,7 +425,32 @@ SELECT 'functions=' || count(DISTINCT p.proname)::text
 
 SELECT 'policies=' || count(*)::text FROM pg_policies WHERE schemaname = 'public';
 
-SELECT 'extensions=' || count(*)::text FROM pg_extension;
+-- ⛔ SCOPED 2026-09-21 (164.9-07) — this key's MEANING narrowed from "every
+-- extension in the whole database" to "every extension whose namespace is
+-- public", one row per extension name, because the guard reading this key
+-- reasons about what lives in PUBLIC while a whole-database COUNT let a
+-- legitimate gain in ANOTHER schema (pg_net, correctly created in schema
+-- `extensions` — CLAUDE.md's run 34274355596) be misread as something LOST
+-- from public. The key NAME stays `extensions` so census_class_lines and
+-- every existing reader still resolves it; only what it counts narrowed.
+--
+-- A NAME-SET, not a count, because a same-count SWAP (one extension dropped
+-- from public, a different one gained) would pass a scoped COUNT silently.
+-- Measured against the repo's own migration corpus before choosing: every
+-- extension `supabase/schema/baseline.sql` creates is explicitly schema-qualified
+-- OUTSIDE public, but `supabase/migrations/20260513094906_enable_pg_cron.sql:17`
+-- creates `pg_cron` with NO schema clause at all — relying on whatever the
+-- default search_path resolved to when it ran. That migration's SQL is never
+-- replayed during a restore (only baseline.sql's DDL executes; the ledger seed
+-- is a provenance sentence, not the statement — see the `was NOT executed on
+-- TEST` marker below), so it cannot itself move this census. But its ambiguity
+-- is why a scoped COUNT was not trusted here: a plain count cannot discriminate
+-- a same-count swap, and this repo's own corpus was not clean enough to assume
+-- one could never happen.
+SELECT 'extensions=' || e.extname
+  FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+ WHERE n.nspname = 'public'
+ ORDER BY 1;
 
 -- The ledger may legitimately not exist yet on a database that has never been
 -- pushed to. `to_regclass` + `query_to_xml` is how a read stays a read: CASE
@@ -747,6 +819,24 @@ refuse_bad_refdata_allowlist() {
     ''|*[!a-z0-9_.]*) fail "REFDATA_KIND_CHECK is '${REFDATA_KIND_CHECK}' — this script refuses to interpolate that into SQL." ;;
   esac
 
+  # THE WRONGSTATE SEAMS (164.9-07), refused the SAME way: TABLE and COL reach
+  # SQL as bare identifiers (TABLE additionally carries a schema dot; COL does
+  # not), ID and EXPECTED reach it only inside a `sql_lit`-quoted string
+  # literal but are still charset-refused here as defense in depth, the same
+  # posture the REFDATA_KIND_* trio above takes.
+  case "$REFDATA_WRONGSTATE_TABLE" in
+    ''|*[!a-z0-9_.]*) fail "REFDATA_WRONGSTATE_TABLE is '${REFDATA_WRONGSTATE_TABLE}' — this script refuses to interpolate that into SQL." ;;
+  esac
+  case "$REFDATA_WRONGSTATE_COL" in
+    ''|*[!a-z0-9_]*) fail "REFDATA_WRONGSTATE_COL is '${REFDATA_WRONGSTATE_COL}' — this script refuses to interpolate that into SQL. A column name carries no schema dot." ;;
+  esac
+  case "$REFDATA_WRONGSTATE_ID" in
+    ''|*[!A-Za-z0-9_.-]*) fail "REFDATA_WRONGSTATE_ID is '${REFDATA_WRONGSTATE_ID}' — this script refuses to interpolate that into SQL." ;;
+  esac
+  case "$REFDATA_WRONGSTATE_EXPECTED" in
+    ''|*[!A-Za-z0-9_.-]*) fail "REFDATA_WRONGSTATE_EXPECTED is '${REFDATA_WRONGSTATE_EXPECTED}' — this script refuses to interpolate that into SQL." ;;
+  esac
+
   # EMPTY IS AN ERROR, and it is checked HERE rather than left to the extractor:
   # the extractor's own empty-allowlist refusal is a second reading of the same
   # fact, and a guard whose only arm reaches the OTHER layer is unmeasured.
@@ -965,6 +1055,41 @@ census_rollback_view() {
 # rather than a count. awk, not grep: awk exits 0 on zero matches, so an empty
 # class is an empty string and never an rc that has to be softened away.
 census_class_lines() { awk -v k="$2" 'index($0, k "=") == 1' "$1" | LC_ALL=C sort; }
+
+# ---------------------------------------------------------------------------
+# THE EXTENSION GUARD (164.9-07) — pulled into its own function so it can be
+# exercised directly against CONSTRUCTED census files (arm_ext_loss/
+# arm_ext_gain/arm_ext_unchanged), the same shape `census_rollback_view` (arm
+# 25) already uses for a check that must be proven to discriminate rather than
+# to always fire. It never touches a database; it reads two census files.
+#
+# ⛔ TWO INDEPENDENTLY REACHABLE FAILURES. A LOSS (something that lived in
+# public is gone) and a GAIN (something now lives in public that did not
+# before) are DIFFERENT faults — a reader shown the loss wording on a gain is
+# being misinformed, which is exactly what happened on CLAUDE.md's run
+# 34274355596 (pg_net, correctly created in schema `extensions`, tripped the
+# old whole-database strict-equality guard and was reported as LOST from
+# public). Do NOT collapse this back to a one-sided
+# `[ "$post_ext_n" -ge "$pre_ext_n" ]` — CONTEXT Area 6 names that exact
+# "fix" as FORBIDDEN: it silences the false positive on a GAIN by
+# reintroducing the identical blindness pointing the other way, and it can no
+# longer see a genuine LOSS that happens to coincide with an unrelated GAIN.
+#
+# ⛔ THIS GUARD RUNS AFTER `run_transaction` — in `--mode restore` the
+# transaction has already COMMITTED by the time `run_restore` calls this. It
+# LABELS an outcome, it does not PREVENT one; `--mode preflight`'s
+# byte-for-byte census compare is what actually stops a bad restore before it
+# commits. That limit is real and is not closed by this change.
+check_extension_guard() {
+  local pre_file="$1" post_file="$2"
+  local pre_ext_lines post_ext_lines ext_lost ext_gained
+  pre_ext_lines=$(census_class_lines "$pre_file" extensions)
+  post_ext_lines=$(census_class_lines "$post_file" extensions)
+  ext_lost=$(comm -23 <(printf '%s\n' "$pre_ext_lines") <(printf '%s\n' "$post_ext_lines") | sed '/^$/d')
+  ext_gained=$(comm -13 <(printf '%s\n' "$pre_ext_lines") <(printf '%s\n' "$post_ext_lines") | sed '/^$/d')
+  [ -z "$ext_lost" ] || fail "post-census extensions=${post_ext_lines:-<none>}, pre-census had ${pre_ext_lines:-<none>}. LOST from public: ${ext_lost//extensions=/}. An extension that lived in public was CASCADE-dropped and the dump did not put it back."
+  [ -z "$ext_gained" ] || fail "post-census extensions=${post_ext_lines:-<none>}, pre-census had ${pre_ext_lines:-<none>}. GAINED in public: ${ext_gained//extensions=/}. An extension now lives in public that did not before the restore — a DIFFERENT fault from something lost, and the dump did not intend to put anything there."
+}
 
 # ⛔ A7 — `grep -c … || true` SWALLOWED EXIT 2. grep exits 1 for "no matches" (a
 # READING) and 2 for "the file could not be read" (a BROKEN INSTRUMENT), and
@@ -1370,9 +1495,10 @@ TXN_REFDATA_TAIL
   cat >> "$out" <<TXN_REFDATA_GATE
 DO \$restore\$
 DECLARE
-  v_empty   text;
-  v_short   text;
-  v_missing text[];
+  v_empty       text;
+  v_short       text;
+  v_wrong_state text;
+  v_missing     text[];
 BEGIN
   -- ⛔ COLLECT FIRST, RAISE ONCE. A RAISE inside the loop aborts on the FIRST
   -- offending table, so the likeliest real failure — the whole replay lost, which
@@ -1391,11 +1517,51 @@ BEGIN
       ${refdata_values}
     ) AS t(tbl, n, expected);
 
+  -- 164.9-07's THIRD leg, a SIBLING of the two above, computed in the SAME
+  -- collect-first pass (BEFORE any of the three RAISEs) so a single restore's
+  -- computation covers every reference-data fault it found even though each
+  -- RAISE still aborts on the first one reached. Neither leg above can see a
+  -- row restored at the RIGHT COUNT but the WRONG STATE: both measure
+  -- count(*), and the row is there ([164.8.1-REPLAY-INSERT-ONLY-SCOPE] —
+  -- TODOS.md; the replay reproduces INSERT effects only, so a later
+  -- migration's UPDATE is never re-applied). BOUNDED to the teaser trio
+  -- (CONTEXT Area 6): REFDATA_WRONGSTATE_* names ONE row and ONE column, never
+  -- a class of rows, and never a FK- or CHECK-bearing reference table — those
+  -- stay the two legs above's job. A scalar subquery, not a JOIN, so an ABSENT
+  -- row is LOUD (actual is NULL, the CASE below names it) rather than
+  -- vanishing out of the comparison the way a JOIN would silently drop it.
+  SELECT CASE
+           WHEN w.actual IS NULL THEN
+             format('%s.%s for id=%s: the row is ABSENT after the replay',
+                    '$(sql_lit "$REFDATA_WRONGSTATE_TABLE")',
+                    '$(sql_lit "$REFDATA_WRONGSTATE_COL")',
+                    '$(sql_lit "$REFDATA_WRONGSTATE_ID")')
+           WHEN w.actual IS DISTINCT FROM w.expected THEN
+             -- Names the row and the column and the two values' SHAPES, never
+             -- the values themselves: this script's own arm runner scans every
+             -- arm's captured output for a DSN shape and a dollar-quoted body,
+             -- and this log is public.
+             format('%s.%s for id=%s disagrees after the replay (actual %s char(s), expected %s char(s))',
+                    '$(sql_lit "$REFDATA_WRONGSTATE_TABLE")',
+                    '$(sql_lit "$REFDATA_WRONGSTATE_COL")',
+                    '$(sql_lit "$REFDATA_WRONGSTATE_ID")',
+                    length(w.actual), length(w.expected))
+         END
+    INTO v_wrong_state
+    FROM (
+      SELECT (SELECT ${REFDATA_WRONGSTATE_COL}::text FROM ${REFDATA_WRONGSTATE_TABLE}
+               WHERE id::text = '$(sql_lit "$REFDATA_WRONGSTATE_ID")') AS actual,
+             '$(sql_lit "$REFDATA_WRONGSTATE_EXPECTED")'::text AS expected
+    ) AS w;
+
   IF v_empty IS NOT NULL THEN
     RAISE EXCEPTION 'restore aborted: reference table(s) % are EMPTY after the replay — the ledger would say their seed migrations applied while their rows are gone; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1). Short-but-not-empty in the same run: %', v_empty, coalesce(v_short, 'none');
   END IF;
   IF v_short IS NOT NULL THEN
     RAISE EXCEPTION 'restore aborted: reference table(s) are SHORT after the replay — %, and each allowlisted statement inserts at least one row into a table the DROP had just emptied, so at least one statement did not land. A PARTIAL replay commits a ledger that swears its seed migration applied; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1)', v_short;
+  END IF;
+  IF v_wrong_state IS NOT NULL THEN
+    RAISE EXCEPTION 'restore aborted: reference row(s) came back in the WRONG STATE after the replay — %. The replay reproduces INSERT effects only; a later migration that UPDATEd this row was never re-applied, so the row is present at the right count but not the value a real restore should carry ([164.8.1-REPLAY-INSERT-ONLY-SCOPE]). Not closable by editing the allowlist — an UPDATE is not a literal INSERT (C2) — see the allowlist''s own SCOPE BOUNDARY block', v_wrong_state;
   END IF;
 
   -- The SECOND partial-replay leg, and it is INDEPENDENT of the count floor
@@ -1871,10 +2037,8 @@ run_restore() {
   # DROP can be expected to succeed". An extension that lived IN public and is not
   # re-created by the dump, or a public object the dump brings back under a
   # different owner, would have committed silently.
-  local pre_ext post_ext class
-  pre_ext=$(census_val "$RESTORE_OUT_DIR/pre-census.txt" extensions)
-  post_ext=$(census_val "$RESTORE_OUT_DIR/post-census.txt" extensions)
-  [ "$post_ext" = "$pre_ext" ] || fail "post-census extensions=${post_ext}, pre-census had ${pre_ext}. An extension that lived in public was CASCADE-dropped and the dump did not put it back."
+  check_extension_guard "$RESTORE_OUT_DIR/pre-census.txt" "$RESTORE_OUT_DIR/post-census.txt"
+  local class
   for class in nonpostgres_rel nonpostgres_fn; do
     [ "$(census_class_lines "$RESTORE_OUT_DIR/post-census.txt" "$class")" \
       = "$(census_class_lines "$RESTORE_OUT_DIR/pre-census.txt" "$class")" ] \
@@ -1949,6 +2113,11 @@ main() {
 #                                                25  GREEN rollback view normalises
 #                                                26  RED  backtick in a txn heredoc
 #                                                27  RED  credential in a published .sql
+#                                                28  RED  extension guard: public LOST
+#                                                29  RED  extension guard: public GAINED
+#                                                30  GREEN extension guard: public unchanged
+#                                                31  RED  value-pinning leg: WRONG STATE
+#                                                32  GREEN value-pinning leg: pinned value holds
 #
 # Several arms carry more than one LEG, because one guard can be false in more than
 # one way and an arm that measures the easy way is not measuring the guard:
@@ -2024,8 +2193,14 @@ main() {
 # at 26 while the sentence introducing it says EVERY arm has an observed-RED
 # falsifier — an unattributed arm makes that sentence unverifiable, which is the
 # same defect as a stale count.
-# MEASURED 2026-09-10 — `--self-test` prints 27/27 and exits 0 on a throwaway cluster.
-EXPECTED_ARMS=27
+#
+# Arms 28-32 are THIS phase's (164.9-07): the extension guard's loss/gain/
+# unchanged discrimination (28-30) and the reference-data value-pinning leg's
+# wrong-state/correct-state discrimination (31-32). All five falsifiers were
+# observed RED before being fixed and are recorded verbatim in this plan's
+# SUMMARY, the same posture arms 19-27 are held to.
+# MEASURED 2026-09-21 — `--self-test` prints 32/32 and exits 0 on a throwaway cluster.
+EXPECTED_ARMS=32
 
 SELFTEST_MUTEX_HOLDER_PID=""
 SELFTEST_TMPD=""
@@ -2259,6 +2434,19 @@ FRESHSTUB
   local ARM_KIND_REGISTRY="public.fx_keep"
   local ARM_KIND_REGISTRY_COL="label"
   local ARM_KIND_CHECK="fx_keep_kind_check"
+  # 164.9-07's third leg, pointed at the fixture analog the same way the W1
+  # trio above is: `public.fx_keep`'s `status` column (baseline-fixture.sql),
+  # row id=1 whose allowlisted INSERT sets status='verified' explicitly —
+  # baseline-fixture.sql's stand-in for "the row's POST-migration value". The
+  # DEFAULT here is the QUIET case (actual matches expected) so every
+  # pre-existing arm stays unaffected; arm 31 overrides ARM_WRONGSTATE_ID to
+  # row id=2, whose status is left at the column's own schema DEFAULT
+  # (baseline-fixture.sql's stand-in for "the INSERT-time value a real
+  # UPDATE-only-scoped replay never overwrites").
+  local ARM_WRONGSTATE_TABLE="public.fx_keep"
+  local ARM_WRONGSTATE_ID="1"
+  local ARM_WRONGSTATE_COL="status"
+  local ARM_WRONGSTATE_EXPECTED="verified"
 
   run_leg() {
     local script="$1" mode="$2" tag="$3"
@@ -2275,6 +2463,10 @@ FRESHSTUB
     REFDATA_KIND_REGISTRY="$ARM_KIND_REGISTRY" \
     REFDATA_KIND_REGISTRY_COL="$ARM_KIND_REGISTRY_COL" \
     REFDATA_KIND_CHECK="$ARM_KIND_CHECK" \
+    REFDATA_WRONGSTATE_TABLE="$ARM_WRONGSTATE_TABLE" \
+    REFDATA_WRONGSTATE_ID="$ARM_WRONGSTATE_ID" \
+    REFDATA_WRONGSTATE_COL="$ARM_WRONGSTATE_COL" \
+    REFDATA_WRONGSTATE_EXPECTED="$ARM_WRONGSTATE_EXPECTED" \
       bash "$script" --run --mode "$mode"
   }
   arm_env() { run_leg "$0" "$1" "${2:-$1}"; }
@@ -3488,6 +3680,105 @@ FRESHSTUB
     return 0
   }
 
+  # ═══ ARM 28 (164.9-07) — the extension guard fires on a LOSS ══════════════
+  # Constructed census files, same technique arm 25 uses for census_rollback_view:
+  # no database, no lane — the guard is a pure function of two census files.
+  arm_ext_loss() {
+    local d="$SELFTEST_TMPD/a28"; mkdir -p "$d"
+    printf 'tables=2\nextensions=pgcrypto\n' > "$d/pre.txt"
+    printf 'tables=2\n' > "$d/post.txt"
+    local out rc=0
+    out=$(check_extension_guard "$d/pre.txt" "$d/post.txt" 2>&1) || rc=$?
+    printf '%s\n' "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: a public extension LOST across the restore did not fail the guard (exit ${rc})"; return 1; }
+    printf '%s\n' "$out" | grep -aq 'LOST from public' \
+      || { echo "MEASURE_FAIL: the failure message does not say LOST from public"; return 1; }
+    if printf '%s\n' "$out" | grep -aq 'GAINED in public'; then
+      echo "MEASURE_FAIL: a pure LOSS was ALSO reported as a GAIN — the two directions are not independently reachable"
+      return 1
+    fi
+    return 0
+  }
+
+  # ═══ ARM 29 (164.9-07) — the extension guard fires on a GAIN, with a ══════
+  # DIFFERENT message than the loss direction (the defect this task exists to
+  # fix: CLAUDE.md's run 34274355596 reported a gain with the loss wording).
+  arm_ext_gain() {
+    local d="$SELFTEST_TMPD/a29"; mkdir -p "$d"
+    printf 'tables=2\n' > "$d/pre.txt"
+    printf 'tables=2\nextensions=pgcrypto\n' > "$d/post.txt"
+    local out rc=0
+    out=$(check_extension_guard "$d/pre.txt" "$d/post.txt" 2>&1) || rc=$?
+    printf '%s\n' "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: a public extension GAINED across the restore did not fail the guard (exit ${rc})"; return 1; }
+    printf '%s\n' "$out" | grep -aq 'GAINED in public' \
+      || { echo "MEASURE_FAIL: the failure message does not say GAINED in public"; return 1; }
+    if printf '%s\n' "$out" | grep -aq 'LOST from public'; then
+      echo "MEASURE_FAIL: a pure GAIN was ALSO reported as a LOSS — the two directions are not independently reachable"
+      return 1
+    fi
+    return 0
+  }
+
+  # ═══ ARM 30 (164.9-07) — the extension guard DISCRIMINATES: unchanged public ══
+  # is quiet. Without this, arms 28/29 alone would not rule out a guard that
+  # always fires regardless of what the census actually says.
+  arm_ext_unchanged() {
+    local d="$SELFTEST_TMPD/a30"; mkdir -p "$d"
+    printf 'tables=2\nextensions=pgcrypto\n' > "$d/pre.txt"
+    printf 'tables=2\nextensions=pgcrypto\n' > "$d/post.txt"
+    local out rc=0
+    out=$(check_extension_guard "$d/pre.txt" "$d/post.txt" 2>&1) || rc=$?
+    printf '%s\n' "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: an UNCHANGED public extension set failed the guard (exit ${rc}) — it does not discriminate, it always fires"; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 31 (164.9-07) — the value-pinning leg fires on a row restored in ═══
+  # the WRONG STATE: right count, wrong value. Row id=2's `status` is left at
+  # the fixture's schema DEFAULT ('newbie') — the analog of a row an
+  # UPDATE-only-scoped replay never revisits ([164.8.1-REPLAY-INSERT-ONLY-SCOPE]).
+  arm_wrongstate_red() {
+    setup_lane || return 1
+    local ARM_WRONGSTATE_ID="2"
+    local out="$SELFTEST_TMPD/a31.out" rc=0
+    arm_env restore a31 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: a row restored in the WRONG STATE exited ${rc}, expected 1"; return 1; }
+    grep -aq 'WRONG STATE after the replay' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not name the wrong-state fault"; return 1; }
+    grep -aq 'public.fx_keep.status for id=2' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not name the row and column that disagreed"; return 1; }
+    if grep -aqE "'newbie'|'verified'" "$out"; then
+      echo "MEASURE_FAIL: the abort printed a raw row VALUE — the message must describe SHAPES, never values"
+      return 1
+    fi
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — a WRONG-STATE row COMMITTED instead of rolling back."; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 32 (164.9-07) — the value-pinning leg is QUIET when the row holds ═══
+  # its pinned value: row id=1's `status` is 'verified' by the allowlisted
+  # replay itself (20260103000000_fixture_c.sql) — without this GREEN, arm 31
+  # alone would not rule out a leg that always fires regardless of state.
+  arm_wrongstate_green() {
+    setup_lane || return 1
+    local out="$SELFTEST_TMPD/a32.out" rc=0
+    arm_env restore a32 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: the value-pinning leg fired on a row restored at its pinned value (exit ${rc}) — it does not discriminate, it always fires"; return 1; }
+    if grep -aq 'WRONG STATE after the replay' "$out"; then
+      echo "MEASURE_FAIL: the wrong-state fault fired on a row restored at its pinned value"
+      return 1
+    fi
+    local n
+    n=$(lane_q "SELECT status FROM public.fx_keep WHERE id = 1;")
+    [ "$n" = "verified" ] || { echo "MEASURE_FAIL: the premise is broken — public.fx_keep id=1 holds status='${n}', not 'verified', so this GREEN would prove nothing"; return 1; }
+    return 0
+  }
+
   run_arm "1  RED   credential absent — a missing DSN is a hard failure, never a skip" 0 arm_credential_absent
   run_arm "2  RED   identity marker NULL — refused before any write" 0 arm_marker_null
   run_arm "3  RED   identity marker names PROD — refused, loudly" 0 arm_marker_prod
@@ -3516,6 +3807,11 @@ FRESHSTUB
   run_arm "25 GREEN the preflight rollback view normalises mutable reference counts and NOTHING else (CR-01)" 0 arm_census_rollback_view
   run_arm "26 RED   a backtick inside ANY unquoted heredoc is refused — SEVEN evasions closed — and THIS script is clean" 0 arm_backtick_in_txn_heredoc
   run_arm "27 RED   a credential in a PUBLISHED .sql file, a file the scan could not find, and the refdata.sql ALTER DATABASE exemption in BOTH directions" 0 arm_published_sql_credential_scan
+  run_arm "28 RED   the extension guard fires on a public extension LOST (164.9-07)" 0 arm_ext_loss
+  run_arm "29 RED   the extension guard fires on a public extension GAINED, a DIFFERENT message than the loss (164.9-07)" 0 arm_ext_gain
+  run_arm "30 GREEN the extension guard is QUIET when public is unchanged — it discriminates (164.9-07)" 0 arm_ext_unchanged
+  run_arm "31 RED   the reference-data value-pinning leg fires on a row restored in the WRONG STATE (164.9-07, [164.8.1-REPLAY-INSERT-ONLY-SCOPE])" 0 arm_wrongstate_red
+  run_arm "32 GREEN the reference-data value-pinning leg is QUIET when the row holds its pinned value (164.9-07)" 0 arm_wrongstate_green
 
   release_mutex
 

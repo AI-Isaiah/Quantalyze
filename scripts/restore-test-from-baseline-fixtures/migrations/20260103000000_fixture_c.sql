@@ -31,6 +31,13 @@
 -- Change the row/statement counts here and both legs must be re-derived.
 SELECT 1;
 
-INSERT INTO fx_keep (id, label) VALUES (1, 'ref_a'), (2, 'ref_b') ON CONFLICT (id) DO NOTHING;
+-- 164.9-07: row 1's `status` is set explicitly to 'verified' — the fixture
+-- analog of a row's POST-migration value, read by ARM_WRONGSTATE_* (arms
+-- 31/32) via `public.fx_keep`.`status`. Row 2 omits the column and is left at
+-- the schema DEFAULT ('newbie'), the analog of a row an UPDATE-only-scoped
+-- replay never revisits. Neither the ROW count nor the STATEMENT count moved,
+-- so arm 23 legs (c)/(d) and arm 24 leg (a)'s pinned 2-over-3 shape are
+-- unaffected — only a THIRD column on an EXISTING statement.
+INSERT INTO fx_keep (id, label, status) VALUES (1, 'ref_a', 'verified'), (2, 'ref_b', DEFAULT) ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO fx_keep (id, label) VALUES (3, 'ref_c') ON CONFLICT (id) DO NOTHING;
