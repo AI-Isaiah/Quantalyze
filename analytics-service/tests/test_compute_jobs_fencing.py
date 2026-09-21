@@ -653,7 +653,24 @@ def _rpc_retry_timeout(fn, attempts: int = 2):
     an EXHAUSTED budget is a sustained shared-TEST outage, and reddening on
     one is the whole point of Phase 164.9 — a skip there would be a green
     reading that measures nothing. The non-timeout re-raise below is
-    unchanged, so the serialization_failure these tests assert still lands."""
+    unchanged, so the serialization_failure these tests assert still lands.
+
+    ⛔ CORRECTED 2026-09-21 (Phase 164.9 review round) — THE "UNREACHABLE"
+    CLAIM ABOVE IS NO LONGER TRUE FOR THIS HELPER, AND THIS HELPER IS THE
+    RPC PATH. The review round made the transport retry stop at the
+    idempotency boundary: `insert`/`upsert`/`update`/`delete`/`rpc` taint the
+    rest of their own chain and their terminal `.execute()` runs EXACTLY
+    ONCE, because replaying a write that may already have committed is worse
+    than not retrying it. `rpc` is on that list FAIL-CLOSED — the wrapper
+    cannot read a function body, so it cannot know which RPCs are read-only.
+    CONSEQUENCE: the inner retry no longer absorbs a read-timeout on an RPC,
+    so the skip path above is REACHABLE AGAIN for exactly the case this
+    docstring said it could no longer happen in. The paragraphs above are
+    kept as lineage because their reasoning still holds for READ paths, which
+    are still retried.
+    ⚠️ Do not resolve this by putting `rpc` back on the retried side. The
+    open follow-up, deliberately not taken as speculative scope, is an
+    explicit allowlist of read-only RPC names."""
     last: Exception | None = None
     for attempt in range(attempts):
         try:
