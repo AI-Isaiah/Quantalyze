@@ -810,16 +810,38 @@ describe("audit-2026-05-07 G10.B — RLS + last_error redaction", () => {
 
         // The user-facing RPC redacts and synthesises a user_message.
         // Note: get_user_compute_jobs filters by auth.uid(); we cannot
-        // exercise it through service-role here. We assert the function
-        // shape via SQL information_schema (the migration's own DO block
-        // already verified this end-to-end at apply time).
-        const { data: cols, error: colsErr } = await admin
-          .from("information_schema.columns" as never)
-          .select("column_name")
-          .eq("table_name", "compute_jobs")
-          .eq("column_name", "reclaim_count");
+        // exercise it through service-role here. We assert instead that the
+        // column the migration added is present on the relation.
+        //
+        // ⚠️ Phase 164.9 fix round (F4) — THE PGRST205 SIGNATURE, MOVED OFF A
+        // SCHEMA POSTGREST CANNOT SERVE. This read used to go through
+        // `.from("information_schema.columns")`, which PostgREST resolves as a
+        // relation literally named `public."information_schema.columns"` and
+        // answers `PGRST205 Could not find the table … in the schema cache` on
+        // EVERY host — `supabase/config.toml` exposes only `public` and
+        // `graphql_public`. That is the same unexposed-schema class as plan
+        // 08's `cron` repair, and PGRST205 is the one ROADMAP failure signature
+        // plan 03 recorded as NOT reproducible from tracked text: execution
+        // reproduced it.
+        //
+        // ⛔ The repair is NOT to widen `[api].schemas`. `public.compute_jobs`
+        // IS on the REST surface, so the column's presence is asked directly of
+        // the relation: PostgREST answers PGRST204 ("column … does not exist")
+        // when a selected column is absent, so a dropped `reclaim_count` still
+        // reddens this arm. Nothing was relaxed — the same fact is asserted
+        // through a path that can actually answer.
+        const { data: reclaimCol, error: colsErr } = await admin
+          .from("compute_jobs")
+          .select("reclaim_count")
+          .eq("strategy_id", strategyId);
         expect(colsErr).toBeNull();
-        expect((cols ?? []).length).toBe(1);
+        expect((reclaimCol ?? []).length).toBe(1);
+        expect(
+          Object.prototype.hasOwnProperty.call(
+            (reclaimCol ?? [])[0] ?? {},
+            "reclaim_count",
+          ),
+        ).toBe(true);
       } finally {
         await cleanupLiveDbRow(admin, {
           userIds: [userId],
