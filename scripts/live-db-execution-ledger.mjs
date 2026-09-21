@@ -285,6 +285,9 @@ export function evaluate(artifact, ledger, context) {
     `executed: ${executed} test(s) (${counts.passed || 0} passed, ${counts.failed || 0} failed), ` +
       `${counts.skipped || 0} skipped, ${counts.total || 0} collected, across ${counts.files || 0} file(s)`,
   );
+  // A run that collected nothing, or executed nothing, cannot support ANY verdict about
+  // which arms still fail — including a staleness verdict. Computed here, consumed below.
+  const vacuous = !Number(counts.total) || executed === 0;
   if (!Number(counts.total)) {
     problems.push("VACUOUS RUN: the artifact reports zero collected tests.");
   }
@@ -333,11 +336,23 @@ export function evaluate(artifact, ledger, context) {
         "       the ledger header states. Fix the arm, or take the decision.",
     );
   }
-  if (isStale.length > 0) {
+  // ⛔ STALENESS IS ONLY MEASURABLE ON A RUN THAT RAN. On a vacuous run EVERY entry
+  // looks stale, because nothing reproduced anything — and the remedy below says
+  // "DELETE the line(s)", which on an absent stack means "delete the whole ledger".
+  // MEASURED 2026-09-21: with the stack down the gate correctly reported VACUOUS RUN
+  // first and exited 1, then appended STALE for all 18 entries; a reader who tails the
+  // log sees only the delete instruction. The diagnosis was right and the advice was
+  // nonsense, so suppress the advice rather than weaken the diagnosis.
+  if (isStale.length > 0 && !vacuous) {
     problems.push(
       `STALE: ${isStale.length} ledger entr(y/ies) the run no longer reproduces.\n` +
         isStale.map(describe).join("\n") +
         "\n    ⭐ DELETE the line(s), in the commit that made them stop being true. The ledger must only shrink.",
+    );
+  } else if (isStale.length > 0 && vacuous) {
+    notes.push(
+      `staleness NOT evaluated: the run was vacuous, so all ${isStale.length} entr(y/ies) would ` +
+        "read as stale for a reason that says nothing about them. Fix the run, then re-measure.",
     );
   }
 
