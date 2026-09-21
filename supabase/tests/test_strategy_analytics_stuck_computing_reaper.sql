@@ -1380,3 +1380,170 @@ BEGIN
 END
 $$;
 ROLLBACK;
+
+-- ==========================================================================
+-- Part 7 -- FANOUT-GLOBAL-01 foreign-row calibration (ROADMAP criterion 2).
+-- Proves that this file's own-row assertions survive a GENUINE competing
+-- row this run did NOT create, and that the survival is not vacuous: the
+-- calibration below was observed to go RED when the deployed sweep's row
+-- budget is narrowed enough for the competitor to win a slot instead.
+--
+-- SEEDING SHAPE. Two of this run's own rows (v_own_1, v_own_2) at the file's
+-- established century-old epoch, staggered by a minute so their relative
+-- order is deterministic, PLUS one FOREIGN row (v_foreign, a synthetic owner
+-- this run did not create) seeded BETWEEN them -- more dominant than v_own_2,
+-- less dominant than v_own_1. Under the file's REAL LIMIT-25 budget all three
+-- fit with room to spare, so this run's own rows dominate the ordering (item
+-- b of this plan's task), and the foreign row is a real participant (it gets
+-- reaped too), not a token. The calibration is proven non-vacuous by
+-- narrowing the SAME deployed budget to 2: the foreign row's position
+-- between v_own_1 and v_own_2 means it wins the second of two slots and
+-- v_own_2 -- one of this run's OWN rows -- is crowded out. That is "a
+-- foreign candidate can crowd this run out", reached without narrowing the
+-- budget below what this run alone would need (26, per Part 3), which would
+-- prove only that an empty budget starves everyone regardless of who is
+-- foreign.
+--
+-- WHAT THIS PROVES, stated honestly per this plan's own requirement: it
+-- proves the seeding discipline dominates a PLAUSIBLE, order-competitive
+-- foreign row under the file's REAL, currently-deployed LIMIT-25 budget, and
+-- that the survival is falsifiable rather than assumed. It does NOT prove the
+-- deployed sweep is caller-scoped -- it is not, and cannot be without a
+-- production migration adding a run discriminator column. The header's own
+-- RESIDUAL ASSUMPTION (no foreign row on shared TEST older than the seed
+-- epoch) is unchanged by this part; this part measures how much margin that
+-- assumption currently has, not whether it holds.
+--
+-- Rolls back unconditionally, like every other part in this file.
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+DO $$
+DECLARE
+  v_user         uuid := gen_random_uuid();
+  v_foreign_user uuid := gen_random_uuid();
+  v_own_1        uuid;   -- MOST dominant of this run's own rows -> MUST reap
+  v_own_2        uuid;   -- LEAST dominant of this run's own rows -> the one
+                          -- the foreign row can crowd out under a narrow budget
+  v_foreign      uuid;   -- a synthetic owner this run did NOT create
+  v_command      TEXT;
+  v_status_1     TEXT;
+  v_status_2     TEXT;
+  v_fstatus      TEXT;
+  v_fresh        TIMESTAMPTZ := now();
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    RAISE NOTICE 'SKIP Part 7: pg_cron not installed here; the deployed-body oracle is unavailable (local dev only).';
+    RETURN;
+  END IF;
+
+  SELECT command INTO v_command
+    FROM cron.job WHERE jobname = 'reap_strategy_analytics_stuck_computing';
+  IF v_command IS NULL THEN
+    RAISE EXCEPTION 'INVARIANT (Part 7 precondition): reap_strategy_analytics_stuck_computing is missing while pg_cron is installed, but Part 1b and Part 2 both already passed. The registration assertions live there.';
+  END IF;
+
+  -- This run's own tenant.
+  INSERT INTO auth.users (id, email)
+    VALUES (v_user, 'sa-reaper-foreign-calib-' || v_user || '@invalid.local');
+  INSERT INTO public.profiles (id, display_name)
+    VALUES (v_user, 'sa-reaper-foreign-calib') ON CONFLICT (id) DO NOTHING;
+  INSERT INTO public.strategies (user_id, name)
+    VALUES (v_user, 'sa-reaper-foreign-calib-own-1') RETURNING id INTO v_own_1;
+  INSERT INTO public.strategies (user_id, name)
+    VALUES (v_user, 'sa-reaper-foreign-calib-own-2') RETURNING id INTO v_own_2;
+
+  -- A DIFFERENT tenant -- a synthetic owner this run did not create, standing
+  -- in for a foreign row this file's header already names as its residual
+  -- assumption boundary.
+  INSERT INTO auth.users (id, email)
+    VALUES (v_foreign_user, 'sa-reaper-foreign-calib-competitor-' || v_foreign_user || '@invalid.local');
+  INSERT INTO public.profiles (id, display_name)
+    VALUES (v_foreign_user, 'sa-reaper-foreign-calib-competitor') ON CONFLICT (id) DO NOTHING;
+  INSERT INTO public.strategies (user_id, name)
+    VALUES (v_foreign_user, 'sa-reaper-foreign-calib-foreign') RETURNING id INTO v_foreign;
+
+  -- v_own_1: MOST dominant -- always wins a slot, at any budget >= 1.
+  INSERT INTO public.strategy_analytics
+    (strategy_id, computation_status, computation_warned, computing_started_at, computed_at)
+  VALUES (v_own_1, 'computing', FALSE, v_fresh - interval '100 years' - interval '2 minutes', v_fresh);
+
+  -- v_foreign: seeded BETWEEN the two own rows -- more dominant than v_own_2,
+  -- less dominant than v_own_1. A real competitor for the budget, not a
+  -- token: it independently satisfies the reap predicate.
+  INSERT INTO public.strategy_analytics
+    (strategy_id, computation_status, computation_warned, computing_started_at, computed_at)
+  VALUES (v_foreign, 'computing', FALSE, v_fresh - interval '100 years' - interval '90 seconds', v_fresh);
+
+  -- v_own_2: LEAST dominant of this run's own rows -- the one a narrowed
+  -- budget can hand to the foreign row instead.
+  INSERT INTO public.strategy_analytics
+    (strategy_id, computation_status, computation_warned, computing_started_at, computed_at)
+  VALUES (v_own_2, 'computing', FALSE, v_fresh - interval '100 years' - interval '1 minute', v_fresh);
+
+  -- ----- THE ORACLE: run the REAL deployed body, exactly as Parts 2 and 3 do.
+  EXECUTE v_command;
+
+  SELECT computation_status INTO v_status_1
+    FROM public.strategy_analytics WHERE strategy_id = v_own_1;
+  SELECT computation_status INTO v_status_2
+    FROM public.strategy_analytics WHERE strategy_id = v_own_2;
+  SELECT computation_status INTO v_fstatus
+    FROM public.strategy_analytics WHERE strategy_id = v_foreign;
+
+  -- RED-UNDER: narrow the reap arm's own bound in the LAST writer of this job,
+  --            20260803130000, from `LIMIT 25` to `LIMIT 2` (the needle takes
+  --            the ORDER BY line with it, exactly as arm 3/arm E/JOB-02's
+  --            needle does, which is what picks the reap arm's LIMIT out of
+  --            the two byte-identical `LIMIT 25` lines in this migration).
+  --            Under this run's own three-row seed, the two most dominant
+  --            rows are v_own_1 and the FOREIGN row -- v_own_2, this run's
+  --            OWN least-dominant row, is crowded out of the narrowed budget
+  --            by the foreign competitor. v_own_1 still reaps (it is always
+  --            the most dominant row at any budget >= 1), so THIS assertion
+  --            -- about v_own_2 -- is the first thing to redden.
+  --            ⚠️ LAYERED: Part 3's arm E asserts the SAME reap arm reaps
+  --            exactly 25 of its own 26 seeded rows per tick, which a budget
+  --            of 2 cannot satisfy -- Part 3 would abort the whole script
+  --            first (`-v ON_ERROR_STOP=1`) and this part would never run.
+  --            Its identity is neutered for this arm only, the same
+  --            precedent this file's arm `2` already sets against `1/JOB-02`.
+  --            Part 2's arm A is NOT neutered: it is the sole reap candidate
+  --            in its own isolated, rolled-back transaction, so any budget
+  --            >= 1 reaps it regardless of this mutation. MEASURED.
+  --            ⚠️ FOUR neuter entries, not one: `3/arm E/JOB-02` names FOUR
+  --            separate RAISE EXCEPTION statements in Part 3 (the v_cnt-after-
+  --            tick-1, the youngest-survived-tick-1, the youngest-failed-
+  --            tick-2, and the v_cnt-after-tick-2 checks), and neuterArm
+  --            replaces only the FIRST live occurrence of a given identity
+  --            per entry -- the same precedent this file's arm `2` already
+  --            sets, repeating `{"arm":"1/JOB-02"}` twice for its two raises.
+  --            MEASURED: three neuter entries left the second tick's checks
+  --            live and WRONG-ARM(3/arm E/JOB-02) fired from there.
+  -- RED-UNDER-M: {"arm":"7/FANOUT-GLOBAL-01","apply":[{"kind":"edit","file":"supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql","find":"       ORDER BY s.computing_started_at ASC\n       LIMIT 25","replace":"       ORDER BY s.computing_started_at ASC\n       LIMIT 2","occurrences":1}],"neuter":[{"arm":"3/arm E/JOB-02"},{"arm":"3/arm E/JOB-02"},{"arm":"3/arm E/JOB-02"},{"arm":"3/arm E/JOB-02"}]}
+  IF v_status_2 IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'TEST FAILED (7/FANOUT-GLOBAL-01): this run''s own less-dominant stranded row was not reaped under the deployed reap budget (got %). Either the budget was narrowed below what this run''s own rows need, or a foreign row crowded it out -- both are the failure this calibration exists to catch.', v_status_2;
+  END IF;
+  IF v_status_1 IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'TEST FAILED (7/FANOUT-GLOBAL-01/own-1): this run''s own MOST-dominant stranded row was not reaped (got %). It should win a slot at any budget >= 1; if it did not, the seed itself is broken and this calibration proves nothing.', v_status_1;
+  END IF;
+
+  -- The foreign row is a real, distinguishable participant, not a token: it
+  -- independently satisfies the SAME reap predicate and is attributed to a
+  -- DIFFERENT synthetic owner. Under the file's REAL LIMIT-25 budget it is
+  -- also reaped here -- proof it genuinely competed for the budget rather
+  -- than sitting inert.
+  IF v_fstatus IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'TEST FAILED (7/FANOUT-GLOBAL-01/foreign): the foreign competitor row was not reaped under the deployed budget (got %). A foreign row that never enters the sweep is a token, not a competitor, and this calibration would prove nothing about isolation under real contention.', v_fstatus;
+  END IF;
+  IF v_foreign = v_own_1 OR v_foreign = v_own_2 THEN
+    RAISE EXCEPTION 'TEST FAILED (7/FANOUT-GLOBAL-01/foreign): the foreign row and one of this run''s own rows resolved to the same strategy_id -- the seeds are not distinguishable, and this calibration is vacuous.';
+  END IF;
+
+  RAISE NOTICE 'Part 7 OK: this run''s own stranded rows survive a genuine, order-competitive foreign row under the deployed reap budget, and the foreign row is a real, distinguishable participant rather than a token.';
+
+  DELETE FROM auth.users WHERE id = v_user;
+  DELETE FROM auth.users WHERE id = v_foreign_user;
+END
+$$;
+ROLLBACK;
