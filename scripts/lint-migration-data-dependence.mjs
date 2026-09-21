@@ -187,6 +187,19 @@ export const SELF_TEST_LEGS = [
     why: "the same nesting with a catalogue-derived outer condition - nesting is not the refused property.",
   },
   {
+    fixture: "r1-do-language-clause.red.sql",
+    colour: "red",
+    rule: "R1-variable-conditioned-raise",
+    expect: "public.fx_ledger",
+    why: "`DO LANGUAGE plpgsql $tag$` - the standard's other spelling, with the clause BEFORE the body. A detector reading only the word before the dollar-quote saw `plpgsql` and never scanned the block; an unscanned block is a refusal that cannot fire.",
+  },
+  {
+    fixture: "r1-do-language-clause.green.sql",
+    colour: "green",
+    rule: "R1-variable-conditioned-raise",
+    why: "the same leading-clause spelling over the catalogue - recognising the clause must make the block SCANNED, not refused.",
+  },
+  {
     fixture: "read-without-raise.green.sql",
     colour: "green",
     rule: null,
@@ -303,7 +316,26 @@ function lineIndexer(src) {
 }
 
 /**
- * The OUTERMOST dollar-quoted bodies whose immediately preceding word is `DO`.
+ * The text that may legally stand between the start of a statement and the
+ * opening dollar-quote of an ANONYMOUS BLOCK.
+ *
+ * `DO $tag$ ... $tag$` is the common spelling and `DO $tag$ ... $tag$ LANGUAGE
+ * plpgsql` puts the clause AFTER the body, so both end on the word `DO`. The
+ * standard also permits the clause FIRST - `DO LANGUAGE plpgsql $tag$ ... $tag$`
+ * - and a detector that only looked at the last word saw `plpgsql` there and
+ * never scanned the block at all. A block that is never scanned is a refusal
+ * that cannot fire, which is the one failure mode this gate must not have.
+ *
+ * The language name may be an identifier, a quoted identifier, or a string
+ * literal; `maskSql` blanks a literal's INTERIOR and keeps its quotes, so the
+ * literal arm matches an emptied pair rather than the word.
+ */
+export const DO_INTRODUCER_RE =
+  /(?:^|[^A-Za-z0-9_$])DO(?:\s+LANGUAGE\s+(?:[A-Za-z_][A-Za-z0-9_$]*|'[^'\n]*'|"[^"\n]*"))?\s*$/i;
+
+/**
+ * The OUTERMOST dollar-quoted bodies introduced by `DO` (with or without a
+ * leading `LANGUAGE` clause).
  *
  * A `CREATE FUNCTION ... AS $$ ... $$` body is deliberately excluded: it is
  * stored, not executed, at apply time.
@@ -326,10 +358,9 @@ export function anonymousBlocks(src) {
   }
   const blocks = [];
   for (const r of tops) {
-    const before = masked.code.slice(Math.max(0, r[0] - 4096), r[0]);
-    const words = before.match(/[A-Za-z_][A-Za-z0-9_]*/g);
-    const lastWord = words && words.length ? words[words.length - 1].toUpperCase() : "";
-    if (lastWord !== "DO") continue;
+    // The whole prefix, not a fixed window: a window can begin in the MIDDLE of
+    // an identifier, and a `^DO` there is a boundary the source does not have.
+    if (!DO_INTRODUCER_RE.test(masked.code.slice(0, r[0]))) continue;
     blocks.push({
       start: r[0],
       end: r[1],
