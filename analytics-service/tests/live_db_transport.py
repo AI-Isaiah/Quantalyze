@@ -187,8 +187,14 @@ def retry_transport(
             if not is_transient_transport_fault(exc):
                 raise
             last_exc = exc
+            # T-164.9-05-05: this line, not the module name in the record, is what
+            # makes a retried run distinguishable — the logger's own %(name)s
+            # already carries module identity, so this string is deliberately
+            # NOT prefixed with the module name (it would collide with the
+            # Task 2 factory-coverage scan's "which module imports the helper"
+            # substring match over this very file).
             logger.warning(
-                "live_db_transport: retry attempt %d/%d after %s",
+                "retry attempt %d/%d after %s",
                 attempt,
                 attempts,
                 type(exc).__name__,

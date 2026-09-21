@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 
 import httpx
 import pytest
@@ -260,5 +261,35 @@ def test_proxy_passes_chained_builders_through_and_retries_only_execute():
     assert log == ["table('strategy_analytics')", "select('*')", "eq('id', 1)"]
     assert len(sleeps) == 1  # exactly one retry happened, transparently
 
-# gsd:task2-derived-pin-goes-here — Task 2 appends the derived factory-coverage
-# pin below this line once the four factories are wired to the retrying proxy.
+
+# ── Task 2's derived factory-coverage pin ────────────────────────────────────
+
+
+def test_all_live_db_client_factories_go_through_retrying_proxy():
+    """Derived pin: the number of tests/*.py modules defining a live-DB client
+    factory (`_need_supabase`) must equal the number of tests/*.py modules
+    (excluding this file and the helper itself) that reference the retry
+    helper. A fifth factory added later without wrapping it fails this — the
+    count is NEVER hard-coded."""
+    tests_dir = Path(__file__).parent
+    factory_modules: set[str] = set()
+    wrapped_modules: set[str] = set()
+
+    for path in sorted(tests_dir.glob("*.py")):
+        if path.name in {"test_live_db_transport.py", "conftest.py", "live_db_transport.py"}:
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if re.search(r"^def _need_supabase\b", source, re.MULTILINE):
+            factory_modules.add(path.name)
+        if "live_db_transport" in source:
+            wrapped_modules.add(path.name)
+
+    assert factory_modules, "expected at least one live-DB client factory module"
+    assert factory_modules == wrapped_modules, (
+        f"factory modules {sorted(factory_modules)} != modules importing "
+        f"live_db_transport {sorted(wrapped_modules)} — every live-DB client "
+        f"factory must return through wrap_live_db_client"
+    )

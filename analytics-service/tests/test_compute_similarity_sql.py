@@ -46,6 +46,11 @@ except ImportError:  # pragma: no cover
     class PostgrestException(Exception):  # type: ignore[no-redef]
         pass
 
+# Phase 164.9 plan 05: retries transient transport faults against shared TEST
+# (`[164.9-SHARED-TEST-TRANSPORT-FLAKE]`). Wraps the client only — no skip
+# condition, env read, or assertion below changes.
+from tests.live_db_transport import wrap_live_db_client
+
 
 SUPABASE_URL = os.getenv("SUPABASE_TEST_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_TEST_SERVICE_KEY")
@@ -59,7 +64,7 @@ def _need_supabase():
 @pytest.fixture
 def admin():
     _need_supabase()
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    return wrap_live_db_client(create_client(SUPABASE_URL, SUPABASE_KEY))
 
 
 def _v1_fp(t1=(1, 0, 0, 0), t2=(1, 0, 0, 0), t3=(1, 0, 0, 0),

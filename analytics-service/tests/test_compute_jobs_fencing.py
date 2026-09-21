@@ -549,6 +549,11 @@ try:
 except ImportError:  # pragma: no cover
     create_client = None  # type: ignore[assignment]
 
+# Phase 164.9 plan 05: retries transient transport faults against shared TEST
+# (`[164.9-SHARED-TEST-TRANSPORT-FLAKE]`). Wraps the client only — no skip
+# condition, env read, or assertion below changes.
+from tests.live_db_transport import wrap_live_db_client
+
 
 SUPABASE_URL = os.getenv("SUPABASE_TEST_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_TEST_SERVICE_KEY")
@@ -612,7 +617,7 @@ def admin():
         follow_redirects=True,
         http2=False,
     )
-    return client
+    return wrap_live_db_client(client)
 
 
 def _rpc_retry_timeout(fn, attempts: int = 2):
