@@ -205,9 +205,17 @@ do_run() {
   [ -n "${NORMALIZE_DB_URL:-}" ] \
     || fail "NORMALIZE_DB_URL is required and is not set. This is a HARD FAILURE, not a skip. ⛔ Do NOT reach for a Supabase CLI link instead — this checkout's link points at PRODUCTION."
 
-  local tmpd write=0
+  local write=0
+  # ⚠️ `tmpd` is DELIBERATELY NOT `local`. The EXIT trap below fires AFTER this
+  # function has returned, so a local is out of scope by then and `set -u` aborts
+  # the trap itself — which does not merely print a confusing message, it SKIPS
+  # THE CLEANUP and leaves the temp dir on disk. That dir holds the psql stderr
+  # file this script refuses to print precisely because it can name the host and
+  # the DB user, so the failure path would leak exactly what the success path
+  # protects. MEASURED 2026-09-21 on a connection failure: `tmpd: unbound
+  # variable`, dir survived. The `${tmpd:-}` guard is a second belt, not the fix.
   tmpd="$(mktemp -d)"
-  trap 'rm -rf "$tmpd"' EXIT
+  trap 'rm -rf "${tmpd:-}"' EXIT
   [ "$MODE" = "commit" ] && write=1
 
   build_sql "$write" > "$tmpd/op.sql"
