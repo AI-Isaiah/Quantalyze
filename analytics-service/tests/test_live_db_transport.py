@@ -242,6 +242,26 @@ class _FakeBuilder:
         self._log.append(f"eq({col!r}, {val!r})")
         return self
 
+    def insert(self, row):
+        self._log.append(f"insert({row!r})")
+        return self
+
+    def update(self, row):
+        self._log.append(f"update({row!r})")
+        return self
+
+    def upsert(self, row):
+        self._log.append(f"upsert({row!r})")
+        return self
+
+    def delete(self):
+        self._log.append("delete()")
+        return self
+
+    def rpc(self, name, params):
+        self._log.append(f"rpc({name!r}, {params!r})")
+        return self
+
     def execute(self):
         self._execute_calls += 1
         if self._execute_calls <= self._fail_times:
@@ -260,6 +280,79 @@ def test_proxy_passes_chained_builders_through_and_retries_only_execute():
     assert result == {"data": [{"id": 1}]}
     assert log == ["table('strategy_analytics')", "select('*')", "eq('id', 1)"]
     assert len(sleeps) == 1  # exactly one retry happened, transparently
+
+
+# ── The idempotency boundary ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "drive,expected_log",
+    [
+        pytest.param(
+            lambda p: p.table("compute_jobs").insert({"id": 1}).execute(),
+            ["table('compute_jobs')", "insert({'id': 1})"],
+            id="insert",
+        ),
+        pytest.param(
+            lambda p: p.table("compute_jobs").update({"state": "done"}).execute(),
+            ["table('compute_jobs')", "update({'state': 'done'})"],
+            id="update",
+        ),
+        pytest.param(
+            lambda p: p.table("compute_jobs").upsert({"id": 1}).execute(),
+            ["table('compute_jobs')", "upsert({'id': 1})"],
+            id="upsert",
+        ),
+        pytest.param(
+            lambda p: p.table("compute_jobs").delete().eq("id", 1).execute(),
+            ["table('compute_jobs')", "delete()", "eq('id', 1)"],
+            id="delete",
+        ),
+        pytest.param(
+            lambda p: p.rpc("claim_compute_job", {"p_kind": "k"}).execute(),
+            ["rpc('claim_compute_job', {'p_kind': 'k'})"],
+            id="rpc",
+        ),
+    ],
+)
+def test_non_idempotent_chains_execute_exactly_once_and_do_not_retry(drive, expected_log):
+    """WHY this matters, not just what it does: a 504 on a write names a request
+    that may ALREADY HAVE COMMITTED. Replaying it double-writes, or raises a
+    23505 that is (correctly) non-transient and hard-fails — manufacturing the
+    flake the retry exists to absorb. So a chain through insert/update/upsert/
+    delete/rpc must call the terminal `.execute()` EXACTLY ONCE and let the
+    transport fault out, even though that same fault WOULD be retried on a read.
+    """
+    log: list[str] = []
+    fake_client = _FakeBuilder(log, fail_times=1)
+    sleeps: list[float] = []
+    proxy = wrap_live_db_client(fake_client, attempts=3, backoff_base=0.01, sleep=sleeps.append)
+
+    with pytest.raises(httpx.ConnectError):
+        drive(proxy)
+
+    assert fake_client._execute_calls == 1  # exactly once — never replayed
+    assert sleeps == []  # no backoff, because no retry was attempted
+    assert log == expected_log  # the chain itself is still passed through verbatim
+
+
+def test_a_mutating_method_taints_only_the_rest_of_its_own_chain():
+    """The taint is positional, not global: the same wrapped client still
+    retries a READ issued after a write chain — otherwise one insert would
+    silently disable the retry for the whole fixture."""
+    log: list[str] = []
+    write_client = _FakeBuilder(log, fail_times=1)
+    sleeps: list[float] = []
+    proxy = wrap_live_db_client(write_client, attempts=3, backoff_base=0.01, sleep=sleeps.append)
+
+    with pytest.raises(httpx.ConnectError):
+        proxy.table("compute_jobs").insert({"id": 1}).execute()
+
+    read_client = _FakeBuilder(log, fail_times=1)
+    read_proxy = wrap_live_db_client(read_client, attempts=3, backoff_base=0.01, sleep=sleeps.append)
+    assert read_proxy.table("compute_jobs").select("*").execute() == {"data": [{"id": 1}]}
+    assert read_client._execute_calls == 2  # the read DID retry
+    assert len(sleeps) == 1
 
 
 # ── Task 2's derived factory-coverage pin ────────────────────────────────────

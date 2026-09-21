@@ -121,6 +121,30 @@ RETRY_BACKOFF_BASE_SECONDS = 0.5
 # Service Unavailable).
 _TRANSIENT_GATEWAY_STATUS_CODES = frozenset({502, 503, 504})
 
+# THE IDEMPOTENCY BOUNDARY (dated 2026-09-21, Phase 164.9 plan 05 review).
+#
+# A bounded retry is only safe over a call the server can execute twice with the
+# same observable result. A 504 on a WRITE is exactly the case where that does not
+# hold: the gateway timed out on the RESPONSE, so the INSERT may already have
+# COMMITTED. Retrying it then either double-writes, or surfaces a 23505 that
+# `is_transient_transport_fault` correctly classifies as NOT transient and
+# hard-fails — manufacturing the very flake this module exists to absorb.
+#
+# ⛔ The fix is NEVER to reclassify 23505 (or any SQLSTATE) as transient: that
+# would hide a double-write behind a green run. The fix is to NOT RETRY the call
+# at all. So the retry applies ONLY to a chain that passed through no mutating
+# builder method; a chain that did is executed exactly once and its transport
+# fault propagates unretried, to be diagnosed rather than replayed.
+#
+# `rpc` is on this list deliberately, even though some RPCs are read-only: this
+# module cannot see a function's body, and the measured victim
+# (`test_compute_jobs_fencing.py`) drives claim/mark RPCs whose whole point is a
+# once-only side effect. Fail-closed — an unretried RPC is a visible red, a
+# replayed claim is a corrupted fence.
+_NON_IDEMPOTENT_BUILDER_METHODS = frozenset(
+    {"insert", "upsert", "update", "delete", "rpc"}
+)
+
 
 class TransportRetryExhausted(RuntimeError):
     """Raised when a bounded retry over a live-DB transport call exhausts its
@@ -214,7 +238,7 @@ class _RetryingClientProxy:
     to end without the call site needing to know about the proxy.
     """
 
-    __slots__ = ("_target", "_attempts", "_backoff_base", "_sleep")
+    __slots__ = ("_target", "_attempts", "_backoff_base", "_sleep", "_retry_safe")
 
     def __init__(
         self,
@@ -223,20 +247,29 @@ class _RetryingClientProxy:
         attempts: int,
         backoff_base: float,
         sleep: Callable[[float], None],
+        retry_safe: bool = True,
     ) -> None:
         object.__setattr__(self, "_target", target)
         object.__setattr__(self, "_attempts", attempts)
         object.__setattr__(self, "_backoff_base", backoff_base)
         object.__setattr__(self, "_sleep", sleep)
+        object.__setattr__(self, "_retry_safe", retry_safe)
 
     def __getattr__(self, name: str):
         target = object.__getattribute__(self, "_target")
         attempts = object.__getattribute__(self, "_attempts")
         backoff_base = object.__getattribute__(self, "_backoff_base")
         sleep = object.__getattribute__(self, "_sleep")
+        retry_safe = object.__getattribute__(self, "_retry_safe")
         attr = getattr(target, name)
 
         if name == "execute" and callable(attr):
+            if not retry_safe:
+                # The idempotency boundary above: this chain passed through a
+                # mutating builder, so the terminal call runs EXACTLY ONCE and a
+                # transport fault propagates unretried.
+                return attr
+
             def _retrying_execute(*args, **kwargs):
                 return retry_transport(
                     lambda: attr(*args, **kwargs),
@@ -247,14 +280,31 @@ class _RetryingClientProxy:
 
             return _retrying_execute
 
+        # A mutating builder method taints the REST of the chain, never the
+        # chain that produced it: `client.table(t)` stays retry-safe, and only
+        # the object returned by `.insert(...)` loses the retry.
+        child_retry_safe = retry_safe and name not in _NON_IDEMPOTENT_BUILDER_METHODS
+
         if callable(attr):
             def _chained(*args, **kwargs):
                 result = attr(*args, **kwargs)
-                return _wrap(result, attempts=attempts, backoff_base=backoff_base, sleep=sleep)
+                return _wrap(
+                    result,
+                    attempts=attempts,
+                    backoff_base=backoff_base,
+                    sleep=sleep,
+                    retry_safe=child_retry_safe,
+                )
 
             return _chained
 
-        return _wrap(attr, attempts=attempts, backoff_base=backoff_base, sleep=sleep)
+        return _wrap(
+            attr,
+            attempts=attempts,
+            backoff_base=backoff_base,
+            sleep=sleep,
+            retry_safe=child_retry_safe,
+        )
 
 
 def _wrap(
@@ -263,10 +313,17 @@ def _wrap(
     attempts: int,
     backoff_base: float,
     sleep: Callable[[float], None],
+    retry_safe: bool = True,
 ):
     if obj is None or isinstance(obj, (str, bytes, int, float, bool)):
         return obj
-    return _RetryingClientProxy(obj, attempts=attempts, backoff_base=backoff_base, sleep=sleep)
+    return _RetryingClientProxy(
+        obj,
+        attempts=attempts,
+        backoff_base=backoff_base,
+        sleep=sleep,
+        retry_safe=retry_safe,
+    )
 
 
 def wrap_live_db_client(
@@ -278,8 +335,14 @@ def wrap_live_db_client(
 ):
     """Given a live-DB client (e.g. a `supabase.create_client(...)` result), return
     a transparent proxy whose terminal `.execute()` calls retry transient
-    transport faults. `.table()`, `.select()`, `.rpc()`, `.eq()`, and every other
-    chained builder are passed through unmodified — this is a transport shim, not
-    a façade.
+    transport faults. `.table()`, `.select()`, `.eq()`, and every other chained
+    builder are passed through unmodified — this is a transport shim, not a
+    façade.
+
+    ⚠️ The retry stops at the idempotency boundary: a chain that passed through
+    `insert`/`upsert`/`update`/`delete`/`rpc` (see
+    `_NON_IDEMPOTENT_BUILDER_METHODS`) executes EXACTLY ONCE and propagates a
+    transport fault unretried, because a 504 on a write may name a request that
+    already committed.
     """
     return _wrap(client, attempts=attempts, backoff_base=backoff_base, sleep=sleep)
