@@ -3338,7 +3338,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
 
 ## Phase 164.9 (TESTISOLATION) — ids booked at planning time (logged 2026-09-21)
 
-- [ ] **`[164.9-SHARED-TEST-TRANSPORT-FLAKE]` a shared-TEST run needed THREE attempts to go
+- [x] **`[164.9-SHARED-TEST-TRANSPORT-FLAKE]` a shared-TEST run needed THREE attempts to go
       green on identical code, with two different failure signatures on two different test
       sets — proof this is TRANSPORT, not logic (booked 2026-09-21, Phase 164.9
       TESTISOLATION)** — MEASURED on run `34763669052` at `e64b0811` on `main`: three attempts
@@ -3356,9 +3356,15 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       RED, restored from a byte backup, never assumed.
       ⛔ **Forbidden closure: never a bare re-run.** A re-run is what made attempt 3 green and it
       taught nothing.
-      **Owner:** Phase 164.9 TESTISOLATION.
+      **Owner:** Phase 164.9 TESTISOLATION — ⛔ **DELIVERED AND CLOSED 2026-09-21 (criterion 11, read AS AMENDED).**
+      A retrying transport now stands behind the live-DB client and an unconditional counter prints at
+      session teardown, so a retried-but-green run is distinguishable from a clean one.
+      ⚠️ **PARTIALLY delivered, and the residue has its own entry:** the retry covers READS ONLY —
+      `rpc` sits on the idempotency boundary fail-closed — so a sustained RPC read-timeout still reaches
+      `pytest.skip`. That is `[164.9-RPC-RETRY-NARROWED-SKIP-REOPENED]`, destination Phase 164.9.1.
+      ⛔ Closing THIS entry does not close that one.
 
-- [ ] **`[164.9-MUTEX-HOLDER-DIED-UNSERIALIZED]` a run whose advisory-lock holder dies mid-job
+- [x] **`[164.9-MUTEX-HOLDER-DIED-UNSERIALIZED]` a run whose advisory-lock holder dies mid-job
       can still report GREEN on DB assertions its own harness has just declared untrustworthy
       (booked 2026-09-21, Phase 164.9 TESTISOLATION)** — **BEFORE.** The dead-holder branch of
       the best-effort mutex release step emits a GitHub Actions log annotation naming the
@@ -3375,7 +3381,12 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       ⛔ **Forbidden closures:** deleting, softening or re-wording the warning; and adding an
       inline non-zero exit to the best-effort release step itself — that regresses the step's
       own documented best-effort invariant rather than fixing the missing verdict.
-      **Owner:** Phase 164.9 TESTISOLATION.
+      **Owner:** Phase 164.9 TESTISOLATION — ⛔ **DELIVERED AND CLOSED 2026-09-21 (criterion 12).**
+      The dead-holder condition now produces a NON-ZERO verdict rather than a log annotation nobody
+      gates on: five paired verdict sites, a vitest test pinning the pairing per file and that the marker
+      path the release step WRITES is the one the verdict script READS, and a drill that kills a real
+      holder on a disposable cluster — observed RED then GREEN, and wired to a real CI call site.
+      ⛔ The warning text was added to, never softened.
 
 - [ ] **`[164.9-LIVEDB-LANE-EXECUTION-CENSUS]` the live-DB class now EXECUTES, and 35 of its 397
       non-skipped tests fail on the local-stack baseline — four families, only three of them
@@ -3494,7 +3505,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       named successor phase booked via `/gsd-phase --edit` — recorded here rather than left
       blank, and surfaced in `164.9-09-SUMMARY.md` as a routed deferral for that booking.
 
-- [ ] **`[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]` the live-DB vitest class that runs ONLY
+- [x] **`[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]` the live-DB vitest class that runs ONLY
       when TEST credentials are present is RED, and establishing whether any CI gate can see it
       comes before any remedy (booked 2026-09-21, Phase 164.9 TESTISOLATION)** — MEASURED at
       `f915bf49`: 16 files / 38 tests FAILED against the SAME tree's credential-free run, which
@@ -3521,7 +3532,13 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       credential-free green is sufficient; and adding TEST credentials to the vitest shards —
       that un-skips the ~284 live-DB tests gated on `HAS_LIVE_DB`, shifts the coverage
       denominator, and invalidates the ratchet baseline that a blocking CI gate rests on.
-      **Owner:** Phase 164.9 TESTISOLATION.
+      **Owner:** Phase 164.9 TESTISOLATION — ⛔ **DELIVERED AND CLOSED 2026-09-21 (criterion 13).**
+      The class now runs somewhere it can go RED: a hermetic live-DB lane on a local stack, wired into the
+      blocking aggregator in BOTH the `needs:` list and the result loop, with a corpus DERIVED from the
+      gate symbol and three independent anti-vacuity controls. ⛔ The existing shards' credential
+      prohibition is untouched, so the coverage ratchet denominator is unaffected.
+      ⚠️ **The static census prints a non-zero unresolved residue every run and does NOT claim it is
+      zero** — that residue is routed to execution in the lane, not silently absorbed.
 
 - [ ] **`[164.8.2-VAC08-FATAL-ON-TRANSIENT]` an unreadable ledger row count now reds the WHOLE
       VAC-08 gate, where it used to cost only the absurdity floor (booked 2026-09-10, Phase
