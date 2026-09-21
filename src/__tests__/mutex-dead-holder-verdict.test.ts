@@ -37,7 +37,51 @@ const TARGET_FILES = [
 const RELEASE_STEP_NAME = "Release shared-test-db mutex (best effort)";
 const VERDICT_STEP_NAME = "Verdict — shared-test-db mutex holder died mid-job";
 const DEAD_HOLDER_ANNOTATION = "died BEFORE this release step";
-const VERDICT_INVOCATION = "run: bash scripts/mutex-dead-holder-verdict.sh";
+const VERDICT_SCRIPT_REL = "scripts/mutex-dead-holder-verdict.sh";
+const VERDICT_INVOCATION = `run: bash ${VERDICT_SCRIPT_REL}`;
+/**
+ * ⛔ THE WORKSPACE-ROOTED SPELLING IS NOT A STYLE CHOICE — it is REQUIRED in any
+ * job that sets `defaults.run.working-directory`, and MEASURED 2026-09-21 when
+ * the `python` job (working-directory: analytics-service) shipped the bare
+ * spelling and every run of it exited **127, "No such file or directory"**. That
+ * is a FAILED verdict step on a healthy job — the precise inversion of a gate
+ * whose whole purpose is to redden only on a real dead holder.
+ *
+ * ⚠️ THIS FILE IS WHY IT SHIPPED. The assertion below used to pin the run: line
+ * to one literal string and the extractor above called itself "intentionally
+ * naive about job boundaries" because "a step body never needs to know which job
+ * it lives in". Both were true when written and the second stopped being true
+ * the moment a verdict step landed in a job with a working directory: the test
+ * asserted SPELLING and the defect was RESOLVABILITY, so it stayed green over a
+ * step that could not run. Job identity is now load-bearing here.
+ */
+const VERDICT_INVOCATION_ROOTED = `run: bash "\${GITHUB_WORKSPACE}/${VERDICT_SCRIPT_REL}"`;
+
+/**
+ * Map a step's position in the file to the job that owns it, and say whether
+ * that job pins a `defaults.run.working-directory`. Deliberately textual, to
+ * match the rest of this file and to keep working on a YAML shape the parser
+ * would normalise away.
+ */
+function jobsWithWorkingDirectory(src: string): Array<{ start: number; end: number; name: string }> {
+  const lines = src.split("\n");
+  const jobs: Array<{ start: number; end: number; name: string }> = [];
+  const starts: Array<{ line: number; name: string }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^ {2}([A-Za-z0-9_.-]+):\s*$/.exec(lines[i]);
+    if (m) starts.push({ line: i, name: m[1] });
+  }
+  for (let i = 0; i < starts.length; i++) {
+    const start = starts[i].line;
+    const end = i + 1 < starts.length ? starts[i + 1].line : lines.length;
+    const body = lines.slice(start, end);
+    // Only a real `defaults: run: working-directory:` counts — not a mention of
+    // the phrase inside a comment, of which this corpus has several.
+    const hasWd = body.some((l) => /^\s{6,}working-directory:\s*\S/.test(l) && !/^\s*#/.test(l));
+    if (hasWd) jobs.push({ start, end, name: starts[i].name });
+  }
+  return jobs;
+}
 const NEVER_REDDEN_INVARIANT = "must never redden a job whose real work passed";
 
 /**
@@ -125,11 +169,63 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
           const runLine = step.body
             .split("\n")
             .find((l) => /^\s*run:/.test(l));
+          const trimmed = runLine?.trim();
           expect(
-            runLine?.trim(),
-            `${rel}: a "${VERDICT_STEP_NAME}" step's run: line is not the bare invocation ` +
-              `"${VERDICT_INVOCATION}" (no wrapper, pipe, or flag). Body:\n${step.body}`,
-          ).toBe(VERDICT_INVOCATION);
+            trimmed === VERDICT_INVOCATION || trimmed === VERDICT_INVOCATION_ROOTED,
+            `${rel}: a "${VERDICT_STEP_NAME}" step's run: line is neither the bare invocation ` +
+              `"${VERDICT_INVOCATION}" nor the workspace-rooted "${VERDICT_INVOCATION_ROOTED}" ` +
+              `(no wrapper, pipe, or flag). Body:\n${step.body}`,
+          ).toBe(true);
+        }
+      });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Test 3b: THE ARM THAT WOULD HAVE CAUGHT THE 127.
+  // A bare relative path resolves against the job's working directory, not the
+  // repository root. In a job that pins `defaults.run.working-directory`, the
+  // bare spelling cannot find the script and the step exits 127 on EVERY run —
+  // a permanently failed gate that reports nothing about a dead holder. Pinning
+  // the run: line to a literal string cannot see this; owning-job identity can.
+  // ─────────────────────────────────────────────────────────────────────
+  describe("Test 3b: a verdict step inside a working-directory job is workspace-rooted", () => {
+    for (const rel of TARGET_FILES) {
+      it(`${rel} — no verdict step can exit 127 on a bare relative path`, () => {
+        const src = readText(rel);
+        const lines = src.split("\n");
+        const wdJobs = jobsWithWorkingDirectory(src);
+        let checked = 0;
+        for (let i = 0; i < lines.length; i++) {
+          if (!new RegExp(`^\\s*-\\s*name:\\s*${VERDICT_STEP_NAME}\\s*$`).test(lines[i])) continue;
+          // the run: line belongs to this step — the next one before any further `- name:`
+          let runIdx = -1;
+          for (let j = i + 1; j < lines.length; j++) {
+            if (/^\s*-\s*name:/.test(lines[j])) break;
+            if (/^\s*run:/.test(lines[j])) { runIdx = j; break; }
+          }
+          expect(runIdx, `${rel}: verdict step at line ${i + 1} has no run: line`).toBeGreaterThan(-1);
+          const owner = wdJobs.find((j) => runIdx >= j.start && runIdx < j.end);
+          if (!owner) continue; // job pins no working directory; the bare form resolves
+          checked++;
+          expect(
+            lines[runIdx].trim(),
+            `${rel}: the "${VERDICT_STEP_NAME}" step in job "${owner.name}" uses a BARE relative ` +
+              `script path, but that job pins defaults.run.working-directory — the path resolves ` +
+              `against the working directory, not the repo root, so this step exits 127 ` +
+              `("No such file or directory") on EVERY run instead of ever reporting a dead holder. ` +
+              `Use the workspace-rooted form.`,
+          ).toBe(VERDICT_INVOCATION_ROOTED);
+        }
+        // Anti-vacuity: ci.yml MUST exercise this arm — the `python` job is the
+        // measured case. A zero here means the scan stopped finding the steps,
+        // not that the corpus got safer.
+        if (rel.endsWith("ci.yml")) {
+          expect(
+            checked,
+            "ci.yml: no verdict step was found inside a working-directory job — this arm " +
+              "measured NOTHING. The `python` job is the known case; if it moved, re-aim the scan.",
+          ).toBeGreaterThan(0);
         }
       });
     }

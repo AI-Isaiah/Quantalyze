@@ -5058,7 +5058,13 @@ jobs:
       # verdict.
       - name: Verdict — shared-test-db mutex holder died mid-job
         if: always()
-        run: bash scripts/mutex-dead-holder-verdict.sh
+        # ⛔ Workspace-rooted, and it MUST stay that way: this job's
+        # defaults.run.working-directory is analytics-service, where a bare
+        # relative script path does NOT resolve — it exits 127 "No such file
+        # or directory", which is a FAILED verdict step on every run rather
+        # than a dead-holder verdict. The sibling wait step above is rooted
+        # the same way for the same reason.
+        run: bash "${GITHUB_WORKSPACE}/scripts/mutex-dead-holder-verdict.sh"
 
   e2e:
     # Runs the PUBLIC/smoke Playwright suite against a placeholder-env
