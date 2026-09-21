@@ -2057,7 +2057,38 @@ export const FILES_FLOOR = 48;
 //                the migration's own self-verify would abort on a renamed
 //                CREATE and the gate would never run. Re-derived over the
 //                corpus: 413 twins across 48 annotated files of 75, 0 waivers.
-export const ARMS_FLOOR = 413;
+// ⭐ CURRENCY 2026-09-21 (Phase 164.9 plan 04, FANOUT-GLOBAL-01 closure): 413
+//                -> 416. THREE new arms, each a foreign-row calibration in a
+//                gate that already annotates -- FILES_FLOOR does not move.
+//                `7/FANOUT-GLOBAL-01` in
+//                supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql
+//                (narrows the reap arm's LIMIT-25 budget to 2, neutering Part
+//                3's `3/arm E/JOB-02` four times); `4/FANOUT-GLOBAL-01` in
+//                supabase/tests/test_retention_orphaned_running.sql (narrows
+//                arm A's LIMIT-100 budget to 2, neutering Part 1's
+//                `1/JOB-05/D-19` three times and Part 3's `3/JOB-05/D-19`
+//                four times); `5/FANOUT-GLOBAL-01` in
+//                supabase/tests/test_reconcile_dropped_enqueue_sweep.sql
+//                (narrows the sweep's LIMIT-25 budget to 4 -- not 2, because
+//                this file's own Part 2 seeds four simultaneously
+//                heal-eligible tied candidates that a budget below 4 would
+//                crowd nondeterministically -- neutering Part 1's
+//                `1/JOB-04/D-08` once and Part 4's `4/JOB-04/D-08` four
+//                times, plus re-basing the migration's own STEP 2 self-verify
+//                so the apply itself does not abort first).
+//                `supabase/tests/test_prod_prober_cadence.sql` is
+//                DELIBERATELY untouched: it asserts about the cron schedule
+//                itself, a global singleton, never multi-tenant data, so
+//                per-run isolation is a category error there.
+//                MEASURED on real pg-lane runs, each arm in isolation
+//                (`--file <gate> --arm <arm>`): all three score
+//                `RED (identity ok)`, exit 2, `No defects in the narrowed
+//                scope.` Full-file re-runs (no `--arm` filter) on all three
+//                gates: `arms: 29/29/0` (reaper, was 28/28/0),
+//                `arms: 25/25/0` (retention, was 24/24/0),
+//                `arms: 38/38/0` (reconcile, was 37/37/0) -- 0 defects each.
+//                WAIVED_CEILING stays 0 (0 waivers, this move).
+export const ARMS_FLOOR = 416;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
