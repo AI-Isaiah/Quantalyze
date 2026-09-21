@@ -273,7 +273,16 @@ def retry_transport(
             return result
     with _RETRY_STATS_LOCK:
         _RETRY_STATS["calls"] += 1
-    assert last_exc is not None  # every loop iteration above sets it before falling through
+    # An `assert` here was a CONTROL INVARIANT, and `python -O` strips those: under
+    # -O the function would fall through and construct `TransportRetryExhausted`
+    # from `type(None)`, reporting "last exception type: NoneType" instead of
+    # failing. A real raise keeps the control flow identical with and without -O.
+    # Deliberately NOT given a test: `attempts >= 1` is enforced above, so the
+    # branch is unreachable and any test of it could not fail.
+    if last_exc is None:  # pragma: no cover
+        raise RuntimeError(
+            "retry_transport exhausted its loop without recording an exception"
+        )
     raise TransportRetryExhausted(attempts=attempts, last_exc_type=type(last_exc)) from last_exc
 
 
