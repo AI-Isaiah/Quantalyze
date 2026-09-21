@@ -170,6 +170,65 @@ NORMALIZER="${NORMALIZER:-scripts/sql-body-normalize.mjs}"
 # every live body against the committed set for that name.
 BODY_CHECK_FUNCTIONS="${BODY_CHECK_FUNCTIONS:-_enqueue_compute_job_internal sanitize_user mark_compute_job_done}"
 
+# ── ⛔ THE BOUNDED RETRY AROUND THE QUERY SEAM ([164.8.2-VAC08-FATAL-ON-TRANSIENT],
+# [164.9-SHARED-TEST-TRANSPORT-FLAKE], Phase 164.9 plan 06) ───────────────────
+#
+# ⛔ THIS SITS ON TOP OF THE THREE NAMED MEASUREMENT FAILURES; IT DOES NOT REPLACE
+# THEM AND IT RESTORES NO SILENT FALLBACK. After the budget an unreadable read
+# still reaches its MEASURE_FAIL and still exits non-zero — that is what keeps it
+# DISTINGUISHABLE from a clean read. The collapse F7 removed — a `||` fallback
+# to an EMPTY STRING on the ledger_rows read, quoted verbatim in the ⛔ F7 block
+# further down and kept there as lineage — IS the defect: it made the absurdity
+# floor silently inert. ⛔ Never bring it back as "the retry's fallback".
+# ⚠️ The superseded form is deliberately NOT restated here. It appears exactly
+# ONCE in this file, in F7's block, and a second copy would make a reader's
+# `grep` for it report two sites where there is one defect being remembered.
+#
+# ⛔ ONLY A FAILED INVOCATION IS RETRIED. An invocation that SUCCEEDED and
+# returned no row, or returned something that is not a number, is a measurement
+# failure about the ANSWER rather than about the transport, and retrying it would
+# turn a real defect into a slow one. Both are still reached on the FIRST attempt,
+# and an arm in `--self-test` asserts exactly that by reading the attempt count
+# out of the message.
+#
+# WHY 3 ATTEMPTS AND A 2s LINEAR BACKOFF. MEASURED 2026-09-21, from the evidence
+# CONTEXT Area 5 records: three attempts of ONE run at ONE commit produced two
+# DIFFERENT failure signatures on DIFFERENT tests and then green on identical
+# code — non-deterministic victims across attempts, which is transport, not logic.
+# A live probe at the same time returned three sub-second 200s with every backend
+# idle, so the fault is a brief connect/pooler blip and NOT the wedged-pool
+# mechanism (whose recorded `pg_terminate_backend` remedy was correctly not fired
+# at infrastructure shared with other people's CI). Three attempts is this repo's
+# own retry shape for every other network op in the CI file. The backoff is 2s
+# linear (2s then 4s) rather than the mutex acquire's 5s base: that base is sized
+# against a 3600s LOCK-CONTENTION window, while this bounds a single sub-second
+# READ, so the worst case added to a healthy run is 6s.
+# ⛔ Raising the budget is never the answer to a read that keeps failing — a
+# transport fault that survives three attempts is an outage, and the MEASURE_FAIL
+# is how you find out.
+#
+# ⛔ THE BUDGET IS A FIXED ASSIGNMENT AND THE BACKOFF IS OVERRIDABLE, AND THAT
+# ASYMMETRY IS THE WHOLE POINT. Overriding the BUDGET to 1 would DISABLE the
+# retry from a workflow's `env:` with nothing in the run saying so, which is the
+# silent-softening shape this gate exists to refuse — so it is not overridable at
+# all. The BACKOFF only decides how long a retry WAITS; setting it to 0 still
+# runs every attempt, still prints every retry line and still reaches the same
+# verdict. The harnesses set it to 0 so they measure the retry's LOGIC without
+# paying its wall clock, and a static leg in
+# src/__tests__/drift-check-scripts.test.ts pins the SHIPPED default so an
+# override can never hide a wrong one.
+LEDGER_QUERY_ATTEMPT_BUDGET=3
+LEDGER_QUERY_RETRY_BACKOFF_SECONDS="${LEDGER_QUERY_RETRY_BACKOFF_SECONDS:-2}"
+
+# ⭐ FD 9 IS THE RETRY NOTICE'S OWN CHANNEL, AND IT HAS TO BE. Every call site
+# below either CAPTURES the seam's stderr into a file it then withholds, or
+# discards it, so a retry notice written to stderr would be invisible on exactly
+# the path this retry exists for — and on the `ledger_rows` path it would also
+# inflate the withheld-line count the MEASURE_FAIL reports. fd 9 is duplicated
+# from stderr once, here, before any redirection, so a retried run is visible in
+# the job log and a clean run is byte-identical to what it was before.
+exec 9>&2
+
 fail() {
   echo "::error::${GATE}: $*"
   exit 1
@@ -257,12 +316,46 @@ default_body_fetch() {
 }
 
 run_ledger_query() {
-  if [ -n "${LEDGER_QUERY_CMD:-}" ]; then
-    # shellcheck disable=SC2086
-    $LEDGER_QUERY_CMD "$1"
-  else
-    default_ledger_query "$1" "$2"
-  fi
+  local direction="$1" names="${2:-}"
+  local attempt=1 rc=0 out="" backoff
+  # ⚠️ THE OUTPUT IS BUFFERED, NOT STREAMED, AND THAT IS WHAT MAKES A RETRY SAFE.
+  # A failed attempt can emit a partial answer; streaming it would concatenate
+  # that partial with the successful attempt's, and the caller would parse the
+  # pair as one value. Nothing reaches stdout until an attempt has SUCCEEDED.
+  # The seam's stderr is NOT captured here — it still flows to whatever channel
+  # the call site chose, so no diagnostic channel is discarded by this retry.
+  while : ; do
+    rc=0
+    if [ -n "${LEDGER_QUERY_CMD:-}" ]; then
+      # shellcheck disable=SC2086
+      out="$($LEDGER_QUERY_CMD "$direction")" || rc=$?
+    else
+      out="$(default_ledger_query "$direction" "$names")" || rc=$?
+    fi
+    # Written on EVERY path, so a caller reading it can never be handed a stale
+    # count from an earlier call — and so the count is present even when the
+    # first attempt succeeded (it reads 1, which is how an arm proves that an
+    # answer-level failure was NOT retried).
+    if [ -n "${LEDGER_QUERY_ATTEMPTS_FILE:-}" ]; then
+      printf '%s\n' "$attempt" > "$LEDGER_QUERY_ATTEMPTS_FILE"
+    fi
+    if [ "$rc" -eq 0 ]; then
+      if [ -n "$out" ]; then printf '%s\n' "$out"; fi
+      return 0
+    fi
+    if [ "$attempt" -ge "$LEDGER_QUERY_ATTEMPT_BUDGET" ]; then
+      # ⛔ THE STATUS IS RETURNED, NOT SWALLOWED. The caller's own MEASURE_FAIL
+      # fires on it, names the attempt count, and exits non-zero.
+      return "$rc"
+    fi
+    backoff=$(( attempt * LEDGER_QUERY_RETRY_BACKOFF_SECONDS ))
+    # One line per retry, on fd 9, so a run that retried is distinguishable from
+    # one that did not. The seam's stderr is NEVER re-emitted here: it can carry
+    # a DSN, host or username, and this log is public.
+    echo "${GATE}: the '${direction}' ledger query FAILED on attempt ${attempt}/${LEDGER_QUERY_ATTEMPT_BUDGET} (exit ${rc}); retrying in ${backoff}s. Its stderr is WITHHELD." >&9
+    sleep "$backoff"
+    attempt=$(( attempt + 1 ))
+  done
 }
 
 run_body_fetch() {
@@ -429,8 +522,14 @@ check() {
   # spoke and refused" from "psql is not there" from "the query returned no row"
   # — and not the text. What it must never do again is discard the channel and
   # then decide.
-  local ledger_rows matched ledger_rows_rc=0 err_lines
+  local ledger_rows matched ledger_rows_rc=0 err_lines ledger_rows_attempts
   local ledger_rows_err="${tmp}/ledger_rows.err"
+  # The seam runs inside a command substitution — a SUBSHELL — so an attempt
+  # counter it set as a variable could never reach this scope. It writes the
+  # count to this file instead, on every path, and the three MEASURE_FAILs below
+  # report it. That is what lets an arm distinguish "retried to exhaustion" from
+  # "failed about the ANSWER on the first attempt, correctly not retried".
+  LEDGER_QUERY_ATTEMPTS_FILE="${tmp}/ledger_rows.attempts"
   set +e
   ledger_rows="$(run_ledger_query ledger_rows "$names_csv" 2>"$ledger_rows_err")"
   ledger_rows_rc=$?
@@ -453,15 +552,25 @@ check() {
   # taken. The braces matter: `wc … || echo '?'` must be grouped BEFORE the pipe,
   # or `tr` succeeds on nothing and the fallback never fires.
   err_lines="$( { wc -l < "$ledger_rows_err" 2>/dev/null || echo '?'; } | tr -d '[:space:]' )"
+  # Read WITHOUT a suppressed channel and WITHOUT a softening token: the seam
+  # writes this file on every path, and a '?' says the count itself could not be
+  # taken rather than rendering a blank inside a diagnosis (D-12/SC-7).
+  ledger_rows_attempts="?"
+  if [ -s "$LEDGER_QUERY_ATTEMPTS_FILE" ]; then
+    ledger_rows_attempts="$(tr -dc '0-9' < "$LEDGER_QUERY_ATTEMPTS_FILE")"
+  fi
+  if [ -z "$ledger_rows_attempts" ]; then
+    ledger_rows_attempts="?"
+  fi
   if [ "$ledger_rows_rc" -ne 0 ]; then
-    fail "MEASURE_FAIL: could not read the TEST ledger row count (the ledger_rows query exited ${ledger_rows_rc}; ${err_lines} line(s) of stderr captured and WITHHELD — it can carry a DSN, host or username). The ABSURDITY FLOOR below is the control that tells a wrong join key from real drift, and it can only fire on a count that was READ; an unreadable one leaves it INERT while the gate reports drift with full confidence. An unreadable input is not a clean one."
+    fail "MEASURE_FAIL: could not read the TEST ledger row count (the ledger_rows query exited ${ledger_rows_rc} after ${ledger_rows_attempts} attempt(s) of a ${LEDGER_QUERY_ATTEMPT_BUDGET}-attempt budget; ${err_lines} line(s) of stderr captured and WITHHELD — it can carry a DSN, host or username). The ABSURDITY FLOOR below is the control that tells a wrong join key from real drift, and it can only fire on a count that was READ; an unreadable one leaves it INERT while the gate reports drift with full confidence. An unreadable input is not a clean one."
   fi
   case "$ledger_rows" in
     "")
-      fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned NO ROW (${err_lines} line(s) of stderr captured and WITHHELD — it can carry a DSN, host or username). A count query returns exactly one number, so an empty answer is a read that did not happen, not a ledger holding zero rows — and zero is one of the values the ABSURDITY FLOOR below can never fire on."
+      fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned NO ROW after ${ledger_rows_attempts} attempt(s) (${err_lines} line(s) of stderr captured and WITHHELD — it can carry a DSN, host or username). A count query returns exactly one number, so an empty answer is a read that did not happen, not a ledger holding zero rows — and zero is one of the values the ABSURDITY FLOOR below can never fire on. ⛔ The retry does NOT apply here and must not be made to: the invocation SUCCEEDED, so this is a failure about the ANSWER, not the transport."
       ;;
     *[!0-9]*)
-      fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned something that is not a number (${#ledger_rows} character(s), value WITHHELD — a failed psql can print connection detail on stdout). A count that cannot be compared is not a count of zero; the ABSURDITY FLOOR below would have gone INERT on it."
+      fail "MEASURE_FAIL: the TEST ledger row-count query exited 0 and returned something that is not a number after ${ledger_rows_attempts} attempt(s) (${#ledger_rows} character(s), value WITHHELD — a failed psql can print connection detail on stdout). A count that cannot be compared is not a count of zero; the ABSURDITY FLOOR below would have gone INERT on it. ⛔ The retry does NOT apply here and must not be made to: the invocation SUCCEEDED, so this is a failure about the ANSWER, not the transport."
       ;;
   esac
   matched=$(( ${#repo_names[@]} - missing_count ))
@@ -941,13 +1050,57 @@ elif [ "$1" = "ledger_rows" ]; then
 fi
 exit 0
 STUB
+  # ── RETRY shims (Phase 164.9 plan 06) ────────────────────────────────────
+  # Three stubs driving the retry's three distinguishable situations through the
+  # SAME injectable seam every other arm uses — which is exactly what that seam
+  # was built for.
+  #   ledger_flaky.sh   fails the `ledger_rows` direction until FLAKY_FAIL_UNTIL,
+  #                     then answers. FLAKY_FAIL_UNTIL=budget ⇒ it recovers on
+  #                     the last attempt; a value above the budget ⇒ it never
+  #                     recovers and the gate must still reach its MEASURE_FAIL.
+  #   ledger_norow.sh   SUCCEEDS and prints nothing for `ledger_rows`.
+  #   ledger_nonnum.sh  SUCCEEDS and prints a non-number for `ledger_rows`.
+  # The last two must NOT be retried: the invocation worked, the ANSWER did not.
+  cat > "$tmp/ledger_flaky.sh" <<'STUB'
+#!/usr/bin/env bash
+if [ "$1" = "missing" ]; then
+  [ -n "${MISSING_NAMES:-}" ] && printf '%s\n' "$MISSING_NAMES"
+elif [ "$1" = "ledger_rows" ]; then
+  n=0
+  if [ -s "${FLAKY_COUNTER}" ]; then n="$(cat "${FLAKY_COUNTER}")"; fi
+  n=$(( n + 1 ))
+  printf '%s\n' "$n" > "${FLAKY_COUNTER}"
+  if [ "$n" -lt "${FLAKY_FAIL_UNTIL}" ]; then
+    echo "self-test shim: simulated transport fault" >&2
+    exit 3
+  fi
+  echo 12
+fi
+exit 0
+STUB
+  cat > "$tmp/ledger_norow.sh" <<'STUB'
+#!/usr/bin/env bash
+if [ "$1" = "missing" ]; then
+  [ -n "${MISSING_NAMES:-}" ] && printf '%s\n' "$MISSING_NAMES"
+fi
+exit 0
+STUB
+  cat > "$tmp/ledger_nonnum.sh" <<'STUB'
+#!/usr/bin/env bash
+if [ "$1" = "missing" ]; then
+  [ -n "${MISSING_NAMES:-}" ] && printf '%s\n' "$MISSING_NAMES"
+elif [ "$1" = "ledger_rows" ]; then
+  echo "not-a-number"
+fi
+exit 0
+STUB
   cat > "$tmp/body.sh" <<'STUB'
 #!/usr/bin/env bash
 f="${LIVE_DIR}/$1.sql"
 [ -f "$f" ] && cat "$f"
 exit 0
 STUB
-  chmod +x "$tmp/ledger.sh" "$tmp/body.sh"
+  chmod +x "$tmp/ledger.sh" "$tmp/body.sh" "$tmp/ledger_flaky.sh" "$tmp/ledger_norow.sh" "$tmp/ledger_nonnum.sh"
 
   local rc pass=0 total=0
   local -a results=()
@@ -976,8 +1129,8 @@ STUB
   # live arm count with
   # `grep -av '^\s*#' scripts/test-ledger-drift-check.sh | grep -ac '^  run_arm "'`.
   # `--self-test --expect-inverted` exits 1. No database: the harness is stub-driven.
-  # MEASURED 2026-09-09 — `--self-test` prints 11/11 and exits 0.
-  EXPECTED_ARMS=11
+  # MEASURED 2026-09-21 — `--self-test` prints 13/13 and exits 0.
+  EXPECTED_ARMS=13
 
   run_arm() {
     local label="$1" want="$2"
@@ -1176,6 +1329,112 @@ STUB
   # `tip-equal-missing RED`: an off-by-one hides at the boundary and nowhere else.
   run_arm "frontier-ceiling-boundary GREEN" 0 arm_env "$tmp/live" "$ceil_edge_names" "selftest_fn" "$tmp/mig_ceil_edge"
 
+  # ── THE BOUNDED RETRY (Phase 164.9 plan 06) — recovery, and exhaustion ─────
+  # A shared env invoker for the retry arms. It is SEPARATE from `arm_env` rather
+  # than a parameter on it: `arm_env` hardcodes the clean stub as
+  # `LEDGER_QUERY_CMD`, and threading an override through it would put a seam in
+  # the path of the nine arms above that do not need one.
+  arm_env_retry() {
+    MIGRATIONS_DIR="$tmp/migrations" \
+    SNAPSHOT_DIR="$tmp/snapshot" \
+    LEDGER_BASELINE_FILE="$tmp/baseline.txt" \
+    LIVE_DIR="$tmp/live" \
+    MISSING_NAMES="" \
+    LEDGER_QUERY_CMD="bash $1" \
+    BODY_FETCH_CMD="bash $tmp/body.sh" \
+    BODY_CHECK_FUNCTIONS="selftest_fn" \
+    NORMALIZER="$NORMALIZER" \
+    FLAKY_COUNTER="$tmp/flaky.counter" \
+    FLAKY_FAIL_UNTIL="${2:-1}" \
+    LEDGER_QUERY_RETRY_BACKOFF_SECONDS=0 \
+    bash "$0" --run-check
+  }
+
+  # GREEN 4 — A TRANSIENT READ RECOVERS, AND SAYS SO. The shim fails the
+  # `ledger_rows` read until the LAST attempt of the budget, so the gate must
+  # proceed to its normal green verdict AND must have printed a retry line. Both
+  # halves matter: a retry that recovered silently is indistinguishable from a
+  # read that never failed, and this repo's whole complaint about the collapsed
+  # fallback was that it made a fault invisible.
+  arm_retry_recovers_green() {
+    local out rc=0
+    : > "$tmp/flaky.counter"
+    printf '%s\n' "$body" > "$tmp/live/selftest_fn.sql"
+    out="$(arm_env_retry "$tmp/ledger_flaky.sh" "$LEDGER_QUERY_ATTEMPT_BUDGET" 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "MEASURE_FAIL: the gate exited ${rc} on a read that failed transiently and then SUCCEEDED within the budget. A recoverable transport fault must not red this gate."
+      return 1
+    fi
+    if ! printf '%s' "$out" | grep -aq "retrying in"; then
+      echo "MEASURE_FAIL: the gate recovered but printed NO retry line, so a run that retried is indistinguishable from one that did not."
+      return 1
+    fi
+    if ! printf '%s' "$out" | grep -aqF "/${LEDGER_QUERY_ATTEMPT_BUDGET} (exit 3)"; then
+      echo "MEASURE_FAIL: the retry line did not name the attempt against the budget, or did not carry the failing exit status."
+      return 1
+    fi
+    return 0
+  }
+  run_arm "retry recovers a transient ledger read (GREEN)" 0 arm_retry_recovers_green
+
+  # RED 8 — EXHAUSTION IS OBSERVED, NOT ASSUMED, and the two answer-level
+  # failures are observed NOT to be retried. One arm, three situations, in the
+  # shape `arm_frontier_ceiling_exceeded` already uses: `run_arm` compares exit
+  # CODES and this gate has several ways to exit 1, so each situation asserts on
+  # the MESSAGE as well.
+  arm_retry_exhausts_and_answer_failures_are_not() {
+    local out rc=0
+    printf '%s\n' "$body" > "$tmp/live/selftest_fn.sql"
+
+    # (1) Never recovers. The named MEASURE_FAIL must still fire, and it must
+    #     name the attempt count — which is the exhaustion observation itself.
+    : > "$tmp/flaky.counter"
+    out="$(arm_env_retry "$tmp/ledger_flaky.sh" 99 2>&1)" || rc=$?
+    if [ "$rc" -ne 1 ]; then
+      echo "MEASURE_FAIL: a ledger read that failed every attempt exited ${rc}, not 1. An unreadable input must still fail LOUDLY after the budget — that is what keeps it distinguishable from a clean one."
+      return 0
+    fi
+    if ! printf '%s' "$out" | grep -aqF "could not read the TEST ledger row count"; then
+      echo "MEASURE_FAIL: the exhausted read exited 1 but never reached its NAMED measurement failure, so this arm was about to pass for the wrong reason."
+      return 0
+    fi
+    if ! printf '%s' "$out" | grep -aqF "after ${LEDGER_QUERY_ATTEMPT_BUDGET} attempt(s) of a ${LEDGER_QUERY_ATTEMPT_BUDGET}-attempt budget"; then
+      echo "MEASURE_FAIL: the exhaustion message did not name the attempt count against the budget."
+      return 0
+    fi
+    if ! printf '%s' "$out" | grep -aqF "line(s) of stderr captured and WITHHELD"; then
+      echo "MEASURE_FAIL: the exhaustion message lost its withholding language — this log is public."
+      return 0
+    fi
+
+    # (2) A read that SUCCEEDED and returned no row is about the ANSWER. It must
+    #     be reached on the FIRST attempt.
+    rc=0
+    out="$(arm_env_retry "$tmp/ledger_norow.sh" 1 2>&1)" || rc=$?
+    if [ "$rc" -ne 1 ]; then
+      echo "MEASURE_FAIL: a ledger_rows query returning NO ROW exited ${rc}, not 1."
+      return 0
+    fi
+    if ! printf '%s' "$out" | grep -aqF "returned NO ROW after 1 attempt(s)"; then
+      echo "MEASURE_FAIL: the NO-ROW failure was not reached on the FIRST attempt — the retry is laundering an answer-level defect into a slow one."
+      return 0
+    fi
+
+    # (3) Same for a non-numeric answer.
+    rc=0
+    out="$(arm_env_retry "$tmp/ledger_nonnum.sh" 1 2>&1)" || rc=$?
+    if [ "$rc" -ne 1 ]; then
+      echo "MEASURE_FAIL: a non-numeric ledger_rows answer exited ${rc}, not 1."
+      return 0
+    fi
+    if ! printf '%s' "$out" | grep -aqF "is not a number after 1 attempt(s)"; then
+      echo "MEASURE_FAIL: the non-numeric failure was not reached on the FIRST attempt — the retry is laundering an answer-level defect into a slow one."
+      return 0
+    fi
+    return 1
+  }
+  run_arm "retry EXHAUSTS loudly, and answer-level failures are not retried RED" 1 arm_retry_exhausts_and_answer_failures_are_not
+
   # ── HARNESS CALIBRATION (WR-03, Phase 164.8.2) — the LAST arm ──────────────
   # ⛔ WITHOUT THIS ARM every `ok` above is a claim about a harness nobody has
   # seen say no. Both halves run `run_arm` in a SUBSHELL so their tallies cannot
@@ -1245,11 +1504,12 @@ STUB
   # up until an arm vanished, which is the one moment the difference matters.
   # ⛔ THE SENTENCE'S COUNT IS MEASURED, NOT RESTATED. Regenerate the green arms
   # with `grep -av '^\s*#' scripts/test-ledger-drift-check.sh | grep -ac '^  run_arm "[^"]*\(GREEN\|green\)'`
-  # (2026-09-09: THREE, after `frontier-ceiling-boundary GREEN` joined). It read
-  # "both green paths" until this phase, which was true of two and became false at
-  # three — a narrative that miscounts its own arms is the same defect class as a
-  # stale ratchet.
-  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — every red mode fires, all THREE green paths pass, and the harness is calibrated)."
+  # (2026-09-09: THREE, after `frontier-ceiling-boundary GREEN` joined;
+  # 2026-09-21: FOUR, after `retry recovers a transient ledger read (GREEN)`
+  # joined). It read "both green paths" until Phase 164.8.2, which was true of two
+  # and became false at three — a narrative that miscounts its own arms is the
+  # same defect class as a stale ratchet, and it has now been true twice.
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — every red mode fires, all FOUR green paths pass, and the harness is calibrated)."
   return 0
 }
 
