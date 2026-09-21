@@ -122,19 +122,63 @@ probe_inflight_flag() {
     printf '%s' "unknown"
     return 0
   fi
-  case "${dsn}" in
-    *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
-  esac
+  dsn="$(session_mode_port "${dsn}")"
   answer="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
       -c "SET statement_timeout = '10s';" \
       -c "$(shared_test_db_inflight_probe_sql)" \
       2>/dev/null | tr -d '\r' | tail -1)" || answer=""
-  answer="$(printf '%s' "${answer}" | tr -d '[:space:]')"
+  classify_inflight_answer "${answer}"
+}
+
+# The two pieces of probe_inflight_flag that can be MEASURED without a database,
+# lifted out for exactly that reason. ⛔ THEY ARE NOT A CONVENIENCE WRAPPER: the
+# self-test drives these bodies, so a typo in the port rewrite or in the answer
+# classification now has somewhere to be caught. The psql invocation between them
+# stays unmeasured here and is stated as such in the self-test's summary line.
+#
+# session_mode_port — the pooler's transaction-mode port rewritten to the
+# session-mode one. Advisory locks are SESSION state; a transaction-mode pooler
+# hands the probe a different backend each time and the answer means nothing.
+session_mode_port() {
+  case "$1" in
+    *":6543/"*) printf '%s' "${1%%:6543/*}:5432/${1#*:6543/}" ;;
+    *)          printf '%s' "$1" ;;
+  esac
+}
+
+# classify_inflight_answer — a SQLSTATE-shaped answer (whitespace, CR, an empty
+# string, an error line) mapped onto exactly one of held | clear | unknown.
+# ⛔ ANYTHING NON-NUMERIC IS `unknown`, NEVER `clear`. A psql error line that
+# classified as clear is a reader deciding a DROP SCHEMA is not running because
+# it could not ask.
+classify_inflight_answer() {
+  local answer
+  answer="$(printf '%s' "${1:-}" | tr -d '[:space:]')"
   case "${answer}" in
     ''|*[!0-9]*) printf '%s' "unknown" ;;
     0)           printf '%s' "clear" ;;
     *)           printf '%s' "held" ;;
   esac
+}
+
+# gh_api — the one place this script speaks to the Actions API, and a DATA seam
+# rather than a BEHAVIOUR one. ⭐ THAT DISTINCTION IS THE POINT. With only
+# `TEST_APPLY_STATE_CMD` (which replaces the whole function), the self-test
+# certified an outcome DISPATCHER while every line that actually reads the API —
+# the URL, the three jq filters, the per-run loop, the aggregation — went
+# unexecuted. A renamed job, a changed API shape or a typo'd jq path would make
+# this answer `unreadable` forever, burning the full budget in three jobs on
+# every merge push and blaming congestion, with the self-test green throughout.
+# Feeding fixture BYTES in here runs that code for real.
+# ⛔ stderr stays discarded: a gh failure can name the repository and the token's
+# owner, and this log is public. The exit status is preserved.
+gh_api() {
+  if [ -n "${TEST_GH_API_CMD:-}" ]; then
+    # shellcheck disable=SC2086
+    $TEST_GH_API_CMD "$1"
+    return $?
+  fi
+  gh api "$1" 2>/dev/null
 }
 
 # ── READ 2: the Actions API ────────────────────────────────────────────────
@@ -157,13 +201,13 @@ probe_apply_state() {
   fi
   local rc=0 runs_json ids id jobs_json st cc
   local seen_running=0 seen_ok=0 seen_bad=0
-  runs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${MIGRATE_WORKFLOW_FILE}/runs?head_sha=${GITHUB_SHA}&per_page=20" 2>/dev/null)" || rc=$?
+  runs_json="$(gh_api "repos/${GITHUB_REPOSITORY}/actions/workflows/${MIGRATE_WORKFLOW_FILE}/runs?head_sha=${GITHUB_SHA}&per_page=20")" || rc=$?
   if [ "${rc}" -ne 0 ]; then printf '%s' "unreadable"; return 0; fi
   ids="$(printf '%s' "${runs_json}" | jq -r '.workflow_runs[]?.id' 2>/dev/null)" || { printf '%s' "unreadable"; return 0; }
   if [ -z "${ids}" ]; then printf '%s' "absent"; return 0; fi
   for id in ${ids}; do
     rc=0
-    jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/jobs?per_page=100" 2>/dev/null)" || rc=$?
+    jobs_json="$(gh_api "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/jobs?per_page=100")" || rc=$?
     if [ "${rc}" -ne 0 ]; then printf '%s' "unreadable"; return 0; fi
     st="$(printf '%s' "${jobs_json}" | jq -r --arg n "${APPLY_JOB_NAME}" '[.jobs[]? | select(.name == $n)] | .[0].status // ""' 2>/dev/null)" || { printf '%s' "unreadable"; return 0; }
     cc="$(printf '%s' "${jobs_json}" | jq -r --arg n "${APPLY_JOB_NAME}" '[.jobs[]? | select(.name == $n)] | .[0].conclusion // ""' 2>/dev/null)" || { printf '%s' "unreadable"; return 0; }
@@ -331,7 +375,126 @@ self_test() {
   seam_arm "apply seam EXITS NON-ZERO answers unreadable" 1 "apply state 'unreadable'" "printf %s clear" "false"
   seam_arm "apply seam PRINTS NOTHING answers unreadable" 1 "apply state 'unreadable'" "printf %s clear" "true"
 
-  echo "wait-for-test-schema-apply self-test OK (${checks} checks) — all three outcomes named, and a held flag beats an absent run."
+  # ══ THE READS THEMSELVES ═══════════════════════════════════════════════
+  # ⛔ EVERY ARM ABOVE INJECTS BOTH SEAMS, SO NOT ONE OF THEM EXECUTES A LINE
+  # OF probe_apply_state's OR probe_inflight_flag's BODY. They certify the
+  # DISPATCHER — which outcome the wait loop reaches for a given pair of
+  # answers — and that is a DIFFERENT CLAIM from "the reads work". The arms
+  # below drive the real bodies through a DATA seam (fixture bytes in, a token
+  # out) instead of a BEHAVIOUR seam (an answer in, the body skipped).
+  #
+  # ⛔ THE FIXTURES CARRY NO REAL RUN ID, ORG, REPOSITORY OR HOST. They are
+  # synthetic placeholders; this file is in a PUBLIC repo.
+  local ST_RUNS_JSON="" ST_JOBS_JSON="" ST_JOBS_JSON_2=""
+
+  st_api_fixture() {
+    case "$1" in
+      *"/actions/workflows/"*"/runs?"*) printf '%s' "${ST_RUNS_JSON}" ;;
+      # Keyed on the run id, so a two-run commit can answer DIFFERENTLY per run
+      # — the whole point of the aggregation arm below.
+      *"/actions/runs/22222222/jobs"*)  printf '%s' "${ST_JOBS_JSON_2:-${ST_JOBS_JSON}}" ;;
+      *"/actions/runs/"*"/jobs"*)       printf '%s' "${ST_JOBS_JSON}" ;;
+      # A URL neither branch recognises means the reader built something this
+      # harness has never seen — a fixture MISS, not an API failure. Answering
+      # `unreadable` for it would let a renamed endpoint pass as a measured read.
+      *) echo "SELF-TEST FAIL: the reader requested an unrecognised URL shape; the fixture measures nothing for it." >&2; exit 1 ;;
+    esac
+  }
+  st_api_fails() { return 1; }
+
+  # Synthetic, and deliberately not this repository's own name or head.
+  export GITHUB_REPOSITORY="synthetic-owner/synthetic-repo"
+  export GITHUB_SHA="0000000000000000000000000000000000000000"
+
+  read_arm() {  # label expected api-fn runs-json jobs-json [jobs-json-for-the-2nd-run]
+    local label="$1" want="$2" api_fn="$3" got=""
+    ST_RUNS_JSON="$4"; ST_JOBS_JSON="$5"; ST_JOBS_JSON_2="${6:-}"
+    TEST_GH_API_CMD="${api_fn}"
+    got="$(TEST_APPLY_STATE_CMD="" probe_apply_state)" || got="(the read EXITED non-zero)"
+    TEST_GH_API_CMD=""
+    checks=$((checks + 1))
+    if [ "${got}" != "${want}" ]; then
+      echo "SELF-TEST FAIL: read arm '${label}' answered '${got}', expected '${want}'. This arm runs the REAL probe_apply_state body over fixture bytes, so a miss means the URL, a jq filter or the aggregation is wrong — not that the dispatcher is." >&2
+      exit 1
+    fi
+  }
+
+  local RUN_ONE='{"workflow_runs":[{"id":11111111}]}'
+  local RUN_TWO='{"workflow_runs":[{"id":11111111},{"id":22222222}]}'
+  local NO_RUNS='{"workflow_runs":[]}'
+  local JOB_OK='{"jobs":[{"name":"apply-test","status":"completed","conclusion":"success"}]}'
+  local JOB_BAD='{"jobs":[{"name":"apply-test","status":"completed","conclusion":"failure"}]}'
+  local JOB_RUNNING='{"jobs":[{"name":"apply-test","status":"in_progress","conclusion":null}]}'
+  local JOB_OTHER='{"jobs":[{"name":"dispatch-ref-guard","status":"completed","conclusion":"success"}]}'
+  local JOB_NONE='{"jobs":[]}'
+  local MALFORMED='{"workflow_runs":[{"id":'
+
+  read_arm "completed/success is concluded-ok"   concluded-ok  st_api_fixture "${RUN_ONE}" "${JOB_OK}"
+  read_arm "completed/failure is concluded-bad"  concluded-bad st_api_fixture "${RUN_ONE}" "${JOB_BAD}"
+  read_arm "in_progress is running"              running       st_api_fixture "${RUN_ONE}" "${JOB_RUNNING}"
+  # ⭐ THE TWO SHAPES THAT LOOK LIKE NOTHING AND ARE NOT. A run whose job list
+  # is empty, and a run carrying only OTHER jobs, both mean `apply-test` has not
+  # registered yet. Reading either as `absent` is a reader walking into the
+  # apply it exists to wait for — the comment in the body says so; these arms
+  # make it true.
+  read_arm "a run with an EMPTY job list is running, not absent" running st_api_fixture "${RUN_ONE}" "${JOB_NONE}"
+  read_arm "a run with no apply-test job yet is running"         running st_api_fixture "${RUN_ONE}" "${JOB_OTHER}"
+  read_arm "no runs at all is absent"             absent     st_api_fixture "${NO_RUNS}" "${JOB_OK}"
+  read_arm "MALFORMED runs JSON is unreadable"    unreadable st_api_fixture "${MALFORMED}" "${JOB_OK}"
+  read_arm "MALFORMED jobs JSON is unreadable"    unreadable st_api_fixture "${RUN_ONE}" "${MALFORMED}"
+  read_arm "a failing API call is unreadable"     unreadable st_api_fails   "${RUN_ONE}" "${JOB_OK}"
+  # Two runs on one commit: the UNFINISHED one decides. `running` outranks a
+  # concluded sibling, or a re-run would let a reader past a live apply.
+  read_arm "running outranks a concluded sibling" running st_api_fixture "${RUN_TWO}" "${JOB_OK}" "${JOB_RUNNING}"
+
+  # ── READ 1's two measurable pieces ──────────────────────────────────────
+  # ⚠️ WHAT THESE DO NOT COVER, stated rather than implied: the psql invocation
+  # between them is unmeasured here. It is exercised end-to-end only on a real
+  # TEST run. What IS measured is the classification of whatever it returns —
+  # which is where "non-numeric reads as clear" would live.
+  flag_arm() {  # label answer expected
+    local label="$1" got
+    got="$(classify_inflight_answer "$2")"
+    checks=$((checks + 1))
+    if [ "${got}" != "$3" ]; then
+      echo "SELF-TEST FAIL: flag classification '${label}' answered '${got}', expected '$3'." >&2
+      exit 1
+    fi
+  }
+  flag_arm "zero is clear"                 "0"   clear
+  flag_arm "one is held"                   "1"   held
+  flag_arm "a larger count is held"        "7"   held
+  flag_arm "whitespace around a count"     "  1  " held
+  flag_arm "a trailing CR around a count"  "$(printf '0\r')" clear
+  flag_arm "an EMPTY answer is unknown"    ""    unknown
+  # ⛔ THE ONE THAT MATTERS: a psql error line must never classify as `clear`.
+  flag_arm "a non-numeric answer is unknown" "ERROR" unknown
+  flag_arm "a numeric-looking error is unknown" "FATAL: 28000" unknown
+
+  # The port rewrite, driven over a synthetic token rather than a connection
+  # string: ⛔ nothing DSN-shaped is written into this public file, and the
+  # parameter expansion under test does not care what surrounds the port.
+  port_arm() {  # label input expected
+    local got
+    got="$(session_mode_port "$2")"
+    checks=$((checks + 1))
+    if [ "${got}" != "$3" ]; then
+      echo "SELF-TEST FAIL: port rewrite '${1}' produced '${got}', expected '$3'. An advisory-lock probe left on the transaction-mode port reads a different backend each poll and its answer means nothing." >&2
+      exit 1
+    fi
+  }
+  port_arm "transaction-mode port is rewritten" "left:6543/right" "left:5432/right"
+  port_arm "a session-mode port is untouched"   "left:5432/right" "left:5432/right"
+  port_arm "no port at all is untouched"        "left/right"      "left/right"
+
+  # And the real probe's own no-credential path, which needs no database.
+  checks=$((checks + 1))
+  if [ "$(TEST_INFLIGHT_PROBE_CMD="" TEST_SUPABASE_DB_URL="" probe_inflight_flag)" != "unknown" ]; then
+    echo "SELF-TEST FAIL: with no TEST credential the flag probe must answer 'unknown' — an absent credential is not a clear flag." >&2
+    exit 1
+  fi
+
+  echo "wait-for-test-schema-apply self-test OK (${checks} checks) — the DISPATCHER (all three outcomes named; a held flag beats both an absent and a concluded run) AND the two READS (probe_apply_state over fixture API bytes; the flag classification and the port rewrite). ⚠️ NOT covered: the psql call itself, which only a real TEST run exercises."
 }
 
 case "${1:-}" in
