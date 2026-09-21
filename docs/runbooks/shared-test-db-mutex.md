@@ -12,6 +12,14 @@ lock**. This page covers "what is holding the lock", "how do I break a stuck
 hold", "what happens on forks", and the drill that proves serialization still
 works.
 
+⭐ **ADDENDUM 2026-09-21 (Phase 164.9) — THERE ARE NOW TWO KEYS, AND SECTIONS 1–6
+DESCRIBE ONLY THE FIRST.** A second advisory key, the *schema-apply-in-flight
+FLAG*, protects a different unit and **nothing blocks on it**; three reader jobs
+now WAIT on a fact before taking the first key. Sections 1–6 are kept as lineage
+and are still correct about the mutual-exclusion key. **Read [section 7](#7-two-keys-two-units--and-the-ordering-wait-added-2026-09-21-phase-1649)
+before changing, counting or citing either key** — it also carries the corrected
+file-level census, which is wider than section 1's three jobs.
+
 > **⚠️ Every secret below is named, never valued.** This repository is PUBLIC.
 > Reference the repo secret **`TEST_SUPABASE_DB_URL`** by name only — never a
 > DSN, host, username, or password, in this file or in any CI log line.
@@ -531,3 +539,100 @@ A repeat cancellation on main with the mutex in place means something other than
 concurrency-group eviction cancelled the run (a manual cancel, a force-push, or
 a runner-level abort) — investigate the run itself before assuming the mutex
 regressed.
+
+## 7. TWO KEYS, TWO UNITS — and the ordering wait (added 2026-09-21, Phase 164.9)
+
+⭐ **Everything above this section describes ONE key and is still correct about
+it. It is kept as lineage.** What changed on 2026-09-21 is that a SECOND
+advisory key now exists, protecting a DIFFERENT unit, and three jobs now WAIT
+on a fact before they take the first key.
+
+### 7.1 The two keys
+
+| | key | unit it protects | who takes it | does anything BLOCK on it? |
+|---|---|---|---|---|
+| mutual-exclusion key | `61616158` | **the shared TEST database** | every DB-touching job | **YES** — contenders block inside `pg_advisory_lock` |
+| schema-apply-in-flight **flag** | `SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY` in `scripts/shared-test-db-keys.sh` | **"a schema apply against this project is in flight"** | the two schema WRITERS only | **NO — NOTHING BLOCKS ON IT** |
+
+⛔ **The second one is a FLAG, not a lock, and the distinction is the whole
+point.** It is HELD by the two schema writers for the duration of their apply
+and READ — non-blockingly, out of `pg_locks` — by the readers. If you ever find
+a job blocking on it, that is a defect: make the reader read, not wait.
+
+⛔ **Cite the flag BY SYMBOL, never by value.** It is written once, in
+`scripts/shared-test-db-keys.sh`, and `--self-test` there proves it is a single
+live line and differs from `61616158`. The mutual-exclusion key deliberately
+stays a literal at each of its existing call sites — it is a working mechanism
+with its own probe drill (§5) and its own pinned occurrence counts, and
+rewriting those call sites to gain a shared constant is risk taken for tidiness.
+
+⛔ **Giving the writer its own lock INSTEAD would have been the wrong fix.** It
+would make the writer stop excluding the readers, and Phase 164.8 Area 4
+recorded a schema apply racing a running gate as the one collision that
+CORRUPTS a reading rather than merely delaying it. Both writers still take
+`61616158`, exactly as before.
+
+### 7.2 Who takes the mutual-exclusion key — the corrected census
+
+⚠️ **Section 1 names three jobs and the header corrects that to five. Both are
+narrower than the truth at file level.** MEASURED 2026-09-21, by occurrence of
+the literal:
+
+| file | occurrences |
+|---|---|
+| `.github/workflows/ci.yml` | 27 |
+| `.github/workflows/test-restore-from-baseline.yml` | 8 |
+| `.github/workflows/supabase-migrate.yml` | 7 |
+| `.github/workflows/mutex-probe.yml` | 4 |
+| `.github/workflows/analytics-deploy-verify.yml` | 1 |
+
+Plus four scripts that name it: `scripts/classify-changed-paths.mjs`,
+`scripts/pg-lane/mutex-dead-holder-lane.sh`,
+`scripts/restore-test-from-baseline.sh`, `scripts/test-ledger-drift-check.sh`.
+⛔ Regenerate rather than trust this table — `grep -rlF 61616158
+.github/workflows scripts` — and note that a reader planning a key change who
+works from section 1's three-job picture will miss most of the call sites.
+
+### 7.3 The ordering wait, and its three outcomes
+
+A mutex guarantees no two holders OVERLAP. It guarantees nothing about which
+goes FIRST. On a merge push, `ci.yml`'s reader jobs and `supabase-migrate.yml`'s
+`apply-test` contended for `61616158` with nothing ordering them — booked as
+`[164.8-PUSH-RACE-VAC08]`. Ordering needed its own primitive, so `sql-tests`,
+`python` and `e2e-seeded` each run
+**`Wait for the TEST schema apply to conclude (merge pushes only)`**
+IMMEDIATELY BEFORE their acquire step, invoking
+`scripts/wait-for-test-schema-apply.sh`.
+
+⛔ **It waits BEFORE taking the key, never while holding it.** A job that waited
+while holding `61616158` would starve every other contender on a database other
+people's CI writes to — including the apply it is waiting for.
+
+⛔ **No `needs:` edge was added, and none may be.** The three jobs' `if:`
+conditions diverge and a skipped `needs:` job skips its dependents; `ci.yml`
+records that at length. The ordering IS the wait.
+
+It makes two reads per poll — the in-flight FLAG (which is the ONLY signal that
+sees `test-restore-from-baseline.yml`, since a dispatched restore produces no
+Actions run on your commit), then the Actions API for the `apply-test` JOB on
+this exact head commit. ⚠️ **The JOB, not the run:** that workflow's PROD `apply`
+sits behind a HUMAN reviewer gate, so the RUN stays `in_progress` until somebody
+clicks, and waiting on the run would wait on a person.
+
+| outcome in the log | what happened | what YOU do |
+|---|---|---|
+| `wait-outcome: apply-concluded` | the apply for this commit finished. If it finished UNSUCCESSFULLY the line says so and the job proceeds anyway — that failure already carries its own red check, and reddening here would duplicate it under the wrong job's name. | nothing. If the line says unsuccessful, go read `supabase-migrate.yml`'s own red check; it is the authority. |
+| `wait-outcome: no-apply-run` | no `supabase-migrate.yml` run appeared for this commit within the appearance grace AND the flag was clear. The ordinary case: the commit changed no migration, so that workflow never triggered. | nothing. |
+| `::error::wait-outcome: wait-exhausted` | the budget ran out. The line names which condition was still true: a **held** flag (a TEST apply or a dispatched restore was still running) or a **running** apply state (its `apply-test` had not finished), or an **unknown**/**unreadable** read, which is a measurement failure and not a clean answer. | Find the other run. A held flag with no visible apply usually means a `test-restore-from-baseline.yml` dispatch is mid-restore — let it finish. A `running` apply usually means the apply is itself queued on `61616158`; triage with §§2–3 (count the waiters FIRST) and re-run once the queue drains. ⛔ Do not raise the budget to make it green. |
+
+**Budgets** are constants at the top of `scripts/wait-for-test-schema-apply.sh`,
+each with its derivation beside it. Read them BY SYMBOL. They are overridable by
+environment variable so the script's `--self-test` can drive all three outcomes
+in seconds; ⛔ setting them in a workflow to make a slow run green is the
+widening this mechanism exists to avoid.
+
+**Falsification.** `bash scripts/wait-for-test-schema-apply.sh --self-test`
+drives every outcome through injectable seams and asserts each one BY NAME and
+by exit code — including the calibration that an ABSENT apply with a HELD flag
+must NOT read as `no-apply-run`, because that is the restore case and the flag
+is the only thing standing between a reader and a `DROP SCHEMA`.

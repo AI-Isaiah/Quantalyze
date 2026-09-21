@@ -2769,6 +2769,14 @@ jobs:
     # `psql -v ON_ERROR_STOP=1` a failed assertion exits non-zero and
     # fails the job.
     runs-on: ubuntu-latest
+    # Job-level scope for the ordering wait's Actions API read (Phase 164.9
+    # plan 06). ⚠️ A job-level `permissions:` block REPLACES the workflow-level
+    # one rather than merging with it, so `contents: read` is RESTATED here —
+    # omitting it would silently break actions/checkout. No write scope is
+    # granted anywhere.
+    permissions:
+      contents: read
+      actions: read
     # TTL for the mutex below (Phase 158 / OPS-01): GitHub kills the job at 90m,
     # the psql session drops, and Postgres releases the advisory lock. That IS
     # the steal path — no reaper cron needed. Manual unlock:
@@ -2933,6 +2941,55 @@ jobs:
             exit 1
           fi
           echo "Preflight clean: ${#files[@]} test file(s) free of refused meta-commands."
+      # ── THE ORDERING WAIT (Phase 164.9 plan 06, [164.8-PUSH-RACE-VAC08]) ───
+      # On a merge push this job's DB work must not begin before the TEST schema
+      # apply for the SAME commit has concluded. The mutex below guarantees the
+      # two never OVERLAP; it guarantees nothing about which goes FIRST. This step
+      # checks that fact rather than racing for it.
+      #
+      # ⛔ IT SITS BEFORE THE ACQUIRE, DELIBERATELY. A job that waited while
+      # holding the shared-test-db key would starve every other contender on a
+      # database other people's CI writes to — including the very apply it is
+      # waiting for, which would wedge the two until the acquire cap expired.
+      #
+      # ⛔ NO `needs:` EDGE WAS ADDED, AND NONE MAY BE. These three jobs' `if:`
+      # conditions diverge and a skipped `needs:` job skips its dependents — the
+      # long ⛔ note on `sql-tests` records why. The ordering IS this wait.
+      #
+      # Three named outcomes, one log line each. The logic lives ONCE, in
+      # scripts/wait-for-test-schema-apply.sh, whose `--self-test` proves all
+      # three reachable (and proves a held flag beats an absent run):
+      #   apply-concluded  the apply for this commit finished — proceed. An
+      #                    UNSUCCESSFUL finish says so and still proceeds: it
+      #                    already carries its own red check, and reddening here
+      #                    would duplicate it under this job's name.
+      #   no-apply-run     no apply run appeared for this commit within the
+      #                    appearance grace AND the in-flight flag is clear —
+      #                    nothing to order against. The ordinary case.
+      #   wait-exhausted   the budget ran out with the flag still held or the
+      #                    apply still unfinished — RED, naming which, with the
+      #                    runbook.
+      #
+      # `github.event_name == 'push'` is conjoined onto this job's own gating,
+      # explicitly rather than inherited: on a pull request there is no apply to
+      # order against, so a wait there would buy nothing and cost every PR.
+      - name: Wait for the TEST schema apply to conclude (merge pushes only)
+        if: ${{ needs.changed-paths.outputs.docs_only != 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true' && github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          # The acquire step below installs psql conditionally too, so this moves
+          # that cost earlier on a merge push rather than adding one.
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Workspace-rooted: the `python` job's defaults.run.working-directory is
+          # analytics-service, where a bare relative script path does not resolve.
+          bash "${GITHUB_WORKSPACE}/scripts/wait-for-test-schema-apply.sh"
+
       # Phase 158 / OPS-01 — the shared-test-db mutex, IDENTICAL in `sql-tests`,
       # `python` and `e2e-seeded`. It replaces the GitHub concurrency group those
       # three jobs used to carry (see the ⛔ note on this job for why that layer
@@ -4098,6 +4155,14 @@ jobs:
     needs: [changed-paths]
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
+    # Job-level scope for the ordering wait's Actions API read (Phase 164.9
+    # plan 06). ⚠️ A job-level `permissions:` block REPLACES the workflow-level
+    # one rather than merging with it, so `contents: read` is RESTATED here —
+    # omitting it would silently break actions/checkout. No write scope is
+    # granted anywhere.
+    permissions:
+      contents: read
+      actions: read
     # TTL for the shared-test-db mutex (Phase 158 / OPS-01): GitHub kills the job
     # at 90m, the psql session drops, and Postgres releases the advisory lock.
     # That IS the steal path. Manual unlock:
@@ -4181,6 +4246,55 @@ jobs:
       # running service, and gating them would add a types-PyYAML dev-dep plus
       # friction for throwaway scripts. tests/ stays untyped by design.
       - run: mypy --strict --follow-imports=silent services/ routers/ models/
+      # ── THE ORDERING WAIT (Phase 164.9 plan 06, [164.8-PUSH-RACE-VAC08]) ───
+      # On a merge push this job's DB work must not begin before the TEST schema
+      # apply for the SAME commit has concluded. The mutex below guarantees the
+      # two never OVERLAP; it guarantees nothing about which goes FIRST. This step
+      # checks that fact rather than racing for it.
+      #
+      # ⛔ IT SITS BEFORE THE ACQUIRE, DELIBERATELY. A job that waited while
+      # holding the shared-test-db key would starve every other contender on a
+      # database other people's CI writes to — including the very apply it is
+      # waiting for, which would wedge the two until the acquire cap expired.
+      #
+      # ⛔ NO `needs:` EDGE WAS ADDED, AND NONE MAY BE. These three jobs' `if:`
+      # conditions diverge and a skipped `needs:` job skips its dependents — the
+      # long ⛔ note on `sql-tests` records why. The ordering IS this wait.
+      #
+      # Three named outcomes, one log line each. The logic lives ONCE, in
+      # scripts/wait-for-test-schema-apply.sh, whose `--self-test` proves all
+      # three reachable (and proves a held flag beats an absent run):
+      #   apply-concluded  the apply for this commit finished — proceed. An
+      #                    UNSUCCESSFUL finish says so and still proceeds: it
+      #                    already carries its own red check, and reddening here
+      #                    would duplicate it under this job's name.
+      #   no-apply-run     no apply run appeared for this commit within the
+      #                    appearance grace AND the in-flight flag is clear —
+      #                    nothing to order against. The ordinary case.
+      #   wait-exhausted   the budget ran out with the flag still held or the
+      #                    apply still unfinished — RED, naming which, with the
+      #                    runbook.
+      #
+      # `github.event_name == 'push'` is conjoined onto this job's own gating,
+      # explicitly rather than inherited: on a pull request there is no apply to
+      # order against, so a wait there would buy nothing and cost every PR.
+      - name: Wait for the TEST schema apply to conclude (merge pushes only)
+        if: ${{ needs.changed-paths.outputs.docs_only != 'true' && github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          # The acquire step below installs psql conditionally too, so this moves
+          # that cost earlier on a merge push rather than adding one.
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Workspace-rooted: the `python` job's defaults.run.working-directory is
+          # analytics-service, where a bare relative script path does not resolve.
+          bash "${GITHUB_WORKSPACE}/scripts/wait-for-test-schema-apply.sh"
+
       # PR #149 v0.22.25.3 follow-up: wire the test Supabase project into
       # the python job so the P97 fence regression tests in
       # tests/test_compute_jobs_fencing.py execute against a real DB. The
@@ -4862,6 +4976,14 @@ jobs:
     # also means needs: only typecheck (F2 rationale: don't burn minutes on
     # an already-doomed PR; e2e validity depends on types, not unit tests).
     runs-on: ubuntu-latest
+    # Job-level scope for the ordering wait's Actions API read (Phase 164.9
+    # plan 06). ⚠️ A job-level `permissions:` block REPLACES the workflow-level
+    # one rather than merging with it, so `contents: read` is RESTATED here —
+    # omitting it would silently break actions/checkout. No write scope is
+    # granted anywhere.
+    permissions:
+      contents: read
+      actions: read
     # TTL for the shared-test-db mutex (Phase 158 / OPS-01): GitHub kills the job
     # at 90m, the psql session drops, and Postgres releases the advisory lock.
     # That IS the steal path. Manual unlock:
@@ -4979,6 +5101,55 @@ jobs:
           else
             npx playwright install --with-deps chromium
           fi
+      # ── THE ORDERING WAIT (Phase 164.9 plan 06, [164.8-PUSH-RACE-VAC08]) ───
+      # On a merge push this job's DB work must not begin before the TEST schema
+      # apply for the SAME commit has concluded. The mutex below guarantees the
+      # two never OVERLAP; it guarantees nothing about which goes FIRST. This step
+      # checks that fact rather than racing for it.
+      #
+      # ⛔ IT SITS BEFORE THE ACQUIRE, DELIBERATELY. A job that waited while
+      # holding the shared-test-db key would starve every other contender on a
+      # database other people's CI writes to — including the very apply it is
+      # waiting for, which would wedge the two until the acquire cap expired.
+      #
+      # ⛔ NO `needs:` EDGE WAS ADDED, AND NONE MAY BE. These three jobs' `if:`
+      # conditions diverge and a skipped `needs:` job skips its dependents — the
+      # long ⛔ note on `sql-tests` records why. The ordering IS this wait.
+      #
+      # Three named outcomes, one log line each. The logic lives ONCE, in
+      # scripts/wait-for-test-schema-apply.sh, whose `--self-test` proves all
+      # three reachable (and proves a held flag beats an absent run):
+      #   apply-concluded  the apply for this commit finished — proceed. An
+      #                    UNSUCCESSFUL finish says so and still proceeds: it
+      #                    already carries its own red check, and reddening here
+      #                    would duplicate it under this job's name.
+      #   no-apply-run     no apply run appeared for this commit within the
+      #                    appearance grace AND the in-flight flag is clear —
+      #                    nothing to order against. The ordinary case.
+      #   wait-exhausted   the budget ran out with the flag still held or the
+      #                    apply still unfinished — RED, naming which, with the
+      #                    runbook.
+      #
+      # `github.event_name == 'push'` is conjoined onto this job's own gating,
+      # explicitly rather than inherited: on a pull request there is no apply to
+      # order against, so a wait there would buy nothing and cost every PR.
+      - name: Wait for the TEST schema apply to conclude (merge pushes only)
+        if: ${{ needs.changed-paths.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true' && github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          # The acquire step below installs psql conditionally too, so this moves
+          # that cost earlier on a merge push rather than adding one.
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Workspace-rooted: the `python` job's defaults.run.working-directory is
+          # analytics-service, where a bare relative script path does not resolve.
+          bash "${GITHUB_WORKSPACE}/scripts/wait-for-test-schema-apply.sh"
+
       # Phase 158 / OPS-01 — the shared-test-db mutex, byte-identical to the step
       # in `sql-tests` and `python` (see the long note on `sql-tests` for the
       # mechanism and the ⛔ constraints). Placed immediately before the seed
