@@ -6,16 +6,16 @@ current_phase: "164.9"
 current_phase_name: TESTISOLATION — a run’s assertions against the shared TEST project
 status: "Phase 164.5.4 shipped — PR #835"
 stopped_at: "Phase 164.5.4 MT5RECON-GAP COMPLETE — verification passed 15/15, security 32 threats / 0 open, two review rounds. Next per the founder’s ordering: 164.9 TESTISOLATION (needs a plan). ⚠️ phase.complete advanced this to Phase 159, which is already complete (159-VERIFICATION.md status: passed) — corrected by hand."
-last_updated: "2026-09-20T21:55:14.573Z"
+last_updated: "2026-09-21T20:07:28.929Z"
 last_activity: 2026-09-20
 last_activity_desc: Phase 164.5.4 complete; state pointed at 164.9 per the founder ordering
-state_head: 4bd415918e423bbee8eb9d1a8b09cafceb08b9eb
+state_head: b79cfcf56304c32c4a24050197e46e35032aedfe
 progress:
-  total_phases: 45
+  total_phases: 48
   completed_phases: 32
-  total_plans: 227
-  completed_plans: 220
-  percent: 27
+  total_plans: 238
+  completed_plans: 231
+  percent: 67
 ---
 
 ## ⭐ STATE lineage
@@ -956,7 +956,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███░░░░░░░] 27%
+Progress: [███████░░░] 67%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1272,6 +1272,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.1.1.1 inserted after Phase 164.1.1: LANEONLYGATES — sql-tests runs a pg-lane-only gate against shared TEST and is permanently red, blocking the analytics-service deploy (URGENT)
 - Phase 164.5.1.4 inserted after Phase 164.5.1: SYNCCURSOR - per-KEY cursor vs per-STRATEGY stores strands failed strategies' window (URGENT)
 - Phase 164.5.4 edited: added defect (3) KEY_UNDECRYPTABLE routed from 164.5.3; corrected the stale independent-of-164.5.3 clause
+- Phase 164.4.2 edited: scope: also owns the shared-TEST mutex contention (founder 2026-09-21); corrected two stale restated floors
 
 ### Decisions
 
