@@ -49,6 +49,15 @@
 # ships a red and a green case for each. The count below is re-derived on every
 # run: a list with no recorded cardinality can be emptied without a single red.
 #
+# AND SHRINK-ONLY IS ITSELF A MECHANISM, NOT THIS PARAGRAPH. Set equality alone
+# cannot see GROWTH - append a line for a new regression, bump ENTRY_COUNT to
+# match, and the comparison is SATISFIED BY THE NEW LINE. So the gate also carries
+# `ENTRY_CEILING`, a dated constant this file's cardinality may never exceed, and
+# `src/__tests__/live-db-execution-ledger.contract.test.ts` catches the other
+# direction: a ceiling left standing above a ledger that correctly shrank has
+# quietly handed back room to grow. ENTRY_CEILING moves DOWN with this file, in the
+# same commit, and UP only by the founder decision described below.
+#
 # ENTRY_COUNT = 18
 #
 # HOW AN ENTRY MAY BE ADDED - FOUNDER DECISION ONLY. The 18 below were seeded by

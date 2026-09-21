@@ -24,6 +24,24 @@
  *          commit that made it stop being true. A ledger allowed to hold stale
  *          entries is a control that has quietly stopped controlling.
  *
+ * ⛔ SHRINK-ONLY IS A MECHANISM HERE, NOT A SENTENCE HERE. Set equality alone
+ *    cannot see the ledger GROW — a new line for a new regression SATISFIES the
+ *    comparison. `ENTRY_CEILING` below is the bound that does see it, and the
+ *    contract test holds the staleness direction. This paragraph describes a
+ *    constant; it is not the constant.
+ *
+ * ⛔ AND A VERDICT IS ONLY AS GOOD AS ITS MEASUREMENT. Three separate ways this
+ *    gate could once print a false green, each now refused by name:
+ *      MODULE ERRORS   a module that fails to IMPORT contributes zero arms and
+ *                      zero failures while still counting toward `counts.files`.
+ *                      Its arms never ran and can never be ledgered.
+ *      ARM FLOOR       a file count cannot notice a module that reported itself
+ *                      and then contributed nothing; a collected-arm floor can.
+ *      STALE ARTIFACT  the artifact is written only at RUN END, so a vitest that
+ *                      dies earlier leaves the PREVIOUS run's file in place. The
+ *                      run is bound to its artifact by a nonce, and the artifact
+ *                      is unlinked before the spawn.
+ *
  * ⛔ THIS IS NOT A TOLERANCE ARM, A WRAPPER THAT SWALLOWS AN EXIT CODE, OR A
  *    SKIP. There is no `|| true` anywhere in this file and no path that exits 0
  *    on an unexpected failure. Every test in the corpus still EXECUTES — this
@@ -62,12 +80,14 @@
  * ⛔ `--ledger` exists for CALIBRATION ON A TEMP COPY. Never point it at a
  *    mutated tracked file; never leave a mutated tracked file behind.
  */
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { liveDbLaneCorpus } from "./live-db-lane-corpus.mjs";
+import { CORPUS_FLOOR, liveDbLaneCorpus } from "./live-db-lane-corpus.mjs";
+import { RUN_ID_ENV } from "./live-db-execution-reporter.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_LEDGER = join(REPO_ROOT, "scripts", "live-db-execution-ledger.txt");
@@ -75,6 +95,43 @@ const DEFAULT_ARTIFACT = join(REPO_ROOT, ".live-db-lane-execution.json");
 
 /** Every entry routes to the same destination — one campaign, one owner. */
 export const DESTINATION = "[164.9-LIVEDB-LANE-EXECUTION-CENSUS]";
+
+/**
+ * ⛔ THE SHRINK-ONLY RULE, AS A MECHANISM RATHER THAN A SENTENCE.
+ *
+ * DATED 2026-09-21: 18 entries, the seeded set. Before this constant existed,
+ * "shrink-only" lived ONLY in this file's header and in a printed remedy string,
+ * while `evaluate` compared the failing set against the ledger for SET EQUALITY
+ * and nothing else. So the ledger could GROW and the gate would applaud: append
+ * a TAB line for a brand-new regression, bump `# ENTRY_COUNT` to match, and the
+ * run prints "OK — the failing set is EXACTLY the ledger (19)" and exits 0. That
+ * is the "prose beside a constant" class `CLAUDE.md` records four times over,
+ * and this repo's own mechanical precedent is `WAIVED_CEILING`, which is
+ * ENFORCED rather than described.
+ *
+ * ⛔ IT ONLY FALLS. Raising it is not a fix and is not available to an agent: an
+ * entry is added only by the founder decision the ledger header states, and that
+ * decision moves this number in the same commit. The stale-HIGH direction — a
+ * ledger that correctly shrank while this ceiling stayed put, quietly re-opening
+ * room to grow back — is caught one layer up by
+ * `src/__tests__/live-db-execution-ledger.contract.test.ts`. Two layers, the
+ * repo's floor idiom inverted: the gate holds the upper bound, the vitest
+ * ratchet holds the staleness.
+ */
+export const ENTRY_CEILING = 18;
+
+/**
+ * THE ARM-COUNT FLOOR. `counts.files` alone cannot detect a module that reported
+ * itself and then contributed nothing — the collection-failure hole this gate's
+ * `MODULE ERRORS` arm closes from the other side. A collected-arm floor bounds
+ * the same hazard by volume.
+ *
+ * PINNED from the run the ledger is a picture of (2026-09-21, head cdb5a989):
+ * 477 collected across 49 files — 396 executed, 81 skipped by the corpus's own
+ * pre-existing conditional gates. Set a few under, the repo's ratchet
+ * convention. ⛔ Never lowered to make a run pass.
+ */
+export const ARM_FLOOR = 460;
 
 /* ───────────────────────────── signature classes ──────────────────────────
  * MEASURED. Derived from the failure the run actually produced. Rules are
@@ -232,9 +289,21 @@ function formatEntry(entry) {
   return [entry.file, entry.kind, entry.signature, entry.fullName].join("\t") + `\t# ${DESTINATION}`;
 }
 
-/** The comparison key: the WHOLE record. See the header. */
+/**
+ * The comparison key: the WHOLE record. See the header.
+ *
+ * ⛔ TAB — the SAME separator `formatEntry` writes, so the key and the line are
+ * one spelling rather than two. It replaced a LITERAL NUL BYTE (2026-09-21),
+ * which was worse than a second spelling: a NUL in a tracked source file makes
+ * `grep` classify the whole file as binary and report NOTHING while exiting 1,
+ * so every plain `grep` over this gate's own source — a reviewer's, a linter's,
+ * a future census's — silently saw an empty file and read that as clean. This
+ * repository already carries one MEASURED instance of that hazard
+ * (`src/lib/wizardErrors.test.ts`, where the NUL is deliberate); this one was
+ * not deliberate and bought nothing a TAB does not.
+ */
 function keyOf(entry) {
-  return [entry.file, entry.kind, entry.signature, entry.fullName].join(" ");
+  return [entry.file, entry.kind, entry.signature, entry.fullName].join("\t");
 }
 
 /** A human-readable rendering of a record, one per line. */
@@ -268,16 +337,45 @@ export function measuredRecords(artifact) {
  *
  * @param {any} artifact
  * @param {{entries: any[], declaredCount: number | null}} ledger
- * @param {{corpusSize: number}} context
+ * @param {{corpusSize: number, corpusFloor: number, armFloor: number, entryCeiling: number, expectedRunId: string | null}} context
  * @returns {{ok: boolean, problems: string[], notes: string[], measured: any[]}}
  */
 export function evaluate(artifact, ledger, context) {
   const problems = [];
   const notes = [];
 
+  // ⛔ EVERY LIMIT IS REQUIRED, and a missing one is a HARD FAILURE rather than a
+  // default. A gate whose ceiling silently becomes `undefined` compares nothing
+  // and passes everything — the precise shape of the defect the ceiling exists
+  // to close. `expectedRunId` is separately allowed to be null (calibration on a
+  // hand-supplied artifact) and so is checked explicitly for presence of the key.
+  for (const limit of ["corpusSize", "corpusFloor", "armFloor", "entryCeiling"]) {
+    if (!Number.isFinite(Number(context && context[limit]))) {
+      problems.push(`GATE MISCONFIGURED: context.${limit} is not a number. Refusing to adjudicate without it.`);
+    }
+  }
+  if (!context || !("expectedRunId" in context)) {
+    problems.push("GATE MISCONFIGURED: context.expectedRunId is absent (pass null to waive the freshness check).");
+  }
+  if (problems.length > 0) return { ok: false, problems, notes, measured: [] };
+
   // ── anti-vacuity guards. A run that could not have failed must never pass. ──
   if (!artifact || typeof artifact !== "object") {
     return { ok: false, problems: ["NO ARTIFACT: the lane produced no execution artifact."], notes, measured: [] };
+  }
+
+  // ── FRESHNESS. `existsSync` is not freshness; see RUN_ID_ENV in the reporter.
+  //    The artifact is written ONLY at run end, so a run that died before that
+  //    leaves the PREVIOUS run's file in place and its verdict would be re-issued
+  //    as this run's. The nonce is the binding between THIS spawn and THIS file. ──
+  if (context.expectedRunId !== null) {
+    if (String(artifact.runId || "") !== String(context.expectedRunId)) {
+      problems.push(
+        "STALE ARTIFACT: the execution artifact does not carry this run's nonce, so it was written by a " +
+          "DIFFERENT run — most likely a vitest that died before run end (a config that fails to load exits 1 " +
+          "with no artifact written). No verdict about this run's failing set is supportable from it.",
+      );
+    }
   }
   const counts = artifact.counts || {};
   const executed = Number(counts.passed || 0) + Number(counts.failed || 0);
@@ -293,6 +391,38 @@ export function evaluate(artifact, ledger, context) {
   }
   if (executed === 0) {
     problems.push("VACUOUS RUN: zero tests EXECUTED. A ledger can only classify a failure that ran.");
+  }
+  // ⛔ A COLLECTED-ARM FLOOR, not just a file count. `counts.files` cannot detect
+  // a module that reported itself and then contributed NOTHING — which is exactly
+  // what a module that fails to import does. Volume is the second bound.
+  if (Number(counts.total || 0) < Number(context.armFloor)) {
+    problems.push(
+      `ARM FLOOR: the run collected ${counts.total || 0} arm(s), below the pinned floor of ` +
+        `${context.armFloor}. A corpus that reports its full file count while collecting far fewer arms is a ` +
+        "run that lost whole modules. ⛔ This is a MEASURE_FAIL; never lowered to make a run pass.",
+    );
+  }
+  // ⛔ MODULES THAT NEVER COLLECTED. Their arms never ran, so they can never be
+  // ledgered, and no verdict about the failing set is supportable while any
+  // exists. MEASURED: such a module contributes zero arms and zero failures while
+  // still counting toward `counts.files`, so every other guard here is satisfied
+  // by it and the gate would print "no arm outside the ledger failed" — false.
+  const moduleErrors = Number(counts.moduleErrors || (artifact.moduleFailures || []).length || 0);
+  if (moduleErrors > 0) {
+    const named = (artifact.moduleFailures || []).map((m) => `    ${m.file} (state=${m.state}, collected ${m.collectedTests} arm(s))`);
+    problems.push(
+      `MODULE ERRORS: ${moduleErrors} module(s) failed OUTSIDE any arm — a collection or import failure.\n` +
+        named.join("\n") +
+        "\n    ⛔ Their arms NEVER RAN and can never be ledgered. No verdict about the failing set is\n" +
+        "       supportable until every module collects. Fix the module; this is not a ledger question.",
+    );
+  }
+  if (Number(context.corpusSize) < Number(context.corpusFloor)) {
+    problems.push(
+      `CORPUS COLLAPSED: the derived corpus is ${context.corpusSize} file(s), below the pinned floor of ` +
+        `${context.corpusFloor}. The run and the expectation come from the SAME derivation, so a narrowing is ` +
+        "invisible to the comparison below — the floor is the only control. See CORPUS_FLOOR.",
+    );
   }
   if (Number(counts.files || 0) !== context.corpusSize) {
     problems.push(
@@ -317,6 +447,20 @@ export function evaluate(artifact, ledger, context) {
     problems.push(
       `LEDGER COUNT DRIFT: the header declares ENTRY_COUNT = ${ledger.declaredCount} but the file holds ` +
         `${ledger.entries.length} entr(y/ies).`,
+    );
+  }
+
+  // ── ⛔ THE SHRINK-ONLY RULE, ENFORCED. Without this the ledger could GROW and
+  //    the gate would applaud: append a line for a new regression, bump the
+  //    count to match, and the run prints "the failing set is EXACTLY the
+  //    ledger" and exits 0. The set comparison below cannot catch that — it is
+  //    satisfied BY the new line. Only a ceiling can. ──
+  if (ledger.entries.length > Number(context.entryCeiling)) {
+    problems.push(
+      `LEDGER GREW: ${ledger.entries.length} entr(y/ies) against a ceiling of ${context.entryCeiling}. ` +
+        "⛔ This ledger is SHRINK-ONLY. A new failing arm is FIXED, not ledgered; an entry is added only by " +
+        "the founder decision the ledger header states, and that decision moves ENTRY_CEILING in the same " +
+        "commit. Raising the ceiling to clear this message is the defect, not the fix.",
     );
   }
 
@@ -370,12 +514,16 @@ function readArtifact(path) {
   }
 }
 
-function runLane() {
+function runLane(artifactPath, runId) {
+  // ⛔ UNLINK FIRST. The artifact is written only at run end, so a vitest that
+  // dies earlier leaves the previous run's file exactly where this gate looks.
+  // Removing it makes "no artifact" — already FATAL below — the honest outcome.
+  rmSync(artifactPath, { force: true });
   console.log("[live-db-ledger] running the lane VERBATIM: npm run test:live-db");
   const result = spawnSync("npm", ["run", "test:live-db"], {
     cwd: REPO_ROOT,
     stdio: "inherit",
-    env: process.env,
+    env: { ...process.env, [RUN_ID_ENV]: runId },
   });
   if (result.error) {
     console.error(`[live-db-ledger] FATAL: could not run the lane: ${result.error.message}`);
@@ -402,12 +550,27 @@ function main(argv) {
 
   if (args.includes("--self-test")) return selfTest();
 
+  // ⛔ A FLAG WITH NO OPERAND IS A REFUSAL, never a fallback. `--artifact` with
+  // nothing after it used to read as "no --artifact" and quietly RAN THE WHOLE
+  // LANE — a typo turning a read-only check into a stack-booting run.
+  for (const name of ["--artifact", "--ledger"]) {
+    if (args.includes(name) && !flag(name)) {
+      console.error(`[live-db-ledger] FATAL: ${name} requires a file argument.`);
+      return 1;
+    }
+  }
+
   const ledgerPath = resolve(REPO_ROOT, flag("--ledger") || DEFAULT_LEDGER);
   const artifactFlag = flag("--artifact");
   const artifactPath = resolve(REPO_ROOT, artifactFlag || DEFAULT_ARTIFACT);
 
+  // Bound to THIS spawn; the reporter writes it into the artifact and `evaluate`
+  // refuses one that comes back carrying anything else. Waived (null) when the
+  // caller supplied an artifact by hand, which is the calibration path.
+  let expectedRunId = null;
   if (!artifactFlag) {
-    const status = runLane();
+    expectedRunId = randomUUID();
+    const status = runLane(artifactPath, expectedRunId);
     if (status === null) return 1;
   }
 
@@ -442,7 +605,13 @@ function main(argv) {
   }
   const ledger = parseLedger(readFileSync(ledgerPath, "utf8"));
   const corpusSize = liveDbLaneCorpus().length;
-  const verdict = evaluate(artifact, ledger, { corpusSize });
+  const verdict = evaluate(artifact, ledger, {
+    corpusSize,
+    corpusFloor: CORPUS_FLOOR,
+    armFloor: ARM_FLOOR,
+    entryCeiling: ENTRY_CEILING,
+    expectedRunId,
+  });
 
   for (const note of verdict.notes) console.log(`[live-db-ledger] ${note}`);
   console.log(
@@ -451,7 +620,7 @@ function main(argv) {
 
   if (verdict.ok) {
     console.log(
-      `[live-db-ledger] OK — the failing set is EXACTLY the ledger (${ledger.entries.length}). ` +
+      `[live-db-ledger] OK — the failing set is EXACTLY the ledger (${ledger.entries.length}/${ENTRY_CEILING}). ` +
         "Every corpus file executed; no arm outside the ledger failed; no ledger entry has gone stale.",
     );
     return 0;
@@ -468,11 +637,20 @@ function main(argv) {
  */
 function artifactOf(failures, overrides = {}) {
   return {
-    schema: 1,
+    schema: 2,
+    runId: "",
     reason: failures.length ? "failed" : "passed",
     unhandledErrorCount: 0,
-    counts: { files: 2, total: 10, passed: 10 - failures.length, failed: failures.length, skipped: 0 },
+    counts: {
+      files: 2,
+      total: 10,
+      passed: 10 - failures.length,
+      failed: failures.length,
+      skipped: 0,
+      moduleErrors: 0,
+    },
     modules: ["a.test.ts", "b.test.ts"],
+    moduleFailures: [],
     failures,
     ...overrides,
   };
@@ -495,7 +673,10 @@ function ledgerOf(records) {
 
 function selfTest() {
   const cases = [];
-  const ctx = { corpusSize: 2 };
+  // The fixture corpus is two files and ten arms, so the fixture limits are
+  // scaled to it. The SHIPPED limits are `CORPUS_FLOOR`, `ARM_FLOOR` and
+  // `ENTRY_CEILING`; the contract test re-derives those against the real tree.
+  const ctx = { corpusSize: 2, corpusFloor: 2, armFloor: 10, entryCeiling: 3, expectedRunId: null };
   const base = measuredRecords(artifactOf([FIXTURE_FAILURE]));
 
   cases.push([
@@ -571,6 +752,103 @@ function selfTest() {
     })(),
   ]);
 
+  // ── ⛔ THE SHRINK-ONLY RULE HAS A RED CASE. Before ENTRY_CEILING existed this
+  //    artifact/ledger pair was GREEN: the set comparison is satisfied by the
+  //    added line, so growth was invisible to every arm above. ──
+  cases.push([
+    "RED (GREW): a ledger one entry over the ceiling, with the failing set matching it exactly",
+    (() => {
+      const grown = [];
+      for (let i = 0; i <= ctx.entryCeiling; i += 1) {
+        grown.push({ ...FIXTURE_FAILURE, fullName: `suite > grown arm ${i}` });
+      }
+      const records = measuredRecords(artifactOf(grown));
+      const v = evaluate(artifactOf(grown), parseLedger(ledgerOf(records)), ctx);
+      return v.ok === false && v.problems.some((p) => p.startsWith("LEDGER GREW:"));
+    })(),
+  ]);
+
+  cases.push([
+    "GREEN: a ledger exactly AT the ceiling is not growth",
+    (() => {
+      const atCeiling = [];
+      for (let i = 0; i < ctx.entryCeiling; i += 1) {
+        atCeiling.push({ ...FIXTURE_FAILURE, fullName: `suite > arm ${i}` });
+      }
+      const records = measuredRecords(artifactOf(atCeiling));
+      return evaluate(artifactOf(atCeiling), parseLedger(ledgerOf(records)), ctx).ok === true;
+    })(),
+  ]);
+
+  cases.push([
+    "RED (MODULE ERRORS): a module that failed to collect, with every other guard satisfied",
+    (() => {
+      // The measured shape: the module is counted in `files`, contributes no arm
+      // and no failure, and the collection error is module-attached rather than
+      // unhandled. Every pre-existing guard passes on this artifact.
+      const blind = artifactOf([], {
+        reason: "failed",
+        unhandledErrorCount: 0,
+        counts: { files: 2, total: 10, passed: 10, failed: 0, skipped: 0, moduleErrors: 1 },
+        moduleFailures: [{ file: "b.test.ts", state: "failed", collectedTests: 0, errors: [{ name: "Error", message: "boom" }] }],
+      });
+      const v = evaluate(blind, parseLedger(ledgerOf([])), ctx);
+      return v.ok === false && v.problems.some((p) => p.startsWith("MODULE ERRORS:"));
+    })(),
+  ]);
+
+  cases.push([
+    "RED (ARM FLOOR): the run collected fewer arms than the pinned floor",
+    (() => {
+      const thin = artifactOf([FIXTURE_FAILURE], {
+        counts: { files: 2, total: 3, passed: 2, failed: 1, skipped: 0, moduleErrors: 0 },
+      });
+      const v = evaluate(thin, parseLedger(ledgerOf(base)), ctx);
+      return v.ok === false && v.problems.some((p) => p.startsWith("ARM FLOOR:"));
+    })(),
+  ]);
+
+  cases.push([
+    "RED (CORPUS COLLAPSED): the shared derivation itself narrowed, so the mismatch arm cannot see it",
+    (() => {
+      // Both sides move together — `files` AND `corpusSize` are 1 — so CORPUS
+      // MISMATCH is satisfied. Only the floor catches this.
+      const narrowed = artifactOf([FIXTURE_FAILURE], {
+        counts: { files: 1, total: 10, passed: 9, failed: 1, skipped: 0, moduleErrors: 0 },
+      });
+      const v = evaluate(narrowed, parseLedger(ledgerOf(base)), { ...ctx, corpusSize: 1 });
+      return v.ok === false && v.problems.some((p) => p.startsWith("CORPUS COLLAPSED:"));
+    })(),
+  ]);
+
+  cases.push([
+    "RED (STALE ARTIFACT): the artifact does not carry this run's nonce",
+    (() => {
+      const v = evaluate(artifactOf([FIXTURE_FAILURE], { runId: "an-earlier-run" }), parseLedger(ledgerOf(base)), {
+        ...ctx,
+        expectedRunId: "this-run",
+      });
+      return v.ok === false && v.problems.some((p) => p.startsWith("STALE ARTIFACT:"));
+    })(),
+  ]);
+
+  cases.push([
+    "GREEN: the artifact carries this run's nonce",
+    evaluate(artifactOf([FIXTURE_FAILURE], { runId: "this-run" }), parseLedger(ledgerOf(base)), {
+      ...ctx,
+      expectedRunId: "this-run",
+    }).ok === true,
+  ]);
+
+  cases.push([
+    "RED (GATE MISCONFIGURED): a limit that went missing adjudicates nothing",
+    (() => {
+      const { entryCeiling: _dropped, ...withoutCeiling } = ctx;
+      const v = evaluate(artifactOf([FIXTURE_FAILURE]), parseLedger(ledgerOf(base)), withoutCeiling);
+      return v.ok === false && v.problems.some((p) => p.startsWith("GATE MISCONFIGURED:"));
+    })(),
+  ]);
+
   cases.push([
     "classifier: the wizard body role gate routes to K2, not to the privilege residue",
     routeKind({
@@ -603,4 +881,44 @@ function selfTest() {
   return 0;
 }
 
-process.exit(main(process.argv));
+/* ─────────────────────────────── entry point ──────────────────────────────
+ * ⛔ THIS FILE USED TO END `process.exit(main(process.argv));` AT MODULE SCOPE,
+ * and that is not a style question. MEASURED twice during review: a plain
+ * `import` of this module SPAWNED `npm run test:live-db` and then KILLED the
+ * importing process, so all six of its exports were unusable by construction —
+ * including by the contract test that is supposed to check them.
+ *
+ * The idiom is copied from `scripts/lint-migration-data-dependence.mjs`, its
+ * sibling from the same plan, and the THREE-way shape is deliberate: a module
+ * invoked as a program that cannot recognise itself would otherwise fall off the
+ * end and EXIT 0 having done nothing, and a step asserting only an exit code is
+ * satisfied by that. `realpathSync` on both sides closes the macOS
+ * /var -> /private/var spelling; exit 2 keeps a harness fault distinct from the
+ * gate's own exit 1.
+ */
+const samePath = (a, b) => {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+};
+const ENTRY = process.argv[1];
+if (ENTRY !== undefined) {
+  const selfPath = fileURLToPath(import.meta.url);
+  if (resolve(ENTRY) === resolve(selfPath) || samePath(ENTRY, selfPath)) {
+    process.exitCode = main(process.argv);
+  } else if (basename(resolve(ENTRY)) === basename(selfPath)) {
+    process.stderr.write(
+      [
+        "live-db-execution-ledger: REFUSING TO EXIT SILENTLY. This module was invoked as a program " +
+          `("${basename(selfPath)}" is the entry point's own basename) but the entry point does not resolve to ` +
+          "this file, so the CLI never ran and NOTHING was adjudicated.",
+        `  entry (process.argv[1]): ${ENTRY}`,
+        `  this module:             ${selfPath}`,
+        "  Exit 0 here would be a gate reporting a clean ledger it never opened.",
+      ].join("\n") + "\n",
+    );
+    process.exit(2);
+  }
+}

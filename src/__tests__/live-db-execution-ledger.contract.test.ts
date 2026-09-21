@@ -26,16 +26,34 @@
  *      and never a failure message, a host, a DSN, an absolute path or a
  *      username. This is the assertion that keeps that true.
  *
- * ⚠️ It deliberately does NOT pin the per-kind tally (9 / 6 / 3). That is a
- * MEASUREMENT of the current tree, it is expected to shrink, and restating it
- * here would make a correct shrink red — the exact "prose beside a constant"
- * defect `CLAUDE.md` records four times over.
+ * ⚠️ It deliberately does NOT pin the per-kind tally (9 / 6 / 3), nor an exact
+ * total. That is a MEASUREMENT of the current tree, it is expected to shrink,
+ * and restating it here would make a correct shrink red — the exact "prose
+ * beside a constant" defect `CLAUDE.md` records four times over.
+ *
+ * ⭐ A CEILING IS NOT A PIN, AND THE REASONING ABOVE DOES NOT RULE ONE OUT. The
+ * argument against a pin is that the ledger may legitimately get SMALLER; a
+ * ceiling is silent about every value below it and only speaks when the ledger
+ * GROWS, which is the one direction the ledger is forbidden to move. So
+ * `ENTRY_CEILING` lives in the gate (the upper bound) and its STALENESS is
+ * checked here (arm 5 below): a ledger that correctly shrank while the ceiling
+ * stayed put has quietly re-opened room to grow back, and that is the one thing
+ * a bound-only-from-above control cannot notice about itself. Two layers, the
+ * repo's `FILES_FLOOR` / `mutation-runner-floors.test.ts` idiom inverted.
+ *
+ * ⚠️ `ARM_FLOOR` gets no staleness arm here on purpose: re-deriving the collected
+ * arm count needs a BOOTED STACK and a real run, which this file has by
+ * construction not got. It is bounded from below in the gate and re-pinned
+ * whenever the lane is re-measured.
  */
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
+
+import { ENTRY_CEILING } from "../../scripts/live-db-execution-ledger.mjs";
+import { CORPUS_FLOOR, liveDbLaneCorpus } from "../../scripts/live-db-lane-corpus.mjs";
 
 const REPO_ROOT = join(__dirname, "..", "..");
 const LEDGER = join(REPO_ROOT, "scripts", "live-db-execution-ledger.txt");
@@ -95,6 +113,48 @@ describe("live-DB execution ledger — contract", () => {
       expect(arm.trim().length).toBeGreaterThan(0);
       expect(destination).toBe(`# ${DESTINATION}`);
     }
+  });
+
+  it("⛔ the ledger is at or under ENTRY_CEILING, and the ceiling is not STALE", () => {
+    const entries = readEntries().length;
+    // Lower bound on the ceiling: the shrink-only rule, checked here too so a
+    // developer without Docker sees it. The gate enforces the same thing against
+    // a RUN; this arm enforces it against the FILE.
+    expect(
+      entries,
+      `the ledger carries ${entries} entr(y/ies) against ENTRY_CEILING = ${ENTRY_CEILING}. ` +
+        "⛔ This ledger is SHRINK-ONLY: a new failing arm is FIXED, not ledgered.",
+    ).toBeLessThanOrEqual(ENTRY_CEILING);
+    // ⛔ RATCHET STALE — the direction the gate cannot see. A ceiling left above
+    // a ledger that correctly shrank has silently handed back room to grow.
+    expect(
+      ENTRY_CEILING,
+      `RATCHET STALE: the ledger is down to ${entries} entr(y/ies) but ENTRY_CEILING is still ` +
+        `${ENTRY_CEILING}, which re-opens ${ENTRY_CEILING - entries} slot(s) the ledger already gave up. ` +
+        "Lower ENTRY_CEILING in scripts/live-db-execution-ledger.mjs to match, in the commit that shrank it.",
+    ).toBe(entries);
+  });
+
+  it("⛔ the derived corpus is at or above CORPUS_FLOOR, and the floor is not STALE", () => {
+    const corpusSize = liveDbLaneCorpus().length;
+    // The lane's `include` and the gate's `corpusSize` come from this ONE
+    // derivation, so dropping a file's gate-symbol reference narrows BOTH sides
+    // at once and the gate's CORPUS MISMATCH arm compares the narrowed run to the
+    // narrowed expectation and finds them equal. How far the floor sits below the
+    // measured corpus IS the size of that blind spot.
+    expect(
+      corpusSize,
+      `the derived live-DB corpus collapsed to ${corpusSize}, under CORPUS_FLOOR = ${CORPUS_FLOOR}`,
+    ).toBeGreaterThanOrEqual(CORPUS_FLOOR);
+    // ⛔ RATCHET STALE. The floor must track the corpus within the slack band, or
+    // the headroom the floor is supposed to bound quietly grows back.
+    const RATCHET_SLACK = 3;
+    expect(
+      corpusSize - CORPUS_FLOOR,
+      `RATCHET STALE: the corpus is ${corpusSize} files but CORPUS_FLOOR is ${CORPUS_FLOOR}, leaving ` +
+        `${corpusSize - CORPUS_FLOOR} files of silent narrowing headroom (max ${RATCHET_SLACK}). ` +
+        "Raise CORPUS_FLOOR in scripts/live-db-lane-corpus.mjs.",
+    ).toBeLessThanOrEqual(RATCHET_SLACK);
   });
 
   it("⛔ no entry carries a specimen — this repository is PUBLIC and this file is TRACKED", () => {
