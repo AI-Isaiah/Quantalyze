@@ -3041,3 +3041,64 @@ describe("[164.6.5-03] D-09: the -10005 remedy names both causes and asserts nei
     expect(preD09.includes("account-switch")).toBe(false);
   });
 });
+
+describe("[164.6.5-03] D-10: the mt5 arm's declared environment and the workflow's supplied environment agree", () => {
+  /**
+   * The `Probe production` step — the ONLY step that actually RUNS the arm
+   * (the credential-assert step above is a pre-flight, not the run). Sliced
+   * from its own `- name:` anchor to its `run: |`, exactly like
+   * `credentialStepText` above.
+   */
+  function probeStepEnvText(text: string): string {
+    return sliceBetweenAnchors(text, "- name: Probe production", "\n        run: |");
+  }
+
+  /**
+   * Every RAILWAY_-prefixed env NAME the workflow supplies to that step.
+   *
+   * ⛔ NAMES ONLY — this reads the KEY on the left of each `KEY: value` line
+   * and never the value on the right, so no secret and no scope claim ever
+   * reaches this test. mt5 is the only arm in this workflow that consumes a
+   * RAILWAY_-prefixed var (the others use ANALYTICS_ / SUPABASE_ vars), so
+   * scoping by that prefix reads exactly mt5's slice of a step that aggregates the
+   * env for all four arms — without typing a list of names that could drift
+   * from either real source.
+   */
+  function suppliedMt5EnvNames(text: string): string[] {
+    const block = probeStepEnvText(text);
+    const names = Array.from(block.matchAll(/^\s+([A-Z0-9_]+):/gm)).map((m) => m[1]);
+    return [...new Set(names.filter((n) => n.startsWith("RAILWAY_")))].sort();
+  }
+
+  it("ARM.requiredEnv and the Probe production step's supplied RAILWAY_ names are the SAME SET", () => {
+    const declared = [...MT5_ARM.requiredEnv].sort();
+    const supplied = suppliedMt5EnvNames(WORKFLOW_TEXT);
+    const missing = declared.filter((n) => !supplied.includes(n));
+    const extra = supplied.filter((n) => !declared.includes(n));
+    expect(
+      missing.length === 0 && extra.length === 0,
+      `the mt5 arm's requiredEnv and the workflow's supplied names disagree — missing from the workflow: [${missing.join(", ")}], supplied but not declared by the arm: [${extra.join(", ")}]. A dropped or renamed name here does not fail loudly at run time: it makes the arm credential-blocked, or makes every hourly run report mt5-ssh-transport — a transport verdict that measured NOTHING about the terminal — which is exactly the state D-10 found and exactly the state that let the unproven MT5-WEDGE-OBS-01 classification be treated as proven. declared=[${declared.join(", ")}] supplied=[${supplied.join(", ")}]`,
+    ).toBe(true);
+  });
+
+  it("CALIBRATION: the same predicate reports the removed member BY NAME", () => {
+    // ⛔ THE SAME LINE ALSO APPEARS in the credential-assert pre-flight step
+    // above `Probe production`, so a plain `WORKFLOW_TEXT.replace(...)` would
+    // silently remove the WRONG occurrence (the pre-flight's, not the run
+    // step's) and this calibration would prove nothing. Scoped to the probe
+    // step's OWN slice, exactly like `probeStepEnvText` reads it, so the
+    // mutation lands on the occurrence that actually feeds the arm.
+    const start = anchorIndex(WORKFLOW_TEXT, "- name: Probe production");
+    const end = anchorIndex(WORKFLOW_TEXT, "\n        run: |", start);
+    const block = WORKFLOW_TEXT.slice(start, end);
+    const mutatedBlock = block.replace('          RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}\n', "");
+    expect(mutatedBlock, "the removal must actually change the probe step's own slice").not.toBe(block);
+    const mutated = WORKFLOW_TEXT.slice(0, start) + mutatedBlock + WORKFLOW_TEXT.slice(end);
+    expect(mutated, "the removal must actually change the full text").not.toBe(WORKFLOW_TEXT);
+    const declared = [...MT5_ARM.requiredEnv].sort();
+    const supplied = suppliedMt5EnvNames(mutated);
+    expect(supplied).not.toContain("RAILWAY_ENVIRONMENT");
+    const missing = declared.filter((n) => !supplied.includes(n));
+    expect(missing, "the removed member is named in the diff").toEqual(["RAILWAY_ENVIRONMENT"]);
+  });
+});
