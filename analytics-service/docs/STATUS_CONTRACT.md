@@ -145,8 +145,9 @@ anything above them in either router does.)
 on `main` and 12 at the 167 head — not six. Re-derive by grep; never trust a count here.
 
 **A second raise in the MT5 transient-client-error arm (167-CREDTRUST plan 01, S-27), cited
-BY SYMBOL rather than by line number** — it SPLITS that existing arm (the `:409` entry
-above) rather than adding a new failure: `routers/exchange.py`'s
+BY SYMBOL rather than by line number** — it SPLITS that existing arm (the MT5
+transient-client-error entry in the stale enumeration above) rather than adding a new
+failure: `routers/exchange.py`'s
 `_validate_mt5_key_probe()`, the narrowed transient tail of its
 `except Mt5ClientError` arm — code `SIGN_IN_FAILED`, `recoverable=False`. Reached from
 the SAME `POST /api/validate-key` path AND from `/internal/keys/{id}/rotate-secret`
@@ -425,10 +426,12 @@ reviewer diffs their assumptions against.
 
 **Tally:** 27 rows = **24 explicit editable sites** (S-01…S-20 plus S-25/S-26
 `HTTPException` raises, plus S-23 the `JSONResponse` literal, plus S-27 the
-`VenueTransientHTTPException` `SIGN_IN_FAILED` raise added by Phase 167) + 2 implicit
+`VenueTransientHTTPException` `SIGN_IN_FAILED` raise Phase 167 split out of the existing
+MT5 transient-client-error arm — a new raise, not a new failure) + 2 implicit
 unhandled-500s (S-21, S-22, no edit possible or needed) + 1 deliberately unchanged
-(S-24). The `23` is the number that an `HTTPException` grep sweep under-counts by
-one, because S-23 is not an `HTTPException`.
+(S-24). A `raise HTTPException` grep sweep over these rows finds **22** of the 24, not
+24: it misses S-23, which is not an `HTTPException` at all, and S-27, whose raise is
+spelled `raise VenueTransientHTTPException`.
 
 **S-25 and S-26 were added by Phase 164.5.1**, and both are the same shape: a
 Supabase read that has already exhausted `db_read_with_retry`'s gateway-timeout
