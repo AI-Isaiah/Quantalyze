@@ -9,7 +9,7 @@ from typing import Any, Final
 import ccxt
 from fastapi import APIRouter, HTTPException, Request
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
-from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL, PERMANENT_VALIDATION_ERROR_CODES
+from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL, SIGN_IN_FAILED_DETAIL, PERMANENT_VALIDATION_ERROR_CODES
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
 from services.sfox_client import SfoxApiError, SFOX_PROD_BASE_URL
 from services.sfox_factory import make_sfox_client
@@ -749,19 +749,39 @@ async def _validate_mt5_key_probe(
             if kind == "wrong_server":
                 trace.outcome = "wrong_server"
                 raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
-            # transient -> fail CLOSED with the shared NETWORK detail (sfox F4
-            # posture: never auth-failed, never valid). WARNING with the scrubbed
-            # code only.
+            # transient -> a LOGIN WAS ATTEMPTED AND DID NOT SUCCEED (167-CREDTRUST
+            # / D-05, D-07). This is the ONE arm this phase narrows, out of all nine
+            # `NETWORK_UNAVAILABLE` sites in this file: it is the arm where a
+            # sign-in was actually tried, which is the claim the copy makes — the
+            # other eight (stage timeout, the abandoned-session fence, the
+            # account-mismatch bracket, and the sFOX/ccxt/portfolio arms) are
+            # transport, lease or concurrency faults where no sign-in is
+            # implicated, and telling their user their credentials may have
+            # changed would be the same false blame this phase removes. Their
+            # `code=` stays byte-unchanged.
+            #
+            # WARNING with the scrubbed code only.
             logger.warning(
                 "validate_key: MT5 transient upstream failure (code=%s)", e.code
             )
             trace.outcome = "transient"
             # PYAPIFIX2-01 (C5) — see the C1 block for the shape rationale.
+            # ⚠️ `recoverable=False` DIVERGES from the sibling MT5 arms' hardcoded
+            # `recoverable=True` above — deliberately. 167-PATTERNS Pattern
+            # Assignment 5 names the hazard that the wire `recoverable` flag and
+            # the TypeScript-derived Retry (`buildEnvelope`, src/lib/envelope.ts)
+            # can disagree invisibly; here they are made to AGREE: a retry re-runs
+            # the identical validate against a terminal a wrong password may have
+            # wedged behind a modal login dialog (the -10004/-10005 class), and
+            # repeated validate attempts against that one shared terminal are the
+            # operation implicated in wedging and account eviction (164.6.5 /
+            # 164.6.6) — so offering one would be the harmful action, not merely
+            # a useless one (D-08).
             raise VenueTransientHTTPException(
                 status_code=424,
-                code="NETWORK_UNAVAILABLE",
-                detail=NETWORK_ERROR_DETAIL,
-                recoverable=True,
+                code="SIGN_IN_FAILED",
+                detail=SIGN_IN_FAILED_DETAIL,
+                recoverable=False,
             )
 
     # ⭐ D-29 — TAKE THE LEASE. Until this line `routers/exchange.py` acquired the

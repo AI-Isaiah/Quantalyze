@@ -452,6 +452,50 @@ export type WizardErrorCode =
   // `KEY_VENUE_ALREADY_CONNECTED` and `ALLOCATION_NOT_ALLOCATABLE` use. The
   // emitter is `retryable=False` and agrees.
   | "KEY_MUST_BE_RECONNECTED"
+  // 167-CREDTRUST / D-05, D-07 — THE ONLY OBSERVATION THIS ARM CAN HONESTLY
+  // MAKE IS THAT A SIGN-IN DID NOT SUCCEED, NOT WHY.
+  //
+  // WHERE IT COMES FROM. `analytics-service`'s `_validate_mt5_key_probe`
+  // (`routers/exchange.py`, reached from BOTH `POST /api/validate-key` and
+  // `rotate_key_secret`'s `_validate_mt5_key` call) raises wire
+  // `SIGN_IN_FAILED` — 424, `recoverable=False`, `SIGN_IN_FAILED_DETAIL` —
+  // from the ONE arm where `classify_mt5_login_error` classified a caught
+  // `Mt5ClientError` `transient`: a login was ATTEMPTED and did not reach a
+  // verdict, and the terminal never told us why. The measured mechanism for a
+  // genuinely wrong MT5 password is a MODAL LOGIN DIALOG blocking IPC (the
+  // -10004/-10005 class), which is indistinguishable from this bridge's own
+  // transport faults from here — so the honest claim is "did not complete",
+  // not "was rejected".
+  //
+  // ⛔ NOT `KEY_MUST_BE_RECONNECTED`, the nearest member by ACTION SHAPE
+  // (copied verbatim below, not one word of its text). Its copy asserts "a
+  // fault on our side of the store rather than a sign that anything is wrong
+  // with the account or its password" — the OPPOSITE claim from this arm,
+  // which has no stored ciphertext to blame and every reason to suspect the
+  // credential.
+  // ⛔ NOT `KEY_AUTH_FAILED`. Its copy asserts "The exchange rejected these
+  // credentials" — a confident rejection claim `classify_mt5_login_error`
+  // deliberately refuses to make on this arm (D-05, the locked A-04
+  // classification is NOT reverted): the terminal never got far enough to
+  // answer either way.
+  // ⛔ NOT `KEY_NETWORK_TIMEOUT`. Different verb, different noun, different
+  // claim: that member says we could not reach the EXCHANGE; this one says a
+  // reach was attempted and a SIGN-IN did not complete. A wrong MT5 password
+  // and an unreachable bridge both land here, on purpose (D-07) — the two
+  // look identical from this vantage point, and the copy says so rather than
+  // guessing which one happened.
+  //
+  // NOT recoverable, DERIVED rather than declared: `actions` below carries
+  // neither member of `RECOVERABLE_ACTIONS` (`clear_and_retry`,
+  // `try_another_key`), so `buildEnvelope` derives `recoverable: false` and
+  // `ErrorEnvelope` renders NO Retry control. THE ABSENCE IS AFFIRMATIVE, not
+  // merely consistent with the emitter's `recoverable=False` (D-08): a Retry
+  // here would re-run the identical validate against a terminal a wrong
+  // password may have wedged behind a modal login dialog — repeated validate
+  // attempts against that one shared terminal are the operation implicated in
+  // wedging and account eviction (164.6.5 / 164.6.6), so the Retry is not
+  // merely useless, it is the harmful action.
+  | "KEY_SIGN_IN_FAILED"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
   | "SYNC_TIMEOUT"
   | "SYNC_FAILED"
@@ -1477,6 +1521,23 @@ const NOT_ON_PRESELECT_SURFACE: FixRequirement = {
  */
 const REQUIRES_DERIBIT: FixRequirement = { kind: "venueIs", venue: "deribit" };
 
+/**
+ * "Render only on MT5" — 167-UI-SPEC.md § Copywriting Contract §2's `fix[1]`,
+ * the investor-password naming bullet. Sibling of `REQUIRES_DERIBIT`
+ * immediately above; same template, same absence rule.
+ *
+ * ⚠️ ITS ONE BULLET IS A NAMING CLARIFICATION AND NOTHING ELSE. The generic
+ * "confirm the credentials are current" instruction stays UNCONDITIONAL one
+ * slot above it (`fix[0]`), so a user on any venue — or on none we were told
+ * about — still gets a complete, actionable remedy. Suppressing this bullet
+ * removes only the MT5-specific noun ("the investor (read-only) password"),
+ * never the instruction, which is what makes the strict absence rule safe
+ * here. Absent venue ⇒ SUPPRESSED (167-UI-SPEC §3 move 2): a bullet naming
+ * ONE venue, rendered with the venue unknown, is a specific claim about a
+ * user we cannot identify.
+ */
+const REQUIRES_MT5: FixRequirement = { kind: "venueIs", venue: "mt5" };
+
 export interface WizardErrorCopy {
   title: string;
   /** Single-sentence summary of WHY the error happened. */
@@ -2465,6 +2526,45 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // destroy work from the error surface. `request_call` keeps the one route
     // out that can actually resolve it; `expand_log` opens the correlation id
     // the third fix line asks for.
+    actions: ["request_call", "expand_log"],
+  },
+
+  // 167-CREDTRUST / D-05, D-07 — see the union member's docblock for why this
+  // mints rather than reusing `KEY_MUST_BE_RECONNECTED`, `KEY_AUTH_FAILED` or
+  // `KEY_NETWORK_TIMEOUT`. Copy specified VERBATIM in 167-UI-SPEC.md §
+  // Copywriting Contract §2 — reproduced here byte-for-byte, not re-authored.
+  //
+  // ⚠️ WHAT THIS COPY MAY CLAIM, read at the emitter rather than assumed: the
+  // attempt did not complete, and the venue did not get far enough to tell us
+  // why. ⛔ AND WHAT IT MAY NOT CLAIM: that the stored credential is invalid
+  // (unobserved — see 167-UI-SPEC § Copywriting Contract §4's two-pipeline
+  // constraint), or that a retry would help (D-08 — a retry against a
+  // terminal a wrong password may have wedged is the harmful action, not
+  // merely a useless one).
+  KEY_SIGN_IN_FAILED: {
+    title: "We could not sign in to this account.",
+    cause:
+      "The attempt did not complete, and it did not get far enough for the venue to tell us why. A credential that no longer works is one reason this happens; the venue being unreachable is another, and from here the two look the same. We will not guess between them.",
+    fix: [
+      "Open this account at the venue and confirm its credentials are current — a changed password, an expiry, or a regenerated key all end here.",
+      "For MT5 that is the investor (read-only) password: your broker can reset it, and changing the master password changes it too.",
+      "Then submit again with the credentials you just confirmed. Submitting the same details unchanged reaches the same place.",
+      "If the credentials are unchanged and this keeps happening, email security@quantalyze.com with the correlation id below — that pattern points at the venue rather than at your account.",
+    ],
+    // Index-aligned to `fix`. Slot 1 (the MT5 investor-password naming) is
+    // gated on `REQUIRES_MT5` — absent venue suppresses it, per that
+    // constant's own docblock. Slot 2 ("submit again") is suppressed on the
+    // saved-key summary screen, which paints no credential form to resubmit
+    // at all — `NOT_ON_PRESELECT_SURFACE`, REUSED rather than a second
+    // preselect requirement minted (D-17 / 162-06 review class). Slots 0 and
+    // 3 stay unconditional so every caller — including one that names no
+    // venue and no surface at all — still gets a complete remedy.
+    fixRequires: [null, REQUIRES_MT5, NOT_ON_PRESELECT_SURFACE, null],
+    docsHref: "/security",
+    // ⛔ NEITHER member of `RECOVERABLE_ACTIONS` — see the union member's
+    // docblock. THE ABSENCE IS AFFIRMATIVE (D-08), not incidental: offering a
+    // Retry here would re-run the identical validate against a terminal a
+    // wrong password may have wedged behind a modal login dialog.
     actions: ["request_call", "expand_log"],
   },
 
@@ -4631,6 +4731,29 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   // exemption reason at once, and `seam-venue-vocabulary.invariant.test.ts`
   // ("no code is BOTH mapped and exempt") reds if one ever does.
   ["KEY_UNDECRYPTABLE", { code: "KEY_MUST_BE_RECONNECTED", status: 500 }],
+  // ── 167-CREDTRUST / D-05, D-07 — the mint, routed at last ──────────────────
+  //
+  // 424, `recoverable=False`, raised by `_validate_mt5_key_probe`
+  // (routers/exchange.py) at the ONE narrowed arm of `except Mt5ClientError`
+  // whose classifier verdict is `transient`: a login was attempted and did
+  // not reach a verdict, and the venue never told us why. Reached from BOTH
+  // `POST /api/validate-key` (the wizard connect surface) and
+  // `rotate_key_secret`'s `_validate_mt5_key` call (`keys/[id]/rotate-secret`)
+  // — `_validate_mt5_key` is a thin bracket over the probe function this row
+  // routes, so this verdict is reachable at both call sites by construction.
+  //
+  // ⭐ WHY THE ROW IS NOT OPTIONAL BESIDE THE MINT — same mechanism
+  // `KEY_UNDECRYPTABLE`'s row states above: `classifyKeyValidationError`
+  // resolves this table BEFORE its substring cascade, and the cascade has no
+  // branch for this detail (swept clean at the emitter, see
+  // `SIGN_IN_FAILED_DETAIL`'s docblock in `services/exchange.py`), so a
+  // minted member with no row here is unreachable and the founder still
+  // lands on `UNKNOWN`.
+  //
+  // Status 424 on the row, matching the emitter's own status, per this
+  // table's stated discipline that the wire answer stays the one the service
+  // chose.
+  ["SIGN_IN_FAILED", { code: "KEY_SIGN_IN_FAILED", status: 424 }],
 ]);
 
 /**
@@ -5556,6 +5679,17 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       //      the dialog then refuses to recognise would render the terminal
       //      UNKNOWN anyway and close nothing.
       "KEY_MUST_BE_RECONNECTED",
+      // 167-CREDTRUST / D-05, D-07 — admitted HERE IN THE SAME COMMIT the
+      // shared classifier starts returning it. `_validate_mt5_key` (called by
+      // `rotate_key_secret`, `routers/internal.py`) is a thin bracket over
+      // `_validate_mt5_key_probe`, the SAME function `POST /api/validate-key`
+      // calls — so this verdict is reachable here through the identical
+      // `seamCode` mechanism the six rows above ride, not by copying a
+      // sibling roster. Omit this line and the membership check rejects the
+      // honest code, the dialog renders `UNKNOWN` — whose copy IS
+      // recoverable — and the founder gets a Retry control for a fault the
+      // emitter marked `recoverable=False`.
+      "KEY_SIGN_IN_FAILED",
     ]),
   ],
 ]);
