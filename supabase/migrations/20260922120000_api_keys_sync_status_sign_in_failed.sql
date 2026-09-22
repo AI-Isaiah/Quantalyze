@@ -36,6 +36,17 @@
 -- class is to REVERT THE MERGE, never to edit `supabase-migrate.yml`.
 -- ===========================================================================
 
+-- ⛔ FAIL FAST RATHER THAN QUEUE. Both statements below take ACCESS EXCLUSIVE
+-- on `api_keys`, and an unbounded wait behind one long-running reader does not
+-- just stall this migration — ACCESS EXCLUSIVE queues ahead of every later
+-- lock request, so every subsequent `api_keys` reader piles up behind a
+-- migration that is itself waiting. A 55P03 (`lock_not_available`) and a RED
+-- apply is the wanted outcome; a silently stalled table is not.
+-- Placement copied from the direct analog,
+-- `20260811210000_api_keys_attested_venue.sql`, which sets the same 3s
+-- immediately above its own `ALTER TABLE public.api_keys`.
+SET lock_timeout = '3s';
+
 ALTER TABLE api_keys DROP CONSTRAINT IF EXISTS api_keys_sync_status_check;
 ALTER TABLE api_keys ADD CONSTRAINT api_keys_sync_status_check
   CHECK (sync_status IN (
