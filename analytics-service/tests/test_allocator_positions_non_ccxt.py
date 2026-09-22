@@ -2177,23 +2177,46 @@ class _StagedFaultMt5Transport(_RecordingMt5Transport):
             ["initialize"],
             id="initialize-raises-ConnectionResetError-before-any-credential",
         ),
+        # D-17 — the login stage answered falsy, but with an IPC-infrastructure
+        # code (-10000…-10004) or the success code 1. None of them is a verdict
+        # on the credential. (-10005 is, and is driven in the next test.)
+        pytest.param(
+            {"login_ok": False, "last_error": (-10000, "internal fail")},
+            ["initialize", "login"],
+            id="login-falsy-with-10000-internal-fail",
+        ),
+        pytest.param(
+            {"login_ok": False, "last_error": (-10001, "internal fail send")},
+            ["initialize", "login"],
+            id="login-falsy-with-10001-send",
+        ),
+        pytest.param(
+            {"login_ok": False, "last_error": (-10002, "internal fail receive")},
+            ["initialize", "login"],
+            id="login-falsy-with-10002-receive",
+        ),
+        pytest.param(
+            {"login_ok": False, "last_error": (-10003, "internal fail init")},
+            ["initialize", "login"],
+            id="login-falsy-with-10003-init",
+        ),
         pytest.param(
             {"login_ok": False, "last_error": (-10004, "No IPC connection")},
             ["initialize", "login"],
-            id="login-falsy-with-ipc-10004",
+            id="login-falsy-with-10004-connect",
         ),
         pytest.param(
-            {"login_ok": False, "last_error": (-10005, "IPC timeout")},
+            {"login_ok": False, "last_error": (1, "Success")},
             ["initialize", "login"],
-            id="login-falsy-with-ipc-10005",
+            id="login-falsy-with-1-res-s-ok",
         ),
     ],
 )
 async def test_mt5_fault_that_is_not_a_login_refusal_writes_error_not_sign_in_failed(
     mt5_enabled, monkeypatch, transport_kwargs, expected_calls
 ):
-    """167 CR-01 — only a login-stage refusal with a non-IPC code is a
-    sign-in failure. Each case here is a transport or post-login fault and must
+    """167 CR-01 / D-17 — only a login-stage refusal is a sign-in failure. Each
+    case here is a transport, post-login or IPC-infrastructure fault and must
     land exactly as it did before Phase 167: sync_status='error' with
     MT5_UNREACHABLE_NOTE."""
     from services.allocator_positions import (
@@ -2221,3 +2244,50 @@ async def test_mt5_fault_that_is_not_a_login_refusal_writes_error_not_sign_in_fa
     # terminal saw, in order (terminal teardown calls excluded).
     assert [c for c in transport.calls if c != "transport_close"] == expected_calls
     assert result.error_kind == "transient"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "last_error",
+    [
+        pytest.param((-10005, "IPC timeout"), id="login-falsy-with-10005-modal-dialog"),
+        pytest.param((0, "authorization failed"), id="login-falsy-with-0"),
+        pytest.param((-6, "Authorization failed"), id="login-falsy-with-6-auth-failed"),
+    ],
+)
+async def test_mt5_login_stage_refusal_code_writes_sign_in_failed_end_to_end(
+    mt5_enabled, monkeypatch, last_error
+):
+    """167 CR-01 / D-17 — the positive half, end to end through the REAL
+    `Mt5Client`: the terminal answers `login()` falsy with -10005, 0 or -6, and
+    the key lands as sync_status='sign_in_failed' with the sign-in copy and a
+    `permanent` job disposition.
+
+    -10005 is the modal login dialog D-08 measured for a wrong MT5 password.
+    Before D-17 it was written 'error' / MT5_UNREACHABLE_NOTE and retried on
+    every backoff rung against the shared terminal."""
+    from services.allocator_positions import (
+        SIGN_IN_FAILED_NOTE,
+        SIGN_IN_FAILED_SYNC_STATUS,
+    )
+
+    transport = _StagedFaultMt5Transport(login_ok=False, last_error=last_error)
+    session = _session(transport)
+
+    coro, updates = _drive_poll_handler(monkeypatch, exchange=session, venue="mt5")
+    result = await coro
+
+    api_key_updates = [p for (name, p) in updates if name == "api_keys"]
+    assert api_key_updates, f"expected an api_keys write; got {updates!r}"
+    final = api_key_updates[-1]
+
+    assert final["sync_status"] == SIGN_IN_FAILED_SYNC_STATUS, (
+        f"login() answered falsy with {last_error[0]}, a sign-in refusal, yet "
+        f"the key was written {final['sync_status']!r}"
+    )
+    assert final["sync_error"] == SIGN_IN_FAILED_NOTE.format(venue="MT5")
+    assert result.error_kind == "permanent"
+    assert [c for c in transport.calls if c != "transport_close"] == [
+        "initialize",
+        "login",
+    ]

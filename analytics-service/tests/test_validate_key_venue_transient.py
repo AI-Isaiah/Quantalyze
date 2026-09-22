@@ -598,9 +598,11 @@ def test_c5_mt5_transient_client_error_carries_a_machine_code(
     `Mt5Client.login` raises when the terminal answers the sign-in falsy) with a
     code-0 text the classifier does not recognise. Until WR-01 this case drove
     code -10004 ("No IPC connection"), and that was the defect: a detached bridge
-    was answered SIGN_IN_FAILED. An IPC code, or any post-login fault, now keeps
-    NETWORK_UNAVAILABLE — see
-    `test_c5_mt5_post_login_client_error_keeps_the_network_code` below.
+    was answered SIGN_IN_FAILED. A login-stage -10000…-10004 or 1, or any
+    post-login fault, now keeps NETWORK_UNAVAILABLE — see
+    `test_c5_mt5_post_login_client_error_keeps_the_network_code` below. A
+    login-stage -10005 lands HERE (D-17) — see
+    `test_c5_mt5_login_stage_refusal_codes_share_the_sign_in_body`.
 
     ⚠️ 167-CREDTRUST plan 01 (D-05, D-07, S-27) — THIS IS THE ARM THE PHASE
     NARROWS, and this case's own expectation moved with it: `code` and
@@ -608,9 +610,9 @@ def test_c5_mt5_transient_client_error_carries_a_machine_code(
     `EXPECTED_NETWORK_ERROR_DETAIL` — a login was actually ATTEMPTED on this
     arm, which is what `SIGN_IN_FAILED` claims and the shared network detail
     does not. `recoverable` flips to `False`, deliberately diverging from
-    every sibling MT5 arm's hardcoded `True` (D-08): a retry re-runs the
-    identical validate against a terminal a wrong password may have wedged
-    behind a modal login dialog. The eight sibling `NETWORK_UNAVAILABLE`
+    every sibling MT5 arm's hardcoded `True` (D-08): a retry re-sends the same
+    credential to a terminal that refused it, or that a wrong password put
+    behind a modal login dialog (D-17). The eight sibling `NETWORK_UNAVAILABLE`
     sites (C1-C4, C6, C7 and the two others) are BYTE-UNCHANGED — see C3
     immediately below for the sibling-arm-unchanged control that proves the
     narrowing did not widen.
@@ -619,8 +621,42 @@ def test_c5_mt5_transient_client_error_carries_a_machine_code(
 
     _arrange_mt5(
         monkeypatch,
-        login_raises=Mt5LoginRefusedError(0, "timeout waiting for response"),
+        # 167 SFH-LOW-3 — a neutral login answer, not timeout-worded text.
+        login_raises=Mt5LoginRefusedError(0, "authorization failed"),
     )
+
+    r = _post_validate_key(app_client, **_MT5_FIELDS)
+
+    _assert_flat_venue_body(
+        r,
+        trigger="mt5_client_error_transient",
+        detail=EXPECTED_SIGN_IN_FAILED_DETAIL,
+        code="SIGN_IN_FAILED",
+        recoverable=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "text"),
+    [
+        pytest.param(-10005, "IPC timeout", id="-10005-modal-login-dialog"),
+        pytest.param(-6, "Authorization failed", id="-6-res-e-auth-failed"),
+    ],
+)
+def test_c5_mt5_login_stage_refusal_codes_share_the_sign_in_body(
+    app_client, monkeypatch, code, text
+) -> None:
+    """C5, the D-17 code set on the wire — a login-stage -10005 or -6 answers the
+    SAME body as the fixture's `mt5_client_error_transient` case. -10005 is the
+    modal login dialog D-08 measured for a wrong password; before D-17 it was
+    answered `NETWORK_UNAVAILABLE` / `recoverable: true`, which is the pre-phase
+    Retry D-08 calls the harmful action.
+
+    Reuses the fixture case rather than adding one: the wire answer is the same
+    contract, only the code that reaches it differs."""
+    from services.mt5_client import Mt5LoginRefusedError
+
+    _arrange_mt5(monkeypatch, login_raises=Mt5LoginRefusedError(code, text))
 
     r = _post_validate_key(app_client, **_MT5_FIELDS)
 

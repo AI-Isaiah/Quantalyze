@@ -1784,16 +1784,34 @@ async def test_mt5_client_error_arm_follows_the_live_classifier_verdict(
             lambda m: m.Mt5ClientError(0, "Invalid account"),
             id="plain-client-error-even-with-auth-text",
         ),
-        # The login stage answered, but with an IPC transport code: the
-        # bridge detached (-10004) or stopped answering (-10005). D-07 keeps
-        # this ambiguity on the transport side.
+        # The login stage answered, but with an IPC-infrastructure code
+        # (-10000…-10004: our bridge failed to carry the call) or the success
+        # code 1. D-17: none of them is a verdict on the credential. A
+        # login-stage -10005 IS one, and is driven by
+        # `test_mt5_login_stage_refusal_code_writes_the_sign_in_claim` below.
         pytest.param(
-            lambda m: m.Mt5LoginRefusedError(-10004, "No IPC connection"),
-            id="login-stage-ipc-10004",
+            lambda m: m.Mt5LoginRefusedError(-10000, "internal fail"),
+            id="login-stage-10000-internal-fail",
         ),
         pytest.param(
-            lambda m: m.Mt5LoginRefusedError(-10005, "IPC timeout"),
-            id="login-stage-ipc-10005",
+            lambda m: m.Mt5LoginRefusedError(-10001, "internal fail send"),
+            id="login-stage-10001-send",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10002, "internal fail receive"),
+            id="login-stage-10002-receive",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10003, "internal fail init"),
+            id="login-stage-10003-init",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10004, "No IPC connection"),
+            id="login-stage-10004-connect",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(1, "Success"),
+            id="login-stage-1-res-s-ok",
         ),
     ],
 )
@@ -1825,6 +1843,96 @@ async def test_mt5_client_error_that_is_not_a_login_refusal_keeps_the_transport_
         "sign-in failure — the owner is told to fix a working credential"
     )
     assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+    assert caught.value.__cause__ is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "text"),
+    [
+        pytest.param(-10005, "IPC timeout", id="login-stage-10005-modal-dialog"),
+        pytest.param(0, "authorization failed", id="login-stage-0"),
+        pytest.param(-6, "Authorization failed", id="login-stage-6-auth-failed"),
+    ],
+)
+async def test_mt5_login_stage_refusal_code_writes_the_sign_in_claim(
+    monkeypatch, code, text
+):
+    """167 CR-01 / D-17 — a login-stage -10005, 0 or -6 is a refused sign-in on
+    the holdings surface too: `AllocatorHoldingsSignInFailedError` with the
+    sign-in copy and a `permanent` disposition, never MT5_UNREACHABLE_NOTE.
+
+    -10005 is the case D-08 is written about (the modal login dialog a wrong
+    MT5 password raises). Before D-17 it kept the transport note ("sync will
+    retry automatically") and climbed the backoff ladder, re-running `login()`
+    against the shared terminal on every rung.
+
+    The classifier is left UNMOCKED: a real `Mt5LoginRefusedError`
+    classifies `unknown`, so the wrap path is the one production takes."""
+    from services import allocator_positions as ap
+    from services.mt5_client import Mt5LoginRefusedError
+
+    expected = Mt5LoginRefusedError(code, text)
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+
+    with pytest.raises(ap.AllocatorHoldingsSignInFailedError) as caught:
+        await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+
+    assert str(caught.value) == ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+    assert caught.value.sync_status == ap.SIGN_IN_FAILED_SYNC_STATUS
+    assert caught.value.error_kind == "permanent", (
+        f"a login-stage refusal with code {code} would climb the backoff "
+        "ladder, re-sending the same password to the shared terminal (D-08)"
+    )
+    assert caught.value.__cause__ is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        # A plain `Mt5ClientError` (not the login-stage marker), so only the
+        # classifier verdict can make it a sign-in failure.
+        pytest.param(
+            lambda m: m.Mt5ClientError(0, "Invalid account or password"),
+            id="plain-client-error-classified-auth",
+        ),
+        pytest.param(
+            lambda m: m.Mt5ClientError(0, "Trade server not found"),
+            id="plain-client-error-classified-wrong_server",
+        ),
+    ],
+)
+async def test_mt5_client_error_the_classifier_blames_on_the_credential_is_a_sign_in_failure(
+    monkeypatch, make_error
+):
+    """167 SFH-LOW-2 — the two surfaces must agree. The wizard answers an
+    `Mt5ClientError` that `classify_mt5_login_error` reads as `"auth"` or
+    `"wrong_server"` with a confident 400 at any stage. The holdings poll
+    used to call the same error a transport blip: MT5_UNREACHABLE_NOTE and a
+    promised retry. It now writes the sign-in claim, with the same copy and a
+    `permanent` disposition as a login-stage refusal.
+
+    Control: `plain-client-error-even-with-auth-text` in
+    `test_mt5_client_error_that_is_not_a_login_refusal_keeps_the_transport_note`
+    ("Invalid account", which the anchored phrase table does NOT match) still
+    keeps the transport note."""
+    from services import allocator_positions as ap
+    from services import mt5_client
+    from services.mt5_validation import classify_mt5_login_error
+
+    expected = make_error(mt5_client)
+    assert not isinstance(expected, mt5_client.Mt5LoginRefusedError)
+    assert classify_mt5_login_error(expected) in ("auth", "wrong_server")
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+
+    with pytest.raises(ap.AllocatorHoldingsSignInFailedError) as caught:
+        await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+
+    assert str(caught.value) == ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+    assert caught.value.error_kind == "permanent"
     assert caught.value.__cause__ is expected
 
 
@@ -2263,6 +2371,11 @@ async def test_sign_in_failure_reaches_its_own_arm_not_the_parents(
         "every backoff rung"
     )
     assert _audit.call_args.kwargs["metadata"]["error_kind"] == "permanent"
+    # 167 SFH-L1 / R2 IN-04 — the audit names the status that actually landed.
+    assert (
+        _audit.call_args.kwargs["metadata"]["sync_status_written"]
+        == ap.SIGN_IN_FAILED_SYNC_STATUS
+    )
 
 
 @pytest.mark.asyncio
@@ -2329,8 +2442,217 @@ async def test_a_refused_sign_in_status_write_falls_back_to_error(
     assert errors and errors[-1].exc_info is not None, (
         "the rejected write must be logged at ERROR with its traceback"
     )
+    # 167 SFH-L1 / R2 IN-04 — the log names a CHECK rejection as one, and the
+    # audit records that the key was downgraded to 'error'.
+    assert "CHECK violation" in errors[-1].getMessage()
+    assert "not a CHECK violation" not in errors[-1].getMessage()
+    assert _audit.call_args.kwargs["metadata"]["sync_status_written"] == "error"
     # The disposition is unaffected by the fallback.
     assert result.error_kind == "permanent"
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_write_that_fails_for_another_reason_says_so(
+    monkeypatch, api_key_row_factory, caplog
+):
+    """167 SFH-L1 / R2 IN-04 — the fallback still runs on a failure that is NOT
+    a CHECK rejection (keeping a stale healthy status is the worse outcome), but
+    the log must not call it one: a transport error here is ambiguous, because
+    PostgREST may have committed the sign_in_failed write before the error
+    reached us, and the fallback then overwrote it. The audit records the
+    status that finally landed."""
+    import logging
+
+    from services import allocator_positions as ap
+    from services import job_worker as jw
+
+    copy = ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+
+    async def _raise_sign_in_failed(venue, exchange, api_key_id=None):
+        raise ap.AllocatorHoldingsSignInFailedError(copy)
+
+    db_calls: list[object] = []
+
+    async def _first_write_times_out(fn):
+        db_calls.append(fn)
+        result = fn()
+        if len(db_calls) == 1:
+            raise TimeoutError("read timed out")
+        return result
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_raise_sign_in_failed
+    )
+    monkeypatch.setattr(jw, "db_execute", _first_write_times_out)
+
+    with caplog.at_level(logging.DEBUG, logger=jw.logger.name):
+        await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses == [ap.SIGN_IN_FAILED_SYNC_STATUS, "error"], statuses
+    errors = [
+        r for r in caplog.records
+        if r.name == jw.logger.name and r.levelno >= logging.ERROR
+        and "falling back" in r.getMessage()
+    ]
+    assert errors, "the failed write was not logged at ERROR"
+    assert "not a CHECK violation (TimeoutError)" in errors[-1].getMessage(), (
+        "a timeout was logged as if the CHECK constraint had refused the value; "
+        "the operator is sent to the migration instead of the ambiguous write"
+    )
+    assert _audit.call_args.kwargs["metadata"]["sync_status_written"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_sign_in_write_whose_fallback_also_fails_is_loud(
+    monkeypatch, api_key_row_factory, caplog
+):
+    """167 SFH-M3 — the "fallback ALSO failed" branch. Both writes are refused
+    (the database is down, say), so the key keeps whatever status it had. That
+    is the worst outcome this arm can produce, and nothing but the log can show
+    it, so BOTH failures must be logged at ERROR with their traceback. The job
+    disposition is still the sign-in subclass's own."""
+    import logging
+
+    from services import allocator_positions as ap
+    from services import job_worker as jw
+
+    copy = ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+
+    async def _raise_sign_in_failed(venue, exchange, api_key_id=None):
+        raise ap.AllocatorHoldingsSignInFailedError(copy)
+
+    async def _every_write_fails(fn):
+        fn()
+        raise RuntimeError("connection refused")
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_raise_sign_in_failed
+    )
+    monkeypatch.setattr(jw, "db_execute", _every_write_fails)
+
+    with caplog.at_level(logging.DEBUG, logger=jw.logger.name):
+        result = await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses == [ap.SIGN_IN_FAILED_SYNC_STATUS, "error"], statuses
+    ours = [r for r in caplog.records if r.name == jw.logger.name]
+    also = [r for r in ours if "ALSO failed" in r.getMessage()]
+    assert also, "the failed fallback write was not logged at all"
+    assert also[-1].levelno == logging.ERROR, (
+        f"the failed fallback was logged at {also[-1].levelname}: the key keeps "
+        "a stale status and nothing alerts on it"
+    )
+    assert also[-1].exc_info is not None, "the fallback's traceback was dropped"
+    first = [r for r in ours if "falling back" in r.getMessage()]
+    assert first and first[-1].levelno == logging.ERROR
+    assert first[-1].exc_info is not None
+    # 167 SFH-L1 / R2 IN-04 — nothing landed, and the audit says so.
+    assert _audit.call_args.kwargs["metadata"]["sync_status_written"] is None
+    assert result.error_kind == "permanent"
+
+
+def _raise_transient(copy):
+    async def _fetch(venue, exchange, api_key_id=None):
+        from services import allocator_positions as ap
+
+        raise ap.AllocatorHoldingsSyncTransientError(copy)
+
+    return _fetch
+
+
+def _raise_rate_limited():
+    async def _fetch(venue, exchange, api_key_id=None):
+        raise ccxt.RateLimitExceeded("binance 429")
+
+    return _fetch
+
+
+def _raise_generic():
+    async def _fetch(venue, exchange, api_key_id=None):
+        raise RuntimeError("venue exploded")
+
+    return _fetch
+
+
+def _fetch_ok():
+    async def _fetch(venue, exchange, api_key_id=None):
+        return [], None
+
+    return _fetch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("make_fetch", "persist_fails", "expected_status"),
+    [
+        pytest.param(
+            lambda: _raise_transient("MT5 terminal unreachable"),
+            False,
+            "error",
+            id="parent-transient-error-write",
+        ),
+        pytest.param(_raise_rate_limited, False, "rate_limited", id="rate_limited-write"),
+        pytest.param(_raise_generic, False, "error", id="generic-arm-write"),
+        pytest.param(_fetch_ok, True, "error", id="persist-failure-stamp"),
+    ],
+)
+async def test_every_failed_sync_status_write_in_the_poll_handler_is_an_error_log(
+    monkeypatch, api_key_row_factory, caplog, make_fetch, persist_fails,
+    expected_status,
+):
+    """167 SFH-M3 — every `sync_status` write in `run_poll_allocator_positions_job`
+    that fails is logged at ERROR with its traceback. A lost write leaves the
+    key on its previous status, which may read healthy or 'syncing' forever, and
+    until this round four of these arms logged it at WARNING, which nothing
+    alerts on. (The sign-in write and its fallback are pinned by the two cases
+    above.)"""
+    import logging
+
+    from services import job_worker as jw
+
+    async def _every_write_fails(fn):
+        fn()
+        raise RuntimeError("connection refused")
+
+    persist = None
+    if persist_fails:
+        async def persist(supa, rows, allocator_id, api_key_id, asof):
+            raise RuntimeError("persist failed")
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="binance"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=make_fetch(), persist=persist
+    )
+    monkeypatch.setattr(jw, "db_execute", _every_write_fails)
+    # The 429 arm stamps last_429_at first; that is not a sync_status write.
+    monkeypatch.setattr(jw, "_stamp_429", AsyncMock())
+
+    with caplog.at_level(logging.DEBUG, logger=jw.logger.name):
+        await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses and statuses[-1] == expected_status, statuses
+    failed = [
+        r for r in caplog.records
+        if r.name == jw.logger.name
+        and ("failed to stamp" in r.getMessage()
+             or "failed to persist sync_status" in r.getMessage())
+    ]
+    assert failed, "the failed sync_status write was not logged at all"
+    assert failed[-1].levelno == logging.ERROR, (
+        f"a failed sync_status write was logged at {failed[-1].levelname}; the "
+        "key keeps a stale status and nothing alerts on it"
+    )
+    assert failed[-1].exc_info is not None, "the traceback was dropped"
 
 
 def test_sign_in_copy_is_not_the_unknown_status_FALLBACK(monkeypatch):

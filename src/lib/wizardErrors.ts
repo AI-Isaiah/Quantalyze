@@ -460,12 +460,14 @@ export type WizardErrorCode =
   // `rotate_key_secret`'s `_validate_mt5_key` call) raises wire
   // `SIGN_IN_FAILED` — 424, `recoverable=False`, `SIGN_IN_FAILED_DETAIL` —
   // from the ONE arm where `classify_mt5_login_error` classified a caught
-  // `Mt5ClientError` `transient`: a login was ATTEMPTED and did not reach a
+  // `Mt5ClientError` `transient` AND `is_mt5_login_refusal` holds: the
+  // terminal received the credential and answered `login()` itself falsy,
+  // with a code outside the -10000…-10004 IPC-infrastructure family and not
+  // the success code 1 (D-17). A login was ATTEMPTED and did not reach a
   // verdict, and the terminal never told us why. The measured mechanism for a
   // genuinely wrong MT5 password is a MODAL LOGIN DIALOG blocking IPC (the
-  // -10004/-10005 class), which is indistinguishable from this bridge's own
-  // transport faults from here — so the honest claim is "did not complete",
-  // not "was rejected".
+  // -10005 class, D-08), which is a timeout rather than a rejection — so the
+  // honest claim is "did not complete", not "was rejected".
   //
   // ⛔ NOT `KEY_MUST_BE_RECONNECTED`, the nearest member by ACTION SHAPE
   // (copied verbatim below, not one word of its text). Its copy asserts "a
@@ -480,10 +482,15 @@ export type WizardErrorCode =
   // answer either way.
   // ⛔ NOT `KEY_NETWORK_TIMEOUT`. Different verb, different noun, different
   // claim: that member says we could not reach the EXCHANGE; this one says a
-  // reach was attempted and a SIGN-IN did not complete. A wrong MT5 password
-  // and an unreachable bridge both land here, on purpose (D-07) — the two
-  // look identical from this vantage point, and the copy says so rather than
-  // guessing which one happened.
+  // reach was attempted and a SIGN-IN did not complete. ⚠️ An unreachable
+  // bridge does NOT land here (167 CR-01 / D-17): a detached or failing IPC
+  // pipe at the login stage (-10000…-10004), an `initialize()` failure before
+  // any credential is sent, and any failure after a successful login all keep
+  // wire `NETWORK_UNAVAILABLE`, which routes to `KEY_NETWORK_TIMEOUT`. What
+  // lands here is a sign-in the terminal received and did not accept,
+  // including the -10005 modal-dialog case, where a wrong password and a
+  // terminal that stalled mid-login look the same from this vantage point.
+  // The copy says so rather than guessing which one happened.
   //
   // NOT recoverable, DERIVED rather than declared: `actions` below carries
   // neither member of `RECOVERABLE_ACTIONS` (`clear_and_retry`,
@@ -4735,7 +4742,8 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   //
   // 424, `recoverable=False`, raised by `_validate_mt5_key_probe`
   // (routers/exchange.py) at the ONE narrowed arm of `except Mt5ClientError`
-  // whose classifier verdict is `transient`: a login was attempted and did
+  // whose classifier verdict is `transient` and whose error is a login-stage
+  // refusal (`is_mt5_login_refusal`, D-17): a login was attempted and did
   // not reach a verdict, and the venue never told us why. Reached from BOTH
   // `POST /api/validate-key` (the wizard connect surface) and
   // `rotate_key_secret`'s `_validate_mt5_key` call (`keys/[id]/rotate-secret`)

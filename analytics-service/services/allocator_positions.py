@@ -72,7 +72,7 @@ from services.mt5_client import (
     Mt5SessionAbandoned,
     Mt5Session,
 )
-from services.mt5_validation import is_mt5_login_refusal
+from services.mt5_validation import classify_mt5_login_error, is_mt5_login_refusal
 # MT5CONC-02 — the ONE terminal-lock registry, imported from the leaf module
 # plan 151-01 extracted it into. NEVER re-declare a terminal-lock dict here: a
 # second registry hands out perfectly functional Locks while the derive job and
@@ -417,9 +417,9 @@ def _must_reach_handler_unwrapped(exc: Exception) -> bool:
        and ``ccxt.BadRequest``. Downgrading either buys the full 30s→6h retry
        ladder plus the daily cron re-enqueue against a host that will never
        answer, under the copy "sync will retry automatically" — a promise that
-       cannot be kept. The handler's transient arm hardcodes
-       ``error_kind='transient'`` and never re-reads the ``__cause__`` chain,
-       so a downgrade here is FINAL.
+       cannot be kept. The handler's transient arm returns the exception's
+       declared ``error_kind`` (``transient`` for the parent type) and never
+       re-reads the ``__cause__`` chain, so a downgrade here is FINAL.
     2. **``ccxt.RateLimitExceeded``**, which the classifier calls transient but
        the handler has a DEDICATED arm for (``_stamp_429`` + the per-exchange
        cooldown shared with strategy-side ``poll_positions``). Swallowing it
@@ -889,14 +889,30 @@ async def _fetch_mt5_account_rows(
             # `validate_key` applies to the same boundary: the terminal answered
             # the `login()` call itself falsy (`Mt5LoginRefusedError`, the shape
             # a wrong investor password and a wrong server BOTH produce) AND the
-            # code is not an IPC transport code. Everything else keeps the
-            # pre-167 posture byte-unchanged: MT5_UNREACHABLE_NOTE, transient.
+            # code is not one of the -10000…-10004 IPC-infrastructure codes or
+            # the success code 1. A login-stage -10005 IS a refusal (D-17: the
+            # modal login dialog D-08 measured for a wrong password). Everything
+            # else keeps the pre-167 posture byte-unchanged:
+            # MT5_UNREACHABLE_NOTE, transient.
+            #
+            # ⭐ 167 SFH-LOW-2 — and a message the ONE classifier reads as
+            # naming the credential or the broker server (`"auth"` /
+            # `"wrong_server"` from `classify_mt5_login_error`) is a sign-in
+            # failure too, whatever stage raised it. The wizard answers that
+            # verdict with a confident 400 (AUTH_FAILED / wrong server) at any
+            # stage; before this, the holdings poll called the SAME error a
+            # transport blip and promised a retry. Same copy and `permanent`
+            # disposition as the login-stage refusal: the terminal's own text
+            # blamed the credential, so re-sending it on every backoff rung is
+            # the D-08 harm.
             #
             # The exception's own text is already secret-scrubbed at
             # construction, but it is still INTERNAL text (it can echo the
             # terminal's `last_error()` back at us); only the authored copy
             # constant is surfaced, and only the numeric code is logged.
-            if not is_mt5_login_refusal(exc):
+            login_verdict = classify_mt5_login_error(exc)
+            names_credential_or_server = login_verdict in ("auth", "wrong_server")
+            if not (names_credential_or_server or is_mt5_login_refusal(exc)):
                 logger.warning(
                     "poll_allocator_positions: mt5 holdings read hit a client "
                     "error that is not a login-stage refusal (code=%s) — "
@@ -918,10 +934,11 @@ async def _fetch_mt5_account_rows(
             # `revoked` claim — see `AllocatorHoldingsSignInFailedError` for
             # the two-honesty-level split this preserves.
             logger.warning(
-                "poll_allocator_positions: mt5 holdings sign-in was refused at "
-                "the login stage (code=%s) — surfacing the sign-in copy "
+                "poll_allocator_positions: mt5 holdings sign-in failed "
+                "(code=%s, login_verdict=%s) — surfacing the sign-in copy "
                 "(D-11 arm B)",
                 exc.code,
+                login_verdict,
             )
             raise AllocatorHoldingsSignInFailedError(
                 SIGN_IN_FAILED_NOTE.format(venue=_venue_display(exchange_name))
