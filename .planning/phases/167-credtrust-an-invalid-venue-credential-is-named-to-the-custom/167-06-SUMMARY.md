@@ -111,7 +111,7 @@ status: complete
 - **R3/R5:** one shared helper, `retireWithheldSuccess`, runs from three event handlers: the dialog's `onUpdated`, `handleDeleteKey`'s success path, and `handleAddKey` after the link. A withheld success is retired rather than re-shown once the key is fixed, deleted or superseded. The guard comes from the pre-change render, and the updater is functional.
 - **R4:** a key's `Update password` is disabled for exactly its own sync. `Modal`'s `showModal()` stops the reverse order (pinned by a spy).
 - **R5:** a key's `Delete` is disabled for exactly its own sync, for R4's reason.
-- **R6:** `handleAddKey`'s background catch now also clears `syncingKeyId`.
+- **R6:** `handleAddKey`'s background catch now also clears `syncingKeyId`. ⛔ **CORRECTED 2026-09-23 (167-06 fix round, see the section below):** that clear could end a DIFFERENT, still-live attempt (167-REVIEW-06 CR-01). The catch now leaves a live attempt alone; only the attempt clears its own marker.
 
 ## RED evidence (verdicts and counts only)
 
@@ -168,13 +168,48 @@ All 23 neuters were observed RED and restored byte-identical.
 - **Placement, not copy.** The sentence names the credential and the remedy. It does not say "your factsheet stopped updating because…". The tie to the factsheet is PLACEMENT: the strategy's own edit page, with its current key marked by `Resync`. No signal ties a strategy's staleness to a key's failure (D-02, D-03). If re-verification judges placement insufficient for goal truth 1, the routes left are a founder override or a new phase that builds a strategy-level write boundary.
 - **R4 closes the in-flight rotation window.** Lineage: plan revision 1 said closing it needed an attempt-tied record. That was wrong. The window exists only if the attempt and the rotation overlap, and existing state prevents the overlap.
 - **R5 extends the retirement to `Delete` and `Add Key`, and `Delete` takes R4's in-flight disable.** Lineage: plan revision 2 retired on `Update password` only, so a withheld success re-appeared once its key was deleted or superseded.
-- **R6 clears the marker in the post-add background catch.** At HEAD, a post-add sync that failed while another key's sync was in flight left every `Resync` and `Use & Sync` disabled until a reload.
+- **R6 clears the marker in the post-add background catch.** At HEAD, a post-add sync that failed while another key's sync was in flight left every `Resync` and `Use & Sync` disabled until a reload. ⛔ **CORRECTED 2026-09-23:** R6 was right about the dead-lock and wrong that clearing the marker was safe. The plan's rationale, that once the marker is clear the abandoned attempt cannot show a success "because nothing polls it any more", fails when the post-add failure lands while the tracked attempt is still awaiting its own enqueue: its 202 then resumes polling with no marker. See the correction section below.
 - **Healthy-key behaviour changes, stated rather than implied.** A key's `Update password` and `Delete` are disabled during that key's own sync, as its `Resync` already was. R6 changes behaviour only in the race where HEAD dead-locked. Otherwise a healthy key's card and panel behave as before, including across an `Update password`, a `Delete` of another key and an `Add Key`, as the three controls pin.
-- **Named residual 1: the post-add sync bypasses the one sync slot.** `handleAddKey` moves the panel's subject to the new key while another key's attempt may still be polling. Between two healthy keys this shows as a premature "Up to date". ⚠️ **The UNTRUSTED-key variant can show a success beside a "Sign-in failed" pill.** Key J is untrusted and syncing. The user adds a key, `lastAttemptedKeyId` moves to the healthy new key, and J's later success then shows beside J's pill. R6 closes the dead-lock half. The subject half needs the post-add sync routed through the tracked slot, which changes the add flow `SEAMUX-05` pins. It stays routed, not fixed.
+- **Named residual 1: the post-add sync bypasses the one sync slot.** `handleAddKey` moves the panel's subject to the new key while another key's attempt may still be polling. Between two healthy keys this shows as a premature "Up to date". ⚠️ **The UNTRUSTED-key variant can show a success beside a "Sign-in failed" pill.** Key J is untrusted and syncing. The user adds a key, `lastAttemptedKeyId` moves to the healthy new key, and J's later success then shows beside J's pill. R6 closes the dead-lock half. The subject half needs the post-add sync routed through the tracked slot, which changes the add flow `SEAMUX-05` pins. It stays routed, not fixed. ⭐ **NARROWED 2026-09-23:** the subject no longer moves while a tracked attempt is live, so this untrusted-key variant is closed. What remains (routed to 167.2) is that the post-add sync is still outside the slot: its failure while another attempt is live reaches only the console, and its own outcome is never polled.
 - **The `handleAddKey` guard can be stale.** It reads the subject's trust status as of the submit click. A re-read landing during the validate or link awaits can make it stale. Only a success line is affected, because the updater is functional. This is recorded in the call-site docblock and in D-18.
 - **Named residual 2: a change made in another tab arrives only through a re-read.** That is the load-error `Retry`, or the terminal-success arm's re-read, and either can lift R2's withhold. Closing it is a redesign of R2.
 - **167-04-SUMMARY residual 2, partially closed.** The `ApiKeyManager` half is closed: the component answers the persisted status through `isUntrustedKeySyncStatus`, and its `SyncProgress` check against `idle` was always local state. `HoldingsTabPanel`'s `keyStatusById` stays open and out of scope.
 - **Verification human item 4 now also covers this card.** That is the render at 320px and at 200% zoom. This card's column is narrower than the `/profile` table.
+
+## Correction 2026-09-23 — the 167-06 fix round (167-REVIEW-06 and the silent-failure review)
+
+⛔ **The sections above are the record as shipped and are kept as lineage.** This section says what
+was wrong in them and what replaced it.
+
+**The root cause, one defect with two routes.** The in-flight marker `syncingKeyId`, and the
+terminal handling in `handleSyncStatusChange`, were scoped to no attempt, so something that did not
+belong to the tracked sync could end it. The attempt then ran on in `computing` with no marker, and
+R1's, R4's and R5's windows re-opened for its own key.
+- **Route A (167-REVIEW-06 CR-01):** R6's marker clear in the post-add background catch ended a
+  different attempt that was still awaiting its own enqueue.
+- **Route B:** `SyncProgress` polls while `syncing`, before the attempt's own `/api/keys/sync` has
+  answered, so a slow enqueue let the poll read the strategy's PREVIOUS analytics row and its
+  terminal status ended the attempt. This one pre-dates 167-06; it is recorded in D-18's R4 lineage.
+
+**The fix, inside `ApiKeyManager` only.** A `SyncAttempt` record is registered in `handleSyncTrades`
+before any await. `endAttempt` is the one place the marker is cleared, and it acts only for the
+live attempt. `handleSyncStatusChange` ignores every poll status until the attempt's own enqueue
+has resolved, and ignores reads while a terminal success's re-read settles. The post-add catch never
+touches a live attempt, and `handleAddKey` no longer moves `lastAttemptedKeyId` while one is live.
+`SyncProgress` and `useStrategySyncPoller` are unchanged: the in-component fix closes Route B,
+because the component can tell a pre-enqueue read from a post-enqueue one and the poller cannot.
+
+**Also fixed in the round:** the healthy-control case now asserts zero live regions on and inside
+each healthy card (WR-01); a terminal success is shown only after its re-read, and a failed
+re-read keeps it withheld and shows the load-error banner; that banner shows while the Add Key form
+is open; `Delete` requires exactly one removed row; the bottom error line is hidden only when it
+repeats the error panel's message. IN-01 and IN-02 are comment corrections. The regression cases,
+their neuters and the gate tails are in the fix round's own report and commit.
+
+**Named limits of the scoping, not fixed** (D-18): a stale read AFTER the enqueue, before the worker
+writes `computing`, can still end an attempt with the previous run's result (pre-existing; needs a
+`computed_at` comparison in the poll); and an enqueue that never answers now spins until the route's
+`maxDuration` ends it, because the poll's cap arrives pre-enqueue and is ignored.
 
 ## Decisions Made
 

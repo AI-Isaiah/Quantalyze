@@ -344,14 +344,37 @@ itself.
     rotation window. ⚠️ **Lineage:** plan revision 1 said closing this window needed a record tying
     the withhold to the attempt's credential. That was WRONG: the window exists only if the two
     overlap, and existing state prevents the overlap, so nothing has to be recorded.
+    ⚠️ **Lineage (167-06 fix round, 2026-09-23):** "existing state prevents the overlap" held only
+    while the marker lasted as long as the attempt, and before this fix it did not. `SyncProgress`
+    polls while `syncing`, BEFORE the attempt's own `/api/keys/sync` has answered, so a slow enqueue
+    (a cold start past the 3 s poll) let the poll read the strategy's PREVIOUS analytics row. That
+    row's terminal status ended the attempt's marker early; the 202 then moved the same attempt to
+    `computing`, which ran on unmarked. So the same stale pre-enqueue read could end a `computing`
+    attempt's marker early, and for the rest of that attempt R4's disable was open: a rotation could
+    set the key to `idle` and the attempt's later success, made under the replaced password, was
+    shown. The failed post-add sync did the same through R6 (below). Both are closed by scoping the
+    marker to the tracked attempt: only that attempt clears it, and its poll's statuses are ignored
+    until its own enqueue has resolved.
   - **R5:** the retirement is ONE shared helper, `retireWithheldSuccess`, called on a successful
     `Update password`, a successful `Delete` and a successful `Add Key`. Its guard is read from the
     pre-change list (the render the user clicked in). `Delete` is disabled during that key's own
     sync, for R4's reason. ⚠️ **Lineage:** plan revision 2 retired on `Update password` only, and a
     withheld success re-appeared once its key was deleted or superseded by an added key.
-  - **R6:** every transition of the panel to `error` clears the in-flight marker. The post-add
-    background sync's catch was the one that did not, and at HEAD that dead-locked every `Resync` and
-    `Use & Sync` until a reload (and, with R4 and R5 alone, would also have locked the remedy).
+  - **R6 (corrected 2026-09-23, 167-06 fix round):** a failed post-add sync never ends, and never
+    dead-locks, a live tracked attempt. While an attempt is live the post-add catch leaves the panel
+    and the marker alone and reaches the console only; the attempt keeps polling and ends itself.
+    With no attempt live, it reports to the panel as before. `handleAddKey` also no longer moves
+    `lastAttemptedKeyId` while an attempt is live, so that attempt's success is judged against its
+    own key. ⚠️ **Lineage:** R6 as first shipped read "every transition of the panel to `error`
+    clears the in-flight marker", and the post-add catch cleared it. At HEAD before 167-06 that
+    catch dead-locked every `Resync` and `Use & Sync` until a reload, and R6 removed the dead-lock.
+    But its justification, that once the marker was clear "nothing polls it any more", was WRONG
+    when the post-add failure landed while the tracked attempt was still awaiting its own enqueue:
+    the attempt's 202 then resumed polling with no marker, so its key's pill claimed
+    `sign_in_failed` under a spinner and its `Update password` and `Delete` were enabled
+    mid-attempt (167-REVIEW-06 CR-01). The same defect had a second route, the stale pre-enqueue
+    read recorded under R4. The fix is the root cause, not the route: the marker is owned by the
+    tracked attempt.
   **What it deliberately does NOT do.** No strategy-level causal sentence (D-02, D-03, UI-SPEC §4).
   No factsheet path (D-04). The `/profile` Exchanges tab stays allocator-only.
   ⚠️ **Residual — placement, not copy.** The sentence names the credential and the remedy; it does
@@ -372,6 +395,25 @@ itself.
     fixed. The `handleAddKey` retirement's guard also reads the subject's trust status as of the
     submit click, so a re-read landing during its validate or link awaits can make it stale; only a
     success line is affected, because the updater is functional.
+    ⭐ **NARROWED 2026-09-23 (167-06 fix round) — the paragraph above is kept as lineage.** The
+    subject no longer moves while a tracked attempt is live, so the untrusted-key variant above (J's
+    success beside J's own pill) is closed and pinned by the corrected R6 case. What REMAINS of this
+    residual, still routed to 167.2: the post-add sync is still outside the tracked slot, so (a) its
+    FAILURE while another attempt is live reaches only the console, because the panel and the marker
+    belong to that attempt; and (b) its own outcome is never polled. Closing either still means
+    routing it through the slot.
+  - **Two limits of the attempt scoping, named 2026-09-23 (167-06 fix round), not fixed.**
+    (a) **A stale read AFTER the enqueue.** The poll's statuses are honoured once the attempt's own
+    `/api/keys/sync` has answered, but the route only enqueues; the worker writes `computing`
+    later. A poll landing in that gap still reads the previous run's row, and a terminal there ends
+    the attempt early with the previous run's result. This is pre-existing and not specific to
+    167-06; closing it needs the poll to compare the row's `computed_at` against the attempt's
+    start, which is a `SyncProgress` / `useStrategySyncPoller` change. (b) **An enqueue that never
+    settles.** Before the fix, the poll's 40-attempt cap could end an attempt whose request never
+    answered; the cap's `error` now arrives before the enqueue and is ignored, so such an attempt
+    spins until its request settles. The route declares `maxDuration = 300`, so the platform ends
+    the request within that bound and the attempt then fails through its own catch: a delay, not a
+    permanent dead-lock. (The link update that precedes it has no such bound of its own.)
   - **A change made in another tab.** R3 and R5 retire on THIS tab's own actions. Another tab's
     `Update password` or `Delete` reaches this tab only through a re-read (the load-error `Retry`, or
     the terminal-success arm's re-read), which can lift R2's withhold. Closing it needs retirement at
@@ -381,8 +423,9 @@ itself.
   `SyncProgress` check against `idle` was measured to be local state, never the column, so it was
   never a member of the class. `HoldingsTabPanel`'s `keyStatusById` stays named and out of scope.
   — **Reversibility:** reversible — one conditional mount, two derived render rules, one shared
-  event-handler helper, two derived `disabled` props and one marker clear in one client component;
-  no data, schema or wire contract moves.
+  event-handler helper, two derived `disabled` props and, since the 167-06 fix round, one
+  attempt-scoped marker (a ref and its single `endAttempt` clear) in one client component; no data,
+  schema or wire contract moves.
 
 - **D-19: The key card on the strategy's edit page closes 167's goal; a key-status mark on the
   `/strategies` list rows is routed to Phase 167.2.** *(Orchestrator decision 2026-09-22,

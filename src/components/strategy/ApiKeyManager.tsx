@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
@@ -100,6 +100,36 @@ function isSyncEnqueued(body: unknown): boolean {
   );
 }
 
+/**
+ * Phase 167 / 167-06 fix round (167-CONTEXT D-18): the ONE tracked sync
+ * attempt, started by `handleSyncTrades`. `syncingKeyId` is its render-side
+ * marker; this record is what decides who may end it.
+ *
+ * THE DEFECT IT CLOSES. The marker and the terminal handling used to be
+ * scoped to nothing, so two things that do not belong to an attempt could end
+ * it, and the attempt then ran on in `computing` with no marker, re-opening
+ * R1's, R4's and R5's windows for its own key:
+ *   - a failed post-add background sync cleared the marker (R6 as first
+ *     shipped, 167-REVIEW-06 CR-01);
+ *   - a poll read taken BEFORE the attempt's own `/api/keys/sync` answered.
+ *     `SyncProgress` polls while `syncing`, so a slow enqueue let the poll
+ *     read the strategy's PREVIOUS analytics row, and that row's terminal
+ *     status ended the attempt before its job existed.
+ *
+ * THE RULES. Only the attempt ends itself (`endAttempt`, the one place the
+ * marker is cleared). A poll status is ignored until the attempt's enqueue
+ * response has resolved, because a read taken before then is about an earlier
+ * run. Once a terminal success arrives, later reads are ignored while its
+ * re-read settles.
+ */
+interface SyncAttempt {
+  keyId: string;
+  /** The attempt's own `/api/keys/sync` returned enqueue evidence. */
+  enqueued: boolean;
+  /** A terminal success arrived and its re-read has not resolved yet. */
+  settling: boolean;
+}
+
 export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: ApiKeyManagerProps) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -126,9 +156,17 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   // is being corrected. Distinct from Reconnect: this key's credential is
   // WRONG and needs re-validation, not merely "try the stored one again".
   const [updatingKeyId, setUpdatingKeyId] = useState<string | null>(null);
+  // The live tracked attempt, or null. See `SyncAttempt`. A ref, not state: it
+  // is read inside async continuations that must see the CURRENT attempt, not
+  // the one their render closed over, and it never drives a render itself
+  // (`syncingKeyId` does).
+  const attemptRef = useRef<SyncAttempt | null>(null);
   const router = useRouter();
 
-  const loadKeys = useCallback(async (opts?: { lastSyncedKeyId?: string }) => {
+  // Resolves true when the list was re-read cleanly, false when the read
+  // failed (and `loadError` is set). The terminal-success arm needs the answer:
+  // it shows a success only after a re-read that could have withheld it.
+  const loadKeys = useCallback(async (opts?: { lastSyncedKeyId?: string }): Promise<boolean> => {
     const supabase = createClient();
     // Project only the allowlist — never `.select("*")` on api_keys from a
     // user-scoped client. Migration 027 (SEC-005) revokes SELECT on the
@@ -148,7 +186,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       // Surface a distinct, retryable error state and keep whatever keys we
       // had — never let the failure collapse into the empty "no keys" UI.
       setLoadError(keysErr.message);
-      return;
+      return false;
     }
     // Reached only on a clean response: clear any prior load error so a
     // successful retry restores the normal list / genuine-empty state.
@@ -165,14 +203,35 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       const targetKey = data.find((k) => k.id === targetKeyId);
       if (targetKey?.last_sync_at) setLastSyncAt(targetKey.last_sync_at);
     }
+    return true;
   }, [currentKeyId]);
 
   useEffect(() => {
     loadKeys();
   }, [loadKeys]);
 
-  const handleSyncStatusChange = useCallback((status: SyncStatus) => {
-    setSyncStatus(status);
+  /**
+   * End `attempt` if, and only if, it is still the live tracked attempt. This
+   * is the ONLY place the in-flight marker is cleared, so nothing that does not
+   * own an attempt can end it (see `SyncAttempt`). Returns whether it ended it.
+   */
+  const endAttempt = useCallback((attempt: SyncAttempt): boolean => {
+    if (attemptRef.current !== attempt) return false;
+    attemptRef.current = null;
+    setSyncingKeyId(null);
+    return true;
+  }, []);
+
+  const handleSyncStatusChange = useCallback(async (status: SyncStatus) => {
+    // Only the live attempt's poll may move the panel, and only after its own
+    // enqueue response resolved: a read taken before then is the strategy's
+    // PREVIOUS analytics row, and its terminal status would end this attempt
+    // before its job exists (see `SyncAttempt`). Reads that land while a
+    // terminal success's re-read is settling are ignored too, so one terminal
+    // is handled once.
+    const attempt = attemptRef.current;
+    if (!attempt || !attempt.enqueued || attempt.settling) return;
+
     // complete_with_warnings is a terminal SUCCESS (SyncProgress maps the
     // DB-native value to this UI state; mig 20260707120000 now persists it
     // instead of laundering to 'complete'). Treat it exactly like 'complete',
@@ -180,20 +239,37 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     // stays disabled ("Syncing…") forever while the panel says "Synced with
     // warnings" — a permanent dead-lock only a reload recovers.
     if (status === "complete" || status === "complete_with_warnings") {
-      setSyncingKeyId(null);
-      // NEW-C37-04: pass the key that was actually synced so loadKeys can
-      // derive lastSyncAt from the correct row, not from currentKeyId.
-      loadKeys({ lastSyncedKeyId: lastAttemptedKeyId ?? undefined });
-      router.refresh();
+      // 167-06 fix round (SFH LOW-1): the success is SHOWN only after the
+      // re-read that R2 judges it by. Setting it first showed "Up to date" for
+      // the length of a re-read that could then withhold it (the card's pill
+      // and live region only update when that re-read lands). Until it resolves the panel stays
+      // in `computing` and the marker stays set, so R4's and R5's disables hold
+      // across the gap. A failed re-read keeps the success withheld (the panel
+      // goes idle) and surfaces the load error instead: an unverified list
+      // cannot vouch for the subject key.
+      attempt.settling = true;
+      let reread = false;
+      try {
+        // NEW-C37-04: pass the key that was actually synced so loadKeys can
+        // derive lastSyncAt from the correct row, not from currentKeyId.
+        reread = await loadKeys({ lastSyncedKeyId: attempt.keyId });
+      } finally {
+        endAttempt(attempt);
+        setSyncStatus(reread ? status : "idle");
+        router.refresh();
+      }
     } else if (status === "error") {
-      setSyncingKeyId(null);
+      endAttempt(attempt);
+      setSyncStatus("error");
       // FINDING-8: when the poller times out (SyncProgress fires onStatusChange("error")
       // after POLL_MAX_ATTEMPTS without any syncError from the catch block),
       // syncError stays null and the UI shows "Sync failed" with no detail text.
       // Fill a default message for the timeout case so the user has actionable context.
       setSyncError((prev) => prev ?? "Analytics computation timed out. Please retry or contact support.");
+    } else {
+      setSyncStatus(status);
     }
-  }, [router, loadKeys, lastAttemptedKeyId]);
+  }, [router, loadKeys, endAttempt]);
 
   /**
    * Phase 167 / 167-06, R2 (167-CONTEXT D-18): is the sync panel's SUBJECT key
@@ -245,8 +321,13 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
    * `rotate-secret`, and the panel's poll can move `syncStatus` during that
    * await. It maps a terminal success to `idle` and returns every other value
    * unchanged. ⛔ `syncing` and `computing` stay as they are, so an in-flight
-   * panel keeps polling and still clears `syncingKeyId` (T-167-06-04); `error`
-   * stays too, because its Retry is useful with a new password.
+   * panel keeps polling and still clears `syncingKeyId` (T-167-06-04). `error`
+   * stays too: it makes no success claim, and it is the attempt's own message.
+   * On `Update password` its Retry is also useful, with the new password. On
+   * `Delete` it is not: the panel's Retry still targets `lastAttemptedKeyId`,
+   * now a deleted id, and surfaces a raw link failure. That is pre-existing,
+   * unchanged by 167-06, and recorded as 167-REVIEW-06 IN-02; retiring an
+   * `error` on Delete would be a behaviour change, so it is not made here.
    *
    * WHY IT IS GUARDED BY THE WITHHOLD. Unguarded, rotating any MT5 password,
    * deleting any key or adding one would retire a TRUTHFUL success about a
@@ -367,7 +448,8 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       // because the updater is functional and returns every in-flight value
       // unchanged. That is a residual, named beside the cross-tab one in D-18
       // (a change made in another tab reaches this tab only through a re-read),
-      // and neither is fixed here.
+      // and neither is fixed here. While a tracked attempt is live the subject
+      // does not move (below) and this is a no-op: the panel is in flight.
       retireWithheldSuccess();
 
       // Auto-sync trades in background (don't block the UI).
@@ -389,7 +471,14 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       // `lastAttemptedKeyId` is set so SyncProgress's Retry button has a
       // target; without it the retry closure would see null and no-op (the
       // pre-existing bug the state's own comment above records).
-      setLastAttemptedKeyId(newKeyId);
+      //
+      // 167-06 fix round (D-18): NOT while a tracked attempt is live. The panel
+      // then belongs to that attempt, and `lastAttemptedKeyId` is its subject
+      // (R2) and its Retry target. Moving it here judged that attempt's later
+      // success against the NEW key, so an untrusted key's success could show
+      // beside its own "Sign-in failed" pill. This post-add sync does not own
+      // the panel in that case (see the catch below).
+      if (attemptRef.current === null) setLastAttemptedKeyId(newKeyId);
       fetch("/api/keys/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -407,21 +496,28 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           // gets diagnosed, and the caught value goes HERE rather than to the
           // DOM (140.3-07's B-27 discipline).
           console.warn("[ApiKeyManager] background sync after key add failed:", err);
+          // Phase 167 / 167-06, R6 (167-CONTEXT D-18), as corrected in the
+          // 167-06 fix round: this failure never touches a live tracked
+          // attempt. This post-add sync is not registered in the one sync slot
+          // and the Add Key form is not modal, so it can fail while ANOTHER
+          // key's attempt is live. Writing `error` then stopped that attempt's
+          // poll and left its marker set, dead-locking every Resync and Use &
+          // Sync, and R4's and R5's remedy controls, until a reload. R6 as
+          // first shipped also cleared the marker here, which ended an attempt
+          // this failure did not stop: when the attempt was still awaiting its
+          // own enqueue, its 202 then resumed polling with no marker, so its
+          // key's pill claimed a credential state under a spinner and its
+          // Update password and Delete were enabled mid-attempt
+          // (167-REVIEW-06 CR-01).
+          // So, while an attempt is live, the panel and the marker are its own:
+          // it keeps polling and ends itself, and this failure reaches the
+          // console only. ⚠️ That loss is a named residual of the post-add sync
+          // bypassing the slot (D-18, routed to 167.2), not a claim that the
+          // failure does not matter. When no attempt is live the panel is idle
+          // or showing a finished attempt, and the failure is shown there as
+          // before (SEAMUX-05 / B-06).
+          if (attemptRef.current !== null) return;
           setSyncStatus("error");
-          // Phase 167 / 167-06, R6 (167-CONTEXT D-18): every transition of the
-          // panel to `error` clears the in-flight marker, and this catch was
-          // the one that did not. This post-add sync is not registered in the
-          // one sync slot and the Add Key form is not modal, so it can fail
-          // while ANOTHER key's sync is in flight. Its `error` then stops that
-          // attempt's poll (SyncProgress polls only while syncing or
-          // computing), `handleSyncStatusChange` never runs, and the marker
-          // stayed set: every Resync and Use & Sync disabled until a reload.
-          // R4's and R5's disables read the same marker, so it would also have
-          // locked that key's Update password and Delete, the remedy the pill
-          // names. When no sync is in flight the marker is already null. The
-          // SUBJECT half of the same race (the post-add sync bypasses the slot)
-          // is named in D-18 and not fixed here.
-          setSyncingKeyId(null);
           setSyncError(
             err instanceof Error ? err.message : SYNC_UNAVAILABLE_COPY,
           );
@@ -456,10 +552,26 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
 
   async function handleDeleteKey(keyId: string) {
     const supabase = createClient();
-    const { error: deleteError } = await supabase.from("api_keys").delete().eq("id", keyId);
+    // 167-06 fix round: `.select("id")` returns the rows the DELETE removed.
+    // Without it, a delete that RLS filtered down to zero rows answers with no
+    // error, the row was dropped locally, R5 retired a withheld success, and
+    // the key came back on the next load. This is the remedy the `revoked`
+    // helper points at, so a delete that removed nothing must say so.
+    const { data: deletedRows, error: deleteError } = await supabase
+      .from("api_keys")
+      .delete()
+      .eq("id", keyId)
+      .select("id");
     setConfirmDelete(null);
     if (deleteError) {
       setError("Failed to delete key: " + deleteError.message);
+      return;
+    }
+    if (deletedRows?.length !== 1) {
+      console.error(
+        `[ApiKeyManager] api_keys delete removed ${deletedRows?.length ?? 0} rows, expected 1`,
+      );
+      setError("Failed to delete key: no key was removed.");
       return;
     }
     // Phase 167 / 167-06, R5 (167-CONTEXT D-18): once the row leaves `keys`,
@@ -477,6 +589,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   }
 
   async function handleSyncTrades(keyId: string) {
+    // The attempt is registered BEFORE any await, so the post-add catch and
+    // `handleSyncStatusChange` see it as live from the first click.
+    const attempt: SyncAttempt = { keyId, enqueued: false, settling: false };
+    attemptRef.current = attempt;
     setSyncingKeyId(keyId);
     setLastAttemptedKeyId(keyId);
     setSyncStatus("syncing");
@@ -514,18 +630,26 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       }
 
       // A job IS enqueued -- analytics may still be computing.
-      // SyncProgress will poll strategy_analytics to track completion.
+      // SyncProgress will poll strategy_analytics to track completion. From
+      // here on its reads may end this attempt (see `SyncAttempt`).
+      attempt.enqueued = true;
       setSyncStatus("computing");
       // NEW-C37-04: pass the key being synced so lastSyncAt reads from
       // the correct row.
       await loadKeys({ lastSyncedKeyId: keyId });
       router.refresh();
     } catch (err) {
+      // Only a live attempt reports its own failure. If this one was already
+      // ended (its terminal arrived, then the post-enqueue re-read threw), the
+      // panel and the marker are no longer its to write.
+      if (!endAttempt(attempt)) {
+        console.warn("[ApiKeyManager] sync failed after its attempt ended:", err);
+        return;
+      }
       const message = err instanceof Error ? err.message : "Sync failed";
       setSyncStatus("error");
       setSyncError(message);
       setError(message);
-      setSyncingKeyId(null);
       // Note: lastAttemptedKeyId is intentionally NOT cleared so the
       // retry button below has a target.
     }
@@ -575,8 +699,13 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
 
       {/* H-0395: distinct load-failure state. Shown instead of the
           "No API keys connected" empty state when the api_keys SELECT
-          failed, so a load error is never disguised as "you have no keys". */}
-      {loadError && !showForm && (
+          failed, so a load error is never disguised as "you have no keys".
+          167-06 fix round (SFH LOW-2): shown whether or not the Add Key form
+          is open. A re-read that follows a remedy (`Update password`'s
+          `onUpdated`, a terminal success) can fail while the form is open, and
+          hiding the banner then left a key reading "Sign-in failed" right after
+          its fix with nothing saying the list was stale. */}
+      {loadError && (
         <Card>
           <div className="flex flex-col items-center gap-3 py-4 text-center">
             <p className="text-sm text-negative">
@@ -661,7 +790,9 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
                   // global disable would block the remedy the pill asks for for
                   // the whole of an unrelated sync. No status conjunct: a
                   // status can flip mid-attempt on a re-read, the in-flight
-                  // marker cannot. Lineage: plan revision 1 said closing this
+                  // marker cannot (only its own attempt clears it; until the
+                  // 167-06 fix round a stale pre-enqueue poll read or a failed
+                  // post-add sync could, see `SyncAttempt`). Lineage: plan revision 1 said closing this
                   // window needed a record tying the withhold to the attempt's
                   // credential. That was wrong: the window exists only if the
                   // attempt and the rotation overlap, and existing state
@@ -717,7 +848,18 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
             Syncing… pill with a silent helper, 167-UI-SPEC S1's
             retry-in-flight cell, so no credential claim sits under a spinner.
             The block stays mounted across the transition, so its one live
-            region is stable and the state that returns is announced politely.
+            region is stable and the state that returns after THIS key's own
+            attempt is announced politely.
+            ⚠️ The FIRST appearance is different (167-REVIEW-06 IN-01). When a
+            key BECOMES untrusted during the page's lifetime (a terminal
+            success's re-read, the mid-flight re-read, the load-error Retry),
+            the block mounts with its sentence already inside the live region,
+            and screen readers generally do not announce text that is present
+            when a region is inserted. The state is still visible and still in
+            the reading order; only the announcement may not fire. Announcing
+            it would need an empty region mounted on every card, which the
+            "a healthy card renders nothing new" rule forbids, so it needs a
+            UI-SPEC decision, not a code change here. No second live region.
           */}
           {isUntrustedKeySyncStatus(key.sync_status) && (
             <div className="mt-2">
@@ -774,7 +916,14 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         }}
       />
 
-      {error && !showForm && syncStatus !== "error" && <p className="text-sm text-negative">{error}</p>}
+      {/* Hidden only when it would repeat the error panel's own message (a
+          failed sync writes the same text to both). 167-06 fix round: it used
+          to be hidden whenever the panel showed ANY error, so a failed Delete
+          on a key whose last sync had failed, the `revoked` helper's remedy
+          path, was reported nowhere. */}
+      {error && !showForm && !(syncStatus === "error" && error === syncError) && (
+        <p className="text-sm text-negative">{error}</p>
+      )}
     </div>
   );
 }
