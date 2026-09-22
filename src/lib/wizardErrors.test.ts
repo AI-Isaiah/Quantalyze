@@ -2071,8 +2071,26 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * never counted off the table. The comment at the head of this file argues
    * why at length: an expectation built by reading the subject is an oracle
    * that cannot fail.
+   *
+   * ⚠️ 94 → 95 (167-CREDTRUST / plan 01, D-05, D-07). ONE entry —
+   * `KEY_SIGN_IN_FAILED`, the honest answer to the wire code the narrowed
+   * MT5 `except Mt5ClientError` transient tail raises, which until now had
+   * no verdict row and reached the founder as the `KEY_NETWORK_TIMEOUT`
+   * terminal with a Retry control that would re-run the identical validate
+   * against a wedged terminal.
+   *
+   * THIS GUARD IS THE DESTRUCTIVE-ACTION SCAN, so its question is "does the
+   * new entry fall INSIDE the population this scan walks?", and the
+   * reasoning was re-run over the entry BEFORE the number moved:
+   *   · the new entry's `actions` are `["request_call", "expand_log"]`;
+   *   · `DESTRUCTIVE_ACTIONS` above holds exactly ONE member, `start_fresh`;
+   *   · neither action is that member, so the entry sits OUTSIDE the scanned
+   *     population by construction and the destructive class below is
+   *     UNCHANGED at four members.
+   * 95 was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 95 to be
+   * 94"), never counted off the table.
    */
-  const EXPECTED_TABLE_SIZE = 94;
+  const EXPECTED_TABLE_SIZE = 95;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2616,8 +2634,26 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * ⚠️ AND THE BASELINE WAS RE-MEASURED AT HEAD BEFORE IT MOVED — 93 is what
    * 164.5.3-02 left, and 94 was READ OFF THE TWIN GUARD'S FAILURE MESSAGE
    * ("expected 94 to be 93") rather than counted off the table.
+   *
+   * ⚠️ 94 → 95 (167-CREDTRUST / plan 01, D-05, D-07), for `KEY_SIGN_IN_FAILED`.
+   * THIS guard is the banned-claims honesty scan, so its question is a
+   * different one from its twin's, and the entry was walked against all four
+   * FORBIDDEN fragments by hand — title, cause and every fix line — BEFORE
+   * the number moved:
+   *   · "been notified" — ABSENT. The fourth fix line names who to email;
+   *     it says nobody has been told yet, the opposite claim.
+   *   · "we fetched your trades" — ABSENT. The entry says nothing about any
+   *     fetch or trade stage; it is about a sign-in, not a sync.
+   *   · "wizard_session_id idempotency" — ABSENT. The entry names no
+   *     column, no env variable and no internal subsystem.
+   *   · "data is unchanged" — ABSENT, and deliberately so: the entry makes
+   *     NO storage claim in either direction (167-UI-SPEC § Open Question 5
+   *     — whether the validate arm stores anything was not measured for
+   *     this arm, so the copy does not assert it).
+   * 95 was READ OFF THE TWIN GUARD'S FAILURE MESSAGE ("expected 95 to be
+   * 94") rather than counted off the table.
    */
-  const EXPECTED_TABLE_SIZE = 94;
+  const EXPECTED_TABLE_SIZE = 95;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
