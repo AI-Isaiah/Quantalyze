@@ -1881,7 +1881,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_wizard_composite_fence.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_wizard_composite_members.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_wizard_session_idempotency.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
-    "per-arm lane time: mean 2.0s over 423 arm run(s)",
+    "per-arm lane time: mean 2.0s over 426 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
