@@ -417,9 +417,9 @@ def _must_reach_handler_unwrapped(exc: Exception) -> bool:
        and ``ccxt.BadRequest``. Downgrading either buys the full 30s→6h retry
        ladder plus the daily cron re-enqueue against a host that will never
        answer, under the copy "sync will retry automatically" — a promise that
-       cannot be kept. The handler's transient arm hardcodes
-       ``error_kind='transient'`` and never re-reads the ``__cause__`` chain,
-       so a downgrade here is FINAL.
+       cannot be kept. The handler's transient arm returns the exception's
+       declared ``error_kind`` (``transient`` for the parent type) and never
+       re-reads the ``__cause__`` chain, so a downgrade here is FINAL.
     2. **``ccxt.RateLimitExceeded``**, which the classifier calls transient but
        the handler has a DEDICATED arm for (``_stamp_429`` + the per-exchange
        cooldown shared with strategy-side ``poll_positions``). Swallowing it
