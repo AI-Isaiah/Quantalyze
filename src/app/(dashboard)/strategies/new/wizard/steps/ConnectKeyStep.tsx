@@ -814,10 +814,26 @@ export function ConnectKeyStep({
   const [existingStrategyName, setExistingStrategyName] = useState<
     string | null
   >(null);
-  // UX-02: the wizard session correlation id — the SAME id wizardFetch sends
-  // on every request below, so the id shown in an error envelope matches the
-  // failing request's server logs / Sentry tag / compute_jobs.metadata.
+  // UX-02: the wizard page-load correlation id — the fallback for the brief
+  // window before any request has been made. See `requestCorrelationId`
+  // below for the id an envelope actually prefers.
   const [correlationId] = useState<string>(() => getWizardCorrelationId());
+  /**
+   * 164.6.5-07 / D-14 — the id of THIS attempt, captured off whichever
+   * wizardFetch call is in flight (task 1's `onCorrelationId`). This step has
+   * TWO request paths that can each fail (the credential submit and the
+   * preselected-key reuse), and both share this ONE piece of state because
+   * they also share ONE `errorCode` / envelope — only one of the two can be
+   * in flight for a given render of this step.
+   *
+   * MEASURED in production: two retries 45s and 55s apart rendered the
+   * IDENTICAL id, because the fallback used to be the page-load
+   * `correlationId` alone. Preferred over it below, so a second failed
+   * attempt renders a DIFFERENT id than the first.
+   */
+  const [requestCorrelationId, setRequestCorrelationId] = useState<
+    string | null
+  >(null);
 
   /**
    * 153.4-04 / D-05 / WIZFORM-05 — THE HONEST LONG WAIT.
@@ -1176,6 +1192,10 @@ export function ConnectKeyStep({
     // docblock: a stale name is a specific lie about which strategy is in the
     // way.
     setExistingStrategyName(null);
+    // 164.6.5-07 / D-14 — cleared with the code it belongs to, for the same
+    // reason: a retry rendering the previous attempt's id is the defect D-14
+    // closes.
+    setRequestCorrelationId(null);
     // 153.4-04 — a fresh attempt clears the previous one's cancelled line for the
     // same reason, and starts the wait: the venue is frozen, the clock is stamped
     // from ONE `Date.now()` the tick then measures against, and the controller is
@@ -1216,6 +1236,9 @@ export function ConnectKeyStep({
           label: nickname.trim() || `${exchange} key`,
           wizard_session_id: wizardSessionId,
         }),
+      }, {
+        // 164.6.5-07 / D-14 — capture the id THIS request put on the wire.
+        onCorrelationId: setRequestCorrelationId,
       });
 
       // 162 review / A-6 — reads the body, and RECORDS a parse failure rather
@@ -1412,21 +1435,31 @@ export function ConnectKeyStep({
     setRetryAfterSeconds(null);
     setExistingStrategyName(null);
     setReuseRequestShapeRefused(false);
+    // 164.6.5-07 / D-14 — same reset rule as the credential arm above; both
+    // arms share this one piece of state (see its docblock).
+    setRequestCorrelationId(null);
     setContinuing(true);
 
     try {
-      const res = await wizardFetch("/api/strategies/create-with-key", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // The pinned reuse contract: the session token and the key id, and
-        // nothing else. No `exchange` — the server reads the venue off the
-        // `api_keys` row, so the wire carries no venue claim of ours to be
-        // wrong about.
-        body: JSON.stringify({
-          wizard_session_id: wizardSessionId,
-          reuse_api_key_id: preselectKey.id,
-        }),
-      });
+      const res = await wizardFetch(
+        "/api/strategies/create-with-key",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          // The pinned reuse contract: the session token and the key id, and
+          // nothing else. No `exchange` — the server reads the venue off the
+          // `api_keys` row, so the wire carries no venue claim of ours to be
+          // wrong about.
+          body: JSON.stringify({
+            wizard_session_id: wizardSessionId,
+            reuse_api_key_id: preselectKey.id,
+          }),
+        },
+        {
+          // 164.6.5-07 / D-14 — capture the id THIS request put on the wire.
+          onCorrelationId: setRequestCorrelationId,
+        },
+      );
 
       // 162 review / A-6 — same reader as the credential arm, for the same
       // reason: a proxy's HTML error page must not read as "the route answered
@@ -1495,8 +1528,12 @@ export function ConnectKeyStep({
     }
   }
 
+  // 164.6.5-07 / D-14 — `requestCorrelationId` (captured off whichever
+  // wizardFetch call is in flight) wins whenever this step actually sent a
+  // request; the page-load `correlationId` remains the fallback only for the
+  // brief window before any request has been made. See that state's docblock.
   const errorEnvelope = errorCode
-    ? buildEnvelope(errorCode, correlationId, {
+    ? buildEnvelope(errorCode, requestCorrelationId ?? correlationId, {
         // 140.3-10's rule, inherited: `?? undefined` because ABSENCE IS NOT
         // ZERO. `null` would be carried into the envelope slot and a `0` there
         // is a wait we were never told about.
