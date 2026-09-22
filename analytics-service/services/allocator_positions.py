@@ -408,7 +408,11 @@ def _must_reach_handler_unwrapped(exc: Exception) -> bool:
 
         kind, _ = classify_exception(exc)
     except Exception:  # noqa: BLE001 - never let classification break the copy path
-        logger.warning(
+        # 167 SFH-L1 — ERROR, not WARNING. The classifier raising is a defect in
+        # OUR code, and its fallback decides the retry disposition: a permanent
+        # failure lost here is retried for good under a retry-promising note.
+        # That has to reach Sentry rather than sit at a level nobody alerts on.
+        logger.error(
             "fetch_allocator_holdings: could not classify %s — treating it as "
             "retryable and surfacing end-user copy",
             type(exc).__name__,

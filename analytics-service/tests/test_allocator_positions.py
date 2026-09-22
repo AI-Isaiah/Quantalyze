@@ -2139,6 +2139,41 @@ def test_every_retry_promising_raise_is_guarded_by_the_classifier():
     )
 
 
+def test_a_classifier_that_raises_is_logged_at_error_with_its_traceback(
+    monkeypatch, caplog
+):
+    """167 SFH-L1 — when `classify_exception` itself raises,
+    `_must_reach_handler_unwrapped` falls back to "retryable" so the copy path
+    survives. That fallback decides the retry disposition. A permanent failure
+    lost here gets retried for good under a note that promises a retry, so the
+    classifier fault must log at ERROR with its traceback (Sentry-grade). A
+    WARNING nobody alerts on is not enough."""
+    import logging
+
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+
+    def _broken_classify(exc):
+        raise RuntimeError("classifier defect")
+
+    monkeypatch.setattr(jw, "classify_exception", _broken_classify)
+
+    with caplog.at_level(logging.DEBUG, logger=ap.logger.name):
+        verdict = ap._must_reach_handler_unwrapped(ValueError("boom"))
+
+    assert verdict is False, "the fallback must still keep the copy path"
+    records = [
+        r for r in caplog.records
+        if r.name == ap.logger.name and "could not classify" in r.getMessage()
+    ]
+    assert records, "the classifier fault was not logged at all"
+    assert records[-1].levelno == logging.ERROR, (
+        f"logged at {records[-1].levelname}, not ERROR — a classifier defect "
+        "that silently downgrades a permanent failure stays invisible"
+    )
+    assert records[-1].exc_info is not None, "the traceback was dropped"
+
+
 def test_rate_limited_note_still_promises_a_retry():
     """167-02 Task 3 — the ONE note in the family whose retry promise is
     legitimate: rate limits ARE transient by construction. Without this pin a
