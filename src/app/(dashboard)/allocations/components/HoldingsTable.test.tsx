@@ -23,6 +23,16 @@ import { UNTRUSTED_KEY_SET_NOUN } from "@/lib/closed-sets";
  *   - Plural/singular rules for the hidden-footer count.
  */
 
+/**
+ * 167 review round 1 / WR-06 — the noun is DATA, not a pattern. Fed into
+ * `new RegExp` unescaped, a future noun carrying a metacharacter (`.`, `(`,
+ * `+`, `?`) would silently change what T4/T5 match instead of failing.
+ */
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+const NOUN_PATTERN = escapeRegExp(UNTRUSTED_KEY_SET_NOUN);
+
 type HoldingRow = HoldingRowType;
 
 function makeHolding(overrides: Partial<HoldingRow> = {}): HoldingRow {
@@ -131,7 +141,7 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
     );
     expect(
       screen.getByText(
-        new RegExp(`1 holding hidden from\\s+${UNTRUSTED_KEY_SET_NOUN}`),
+        new RegExp(`1 holding hidden from\\s+${NOUN_PATTERN}`),
       ),
     ).toBeInTheDocument();
     // Anti-vacuity: the superseded string must be gone, not merely unmatched.
@@ -166,7 +176,7 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
     );
     expect(
       screen.getByText(
-        new RegExp(`2 holdings hidden from\\s+${UNTRUSTED_KEY_SET_NOUN}`),
+        new RegExp(`2 holdings hidden from\\s+${NOUN_PATTERN}`),
       ),
     ).toBeInTheDocument();
   });
@@ -182,7 +192,10 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
   //
   // ⛔ It asserts the RENDERED text, and derives it from the same constant the
   // component renders, so the two cannot drift apart. It still fails if the
-  // label is emptied, reworded by hand, or unhooked from its input.
+  // label is emptied, reworded at the call site, or unhooked from its input.
+  // ⚠️ It does NOT fail on a rewording made IN THE CONSTANT — the only place
+  // the wording now lives (167 review round 1 / WR-06). That is pinned once,
+  // literally, in `src/lib/closed-sets.untrusted-key-status.test.ts`.
   it(`T6: toggle label reads "Show holdings from ${UNTRUSTED_KEY_SET_NOUN}" exactly`, () => {
     render(
       <HoldingsTable

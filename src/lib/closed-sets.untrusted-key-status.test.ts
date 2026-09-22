@@ -32,6 +32,7 @@
 import { describe, it, expect } from "vitest";
 import {
   TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES,
+  UNTRUSTED_KEY_SET_NOUN,
   UNTRUSTED_KEY_SYNC_STATUSES,
   isUntrustedKeySyncStatus,
   untrustedKeyChipLabel,
@@ -88,6 +89,16 @@ describe("[D-16] untrusted-key sync_status closed set", () => {
       expect(isUntrustedKeySyncStatus(status)).toBe(false);
       expect(untrustedKeyChipLabel(status)).toBeNull();
     }
+  });
+
+  it("UNTRUSTED_KEY_SET_NOUN is the cause-neutral set noun, verbatim", () => {
+    // 167 review round 1 / WR-06 — THE one pin on this constant's VALUE.
+    // HoldingsTable's T4/T5/T6 derive their expected text from the constant
+    // (proving the wiring), so without this line any rewording of the constant
+    // passes all three — including a cause-SPECIFIC noun such as "failed
+    // sign-ins", which would bring back "names a narrower set than it hides".
+    // Typed as a literal on purpose (ORACLE INDEPENDENCE above).
+    expect(UNTRUSTED_KEY_SET_NOUN).toBe("keys needing attention");
   });
 
   it("the declared trusted/neutral partition is exactly the hand-typed list — no silent widening", () => {
