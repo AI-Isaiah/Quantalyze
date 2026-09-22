@@ -1912,3 +1912,123 @@ async def test_sfox_balances_arm_follows_the_live_classifier_verdict(
         assert str(caught.value) == ap.SFOX_FETCH_FAILED_NOTE
         assert caught.value.__cause__ is expected
 
+
+# ---------------------------------------------------------------------------
+# Task 3 — the CLASS closure: a roster case, plus the rate-limit pin
+# ---------------------------------------------------------------------------
+def test_every_retry_promising_raise_is_guarded_by_the_classifier():
+    """D-09 as a CLASS, not a list of point fixes (167-02 Task 3).
+
+    Derives the "promises a retry" note set from the module's OWN source (any
+    `*_NOTE` constant whose text contains "retry automatically"), then asserts
+    every except-arm that raises one has `_must_reach_handler_unwrapped(exc)`
+    as its FIRST statement. AST, not grep/text: comments never enter the
+    tree (this repo's dated header-prose-counted-as-code class cannot recur
+    here — `sql-gate-lint`'s R2 rule exists for exactly that class in SQL, and
+    this gate gets the same property for free from `ast.parse`), and a
+    reformat cannot turn this vacuous. A SEVENTH arm added later that raises
+    one of these notes without the guard fails here BY NAME.
+
+    Scope, stated precisely: this governs EXCEPT-catching arms only — the
+    mechanism needs an exception object to consult the classifier with. Four
+    sites raise one of these notes from a plain `if` with NO exception in
+    scope (missing account ref x2, blank currency, non-finite equity) and
+    fall outside this gate's domain by construction, exactly like the two
+    already-guarded ccxt arms fall INSIDE it for free — see
+    167-02-SUMMARY.md for the named residuals, not silently exempted here.
+    """
+    import ast
+    import inspect
+    from services import allocator_positions as ap
+
+    tree = ast.parse(inspect.getsource(ap))
+
+    # Step 1 — the retry-promising constant NAMES, derived from source. Only
+    # TOP-LEVEL module assignments count (mirrors how these constants are
+    # actually declared), so a same-named local variable inside a function
+    # body can never be mistaken for one.
+    note_re = re.compile(r"^[A-Z][A-Z0-9_]*_NOTE$")
+    retry_promising_names: set[str] = set()
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target = node.targets[0]
+        if not (isinstance(target, ast.Name) and note_re.match(target.id)):
+            continue
+        value = getattr(ap, target.id, None)
+        if isinstance(value, str) and "retry automatically" in value.lower():
+            retry_promising_names.add(target.id)
+
+    assert retry_promising_names, (
+        "extracted no retry-promising NOTE constants — the scan is not "
+        "seeing the module's own source"
+    )
+
+    def _raises_retry_promising_note(raise_node: ast.Raise) -> bool:
+        exc = raise_node.exc
+        if not (
+            isinstance(exc, ast.Call)
+            and isinstance(exc.func, ast.Name)
+            and exc.func.id == "AllocatorHoldingsSyncTransientError"
+            and exc.args
+        ):
+            return False
+        arg = exc.args[0]
+        if isinstance(arg, ast.Name):
+            return arg.id in retry_promising_names
+        if (
+            isinstance(arg, ast.Call)
+            and isinstance(arg.func, ast.Attribute)
+            and arg.func.attr == "format"
+            and isinstance(arg.func.value, ast.Name)
+        ):
+            return arg.func.value.id in retry_promising_names
+        return False
+
+    def _is_guard_first_statement(handler: ast.ExceptHandler) -> bool:
+        if not handler.body:
+            return False
+        first = handler.body[0]
+        return (
+            isinstance(first, ast.If)
+            and isinstance(first.test, ast.Call)
+            and isinstance(first.test.func, ast.Name)
+            and first.test.func.id == "_must_reach_handler_unwrapped"
+            and len(first.body) == 1
+            and isinstance(first.body[0], ast.Raise)
+            and first.body[0].exc is None
+        )
+
+    examined: list[str] = []
+    offenders: list[str] = []
+    for handler in (n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler)):
+        raises_note = any(
+            isinstance(n, ast.Raise) and _raises_retry_promising_note(n)
+            for n in ast.walk(handler)
+        )
+        if not raises_note:
+            continue
+        exc_type = ast.unparse(handler.type) if handler.type else "<bare except>"
+        examined.append(f"{exc_type} (line {handler.lineno})")
+        if not _is_guard_first_statement(handler):
+            offenders.append(f"{exc_type} (line {handler.lineno})")
+
+    # Anti-vacuity control: prove the extractor actually found arms to check.
+    assert examined, (
+        "found zero except-arms raising a retry-promising note — the "
+        "extractor is not seeing the arms it must gate"
+    )
+    assert offenders == [], (
+        "these except-arms raise a retry-promising note without consulting "
+        f"_must_reach_handler_unwrapped FIRST (D-09/D-10): {offenders}"
+    )
+
+
+def test_rate_limited_note_still_promises_a_retry():
+    """167-02 Task 3 — the ONE note in the family whose retry promise is
+    legitimate: rate limits ARE transient by construction. Without this pin a
+    future "clean sweep" of the retry-promising family removes it too and
+    creates a NEW dishonesty (167-RESEARCH Pitfall 2)."""
+    from services.allocator_positions import SYNC_ERROR_COPY_BY_STATUS
+
+    assert "retry automatically" in SYNC_ERROR_COPY_BY_STATUS["rate_limited"].lower()
