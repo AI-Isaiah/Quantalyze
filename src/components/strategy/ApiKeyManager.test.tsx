@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, act, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, act, fireEvent, waitFor, within } from "@testing-library/react";
 import { ApiKeyManager } from "./ApiKeyManager";
+import { TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES } from "@/lib/closed-sets";
 
 /**
  * H-0395 (F1 loud-fail discipline) — ApiKeyManager.loadKeys must discriminate
@@ -1471,5 +1472,188 @@ describe("ApiKeyManager — SEAMUX-05: both sync call sites observe the HTTP out
     // A background sync that SUCCEEDED must not manufacture an error surface.
     // The panel only renders once syncStatus leaves "idle".
     expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * [167-06] Phase 167 CREDTRUST, gap 1 — the persisted credential state renders
+ * on the MANAGER's own key card.
+ *
+ * THE GAP, MEASURED. `profiles.role` defaults to `manager`, and the daily
+ * holdings poll stamps every active key regardless of role. Before this plan
+ * the only component that rendered the stamped `api_keys.sync_status` was
+ * `AllocatorSyncStatus`, mounted only on the allocator-only `/profile`
+ * Exchanges tab. A manager's `sign_in_failed` key was therefore WRITTEN and
+ * shown on no page they could reach. `ApiKeyManager` already selects
+ * `sync_status` and `sync_error` through `API_KEY_USER_COLUMNS`; it rendered
+ * neither.
+ *
+ * ⛔ ORACLE INDEPENDENCE. Every expected pill label and helper sentence below is
+ * HAND-TYPED (the helper's U+2014 em-dash included). Importing them from the
+ * component under test would let a reworded string pass its own pin. The
+ * healthy-control iteration DOMAIN is imported on purpose: a future trusted
+ * value is then covered automatically, while its expected output (nothing) is
+ * still asserted here.
+ *
+ * Each status gets its OWN render (it.each). Testing-library cleans up only
+ * between tests, so a loop of renders inside one test would stack components
+ * and make every "zero nodes" assertion unreliable.
+ */
+describe("[167-06] the persisted credential state renders on the manager's key card", () => {
+  // Hand-typed, never imported (see the oracle-independence note above).
+  const SIGN_IN_FAILED_HELPER =
+    "Update this account's credentials — they may have changed.";
+  const REVOKED_HELPER_TEXT = "Re-add a read-only key from your exchange.";
+  // A raw `sync_error` the pre-167 pipeline really wrote: a retry promise that
+  // cannot be kept for a credential failure. It must never reach this surface.
+  const RAW_SYNC_ERROR =
+    "MT5 terminal unreachable — sync will retry automatically.";
+
+  function row(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      id: "key-mt5-sif",
+      user_id: "user-a",
+      exchange: "mt5",
+      label: "Manager MT5",
+      is_active: true,
+      sync_status: "sign_in_failed",
+      last_sync_at: "2026-04-19T11:58:00Z",
+      account_balance_usdt: 1000,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+      venue_account_id: "synth1234",
+      ...overrides,
+    };
+  }
+
+  async function renderRows(
+    rows: ReturnType<typeof row>[],
+    currentKeyId: string | null = null,
+  ) {
+    selectResultMock.mockReturnValue({ data: rows, error: null });
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(
+        <ApiKeyManager strategyId="strat-1" currentKeyId={currentKeyId} />,
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByText(rows[0].label as string)).toBeInTheDocument();
+    });
+    return utils;
+  }
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+    capturedOnStatusChange = null;
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    {
+      status: "sign_in_failed",
+      exchange: "mt5",
+      label: "Manager MT5",
+      pillText: "Sign-in failed",
+      pillClasses: ["bg-warning-bg", "text-warning"],
+      helperText: SIGN_IN_FAILED_HELPER,
+      remedy: "Update password",
+    },
+    {
+      status: "revoked",
+      exchange: "binance",
+      label: "Manager Binance",
+      pillText: "Key revoked",
+      pillClasses: ["bg-negative/10", "text-negative"],
+      helperText: REVOKED_HELPER_TEXT,
+      remedy: "Delete",
+    },
+  ])(
+    "an untrusted $status key shows the existing pill and authored helper inside ITS OWN card, beside the $remedy control",
+    async ({ status, exchange, label, pillText, pillClasses, helperText, remedy }) => {
+      await renderRows([
+        row({
+          id: `key-${status}`,
+          exchange,
+          label,
+          sync_status: status,
+          venue_account_id: exchange === "mt5" ? "synth1234" : null,
+        }),
+      ]);
+
+      const card = screen.getByTestId(`api-key-card-key-${status}`);
+      const pill = within(card).getByTestId("allocator-sync-pill");
+      expect(pill).toHaveAttribute("data-sync-status", status);
+      expect(pill.textContent).toBe(pillText);
+      for (const cls of pillClasses) expect(pill).toHaveClass(cls);
+
+      const helper = within(card).getByTestId("allocator-sync-helper");
+      expect(helper).toHaveAttribute("role", "status");
+      expect(helper.textContent).toBe(helperText);
+
+      // The remedy the helper names is on the SAME card, not elsewhere.
+      expect(
+        within(card).getByRole("button", { name: remedy }),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it.each([...TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES, null])(
+    "HEALTHY CONTROL: sync_status %s renders no pill, no helper and no added live region",
+    async (status) => {
+      await renderRows([
+        row({ id: "key-mt5-ok", label: "Healthy MT5", sync_status: status }),
+        row({
+          id: "key-bin-ok",
+          exchange: "binance",
+          label: "Healthy Binance",
+          sync_status: status,
+          venue_account_id: null,
+        }),
+      ]);
+      expect(screen.getByText("Healthy Binance")).toBeInTheDocument();
+
+      expect(screen.queryAllByTestId("allocator-sync-pill")).toHaveLength(0);
+      expect(screen.queryAllByTestId("allocator-sync-helper")).toHaveLength(0);
+    },
+  );
+
+  it.each(["revoked", "sign_in_failed"])(
+    "the raw api_keys.sync_error of a %s key never reaches the DOM",
+    async (status) => {
+      await renderRows([
+        row({ id: `key-leak-${status}`, sync_status: status, sync_error: RAW_SYNC_ERROR }),
+      ]);
+
+      const text = document.body.textContent ?? "";
+      expect(text).not.toContain(RAW_SYNC_ERROR);
+      expect(text).not.toContain("will retry automatically");
+    },
+  );
+
+  it("adds EXACTLY ONE live region per untrusted card (no second live region)", async () => {
+    // Baseline measured in THIS test, from a healthy-only render of the same
+    // shape, so a live region some other part of the tree carries is counted on
+    // both sides rather than hard-coded here.
+    const healthy = await renderRows([
+      row({ id: "key-a", label: "Key A", sync_status: "complete" }),
+    ]);
+    const baseline = healthy.container.querySelectorAll("[aria-live]").length;
+    healthy.unmount();
+
+    const untrusted = await renderRows([
+      row({ id: "key-a", label: "Key A", sync_status: "sign_in_failed" }),
+    ]);
+    const card = screen.getByTestId("api-key-card-key-a");
+    expect(within(card).getAllByRole("status")).toHaveLength(1);
+    expect(
+      untrusted.container.querySelectorAll("[aria-live]").length,
+    ).toBe(baseline + 1);
   });
 });

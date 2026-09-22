@@ -9,8 +9,10 @@ import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "./ApiKeyForm";
 import { SyncProgress, type SyncStatus } from "./SyncProgress";
 import { UpdateMt5SecretDialog } from "./UpdateMt5SecretDialog";
+import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 import type { ApiKey } from "@/lib/types";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
+import { isUntrustedKeySyncStatus } from "@/lib/closed-sets";
 
 interface ApiKeyManagerProps {
   strategyId: string;
@@ -486,7 +488,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       )}
 
       {keys.map((key) => (
-        <Card key={key.id}>
+        <Card key={key.id} data-testid={`api-key-card-${key.id}`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <span
@@ -546,6 +548,38 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
               </Button>
             </div>
           </div>
+          {/*
+            Phase 167 CREDTRUST / 167-06 (gap 1): the MANAGER-role surface for
+            the persisted credential state. RESEARCH Open Question 2 is closed
+            by this plan's scoping decision (recorded as 167-CONTEXT D-18): a
+            manager owns the stalled factsheet, `profiles.role` defaults to
+            `manager`, and the only other render of this state sits on the
+            allocator-only `/profile` Exchanges tab. This card is on the
+            strategy's own edit page, beside the controls the helper names
+            (`Update password`, and `Delete` / `Add Key` for a re-add).
+            - REUSES the locked `AllocatorSyncStatus`: no copy and no colour is
+              authored here (D-05, D-11 arm B, 167-UI-SPEC S1).
+            - No factsheet path is touched (D-04).
+            - Only the UNTRUSTED partition mounts. Every trusted-or-neutral
+              status, `error` and `rate_limited` included, stays unrendered on
+              this card: the gap is the credential state, and a full pill here
+              would need the rate-limit cooldown inputs this component does not
+              load.
+            - It reads the server's stored status only and never infers a cause
+              from staleness (D-02, D-03).
+            The wrapper carries no role and no aria-*: the component's helper is
+            the card's one live region (167-UI-SPEC § Accessibility).
+          */}
+          {isUntrustedKeySyncStatus(key.sync_status) && (
+            <div className="mt-2">
+              <AllocatorSyncStatus
+                syncStatus={key.sync_status}
+                syncError={key.sync_error}
+                lastSyncAt={key.last_sync_at}
+                exchange={key.exchange}
+              />
+            </div>
+          )}
         </Card>
       ))}
 
