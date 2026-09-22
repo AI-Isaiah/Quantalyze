@@ -204,7 +204,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
     expect(pill.textContent).toBe("Sign-in failed");
     const helper = screen.getByTestId("allocator-sync-helper");
     expect(helper.textContent).toBe(
-      "Update this account's credentials \u2014 the saved ones may have changed.",
+      "Update this account's credentials \u2014 they may have changed.",
     );
     expect(helper.textContent).not.toContain("credentials - the saved");
     // 167 review round 1 / WR-03: the remedy must not name "Reconnect". That
@@ -234,7 +234,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
     );
     const helper = screen.getByTestId("allocator-sync-helper");
     expect(helper.textContent).toBe(
-      "Update this account's credentials \u2014 the saved ones may have changed.",
+      "Update this account's credentials \u2014 they may have changed.",
     );
     expect(helper.textContent).not.toContain("MT5 terminal unreachable");
     expect(helper.textContent).not.toContain("will retry automatically");

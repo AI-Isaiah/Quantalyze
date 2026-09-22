@@ -86,9 +86,9 @@ const EM_DASH = "\u2014"; // U+2014 — NOT a hyphen-minus.
 // password" (MT5), which re-validates a NEW credential. So the sentence now
 // names the thing to change (the credentials) rather than a control that
 // retries the old ones. It stays venue-agnostic: "credentials", never
-// "password" or "key". ⚠️ 68 characters, over 167-UI-SPEC § Typography's
-// 60-character helper budget; the wording was decided with that known.
-const CREDENTIAL_FAILED_HELPER = `Update this account's credentials ${EM_DASH} the saved ones may have changed.`;
+// "password" or "key". 58 characters, inside 167-UI-SPEC § Typography's
+// 60-character helper budget.
+const CREDENTIAL_FAILED_HELPER = `Update this account's credentials ${EM_DASH} they may have changed.`;
 
 // Queued threshold: only surface the Queued helper when the breaker cooldown is
 // ≥30s out. Under 30s is treated as a "pending/starting" state where the

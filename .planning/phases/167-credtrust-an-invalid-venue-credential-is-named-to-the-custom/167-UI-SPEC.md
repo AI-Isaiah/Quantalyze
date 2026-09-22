@@ -193,10 +193,10 @@ and it is recorded here rather than acted on. → `## Open Questions`, item 3.
 
 | Element | Copy |
 |---------|------|
-| Primary CTA | **None added.** This phase authors no button. The action is named *in prose* — "Reconnect this account" — and performed through the existing key-management controls in `AllocatorExchangeManager` (S1) and the existing credential form (S2). ⛔ Do not mint a CTA to carry this copy. |
+| Primary CTA | **None added.** This phase authors no button. The action is named *in prose* — "Update this account's credentials" — and performed through the existing key-management controls in `AllocatorExchangeManager` (S1) and the existing credential form (S2). ⛔ Do not mint a CTA to carry this copy. |
 | Empty state heading | Not reached. Neither surface has an empty state this phase owns: with no key connected, `AllocatorSyncStatus` is not mounted at all and `AllocatorExchangeManager` renders its existing add-key affordance. |
 | Empty state body | Not reached — see above. |
-| Error state | **S1:** `Reconnect this account — its credentials may have changed.` **S2:** title `We could not sign in to this account.` + the `cause` and `fix[]` specified in §2 below. Both state the problem and the next step; neither promises a retry. |
+| Error state | **S1:** `Update this account's credentials — they may have changed.` **S2:** title `We could not sign in to this account.` + the `cause` and `fix[]` specified in §2 below. Both state the problem and the next step; neither promises a retry. |
 | Destructive confirmation | Not reached. This phase adds no destructive action. "Reconnect" is additive and non-destructive; the one genuinely destructive adjacent flow (delete/rotate a key) is untouched. |
 
 ### 1. S1 — the authored owner helper line
@@ -208,12 +208,12 @@ already shows the right shape: an **authored** constant that ignores `syncError`
 adds a second authored constant of exactly that shape.
 
 ```
-CREDENTIAL_FAILED_HELPER = "Reconnect this account — its credentials may have changed."
+CREDENTIAL_FAILED_HELPER = "Update this account's credentials — they may have changed."
 ```
 
 | Property | Value |
 |----------|-------|
-| Rendered form | `Reconnect this account — its credentials may have changed.` |
+| Rendered form | `Update this account's credentials — they may have changed.` |
 | Length | 58 characters — inside the ≤60 budget declared in § Typography |
 | Em-dash | **U+2014**, composed through the file's existing `EM_DASH` constant. ⛔ never `-`, never `--` |
 | Terminating period | **required** — matches `REVOKED_HELPER`'s locked shape |
@@ -222,9 +222,12 @@ CREDENTIAL_FAILED_HELPER = "Reconnect this account — its credentials may have 
 
 **Why each clause, against DESIGN.md § Voice:**
 
-- *"Reconnect this account"* — **active voice, imperative, remedy first.** Venue-agnostic:
-  it names neither a key nor a password (see §3).
-- *"— its credentials may have changed"* — **states its own limit.** It does NOT assert the
+- *"Update this account's credentials"* — **active voice, imperative, remedy first.** Venue-agnostic:
+  it names neither a key nor a password (see §3). ⚠️ AMENDED 2026-09-22 (review round 1, WR-03):
+  this clause read *"Reconnect this account"*, but the card's Reconnect control re-runs the SAVED
+  credential — the one that just failed — while the control that fixes the state is "Update
+  password". The sentence now names what to change rather than a control that retries the old one.
+- *"— they may have changed"* — **states its own limit.** It does NOT assert the
   credential is invalid, because on the arm this phase routes (a transport-shaped failure
   the classifier declines to call permanent) we do not know that. "May have changed" is true
   of both measured cases: an MT5 password the founder changed, and a venue key that expired.
