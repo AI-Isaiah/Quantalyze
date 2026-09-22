@@ -21,7 +21,9 @@ needing a real KEK or live api_keys row.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import ccxt.async_support as ccxt
@@ -1556,3 +1558,357 @@ def test_sync_error_copy_constants_are_product_copy():
     assert sync_error_copy("a-status-invented-later", "binance") == (
         SYNC_ERROR_COPY_BY_STATUS["error"].format(venue="Binance")
     )
+
+
+# ===========================================================================
+# Phase 167-02 (D-09/D-10) — the retry PROMISE is a function of the retry
+# DISPOSITION across the WHOLE allocator holdings copy family, not just the
+# two ccxt arms tests 5c/5d above already prove (`fetch_allocator_holdings`'s
+# spot/derivative arms). MT5_UNREACHABLE_NOTE / MT5_MISSING_ACCOUNT_REF_NOTE /
+# SFOX_FETCH_FAILED_NOTE were raised UNCONDITIONALLY by every MT5/sFOX
+# except-arm; each now carries `if _must_reach_handler_unwrapped(exc): raise`
+# as its first statement, copied from the ccxt arms' placement verbatim.
+#
+# WHY EVERY CASE BELOW MOCKS `classify_exception` RATHER THAN CALLING IT FOR
+# REAL (departure from test 5c's style, deliberate — read before changing):
+# `job_worker.classify_exception` has NO Mt5ClientError / Mt5SessionAbandoned
+# / Mt5AccountMismatchError / SfoxApiError branch today — all four are plain
+# RuntimeError/Exception subclasses (D-42), so a REAL instance of any of them
+# falls straight to the classifier's final `return ("unknown", ...)`, and
+# `asyncio.TimeoutError` hits its own explicit 'transient' branch. A case
+# built ONLY from an unmocked `classify_exception` call could therefore never
+# observe a 'permanent' verdict for these types, and removing the guard would
+# change NOTHING such a case could see — the exactly-vacuous shape this
+# repo's anti-vacuity rule forbids ("a test that cannot fail is worse than
+# none"). D-10's own text says the measured wrong-password case is left
+# "truthful-but-useless" by this plan for exactly this reason (167-02-PLAN.md
+# scope_note) — the mechanism is what must be proven, not today's verdict.
+#
+# So every case follows test 5d's shape (`job_worker.classify_exception`
+# monkeypatched to a controlled verdict — "the classifier is CONSULTED, not
+# mirrored") while keeping test 5c's REAL-SHAPE discipline: every exception
+# raised is a genuinely-constructed instance of the type its except clause
+# names — `Mt5ClientError(0, "Invalid account")` is the ROADMAP's own
+# measured wrong-password corpus string (services/mt5_validation.py's
+# `_AUTH_PHRASES` table), never a synthetic marker class. That combination is
+# the only shape that is simultaneously real AND falsifiable given today's
+# classifier. See 167-02-SUMMARY.md for the full accounting (six except-arms
+# guarded, four residual `if`-sites with no exception in scope named there).
+# ===========================================================================
+
+
+class _Mt5ClientDouble:
+    """A duck-typed `_fetch_mt5_account_rows` CLIENT double.
+
+    Narrower than the real `Mt5Client` facade `test_allocator_positions_
+    non_ccxt.py` exercises through its `_connect` injection seam — that file
+    proves the terminal-lock/IPC discipline end to end; these D-09/D-10 guard
+    oracles only need the RIGHT exception TYPE to reach the except clause
+    under test, injected at the FIRST call `_mt5_read` makes
+    (``session.client.login(...)``) so every arm's setup is uniform. `cast()`
+    at the real call site is a typing-only no-op, so a duck-typed double is
+    legitimate here the same way `_SpecConstrainedClient` is in the sibling
+    file, just narrower (this file's scope is the guard, not the IPC
+    facade).
+    """
+
+    def __init__(self, *, login_raises=None, account_info=None):
+        self.terminal_key = "h:167-02"
+        self._login_raises = login_raises
+        self._account_info = account_info if account_info is not None else {}
+
+    def login(self, login, investor_password, server):  # noqa: ANN001
+        if self._login_raises is not None:
+            raise self._login_raises
+
+    def account_info(self):
+        return self._account_info
+
+
+class _Mt5SessionDouble:
+    """Matches `Mt5Session`'s shape: `.login` (the account int), `.client`."""
+
+    def __init__(self, client, login: int = 246813):
+        self.client = client
+        self.login = login
+        self.investor_password = "pw"  # noqa: S105 - test fixture, not a secret
+        self.server = "Broker-Live"
+
+
+class _SfoxClientDouble:
+    """A duck-typed `_fetch_sfox_balance_rows` client double — `get_balances()`
+    only, the ONE method that arm calls."""
+
+    def __init__(self, *, raises):
+        self._raises = raises
+
+    async def get_balances(self):
+        raise self._raises
+
+
+def _mt5_verdict_case_setup(monkeypatch) -> None:
+    """Shared drive for every MT5 arm's verdict-parametrized oracle below.
+
+    The env/reset/patch plumbing is byte-identical across all five MT5 arms
+    (MT5_ENABLED on, the shared terminal-lock/epoch registry reset, the
+    restart hook stubbed so a `TimeoutError`/`Mt5AccountMismatchError` case
+    never touches a real `Mt5Client.restart()`) — lives here ONCE rather than
+    five times.
+    """
+    from services import allocator_positions as ap
+    from services import mt5_concurrency
+
+    mt5_concurrency.reset_terminal_state_for_tests()
+    monkeypatch.setenv("MT5_ENABLED", "true")
+
+    async def _fake_restart(client, *, log_prefix="derive_broker_dailies"):
+        pass
+
+    monkeypatch.setattr(ap, "_mt5_bounded_restart", _fake_restart)
+
+
+# ---------------------------------------------------------------------------
+# Task 1 — the MEASURED wrong-password path: `except Mt5ClientError`
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict, unwrapped",
+    [("permanent", True), ("transient", False), ("unknown", False)],
+)
+async def test_mt5_client_error_arm_follows_the_live_classifier_verdict(
+    monkeypatch, verdict, unwrapped
+):
+    """D-09/D-10 Task 1 — `Mt5ClientError(0, "Invalid account")` is the
+    ROADMAP's own measured wrong-password corpus string. `must_be_unwrapped`
+    is controlled (see the module note above for why) but the exception
+    object is real, and the assertion is IDENTITY — the handler must receive
+    the exact same instance, never a copy or a re-wrap."""
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+    from services.mt5_client import Mt5ClientError
+
+    expected = Mt5ClientError(0, "Invalid account")
+
+    def _fake_classify(exc):
+        assert exc is expected
+        return (verdict, "sanitized")
+
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+    monkeypatch.setattr(jw, "classify_exception", _fake_classify)
+
+    if unwrapped:
+        with pytest.raises(Mt5ClientError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert caught.value is expected, (
+            f"{verdict!r} failure was swallowed into "
+            f"{type(caught.value).__name__} instead of reaching the handler "
+            "unwrapped — a permanent failure would become an unbounded retry"
+        )
+    else:
+        with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+        assert caught.value.__cause__ is expected
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — the remaining five except-arms, each its OWN case + OWN real shape
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict, unwrapped",
+    [("permanent", True), ("transient", False), ("unknown", False)],
+)
+async def test_mt5_read_timeout_arm_follows_the_live_classifier_verdict(
+    monkeypatch, verdict, unwrapped
+):
+    """D-09/D-10 Task 2 — the read-timeout arm (WEDGE-01 / MT5CONC-01).
+    `asyncio.TimeoutError` classifies 'transient' for REAL (classify_
+    exception's first isinstance check) — a genuinely 'permanent' verdict for
+    this type cannot occur today, so (mirroring the Mt5ClientError case) the
+    verdict is controlled to prove the arm consults it at all.
+
+    MEASURED: `asyncio.wait_for`/`to_thread` does NOT preserve object identity
+    for a `TimeoutError` raised INSIDE the awaited thread — the object the
+    except-arm receives is not `is` the one the double raised (every OTHER
+    arm's exception survives the trip unchanged; this is `TimeoutError`-
+    specific asyncio plumbing, not a guard defect). So this case captures the
+    REAL propagated object via the classify hook instead of asserting against
+    a pre-built one — self-consistent identity, not assumed identity."""
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+
+    captured: list[BaseException] = []
+
+    def _fake_classify(exc):
+        captured.append(exc)
+        return (verdict, "sanitized")
+
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=asyncio.TimeoutError()))
+    _mt5_verdict_case_setup(monkeypatch)
+    monkeypatch.setattr(jw, "classify_exception", _fake_classify)
+
+    if unwrapped:
+        with pytest.raises(asyncio.TimeoutError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert captured and caught.value is captured[0]
+    else:
+        with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+        assert captured and caught.value.__cause__ is captured[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict, unwrapped",
+    [("permanent", True), ("transient", False), ("unknown", False)],
+)
+async def test_mt5_abandoned_session_arm_follows_the_live_classifier_verdict(
+    monkeypatch, verdict, unwrapped
+):
+    """D-09/D-10 Task 2 — the abandoned-session fence (WIZFORM-ABANDON/D-40).
+    `Mt5SessionAbandoned` is a plain `Exception` (D-42) with no classifier
+    branch, so a real instance is 'unknown' today — same reasoning as the
+    timeout arm above."""
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+    from services.mt5_client import Mt5SessionAbandoned
+
+    expected = Mt5SessionAbandoned("account_info")
+
+    def _fake_classify(exc):
+        assert exc is expected
+        return (verdict, "sanitized")
+
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+    monkeypatch.setattr(jw, "classify_exception", _fake_classify)
+
+    if unwrapped:
+        with pytest.raises(Mt5SessionAbandoned) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert caught.value is expected
+    else:
+        with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+        assert caught.value.__cause__ is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict, unwrapped",
+    [("permanent", True), ("transient", False), ("unknown", False)],
+)
+async def test_mt5_account_mismatch_arm_follows_the_live_classifier_verdict(
+    monkeypatch, verdict, unwrapped
+):
+    """D-09/D-10 Task 2 — the login-mismatch fence (MT5CONC-02)."""
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+    from services.mt5_client import Mt5AccountMismatchError
+
+    expected = Mt5AccountMismatchError(246813, 999999)
+
+    def _fake_classify(exc):
+        assert exc is expected
+        return (verdict, "sanitized")
+
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+    monkeypatch.setattr(jw, "classify_exception", _fake_classify)
+
+    if unwrapped:
+        with pytest.raises(Mt5AccountMismatchError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert caught.value is expected
+    else:
+        with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+        assert caught.value.__cause__ is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict, unwrapped",
+    [("permanent", True), ("transient", False), ("unknown", False)],
+)
+async def test_mt5_equity_extraction_arm_follows_the_live_classifier_verdict(
+    monkeypatch, verdict, unwrapped
+):
+    """D-09/D-10 Task 2 — NEWLY MEASURED (not in 167-PATTERNS' six-arm count):
+    the equity-extraction `except (KeyError, TypeError, ValueError)` arm. See
+    167-02-SUMMARY.md's re-measurement note for why this differs from the
+    plan's own citation. A REAL, naturally-triggered `ValueError` (a
+    non-numeric `equity` field — the same malformed-payload class the ccxt
+    arms' `KeyError("total")` param already covers) drives the case; no
+    injection into `client.login` needed, unlike the four arms above."""
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+
+    client = _Mt5ClientDouble(
+        account_info={"login": 246813, "currency": "USD", "equity": "not-a-number"}
+    )
+    session = _Mt5SessionDouble(client)
+    _mt5_verdict_case_setup(monkeypatch)
+
+    captured: list[BaseException] = []
+
+    def _fake_classify(exc):
+        captured.append(exc)
+        return (verdict, "sanitized")
+
+    monkeypatch.setattr(jw, "classify_exception", _fake_classify)
+
+    if unwrapped:
+        with pytest.raises(ValueError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert captured and caught.value is captured[0]
+    else:
+        with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+        assert captured and caught.value.__cause__ is captured[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict, unwrapped",
+    [("permanent", True), ("transient", False), ("unknown", False)],
+)
+async def test_sfox_balances_arm_follows_the_live_classifier_verdict(
+    monkeypatch, verdict, unwrapped
+):
+    """D-09/D-10 Task 2 — the sFOX balances read (AUM-05), dark behind
+    SFOX_ENABLED with zero stored keys today — proven correct BEFORE its
+    go-live flip, the same posture `test_sfox_fetch_failure_raises_transient_
+    human_copy` already takes in test_allocator_positions_non_ccxt.py."""
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+    from services.sfox_client import SfoxApiError
+
+    monkeypatch.setenv("SFOX_ENABLED", "true")
+
+    expected = SfoxApiError(503, "Service Unavailable")
+
+    def _fake_classify(exc):
+        assert exc is expected
+        return (verdict, "sanitized")
+
+    monkeypatch.setattr(jw, "classify_exception", _fake_classify)
+
+    client = _SfoxClientDouble(raises=expected)
+
+    if unwrapped:
+        with pytest.raises(SfoxApiError) as caught:
+            await ap.fetch_allocator_holdings("sfox", client, API_KEY_ID)
+        assert caught.value is expected
+    else:
+        with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+            await ap.fetch_allocator_holdings("sfox", client, API_KEY_ID)
+        assert str(caught.value) == ap.SFOX_FETCH_FAILED_NOTE
+        assert caught.value.__cause__ is expected
+

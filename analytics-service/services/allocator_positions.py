@@ -680,6 +680,10 @@ async def _fetch_mt5_account_rows(
                 asyncio.to_thread(_mt5_read), timeout=_MT5_DERIVE_READ_TIMEOUT_S
             )
         except asyncio.TimeoutError as exc:
+            # D-09/D-10 (167-02) — see the Mt5ClientError arm below for why
+            # this is consulted before anything else in the arm.
+            if _must_reach_handler_unwrapped(exc):
+                raise
             # A blocked RPyC/Wine pipe does NOT self-unblock, so actively (and
             # boundedly) restart the terminal before the transient, or every
             # retry inherits the same wedge and burns to failed_final.
@@ -691,6 +695,9 @@ async def _fetch_mt5_account_rows(
             await _mt5_bounded_restart(session.client, log_prefix="poll_allocator_positions")
             raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
         except Mt5SessionAbandoned as exc:
+            # D-09/D-10 (167-02) — see the Mt5ClientError arm below.
+            if _must_reach_handler_unwrapped(exc):
+                raise
             # ⭐ WIZFORM-ABANDON / D-40. `Mt5SessionAbandoned` is a plain
             # `Exception` (D-42), so it matches none of the three sibling arms
             # here; without this one it left `fetch_allocator_holdings` as a raw
@@ -716,6 +723,9 @@ async def _fetch_mt5_account_rows(
             )
             raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
         except Mt5AccountMismatchError as exc:
+            # D-09/D-10 (167-02) — see the Mt5ClientError arm below.
+            if _must_reach_handler_unwrapped(exc):
+                raise
             # A mis-routed / stale terminal is an INFRA fault, never user blame:
             # nothing is returned, nothing is persisted, and the restart heals
             # exactly the stale pipe that causes it. The mismatch detail (two
@@ -730,6 +740,18 @@ async def _fetch_mt5_account_rows(
             await _mt5_bounded_restart(session.client, log_prefix="poll_allocator_positions")
             raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
         except Mt5ClientError as exc:
+            # D-09/D-10 (167-02) — consult the same authority the two ccxt
+            # arms below already do, ahead of anything else in this arm. This
+            # is the MEASURED wrong-password path (`Mt5ClientError(0, "Invalid
+            # account")` — services/mt5_validation.py's `_AUTH_PHRASES`
+            # corpus). `job_worker.classify_exception` has no MT5-specific
+            # branch today, so a real instance still falls to its generic
+            # 'unknown' bucket and this stays a structural fix rather than a
+            # behavior change for THAT shape — see 167-02-SUMMARY.md. It stops
+            # being a no-op the day a future classifier addition (or a later
+            # phase) makes an MT5 read-time failure classify permanent.
+            if _must_reach_handler_unwrapped(exc):
+                raise
             # The key already validated at connect, so a read-time client error
             # is a transport/terminal condition, not a credential verdict:
             # retry. Its text is already secret-scrubbed at construction, but it
@@ -809,6 +831,12 @@ async def _fetch_mt5_account_rows(
     try:
         equity = float(info["equity"])
     except (KeyError, TypeError, ValueError) as exc:
+        # D-09/D-10 (167-02) — a malformed/missing payload field is the same
+        # class of failure the ccxt arms' `KeyError`/`TypeError` params already
+        # cover (see the module-level oracle in test_allocator_positions.py);
+        # see the Mt5ClientError arm above for why this is consulted first.
+        if _must_reach_handler_unwrapped(exc):
+            raise
         logger.warning(
             "poll_allocator_positions: mt5 account_info missing/non-numeric "
             "equity — refusing to emit a row"
@@ -1002,6 +1030,10 @@ async def _fetch_sfox_balance_rows(
             client.get_balances(), timeout=_SFOX_HOLDINGS_READ_TIMEOUT_S
         )
     except (SfoxApiError, asyncio.TimeoutError) as exc:
+        # D-09/D-10 (167-02) — see the Mt5ClientError arm's comment in
+        # `_fetch_mt5_account_rows` above for why this is consulted first.
+        if _must_reach_handler_unwrapped(exc):
+            raise
         # SfoxApiError's detail is already secret-scrubbed at construction, but
         # it is still INTERNAL text (upstream bodies, status codes). Only the
         # fixed copy constant is surfaced; the detail survives in the log and in
