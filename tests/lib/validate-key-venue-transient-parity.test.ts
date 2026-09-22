@@ -142,6 +142,18 @@ const EXPECTED: Readonly<
     wireRecoverable: true,
     envelopeRecoverable: true,
   },
+  // 167-CREDTRUST plan 01 (D-05 / D-07 / D-08, STATUS_CONTRACT S-27) NARROWED
+  // C5 away from the shared NETWORK_UNAVAILABLE vocabulary onto this minted
+  // code. The two `recoverable` columns AGREE here, and the agreement is
+  // load-bearing rather than incidental: the wizard entry carries NEITHER
+  // member of `RECOVERABLE_ACTIONS`, so no Retry control renders, which is the
+  // same answer the Python contract gives. It is therefore NOT a second
+  // permitted divergence — see `DIVERGENT_WIRE_CODE`, which stays at one.
+  SIGN_IN_FAILED: {
+    wizardCode: "KEY_SIGN_IN_FAILED",
+    wireRecoverable: false,
+    envelopeRecoverable: false,
+  },
   // Correct BY CONSTRUCTION: the contract's own control for a code the table
   // has never seen. It must reach UNKNOWN through the surviving cascade, not
   // through a short-circuit above it.
@@ -170,17 +182,23 @@ const DIVERGENT_WIRE_CODE = "AUTH_FAILED";
  * or `spec.cases.length` — a corpus that quietly shrinks would otherwise take
  * its own guard down with it.
  *
- * ⚠️ `NON_RECOVERABLE_WIRE_CASES` is 2, not 1. The plan that ordered this test
- * said "exactly 1 non-recoverable (AUTH_FAILED)"; the fixture carries the
- * permanent control at BOTH collapse sites (C6 and C7) on purpose, so that the
- * derivation is proven to be the same rule at the site with traffic and at the
- * dead one. One CODE, two CASES. Both numbers are pinned so neither reading can
- * quietly drift.
+ * ⚠️ `NON_RECOVERABLE_WIRE_CASES` exceeds `NON_RECOVERABLE_WIRE_CODES`. The plan
+ * that ordered this test said "exactly 1 non-recoverable (AUTH_FAILED)"; the
+ * fixture carries that permanent control at BOTH collapse sites (C6 and C7) on
+ * purpose, so that the derivation is proven to be the same rule at the site
+ * with traffic and at the dead one. One CODE, two CASES.
+ *
+ * ⚠️ 167-CREDTRUST plan 01 added a SECOND non-recoverable CODE at a THIRD site:
+ * C5 now answers `SIGN_IN_FAILED` / `recoverable: false`. ⛔ `TOTAL_CASES` did
+ * NOT move — that arm was NARROWED, not added — so three of these four numbers
+ * changed and one did not. Each is pinned separately precisely so no reading
+ * can drift behind another, and ⛔ none of them is ever to be "fixed" by
+ * deriving it from the corpus it guards.
  */
 const TOTAL_CASES = 14;
-const DISTINCT_WIRE_CODES = 7;
-const NON_RECOVERABLE_WIRE_CASES = 2;
-const NON_RECOVERABLE_WIRE_CODES = 1;
+const DISTINCT_WIRE_CODES = 8;
+const NON_RECOVERABLE_WIRE_CASES = 3;
+const NON_RECOVERABLE_WIRE_CODES = 2;
 
 /**
  * Build the throwable the seam client puts in front of the classifier: a plain
@@ -243,12 +261,24 @@ describe("[140.3-05 / TS-35] the wizard classifier agrees with the committed ven
     expect(new Set(nonRecoverable.map((c) => c.body.code)).size).toBe(
       NON_RECOVERABLE_WIRE_CODES,
     );
-    expect(nonRecoverable.map((c) => c.body.code)).toEqual([
-      DIVERGENT_WIRE_CODE,
-      DIVERGENT_WIRE_CODE,
-    ]);
-    // Both collapse sites, not just the one with traffic.
-    expect(new Set(nonRecoverable.map((c) => c.site_id)).size).toBe(2);
+    // The ccxt collapse control, asserted at BOTH collapse sites and not just
+    // the one with traffic. Scoped to AUTH_FAILED rather than to the whole
+    // non-recoverable list, so that a future third permanent code cannot
+    // dilute what this arm proves — which is exactly what 167-CREDTRUST's
+    // SIGN_IN_FAILED would have done to a bare list comparison.
+    const authFailedCases = nonRecoverable.filter(
+      (c) => c.body.code === DIVERGENT_WIRE_CODE,
+    );
+    expect(authFailedCases.map((c) => c.site_id)).toEqual(["C6", "C7"]);
+
+    // 167-CREDTRUST's narrowed MT5 sign-in arm: ONE case, at ONE site. The
+    // site identity is pinned, not just the count — narrowing a DIFFERENT arm
+    // onto this code would be a user-visible behaviour change wearing a
+    // count's clothes, and a count alone could not tell the two apart.
+    const signInFailedCases = nonRecoverable.filter(
+      (c) => c.body.code === "SIGN_IN_FAILED",
+    );
+    expect(signInFailedCases.map((c) => c.site_id)).toEqual(["C5"]);
   });
 
   it("every case answers ONE status, and this test does not care which", () => {
