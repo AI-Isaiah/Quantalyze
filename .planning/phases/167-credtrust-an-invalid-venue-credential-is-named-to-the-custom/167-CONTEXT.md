@@ -209,6 +209,28 @@ itself.
 
 ### Discipline
 
+- ⛔⛔ **D-15b (ADDED 2026-09-22, MEASURED during execution) — THE `requirements:` IDS IN THIS
+  PHASE'S PLANS COLLIDE WITH THE GLOBAL `REQUIREMENTS.md` LEDGER. NEVER RUN
+  `requirements.mark-complete` WITH THEM.**
+  This phase has no v1.20 requirement IDs, so its plans use the phase-local decision IDs (D-01…D-15)
+  from THIS file as their `requirements:` frontmatter. Three of those strings also exist in the
+  global `.planning/REQUIREMENTS.md`, meaning something entirely different:
+
+  | id | global `REQUIREMENTS.md` meaning | this phase's meaning | carried by |
+  |---|---|---|---|
+  | **D-09** | the composite `stitch_composite` re-run mechanism / "composite healer" | "the defect is a COPY FAMILY, not a string" | plans 01, 02, 04 |
+  | **D-03** | a per-venue capability-flag precedent (`passphraseSecret`) | "the credential verdict is a CONJUNCTION" | plans 03, 04 |
+
+  ⇒ **`requirements.mark-complete D-09` would tick off the composite healer** — a phase-scale item
+  nobody in 167 has touched — and the ledger would then claim delivered work that does not exist.
+  ⭐ **Caught by 167-02's executor, which tried the handler, read the refusal, checked what the
+  global id actually meant, and declined rather than forcing it.** That is the correct behaviour and
+  the reason this entry exists.
+  ⚠️ `D-14` looks like a third collision under a naive grep but is NOT — the only global hit is the
+  substring inside `D-146-4`. ⛔ Do not "fix" it.
+  **Disposition:** the phase's own completion is tracked by its SUMMARY files and this CONTEXT, not
+  by the global ledger. ⛔ Leave `REQUIREMENTS.md` untouched for the whole of Phase 167.
+
 - **D-12: The staleness view is `service_role` only and `security_invoker = true`.** A customer-facing
   reader cannot select it as `authenticated`. Any consumption path must be designed for that —
   and if a SECURITY DEFINER wrapper is chosen, this repo has two dated traps to honour: a SECDEF
