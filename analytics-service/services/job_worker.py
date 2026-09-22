@@ -8136,6 +8136,31 @@ async def run_poll_positions_job(job: dict[str, Any]) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+# PostgreSQL's check_violation, which PostgREST forwards verbatim as the error
+# ``code``, and the constraint that admits each ``api_keys.sync_status`` value.
+_PG_CHECK_VIOLATION = "23514"
+_API_KEYS_SYNC_STATUS_CHECK = "api_keys_sync_status_check"
+
+
+def _sync_status_write_failure_cause(exc: BaseException) -> str:
+    """Name what refused an ``api_keys.sync_status`` write, for the log only.
+
+    167 SFH-L1 / R2 IN-04. A CHECK rejection means the value is not admitted
+    yet (the worker deployed ahead of its migration): nothing was written. Any
+    other failure is ambiguous: PostgREST may have committed the write before
+    the error reached us. The caller's fallback is the same either way; this
+    only makes the log say which case it was.
+    """
+    code = getattr(exc, "code", None)
+    text = str(getattr(exc, "message", None) or exc)
+    if code == _PG_CHECK_VIOLATION or _API_KEYS_SYNC_STATUS_CHECK in text:
+        return f"CHECK violation: {_API_KEYS_SYNC_STATUS_CHECK} refused the value"
+    return (
+        f"not a CHECK violation ({type(exc).__name__}): the write may have "
+        "committed before the error"
+    )
+
+
 async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResult:
     """INGEST-03: poll allocator holdings (spot + derivatives) via CCXT
     and upsert into allocator_holdings.
@@ -8265,9 +8290,14 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                     {"sync_status": status, "sync_error": human_copy}
                 ).eq("id", api_key_id).execute()
 
+            # 167 R2 IN-04 / SFH-L1 — the status that actually landed, carried
+            # into the audit event so a fallback downgrade is visible after the
+            # fact. ``None`` means no write succeeded.
+            sync_status_written: str | None = sync_status
             try:
                 await db_execute(lambda: _update_transient(sync_status))
             except Exception as upd_exc:  # noqa: BLE001
+                sync_status_written = None
                 if sync_status == "error":
                     # 167 SFH-M3 — ERROR with the traceback: the key keeps its
                     # previous, possibly healthy, status.
@@ -8289,16 +8319,25 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                     # (not MT5_UNREACHABLE_NOTE): the 'error' pill renders
                     # `sync_error` verbatim, and the sign-in copy is the TRUE
                     # cause. The transport note would bring back the false one.
+                    #
+                    # 167 SFH-L1 / R2 IN-04 — the fallback runs on ANY failure,
+                    # not only a CHECK rejection, and that stays: an ambiguous
+                    # transport error may leave the key on a stale status, which
+                    # is the worse outcome. But the log now says which it was,
+                    # so an operator can tell "the migration has not applied"
+                    # from "the write may have committed and been overwritten".
                     logger.error(
                         "poll_allocator_positions: failed to stamp "
-                        "sync_status=%r for api_key %s — falling back to "
+                        "sync_status=%r for api_key %s (%s) — falling back to "
                         "sync_status='error' so the key does not keep a "
                         "healthy status",
                         sync_status, api_key_id,
+                        _sync_status_write_failure_cause(upd_exc),
                         exc_info=upd_exc,
                     )
                     try:
                         await db_execute(lambda: _update_transient("error"))
+                        sync_status_written = "error"
                     except Exception as fallback_exc:  # noqa: BLE001
                         logger.error(
                             "poll_allocator_positions: fallback stamp "
@@ -8308,7 +8347,11 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                         )
             _emit_audit(
                 allocator_id, api_key_id, "allocator.holdings.sync_failed",
-                {"error_kind": exc_error_kind, "sanitized_message": human_copy},
+                {
+                    "error_kind": exc_error_kind,
+                    "sanitized_message": human_copy,
+                    "sync_status_written": sync_status_written,
+                },
             )
             return DispatchResult(
                 outcome=DispatchOutcome.FAILED,

@@ -2371,6 +2371,11 @@ async def test_sign_in_failure_reaches_its_own_arm_not_the_parents(
         "every backoff rung"
     )
     assert _audit.call_args.kwargs["metadata"]["error_kind"] == "permanent"
+    # 167 SFH-L1 / R2 IN-04 — the audit names the status that actually landed.
+    assert (
+        _audit.call_args.kwargs["metadata"]["sync_status_written"]
+        == ap.SIGN_IN_FAILED_SYNC_STATUS
+    )
 
 
 @pytest.mark.asyncio
@@ -2437,8 +2442,68 @@ async def test_a_refused_sign_in_status_write_falls_back_to_error(
     assert errors and errors[-1].exc_info is not None, (
         "the rejected write must be logged at ERROR with its traceback"
     )
+    # 167 SFH-L1 / R2 IN-04 — the log names a CHECK rejection as one, and the
+    # audit records that the key was downgraded to 'error'.
+    assert "CHECK violation" in errors[-1].getMessage()
+    assert "not a CHECK violation" not in errors[-1].getMessage()
+    assert _audit.call_args.kwargs["metadata"]["sync_status_written"] == "error"
     # The disposition is unaffected by the fallback.
     assert result.error_kind == "permanent"
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_write_that_fails_for_another_reason_says_so(
+    monkeypatch, api_key_row_factory, caplog
+):
+    """167 SFH-L1 / R2 IN-04 — the fallback still runs on a failure that is NOT
+    a CHECK rejection (keeping a stale healthy status is the worse outcome), but
+    the log must not call it one: a transport error here is ambiguous, because
+    PostgREST may have committed the sign_in_failed write before the error
+    reached us, and the fallback then overwrote it. The audit records the
+    status that finally landed."""
+    import logging
+
+    from services import allocator_positions as ap
+    from services import job_worker as jw
+
+    copy = ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+
+    async def _raise_sign_in_failed(venue, exchange, api_key_id=None):
+        raise ap.AllocatorHoldingsSignInFailedError(copy)
+
+    db_calls: list[object] = []
+
+    async def _first_write_times_out(fn):
+        db_calls.append(fn)
+        result = fn()
+        if len(db_calls) == 1:
+            raise TimeoutError("read timed out")
+        return result
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_raise_sign_in_failed
+    )
+    monkeypatch.setattr(jw, "db_execute", _first_write_times_out)
+
+    with caplog.at_level(logging.DEBUG, logger=jw.logger.name):
+        await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses == [ap.SIGN_IN_FAILED_SYNC_STATUS, "error"], statuses
+    errors = [
+        r for r in caplog.records
+        if r.name == jw.logger.name and r.levelno >= logging.ERROR
+        and "falling back" in r.getMessage()
+    ]
+    assert errors, "the failed write was not logged at ERROR"
+    assert "not a CHECK violation (TimeoutError)" in errors[-1].getMessage(), (
+        "a timeout was logged as if the CHECK constraint had refused the value; "
+        "the operator is sent to the migration instead of the ambiguous write"
+    )
+    assert _audit.call_args.kwargs["metadata"]["sync_status_written"] == "error"
 
 
 @pytest.mark.asyncio
@@ -2488,6 +2553,8 @@ async def test_a_refused_sign_in_write_whose_fallback_also_fails_is_loud(
     first = [r for r in ours if "falling back" in r.getMessage()]
     assert first and first[-1].levelno == logging.ERROR
     assert first[-1].exc_info is not None
+    # 167 SFH-L1 / R2 IN-04 — nothing landed, and the audit says so.
+    assert _audit.call_args.kwargs["metadata"]["sync_status_written"] is None
     assert result.error_kind == "permanent"
 
 
