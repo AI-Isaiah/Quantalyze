@@ -5,10 +5,10 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "167"
 current_phase_name: "CREDTRUST — an invalid venue credential is named to the customer"
 status: "Phase 164.9 shipped — PR #837"
-stopped_at: Phase 167 context gathered
-last_updated: "2026-09-22T04:13:45.163Z"
+stopped_at: Completed 167-02-PLAN.md (wave 1) — six MT5/sFOX except-arms in allocator_positions.py now consult the classifier before promising a retry
+last_updated: "2026-09-22T09:44:34.000Z"
 last_activity: 2026-09-22
-last_activity_desc: "Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction. Phase 167 CREDTRUST context locked 2026-09-22."
+last_activity_desc: "Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction. Phase 167 CREDTRUST context locked 2026-09-22. Plan 167-01 (wizard SIGN_IN_FAILED mint) shipped. Plan 167-02 (D-09/D-10, six retry-disposition guards on allocator_positions.py's MT5/sFOX arms + AST roster case) shipped this session, commits 5c48916a + 26c83dc3 — see 167-02-SUMMARY.md."
 state_head: 47beee0b11f47dbca1d5e4055e088276488a099c
 progress:
   total_phases: 48

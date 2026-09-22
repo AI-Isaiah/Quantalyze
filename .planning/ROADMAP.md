@@ -2868,7 +2868,7 @@ Plans:
 Plans:
 
 - [ ] 167-01-PLAN.md — wave 1 · the wizard cross-language mint: a new Python wire code and a new `WizardErrorCode` whose copy is honest about uncertainty and whose action set renders no Retry (D-05…D-09)
-- [ ] 167-02-PLAN.md — wave 1 · make the retry PROMISE a function of the retry DISPOSITION across the whole venue-agnostic copy family, by finishing the classifier guard this repo already half-applied (D-09/D-10)
+- [x] 167-02-PLAN.md — wave 1 · make the retry PROMISE a function of the retry DISPOSITION across the whole venue-agnostic copy family, by finishing the classifier guard this repo already half-applied (D-09/D-10) — see 167-02-SUMMARY.md, commits `5c48916a` + `26c83dc3`
 - [ ] 167-03-PLAN.md — wave 2 · **D-11 closed: arm B.** A new `api_keys.sync_status` value, its CHECK-constraint migration and CI gate, and the amber pill + authored owner helper — style map and migration in ONE commit (`checkpoint:decision` + three-reviewer gate)
 - [ ] 167-04-PLAN.md — wave 3 · the write side: the daily holdings poll stops stamping a wrong cause and an impossible promise, and writes the new state instead. ⭐ No new strategy-level write boundary — PROD cron jobid 15 already polls every active non-revoked key daily
 - [ ] 167-05-PLAN.md — wave 4 · release gate: both full suites, the one release commit (VERSION + CHANGELOG), and the D-01 ROADMAP `Depends on:` correction
