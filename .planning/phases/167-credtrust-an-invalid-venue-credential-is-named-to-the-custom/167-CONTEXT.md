@@ -281,8 +281,19 @@ itself.
   self-referential regex assertion that reads them back out of the source.
 - `src/lib/seam-venue-vocabulary.invariant.test.ts` — the Python-emitter ↔ TS-disposition SET
   comparison that reds by name on an undispositioned new code.
-- `src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.tsx` and `SyncPreviewStep.tsx` —
-  the two wizard rosters (and the `ROSTER-DERIVE-01` note on why they are duplicated).
+- `src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.tsx` and
+  `MultiKeyConnectStep.tsx` — the two wizard rosters, `KNOWN_CREATE_WITH_KEY_CODES` and
+  `KNOWN_ADD_KEY_CODES` (and the `ROSTER-DERIVE-01` note on why they are duplicated).
+  > ⛔ **CORRECTED 2026-09-22 by the orchestrator, against a measurement.** This line named
+  > `SyncPreviewStep.tsx` as the second roster. It is not. Measured at `36216917`: the two
+  > `ReadonlySet<WizardErrorCode>` rosters are `KNOWN_CREATE_WITH_KEY_CODES` (`ConnectKeyStep.tsx`)
+  > and `KNOWN_ADD_KEY_CODES` (`MultiKeyConnectStep.tsx`). `SyncPreviewStep.tsx` carries a THIRD,
+  > differently-typed roster — `KNOWN_KICKOFF_CODES: Readonly<Record<string, WizardErrorCode>>` —
+  > governing post-connect job kickoff, a different failure surface from connect-time validate.
+  > A planner that edited `SyncPreviewStep.tsx` and skipped `MultiKeyConnectStep.tsx` would have
+  > left the multi-key connect path rendering the UNKNOWN terminal for the new code.
+- `src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx` — `KNOWN_KICKOFF_CODES`,
+  the third roster; in scope only if the kickoff surface is in scope.
 
 ### The Python side
 - `analytics-service/routers/exchange.py` — `validate_key`, the `424 NETWORK_UNAVAILABLE` /
