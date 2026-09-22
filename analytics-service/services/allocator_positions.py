@@ -52,7 +52,7 @@ import json
 import logging
 import math
 import re
-from typing import Any, Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable, ClassVar, Literal, cast
 
 import ccxt.async_support as ccxt
 from supabase import Client
@@ -264,7 +264,19 @@ class AllocatorHoldingsSyncTransientError(Exception):
     three founder accounts (AUM-02).
 
     Callers MUST pass a fixed copy constant, never an interpolated exception.
+
+    ⭐ 167 WR-05 — the exception CARRIES what the handler writes. The worker's
+    ONE arm for this type (and its subclass) reads ``sync_status`` and
+    ``error_kind`` off the instance, so a subclass that changes the status or
+    the job disposition declares it here rather than through a second,
+    order-sensitive ``except`` arm that duplicates the write.
     """
+
+    #: The ``api_keys.sync_status`` value the handler writes for this failure.
+    sync_status: ClassVar[str] = "error"
+    #: The ``compute_jobs`` disposition the handler returns. ``transient`` sends
+    #: the job up the DB backoff ladder, the right answer for a transport blip.
+    error_kind: ClassVar[Literal["transient", "permanent"]] = "transient"
 
 
 class AllocatorHoldingsSignInFailedError(AllocatorHoldingsSyncTransientError):
@@ -295,12 +307,17 @@ class AllocatorHoldingsSignInFailedError(AllocatorHoldingsSyncTransientError):
     pick up), only the user-facing CLAIM differs. ``str(self)`` IS end-user
     copy, identical to the parent's contract.
 
-    ⛔⛔ The subclassing makes the handler's arm ORDER load-bearing AND its
-    failure SILENT: an ``except`` arm for this type placed BELOW the parent's
-    is dead code, and every sign-in failure silently reverts to ``error`` —
-    which is today's defect, restored. See ``run_poll_allocator_positions_job``
-    and the behavioural pin in tests/test_allocator_positions.py.
+    ⭐ 167 WR-05 — the difference is DECLARED on the class (``sync_status``
+    below), and ``run_poll_allocator_positions_job`` has ONE arm for the parent
+    that reads it off the instance. The first version gave this type its own
+    ``except`` arm, a line-for-line copy of the parent's, which made the arm
+    ORDER load-bearing and its failure SILENT (an arm below the parent's is
+    dead code, and every sign-in failure reverts to ``error``). With one arm
+    there is no order to get wrong. The behavioural pin in
+    tests/test_allocator_positions.py still drives the real handler.
     """
+
+    sync_status: ClassVar[str] = SIGN_IN_FAILED_SYNC_STATUS
 
 
 def _extract_bybit_unified_walletbalances(info: dict[str, Any]) -> dict[str, float]:
@@ -439,8 +456,8 @@ def _map_exception_to_sync_status(exc: Exception) -> str:
     where a login was attempted, did not succeed, and the boundary cannot say
     why (see ``AllocatorHoldingsSignInFailedError``). Collapsing the two would
     re-introduce the false permanent blame 164.5.4 removed; it does not reach
-    this function at all, because the sign-in arms raise a typed exception the
-    handler has its own arm for.
+    this function at all, because the sign-in arms raise a typed exception
+    that carries its own ``sync_status`` to the handler.
     """
     if isinstance(exc, (ccxt.AuthenticationError, ccxt.PermissionDenied)):
         return "revoked"

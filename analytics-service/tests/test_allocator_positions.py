@@ -2195,15 +2195,19 @@ def test_rate_limited_note_still_promises_a_retry():
 async def test_sign_in_failure_reaches_its_own_arm_not_the_parents(
     monkeypatch, api_key_row_factory
 ):
-    """⛔⛔ THE HANDLER-ORDERING PIN (T-167-13).
+    """⛔⛔ THE HANDLER-ORDERING PIN (T-167-13), re-cut by 167 WR-05.
 
     `AllocatorHoldingsSignInFailedError` SUBCLASSES
     `AllocatorHoldingsSyncTransientError`, and Python matches the FIRST
-    `except` whose type the exception is an instance of. So an arm placed
-    below the parent's is DEAD CODE: the parent catches every sign-in failure
-    and the column silently reverts to sync_status='error' with "sync will
-    retry automatically" — the exact 17-day PROD defect this phase removes.
-    Nothing about that failure is observable except the value written.
+    `except` whose type the exception is an instance of. The first design gave
+    the subclass its own arm, and an arm placed below the parent's was DEAD
+    CODE. WR-05 removed that hazard structurally: there is now ONE arm, which
+    reads `sync_status` off the exception. The failure this case guards is the
+    same either way: the column silently reverting to sync_status='error' with
+    "sync will retry automatically", the exact 17-day PROD defect this phase
+    removes. That could come from a re-introduced shadowed arm or from the
+    class attribute being dropped. Nothing about it is observable except the
+    value written.
 
     ⛔ BEHAVIOURAL, deliberately — NOT an assertion on source-text order. A
     text assertion can be satisfied by arms in the right order that do the
@@ -2242,9 +2246,10 @@ async def test_sign_in_failure_reaches_its_own_arm_not_the_parents(
     statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
     assert statuses, f"expected a sync_status write; got {payloads!r}"
     assert statuses[-1] == ap.SIGN_IN_FAILED_SYNC_STATUS, (
-        "the sign-in exception was caught by the PARENT's arm — the new arm "
-        "is below it and is dead code. Every sign-in failure now writes "
-        f"{statuses[-1]!r}, which is today's defect restored"
+        "the sign-in exception was written as its PARENT — either a shadowed "
+        "arm was re-introduced or the class's `sync_status` attribute is gone. "
+        f"Every sign-in failure now writes {statuses[-1]!r}, which is the "
+        "17-day defect restored"
     )
     assert _sync_errors(payloads)[-1] == copy
     # The queue disposition is the parent's, unchanged.
@@ -2370,6 +2375,21 @@ def test_every_status_this_module_can_write_has_its_own_copy_row():
         value = getattr(ap, target.id, None)
         if isinstance(value, str):
             statuses.add(value)
+
+    # (3) 167 WR-05 — the handler's single typed arm writes `exc.sync_status`,
+    # so every class in the transient family is a writer. Read the attribute
+    # off each class at RUNTIME: a future subclass declaring a literal status
+    # (not a `*_SYNC_STATUS` constant) would be invisible to (2).
+    family = [
+        obj
+        for obj in vars(ap).values()
+        if isinstance(obj, type)
+        and issubclass(obj, ap.AllocatorHoldingsSyncTransientError)
+    ]
+    assert len(family) >= 2, (
+        "derivation (3) found fewer than the parent and its sign-in subclass"
+    )
+    statuses.update(cls.sync_status for cls in family)
 
     # Anti-vacuity: prove the extractor found a non-zero set, and that it saw
     # BOTH derivations rather than one of them silently returning nothing.
