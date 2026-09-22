@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, act, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, act, fireEvent, waitFor, within } from "@testing-library/react";
 import { ApiKeyManager } from "./ApiKeyManager";
+import { TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES } from "@/lib/closed-sets";
 
 /**
  * H-0395 (F1 loud-fail discipline) — ApiKeyManager.loadKeys must discriminate
@@ -58,6 +59,11 @@ const strategiesUpdateMock = vi.fn();
 // Records which table each chain targeted — an assertion that "the update went
 // to strategies" is worthless if the mock would accept any table name.
 const fromTableMock = vi.fn();
+// 167-06 (R5): `handleDeleteKey` does `from("api_keys").delete().eq("id", …)`.
+// The mock had no `delete`, so every Delete case threw. The spy receives the
+// TABLE name, so a case can assert the delete went to `api_keys` (same reason
+// as `fromTableMock`). It returns the queued result, defaulting to success.
+const apiKeyDeleteMock = vi.fn();
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -92,6 +98,12 @@ vi.mock("@/lib/supabase/client", () => ({
               Promise.resolve(queued ?? { error: null }),
           };
         },
+        // handleDeleteKey does api_keys.delete().eq('id', ...). See
+        // apiKeyDeleteMock above.
+        delete: () => ({
+          eq: (_col: string, _val: unknown) =>
+            Promise.resolve(apiKeyDeleteMock(table) ?? { error: null }),
+        }),
       };
     },
   }),
@@ -264,6 +276,14 @@ describe("ApiKeyManager — H-0395 loud-fail on api_keys load failure", () => {
  * consumed + already discriminatingly tested by the sibling
  * AllocatorExchangeManager (pill text / Disconnected section). So for
  * ApiKeyManager the genuine residual is exactly exchange + last_sync_at.
+ *
+ * CORRECTED 2026-09-22 (167-06): the paragraph above is kept as lineage and is
+ * no longer true in one respect. ApiKeyManager now READS `key.sync_status`, for
+ * the untrusted partition only (`isUntrustedKeySyncStatus`), and mounts the
+ * existing `AllocatorSyncStatus` pill on that key's card. `SyncProgress`'s
+ * status is still component state, never the column. The healthy `complete`
+ * fixtures in this block render nothing new, which the `[167-06]` describe
+ * pins with its healthy control over every trusted-or-neutral status.
  */
 describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", () => {
   beforeEach(() => {
@@ -1471,5 +1491,754 @@ describe("ApiKeyManager — SEAMUX-05: both sync call sites observe the HTTP out
     // A background sync that SUCCEEDED must not manufacture an error surface.
     // The panel only renders once syncStatus leaves "idle".
     expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * [167-06] Phase 167 CREDTRUST, gap 1 — the persisted credential state renders
+ * on the MANAGER's own key card.
+ *
+ * THE GAP, MEASURED. `profiles.role` defaults to `manager`, and the daily
+ * holdings poll stamps every active key regardless of role. Before this plan
+ * the only component that rendered the stamped `api_keys.sync_status` was
+ * `AllocatorSyncStatus`, mounted only on the allocator-only `/profile`
+ * Exchanges tab. A manager's `sign_in_failed` key was therefore WRITTEN and
+ * shown on no page they could reach. `ApiKeyManager` already selects
+ * `sync_status` and `sync_error` through `API_KEY_USER_COLUMNS`; it rendered
+ * neither.
+ *
+ * ⛔ ORACLE INDEPENDENCE. Every expected pill label and helper sentence below is
+ * HAND-TYPED (the helper's U+2014 em-dash included). Importing them from the
+ * component under test would let a reworded string pass its own pin. The
+ * healthy-control iteration DOMAIN is imported on purpose: a future trusted
+ * value is then covered automatically, while its expected output (nothing) is
+ * still asserted here.
+ *
+ * Each status gets its OWN render (it.each). Testing-library cleans up only
+ * between tests, so a loop of renders inside one test would stack components
+ * and make every "zero nodes" assertion unreliable.
+ */
+describe("[167-06] the persisted credential state renders on the manager's key card", () => {
+  // Hand-typed, never imported (see the oracle-independence note above).
+  const SIGN_IN_FAILED_HELPER =
+    "Update this account's credentials — they may have changed.";
+  const REVOKED_HELPER_TEXT = "Re-add a read-only key from your exchange.";
+  // A raw `sync_error` the pre-167 pipeline really wrote: a retry promise that
+  // cannot be kept for a credential failure. It must never reach this surface.
+  const RAW_SYNC_ERROR =
+    "MT5 terminal unreachable — sync will retry automatically.";
+
+  function row(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      id: "key-mt5-sif",
+      user_id: "user-a",
+      exchange: "mt5",
+      label: "Manager MT5",
+      is_active: true,
+      sync_status: "sign_in_failed",
+      last_sync_at: "2026-04-19T11:58:00Z",
+      account_balance_usdt: 1000,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+      venue_account_id: "synth1234",
+      ...overrides,
+    };
+  }
+
+  async function renderRows(
+    rows: ReturnType<typeof row>[],
+    currentKeyId: string | null = null,
+    defaultExchange?: string,
+  ) {
+    selectResultMock.mockReturnValue({ data: rows, error: null });
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(
+        <ApiKeyManager
+          strategyId="strat-1"
+          currentKeyId={currentKeyId}
+          defaultExchange={defaultExchange}
+        />,
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByText(rows[0].label as string)).toBeInTheDocument();
+    });
+    return utils;
+  }
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+    capturedOnStatusChange = null;
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    {
+      status: "sign_in_failed",
+      exchange: "mt5",
+      label: "Manager MT5",
+      pillText: "Sign-in failed",
+      pillClasses: ["bg-warning-bg", "text-warning"],
+      helperText: SIGN_IN_FAILED_HELPER,
+      remedy: "Update password",
+    },
+    {
+      status: "revoked",
+      exchange: "binance",
+      label: "Manager Binance",
+      pillText: "Key revoked",
+      pillClasses: ["bg-negative/10", "text-negative"],
+      helperText: REVOKED_HELPER_TEXT,
+      remedy: "Delete",
+    },
+  ])(
+    "an untrusted $status key shows the existing pill and authored helper inside ITS OWN card, beside the $remedy control",
+    async ({ status, exchange, label, pillText, pillClasses, helperText, remedy }) => {
+      await renderRows([
+        row({
+          id: `key-${status}`,
+          exchange,
+          label,
+          sync_status: status,
+          venue_account_id: exchange === "mt5" ? "synth1234" : null,
+        }),
+      ]);
+
+      const card = screen.getByTestId(`api-key-card-key-${status}`);
+      const pill = within(card).getByTestId("allocator-sync-pill");
+      expect(pill).toHaveAttribute("data-sync-status", status);
+      expect(pill.textContent).toBe(pillText);
+      for (const cls of pillClasses) expect(pill).toHaveClass(cls);
+
+      const helper = within(card).getByTestId("allocator-sync-helper");
+      expect(helper).toHaveAttribute("role", "status");
+      expect(helper.textContent).toBe(helperText);
+
+      // The remedy the helper names is on the SAME card, not elsewhere.
+      expect(
+        within(card).getByRole("button", { name: remedy }),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it.each([...TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES, null])(
+    "HEALTHY CONTROL: sync_status %s renders no pill, no helper and no added live region",
+    async (status) => {
+      await renderRows([
+        row({ id: "key-mt5-ok", label: "Healthy MT5", sync_status: status }),
+        row({
+          id: "key-bin-ok",
+          exchange: "binance",
+          label: "Healthy Binance",
+          sync_status: status,
+          venue_account_id: null,
+        }),
+      ]);
+      expect(screen.getByText("Healthy Binance")).toBeInTheDocument();
+
+      expect(screen.queryAllByTestId("allocator-sync-pill")).toHaveLength(0);
+      expect(screen.queryAllByTestId("allocator-sync-helper")).toHaveLength(0);
+    },
+  );
+
+  it.each(["revoked", "sign_in_failed"])(
+    "the raw api_keys.sync_error of a %s key never reaches the DOM",
+    async (status) => {
+      await renderRows([
+        row({ id: `key-leak-${status}`, sync_status: status, sync_error: RAW_SYNC_ERROR }),
+      ]);
+
+      const text = document.body.textContent ?? "";
+      expect(text).not.toContain(RAW_SYNC_ERROR);
+      expect(text).not.toContain("will retry automatically");
+    },
+  );
+
+  it("adds EXACTLY ONE live region per untrusted card (no second live region)", async () => {
+    // Baseline measured in THIS test, from a healthy-only render of the same
+    // shape, so a live region some other part of the tree carries is counted on
+    // both sides rather than hard-coded here.
+    const healthy = await renderRows([
+      row({ id: "key-a", label: "Key A", sync_status: "complete" }),
+    ]);
+    const baseline = healthy.container.querySelectorAll("[aria-live]").length;
+    healthy.unmount();
+
+    const untrusted = await renderRows([
+      row({ id: "key-a", label: "Key A", sync_status: "sign_in_failed" }),
+    ]);
+    const card = screen.getByTestId("api-key-card-key-a");
+    expect(within(card).getAllByRole("status")).toHaveLength(1);
+    expect(
+      untrusted.container.querySelectorAll("[aria-live]").length,
+    ).toBe(baseline + 1);
+  });
+
+  /**
+   * [167-06] Task 2 — the persisted state COEXISTS with the local SyncProgress
+   * panel, rules R1–R6 of 167-CONTEXT D-18.
+   *
+   * `SyncProgress` is a LOCAL state machine fed from component state, never
+   * from `api_keys.sync_status`, and an MT5 resync can finish as a terminal
+   * success whether or not the password works (the MT5 branch of
+   * `run_sync_trades_job` makes the daily-PnL fetch a no-op). So the two
+   * regions can contradict each other unless the rules below hold:
+   *   R1 no credential claim under a spinner; one stable live region;
+   *   R2 no panel success beside a server-read sign-in failure;
+   *   R3 a withheld success is retired, never re-shown, after Update password;
+   *   R4 a key's password is never replaced during its OWN sync;
+   *   R5 the same retirement on Delete and Add Key, and Delete takes R4's
+   *      disable;
+   *   R6 every panel transition to error clears the in-flight marker.
+   *
+   * ⛔ Every "the panel is NOT rendered" assertion that follows a remedy waits
+   * for the remedy to LAND first (the pill leaving, the card leaving, the new
+   * card appearing). The panel is still withheld until then, so an earlier
+   * absence would pass without any retirement at all.
+   */
+  describe("coexistence with the local sync panel (R1-R6, D-18)", () => {
+    const JSON_HEADERS = { "content-type": "application/json" };
+
+    function syncAccepted() {
+      return new Response(
+        JSON.stringify({ ok: true, accepted: true, status: "syncing", queued: true }),
+        { status: 202, headers: JSON_HEADERS },
+      );
+    }
+
+    /**
+     * Route `fetch` by URL, as the 160-02 conversion describe does. An
+     * unexpected URL answers 404, so a request a case did not plan for (a
+     * rotation of an empty key id, say) can never read as a success.
+     */
+    function routeFetch(opts: { sync?: () => Response } = {}) {
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url === "/api/keys/sync") {
+          return Promise.resolve((opts.sync ?? syncAccepted)());
+        }
+        if (url === "/api/keys/validate-and-encrypt") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ api_key_id: "key-new", valid: true, read_only: true }),
+              { status: 200, headers: JSON_HEADERS },
+            ),
+          );
+        }
+        if (/^\/api\/keys\/[^/]+\/rotate-secret$/.test(url)) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ ok: true }), {
+              status: 200,
+              headers: JSON_HEADERS,
+            }),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: "unexpected request" }), {
+            status: 404,
+            headers: JSON_HEADERS,
+          }),
+        );
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      return fetchMock;
+    }
+
+    function card(id: string) {
+      return screen.getByTestId(`api-key-card-${id}`);
+    }
+
+    function cardButton(id: string, name: string) {
+      return within(card(id)).getByRole("button", { name });
+    }
+
+    function dialogTitled(text: string) {
+      const found = Array.from(document.querySelectorAll("dialog")).find((d) =>
+        d.textContent?.includes(text),
+      );
+      expect(found, `no dialog containing "${text}"`).toBeTruthy();
+      return found!;
+    }
+
+    /** Click the current key's Resync and wait for flight AND its mid-flight re-read. */
+    async function resync(id: string) {
+      const reads = selectResultMock.mock.calls.length;
+      await act(async () => {
+        fireEvent.click(cardButton(id, "Resync"));
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+          "data-sync-status",
+          "computing",
+        );
+        expect(selectResultMock.mock.calls.length).toBeGreaterThan(reads);
+      });
+    }
+
+    /** Drive the panel's terminal success and wait for the terminal arm's re-read. */
+    async function finish(status: "complete" | "complete_with_warnings") {
+      const reads = selectResultMock.mock.calls.length;
+      await act(async () => {
+        capturedOnStatusChange!(status);
+      });
+      await waitFor(() => {
+        expect(selectResultMock.mock.calls.length).toBeGreaterThan(reads);
+      });
+    }
+
+    /** Open THIS card's Update password, submit a new password, wait for the dialog to close. */
+    async function rotate(id: string) {
+      await act(async () => {
+        fireEvent.click(cardButton(id, "Update password"));
+      });
+      expect(dialogTitled("New password")).toHaveAttribute("open");
+      fireEvent.change(screen.getByLabelText("New password"), {
+        target: { value: "new-investor-password" },
+      });
+      await act(async () => {
+        fireEvent.click(
+          within(dialogTitled("New password")).getByRole("button", {
+            name: "Update password",
+          }),
+        );
+      });
+      await waitFor(() => {
+        expect(dialogTitled("New password")).not.toHaveAttribute("open");
+      });
+    }
+
+    /** Click THIS card's Delete, then Delete inside the confirm. */
+    async function deleteKey(id: string) {
+      await act(async () => {
+        fireEvent.click(cardButton(id, "Delete"));
+      });
+      expect(dialogTitled("Delete API Key")).toHaveAttribute("open");
+      await act(async () => {
+        fireEvent.click(
+          within(dialogTitled("Delete API Key")).getByRole("button", {
+            name: "Delete",
+          }),
+        );
+      });
+    }
+
+    /** Add a key through the real form, as the SEAMUX-05 background-sync case does. */
+    async function addKey() {
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /Add Key/i }));
+      });
+      const labelInput = screen.getByLabelText(/Label/i);
+      fireEvent.change(labelInput, { target: { value: "Added Key" } });
+      fireEvent.change(screen.getByLabelText(/API Key$/i), {
+        target: { value: "test-key" },
+      });
+      fireEvent.change(screen.getByLabelText("API Secret"), {
+        target: { value: "test-secret" },
+      });
+      await act(async () => {
+        fireEvent.submit(labelInput.closest("form")!);
+      });
+    }
+
+    const newRow = () =>
+      row({
+        id: "key-new",
+        exchange: "binance",
+        label: "Added Key",
+        sync_status: null,
+        venue_account_id: null,
+      });
+
+    beforeEach(() => {
+      apiKeyDeleteMock.mockReset();
+      strategiesUpdateMock.mockReset();
+    });
+
+    // ── R1 ─────────────────────────────────────────────────────────────────
+
+    it("R1 in flight: the card shows the neutral Syncing… pill with a silent helper and no credential claim, and the panel shows progress", async () => {
+      routeFetch();
+      await renderRows([row({ id: "key-j" })], "key-j");
+
+      await resync("key-j");
+
+      expect(
+        within(card("key-j")).getByTestId("allocator-sync-pill"),
+      ).toHaveAttribute("data-sync-status", "syncing");
+      expect(
+        within(card("key-j")).getByTestId("allocator-sync-helper").textContent,
+      ).toBe("");
+      const text = document.body.textContent ?? "";
+      expect(text).not.toContain("Sign-in failed");
+      expect(text).not.toContain(SIGN_IN_FAILED_HELPER);
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "computing",
+      );
+    });
+
+    it("R1 stable live region: the card's helper is the SAME node before, during and after the attempt", async () => {
+      routeFetch();
+      await renderRows([row({ id: "key-j" })], "key-j");
+      const before = within(card("key-j")).getByTestId("allocator-sync-helper");
+
+      await resync("key-j");
+      const during = within(card("key-j")).getByTestId("allocator-sync-helper");
+      await finish("complete");
+      const after = within(card("key-j")).getByTestId("allocator-sync-helper");
+
+      expect(during).toBe(before);
+      expect(after).toBe(before);
+      expect(after.textContent).toBe(SIGN_IN_FAILED_HELPER);
+    });
+
+    // ── R2 ─────────────────────────────────────────────────────────────────
+
+    it.each(["complete", "complete_with_warnings"] as const)(
+      "R2 terminal %s beside a server-read sign-in failure: the panel's success is withheld and the pill returns",
+      async (status) => {
+        routeFetch();
+        await renderRows([row({ id: "key-j" })], "key-j");
+
+        await resync("key-j");
+        await finish(status);
+
+        expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+        expect(
+          within(card("key-j")).getByTestId("allocator-sync-pill"),
+        ).toHaveAttribute("data-sync-status", "sign_in_failed");
+        expect(
+          within(card("key-j")).getByTestId("allocator-sync-helper").textContent,
+        ).toBe(SIGN_IN_FAILED_HELPER);
+      },
+    );
+
+    it("R2 terminal error: BOTH the panel's error and the card's untrusted pill render", async () => {
+      routeFetch({
+        sync: () =>
+          new Response(JSON.stringify({ error: "Sync could not start" }), {
+            status: 503,
+            headers: JSON_HEADERS,
+          }),
+      });
+      await renderRows([row({ id: "key-j" })], "key-j");
+
+      await act(async () => {
+        fireEvent.click(cardButton("key-j", "Resync"));
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+          "data-sync-status",
+          "error",
+        );
+      });
+      expect(
+        within(card("key-j")).getByTestId("allocator-sync-pill"),
+      ).toHaveAttribute("data-sync-status", "sign_in_failed");
+    });
+
+    // ── R3 ─────────────────────────────────────────────────────────────────
+
+    it("CONTROL (R3's guard): a healthy key's success is shown as before, and survives an Update password", async () => {
+      routeFetch();
+      await renderRows(
+        [row({ id: "key-h", label: "Healthy MT5", sync_status: "complete" })],
+        "key-h",
+      );
+
+      await resync("key-h");
+      await finish("complete");
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "complete",
+      );
+
+      const reads = selectResultMock.mock.calls.length;
+      await rotate("key-h");
+      await waitFor(() => {
+        expect(selectResultMock.mock.calls.length).toBeGreaterThan(reads);
+      });
+
+      // A success that was never withheld is not retired.
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "complete",
+      );
+    });
+
+    it("R3 remedy after a withheld success: a successful Update password retires it, and it is not re-shown when the re-read lifts the withhold", async () => {
+      const fetchMock = routeFetch();
+      await renderRows([row({ id: "key-j" })], "key-j");
+
+      await resync("key-j");
+      await finish("complete");
+      // R2's withhold: the precondition this case exists for.
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+
+      // rotate-secret's validated write sets the status to idle.
+      selectResultMock.mockReturnValue({
+        data: [row({ id: "key-j", sync_status: "idle" })],
+        error: null,
+      });
+      await rotate("key-j");
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/keys/key-j/rotate-secret",
+        expect.objectContaining({ method: "PATCH" }),
+      );
+
+      // FIRST: the re-read landed (the pill left) ...
+      await waitFor(() => {
+        expect(
+          within(card("key-j")).queryByTestId("allocator-sync-pill"),
+        ).not.toBeInTheDocument();
+      });
+      // ... THEN: the success from the replaced password is not re-shown.
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+    });
+
+    it("R3 remedy during flight: rotating ANOTHER key while the current key syncs leaves that sync running and its panel mounted", async () => {
+      const fetchMock = routeFetch();
+      await renderRows(
+        [
+          row({ id: "key-j", label: "Key J" }),
+          row({ id: "key-k", label: "Key K" }),
+        ],
+        "key-j",
+      );
+
+      await resync("key-j");
+
+      selectResultMock.mockReturnValue({
+        data: [
+          row({ id: "key-j", label: "Key J" }),
+          row({ id: "key-k", label: "Key K", sync_status: "idle" }),
+        ],
+        error: null,
+      });
+      await rotate("key-k");
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/keys/key-k/rotate-secret",
+        expect.objectContaining({ method: "PATCH" }),
+      );
+      await waitFor(() => {
+        expect(
+          within(card("key-k")).queryByTestId("allocator-sync-pill"),
+        ).not.toBeInTheDocument();
+      });
+
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "computing",
+      );
+      expect(cardButton("key-j", "Syncing…")).toBeInTheDocument();
+    });
+
+    // ── R4 ─────────────────────────────────────────────────────────────────
+
+    it("R4 rotation blocked in flight: a key's own Update password is disabled for exactly its attempt, another key's stays usable, and the dialog opens modally", async () => {
+      routeFetch();
+      await renderRows(
+        [
+          row({ id: "key-j", label: "Key J" }),
+          row({ id: "key-k", label: "Key K" }),
+        ],
+        "key-j",
+      );
+
+      expect(cardButton("key-j", "Update password")).toBeEnabled();
+
+      await resync("key-j");
+      expect(cardButton("key-j", "Update password")).toBeDisabled();
+      expect(cardButton("key-k", "Update password")).toBeEnabled();
+
+      await finish("complete");
+      expect(cardButton("key-j", "Update password")).toBeEnabled();
+
+      // Spied AFTER the file's polyfill has run. jsdom does not model the
+      // inertness showModal() gives a real browser; this pins that the dialog
+      // opens MODALLY, which is what makes the reverse order impossible.
+      const showModalSpy = vi.spyOn(HTMLDialogElement.prototype, "showModal");
+      try {
+        await act(async () => {
+          fireEvent.click(cardButton("key-j", "Update password"));
+        });
+        expect(showModalSpy.mock.contexts).toContain(dialogTitled("New password"));
+        expect(dialogTitled("New password")).toHaveAttribute("open");
+      } finally {
+        showModalSpy.mockRestore();
+      }
+    });
+
+    // ── R5 ─────────────────────────────────────────────────────────────────
+
+    it("R5 remedy by Delete: deleting the key a success was withheld beside retires it, and it is not re-shown once the row leaves", async () => {
+      routeFetch();
+      await renderRows([row({ id: "key-j" })], "key-j");
+
+      await resync("key-j");
+      await finish("complete");
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+
+      await deleteKey("key-j");
+      expect(apiKeyDeleteMock).toHaveBeenCalledWith("api_keys");
+
+      // FIRST: the row left ...
+      await waitFor(() => {
+        expect(screen.queryByTestId("api-key-card-key-j")).not.toBeInTheDocument();
+      });
+      // ... THEN: the withheld success did not re-appear.
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+    });
+
+    it("R5 remedy by Add Key: adding a key after a withheld success retires it, and it is not re-shown once the subject moves", async () => {
+      routeFetch();
+      const revoked = row({
+        id: "key-r",
+        exchange: "binance",
+        label: "Revoked Binance",
+        sync_status: "revoked",
+        venue_account_id: null,
+      });
+      await renderRows([revoked], "key-r", "binance");
+
+      await resync("key-r");
+      await finish("complete");
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+
+      selectResultMock.mockReturnValue({ data: [newRow(), revoked], error: null });
+      await addKey();
+
+      // FIRST: the new key's card appeared ...
+      await waitFor(() => {
+        expect(screen.getByTestId("api-key-card-key-new")).toBeInTheDocument();
+      });
+      // ... THEN: the withheld success did not re-appear.
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+    });
+
+    it("CONTROL (R5 on Delete): a success that was never withheld survives deleting ANOTHER key", async () => {
+      routeFetch();
+      await renderRows(
+        [
+          row({ id: "key-h", label: "Healthy MT5", sync_status: "complete" }),
+          row({ id: "key-h2", label: "Other MT5", sync_status: "complete" }),
+        ],
+        "key-h",
+      );
+
+      await resync("key-h");
+      await finish("complete");
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "complete",
+      );
+
+      await deleteKey("key-h2");
+      await waitFor(() => {
+        expect(screen.queryByTestId("api-key-card-key-h2")).not.toBeInTheDocument();
+      });
+
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "complete",
+      );
+    });
+
+    it("CONTROL (R5 on Add Key): a success that was never withheld survives an Add Key", async () => {
+      routeFetch();
+      const healthy = row({
+        id: "key-h",
+        exchange: "binance",
+        label: "Healthy Binance",
+        sync_status: "complete",
+        venue_account_id: null,
+      });
+      await renderRows([healthy], "key-h", "binance");
+
+      await resync("key-h");
+      await finish("complete");
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "complete",
+      );
+
+      selectResultMock.mockReturnValue({ data: [newRow(), healthy], error: null });
+      await addKey();
+      await waitFor(() => {
+        expect(screen.getByTestId("api-key-card-key-new")).toBeInTheDocument();
+      });
+
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "complete",
+      );
+    });
+
+    it("R5 Delete blocked in flight: a key's own Delete is disabled for exactly its attempt, and another key's stays usable", async () => {
+      routeFetch();
+      await renderRows(
+        [
+          row({ id: "key-j", label: "Key J" }),
+          row({ id: "key-k", label: "Key K" }),
+        ],
+        "key-j",
+      );
+
+      expect(cardButton("key-j", "Delete")).toBeEnabled();
+
+      await resync("key-j");
+      expect(cardButton("key-j", "Delete")).toBeDisabled();
+      expect(cardButton("key-k", "Delete")).toBeEnabled();
+
+      await finish("complete");
+      expect(cardButton("key-j", "Delete")).toBeEnabled();
+    });
+
+    // ── R6 ─────────────────────────────────────────────────────────────────
+
+    it("R6: a post-add sync that fails while another key syncs clears the in-flight marker, so no control stays disabled", async () => {
+      let syncCalls = 0;
+      routeFetch({
+        sync: () => {
+          syncCalls += 1;
+          // First: the Resync. Second: the post-add background sync.
+          return syncCalls === 1
+            ? syncAccepted()
+            : new Response(JSON.stringify({ error: "Post-add sync failed" }), {
+                status: 503,
+                headers: JSON_HEADERS,
+              });
+        },
+      });
+      const current = row({ id: "key-j" });
+      await renderRows([current], "key-j", "binance");
+
+      await resync("key-j");
+      expect(cardButton("key-j", "Update password")).toBeDisabled();
+      expect(cardButton("key-j", "Delete")).toBeDisabled();
+
+      selectResultMock.mockReturnValue({ data: [newRow(), current], error: null });
+      await addKey();
+
+      // FIRST: the post-add sync's failure reached the panel ...
+      await waitFor(() => {
+        expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+          "data-sync-status",
+          "error",
+        );
+      });
+      expect(syncCalls).toBe(2);
+      // ... THEN: nothing on the original key is left dead-locked.
+      expect(cardButton("key-j", "Resync")).toBeEnabled();
+      expect(cardButton("key-j", "Update password")).toBeEnabled();
+      expect(cardButton("key-j", "Delete")).toBeEnabled();
+    });
   });
 });
