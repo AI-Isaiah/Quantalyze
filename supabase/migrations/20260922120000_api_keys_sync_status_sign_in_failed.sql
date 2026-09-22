@@ -42,10 +42,32 @@
 -- lock request, so every subsequent `api_keys` reader piles up behind a
 -- migration that is itself waiting. A 55P03 (`lock_not_available`) and a RED
 -- apply is the wanted outcome; a silently stalled table is not.
--- Placement copied from the direct analog,
--- `20260811210000_api_keys_attested_venue.sql`, which sets the same 3s
--- immediately above its own `ALTER TABLE public.api_keys`.
-SET lock_timeout = '3s';
+--
+-- ⛔ `SET LOCAL`, NOT a session `SET`. Transaction framing: this file has NO
+-- explicit BEGIN/COMMIT — Supabase wraps each migration in its own transaction,
+-- and `SET LOCAL` scopes the bound to THAT transaction. A session-level
+-- `SET lock_timeout` SURVIVES COMMIT and silently leaks into every later
+-- migration in the same `db push --include-all`, where it could abort an
+-- unrelated later ALTER that legitimately needs to queue.
+-- Precedent, same shape (no explicit BEGIN): the rationale above is quoted from
+-- `20260803150000_strategy_analytics_series_completeness.sql`, and
+-- `20260919120000_strategy_sync_cursors.sql` — the migration immediately before
+-- this one — already uses `SET LOCAL lock_timeout = '3s'`.
+-- ⚠️ `20260811210000_api_keys_attested_venue.sql` is NOT the precedent to copy
+-- here: it wraps in an explicit `BEGIN;`/`COMMIT;`, so its session-level `SET`
+-- is a deliberate choice inside a frame this file does not have.
+-- ⚠️ MEASURED 2026-09-22 on `scripts/pg-lane/run.sh`: the lane applies migrations
+-- OUTSIDE a transaction, so this line emits `WARNING: 25P01: SET LOCAL can only
+-- be used in transaction blocks` there and binds nothing. The gate still passes
+-- (an idle throwaway cluster never contends), so ⛔ THE LANE CANNOT PROVE THIS
+-- BOUND IS IN FORCE — it proves only that the migration applies. The bound is
+-- real under `supabase db push`, which wraps each migration in its own
+-- transaction; that wrap is the premise the convention rests on and it is
+-- asserted by `20260803150000`, not measured from this checkout (no database
+-- command may be run against any remote from here).
+-- ⛔ Do NOT silence the lane warning by reverting to a session-level `SET`.
+-- That trades a harmless, documented warning for a silent cross-migration leak.
+SET LOCAL lock_timeout = '3s';
 
 ALTER TABLE public.api_keys DROP CONSTRAINT IF EXISTS api_keys_sync_status_check;
 ALTER TABLE public.api_keys ADD CONSTRAINT api_keys_sync_status_check
