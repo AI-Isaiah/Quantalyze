@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "164.9"
-current_phase_name: TESTISOLATION — a run’s assertions against the shared TEST project
+current_phase: 164.6.6
+current_phase_name: MT5TERMINALISOLATION
 status: "Phase 164.9 shipped — PR #837"
 stopped_at: Phase 164.6.6 context gathered
-last_updated: "2026-09-22T01:58:56.034Z"
+last_updated: "2026-09-22T02:47:19.551Z"
 last_activity: 2026-09-21
 last_activity_desc: "Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction"
-state_head: 03ea859163494dbee13dba2d60933463962ec77e
+state_head: 0909795e37068a221f533a45235b11a5400553e6
 progress:
   total_phases: 48
   completed_phases: 32
-  total_plans: 238
+  total_plans: 242
   completed_plans: 231
-  percent: 67
+  percent: 63
 ---
 
 ## ⭐ STATE lineage
@@ -179,7 +179,7 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 159 — RANK — Public-ranking integrity
+Phase: 164.6.6 (MT5TERMINALISOLATION) — READY TO EXECUTE
 Plan: Not started
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
@@ -956,7 +956,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███████░░░] 67%
+Progress: [██████░░░░] 63%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 

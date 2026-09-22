@@ -2388,10 +2388,14 @@ decision. ⭐ Re-run `/gsd-plan-phase 164.6.6` after the `checkpoint:decision` i
 to author plans 05+. That is a real dependency, not an omission.
 
 Plans:
+**Wave 1**
 
 - [ ] 164.6.6-01-PLAN.md — C3 salience: the blind-instrument signal reaches a human via a rate-limited Sentry escalation (carries the phase TRACER)
 - [ ] 164.6.6-02-PLAN.md — C2 disclosure fence: no code path can read the terminal's account store, proven able to fire (⛔ the accumulation remedy is NOT here; it inherits criterion 4)
 - [ ] 164.6.6-03-PLAN.md — C1 assumption half: the lease's single-process requirement made observable, and D-04's "nowhere stated" claim corrected against measurement
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 164.6.6-04-PLAN.md — C4: the D-10 ownership decision at a blocking founder checkpoint, recorded in every ledger that carries it
 
 ### Phase 164.6.1: MYPYSTRICT — the strict gate claims to cover all running-service code and does not cover the module that IS the service (INSERTED)
