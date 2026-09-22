@@ -2,9 +2,9 @@
 phase: "167"
 slug: "credtrust-an-invalid-venue-credential-is-named-to-the-custom"
 # status lifecycle: draft (seeded by plan-phase) → validated (set by validate-phase §6)
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: validated
+nyquist_compliant: true
+wave_0_complete: true
 created: "2026-09-22"
 ---
 
@@ -60,9 +60,9 @@ dependency. The decision→behaviour rows below are the contract those task rows
 | D-08 | `buildEnvelope` derives `recoverable: false` for the new code, so `ErrorEnvelope` renders NO Retry | unit | `npx vitest run src/lib/wizardErrors.test.ts src/components/error/ErrorEnvelope.test.tsx --reporter=dot` | ✅ |
 | rosters | BOTH `ReadonlySet<WizardErrorCode>` rosters admit the new code — `KNOWN_CREATE_WITH_KEY_CODES` (`ConnectKeyStep.tsx`) and `KNOWN_ADD_KEY_CODES` (`MultiKeyConnectStep.tsx`) | unit | `npx vitest run src/lib/ --reporter=dot` | ✅ |
 | D-05 / D-09 | The owner-surface helper for a credential failure is AUTHORED, not a pass-through of `api_keys.sync_error` | unit | `npx vitest run src/components/exchanges/AllocatorSyncStatus.test.tsx --reporter=dot` | ✅ |
-| D-09 / D-10 | No end-user note promises a retry when `classify_exception` calls the failure permanent | unit | `./.venv/bin/python -m pytest tests/test_allocator_positions.py -x` (cwd `analytics-service/`) | ⚠️ file exists; the cases assert today's UNCONDITIONAL strings — **Wave 0 gap** |
-| D-04 | The public factsheet payload never carries the new cause field | integration | `npx vitest run src/__tests__/phase-148-owner-lane-cache-isolation.test.ts --reporter=dot` | ✅ existing guard; must be EXTENDED if any field is added to the payload type |
-| D-12 | `ledger_refresh_staleness`'s grants stay `service_role`-only after any new consumer | sql gate | a new `supabase/tests/test_*.sql` gate | ❌ **Wave 0** — only if a consumer is added |
+| D-09 / D-10 | No end-user note promises a retry when `classify_exception` calls the failure permanent | unit | `./.venv/bin/python -m pytest tests/test_allocator_positions.py -x` (cwd `analytics-service/`) | ⚠️ file exists; today's cases pin the UNCONDITIONAL strings — **owned by `167-02` tasks 1–3** |
+| D-04 | The public factsheet payload never carries the new cause field | *(none — honoured by omission)* | ⛔ **No command. MEASURED: `phase-148-owner-lane-cache-isolation.test.ts` has ZERO field-level assertions over `FactsheetPayload` — every payload mention is the cached builder's function name or prose. It would stay GREEN through a leaked field.** The guard CANNOT be the evidence here, so the plan action is *do not add the field*, verified by no plan's `files_modified` touching `fetchAndBuildPayload`, the cached wrapper or the share route. A new guard is owed only if a `checkpoint:decision` ever approves such a field. | n/a |
+| D-12 | `ledger_refresh_staleness`'s grants stay `service_role`-only | *(none needed)* | ⭐ **No consumer is added by any of the five plans**, so the view's grant posture is untouched and nothing is owed. Re-opens only if a future phase adds a reader. | n/a |
 
 ⛔ **Every assertion added or changed must be proven able to fail:** neuter → observe RED →
 restore from a `cp` byte backup verified with `cmp`, re-taken after every edit. ⛔ Never
@@ -72,16 +72,24 @@ restore from a `cp` byte backup verified with `cmp`, re-taken after every edit. 
 
 ## Wave 0 Requirements
 
-- [ ] Python cases proving the retry-promising copy family became a function of
-      `classify_exception`'s verdict (D-10). None exist: today's cases pin the current
-      unconditional strings, so they would pass unchanged against a broken implementation.
-- [ ] **If D-11 arm B (a new `sync_status` value) is chosen:** a `supabase/tests/test_*.sql` gate
-      over the widened CHECK constraint, and a test proving `PILL_STYLES`' unknown-value fallback
-      cannot render the new value as a neutral **idle** pill. ⛔ That fallback is the phase's
-      worst silent-failure mode — a half-done rollout shows a BROKEN key as HEALTHY.
-- [ ] **If a new write boundary is added** to `run_sync_trades_job` or the ledger fan-out (see the
-      open scoping question in RESEARCH): a Python test proving that boundary writes the same
-      curated-copy contract the holdings pipeline already enforces — never a raw exception string.
+⭐ **All three gaps are OWNED by plan tasks as of 2026-09-22.** Verified by `gsd-plan-checker`
+against the five committed plans; the owners below are task-level, not aspirational.
+
+- [x] Python cases proving the retry-promising copy family became a function of
+      `classify_exception`'s verdict (D-10) — **owned by `167-02`, tasks 1–3.**
+- [x] The arm-B SQL gate over the widened CHECK constraint, and the test proving the new
+      `sync_status` value cannot render as a neutral **idle** pill — **owned by `167-03`, tasks 1–2**,
+      landing in the SAME commit as the migration.
+- [x] ⛔ **The "new write boundary" gap is N/A by measurement, not by waiver.** `167-04`'s scoping
+      decision measures that PROD cron **jobid 15** (`poll-allocator-positions`, `0 4 * * *`, active)
+      already polls every active non-revoked key daily — the write boundary EXISTS and fires. The
+      ROADMAP's own multi-week evidence is that job writing the wrong cause repeatedly. Nothing is
+      built; the gap is closed by the absence of a need for it.
+
+⚠️ **A fourth fallback was found during planning and is closed in `167-04`:** `sync_error_copy`'s
+`.get(status, SYNC_ERROR_COPY_BY_STATUS["error"])` silently renders the GENERIC sentence for a status
+with no copy row — so the new value would have looked handled while saying the wrong thing. It is
+closed with a fallback-SPECIFIC test, not a key-existence test.
 
 *Existing `wizardErrors.test.ts`, `seam-venue-vocabulary.invariant.test.ts` and the envelope tests
 are NOT gaps — they are the proven, reusable mechanism from 164.5.4 and simply gain cases and pins.*
@@ -100,11 +108,19 @@ are NOT gaps — they are the proven, reusable mechanism from 164.5.4 and simply
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or a named Wave 0 dependency
-- [ ] Sampling continuity: no 3 consecutive tasks without an automated verify
-- [ ] Wave 0 covers every MISSING reference above
-- [ ] No watch-mode flags; every command asserts non-zero test discovery
-- [ ] Feedback latency < 120 s for the scoped commands
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or a named Wave 0 dependency
+- [x] Sampling continuity: no 3 consecutive tasks without an automated verify
+- [x] Wave 0 covers every MISSING reference above
+- [x] No watch-mode flags; every command asserts non-zero test discovery
+- [x] Feedback latency < 120 s for the scoped commands
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** approved 2026-09-22 — `gsd-plan-checker` VERIFICATION PASSED over the five committed
+plans, 0 blockers. The checker re-measured every census pin, the wave intersection and the D-11
+self-latch evidence itself rather than reading them off the plans.
+
+⚠️ **This file's frontmatter was stale until this edit** (`draft` / `nyquist_compliant: false` /
+`wave_0_complete: false`) while all three gaps were already owned. Caught by the plan checker and
+recorded here rather than silently corrected, because an automated Nyquist gate reads the
+frontmatter, not the prose — a stale `draft` would have misled it in the direction of looking
+*less* verified than the phase is, which is the harmless direction, but it is still a lie.
