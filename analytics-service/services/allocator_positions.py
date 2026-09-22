@@ -1139,6 +1139,33 @@ async def _fetch_sfox_balance_rows(
         # `_fetch_mt5_account_rows` above for why this is consulted first.
         if _must_reach_handler_unwrapped(exc):
             raise
+        # ⭐ 167-04 Task 2 — THE sFOX MEASUREMENT, recorded at the site so the
+        # next reader does not re-open a closed question. sFOX is the second
+        # NON-CCXT venue, so "does D-11 arm B's two-honesty-level split apply
+        # here too?" is the venue-agnostic question this phase had to answer.
+        #
+        # MEASURED: `SfoxApiError` DOES carry an auth-distinguishable shape —
+        # it stores the HTTP `status`, and THREE shipped call sites already
+        # dispose of 401/403 as a DEFINITIVE credential rejection
+        # (`routers/exchange._validate_sfox_key`, the `routers/internal`
+        # finalize probe, `services/ingestion/sfox`). But that disposition is
+        # the VENUE ASSERTING the rejection, which this phase routes to the
+        # CONFIDENT level (`revoked`), not to `sign_in_failed`. sFOX has no arm
+        # of the ambiguous kind the new status exists for: it either tells us
+        # (401/403) or the failure is transport (status 0 shape violation, 429,
+        # 5xx, timeout). So the split does not apply, and this arm is left
+        # exactly as plan 02 left it — guarded, still writing `error`.
+        #
+        # ⛔ AND PROMOTING 401/403 TO `revoked` HERE IS NOT AN EXECUTOR'S CALL.
+        # `routers/internal.py`'s own note records that a 4xx behind the shared
+        # static-egress proxy can be a transient IP/WAF block rather than a
+        # revoked key, that the ambiguity applies to every surface identically,
+        # and that changing it is a FOUNDER decision which must move
+        # `validate_key` and the finalize probe together — never a unilateral
+        # split at one new site. A `revoked` write is also consequential in a
+        # way the validate surfaces' verdicts are not: the daily cron enqueues
+        # only keys `WHERE sync_status IS DISTINCT FROM 'revoked'`, so it stops
+        # the poll. Named in 167-04-SUMMARY.md, not silently skipped.
         # SfoxApiError's detail is already secret-scrubbed at construction, but
         # it is still INTERNAL text (upstream bodies, status codes). Only the
         # fixed copy constant is surfaced; the detail survives in the log and in

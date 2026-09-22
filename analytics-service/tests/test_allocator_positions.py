@@ -1488,6 +1488,14 @@ def test_transient_error_is_only_ever_constructed_from_a_copy_constant():
     never an interpolated exception. A future `raise
     AllocatorHoldingsSyncTransientError(str(exc))` goes RED here.
 
+    ⭐ WIDENED by 167-04 to the SUBCLASS. `AllocatorHoldingsSignInFailedError`
+    inherits the same "my message is end-user copy" contract and gets its own
+    verbatim-stamping handler arm, so a gate that scanned only the parent's
+    NAME left the new constructor completely unguarded — a hole opened by the
+    act of adding a subclass, and invisible to every existing case here. The
+    scan is now over the SET of constructor names, so the next subclass costs
+    one entry rather than a silent exemption.
+
     AST, not text: a reformat must not turn this RED, and a leak must not hide
     behind one. (The sibling closure in test_allocator_positions_non_ccxt.py
     bans `str(exc)` / f-strings inside except arms; this one bans everything
@@ -1516,18 +1524,47 @@ def test_transient_error_is_only_ever_constructed_from_a_copy_constant():
             return bool(constant_name.match(node.func.value.id))
         return False
 
+    # Every type whose `str()` a handler arm stamps VERBATIM into the column.
+    # Derived from the class hierarchy, not hand-listed, so a further subclass
+    # joins the gate by existing rather than by someone remembering it.
+    verbatim_types = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and (
+            node.name == "AllocatorHoldingsSyncTransientError"
+            or any(
+                isinstance(base, ast.Name)
+                and base.id == "AllocatorHoldingsSyncTransientError"
+                for base in node.bases
+            )
+        )
+    }
+    assert "AllocatorHoldingsSyncTransientError" in verbatim_types
+    assert "AllocatorHoldingsSignInFailedError" in verbatim_types, (
+        "the 167-04 sign-in type is not being scanned — a subclass whose "
+        "message is stamped verbatim must be inside this gate, not beside it"
+    )
+
     sites = [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == "AllocatorHoldingsSyncTransientError"
+        and node.func.id in verbatim_types
     ]
     assert sites, "no construction sites found — the scan is not seeing the code"
+    # Anti-vacuity per TYPE, not just in aggregate: without this, the subclass
+    # could have zero construction sites and the gate would still pass on the
+    # parent's, reporting coverage it does not have.
+    for name in verbatim_types:
+        assert any(
+            isinstance(c.func, ast.Name) and c.func.id == name for c in sites
+        ), f"{name} has no construction site in this module — gate is blind to it"
 
     for call in sites:
         assert len(call.args) == 1 and _is_copy_constant(call.args[0]), (
-            "AllocatorHoldingsSyncTransientError must be constructed from a "
+            f"{call.func.id} must be constructed from a "
             f"copy constant; line {call.lineno} passes "
             f"{ast.unparse(call.args[0]) if call.args else '<no argument>'!r}"
         )
@@ -2050,3 +2087,191 @@ def test_rate_limited_note_still_promises_a_retry():
     from services.allocator_positions import SYNC_ERROR_COPY_BY_STATUS
 
     assert "retry automatically" in SYNC_ERROR_COPY_BY_STATUS["rate_limited"].lower()
+
+
+# ===========================================================================
+# Phase 167-04 Task 2 — PIN THE SILENT FAILURES.
+#
+# Both of this plan's traps fail without a traceback, without a log line and
+# without any test that reads source text noticing. Each is pinned by what it
+# would actually do to the column.
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_sign_in_failure_reaches_its_own_arm_not_the_parents(
+    monkeypatch, api_key_row_factory
+):
+    """⛔⛔ THE HANDLER-ORDERING PIN (T-167-13).
+
+    `AllocatorHoldingsSignInFailedError` SUBCLASSES
+    `AllocatorHoldingsSyncTransientError`, and Python matches the FIRST
+    `except` whose type the exception is an instance of. So an arm placed
+    below the parent's is DEAD CODE: the parent catches every sign-in failure
+    and the column silently reverts to sync_status='error' with "sync will
+    retry automatically" — the exact 17-day PROD defect this phase removes.
+    Nothing about that failure is observable except the value written.
+
+    ⛔ BEHAVIOURAL, deliberately — NOT an assertion on source-text order. A
+    text assertion can be satisfied by arms in the right order that do the
+    wrong thing, and is broken by a reformat that changes nothing. This case
+    drives the REAL handler with the new type and reads the REAL write.
+
+    The subclass assertion is not decoration: it is what makes the ordering
+    load-bearing in the first place. If a later change breaks the inheritance,
+    the shadowing risk is gone and this case should be re-derived rather than
+    silently kept passing for a different reason.
+    """
+    from services import allocator_positions as ap
+    from services import job_worker as jw
+
+    assert issubclass(
+        ap.AllocatorHoldingsSignInFailedError,
+        ap.AllocatorHoldingsSyncTransientError,
+    ), (
+        "the sign-in type no longer subclasses the transient one — the "
+        "ordering trap this case pins has changed shape; re-derive it"
+    )
+
+    copy = ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+
+    async def _raise_sign_in_failed(venue, exchange, api_key_id=None):
+        raise ap.AllocatorHoldingsSignInFailedError(copy)
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_raise_sign_in_failed
+    )
+    result = await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses, f"expected a sync_status write; got {payloads!r}"
+    assert statuses[-1] == ap.SIGN_IN_FAILED_SYNC_STATUS, (
+        "the sign-in exception was caught by the PARENT's arm — the new arm "
+        "is below it and is dead code. Every sign-in failure now writes "
+        f"{statuses[-1]!r}, which is today's defect restored"
+    )
+    assert _sync_errors(payloads)[-1] == copy
+    # The queue disposition is the parent's, unchanged.
+    assert result.error_kind == "transient"
+
+
+def test_sign_in_copy_is_not_the_unknown_status_FALLBACK(monkeypatch):
+    """⛔ THE COPY-TABLE FALLBACK PIN (T-167-14), and it is fallback-SPECIFIC.
+
+    MEASURED: `sync_error_copy` does
+    `SYNC_ERROR_COPY_BY_STATUS.get(status, SYNC_ERROR_COPY_BY_STATUS["error"])`
+    — by design, because a KeyError here would abort the very write that
+    clears the UI's 'syncing' spinner. The cost of that design is that a
+    status written WITHOUT its row renders the generic holdings-sync sentence
+    and NOTHING SAYS SO.
+
+    ⛔ A case that only asserted `status in SYNC_ERROR_COPY_BY_STATUS` cannot
+    fail the way the fallback fails: it would go red on a KeyError the code
+    never raises, and green on a `.get` default it never inspects. So this
+    case asserts against the FALLBACK VALUE itself, and it proves the fallback
+    is reachable at all (the control below) rather than assuming it.
+    """
+    from services.allocator_positions import (
+        SIGN_IN_FAILED_NOTE,
+        SIGN_IN_FAILED_SYNC_STATUS,
+        SYNC_ERROR_COPY_BY_STATUS,
+        sync_error_copy,
+    )
+
+    generic = SYNC_ERROR_COPY_BY_STATUS["error"].format(venue="MT5")
+
+    # CONTROL: the fallback is live. Without this the assertion below could
+    # pass because `sync_error_copy` stopped falling back at all, which would
+    # be a different (and also untested) module.
+    assert sync_error_copy("a-status-invented-later", "mt5") == generic
+
+    text = sync_error_copy(SIGN_IN_FAILED_SYNC_STATUS, "mt5")
+    assert text != generic, (
+        "the new status fell through to the generic holdings-sync sentence — "
+        "its SYNC_ERROR_COPY_BY_STATUS row is missing. The user is told we "
+        "could not REACH the venue, for a credential the venue refused"
+    )
+    assert text == SIGN_IN_FAILED_NOTE.format(venue="MT5")
+    # And the promise the phase exists to kill is absent from it.
+    assert "retry" not in text.lower()
+
+
+def test_every_status_this_module_can_write_has_its_own_copy_row():
+    """THE ROSTER PIN — no future status may ship into the silent fallback.
+
+    The status set is DERIVED from the module's own AST, never hand-listed:
+    a hand-listed roster is a second list that falls out of step with the
+    first, which is the class of defect this whole phase is made of. Two
+    derivations, unioned:
+
+      1. every string literal `_map_exception_to_sync_status` can RETURN
+         (the ccxt mapping's whole output range);
+      2. every top-level `*_SYNC_STATUS` constant (the typed-exception arms'
+         statuses, which never pass through that function).
+
+    ⛔ AST AND NOT A TEXT SCAN. This module's comments and docblocks NAME
+    several statuses in prose — `_map_exception_to_sync_status`'s own docblock
+    draws the mapping table, and the copy-table block comment quotes
+    `'revoked'` — so a grep-shaped extractor would count prose as code. That
+    is the self-invalidating-census class this repo has already paid for, and
+    `ast.parse` is immune to it for free: comments never enter the tree.
+    """
+    import ast
+    import inspect
+    import re as _re
+    from services import allocator_positions as ap
+
+    tree = ast.parse(inspect.getsource(ap))
+
+    statuses: set[str] = set()
+
+    # (1) the mapping function's return range.
+    mapper = next(
+        (
+            n
+            for n in tree.body
+            if isinstance(n, ast.FunctionDef)
+            and n.name == "_map_exception_to_sync_status"
+        ),
+        None,
+    )
+    assert mapper is not None, (
+        "the extractor cannot find _map_exception_to_sync_status — it is not "
+        "reading the module it claims to read"
+    )
+    for node in ast.walk(mapper):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Constant):
+            if isinstance(node.value.value, str):
+                statuses.add(node.value.value)
+
+    # (2) the typed-arm status constants.
+    status_const = _re.compile(r"^[A-Z][A-Z0-9_]*_SYNC_STATUS$")
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target = node.targets[0]
+        if not (isinstance(target, ast.Name) and status_const.match(target.id)):
+            continue
+        value = getattr(ap, target.id, None)
+        if isinstance(value, str):
+            statuses.add(value)
+
+    # Anti-vacuity: prove the extractor found a non-zero set, and that it saw
+    # BOTH derivations rather than one of them silently returning nothing.
+    assert statuses, "extracted ZERO writable statuses — the scan is blind"
+    assert "revoked" in statuses, (
+        "derivation (1) found nothing — the mapping function's returns are "
+        "not being seen"
+    )
+    assert ap.SIGN_IN_FAILED_SYNC_STATUS in statuses, (
+        "derivation (2) found nothing — the *_SYNC_STATUS constants are not "
+        "being seen"
+    )
+
+    missing = sorted(s for s in statuses if s not in ap.SYNC_ERROR_COPY_BY_STATUS)
+    assert missing == [], (
+        "these statuses can be WRITTEN to api_keys.sync_status but have no "
+        "SYNC_ERROR_COPY_BY_STATUS row, so sync_error_copy answers them with "
+        f"the generic 'error' sentence, silently: {missing}"
+    )

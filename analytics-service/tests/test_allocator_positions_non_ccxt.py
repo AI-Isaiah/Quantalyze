@@ -2030,15 +2030,25 @@ async def test_mt5_refused_sign_in_writes_sign_in_failed_end_to_end(
     `api_keys` as sync_status='sign_in_failed' with the AUTHORED sign-in copy
     — NOT as 'error', and NOT as the generic holdings-sync sentence.
 
-    Three distinct failures each turn this RED, which is why it is one case
-    and not three:
-      1. the MT5 client-error arm raising the generic transient type again;
-      2. the handler's new `except` arm sitting BELOW its parent (the new type
+    TWO distinct failures each turn this RED, both MEASURED under their own
+    neuter rather than asserted from the shape of the code:
+      1. the MT5 client-error arm raising the generic transient type again
+         (observed: the write becomes 'error');
+      2. the handler's new `except` arm sitting BELOW its parent — the new type
          is a SUBCLASS, so a below-parent arm is dead code and every sign-in
-         failure silently reverts to 'error' — today's defect, restored);
-      3. `SYNC_ERROR_COPY_BY_STATUS` losing its row for the new status, which
-         `sync_error_copy` answers with the generic 'error' sentence rather
-         than a KeyError.
+         failure silently reverts to 'error', today's defect restored
+         (observed by physically swapping the two arms).
+
+    ⚠️ AND ONE IT DOES *NOT* CATCH, stated rather than implied because an
+    over-claimed test is worse than a missing one. Deleting the new status's
+    `SYNC_ERROR_COPY_BY_STATUS` row leaves this case GREEN: the handler's
+    typed arm stamps `str(exc)` — the copy constant the venue branch raised —
+    and never consults `sync_error_copy` at all. That fallback is covered by
+    its own fallback-SPECIFIC pin in tests/test_allocator_positions.py
+    (`test_sign_in_copy_is_not_the_unknown_status_FALLBACK`), which asserts
+    against the generic sentence itself, plus the roster pin beside it. The
+    inequality assertion below is a cheap CONSISTENCY check between the two
+    strings, not the fallback gate.
     """
     import services.job_worker as jw
     from services.allocator_positions import (
