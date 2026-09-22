@@ -155,8 +155,8 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
               const untrustedLabel = untrustedKeyChipLabel(
                 r.source_key_sync_status,
               );
-              const isRevoked = untrustedLabel !== null;
-              const numericCell = isRevoked
+              const isUntrusted = untrustedLabel !== null;
+              const numericCell = isUntrusted
                 ? "px-4 py-2 font-metric tabular-nums text-right line-through text-text-muted"
                 : "px-4 py-2 font-metric tabular-nums text-right text-text-primary";
               return (
@@ -191,7 +191,7 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                   <td className={numericCell}>{formatUsd(r.mark_price)}</td>
                   <td
                     className={
-                      isRevoked
+                      isUntrusted
                         ? "px-4 py-2 font-metric tabular-nums text-right line-through text-text-muted"
                         : "px-4 py-2 font-metric tabular-nums text-right text-text-secondary"
                     }
