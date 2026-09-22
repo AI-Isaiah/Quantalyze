@@ -910,6 +910,20 @@ export const UNTRUSTED_KEY_STATUS_CHIP_LABEL = {
   sign_in_failed: "Sign-in failed",
 } as const satisfies Record<UntrustedKeySyncStatus, string>;
 
+// The COLLECTIVE noun for the set, for surfaces that filter on it rather than
+// label one row. ⛔ This is not a third state vocabulary: the per-state chips
+// above still name the specific cause ("Key revoked" / "Sign-in failed") on the
+// row itself. This names the SET, and it must stay cause-neutral — a filter that
+// hides two causes cannot honestly name one of them.
+//
+// ⚠️ IT REPLACES "revoked" IN USER-FACING FILTER COPY, and that was a real
+// defect: the toggle said "Show revoked-key holdings" and the footer said
+// "hidden from revoked keys" while the predicate already hid `sign_in_failed`
+// too, so the surface NAMED A NARROWER SET THAN IT HID. Derived from one
+// constant here rather than restated at each call site, because this phase has
+// a dated record of the same count drifting across seven restatements.
+export const UNTRUSTED_KEY_SET_NOUN = "keys needing attention";
+
 /**
  * Whether a row's source key is in a state that forbids showing its numbers as
  * current. Fails CLOSED in both directions: an unknown / null / empty status is

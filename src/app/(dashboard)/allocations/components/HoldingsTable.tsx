@@ -56,6 +56,7 @@ import { formatUsd } from "@/lib/dollar-validation";
 import {
   isUntrustedKeySyncStatus,
   untrustedKeyChipLabel,
+  UNTRUSTED_KEY_SET_NOUN,
 } from "@/lib/closed-sets";
 import { OWN_CAPITAL } from "@/lib/capital-ownership";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
@@ -573,7 +574,7 @@ function LegacyHoldingsTable({
             checked={showRevoked}
             onChange={(e) => onShowRevokedChange(e.target.checked)}
           />
-          <span>Show revoked-key holdings</span>
+          <span>Show holdings from {UNTRUSTED_KEY_SET_NOUN}</span>
         </label>
       </div>
 
@@ -695,8 +696,8 @@ function LegacyHoldingsTable({
 
       {!showRevoked && hiddenCount > 0 ? (
         <p className="px-4 py-2 text-xs text-text-muted">
-          {hiddenCount} {hiddenCount === 1 ? "holding" : "holdings"} hidden from
-          revoked keys ·{" "}
+          {hiddenCount} {hiddenCount === 1 ? "holding" : "holdings"} hidden from{" "}
+          {UNTRUSTED_KEY_SET_NOUN} ·{" "}
           <button
             type="button"
             onClick={() => onShowRevokedChange(true)}
@@ -813,7 +814,7 @@ function DesignHoldingsTable({
               checked={showRevoked}
               onChange={(e) => onShowRevokedChange(e.target.checked)}
             />
-            <span>Show revoked-key holdings</span>
+            <span>Show holdings from {UNTRUSTED_KEY_SET_NOUN}</span>
           </label>
         ) : null}
       </div>
@@ -1019,8 +1020,8 @@ function DesignHoldingsTable({
 
       {!showRevoked && hiddenCount > 0 && onShowRevokedChange ? (
         <p className="px-4 py-2 text-xs text-text-muted">
-          {hiddenCount} {hiddenCount === 1 ? "holding" : "holdings"} hidden from
-          revoked keys ·{" "}
+          {hiddenCount} {hiddenCount === 1 ? "holding" : "holdings"} hidden from{" "}
+          {UNTRUSTED_KEY_SET_NOUN} ·{" "}
           <button
             type="button"
             onClick={() => onShowRevokedChange(true)}
