@@ -237,7 +237,7 @@ Each restore was from a `cp` byte backup verified with `cmp`, re-taken after eve
 
 | gate | result |
 |---|---|
-| full `analytics-service` pytest suite | **6045 passed, 90 skipped**, exit 0 |
+| full `analytics-service` pytest suite | **6045 passed, 90 skipped**, exit 0 — re-run and SHA-bound to the FINAL tree at `8ec24511`, not only to the mid-plan state, because the last edit (the sFOX comment) landed after the first full run and an unbound "suite is green" is the claim this repo distrusts most |
 | `pytest tests/test_allocator_positions{,_non_ccxt}.py tests/test_job_worker.py` | 255 passed, 1 skipped |
 | `mypy services/allocator_positions.py services/job_worker.py` | Success, no issues |
 | `vitest run "src/app/(dashboard)/allocations/"` + the closed-sets case | **1930 + 4 passed**, 0 failed |
