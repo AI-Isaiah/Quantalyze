@@ -2885,6 +2885,17 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1 to break down)
 
+### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
+
+**Goal:** On a manager's key card (`ApiKeyManager`), a sync result is only ever shown about the key it came from, and a success the card withheld beside a "Sign-in failed" pill cannot reappear through a re-read.
+**Requirements**: TBD. Source: Phase 167 plan 06 residuals, recorded in `167-CONTEXT.md` D-18 (2026-09-22). (1) The post-add sync bypasses the component's one tracked sync slot: adding a key while another key's sync is in flight moves `lastAttemptedKeyId` to the new key, so the older sync's result is shown as the new key's — and when that older key is UNTRUSTED, its later success appears beside its own "Sign-in failed" pill. Closing it routes the post-add sync through the tracked slot, which changes the add flow the `SEAMUX-05` tests pin. (2) A change made in another tab can surface a withheld success through a re-read (the load-error Retry or the terminal-success re-read); closing it means retiring the success at the moment of withholding, a redesign of 167-06's R2.
+**Depends on:** Phase 167
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 167.2 to break down)
+
 ### Phase 168: DRBOPTIONS — a Deribit options account ingests end to end
 
 **Goal:** Classify Deribit's `assignment` transaction-log type **against a captured row census rather than a guess**, so an options account ingests end to end and the realized-cash series it feeds is neither silently dropped nor double-counted.

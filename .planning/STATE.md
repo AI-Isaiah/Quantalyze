@@ -6,16 +6,16 @@ current_phase: "167"
 current_phase_name: "CREDTRUST — an invalid venue credential is named to the customer"
 status: "Phase 164.9 shipped — PR #837"
 stopped_at: Completed 167-02-PLAN.md (wave 1) — six MT5/sFOX except-arms in allocator_positions.py now consult the classifier before promising a retry
-last_updated: "2026-09-22T21:04:51.275Z"
+last_updated: "2026-09-22T23:17:23.003Z"
 last_activity: 2026-09-22
 last_activity_desc: "Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction. Phase 167 CREDTRUST context locked 2026-09-22. Plan 167-01 (wizard SIGN_IN_FAILED mint) shipped. Plan 167-02 (D-09/D-10, six retry-disposition guards on allocator_positions.py's MT5/sFOX arms + AST roster case) shipped this session, commits 5c48916a + 26c83dc3 — see 167-02-SUMMARY.md."
-state_head: 6892063551cf024764aab264fd83cf9697292a9f
+state_head: de41a2009d03b6b62288b591223cd12659e51b88
 progress:
-  total_phases: 49
+  total_phases: 50
   completed_phases: 32
-  total_plans: 243
-  completed_plans: 236
-  percent: 65
+  total_plans: 244
+  completed_plans: 237
+  percent: 64
 ---
 
 ## ⭐ STATE lineage
@@ -956,7 +956,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███████░░░] 65%
+Progress: [██████░░░░] 64%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1274,6 +1274,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.5.4 edited: added defect (3) KEY_UNDECRYPTABLE routed from 164.5.3; corrected the stale independent-of-164.5.3 clause
 - Phase 164.4.2 edited: scope: also owns the shared-TEST mutex contention (founder 2026-09-21); corrected two stale restated floors
 - Phase 167.1 inserted after Phase 167: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention (from 167 review M2)
+- Phase 167.2 inserted after Phase 167: KEYCARDSYNC — the key card never shows one key's sync result as another key's (from 167-06 D-18 residuals)
 
 ### Decisions
 

@@ -357,7 +357,7 @@ itself.
   strategy's staleness to a key's failure, and authoring one would be the inference this phase
   forbids. If re-verification judges placement insufficient, the only remaining routes are a founder
   override or a new phase that builds a strategy-level write boundary.
-  ⚠️ **Two residuals, named and NOT fixed.**
+  ⚠️ **Two residuals, named and NOT fixed.** ⭐ **Destination (added 2026-09-22): Phase 167.2 KEYCARDSYNC**, inserted in the ROADMAP for both.
   - **The post-add sync bypasses the one sync slot.** `handleAddKey` moves the panel's subject to the
     new key while another key's attempt may still be polling, so that attempt's terminal success is
     judged against the new key and reads as being about it. Between two healthy keys it shows as a
