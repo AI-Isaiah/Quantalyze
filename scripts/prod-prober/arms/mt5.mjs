@@ -49,6 +49,12 @@
  * mt5_validation.py:71-83`). `REMEDIES` below keeps them apart, and the
  * self-test asserts the two strings differ.
  *
+ * ⛔ D-09 (phase 164.6.5): the paragraph above is the ORIGINAL observation and
+ * stays correct for its OWN cause, but it is not the ONLY cause of `-10005` —
+ * a second, mechanically indistinguishable cause was measured 2026-09-21. The
+ * decision record beside `REMEDIES` below states why the classifier was NOT
+ * split to cover it; read that record before rewording either `-10005` string.
+ *
  * ⚠️ FOUR STATES AROUND THEM, kept distinct on purpose:
  *   - `mt5-probe-timeout`  — the PROBER's own 120 s transport budget elapsed.
  *                            This is OUR instrument, NOT the terminal's -10005.
@@ -141,19 +147,58 @@ export const MT5_PROBE_PY = [
 ].join("\n");
 
 /**
+ * ⛔ D-09 DECISION RECORD (phase 164.6.5) — WHY `-10005` STAYS ONE KIND, ONE
+ * REMEDY, BROADENED RATHER THAN SPLIT.
+ *
+ * `-10005` has AT LEAST TWO measured causes that read IDENTICALLY on this
+ * arm's transcript: a PERSISTED modal-login-dialog wedge (the Wine prefix and
+ * the dialog live on the named volume and survive a redeploy — the ORIGINAL
+ * observation above) and a PROCESS-state wedge measured 2026-09-21 during an
+ * account switch (the VNC console was clean and the Alerts tab was empty even
+ * though the terminal was not answering; a process recycle cleared it in
+ * 2.0 s). A classifier split — one kind per cause — was the FIRST option
+ * considered and was REFUSED, for three measured reasons:
+ *
+ *   1. Both causes produce the IDENTICAL `initialize()` failure code, and the
+ *      probe is READ-ONLY by hard constraint (see the file header above): a
+ *      `login()` call is itself an account change, which would re-trip the
+ *      D-15 landmine this phase pins. The probe cannot be widened to
+ *      disambiguate.
+ *   2. The alternative — correlating against external state, such as a
+ *      recent validate from the session monitor's own episode log — would
+ *      require this arm to READ something outside its own transcript. The
+ *      arm is pinned IMPORT-FREE by the mutation harness idiom (the
+ *      `withMutantArm` temp-directory copy in the wiring test depends on it);
+ *      that correlation cannot live here.
+ *   3. `run.mjs`'s own self-test requires every declared kind to carry a RED
+ *      FIXTURE that fires it and nothing else. With no mechanical
+ *      discriminator, no HONEST fixture exists for a second `-10005` kind —
+ *      and a fabricated one would be exactly the vacuous gate this milestone
+ *      exists to close.
+ *
+ * So `mt5-ipc-timeout` stays ONE kind, and its remedy is BROADENED to name
+ * both causes, assert NEITHER as the cause of the reading in hand, and give
+ * the ordered procedure that is correct under both. WHAT WOULD REOPEN THE
+ * SPLIT: a read-only signal, IN THE COMMITTED PROBE BODY, that differs
+ * between the two causes — nothing observed to date provides one.
+ */
+
+/**
  * ⛔ ONE REMEDY PER KIND, AND THE TWO IPC REMEDIES SAY OPPOSITE THINGS.
  *
- * `mt5-no-ipc` says redeploy. `mt5-ipc-timeout` says a redeploy will NOT help
- * and names the VNC console. If these two ever converge on one string, the arm
- * has stopped doing the one thing it was built for — the self-test asserts they
- * differ, that each carries its distinguishing word, and that no two remedies
- * in this table are the same string.
+ * `mt5-no-ipc` says redeploy fixes -10004. `mt5-ipc-timeout` still differs
+ * from it and still names the VNC console — but since D-09 it no longer
+ * claims a redeploy cannot help under EITHER of -10005's two causes, only
+ * under the persisted-dialog one. If these two ever converge on one string,
+ * the arm has stopped doing the one thing it was built for — the self-test
+ * asserts they differ, that each carries its distinguishing word, and that
+ * no two remedies in this table are the same string.
  */
 export const REMEDIES = {
   "mt5-no-ipc":
     "The rpyc bridge is NOT ATTACHED (-10004): the gateway is down or mid-redeploy, so the terminal was never reached. Run `railway redeploy` on the mt5-gateway service, wait for the container to report healthy, then re-run this prober. This is the code a redeploy DOES fix.",
   "mt5-ipc-timeout":
-    "The bridge IS ATTACHED but the terminal is NOT ANSWERING (-10005). Open the gateway's VNC console and clear the MODAL LOGIN DIALOG by completing any login — ⛔ a redeploy does NOT fix this, because the Wine prefix and the dialog live on the persistent volume and come straight back. A transient reading is possible while a real validate call holds the terminal's IPC bridge, so a SECOND consecutive hourly hit is the confirmation.",
+    "The bridge IS ATTACHED but the terminal is NOT ANSWERING (-10005). Two known causes read identically on this transcript, and it cannot tell them apart: the modal-login-dialog wedge, PERSISTED with the Wine prefix on the named volume and unaffected by a redeploy; and the account-switch wedge measured 2026-09-21, a PROCESS state where the terminal's own console was clean and the Alerts tab was empty even though it was not answering. Do this in order: first, recycle the gateway's terminal process — cheap, unattended, measured at 2.0 s, and it cannot make the dialog cause worse. If -10005 returns, open the gateway's VNC console and clear the MODAL LOGIN DIALOG by completing any login; a redeploy does NOT fix that cause, because the dialog and the Wine prefix live on the persistent volume and come straight back. See the -10005 differential-diagnosis section in docs/runbooks/mt5-go-live.md for the full procedure. A transient reading is possible while a real validate call holds the terminal's IPC bridge, so a SECOND consecutive hourly hit is the confirmation.",
   "mt5-ssh-transport":
     "railway ssh did not return a PROBE line, so the terminal was never reached and nothing about it was measured. Check, in order: the RAILWAY_API_TOKEN's scope (it must be the WORKSPACE/account slot — the CLI's project-slot token is refused by `railway ssh`), then the project / environment / service variables, then the gateway container's own state in Railway.",
   "mt5-probe-timeout":
@@ -294,10 +339,16 @@ export function classifyProbe(result) {
     return {
       kind: "mt5-ipc-timeout",
       subject: "-10005",
+      // ⛔ D-09: this describes ONLY what was READ — the bridge is attached
+      // and the terminal is not answering. It does NOT name a cause: `-10005`
+      // has at least two measured causes that read identically here (see the
+      // D-09 decision record beside REMEDIES above), and a detail string that
+      // narrated a cause it did not measure is this arm's own named defect
+      // class (see the `-6` branch's comments below).
       detail:
         "MT5 initialize() failed with -10005 (IPC timeout): the rpyc bridge IS attached but the terminal " +
-        "stopped answering — the modal-login-dialog wedge, observed three times in one day behind a healthy " +
-        "container, a green /health and a quiet log. NOT the same state as -10004 and NOT fixed by a redeploy.",
+        "is NOT ANSWERING. This code alone does not say why — see the mt5-ipc-timeout remedy for the two " +
+        "known causes and the ordered procedure that is correct under both.",
       info: null,
     };
   }

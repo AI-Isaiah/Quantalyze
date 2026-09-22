@@ -63,7 +63,7 @@ import {
   splitHygiene,
   UNRECORDED_VERDICT,
 } from "../../scripts/prod-prober/arms/cron-drift.mjs";
-import { classifyProbe } from "../../scripts/prod-prober/arms/mt5.mjs";
+import { ARM as MT5_ARM, classifyProbe } from "../../scripts/prod-prober/arms/mt5.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "prod-prober.yml");
@@ -2988,5 +2988,56 @@ describe("[164.1-fix] psql must not print its command tag into the row count", (
     // emits without -q, so the reason for the flag is pinned next to the flag.
     expect(countReturnedRows("1\n")).toBe(1);
     expect(countReturnedRows("1\nINSERT 0 1\n")).toBe(2);
+  });
+});
+
+describe("[164.6.5-03] D-09: the -10005 remedy names both causes and asserts neither", () => {
+  // ⛔ THE DEFECT THIS PINS. Before D-09 the `mt5-ipc-timeout` remedy told the
+  // operator ONE cause (a modal login dialog) and asserted a redeploy would
+  // NOT help — both measured FALSE for the 2026-09-21 incident (VNC console
+  // clean, Alerts tab empty, a 2.0 s process recycle fixed it). The remedy
+  // must now name BOTH known causes, assert neither as the cause of the
+  // reading in hand, and give the ordered procedure that is correct under
+  // both.
+  const remedy = MT5_ARM.REMEDIES["mt5-ipc-timeout"];
+
+  it("names both causes and the ordered procedure (recycle before VNC)", () => {
+    const dialogAt = remedy.indexOf("modal-login-dialog");
+    const accountSwitchAt = remedy.indexOf("account-switch");
+    const recycleAt = remedy.indexOf("recycle");
+    const vncAt = remedy.indexOf("VNC");
+    expect(dialogAt, `the remedy names the persisted modal-login-dialog cause (${JSON.stringify(remedy)})`).toBeGreaterThan(-1);
+    expect(accountSwitchAt, `the remedy names the process-state account-switch cause (${JSON.stringify(remedy)})`).toBeGreaterThan(
+      -1,
+    );
+    expect(recycleAt, "the ordered procedure names the process recycle").toBeGreaterThan(-1);
+    expect(vncAt, "the ordered procedure names the VNC console for the dialog cause").toBeGreaterThan(-1);
+    expect(recycleAt, "the recycle step comes BEFORE the VNC step — cheap and unattended first").toBeLessThan(vncAt);
+  });
+
+  it("⛔ EXPRESSED AS A PROPERTY OF THE REMEDY'S OWN CONTENT: it affirmatively states the reading cannot distinguish the two causes, rather than merely lacking the old single-cause sentence", () => {
+    // A gate that only checks a word is GONE goes green the moment someone
+    // rewords the old sentence without adding the new disclaimer. This checks
+    // for the POSITIVE presence of the ambiguity statement instead.
+    expect(
+      remedy.includes("cannot tell them apart"),
+      `the remedy must affirmatively state that this reading alone cannot distinguish the two causes (${JSON.stringify(remedy)})`,
+    ).toBe(true);
+  });
+
+  it("points at the runbook's -10005 differential section BY SYMBOL, never re-deriving the procedure inline", () => {
+    expect(remedy).toContain("docs/runbooks/mt5-go-live.md");
+    expect(remedy).toContain("differential-diagnosis");
+  });
+
+  it("CALIBRATION: a single-cause revert (the pre-D-09 shape) FAILS the ambiguity-property assertion", () => {
+    // The mutant is the REAL pre-D-09 sentence this arm shipped, not a
+    // paraphrase — so this calibration proves the assertion above is a
+    // reading, not a predicate only ever shown passing input.
+    const preD09 =
+      "The bridge IS ATTACHED but the terminal is NOT ANSWERING (-10005). Open the gateway's VNC console and clear the MODAL LOGIN DIALOG by completing any login — ⛔ a redeploy does NOT fix this, because the Wine prefix and the dialog live on the persistent volume and come straight back. A transient reading is possible while a real validate call holds the terminal's IPC bridge, so a SECOND consecutive hourly hit is the confirmation.";
+    expect(preD09, "the pre-D-09 sentence must actually differ from the shipped remedy").not.toBe(remedy);
+    expect(preD09.includes("cannot tell them apart")).toBe(false);
+    expect(preD09.includes("account-switch")).toBe(false);
   });
 });
