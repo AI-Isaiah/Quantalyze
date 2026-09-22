@@ -1,215 +1,238 @@
 ---
 phase: 167-credtrust-an-invalid-venue-credential-is-named-to-the-custom
-reviewed: 2026-09-22T19:55:55Z
+round: 2
+reviewed: 2026-09-22T20:50:22Z
+reviewed_at_sha: b52b6032
+diff_base: b12dd05c
 depth: standard
-files_reviewed: 32
+files_reviewed: 26
 files_reviewed_list:
   - analytics-service/docs/STATUS_CONTRACT.md
   - analytics-service/routers/exchange.py
   - analytics-service/services/allocator_positions.py
-  - analytics-service/services/exchange.py
   - analytics-service/services/job_worker.py
+  - analytics-service/services/mt5_client.py
+  - analytics-service/services/mt5_validation.py
   - analytics-service/tests/fixtures/validate_key_venue_transient_contract.json
   - analytics-service/tests/test_allocator_positions.py
   - analytics-service/tests/test_allocator_positions_non_ccxt.py
+  - analytics-service/tests/test_mt5_client_contract.py
+  - analytics-service/tests/test_mt5_read.py
   - analytics-service/tests/test_mt5_validate.py
+  - analytics-service/tests/test_raw_5xx_census.py
   - analytics-service/tests/test_validate_key_venue_transient.py
-  - scripts/mutation-runner/run.mjs
-  - src/__tests__/gate-family-meta.test.ts
-  - src/__tests__/lint-sql-gates.test.ts
-  - src/__tests__/mutation-annotation-parser.test.ts
-  - src/__tests__/mutation-runner-floors.test.ts
+  - src/__tests__/contracts/check-zod-db-check-parity.test.ts
   - src/app/(dashboard)/allocations/components/HoldingsTable.test.tsx
-  - src/app/(dashboard)/allocations/components/HoldingsTable.tsx
   - src/app/(dashboard)/allocations/components/OpenPositionsTable.tsx
   - src/app/(dashboard)/allocations/components/untrusted-key-status.surfaces.test.tsx
-  - src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.tsx
-  - src/app/(dashboard)/strategies/new/wizard/steps/MultiKeyConnectStep.tsx
   - src/components/exchanges/AllocatorSyncStatus.test.tsx
   - src/components/exchanges/AllocatorSyncStatus.tsx
+  - src/components/exchanges/allocator-sync-pill-styles.ts
+  - src/components/strategy/UpdateMt5SecretDialog.test.tsx
+  - src/components/strategy/UpdateMt5SecretDialog.tsx
   - src/lib/closed-sets.ts
   - src/lib/closed-sets.untrusted-key-status.test.ts
-  - src/lib/dialog-envelope.invariant.test.ts
-  - src/lib/seam-venue-vocabulary.invariant.test.ts
-  - src/lib/wizardErrors.test.ts
-  - src/lib/wizardErrors.ts
-  - supabase/migrations/20260922120000_api_keys_sync_status_sign_in_failed.sql
-  - supabase/tests/test_api_keys_sync_status_sign_in_failed.sql
   - tests/lib/validate-key-venue-transient-parity.test.ts
 findings:
   critical: 1
-  warning: 6
+  warning: 1
   info: 4
-  total: 11
+  total: 6
 status: issues_found
 ---
 
-# Phase 167: Code Review Report
+# Phase 167: Code Review Report, Round 2 (fix round)
 
-**Reviewed:** 2026-09-22T19:55:55Z
-**Depth:** standard
-**Files Reviewed:** 32
+**Reviewed:** 2026-09-22T20:50:22Z
+**Depth:** standard, with call sites traced
+**Files Reviewed:** 26 (the `b12dd05c..b52b6032` diff, `.planning/` excluded)
 **Status:** issues_found
 
 ## Summary
 
-All 32 files in scope were reviewed at standard depth. Where a claim depended on a callee, the callee was read too (`services/mt5_client.py` `Mt5Client.login` / `account_info` / `_guarded_read` / `_raise_last`, `services/mt5_probe.py` `run_probe`, `services/mt5_validation.py` `classify_mt5_login_error`, `services/job_worker.py` `classify_exception`, `components/strategy/UpdateMt5SecretDialog.tsx`, `components/exchanges/AllocatorExchangeManager.tsx`, `app/api/keys/[id]/rotate-secret/route.ts`). Citations are by symbol, not by line number.
+This round reviewed the 26-file fix-round diff and the call sites it touches:
+- `Mt5Client.login`, `_raise_last`, `_guarded_read` and `account_info`
+- `services/mt5_probe.py` `run_probe`
+- `classify_mt5_login_error` and `_IPC_TRANSPORT_CODES`
+- the holdings `_mt5_read` and its `except` ladder
+- `run_poll_allocator_positions_job` and the dispatcher's use of `error_kind`
+- the latest `mark_compute_job_failed` and `enqueue_poll_allocator_positions_for_all_keys` definitions
+- the `rotate-secret` and manual-sync routes
+- the `KEY_SIGN_IN_FAILED` docblocks in `src/lib/wizardErrors.ts`
 
-**The mechanics hold.** The cross-language mint works end to end: the wire code, the `VENUE_WIRE_CODE_TO_VERDICT` row, both wizard rosters and the dashboard-dialog roster are wired, and `recoverable` agrees on the wire and in the envelope. The handler-arm order in `run_poll_allocator_positions_job` is correct and is pinned by behaviour, not by source text. `SYNC_ERROR_COPY_BY_STATUS` has its row, with a pin written specifically against the fallback. All seven former `revoked` equalities now go through `isUntrustedKeySyncStatus` / `untrustedKeyChipLabel`.
+All citations are by symbol.
 
-**The defect is in scope, not in wiring.** Both new "sign-in failed" arms (the wizard's `SIGN_IN_FAILED` tail in `_validate_mt5_key_probe` and the holdings poll's `except Mt5ClientError` in `_fetch_mt5_account_rows`) catch every `Mt5ClientError` their `try` block produces. Those blocks also contain calls that run after a successful login, and transport calls where no credential has been sent yet. I checked this by running two throwaway probes against this worktree's code (kept in the session scratchpad; no source file was touched):
+**The mechanical fixes hold.**
+- **The marker cannot leak onto another path.** `Mt5LoginRefusedError` is constructed in exactly one place: the last raise of `_raise_last`, and only when `login`'s falsy arm passes `answered_type`. The two earlier raises (`last_error` round trip died, or returned nothing) stay the base class. The `initialize()` arms and the transport-raise arm are untouched.
+- **Redaction is unchanged.** The same `_redact_with_optional_credentials(text, credentials)` call feeds whichever class is raised.
+- **Nothing drops the type.** No code in `services/` or `routers/` catches the marker and re-raises it as a plain `Mt5ClientError`, and no code checks for the exact type or class name.
+- **The permanent disposition works as intended.**
+  - `mark_compute_job_failed` sends `p_error_kind = 'permanent'` straight to `failed_final`.
+  - The daily `enqueue_poll_allocator_positions_for_all_keys` filters only `revoked`, `is_active` and `disconnected_at`, so a `sign_in_failed` key is re-polled once a day.
+  - The manual "Sync now" route is still available.
+- **The one-arm handler is sound.** WR-05's single arm is correct, and the H2 fallback does what its commit says.
+- **Both moved census pins are justified by real new sites or cases, not by blanket bumps:**
+  - `TOTAL_CASES` 14 → 15: one new fixture case, `mt5_post_login_client_error`. It is recoverable and reuses an existing code, so the distinct-code and non-recoverable counts correctly stay where they were.
+  - `EXPECTED_SUBCLASS_CONSTRUCTION_SITES` 12 → 13: `raise VenueTransientHTTPException` in `routers/exchange.py` is 11 on `main`, 11 at `b12dd05c` and 12 at HEAD, plus 1 in `routers/portfolio.py`.
 
-- **Holdings poll.** A failure in `account_info()` after a successful `login()`, and an RPyC stream drop inside `initialize()` before any credential is sent, both raise `AllocatorHoldingsSignInFailedError`. The owner therefore sees `sign_in_failed`, "Reconnect this account — its credentials may have changed.", and that account's holdings are hidden by default.
-- **Wizard.** With `login()` and `account_info()` succeeding, a probe `order_check` failing with an IPC timeout returns `424 SIGN_IN_FAILED` with `recoverable=False`.
+**The regression is in a decision, not in the wiring.** To narrow the sign-in arm, the fix round had to decide which login-stage codes count as "sign-in failed". Its answer contradicts D-07 and D-08, even though the fix commit says it does not reopen them (CR-01 below). Separately, the predicate's IPC gate is narrower than this repo's own list of IPC faults (WR-01).
 
-This is the exact wrong-cause harm the phase exists to remove, and D-03's premise names it: a key with good credentials must not be told to fix itself.
+Evidence: one read-only probe, run with the worktree's interpreter, that evaluated `classify_mt5_login_error` and `is_mt5_login_refusal` over MT5 `last_error` codes. No source file was touched and no test suite was re-run (the orchestrator's full runs at this SHA are the suite evidence).
 
-**Test runs** (read-only, from this worktree):
-- pytest over the 4 changed Python test files: 225 passed, 1 skipped, collection non-empty.
-- vitest over the 12 changed TS test files: 11 files green (695 tests passed). `src/__tests__/lint-sql-gates.test.ts` has 4 red cases. All 4 are pre-existing `EXECUTION ORACLE` cases this phase did not modify, each timing out at about 6.5 s against the 5 s default, and they failed the same way when run alone. This looks like local load, not something the phase caused. I did not verify it on `origin/main`, so treat it as unconfirmed rather than cleared.
+## Round 1 disposition
 
-Out of scope as instructed: the migration and its SQL gate (closed by two prior review rounds and founder-approved), D-07's copy stance, D-08's Retry suppression, and the `HoldingsTabPanel` / `ApiKeyManager` exclusions. The findings below do not reopen D-07 or D-08. They concern which faults reach the arms those decisions govern.
+| Round-1 finding | Verdict at `b52b6032` | Note |
+|---|---|---|
+| CR-01 holdings poll stamps transport and post-login faults `sign_in_failed` | **Closed for the paths named**, with a residual | `initialize()` falsy or raising, transport raising mid-login, `account_info()` failing after login, and a `last_error` round trip that died or answered nothing all stay the base type. This is pinned at the client level and end to end. Residual: WR-01 below. |
+| WR-01 wizard `SIGN_IN_FAILED` catches post-login failures | **Closed** | A post-login `order_check` or `account_info` failure goes back to `NETWORK_UNAVAILABLE` / `recoverable=true`, with a wire case and a router case. The same commit introduced CR-01 below. |
+| WR-02 dialog envelope built without venue | **Closed** | `{ venue: "mt5" }` is passed. Two dialog cases were added, with expected text typed literally. |
+| WR-03 copy names "Reconnect" | **Closed** | Both the TS helper and the Python note were reworded. A literal pin and a no-"reconnect" guard were added on each side. The helper is 58 characters, inside the 60-character budget. |
+| WR-04 sign-in failure climbs the retry ladder | **Closed** for the codes that now reach the type | The residual for the `-10005` class is part of CR-01 below. |
+| WR-05 duplicated, order-sensitive handler arms | **Closed** | One arm reads `sync_status` / `error_kind` off the class. The roster pin gained runtime derivation (3). |
+| WR-06 set-noun pins check the constant against itself | **Closed** | A literal pin was added, and the noun is regex-escaped in T4/T5. |
+| IN-01 STATUS_CONTRACT census / tally | **Closed**, with a leftover | See IN-01 below. |
+| IN-02 handler docstring vocabulary | **Closed** | |
+| IN-03 `PILL_STYLES` in a `"use client"` module | **Closed** | Moved to a plain module. The component's only remaining exports are the component and a type. |
+| IN-04 local `isRevoked` | **Closed** | |
+| SFH H1 | **Closed with CR-01 (round 1)** | This is the overlap the orchestrator noted. |
+| SFH H2 rejected `sign_in_failed` write swallowed | **Closed** | Logged at ERROR, then falls back to `'error'` and keeps the sign-in copy. A narrow follow-up is IN-04 below. |
+| SFH M1 unknown status defaults to trusted, unguarded | **Closed** | `TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES` was added, with a B9 CHECK-parity row that resolves the latest named `api_keys_sync_status_check` and a disjointness case. I checked that the resolver's regex captures the 9-value list in the 167 migration. |
+| SFH M2 false AUM claim | **Closed** | The false sentence was corrected in all three places. The AUM change is booked as a follow-up. |
+| SFH M3 / M4 | **Not independently dispositioned** | These IDs appear in no in-tree artifact or fix commit. The orchestrator reports they overlap CR-01, WR-01 and WR-04, and those are dispositioned above. |
+| SFH L1 classifier raise logged at WARNING | **Closed** | Now logged at ERROR with `exc_info`, pinned by a caplog case. |
 
 ## Narrative Findings (AI reviewer)
 
 ## Critical Issues
 
-### CR-01: The holdings poll's sign-in arm catches post-login read failures and pre-credential transport drops, and stamps them `sign_in_failed`
+### CR-01: The fix round took the `-10004`/`-10005` login-stage class off `SIGN_IN_FAILED`, which reverses D-07/D-08 as they are recorded. The commits say the opposite.
 
-**File:** `analytics-service/services/allocator_positions.py` — `_fetch_mt5_account_rows`, the `except Mt5ClientError` arm around `_mt5_read`
-**Issue:** `_mt5_read` runs `session.client.login(...)` and then `session.client.account_info()` inside one `try`, and the `except Mt5ClientError` arm raises `AllocatorHoldingsSignInFailedError` for every `Mt5ClientError` either call produces. The arm's own comment gives its justification as "This is the arm where a LOGIN WAS ATTEMPTED AND DID NOT SUCCEED". That is true for only one of the ways into the arm:
-- `Mt5Client.account_info()` raises `Mt5ClientError` through `_raise_last()` when it gets `None`. That happens after `login()` has returned successfully, for example on an IPC detach, a wedged pipe or a `-10004` / `-10005` mid-read.
-- `Mt5Client._guarded_read` turns any raw transport exception into `Mt5ClientError(0, …)`.
-- `Mt5Client.login()` itself turns an `initialize()` transport exception (for example an RPyC `EOFError` while the gateway redeploys) into `Mt5ClientError(0, …)`. No credential has been sent at that point.
+**File:** `analytics-service/services/mt5_validation.py` — `is_mt5_login_refusal` (condition 2). Consumed by `routers/exchange.py` `_validate_mt5_key_probe` (`except Mt5ClientError` transient tail) and `services/allocator_positions.py` `_fetch_mt5_account_rows` (`except Mt5ClientError`).
 
-Measured with a throwaway probe against this worktree:
-- A transport where `initialize` and `login` succeed and `account_info` returns `None` (`last_error` = IPC detach) produced `AllocatorHoldingsSignInFailedError`, with calls `initialize → login → account_info`.
-- A transport whose `initialize` raises `EOFError` produced `AllocatorHoldingsSignInFailedError`, with calls `initialize` only.
+**Issue:** `is_mt5_login_refusal` returns False for a login-stage refusal carrying `-10004` or `-10005`. Both surfaces then give the pre-167 answer:
+- **Wizard:** `424 NETWORK_UNAVAILABLE`, `recoverable=true`, and a Retry is rendered.
+- **Holdings poll:** `sync_status='error'`, `MT5_UNREACHABLE_NOTE` ("…sync will retry automatically."), `error_kind='transient'`, so the job climbs the full backoff ladder and re-runs `login()` on every rung.
 
-What the user gets: `api_keys.sync_status='sign_in_failed'`, an amber "Sign-in failed" pill, the helper "Reconnect this account — its credentials may have changed.", and a `sync_error` reading "Couldn't sign in to MT5 with these credentials — reconnect this account…". Through the D-16 predicate, that key's holdings are also hidden from `HoldingsTable` by default and struck through on `OpenPositionsTable`. Before this phase the same faults read "MT5 terminal unreachable", which was true for them.
+The new router, holdings and wire cases (`login-stage-ipc-10004`, `login-stage-ipc-10005`) pin this. The fix commit says "D-07/D-08 are not reopened. -10004/-10005 stay on NETWORK_UNAVAILABLE, as before 167."
 
-A gateway redeploy or a terminal wedge hits every MT5 key on that terminal at once. So this tells every MT5 owner to fix a credential that is fine, which is the case D-03 says must not happen.
+That claim is contradicted by the phase's own recorded decisions and by texts still shipped at HEAD:
+- **D-08** says the Retry suppression is correct *because* "the measured mechanism for a wrong MT5 password is a MODAL LOGIN DIALOG blocking IPC (the `-10005` class)".
+- The **`KEY_SIGN_IN_FAILED` union-member docblock** in `src/lib/wizardErrors.ts` says:
+  - "The measured mechanism for a genuinely wrong MT5 password is a MODAL LOGIN DIALOG blocking IPC (the -10004/-10005 class)".
+  - "A wrong MT5 password and an unreachable bridge both land here, on purpose (D-07)".
+- The **router comment** that justifies `recoverable=False` on the `SIGN_IN_FAILED` raise still cites "a terminal a wrong password may have wedged behind a modal login dialog (the -10004/-10005 class)". That class can no longer reach the raise.
+- The **fixture's C5 note** makes the same modal-dialog argument for `recoverable: false`.
 
-The new end-to-end test `test_mt5_refused_sign_in_writes_sign_in_failed_end_to_end` avoids this path on purpose ("`initialize()` succeeds … this is deliberately NOT a transport fault"). Nothing pins what should happen when `initialize()` or `account_info()` fails. The class docstring on `AllocatorHoldingsSignInFailedError` also says auth and wrong-server are "indistinguishable at that boundary". Yet `classify_mt5_login_error`, which the wizard applies to the same boundary, does separate `auth`, `wrong_server` and `transient`. The poll throws that signal away.
-**Fix:** Mark only a failure of the `login()` stage as a sign-in failure, and let a post-login read failure keep its existing transport disposition. For example:
+Consequences, by the repo's own record of how a wrong MT5 password presents:
+1. If a real wrong password arrives as `-10005`, the phase's headline MT5 case now gets exactly the pre-phase defect on both surfaces: a transport-sounding note, a retry promise, and a Retry control. D-08 calls that Retry "the harmful action".
+2. WR-04's `permanent` disposition was justified by "every rung re-runs `login()` … against the ONE shared MT5 terminal (the D-08 harm)". It does not reach the one code class D-08 names, and that class still climbs the ladder.
+3. Whether the phase delivers for MT5 at all now depends on which code a real wrong password produces:
+   - `-6` (RES_E_AUTH_FAILED, the code the prober measured for an unauthorized terminal) classifies `transient` and does reach `SIGN_IN_FAILED`.
+   - `-10005` does not.
+
+   RESEARCH assumption A1 records that the `-10005` mechanism was never re-derived. So the fix round made the phase's outcome hinge on an unmeasured assumption, and recorded it as "not reopened".
+
+Excluding `-10004` is defensible. Round 1's CR-01 is right that a detached bridge before any answer is not a sign-in verdict. `-10005` at the login stage is the case the locked decisions were written about, and the fix round decided it alone. Round 1 routed that choice to the founder ("whichever transient codes the founder decides count as credential-caused under D-08's -10005 modal-dialog finding").
+
+**Fix:** This needs a decision, then all the code and docs made to agree. Pick one:
+- **(a) Keep IPC codes on transport.** Record the reversal as a decision in `167-CONTEXT.md` **and** the ROADMAP (per the deviation policy). Rewrite the three texts that now contradict the code:
+  - the `KEY_SIGN_IN_FAILED` docblock in `wizardErrors.ts`
+  - the `recoverable=False` comment in `_validate_mt5_key_probe`
+  - the fixture's C5 note
+
+  Book the missing measurement (what a wrong investor password returns from `login()` on the gateway) as a routed item.
+- **(b) Honour D-08.** Keep `-10004` (bridge detached) on transport, and let a login-stage `-10005` through as a sign-in refusal:
+
 ```python
-class _Mt5LoginRefused(Exception):
-    def __init__(self, cause: Mt5ClientError) -> None:
-        super().__init__("login refused")
-        self.cause = cause
+# services/mt5_validation.py
+_LOGIN_STAGE_TRANSPORT_CODES: tuple[int, ...] = (-10004,)  # bridge detached: no answer
 
-def _mt5_read() -> dict[str, Any]:
-    try:
-        session.client.login(session.login, session.investor_password, session.server)
-    except Mt5ClientError as exc:
-        raise _Mt5LoginRefused(exc) from exc
-    info = session.client.account_info()   # a failure here is NOT a sign-in verdict
-    _assert_expected_login(info)
-    return info
-...
-except _Mt5LoginRefused as wrapped:
-    if _must_reach_handler_unwrapped(wrapped.cause):
-        raise wrapped.cause
-    raise AllocatorHoldingsSignInFailedError(
-        SIGN_IN_FAILED_NOTE.format(venue=_venue_display(exchange_name))
-    ) from wrapped.cause
-except Mt5ClientError as exc:   # post-login read: unchanged pre-167 posture
-    if _must_reach_handler_unwrapped(exc):
-        raise
-    raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
+def is_mt5_login_refusal(err: Mt5ClientError) -> bool:
+    return (
+        isinstance(err, Mt5LoginRefusedError)
+        and err.code not in _LOGIN_STAGE_TRANSPORT_CODES
+    )
 ```
-Also stop the `initialize()` transport-raise path inside `Mt5Client.login` from counting as a login refusal. Either expose the failing stage (the client already brackets `initialize` and `login` separately in `_timed`), or check `classify_mt5_login_error` and treat only `auth` / `wrong_server` (plus whichever transient codes the founder decides count as credential-caused under D-08's `-10005` modal-dialog finding) as sign-in failures. Add behavioural cases for "account_info fails after a successful login" and "initialize raises" that assert `sync_status == 'error'`.
+
+With (b), flip the `login-stage-ipc-10005` cases (router, holdings, end to end) to expect `SIGN_IN_FAILED` / `sign_in_failed` / `permanent`. Either way, the commit text "D-07/D-08 are not reopened" must not stand.
 
 ## Warnings
 
-### WR-01: The wizard's `SIGN_IN_FAILED` tail also catches failures after a successful login, and removes Retry for them
+### WR-01: `is_mt5_login_refusal`'s IPC gate is narrower than this repo's own list of IPC faults, so a login-stage IPC send, receive or init failure becomes a permanent `sign_in_failed`
 
-**File:** `analytics-service/routers/exchange.py` — `_validate_mt5_key_probe`, the `except Mt5ClientError` arm around `run_probe`
-**Issue:** `services/mt5_probe.py` `run_probe` runs `login` → `account_info` → `read_terminal` → `order_check` → `account_info`, all in the one `try` whose `except Mt5ClientError` now answers `SIGN_IN_FAILED` / `recoverable=False` whenever `classify_mt5_login_error` returns `transient`. `transient` is the classifier's default for any text it does not recognise. So a failed `order_check` or post-login `account_info`, after the credential has already been accepted, reaches the arm too.
+**File:** `analytics-service/services/mt5_validation.py` — `_IPC_TRANSPORT_CODES` (`(-10004, -10005)`) as used by `is_mt5_login_refusal`
 
-Measured with a throwaway probe through the router test harness: `login` and `account_info` succeed, the terminal reports connected with trading permitted, and `order_check` raises `Mt5ClientError(-10005, "IPC timeout")`. The result is `424`, `code=SIGN_IN_FAILED`, `recoverable=False`, with `login.called=True` and `order_check.called=True`.
+**Issue:** MT5's `last_error` internal-failure family is `-10000` … `-10005` (internal fail, send, receive, init, connect, timeout). This repo already treats `-10003` as an IPC fault in two places: `Mt5Client.assert_session_authorized`'s docstring ("`-10003` / `-10004` / `-10005` — IPC faults") and `services/mt5_relogin.py` (`_MT5_NO_AUTHORIZED_ACCOUNT_CODE`'s comment). The predicate only excludes two of them. Measured with a read-only probe over `Mt5LoginRefusedError(code, …)`:
+- **`True` (reported as a sign-in refusal):** `-10000`, `-10001`, `-10002`, `-10003`. So is `1` (`RES_S_OK`, "success"), and so is `0` from `_raise_last`'s malformed-`last_error`-shape fallback (the "unknown (malformed last_error shape)" path).
+- **`False`:** only `-10004` and `-10005`.
 
-The user is told "We could not sign in to this account." and gets no Retry, after a sign-in that succeeded. The arm's comment, the S-27 row in `STATUS_CONTRACT.md`, the fixture's C5 note and the `KEY_SIGN_IN_FAILED` docblock all say "a login was attempted and did not succeed / the ONE arm where a sign-in was actually tried", and none of them hold for these paths. This does not reopen D-07 or D-08. Those decisions govern what the arm says and whether it offers Retry, and both rest on a sign-in actually failing. This finding is about faults that reach the arm without one.
-**Fix:** Same shape as CR-01. Split `run_probe`'s `login` stage from its post-login reads, either by letting `run_probe` tag the stage or by wrapping `client.login` in a marker exception. Send only login-stage transients to `SIGN_IN_FAILED`, and keep the pre-167 `NETWORK_UNAVAILABLE` / `recoverable=True` answer for post-login read failures. Add a C5-sibling wire case, "order_check raises after a successful login", pinned to `NETWORK_UNAVAILABLE`. Land it together with CR-01 so the two surfaces keep one definition of "sign-in failed".
+So a pipe that fails to send, receive or initialise during `login()` produces:
+- **Holdings:** `sign_in_failed`, the key's holdings hidden by the D-16 filter, and, since WR-04, a `failed_final` job.
+- **Wizard:** `SIGN_IN_FAILED` with no Retry.
 
-### WR-02: The MT5 investor-password bullet never renders on the MT5-only "Update password" dialog
+This is the round-1 CR-01 harm, reached through the codes the fix did not list. The malformed-shape case also contradicts `_raise_last`'s new docstring ("when the terminal told us nothing … a transport drop must never be reported as a refused sign-in").
 
-**File:** `src/lib/wizardErrors.ts` — `WIZARD_ERROR_COPY.KEY_SIGN_IN_FAILED.fixRequires` (`REQUIRES_MT5`), consumed by `src/components/strategy/UpdateMt5SecretDialog.tsx`
-**Issue:** `fix[1]` ("For MT5 that is the investor (read-only) password…") depends on `REQUIRES_MT5`, a `venueIs` requirement that is suppressed whenever `context.venue` is missing (`requirementMet`). `UpdateMt5SecretDialog` builds its envelope as `buildEnvelope(recogniseDashboardDialogCode(ROUTE, body?.code), correlationId)` with no context. The route behind it (`keys/[id]/rotate-secret`) is MT5-only by construction (`.eq("exchange", "mt5")`), and `KEY_SIGN_IN_FAILED` was added to its roster in this phase. So the one surface guaranteed to be MT5 is the one that never shows the MT5-specific remedy. `dialog-envelope.invariant.test.ts` counts the roster (32 → 33) but never renders the bullets.
-**Fix:** Pass the venue the dialog already knows: `buildEnvelope(code, correlationId, { venue: "mt5" })`. Add a case asserting that the dialog's `KEY_SIGN_IN_FAILED` envelope includes the investor-password bullet.
+**Fix:** Gate the predicate on the whole internal range rather than two members, and do not let the malformed-shape fallback carry the marker:
 
-### WR-03: The owner-surface remedy says "Reconnect", which names a different control that retries the stored credential
-
-**File:** `src/components/exchanges/AllocatorSyncStatus.tsx` — `CREDENTIAL_FAILED_HELPER`; `analytics-service/services/allocator_positions.py` — `SIGN_IN_FAILED_NOTE`
-**Issue:** Both strings tell the owner to "Reconnect this account". On the card where the pill renders (`AllocatorExchangeManager`, active keys), the controls are "Sync now", "Update password" (MT5) and "Disconnect". A control labelled **Reconnect** exists only in the Disconnected section. `AllocatorExchangeManager` documents it as distinct from Update password: that dialog exists because "this credential is WRONG and needs re-validation, not a retry of the stored one". An owner who follows the copy literally will either find nothing called Reconnect, or disconnect and then Reconnect, which re-runs the same stored credential the sign-in arm just failed. That is the one action that cannot fix the condition the copy describes. The fix that does work, `rotate-secret` via "Update password", writes `sync_status: "idle"` unconditionally.
-**Fix:** Name the control that exists and fixes the problem. For MT5, something like "Update this account's password — its credentials may have changed." (the helper can stay venue-agnostic with "Update this account's credentials"). Apply the same wording to `SIGN_IN_FAILED_NOTE`, and update the LOCKED pins in `AllocatorSyncStatus.test.tsx` in the same commit.
-
-### WR-04: The poll keeps re-running a failing MT5 login against the shared terminal, which contradicts D-08's own premise
-
-**File:** `analytics-service/services/job_worker.py` — `run_poll_allocator_positions_job`, `except AllocatorHoldingsSignInFailedError` (`error_kind="transient"`)
-**Issue:** D-08, the router comment and the `KEY_SIGN_IN_FAILED` docblock all say that repeating a validate against the one shared terminal, after a wrong password, is "the operation implicated in wedging and account eviction (164.6.5 / 164.6.6), so … the Retry is … the harmful action". The new poll arm now knows it is looking at a failed sign-in, yet it deliberately keeps `error_kind="transient"`. That sends the job up the full 30 s → 6 h backoff ladder, and every rung re-runs `login()` with the same stored password against the same shared terminal, on top of the daily cron re-enqueue (which excludes only `revoked`). The arm's comment justifies this as "a rotated credential is precisely what a later poll should pick up". But a rotation already resets the key: `rotate-secret` writes `sync_status: "idle"` and fresh ciphertext, and the daily cron re-enqueues the key anyway. The ladder adds only repeated wrong-password logins. This behaviour predates the phase, but the phase is where it became knowable and is now written down as correct.
-**Fix:** Once CR-01 is fixed and the arm only sees real login-stage refusals, classify this arm `permanent` for the job (`error_kind="permanent"`). That stops the in-job ladder, and the daily cron plus `rotate-secret` still guarantee pickup. If that is judged out of scope, record it as a routed decision rather than a correct-by-construction claim, and remove "which is correct" from the arm's comment.
-
-### WR-05: The two-arm design creates the silent ordering hazard it then documents; one arm would remove it structurally
-
-**File:** `analytics-service/services/job_worker.py` — `run_poll_allocator_positions_job`, `except AllocatorHoldingsSignInFailedError` / `except AllocatorHoldingsSyncTransientError`
-**Issue:** The new arm is a line-for-line copy of the parent arm (same `human_copy`, same update shape, same audit call, same `DispatchResult`). The only difference is the `sync_status` literal. The subclass relationship is what makes the ordering matter and fail silently, as the file's own comment says ("an arm placed BELOW the parent's is DEAD CODE … Nothing about the failure is visible"). A behavioural test pins it today. The hazard itself is a structural choice, though, and the duplicated body is a second copy that can drift (a later fix to one arm's audit metadata or cap will miss the other). Under Rule 6 this is a band-aid (a pin) where the root cause (two arms for one disposition) could be removed.
-**Fix:** Carry the status on the exception and collapse the two arms into one:
 ```python
-class AllocatorHoldingsSyncTransientError(Exception):
-    sync_status: ClassVar[str] = "error"
+# services/mt5_validation.py
+_MT5_INTERNAL_FAILURE_FLOOR = -10005  # RES_E_INTERNAL_FAIL_TIMEOUT
+_MT5_INTERNAL_FAILURE_CEIL = -10000   # RES_E_INTERNAL_FAIL
 
-class AllocatorHoldingsSignInFailedError(AllocatorHoldingsSyncTransientError):
-    sync_status: ClassVar[str] = SIGN_IN_FAILED_SYNC_STATUS
+def _is_internal_ipc_code(code: int) -> bool:
+    return _MT5_INTERNAL_FAILURE_FLOOR <= code <= _MT5_INTERNAL_FAILURE_CEIL
 
-# job_worker — ONE arm; order is no longer load-bearing
-except AllocatorHoldingsSyncTransientError as exc:
-    status = exc.sync_status
-    human_copy = str(exc)[:500]
-    ...update({"sync_status": status, "sync_error": human_copy})...
+def is_mt5_login_refusal(err: Mt5ClientError) -> bool:
+    return (
+        isinstance(err, Mt5LoginRefusedError)
+        and not _is_internal_ipc_code(err.code)   # (adjust per CR-01's decision on -10005)
+        and err.code not in (0, 1)                # no-answer / "success" is not a refusal
+    )
 ```
-The roster test `test_every_status_this_module_can_write_has_its_own_copy_row` still works if derivation (2) also reads `sync_status` class attributes.
 
-### WR-06: The re-written T4/T5/T6 pins check the copy against itself, so the "locked" filter wording is no longer locked
+In `Mt5Client._raise_last`, raise the base class from the malformed-shape arm. For example, set `answered_type = Mt5ClientError` inside the `except (TypeError, IndexError, KeyError, ValueError)` coercion. Add `-10001`, `-10002`, `-10003` and the malformed-shape case to the parametrized negatives in `test_mt5_client_contract.py` and to the holdings `test_mt5_client_error_that_is_not_a_login_refusal_keeps_the_transport_note`.
 
-**File:** `src/app/(dashboard)/allocations/components/HoldingsTable.test.tsx` — T4, T5, T6; `src/lib/closed-sets.ts` — `UNTRUSTED_KEY_SET_NOUN`
-**Issue:** T4, T5 and T6 now build their expected text from `UNTRUSTED_KEY_SET_NOUN`, the same constant the component renders, and a repository-wide search found no other pin of that constant's value. T6 used to be an "exactly" pin on the literal label. Now any rewording of the constant passes all three, as long as it is not empty (T6's exact match catches an empty noun) and is not literally "revoked keys" (T4's anti-vacuity `queryByText(/hidden from revoked keys/)` catches that one). That includes a cause-specific noun such as "failed sign-ins", which brings back the exact "names a narrower set than it hides" defect the constant's own comment describes. The T6 comment says the pin was "never relaxed to a substring match" and "still fails if the label is … reworded by hand". The second claim is false for a rewording made in the constant, which is the only place the wording now lives. A secondary problem: the noun is put into `new RegExp(...)` without escaping, so a future noun containing regex metacharacters silently changes what T4 and T5 match.
-**Fix:** Pin the literal once, in `src/lib/closed-sets.untrusted-key-status.test.ts`:
-```ts
-it("UNTRUSTED_KEY_SET_NOUN is the cause-neutral set noun, verbatim", () => {
-  expect(UNTRUSTED_KEY_SET_NOUN).toBe("keys needing attention");
-});
-```
-Keep T4, T5 and T6 deriving from the constant (they prove it is wired up), and escape the noun before building the RegExp.
+⚠️ Do not widen `_IPC_TRANSPORT_CODES` itself without checking `classify_mt5_login_error`'s locked 164.5.4 contract. Widening it only moves verdicts toward `transient`, which is the safe direction, but it is a separate decision.
 
 ## Info
 
-### IN-01: The STATUS_CONTRACT raise-site census double-counts S-27, and the §7 tally contradicts its own legend
+### IN-01: A sentence in STATUS_CONTRACT §7 still refers to a number the rewritten Tally no longer states, and the new text cites a line number
 
-**File:** `analytics-service/docs/STATUS_CONTRACT.md` — the "`VenueTransientHTTPException`'s seven raise sites" paragraph and §7 "Tally"
-**Issue:** "Plus an eighth (… S-27)" adds a raise site that is already one of the seven listed just above it ("MT5 transient client error"). The phase narrowed that existing site; it did not add one. The S-27 row's own "Before" column (`424 NETWORK_UNAVAILABLE`) shows this. §7's legend was updated to "24 explicit sites", but the Tally paragraph still reads "26 rows = 23 explicit editable sites" even though the table now has 27 rows.
-**Fix:** Change "Plus an eighth" to say that one of the seven was narrowed, and correct the Tally line (or remove its numbers, following the repo's cite-by-symbol rule).
+**File:** `analytics-service/docs/STATUS_CONTRACT.md` — §7 "Tally" paragraph, and the "A second raise in the MT5 transient-client-error arm" paragraph
 
-### IN-02: The handler's docstring vocabulary is stale
+**Issue:**
+- The Tally now reads "27 rows = 24 explicit editable sites …", and the following sentence still says "The `23` is the number that an `HTTPException` grep sweep under-counts by one". No `23` remains for it to refer to.
+- The new paragraph points at "the `:409` entry above", a line-number anchor. The same section says these anchors have already rotted.
+- The Tally calls S-27 a raise "added by Phase 167". The paragraph above says it "SPLITS that existing arm rather than adding a new failure". Both can be true, but the two descriptions read as if they disagree.
 
-**File:** `analytics-service/services/job_worker.py` — `run_poll_allocator_positions_job` docstring
-**Issue:** It still says the handler maps failures to "('revoked' / 'rate_limited' / 'error')". `sign_in_failed` is now written by this handler.
-**Fix:** Add `sign_in_failed` and point to `AllocatorHoldingsSignInFailedError`.
+**Fix:** Recompute or drop the orphaned sentence. Say what grep over-counts or under-counts against the current 24. Replace `:409` with the symbol (`_validate_mt5_key_probe`'s `except Mt5ClientError` arm).
 
-### IN-03: `PILL_STYLES` is exported from a `"use client"` component module only so a test can reach it
+### IN-02: `_must_reach_handler_unwrapped`'s docstring still says the handler "hardcodes `error_kind='transient'`"
 
-**File:** `src/components/exchanges/AllocatorSyncStatus.tsx` — `export const PILL_STYLES`
-**Issue:** A non-component export from a component module takes that module out of React Fast Refresh's component-only boundary, so an edit forces a full reload. It also leaves an importable client-reference value that a future server component could pick up by mistake.
-**Fix:** Move `PILL_STYLES` (and ideally the label switch) into a plain module, for example next to `closed-sets.ts`, and import it from both the component and the roster test.
+**File:** `analytics-service/services/allocator_positions.py` — `_must_reach_handler_unwrapped` docstring, reason 1
 
-### IN-04: The `revoked` names now carry the wider untrusted meaning
+**Issue:** Since WR-05 and WR-04, the handler's single arm returns `exc.error_kind`, and the sign-in subclass declares `permanent`. The sentence "The handler's transient arm hardcodes `error_kind='transient'` … so a downgrade here is FINAL" is still true for the parent type, but it misstates the mechanism.
 
-**File:** `src/app/(dashboard)/allocations/components/OpenPositionsTable.tsx` — local `isRevoked`; `HoldingsTable.tsx` — `showRevoked`, `onShowRevokedChange`, `revokedStatusByHoldingId`, `HoldingNoteIconButton revoked={isUntrusted}`
-**Issue:** `isRevoked = untrustedLabel !== null` is now true for `sign_in_failed` too. The rename was deferred for the shared component, but `OpenPositionsTable`'s `isRevoked` is a local variable inside this phase's own diff.
-**Fix:** Rename the local to `isUntrusted` (as `HoldingsTable` already did) and route the prop and state renames to a follow-up.
+**Fix:** "The handler's transient arm returns the exception's declared `error_kind` (`transient` for the parent type) and never re-reads the `__cause__` chain, so a downgrade here is FINAL."
+
+### IN-03: A guard in `AllocatorSyncStatus.test.tsx` cannot fail, because it targets wording that never shipped
+
+**File:** `src/components/exchanges/AllocatorSyncStatus.test.tsx` — the `sign_in_failed` helper case, `expect(helper.textContent).not.toContain("credentials - the saved")`
+
+**Issue:** This hyphen-minus guard was written for the intermediate wording "…the saved ones may have changed." A later commit replaced that wording before it shipped. The shipped text contains no "the saved", so the assertion is true whatever the dash is. The exact `toBe` pin beside it already catches a hyphen-minus substitution, so no coverage is lost, but the line is dead weight that reads as a guard.
+
+**Fix:** Retarget it to the shipped text (`not.toContain("credentials - they")`), or delete it and rely on the exact pin.
+
+### IN-04: The SFH-H2 fallback fires on any write failure, including one whose outcome is ambiguous, and the audit event does not say which status was written
+
+**File:** `analytics-service/services/job_worker.py` — `run_poll_allocator_positions_job`, the single `except AllocatorHoldingsSyncTransientError` arm, `else:` branch of the write `try`
+
+**Issue:** The fallback to `'error'` runs for every exception from the first write, not only a CHECK rejection. A transport error raised after PostgREST committed the `sign_in_failed` write would be followed by an `'error'` write that overwrites the committed status. The result is a red "Sync failed" pill instead of the amber sign-in pill, and the holdings shown as trusted. The `allocator.holdings.sync_failed` audit carries `error_kind` but not the status actually persisted, so the downgrade cannot be seen afterwards. The impact is narrow, because the copy stays truthful.
+
+**Fix:** Restrict the fallback to a constraint rejection (match SQLSTATE `23514` or the constraint name `api_keys_sync_status_check` on the PostgREST error), and add `"sync_status_written": <final status>` to the audit metadata.
 
 ---
 
-_Reviewed: 2026-09-22T19:55:55Z_
-_Reviewer: Claude (gsd-code-reviewer)_
+_Reviewed: 2026-09-22T20:50:22Z_
+_Reviewer: Claude (gsd-code-reviewer), round 2_
 _Depth: standard_
