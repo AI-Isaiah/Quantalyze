@@ -203,9 +203,13 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
     expect(pill.textContent).toBe("Sign-in failed");
     const helper = screen.getByTestId("allocator-sync-helper");
     expect(helper.textContent).toBe(
-      "Reconnect this account \u2014 its credentials may have changed.",
+      "Update this account's credentials \u2014 the saved ones may have changed.",
     );
-    expect(helper.textContent).not.toContain("Reconnect this account - its");
+    expect(helper.textContent).not.toContain("credentials - the saved");
+    // 167 review round 1 / WR-03: the remedy must not name "Reconnect". That
+    // control re-runs the SAVED credential this sign-in just failed with; the
+    // fixing control is "Update password". A reword back to "Reconnect" reds.
+    expect(helper.textContent).not.toMatch(/reconnect/i);
     // aria-live contract: helper line is the announcement channel; the pill
     // itself carries no aria-live.
     expect(helper).toHaveAttribute("role", "status");
@@ -229,7 +233,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
     );
     const helper = screen.getByTestId("allocator-sync-helper");
     expect(helper.textContent).toBe(
-      "Reconnect this account \u2014 its credentials may have changed.",
+      "Update this account's credentials \u2014 the saved ones may have changed.",
     );
     expect(helper.textContent).not.toContain("MT5 terminal unreachable");
     expect(helper.textContent).not.toContain("will retry automatically");

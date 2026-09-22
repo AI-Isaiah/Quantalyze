@@ -112,7 +112,19 @@ const EM_DASH = "\u2014"; // U+2014 — NOT a hyphen-minus.
 // branch. Venue-agnostic — names neither a key (bybit) nor a password
 // (MT5) — and states its own limit ("may have changed") rather than
 // asserting the credential IS invalid.
-const CREDENTIAL_FAILED_HELPER = `Reconnect this account ${EM_DASH} its credentials may have changed.`;
+//
+// ⚠️ REWORDED 2026-09-22 (167 review round 1 / WR-03), deliberately and with
+// its pins moved in the same commit. It used to open "Reconnect this account".
+// On the card where this pill renders, the only control labelled Reconnect
+// lives in the Disconnected section, and it re-runs the SAVED credential —
+// the very one this sign-in just failed with, so it is the one action that
+// cannot fix the state described. The control that does fix it is "Update
+// password" (MT5), which re-validates a NEW credential. So the sentence now
+// names the thing to change (the credentials) rather than a control that
+// retries the old ones. It stays venue-agnostic: "credentials", never
+// "password" or "key". ⚠️ 68 characters, over 167-UI-SPEC § Typography's
+// 60-character helper budget; the wording was decided with that known.
+const CREDENTIAL_FAILED_HELPER = `Update this account's credentials ${EM_DASH} the saved ones may have changed.`;
 
 // Queued threshold: only surface the Queued helper when the breaker cooldown is
 // ≥30s out. Under 30s is treated as a "pending/starting" state where the
