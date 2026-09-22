@@ -72,6 +72,7 @@ from services.mt5_client import (
     Mt5SessionAbandoned,
     Mt5Session,
 )
+from services.mt5_validation import is_mt5_login_refusal
 # MT5CONC-02 — the ONE terminal-lock registry, imported from the leaf module
 # plan 151-01 extracted it into. NEVER re-declare a terminal-lock dict here: a
 # second registry hands out perfectly functional Locks while the derive job and
@@ -833,14 +834,34 @@ async def _fetch_mt5_account_rows(
             # phase) makes an MT5 read-time failure classify permanent.
             if _must_reach_handler_unwrapped(exc):
                 raise
-            # ⭐ Phase 167 / D-11 arm B — WHY THIS ARM AND ONLY THIS ARM.
-            # This is the arm where a LOGIN WAS ATTEMPTED AND DID NOT SUCCEED.
-            # `_mt5_read` above calls `session.client.login(...)` first, and
-            # `Mt5Client.login` turns the terminal's opaque `False` — the shape
-            # a wrong investor password and a wrong server BOTH produce — into
-            # this typed error. It is the same boundary the wizard's
-            # `validate_key` classifies with `classify_mt5_login_error`, and it
-            # is the ROADMAP's measured wrong-password path.
+            # ⭐ Phase 167 / D-11 arm B, NARROWED by CR-01 — ONLY A LOGIN-STAGE
+            # REFUSAL IS A SIGN-IN FAILURE. This arm sees every `Mt5ClientError`
+            # `_mt5_read` can produce, and most of them are NOT one:
+            # `initialize()` failing or its transport dropping (no credential
+            # sent yet — a gateway redeploy or wedge hits every MT5 key on the
+            # terminal at once), the transport dropping mid-login, and
+            # `account_info()` failing AFTER a successful login. Stamping those
+            # `sign_in_failed` told every owner to fix a working credential.
+            #
+            # `is_mt5_login_refusal` is the ONE predicate the wizard's
+            # `validate_key` applies to the same boundary: the terminal answered
+            # the `login()` call itself falsy (`Mt5LoginRefusedError`, the shape
+            # a wrong investor password and a wrong server BOTH produce) AND the
+            # code is not an IPC transport code. Everything else keeps the
+            # pre-167 posture byte-unchanged: MT5_UNREACHABLE_NOTE, transient.
+            #
+            # The exception's own text is already secret-scrubbed at
+            # construction, but it is still INTERNAL text (it can echo the
+            # terminal's `last_error()` back at us); only the authored copy
+            # constant is surfaced, and only the numeric code is logged.
+            if not is_mt5_login_refusal(exc):
+                logger.warning(
+                    "poll_allocator_positions: mt5 holdings read hit a client "
+                    "error that is not a login-stage refusal (code=%s) — "
+                    "classified transient, retrying",
+                    exc.code,
+                )
+                raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
             #
             # ⛔ The three SIBLING arms above are deliberately NOT moved. A
             # stage timeout, an abandoned-session fence refusal and an
@@ -854,14 +875,11 @@ async def _fetch_mt5_account_rows(
             # VENUE asserted that rejection, so it stays the confident
             # `revoked` claim — see `AllocatorHoldingsSignInFailedError` for
             # the two-honesty-level split this preserves.
-            #
-            # The exception's own text is already secret-scrubbed at
-            # construction, but it is still INTERNAL text (it can echo the
-            # terminal's `last_error()` back at us); only the authored copy
-            # constant is surfaced.
             logger.warning(
-                "poll_allocator_positions: mt5 holdings sign-in was refused — "
-                "classified transient, surfacing the sign-in copy (D-11 arm B)"
+                "poll_allocator_positions: mt5 holdings sign-in was refused at "
+                "the login stage (code=%s) — surfacing the sign-in copy "
+                "(D-11 arm B)",
+                exc.code,
             )
             raise AllocatorHoldingsSignInFailedError(
                 SIGN_IN_FAILED_NOTE.format(venue=_venue_display(exchange_name))

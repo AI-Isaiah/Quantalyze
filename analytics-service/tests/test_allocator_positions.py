@@ -1733,9 +1733,14 @@ async def test_mt5_client_error_arm_follows_the_live_classifier_verdict(
     a copy-string comparison that proves nothing about the chain."""
     from services import allocator_positions as ap
     import services.job_worker as jw
-    from services.mt5_client import Mt5ClientError
+    from services.mt5_client import Mt5ClientError, Mt5LoginRefusedError
 
-    expected = Mt5ClientError(0, "Invalid account")
+    # ⭐ 167 CR-01 — the LOGIN-STAGE marker, which is what the real
+    # `Mt5Client.login` raises when the terminal answers the sign-in falsy.
+    # A plain `Mt5ClientError` from this arm is a transport/post-login fault
+    # and keeps the pre-167 transport note — see
+    # `test_mt5_client_error_that_is_not_a_login_refusal_keeps_the_transport_note`.
+    expected = Mt5LoginRefusedError(0, "Invalid account")
 
     def _fake_classify(exc):
         assert exc is expected
@@ -1765,6 +1770,61 @@ async def test_mt5_client_error_arm_follows_the_live_classifier_verdict(
         # was unreachable. The three sibling MT5 arms still do — their own
         # cases below assert exactly that, and are the control for this one.
         assert str(caught.value) != ap.MT5_UNREACHABLE_NOTE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        # Not the login-stage marker: an `initialize()` failure, a transport
+        # drop mid-login, or a post-login `account_info()` failure all arrive
+        # as a plain `Mt5ClientError`, whatever their text says.
+        pytest.param(
+            lambda m: m.Mt5ClientError(0, "Invalid account"),
+            id="plain-client-error-even-with-auth-text",
+        ),
+        # The login stage answered, but with an IPC transport code: the
+        # bridge detached (-10004) or stopped answering (-10005). D-07 keeps
+        # this ambiguity on the transport side.
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10004, "No IPC connection"),
+            id="login-stage-ipc-10004",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10005, "IPC timeout"),
+            id="login-stage-ipc-10005",
+        ),
+    ],
+)
+async def test_mt5_client_error_that_is_not_a_login_refusal_keeps_the_transport_note(
+    monkeypatch, make_error
+):
+    """167 CR-01 — the sign-in claim is made ONLY for a login-stage refusal.
+
+    Every other `Mt5ClientError` this arm can see keeps the pre-167 posture
+    byte-unchanged: the transient type (NOT its sign-in subclass) carrying
+    MT5_UNREACHABLE_NOTE. A gateway redeploy or wedge hits every MT5 key on the
+    terminal at once, so misreading these as sign-in failures would tell every
+    MT5 owner to fix a credential that is fine (D-03).
+
+    The classifier is left UNMOCKED here: a real `Mt5ClientError` classifies
+    `unknown`, so the wrap path is the one production takes."""
+    from services import allocator_positions as ap
+    from services import mt5_client
+
+    expected = make_error(mt5_client)
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+
+    with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+        await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+
+    assert not isinstance(caught.value, ap.AllocatorHoldingsSignInFailedError), (
+        f"{expected!r} is not a login-stage refusal, yet it was reported as a "
+        "sign-in failure — the owner is told to fix a working credential"
+    )
+    assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+    assert caught.value.__cause__ is expected
 
 
 # ---------------------------------------------------------------------------

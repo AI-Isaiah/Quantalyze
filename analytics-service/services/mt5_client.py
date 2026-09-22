@@ -621,6 +621,30 @@ class Mt5ClientError(RuntimeError):
         super().__init__(f"MT5 client error (code={code}): {scrub_freeform_string(detail)}")
 
 
+class Mt5LoginRefusedError(Mt5ClientError):
+    """The terminal ANSWERED the ``login()`` call itself, and the answer was no.
+
+    Raised from exactly ONE place: the falsy-return arm of ``Mt5Client.login``,
+    after ``initialize()`` attached and the credentialed ``login()`` round-trip
+    completed. It carries the terminal's own ``last_error()`` code and text,
+    redacted exactly as the parent's would be — construction is inherited
+    unchanged.
+
+    ⭐ WHY A MARKER TYPE (Phase 167 CR-01 / WR-01). A caller holding a bare
+    ``Mt5ClientError`` cannot tell which STAGE produced it: ``initialize()``
+    failing before any credential is sent, the transport dropping mid-login,
+    and ``account_info()`` / ``order_check()`` failing AFTER a successful login
+    all arrive as the same type. Treating every one of them as a refused sign-in
+    told every MT5 owner to fix a working credential whenever the shared gateway
+    wedged or redeployed. Only this subclass means "a sign-in was attempted and
+    refused"; ``services.mt5_validation.is_mt5_login_refusal`` is the ONE
+    predicate over it that both the wizard and the holdings poll consult.
+
+    ⛔ A subclass, so every existing ``except Mt5ClientError`` arm still catches
+    it — no disposition anywhere changes unless the caller asks for this type.
+    """
+
+
 class Mt5AccountMismatchError(Exception):
     """MT5CONC-02 — the live terminal presented an account whose ``login`` does NOT
     match the connected key's expected login (or omitted the field entirely).
@@ -1078,7 +1102,10 @@ class Mt5Client:
         return result
 
     def _raise_last(
-        self, *, credentials: tuple[int, str, str] | None = None
+        self,
+        *,
+        credentials: tuple[int, str, str] | None = None,
+        answered_type: type[Mt5ClientError] = Mt5ClientError,
     ) -> NoReturn:
         """Capture `last_error()` IMMEDIATELY (the next remote call overwrites it)
         and raise a typed, secret-scrubbed error.
@@ -1114,6 +1141,15 @@ class Mt5Client:
         `credentials` TUPLE is NEITHER, and that is right rather than a dodge: the
         gate's class is "methods that hand a credential to a transport call", and this
         method hands credentials to nothing — it only formats.
+
+        ``answered_type`` (Phase 167 CR-01) chooses the class of the ONE raise that
+        carries the terminal's own ``last_error()`` answer — the last raise below.
+        ``login``'s falsy arm passes ``Mt5LoginRefusedError`` so a refused sign-in is
+        distinguishable by TYPE from every other stage's failure. ⛔ It deliberately
+        does NOT apply to the two earlier raises: when the ``last_error()`` round-trip
+        itself dies, or answers nothing, the terminal told us nothing about the
+        login, and a transport drop must never be reported as a refused sign-in.
+        The message and the redaction are identical for every class.
         """
         # WIZFORM-ABANDON / D-36 — the fence is the FIRST statement, BEFORE the
         # try/except below, for a reason specific to this method: that except arm
@@ -1155,7 +1191,7 @@ class Mt5Client:
         # ⛔ THE CODE IS PRESERVED THROUGH THE REDACTION. A heal that lost `-6` is
         # undebuggable from a log, and `-6` is the ONE fault this phase's detector
         # distinguishes — only the freeform TEXT is rewritten.
-        raise Mt5ClientError(
+        raise answered_type(
             code, _redact_with_optional_credentials(text, credentials)
         )
 
@@ -1261,7 +1297,16 @@ class Mt5Client:
         if not ok:
             # Criterion 5 — as above. This is the arm a bad credential or a wrong
             # server actually lands on, so it is the likeliest to carry an echo.
-            self._raise_last(credentials=(login, password, server))
+            #
+            # Phase 167 CR-01 — and it is the ONLY arm of this method where the
+            # terminal answered the sign-in itself, so it alone raises the
+            # `Mt5LoginRefusedError` marker. The `initialize()` arms above and the
+            # transport-raise arm stay plain `Mt5ClientError`: no sign-in verdict
+            # exists on those paths.
+            self._raise_last(
+                credentials=(login, password, server),
+                answered_type=Mt5LoginRefusedError,
+            )
 
     def assert_session_authorized(self) -> None:
         """Assert that the terminal currently HAS an authorized broker account —
