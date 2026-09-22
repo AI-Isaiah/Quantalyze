@@ -8,9 +8,11 @@
  * closed set over `api_keys.sync_status` anywhere, so **every status that was
  * not `revoked` defaulted to the healthy branch**. Once plan 167-04 made the
  * worker write `sign_in_failed`, a holding sourced from a key the venue has
- * stopped accepting would have rendered un-chipped, un-filtered and counted in
- * the headline AUM — the exact false-confidence failure the phase exists to
- * remove, reproduced one surface over.
+ * stopped accepting would have rendered un-chipped and un-filtered — the exact
+ * false-confidence failure the phase exists to remove, reproduced one surface
+ * over. ⚠️ The predicate does NOT keep such a holding out of the headline AUM
+ * (`src/lib/queries.ts` sums every holding regardless of key status); see the
+ * SFH-M2 note beside `UNTRUSTED_KEY_SYNC_STATUSES`.
  *
  * ⛔ THE EQUALITY *SHAPE* IS THE DEFECT, NOT THE MISSING VALUE. A fix that
  * appended `|| status === "sign_in_failed"` beside each `=== "revoked"` would

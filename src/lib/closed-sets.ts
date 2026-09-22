@@ -864,8 +864,18 @@ export function deriveEmptySeriesState(
 // so EVERY status that was not `revoked` fell to the healthy branch by
 // default. The moment the holdings poll gained a second failed-credential
 // value (`sign_in_failed`, 167-04), a holding sourced from a key the venue has
-// stopped accepting would have rendered un-chipped, un-filtered and counted in
-// the headline AUM.
+// stopped accepting would have rendered un-chipped and un-filtered.
+//
+// ⚠️ WHAT THIS PREDICATE DOES NOT REACH (review round 1, SFH-M2 — an earlier
+// version of this comment claimed otherwise): the HEADLINE AUM. The chip and
+// the `HoldingsTable` filter are its only consumers. The AUM is summed in
+// `src/lib/queries.ts` (`emptyLiveBaselineMetrics` /
+// `liveBaselineMetricsFromPerKeyDailies`, `totalAum = holdingsSummary.reduce`)
+// over holdings with no key-status test at all, so a holding from a `revoked`
+// or `sign_in_failed` key IS counted there — true before Phase 167 for
+// `revoked`, and unchanged by it. Flagging the AUM as partial when an
+// untrusted key contributes is a money-number change and is booked as a
+// follow-up, not made here.
 //
 // ⛔ THE EQUALITY SHAPE WAS THE DEFECT, NOT THE MISSING VALUE. Appending
 // `|| status === "sign_in_failed"` beside each `=== "revoked"` reproduces it

@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 51
+open_count: 52
 waived_count: 0
 fixed_count: 14
-total_count: 65
-last_updated: 2026-09-22T17:41:57.032Z
+total_count: 66
+last_updated: 2026-09-22T20:10:03.968Z
 ---
 
 # Broken Windows Ledger
@@ -80,6 +80,7 @@ last_updated: 2026-09-22T17:41:57.032Z
 | 63 | 164.9 | unrun-verify | .github/workflows/ci.yml |  | frontend-live-db-lane is wired BLOCKING and is MEASURED RED: 35 of 397 non-skipped tests fail on the local-stack baseline (362 pass). Four families booked as [164.9-LIVEDB-LANE-EXECUTION-CENSUS] in TODOS.md; F1 (privilege state absent from the schema-only baseline, ~14 failures) is NOT fixable test-side and needs a baseline re-dump. Until F1-F4 close, the frontend aggregate is red and Railway skips the analytics deploy. | open |  | 2026-09-21T17:12:21.238Z |  |
 | 64 | 167 | deviation | src/app/(dashboard)/allocations/HoldingsTabPanel.tsx |  | D-16 closed the two money surfaces and NOT the class. HoldingsTabPanel's keyStatusById map and ApiKeyManager.tsx's SyncProgress (no sign_in_failed branch, and not confirmed to be fed from api_keys.sync_status) carry the same shape: no closed set over the column, so every status that is not the one literal they test falls to the healthy branch. A key whose sign-in was refused can still read as healthy there. Mechanical to fix now that isUntrustedKeySyncStatus exists — make them callers of it. | fixed | CLOSED AS NOT-A-DEFECT 2026-09-22 — measured, not fixed. Both halves were over-scoped when filed. (a) ApiKeyManager SyncProgress reads a LOCAL six-value wizard vocabulary (idle / syncing / computing / complete / complete_with_warnings / error) driven entirely by setSyncStatus from local flow events; it is never fed from api_keys.sync_status and cannot receive the new value. (b) HoldingsTabPanel carries no trust branch at all — it maps api_key.id to sync_status and passes it through as source_key_sync_status, and the two consuming tables make the trust decision, both already via isUntrustedKeySyncStatus. The genuine half of the D-16 residual was the FILTER COPY, which is entry 65 and is now fixed. Verdicts and counts only. | 2026-09-22T17:09:03.419Z | 2026-09-22T17:41:57.032Z |
 | 65 | 167 | deviation | src/app/(dashboard)/allocations/components/HoldingsTable.tsx |  | The toggle label 'Show revoked-key holdings' and the footer '{N} holdings hidden from revoked keys' now describe a WIDER set than they NAME: a holding hidden for sign_in_failed is reported as hidden from revoked keys. Left unchanged on purpose by 167-04 — the toggle label carries a locked pin asserting it reads exactly that string, on a surface documented as preserved byte-for-byte, and 167-UI-SPEC authors no copy for these tables. Needs a copy decision, not an executor's guess. | open |  | 2026-09-22T17:09:18.951Z |  |
+| 66 | 167 | todo | src/lib/queries.ts |  | Phase 167 review round 1, SFH-M2 follow-up: the headline AUM (emptyLiveBaselineMetrics / liveBaselineMetricsFromPerKeyDailies, totalAum = holdingsSummary.reduce) sums holdings from untrusted keys (revoked, sign_in_failed) with no key-status test, while HoldingsTable hides those rows by default. The false comment claiming the predicate kept them out of the AUM was corrected; the money number was NOT changed. Follow-up: flag the AUM as partial (or disclose the contribution) when an untrusted key contributes — a money-number change with its own blast radius, needs its own decision. | open |  | 2026-09-22T20:10:03.968Z |  |
 
 ````json
 [
@@ -864,6 +865,19 @@ last_updated: 2026-09-22T17:41:57.032Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-22T17:09:18.951Z",
+    "resolved_at": null,
+    "milestone": "v1.20"
+  },
+  {
+    "id": 66,
+    "kind": "todo",
+    "phase": "167",
+    "file": "src/lib/queries.ts",
+    "line": null,
+    "description": "Phase 167 review round 1, SFH-M2 follow-up: the headline AUM (emptyLiveBaselineMetrics / liveBaselineMetricsFromPerKeyDailies, totalAum = holdingsSummary.reduce) sums holdings from untrusted keys (revoked, sign_in_failed) with no key-status test, while HoldingsTable hides those rows by default. The false comment claiming the predicate kept them out of the AUM was corrected; the money number was NOT changed. Follow-up: flag the AUM as partial (or disclose the contribution) when an untrusted key contributes — a money-number change with its own blast radius, needs its own decision.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-22T20:10:03.968Z",
     "resolved_at": null,
     "milestone": "v1.20"
   }
