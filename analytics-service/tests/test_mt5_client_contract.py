@@ -452,12 +452,23 @@ def test_login_stage_refusal_is_the_only_path_raising_the_marker():
             {"login": False, "last_error": None},
             id="login-falsy-but-last_error-answered-nothing",
         ),
+        # 167 SFH MEDIUM-1 — a truthy answer we cannot read (a one-element
+        # tuple, so `err[1]` is an IndexError). `_raise_last` coerces it to
+        # code 0, which `is_mt5_login_refusal` would call a refusal if the
+        # marker survived the coercion.
+        pytest.param(
+            {"login": False, "last_error": (0,)},
+            id="login-falsy-malformed-last_error",
+        ),
     ],
 )
 def test_login_failures_with_no_sign_in_answer_are_not_the_marker(scenario):
     """Phase 167 CR-01 — the negative half. Each of these fails inside `login()`
     WITHOUT the terminal having answered the sign-in, so each must stay a plain
-    `Mt5ClientError`, which callers treat as a transport fault."""
+    `Mt5ClientError`, which callers treat as a transport fault.
+
+    The malformed case also pins that the redaction and the coerced code are
+    unchanged: the message is the fixed "malformed" text and the code is 0."""
     from services.mt5_client import Mt5LoginRefusedError
 
     connect, _fake, _rec = _make(scenario)
@@ -469,6 +480,10 @@ def test_login_failures_with_no_sign_in_answer_are_not_the_marker(scenario):
         "answered the sign-in — a transport fault would be reported as a "
         "credential failure"
     )
+    if scenario.get("last_error") == (0,):
+        assert exc_info.value.code == 0
+        assert "malformed last_error shape" in str(exc_info.value)
+        assert "Broker-Demo" not in str(exc_info.value)
 
 
 def test_post_login_read_failure_is_not_the_marker():

@@ -1146,9 +1146,10 @@ class Mt5Client:
         carries the terminal's own ``last_error()`` answer — the last raise below.
         ``login``'s falsy arm passes ``Mt5LoginRefusedError`` so a refused sign-in is
         distinguishable by TYPE from every other stage's failure. ⛔ It deliberately
-        does NOT apply to the two earlier raises: when the ``last_error()`` round-trip
-        itself dies, or answers nothing, the terminal told us nothing about the
-        login, and a transport drop must never be reported as a refused sign-in.
+        does NOT apply to the two earlier raises, nor to a malformed answer: when the
+        ``last_error()`` round-trip itself dies, answers nothing, or answers in a
+        shape we cannot read, the terminal told us nothing about the login, and a
+        transport drop must never be reported as a refused sign-in.
         The message and the redaction are identical for every class.
         """
         # WIZFORM-ABANDON / D-36 — the fence is the FIRST statement, BEFORE the
@@ -1188,6 +1189,12 @@ class Mt5Client:
             code, text = int(err[0]), str(err[1])
         except (TypeError, IndexError, KeyError, ValueError):
             code, text = 0, "unknown (malformed last_error shape)"
+            # ⛔ 167 SFH MEDIUM-1 — a malformed answer is the terminal telling us
+            # NOTHING about the login, exactly like the two raises above, so it
+            # must never carry the sign-in marker. Without this the coerced
+            # code 0 passes `is_mt5_login_refusal` and a garbled bridge reply
+            # is reported as a refused sign-in.
+            answered_type = Mt5ClientError
         # ⛔ THE CODE IS PRESERVED THROUGH THE REDACTION. A heal that lost `-6` is
         # undebuggable from a log, and `-6` is the ONE fault this phase's detector
         # distinguishes — only the freeform TEXT is rewritten.
