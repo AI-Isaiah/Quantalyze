@@ -42,6 +42,7 @@ from services.mt5_validation import (
     Mt5ValidationError,
     classify_mt5_login_error,
     classify_trade_capability,
+    is_ipc_transport_fault,
     parse_mt5_credentials,
     terminal_trade_permission_off,
 )
@@ -749,6 +750,38 @@ async def _validate_mt5_key_probe(
             if kind == "wrong_server":
                 trace.outcome = "wrong_server"
                 raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
+            # 164.6.5 / criterion 5 (D-12/D-13) — an IPC transport fault: OUR OWN
+            # terminal bridge, never the caller's key. `classify_mt5_login_error`
+            # code-gates -10004/-10005 into its "transient" bucket (164.5.4 /
+            # D-02: its three-way contract is pinned and must not grow a fourth
+            # class), so this arm asks the narrower question directly, on the
+            # SAME code tuple, BEFORE the generic transient tail below.
+            #
+            # MEASURED 2026-09-21: a wedged gateway terminal answered -10005
+            # across two retries 45s and 55s apart — one with CORRECT
+            # credentials — and stayed wedged 1h39m. The generic transient copy
+            # below says "try again in a moment", which was false both times: no
+            # retry from the wizard could ever have cleared this. 500,
+            # retryable=False, dependency named — an operator, not a retry,
+            # clears it, following the gateway-unconfigured arm's shape above.
+            # Fails CLOSED and reaches no persistence, like every other arm of
+            # this function.
+            if is_ipc_transport_fault(e):
+                logger.warning(
+                    "validate_key: MT5 terminal IPC transport fault (code=%s)",
+                    e.code,
+                )
+                trace.outcome = "terminal_unresponsive"
+                raise service_error(
+                    500,
+                    "MT5_TERMINAL_UNRESPONSIVE",
+                    dependency="mt5-gateway",
+                    retryable=False,
+                    detail=(
+                        "The MetaTrader terminal we use to check this key "
+                        "stopped answering. This needs an operator, not a retry."
+                    ),
+                )
             # transient -> fail CLOSED with the shared NETWORK detail (sfox F4
             # posture: never auth-failed, never valid). WARNING with the scrubbed
             # code only.

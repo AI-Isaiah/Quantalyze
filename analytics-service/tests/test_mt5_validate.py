@@ -1054,6 +1054,152 @@ async def test_mt5_transient_maps_to_network_detail_not_credentials(exchange_rou
     client.release.assert_called_once()
 
 
+# --------------------------------------------------------------------------- #
+# 164.6.5 / criterion 5 (D-12/D-13) — the IPC-transport arm: OUR terminal, not
+# the user's key, and never a retry instruction that cannot work
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        (-10004, "No IPC connection"),
+        (-10005, "IPC timeout"),
+    ],
+)
+async def test_mt5_ipc_transport_fault_maps_to_terminal_unresponsive(
+    exchange_router, code, detail
+):
+    """164.6.5 / criterion 5 — BOTH IPC transport codes now raise a distinct,
+    honest, non-retryable 500 instead of falling through to the generic "try
+    again in a moment" transient copy. MEASURED 2026-09-21: -10005 stayed
+    wedged 1h39m across two retries, one with CORRECT credentials, and no
+    retry from the wizard could ever have cleared it — the same instruction
+    the 424/transient tail below still gives for every OTHER unrecognised
+    login error, honestly, because those really can clear on a retry.
+
+    release() runs — the session is torn down like every other arm. Raising
+    (never returning {"valid": true}) is this function's fail-CLOSED posture;
+    nothing is persisted on any arm of it, this one included."""
+    router = exchange_router
+    err = Mt5ClientError(code, detail)
+    client = _make_client(login_raises=err)
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 500
+    assert ei.value.status_code != 424, (
+        "an IPC transport fault must not fall through to the generic "
+        "transient/424 tail — that copy asks the user to retry a terminal "
+        "that will not answer again"
+    )
+    body = ei.value.detail
+    assert body["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    assert body["dependency"] == "mt5-gateway"
+    assert body["retryable"] is False
+    # R-1: a permanent fault never advertises a wait.
+    assert not (ei.value.headers or {}).get("Retry-After")
+    # Never the dishonest transient copy, and never a credential-blame copy.
+    assert body["detail"] != NETWORK_ERROR_DETAIL
+    assert body["detail"] != AUTH_FAILED_DETAIL
+    assert body["detail"] != MT5_WRONG_SERVER_DETAIL
+    assert "read_only" not in repr(body)
+    client.release.assert_called_once()
+
+
+async def test_mt5_non_ipc_client_error_is_unchanged_the_d12_fence(exchange_router):
+    """⭐ D-12 as an EXECUTING assertion — the honest transport arm must be
+    PROVEN intact, not merely left alone. A login error carrying a code
+    OUTSIDE `_IPC_TRANSPORT_CODES` must still classify exactly as it did
+    before this plan: the generic 424/transient tail, never the new 500.
+    `KEY_NETWORK_TIMEOUT` (the TypeScript sibling of this Python-side copy)
+    is neither deleted nor widened."""
+    router = exchange_router
+    err = Mt5ClientError(0, "timeout waiting for response")
+    client = _make_client(login_raises=err)
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.status_code != 500, (
+        "D-12: the honest transport arm must not be widened into the new "
+        "IPC-specific 500 — a non-IPC code stays on its EXISTING disposition"
+    )
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    client.release.assert_called_once()
+
+
+async def test_mt5_ipc_transport_fault_emits_its_own_outcome_category(
+    exchange_router,
+):
+    """The stage event's recorded outcome is a NEW category, distinct from the
+    existing "transient" bucket — the parity histogram this field feeds
+    groups by it, and folding this operator-actionable state into the
+    transient bucket would corrupt the counts."""
+    router = exchange_router
+    err = Mt5ClientError(-10005, "IPC timeout")
+    client = _make_client(login_raises=err)
+    _install_mt5_client(router, client)
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req())
+
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1
+    assert validate[0]["outcome"] == "terminal_unresponsive"
+    assert validate[0]["outcome"] != "transient", (
+        "folding this into the existing transient category would corrupt "
+        "the parity histogram this field is built from"
+    )
+    assert validate[0]["ok"] is False
+
+
+async def test_mt5_ipc_transport_fault_logs_scrubbed_code_no_credentials(
+    exchange_router, monkeypatch
+):
+    """The WARNING for this arm carries the SCRUBBED code only — never the
+    interpolated remote text, never a login, password, or broker server
+    value. Asserted as a PROPERTY of what was logged (secrets absent), never
+    by constructing a credential-shaped literal as the thing searched for
+    (this repo's own dated proof-of-absence rule)."""
+    router = exchange_router
+    err = Mt5ClientError(-10005, "IPC timeout")
+    client = _make_client(login_raises=err)
+    _install_mt5_client(router, client)
+    mock_logger = MagicMock()
+    monkeypatch.setattr(router, "logger", mock_logger)
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException):
+            await _call(
+                router,
+                _make_req(
+                    api_key="123456", api_secret="s3cr3t-pw", passphrase="MyBroker-Live"
+                ),
+            )
+
+    secrets = ("123456", "s3cr3t-pw", "MyBroker-Live")
+    for meth in ("exception", "error", "warning", "info", "debug"):
+        for call in getattr(mock_logger, meth).call_args_list:
+            rendered = repr(call)
+            for secret in secrets:
+                assert secret not in rendered
+    assert mock_logger.warning.call_args_list, (
+        "the sweep above is vacuous unless at least one WARNING was captured"
+    )
+
+    events = [e for e in captured if e.get("event") == "mt5.stage"]
+    assert events, "the structlog half of the sweep is vacuous"
+    rendered_events = repr(events)
+    for secret in secrets:
+        assert secret not in rendered_events
+
+
 async def test_mt5_probe_timeout_maps_to_network_detail_and_releases(
     exchange_router, monkeypatch
 ):

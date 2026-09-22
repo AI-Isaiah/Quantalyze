@@ -342,6 +342,11 @@ const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
     "KEY_AUTH_FAILED",
     "KEY_MT5_MASTER_PASSWORD",
     "KEY_MT5_WRONG_SERVER",
+    // 164.6.5 / criterion 5 — same addition as `KNOWN_CREATE_WITH_KEY_CODES`
+    // (full reasoning there), taken together because both routes share the
+    // classifier that emits it. Admitted HERE IN THE SAME COMMIT the shared
+    // classifier starts returning it.
+    "KEY_MT5_TERMINAL_UNRESPONSIVE",
     "KEY_IP_ALLOWLIST",
     "KEY_NETWORK_TIMEOUT",
     "KEY_PROBE_FAILED",

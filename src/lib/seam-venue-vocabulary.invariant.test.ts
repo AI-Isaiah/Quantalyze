@@ -762,6 +762,14 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   "MT5_GATEWAY_UNCONFIGURED",
   "MT5_GATEWAY_UNREACHABLE",
   "MT5_MASTER_PASSWORD",
+  // 164.6.5 / criterion 5 (D-12/D-13) — minted by `_validate_mt5_key_probe`'s
+  // `Mt5ClientError` handler when the client error's code is one of MT5's IPC
+  // transport codes (our own terminal bridge, never the exchange). Takes a
+  // KEY_MT5_TERMINAL_UNRESPONSIVE verdict row, 500/retryable=false. Added here
+  // because this roster is the ARRIVAL gate: a new Python error_code with no
+  // TypeScript disposition falls through the substring cascade, which is what
+  // this file exists to prevent.
+  "MT5_TERMINAL_UNRESPONSIVE",
   // 164.5.3 / MT5CREDS — minted by `rotate_key_secret`'s probe-invariant
   // assertion; takes a SEAM_INTERNAL_FAULT verdict row (a code fault, not a
   // setting). Added here because this roster is the ARRIVAL gate: a new
@@ -795,6 +803,10 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * reads as protection while measuring nothing, and `it.each([])` is zero cases,
  * which is a passing suite.
  *
+ * 24 → 25 (2026-09-22, Phase 164.6.5 / criterion 5): one further arrival
+ * (`MT5_TERMINAL_UNRESPONSIVE`) puts the measured population at 42 codes;
+ * 0.6 × 42 = 25.2, floored to 25.
+ *
  * 23 → 24 (2026-09-16, Phase 164.5.1 review fix): 0.6 × 40 measured codes
  * = 24.0 exactly, floored to 24 — same rule, one further arrival
  * (`CURSOR_UNAVAILABLE`). ⚠️ The product is a whole number at this population,
@@ -816,7 +828,7 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * absence assertion in this file — the hand-typed roster above, the reach pin
  * and the both-shapes assertion are what stand against it.
  */
-const DERIVED_FLOOR = 24;
+const DERIVED_FLOOR = 25;
 
 /**
  * ⭐ THE REACH PIN — hand-typed, because today nothing else asserts WHERE the

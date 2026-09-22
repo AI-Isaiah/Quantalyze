@@ -2071,8 +2071,10 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * never counted off the table. The comment at the head of this file argues
    * why at length: an expectation built by reading the subject is an oracle
    * that cannot fail.
+   *
+   * 94 -> 95 (164.6.5 / criterion 5): `KEY_MT5_TERMINAL_UNRESPONSIVE` added.
    */
-  const EXPECTED_TABLE_SIZE = 94;
+  const EXPECTED_TABLE_SIZE = 95;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2616,8 +2618,10 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * ⚠️ AND THE BASELINE WAS RE-MEASURED AT HEAD BEFORE IT MOVED — 93 is what
    * 164.5.3-02 left, and 94 was READ OFF THE TWIN GUARD'S FAILURE MESSAGE
    * ("expected 94 to be 93") rather than counted off the table.
+   *
+   * 94 -> 95 (164.6.5 / criterion 5): `KEY_MT5_TERMINAL_UNRESPONSIVE` added.
    */
-  const EXPECTED_TABLE_SIZE = 94;
+  const EXPECTED_TABLE_SIZE = 95;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -4099,6 +4103,80 @@ describe("[153.6-06 / PARITY-05] the probe-failure pair renders opposite control
     const copy = formatKeyError("KEY_SCOPE_CHECK_UNREADABLE");
     expect(copy.actions).not.toContain("start_fresh");
     expect(copy.actions).not.toContain("try_another_key");
+  });
+});
+
+/**
+ * [164.6.5 / criterion 5] `KEY_MT5_TERMINAL_UNRESPONSIVE` — the wedged-terminal
+ * arm (D-12/D-13).
+ *
+ * ⭐ THE ORACLE IS `buildEnvelope`'s DERIVATION, never the `actions` array —
+ * same convention the PARITY-05 block above states and follows. The claim
+ * under test is "no Retry control renders", decided by `buildEnvelope` reading
+ * `actions` against `RECOVERABLE_ACTIONS`, never by reading the array back.
+ */
+describe("[164.6.5 / criterion 5] the wedged-terminal arm renders honest, non-retry copy", () => {
+  it("the new code derives NON-recoverable — no Retry control renders", () => {
+    const envelope = buildEnvelope("KEY_MT5_TERMINAL_UNRESPONSIVE", "corr-mt5-1");
+    expect(
+      envelope.recoverable,
+      "⛔ PROVEN-ABLE-TO-FAIL (2026-09-22): adding `clear_and_retry` to this " +
+        "code's `actions` in wizardErrors.ts and re-running this suite flips " +
+        "this assertion to FAIL (RED observed), restored via a `cmp`-verified " +
+        "byte backup — see the SUMMARY. A wedged terminal cannot be cleared by " +
+        "resubmitting the same form; a Retry control here would be exactly the " +
+        "'try again in a moment' lie the measured 2026-09-21 incident exists " +
+        "to remove.",
+    ).toBe(false);
+  });
+
+  it("the generic transport code (KEY_NETWORK_TIMEOUT) is byte-unchanged — D-12", () => {
+    // ⛔ D-12: this arm must NOT delete or widen the honest transport code.
+    // KEY_NETWORK_TIMEOUT stays correct for a genuine transport failure, where
+    // a retry really can succeed.
+    const envelope = buildEnvelope("KEY_NETWORK_TIMEOUT", "corr-mt5-2");
+    expect(envelope.recoverable).toBe(true);
+    const copy = formatKeyError("KEY_NETWORK_TIMEOUT");
+    expect(copy.title).toBe("We could not reach the exchange.");
+  });
+
+  it("the copy does not instruct a retry and does not promise an automatic recovery", () => {
+    // ⛔ D-13: the copy must not promise a self-heal that D-05 (a separate,
+    // concurrent plan) may not have shipped when this renders. Expressed as a
+    // property of what the copy DOES say — a bare grep for an absent phrase
+    // goes green the moment someone rewords it, so this also asserts the
+    // POSITIVE half: the copy must say the draft is safe.
+    const copy = formatKeyError("KEY_MT5_TERMINAL_UNRESPONSIVE");
+    const haystack = [copy.title, copy.cause, ...copy.fix]
+      .join("   ")
+      .toLowerCase();
+    for (const banned of [
+      "try again",
+      "in a moment",
+      "will recover",
+      "should recover",
+      "automatically",
+      "self-heal",
+    ]) {
+      expect(
+        haystack.includes(banned),
+        `The wedged-terminal copy says "${banned}" — a retry instruction or a ` +
+          `self-heal promise this arm exists to remove.`,
+      ).toBe(false);
+    }
+    // The POSITIVE half: the reader's position, stated honestly.
+    expect(/draft/i.test(haystack)).toBe(true);
+  });
+
+  it("the classifier matches the MACHINE code, not message text", () => {
+    // Proven by giving the error a message that would classify differently
+    // under the substring cascade (it contains "timeout", which the cascade's
+    // KEY_NETWORK_TIMEOUT branch matches) — only the seamCode wins.
+    const result = classifyKeyValidationError({
+      seamCode: "MT5_TERMINAL_UNRESPONSIVE",
+      message: "connection timeout while validating",
+    });
+    expect(result).toEqual({ code: "KEY_MT5_TERMINAL_UNRESPONSIVE", status: 500 });
   });
 });
 

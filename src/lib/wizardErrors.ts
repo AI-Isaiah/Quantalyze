@@ -108,6 +108,20 @@ export type WizardErrorCode =
   //     fix is the server string shown in the MT5 terminal login window.
   | "KEY_MT5_MASTER_PASSWORD"
   | "KEY_MT5_WRONG_SERVER"
+  // Phase 164.6.5 / criterion 5 (D-12/D-13) — the THIRD MT5-specific sibling,
+  // and the one whose subject is OUR terminal, not the user's credential and
+  // not their broker server. MEASURED 2026-09-21: the shipped copy at the
+  // wire code this replaces (`KEY_NETWORK_TIMEOUT`) told a client this was "a
+  // temporary exchange issue or a network blip" and to "Try again in a
+  // moment" — FALSE across two retries 45s and 55s apart, one with CORRECT
+  // credentials, against a terminal that stayed wedged for 1h39m. The server
+  // already classifies this server-side (an IPC transport fault — our own
+  // terminal bridge, D-13); this code carries that classification through
+  // rather than re-deriving it from message text.
+  // ⛔ `KEY_NETWORK_TIMEOUT` is NEITHER deleted NOR widened (D-12) — it stays
+  // correct for a genuine transport failure, where a retry really can
+  // succeed. This is a DISTINCT arm for a fault where it cannot.
+  | "KEY_MT5_TERMINAL_UNRESPONSIVE"
   // Phase 142.2 / MT5-04 (D-05) — THE FOUR CAUSES `KEY_INVALID_FORMAT` USED TO
   // SWALLOW. The two wizard connect routes (`strategies/create-with-key` and
   // `strategies/composite/add-key`) answered ONE code at TWELVE guards each —
@@ -1730,6 +1744,50 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#readonly-key",
     actions: ["clear_and_retry", "request_call"],
+  },
+
+  // Phase 164.6.5 / criterion 5 (D-12/D-13) — the wedged-terminal arm.
+  //
+  // ⭐ WHAT THIS REPLACES. MEASURED 2026-09-21: an MT5 validate against a
+  // wedged gateway terminal fell through to `KEY_NETWORK_TIMEOUT`, whose copy
+  // says "a temporary exchange issue or a network blip" and "Try again in a
+  // moment" — false on both halves here, across two retries 45s and 55s
+  // apart, one with CORRECT credentials, against a terminal that stayed
+  // wedged for 1h39m. The server already knows this is an IPC transport
+  // fault (our own terminal bridge, not the exchange) — D-13 says carry that
+  // classification through rather than re-deriving it, and this is the
+  // wizard-side half of that chain (the Python-side mint is
+  // `analytics-service/routers/exchange.py`'s `_validate_mt5_key_probe`).
+  //
+  // ⛔ NOT a widened `KEY_NETWORK_TIMEOUT` (D-12) — that code stays exactly as
+  // it is for a genuine transport failure, where a retry really can succeed.
+  // This arm exists because THIS failure is a different fact: the terminal
+  // itself stopped answering, and no retry from the wizard can make it
+  // answer again.
+  //
+  // NOT recoverable, on the same mechanism `KEY_SCOPE_CHECK_UNAVAILABLE`
+  // uses directly above: `actions` holds no member of `RECOVERABLE_ACTIONS`
+  // (src/lib/envelope.ts), so `buildEnvelope` derives `recoverable: false`
+  // and `ErrorEnvelope` renders NO Retry control. That is the entire fix —
+  // never a component-level condition. A Retry button that can only fail
+  // again is worse than no button (this reasoning is shared verbatim with
+  // the sibling copy above).
+  //
+  // ⛔ Does NOT promise a self-heal. D-05's supervision/self-heal work is a
+  // separate, concurrent plan and may not have shipped when this renders —
+  // copy that promises an automatic recovery which has not shipped is the
+  // same class of false statement `KEY_NETWORK_TIMEOUT`'s "try again" was,
+  // pointed the other way.
+  KEY_MT5_TERMINAL_UNRESPONSIVE: {
+    title: "Our MetaTrader terminal stopped answering.",
+    cause:
+      "The terminal we use to check MT5 keys is not responding. This is ours to fix — not your key, your password, or your broker server — and it will not clear on a retry. Your draft is saved; nothing you do from this screen can clear it.",
+    fix: [
+      "Nothing you can do from here — tell us and we will fix it.",
+      "Your draft is saved. You can come back to it once we have.",
+    ],
+    docsHref: "/security#readonly-key",
+    actions: ["request_call"],
   },
 
   // ── Phase 142.2 / MT5-04 (D-05) — the four honest causes ──────────────────
@@ -4571,6 +4629,17 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   // `SERVICE_UNREACHABLE` and `KEY_PROBE_FAILED` are already in both.
   ["MT5_GATEWAY_UNCONFIGURED", { code: "SEAM_INTERNAL_FAULT", status: 500 }],
   ["MT5_GATEWAY_UNREACHABLE", { code: "SERVICE_UNREACHABLE", status: 503 }],
+  // 164.6.5 / criterion 5 (D-12/D-13) — minted by `_validate_mt5_key_probe`'s
+  // `Mt5ClientError` handler when the client error's code is one of MT5's IPC
+  // transport codes (our own terminal bridge, never the exchange). 500,
+  // `retryable=False`, `dependency="mt5-gateway"` — the SAME status this new
+  // wizard code's copy entry declares, written down there so the two cannot
+  // silently disagree. ⛔ NOT `SERVICE_UNREACHABLE`/`MT5_GATEWAY_UNREACHABLE`'s
+  // row above: that pair is a genuine 503 TRANSIENT bridge-connect fault where
+  // a retry can win. This is the terminal ITSELF not answering once a session
+  // is established — permanent from the wizard's vantage point, because
+  // nothing the user does from this screen can clear it.
+  ["MT5_TERMINAL_UNRESPONSIVE", { code: "KEY_MT5_TERMINAL_UNRESPONSIVE", status: 500 }],
   ["EGRESS_PROXY_MISCONFIGURED", { code: "SEAM_MISCONFIGURED", status: 500 }],
   ["SERVICE_KEY_UNCONFIGURED", { code: "SEAM_MISCONFIGURED", status: 500 }],
   ["KEK_UNAVAILABLE", { code: "SEAM_MISCONFIGURED", status: 500 }],
