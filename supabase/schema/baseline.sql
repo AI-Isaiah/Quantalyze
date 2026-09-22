@@ -9943,7 +9943,7 @@ COMMENT ON COLUMN "public"."api_keys"."attested_venue" IS 'RPC-WRITTEN venue (mi
 
 
 
-COMMENT ON COLUMN "public"."api_keys"."venue_account_id" IS 'Phase 154 / WIZCONT-02. NON-SECRET account identity for the credential in this row — the MT5 broker login today. ⛔ TRUST BOUNDARY, STATED HONESTLY — DO NOT CALL THIS VALUE VENUE-CONFIRMED. What is enforced: a DIRECT client INSERT cannot persist it, because the api_keys_scrub_venue_account_id BEFORE INSERT trigger NULLs it for every current_user outside the postgres/service_role/supabase_admin allowlist. What is NOT enforced: `authenticated` holds EXECUTE on the SECURITY DEFINER create_wizard_strategy, which stamps this column verbatim from a caller-supplied parameter WITHOUT VALIDATION — so a browser session calling /rest/v1/rpc/create_wizard_strategy directly can persist an identity of its choosing and evade the dedup. The trigger closes the table-INSERT path, not the RPC path. Remedy is PHASE 156 (CONNECT-REFACTOR). NULL is the NORMAL value and means "this venue exposes no stable non-secret account id at validation" — every ccxt venue today. That is why api_keys_user_exchange_venue_account_uniq is PARTIAL. api_keys_venue_account_id_nonblank forbids '''' and whitespace-only. ⛔ Never echo this value to the browser (UI-SPEC).';
+COMMENT ON COLUMN "public"."api_keys"."venue_account_id" IS 'Phase 154/WIZCONT-02, RE-STAMPED by 164.5.3/MT5CREDS (founder decision D-01-PRIME, 2026-09-20; full reasoning in 164.5.3-CONTEXT.md AMENDMENT section, not restated here). NON-SECRET account identity for the credential in this row: the MT5 broker login today, which analytics-service/services/mt5_probe.py asserts against the gateway at validation time. It is an ACCOUNT NUMBER, not a credential. The secret half lives in api_key_encrypted and never comes near this column. TRUST BOUNDARY, STATED HONESTLY: DO NOT CALL THIS VALUE VENUE-CONFIRMED. What is enforced, by FOUR independent fences (see the header of this migration file for the full argument): a direct client INSERT is scrubbed to NULL by the scrub_client_supplied_venue_account_id trigger (20260812083206); direct client INSERT and UPDATE on api_keys are both fully revoked (20260823120000, 20260810120000 respectively); and authenticated holds NO EXECUTE on either wizard RPC (20260814120000), though that REVOKE is NOT durable across a future DROP+CREATE of either RPC unless the REVOKE/GRANT pair is re-issued in the same change (see the header of that migration). What is NOT enforced: the value has no in-database oracle. The real guarantee is a login the server has authenticated credentials for. The value is persisted only after the credentials it is derived from authenticated read-only against the live broker at connect time, or by decrypting the stored ciphertext already on this same row on an update, never accepted as a fresh caller-supplied string with no server-side step behind it. A caller can choose which of their own working broker logins to connect; they cannot mint one they do not hold. Treat the value as what the server derived, not what the venue confirmed: the CR-01 provenance residual (164.5.3-CONTEXT.md AMENDMENT, D-01-PRIME) stays OPEN. NULL is the NORMAL value and means this venue exposes no stable non-secret account id at validation: every ccxt venue today, whose ValidationResult carries no account-identity field at all. That is why api_keys_user_exchange_venue_account_uniq is PARTIAL: under a total index every NULL would collide and no user could hold two ccxt keys. api_keys_venue_account_id_nonblank forbids blank and whitespace-only values, because a blank string is non-NULL and would otherwise be governed by that index as if it were a real identity, collapsing two DIFFERENT accounts onto one row. OVERRIDE, RECORDED HONESTLY (164.5.3/MT5CREDS, founder decision D-01-PRIME, 2026-09-20): the prior form of this comment said never to echo this value to the browser, and said it was not readable by anon or authenticated anyway. BOTH ARE NOW FALSE BY DESIGN. This migration GRANTs authenticated SELECT on this column so the key card can display it. That is a bounded confidentiality delta under the threat model migration 027 states: a compromised user account or an XSS-captured JWT can now also read this identifier, not just exchange/label. It is accepted because the founder demonstrably needs the identifier to tell same-venue MT5 cards apart, and because publishing discloses nothing ACROSS a tenant boundary, since RLS still scopes every row to its own owner. anon still has NO grant on this column: migration 20260410225608 REVOKE-then-allowlist governs it and anon is not on the allowlist.';
 
 
 
@@ -11348,6 +11348,32 @@ COMMENT ON COLUMN "public"."strategy_shares"."revoked_at" IS 'Soft-revoke tombst
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."strategy_sync_cursors" (
+    "strategy_id" "uuid" NOT NULL,
+    "last_sync_at" timestamp with time zone,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."strategy_sync_cursors" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."strategy_sync_cursors" IS 'Internal cron resume state: at most one row per strategy, recording where the trade sync got to for THAT strategy rather than for its api key. Sole writer is the analytics service cron fan out, through the service role client. No user facing consumer exists or is planned, which is why RLS here is deny all with no owner tier. See phase 164.5.1.4.';
+
+
+
+COMMENT ON COLUMN "public"."strategy_sync_cursors"."strategy_id" IS 'The whole primary key. Cascades on strategy deletion, so nothing is orphaned and no cleanup job is needed. Deliberately NOT composite: the strategy is the stable axis, while the key a strategy points at is mutable and nullable, so a composite key would strand this row on a re-point. See phase 164.5.1.4.';
+
+
+
+COMMENT ON COLUMN "public"."strategy_sync_cursors"."last_sync_at" IS 'Wall clock at the moment this strategy was last fully synced, mirroring api_keys.last_sync_at in meaning. NOT the maximum trade timestamp in the payload. THREE STATES, and the first two are DIFFERENT: (1) NO ROW for this strategy means no per strategy information, so the consumer falls back to api_keys.last_sync_at, which is what makes this migration inert the moment it lands; (2) ROW PRESENT with a NULL value means this strategy must re fetch from the start of history; (3) ROW PRESENT with a timestamp means resume from there. The consumer MUST distinguish (1) from (2) by key MEMBERSHIP, never by a dictionary lookup that returns the same None for both. See phase 164.5.1.4.';
+
+
+
+COMMENT ON COLUMN "public"."strategy_sync_cursors"."updated_at" IS 'When this cursor row was last written. Set explicitly by the single writer in its own upsert payload; there is deliberately no trigger. See phase 164.5.1.4.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."strategy_verifications" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "strategy_id" "uuid" NOT NULL,
@@ -11993,6 +12019,11 @@ ALTER TABLE ONLY "public"."strategy_shares"
 
 ALTER TABLE ONLY "public"."strategy_shares"
     ADD CONSTRAINT "strategy_shares_strategy_id_key" UNIQUE ("strategy_id");
+
+
+
+ALTER TABLE ONLY "public"."strategy_sync_cursors"
+    ADD CONSTRAINT "strategy_sync_cursors_pkey" PRIMARY KEY ("strategy_id");
 
 
 
@@ -13209,6 +13240,11 @@ ALTER TABLE ONLY "public"."strategy_shares"
 
 
 
+ALTER TABLE ONLY "public"."strategy_sync_cursors"
+    ADD CONSTRAINT "strategy_sync_cursors_strategy_id_fkey" FOREIGN KEY ("strategy_id") REFERENCES "public"."strategies"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."strategy_verifications"
     ADD CONSTRAINT "strategy_verifications_strategy_id_fkey" FOREIGN KEY ("strategy_id") REFERENCES "public"."strategies"("id") ON DELETE CASCADE;
 
@@ -14038,6 +14074,17 @@ ALTER TABLE "public"."strategy_shares" ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "strategy_shares_owner" ON "public"."strategy_shares" TO "authenticated" USING (("created_by" = "auth"."uid"())) WITH CHECK ((("created_by" = "auth"."uid"()) AND (EXISTS ( SELECT 1
    FROM "public"."strategies" "s"
   WHERE (("s"."id" = "strategy_shares"."strategy_id") AND ("s"."user_id" = "auth"."uid"()))))));
+
+
+
+ALTER TABLE "public"."strategy_sync_cursors" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "strategy_sync_cursors_deny_all" ON "public"."strategy_sync_cursors" USING (false) WITH CHECK (false);
+
+
+
+COMMENT ON POLICY "strategy_sync_cursors_deny_all" ON "public"."strategy_sync_cursors" IS 'Service role only. Non service callers get zero rows and can write none. This table has NO owner facing tier, so the narrower USING (false) form is used rather than an explicit auth.role() arm; service_role bypasses RLS by default per ADR 0003. See phase 164.5.1.4.';
 
 
 
@@ -15195,6 +15242,10 @@ GRANT SELECT("disconnected_at") ON TABLE "public"."api_keys" TO "authenticated";
 
 
 
+GRANT SELECT("venue_account_id") ON TABLE "public"."api_keys" TO "authenticated";
+
+
+
 GRANT ALL ON TABLE "public"."audit_log" TO "anon";
 GRANT SELECT,INSERT,REFERENCES,TRIGGER,TRUNCATE,MAINTAIN ON TABLE "public"."audit_log" TO "authenticated";
 GRANT SELECT,INSERT,REFERENCES,TRIGGER,TRUNCATE,MAINTAIN ON TABLE "public"."audit_log" TO "service_role";
@@ -15586,6 +15637,10 @@ GRANT UPDATE("generation") ON TABLE "public"."strategy_shares" TO "authenticated
 
 
 GRANT UPDATE("revoked_at") ON TABLE "public"."strategy_shares" TO "authenticated";
+
+
+
+GRANT ALL ON TABLE "public"."strategy_sync_cursors" TO "service_role";
 
 
 

@@ -48,17 +48,54 @@ SP-M03 records what happens when they drift apart.
 
 | | |
 |---|---|
-| Taken | 2026-09-18 |
+| Taken | 2026-09-22 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
 | Supabase CLI | 2.84.2 (CI pins 2.98.2 — see the caveat below) |
-| sha256 | `d8dd17860efd45d170d56ab934ca3660ca17c531c80bbea975ac025f2a23c4a9` |
-| Shape | 62 tables, 154 policies, 123 function statements (121 distinct names), **0 data statements** |
+| sha256 | `447a3a609b7195ef7e70ee0c0e71c9fbefce07aebac9188bf8672d29df628129` |
+| Shape | 63 tables, 155 policies, 123 function statements (121 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
 `scripts/local-stack/REPLAY-SPIKE.md`: no DSN, no `\connect`, no `ALTER DATABASE`, no JWT,
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-09-22 — the two migrations that landed after the 2026-09-18 capture
+
+⛔ **A SEPARATE REVIEWED ACT, taken by the founder** — this checkout runs no database command
+against a remote, so the dump itself is a founder step. Taken at the request of Phase 164.4.2
+plan 03, whose currency gate had correctly REFUSED: the committed dump was 2026-09-18 while
+`supabase/migrations/` had moved on 2026-09-20.
+
+**Which migrations the new dump now carries** — measured, not assumed, as the complete set added
+since the prior capture:
+
+| migration | what it adds | expected shape delta |
+|---|---|---|
+| `20260919120000_strategy_sync_cursors.sql` | `strategy_sync_cursors` + RLS + a deny-all policy + a service_role grant | +1 table, +1 policy |
+| `20260920120000_api_keys_venue_account_id_grant.sql` | a column-level `GRANT SELECT (venue_account_id)` | none of the counted shapes |
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Shape delta | tables 62 → **63**, policies 154 → **155** — exactly the one table and one policy above |
+| Functions | 123 statements / 121 distinct names — **unchanged**, as a grant-only migration must leave them |
+| Data statements | **0** — unchanged, as a schema-only dump must be |
+| sha256 | `d8dd1786…` → `447a3a60…` |
+| Secret scan (all five classes) | **0** matches |
+| Home path / local username | 0 matches |
+| File integrity | single dump preamble, single `SET client_encoding`, no NUL bytes; leading/trailing whitespace shape (3 / 32) byte-identical to the prior capture, i.e. the CLI's own output shape |
+
+⚠️ **An in-flight hazard was created and closed during this regeneration, recorded because the
+next person deserves the warning.** `supabase db dump -f <path>` TRUNCATES its target before it
+writes, so the file reads **0 bytes for the whole duration of the dump**. A reader who measures
+the file mid-run sees an empty file and can wrongly conclude the dump failed; acting on that
+reading by restoring the previous content writes into a path the running CLI still owns. That
+happened here. The dump completed and overwrote the interference, and the file was then verified
+intact by the structural checks in the table above — one preamble, coherent counts, and a shape
+delta that maps exactly to the two migrations. ⛔ **Do not read the file while the dump is
+running, and do not write to that path until the command has exited.**
 
 ### Regenerated 2026-09-18 — the Phase 164.1.1 apply, one NEW function, nothing else
 
