@@ -36,8 +36,19 @@
 -- class is to REVERT THE MERGE, never to edit `supabase-migrate.yml`.
 -- ===========================================================================
 
-ALTER TABLE api_keys DROP CONSTRAINT IF EXISTS api_keys_sync_status_check;
-ALTER TABLE api_keys ADD CONSTRAINT api_keys_sync_status_check
+-- ⛔ FAIL FAST RATHER THAN QUEUE. Both statements below take ACCESS EXCLUSIVE
+-- on `api_keys`, and an unbounded wait behind one long-running reader does not
+-- just stall this migration — ACCESS EXCLUSIVE queues ahead of every later
+-- lock request, so every subsequent `api_keys` reader piles up behind a
+-- migration that is itself waiting. A 55P03 (`lock_not_available`) and a RED
+-- apply is the wanted outcome; a silently stalled table is not.
+-- Placement copied from the direct analog,
+-- `20260811210000_api_keys_attested_venue.sql`, which sets the same 3s
+-- immediately above its own `ALTER TABLE public.api_keys`.
+SET lock_timeout = '3s';
+
+ALTER TABLE public.api_keys DROP CONSTRAINT IF EXISTS api_keys_sync_status_check;
+ALTER TABLE public.api_keys ADD CONSTRAINT api_keys_sync_status_check
   CHECK (sync_status IN (
     'idle','syncing','computing','complete','complete_with_warnings',
     'error','revoked','rate_limited','sign_in_failed'
@@ -50,15 +61,51 @@ DO $$
 DECLARE
   v_sync_status_def TEXT;
 BEGIN
+  -- ⛔ SCOPED BY conrelid, not by conname alone. `conname` is unique only per
+  -- (relation, name), so a same-named constraint on another table — in this
+  -- schema or any other on `search_path` — could be the row this SELECT reads,
+  -- and the whole DO block would then be verifying someone else's constraint
+  -- while reporting success for ours. The sibling gate already scopes this way;
+  -- this is the migration copying its predicate rather than trusting the name.
   SELECT pg_get_constraintdef(oid) INTO v_sync_status_def
-    FROM pg_constraint WHERE conname = 'api_keys_sync_status_check';
+    FROM pg_constraint
+   WHERE conrelid = 'public.api_keys'::regclass
+     AND conname = 'api_keys_sync_status_check';
 
   IF v_sync_status_def IS NULL THEN
     RAISE EXCEPTION 'Migration 20260922120000 failed: api_keys_sync_status_check not found';
   END IF;
 
+  -- ⛔ EVERY probe below matches the QUOTED, DELIMITED, CAST token exactly as
+  -- `pg_get_constraintdef` renders it — never a bare substring.
+  --
+  -- THE HOLE THIS CLOSES, and it was MEASURED on a pg-lane, not reasoned:
+  -- `'complete'` is a SUBSTRING of `'complete_with_warnings'`, so the bare
+  -- `NOT LIKE '%complete%'` arm that stood here was satisfied by a constraint
+  -- that had LOST `'complete'` as long as it still carried
+  -- `'complete_with_warnings'`. A re-typed, stale list could drop a live value
+  -- and this block — the block whose entire job is "no prior value was lost" —
+  -- would report success. The same hole sits under any value that is a prefix
+  -- of another, so the IDIOM is fixed here, not just the one arm.
+  --
+  -- The rendered form, read off a lane clone of this migration (verbatim):
+  --   CHECK ((sync_status = ANY (ARRAY['idle'::text, ..., 'sign_in_failed'::text])))
+  -- so `'complete'::text` is unambiguous against `'complete_with_warnings'::text`
+  -- and stays unambiguous if a FUTURE value becomes a prefix of another.
+  --
+  -- ⚠️ `position()` replaces `LIKE` deliberately: `_` is a LIKE WILDCARD, and
+  -- three of these nine values contain one (`complete_with_warnings`,
+  -- `rate_limited`, `sign_in_failed`), so the LIKE spelling was a second,
+  -- quieter ambiguity in the same check. `position()` has no wildcards, and it
+  -- is the idiom the sibling gate already uses.
+  --
+  -- ⚠️ The `::text` suffix couples this block to `sync_status` being declared
+  -- `text` (it is: the PROD-derived baseline carries `"sync_status" "text"`).
+  -- A future type change would redden this apply LOUDLY rather than pass a
+  -- hollow check — the acceptable direction for a coupling to fail in.
+
   -- (a) the new value is admitted.
-  IF v_sync_status_def NOT LIKE '%sign_in_failed%' THEN
+  IF position('''sign_in_failed''::text' IN v_sync_status_def) = 0 THEN
     RAISE EXCEPTION 'Migration 20260922120000 failed: api_keys_sync_status_check missing sign_in_failed. Got: %',
       v_sync_status_def;
   END IF;
@@ -66,14 +113,14 @@ BEGIN
   -- (b) every prior value survived the DROP+ADD — the guard against a
   -- DROP+ADD that re-types a stale list and silently removes a value added
   -- since (Pattern Assignment 8's named hazard, 167-PATTERNS.md).
-  IF v_sync_status_def NOT LIKE '%idle%'
-     OR v_sync_status_def NOT LIKE '%syncing%'
-     OR v_sync_status_def NOT LIKE '%computing%'
-     OR v_sync_status_def NOT LIKE '%complete_with_warnings%'
-     OR v_sync_status_def NOT LIKE '%complete%'
-     OR v_sync_status_def NOT LIKE '%error%'
-     OR v_sync_status_def NOT LIKE '%revoked%'
-     OR v_sync_status_def NOT LIKE '%rate_limited%' THEN
+  IF position('''idle''::text' IN v_sync_status_def) = 0
+     OR position('''syncing''::text' IN v_sync_status_def) = 0
+     OR position('''computing''::text' IN v_sync_status_def) = 0
+     OR position('''complete_with_warnings''::text' IN v_sync_status_def) = 0
+     OR position('''complete''::text' IN v_sync_status_def) = 0
+     OR position('''error''::text' IN v_sync_status_def) = 0
+     OR position('''revoked''::text' IN v_sync_status_def) = 0
+     OR position('''rate_limited''::text' IN v_sync_status_def) = 0 THEN
     RAISE EXCEPTION 'Migration 20260922120000 failed: api_keys_sync_status_check lost a prior value. Got: %',
       v_sync_status_def;
   END IF;

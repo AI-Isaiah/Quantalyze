@@ -2167,7 +2167,33 @@ export const FILES_FLOOR = 49;
 //    49/76`, `arms: 425/425/0`, `biting: 425`, `lane-invocations: 425`,
 //    exit 0); this entry adds only the per-file `sections 2 / judged 2 /
 //    annotated 2 / waived 0 / biting 2` line and the arm-level attribution.
-export const ARMS_FLOOR = 425;
+//
+// ⭐ RE-DERIVED 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 425 ->
+//    426. ONE new arm, 3, in the now-EXISTING annotated file
+//    supabase/tests/test_api_keys_sync_status_sign_in_failed.sql. It carries
+//    the mutation that the file's pre-fix SUBSTRING probe passed clean: re-type
+//    the CHECK dropping 'complete' while KEEPING 'complete_with_warnings', so
+//    the shorter value is lost and a bare `position('complete' …)` still finds
+//    it inside the longer one. The gate's "no prior value was lost" claim was
+//    blind to exactly that, and this arm is what keeps the repaired idiom
+//    honest.
+//    ⚠️ Arm 3 gets its OWN check (c) and its OWN `TEST FAILED (3)` identity
+//    rather than riding on (2): the runner scores an arm by the FIRST
+//    `TEST FAILED (…)` in the lane output, so an arm whose mutation reddened
+//    (2) could never be told apart from arm 2 itself.
+//    So ARMS moves and FILES does not: FILES_FLOOR stays 49 (the file was
+//    already annotated by the time this arm landed) and WAIVED_CEILING stays 0.
+//    MEASURED via a full lane run, `node scripts/mutation-runner/run.mjs`:
+//    `coverage: files 49/76`, `arms: 426/426/0`, `biting: 426`,
+//    `lane-invocations: 426` (the two independent tallies AGREE),
+//    `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`,
+//    `unreachable: 27 file(s)`, `pending: 0`,
+//    `✅ No defects. Every annotated arm bit its own arm first.`, exit 0.
+//    Per-file line: `test_api_keys_sync_status_sign_in_failed.sql: sections 3 /
+//    judged 3 / annotated 3 / waived 0 / biting 3`. Arm 3 itself scored
+//    `RED (identity ok)` — not NO-IDENTITY, so its `TEST FAILED (3)` marker is
+//    the shape the runner reads.
+export const ARMS_FLOOR = 426;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

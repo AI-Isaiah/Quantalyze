@@ -47,28 +47,56 @@ BEGIN
   -- (drop 'sign_in_failed') — the constraint the phase's own migration
   -- exists to widen.
   -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"sql","stmt":"ALTER TABLE public.api_keys DROP CONSTRAINT api_keys_sync_status_check; ALTER TABLE public.api_keys ADD CONSTRAINT api_keys_sync_status_check CHECK (sync_status IN ('idle','syncing','computing','complete','complete_with_warnings','error','revoked','rate_limited'))"}]}
-  IF position('sign_in_failed' IN v_def) = 0 THEN
+  IF position('''sign_in_failed''::text' IN v_def) = 0 THEN
     RAISE EXCEPTION 'TEST FAILED (1): api_keys_sync_status_check does not admit sign_in_failed (D-11 arm B widening missing or reverted). Got: %',
       v_def;
   END IF;
 
-  -- (b) Every prior value survived the DROP+ADD — the guard against a
-  -- DROP+ADD that re-types a stale list and silently removes a value added
-  -- since (167-PATTERNS.md Pattern Assignment 8's named hazard).
+  -- (b) Every prior value OUTSIDE the prefix family survived the DROP+ADD —
+  -- the guard against a DROP+ADD that re-types a stale list and silently
+  -- removes a value added since (167-PATTERNS.md Pattern Assignment 8's named
+  -- hazard). The `complete` / `complete_with_warnings` pair is checked
+  -- SEPARATELY in (c); see the note there for why splitting them matters.
   --
   -- RED-UNDER: re-type the LIVE constraint from a STALE list that lost one
   -- prior value ('revoked') while still admitting sign_in_failed — the
   -- exact shape of the hazard this check exists to catch.
   -- RED-UNDER-M: {"arm":"2","apply":[{"kind":"sql","stmt":"ALTER TABLE public.api_keys DROP CONSTRAINT api_keys_sync_status_check; ALTER TABLE public.api_keys ADD CONSTRAINT api_keys_sync_status_check CHECK (sync_status IN ('idle','syncing','computing','complete','complete_with_warnings','error','rate_limited','sign_in_failed'))"}]}
-  IF position('idle' IN v_def) = 0
-     OR position('syncing' IN v_def) = 0
-     OR position('computing' IN v_def) = 0
-     OR position('complete_with_warnings' IN v_def) = 0
-     OR position('complete' IN v_def) = 0
-     OR position('error' IN v_def) = 0
-     OR position('revoked' IN v_def) = 0
-     OR position('rate_limited' IN v_def) = 0 THEN
+  IF position('''idle''::text' IN v_def) = 0
+     OR position('''syncing''::text' IN v_def) = 0
+     OR position('''computing''::text' IN v_def) = 0
+     OR position('''error''::text' IN v_def) = 0
+     OR position('''revoked''::text' IN v_def) = 0
+     OR position('''rate_limited''::text' IN v_def) = 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2): api_keys_sync_status_check lost a prior value (stale DROP+ADD re-type). Got: %',
+      v_def;
+  END IF;
+
+  -- (c) THE PREFIX FAMILY — `complete` and `complete_with_warnings`, checked
+  -- apart from (b) because the loss of the SHORTER one is the case a substring
+  -- probe cannot see.
+  --
+  -- ⛔ THE HOLE THIS ARM CLOSES, MEASURED on a pg-lane rather than reasoned:
+  -- with the old bare `position('complete' IN v_def)` spelling, a constraint
+  -- re-typed WITHOUT 'complete' but WITH 'complete_with_warnings' satisfied
+  -- the check and this gate printed `Part 1 OK`. The gate whose entire subject
+  -- is "no prior value was lost" was blind to the loss of a live value.
+  -- Every probe in Part 1 now matches the QUOTED, DELIMITED, CAST token as
+  -- `pg_get_constraintdef` actually renders it — read off a lane verbatim:
+  --   CHECK ((sync_status = ANY (ARRAY['idle'::text, ..., 'sign_in_failed'::text])))
+  -- so the fix cannot rot when a FUTURE value becomes a prefix of another.
+  --
+  -- ⚠️ This is a SEPARATE identity from (2) on purpose: the runner scores an
+  -- arm by the FIRST `TEST FAILED (…)` in the lane output, so an arm whose
+  -- mutation reddened (2) could never be told apart from arm 2 itself.
+  --
+  -- RED-UNDER: re-type the LIVE constraint dropping ONLY 'complete' while
+  -- KEEPING 'complete_with_warnings' — the exact mutation the pre-fix
+  -- substring spelling passed clean.
+  -- RED-UNDER-M: {"arm":"3","apply":[{"kind":"sql","stmt":"ALTER TABLE public.api_keys DROP CONSTRAINT api_keys_sync_status_check; ALTER TABLE public.api_keys ADD CONSTRAINT api_keys_sync_status_check CHECK (sync_status IN ('idle','syncing','computing','complete_with_warnings','error','revoked','rate_limited','sign_in_failed'))"}]}
+  IF position('''complete''::text' IN v_def) = 0
+     OR position('''complete_with_warnings''::text' IN v_def) = 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (3): api_keys_sync_status_check lost a member of the complete/complete_with_warnings prefix family — the loss a substring probe cannot see. Got: %',
       v_def;
   END IF;
 
