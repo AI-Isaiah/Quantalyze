@@ -379,3 +379,35 @@ def classify_mt5_login_error(
     # ⭐ THE REFUSAL. Unrecognised == transient, NEVER a permanent user-blame
     # stamp. ⛔ Do not "improve" this into a best-guess arm.
     return "transient"
+
+
+def is_ipc_transport_fault(err: Mt5ClientError) -> bool:
+    """True iff ``err`` is one of MT5's IPC-transport failure codes.
+
+    164.6.5 / criterion 5 (D-12/D-13). A narrow, single-purpose predicate
+    answering ONE question from the CODE alone — REUSES ``_IPC_TRANSPORT_CODES``
+    above, the same tuple ``classify_mt5_login_error`` code-gates on, rather than
+    re-spelling or duplicating it (a shape test copied twice drifts, and the
+    drift is silent — this module's own comment on that tuple says so).
+
+    ⛔ DELIBERATELY NOT a fourth class of ``classify_mt5_login_error``. That
+    function's three-way ``auth`` / ``wrong_server`` / ``transient`` contract is
+    pinned by executing tests at two call sites (the FastAPI router and the
+    worker adapter), and its own REFUSAL RULE docstring is explicit that exactly
+    two of the three classes become a permanent, user-attributed verdict.
+    Widening it to carry a disposition only ONE caller needs is how a shared
+    classifier acquires that caller's concerns — the initial-validate router is
+    currently the only site that must distinguish "our own terminal bridge
+    stopped answering" from the rest of the ``"transient"`` bucket, so the
+    distinction lives here, beside the classifier, never inside it.
+
+    MEASURED 2026-09-21: a wedged gateway terminal answered -10005 ("IPC
+    timeout") across two retries 45s and 55s apart, one with CORRECT
+    credentials, and stayed wedged for 1h39m. The wizard told the user this was
+    "a temporary exchange issue" and to try again — false, because the fault was
+    ours and no retry from the wizard could ever have cleared it. The caller
+    (``routers/exchange.py``) uses this predicate to raise a distinct, honest,
+    non-retryable verdict for exactly that case, while every other
+    ``"transient"`` cause classify_mt5_login_error returns keeps its existing
+    disposition untouched."""
+    return err.code in _IPC_TRANSPORT_CODES
