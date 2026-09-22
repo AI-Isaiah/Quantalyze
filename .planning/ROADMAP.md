@@ -2878,8 +2878,12 @@ Plans:
 
 **Goal:** The allocator KPI strip's headline AUM stops presenting a number as current when part of it comes from keys whose sync is untrusted (`isUntrustedKeySyncStatus`: `revoked`, `sign_in_failed`), while the holdings table on the same page already strikes those rows through as not current.
 **Requirements**: TBD. Source: Phase 167 silent-failure review M2 (2026-09-22); booked as `.planning/WINDOWS.md` entry 66. ⛔ A money-number change — the math in `src/lib/queries.ts` (`emptyLiveBaselineMetrics`, `liveBaselineMetricsFromPerKeyDailies`) is NOT to be changed silently; the design choice (flag as partial vs. exclude) is this phase's first decision.
-**Depends on:** Phase 167 (the `sign_in_failed` status and the predicate).
+**Depends on:** Phase 167
 **Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 167.1 to break down)
 
 ### Phase 168: DRBOPTIONS — a Deribit options account ingests end to end
 
