@@ -621,7 +621,8 @@ def test_c5_mt5_transient_client_error_carries_a_machine_code(
 
     _arrange_mt5(
         monkeypatch,
-        login_raises=Mt5LoginRefusedError(0, "timeout waiting for response"),
+        # 167 SFH-LOW-3 — a neutral login answer, not timeout-worded text.
+        login_raises=Mt5LoginRefusedError(0, "authorization failed"),
     )
 
     r = _post_validate_key(app_client, **_MT5_FIELDS)

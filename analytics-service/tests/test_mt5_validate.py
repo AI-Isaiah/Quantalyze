@@ -1118,7 +1118,12 @@ async def test_mt5_transient_maps_to_sign_in_failed_detail_not_credentials(
     stage is NOT a sign-in failure; see
     `test_mt5_post_login_or_ipc_transient_keeps_the_network_detail`."""
     router = exchange_router
-    err = Mt5LoginRefusedError(0, "timeout waiting for response")
+    # 167 SFH-LOW-3 — a NEUTRAL login answer the classifier does not recognise.
+    # This used to be "timeout waiting for response", which pinned
+    # timeout-worded text as a sign-in failure: a reader would take it that a
+    # timeout IS a sign-in refusal. What makes this a refusal is the stage
+    # (the marker type) and the code, not the wording.
+    err = Mt5LoginRefusedError(0, "authorization failed")
     client = _make_client(login_raises=err)
     _install_mt5_client(router, client)
 
@@ -1145,9 +1150,7 @@ async def test_mt5_transient_maps_to_sign_in_failed_detail_not_credentials(
             {
                 "account": _INVESTOR_ACCOUNT,
                 "terminal": {"connected": True, "trade_allowed": True},
-                "order_check_raises": Mt5ClientError(
-                    0, "timeout waiting for response"
-                ),
+                "order_check_raises": Mt5ClientError(0, "authorization failed"),
             },
             True,
             id="post-login-order_check-code-0",
