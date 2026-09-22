@@ -72,6 +72,18 @@ look the same, and guessing between them is the defect this phase removes, not t
 
 ### Fixed
 
+- **The holdings filter named a narrower set than it hid.** The allocator's toggle read *"Show
+  revoked-key holdings"* and its footer *"hidden from revoked keys"*, while the predicate behind
+  them already withheld `sign_in_failed` too — so a holding kept back because a sign-in was refused
+  was reported to the allocator as hidden for revocation, a cause that had not occurred. A single
+  cause-NEUTRAL collective noun now sits beside the set it names and feeds all four call sites: a
+  filter hiding two causes cannot honestly name one of them. The per-row chips are unchanged and
+  still name the specific state, so precision moves to the row, where the customer can act on it.
+  ⚠️ Three LOCKED copy pins went red on the correction — which is a pin working — and each was
+  RE-ARGUED for the string that is now true, never deleted and never relaxed to a substring, each
+  deriving its expectation from the same constant the component renders. Proven able to fail: the
+  superseded literals were pasted back at two sites, 3 of 15 cases reddened, restored from a
+  `cmp`-verified byte backup.
 - **The "no prior value was lost" guard could not see the loss it existed to catch.** Both the
   migration's self-verify block and its SQL gate probed with a bare substring `LIKE`. Fixed as an
   IDIOM in both files: every probe now matches the quoted, delimited, cast token as
@@ -182,13 +194,18 @@ look the same, and guessing between them is the defect this phase removes, not t
   passes because an idle throwaway cluster never contends. The bound is real under `db push`, whose
   per-migration transaction wrap is ASSERTED by an existing migration and was not measured from this
   checkout — no database command may be run against a remote from here.
-- ⛔ **`gsd-tools windows append` is REFUSING every new entry, and it is not this phase's drift.**
-  The broken-windows ledger's fenced JSON — the tool's sole source of truth — disagrees with its
-  rendered table, because an earlier commit hand-edited the table, which the tool forbids. The
-  disagreement pre-dates this phase and is cross-phase. It was NOT hand-repaired: editing a count to
-  unblock an append is the same move as clearing a red by widening the thing that measures it, on a
-  register this phase does not own. **Consequence, stated plainly: two of the residuals above are
-  UNFILED and live only in `167-04-SUMMARY.md`.**
+- ⭐ **`gsd-tools windows append` had been refusing EVERY new entry, and is now repaired.** Two
+  failures in sequence, both from one earlier commit that closed a ledger entry by hand-editing the
+  RENDERED TABLE — the one thing `broken-windows.cjs` forbids, since the fenced JSON is its sole
+  source of truth. First `parseLedger` threw on a count drift (frontmatter 50/0/13/63 against
+  entries yielding 51/0/12/63); once that agreed, a BYTE-EXACT comparison of `renderTable(entries)`
+  against the on-disk table failed too. ⛔ **The obvious repair would have destroyed evidence:**
+  that commit had written 925 characters of verified-closed justification — the hours-apart
+  thread-reap readings and their contiguity counts — into a column the renderer emits EMPTY, and it
+  existed nowhere else. It was lifted into the JSON's `reason` field and verified intact BEFORE the
+  table was regenerated from the JSON with the tool's own renderer. The register now parses, its
+  table is byte-equal to its rendering, and the two residuals below are FILED rather than stranded.
+  ⚠️ `workflow.windows_enforce` remains OFF: with 51 entries open it would block every ship.
 - **Two pre-existing visual findings were surfaced and not fixed**, per the phase's own UI contract:
   two existing pills measure below the 4.5:1 contrast bar, and `AllocatorSyncStatus` and
   `HoldingsTable` disagree today about red versus amber for the same condition. Out of scope by
