@@ -140,14 +140,20 @@ TypeScript caller and is closed on class-integrity grounds only. (Re-derive thes
 `grep -n "raise VenueTransientHTTPException"` before trusting them — they move whenever
 anything above them in either router does.)
 
-**Plus an eighth (167-CREDTRUST plan 01, S-27), cited BY SYMBOL rather than by the
-line numbers above that already rotted once**: `routers/exchange.py`'s
+⚠️ **The enumeration above is STALE and is kept as lineage** (167 review IN-01): measured
+2026-09-22, `grep -c "raise VenueTransientHTTPException"` finds 11 in `routers/exchange.py`
+on `main` and 12 at the 167 head — not six. Re-derive by grep; never trust a count here.
+
+**A second raise in the MT5 transient-client-error arm (167-CREDTRUST plan 01, S-27), cited
+BY SYMBOL rather than by line number** — it SPLITS that existing arm (the `:409` entry
+above) rather than adding a new failure: `routers/exchange.py`'s
 `_validate_mt5_key_probe()`, the narrowed transient tail of its
 `except Mt5ClientError` arm — code `SIGN_IN_FAILED`, `recoverable=False`. Reached from
 the SAME `POST /api/validate-key` path AND from `/internal/keys/{id}/rotate-secret`
 (`routers/internal.py`'s `rotate_key_secret`, whose `_validate_mt5_key` call is a thin
-bracket over the same probe function) — the first of the eight to be reachable from
-two endpoints.
+bracket over the same probe function) — the first site in this class to be reachable from
+two endpoints. The arm's other raise keeps the pre-167 `NETWORK_UNAVAILABLE`,
+`recoverable=True` answer for every fault that is not a login-stage refusal (167 WR-01).
 
 The class is a **CALLER-class 4xx by construction** and refuses anything outside
 `400 <= status < 500`: it carries no `dependency`, no `Retry-After` and no
@@ -417,8 +423,9 @@ reviewer diffs their assumptions against.
 | S-26 | `routers/match.py` `cron_recompute()`, the `except` around `_read_cron_cursor()` | `/api/match/cron-recompute` | **500 `text/plain`** (unhandled) | the batching-cursor read exhausted `db_read_with_retry` | SERVICE-TRANSIENT | **503** `CURSOR_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | **164.5.1** | ✅ |
 | S-27 | `routers/exchange.py` `_validate_mt5_key_probe()`, the `except Mt5ClientError` transient tail (also reached via `rotate_key_secret`'s `_validate_mt5_key` call) | `/api/validate-key`, `/internal/keys/{id}/rotate-secret` | 424 `NETWORK_UNAVAILABLE` | `classify_mt5_login_error` classified the caught `Mt5ClientError` `transient` AND `is_mt5_login_refusal` holds — the terminal answered the sign-in itself falsy with a non-IPC code, and never told us why. **167 WR-01:** a post-login read failure or an IPC code (`-10004`/`-10005`) reaching the same arm keeps the pre-167 424 `NETWORK_UNAVAILABLE`, `recoverable:true` | CALLER'S EXCHANGE (3b FLAT — §2.1) | **424** `SIGN_IN_FAILED`, **`recoverable:false`** — DIVERGES from this class's `recoverable:true` default: a retry re-runs the identical validate against a terminal a wrong password may have wedged behind a modal login dialog (D-08) | **167-CREDTRUST plan 01** | ✅ |
 
-**Tally:** 26 rows = **23 explicit editable sites** (S-01…S-20 plus S-25/S-26
-`HTTPException` raises, plus S-23 the `JSONResponse` literal) + 2 implicit
+**Tally:** 27 rows = **24 explicit editable sites** (S-01…S-20 plus S-25/S-26
+`HTTPException` raises, plus S-23 the `JSONResponse` literal, plus S-27 the
+`VenueTransientHTTPException` `SIGN_IN_FAILED` raise added by Phase 167) + 2 implicit
 unhandled-500s (S-21, S-22, no edit possible or needed) + 1 deliberately unchanged
 (S-24). The `23` is the number that an `HTTPException` grep sweep under-counts by
 one, because S-23 is not an `HTTPException`.
