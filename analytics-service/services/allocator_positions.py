@@ -889,8 +889,11 @@ async def _fetch_mt5_account_rows(
             # `validate_key` applies to the same boundary: the terminal answered
             # the `login()` call itself falsy (`Mt5LoginRefusedError`, the shape
             # a wrong investor password and a wrong server BOTH produce) AND the
-            # code is not an IPC transport code. Everything else keeps the
-            # pre-167 posture byte-unchanged: MT5_UNREACHABLE_NOTE, transient.
+            # code is not one of the -10000…-10004 IPC-infrastructure codes or
+            # the success code 1. A login-stage -10005 IS a refusal (D-17: the
+            # modal login dialog D-08 measured for a wrong password). Everything
+            # else keeps the pre-167 posture byte-unchanged:
+            # MT5_UNREACHABLE_NOTE, transient.
             #
             # The exception's own text is already secret-scrubbed at
             # construction, but it is still INTERNAL text (it can echo the

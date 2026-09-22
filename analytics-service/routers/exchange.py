@@ -763,13 +763,19 @@ async def _validate_mt5_key_probe(
             # read failing (an IPC timeout on `order_check`, say) arrives here
             # AFTER the credential was accepted. `is_mt5_login_refusal` is the
             # ONE predicate the holdings poll applies to the same boundary: the
-            # terminal answered `login()` itself falsy AND the code is not an IPC
-            # transport code. Every other transient keeps the pre-167 answer,
-            # NETWORK_UNAVAILABLE with `recoverable=True`. ⚠️ D-07 accepted that
-            # a wrong password behind a modal login dialog can surface as
-            # -10004/-10005; those codes stay on NETWORK_UNAVAILABLE, as before
-            # this phase. D-07/D-08 are not reopened: this changes WHICH faults
-            # reach the SIGN_IN_FAILED answer, not what that answer says.
+            # terminal answered `login()` itself falsy AND the code is not one
+            # of the -10000…-10004 IPC-infrastructure codes or the success code
+            # 1. Every other transient keeps the pre-167 answer,
+            # NETWORK_UNAVAILABLE with `recoverable=True`.
+            #
+            # ⭐ D-17 — a login-stage -10005 IS a sign-in refusal and reaches
+            # SIGN_IN_FAILED. D-08 names it as the measured wrong-password
+            # mechanism (a modal login dialog blocking IPC). The classifier call
+            # above cannot pre-empt it: its code-gate answers "transient" for
+            # -10005, which is this tail, and only then does the predicate split
+            # it. The marker is raised only after `initialize()` attached, so a
+            # terminal that is already wedged fails at `initialize()` as a plain
+            # `Mt5ClientError` and keeps NETWORK_UNAVAILABLE.
             #
             # WARNING with the scrubbed code only.
             trace.outcome = "transient"
@@ -796,13 +802,16 @@ async def _validate_mt5_key_probe(
             # `recoverable=True` above — deliberately. 167-PATTERNS Pattern
             # Assignment 5 names the hazard that the wire `recoverable` flag and
             # the TypeScript-derived Retry (`buildEnvelope`, src/lib/envelope.ts)
-            # can disagree invisibly; here they are made to AGREE: a retry re-runs
-            # the identical validate against a terminal a wrong password may have
-            # wedged behind a modal login dialog (the -10004/-10005 class), and
-            # repeated validate attempts against that one shared terminal are the
-            # operation implicated in wedging and account eviction (164.6.5 /
-            # 164.6.6) — so offering one would be the harmful action, not merely
-            # a useless one (D-08).
+            # can disagree invisibly; here they are made to AGREE. Only a
+            # login-stage refusal reaches this raise: the terminal received the
+            # credential and answered `login()` falsy, either with a sign-in
+            # code (0, -6, …) or with -10005, the modal login dialog a wrong
+            # password raises (D-08, D-17). A retry re-runs the SAME credential
+            # against that terminal, which either refuses it again or puts the
+            # dialog back up, and repeated validate attempts against that one
+            # shared terminal are the operation implicated in wedging and account
+            # eviction (164.6.5 / 164.6.6) — so offering one would be the harmful
+            # action, not merely a useless one (D-08).
             raise VenueTransientHTTPException(
                 status_code=424,
                 code="SIGN_IN_FAILED",

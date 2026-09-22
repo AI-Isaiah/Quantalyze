@@ -1784,16 +1784,34 @@ async def test_mt5_client_error_arm_follows_the_live_classifier_verdict(
             lambda m: m.Mt5ClientError(0, "Invalid account"),
             id="plain-client-error-even-with-auth-text",
         ),
-        # The login stage answered, but with an IPC transport code: the
-        # bridge detached (-10004) or stopped answering (-10005). D-07 keeps
-        # this ambiguity on the transport side.
+        # The login stage answered, but with an IPC-infrastructure code
+        # (-10000…-10004: our bridge failed to carry the call) or the success
+        # code 1. D-17: none of them is a verdict on the credential. A
+        # login-stage -10005 IS one, and is driven by
+        # `test_mt5_login_stage_refusal_code_writes_the_sign_in_claim` below.
         pytest.param(
-            lambda m: m.Mt5LoginRefusedError(-10004, "No IPC connection"),
-            id="login-stage-ipc-10004",
+            lambda m: m.Mt5LoginRefusedError(-10000, "internal fail"),
+            id="login-stage-10000-internal-fail",
         ),
         pytest.param(
-            lambda m: m.Mt5LoginRefusedError(-10005, "IPC timeout"),
-            id="login-stage-ipc-10005",
+            lambda m: m.Mt5LoginRefusedError(-10001, "internal fail send"),
+            id="login-stage-10001-send",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10002, "internal fail receive"),
+            id="login-stage-10002-receive",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10003, "internal fail init"),
+            id="login-stage-10003-init",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10004, "No IPC connection"),
+            id="login-stage-10004-connect",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(1, "Success"),
+            id="login-stage-1-res-s-ok",
         ),
     ],
 )
@@ -1825,6 +1843,48 @@ async def test_mt5_client_error_that_is_not_a_login_refusal_keeps_the_transport_
         "sign-in failure — the owner is told to fix a working credential"
     )
     assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+    assert caught.value.__cause__ is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "text"),
+    [
+        pytest.param(-10005, "IPC timeout", id="login-stage-10005-modal-dialog"),
+        pytest.param(0, "authorization failed", id="login-stage-0"),
+        pytest.param(-6, "Authorization failed", id="login-stage-6-auth-failed"),
+    ],
+)
+async def test_mt5_login_stage_refusal_code_writes_the_sign_in_claim(
+    monkeypatch, code, text
+):
+    """167 CR-01 / D-17 — a login-stage -10005, 0 or -6 is a refused sign-in on
+    the holdings surface too: `AllocatorHoldingsSignInFailedError` with the
+    sign-in copy and a `permanent` disposition, never MT5_UNREACHABLE_NOTE.
+
+    -10005 is the case D-08 is written about (the modal login dialog a wrong
+    MT5 password raises). Before D-17 it kept the transport note ("sync will
+    retry automatically") and climbed the backoff ladder, re-running `login()`
+    against the shared terminal on every rung.
+
+    The classifier is left UNMOCKED: a real `Mt5LoginRefusedError`
+    classifies `unknown`, so the wrap path is the one production takes."""
+    from services import allocator_positions as ap
+    from services.mt5_client import Mt5LoginRefusedError
+
+    expected = Mt5LoginRefusedError(code, text)
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+
+    with pytest.raises(ap.AllocatorHoldingsSignInFailedError) as caught:
+        await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+
+    assert str(caught.value) == ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+    assert caught.value.sync_status == ap.SIGN_IN_FAILED_SYNC_STATUS
+    assert caught.value.error_kind == "permanent", (
+        f"a login-stage refusal with code {code} would climb the backoff "
+        "ladder, re-sending the same password to the shared terminal (D-08)"
+    )
     assert caught.value.__cause__ is expected
 
 
