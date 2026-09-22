@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { AllocatorSyncStatus, PILL_STYLES } from "./AllocatorSyncStatus";
+import { AllocatorSyncStatus } from "./AllocatorSyncStatus";
+import { PILL_STYLES } from "./allocator-sync-pill-styles";
 
 /**
  * Phase 06 Plan 04 Task 1 — AllocatorSyncStatus sub-component test suite.
