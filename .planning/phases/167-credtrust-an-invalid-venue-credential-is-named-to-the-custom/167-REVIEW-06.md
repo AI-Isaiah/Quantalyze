@@ -130,3 +130,20 @@ This behaviour is pre-existing: it happened in the same way before 167-06, and R
 _Reviewed: 2026-09-22T23:30:01Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
+
+---
+
+## Silent-failure hunt (same scope, run in parallel with this review)
+
+Verdict: changes requested — 1 HIGH, 2 MEDIUM (test gaps), 2 LOW, 1 pre-existing. No catch in the 167-06 diff loses information; a failed delete or rotation is never treated as a success.
+
+| Id | Severity | Finding | Relation to the review |
+|----|----------|---------|------------------------|
+| SFH-HIGH-1 | high | An early poll read of the strategy's EXISTING analytics row (poll starts while `syncing`, before the enqueue response) ends the tracked attempt: `handleSyncStatusChange` clears `syncingKeyId`, then the 202 moves the panel to `computing` with no marker. Reproduced: credential pill under a spinner; the key's own Update password / Delete enabled; after a rotation, the attempt's later success is shown. | Same root cause as CR-01 — the marker is not scoped to the tracked attempt. Fixed together. |
+| SFH-MED-1 | medium | Nothing pins that `retireWithheldSuccess` leaves `error` unchanged; mutating it to map `error`→idle leaves all tests green. | test gap |
+| SFH-MED-2 | medium | Nothing pins the FUNCTIONAL updater; replacing it with the closure value leaves all tests green. | test gap |
+| SFH-LOW-1 | low | A terminal success can render (aria-live) before the terminal arm's re-read that would withhold it; if that re-read fails it stays. | — |
+| SFH-LOW-2 | low | `onUpdated`'s un-awaited re-read failing leaves "Sign-in failed" up right after the fix, with the load-error banner hidden while the Add Key form is open. | — |
+| SFH-PRE | pre-existing | `handleDeleteKey` treats an RLS-filtered 0-row delete as success; the key reappears on reload. | on the remedy path the `revoked` helper points at — fixed anyway |
+
+Mutations the existing tests caught: every R1–R6 rule and each retirement call site. Survived: the two test gaps above, plus one harmless reorder (not a finding).
