@@ -570,14 +570,21 @@ def test_c5_mt5_transient_client_error_carries_a_machine_code(
 ) -> None:
     """C5 — `Mt5ClientError` classified `transient` by the ONE mt5_validation seam.
 
-    Code -10004 ("No IPC connection") is the canonical case: the terminal bridge
-    is detached (gateway down / mid-redeploy), which the classifier deliberately
-    code-gates to `transient` so a valid key is never permanently rejected during
-    an outage.
+    ⚠️ RE-CUT 2026-09-22 (Phase 164.6.5 / criterion 5, D-12/D-13). This case
+    used to drive -10004 ("No IPC connection") as its example. As of this
+    plan -10004 and -10005 LEAVE this class — they now raise a distinct,
+    honest, non-retryable 500 (see
+    `test_c5b_ipc_transport_codes_leave_the_venue_transient_class` below) — so
+    this case is re-cut to a NON-IPC code, which is the population C5 still
+    covers: any OTHER unrecognised login error, code-gated `transient` by
+    `classify_mt5_login_error`'s REFUSAL RULE default so a valid key is never
+    permanently rejected during a genuine, retryable upstream blip.
     """
     from services.mt5_client import Mt5ClientError
 
-    _arrange_mt5(monkeypatch, login_raises=Mt5ClientError(-10004, "No IPC connection"))
+    _arrange_mt5(
+        monkeypatch, login_raises=Mt5ClientError(0, "timeout waiting for response")
+    )
 
     r = _post_validate_key(app_client, **_MT5_FIELDS)
 
@@ -588,6 +595,55 @@ def test_c5_mt5_transient_client_error_carries_a_machine_code(
         code="NETWORK_UNAVAILABLE",
         recoverable=True,
     )
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        (-10004, "No IPC connection"),
+        (-10005, "IPC timeout"),
+    ],
+)
+def test_c5b_ipc_transport_codes_leave_the_venue_transient_class(
+    app_client, monkeypatch, code: int, detail: str
+) -> None:
+    """164.6.5 / criterion 5 (D-12/D-13) — THE CLASS BOUNDARY, proven at the
+    LIVE route. Both IPC transport codes no longer answer this file's flat
+    424 venue-transient shape at all: they answer a DIFFERENT, honest,
+    non-retryable 500 — the wedged terminal is ours to fix, not a venue
+    hiccup a retry can clear. MEASURED 2026-09-21: -10005 stayed wedged
+    1h39m across two retries, one with CORRECT credentials — the "try again
+    in a moment" copy this class's shape carries was false both times.
+
+    The router-level assertions (machine code, dependency, retryable, outcome
+    category, log scrub) live in `test_mt5_validate.py`; this test's job is
+    narrower and specific to THIS file: prove the live route no longer routes
+    this pair through the flat venue-transient body at all.
+    """
+    from services.mt5_client import Mt5ClientError
+
+    _arrange_mt5(monkeypatch, login_raises=Mt5ClientError(code, detail))
+
+    r = _post_validate_key(app_client, **_MT5_FIELDS)
+
+    assert r.status_code == 500, (
+        f"an IPC transport fault (code={code}) must not answer this class's "
+        f"424 shape any more — got {r.status_code} with {r.json()!r}"
+    )
+    assert r.status_code != EXPECTED_STATUS, (
+        f"EXPECTED_STATUS ({EXPECTED_STATUS}) is this file's flat "
+        f"venue-transient 424 — an IPC transport fault must have LEFT that "
+        f"class, not merely changed its body"
+    )
+    body = r.json()
+    assert body["detail"]["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    assert body["detail"]["retryable"] is False
+    assert body["detail"]["dependency"] == "mt5-gateway"
+    # Never the class's own flat shape — that shape's `code` lives at the top
+    # level of `detail`, not nested one further, and never claims recoverable.
+    assert "recoverable" not in body["detail"] or body["detail"].get(
+        "recoverable"
+    ) is not True
 
 
 # --------------------------------------------------------------------------- #
