@@ -399,6 +399,14 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     "KEY_AUTH_FAILED",
     "KEY_MT5_MASTER_PASSWORD",
     "KEY_MT5_WRONG_SERVER",
+    // 164.6.5 / criterion 5 — admitted HERE IN THE SAME COMMIT the shared
+    // classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now answers
+    // for `MT5_TERMINAL_UNRESPONSIVE` (an IPC transport fault raised inside
+    // `_validate_mt5_key_probe`) with this code; omit this line and the
+    // membership check rejects the honest code, the step renders `UNKNOWN` —
+    // whose copy IS recoverable — and the user gets a Retry control for a fault
+    // the service marked `retryable=False`. Same trap the notes above record.
+    "KEY_MT5_TERMINAL_UNRESPONSIVE",
     "KEY_IP_ALLOWLIST",
     "KEY_NETWORK_TIMEOUT",
     "KEY_PROBE_FAILED",
