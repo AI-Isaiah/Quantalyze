@@ -2251,7 +2251,7 @@ IPC liveness + auto-login-preserving restart), 164.6.5-C3 (the heal ACTS on `ipc
 retry that cannot work), 164.6.5-C6 (`correlation_id` per request), 164.6.5-C7 (the algo-trading
 settings landmine is PINNED, not ticked)
 **Depends on:** Phase 164.6 (nothing blocking; the fault is live in PROD today)
-**Plans:** 8 plans
+**Plans:** 2/8 plans executed
 
 ⛔ **BOOKED FROM A LIVE PRODUCTION INCIDENT, measured end-to-end 2026-09-21 by the founder and the
 orchestrator together.** Everything below is a reading, not an inference. Founder's words:
@@ -2397,7 +2397,7 @@ Plans:
 - [ ] 164.6.5-06-PLAN.md — C7: reconcile the five-place recorded belief against a live reading, and
       make the observable consequence fail LOUDLY. ⛔ Never ticks the box. [wave 2, depends 04,
       has checkpoints]
-- [ ] 164.6.5-07-PLAN.md — C6: a per-request correlation id on the wire and on the screen, the
+- [x] 164.6.5-07-PLAN.md — C6: a per-request correlation id on the wire and on the screen, the
       per-page-load id preserved beside it, closed as a class across every wizard envelope
       surface. [wave 2, depends 04]
 - [ ] 164.6.5-08-PLAN.md — close: per-criterion outcomes (MET or OPEN with a routed residual) in
