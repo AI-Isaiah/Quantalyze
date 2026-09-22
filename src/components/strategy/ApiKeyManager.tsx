@@ -12,7 +12,7 @@ import { UpdateMt5SecretDialog } from "./UpdateMt5SecretDialog";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 import type { ApiKey } from "@/lib/types";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
-import { isUntrustedKeySyncStatus } from "@/lib/closed-sets";
+import { isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
 
 interface ApiKeyManagerProps {
   strategyId: string;
@@ -195,6 +195,78 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     }
   }, [router, loadKeys, lastAttemptedKeyId]);
 
+  /**
+   * Phase 167 / 167-06, R2 (167-CONTEXT D-18): is the sync panel's SUBJECT key
+   * untrusted on the server? The subject is `lastAttemptedKeyId`, the key the
+   * panel's attempt belongs to. A subject row missing from `keys` answers false.
+   *
+   * WHY THE PANEL'S SUCCESS IS WITHHELD BESIDE IT. `SyncProgress` is a LOCAL
+   * state machine, fed from component state and never from
+   * `api_keys.sync_status`. `run_sync_trades_job`'s MT5 branch makes the
+   * daily-PnL fetch an explicit no-op and its balance read is best-effort, so a
+   * resync of an MT5 key whose password is wrong can still finish as a terminal
+   * success and render "Up to date". That line is a claim about an analytics
+   * run, NOT evidence that the credential works; the server-read sign-in
+   * failure is the only evidence about the credential, and a success line
+   * beside it is the false confidence this phase exists to remove.
+   *
+   * WHAT IS WITHHELD, AND ONLY THAT. The terminal-success render (the shared
+   * `isComputedAnalytics` predicate, never an exact match on one success
+   * value). The ERROR render is kept: it agrees with the pill and carries that
+   * attempt's own message. ⛔ The panel is NEVER withheld in flight (syncing or
+   * computing): its poll is what drives `handleSyncStatusChange`, and
+   * unmounting it mid-flight would strand `syncingKeyId`, leaving every Resync
+   * disabled until a reload. Pure derivations in render, no effect and no state
+   * that mirrors other state. 167-UI-SPEC S1 / S1b: the retry-in-flight cell
+   * (no credential claim under a spinner) and the optimistic cell (a claim
+   * renders only from a status read back from the server).
+   */
+  const panelSubjectUntrusted = isUntrustedKeySyncStatus(
+    keys.find((k) => k.id === lastAttemptedKeyId)?.sync_status,
+  );
+  const withholdPanelSuccess =
+    isComputedAnalytics(syncStatus) && panelSubjectUntrusted;
+
+  /**
+   * Phase 167 / 167-06, R3 and R5 (167-CONTEXT D-18): retire a panel success
+   * that R2 is withholding, so it is never re-shown.
+   *
+   * WHY. R2's withhold reads the subject key's CURRENT status, so it lapses the
+   * moment that status stops being untrusted, and the panel would re-mount with
+   * the terminal success of an attempt that the fix never touched:
+   *   - R3, `Update password`: `rotate-secret`'s validated write sets the key's
+   *     status to `idle`, and the run shown was made under the REPLACED password;
+   *   - R5, `Delete`: the subject row leaves `keys`, and a missing row reads as
+   *     "not untrusted";
+   *   - R5, `Add Key`: the subject moves to the new key, which R2 then judges.
+   *
+   * WHY THE UPDATER IS FUNCTIONAL. It reads the state committed when it runs,
+   * not this closure's copy: the dialog calls `onUpdated` only after awaiting
+   * `rotate-secret`, and the panel's poll can move `syncStatus` during that
+   * await. It maps a terminal success to `idle` and returns every other value
+   * unchanged. ⛔ `syncing` and `computing` stay as they are, so an in-flight
+   * panel keeps polling and still clears `syncingKeyId` (T-167-06-04); `error`
+   * stays too, because its Retry is useful with a new password.
+   *
+   * WHY IT IS GUARDED BY THE WITHHOLD. Unguarded, rotating any MT5 password,
+   * deleting any key or adding one would retire a TRUTHFUL success about a
+   * healthy key. The guard is `panelSubjectUntrusted` from the render the user
+   * clicked in. For `Delete` that render still holds the row; re-deriving it
+   * from the list with the row filtered out would answer false and re-show the
+   * success.
+   *
+   * The one window this cannot reach, a rotation that lands while the rotated
+   * key's OWN sync is in flight, is closed by R4: that key's `Update password`
+   * (and, by R5, its `Delete`) is disabled for exactly that window.
+   *
+   * ⛔ This is the ONLY place in the component that maps a terminal success to
+   * `idle`. It runs from event handlers only; it is not an effect.
+   */
+  function retireWithheldSuccess() {
+    if (!panelSubjectUntrusted) return;
+    setSyncStatus((prev) => (isComputedAnalytics(prev) ? "idle" : prev));
+  }
+
   async function handleAddKey(data: {
     exchange: string;
     label: string;
@@ -283,6 +355,21 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         );
       }
 
+      // Phase 167 / 167-06, R5 (167-CONTEXT D-18): the panel's subject is
+      // about to move to the new key (`setLastAttemptedKeyId` below), and R2
+      // would then judge the new, healthy key instead. A success R2 was
+      // withholding beside the old key's failed sign-in would re-appear, so it
+      // is retired here, after the link succeeded. A failed validation or link
+      // throws before this point and leaves the subject where it was.
+      // ⚠️ This guard reads the subject's trust status AS OF THE SUBMIT CLICK:
+      // the closure is that render's. A re-read landing during the validate or
+      // link awaits above can make it stale. Only a success line is affected,
+      // because the updater is functional and returns every in-flight value
+      // unchanged. That is a residual, named beside the cross-tab one in D-18
+      // (a change made in another tab reaches this tab only through a re-read),
+      // and neither is fixed here.
+      retireWithheldSuccess();
+
       // Auto-sync trades in background (don't block the UI).
       //
       // 140.3-08 / SEAMUX-05 (B-06) — observe the HTTP OUTCOME, not just a
@@ -321,6 +408,20 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           // DOM (140.3-07's B-27 discipline).
           console.warn("[ApiKeyManager] background sync after key add failed:", err);
           setSyncStatus("error");
+          // Phase 167 / 167-06, R6 (167-CONTEXT D-18): every transition of the
+          // panel to `error` clears the in-flight marker, and this catch was
+          // the one that did not. This post-add sync is not registered in the
+          // one sync slot and the Add Key form is not modal, so it can fail
+          // while ANOTHER key's sync is in flight. Its `error` then stops that
+          // attempt's poll (SyncProgress polls only while syncing or
+          // computing), `handleSyncStatusChange` never runs, and the marker
+          // stayed set: every Resync and Use & Sync disabled until a reload.
+          // R4's and R5's disables read the same marker, so it would also have
+          // locked that key's Update password and Delete, the remedy the pill
+          // names. When no sync is in flight the marker is already null. The
+          // SUBJECT half of the same race (the post-add sync bypasses the slot)
+          // is named in D-18 and not fixed here.
+          setSyncingKeyId(null);
           setSyncError(
             err instanceof Error ? err.message : SYNC_UNAVAILABLE_COPY,
           );
@@ -361,6 +462,16 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       setError("Failed to delete key: " + deleteError.message);
       return;
     }
+    // Phase 167 / 167-06, R5 (167-CONTEXT D-18): once the row leaves `keys`,
+    // R2 reads the missing subject row as "not untrusted", so a success it was
+    // withholding beside that key's failed sign-in would re-appear. Retire it
+    // here, AFTER the error return (a failed delete leaves the row, so the
+    // withhold still holds) and BEFORE the row is filtered out. The guard is
+    // the pre-delete derivation from the render the user clicked in, which
+    // still holds the row; the list cannot move during the delete await,
+    // because the confirm is open and opened modally. ⛔ Do not re-derive it
+    // from the filtered list: that answers false and re-shows the success.
+    retireWithheldSuccess();
     setKeys((prev) => prev.filter((k) => k.id !== keyId));
     router.refresh();
   }
@@ -535,6 +646,27 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
                   size="sm"
                   variant="ghost"
                   onClick={() => setUpdatingKeyId(key.id)}
+                  // Phase 167 / 167-06, R4 (167-CONTEXT D-18): a key's password
+                  // is never replaced while THAT key's own sync is in flight.
+                  // Otherwise the rotation's validated write sets the status to
+                  // idle, R2 no longer withholds, and the attempt's later
+                  // success, made under the REPLACED password, is shown. The
+                  // reverse order is already impossible: `Modal` opens this
+                  // dialog with `showModal()`, which makes the rest of the
+                  // document inert, so no sync can start while it is open, and
+                  // `rotate-secret` is awaited before the dialog closes.
+                  // KEY-SCOPED, not `!!syncingKeyId`: a rotation occupies none
+                  // of the one sync slot and changes only the rotated key's
+                  // status, so another key's withhold is untouched, and a
+                  // global disable would block the remedy the pill asks for for
+                  // the whole of an unrelated sync. No status conjunct: a
+                  // status can flip mid-attempt on a re-read, the in-flight
+                  // marker cannot. Lineage: plan revision 1 said closing this
+                  // window needed a record tying the withhold to the attempt's
+                  // credential. That was wrong: the window exists only if the
+                  // attempt and the rotation overlap, and existing state
+                  // prevents the overlap, so nothing has to be recorded.
+                  disabled={syncingKeyId === key.id}
                 >
                   Update password
                 </Button>
@@ -543,6 +675,16 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
                 size="sm"
                 variant="ghost"
                 onClick={() => setConfirmDelete(key.id)}
+                // Phase 167 / 167-06, R5 (167-CONTEXT D-18): a key is never
+                // deleted during its own sync. Deleting it mid-attempt removes
+                // the panel's subject while the retirement must leave
+                // `computing` alone, so the attempt's later success would land
+                // with no row left to withhold it. The reverse order is closed
+                // as R4's is: the confirm renders through `Modal`, opens with
+                // `showModal()`, and `handleDeleteKey` awaits the delete before
+                // it closes the confirm. Key-scoped for R4's reason: deleting
+                // key K changes only K's row.
+                disabled={syncingKeyId === key.id}
               >
                 Delete
               </Button>
@@ -569,11 +711,18 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
               from staleness (D-02, D-03).
             The wrapper carries no role and no aria-*: the component's helper is
             the card's one live region (167-UI-SPEC § Accessibility).
+            R1 (D-18): the MOUNT reads the server value only, so a healthy key
+            never mounts a pill, not even in flight. While THIS key's sync is in
+            flight the DISPLAYED status is overridden to `syncing`: the neutral
+            Syncing… pill with a silent helper, 167-UI-SPEC S1's
+            retry-in-flight cell, so no credential claim sits under a spinner.
+            The block stays mounted across the transition, so its one live
+            region is stable and the state that returns is announced politely.
           */}
           {isUntrustedKeySyncStatus(key.sync_status) && (
             <div className="mt-2">
               <AllocatorSyncStatus
-                syncStatus={key.sync_status}
+                syncStatus={syncingKeyId === key.id ? "syncing" : key.sync_status}
                 syncError={key.sync_error}
                 lastSyncAt={key.last_sync_at}
                 exchange={key.exchange}
@@ -583,8 +732,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         </Card>
       ))}
 
-      {/* Sync progress indicator */}
-      {syncStatus !== "idle" && (
+      {/* Sync progress indicator. R2 (167-06, D-18): withheld ONLY on a
+          terminal success whose subject key is untrusted on the server; see
+          `withholdPanelSuccess`. Never withheld in flight, never on error. */}
+      {syncStatus !== "idle" && !withholdPanelSuccess && (
         <SyncProgress
           strategyId={strategyId}
           syncStatus={syncStatus}
@@ -613,7 +764,14 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         open={!!updatingKeyId}
         apiKeyId={updatingKeyId ?? ""}
         onClose={() => setUpdatingKeyId(null)}
-        onUpdated={() => loadKeys()}
+        // Phase 167 / 167-06, R3 (D-18): retire a success R2 is withholding
+        // FIRST, then re-read. The re-read returns the rotated key as idle,
+        // which lifts the withhold; without the retirement the panel would
+        // re-show a success from the attempt made under the replaced password.
+        onUpdated={() => {
+          retireWithheldSuccess();
+          loadKeys();
+        }}
       />
 
       {error && !showForm && syncStatus !== "error" && <p className="text-sm text-negative">{error}</p>}
