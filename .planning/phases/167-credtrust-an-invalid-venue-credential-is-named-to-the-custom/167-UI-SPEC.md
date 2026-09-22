@@ -34,8 +34,62 @@ created: "2026-09-22"
 
 | # | Surface | Component | What changes |
 |---|---------|-----------|--------------|
-| S1 | Owner sync surface | `AllocatorSyncStatus` (via `AllocatorExchangeManager`) | one authored helper string replaces a pass-through of the raw `api_keys.sync_error` for the credential case |
+| S1 | Owner sync surface | `AllocatorSyncStatus` (via `AllocatorExchangeManager`) | one authored helper string replaces a pass-through of the raw `api_keys.sync_error` for the credential case · *2026-09-22 (167-06): also mounted on the manager's key card, see S1b below* |
 | S2 | Wizard validate surface | `ErrorEnvelope` ← `buildEnvelope` ← `wizardErrors.ts` | one new `WizardErrorCode` entry: `title` / `cause` / `fix[]` / `fixRequires[]` / `docsHref` / `actions` |
+
+### Amendment 2026-09-22 — S1b: the manager key card (`AllocatorSyncStatus` mounted by `ApiKeyManager`, added by 167-06)
+
+**Why it exists.** Verification gap 1: the state this phase writes for a key rendered only on the
+allocator-only `/profile` Exchanges tab, and `profiles.role` defaults to `manager`. 167-CONTEXT
+**D-18** closes RESEARCH Open Question 2: the manager-role surface is each key's card in
+`ApiKeyManager` on `/strategies/[id]/edit`, beside the controls the helper names.
+
+**No new component, copy, colour or token.** S1b mounts the existing `AllocatorSyncStatus`
+unchanged, with its locked pill map and its authored helpers. It mounts ONLY when
+`isUntrustedKeySyncStatus(key.sync_status)` holds, so only the two untrusted statuses (`revoked`,
+`sign_in_failed`) ever render here. Every trusted-or-neutral status, `error` and `rate_limited`
+included, renders nothing new on this card.
+
+**Placement.** A row after the card's existing top row (avatar, label, controls), with an 8px top
+margin (spacing token 2, `mt-2`). The pill and helper are right-aligned by the component's own
+`flex-col items-end` column. The wrapper carries no role and no `aria-*`.
+
+**One live region per untrusted card.** The component's helper line (`role="status"
+aria-live="polite"`) is the card's only live region. The block stays mounted for as long as the
+server says the key is untrusted, including while that key syncs, so the region is stable and a
+returning state is announced politely rather than silently re-inserted.
+
+**Coexistence with the card's local `SyncProgress` panel (167-CONTEXT D-18).**
+- **R1:** the mount reads the server value; while that key's own sync is in flight, the displayed
+  status is `syncing` (the neutral `Syncing…` pill, silent helper). No credential claim sits under
+  a spinner.
+- **R2:** the panel's terminal-success render is withheld while its subject key is untrusted on the
+  server. Its error render is kept. It is never withheld in flight.
+- **R3:** a successful `Update password` retires a withheld success; it is never re-shown when the
+  re-read lifts the withhold.
+- **R4:** a key's `Update password` is disabled while that key's own sync is in flight, and usable
+  again when the attempt ends. Another key's stays usable. The dialog opens modally.
+- **R5:** the same retirement runs on a successful `Delete` and a successful `Add Key`. A key's
+  `Delete` is disabled while that key's own sync is in flight.
+- **R6:** every transition of the panel to `error` clears the in-flight marker, so a failed post-add
+  sync never leaves a control disabled until a reload.
+
+#### S1b — 9-state matrix
+
+| State | Behaviour |
+|-------|-----------|
+| **loading** | No key card and no pill until the `api_keys` read returns; the component's existing pre-load render is unchanged. Nothing new renders. |
+| **empty** | No key connected: the existing "No API keys connected" copy. No pill. **No new copy.** |
+| **error** | An untrusted server status shows the existing pill (`Sign-in failed` amber, or `Key revoked` red) and its authored helper on that key's card. A FAILED `api_keys` read shows the existing load-error banner and never a pill: the network between the browser and us says nothing about the credential. |
+| **partial** | Nothing new. `complete_with_warnings` is trusted-or-neutral and does not mount on this card. |
+| **success** | Nothing new. The pill clears when the re-read status is trusted. A panel success withheld beside the failure is retired rather than re-shown, whether the key is fixed (R3), deleted, or superseded by an added key (R5). |
+| **retry-in-flight** | A neutral `Syncing…` pill with a silent helper on that key's card. That key's `Update password` and `Delete` are disabled until the attempt ends, in `Button`'s existing disabled style (R4, R5). If a post-add sync fails meanwhile, the attempt ends there and both come back (R6). The panel withholds only a terminal success. |
+| **stale** | Nothing new. No credential claim is inferred from staleness (D-02, D-03); only a status read back from the server renders. |
+| **optimistic** | None. The pill renders only from a status read back from the server, never from a client-side guess. |
+| **offline** | The last server-read state stays on screen unchanged, and the existing load-error banner shows. |
+
+⚠️ **Held-out visual check, extended.** Verification human item 4 (the render at 320px and at
+200% zoom) now also covers this card, whose sidebar column is narrower than the `/profile` table.
 
 **Out of scope, named so it is not drifted into:** the public factsheet payload (D-04 — an
 id-keyed `unstable_cache` would publish an owner-only fact to anonymous readers), the existing

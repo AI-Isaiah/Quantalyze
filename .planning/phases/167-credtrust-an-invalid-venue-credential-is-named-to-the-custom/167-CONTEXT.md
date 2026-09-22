@@ -294,6 +294,93 @@ itself.
   re-open the 17-day silence this phase exists to close. — **Reversibility:** reversible (one
   named constant in `services/mt5_validation.py`).
 
+- **D-18: The manager-role surface for the persisted credential state is the key card in
+  `ApiKeyManager`, on `/strategies/[id]/edit`. RESEARCH Open Question 2 is CLOSED.**
+  *(Added 2026-09-22, gap closure 167-06. It closes verification gap 1: the state this phase writes
+  for a key was rendered only on a surface a manager-role owner cannot reach.)*
+  **Why this surface: five reasons, each measured.**
+  1. **Who has the symptom.** A manager owns the factsheet whose staleness is the symptom. The
+     initial-schema `role` DEFAULT is `manager`, so a manager-role owner is the common case. The
+     daily holdings poll (`enqueue_poll_allocator_positions_for_all_keys`, no role filter) stamps
+     that owner's key, and before 167-06 no page they could reach rendered it.
+  2. **Where the manager meets the key.** The edit page is gated by ownership only: it reads the
+     strategy with `.eq("user_id", user.id)` and reads nothing from `profiles`. The dashboard layout
+     reads `role` only to choose nav chrome, and `src/proxy.ts` gates admin routes only. The page
+     mounts `ApiKeyManager` with `currentKeyId = strategy.api_key_id`, so the key that feeds THIS
+     strategy is shown on THIS strategy's page, marked by its `Resync` control.
+  3. **The remedy is on the same card.** The helper's imperative names an action the card can
+     perform: `Update password` for MT5, which goes to `rotate-secret`, whose validated write sets
+     `sync_status` to `idle` (the only place the column is cleared); `Add Key` and `Delete` for the
+     ccxt re-add that the `revoked` helper asks for.
+  4. **Why not the factsheet.** D-04 is one-way and the owner lane shares the id-keyed payload. A
+     strategy-level causal sentence would also need the D-03 staleness conjunct, which
+     `ledger_refresh_staleness` exposes only to `service_role` (D-12), and 167-UI-SPEC §4 binds S1 to
+     claim only what was written for the key.
+  5. **Why not open the `/profile` Exchanges tab to managers.** It is the allocator's
+     holdings-and-balance surface (`ProfileTabs` marks it `allocatorOnly`; `profile/page.tsx` loads
+     its keys only for an allocator). Un-gating it changes a role boundary on an unrelated surface,
+     and it would still not be the page where a manager manages a strategy's key.
+  **What renders.** The EXISTING `AllocatorSyncStatus` is mounted on a key card only when
+  `isUntrustedKeySyncStatus(key.sync_status)`. No new copy, colour, token or component (D-05, D-11
+  arm B). Every trusted-or-neutral status stays unrendered on that card.
+  **Coexistence with the card's local `SyncProgress` panel, one line each.** (`SyncProgress` is a
+  local state machine, never fed from `api_keys.sync_status`, and an MT5 resync can reach a terminal
+  success whatever the password, because `run_sync_trades_job`'s MT5 branch makes the daily-PnL
+  fetch a no-op.)
+  - **R1:** the pill block mounts from the server value only; while that key's own sync is in
+    flight its DISPLAYED status is `syncing` (neutral pill, silent helper), and the block stays
+    mounted, so the card keeps one stable live region.
+  - **R2:** the panel's terminal-success render is withheld while its subject key
+    (`lastAttemptedKeyId`) is untrusted in the loaded keys. Its error render is kept, and it is
+    never withheld in flight, because its poll is what clears `syncingKeyId`.
+  - **R3:** a successful `Update password` retires a withheld success rather than letting the
+    re-read re-show it. One guarded functional update; in-flight and error values are unchanged.
+  - **R4:** a key's `Update password` is disabled while that key's own sync is in flight, key-scoped
+    (`syncingKeyId === key.id`). `Modal`'s `showModal()` stops a sync starting while the dialog is
+    open. Together, one key's attempt and its rotation never overlap, which closes the in-flight
+    rotation window. ⚠️ **Lineage:** plan revision 1 said closing this window needed a record tying
+    the withhold to the attempt's credential. That was WRONG: the window exists only if the two
+    overlap, and existing state prevents the overlap, so nothing has to be recorded.
+  - **R5:** the retirement is ONE shared helper, `retireWithheldSuccess`, called on a successful
+    `Update password`, a successful `Delete` and a successful `Add Key`. Its guard is read from the
+    pre-change list (the render the user clicked in). `Delete` is disabled during that key's own
+    sync, for R4's reason. ⚠️ **Lineage:** plan revision 2 retired on `Update password` only, and a
+    withheld success re-appeared once its key was deleted or superseded by an added key.
+  - **R6:** every transition of the panel to `error` clears the in-flight marker. The post-add
+    background sync's catch was the one that did not, and at HEAD that dead-locked every `Resync` and
+    `Use & Sync` until a reload (and, with R4 and R5 alone, would also have locked the remedy).
+  **What it deliberately does NOT do.** No strategy-level causal sentence (D-02, D-03, UI-SPEC §4).
+  No factsheet path (D-04). The `/profile` Exchanges tab stays allocator-only.
+  ⚠️ **Residual — placement, not copy.** The sentence names the credential and the remedy; it does
+  not say "your factsheet stopped updating because…". The tie to the factsheet is carried by
+  PLACEMENT (the strategy's own page, with its current key marked), because no signal ties a
+  strategy's staleness to a key's failure, and authoring one would be the inference this phase
+  forbids. If re-verification judges placement insufficient, the only remaining routes are a founder
+  override or a new phase that builds a strategy-level write boundary.
+  ⚠️ **Two residuals, named and NOT fixed.**
+  - **The post-add sync bypasses the one sync slot.** `handleAddKey` moves the panel's subject to the
+    new key while another key's attempt may still be polling, so that attempt's terminal success is
+    judged against the new key and reads as being about it. Between two healthy keys it shows as a
+    premature "Up to date". ⚠️ **The UNTRUSTED-key variant can show a success beside a "Sign-in
+    failed" pill:** key J is untrusted and syncing, the user adds a key, `lastAttemptedKeyId` moves
+    to the healthy new key, and J's later success is shown beside J's own pill. R6 closes the
+    dead-lock half of this race. Closing the subject half means routing the post-add sync through
+    the tracked slot, which changes the add flow the `SEAMUX-05` describe block pins. Routed, not
+    fixed. The `handleAddKey` retirement's guard also reads the subject's trust status as of the
+    submit click, so a re-read landing during its validate or link awaits can make it stale; only a
+    success line is affected, because the updater is functional.
+  - **A change made in another tab.** R3 and R5 retire on THIS tab's own actions. Another tab's
+    `Update password` or `Delete` reaches this tab only through a re-read (the load-error `Retry`, or
+    the terminal-success arm's re-read), which can lift R2's withhold. Closing it needs retirement at
+    the moment of withholding, a redesign of R2.
+  **The D-16 residual it closes.** The `ApiKeyManager` half of 167-04-SUMMARY residual 2 is closed:
+  the component now answers the persisted status through `isUntrustedKeySyncStatus`, and its
+  `SyncProgress` check against `idle` was measured to be local state, never the column, so it was
+  never a member of the class. `HoldingsTabPanel`'s `keyStatusById` stays named and out of scope.
+  — **Reversibility:** reversible — one conditional mount, two derived render rules, one shared
+  event-handler helper, two derived `disabled` props and one marker clear in one client component;
+  no data, schema or wire contract moves.
+
 ### Claude's Discretion
 
 - The exact wording of the new `WizardErrorCode` copy and the authored owner-surface helper line,
