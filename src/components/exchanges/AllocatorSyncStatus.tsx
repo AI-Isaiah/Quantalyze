@@ -68,7 +68,17 @@ export interface AllocatorSyncStatusProps {
 // `rate_limited`/`sign_in_failed` are amber; `revoked`/`error` are red. No
 // positive colour is used here — positive is reserved for future status
 // states.
-const PILL_STYLES: Record<
+//
+// ⛔ EXPORTED FOR THE ROSTER TEST, and the export is load-bearing. Because this
+// map is typed `Record<string, …>`, `keyof typeof PILL_STYLES` is `string`, so
+// the `switch (normalized)` below is NON-EXHAUSTIVE BY CONSTRUCTION and
+// `let pillLabel: React.ReactNode` admits `undefined` — TypeScript cannot flag
+// a status that has a STYLE row here but no `case` there. The failure is
+// silent and ugly: a correctly-coloured EMPTY pill. The only thing that can
+// catch it is a test that walks THIS map at runtime, so the map has to be
+// reachable from the test. A hand-listed roster in the test would reproduce
+// the very defect (a second list that can fall out of step with this one).
+export const PILL_STYLES: Record<
   string,
   { bg: string; text: string; border?: string }
 > = {

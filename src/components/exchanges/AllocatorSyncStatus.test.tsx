@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { AllocatorSyncStatus } from "./AllocatorSyncStatus";
+import { AllocatorSyncStatus, PILL_STYLES } from "./AllocatorSyncStatus";
 
 /**
  * Phase 06 Plan 04 Task 1 — AllocatorSyncStatus sub-component test suite.
@@ -616,4 +616,61 @@ describe("AllocatorSyncStatus — motion + spinner respects prefers-reduced-moti
     expect(svg!.getAttribute("class") ?? "").toMatch(/motion-safe:animate-spin/);
     expect(svg!.getAttribute("aria-hidden")).toBe("true");
   });
+});
+
+/**
+ * ROSTER — every status that has a PILL_STYLES row must also have a `switch`
+ * case that produces a visible label.
+ *
+ * ⛔ THE DEFECT THIS EXISTS TO CATCH, and why the compiler cannot.
+ * `PILL_STYLES` is typed `Record<string, …>`, so `keyof typeof PILL_STYLES`
+ * widens to `string`; `normalized` is therefore a `string` and the component's
+ * `switch (normalized)` is NON-EXHAUSTIVE BY CONSTRUCTION. `pillLabel` is
+ * declared `let pillLabel: React.ReactNode`, which admits `undefined`, so no
+ * definite-assignment error fires either. A status added to `PILL_STYLES` but
+ * NOT to the switch therefore type-checks, lints, and renders a correctly
+ * COLOURED, completely EMPTY pill — the silent failure, in the surface whose
+ * whole job is telling an allocator that a key is broken.
+ *
+ * ⛔ THE ROSTER IS DERIVED FROM THE LIVE MAP, NEVER HAND-LISTED. A literal
+ * array here would be a second list that can fall out of step with the first,
+ * which is the very defect being guarded — the next status would be missing
+ * from BOTH the switch and the roster, and this test would stay green.
+ * `Object.keys(PILL_STYLES)` means adding a style row is what arms the guard.
+ */
+describe("AllocatorSyncStatus — PILL_STYLES roster is fully labelled", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-19T12:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Non-vacuity: if the map were ever emptied or the import went undefined,
+  // the `it.each` below would run zero cases and report green over nothing.
+  it("walks a non-empty roster", () => {
+    expect(Object.keys(PILL_STYLES).length).toBeGreaterThan(0);
+  });
+
+  it.each(Object.keys(PILL_STYLES))(
+    "status %s renders a non-empty pill label",
+    (status) => {
+      render(
+        <AllocatorSyncStatus
+          syncStatus={status}
+          syncError={null}
+          lastSyncAt={null}
+          exchange="binance"
+        />,
+      );
+      const pill = screen.getByTestId("allocator-sync-pill");
+      // The status must round-trip: a key present in PILL_STYLES must never be
+      // normalised away to the `idle` fallback, or the assertion below would
+      // be measuring the fallback's label instead of this status'.
+      expect(pill.getAttribute("data-sync-status")).toBe(status);
+      expect((pill.textContent ?? "").trim()).not.toBe("");
+    },
+  );
 });
