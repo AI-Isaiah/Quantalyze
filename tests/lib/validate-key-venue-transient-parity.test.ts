@@ -194,8 +194,14 @@ const DIVERGENT_WIRE_CODE = "AUTH_FAILED";
  * changed and one did not. Each is pinned separately precisely so no reading
  * can drift behind another, and ⛔ none of them is ever to be "fixed" by
  * deriving it from the corpus it guards.
+ *
+ * ⚠️ 167 WR-01 then added ONE case, `mt5_post_login_client_error`, at the SAME
+ * site C5: a post-login fault reaching that arm keeps `NETWORK_UNAVAILABLE` /
+ * `recoverable: true`, so only `TOTAL_CASES` moved (14 → 15). Its code already
+ * had a row, so `DISTINCT_WIRE_CODES` did not move, and it is recoverable, so
+ * neither non-recoverable count moved either.
  */
-const TOTAL_CASES = 14;
+const TOTAL_CASES = 15;
 const DISTINCT_WIRE_CODES = 8;
 const NON_RECOVERABLE_WIRE_CASES = 3;
 const NON_RECOVERABLE_WIRE_CODES = 2;

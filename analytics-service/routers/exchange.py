@@ -42,6 +42,7 @@ from services.mt5_validation import (
     Mt5ValidationError,
     classify_mt5_login_error,
     classify_trade_capability,
+    is_mt5_login_refusal,
     parse_mt5_credentials,
     terminal_trade_permission_off,
 )
@@ -749,22 +750,47 @@ async def _validate_mt5_key_probe(
             if kind == "wrong_server":
                 trace.outcome = "wrong_server"
                 raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
-            # transient -> a LOGIN WAS ATTEMPTED AND DID NOT SUCCEED (167-CREDTRUST
-            # / D-05, D-07). This is the ONE arm this phase narrows, out of all nine
-            # `NETWORK_UNAVAILABLE` sites in this file: it is the arm where a
-            # sign-in was actually tried, which is the claim the copy makes — the
+            # transient. 167-CREDTRUST (D-05, D-07) narrows this tail, and only
+            # this tail, out of the file's nine `NETWORK_UNAVAILABLE` sites. The
             # other eight (stage timeout, the abandoned-session fence, the
             # account-mismatch bracket, and the sFOX/ccxt/portfolio arms) are
             # transport, lease or concurrency faults where no sign-in is
-            # implicated, and telling their user their credentials may have
-            # changed would be the same false blame this phase removes. Their
-            # `code=` stays byte-unchanged.
+            # implicated. Their `code=` stays byte-unchanged.
+            #
+            # ⭐ WR-01 — and even here, ONLY A LOGIN-STAGE REFUSAL is a sign-in
+            # failure. `run_probe` runs login → account_info → terminal_info →
+            # order_check → account_info inside this one `try`, so a post-login
+            # read failing (an IPC timeout on `order_check`, say) arrives here
+            # AFTER the credential was accepted. `is_mt5_login_refusal` is the
+            # ONE predicate the holdings poll applies to the same boundary: the
+            # terminal answered `login()` itself falsy AND the code is not an IPC
+            # transport code. Every other transient keeps the pre-167 answer,
+            # NETWORK_UNAVAILABLE with `recoverable=True`. ⚠️ D-07 accepted that
+            # a wrong password behind a modal login dialog can surface as
+            # -10004/-10005; those codes stay on NETWORK_UNAVAILABLE, as before
+            # this phase. D-07/D-08 are not reopened: this changes WHICH faults
+            # reach the SIGN_IN_FAILED answer, not what that answer says.
             #
             # WARNING with the scrubbed code only.
-            logger.warning(
-                "validate_key: MT5 transient upstream failure (code=%s)", e.code
-            )
             trace.outcome = "transient"
+            if not is_mt5_login_refusal(e):
+                logger.warning(
+                    "validate_key: MT5 transient upstream failure, not a "
+                    "login-stage refusal (code=%s)",
+                    e.code,
+                )
+                # PYAPIFIX2-01 (C5, post-login / transport half) — the pre-167
+                # answer, byte-for-byte.
+                raise VenueTransientHTTPException(
+                    status_code=424,
+                    code="NETWORK_UNAVAILABLE",
+                    detail=NETWORK_ERROR_DETAIL,
+                    recoverable=True,
+                )
+            logger.warning(
+                "validate_key: MT5 sign-in refused at the login stage (code=%s)",
+                e.code,
+            )
             # PYAPIFIX2-01 (C5) — see the C1 block for the shape rationale.
             # ⚠️ `recoverable=False` DIVERGES from the sibling MT5 arms' hardcoded
             # `recoverable=True` above — deliberately. 167-PATTERNS Pattern
