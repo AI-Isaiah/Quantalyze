@@ -8208,10 +8208,14 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             try:
                 await db_execute(_update_rate_limited)
             except Exception as upd_exc:  # noqa: BLE001
-                logger.warning(
+                # 167 SFH-M3 — ERROR with the traceback, like every other failed
+                # sync_status write in this handler: a lost write leaves the key
+                # on its previous (possibly healthy) status with no other signal.
+                logger.error(
                     "poll_allocator_positions: failed to persist sync_status=%r "
-                    "for api_key %s: %s",
-                    sync_status, api_key_id, upd_exc,
+                    "for api_key %s",
+                    sync_status, api_key_id,
+                    exc_info=upd_exc,
                 )
             _emit_audit(
                 allocator_id, api_key_id, "allocator.holdings.sync_failed",
@@ -8265,10 +8269,13 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                 await db_execute(lambda: _update_transient(sync_status))
             except Exception as upd_exc:  # noqa: BLE001
                 if sync_status == "error":
-                    logger.warning(
+                    # 167 SFH-M3 — ERROR with the traceback: the key keeps its
+                    # previous, possibly healthy, status.
+                    logger.error(
                         "poll_allocator_positions: failed to stamp "
-                        "sync_status='error' for api_key %s: %s",
-                        api_key_id, upd_exc,
+                        "sync_status='error' for api_key %s",
+                        api_key_id,
+                        exc_info=upd_exc,
                     )
                 else:
                     # ⛔ 167 SFH-H2 — a status the parent does not write can be
@@ -8333,10 +8340,12 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             try:
                 await db_execute(_update_err)
             except Exception as upd_exc:  # noqa: BLE001
-                logger.warning(
+                # 167 SFH-M3 — ERROR with the traceback (see the arms above).
+                logger.error(
                     "poll_allocator_positions: failed to stamp sync_status='%s' "
-                    "for api_key %s: %s",
-                    status_target, api_key_id, upd_exc,
+                    "for api_key %s",
+                    status_target, api_key_id,
+                    exc_info=upd_exc,
                 )
             _emit_audit(
                 allocator_id, api_key_id, "allocator.holdings.sync_failed",
@@ -8416,10 +8425,13 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                 ).eq("id", api_key_id).execute()
             await db_execute(_update_persist_err)
         except Exception as stamp_exc:  # noqa: BLE001
-            logger.warning(
+            # 167 SFH-M3 — ERROR with the traceback: this write is the only
+            # thing that moves the key off 'syncing' after a persist failure.
+            logger.error(
                 "poll_allocator_positions: failed to stamp sync_status='error' "
-                "for api_key %s after persist failure: %s",
-                api_key_id, stamp_exc,
+                "for api_key %s after persist failure",
+                api_key_id,
+                exc_info=stamp_exc,
             )
         _emit_audit(
             allocator_id, api_key_id, "allocator.holdings.persist_failed",

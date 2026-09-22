@@ -2441,6 +2441,153 @@ async def test_a_refused_sign_in_status_write_falls_back_to_error(
     assert result.error_kind == "permanent"
 
 
+@pytest.mark.asyncio
+async def test_a_refused_sign_in_write_whose_fallback_also_fails_is_loud(
+    monkeypatch, api_key_row_factory, caplog
+):
+    """167 SFH-M3 — the "fallback ALSO failed" branch. Both writes are refused
+    (the database is down, say), so the key keeps whatever status it had. That
+    is the worst outcome this arm can produce, and nothing but the log can show
+    it, so BOTH failures must be logged at ERROR with their traceback. The job
+    disposition is still the sign-in subclass's own."""
+    import logging
+
+    from services import allocator_positions as ap
+    from services import job_worker as jw
+
+    copy = ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+
+    async def _raise_sign_in_failed(venue, exchange, api_key_id=None):
+        raise ap.AllocatorHoldingsSignInFailedError(copy)
+
+    async def _every_write_fails(fn):
+        fn()
+        raise RuntimeError("connection refused")
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_raise_sign_in_failed
+    )
+    monkeypatch.setattr(jw, "db_execute", _every_write_fails)
+
+    with caplog.at_level(logging.DEBUG, logger=jw.logger.name):
+        result = await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses == [ap.SIGN_IN_FAILED_SYNC_STATUS, "error"], statuses
+    ours = [r for r in caplog.records if r.name == jw.logger.name]
+    also = [r for r in ours if "ALSO failed" in r.getMessage()]
+    assert also, "the failed fallback write was not logged at all"
+    assert also[-1].levelno == logging.ERROR, (
+        f"the failed fallback was logged at {also[-1].levelname}: the key keeps "
+        "a stale status and nothing alerts on it"
+    )
+    assert also[-1].exc_info is not None, "the fallback's traceback was dropped"
+    first = [r for r in ours if "falling back" in r.getMessage()]
+    assert first and first[-1].levelno == logging.ERROR
+    assert first[-1].exc_info is not None
+    assert result.error_kind == "permanent"
+
+
+def _raise_transient(copy):
+    async def _fetch(venue, exchange, api_key_id=None):
+        from services import allocator_positions as ap
+
+        raise ap.AllocatorHoldingsSyncTransientError(copy)
+
+    return _fetch
+
+
+def _raise_rate_limited():
+    async def _fetch(venue, exchange, api_key_id=None):
+        raise ccxt.RateLimitExceeded("binance 429")
+
+    return _fetch
+
+
+def _raise_generic():
+    async def _fetch(venue, exchange, api_key_id=None):
+        raise RuntimeError("venue exploded")
+
+    return _fetch
+
+
+def _fetch_ok():
+    async def _fetch(venue, exchange, api_key_id=None):
+        return [], None
+
+    return _fetch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("make_fetch", "persist_fails", "expected_status"),
+    [
+        pytest.param(
+            lambda: _raise_transient("MT5 terminal unreachable"),
+            False,
+            "error",
+            id="parent-transient-error-write",
+        ),
+        pytest.param(_raise_rate_limited, False, "rate_limited", id="rate_limited-write"),
+        pytest.param(_raise_generic, False, "error", id="generic-arm-write"),
+        pytest.param(_fetch_ok, True, "error", id="persist-failure-stamp"),
+    ],
+)
+async def test_every_failed_sync_status_write_in_the_poll_handler_is_an_error_log(
+    monkeypatch, api_key_row_factory, caplog, make_fetch, persist_fails,
+    expected_status,
+):
+    """167 SFH-M3 — every `sync_status` write in `run_poll_allocator_positions_job`
+    that fails is logged at ERROR with its traceback. A lost write leaves the
+    key on its previous status, which may read healthy or 'syncing' forever, and
+    until this round four of these arms logged it at WARNING, which nothing
+    alerts on. (The sign-in write and its fallback are pinned by the two cases
+    above.)"""
+    import logging
+
+    from services import job_worker as jw
+
+    async def _every_write_fails(fn):
+        fn()
+        raise RuntimeError("connection refused")
+
+    persist = None
+    if persist_fails:
+        async def persist(supa, rows, allocator_id, api_key_id, asof):
+            raise RuntimeError("persist failed")
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="binance"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=make_fetch(), persist=persist
+    )
+    monkeypatch.setattr(jw, "db_execute", _every_write_fails)
+    # The 429 arm stamps last_429_at first; that is not a sync_status write.
+    monkeypatch.setattr(jw, "_stamp_429", AsyncMock())
+
+    with caplog.at_level(logging.DEBUG, logger=jw.logger.name):
+        await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses and statuses[-1] == expected_status, statuses
+    failed = [
+        r for r in caplog.records
+        if r.name == jw.logger.name
+        and ("failed to stamp" in r.getMessage()
+             or "failed to persist sync_status" in r.getMessage())
+    ]
+    assert failed, "the failed sync_status write was not logged at all"
+    assert failed[-1].levelno == logging.ERROR, (
+        f"a failed sync_status write was logged at {failed[-1].levelname}; the "
+        "key keeps a stale status and nothing alerts on it"
+    )
+    assert failed[-1].exc_info is not None, "the traceback was dropped"
+
+
 def test_sign_in_copy_is_not_the_unknown_status_FALLBACK(monkeypatch):
     """⛔ THE COPY-TABLE FALLBACK PIN (T-167-14), and it is fallback-SPECIFIC.
 
