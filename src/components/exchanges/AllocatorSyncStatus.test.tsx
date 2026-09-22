@@ -206,7 +206,10 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
     expect(helper.textContent).toBe(
       "Update this account's credentials \u2014 they may have changed.",
     );
-    expect(helper.textContent).not.toContain("credentials - the saved");
+    // Hyphen-minus guard on the SHIPPED wording (167 R2 IN-03). It used to
+    // target "credentials - the saved", an intermediate wording that never
+    // shipped, so it could not fail whatever the dash was.
+    expect(helper.textContent).not.toContain("credentials - they");
     // 167 review round 1 / WR-03: the remedy must not name "Reconnect". That
     // control re-runs the SAVED credential this sign-in just failed with; the
     // fixing control is "Update password". A reword back to "Reconnect" reds.
