@@ -303,8 +303,11 @@ itself.
      initial-schema `role` DEFAULT is `manager`, so a manager-role owner is the common case. The
      daily holdings poll (`enqueue_poll_allocator_positions_for_all_keys`, no role filter) stamps
      that owner's key, and before 167-06 no page they could reach rendered it.
-  2. **Where the manager meets the key.** The edit page is gated by ownership only: it reads the
-     strategy with `.eq("user_id", user.id)` and reads nothing from `profiles`. The dashboard layout
+  2. **Where the manager meets the key.** The edit page is gated by ownership AND by role: it reads the
+     strategy with `.eq("user_id", user.id)`, and it sits under `strategies/layout.tsx`, whose
+     `requireRolePage(…, "manager")` admits `manager` and `both` — both of which own strategies, so
+     the conclusion holds. *(Corrected 2026-09-22 per re-verification: this line said "ownership
+     only"; the page itself reads nothing from `profiles`, but its layout is role-gated.)* The dashboard layout
      reads `role` only to choose nav chrome, and `src/proxy.ts` gates admin routes only. The page
      mounts `ApiKeyManager` with `currentKeyId = strategy.api_key_id`, so the key that feeds THIS
      strategy is shown on THIS strategy's page, marked by its `Resync` control.
@@ -380,6 +383,20 @@ itself.
   — **Reversibility:** reversible — one conditional mount, two derived render rules, one shared
   event-handler helper, two derived `disabled` props and one marker clear in one client component;
   no data, schema or wire contract moves.
+
+- **D-19: The key card on the strategy's edit page closes 167's goal; a key-status mark on the
+  `/strategies` list rows is routed to Phase 167.2.** *(Orchestrator decision 2026-09-22,
+  founder-delegated, after re-verification left goal truth 1 as a founder call.)* An honest
+  "your factsheet stopped because of the credential" sentence cannot be written under D-02, D-03
+  and D-12, so 167 delivers the credential-level signal where the owner manages that key: the
+  strategy's own edit page, on the card of the key that feeds it (marked by its Resync control),
+  beside the remedy control. The re-verifier showed a stronger placement is ALSO allowed:
+  `StrategiesPage` (`/strategies`), where a manager lands, already selects each owned strategy's
+  `api_key_id`, is owner-scoped and uncached, and touches no D-04 path — a key-level mark on a
+  strategy row there makes no causal claim. It is not built here because it is a new surface with
+  its own design questions, not a closure of 167's measured gap; it is the same family as 167.2's
+  key-card work, so it joins that phase rather than getting a third one. — **Reversibility:**
+  reversible (additive UI).
 
 ### Claude's Discretion
 
