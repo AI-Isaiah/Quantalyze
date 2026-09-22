@@ -47,8 +47,8 @@
 -- immediately above its own `ALTER TABLE public.api_keys`.
 SET lock_timeout = '3s';
 
-ALTER TABLE api_keys DROP CONSTRAINT IF EXISTS api_keys_sync_status_check;
-ALTER TABLE api_keys ADD CONSTRAINT api_keys_sync_status_check
+ALTER TABLE public.api_keys DROP CONSTRAINT IF EXISTS api_keys_sync_status_check;
+ALTER TABLE public.api_keys ADD CONSTRAINT api_keys_sync_status_check
   CHECK (sync_status IN (
     'idle','syncing','computing','complete','complete_with_warnings',
     'error','revoked','rate_limited','sign_in_failed'
@@ -61,8 +61,16 @@ DO $$
 DECLARE
   v_sync_status_def TEXT;
 BEGIN
+  -- ⛔ SCOPED BY conrelid, not by conname alone. `conname` is unique only per
+  -- (relation, name), so a same-named constraint on another table — in this
+  -- schema or any other on `search_path` — could be the row this SELECT reads,
+  -- and the whole DO block would then be verifying someone else's constraint
+  -- while reporting success for ours. The sibling gate already scopes this way;
+  -- this is the migration copying its predicate rather than trusting the name.
   SELECT pg_get_constraintdef(oid) INTO v_sync_status_def
-    FROM pg_constraint WHERE conname = 'api_keys_sync_status_check';
+    FROM pg_constraint
+   WHERE conrelid = 'public.api_keys'::regclass
+     AND conname = 'api_keys_sync_status_check';
 
   IF v_sync_status_def IS NULL THEN
     RAISE EXCEPTION 'Migration 20260922120000 failed: api_keys_sync_status_check not found';
