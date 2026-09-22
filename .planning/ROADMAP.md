@@ -2389,7 +2389,7 @@ Plans:
 - [ ] 164.6.5-03-PLAN.md — C4: the `-10005` remedy stops asserting one cause; a CI gate ties the
       arm's declared environment to the workflow's supplied environment; live proof + real-wedge
       calibration. [wave 1, has checkpoints]
-- [ ] 164.6.5-04-PLAN.md — C5: mint a distinct MT5 wire code and wizard code, honest
+- [x] 164.6.5-04-PLAN.md — C5: mint a distinct MT5 wire code and wizard code, honest
       non-recoverable copy, and the arrival/roster gates that keep both vocabularies agreeing.
       ⛔ `KEY_NETWORK_TIMEOUT` is neither deleted nor widened. [wave 1]
 - [ ] 164.6.5-05-PLAN.md — C3: the heal ESCALATES on `ipc_fault` — five readings, ONE recovery
