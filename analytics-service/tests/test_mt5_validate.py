@@ -65,7 +65,7 @@ from services.closed_sets import (
     MT5_MASTER_PASSWORD_DETAIL,
     MT5_WRONG_SERVER_DETAIL,
 )
-from services.exchange import AUTH_FAILED_DETAIL, NETWORK_ERROR_DETAIL
+from services.exchange import AUTH_FAILED_DETAIL, NETWORK_ERROR_DETAIL, SIGN_IN_FAILED_DETAIL
 from services.mt5_client import (
     MT5_REQUEST_TIMEOUT_S,
     MT5_VALIDATE_REQUEST_TIMEOUT_S,
@@ -1032,10 +1032,22 @@ async def test_mt5_wrong_server_maps_to_wrong_server_detail(exchange_router):
     client.release.assert_called_once()
 
 
-async def test_mt5_transient_maps_to_network_detail_not_credentials(exchange_router):
-    """F4: an unrecognized (transient) login error must fail CLOSED with the SHARED
-    NETWORK_ERROR_DETAIL — never {"valid": true}, never 'authentication failed'
-    (a transient bridge blip is not the user's key). release() runs."""
+async def test_mt5_transient_maps_to_sign_in_failed_detail_not_credentials(
+    exchange_router,
+):
+    """F4, NARROWED by 167-CREDTRUST plan 01 (D-05, D-07, S-27): an unrecognized
+    (transient) login error must fail CLOSED with SIGN_IN_FAILED_DETAIL — never
+    {"valid": true}, never 'authentication failed' (an ambiguous sign-in is not a
+    confirmed bad key). release() runs.
+
+    ⚠️ THIS CASE'S EXPECTATION MOVED. Until this phase it asserted the SHARED
+    NETWORK_ERROR_DETAIL, like every other MT5 transient arm — but a login WAS
+    attempted here (`classify_mt5_login_error` classified it `transient`, not
+    `auth`/`wrong_server`), which is exactly the claim SIGN_IN_FAILED_DETAIL makes
+    and the shared network detail does not. `recoverable=False` on the raise
+    diverges from the sibling MT5 arms' hardcoded `True` (D-08) — this test only
+    reaches `HTTPException.detail`/`.status_code`, so that flag is asserted at the
+    wire-body layer (`test_validate_key_venue_transient.py::test_c5_...`)."""
     router = exchange_router
     err = Mt5ClientError(0, "timeout waiting for response")
     client = _make_client(login_raises=err)
@@ -1045,10 +1057,10 @@ async def test_mt5_transient_maps_to_network_detail_not_credentials(exchange_rou
         await _call(router, _make_req())
 
     # 424 = CALLER'S EXCHANGE (C5; see the account-mismatch case for the full
-    # rationale). A transient bridge blip is neither the user's key nor a
+    # rationale). An ambiguous sign-in is neither a confirmed bad key nor a
     # malformed request.
     assert ei.value.status_code == 424
-    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.detail == SIGN_IN_FAILED_DETAIL
     assert ei.value.status_code != 500
     assert "authentication failed" not in ei.value.detail.lower()
     client.release.assert_called_once()
