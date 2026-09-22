@@ -190,6 +190,51 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
     expect(helper.textContent).toContain("HTTP 502 from binance");
   });
 
+  it("renders 'Sign-in failed' pill + authored helper (D-05/D-11 arm B)", () => {
+    render(
+      <AllocatorSyncStatus
+        syncStatus="sign_in_failed"
+        syncError={null}
+        lastSyncAt={null}
+        exchange="binance"
+      />,
+    );
+    const pill = screen.getByTestId("allocator-sync-pill");
+    expect(pill.textContent).toBe("Sign-in failed");
+    const helper = screen.getByTestId("allocator-sync-helper");
+    expect(helper.textContent).toBe(
+      "Reconnect this account \u2014 its credentials may have changed.",
+    );
+    expect(helper.textContent).not.toContain("Reconnect this account - its");
+    // aria-live contract: helper line is the announcement channel; the pill
+    // itself carries no aria-live.
+    expect(helper).toHaveAttribute("role", "status");
+    expect(helper).toHaveAttribute("aria-live", "polite");
+    expect(pill).not.toHaveAttribute("aria-live");
+  });
+
+  // ⭐ Non-vacuity control (T-167-08 / D-05): the whole point of the
+  // authored helper is that it IGNORES syncError. Without this control the
+  // case above cannot fail the way the shipped defect failed — a
+  // pass-through implementation would still print "Sign-in failed" and a
+  // sentence, just the WRONG one.
+  it("sign_in_failed helper IGNORES syncError — non-vacuity control", () => {
+    render(
+      <AllocatorSyncStatus
+        syncStatus="sign_in_failed"
+        syncError="MT5 terminal unreachable \u2014 sync will retry automatically."
+        lastSyncAt={null}
+        exchange="mt5"
+      />,
+    );
+    const helper = screen.getByTestId("allocator-sync-helper");
+    expect(helper.textContent).toBe(
+      "Reconnect this account \u2014 its credentials may have changed.",
+    );
+    expect(helper.textContent).not.toContain("MT5 terminal unreachable");
+    expect(helper.textContent).not.toContain("will retry automatically");
+  });
+
   it("renders '{exchange title-case} cooldown remaining' helper for rate_limited", () => {
     render(
       <AllocatorSyncStatus
@@ -315,6 +360,27 @@ describe("AllocatorSyncStatus — pill color class map", () => {
     const pill = screen.getByTestId("allocator-sync-pill");
     expect(pill.className).toMatch(/bg-negative\/10/);
     expect(pill.className).toMatch(/text-negative/);
+  });
+
+  it("sign_in_failed pill uses the opaque amber trio and NEVER the idle fallback classes (T-167-08)", () => {
+    render(
+      <AllocatorSyncStatus
+        syncStatus="sign_in_failed"
+        syncError={null}
+        lastSyncAt={null}
+        exchange="binance"
+      />,
+    );
+    const pill = screen.getByTestId("allocator-sync-pill");
+    expect(pill.className).toMatch(/bg-warning-bg/);
+    expect(pill.className).toMatch(/\btext-warning\b/);
+    expect(pill.className).toMatch(/border-warning-border/);
+    // Guard against the PILL_STYLES unknown-key fallback (T-167-08): a
+    // partial rollout must NEVER render this broken-key state as the
+    // neutral idle style.
+    expect(pill.className).not.toMatch(/bg-\[#F1F5F9\]/);
+    expect(pill.className).not.toMatch(/text-text-secondary/);
+    expect(pill.getAttribute("data-sync-status")).toBe("sign_in_failed");
   });
 
   it("falls back to idle neutral pill for unknown sync_status (including 'computing' and null)", () => {

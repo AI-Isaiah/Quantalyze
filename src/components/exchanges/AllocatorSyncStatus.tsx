@@ -33,7 +33,7 @@ import { EXCHANGE_DISPLAY } from "@/lib/closed-sets";
  * (helper line is empty for neutral states).
  */
 export interface AllocatorSyncStatusProps {
-  /** One of: idle | syncing | complete | complete_with_warnings | rate_limited | revoked | error. Unknown / null / 'computing' fall back to 'idle'. */
+  /** One of: idle | syncing | complete | complete_with_warnings | rate_limited | revoked | error | sign_in_failed. Unknown / null / 'computing' fall back to 'idle'. */
   syncStatus: string | null;
   /** DB value of api_keys.sync_error (sanitized ≤500 chars server-side). */
   syncError: string | null;
@@ -59,11 +59,19 @@ export interface AllocatorSyncStatusProps {
   helperOverride?: string | null;
 }
 
-// LOCKED pill colour map — do NOT deviate.
+// LOCKED pill colour map — do NOT deviate on any EXISTING row. `sign_in_failed`
+// is a Phase 167 / D-11 arm-B EXTENSION, landed in the SAME commit as the
+// migration that mints the value (T-167-08 — the map's unknown-key fallback
+// below normalises to `idle`, a NEUTRAL pill, so a partial rollout would
+// otherwise render a BROKEN key as HEALTHY).
 // `idle`/`syncing`/`complete` are neutral; `complete_with_warnings`/
-// `rate_limited` are amber; `revoked`/`error` are red. No positive colour is
-// used here — positive is reserved for future status states.
-const PILL_STYLES: Record<string, { bg: string; text: string }> = {
+// `rate_limited`/`sign_in_failed` are amber; `revoked`/`error` are red. No
+// positive colour is used here — positive is reserved for future status
+// states.
+const PILL_STYLES: Record<
+  string,
+  { bg: string; text: string; border?: string }
+> = {
   idle: { bg: "bg-[#F1F5F9]", text: "text-text-secondary" },
   syncing: { bg: "bg-[#F1F5F9]", text: "text-text-secondary" },
   complete: { bg: "bg-[#F1F5F9]", text: "text-text-secondary" },
@@ -71,6 +79,15 @@ const PILL_STYLES: Record<string, { bg: string; text: string }> = {
   rate_limited: { bg: "bg-warning/10", text: "text-warning" },
   revoked: { bg: "bg-negative/10", text: "text-negative" },
   error: { bg: "bg-negative/10", text: "text-negative" },
+  // 167-UI-SPEC.md § Color — the DESIGN.md-pinned OPAQUE warning trio, not
+  // the `bg-warning/10` alpha fill the neighbouring amber pills use: the
+  // opaque `#FEF3C7` chip clears the 4.5:1 a11y minimum, the alpha fill does
+  // not (measured in 167-UI-SPEC.md § Color, Contrast table).
+  sign_in_failed: {
+    bg: "bg-warning-bg",
+    text: "text-warning",
+    border: "border-warning-border",
+  },
 };
 
 // LOCKED helper copy — note the terminating period.
@@ -78,6 +95,14 @@ const REVOKED_HELPER = "Re-add a read-only key from your exchange.";
 
 const ELLIPSIS = "\u2026"; // U+2026 — NOT three dots.
 const EM_DASH = "\u2014"; // U+2014 — NOT a hyphen-minus.
+
+// LOCKED helper copy — 167-UI-SPEC.md § Copywriting Contract §1 (D-05 / D-11
+// arm B). AUTHORED, exactly like REVOKED_HELPER: ignores `syncError`
+// entirely, so the raw `api_keys.sync_error` string can never reach this
+// branch. Venue-agnostic — names neither a key (bybit) nor a password
+// (MT5) — and states its own limit ("may have changed") rather than
+// asserting the credential IS invalid.
+const CREDENTIAL_FAILED_HELPER = `Reconnect this account ${EM_DASH} its credentials may have changed.`;
 
 // Queued threshold: only surface the Queued helper when the breaker cooldown is
 // ≥30s out. Under 30s is treated as a "pending/starting" state where the
@@ -231,6 +256,9 @@ export function AllocatorSyncStatus({
     case "error":
       pillLabel = "Sync failed";
       break;
+    case "sign_in_failed":
+      pillLabel = "Sign-in failed";
+      break;
   }
 
   // Helper text resolution order:
@@ -247,6 +275,11 @@ export function AllocatorSyncStatus({
     helperText = helperOverride;
   } else if (normalized === "revoked") {
     helperText = REVOKED_HELPER;
+  } else if (normalized === "sign_in_failed") {
+    // 167-UI-SPEC.md § Copywriting Contract §1 (D-05 / D-11 arm B) —
+    // AUTHORED, ignores `syncError`. The shared `error ||
+    // complete_with_warnings` branch below is BYTE-UNCHANGED.
+    helperText = CREDENTIAL_FAILED_HELPER;
   } else if (normalized === "rate_limited") {
     helperText = `${exchangeDisplayName(exchange)} cooldown remaining`;
   } else if (normalized === "error" || normalized === "complete_with_warnings") {
@@ -263,7 +296,7 @@ export function AllocatorSyncStatus({
       <span
         data-testid="allocator-sync-pill"
         data-sync-status={normalized}
-        className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium transition-colors duration-150 ease-out ${styles.bg} ${styles.text}`}
+        className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium transition-colors duration-150 ease-out ${styles.bg} ${styles.text}${styles.border ? ` border ${styles.border}` : ""}`}
       >
         {pillLabel}
       </span>
