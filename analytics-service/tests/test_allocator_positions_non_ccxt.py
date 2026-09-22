@@ -2088,12 +2088,136 @@ async def test_mt5_refused_sign_in_writes_sign_in_failed_end_to_end(
     assert transport.calls.count("login") == 1
     assert "account_info" not in transport.calls
 
-    # Queue disposition is UNCHANGED — the new status is a user-facing claim,
-    # not a retry-disposition change. A rotated credential is exactly what a
-    # later retry should pick up.
+    # 167 WR-04 — the job does NOT climb the backoff ladder. Each rung would
+    # re-run the SAME stored password against the one shared MT5 terminal (the
+    # D-08 harm). A rotated credential is still picked up: the daily cron
+    # re-enqueues every non-revoked key, and rotate-secret resets it to idle.
     assert result.outcome == jw.DispatchOutcome.FAILED
-    assert result.error_kind == "transient"
+    assert result.error_kind == "permanent"
+    # And exactly ONE sign-in was attempted in this job.
+    assert transport.calls.count("login") == 1
 
     # No internal text anywhere in the user-visible column.
     for banned in BANNED_INTERNALS + ("Invalid account",):
         assert banned not in final["sync_error"]
+
+
+# ===========================================================================
+# Phase 167 CR-01 — the faults that are NOT a refused sign-in, end to end.
+#
+# The case above proves a login-stage refusal is NAMED. These prove the arm is
+# NARROW: every other way an `Mt5ClientError` reaches it keeps the pre-167
+# write (sync_status='error', MT5_UNREACHABLE_NOTE). Each drives the REAL
+# `Mt5Client` over a transport double, so the stage marker under test is
+# produced (or NOT produced) by the shipped client, never hand-built.
+# A gateway redeploy or wedge hits every MT5 key on the terminal at once;
+# stamping these `sign_in_failed` told every MT5 owner to fix a working
+# credential (D-03).
+# ===========================================================================
+class _StagedFaultMt5Transport(_RecordingMt5Transport):
+    """A terminal that fails at ONE chosen stage.
+
+    `initialize_raises` — the RPyC bridge drops inside `initialize()`, before
+    any credential is sent (a gateway redeploy). `login_ok=False` with
+    `last_error` — the terminal answers the sign-in itself falsy with that
+    code. `account_info_none` — the login SUCCEEDS and the post-login read then
+    returns None (an IPC detach mid-read).
+    """
+
+    def __init__(
+        self,
+        *,
+        initialize_raises: BaseException | None = None,
+        login_ok: bool = True,
+        account_info_none: bool = False,
+        last_error: tuple[int, str] = (0, "unknown"),
+    ) -> None:
+        super().__init__(account=_account())
+        self._initialize_raises = initialize_raises
+        self._login_ok = login_ok
+        self._account_info_none = account_info_none
+        self._last_error = last_error
+
+    def initialize(self, **kwargs):
+        self.calls.append("initialize")
+        if self._initialize_raises is not None:
+            raise self._initialize_raises
+        return True
+
+    def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
+        self.calls.append("login")
+        return self._login_ok
+
+    def account_info(self):
+        if self._account_info_none:
+            self.calls.append("account_info")
+            return None
+        return super().account_info()
+
+    def last_error(self):
+        return self._last_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transport_kwargs, expected_calls",
+    [
+        pytest.param(
+            {"account_info_none": True, "last_error": (-10004, "No IPC connection")},
+            ["initialize", "login", "account_info"],
+            id="account_info-none-after-a-successful-login",
+        ),
+        pytest.param(
+            {"initialize_raises": EOFError("stream has been closed")},
+            ["initialize"],
+            id="initialize-raises-EOFError-before-any-credential",
+        ),
+        pytest.param(
+            {"initialize_raises": ConnectionResetError("connection reset by peer")},
+            ["initialize"],
+            id="initialize-raises-ConnectionResetError-before-any-credential",
+        ),
+        pytest.param(
+            {"login_ok": False, "last_error": (-10004, "No IPC connection")},
+            ["initialize", "login"],
+            id="login-falsy-with-ipc-10004",
+        ),
+        pytest.param(
+            {"login_ok": False, "last_error": (-10005, "IPC timeout")},
+            ["initialize", "login"],
+            id="login-falsy-with-ipc-10005",
+        ),
+    ],
+)
+async def test_mt5_fault_that_is_not_a_login_refusal_writes_error_not_sign_in_failed(
+    mt5_enabled, monkeypatch, transport_kwargs, expected_calls
+):
+    """167 CR-01 — only a login-stage refusal with a non-IPC code is a
+    sign-in failure. Each case here is a transport or post-login fault and must
+    land exactly as it did before Phase 167: sync_status='error' with
+    MT5_UNREACHABLE_NOTE."""
+    from services.allocator_positions import (
+        MT5_UNREACHABLE_NOTE,
+        SIGN_IN_FAILED_SYNC_STATUS,
+    )
+
+    transport = _StagedFaultMt5Transport(**transport_kwargs)
+    session = _session(transport)
+
+    coro, updates = _drive_poll_handler(monkeypatch, exchange=session, venue="mt5")
+    result = await coro
+
+    api_key_updates = [p for (name, p) in updates if name == "api_keys"]
+    assert api_key_updates, f"expected an api_keys write; got {updates!r}"
+    final = api_key_updates[-1]
+
+    assert final["sync_status"] != SIGN_IN_FAILED_SYNC_STATUS, (
+        f"{transport.calls!r} is not a refused sign-in, yet the key was told its "
+        "credentials failed — the D-03 false blame, fleet-wide on a gateway wedge"
+    )
+    assert final["sync_status"] == "error"
+    assert final["sync_error"] == MT5_UNREACHABLE_NOTE
+    # The fault really happened at the stage the case names: the calls the
+    # terminal saw, in order (terminal teardown calls excluded).
+    assert [c for c in transport.calls if c != "transport_close"] == expected_calls
+    assert result.error_kind == "transient"

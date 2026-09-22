@@ -47,7 +47,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from services.mt5_client import Mt5ClientError
+from services.mt5_client import Mt5ClientError, Mt5LoginRefusedError
 
 # MT5 order_check retcode meaning "the order request is valid and would be
 # accepted" (TRADE_RETCODE_DONE). A login that can pass an order_check probe is
@@ -379,3 +379,32 @@ def classify_mt5_login_error(
     # ⭐ THE REFUSAL. Unrecognised == transient, NEVER a permanent user-blame
     # stamp. ⛔ Do not "improve" this into a best-guess arm.
     return "transient"
+
+
+def is_mt5_login_refusal(err: Mt5ClientError) -> bool:
+    """True only when ``err`` is a SIGN-IN the terminal answered and refused.
+
+    ⭐ THE ONE DEFINITION of "sign-in failed" (Phase 167 CR-01 / WR-01). Both
+    surfaces that make that claim consult it — the wizard's ``validate_key`` MT5
+    arm and the holdings poll's MT5 arm — so they cannot disagree about it.
+
+    Two conditions, both required:
+
+      1. **The login stage answered.** ``err`` is ``Mt5LoginRefusedError``, which
+         ``Mt5Client.login`` raises from its falsy-return arm and from nowhere
+         else. An ``initialize()`` failure (no credential sent yet), a transport
+         raise mid-login, and every post-login read (``account_info``,
+         ``order_check``) arrive as a plain ``Mt5ClientError``. None of them is a
+         sign-in verdict: the key may be fine and the gateway wedged.
+      2. **The code is not an IPC transport code.** ``_IPC_TRANSPORT_CODES`` is
+         the gate ``classify_mt5_login_error`` applies FIRST: ``-10004`` /
+         ``-10005`` mean our bridge detached or stopped answering, so even a
+         login-stage answer carrying one of them says nothing about the
+         credential. ⚠️ D-07 accepted that a wrong password behind a modal login
+         dialog can surface as ``-10005``; that ambiguity stays on the transport
+         side, where it was before Phase 167.
+    """
+    return (
+        isinstance(err, Mt5LoginRefusedError)
+        and err.code not in _IPC_TRANSPORT_CODES
+    )

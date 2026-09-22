@@ -187,6 +187,7 @@ EXPECTED_FIXTURE_TRIGGERS = {
     "mt5_probe_timeout",
     "mt5_account_mismatch",
     "mt5_client_error_transient",
+    "mt5_post_login_client_error",
     "ccxt_rate_limited",
     "ccxt_ddos_protection",
     "ccxt_exchange_unavailable",
@@ -360,8 +361,12 @@ def _arrange_mt5(
     *,
     login_raises: BaseException | None = None,
     account: dict[str, Any] | None = None,
+    account_info_raises: BaseException | None = None,
 ) -> None:
-    """Walk the MT5 branch to the probe with a stubbed synchronous Mt5Client."""
+    """Walk the MT5 branch to the probe with a stubbed synchronous Mt5Client.
+
+    `account_info_raises` makes the FIRST post-login read raise, i.e. a fault
+    that arrives after the sign-in was already accepted."""
     g = _handler_globals("/api/validate-key")
 
     client = MagicMock(name="Mt5Client-instance")
@@ -369,7 +374,12 @@ def _arrange_mt5(
         client.login = MagicMock(side_effect=login_raises)
     else:
         client.login = MagicMock(return_value=None)
-    client.account_info = MagicMock(return_value=account if account is not None else {})
+    if account_info_raises is not None:
+        client.account_info = MagicMock(side_effect=account_info_raises)
+    else:
+        client.account_info = MagicMock(
+            return_value=account if account is not None else {}
+        )
     client.order_check = MagicMock(return_value={})
     client.close = MagicMock()
     monkeypatch.setitem(g, "Mt5Client", MagicMock(return_value=client))
@@ -581,12 +591,16 @@ def test_c4_mt5_account_mismatch_carries_a_machine_code(
 def test_c5_mt5_transient_client_error_carries_a_machine_code(
     app_client, monkeypatch
 ) -> None:
-    """C5 — `Mt5ClientError` classified `transient` by the ONE mt5_validation seam.
+    """C5 — a LOGIN-STAGE refusal classified `transient` by the ONE
+    mt5_validation seam.
 
-    Code -10004 ("No IPC connection") is the canonical case: the terminal bridge
-    is detached (gateway down / mid-redeploy), which the classifier deliberately
-    code-gates to `transient` so a valid key is never permanently rejected during
-    an outage.
+    ⭐ 167 WR-01 — the trigger is `Mt5LoginRefusedError` (what the real
+    `Mt5Client.login` raises when the terminal answers the sign-in falsy) with a
+    code-0 text the classifier does not recognise. Until WR-01 this case drove
+    code -10004 ("No IPC connection"), and that was the defect: a detached bridge
+    was answered SIGN_IN_FAILED. An IPC code, or any post-login fault, now keeps
+    NETWORK_UNAVAILABLE — see
+    `test_c5_mt5_post_login_client_error_keeps_the_network_code` below.
 
     ⚠️ 167-CREDTRUST plan 01 (D-05, D-07, S-27) — THIS IS THE ARM THE PHASE
     NARROWS, and this case's own expectation moved with it: `code` and
@@ -601,9 +615,12 @@ def test_c5_mt5_transient_client_error_carries_a_machine_code(
     immediately below for the sibling-arm-unchanged control that proves the
     narrowing did not widen.
     """
-    from services.mt5_client import Mt5ClientError
+    from services.mt5_client import Mt5LoginRefusedError
 
-    _arrange_mt5(monkeypatch, login_raises=Mt5ClientError(-10004, "No IPC connection"))
+    _arrange_mt5(
+        monkeypatch,
+        login_raises=Mt5LoginRefusedError(0, "timeout waiting for response"),
+    )
 
     r = _post_validate_key(app_client, **_MT5_FIELDS)
 
@@ -613,6 +630,36 @@ def test_c5_mt5_transient_client_error_carries_a_machine_code(
         detail=EXPECTED_SIGN_IN_FAILED_DETAIL,
         code="SIGN_IN_FAILED",
         recoverable=False,
+    )
+
+
+def test_c5_mt5_post_login_client_error_keeps_the_network_code(
+    app_client, monkeypatch
+) -> None:
+    """C5, post-login half (167 WR-01) — the SAME `except Mt5ClientError` arm,
+    reached AFTER the sign-in was accepted.
+
+    `login()` succeeds and the first post-login `account_info()` read raises an
+    IPC timeout. No sign-in failed, so the arm must give the pre-167 answer
+    byte-for-byte: `NETWORK_UNAVAILABLE`, the shared network detail and
+    `recoverable=True`, so the Retry survives. Before WR-01 this answered
+    `SIGN_IN_FAILED` / `recoverable=False` after a sign-in that had succeeded.
+    """
+    from services.mt5_client import Mt5ClientError
+
+    _arrange_mt5(
+        monkeypatch,
+        account_info_raises=Mt5ClientError(-10005, "IPC timeout"),
+    )
+
+    r = _post_validate_key(app_client, **_MT5_FIELDS)
+
+    _assert_flat_venue_body(
+        r,
+        trigger="mt5_post_login_client_error",
+        detail=EXPECTED_NETWORK_ERROR_DETAIL,
+        code="NETWORK_UNAVAILABLE",
+        recoverable=True,
     )
 
 

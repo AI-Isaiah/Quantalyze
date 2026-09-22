@@ -70,6 +70,7 @@ from services.mt5_client import (
     MT5_REQUEST_TIMEOUT_S,
     MT5_VALIDATE_REQUEST_TIMEOUT_S,
     Mt5ClientError,
+    Mt5LoginRefusedError,
 )
 from services import mt5_concurrency
 from tests.limiter_stub import evict_module, patch_shared_limiter
@@ -1047,9 +1048,15 @@ async def test_mt5_transient_maps_to_sign_in_failed_detail_not_credentials(
     and the shared network detail does not. `recoverable=False` on the raise
     diverges from the sibling MT5 arms' hardcoded `True` (D-08) — this test only
     reaches `HTTPException.detail`/`.status_code`, so that flag is asserted at the
-    wire-body layer (`test_validate_key_venue_transient.py::test_c5_...`)."""
+    wire-body layer (`test_validate_key_venue_transient.py::test_c5_...`).
+
+    ⭐ 167 CR-01 / WR-01 — the error is now the LOGIN-STAGE marker
+    (`Mt5LoginRefusedError`, what the real `Mt5Client.login` raises when the
+    terminal answers the sign-in falsy). The same code-0 text from a POST-login
+    stage is NOT a sign-in failure; see
+    `test_mt5_post_login_or_ipc_transient_keeps_the_network_detail`."""
     router = exchange_router
-    err = Mt5ClientError(0, "timeout waiting for response")
+    err = Mt5LoginRefusedError(0, "timeout waiting for response")
     client = _make_client(login_raises=err)
     _install_mt5_client(router, client)
 
@@ -1063,6 +1070,74 @@ async def test_mt5_transient_maps_to_sign_in_failed_detail_not_credentials(
     assert ei.value.detail == SIGN_IN_FAILED_DETAIL
     assert ei.value.status_code != 500
     assert "authentication failed" not in ei.value.detail.lower()
+    client.release.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "client_kwargs, reached_order_check",
+    [
+        # The SAME code-0 text as the login-stage case above, but raised by the
+        # probe AFTER `login()` and `account_info()` succeeded: the credential
+        # was accepted, so this is not a sign-in failure.
+        pytest.param(
+            {
+                "account": _INVESTOR_ACCOUNT,
+                "terminal": {"connected": True, "trade_allowed": True},
+                "order_check_raises": Mt5ClientError(
+                    0, "timeout waiting for response"
+                ),
+            },
+            True,
+            id="post-login-order_check-code-0",
+        ),
+        pytest.param(
+            {
+                "account": _INVESTOR_ACCOUNT,
+                "terminal": {"connected": True, "trade_allowed": True},
+                "order_check_raises": Mt5ClientError(-10005, "IPC timeout"),
+            },
+            True,
+            id="post-login-order_check-ipc-10005",
+        ),
+        # The login stage answered, but with an IPC transport code. D-07 keeps
+        # this ambiguity (a modal login dialog can produce it) on the transport
+        # side, where it was before Phase 167.
+        pytest.param(
+            {"login_raises": Mt5LoginRefusedError(-10004, "No IPC connection")},
+            False,
+            id="login-stage-ipc-10004",
+        ),
+        pytest.param(
+            {"login_raises": Mt5LoginRefusedError(-10005, "IPC timeout")},
+            False,
+            id="login-stage-ipc-10005",
+        ),
+    ],
+)
+async def test_mt5_post_login_or_ipc_transient_keeps_the_network_detail(
+    exchange_router, client_kwargs, reached_order_check
+):
+    """167 WR-01 — `SIGN_IN_FAILED` is answered ONLY for a login-stage refusal
+    with a non-IPC code (`is_mt5_login_refusal`). A post-login read failure or an
+    IPC code keeps the pre-167 answer, `424` with the shared network detail, so
+    the user is not told a working sign-in failed and keeps the Retry
+    (`recoverable=True` is asserted at the wire layer in
+    `test_validate_key_venue_transient.py`)."""
+    router = exchange_router
+    client = _make_client(**client_kwargs)
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail != SIGN_IN_FAILED_DETAIL, (
+        "a fault that is not a login-stage refusal was answered SIGN_IN_FAILED "
+        "— the user is told a sign-in failed and loses the Retry"
+    )
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    client.login.assert_called_once()
+    assert client.order_check.called is reached_order_check
     client.release.assert_called_once()
 
 

@@ -8142,8 +8142,12 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
 
     Preflight via _allocator_key_preflight — no strategy hop. On
     fetch_allocator_holdings failure, map the exception to
-    api_keys.sync_status per D-07 ('revoked' / 'rate_limited' / 'error')
-    and emit an ``allocator.holdings.sync_failed`` audit event (f7). On
+    api_keys.sync_status per D-07 ('revoked' / 'rate_limited' / 'error'),
+    or, for a venue sign-in refused at the login stage, 'sign_in_failed'
+    (Phase 167 D-11 arm B: ``AllocatorHoldingsSignInFailedError`` carries that
+    status and a ``permanent`` job disposition on the class, and the handler's
+    one typed arm reads both off it), and emit an
+    ``allocator.holdings.sync_failed`` audit event (f7). On
     DONE, update sync_status / last_sync_at and emit
     ``allocator.holdings.sync_completed`` with row_count +
     holding_type_counts metadata.
@@ -8154,8 +8158,6 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
     through without touching api_keys (the job stays queued).
     """
     from services.allocator_positions import (
-        SIGN_IN_FAILED_SYNC_STATUS,
-        AllocatorHoldingsSignInFailedError,
         AllocatorHoldingsSyncTransientError,
         fetch_allocator_holdings,
         persist_allocator_holdings,
@@ -8220,57 +8222,6 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                 error_message=sanitized,
                 error_kind=error_kind,
             )
-        except AllocatorHoldingsSignInFailedError as exc:
-            # ⛔⛔ Phase 167 / D-11 arm B — THIS ARM'S POSITION IS LOAD-BEARING
-            # AND ITS FAILURE IS SILENT. `AllocatorHoldingsSignInFailedError`
-            # SUBCLASSES `AllocatorHoldingsSyncTransientError`, so an arm
-            # placed BELOW the parent's is DEAD CODE: Python matches the first
-            # `except` whose type the exception is an instance of, the parent
-            # would catch every sign-in failure, and the column would silently
-            # go back to sync_status='error' with "sync will retry
-            # automatically" — which IS the 17-day PROD defect this phase
-            # removes. Nothing about the failure is visible: no traceback, no
-            # log line, no test that asserts on the source text. It is pinned
-            # BEHAVIOURALLY instead — see
-            # tests/test_allocator_positions.py::
-            # test_sign_in_failure_reaches_its_own_arm_not_the_parents.
-            # ⛔ Never reorder these two arms.
-            #
-            # Everything else is the parent arm's contract, deliberately
-            # unchanged: `str(exc)` IS the authored end-user copy so it is
-            # stamped verbatim under the same [:500] cap, and
-            # `error_kind='transient'` keeps the QUEUE behaviour identical —
-            # the job still backs off and retries, which is correct, because a
-            # rotated credential is exactly what a later poll should pick up.
-            # Only the user-facing CLAIM differs.
-            human_copy = str(exc)[:500]
-
-            def _update_sign_in_failed() -> None:
-                # Return value discarded by the caller (see _update_err).
-                ctx.supabase.table("api_keys").update(
-                    {
-                        "sync_status": SIGN_IN_FAILED_SYNC_STATUS,
-                        "sync_error": human_copy,
-                    }
-                ).eq("id", api_key_id).execute()
-
-            try:
-                await db_execute(_update_sign_in_failed)
-            except Exception as upd_exc:  # noqa: BLE001
-                logger.warning(
-                    "poll_allocator_positions: failed to stamp sync_status=%r "
-                    "for api_key %s: %s",
-                    SIGN_IN_FAILED_SYNC_STATUS, api_key_id, upd_exc,
-                )
-            _emit_audit(
-                allocator_id, api_key_id, "allocator.holdings.sync_failed",
-                {"error_kind": "transient", "sanitized_message": human_copy},
-            )
-            return DispatchResult(
-                outcome=DispatchOutcome.FAILED,
-                error_message=human_copy,
-                error_kind="transient",
-            )
         except AllocatorHoldingsSyncTransientError as exc:
             # AUM-02 — THE arm that keeps raw Python out of a user-visible
             # column. It MUST precede the generic `except Exception` below:
@@ -8280,34 +8231,82 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             # stamped onto all three founder MT5 keys. A non-ccxt venue branch
             # converts its venue-specific exception to END-USER copy and raises
             # this type; str(exc) IS that copy, so we stamp it verbatim.
-            # Classified TRANSIENT (never 'permanent'): an unreachable terminal
+            # The parent type is classified TRANSIENT: an unreachable terminal
             # or a blipping broker API self-heals, so the DB backoff must retry
             # rather than burn the key to a permanent error state.
+            # ⚠️ 167 WR-04 — the sign-in subclass declares `permanent` instead.
+            # Retrying a refused login re-runs the SAME stored password against
+            # the ONE shared MT5 terminal on every rung of the ladder (the D-08
+            # harm). The daily cron still re-enqueues the key once per day,
+            # because it skips only `revoked`. See
+            # `AllocatorHoldingsSignInFailedError`.
             # The [:500] cap mirrors the sibling arms (copy is far shorter).
+            #
+            # ⭐ 167 WR-05 — ONE arm for this type AND its subclasses. What
+            # differs between them (the `sync_status` written and the job's
+            # `error_kind`) is declared as class attributes on the exception
+            # and read here, so `AllocatorHoldingsSignInFailedError` writes
+            # `sign_in_failed` through this same body. The earlier design gave
+            # the subclass its own arm, a line-for-line copy of this one. That
+            # made the arm ORDER load-bearing with a SILENT failure (an arm below
+            # this one is dead code) and left a second copy of the write free to
+            # drift. With one arm there is no order to get wrong.
             human_copy = str(exc)[:500]
+            sync_status = exc.sync_status
+            exc_error_kind = exc.error_kind
 
-            def _update_transient() -> None:
+            def _update_transient(status: str) -> None:
                 # Return value discarded by the caller (see _update_err).
                 ctx.supabase.table("api_keys").update(
-                    {"sync_status": "error", "sync_error": human_copy}
+                    {"sync_status": status, "sync_error": human_copy}
                 ).eq("id", api_key_id).execute()
 
             try:
-                await db_execute(_update_transient)
+                await db_execute(lambda: _update_transient(sync_status))
             except Exception as upd_exc:  # noqa: BLE001
-                logger.warning(
-                    "poll_allocator_positions: failed to stamp sync_status='error' "
-                    "for api_key %s: %s",
-                    api_key_id, upd_exc,
-                )
+                if sync_status == "error":
+                    logger.warning(
+                        "poll_allocator_positions: failed to stamp "
+                        "sync_status='error' for api_key %s: %s",
+                        api_key_id, upd_exc,
+                    )
+                else:
+                    # ⛔ 167 SFH-H2 — a status the parent does not write can be
+                    # REFUSED by `api_keys_sync_status_check`: Railway deploys
+                    # this worker and the migration that admits
+                    # `sign_in_failed` applies separately, with nothing ordering
+                    # the two. Swallowing that at WARNING left the key reading
+                    # its last healthy or 'syncing' status. So log it LOUDLY and
+                    # fall back to the parent's write, `sync_status='error'`,
+                    # which every deployed CHECK admits. `human_copy` is kept
+                    # (not MT5_UNREACHABLE_NOTE): the 'error' pill renders
+                    # `sync_error` verbatim, and the sign-in copy is the TRUE
+                    # cause. The transport note would bring back the false one.
+                    logger.error(
+                        "poll_allocator_positions: failed to stamp "
+                        "sync_status=%r for api_key %s — falling back to "
+                        "sync_status='error' so the key does not keep a "
+                        "healthy status",
+                        sync_status, api_key_id,
+                        exc_info=upd_exc,
+                    )
+                    try:
+                        await db_execute(lambda: _update_transient("error"))
+                    except Exception as fallback_exc:  # noqa: BLE001
+                        logger.error(
+                            "poll_allocator_positions: fallback stamp "
+                            "sync_status='error' ALSO failed for api_key %s",
+                            api_key_id,
+                            exc_info=fallback_exc,
+                        )
             _emit_audit(
                 allocator_id, api_key_id, "allocator.holdings.sync_failed",
-                {"error_kind": "transient", "sanitized_message": human_copy},
+                {"error_kind": exc_error_kind, "sanitized_message": human_copy},
             )
             return DispatchResult(
                 outcome=DispatchOutcome.FAILED,
                 error_message=human_copy,
-                error_kind="transient",
+                error_kind=exc_error_kind,
             )
         except Exception as exc:  # noqa: BLE001
             error_kind, msg = classify_exception(exc)

@@ -403,6 +403,91 @@ def test_login_initialize_transport_raise_is_typed():
         client.login(123, password="pw", server="Broker-Demo")
 
 
+def test_login_stage_refusal_is_the_only_path_raising_the_marker():
+    """Phase 167 CR-01 — `Mt5LoginRefusedError` means "the terminal answered the
+    sign-in itself, and said no", and NOTHING else may raise it.
+
+    The wizard and the holdings poll both tell a user their credentials failed
+    on this type (via `is_mt5_login_refusal`). If a pre-credential or transport
+    stage raised it, a gateway wedge would be reported as a wrong password on
+    every MT5 key at once.
+
+    Positive: a falsy `login()` raises the marker, carrying the terminal's code,
+    with the credential redacted exactly as the parent type's would be."""
+    from services.mt5_client import Mt5LoginRefusedError
+
+    connect, _fake, _rec = _make(
+        {"login": False, "last_error": (0, "Invalid account 123 on Broker-Demo")}
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5LoginRefusedError) as exc_info:
+        client.login(123, password="s3cr3t-pw", server="Broker-Demo")
+    assert exc_info.value.code == 0
+    assert isinstance(exc_info.value, Mt5ClientError)
+    msg = str(exc_info.value)
+    assert "s3cr3t-pw" not in msg
+    assert "Broker-Demo" not in msg
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param(
+            {"initialize": False, "last_error": (-10004, "No IPC connection")},
+            id="initialize-falsy",
+        ),
+        pytest.param(
+            {"initialize_raises": EOFError("stream has been closed")},
+            id="initialize-transport-raise",
+        ),
+        pytest.param(
+            {"login_raises": RuntimeError("rpyc remote error")},
+            id="login-transport-raise",
+        ),
+        pytest.param(
+            {"login": False, "last_error_raises": ConnectionResetError("reset")},
+            id="login-falsy-but-last_error-round-trip-died",
+        ),
+        pytest.param(
+            {"login": False, "last_error": None},
+            id="login-falsy-but-last_error-answered-nothing",
+        ),
+    ],
+)
+def test_login_failures_with_no_sign_in_answer_are_not_the_marker(scenario):
+    """Phase 167 CR-01 — the negative half. Each of these fails inside `login()`
+    WITHOUT the terminal having answered the sign-in, so each must stay a plain
+    `Mt5ClientError`, which callers treat as a transport fault."""
+    from services.mt5_client import Mt5LoginRefusedError
+
+    connect, _fake, _rec = _make(scenario)
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.login(123, password="pw", server="Broker-Demo")
+    assert not isinstance(exc_info.value, Mt5LoginRefusedError), (
+        f"{scenario!r} raised the login-refusal marker, but the terminal never "
+        "answered the sign-in — a transport fault would be reported as a "
+        "credential failure"
+    )
+
+
+def test_post_login_read_failure_is_not_the_marker():
+    """Phase 167 CR-01 — `account_info()` returning None after a successful login
+    raises through the SAME `_raise_last` site, and must stay a plain
+    `Mt5ClientError`: the credential was already accepted."""
+    from services.mt5_client import Mt5LoginRefusedError
+
+    connect, _fake, _rec = _make(
+        {"login": True, "account": None, "last_error": (-10004, "No IPC connection")}
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.login(123, password="pw", server="Broker-Demo")
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.account_info()
+    assert exc_info.value.code == -10004
+    assert not isinstance(exc_info.value, Mt5LoginRefusedError)
+
+
 def test_order_check_passed_as_keywords_not_positional_dict():
     """REGRESSION (soak, 2026-07-25): order_check MUST be called with KEYWORDS, not a
     positional dict. mt5linux 0.1.9 evals ``mt5.order_check(*args, **kwargs)`` and MT5

@@ -1733,9 +1733,14 @@ async def test_mt5_client_error_arm_follows_the_live_classifier_verdict(
     a copy-string comparison that proves nothing about the chain."""
     from services import allocator_positions as ap
     import services.job_worker as jw
-    from services.mt5_client import Mt5ClientError
+    from services.mt5_client import Mt5ClientError, Mt5LoginRefusedError
 
-    expected = Mt5ClientError(0, "Invalid account")
+    # ⭐ 167 CR-01 — the LOGIN-STAGE marker, which is what the real
+    # `Mt5Client.login` raises when the terminal answers the sign-in falsy.
+    # A plain `Mt5ClientError` from this arm is a transport/post-login fault
+    # and keeps the pre-167 transport note — see
+    # `test_mt5_client_error_that_is_not_a_login_refusal_keeps_the_transport_note`.
+    expected = Mt5LoginRefusedError(0, "Invalid account")
 
     def _fake_classify(exc):
         assert exc is expected
@@ -1758,13 +1763,69 @@ async def test_mt5_client_error_arm_follows_the_live_classifier_verdict(
             await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
         assert str(caught.value) == ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
         assert caught.value.__cause__ is expected
-        # The retry disposition is UNCHANGED: still a transient subclass, so
-        # the handler's queue behaviour and the DB backoff are untouched.
+        # Still a subclass of the transient type, so it reaches the handler's
+        # ONE typed arm (WR-05). Its job disposition is its own declared
+        # `error_kind` (permanent since WR-04; pinned in the handler cases).
         assert isinstance(caught.value, ap.AllocatorHoldingsSyncTransientError)
         # ⛔ And it is NARROW: the sign-in arm no longer claims the terminal
         # was unreachable. The three sibling MT5 arms still do — their own
         # cases below assert exactly that, and are the control for this one.
         assert str(caught.value) != ap.MT5_UNREACHABLE_NOTE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        # Not the login-stage marker: an `initialize()` failure, a transport
+        # drop mid-login, or a post-login `account_info()` failure all arrive
+        # as a plain `Mt5ClientError`, whatever their text says.
+        pytest.param(
+            lambda m: m.Mt5ClientError(0, "Invalid account"),
+            id="plain-client-error-even-with-auth-text",
+        ),
+        # The login stage answered, but with an IPC transport code: the
+        # bridge detached (-10004) or stopped answering (-10005). D-07 keeps
+        # this ambiguity on the transport side.
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10004, "No IPC connection"),
+            id="login-stage-ipc-10004",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10005, "IPC timeout"),
+            id="login-stage-ipc-10005",
+        ),
+    ],
+)
+async def test_mt5_client_error_that_is_not_a_login_refusal_keeps_the_transport_note(
+    monkeypatch, make_error
+):
+    """167 CR-01 — the sign-in claim is made ONLY for a login-stage refusal.
+
+    Every other `Mt5ClientError` this arm can see keeps the pre-167 posture
+    byte-unchanged: the transient type (NOT its sign-in subclass) carrying
+    MT5_UNREACHABLE_NOTE. A gateway redeploy or wedge hits every MT5 key on the
+    terminal at once, so misreading these as sign-in failures would tell every
+    MT5 owner to fix a credential that is fine (D-03).
+
+    The classifier is left UNMOCKED here: a real `Mt5ClientError` classifies
+    `unknown`, so the wrap path is the one production takes."""
+    from services import allocator_positions as ap
+    from services import mt5_client
+
+    expected = make_error(mt5_client)
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+
+    with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+        await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+
+    assert not isinstance(caught.value, ap.AllocatorHoldingsSignInFailedError), (
+        f"{expected!r} is not a login-stage refusal, yet it was reported as a "
+        "sign-in failure — the owner is told to fix a working credential"
+    )
+    assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+    assert caught.value.__cause__ is expected
 
 
 # ---------------------------------------------------------------------------
@@ -2079,6 +2140,41 @@ def test_every_retry_promising_raise_is_guarded_by_the_classifier():
     )
 
 
+def test_a_classifier_that_raises_is_logged_at_error_with_its_traceback(
+    monkeypatch, caplog
+):
+    """167 SFH-L1 — when `classify_exception` itself raises,
+    `_must_reach_handler_unwrapped` falls back to "retryable" so the copy path
+    survives. That fallback decides the retry disposition. A permanent failure
+    lost here gets retried for good under a note that promises a retry, so the
+    classifier fault must log at ERROR with its traceback (Sentry-grade). A
+    WARNING nobody alerts on is not enough."""
+    import logging
+
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+
+    def _broken_classify(exc):
+        raise RuntimeError("classifier defect")
+
+    monkeypatch.setattr(jw, "classify_exception", _broken_classify)
+
+    with caplog.at_level(logging.DEBUG, logger=ap.logger.name):
+        verdict = ap._must_reach_handler_unwrapped(ValueError("boom"))
+
+    assert verdict is False, "the fallback must still keep the copy path"
+    records = [
+        r for r in caplog.records
+        if r.name == ap.logger.name and "could not classify" in r.getMessage()
+    ]
+    assert records, "the classifier fault was not logged at all"
+    assert records[-1].levelno == logging.ERROR, (
+        f"logged at {records[-1].levelname}, not ERROR — a classifier defect "
+        "that silently downgrades a permanent failure stays invisible"
+    )
+    assert records[-1].exc_info is not None, "the traceback was dropped"
+
+
 def test_rate_limited_note_still_promises_a_retry():
     """167-02 Task 3 — the ONE note in the family whose retry promise is
     legitimate: rate limits ARE transient by construction. Without this pin a
@@ -2100,15 +2196,19 @@ def test_rate_limited_note_still_promises_a_retry():
 async def test_sign_in_failure_reaches_its_own_arm_not_the_parents(
     monkeypatch, api_key_row_factory
 ):
-    """⛔⛔ THE HANDLER-ORDERING PIN (T-167-13).
+    """⛔⛔ THE HANDLER-ORDERING PIN (T-167-13), re-cut by 167 WR-05.
 
     `AllocatorHoldingsSignInFailedError` SUBCLASSES
     `AllocatorHoldingsSyncTransientError`, and Python matches the FIRST
-    `except` whose type the exception is an instance of. So an arm placed
-    below the parent's is DEAD CODE: the parent catches every sign-in failure
-    and the column silently reverts to sync_status='error' with "sync will
-    retry automatically" — the exact 17-day PROD defect this phase removes.
-    Nothing about that failure is observable except the value written.
+    `except` whose type the exception is an instance of. The first design gave
+    the subclass its own arm, and an arm placed below the parent's was DEAD
+    CODE. WR-05 removed that hazard structurally: there is now ONE arm, which
+    reads `sync_status` off the exception. The failure this case guards is the
+    same either way: the column silently reverting to sync_status='error' with
+    "sync will retry automatically", the exact 17-day PROD defect this phase
+    removes. That could come from a re-introduced shadowed arm or from the
+    class attribute being dropped. Nothing about it is observable except the
+    value written.
 
     ⛔ BEHAVIOURAL, deliberately — NOT an assertion on source-text order. A
     text assertion can be satisfied by arms in the right order that do the
@@ -2147,13 +2247,90 @@ async def test_sign_in_failure_reaches_its_own_arm_not_the_parents(
     statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
     assert statuses, f"expected a sync_status write; got {payloads!r}"
     assert statuses[-1] == ap.SIGN_IN_FAILED_SYNC_STATUS, (
-        "the sign-in exception was caught by the PARENT's arm — the new arm "
-        "is below it and is dead code. Every sign-in failure now writes "
-        f"{statuses[-1]!r}, which is today's defect restored"
+        "the sign-in exception was written as its PARENT — either a shadowed "
+        "arm was re-introduced or the class's `sync_status` attribute is gone. "
+        f"Every sign-in failure now writes {statuses[-1]!r}, which is the "
+        "17-day defect restored"
     )
     assert _sync_errors(payloads)[-1] == copy
-    # The queue disposition is the parent's, unchanged.
-    assert result.error_kind == "transient"
+    # 167 WR-04 — the queue disposition is NOT the parent's. A refused sign-in
+    # must not climb the backoff ladder, because every rung re-runs the same
+    # stored password against the one shared MT5 terminal (the D-08 harm). The
+    # audit carries the same disposition the queue gets.
+    assert result.error_kind == "permanent", (
+        f"a refused sign-in returned error_kind={result.error_kind!r}: the job "
+        "will retry the same wrong password against the shared terminal on "
+        "every backoff rung"
+    )
+    assert _audit.call_args.kwargs["metadata"]["error_kind"] == "permanent"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_sign_in_status_write_falls_back_to_error(
+    monkeypatch, api_key_row_factory, caplog
+):
+    """167 SFH-H2 — the worker and the migration that admits `sign_in_failed`
+    deploy SEPARATELY (Railway vs. the migration apply, with nothing ordering
+    them). If `api_keys_sync_status_check` refuses the new value, a swallowed
+    WARNING left the key reading its last healthy/'syncing' status: a broken
+    key shown as fine.
+
+    The fake `db_execute` RUNS the update (so the attempted payload is
+    captured) and then raises the CHECK violation, the way PostgREST would.
+    The handler must log at ERROR and fall back to the parent's write,
+    `sync_status='error'`, keeping the true sign-in copy."""
+    import logging
+
+    from services import allocator_positions as ap
+    from services import job_worker as jw
+
+    copy = ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+
+    async def _raise_sign_in_failed(venue, exchange, api_key_id=None):
+        raise ap.AllocatorHoldingsSignInFailedError(copy)
+
+    db_calls: list[object] = []
+
+    async def _check_rejects_first_write(fn):
+        db_calls.append(fn)
+        result = fn()
+        if len(db_calls) == 1:
+            raise RuntimeError(
+                'new row for relation "api_keys" violates check constraint '
+                '"api_keys_sync_status_check"'
+            )
+        return result
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_raise_sign_in_failed
+    )
+    monkeypatch.setattr(jw, "db_execute", _check_rejects_first_write)
+
+    with caplog.at_level(logging.DEBUG, logger=jw.logger.name):
+        result = await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses == [ap.SIGN_IN_FAILED_SYNC_STATUS, "error"], (
+        "a refused sign_in_failed write must be followed by the parent's "
+        f"'error' write, or the key keeps a healthy status; got {statuses!r}"
+    )
+    assert _sync_errors(payloads)[-1] == copy, (
+        "the fallback must keep the TRUE cause; the transport note would "
+        "re-introduce the false one"
+    )
+    errors = [
+        r for r in caplog.records
+        if r.name == jw.logger.name and r.levelno >= logging.ERROR
+        and "falling back" in r.getMessage()
+    ]
+    assert errors and errors[-1].exc_info is not None, (
+        "the rejected write must be logged at ERROR with its traceback"
+    )
+    # The disposition is unaffected by the fallback.
+    assert result.error_kind == "permanent"
 
 
 def test_sign_in_copy_is_not_the_unknown_status_FALLBACK(monkeypatch):
@@ -2195,6 +2372,25 @@ def test_sign_in_copy_is_not_the_unknown_status_FALLBACK(monkeypatch):
     assert text == SIGN_IN_FAILED_NOTE.format(venue="MT5")
     # And the promise the phase exists to kill is absent from it.
     assert "retry" not in text.lower()
+
+
+def test_sign_in_copy_names_the_remedy_that_works_verbatim():
+    """167 WR-03 — THE LITERAL PIN, hand-typed and never derived from the
+    constant it checks.
+
+    The copy must name the action that FIXES a refused sign-in: replacing the
+    credential. The old wording said "reconnect this account", and on the
+    owner's card "Reconnect" re-runs the STORED credential, the one that just
+    failed, so an owner who followed the copy could not fix the problem. Every
+    other pin reads `SIGN_IN_FAILED_NOTE` itself, so without this one a rewording
+    of the constant would pass all of them."""
+    from services.allocator_positions import SIGN_IN_FAILED_NOTE
+
+    assert SIGN_IN_FAILED_NOTE == (
+        "Couldn't sign in to {venue} with these credentials — update them "
+        "to resume syncing."
+    )
+    assert "reconnect" not in SIGN_IN_FAILED_NOTE.lower()
 
 
 def test_every_status_this_module_can_write_has_its_own_copy_row():
@@ -2256,6 +2452,21 @@ def test_every_status_this_module_can_write_has_its_own_copy_row():
         value = getattr(ap, target.id, None)
         if isinstance(value, str):
             statuses.add(value)
+
+    # (3) 167 WR-05 — the handler's single typed arm writes `exc.sync_status`,
+    # so every class in the transient family is a writer. Read the attribute
+    # off each class at RUNTIME: a future subclass declaring a literal status
+    # (not a `*_SYNC_STATUS` constant) would be invisible to (2).
+    family = [
+        obj
+        for obj in vars(ap).values()
+        if isinstance(obj, type)
+        and issubclass(obj, ap.AllocatorHoldingsSyncTransientError)
+    ]
+    assert len(family) >= 2, (
+        "derivation (3) found fewer than the parent and its sign-in subclass"
+    )
+    statuses.update(cls.sync_status for cls in family)
 
     # Anti-vacuity: prove the extractor found a non-zero set, and that it saw
     # BOTH derivations rather than one of them silently returning nothing.
