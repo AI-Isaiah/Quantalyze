@@ -620,6 +620,19 @@ export function SyncPreviewStep({
   const [upstreamCorrelationId, setUpstreamCorrelationId] = useState<
     string | null
   >(null);
+  /**
+   * 164.6.5-07 / D-14 — the id of THIS attempt, captured off whichever
+   * wizardFetch call is in flight (the kickoff or the stall retry — task 1's
+   * `onCorrelationId`). Preferred over the page-load id below (the upstream
+   * id still wins when the wire carried one), same shape as `SubmitStep` and
+   * `ConnectKeyStep`.
+   *
+   * PER-FAILURE, same reset discipline as `upstreamCorrelationId` beside it:
+   * cleared on every fresh attempt from either arm.
+   */
+  const [requestCorrelationId, setRequestCorrelationId] = useState<
+    string | null
+  >(null);
   // useRef initializer must be a non-impure value for React Compiler's
   // purity rule. Real start time is set in the mount effect.
   const startedAtRef = useRef<number>(0);
@@ -780,11 +793,18 @@ export function SyncPreviewStep({
           // preserved without blocking a legitimate stale single-key re-sync on
           // a transient marker-read blip.
         }
-        const res = await wizardFetch("/api/keys/sync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ strategy_id: strategyId }),
-        });
+        const res = await wizardFetch(
+          "/api/keys/sync",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ strategy_id: strategyId }),
+          },
+          {
+            // 164.6.5-07 / D-14 — capture the id THIS request put on the wire.
+            onCorrelationId: setRequestCorrelationId,
+          },
+        );
         if (!res.ok) {
           // A non-2xx kickoff fails CLOSED — we never silently assume
           // single-key. What changed in 140.3-10 is only WHICH honest state we
@@ -1837,12 +1857,23 @@ export function SyncPreviewStep({
     // wait BEFORE the request, so nothing from attempt N can render under
     // attempt N+1 (TRAP-3). Same reset point as `handleKickoffRetry`.
     setRetryAfterSeconds(null);
+    // 164.6.5-07 / D-14 — same reset rule as `upstreamCorrelationId`, same
+    // reason: a stale id from a previous attempt must not render under this
+    // one (TRAP-3).
+    setRequestCorrelationId(null);
     try {
-      const res = await wizardFetch("/api/keys/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy_id: strategyId }),
-      });
+      const res = await wizardFetch(
+        "/api/keys/sync",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ strategy_id: strategyId }),
+        },
+        {
+          // 164.6.5-07 / D-14 — capture the id THIS request put on the wire.
+          onCorrelationId: setRequestCorrelationId,
+        },
+      );
       if (res.ok && mountedRef.current) {
         statusChangedAtRef.current = Date.now();
         setStallBackstop(false);
@@ -1937,30 +1968,39 @@ export function SyncPreviewStep({
 
   // 140.3-15 / TS-20 — ONE id field, the one `ErrorEnvelope` already renders and
   // `buildDiagBlock` already copies into the QUANTALYZE_DIAG payload. The
-  // upstream id WINS when the wire carried a usable one; today's browser-minted
-  // id remains the fallback, so nothing that previously rendered an id stops
-  // doing so. No second field was added — the render slot expects exactly one
-  // value, and two ids in a diagnostics block is a support ticket asking which
-  // one to search.
+  // upstream id WINS when the wire carried a usable one; the render slot
+  // expects exactly one value, and two ids in a diagnostics block is a
+  // support ticket asking which one to search.
+  //
+  // 164.6.5-07 / D-14 — THE FALLBACK CHAIN GREW A MIDDLE LINK, same shape as
+  // SubmitStep. `requestCorrelationId` (captured off whichever of the two
+  // wizardFetch calls above ran) sits between the upstream id and the
+  // page-load id, so a second failed attempt with no upstream id renders a
+  // DIFFERENT id than the first — MEASURED in production, two retries
+  // rendering the identical id.
   const errorEnvelope = errorCode
-    ? buildEnvelope(errorCode, upstreamCorrelationId ?? correlationId, {
-        trades: gateResult?.detail?.trades as number | undefined,
-        days: gateResult?.detail?.days as number | undefined,
-        // ⛔ `computationError` is NOT threaded here any more (Phase 162 /
-        // HONEST-01, UI-SPEC C-2): its text has no path into the envelope body.
-        // The field is gone from WizardErrorContext too, so this is a typed
-        // absence, not a habit.
-        // ⚠️ This note used to add "the gate reads it (`checkStrategyGate`,
-        // above) to decide WHICH code we are in". That was FALSE and is deleted:
-        // the `checkStrategyGate` call passes `computationError: nextError` —
-        // the poller callback's own argument — never the state. Nothing reads
-        // the state at all; see the `_computationError` declaration for what it
-        // is still there for and why it is underscore-prefixed.
-        // 140.3-10 — `?? undefined` because ABSENCE IS NOT ZERO. `null` would
-        // be carried into the envelope slot and a `0` there is a wait we were
-        // never told about.
-        retryAfterSeconds: retryAfterSeconds ?? undefined,
-      })
+    ? buildEnvelope(
+        errorCode,
+        upstreamCorrelationId ?? requestCorrelationId ?? correlationId,
+        {
+          trades: gateResult?.detail?.trades as number | undefined,
+          days: gateResult?.detail?.days as number | undefined,
+          // ⛔ `computationError` is NOT threaded here any more (Phase 162 /
+          // HONEST-01, UI-SPEC C-2): its text has no path into the envelope body.
+          // The field is gone from WizardErrorContext too, so this is a typed
+          // absence, not a habit.
+          // ⚠️ This note used to add "the gate reads it (`checkStrategyGate`,
+          // above) to decide WHICH code we are in". That was FALSE and is deleted:
+          // the `checkStrategyGate` call passes `computationError: nextError` —
+          // the poller callback's own argument — never the state. Nothing reads
+          // the state at all; see the `_computationError` declaration for what it
+          // is still there for and why it is underscore-prefixed.
+          // 140.3-10 — `?? undefined` because ABSENCE IS NOT ZERO. `null` would
+          // be carried into the envelope slot and a `0` there is a wait we were
+          // never told about.
+          retryAfterSeconds: retryAfterSeconds ?? undefined,
+        },
+      )
     : null;
 
   /**
@@ -1988,6 +2028,8 @@ export function SyncPreviewStep({
     // let a second failure on a DIFFERENT path render the first one's id, which
     // is worse than rendering none: it points support at the wrong request.
     setUpstreamCorrelationId(null);
+    // 164.6.5-07 / D-14 — same reset rule, same reason.
+    setRequestCorrelationId(null);
     setPhase("kicking_off");
     setKickoffNonce((n) => n + 1);
   }, []);
