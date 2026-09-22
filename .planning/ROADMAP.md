@@ -2245,9 +2245,13 @@ Plans:
 
 **Goal:** A client can add an MT5 key, repeatedly, without taking MT5 validation down for
 everyone — and if the terminal does wedge, it recovers WITHOUT a human.
-**Requirements**: TBD
+**Requirements**: 164.6.5-C1 (root cause named or honestly open), 164.6.5-C2 (supervision +
+IPC liveness + auto-login-preserving restart), 164.6.5-C3 (the heal ACTS on `ipc_fault`),
+164.6.5-C4 (the prober actually measures the terminal), 164.6.5-C5 (the wizard stops promising a
+retry that cannot work), 164.6.5-C6 (`correlation_id` per request), 164.6.5-C7 (the algo-trading
+settings landmine is PINNED, not ticked)
 **Depends on:** Phase 164.6 (nothing blocking; the fault is live in PROD today)
-**Plans:** 0 plans
+**Plans:** 8 plans
 
 ⛔ **BOOKED FROM A LIVE PRODUCTION INCIDENT, measured end-to-end 2026-09-21 by the founder and the
 orchestrator together.** Everything below is a reading, not an inference. Founder's words:
@@ -2334,9 +2338,71 @@ nothing in the repo asserts it.
 ⛔ **THIS PHASE DOES NOT FIX THE EVICTION** — that is Phase 164.6.6. Do not let "MT5 is back" read
 as "the finding is closed": the outage was the symptom, the shared mutable terminal is the defect.
 
+⭐ **D-05 IS CLOSED BY THE PLANNER, with the reason it beat the other candidates (plan 02 task 1 is
+the founder's ratification gate).** The remedy is **external supervision over the rpyc channel the
+analytics-service already holds**: the liveness DECISION is taken by the credential-free IPC
+detector that already exists, and the ACTION is a process-level recycle of the Wine-hosted terminal
+inside the same container, under the same Wine prefix and the same named volume.
+⛔ **Wrapping the image was refused for a measured reason, not a cost one:** an s6 `longrun`
+supervises EXIT, and there was NO exit — the process ran and its UI answered a human for the whole
+1h39m. A bare longrun would have stayed quiet through the entire outage, so Option 1 only works if
+it ALSO builds Option 2's IPC detector, inside an image we would then own. ⛔ A Railway healthcheck
+was refused because the image exposes no HTTP surface and the rpyc bridge may never be exposed, so
+it cannot satisfy the IPC-probe fence at all.
+⚠️ **The cost is real and is booked here, not buried:** this makes a documented unauthenticated
+arbitrary-remote-code channel (Phase-134 `T-134-03`) a load-bearing production recovery path. It is
+paid for with ONE narrow verb over a COMMITTED, non-interpolated remote-source constant — the shape
+`_REMOTE_MATERIALIZE_SRC` already ships in the same file — plus a threat model and
+`/gsd-secure-phase`.
+
+⭐ **D-09 IS CLOSED AS "BROADEN THE REMEDY", NOT "SPLIT THE CLASSIFIER", for three measured
+reasons:** both `-10005` causes produce the identical `initialize()` code and the probe is
+read-only by hard constraint; the arm is pinned IMPORT-FREE by the mutation harness, so external
+correlation cannot live in it; and the runner requires every declared kind to carry a RED FIXTURE
+that fires it, so with no discriminator a new kind would need a fabricated fixture — the vacuous
+gate this milestone exists to remove.
+
+⭐ **D-12/D-13's STAGE IS THE INITIAL VALIDATE**, picked on evidence: the measured incident answered
+**HTTP 424**, and on this seam only the flat venue-transient shape raised inside
+`_validate_mt5_key_probe` emits a 424. The finalize-time scope arm answers 502 from the Next route
+and never reaches that seam.
+
+⭐ **D-14 IS CLOSED AS KEEP-ALONGSIDE, NOT REPLACE**, and the subject was corrected: the rendered id
+is `getWizardCorrelationId()` in `src/lib/wizard/wizard-correlation.ts` (a per-PAGE-LOAD memo), not
+the localStorage session id CONTEXT.md and PATTERNS.md pointed at. The page-load id keeps its name
+and its telemetry join; a fresh per-REQUEST id is what the server logs and what the user is shown.
+
+⛔ **A CONTRADICTION IN THE RECORD, FOUND AT PLANNING TIME AND OWNED BY PLAN 06.** Five places in
+this repo state the gateway re-clears *"Allow algorithmic trading"* on EVERY account change
+(founder-measured 2026-08-13), and one of them is USER-FACING copy. CONTEXT.md D-15 states,
+measured 2026-09-22, that the box is UNCHECKED. Both cannot be true of the same checkbox. ⛔ Plan 06
+reconciles them against a live reading and corrects whichever side is stale — it does NOT average
+them.
+
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.6.5 to break down)
+- [ ] 164.6.5-01-PLAN.md — C1: the asymmetry, named or honestly open; the runbook's `-10005`
+      differential procedure; `MT5-WEDGE-OBS-01` refined (⛔ not reopened). Owns `TODOS.md` and
+      `docs/runbooks/mt5-go-live.md` for the whole phase. [wave 1, has checkpoints]
+- [ ] 164.6.5-02-PLAN.md — ⭐ THE TRACER. C2: the D-05 ratification gate, the live A1 spike, and the
+      narrow credential-free recycle verb on `Mt5Client`. [wave 1, has checkpoints]
+- [ ] 164.6.5-03-PLAN.md — C4: the `-10005` remedy stops asserting one cause; a CI gate ties the
+      arm's declared environment to the workflow's supplied environment; live proof + real-wedge
+      calibration. [wave 1, has checkpoints]
+- [ ] 164.6.5-04-PLAN.md — C5: mint a distinct MT5 wire code and wizard code, honest
+      non-recoverable copy, and the arrival/roster gates that keep both vocabularies agreeing.
+      ⛔ `KEY_NETWORK_TIMEOUT` is neither deleted nor widened. [wave 1]
+- [ ] 164.6.5-05-PLAN.md — C3: the heal ESCALATES on `ipc_fault` — five readings, ONE recovery
+      attempt — inside the module's one lease, structurally unable to raise. [wave 2, depends 02]
+- [ ] 164.6.5-06-PLAN.md — C7: reconcile the five-place recorded belief against a live reading, and
+      make the observable consequence fail LOUDLY. ⛔ Never ticks the box. [wave 2, depends 04,
+      has checkpoints]
+- [ ] 164.6.5-07-PLAN.md — C6: a per-request correlation id on the wire and on the screen, the
+      per-page-load id preserved beside it, closed as a class across every wizard envelope
+      surface. [wave 2, depends 04]
+- [ ] 164.6.5-08-PLAN.md — close: per-criterion outcomes (MET or OPEN with a routed residual) in
+      both ledgers, then ONE release commit carrying the version bump and the CHANGELOG entry.
+      [wave 3, depends on all]
 
 ### Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session (INSERTED)
 
