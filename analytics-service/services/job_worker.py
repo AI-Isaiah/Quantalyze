@@ -8142,8 +8142,12 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
 
     Preflight via _allocator_key_preflight — no strategy hop. On
     fetch_allocator_holdings failure, map the exception to
-    api_keys.sync_status per D-07 ('revoked' / 'rate_limited' / 'error')
-    and emit an ``allocator.holdings.sync_failed`` audit event (f7). On
+    api_keys.sync_status per D-07 ('revoked' / 'rate_limited' / 'error'),
+    or, for a venue sign-in refused at the login stage, 'sign_in_failed'
+    (Phase 167 D-11 arm B: ``AllocatorHoldingsSignInFailedError`` carries that
+    status and a ``permanent`` job disposition on the class, and the handler's
+    one typed arm reads both off it), and emit an
+    ``allocator.holdings.sync_failed`` audit event (f7). On
     DONE, update sync_status / last_sync_at and emit
     ``allocator.holdings.sync_completed`` with row_count +
     holding_type_counts metadata.
