@@ -49,8 +49,10 @@ vi.mock("next/link", () => ({
  * no closed set over the column anywhere, so EVERY other status defaulted to
  * the healthy branch. Once `167-04` made the daily poll write
  * `sign_in_failed`, a holding sourced from a key the venue has stopped
- * accepting would have rendered un-chipped, un-filtered and counted in the
- * headline AUM.
+ * accepting would have rendered un-chipped and un-filtered. ⚠️ The predicate
+ * does NOT keep it out of the headline AUM, which `src/lib/queries.ts` sums
+ * over every holding regardless of key status (see the SFH-M2 note beside
+ * `UNTRUSTED_KEY_SYNC_STATUSES`); nothing here asserts otherwise.
  *
  * ⛔ WHY THE ASSERTIONS ARE PARAMETRIZED OVER THE SET AND NOT WRITTEN TWICE.
  * The equality SHAPE is the defect, not the missing value: a fix that appended

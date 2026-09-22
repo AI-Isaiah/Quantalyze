@@ -2,6 +2,7 @@
 
 import React from "react";
 import { EXCHANGE_DISPLAY } from "@/lib/closed-sets";
+import { PILL_STYLES } from "./allocator-sync-pill-styles";
 
 /**
  * Allocator-facing sync-status pill + helper line.
@@ -59,46 +60,9 @@ export interface AllocatorSyncStatusProps {
   helperOverride?: string | null;
 }
 
-// LOCKED pill colour map — do NOT deviate on any EXISTING row. `sign_in_failed`
-// is a Phase 167 / D-11 arm-B EXTENSION, landed in the SAME commit as the
-// migration that mints the value (T-167-08 — the map's unknown-key fallback
-// below normalises to `idle`, a NEUTRAL pill, so a partial rollout would
-// otherwise render a BROKEN key as HEALTHY).
-// `idle`/`syncing`/`complete` are neutral; `complete_with_warnings`/
-// `rate_limited`/`sign_in_failed` are amber; `revoked`/`error` are red. No
-// positive colour is used here — positive is reserved for future status
-// states.
-//
-// ⛔ EXPORTED FOR THE ROSTER TEST, and the export is load-bearing. Because this
-// map is typed `Record<string, …>`, `keyof typeof PILL_STYLES` is `string`, so
-// the `switch (normalized)` below is NON-EXHAUSTIVE BY CONSTRUCTION and
-// `let pillLabel: React.ReactNode` admits `undefined` — TypeScript cannot flag
-// a status that has a STYLE row here but no `case` there. The failure is
-// silent and ugly: a correctly-coloured EMPTY pill. The only thing that can
-// catch it is a test that walks THIS map at runtime, so the map has to be
-// reachable from the test. A hand-listed roster in the test would reproduce
-// the very defect (a second list that can fall out of step with this one).
-export const PILL_STYLES: Record<
-  string,
-  { bg: string; text: string; border?: string }
-> = {
-  idle: { bg: "bg-[#F1F5F9]", text: "text-text-secondary" },
-  syncing: { bg: "bg-[#F1F5F9]", text: "text-text-secondary" },
-  complete: { bg: "bg-[#F1F5F9]", text: "text-text-secondary" },
-  complete_with_warnings: { bg: "bg-warning/10", text: "text-warning" },
-  rate_limited: { bg: "bg-warning/10", text: "text-warning" },
-  revoked: { bg: "bg-negative/10", text: "text-negative" },
-  error: { bg: "bg-negative/10", text: "text-negative" },
-  // 167-UI-SPEC.md § Color — the DESIGN.md-pinned OPAQUE warning trio, not
-  // the `bg-warning/10` alpha fill the neighbouring amber pills use: the
-  // opaque `#FEF3C7` chip clears the 4.5:1 a11y minimum, the alpha fill does
-  // not (measured in 167-UI-SPEC.md § Color, Contrast table).
-  sign_in_failed: {
-    bg: "bg-warning-bg",
-    text: "text-warning",
-    border: "border-warning-border",
-  },
-};
+// The LOCKED pill colour map lives in `./allocator-sync-pill-styles` (a plain
+// module — 167 review round 1 / IN-03); its docblock carries the lock, the
+// arm-B extension note and why it is exported for the roster test.
 
 // LOCKED helper copy — note the terminating period.
 const REVOKED_HELPER = "Re-add a read-only key from your exchange.";
@@ -112,7 +76,19 @@ const EM_DASH = "\u2014"; // U+2014 — NOT a hyphen-minus.
 // branch. Venue-agnostic — names neither a key (bybit) nor a password
 // (MT5) — and states its own limit ("may have changed") rather than
 // asserting the credential IS invalid.
-const CREDENTIAL_FAILED_HELPER = `Reconnect this account ${EM_DASH} its credentials may have changed.`;
+//
+// ⚠️ REWORDED 2026-09-22 (167 review round 1 / WR-03), deliberately and with
+// its pins moved in the same commit. It used to open "Reconnect this account".
+// On the card where this pill renders, the only control labelled Reconnect
+// lives in the Disconnected section, and it re-runs the SAVED credential —
+// the very one this sign-in just failed with, so it is the one action that
+// cannot fix the state described. The control that does fix it is "Update
+// password" (MT5), which re-validates a NEW credential. So the sentence now
+// names the thing to change (the credentials) rather than a control that
+// retries the old ones. It stays venue-agnostic: "credentials", never
+// "password" or "key". ⚠️ 68 characters, over 167-UI-SPEC § Typography's
+// 60-character helper budget; the wording was decided with that known.
+const CREDENTIAL_FAILED_HELPER = `Update this account's credentials ${EM_DASH} the saved ones may have changed.`;
 
 // Queued threshold: only surface the Queued helper when the breaker cooldown is
 // ≥30s out. Under 30s is treated as a "pending/starting" state where the
@@ -152,7 +128,10 @@ function titleCase(s: string): string {
 // matching the `exchange.toLowerCase()` lookup below.
 const EXCHANGE_DISPLAY_NAME: Record<string, string> = EXCHANGE_DISPLAY;
 
-export function exchangeDisplayName(exchange: string): string {
+// Module-local (un-exported 167 review round 1 / IN-03: it had no importer, and
+// as a non-component export it kept this "use client" module outside the Fast
+// Refresh component-only boundary even after PILL_STYLES moved out).
+function exchangeDisplayName(exchange: string): string {
   if (!exchange) return exchange;
   return (
     EXCHANGE_DISPLAY_NAME[exchange.toLowerCase()] ?? titleCase(exchange)

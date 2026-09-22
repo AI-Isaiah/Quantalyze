@@ -45,6 +45,8 @@ import {
   FUNDING_EXCHANGES,
   SIGNUP_ROLES,
   LIQUIDITY_PREFERENCES,
+  TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES,
+  UNTRUSTED_KEY_SYNC_STATUSES,
 } from "@/lib/closed-sets";
 import { APP_ROLES } from "@/lib/auth-types";
 import { REJECTION_REASONS } from "@/lib/bridge-outcome-schema";
@@ -298,6 +300,23 @@ const SPECS: Spec[] = [
       ),
   },
   {
+    // Phase 167 CREDTRUST review round 1 (SFH-M1). NOT a write-side set: this
+    // is the READ-side trust PARTITION the money surfaces use
+    // (`isUntrustedKeySyncStatus`), whose unknown-value default is "trusted".
+    // Pinning the UNION of both halves to the latest CHECK is what makes that
+    // default safe: a migration that admits a new value (e.g. a future
+    // credential failure) reds HERE, by name, until the value is placed on
+    // one side. Disjointness of the two halves is asserted in
+    // `src/lib/closed-sets.untrusted-key-status.test.ts`; the two together
+    // mean "every CHECK value is in exactly one partition".
+    column: "api_keys.sync_status",
+    ts: [...TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES, ...UNTRUSTED_KEY_SYNC_STATUSES],
+    tsNote:
+      "TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES ∪ UNTRUSTED_KEY_SYNC_STATUSES (closed-sets.ts) — the read-side trust partition; latest CHECK is 20260922120000 (named, newest wins).",
+    sql: () =>
+      resolveColumnCheck("api_keys", "sync_status", "20260406065011_security_hardening.sql"),
+  },
+  {
     column: "profiles.role",
     ts: SIGNUP_ROLES,
     sql: () => resolveColumnCheck("profiles", "role", "20260405061911_initial_schema.sql"),
@@ -389,6 +408,7 @@ describe("[B9] CHECK ↔ Zod parity matrix", () => {
       "api_keys.exchange",
       "strategy_verifications.source",
       "position_snapshots.exchange",
+      "api_keys.sync_status",
       "profiles.role",
       "user_app_roles.role",
       "user_notes.scope_kind",

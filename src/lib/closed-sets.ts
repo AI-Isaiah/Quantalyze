@@ -864,8 +864,18 @@ export function deriveEmptySeriesState(
 // so EVERY status that was not `revoked` fell to the healthy branch by
 // default. The moment the holdings poll gained a second failed-credential
 // value (`sign_in_failed`, 167-04), a holding sourced from a key the venue has
-// stopped accepting would have rendered un-chipped, un-filtered and counted in
-// the headline AUM.
+// stopped accepting would have rendered un-chipped and un-filtered.
+//
+// ⚠️ WHAT THIS PREDICATE DOES NOT REACH (review round 1, SFH-M2 — an earlier
+// version of this comment claimed otherwise): the HEADLINE AUM. The chip and
+// the `HoldingsTable` filter are its only consumers. The AUM is summed in
+// `src/lib/queries.ts` (`emptyLiveBaselineMetrics` /
+// `liveBaselineMetricsFromPerKeyDailies`, `totalAum = holdingsSummary.reduce`)
+// over holdings with no key-status test at all, so a holding from a `revoked`
+// or `sign_in_failed` key IS counted there — true before Phase 167 for
+// `revoked`, and unchanged by it. Flagging the AUM as partial when an
+// untrusted key contributes is a money-number change and is booked as a
+// follow-up, not made here.
 //
 // ⛔ THE EQUALITY SHAPE WAS THE DEFECT, NOT THE MISSING VALUE. Appending
 // `|| status === "sign_in_failed"` beside each `=== "revoked"` reproduces it
@@ -892,6 +902,36 @@ export const UNTRUSTED_KEY_SYNC_STATUSES = [
 ] as const;
 export type UntrustedKeySyncStatus =
   (typeof UNTRUSTED_KEY_SYNC_STATUSES)[number];
+
+// The OTHER half of the partition: every `api_keys.sync_status` value a money
+// surface may render as current (healthy, in flight, or failed-but-transient).
+// Declared so that the partition is TOTAL and CHECKED, not implied by "whatever
+// the set above does not list".
+//
+// ⛔ WHY THIS EXISTS (review round 1, SFH-M1). `isUntrustedKeySyncStatus`
+// answers `false` for a value it has never heard of, so a FUTURE
+// credential-failure value added to `api_keys_sync_status_check` would render
+// as healthy with nothing going red. The runtime default is deliberately NOT
+// flipped (a null status is the legitimate no-key case, and striking through a
+// healthy book on a value drift is its own false claim). The guard is at CI
+// time instead: the B9 CHECK parity matrix
+// (`src/__tests__/contracts/check-zod-db-check-parity.test.ts`, row
+// `api_keys.sync_status`) resolves the LATEST `api_keys_sync_status_check`
+// from `supabase/migrations/` and asserts it equals the UNION of these two
+// lists, and `closed-sets.untrusted-key-status.test.ts` asserts they are
+// DISJOINT. Together: every value the CHECK admits is in EXACTLY ONE
+// partition, and neither partition holds a value the CHECK lacks. A migration
+// that widens the CHECK therefore reds CI until someone decides which side the
+// new value is on.
+export const TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES = [
+  "idle",
+  "syncing",
+  "computing",
+  "complete",
+  "complete_with_warnings",
+  "error",
+  "rate_limited",
+] as const;
 
 // Per-status chip copy. `satisfies Record<UntrustedKeySyncStatus, string>`
 // makes a missing label a COMPILE error, so a future member of the set above
@@ -926,9 +966,15 @@ export const UNTRUSTED_KEY_SET_NOUN = "keys needing attention";
 
 /**
  * Whether a row's source key is in a state that forbids showing its numbers as
- * current. Fails CLOSED in both directions: an unknown / null / empty status is
- * NOT untrusted (a value drift must not strike through a healthy book), and a
- * known untrusted status is never admitted to the healthy branch.
+ * current. A known untrusted status is never admitted to the healthy branch.
+ *
+ * ⚠️ It does NOT fail closed on an UNKNOWN value, and says so: an unknown /
+ * null / empty status answers `false` (trusted). `null` is the legitimate
+ * no-source-key case, and a value drift must not strike through a healthy
+ * book. The cost of that default — a NEW credential-failure value would read
+ * as healthy — is closed at CI time, not here: see
+ * `TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES`, whose partition test reds the moment
+ * `api_keys_sync_status_check` admits a value neither list declares.
  */
 export function isUntrustedKeySyncStatus(
   status: string | null | undefined,
