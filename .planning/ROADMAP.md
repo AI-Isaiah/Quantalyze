@@ -2342,10 +2342,12 @@ Plans:
 
 **Goal:** A client's key validation cannot evict, disturb or expose another client's broker session
 on the shared terminal — and a shared-terminal outage reaches a human without one clicking a button.
-**Requirements**: TBD
+**Requirements**: none from `REQUIREMENTS.md` — this phase carries no v1.20 requirement IDs. The four
+success criteria below ARE the coverage axis and are addressed in plans as `164.6.6-C1`…`164.6.6-C4`,
+the same convention Phase 164.6.5 uses.
 **Depends on:** Phase 164.6.5 (availability first: this phase changes the terminal's ownership model,
 which is only safe once validation stops wedging it)
-**Plans:** 0 plans
+**Plans:** 4 plans (⚠️ PARTIAL BY DESIGN — see the note under criterion 4)
 
 ⛔ **SAME INCIDENT AS 164.6.5, DIFFERENT DEFECT.** 164.6.5 makes validation stop breaking the
 terminal; this phase makes the terminal stop being a shared mutable resource. 164.6.5 is
@@ -2377,9 +2379,20 @@ independently shippable; this is the architecture.
    pooled terminals) vs serialize-and-restore on one terminal. Both have real cost; record the
    reasoning wherever this repo tracks decisions.
 
+⛔ **PLANNED 2026-09-22, AND DELIBERATELY ONLY PART OF THE WAY.** Criterion 4 is an OPEN one-way
+founder decision (CONTEXT `D-10`), and the criterion-1 eviction remedy plus criterion 2's
+ACCUMULATION remedy are both downstream of its answer — their files, tests and risks are all
+different under each option, so a plan written before the answer would be fiction. The four plans
+below ship everything that is true under ALL THREE candidate answers and then gate on the
+decision. ⭐ Re-run `/gsd-plan-phase 164.6.6` after the `checkpoint:decision` in plan 04 resolves,
+to author plans 05+. That is a real dependency, not an omission.
+
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.6.6 to break down)
+- [ ] 164.6.6-01-PLAN.md — C3 salience: the blind-instrument signal reaches a human via a rate-limited Sentry escalation (carries the phase TRACER)
+- [ ] 164.6.6-02-PLAN.md — C2 disclosure fence: no code path can read the terminal's account store, proven able to fire (⛔ the accumulation remedy is NOT here; it inherits criterion 4)
+- [ ] 164.6.6-03-PLAN.md — C1 assumption half: the lease's single-process requirement made observable, and D-04's "nowhere stated" claim corrected against measurement
+- [ ] 164.6.6-04-PLAN.md — C4: the D-10 ownership decision at a blocking founder checkpoint, recorded in every ledger that carries it
 
 ### Phase 164.6.1: MYPYSTRICT — the strict gate claims to cover all running-service code and does not cover the module that IS the service (INSERTED)
 
