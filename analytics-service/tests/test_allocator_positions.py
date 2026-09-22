@@ -2265,6 +2265,74 @@ async def test_sign_in_failure_reaches_its_own_arm_not_the_parents(
     assert _audit.call_args.kwargs["metadata"]["error_kind"] == "permanent"
 
 
+@pytest.mark.asyncio
+async def test_a_refused_sign_in_status_write_falls_back_to_error(
+    monkeypatch, api_key_row_factory, caplog
+):
+    """167 SFH-H2 — the worker and the migration that admits `sign_in_failed`
+    deploy SEPARATELY (Railway vs. the migration apply, with nothing ordering
+    them). If `api_keys_sync_status_check` refuses the new value, a swallowed
+    WARNING left the key reading its last healthy/'syncing' status: a broken
+    key shown as fine.
+
+    The fake `db_execute` RUNS the update (so the attempted payload is
+    captured) and then raises the CHECK violation, the way PostgREST would.
+    The handler must log at ERROR and fall back to the parent's write,
+    `sync_status='error'`, keeping the true sign-in copy."""
+    import logging
+
+    from services import allocator_positions as ap
+    from services import job_worker as jw
+
+    copy = ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+
+    async def _raise_sign_in_failed(venue, exchange, api_key_id=None):
+        raise ap.AllocatorHoldingsSignInFailedError(copy)
+
+    db_calls: list[object] = []
+
+    async def _check_rejects_first_write(fn):
+        db_calls.append(fn)
+        result = fn()
+        if len(db_calls) == 1:
+            raise RuntimeError(
+                'new row for relation "api_keys" violates check constraint '
+                '"api_keys_sync_status_check"'
+            )
+        return result
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_raise_sign_in_failed
+    )
+    monkeypatch.setattr(jw, "db_execute", _check_rejects_first_write)
+
+    with caplog.at_level(logging.DEBUG, logger=jw.logger.name):
+        result = await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses == [ap.SIGN_IN_FAILED_SYNC_STATUS, "error"], (
+        "a refused sign_in_failed write must be followed by the parent's "
+        f"'error' write, or the key keeps a healthy status; got {statuses!r}"
+    )
+    assert _sync_errors(payloads)[-1] == copy, (
+        "the fallback must keep the TRUE cause; the transport note would "
+        "re-introduce the false one"
+    )
+    errors = [
+        r for r in caplog.records
+        if r.name == jw.logger.name and r.levelno >= logging.ERROR
+        and "falling back" in r.getMessage()
+    ]
+    assert errors and errors[-1].exc_info is not None, (
+        "the rejected write must be logged at ERROR with its traceback"
+    )
+    # The disposition is unaffected by the fallback.
+    assert result.error_kind == "permanent"
+
+
 def test_sign_in_copy_is_not_the_unknown_status_FALLBACK(monkeypatch):
     """⛔ THE COPY-TABLE FALLBACK PIN (T-167-14), and it is fallback-SPECIFIC.
 
