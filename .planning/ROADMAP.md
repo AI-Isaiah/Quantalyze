@@ -2877,7 +2877,7 @@ Plans:
 ### Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention (INSERTED)
 
 **Goal:** The allocator KPI strip's headline AUM stops presenting a number as current when part of it comes from keys whose sync is untrusted (`isUntrustedKeySyncStatus`: `revoked`, `sign_in_failed`), while the holdings table on the same page already strikes those rows through as not current.
-**Requirements**: TBD. Source: Phase 167 silent-failure review M2 (2026-09-22); booked as `.planning/WINDOWS.md` entry 66. ⛔ A money-number change — the math in `src/lib/queries.ts` (`emptyLiveBaselineMetrics`, `liveBaselineMetricsFromPerKeyDailies`) is NOT to be changed silently; the design choice (flag as partial vs. exclude) is this phase's first decision.
+**Requirements**: TBD. Source: Phase 167 silent-failure review M2 (2026-09-22); booked as `.planning/WINDOWS.md` entry 66. ⛔ A money-number change — the math in `src/lib/queries.ts` (`emptyLiveBaselineMetrics`, `liveBaselineMetricsFromPerKeyDailies`) is NOT to be changed silently; ⭐ **FOUNDER DECISION 2026-09-22: keep the total and FLAG it** — the headline shows the full number with a marker naming how much comes from keys needing attention (e.g. "includes $X from keys needing attention"). Excluding them was rejected: a password rotation would read as an AUM loss. Nothing silently disappears, and the headline stays reconcilable with the holdings table.
 **Depends on:** Phase 167
 **Plans:** 0 plans
 
