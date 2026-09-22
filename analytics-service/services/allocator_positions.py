@@ -301,11 +301,24 @@ class AllocatorHoldingsSignInFailedError(AllocatorHoldingsSyncTransientError):
         a wrong investor password and a wrong server are indistinguishable at
         that boundary, so naming a cause would be a guess.
 
-    SUBCLASS of ``AllocatorHoldingsSyncTransientError``, deliberately: the
-    retry DISPOSITION is unchanged (the job still backs off and retries, which
-    is correct — a rotated credential is precisely what a later poll should
-    pick up), only the user-facing CLAIM differs. ``str(self)`` IS end-user
-    copy, identical to the parent's contract.
+    SUBCLASS of ``AllocatorHoldingsSyncTransientError`` so it shares the
+    parent's handler arm and its copy contract: ``str(self)`` IS end-user copy.
+    It differs in two declared ways, both below.
+
+    ⭐ 167 WR-04 (orchestrator decision under the founder's standing
+    instruction) — the job disposition is ``permanent``, NOT the parent's
+    ``transient``. A transient disposition sent the job up the full 30s → 6h
+    backoff ladder, and every rung re-ran ``login()`` with the SAME stored
+    password against the ONE shared MT5 terminal. D-08 names exactly that as
+    the harm: repeated validate attempts against that terminal are the
+    operation implicated in wedging and account eviction (164.6.5 / 164.6.6).
+    The ladder bought nothing a later check does not already give: the daily
+    ``enqueue_poll_allocator_positions_for_all_keys`` cron re-enqueues every
+    active key that is not ``revoked`` (``sign_in_failed`` included), so a
+    rotated credential is still re-checked ONCE PER DAY, and ``rotate-secret``
+    resets the key to ``idle`` with fresh ciphertext. ⚠️ Only a login-stage
+    refusal reaches this type (CR-01), so a transport fault never loses its
+    retry ladder here.
 
     ⭐ 167 WR-05 — the difference is DECLARED on the class (``sync_status``
     below), and ``run_poll_allocator_positions_job`` has ONE arm for the parent
@@ -318,6 +331,7 @@ class AllocatorHoldingsSignInFailedError(AllocatorHoldingsSyncTransientError):
     """
 
     sync_status: ClassVar[str] = SIGN_IN_FAILED_SYNC_STATUS
+    error_kind: ClassVar[Literal["transient", "permanent"]] = "permanent"
 
 
 def _extract_bybit_unified_walletbalances(info: dict[str, Any]) -> dict[str, float]:

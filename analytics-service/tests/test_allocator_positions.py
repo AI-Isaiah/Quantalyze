@@ -1763,8 +1763,9 @@ async def test_mt5_client_error_arm_follows_the_live_classifier_verdict(
             await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
         assert str(caught.value) == ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
         assert caught.value.__cause__ is expected
-        # The retry disposition is UNCHANGED: still a transient subclass, so
-        # the handler's queue behaviour and the DB backoff are untouched.
+        # Still a subclass of the transient type, so it reaches the handler's
+        # ONE typed arm (WR-05). Its job disposition is its own declared
+        # `error_kind` (permanent since WR-04; pinned in the handler cases).
         assert isinstance(caught.value, ap.AllocatorHoldingsSyncTransientError)
         # ⛔ And it is NARROW: the sign-in arm no longer claims the terminal
         # was unreachable. The three sibling MT5 arms still do — their own
@@ -2252,8 +2253,16 @@ async def test_sign_in_failure_reaches_its_own_arm_not_the_parents(
         "17-day defect restored"
     )
     assert _sync_errors(payloads)[-1] == copy
-    # The queue disposition is the parent's, unchanged.
-    assert result.error_kind == "transient"
+    # 167 WR-04 — the queue disposition is NOT the parent's. A refused sign-in
+    # must not climb the backoff ladder, because every rung re-runs the same
+    # stored password against the one shared MT5 terminal (the D-08 harm). The
+    # audit carries the same disposition the queue gets.
+    assert result.error_kind == "permanent", (
+        f"a refused sign-in returned error_kind={result.error_kind!r}: the job "
+        "will retry the same wrong password against the shared terminal on "
+        "every backoff rung"
+    )
+    assert _audit.call_args.kwargs["metadata"]["error_kind"] == "permanent"
 
 
 def test_sign_in_copy_is_not_the_unknown_status_FALLBACK(monkeypatch):

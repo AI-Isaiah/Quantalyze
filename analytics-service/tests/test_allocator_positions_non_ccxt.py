@@ -2088,11 +2088,14 @@ async def test_mt5_refused_sign_in_writes_sign_in_failed_end_to_end(
     assert transport.calls.count("login") == 1
     assert "account_info" not in transport.calls
 
-    # Queue disposition is UNCHANGED — the new status is a user-facing claim,
-    # not a retry-disposition change. A rotated credential is exactly what a
-    # later retry should pick up.
+    # 167 WR-04 — the job does NOT climb the backoff ladder. Each rung would
+    # re-run the SAME stored password against the one shared MT5 terminal (the
+    # D-08 harm). A rotated credential is still picked up: the daily cron
+    # re-enqueues every non-revoked key, and rotate-secret resets it to idle.
     assert result.outcome == jw.DispatchOutcome.FAILED
-    assert result.error_kind == "transient"
+    assert result.error_kind == "permanent"
+    # And exactly ONE sign-in was attempted in this job.
+    assert transport.calls.count("login") == 1
 
     # No internal text anywhere in the user-visible column.
     for banned in BANNED_INTERNALS + ("Invalid account",):

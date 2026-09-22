@@ -8227,9 +8227,15 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             # stamped onto all three founder MT5 keys. A non-ccxt venue branch
             # converts its venue-specific exception to END-USER copy and raises
             # this type; str(exc) IS that copy, so we stamp it verbatim.
-            # Classified TRANSIENT (never 'permanent'): an unreachable terminal
+            # The parent type is classified TRANSIENT: an unreachable terminal
             # or a blipping broker API self-heals, so the DB backoff must retry
             # rather than burn the key to a permanent error state.
+            # ⚠️ 167 WR-04 — the sign-in subclass declares `permanent` instead.
+            # Retrying a refused login re-runs the SAME stored password against
+            # the ONE shared MT5 terminal on every rung of the ladder (the D-08
+            # harm). The daily cron still re-enqueues the key once per day,
+            # because it skips only `revoked`. See
+            # `AllocatorHoldingsSignInFailedError`.
             # The [:500] cap mirrors the sibling arms (copy is far shorter).
             #
             # ⭐ 167 WR-05 — ONE arm for this type AND its subclasses. What
