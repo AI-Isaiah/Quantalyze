@@ -1888,6 +1888,54 @@ async def test_mt5_login_stage_refusal_code_writes_the_sign_in_claim(
     assert caught.value.__cause__ is expected
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        # A plain `Mt5ClientError` (not the login-stage marker), so only the
+        # classifier verdict can make it a sign-in failure.
+        pytest.param(
+            lambda m: m.Mt5ClientError(0, "Invalid account or password"),
+            id="plain-client-error-classified-auth",
+        ),
+        pytest.param(
+            lambda m: m.Mt5ClientError(0, "Trade server not found"),
+            id="plain-client-error-classified-wrong_server",
+        ),
+    ],
+)
+async def test_mt5_client_error_the_classifier_blames_on_the_credential_is_a_sign_in_failure(
+    monkeypatch, make_error
+):
+    """167 SFH-LOW-2 — the two surfaces must agree. The wizard answers an
+    `Mt5ClientError` that `classify_mt5_login_error` reads as `"auth"` or
+    `"wrong_server"` with a confident 400 at any stage. The holdings poll
+    used to call the same error a transport blip: MT5_UNREACHABLE_NOTE and a
+    promised retry. It now writes the sign-in claim, with the same copy and a
+    `permanent` disposition as a login-stage refusal.
+
+    Control: `plain-client-error-even-with-auth-text` in
+    `test_mt5_client_error_that_is_not_a_login_refusal_keeps_the_transport_note`
+    ("Invalid account", which the anchored phrase table does NOT match) still
+    keeps the transport note."""
+    from services import allocator_positions as ap
+    from services import mt5_client
+    from services.mt5_validation import classify_mt5_login_error
+
+    expected = make_error(mt5_client)
+    assert not isinstance(expected, mt5_client.Mt5LoginRefusedError)
+    assert classify_mt5_login_error(expected) in ("auth", "wrong_server")
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+
+    with pytest.raises(ap.AllocatorHoldingsSignInFailedError) as caught:
+        await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+
+    assert str(caught.value) == ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+    assert caught.value.error_kind == "permanent"
+    assert caught.value.__cause__ is expected
+
+
 # ---------------------------------------------------------------------------
 # Task 2 — the remaining five except-arms, each its OWN case + OWN real shape
 # ---------------------------------------------------------------------------
