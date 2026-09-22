@@ -276,6 +276,24 @@ itself.
   NOT confirmed to be fed from `api_keys.sync_status`) carry the same shape. `167-04` closes the two
   money surfaces; anything it does not reach is named in its SUMMARY rather than left implied.
 
+- **D-17: A login-stage `-10005` IS a sign-in refusal; the IPC-infrastructure codes are NOT.**
+  *(Added 2026-09-22 after code-review round 2, which found the fix round had silently routed the
+  measured wrong-password case back to the pre-167 copy, crediting a D-07 "acceptance" that this
+  file never recorded — that premise came from the orchestrator's own fixer brief, and was wrong.)*
+  "Sign-in failed" is stamped only when the terminal ANSWERED the `login()` call itself falsy —
+  `Mt5LoginRefusedError`, which `Mt5Client.login` raises only after `initialize()` succeeded — and
+  the answer's code is not `-10000…-10004` (the MetaQuotes internal-IPC family below `-10005`; the
+  repo already treats `-10003` as IPC in `assert_session_authorized` and `mt5_relogin`), not the
+  success code `1`, and not a malformed `last_error` shape. Everything else — an `initialize()`
+  failure, a transport raise, a post-login read failure — keeps the pre-167 transport answer.
+  **Why `-10005` stays in:** D-08 names it as the measured wrong-password mechanism (a modal login
+  dialog blocking IPC), and reaching the marker already implies the bridge answered `initialize()`,
+  so a terminal-wide wedge lands on the transport path instead. ⚠️ Accepted cost: a login-stage
+  `-10005` WITHOUT a dialog (measured once, per the ROADMAP) is shown the hedged sign-in copy
+  ("they may have changed") until the next daily poll re-checks it. Excluding it instead would
+  re-open the 17-day silence this phase exists to close. — **Reversibility:** reversible (one
+  named constant in `services/mt5_validation.py`).
+
 ### Claude's Discretion
 
 - The exact wording of the new `WizardErrorCode` copy and the authored owner-surface helper line,
