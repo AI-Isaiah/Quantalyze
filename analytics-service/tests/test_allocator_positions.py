@@ -1682,7 +1682,18 @@ async def test_mt5_client_error_arm_follows_the_live_classifier_verdict(
     ROADMAP's own measured wrong-password corpus string. `must_be_unwrapped`
     is controlled (see the module note above for why) but the exception
     object is real, and the assertion is IDENTITY — the handler must receive
-    the exact same instance, never a copy or a re-wrap."""
+    the exact same instance, never a copy or a re-wrap.
+
+    ⭐ AMENDED by 167-04 Task 1 (D-11 arm B), and ONLY on the wrapped branch.
+    This is the arm where a LOGIN WAS ATTEMPTED AND DID NOT SUCCEED, so the
+    non-permanent verdicts now surface `AllocatorHoldingsSignInFailedError`
+    with the authored sign-in copy instead of the transport note. The
+    PERMANENT branch is byte-unchanged — plan 02's guard still does the one
+    thing it was built for. The assertions below deliberately keep BOTH the
+    subclass relationship (the retry DISPOSITION is unchanged, so the job
+    still backs off) and the `__cause__` identity (the diagnosis is not lost),
+    because dropping either would let a future "simplification" turn this into
+    a copy-string comparison that proves nothing about the chain."""
     from services import allocator_positions as ap
     import services.job_worker as jw
     from services.mt5_client import Mt5ClientError
@@ -1706,10 +1717,17 @@ async def test_mt5_client_error_arm_follows_the_live_classifier_verdict(
             "unwrapped — a permanent failure would become an unbounded retry"
         )
     else:
-        with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+        with pytest.raises(ap.AllocatorHoldingsSignInFailedError) as caught:
             await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
-        assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+        assert str(caught.value) == ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
         assert caught.value.__cause__ is expected
+        # The retry disposition is UNCHANGED: still a transient subclass, so
+        # the handler's queue behaviour and the DB backoff are untouched.
+        assert isinstance(caught.value, ap.AllocatorHoldingsSyncTransientError)
+        # ⛔ And it is NARROW: the sign-in arm no longer claims the terminal
+        # was unreachable. The three sibling MT5 arms still do — their own
+        # cases below assert exactly that, and are the control for this one.
+        assert str(caught.value) != ap.MT5_UNREACHABLE_NOTE
 
 
 # ---------------------------------------------------------------------------

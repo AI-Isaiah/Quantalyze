@@ -46,6 +46,17 @@ import { formatNumber, formatPercent } from "@/lib/utils";
 // formatter for this surface (shared with the Phase-150 mark/allocate
 // dialogs). Body unchanged — a second money formatter here is forbidden.
 import { formatUsd } from "@/lib/dollar-validation";
+// Phase 167 CREDTRUST / D-16 — the ONE definition of "this key's data is not
+// to be trusted as current". This file used to answer that question with SIX
+// hand-kept equalities against the literal `revoked`, with no closed set over
+// the column anywhere, so every OTHER status fell to the healthy branch by
+// default. ⛔ Do not re-introduce a local equality on `sync_status` here: the
+// equality SHAPE is the defect, and a second literal pasted beside the first
+// reproduces it for the next status.
+import {
+  isUntrustedKeySyncStatus,
+  untrustedKeyChipLabel,
+} from "@/lib/closed-sets";
 import { OWN_CAPITAL } from "@/lib/capital-ownership";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { Button } from "@/components/ui/Button";
@@ -534,13 +545,17 @@ function LegacyHoldingsTable({
   onShowRevokedChange,
   notesByHoldingScopeRef,
 }: LegacyProps) {
+  // D-16 sites 1 and 2 — filter + hidden counter. They MUST stay in lockstep:
+  // a filter that hides a row a counter does not count is a row that vanishes
+  // from the surface with no footer telling the reader it was dropped.
   const visibleHoldings = showRevoked
     ? holdings
-    : holdings.filter((h) => h.source_key_sync_status !== "revoked");
+    : holdings.filter((h) => !isUntrustedKeySyncStatus(h.source_key_sync_status));
 
   const hiddenCount = showRevoked
     ? 0
-    : holdings.filter((h) => h.source_key_sync_status === "revoked").length;
+    : holdings.filter((h) => isUntrustedKeySyncStatus(h.source_key_sync_status))
+        .length;
 
   const [expandedNoteRowId, setExpandedNoteRowId] = useState<string | null>(
     null,
@@ -584,8 +599,16 @@ function LegacyHoldingsTable({
           </thead>
           <tbody>
             {visibleHoldings.map((h) => {
-              const isRevoked = h.source_key_sync_status === "revoked";
-              const numericCell = isRevoked
+              // D-16 site 3 — the per-row flag. The CHIP is per-status copy,
+              // not one shared sentence: `revoked` means the venue asserted
+              // the rejection, `sign_in_failed` means we could not sign in and
+              // cannot say why, and a chip naming a cause it cannot support is
+              // the same false blame this phase exists to remove.
+              const untrustedLabel = untrustedKeyChipLabel(
+                h.source_key_sync_status,
+              );
+              const isUntrusted = untrustedLabel !== null;
+              const numericCell = isUntrusted
                 ? "px-4 py-2 font-metric tabular-nums text-right line-through text-text-muted"
                 : "px-4 py-2 font-metric tabular-nums text-right text-text-primary";
               const scopeRef = buildHoldingScopeRef({
@@ -606,12 +629,12 @@ function LegacyHoldingsTable({
                         <span className="font-medium text-text-primary">
                           {venueLabel(h.venue)} · {h.symbol}
                         </span>
-                        {isRevoked ? (
+                        {untrustedLabel !== null ? (
                           <span
                             className="inline-flex items-center rounded px-1.5 py-0.5 text-micro font-semibold uppercase tracking-wider"
                             style={AMBER_CHIP_STYLE}
                           >
-                            Key revoked
+                            {untrustedLabel}
                           </span>
                         ) : null}
                       </div>
@@ -628,7 +651,13 @@ function LegacyHoldingsTable({
                     <td className="px-2 py-2">
                       <HoldingNoteIconButton
                         hasNote={!!noteEntry}
-                        revoked={isRevoked}
+                        // The prop is a STYLING flag on a shared component
+                        // outside this phase's scope; its name still says
+                        // `revoked` while its meaning is now the wider
+                        // untrusted set. Named in 167-04-SUMMARY.md rather
+                        // than renamed here — a rename reaches HoldingNoteRow
+                        // and its own pins.
+                        revoked={isUntrusted}
                         isExpanded={isExpanded}
                         onClick={() =>
                           setExpandedNoteRowId((prev) =>
@@ -737,17 +766,21 @@ function DesignHoldingsTable({
   });
   const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
 
+  // D-16 sites 4 and 5 — the design-mode filter + hidden counter, joined
+  // against `revokedStatusByHoldingId`. Same lockstep requirement as the
+  // legacy pair above.
   const visibleRows = useMemo(() => {
     if (showRevoked) return rows;
     return rows.filter(
-      (r) => revokedStatusByHoldingId[r.id] !== "revoked",
+      (r) => !isUntrustedKeySyncStatus(revokedStatusByHoldingId[r.id]),
     );
   }, [rows, revokedStatusByHoldingId, showRevoked]);
 
   const hiddenCount = useMemo(() => {
     if (showRevoked) return 0;
-    return rows.filter((r) => revokedStatusByHoldingId[r.id] === "revoked")
-      .length;
+    return rows.filter((r) =>
+      isUntrustedKeySyncStatus(revokedStatusByHoldingId[r.id]),
+    ).length;
   }, [rows, revokedStatusByHoldingId, showRevoked]);
 
   const sortedRows = useMemo(() => {
@@ -849,10 +882,14 @@ function DesignHoldingsTable({
           <tbody>
             {sortedRows.map((row) => {
               const isExpanded = expandedRowId === row.id;
-              const isRevoked = revokedStatusByHoldingId[row.id] === "revoked";
-              const numericCell = isRevoked
-                ? "px-4 py-2 font-metric tabular-nums text-right line-through text-text-muted"
-                : "px-4 py-2 font-metric tabular-nums text-right text-text-primary";
+              // D-16 site 6 — the design-mode per-row flag + chip copy.
+              const untrustedLabel = untrustedKeyChipLabel(
+                revokedStatusByHoldingId[row.id],
+              );
+              const numericCell =
+                untrustedLabel !== null
+                  ? "px-4 py-2 font-metric tabular-nums text-right line-through text-text-muted"
+                  : "px-4 py-2 font-metric tabular-nums text-right text-text-primary";
               const candidateStrategyId =
                 flaggedHoldingsByRef[row.id]?.top_candidate_strategy_id ?? null;
               return (
@@ -876,12 +913,12 @@ function DesignHoldingsTable({
                         <span className="font-medium text-text-primary">
                           {row.strategy ?? "—"}
                         </span>
-                        {isRevoked ? (
+                        {untrustedLabel !== null ? (
                           <span
                             className="inline-flex items-center rounded px-1.5 py-0.5 text-micro font-semibold uppercase tracking-wider"
                             style={AMBER_CHIP_STYLE}
                           >
-                            Key revoked
+                            {untrustedLabel}
                           </span>
                         ) : null}
                         {row.bridgeCandidate ? (

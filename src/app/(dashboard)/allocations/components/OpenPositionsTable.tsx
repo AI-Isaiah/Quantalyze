@@ -20,6 +20,11 @@
 
 import { type CSSProperties } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
+// Phase 167 CREDTRUST / D-16 — the SEVENTH former `=== "revoked"` equality,
+// and the only one on this surface. Shared with HoldingsTable so the two money
+// surfaces cannot drift on what "trusted" means. ⛔ Do not re-introduce a
+// local equality on `sync_status` here.
+import { untrustedKeyChipLabel } from "@/lib/closed-sets";
 
 const AMBER_CHIP_STYLE: CSSProperties = {
   color: "var(--color-warning)",
@@ -144,7 +149,13 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
           </thead>
           <tbody>
             {rows.map((r) => {
-              const isRevoked = r.source_key_sync_status === "revoked";
+              // D-16 site 7. The chip is per-status copy, not one shared
+              // sentence — `revoked` names a cause a sign-in failure does not
+              // have, and vice versa.
+              const untrustedLabel = untrustedKeyChipLabel(
+                r.source_key_sync_status,
+              );
+              const isRevoked = untrustedLabel !== null;
               const numericCell = isRevoked
                 ? "px-4 py-2 font-metric tabular-nums text-right line-through text-text-muted"
                 : "px-4 py-2 font-metric tabular-nums text-right text-text-primary";
@@ -159,12 +170,12 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                       <span className="font-medium text-text-primary">
                         {venueLabel(r.venue)} · {r.symbol}
                       </span>
-                      {isRevoked ? (
+                      {untrustedLabel !== null ? (
                         <span
                           className="inline-flex items-center rounded px-1.5 py-0.5 text-micro font-semibold uppercase tracking-wider"
                           style={AMBER_CHIP_STYLE}
                         >
-                          Key revoked
+                          {untrustedLabel}
                         </span>
                       ) : null}
                     </div>

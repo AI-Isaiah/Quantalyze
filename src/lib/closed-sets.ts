@@ -852,6 +852,91 @@ export function deriveEmptySeriesState(
   return "empty";
 }
 
+// --- Untrusted key sync_status (Phase 167 CREDTRUST / D-16) ----------------
+// THE ONE DEFINITION of "this key's data is not to be trusted as current".
+//
+// MEASURED DEFECT THIS REPLACES (founder decision D-16, 2026-09-22; found
+// independently by `rls-policy-auditor` and `silent-failure-hunter`): the
+// holdings and open-positions surfaces answered that question with SEVEN
+// hand-kept equalities against the single literal `revoked` — six in
+// `HoldingsTable.tsx`, one in `OpenPositionsTable.tsx`. There was no
+// allow-list, no enum and no closed set over `api_keys.sync_status` anywhere,
+// so EVERY status that was not `revoked` fell to the healthy branch by
+// default. The moment the holdings poll gained a second failed-credential
+// value (`sign_in_failed`, 167-04), a holding sourced from a key the venue has
+// stopped accepting would have rendered un-chipped, un-filtered and counted in
+// the headline AUM.
+//
+// ⛔ THE EQUALITY SHAPE WAS THE DEFECT, NOT THE MISSING VALUE. Appending
+// `|| status === "sign_in_failed"` beside each `=== "revoked"` reproduces it
+// for the tenth status. Every one of those sites is now a CALLER of the
+// predicate below; ⛔ do not re-introduce a local equality on this column.
+//
+// The TWO members are two different CLAIMS with one shared consequence:
+//   * `revoked`        — the VENUE asserted the rejection (ccxt
+//                        AuthenticationError / PermissionDenied).
+//   * `sign_in_failed` — WE could not sign in and cannot say why (the MT5
+//                        login that returns an opaque False).
+// Both mean the same thing to a money surface: the numbers on this row are
+// not current. They are NOT interchangeable in COPY, which is why the label
+// map below is per-status rather than one shared sentence.
+//
+// ⚠️ SCOPE, stated rather than implied: this set governs the ROW-LEVEL trust
+// question on the allocator money surfaces. It is NOT the pill vocabulary —
+// `AllocatorSyncStatus`'s PILL_STYLES covers all nine statuses including the
+// healthy ones, and is a different question (what state is this key in?) from
+// this one (may I show this key's numbers as current?).
+export const UNTRUSTED_KEY_SYNC_STATUSES = [
+  "revoked",
+  "sign_in_failed",
+] as const;
+export type UntrustedKeySyncStatus =
+  (typeof UNTRUSTED_KEY_SYNC_STATUSES)[number];
+
+// Per-status chip copy. `satisfies Record<UntrustedKeySyncStatus, string>`
+// makes a missing label a COMPILE error, so a future member of the set above
+// physically cannot ship rendering an EMPTY chip — a correctly-coloured blank,
+// which is the silent failure the sibling `PILL_STYLES`/`pillLabel` pair had
+// to be pinned by a runtime roster test to catch.
+//
+// ⛔ NEITHER STRING IS NEW, and that is deliberate (167-UI-SPEC § Copywriting
+// Contract — do not invent a third vocabulary for a state that already has
+// one): "Key revoked" is the byte-unchanged Phase 08 MANAGE-02 chip, and
+// "Sign-in failed" is the pill label plan 167-03 shipped in
+// `AllocatorSyncStatus`. The chip names the STATE; the remedy sentence lives
+// on the owner's key surface, which is the only surface that can act on it.
+export const UNTRUSTED_KEY_STATUS_CHIP_LABEL = {
+  revoked: "Key revoked",
+  sign_in_failed: "Sign-in failed",
+} as const satisfies Record<UntrustedKeySyncStatus, string>;
+
+/**
+ * Whether a row's source key is in a state that forbids showing its numbers as
+ * current. Fails CLOSED in both directions: an unknown / null / empty status is
+ * NOT untrusted (a value drift must not strike through a healthy book), and a
+ * known untrusted status is never admitted to the healthy branch.
+ */
+export function isUntrustedKeySyncStatus(
+  status: string | null | undefined,
+): status is UntrustedKeySyncStatus {
+  return (UNTRUSTED_KEY_SYNC_STATUSES as readonly string[]).includes(
+    status ?? "",
+  );
+}
+
+/**
+ * The chip copy for an untrusted status, or `null` for anything a money
+ * surface may render as current. Returning null (rather than an empty string)
+ * keeps the caller's `{label ? <chip/> : null}` honest.
+ */
+export function untrustedKeyChipLabel(
+  status: string | null | undefined,
+): string | null {
+  return isUntrustedKeySyncStatus(status)
+    ? UNTRUSTED_KEY_STATUS_CHIP_LABEL[status]
+    : null;
+}
+
 // --- Signup roles (SECURITY BOUNDARY) --------------------------------------
 // SECURITY BOUNDARY (NEW-C15-05): the AUTHORITATIVE allowlist for the role a
 // new user receives is the SQL trigger handle_new_user
