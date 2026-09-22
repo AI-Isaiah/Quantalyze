@@ -201,6 +201,68 @@ describe("UpdateMt5SecretDialog", () => {
     });
   });
 
+  // 167 review round 1 / WR-02. This dialog's route is MT5-only by
+  // construction, so its envelopes must be built WITH the MT5 venue. Before the
+  // fix `buildEnvelope` got no context and every venue-gated bullet took its
+  // venue-unknown answer: the MT5 investor-password remedy was suppressed on
+  // the one surface guaranteed to be MT5, and the rate-limit card told an MT5
+  // owner to try "a different exchange account". Expected text is typed here,
+  // not read out of the copy table it pins.
+  async function submitAndFailWith(code: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ code }), {
+          status: 424,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    render(
+      <UpdateMt5SecretDialog
+        open
+        apiKeyId="key-1"
+        onClose={vi.fn()}
+        onUpdated={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("New password"), {
+      target: { value: "some-password" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Update password/i }));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+        "data-error-code",
+        code,
+      );
+    });
+    return screen.getByTestId("error-envelope");
+  }
+
+  it("KEY_SIGN_IN_FAILED renders the MT5 investor-password bullet (venue passed)", async () => {
+    const envelope = await submitAndFailWith("KEY_SIGN_IN_FAILED");
+    expect(envelope.textContent).toContain(
+      "For MT5 that is the investor (read-only) password: your broker can reset it, and changing the master password changes it too.",
+    );
+    // Non-vacuity: the unconditional bullets still render beside it, so the
+    // assertion above is about the gated slot, not about an empty list.
+    expect(envelope.textContent).toContain(
+      "Open this account at the venue and confirm its credentials are current",
+    );
+  });
+
+  it("KEY_RATE_LIMIT does not tell an MT5 owner to try a different exchange account", async () => {
+    const envelope = await submitAndFailWith("KEY_RATE_LIMIT");
+    expect(envelope.textContent).not.toContain(
+      "try a different exchange account",
+    );
+    expect(envelope.textContent).toContain(
+      "This is your broker account, so there is no other venue to try.",
+    );
+  });
+
   it("the submit button is disabled while the field is empty", () => {
     render(
       <UpdateMt5SecretDialog
