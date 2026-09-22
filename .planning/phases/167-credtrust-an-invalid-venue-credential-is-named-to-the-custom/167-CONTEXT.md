@@ -252,6 +252,30 @@ itself.
   one-way arm with a PROD migration and two measured silent side-effects — and not because leaving
   one open looks careful.
 
+- **D-16: The holdings surfaces' "healthy" test is an EQUALITY against `revoked`, and it is
+  widened to a shared predicate in the SAME commit as the writer — founder decision 2026-09-22.**
+  Found independently by `rls-policy-auditor` and `silent-failure-hunter` during plan 03's D-13
+  review round, and re-measured by the orchestrator: **7 sites**, six in
+  `src/app/(dashboard)/allocations/components/HoldingsTable.tsx` and one in
+  `OpenPositionsTable.tsx`, each of the shape `source_key_sync_status !== "revoked"` or
+  `=== "revoked"`. There is no allow-list, no enum and no closed set over the column anywhere, so
+  **every status that is not `revoked` defaults to the healthy branch**. The consequence once
+  `167-04` lands the writer: a holding sourced from a key the venue has stopped accepting renders
+  un-chipped, un-filtered and counted in the headline AUM — the exact false-confidence failure this
+  phase exists to remove, reproduced one surface over. Within-tenant only; the ADR-0022 two-layer
+  gate is intact and unweakened.
+  ⛔ **Not deferred, and not folded into plan 03.** The harm exists only once a row can carry the
+  value, so the fix belongs with the writer: `167-04`'s `files_modified` gains the two components
+  and the equality is replaced by ONE shared predicate rather than a third and fourth hand-kept
+  copy. Landing both in one commit means there is never a window in which the value exists and the
+  surface lies about it. ⚠️ Plan 03 was deliberately NOT widened at its gate — three reviewers had
+  already signed off on its scope, and reopening a reviewed scope to append an unreviewed change is
+  how a fix round becomes a regression.
+  ⚠️ **The class is wider than the two files.** `HoldingsTabPanel`'s `keyStatusById` map and
+  `ApiKeyManager.tsx`'s `SyncProgress` (`syncStatus !== "idle"`, no `sign_in_failed` branch, and
+  NOT confirmed to be fed from `api_keys.sync_status`) carry the same shape. `167-04` closes the two
+  money surfaces; anything it does not reach is named in its SUMMARY rather than left implied.
+
 ### Claude's Discretion
 
 - The exact wording of the new `WizardErrorCode` copy and the authored owner-surface helper line,
