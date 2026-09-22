@@ -211,9 +211,16 @@ SPOT_FETCH_FAILED_NOTE = (
 # 167-UI-SPEC S1 specifies an AUTHORED TypeScript helper that ignores
 # ``sync_error`` entirely. This string exists because ``sync_error`` has OTHER
 # readers, so it has to stand on its own.
+#
+# ⭐ 167 WR-03 — the remedy is "update them", NOT "reconnect". On the owner's
+# card, "Reconnect" names a control that re-runs the STORED credential — the
+# very one this arm just failed to sign in with — so following the old wording
+# literally could not fix the condition it described. The control that does
+# fix it replaces the credential ("Update password" for MT5), so the copy names
+# that action, venue-agnostically.
 SIGN_IN_FAILED_NOTE = (
-    "Couldn't sign in to {venue} with these credentials — reconnect this "
-    "account to resume syncing."
+    "Couldn't sign in to {venue} with these credentials — update them to "
+    "resume syncing."
 )
 
 # Phase 167 / D-11 arm B — the api_keys.sync_status value the sign-in arm

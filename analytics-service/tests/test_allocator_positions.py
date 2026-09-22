@@ -2257,6 +2257,25 @@ def test_sign_in_copy_is_not_the_unknown_status_FALLBACK(monkeypatch):
     assert "retry" not in text.lower()
 
 
+def test_sign_in_copy_names_the_remedy_that_works_verbatim():
+    """167 WR-03 — THE LITERAL PIN, hand-typed and never derived from the
+    constant it checks.
+
+    The copy must name the action that FIXES a refused sign-in: replacing the
+    credential. The old wording said "reconnect this account", and on the
+    owner's card "Reconnect" re-runs the STORED credential, the one that just
+    failed, so an owner who followed the copy could not fix the problem. Every
+    other pin reads `SIGN_IN_FAILED_NOTE` itself, so without this one a rewording
+    of the constant would pass all of them."""
+    from services.allocator_positions import SIGN_IN_FAILED_NOTE
+
+    assert SIGN_IN_FAILED_NOTE == (
+        "Couldn't sign in to {venue} with these credentials — update them "
+        "to resume syncing."
+    )
+    assert "reconnect" not in SIGN_IN_FAILED_NOTE.lower()
+
+
 def test_every_status_this_module_can_write_has_its_own_copy_row():
     """THE ROSTER PIN — no future status may ship into the silent fallback.
 
