@@ -15,8 +15,8 @@
 # host this spec. Measured on the running stack 2026-08-29: PostgREST 200,
 # GoTrue /health 200 (v2.188.1).
 #
-# SCHEMA SOURCE: baseline, NOT migration replay
-# ---------------------------------------------
+# SCHEMA SOURCE: baseline + the TAIL the dump does not carry, NEVER a replay from empty
+# ------------------------------------------------------------------------------------
 # The spike (scripts/local-stack/REPLAY-SPIKE.md) MEASURED the chain: 262 migrations,
 # 69 fail, 193 apply. `supabase db reset` dies at 20260416125432 (CREATE INDEX
 # CONCURRENTLY inside the CLI's libpq pipeline, SQLSTATE 25001), and removing the
@@ -24,10 +24,19 @@
 # 20260823120000_revoke_api_keys_insert.sql which REFUSES BY DESIGN to run against a
 # database it cannot identify.
 #
-# So this lane loads a prebuilt baseline. It does NOT replay migrations, and it does
-# NOT fall back to "apply the 193 that work" — a partially-applied schema that mostly
-# works is precisely the vacuity this phase exists to eliminate. Missing baseline is a
-# LOUD FAILURE, never a silent degrade.
+# So this lane loads a prebuilt baseline. It does NOT replay the chain from EMPTY, and
+# it does NOT fall back to "apply the 193 that work" — a partially-applied schema that
+# mostly works is precisely the vacuity this phase exists to eliminate. Missing
+# baseline is a LOUD FAILURE, never a silent degrade.
+#
+# ⭐ DECISION F (Phase 164.4.2, founder 2026-09-23): on top of the dump, the lane
+# REPLAYS — in filename order, each file AS AUTHORED — exactly the
+# supabase/migrations/*.sql files the dump does not carry. WHICH files those are is
+# read from supabase/schema/baseline-carried-migrations.txt, a committed marker bound
+# to the dump's sha256, never inferred from commit dates. A migration newer than the
+# dump is therefore the NORMAL case: it is replayed, NAMED on every boot (the zero
+# case included), and ledgered in supabase_migrations.schema_migrations only after it
+# applied. An undeterminable set, or a replayed migration that errors, is FATAL.
 #
 # INVOCATIONS (CI pastes these verbatim — Pitfall 2: a wrapped run is a different run)
 # -----------------------------------------------------------------------------------
@@ -41,7 +50,14 @@
 #   scripts/local-stack/run.sh --print-baseline-path   # print the RESOLVED BASELINE_FILE
 #   scripts/local-stack/run.sh --print-workdir         # print the RESOLVED STACK_DIR
 #   scripts/local-stack/run.sh --check-currency        # run the baseline CURRENCY gate
-#                                                      # exactly as `up` does; exit = its verdict
+#                                                      # exactly as `up` does (--replay-set:
+#                                                      # names the migrations it would replay);
+#                                                      # exit = its verdict
+#
+# Environment seams (defaults = the repo paths; each resolved value is logged):
+#   LANE_MIGRATIONS_DIR     the migrations directory the gate classifies and the replay applies
+#   LANE_CARRIED_MARKER     the carried-migrations marker (baseline-carried-migrations.txt)
+#   LANE_REFDATA_ALLOWLIST  the reference-data allowlist the gate filters for the extractor
 #
 # ⚠️ R2-I03: these were dispatched but absent from this block, which is the
 # block `usage()` prints — so `run.sh` with no argument documented neither.
@@ -58,7 +74,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LANE_DIR="${REPO_ROOT}/scripts/local-stack"
 ENV_FILE="${LANE_DIR}/.stack-env"
 BASELINE_FILE="${REPO_ROOT}/supabase/schema/baseline.sql"
-MIGRATIONS_DIR="${REPO_ROOT}/supabase/migrations"
+# Three DECISION F seams (Phase 164.4.2 plan 06). The defaults are the repo paths;
+# the overrides exist so the replay can be driven end to end — synthetic
+# migrations newer than the dump — without touching supabase/migrations/.
+# ONE directory serves the gate, the reference-data filter, the extractor and
+# the replay, so none of them can classify one directory and apply another.
+MIGRATIONS_DIR="${LANE_MIGRATIONS_DIR:-${REPO_ROOT}/supabase/migrations}"
+CARRIED_MARKER="${LANE_CARRIED_MARKER:-${REPO_ROOT}/supabase/schema/baseline-carried-migrations.txt}"
+REFDATA_ALLOWLIST="${LANE_REFDATA_ALLOWLIST:-${REPO_ROOT}/scripts/restore-test-refdata-allowlist.txt}"
 CONFIG_TOML="${REPO_ROOT}/supabase/config.toml"
 
 # Lane-owned Supabase workdir, generated per run and gitignored.
@@ -78,6 +101,14 @@ CONFIG_TOML="${REPO_ROOT}/supabase/config.toml"
 # directory, so the lane cannot drift from the real config and cannot corrupt it.
 STACK_DIR="${LANE_DIR}/.stack"
 STACK_CONFIG="${STACK_DIR}/supabase/config.toml"
+# The currency gate's handover files (replay set, carried set, filtered
+# reference-data allowlist). Inside the gitignored lane workdir, and emptied
+# before every gate run, so a gate that refuses leaves NO file for a later
+# step to trust.
+REPLAY_HANDOFF_DIR="${STACK_DIR}/replay"
+REPLAY_SET_FILE="${REPLAY_HANDOFF_DIR}/replay-set.txt"
+CARRIED_SET_FILE="${REPLAY_HANDOFF_DIR}/carried-set.txt"
+REFDATA_ALLOWLIST_FILTERED="${REPLAY_HANDOFF_DIR}/refdata-allowlist.filtered.txt"
 
 cd "$REPO_ROOT"
 
@@ -209,21 +240,34 @@ write_env_handoff() {
 # restore script's `refuse_stale_baseline()`. This lane calls it rather than
 # carrying a second copy of the comparison.
 #
-# BASELINE_FILE and MIGRATIONS_DIR are passed EXPLICITLY, so the lane and the
-# gate cannot disagree about which two paths were compared. FRESHNESS_TS_CMD
-# is passed through untouched (empty = the gate's own `git log` default), which
-# is the seam that lets the refusal be driven in both directions without
-# rewriting history.
+# ⭐ DECISION F (plan 06) — "refuse" became "bound and name". Plan 03 ran the
+# gate's DEFAULT mode here, which REFUSES a dump older than the newest
+# migration: correct as a detector, but it reddened every lane job on the next
+# migration merge until the founder re-dumped PRODUCTION, and it left a PR
+# unable to exercise its own migration on the lane at all. The lane now runs the
+# gate's `--replay-set` mode, which reads the committed carried-migrations
+# marker (bound to the dump's sha256), NAMES the migrations the dump does not
+# carry, and hands them — plus the carried set and a reference-data allowlist
+# with the replayed files' lines removed — to the steps below through files it
+# writes ONLY when the set was determined. The DEFAULT mode is untouched: it is
+# still the restore path's `refuse_stale_baseline()`.
 #
-# ⚠️ On a SHALLOW clone `git log -1 --format=%ct` reports the clone's own
-# commit time for every path, so the two epochs compare equal and this passes
-# having measured nothing. The CI jobs that boot this lane check out with
-# `fetch-depth: 0` for exactly that reason.
+# Every path is passed EXPLICITLY, so the lane and the gate cannot disagree
+# about which marker, dump or directory was read. The marker comparison reads
+# files on disk, so the shallow-clone vacuity the epoch comparison had (two
+# identical commit times comparing equal) does not exist for this mode.
 check_baseline_currency() {
+  log "currency gate inputs: migrations=${MIGRATIONS_DIR} marker=${CARRIED_MARKER} refdata-allowlist=${REFDATA_ALLOWLIST}"
+  rm -rf "$REPLAY_HANDOFF_DIR"
+  mkdir -p "$REPLAY_HANDOFF_DIR"
+  CARRIED_MARKER="$CARRIED_MARKER" \
   BASELINE_FILE="$BASELINE_FILE" \
   MIGRATIONS_DIR="$MIGRATIONS_DIR" \
-  FRESHNESS_TS_CMD="${FRESHNESS_TS_CMD:-}" \
-    node "${REPO_ROOT}/scripts/check-baseline-currency.mjs"
+  REPLAY_SET_FILE="$REPLAY_SET_FILE" \
+  CARRIED_SET_FILE="$CARRIED_SET_FILE" \
+  REFDATA_ALLOWLIST_IN="$REFDATA_ALLOWLIST" \
+  REFDATA_ALLOWLIST_OUT="$REFDATA_ALLOWLIST_FILTERED" \
+    node "${REPO_ROOT}/scripts/check-baseline-currency.mjs" --replay-set
 }
 
 load_baseline() {
@@ -242,10 +286,12 @@ EOF
   fi
 
   # ⛔ CURRENCY, before the first connection and before psql reads a byte of
-  # the dump. A REFUSAL, never a warning: a lane that logs "stale" and loads
-  # anyway is a gate that measures nothing.
+  # the dump. Since DECISION F this determines the REPLAY SET rather than
+  # refusing a newer migration — but an UNDETERMINABLE set is still a REFUSAL,
+  # never a warning: a lane that cannot say what it is about to replay and
+  # loads anyway is a gate that measures nothing.
   if ! check_baseline_currency; then
-    echo "FATAL: refusing to load ${BASELINE_FILE} into the local database: the baseline currency gate above did not pass." >&2
+    echo "FATAL: refusing to load ${BASELINE_FILE} into the local database: the baseline currency gate above could not determine the replay set." >&2
     exit 1
   fi
 
@@ -271,7 +317,97 @@ EOF
   "$psql" "$db_url" -v ON_ERROR_STOP=1 -q -f "$BASELINE_FILE"
   log "baseline loaded from ${BASELINE_FILE}"
 
+  # Reference rows come from CARRIED migrations only (the gate removed the
+  # replayed files' allowlist lines), and they predate every migration newer
+  # than the dump — PRODUCTION's own chronological order — so they load first.
   load_reference_data "$psql" "$db_url"
+
+  replay_migrations "$psql" "$db_url"
+}
+
+# ── Replay of the migrations the dump does not carry (DECISION F, plan 06) ────
+#
+# HOW A REPLAYED FILE IS APPLIED — and why there is NO wrapper. Each file runs AS
+# AUTHORED, one psql call per file in psql's default autocommit mode, so the
+# file's OWN transaction control governs it. MEASURED at planning time: 182
+# committed migrations carry a top-level BEGIN;/COMMIT; pair and 4 carry a
+# top-level CREATE INDEX CONCURRENTLY, which cannot run inside a transaction
+# block. A lane-added whole-file transaction would (a) be ended early by the
+# file's own COMMIT;, so it never made the ledger row atomic with the file, and
+# (b) turn every CONCURRENTLY migration into a FATAL boot. ⛔ Do not re-add one
+# "for safety" — the tracer's CONCURRENTLY arm was observed RED with it.
+#
+# WHAT IS CLAIMED INSTEAD: a file's ledger row is written by a SEPARATE psql
+# call only AFTER that file's psql exited 0, so the ledger never names an
+# unapplied migration. NO migration+ledger atomicity is claimed. A failure in
+# either call is FATAL, and the EXIT trap tears the ephemeral stack down, so a
+# partially applied file is never tested against.
+#
+# THE LEDGER. `supabase_migrations.schema_migrations` in the Supabase CLI's own
+# shape (the same DDL scripts/restore-test-from-baseline.sh uses). CARRIED
+# migrations get a row too, whose `statements` says the dump carried them and the
+# lane did NOT execute them — two corpus files read this table as an applied-ness
+# oracle and RAISE when it is absent. MEASURED before this step existed
+# (2026-09-23): the lane had no such table at all. Plain INSERTs, never ON
+# CONFLICT: a pre-existing row is a defect to see, not one to skip.
+replay_migrations() {
+  local psql="$1" db_url="$2" sha16 base version name sql n=0 total
+  if [ ! -f "$REPLAY_SET_FILE" ] || [ ! -f "$CARRIED_SET_FILE" ]; then
+    echo "FATAL: the currency gate handed over no replay/carried set (${REPLAY_HANDOFF_DIR}); refusing to guess." >&2
+    exit 1
+  fi
+  sha16="$(node -e 'process.stdout.write(require("crypto").createHash("sha256").update(require("fs").readFileSync(process.argv[1])).digest("hex").slice(0,16))' "$BASELINE_FILE")"
+
+  sql="${REPLAY_HANDOFF_DIR}/ledger-carried.sql"
+  {
+    echo "CREATE SCHEMA IF NOT EXISTS supabase_migrations;"
+    echo "CREATE TABLE IF NOT EXISTS supabase_migrations.schema_migrations (version text NOT NULL PRIMARY KEY, statements text[], name text);"
+  } >"$sql"
+  while IFS= read -r base <&3; do
+    if ! [[ "$base" =~ ^[0-9]+_[a-z0-9_]+\.sql$ ]]; then
+      echo "FATAL: carried set holds a line that is not a strict migration basename: '${base}'" >&2
+      exit 1
+    fi
+    version="${base%%_*}"
+    name="${base#*_}"
+    name="${name%.sql}"
+    printf "INSERT INTO supabase_migrations.schema_migrations (version, name, statements) VALUES ('%s', '%s', ARRAY['carried by the committed dump supabase/schema/baseline.sql sha256 %s; NOT executed on the local-stack lane']);\n" \
+      "$version" "$name" "$sha16" >>"$sql"
+  done 3<"$CARRIED_SET_FILE"
+  if ! "$psql" -X "$db_url" -v ON_ERROR_STOP=1 -q -f "$sql" </dev/null; then
+    echo "FATAL: could not write the carried migrations' ledger rows into supabase_migrations.schema_migrations." >&2
+    exit 1
+  fi
+  log "ledger: $(grep -c . "$CARRIED_SET_FILE" || true) carried migration row(s) written (dump sha256 ${sha16}…)"
+
+  total="$(grep -c . "$REPLAY_SET_FILE" || true)"
+  while IFS= read -r base <&3; do
+    if ! [[ "$base" =~ ^[0-9]+_[a-z0-9_]+\.sql$ ]]; then
+      echo "FATAL: replay set holds a line that is not a strict migration basename: '${base}'" >&2
+      exit 1
+    fi
+    version="${base%%_*}"
+    name="${base#*_}"
+    name="${name%.sql}"
+    # (1) the file, as authored — no wrapper (see above).
+    if ! "$psql" -X "$db_url" -v ON_ERROR_STOP=1 -q -f "${MIGRATIONS_DIR}/${base}" </dev/null; then
+      echo "FATAL: replayed migration ${base} failed" >&2
+      exit 1
+    fi
+    # (2) ONLY after (1) exited 0: its ledger row, in a separate call.
+    if ! "$psql" -X "$db_url" -v ON_ERROR_STOP=1 -q -c \
+      "INSERT INTO supabase_migrations.schema_migrations (version, name, statements) VALUES ('${version}', '${name}', ARRAY['replayed on the local-stack lane from supabase/migrations/${base}']);" </dev/null; then
+      echo "FATAL: replayed migration ${base} failed (it applied, but its ledger row could not be written)" >&2
+      exit 1
+    fi
+    log "replayed ${base} (ledger row written)"
+    n=$((n + 1))
+  done 3<"$REPLAY_SET_FILE"
+  if [ "$n" != "$total" ]; then
+    echo "FATAL: replayed ${n} migration(s) but the handed-over set names ${total}." >&2
+    exit 1
+  fi
+  log "replay complete: ${n} migration(s) applied on top of the dump"
 }
 
 # ── Reference-data replay (Phase 164.9 plan 08) ───────────────────────────────
@@ -295,10 +431,19 @@ EOF
 # an empty reference table would not skip — it would fail 29 specs with a foreign
 # key error that says nothing about the real cause, which is how a whole class of
 # specs gets written off as "flaky".
+#
+# ⭐ DECISION F (plan 06): the extractor reads the gate-written FILTERED allowlist
+# — the lines naming REPLAYED migrations removed — and the SAME migrations
+# directory the gate classified and the replay applies from. A replayed
+# migration's own statements then run exactly once, natively, in the replay,
+# after the tables they need exist; extracting them here as well would run a
+# plain VALUES insert twice (or before its table exists). Without `--migrations`
+# the extractor would resolve entries against its repo default and refuse every
+# entry naming a file only an overridden lane directory holds.
 load_reference_data() {
   local psql="$1" db_url="$2" tmp
   tmp="$(mktemp)"
-  if ! node "${REPO_ROOT}/scripts/extract-reference-inserts.mjs" >"$tmp"; then
+  if ! node "${REPO_ROOT}/scripts/extract-reference-inserts.mjs" --allowlist "$REFDATA_ALLOWLIST_FILTERED" --migrations "$MIGRATIONS_DIR" >"$tmp"; then
     rm -f "$tmp"
     echo "FATAL: scripts/extract-reference-inserts.mjs failed. The lane's reference" >&2
     echo "       tables would be EMPTY and every FK into them would raise 23503." >&2
@@ -522,7 +667,8 @@ case "${1:-}" in
   # exits with its status. Same argument as the two print seams above: a test
   # (or a CI step) can ASK the lane whether it would refuse, instead of
   # pattern-matching a line that any ordinary re-spelling would read as
-  # "unwired". No daemon, no stack — it reads two commit timestamps.
+  # "unwired". No daemon, no stack — it reads the marker, the dump's sha256 and
+  # the migrations directory, and names the replay set (DECISION F).
   --check-currency) check_baseline_currency ;;
   *)           usage; exit 2 ;;
 esac

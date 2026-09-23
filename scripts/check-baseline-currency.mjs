@@ -39,10 +39,38 @@
  *
  *     node scripts/check-baseline-currency.mjs --self-test
  *     node scripts/check-baseline-currency.mjs
+ *
+ * ── `--replay-set` (Phase 164.4.2 DECISION F, founder 2026-09-23) ───────────
+ *
+ * The DEFAULT mode above is the restore path's refusal and is unchanged, byte
+ * for byte. `--replay-set` is the LOCAL-STACK LANE's use of this gate, where a
+ * migration newer than the dump is the NORMAL case: the lane loads the dump and
+ * then replays, in filename order, exactly the migrations the dump does not
+ * carry. This mode's job is "bound and name", never "refuse a newer migration":
+ *
+ *   - WHICH migrations the dump carries is read from a committed marker,
+ *     `supabase/schema/baseline-carried-migrations.txt`, bound to the dump by a
+ *     `baseline-sha256:` line — never inferred from commit dates.
+ *   - the replay set is every top-level `*.sql` in MIGRATIONS_DIR the marker does
+ *     not list, sorted by filename (the order the CLI applies them in).
+ *   - the `baseline-currency:` line prints on EVERY run; the set itself
+ *     (`baseline-replay:`) prints ONLY when it was determined (defects=0), and so
+ *     do the handover files. An undeterminable set is never printed as a set.
+ *
+ * Env (all optional; defaults are the repo paths):
+ *   CARRIED_MARKER, BASELINE_FILE, MIGRATIONS_DIR   — the three inputs
+ *   REPLAY_SET_FILE                                  — out: replay basenames, one per line
+ *   CARRIED_SET_FILE                                 — out: carried basenames, one per line
+ *   REFDATA_ALLOWLIST_IN + REFDATA_ALLOWLIST_OUT     — out: the reference-data allowlist
+ *        minus every line whose FIRST TAB FIELD is a replay basename, so an allowlisted
+ *        statement in a replayed migration runs once, in the replay, not twice.
+ *
+ *     node scripts/check-baseline-currency.mjs --replay-set
  */
 import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const DEFECTS = ["baseline-stale", "baseline-epoch-unreadable", "migrations-epoch-unreadable"];
@@ -250,12 +278,243 @@ function readEpoch(freshnessCmd, path) {
   }
 }
 
+// ── --replay-set (DECISION F) ────────────────────────────────────────────────
+
+/** Every defect kind `judgeReplaySet()` can emit. Separate from `DEFECTS`, which
+ * is the default mode's list and the restore path's contract. */
+export const REPLAY_DEFECTS = [
+  "marker-unreadable",
+  "marker-sha-absent",
+  "marker-sha-mismatch",
+  "migrations-dir-unreadable",
+  "refdata-allowlist-unreadable",
+];
+
+/** A migration basename the lane will hand to psql: digits, underscore, lower snake, .sql. */
+export const MIGRATION_BASENAME_RE = /^[0-9]+_[a-z0-9_]+\.sql$/;
+const SHA_LINE_RE = /^baseline-sha256:[ \t]*(\S*)[ \t]*$/;
+
+/** Parse the marker's text into its sha line and its basename entries. */
+function parseMarker(text) {
+  const shas = [];
+  const entries = [];
+  const malformed = [];
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i].replace(/\r$/, "");
+    if (/^[\t ]*(#|$)/.test(raw)) continue;
+    const sha = SHA_LINE_RE.exec(raw);
+    if (sha) shas.push(sha[1]);
+    else if (MIGRATION_BASENAME_RE.test(raw)) entries.push(raw);
+    else malformed.push({ lineNo: i + 1, raw });
+  }
+  return { shas, entries, malformed };
+}
+
+/**
+ * PURE: given already-read facts, determine the replay set or name why it
+ * cannot be determined. No I/O, so `--self-test` drives the real decision.
+ *
+ * @param {{
+ *   markerText: string|null,      // null = the marker could not be read
+ *   baselineSha: string|null,     // sha256 hex of baseline.sql; null = unreadable
+ *   migrations: Array<{name: string, isDir: boolean}>|null, // top-level entries; null = unreadable dir
+ *   migrationTexts?: Record<string, string>, // file name -> contents (replay files at least)
+ *   refdataAllowlistUnreadable?: boolean,
+ *   markerLabel?: string, baselineLabel?: string, migrationsLabel?: string,
+ * }} facts
+ * @returns {{carried: string[], replay: string[], markerSha: "match"|"MISMATCH"|"ABSENT",
+ *            defects: Array<{kind: string, detail: string}>}}
+ */
+export function judgeReplaySet({
+  markerText,
+  baselineSha,
+  migrations,
+  migrationTexts = {},
+  refdataAllowlistUnreadable = false,
+  markerLabel = "the carried-migrations marker",
+  baselineLabel = "the baseline file",
+  migrationsLabel = "the migrations directory",
+}) {
+  const defects = [];
+  const push = (kind, detail) => defects.push({ kind, detail });
+
+  if (refdataAllowlistUnreadable) {
+    push(
+      "refdata-allowlist-unreadable",
+      `REFDATA_ALLOWLIST_IN could not be read. The lane never falls back to an unfiltered or empty ` +
+        `copy: an unfiltered one would run a replayed migration's reference rows twice.`,
+    );
+  }
+  if (migrations === null) {
+    push(
+      "migrations-dir-unreadable",
+      `${migrationsLabel} could not be listed, so which migrations are newer than the dump is unknown. ` +
+        `"Could not list" is not "nothing to replay".`,
+    );
+  }
+  if (markerText === null || markerText === undefined) {
+    push(
+      "marker-unreadable",
+      `${markerLabel} could not be read. Without it the carried set is unknown, and an unknown set is ` +
+        `never read as empty — that would replay all 270-odd migrations onto a dump that already carries them.`,
+    );
+    return { carried: [], replay: [], markerSha: "ABSENT", defects };
+  }
+
+  const parsed = parseMarker(markerText);
+  let markerSha = "ABSENT";
+  if (parsed.shas.length === 0 || !parsed.shas[0]) {
+    push(
+      "marker-sha-absent",
+      `${markerLabel} has no \`baseline-sha256: <hex>\` line, so nothing binds its list to the dump.`,
+    );
+  } else if (parsed.shas[0] !== String(baselineSha ?? "")) {
+    markerSha = "MISMATCH";
+    push(
+      "marker-sha-mismatch",
+      `${markerLabel} is bound to baseline sha256 ${parsed.shas[0].slice(0, 12)}… but ${baselineLabel} ` +
+        `hashes to ${String(baselineSha || "UNREADABLE").slice(0, 12)}…. The dump was regenerated without ` +
+        `regenerating the marker (or the reverse) — regenerate both in ONE commit (BASELINE.md, Regenerating).`,
+    );
+  } else {
+    markerSha = "match";
+  }
+
+  const carried = [...parsed.entries].sort();
+  const carriedSet = new Set(carried);
+  const replay =
+    migrations === null
+      ? []
+      : migrations
+          .filter((m) => !m.isDir && MIGRATION_BASENAME_RE.test(m.name) && !carriedSet.has(m.name))
+          .map((m) => m.name)
+          .sort();
+
+  return { carried, replay, markerSha, defects };
+}
+
+/**
+ * PURE: the reference-data allowlist minus every line whose FIRST TAB FIELD is
+ * a replay basename. Comment and blank lines (the extractor's own skip rule,
+ * `/^[\t ]*(#|$)/`) are kept verbatim, and so is every carried line — even one
+ * whose comment field happens to QUOTE a replay basename, which a substring
+ * filter would wrongly drop. With an empty replay set the output is the input,
+ * byte for byte.
+ *
+ * @returns {{text: string, excluded: string[]}} excluded = first fields dropped, in file order
+ */
+export function filterRefdataAllowlist(text, replay) {
+  const replaySet = new Set(replay);
+  const excluded = [];
+  const kept = [];
+  for (const raw of String(text).split("\n")) {
+    if (!/^[\t ]*(#|$)/.test(raw) && replaySet.has(raw.split("\t")[0])) {
+      excluded.push(raw.split("\t")[0]);
+      continue;
+    }
+    kept.push(raw);
+  }
+  return { text: kept.join("\n"), excluded };
+}
+
+function readOrNull(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function sha256OrNull(path) {
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+function replayMain() {
+  const markerFile = process.env.CARRIED_MARKER || "supabase/schema/baseline-carried-migrations.txt";
+  const baselineFile = process.env.BASELINE_FILE || "supabase/schema/baseline.sql";
+  const migrationsDir = process.env.MIGRATIONS_DIR || "supabase/migrations";
+  const allowIn = process.env.REFDATA_ALLOWLIST_IN || "";
+  const allowOut = process.env.REFDATA_ALLOWLIST_OUT || "";
+  if (Boolean(allowIn) !== Boolean(allowOut)) {
+    console.error(
+      "::error::REFDATA_ALLOWLIST_IN and REFDATA_ALLOWLIST_OUT must be set together — one without the other would hand the lane no filtered allowlist.",
+    );
+    return 1;
+  }
+
+  let migrations = null;
+  try {
+    migrations = readdirSync(migrationsDir, { withFileTypes: true }).map((d) => ({
+      name: d.name,
+      isDir: d.isDirectory(),
+    }));
+  } catch {
+    migrations = null;
+  }
+  const migrationTexts = {};
+  for (const m of migrations ?? []) {
+    if (!m.isDir && MIGRATION_BASENAME_RE.test(m.name)) {
+      const t = readOrNull(join(migrationsDir, m.name));
+      if (t !== null) migrationTexts[m.name] = t;
+    }
+  }
+  const allowText = allowIn ? readOrNull(allowIn) : null;
+
+  const { carried, replay, markerSha, defects } = judgeReplaySet({
+    markerText: readOrNull(markerFile),
+    baselineSha: sha256OrNull(baselineFile),
+    migrations,
+    migrationTexts,
+    refdataAllowlistUnreadable: Boolean(allowIn) && allowText === null,
+    markerLabel: markerFile,
+    baselineLabel: baselineFile,
+    migrationsLabel: migrationsDir,
+  });
+
+  // Never let "clean" and "did not run" look alike: this line prints on every exit.
+  console.log(
+    `baseline-currency: carried=${carried.length} replay=${replay.length} marker-sha=${markerSha} ` +
+      `defects=${defects.length}`,
+  );
+  if (defects.length > 0) {
+    for (const d of defects) console.error(`::error::${d.kind} — ${d.detail}`);
+    console.error(`${defects.length} defect(s) — the replay set is UNDETERMINED; no set is printed and no handover file is written.`);
+    return 1;
+  }
+
+  console.log(
+    replay.length === 0
+      ? "baseline-replay: 0 migration(s) newer than the dump (none)"
+      : `baseline-replay: ${replay.length} migration(s) newer than the dump: ${replay.join(" ")}`,
+  );
+  const lines = (xs) => (xs.length === 0 ? "" : `${xs.join("\n")}\n`);
+  if (process.env.REPLAY_SET_FILE) writeFileSync(process.env.REPLAY_SET_FILE, lines(replay));
+  if (process.env.CARRIED_SET_FILE) writeFileSync(process.env.CARRIED_SET_FILE, lines(carried));
+  if (allowIn) {
+    const { text, excluded } = filterRefdataAllowlist(allowText, replay);
+    writeFileSync(allowOut, text);
+    console.log(
+      `baseline-replay: excluded ${excluded.length} reference-data allowlist line(s) naming replayed migrations: ` +
+        (excluded.length === 0 ? "(none)" : [...new Set(excluded)].join(" ")),
+    );
+  }
+  return 0;
+}
+
 function main(argv) {
   if (argv.includes("--self-test")) return selfTest();
+  if (argv.length === 1 && argv[0] === "--replay-set") return replayMain();
   // ⛔ A typo'd flag must not silently fall through to a green corpus run.
   const unknown = argv.filter((a) => a !== "--self-test");
   if (unknown.length > 0) {
-    console.error(`::error::unknown argument(s): ${unknown.join(" ")} — this gate takes only --self-test`);
+    console.error(
+      `::error::unknown argument(s): ${unknown.join(" ")} — this gate takes only --self-test, or --replay-set on its own`,
+    );
     return 1;
   }
 
