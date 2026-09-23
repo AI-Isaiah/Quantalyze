@@ -25,6 +25,10 @@
  * `ALTER DEFAULT PRIVILEGES ... IN SCHEMA "public"` lines; ACTUAL = pg_default_acl.
  * Column-level grants (`GRANT SELECT("col") ...`) live in pg_attribute.attacl,
  * which a default ACL never touches, so they are counted and not compared.
+ * Object ACLs on TYPES (pg_type.typacl) are not read at all: the dump carries no
+ * GRANT/REVOKE on a public type (one would be a MEASURE_FAIL below), and the
+ * schema's TYPES default ACLs are compared. Both limits are named on the verdict
+ * line (review 164.4.2 IN-06), so an OK is never read as "every privilege matched".
  *
  * ⛔ A line of the dump that grants or revokes on a public object in a shape this
  * gate does not parse is a MEASURE_FAIL, never skipped. So is a dump object the
@@ -35,7 +39,7 @@
  *   (<rows> is the output of `psql -X -q -At -F '|' -f scripts/local-stack/acl-fidelity-catalogue.sql`)
  *
  * PRINTS one always-on line:
- *   acl-fidelity: relations=<R> functions=<F> default-acl-entries=<D> privileges-compared=<P> column-grants-not-compared=<C> extension-members-excluded=<E> drift=<N> verdict <OK|DRIFT|MEASURE_FAIL>
+ *   acl-fidelity: relations=<R> functions=<F> default-acl-entries=<D> privileges-compared=<P> column-grants-not-compared=<C> type-acls=not-compared extension-members-excluded=<E> drift=<N> verdict <OK|DRIFT|MEASURE_FAIL>
  * EXIT 0 = OK, 1 = DRIFT (each difference named above the line), 2 = MEASURE_FAIL.
  */
 import { readFileSync } from "node:fs";
@@ -208,6 +212,10 @@ const fields = [
   `default-acl-entries=${defaclActual.size}`,
   `privileges-compared=${expected.size + defaclExpected.size}`,
   `column-grants-not-compared=${columnGrants}`,
+  // Review 164.4.2 IN-06: named on the verdict line, not only in this header.
+  // pg_type.typacl is never read; a dump GRANT/REVOKE on a public type is a
+  // MEASURE_FAIL (the unparsed-shape refusal), and TYPES default ACLs ARE compared.
+  "type-acls=not-compared",
   `extension-members-excluded=${extensionMembers}`,
   `drift=${diffs.length}`,
 ].join(" ");

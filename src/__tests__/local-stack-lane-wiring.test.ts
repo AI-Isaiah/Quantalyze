@@ -678,6 +678,10 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       const ok = run(dump, good);
       expect(ok.status, ok.stdout + ok.stderr).toBe(0);
       expect(ok.stdout).toMatch(/^acl-fidelity: .* drift=0 verdict OK$/m);
+      // Review 164.4.2 IN-06: the verdict line itself names what is NOT compared —
+      // column grants (counted) and type ACLs — so an OK is never read as "every
+      // privilege on public matched".
+      expect(ok.stdout).toMatch(/^acl-fidelity: .*column-grants-not-compared=\d+ type-acls=not-compared .* verdict OK$/m);
 
       const drift = run(dump, [...good, "acl|rel|system_settings|authenticated|TRUNCATE:false"]);
       expect(drift.status, drift.stdout + drift.stderr).toBe(1);
