@@ -12,9 +12,20 @@
  *   node scripts/mutation-runner/run.mjs --parse-only       # STATIC only — runs ZERO arms
  *   node scripts/mutation-runner/run.mjs --file <gate.sql>  # DIAGNOSTIC (never exits 0)
  *   node scripts/mutation-runner/run.mjs --arm "<ARM ID>"   # DIAGNOSTIC (never exits 0)
+ *   node scripts/mutation-runner/run.mjs --subset-from <list> # SUBSET gate (164.4.2, D-D)
+ *
+ * Every run of the corpus prints exactly ONE `scope:` line naming what it
+ * covered and the full-corpus size it narrowed FROM:
+ *   scope: FULL <N>/<N> annotated files
+ *   scope: FULL <N>/<N> annotated files (subset fallback: <reason>)
+ *   scope: SUBSET <k>/<N> annotated files: <basename> <basename> …
+ *   scope: DIAGNOSTIC <file-or-arm>
  *
  * Exit codes:
- *   0  full gate run, no defects, floors held, the runner's own counts agree
+ *   0  full gate run, no defects, floors held, the runner's own counts agree —
+ *      OR a SUBSET run (`--subset-from`) with no defects, FILES_FLOOR and
+ *      WAIVED_CEILING held. A subset run is a gate that can pass, and its
+ *      `scope: SUBSET` line is what stops it reading as full coverage.
  *   1  at least one defect, a coverage floor regression, or an ABSURDITY — the
  *      runner's two independent arm tallies disagree (164.3.1-10, D-09)
  *   2  NARROWED DIAGNOSTIC RUN that found no defects. Deliberately NOT 0: a run
@@ -4334,6 +4345,13 @@ function materialize(slotDir, relPaths) {
  * @param {string} opts.scopeDir         directory whose *.sql files form the corpus
  * @param {string|null} [opts.onlyFile]  repo-relative gate path to narrow to
  * @param {string|null} [opts.onlyArm]   arm ID to narrow to
+ * @param {string[]|null} [opts.subsetFiles] 164.4.2-07 (D-D): gate paths a SUBSET
+ *        run narrows to, matched by basename against the FULL scan's annotated
+ *        files. `scopeDir` is still scanned whole — the corpus size the subset
+ *        narrowed FROM is half of what the `scope:` line owes. Narrows ONLY when
+ *        EVERY listed file is annotated; otherwise the run is FULL with the
+ *        fallback reason naming the unannotated ones. Distinct from `narrowed`:
+ *        a clean subset run exits 0, a clean diagnostic run still exits 2.
  * @param {number} [opts.filesFloor]     ratchet; overridable ONLY by --self-test
  * @param {number} [opts.armsFloor]
  * @param {number} [opts.waivedCeiling]  ceiling on waived arms; overridable ONLY by --self-test
@@ -4350,6 +4368,7 @@ export function runCorpus({
   scopeDir,
   onlyFile = null,
   onlyArm = null,
+  subsetFiles = null,
   filesFloor = FILES_FLOOR,
   armsFloor = ARMS_FLOOR,
   waivedCeiling = WAIVED_CEILING,
@@ -4357,6 +4376,10 @@ export function runCorpus({
   log = (s) => console.log(s),
 }) {
   const narrowed = Boolean(onlyFile || onlyArm);
+  if (subsetFiles !== null && narrowed) {
+    // A usage error, not a defect: the two modes carry opposite exit-0 contracts.
+    throw new Error("runCorpus: subsetFiles does not combine with onlyFile/onlyArm");
+  }
   const corpus = scanCorpus(scopeDir);
   const defects = [];
   const addDefect = (kind, arm, file, detail) => {
@@ -4397,6 +4420,25 @@ export function runCorpus({
       addDefect("parse", null, onlyFile, "--file names a gate with no line-start RED-UNDER markers");
     }
   }
+  // 164.4.2-07 (D-D): the SUBSET narrowing, in the same place `--file` narrows.
+  // The full scan above is untouched, so `corpus.filesAnnotated` — the
+  // FILES_FLOOR numerator and the `scope:` denominator — is the whole corpus.
+  let subset = false;
+  if (subsetFiles !== null) {
+    const listed = new Set(subsetFiles.map((p) => p.split("/").pop()));
+    targets = targets.filter((f) => listed.has(f));
+    subset = true;
+  }
+
+  // Exactly ONE `scope:` line per run, printed BEFORE any lane so a run killed
+  // mid-corpus still says what it was covering. ⛔ A narrowed run must never
+  // read as full coverage: the SUBSET form carries both numbers and the names.
+  const annotatedTotal = corpus.filesAnnotated;
+  let scopeLine;
+  if (narrowed) scopeLine = `scope: DIAGNOSTIC ${[onlyFile, onlyArm].filter(Boolean).join(" ")}`;
+  else if (subset) scopeLine = `scope: SUBSET ${targets.length}/${annotatedTotal} annotated files: ${targets.join(" ")}`;
+  else scopeLine = `scope: FULL ${annotatedTotal}/${annotatedTotal} annotated files`;
+  log(scopeLine);
 
   // Snapshot the working tree BEFORE any lane run. The invariant is "this run
   // did not touch the checkout", NOT "the developer has no uncommitted work" —
@@ -4941,7 +4983,20 @@ export function runCorpus({
         `FILES_FLOOR regression: ${corpus.filesAnnotated} annotated file(s) < floor ${filesFloor}`,
       );
     }
-    if (bitingArms < armsFloor) {
+    // 164.4.2-07 (D-D): ARMS_FLOOR bounds the FULL corpus's biting count. A
+    // subset's biting count is a count over fewer files, so comparing it would
+    // either always fail or — renormalised to the narrowed denominator — be the
+    // exact floor-laundering defect CONTEXT's vacuity fence forbids. It is NOT
+    // compared, and the run SAYS so. FILES_FLOOR above stays enforced (its
+    // numerator is the full scan's), and so does WAIVED_CEILING below (a
+    // subset's waived count is bounded above by the full count).
+    if (subset) {
+      log("");
+      log(
+        `ARMS_FLOOR: NOT compared — this SUBSET run covered ${targets.length} of ${corpus.filesAnnotated} ` +
+          `annotated files; ARMS_FLOOR is compared by the full-corpus run (push to main).`,
+      );
+    } else if (bitingArms < armsFloor) {
       addDefect("floor", null, scopeDir, `ARMS_FLOOR regression: ${bitingArms} biting arm(s) < floor ${armsFloor}`);
     }
     // The ceiling on waivers (see WAIVED_CEILING): a waiver twin satisfies
@@ -4980,7 +5035,14 @@ export function runCorpus({
   // -----------------------------------------------------------------------
   log("");
   if (defects.length === 0) {
-    log(narrowed ? "No defects in the narrowed scope." : "✅ No defects. Every annotated arm bit its own arm first.");
+    if (narrowed) log("No defects in the narrowed scope.");
+    else if (subset) {
+      // ⛔ Must not say or imply the whole corpus was covered (T-164.4.2-21).
+      log(
+        `✅ No defects in the SUBSET: every annotated arm of these ${targets.length} of ` +
+          `${corpus.filesAnnotated} annotated files bit its own arm first. NOT full-corpus coverage.`,
+      );
+    } else log("✅ No defects. Every annotated arm bit its own arm first.");
   } else {
     log(`❌ ${defects.length} defect(s):`);
     log("");
@@ -4995,6 +5057,9 @@ export function runCorpus({
   return {
     scopeDir,
     narrowed,
+    // 164.4.2-07: the SUBSET state and the one `scope:` line this run printed.
+    subset,
+    scopeLine,
     filesTotal: corpus.filesTotal,
     filesAnnotated: corpus.filesAnnotated,
     armsAnnotated,
@@ -5849,6 +5914,7 @@ function main(argv) {
   let onlyFile = null;
   let onlyArm = null;
   let parseOnly = false;
+  let subsetFrom = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -5873,10 +5939,16 @@ function main(argv) {
         console.error("ERROR: --arm needs an arm ID");
         return 3;
       }
+    } else if (arg === "--subset-from") {
+      subsetFrom = argv[++i];
+      if (!subsetFrom) {
+        console.error("ERROR: --subset-from needs a list file");
+        return 3;
+      }
     } else {
       console.error(`ERROR: unknown argument ${JSON.stringify(arg)}`);
       console.error(
-        "Usage: node scripts/mutation-runner/run.mjs [--fixture-corpus] [--file <gate.sql>] [--arm <ID>] [--parse-only] [--self-test]",
+        "Usage: node scripts/mutation-runner/run.mjs [--fixture-corpus] [--file <gate.sql>] [--arm <ID>] [--subset-from <list>] [--parse-only] [--self-test]",
       );
       return 3;
     }
@@ -5896,8 +5968,13 @@ function main(argv) {
     return 3;
   }
 
+  let subsetFiles = null;
+  if (subsetFrom !== null) {
+    subsetFiles = readFileSync(subsetFrom, "utf8").split(/\s+/).filter(Boolean);
+  }
+
   console.log(`mutation-runner: scope ${relative(REPO_ROOT, scopeDir) || "."}`);
-  return runCorpus({ scopeDir, onlyFile, onlyArm }).exitCode;
+  return runCorpus({ scopeDir, onlyFile, onlyArm, subsetFiles }).exitCode;
 }
 
 if (process.argv[1] && process.argv[1].endsWith("run.mjs")) {
