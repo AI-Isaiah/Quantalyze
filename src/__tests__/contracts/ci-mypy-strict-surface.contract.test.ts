@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -17,9 +18,12 @@ import { join } from "node:path";
  * WHAT IT PINS:
  *   - the path set of the ci.yml `python` job's step
  *     `Type gate - mypy strict over the running-service surface` EQUALS the
- *     service surface derived from DISK: every directory directly under
- *     `analytics-service/` carrying an `__init__.py`, minus the hand-typed
- *     `EXCLUDED` record, plus every top-level `analytics-service/*.py` file;
+ *     service surface derived from the TRACKED tree (`git ls-files`, so local
+ *     and CI agree): every top-level directory under `analytics-service/`
+ *     holding a tracked `.py` file anywhere beneath it (namespace packages
+ *     included — `__init__.py` does not decide it; `__pycache__` and
+ *     dot-directories skipped), minus the hand-typed `EXCLUDED` record, plus
+ *     every tracked top-level `analytics-service/*.py` file;
  *   - the Makefile `typecheck` recipe names the same set;
  *   - the `python` job carries exactly ONE mypy --strict invocation, and its
  *     flag set is EXACTLY `--strict --follow-imports=silent` (an extra flag
@@ -29,7 +33,7 @@ import { join } from "node:path";
  *     `shell:` or `env:` that could switch it off with its run line intact), the
  *     `python` job carries no job-level `continue-on-error:`, and neither the job's
  *     nor the workflow's `defaults:` sets a `shell:`;
- *   - every `EXCLUDED` member still exists on disk (a stale exclusion reddens).
+ *   - every `EXCLUDED` member still holds a tracked `.py` (a stale exclusion reddens).
  *   The D-02 before/after record this pin keeps from going stale:
  *     BEFORE: `services/ routers/ models/` — 96 source files as mypy counts them.
  *     AFTER:  that set plus exactly `main.py main_worker.py main_worker_healthz.py
@@ -53,16 +57,17 @@ const ROOT = process.cwd();
 const STEP_NAME = "Type gate - mypy strict over the running-service surface";
 const CI_YML = join(ROOT, ".github/workflows/ci.yml");
 const MAKEFILE = join(ROOT, "analytics-service/Makefile");
-const SERVICE_DIR = join(ROOT, "analytics-service");
+const SERVICE_DIR_REL = "analytics-service";
 
 /** The ci.yml mypy command's flag set, EXACTLY (sorted). */
 const REQUIRED_CI_FLAGS = ["--follow-imports=silent", "--strict"] as const;
 
 /**
- * Packages that carry an `__init__.py` but are OUTSIDE the gate BY STATED
- * DESIGN. Hand-typed on purpose: an exclusion is a decision, and a decision
- * must be written down where a reviewer sees it. Each member is asserted to
- * exist on disk, so an exclusion cannot outlive its subject silently.
+ * Top-level directories holding tracked `.py` files that are OUTSIDE the gate
+ * BY STATED DESIGN. Hand-typed on purpose: an exclusion is a decision, and a
+ * decision must be written down where a reviewer sees it. Each member is
+ * asserted to still hold a tracked `.py`, so an exclusion cannot outlive its
+ * subject silently.
  */
 const EXCLUDED: Record<string, string> = {
   tests:
@@ -72,12 +77,6 @@ const EXCLUDED: Record<string, string> = {
     "one-off operational tooling (backfills, cassette recording), not the running service; " +
     "gating it would add a types-PyYAML dev-dep for throwaway scripts",
 };
-
-interface ListingEntry {
-  name: string;
-  kind: "file" | "dir";
-  hasInit: boolean;
-}
 
 /** The raw lines of the `python` job's block, from its key line to the line before the next job key. */
 function pythonJobLines(ymlText: string): string[] {
@@ -259,35 +258,65 @@ function flagSet(tokens: string[]): Set<string> {
   return new Set(tokens.filter((t) => t.startsWith("--")));
 }
 
-function readListing(dir: string): ListingEntry[] {
-  return readdirSync(dir, { withFileTypes: true }).map((d) => {
-    const kind: ListingEntry["kind"] = d.isDirectory() ? "dir" : "file";
-    return {
-      name: d.name,
-      kind,
-      hasInit: kind === "dir" && existsSync(join(dir, d.name, "__init__.py")),
-    };
+/**
+ * Every TRACKED path under `analytics-service/`, relative to it. Read from
+ * `git ls-files`, not the working tree, so a developer's untracked scratch
+ * file (or a gitignored `__pycache__/`) cannot make this test disagree with
+ * CI's clean checkout. `execFileSync` with no shell; an empty result throws,
+ * because an empty listing would derive an empty surface and read as a
+ * mismatch against every named path rather than as a broken read.
+ */
+function readTrackedListing(): string[] {
+  const out = execFileSync("git", ["ls-files", "-z", "--", SERVICE_DIR_REL], {
+    cwd: ROOT,
+    encoding: "utf8",
   });
+  const prefix = `${SERVICE_DIR_REL}/`;
+  const paths = out
+    .split("\0")
+    .filter(Boolean)
+    .map((p) => (p.startsWith(prefix) ? p.slice(prefix.length) : p));
+  if (paths.length === 0) {
+    throw new Error(
+      `\`git ls-files -- ${SERVICE_DIR_REL}\` returned nothing from ${ROOT}. The surface is derived ` +
+        `from that listing; run this test from the repository root of a git checkout.`,
+    );
+  }
+  return paths;
 }
 
-/** Top-level `*.py` files plus package directories not in `excluded`. */
-function diskSurface(listing: ListingEntry[], excluded: Record<string, string>): Set<string> {
-  return new Set(
-    listing
-      .filter(
-        (e) =>
-          (e.kind === "file" && e.name.endsWith(".py")) ||
-          (e.kind === "dir" && e.hasInit && !Object.hasOwn(excluded, e.name)),
-      )
-      .map((e) => e.name),
-  );
+/**
+ * The top-level directory a tracked `.py` path makes a surface candidate, or
+ * `null`. Any directory holding a `.py` file ANYWHERE beneath it counts —
+ * `__init__.py` does NOT decide it, because Python 3 imports a directory
+ * without one as a namespace package and mypy follows it under
+ * `--follow-imports=silent` with its errors suppressed. `__pycache__` and
+ * dot-directories are skipped at any depth.
+ */
+function pyTopDir(path: string): string | null {
+  const parts = path.split("/");
+  if (parts.length < 2 || !path.endsWith(".py")) return null;
+  const dirs = parts.slice(0, -1);
+  if (dirs.some((d) => d === "__pycache__" || d.startsWith("."))) return null;
+  return dirs[0];
+}
+
+/** Top-level `*.py` files plus every top-level directory holding a `.py`, minus `excluded`. */
+function diskSurface(listing: string[], excluded: Record<string, string>): Set<string> {
+  const surface = new Set<string>();
+  for (const p of listing) {
+    if (!p.includes("/") && p.endsWith(".py")) surface.add(p);
+    const top = pyTopDir(p);
+    if (top !== null && !Object.hasOwn(excluded, top)) surface.add(top);
+  }
+  return surface;
 }
 
 /** Every disagreement between the CI command, the Makefile recipe and disk. Empty ⇔ pinned. */
 function surfaceProblems(
   ymlText: string,
   makefileText: string,
-  listing: ListingEntry[],
+  listing: string[],
   excluded: Record<string, string>,
 ): string[] {
   const problems: string[] = [];
@@ -339,7 +368,7 @@ function surfaceProblems(
     for (const member of [...surface].sort()) {
       if (!named.has(member)) {
         problems.push(
-          `${label}: service-surface member "${member}" exists on disk under analytics-service/ but ` +
+          `${label}: service-surface member "${member}" is tracked under analytics-service/ but ` +
             `is NOT named by the mypy invocation. Name it on the command line (a module reached only ` +
             `by import is followed with its errors suppressed), or add it to EXCLUDED with a reason.`,
         );
@@ -348,17 +377,19 @@ function surfaceProblems(
     for (const path of [...named].sort()) {
       if (!surface.has(path)) {
         problems.push(
-          `${label}: the mypy invocation names "${path}", which is not a service-surface member on ` +
-            `disk (not a top-level *.py file, not a package with __init__.py, or an EXCLUDED one).`,
+          `${label}: the mypy invocation names "${path}", which is not a service-surface member ` +
+            `(not a tracked top-level *.py file, not a top-level directory holding a tracked .py ` +
+            `file, or an EXCLUDED one).`,
         );
       }
     }
   }
 
   for (const name of Object.keys(excluded).sort()) {
-    if (!listing.some((e) => e.name === name && e.kind === "dir")) {
+    if (!listing.some((p) => pyTopDir(p) === name)) {
       problems.push(
-        `EXCLUDED: the exclusion "${name}" names no directory under analytics-service/. A stale ` +
+        `EXCLUDED: the exclusion "${name}" names no directory holding a tracked .py file under ` +
+          `analytics-service/. A stale ` +
           `exclusion is a decision that outlived its subject — remove it or restore the directory.`,
       );
     }
@@ -370,7 +401,7 @@ function surfaceProblems(
 // ── read ONCE at module load; the byte-unchanged arm compares disk to these ──
 const REAL_YML = readFileSync(CI_YML, "utf8");
 const REAL_MAKEFILE = readFileSync(MAKEFILE, "utf8");
-const REAL_LISTING = readListing(SERVICE_DIR);
+const REAL_LISTING = readTrackedListing();
 
 describe("[164.6.1 / MYPY-MAINPY-01] the mypy --strict invocation names exactly the service surface", () => {
   it("ci.yml path set == disk-derived surface == Makefile `typecheck` set, one invocation", () => {
@@ -435,8 +466,8 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     expect(has(problems, "Makefile:"), problems.join("\n")).toBe(false);
   });
 
-  it("(b) a phantom top-level `newmod.py` on disk → a problem naming newmod.py", () => {
-    const listing: ListingEntry[] = [...REAL_LISTING, { name: "newmod.py", kind: "file", hasInit: false }];
+  it("(b) a phantom tracked top-level `newmod.py` → a problem naming newmod.py", () => {
+    const listing = [...REAL_LISTING, "newmod.py"];
     const problems = surfaceProblems(REAL_YML, REAL_MAKEFILE, listing, EXCLUDED);
     expect(has(problems, '"newmod.py"', "ci.yml:"), problems.join("\n")).toBe(true);
     expect(has(problems, '"newmod.py"', "Makefile:"), problems.join("\n")).toBe(true);
@@ -450,10 +481,21 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
   });
 
   it("(d) a phantom package `newpkg/` with __init__.py → a problem naming newpkg (D-09)", () => {
-    const listing: ListingEntry[] = [...REAL_LISTING, { name: "newpkg", kind: "dir", hasInit: true }];
+    const listing = [...REAL_LISTING, "newpkg/__init__.py"];
     const problems = surfaceProblems(REAL_YML, REAL_MAKEFILE, listing, EXCLUDED);
     expect(has(problems, '"newpkg"', "ci.yml:"), problems.join("\n")).toBe(true);
     expect(has(problems, '"newpkg"', "Makefile:"), problems.join("\n")).toBe(true);
+  });
+
+  it("(d2) a phantom NAMESPACE package `newns/` (a nested .py, no __init__.py) → a problem naming newns", () => {
+    const listing = [...REAL_LISTING, "newns/dispatch/worker.py"];
+    expect(
+      listing.some((p) => p.startsWith("newns/") && p.endsWith("__init__.py")),
+      "CALIBRATION (d2): the phantom must carry NO __init__.py, or it proves nothing new over (d)",
+    ).toBe(false);
+    const problems = surfaceProblems(REAL_YML, REAL_MAKEFILE, listing, EXCLUDED);
+    expect(has(problems, '"newns"', "ci.yml:"), problems.join("\n")).toBe(true);
+    expect(has(problems, '"newns"', "Makefile:"), problems.join("\n")).toBe(true);
   });
 
   it("(e) a second, partial mypy --strict step in the python job → an invocation-count problem", () => {
@@ -476,8 +518,8 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
   });
 
   it("(g) removing `scripts` from the listing → a stale-exclusion problem naming scripts", () => {
-    const listing = REAL_LISTING.filter((e) => e.name !== "scripts");
-    expect(listing.length, "CALIBRATION (g): `scripts` was not in the real listing").toBe(REAL_LISTING.length - 1);
+    const listing = REAL_LISTING.filter((p) => !p.startsWith("scripts/"));
+    expect(listing.length, "CALIBRATION (g): `scripts/` held no tracked path").toBeLessThan(REAL_LISTING.length);
     const problems = surfaceProblems(REAL_YML, REAL_MAKEFILE, listing, EXCLUDED);
     expect(has(problems, "EXCLUDED:", '"scripts"'), problems.join("\n")).toBe(true);
   });
@@ -554,8 +596,13 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     expect(surfaceProblems(REAL_YML, REAL_MAKEFILE, REAL_LISTING, EXCLUDED)).toEqual([]);
     const surface = diskSurface(REAL_LISTING, EXCLUDED);
     expect(surface.has("main.py"), "the disk surface lost main.py — the listing is not the service").toBe(true);
-    const pkgs = REAL_LISTING.filter((e) => e.kind === "dir" && surface.has(e.name));
-    expect(pkgs.length, "fewer than 3 package directories derived — the listing is suspect").toBeGreaterThanOrEqual(3);
+    const dirs = [...surface].filter((m) => !m.endsWith(".py"));
+    expect(dirs.length, "fewer than 3 directories derived — the listing is suspect").toBeGreaterThanOrEqual(3);
+    // The recursive rule's two exclusions, and a non-.py directory, stay OUT of
+    // the surface: a `.py` under `__pycache__/` or a dot-directory is not
+    // service code, and `docs/` (tracked, no .py) is not a package.
+    const extra = diskSurface([...REAL_LISTING, "cachey/__pycache__/x.py", ".hidden/x.py", "docs/x.md"], EXCLUDED);
+    expect([...extra].sort(), "a __pycache__/dot-dir/non-.py path entered the surface").toEqual([...surface].sort());
     expect(
       pathSet(ciMypyArgs(REAL_YML)).size,
       "fewer than 7 path tokens extracted from the run line — extraction is broken",
