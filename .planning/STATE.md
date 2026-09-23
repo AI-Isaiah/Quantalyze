@@ -1276,6 +1276,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.1 inserted after Phase 167: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention (from 167 review M2)
 - Phase 167.2 inserted after Phase 167: KEYCARDSYNC — the key card never shows one key's sync result as another key's (from 167-06 D-18 residuals)
 - Phase 167.2 edited: goal widened (founder 2026-09-23) — the owner's still-computing factsheet states the real compute-job state; public lane stays neutral
+- Phase 168 edited: edited fields: requirements (the waiting census dependency met 2026-09-23)
 
 ### Decisions
 
