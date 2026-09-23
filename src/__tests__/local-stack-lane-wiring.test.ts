@@ -469,6 +469,120 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
     ).toBeGreaterThan(apply);
   });
 
+  // ⭐ Phase 164.4.2, the fix for plan 08's checkpoint RED (CI run 35886515179). The
+  // Supabase image gives schema `public` default ACLs that grant ALL to anon,
+  // authenticated and service_role. The dump sets its own defaults LAST and its
+  // GRANTs only add, so without a reset every object it creates is WIDER than on
+  // PROD. MEASURED on the lane with the reset missing: 35 of 76 corpus files RED,
+  // 377 privileges beyond what the dump declares. The reset must run inside
+  // load_baseline(), after the currency gate and BEFORE psql reads the dump, and the
+  // ACL-fidelity gate must run after the dump and before anything can change an ACL.
+  it("load_baseline() resets public's default ACLs before the dump loads, derives them from the catalogue, and proves ACL fidelity right after the load", () => {
+    const lane = read(RUN_SH);
+    const body = liveLines(bashFunctionBody(lane, "load_baseline"));
+    const guard = body.findIndex((l) => /^if\s+!\s+check_baseline_currency\s*;\s*then$/.test(l));
+    const reset = body.findIndex((l) => /^reset_public_default_acls\s+"\$psql"\s+"\$db_url"$/.test(l));
+    const load = body.findIndex((l) => l.includes('-f "$BASELINE_FILE"'));
+    const fidelity = body.findIndex((l) => /^check_acl_fidelity\s+"\$psql"\s+"\$db_url"$/.test(l));
+    const refdata = body.findIndex((l) => /^load_reference_data\b/.test(l));
+    expect(
+      reset,
+      "load_baseline() no longer calls reset_public_default_acls — every object the dump creates would inherit the image's ALL grants (authenticated could TRUNCATE public.system_settings, which PROD does not grant)",
+    ).toBeGreaterThan(-1);
+    expect(reset, "the default-ACL reset runs before the currency gate").toBeGreaterThan(guard);
+    expect(
+      reset < load,
+      "the default-ACL reset runs AFTER psql loads the dump — by then every object already inherited the image's grants, and the dump's GRANT lines cannot take them back",
+    ).toBe(true);
+    expect(fidelity, "load_baseline() no longer runs check_acl_fidelity after the dump").toBeGreaterThan(load);
+    expect(
+      fidelity < refdata,
+      "check_acl_fidelity must run before reference data and the replay: after a replayed migration's own GRANT/REVOKE, the dump is no longer the fixed point it compares against",
+    ).toBe(true);
+
+    // Both FATAL on failure — a reset or a gate that only logs measures nothing.
+    const resetBody = liveLines(bashFunctionBody(lane, "reset_public_default_acls"));
+    expect(
+      resetBody.some((l) => l.includes('-f "${LANE_DIR}/reset-public-default-acl.sql"')),
+      "reset_public_default_acls no longer runs scripts/local-stack/reset-public-default-acl.sql",
+    ).toBe(true);
+    expect(resetBody.filter((l) => /^exit\s+[1-9]/.test(l)).length).toBeGreaterThanOrEqual(3);
+    const gateBody = liveLines(bashFunctionBody(lane, "check_acl_fidelity"));
+    expect(gateBody.some((l) => l.includes("acl-fidelity.mjs") && l.includes('--dump "$BASELINE_FILE"'))).toBe(true);
+    expect(gateBody.filter((l) => /^exit\s+[1-9]/.test(l)).length).toBeGreaterThanOrEqual(2);
+
+    // The reset DERIVES the grantor roles, object types and grantees from the
+    // catalogue: no role is named in executable SQL, and a surviving row RAISES.
+    const sqlLive = read("scripts/local-stack/reset-public-default-acl.sql")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("--"))
+      .join("\n");
+    expect(sqlLive).toMatch(/FROM pg_default_acl d\s+WHERE d\.defaclnamespace = 'public'::regnamespace/);
+    expect(sqlLive).toContain("aclexplode(r.defaclacl)");
+    expect(sqlLive, "the reset names a role literally instead of reading it from pg_default_acl").not.toMatch(
+      /\b(supabase_admin|anon|authenticated|service_role)\b|FOR ROLE "?postgres/,
+    );
+    expect(sqlLive).toMatch(/IF v_left <> 0 THEN\s+RAISE EXCEPTION/);
+  });
+
+  // The fidelity gate itself, driven with a synthetic dump and catalogue (no Docker):
+  // an exact match is OK, the CI run's exact defect (authenticated TRUNCATE on
+  // system_settings, which the dump does not grant) is DRIFT, and a GRANT shape it
+  // cannot parse is MEASURE_FAIL rather than skipped.
+  it("acl-fidelity.mjs passes an exact match, names the extra TRUNCATE as DRIFT, and refuses a dump line it cannot parse", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acl-fidelity-"));
+    try {
+      const dump = [
+        'GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE "public"."system_settings" TO "authenticated";',
+        'GRANT ALL ON TABLE "public"."system_settings" TO "service_role";',
+        'REVOKE ALL ON FUNCTION "public"."f"("p_a" "uuid") FROM PUBLIC;',
+        'GRANT ALL ON FUNCTION "public"."f"("p_a" "uuid") TO "service_role";',
+        'ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "anon";',
+      ].join("\n");
+      const tablePrivs = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN"];
+      const good = [
+        "excluded-extension-members|0",
+        "obj|rel|r|system_settings|postgres",
+        ...tablePrivs.map((p) => `acl|rel|system_settings|postgres|${p}:false`),
+        ...["SELECT", "INSERT", "DELETE", "MAINTAIN", "UPDATE"].map((p) => `acl|rel|system_settings|authenticated|${p}:false`),
+        ...tablePrivs.map((p) => `acl|rel|system_settings|service_role|${p}:false`),
+        "obj|fn|-|public.f(p_a uuid)|postgres",
+        "acl|fn|public.f(p_a uuid)|postgres|EXECUTE:false",
+        "acl|fn|public.f(p_a uuid)|service_role|EXECUTE:false",
+        "defacl|postgres|f|anon|EXECUTE:false",
+      ];
+      const run = (dumpText: string, cat: string[]) => {
+        writeFileSync(join(dir, "dump.sql"), dumpText);
+        writeFileSync(join(dir, "cat.txt"), cat.join("\n") + "\n");
+        return spawnSync(
+          process.execPath,
+          [REPO_ROOT + "scripts/local-stack/acl-fidelity.mjs", "--dump", join(dir, "dump.sql"), "--catalogue", join(dir, "cat.txt")],
+          { encoding: "utf8" },
+        );
+      };
+      const ok = run(dump, good);
+      expect(ok.status, ok.stdout + ok.stderr).toBe(0);
+      expect(ok.stdout).toMatch(/^acl-fidelity: .* drift=0 verdict OK$/m);
+
+      const drift = run(dump, [...good, "acl|rel|system_settings|authenticated|TRUNCATE:false"]);
+      expect(drift.status, drift.stdout + drift.stderr).toBe(1);
+      expect(drift.stdout).toContain("EXTRA    system_settings|authenticated|TRUNCATE");
+      expect(drift.stdout).toMatch(/drift=1 verdict DRIFT$/m);
+
+      const anonFn = run(dump, [...good, "acl|fn|public.f(p_a uuid)|anon|EXECUTE:false"]);
+      expect(anonFn.status, "an anon EXECUTE the dump revoked (via PUBLIC) is not DRIFT").toBe(1);
+
+      const unparsed = run(dump + '\nGRANT ALL ON TABLE "public"."x" TO "anon" WITH GRANT OPTION;', good);
+      expect(unparsed.status, unparsed.stdout + unparsed.stderr).toBe(2);
+      expect(unparsed.stdout).toMatch(/verdict MEASURE_FAIL$/m);
+
+      const empty = run(dump, ["excluded-extension-members|0"]);
+      expect(empty.status, "an empty catalogue passed the fidelity gate").toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // ⭐ Phase 164.4.2 plan 03. The guard above compares `git log -1 --format=%ct`
   // for two paths. On the default SHALLOW checkout both answers are the one
   // fetched commit's time, they compare equal, and the guard passes having

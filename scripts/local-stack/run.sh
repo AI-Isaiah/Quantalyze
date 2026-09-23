@@ -309,6 +309,12 @@ EOF
     exit 1
   fi
 
+  # ⛔ PROD's starting state for `public`, BEFORE psql reads a byte of the dump.
+  # Without it every object the dump creates inherits the image's default ACLs
+  # (ALL to anon/authenticated/service_role) and the lane's catalogue is WIDER than
+  # PROD's (see reset_public_default_acls).
+  reset_public_default_acls "$psql" "$db_url"
+
   # Name the file on the SUCCESS path too, not just in the FATAL above. Phase
   # 164.5 criterion 1 is "the lane boots from the COMMITTED baseline, proven by
   # running it" — and a log line reading only "baseline loaded" cannot tell a
@@ -317,12 +323,79 @@ EOF
   "$psql" "$db_url" -v ON_ERROR_STOP=1 -q -f "$BASELINE_FILE"
   log "baseline loaded from ${BASELINE_FILE}"
 
+  # The reset's proof, for every object: the ACLs now equal what the dump declares.
+  check_acl_fidelity "$psql" "$db_url"
+
   # Reference rows come from CARRIED migrations only (the gate removed the
   # replayed files' allowlist lines), and they predate every migration newer
   # than the dump — PRODUCTION's own chronological order — so they load first.
   load_reference_data "$psql" "$db_url"
 
   replay_migrations "$psql" "$db_url"
+}
+
+# ── Default-ACL reset and ACL fidelity (Phase 164.4.2, plan 08 checkpoint RED) ─
+#
+# ⛔ WHY. MEASURED in CI run 35886515179: on this lane an authenticated NON-ADMIN
+# could TRUNCATE public.system_settings, which PROD does not grant. The Supabase
+# image creates `public` with default ACLs granting ALL on TABLES, SEQUENCES and
+# FUNCTIONS to anon, authenticated and service_role (for the grantor roles postgres
+# and supabase_admin). The dump sets its OWN default privileges LAST, after every
+# CREATE, and its GRANT lines only ADD, so every object it created kept the image's
+# ALL. PROD and the TEST restore path (`DROP SCHEMA public CASCADE`, which drops
+# those rows) get exactly the dump's GRANTs. Every privilege and RLS gate that ran
+# on this lane was measuring a wider catalogue than PROD's.
+#
+# WHY A RESET AND NOT DROP SCHEMA. The image's `public` is EMPTY apart from these
+# rows (measured: 0 relations, 0 functions, 0 types), so removing them yields the
+# restore path's starting state. Dropping and recreating the schema would ALSO
+# change its owner (pg_database_owner) and its ACL (PUBLIC USAGE), which the dump
+# does not recreate and PROD still has. The reset changes only what is wrong.
+#
+# The roles, object types and grantees are READ from pg_default_acl, not listed.
+# It must run as the stack's superuser, because postgres may only alter its own
+# defaults and supabase_admin also holds rows on `public`. That URL is the lane's
+# own loopback DSN with the role swapped; a DSN that does not name `postgres` is
+# refused rather than guessed at. A surviving row is FATAL.
+reset_public_default_acls() {
+  local psql="$1" db_url="$2" admin_url left
+  admin_url="${db_url/#postgresql:\/\/postgres:/postgresql://supabase_admin:}"
+  if [ "$admin_url" = "$db_url" ]; then
+    echo "FATAL: the lane DSN does not start with postgresql://postgres:, so the superuser DSN the default-ACL reset needs cannot be derived. Refusing to load the dump over the image's default ACLs." >&2
+    exit 1
+  fi
+  if ! "$psql" -X "$admin_url" -v ON_ERROR_STOP=1 -q -f "${LANE_DIR}/reset-public-default-acl.sql" </dev/null; then
+    echo "FATAL: the default-ACL reset on schema public failed. Loading the dump now would give every object the image's ALL grants." >&2
+    exit 1
+  fi
+  # Re-read by an INDEPENDENT connection (the loading role), not the reset's own claim.
+  if ! left="$("$psql" -X "$db_url" -v ON_ERROR_STOP=1 -q -At -c "SELECT count(*) FROM pg_default_acl WHERE defaclnamespace = 'public'::regnamespace;" </dev/null)"; then
+    echo "FATAL: could not count the default ACLs left on schema public after the reset. Unmeasured is not zero." >&2
+    exit 1
+  fi
+  if [ "$left" != "0" ]; then
+    echo "FATAL: ${left} default-ACL row(s) on schema public survived the reset." >&2
+    exit 1
+  fi
+  log "default ACLs on schema public reset: 0 remain before the dump loads"
+}
+
+# Every public table, view, sequence and function's ACL, and the schema's default
+# ACLs, compared with what the dump declares (scripts/local-stack/acl-fidelity.mjs).
+# Runs right after the dump and BEFORE reference data and the replay: a replayed
+# migration may legitimately GRANT or REVOKE, exactly as it would on PROD, so the
+# dump alone is the fixed point this gate can be exact about. DRIFT is FATAL.
+check_acl_fidelity() {
+  local psql="$1" db_url="$2" rows
+  rows="${REPLAY_HANDOFF_DIR}/acl-catalogue.txt"
+  if ! "$psql" -X "$db_url" -v ON_ERROR_STOP=1 -q -At -F '|' -f "${LANE_DIR}/acl-fidelity-catalogue.sql" >"$rows" </dev/null; then
+    echo "FATAL: could not read the lane's ACL catalogue for the fidelity gate." >&2
+    exit 1
+  fi
+  if ! node "${LANE_DIR}/acl-fidelity.mjs" --dump "$BASELINE_FILE" --catalogue "$rows"; then
+    echo "FATAL: the lane's public ACLs are not the ones ${BASELINE_FILE} declares (acl-fidelity above). Privilege and RLS gates on this lane would measure a catalogue that is not PROD's." >&2
+    exit 1
+  fi
 }
 
 # ── Replay of the migrations the dump does not carry (DECISION F, plan 06) ────
