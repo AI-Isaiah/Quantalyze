@@ -983,6 +983,21 @@ describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test 
     expect(out).toContain("FAIL — a sibling directory sharing the prefix does not launder into the allow-list");
   });
 
+  // ── review 164.4.2 IN-02: no raw git line above a PASSED verdict ──────────
+  // The unreadable-ref arm makes git fail on purpose. With git's stderr inherited,
+  // `fatal: ambiguous argument …` printed raw into the CI log above a PASSED
+  // verdict, where a reader triaging a red run could take it for the cause. Both
+  // scripts that drive the shared diff are checked, through the real files.
+  it("neither self-test prints a raw `fatal:` git line — git's reason travels inside the MEASURE_FAIL", () => {
+    for (const script of [CLASSIFIER, join(ROOT, "scripts/sql-gate-subset.mjs")]) {
+      const res = spawnSync(process.execPath, [script, "--self-test"], { cwd: ROOT, encoding: "utf8" });
+      const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+      expect(res.status, `${script} self-test must pass through this spawn\n${out}`).toBe(0);
+      expect(out, "AIM: the unreadable-ref arm ran").toContain("UNREADABLE diff base");
+      expect(out.split("\n").filter((l) => l.startsWith("fatal:")), `${script} printed git's stderr raw`).toEqual([]);
+    }
+  });
+
   // ── the tree is untouched ────────────────────────────────────────────────
   it("the checked-out classifier is byte-unchanged by the mutations above", () => {
     expect(

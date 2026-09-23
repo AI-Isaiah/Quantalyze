@@ -102,7 +102,10 @@ export function judge(changedFiles) {
 }
 
 function git(args, cwd) {
-  return execFileSync("git", args, { encoding: "utf8", ...(cwd ? { cwd } : {}) });
+  // stderr is PIPED, never inherited (review 164.4.2 IN-02): a failing git's
+  // `fatal:` line travels inside the caller's MEASURE_FAIL instead of printing
+  // raw into the log above whatever verdict follows.
+  return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...(cwd ? { cwd } : {}) });
 }
 
 /**
@@ -154,7 +157,8 @@ export function changedFilesAgainstBase({ baseRefName = process.env.GITHUB_BASE_
       .filter(Boolean);
   } catch (e) {
     // ⛔ A gate that cannot read cannot report a pass.
-    throw new Error(`MEASURE_FAIL: could not read ${baseRef} — ${e.message}`);
+    const why = String(e.stderr ?? "").trim() || e.message;
+    throw new Error(`MEASURE_FAIL: could not read ${baseRef} — ${why}`);
   }
 }
 
@@ -290,6 +294,14 @@ const CASES = [
         ok(
           threw !== null && threw.message.startsWith("MEASURE_FAIL: could not read origin/gsd-self-test-no-such-base-ref"),
           "and the error is the named MEASURE_FAIL naming the unreadable ref",
+        ) && pass;
+      // Review 164.4.2 IN-02: git's own reason travels INSIDE the MEASURE_FAIL,
+      // and is not printed raw above a PASSED verdict where a reader triaging a
+      // red run could take it for the cause.
+      pass =
+        ok(
+          threw !== null && /fatal: /.test(threw.message),
+          `and it carries git's own stderr reason (got ${JSON.stringify(threw?.message ?? null)})`,
         ) && pass;
       return pass;
     },
