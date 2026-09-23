@@ -49,12 +49,15 @@ BEGIN
       RAISE EXCEPTION 'acl-reset: pg_default_acl row for role % on schema public has object type %, which this reset does not know how to revoke',
         r.defaclrole::regrole, r.defaclobjtype;
     END IF;
+    -- `regrole::text` is ALREADY a quoted identifier when the name needs quoting,
+    -- so it is spliced with %s. Review 164.4.2 IN-01: `%I` / quote_ident over it
+    -- quoted a second time and named a role that does not exist.
     FOR g IN SELECT DISTINCT a.grantee FROM aclexplode(r.defaclacl) a LOOP
       EXECUTE format(
-        'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public REVOKE ALL ON %s FROM %s CASCADE',
+        'ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public REVOKE ALL ON %s FROM %s CASCADE',
         r.defaclrole::regrole::text,
         v_kind,
-        CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(g.grantee::regrole::text) END);
+        CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE g.grantee::regrole::text END);
     END LOOP;
   END LOOP;
 

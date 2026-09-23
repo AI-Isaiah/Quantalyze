@@ -1200,3 +1200,19 @@ describe("assert_lane_pg_image accepts exactly one line naming the pinned image 
     expect(drive("public.ecr.aws/supabase/postgres:17.6.1.106\n").status).toBe(1);
   });
 });
+
+// ── Review 164.4.2 IN-01: the default-ACL reset never re-quotes a regrole. ──────
+// `regrole::text` is already a quoted identifier when a role name needs quoting, so
+// `%I` or quote_ident over it names a role that does not exist. MEASURED on a
+// scripts/pg-lane cluster with roles "Grantor-X" / "Grantee Y": the double-quoting
+// form raised 42704 `role ""Grantee Y"" does not exist`; the %s form removed both
+// default-ACL rows. That run needs a cluster; this pin keeps the fixed shape.
+it("reset-public-default-acl.sql splices regrole::text with %s, never %I or quote_ident (IN-01)", () => {
+  const sql = read("scripts/local-stack/reset-public-default-acl.sql")
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("--"))
+    .join("\n");
+  expect(sql, "AIM: the reset still builds its REVOKE with format()").toMatch(/ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public/);
+  expect(sql).not.toMatch(/FOR ROLE %I/);
+  expect(sql).not.toMatch(/quote_ident\([^)]*regrole::text\)/);
+});
