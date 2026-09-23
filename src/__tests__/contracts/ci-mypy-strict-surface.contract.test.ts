@@ -46,8 +46,10 @@ import { join } from "node:path";
  *     with `strict = true` and `follow_imports = "silent"` (so no `exclude`,
  *     `files` or `ignore_errors`), its `[[tool.mypy.overrides]]` name EXACTLY
  *     the hand-typed third-party set and carry no `ignore_errors`, no tracked
- *     `mypy.ini` / `.mypy.ini` shadows it, and no surface `.py` file carries a
- *     `# mypy:` comment or a top-of-file bare `# type: ignore`.
+ *     `mypy.ini` / `.mypy.ini` shadows it, no tracked `.pyi` stub outside an
+ *     `EXCLUDED` directory replaces a surface module in mypy's crawl, and no
+ *     surface `.py` file carries a `# mypy:` comment or a top-of-file bare
+ *     `# type: ignore`.
  *   The D-02 before/after record this pin keeps from going stale:
  *     BEFORE: `services/ routers/ models/` — 96 source files as mypy counts them.
  *     AFTER:  that set plus exactly `main.py main_worker.py main_worker_healthz.py
@@ -611,6 +613,20 @@ function mypyConfigProblems(
     }
   }
 
+  // A `.pyi` stub beside a module REPLACES that module in mypy's crawl: mypy
+  // checks the stub and never reads the `.py`, so a red `pkg/bad.py` goes green
+  // the moment `pkg/bad.pyi` is added. None is tracked today; any one outside an
+  // EXCLUDED directory is refused.
+  for (const p of listing) {
+    if (!p.endsWith(".pyi")) continue;
+    const top = p.includes("/") ? p.split("/")[0] : null;
+    if (top !== null && Object.hasOwn(excluded, top)) continue;
+    problems.push(
+      `analytics-service/${p} is a tracked stub. mypy reads it INSTEAD of ` +
+        `analytics-service/${p.replace(/\.pyi$/, ".py")}, so that module is no longer checked.`,
+    );
+  }
+
   const { tables, errors } = parseTomlTables(pyprojectText);
   problems.push(...errors);
   const mypyTables = tables.filter(
@@ -997,6 +1013,19 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
   it("(t) a tracked analytics-service/mypy.ini → a problem naming it", () => {
     const problems = cfg(REAL_PYPROJECT, [...REAL_LISTING, "mypy.ini"]);
     expect(has(problems, "mypy.ini is tracked"), problems.join("\n")).toBe(true);
+  });
+
+  it("(y) a tracked `.pyi` stub beside a surface module → a problem naming the shadowed .py", () => {
+    const listing = [...REAL_LISTING, "services/metrics.pyi"];
+    expect(REAL_LISTING.includes("services/metrics.py"), "CALIBRATION (y): the shadowed module is not tracked").toBe(true);
+    const problems = cfg(REAL_PYPROJECT, listing);
+    expect(has(problems, "services/metrics.pyi is a tracked stub", "services/metrics.py,"), problems.join("\n")).toBe(true);
+  });
+
+  it("(y2) a tracked top-level `main.pyi` → a problem naming main.py; one under tests/ stays out", () => {
+    const problems = cfg(REAL_PYPROJECT, [...REAL_LISTING, "main.pyi", "tests/helper.pyi"]);
+    expect(has(problems, "analytics-service/main.pyi is a tracked stub", "main.py,"), problems.join("\n")).toBe(true);
+    expect(has(problems, "tests/helper.pyi"), problems.join("\n")).toBe(false);
   });
 
   it("(u) a multi-line array the reader cannot parse → a parse problem, never a silent skip", () => {
