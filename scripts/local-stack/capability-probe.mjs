@@ -214,7 +214,7 @@ export function refuseNonLocalDsn(dsn) {
     return "the handoff's DB_URL names a host other than 127.0.0.1/localhost. This probe is local-only: TEST is shared and PROD is PROD";
   }
   if (u.port === "") {
-    return "the handoff's DB_URL carries no port. The lane always writes one, and run.sh's own guard requires it";
+    return "the handoff's DB_URL carries no port, and the lane always writes one";
   }
   if (u.search !== "" || u.hash !== "") {
     return "the handoff's DB_URL carries a query string or fragment. libpq honours host=, hostaddr= and service= there, and those can re-point the connection away from the loopback host";
@@ -634,7 +634,7 @@ function selfTest() {
     ok(typeof refuseNonLocalDsn(refusals.query) === "string", "a query string is refused — host=/hostaddr=/service= re-point libpq");
     ok(typeof refuseNonLocalDsn(refusals.scheme) === "string", "a non-postgres scheme is refused");
     ok(typeof refuseNonLocalDsn(refusals.unparseable) === "string", "an unparseable DSN is refused");
-    ok(typeof refuseNonLocalDsn(refusals.portless) === "string", "a DSN with no port is refused, matching run.sh's own '@127.0.0.1:' guard");
+    ok(typeof refuseNonLocalDsn(refusals.portless) === "string", "a DSN with no port is refused — the lane always writes a port");
     ok(
       typeof refuseNonLocalDsn(refusals.hostList) === "string",
       "a comma host list behind a second '@' is refused — libpq connects to its FIRST, remote, host",
