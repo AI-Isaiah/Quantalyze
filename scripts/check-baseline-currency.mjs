@@ -446,6 +446,8 @@ function selfTest() {
   );
   // Silent-failure-hunter round 2, WR-04: psql reads every byte >= 0x80 as an
   // identifier character, so `é$a$` is ONE identifier, not `é` then a dollar body.
+  // MEASURED on psql 16 (pg-lane, 2026-09-24): this shape and the `$é$` tag
+  // below each ran their shell command.
   const r10i = see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT é$a$\n\\! echo exfiltrate\n, é$a$;\n" } }));
   ok(
     r10i.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes("line 2")),
@@ -456,17 +458,19 @@ function selfTest() {
     r10j.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes("line 1")),
     "a non-ASCII dollar TAG `$é$` opens and closes a body, so the `\\!` after it is refused",
   );
-  // psql continues a literal across whitespace holding a newline IN THE SAME
-  // MODE, so the continuation of an E'…' literal honours backslash escapes.
-  const r10k = see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT E'a'\n'\\'' ; \\! echo exfiltrate ; '\n" } }));
+  // psql reads line by line, so `'…'` on the line after an E'…' literal is a NEW
+  // plain literal to psql, though the server continues it in E mode. MEASURED on
+  // psql 16 (pg-lane, 2026-09-24): this exact shape ran its shell command.
+  const r10k = see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT E'a'\n'\\' ; \\! echo exfiltrate #'\n" } }));
   ok(
     r10k.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes("line 2")),
-    "the newline-continuation of an E'…' literal is lexed as E'…', so the `\\!` it ends before is refused",
+    "a literal on the line after an E'…' literal is lexed as psql lexes it, a new plain literal, so the `\\!` after it is refused",
   );
   // A number run straight into an identifier character is lexed by
   // version-dependent junk-token rules: `1E'\'…'` is the junk token `1E` then a
   // plain literal on one psql, and `1` then an E'…' literal on another. Refused,
-  // never guessed.
+  // never guessed. MEASURED on psql 16 (pg-lane, 2026-09-24): the junk reading,
+  // and the shell command ran.
   const r10l = ["SELECT 1E'\\'; \\! echo exfiltrate; '\n", "SELECT $1E'\\'; \\! echo exfiltrate; '\n"].map((t) =>
     see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: t } })),
   );
@@ -486,7 +490,7 @@ function selfTest() {
   );
   ok(
     r10m.defects.length === 0 && r10m.replay.join(",") === C,
-    `CONTROL: \`$\` inside an identifier, non-ASCII identifiers and tags, numbers, parameters and literal continuations are code psql can read (got ${JSON.stringify(r10m.defects.map((d) => d.detail))})`,
+    `CONTROL: \`$\` inside an identifier, non-ASCII identifiers and tags, numbers, parameters and a literal on the line after an E-literal are code psql can read (got ${JSON.stringify(r10m.defects.map((d) => d.detail))})`,
   );
 
   console.log("=== SELF-TEST R11/14: ANY defect -> the pure result carries no set at all");
@@ -631,14 +635,16 @@ const identCont = (ch) => ch !== undefined && (/[A-Za-z0-9_$]/.test(ch) || ch.ch
 const DOLQ_DELIM = /\$(?:[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿]*)?\$/y;
 /** A numeric literal's longest run (decimal, fraction, exponent, 0x/0o/0b, `_` separators). */
 const NUMBER = /0[xXoObB][0-9A-Fa-f_]*|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9][0-9_]*)?/y;
-/** psqlscan.l's quotecontinue: whitespace holding a newline (and `--` comments), then a quote. */
-const QUOTE_CONTINUE = /[ \t\f]*[\n\r](?:[ \t\n\r\f\v]+|--[^\n\r]*[\n\r])*'/y;
 
 /**
  * PURE: the 1-based line numbers on which psql would read a backslash as a
  * meta-command — any backslash outside a `--` comment, a (nested) block
- * comment, a '…' or E'…' literal (and its newline continuations), a "…"
- * identifier and a $tag$…$tag$ body. A meta-command may start mid-line.
+ * comment, a '…' or E'…' literal, a "…" identifier and a $tag$…$tag$ body. A
+ * meta-command may start mid-line. ⚠️ A literal continued across a newline
+ * (`E'a'` then `'…'` on the next line) is a NEW plain literal to psql, which
+ * reads its input line by line, even though the SERVER continues it in E mode.
+ * MEASURED on psql 16 in a pg-lane run, 2026-09-24: `SELECT E'a'` then
+ * `'\' ; \! cmd #'` ran `cmd`. So this lexer, like psql, never continues one.
  *
  * ⛔ This is psql's lexer's view ONLY under the settings psql connects with
  * (`standard_conforming_strings = on`, an ASCII-safe `client_encoding`), and
@@ -677,23 +683,16 @@ export function psqlMetaCommandLines(src) {
       line: src.slice(0, mode.index).split("\n").length,
     };
   }
-  /** End of the '…' literal opened at `i` (continuations included), or -1. */
+  /** End of the '…' literal opened at `i` (one past its closing quote), or -1. */
   const literalEnd = (i, escaped) => {
     let j = i + 1;
-    for (;;) {
-      while (j < n) {
-        if (escaped && src[j] === "\\") j += 2;
-        else if (src[j] === "'" && src[j + 1] === "'") j += 2;
-        else if (src[j] === "'") break;
-        else j++;
-      }
-      if (j >= n) return -1;
-      j++; // past the closing quote
-      QUOTE_CONTINUE.lastIndex = j;
-      const cont = QUOTE_CONTINUE.exec(src);
-      if (!cont) return j;
-      j += cont[0].length; // continue in the SAME mode, as psql does
+    while (j < n) {
+      if (escaped && src[j] === "\\") j += 2;
+      else if (src[j] === "'" && src[j + 1] === "'") j += 2;
+      else if (src[j] === "'") return j + 1;
+      else j++;
     }
+    return -1;
   };
   let i = 0;
   while (i < n) {
@@ -787,7 +786,14 @@ export function psqlMetaCommandLines(src) {
         continue;
       }
     }
-    if (c === "\\") lines.add(line);
+    if (c === "\\") {
+      // psql hands the rest of the line to the meta-command as its arguments,
+      // so it is not lexed as SQL. The file is refused on this line either way.
+      lines.add(line);
+      const eol = src.indexOf("\n", i);
+      i = eol === -1 ? n : eol;
+      continue;
+    }
     if (c === "\n") line++;
     i++;
   }
