@@ -1216,3 +1216,47 @@ it("reset-public-default-acl.sql splices regrole::text with %s, never %I or quot
   expect(sql).not.toMatch(/FOR ROLE %I/);
   expect(sql).not.toMatch(/quote_ident\([^)]*regrole::text\)/);
 });
+
+// ── sql-corpus-report.mjs, EXECUTED in a scratch tree with a stubbed psql. ──────
+// Review 164.4.2 IN-05: a green report must say out loud what it did NOT check,
+// so it is never read as a green `sql-tests`. And the WR-08 class: its loopback
+// check is the same parse-based rule as every other lane DSN gate.
+describe("sql-corpus-report.mjs (IN-05, and the WR-08 loopback rule)", () => {
+  const drive = (dsn: string) => {
+    const root = mkdtempSync(join(tmpdir(), "corpus-report-"));
+    try {
+      const lane = join(root, "scripts", "local-stack");
+      mkdirSync(lane, { recursive: true });
+      for (const f of ["sql-corpus-report.mjs", "capability-probe.mjs"]) {
+        writeFileSync(join(lane, f), read(`scripts/local-stack/${f}`));
+      }
+      writeFileSync(join(lane, ".stack-env"), `DB_URL="${dsn}"\n`);
+      mkdirSync(join(root, "supabase", "tests"), { recursive: true });
+      writeFileSync(join(root, "supabase", "tests", "test_ok.sql"), "SELECT 1;\n");
+      const bin = join(root, "bin");
+      mkdirSync(bin);
+      writeFileSync(join(bin, "psql"), "#!/usr/bin/env bash\nexit 0\n");
+      chmodSync(join(bin, "psql"), 0o755);
+      const r = spawnSync(process.execPath, [join(lane, "sql-corpus-report.mjs")], {
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+      });
+      return { status: r.status, out: `${r.stdout}${r.stderr}` };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it("a green run prints that sentinels and arm rosters were NOT checked, beside its verdict", () => {
+    const r = drive("postgresql://postgres:postgres@127.0.0.1:54322/postgres");
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toMatch(/^sql-corpus: files=1 pass=1 fail=0 /m);
+    expect(r.out).toMatch(/^not-checked: .*completion sentinels.*arm rosters.* NOT a green sql-tests/m);
+  });
+
+  it("refuses a loopback-looking DSN whose ?host= re-points libpq (the parse-based rule, not a regex)", () => {
+    const r = drive("postgresql://postgres:s3cret@127.0.0.1:54322/postgres?host=db.example.invalid");
+    expect(r.status, r.out).toBe(2);
+    expect(r.out).not.toContain("s3cret");
+  });
+});

@@ -37,6 +37,9 @@
  * prints a SKIP marker and THEN errors is a FAIL: an error must never be masked as a
  * skip, and the louder label wins.
  *
+ * and, always beside it, a `not-checked:` line naming what `sql-tests` checks and this
+ * report does not (review 164.4.2 IN-05).
+ *
  * EXIT 0 only when fail = 0 and whole-file-skip = 0; 1 otherwise; 2 when it cannot
  * measure (no DB_URL in scripts/local-stack/.stack-env, a non-loopback DSN, an empty
  * corpus, no psql, or a `--file` that does not exist).
@@ -48,6 +51,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { basename, delimiter, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { refuseNonLocalDsn } from "./capability-probe.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ENV_FILE = join(REPO_ROOT, "scripts", "local-stack", ".stack-env");
@@ -89,9 +94,11 @@ const dbUrl = envText
   .map((l) => /^DB_URL="?([^"]*)"?$/.exec(l))
   .find(Boolean)?.[1];
 if (!dbUrl) cannotMeasure(`no DB_URL line in ${relative(REPO_ROOT, ENV_FILE)}`);
-if (!/@(127\.0\.0\.1|localhost):/.test(dbUrl)) {
-  cannotMeasure("the lane handoff's DB_URL does not name 127.0.0.1/localhost; this report is local-only");
-}
+// Review 164.4.2 WR-08, applied to this caller too: the ONE parse-based loopback rule
+// (capability-probe.mjs's refuseNonLocalDsn). The `@127.0.0.1:` regex it replaces
+// accepted a ?host= / hostaddr= override, which libpq honours.
+const dsnRefusal = refuseNonLocalDsn(dbUrl);
+if (dsnRefusal) cannotMeasure(`${dsnRefusal}; this report is local-only`);
 
 // ── psql, resolved as resolve_psql() resolves it ────────────────────────────
 function resolvePsql() {
@@ -179,5 +186,11 @@ if (narrowed.length > 0) {
 }
 console.log(
   `sql-corpus: files=${files.length} pass=${tally.pass} fail=${tally.fail} whole-file-skip=${tally.skip} lane-only=${tally.laneOnly}`,
+);
+// Review 164.4.2 IN-05: printed on every completed run, beside the verdict, so a
+// green report is never read as a green `sql-tests`.
+console.log(
+  "not-checked: completion sentinels, arm rosters (roster-vs-count coherence and the arms bound), the NOTICE-channel " +
+    "probe and narrow-partial-skip annotations — sql-tests checks those; this report is NOT a green sql-tests",
 );
 process.exit(tally.fail === 0 && tally.skip === 0 ? 0 : 1);
