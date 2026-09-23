@@ -2398,3 +2398,106 @@ describe("[164.8.2-WR-07] slice anchors fail loud instead of degenerating", () =
     ).toThrow(/ANCHOR MISSING: "\\n {2}plan-anchor-verify:"/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 164.4.2-07 (DECISION D) — the SUBSET path keeps every floor's FULL-CORPUS
+// meaning. A subset run (`--subset-from`) can exit 0, which is new: until this
+// phase only a full run could. So the floors must be pinned on the subset path
+// in BOTH directions, one layer above the runner:
+//   - ARMS_FLOOR is NOT compared on a subset — a narrowed biting count under a
+//     full-corpus floor would always fail, and renormalising the floor to the
+//     narrowed denominator is the laundering CONTEXT's vacuity fence forbids;
+//   - FILES_FLOOR and WAIVED_CEILING STILL fire on a subset, and FILES_FLOOR's
+//     numerator is the FULL scan's — the stale-low direction the runner is blind
+//     to by construction if a subset ever fed it a narrowed count.
+// Driven through `runCorpus` with an injected lane runner, so no cluster is
+// needed; the assertions read ONLY `floor` defects and the printed lines, never
+// the stub's arm verdicts.
+// ---------------------------------------------------------------------------
+describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally against a lower-bound floor, and never moves one", () => {
+  const FIXTURE_DIR = join(REPO_ROOT, "scripts", "mutation-runner", "fixtures");
+  const PROBE_ABSENT = { status: 0, output: "NOTICE:  LANE-PROBE: pg_cron absent", seconds: 0, measureFail: null, invoked: true };
+  const stubLane = ({ leg }: { leg: string }) =>
+    leg === "probe" ? PROBE_ABSENT : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+  type Defect = { kind: string; detail: string };
+  const floorDefects = (defects: Defect[], re: RegExp) => defects.filter((d) => d.kind === "floor" && re.test(d.detail));
+  const drive = (opts: Record<string, unknown>) => {
+    const lines: string[] = [];
+    const r = runCorpus({ scopeDir: FIXTURE_DIR, laneRunner: stubLane, log: (s: string) => lines.push(s), ...opts });
+    return { r, lines };
+  };
+
+  it("AIM: the fixture corpus has exactly ONE annotated file carrying ONE waiver — so a one-file subset IS the whole annotated set, and any floor difference below is the MODE's", () => {
+    const corpus = scanCorpus(FIXTURE_DIR);
+    expect(corpus.annotatedFiles).toEqual(["mini-gate.sql"]);
+    const waivers = readFileSync(join(FIXTURE_DIR, "mini-gate.sql"), "utf8")
+      .split("\n")
+      .filter((l) => WAIVER.test(l));
+    expect(waivers).toHaveLength(1);
+  });
+
+  it("a SUBSET run raises NO ARMS_FLOOR defect though its biting count is far below ARMS_FLOOR — and SAYS the floor was not compared", () => {
+    const { r, lines } = drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 1, armsFloor: ARMS_FLOOR, waivedCeiling: 1 });
+    expect(r.subset, "the run must actually have been a SUBSET run").toBe(true);
+    expect(r.bitingArms, "AIM: the biting count must sit below the real constant, or the absence proves nothing").toBeLessThan(ARMS_FLOOR);
+    expect(floorDefects(r.defects, /ARMS_FLOOR/)).toEqual([]);
+    expect(lines.some((l) => /^ARMS_FLOOR: NOT compared — this SUBSET run covered 1 of 1 annotated files/.test(l))).toBe(true);
+    expect(lines.filter((l) => l.startsWith("scope: "))).toEqual(["scope: SUBSET 1/1 annotated files: mini-gate.sql"]);
+  });
+
+  it("CONTROL: a FULL run over the SAME fixture with the SAME floor still raises the ARMS_FLOOR regression", () => {
+    const { r, lines } = drive({ filesFloor: 1, armsFloor: ARMS_FLOOR, waivedCeiling: 1 });
+    expect(r.subset).toBe(false);
+    expect(floorDefects(r.defects, /^ARMS_FLOOR regression: \d+ biting arm\(s\) < floor /)).toHaveLength(1);
+    expect(lines.filter((l) => l.startsWith("scope: "))).toEqual(["scope: FULL 1/1 annotated files"]);
+    expect(r.exitCode).toBe(1);
+  });
+
+  it("FILES_FLOOR still FIRES on a subset run when violated", () => {
+    const { r } = drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 99, armsFloor: 0, waivedCeiling: 1 });
+    expect(r.subset).toBe(true);
+    expect(floorDefects(r.defects, /^FILES_FLOOR regression: 1 annotated file\(s\) < floor 99$/)).toHaveLength(1);
+    expect(r.exitCode).toBe(1);
+  });
+
+  it("WAIVED_CEILING still FIRES on a subset run when violated", () => {
+    const { r } = drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 1, armsFloor: 0, waivedCeiling: 0 });
+    expect(r.subset).toBe(true);
+    expect(floorDefects(r.defects, /^WAIVED_CEILING exceeded: 1 waived arm\(s\) > ceiling 0\./)).toHaveLength(1);
+    expect(r.exitCode).toBe(1);
+  });
+
+  it("FILES_FLOOR's numerator on a subset run is the FULL scan's, never the narrowed count — both directions", () => {
+    // The self-test corpus has many annotated files; narrowing to ONE makes a
+    // renormalised numerator (1) distinguishable from the full one (N).
+    const full = scanCorpus(SELFTEST_DIR).filesAnnotated;
+    expect(full, "AIM: the narrowed and full numerators must differ, or this arm cannot tell them apart").toBeGreaterThan(1);
+    const at = (filesFloor: number) =>
+      runCorpus({
+        scopeDir: SELFTEST_DIR,
+        subsetFiles: ["nonbiting-gate.sql"],
+        filesFloor,
+        armsFloor: 0,
+        waivedCeiling: 99,
+        laneRunner: stubLane,
+        log: () => {},
+      });
+    const holds = at(full);
+    expect(holds.subset).toBe(true);
+    expect(holds.filesAnnotated).toBe(full);
+    expect(floorDefects(holds.defects, /FILES_FLOOR/), "a floor equal to the FULL count must hold on a subset run").toEqual([]);
+    const fires = at(full + 1);
+    expect(floorDefects(fires.defects, /FILES_FLOOR regression/), "one above the FULL count must fire on a subset run").toHaveLength(1);
+  });
+
+  it("the CLI can never hand a subset run a lowered floor: main's runCorpus call passes no floor, ceiling or lane runner", () => {
+    const code = maskJsComments(readFileSync(RUNNER_PATH, "utf8"));
+    const at = code.indexOf("\nfunction main(argv) {");
+    expect(at, "main(argv) not found in the masked source").toBeGreaterThan(-1);
+    const end = code.indexOf("\n}\n", at);
+    expect(end).toBeGreaterThan(at);
+    const mainBody = code.slice(at, end);
+    const calls = mainBody.match(/runCorpus\(\{[^}]*\}\)/g) ?? [];
+    expect(calls).toEqual(["runCorpus({ scopeDir, onlyFile, onlyArm, subsetFiles })"]);
+  });
+});

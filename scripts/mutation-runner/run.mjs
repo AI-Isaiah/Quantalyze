@@ -111,6 +111,10 @@ import {
   scanCorpus,
   tokenizeStatements,
 } from "./parse.mjs";
+// 164.4.2-07: the ONE strict gate-file pattern. The derivation that writes a
+// subset list and this runner's refusal of a list read the same constant, so
+// the set of names a shell step may be handed cannot differ between the two.
+import { GATE_FILE_RE } from "../sql-gate-subset.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const LANE = join(REPO_ROOT, "scripts", "pg-lane", "run.sh");
@@ -4423,11 +4427,31 @@ export function runCorpus({
   // 164.4.2-07 (D-D): the SUBSET narrowing, in the same place `--file` narrows.
   // The full scan above is untouched, so `corpus.filesAnnotated` — the
   // FILES_FLOOR numerator and the `scope:` denominator — is the whole corpus.
+  //
+  // ⛔ It narrows ONLY when EVERY listed file is annotated. A listed file that
+  // is not annotated — none of them, or some of them — would otherwise be
+  // silently left unmutated while the run read as a clean SUBSET, so the run
+  // falls back to FULL (every floor enforced) and the `scope:` line names them.
   let subset = false;
+  let subsetFallback = null;
   if (subsetFiles !== null) {
-    const listed = new Set(subsetFiles.map((p) => p.split("/").pop()));
-    targets = targets.filter((f) => listed.has(f));
-    subset = true;
+    const listed = [...new Set(subsetFiles.map((p) => p.split("/").pop()))];
+    if (listed.length === 0) {
+      // `readSubsetList` refuses an empty list before this point; a library
+      // caller that reaches here gets the same answer, never an empty pass.
+      throw new Error("runCorpus: subsetFiles is EMPTY — an empty narrowed scope is never a pass");
+    }
+    const annotated = new Set(targets);
+    const unannotated = listed.filter((f) => !annotated.has(f));
+    if (unannotated.length === listed.length) {
+      subsetFallback = `no listed file is annotated: ${unannotated.join(" ")}`;
+    } else if (unannotated.length > 0) {
+      subsetFallback = `${unannotated.length} of ${listed.length} listed file(s) not annotated: ${unannotated.join(" ")}`;
+    } else {
+      const want = new Set(listed);
+      targets = targets.filter((f) => want.has(f));
+      subset = true;
+    }
   }
 
   // Exactly ONE `scope:` line per run, printed BEFORE any lane so a run killed
@@ -4437,7 +4461,10 @@ export function runCorpus({
   let scopeLine;
   if (narrowed) scopeLine = `scope: DIAGNOSTIC ${[onlyFile, onlyArm].filter(Boolean).join(" ")}`;
   else if (subset) scopeLine = `scope: SUBSET ${targets.length}/${annotatedTotal} annotated files: ${targets.join(" ")}`;
-  else scopeLine = `scope: FULL ${annotatedTotal}/${annotatedTotal} annotated files`;
+  else {
+    scopeLine = `scope: FULL ${annotatedTotal}/${annotatedTotal} annotated files`;
+    if (subsetFallback !== null) scopeLine += ` (subset fallback: ${subsetFallback})`;
+  }
   log(scopeLine);
 
   // Snapshot the working tree BEFORE any lane run. The invariant is "this run
@@ -5057,8 +5084,10 @@ export function runCorpus({
   return {
     scopeDir,
     narrowed,
-    // 164.4.2-07: the SUBSET state and the one `scope:` line this run printed.
+    // 164.4.2-07: the SUBSET state, why a requested subset fell back to FULL
+    // (null when none was requested or it narrowed), and the one `scope:` line.
     subset,
+    subsetFallback,
     scopeLine,
     filesTotal: corpus.filesTotal,
     filesAnnotated: corpus.filesAnnotated,
@@ -5100,6 +5129,70 @@ export function scopeDirForFile(onlyFile, cwd = process.cwd()) {
     );
   }
   return join(REPO_ROOT, dirname(rel));
+}
+
+/**
+ * 164.4.2-07 (D-D): read and REFUSE a `--subset-from` list. Every refusal is a
+ * named `MEASURE_FAIL` and a non-zero exit — never an empty or silently
+ * shortened subset:
+ *   - the list file is missing or unreadable;
+ *   - the list is EMPTY (an empty narrowed scope is never a pass);
+ *   - an entry fails the strict `GATE_FILE_RE` (a name a shell step could have
+ *     been handed with a metacharacter in it, or anything that is not a gate);
+ *   - an entry does not exist on disk. The derivation already forces FULL for a
+ *     deleted or moved gate file, so a nonexistent path reaching the runner is a
+ *     broken contract, never something to skip.
+ *
+ * @param {string} listPath
+ * @param {{repoRoot?: string}} [opts]
+ * @returns {{files: string[]} | {error: string}}
+ */
+export function readSubsetList(listPath, { repoRoot = REPO_ROOT } = {}) {
+  let text;
+  try {
+    text = readFileSync(listPath, "utf8");
+  } catch (err) {
+    return { error: `MEASURE_FAIL: could not read the --subset-from list ${JSON.stringify(listPath)} — ${err.message}` };
+  }
+  const names = [...new Set(text.split(/\s+/).filter(Boolean))];
+  if (names.length === 0) {
+    return {
+      error:
+        `MEASURE_FAIL: the --subset-from list ${JSON.stringify(listPath)} is EMPTY — an empty narrowed ` +
+        `scope is never a pass; run the full corpus instead`,
+    };
+  }
+  const nonConforming = names.filter((p) => !GATE_FILE_RE.test(p));
+  if (nonConforming.length > 0) {
+    return {
+      error: `MEASURE_FAIL: --subset-from entries fail the strict gate-file pattern: ${nonConforming.map((p) => JSON.stringify(p)).join(" ")}`,
+    };
+  }
+  const missing = names.filter((p) => !existsSync(join(repoRoot, p)));
+  if (missing.length > 0) {
+    return {
+      error:
+        `MEASURE_FAIL: --subset-from names gate file(s) absent from the checkout: ${missing.join(" ")} — ` +
+        `the derivation forces FULL for a deleted or moved gate, so this list broke its contract`,
+    };
+  }
+  return { files: names };
+}
+
+/**
+ * 164.4.2-07: the flags `--subset-from` refuses to combine with, as a message,
+ * or null. A diagnostic flag would turn a gate that can pass into one that
+ * cannot (or the reverse); `--parse-only` runs no arm; `--fixture-corpus`
+ * would pair a `supabase/tests/` list with a scope it is not drawn from.
+ */
+export function subsetFlagConflict({ onlyFile, onlyArm, parseOnly, fixtureCorpus }) {
+  const with_ = [
+    onlyFile ? "--file" : null,
+    onlyArm ? "--arm" : null,
+    parseOnly ? "--parse-only" : null,
+    fixtureCorpus ? "--fixture-corpus" : null,
+  ].filter(Boolean);
+  return with_.length === 0 ? null : `--subset-from does not combine with ${with_.join(", ")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -5894,10 +5987,184 @@ function selfTest() {
     ) &&
     pass;
 
+  // ⭐ 164.4.2-07 (DECISION D) — THE SUBSET MODE, a separately-counted set so
+  // the 17 numbered scenarios above (pinned by needle elsewhere) keep their
+  // numbers. A subset run is the first narrowed run that CAN exit 0, so each
+  // refusal that keeps it honest is proven to fire here, and the very first
+  // scenario pins BOTH exit contracts in one place: a future edit cannot make
+  // the subset pass by making the diagnostic mode pass too, or the reverse.
+  console.log("");
+  console.log("=== SELF-TEST (subset) 1/6: a clean SUBSET run exits 0 AND a clean --file run over the SAME gate still exits 2 ===");
+  const sClean = runCorpus({
+    scopeDir: FIXTURE_CORPUS,
+    subsetFiles: ["mini-gate.sql"],
+    filesFloor: 1,
+    armsFloor: 2,
+    waivedCeiling: 1,
+    log: quiet,
+  });
+  const dClean = runCorpus({ scopeDir: FIXTURE_CORPUS, onlyFile: "mini-gate.sql", filesFloor: 1, armsFloor: 2, waivedCeiling: 1, log: quiet });
+  pass =
+    expect(
+      sClean.exitCode === 0 && sClean.subset === true && sClean.defects.length === 0,
+      `the clean SUBSET run exits 0 (got exit ${sClean.exitCode}, subset ${sClean.subset}, defects ${JSON.stringify(sClean.defects.map((x) => x.kind))})`,
+    ) &&
+    expect(
+      sClean.armsExecuted === 2 && sClean.laneInvocations === 2,
+      `through REAL lanes: 2 arms executed and 2 arm lanes tallied (got ${sClean.armsExecuted}/${sClean.laneInvocations})`,
+    ) &&
+    expect(
+      sClean.scopeLine === "scope: SUBSET 1/1 annotated files: mini-gate.sql",
+      `its scope line is the SUBSET form (got ${JSON.stringify(sClean.scopeLine)})`,
+    ) &&
+    expect(
+      dClean.exitCode === 2 && dClean.defects.length === 0 && /^scope: DIAGNOSTIC /.test(dClean.scopeLine),
+      `the clean --file run over the SAME gate still exits 2 with a DIAGNOSTIC scope (got exit ${dClean.exitCode}, ${JSON.stringify(dClean.scopeLine)})`,
+    ) &&
+    pass;
+
+  console.log("=== SELF-TEST (subset) 2/6: a SUBSET run with a defect exits 1 ===");
+  const sBad = runCorpus({
+    scopeDir: SELFTEST_DIR,
+    subsetFiles: ["nonbiting-gate.sql"],
+    filesFloor: 1,
+    armsFloor: 0,
+    log: quiet,
+  });
+  pass =
+    expect(sBad.subset === true, `the run narrowed (subset ${sBad.subset}, ${JSON.stringify(sBad.scopeLine)})`) &&
+    expect(sBad.exitCode === 1, `exit code is 1 (got ${sBad.exitCode})`) &&
+    expect(
+      sBad.defects.some((d) => d.kind === "no-red" && d.arm === "NONBITE 1"),
+      'the defect table names NONBITE 1 with kind "no-red"',
+    ) &&
+    pass;
+
+  console.log("=== SELF-TEST (subset) 3/6: an unreadable, EMPTY, non-conforming or nonexistent list is REFUSED by name ===");
+  const listDir = mkdtempSync(join(tmpdir(), "mutation-runner-subset-"));
+  try {
+    const writeList = (name, body) => {
+      const p = join(listDir, name);
+      writeFileSync(p, body);
+      return p;
+    };
+    const missingList = readSubsetList(join(listDir, "no-such-list.txt"));
+    const emptyList = readSubsetList(writeList("empty.txt", " \n\n"));
+    // A name carrying a shell metacharacter: exactly what a fork PR author
+    // could choose, and exactly what the strict pattern exists to stop.
+    const badName = "supabase/tests/test_x;echo_hi.sql";
+    const badList = readSubsetList(writeList("bad.txt", `${badName}\n`));
+    const ghost = "supabase/tests/test_gsd_self_test_no_such_gate.sql";
+    const ghostList = readSubsetList(writeList("ghost.txt", `${ghost}\n`));
+    const realGate = scanCorpus(DEFAULT_CORPUS).annotatedFiles[0];
+    const goodList = readSubsetList(writeList("good.txt", `supabase/tests/${realGate}\nsupabase/tests/${realGate}\n`));
+    pass =
+      expect(
+        "error" in missingList && /^MEASURE_FAIL: could not read the --subset-from list /.test(missingList.error),
+        `a missing list file is a MEASURE_FAIL (got ${JSON.stringify(missingList)})`,
+      ) &&
+      expect(
+        "error" in emptyList && /^MEASURE_FAIL: .* is EMPTY — an empty narrowed scope is never a pass/.test(emptyList.error),
+        `an EMPTY list is refused, never an empty subset (got ${JSON.stringify(emptyList)})`,
+      ) &&
+      expect(
+        "error" in badList && badList.error.startsWith("MEASURE_FAIL: ") && badList.error.includes(JSON.stringify(badName)),
+        `a non-conforming entry is refused BY NAME (got ${JSON.stringify(badList)})`,
+      ) &&
+      expect(
+        "error" in ghostList && /^MEASURE_FAIL: .*absent from the checkout/.test(ghostList.error) && ghostList.error.includes(ghost),
+        `a nonexistent gate path is a MEASURE_FAIL naming it (got ${JSON.stringify(ghostList)})`,
+      ) &&
+      expect(
+        // CONTROL: the same reader ACCEPTS a real gate, deduplicated — so the
+        // four refusals above are the reader discriminating, not refusing all.
+        "files" in goodList && JSON.stringify(goodList.files) === JSON.stringify([`supabase/tests/${realGate}`]),
+        `CONTROL: a real annotated gate listed twice is accepted once (got ${JSON.stringify(goodList)})`,
+      ) &&
+      pass;
+  } finally {
+    rmSync(listDir, { recursive: true, force: true });
+  }
+
+  console.log("=== SELF-TEST (subset) 4/6: a list with NO annotated file runs FULL, floors enforced, the fallback naming it ===");
+  // The lane is stubbed: what is asserted is the MODE (scope line, subset
+  // flag, the ARMS_FLOOR comparison happening), never an arm verdict.
+  const subsetStub = ({ leg }) =>
+    leg === "probe"
+      ? { status: 0, output: PROBE_ABSENT_OUTPUT, seconds: 0, measureFail: null, invoked: true }
+      : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+  const none = runCorpus({
+    scopeDir: FIXTURE_CORPUS,
+    subsetFiles: ["mini-migration.sql"],
+    filesFloor: 1,
+    armsFloor: 99,
+    waivedCeiling: 1,
+    laneRunner: subsetStub,
+    log: quiet,
+  });
+  pass =
+    expect(none.subset === false, `the run did NOT narrow (subset ${none.subset})`) &&
+    expect(
+      none.scopeLine === "scope: FULL 1/1 annotated files (subset fallback: no listed file is annotated: mini-migration.sql)",
+      `the scope line is the FULL fallback form naming the unannotated file (got ${JSON.stringify(none.scopeLine)})`,
+    ) &&
+    expect(
+      none.defects.some((d) => d.kind === "floor" && /^ARMS_FLOOR regression/.test(d.detail)),
+      "ARMS_FLOOR IS compared on the fallback run — it is a FULL run",
+    ) &&
+    pass;
+
+  console.log("=== SELF-TEST (subset) 5/6: a list MIXING annotated and unannotated files runs FULL too — never a subset that silently drops one ===");
+  const mixed = runCorpus({
+    scopeDir: FIXTURE_CORPUS,
+    subsetFiles: ["mini-gate.sql", "mini-migration.sql"],
+    filesFloor: 1,
+    armsFloor: 99,
+    waivedCeiling: 1,
+    laneRunner: subsetStub,
+    log: quiet,
+  });
+  pass =
+    expect(mixed.subset === false, `the run did NOT narrow to the annotated file (subset ${mixed.subset})`) &&
+    expect(
+      mixed.scopeLine ===
+        "scope: FULL 1/1 annotated files (subset fallback: 1 of 2 listed file(s) not annotated: mini-migration.sql)",
+      `the scope line is the FULL fallback form naming ONLY the unannotated file (got ${JSON.stringify(mixed.scopeLine)})`,
+    ) &&
+    expect(
+      mixed.defects.some((d) => d.kind === "floor" && /^ARMS_FLOOR regression/.test(d.detail)),
+      "ARMS_FLOOR IS compared on the mixed fallback run",
+    ) &&
+    pass;
+
+  console.log("=== SELF-TEST (subset) 6/6: --subset-from refuses --file, --arm, --parse-only and --fixture-corpus; runCorpus refuses the diagnostic pair ===");
+  const conflicts = [
+    [{ onlyFile: "x.sql" }, "--file"],
+    [{ onlyArm: "A 1" }, "--arm"],
+    [{ parseOnly: true }, "--parse-only"],
+    [{ fixtureCorpus: true }, "--fixture-corpus"],
+  ];
+  for (const [flags, name] of conflicts) {
+    const msg = subsetFlagConflict({ onlyFile: null, onlyArm: null, parseOnly: false, fixtureCorpus: false, ...flags });
+    pass = expect(msg !== null && msg.includes(name), `${name} is refused beside --subset-from (got ${JSON.stringify(msg)})`) && pass;
+  }
+  pass =
+    expect(
+      subsetFlagConflict({ onlyFile: null, onlyArm: null, parseOnly: false, fixtureCorpus: false }) === null,
+      "CONTROL: --subset-from alone is accepted",
+    ) && pass;
+  let threwOnPair = false;
+  try {
+    runCorpus({ scopeDir: FIXTURE_CORPUS, subsetFiles: ["mini-gate.sql"], onlyFile: "mini-gate.sql", log: quiet });
+  } catch {
+    threwOnPair = true;
+  }
+  pass = expect(threwOnPair, "runCorpus throws on subsetFiles + onlyFile rather than picking one contract") && pass;
+
   console.log("");
   if (pass) {
     console.log(
-      "=== SELF-TEST PASSED: both floor modes, the waiver ceiling, the wrong-identity mode, MEASURE_FAIL, the absurdity floor, the stand-in target refusal, the stale-deferral probe and the 164.3.1-11 regression corpus all fire ===",
+      "=== SELF-TEST PASSED: both floor modes, the waiver ceiling, the wrong-identity mode, MEASURE_FAIL, the absurdity floor, the stand-in target refusal, the stale-deferral probe, the 164.3.1-11 regression corpus and the 164.4.2 subset mode all fire ===",
     );
     return 0;
   }
@@ -5915,12 +6182,16 @@ function main(argv) {
   let onlyArm = null;
   let parseOnly = false;
   let subsetFrom = null;
+  let fixtureCorpus = false;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--self-test") return selfTest();
     else if (arg === "--parse-only") parseOnly = true;
-    else if (arg === "--fixture-corpus") scopeDir = FIXTURE_CORPUS;
+    else if (arg === "--fixture-corpus") {
+      scopeDir = FIXTURE_CORPUS;
+      fixtureCorpus = true;
+    }
     else if (arg === "--file") {
       onlyFile = argv[++i];
       if (!onlyFile) {
@@ -5954,6 +6225,14 @@ function main(argv) {
     }
   }
 
+  if (subsetFrom !== null) {
+    const conflict = subsetFlagConflict({ onlyFile, onlyArm, parseOnly, fixtureCorpus });
+    if (conflict !== null) {
+      console.error(`ERROR: ${conflict}`);
+      return 3;
+    }
+  }
+
   if (parseOnly) {
     if (onlyFile || onlyArm) {
       console.error("ERROR: --parse-only is a whole-corpus static check and does not combine with --file/--arm");
@@ -5970,7 +6249,12 @@ function main(argv) {
 
   let subsetFiles = null;
   if (subsetFrom !== null) {
-    subsetFiles = readFileSync(subsetFrom, "utf8").split(/\s+/).filter(Boolean);
+    const list = readSubsetList(subsetFrom);
+    if ("error" in list) {
+      console.error(list.error);
+      return 1;
+    }
+    subsetFiles = list.files;
   }
 
   console.log(`mutation-runner: scope ${relative(REPO_ROOT, scopeDir) || "."}`);
