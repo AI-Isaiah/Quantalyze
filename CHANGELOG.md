@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.86.0.1] - 2026-09-23 — a real key identifier and strategy name leave the public tree
+
+### Changed
+
+- **Five tracked documents stop naming a real API key and a real strategy.** The repository is
+  public and `.planning/` is tracked. Phase 167's requirements line (which feeds the phase's
+  requirement ids) and four other planning and backlog entries named one live key by id and by
+  label, and one strategy by name. They now read `<key A>`, `<key A label>`, `<strategy X>` and
+  `<strategy X subtitle>`. Eleven lines changed one for one; nothing else moved.
+
+### Notes
+
+- ⚠️ **Git history keeps the old values.** This stops the CURRENT tree from republishing them; it
+  does not rewrite history, and nothing here claims otherwise.
+- Other key LABELS (not ids) still appear in older v1.18 prose. They were outside the founder's
+  decision (2026-09-22: a separate docs-only PR after Phase 167 landed) and are left as they are.
+
 ## [0.86.0.0] - 2026-09-22 — CREDTRUST: a credential that stopped working is NAMED, instead of going quietly stale behind a retry that could never succeed
 
 ⭐ **What changed for whoever reads this next.** A customer whose venue credential stopped working
