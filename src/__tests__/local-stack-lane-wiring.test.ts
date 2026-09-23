@@ -1219,6 +1219,10 @@ describe("assert_lane_pg_image accepts exactly one line naming the pinned image 
   it("two lines, the LAST naming the pin, FAIL — never a match across a newline", () => {
     const r = drive(`evil.example.invalid/postgres:16.0\npublic.ecr.aws/supabase/postgres:${pin}\n`);
     expect(r.status, r.out).toBe(1);
+    // Round-2 review IN-03: the anchored regex alone also rejects two lines, so
+    // `status 1` could not tell which guard fired. The line-count guard this
+    // test is named for must be the one that refused.
+    expect(r.out).toContain("named more than one lane db container");
   });
 
   it("a tag that only starts with the pin, or a different pin, FAILS", () => {
