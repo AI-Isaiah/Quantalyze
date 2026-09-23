@@ -3,13 +3,84 @@
  * LOCAL-STACK CAPABILITY PROBE — does the ephemeral Supabase stack SUPPLY what
  * the SQL self-test corpus DEMANDS? (Phase 164.4.2 plan 04.)
  *
- * RED PHASE: the self-test below is written; the functions it drives are stubs.
+ * ⚠️ WHY THIS EXISTS. Phase 164.4.2 moves `sql-tests` off the shared TEST
+ * project onto the local stack `scripts/local-stack/run.sh up` boots. Whether
+ * that stack can host `supabase/tests/test_*.sql` was RESEARCH Assumption A1,
+ * recorded as NOT verified: the Supabase image "plausibly" ships vault, pg_net
+ * and the auth functions, and nothing in this repo had asked it. CONTEXT Area C
+ * allows the fallback only on a MEASURED refutation written down with its
+ * measurement. This probe is that measurement. It is not an inference from the
+ * image tag, the docs, or the live-DB lane being green.
+ *
+ * WHAT IT PRINTS — one always-on line, both sides of the question on it:
+ *
+ *   stack-probe: corpus=<N> lane-only-excluded=<M> <class>=<demand>/<present|absent> … verdict <V>
+ *
+ *   DEMAND comes from the corpus: for each class, how many corpus FILES mention
+ *   its object. It is re-derived every run. ⛔ It is NOT pinned, NOT floored and
+ *   NOT compared with a stored number. `supabase/tests/` already has several
+ *   independent census pins, and this probe deliberately adds none.
+ *   A mention counts wherever it sits, comments included, so demand is an UPPER
+ *   bound. That errs toward INSUFFICIENT and never toward a false SUFFICIENT.
+ *   Files carrying a `-- LANE-ONLY:` line are excluded, using the same
+ *   line-start predicate `sql-tests` uses to skip them. They never run under
+ *   `sql-tests`, so what they mention is not demand on the lane `sql-tests`
+ *   runs on.
+ *
+ *   SUPPLY comes from the lane: ONE `psql` call against the DSN in the mode-600
+ *   handoff `run.sh up` writes (`scripts/local-stack/.stack-env`), with one
+ *   catalogue query per class.
+ *
+ * VERDICTS AND EXIT CODES
+ *   SUFFICIENT    exit 0  every class some file demands is present
+ *   INSUFFICIENT  exit 2  the lane was measured and lacks >= 1 demanded class
+ *   MEASURE_FAIL  exit 1  either side could not be read. That covers an empty
+ *                         corpus, an unreadable demand count, an unreadable
+ *                         supply for ANY class (demanded or not), a missing
+ *                         handoff, a refused DSN and a failed psql. Unknown is
+ *                         not absent and it is not present.
+ *
+ * ⛔ LOCAL ONLY. The DSN is refused before any connection unless it is a
+ * postgres URL naming 127.0.0.1 or localhost with a port and no query string.
+ * libpq honours host=/hostaddr=/service= in a query string, which would re-point
+ * the connection. That is stricter than `run.sh`'s own `*@127.0.0.1:*` glob,
+ * because a glob also matches `@127.0.0.1:` smuggled into the userinfo. psql
+ * gets the DSN as an argv ELEMENT, never through a shell, and runs with every
+ * PG* environment variable stripped: PGHOSTADDR, PGSERVICE and the rest would
+ * otherwise apply to anything the DSN leaves unset.
+ *
+ * ⛔ THE DSN IS NEVER PRINTED. Output is class names, counts and verdicts only.
+ * The execFileSync error message embeds the full argv, so it is never printed.
+ * psql's stderr is printed only after the DSN and its password are redacted.
+ *
+ * Env seams, used so the refusal paths can run without a stack:
+ *   STACK_ENV_FILE  the handoff to read (default scripts/local-stack/.stack-env)
+ *   SQL_TESTS_DIR   the corpus directory  (default supabase/tests)
+ *
+ * The EXACT commands CI runs, and the exact commands a developer runs locally:
+ *
+ *     node scripts/local-stack/capability-probe.mjs --self-test
+ *     node scripts/local-stack/capability-probe.mjs      # after `bash scripts/local-stack/run.sh up`
  */
+import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const EXIT = Object.freeze({ SUFFICIENT: 0, MEASURE_FAIL: 1, INSUFFICIENT: 2 });
 
+/** `sql-tests`'s own predicate (`grep -a -m1 '^-- LANE-ONLY:'`), as a regex. */
 export const LANE_ONLY_RE = /^-- LANE-ONLY:/m;
 
+/**
+ * The five capability classes, taken from the RESEARCH R2 census. Each class
+ * carries its OWN demand detector and its OWN supply query. A class is
+ * present when its query returns at least `required`.
+ *
+ * ⚠️ `vault` is the supabase_vault EXTENSION. It is NOT the commented-out
+ * `[db.vault]` block in `supabase/config.toml`, which governs a secret-key
+ * override and says nothing about whether the extension exists.
+ */
 export const CLASSES = Object.freeze([
   {
     name: "pg_net",
@@ -50,24 +121,240 @@ export const CLASSES = Object.freeze([
   },
 ]);
 
-// ── stubs (RED) ──────────────────────────────────────────────────────────────
-export function deriveDemand(_fileTexts) {
-  return { files: 0, laneOnly: 0, demand: {} };
+/** Finding kinds that mean "could not measure". Any one of them makes the verdict MEASURE_FAIL. */
+export const MEASURE_FAIL_KINDS = Object.freeze(["empty-corpus", "demand-unreadable", "supply-unreadable"]);
+
+const isCount = (v) => Number.isInteger(v) && v >= 0;
+
+/**
+ * PURE: corpus file TEXTS -> how many non-LANE-ONLY files demand each class.
+ * @param {string[]} fileTexts
+ */
+export function deriveDemand(fileTexts) {
+  const demand = Object.fromEntries(CLASSES.map((c) => [c.name, 0]));
+  let files = 0;
+  let laneOnly = 0;
+  for (const text of fileTexts) {
+    if (LANE_ONLY_RE.test(text)) {
+      laneOnly += 1;
+      continue;
+    }
+    files += 1;
+    for (const c of CLASSES) if (c.demand.test(text)) demand[c.name] += 1;
+  }
+  return { files, laneOnly, demand };
 }
+
+/** The ONE query: one row per class, `<class>|<count>` under psql -A -t -F '|'. */
 export function buildSupplyQuery() {
-  return "";
+  return (
+    CLASSES.map((c) => `SELECT '${c.name}' AS class, (${c.supplySql})::int AS n`).join("\nUNION ALL\n") + ";"
+  );
 }
-export function parseSupply(_stdout) {
-  return {};
+
+/**
+ * PURE: psql's answer -> { class: count | null }. Every class has to be
+ * answered exactly once, as a non-negative integer. Anything else is null,
+ * which means unreadable. A line that is not ours makes EVERY class
+ * unreadable, because an answer carrying something we did not ask for is not
+ * an answer to what we asked.
+ */
+export function parseSupply(stdout) {
+  const none = () => Object.fromEntries(CLASSES.map((c) => [c.name, null]));
+  const out = none();
+  const known = new Set(CLASSES.map((c) => c.name));
+  const seen = new Map();
+  for (const raw of String(stdout ?? "").split("\n")) {
+    const line = raw.trim();
+    if (line === "") continue;
+    const m = /^([A-Za-z0-9_-]+)\|([0-9]+)$/.exec(line);
+    if (!m || !known.has(m[1])) return none();
+    seen.set(m[1], (seen.get(m[1]) ?? 0) + 1);
+    out[m[1]] = Number(m[2]);
+  }
+  for (const [name, n] of seen) if (n > 1) out[name] = null;
+  return out;
 }
-export function refuseNonLocalDsn(_dsn) {
+
+/**
+ * PURE: null when the DSN is a loopback postgres URL this probe may connect to.
+ * Otherwise a reason. ⛔ The reason never quotes the DSN, its password or its host.
+ */
+export function refuseNonLocalDsn(dsn) {
+  let u;
+  try {
+    u = new URL(String(dsn));
+  } catch {
+    return "the handoff's DB_URL is not a parseable URL";
+  }
+  if (u.protocol !== "postgresql:" && u.protocol !== "postgres:") {
+    return "the handoff's DB_URL is not a postgres:// or postgresql:// URL";
+  }
+  if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") {
+    return "the handoff's DB_URL names a host other than 127.0.0.1/localhost. This probe is local-only: TEST is shared and PROD is PROD";
+  }
+  if (u.port === "") {
+    return "the handoff's DB_URL carries no port. The lane always writes one, and run.sh's own guard requires it";
+  }
+  if (u.search !== "" || u.hash !== "") {
+    return "the handoff's DB_URL carries a query string or fragment. libpq honours host=, hostaddr= and service= there, and those can re-point the connection away from the loopback host";
+  }
   return null;
 }
-export function judge(_facts) {
-  return { verdict: "SUFFICIENT", findings: [], rows: [] };
+
+/**
+ * PURE: demand (from the corpus) x supply (from the lane) -> verdict, named
+ * findings, and one row per class for the verdict line.
+ * @param {{files: number, demand: Record<string, number|null>, supply: Record<string, number|null>}} facts
+ */
+export function judge({ files, demand, supply }) {
+  const findings = [];
+  if (!isCount(files) || files === 0) {
+    findings.push({
+      kind: "empty-corpus",
+      class: null,
+      detail: isCount(files)
+        ? "the corpus holds ZERO test files, so there is nothing to measure demand from. An empty corpus is never a clean probe."
+        : `the corpus size is unreadable (got ${String(files)})`,
+    });
+  }
+  const rows = [];
+  for (const c of CLASSES) {
+    const d = demand?.[c.name];
+    const s = supply?.[c.name];
+    if (!isCount(d)) {
+      findings.push({ kind: "demand-unreadable", class: c.name, detail: `the demand count for ${c.name} is unreadable (got ${String(d)})` });
+    }
+    if (!isCount(s)) {
+      findings.push({
+        kind: "supply-unreadable",
+        class: c.name,
+        detail: `the lane's supply of ${c.name} is unreadable (got ${String(s)}). The lane was not measured for it, so it is reported neither absent nor present.`,
+      });
+    }
+    const state = !isCount(s) ? "UNREADABLE" : s >= c.required ? "present" : "absent";
+    if (isCount(d) && d > 0 && state === "absent") {
+      findings.push({
+        kind: "unsatisfied",
+        class: c.name,
+        detail: `${d} corpus file(s) demand ${c.name} and the lane does not supply it. Needs: ${c.supplies}. Measured ${s} of ${c.required}.`,
+      });
+    }
+    rows.push({ name: c.name, demand: isCount(d) ? d : "UNREADABLE", state });
+  }
+  const verdict = findings.some((f) => MEASURE_FAIL_KINDS.includes(f.kind))
+    ? "MEASURE_FAIL"
+    : findings.some((f) => f.kind === "unsatisfied")
+      ? "INSUFFICIENT"
+      : "SUFFICIENT";
+  return { verdict, findings, rows };
 }
-export function verdictLine(_corpus, _result) {
-  return "";
+
+/** PURE: the one always-on line. Every class appears on every path. */
+export function verdictLine(corpus, result) {
+  const n = (v) => (isCount(v) ? v : "UNREADABLE");
+  const classes = result.rows.map((r) => `${r.name}=${r.demand}/${r.state}`).join(" ");
+  return `stack-probe: corpus=${n(corpus?.files)} lane-only-excluded=${n(corpus?.laneOnly)} ${classes} verdict ${result.verdict}`;
+}
+
+// ── I/O (main only; the pure functions above never touch the disk or the network) ──
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(HERE, "..", "..");
+const DEFAULT_STACK_ENV = join(HERE, ".stack-env");
+const DEFAULT_TESTS_DIR = join(REPO_ROOT, "supabase", "tests");
+const shown = (p) => relative(REPO_ROOT, p) || ".";
+
+/** The corpus as TEXT, read latin1 so an odd byte can never make a file unreadable. */
+function readCorpus(dir) {
+  try {
+    const names = readdirSync(dir)
+      .filter((n) => /^test_.*\.sql$/.test(n))
+      .sort();
+    return { texts: names.map((n) => readFileSync(join(dir, n), "latin1")), error: null };
+  } catch (e) {
+    return { texts: [], error: `could not read the corpus directory ${shown(dir)} (${e.code ?? "error"})` };
+  }
+}
+
+/** Every PG* variable stripped. Anything the DSN leaves unset must not come from the environment. */
+function childEnv() {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("PG")) env[k] = v;
+  env.PGCONNECT_TIMEOUT = "10";
+  return env;
+}
+
+function redact(text, dsn) {
+  let out = String(text ?? "");
+  if (dsn) out = out.split(dsn).join("<DB_URL>");
+  try {
+    const pw = decodeURIComponent(new URL(dsn).password);
+    if (pw) out = out.split(pw).join("<redacted>");
+  } catch {
+    /* an unparseable DSN was refused before psql ran */
+  }
+  return out;
+}
+
+/** -> { supply, error }. On ANY failure every class is null (unreadable), never 0 (absent). */
+function readSupply(envFile) {
+  const unreadable = (error) => ({ supply: Object.fromEntries(CLASSES.map((c) => [c.name, null])), error });
+  if (!existsSync(envFile)) {
+    return unreadable(`the lane handoff ${shown(envFile)} does not exist, so the lane was not measured. Boot it first: bash scripts/local-stack/run.sh up`);
+  }
+  let raw;
+  try {
+    raw = readFileSync(envFile, "utf8");
+  } catch (e) {
+    return unreadable(`could not read the lane handoff ${shown(envFile)} (${e.code ?? "error"})`);
+  }
+  // Same key and shape `run.sh`'s load_baseline() and the lane spec read.
+  const m = raw.match(/^DB_URL="?([^"\n]*)"?$/m);
+  if (!m || !m[1]) return unreadable(`the lane handoff ${shown(envFile)} carries no usable DB_URL`);
+  const dsn = m[1];
+
+  const refusal = refuseNonLocalDsn(dsn);
+  if (refusal) return unreadable(`refusing to connect: ${refusal}`);
+
+  let stdout;
+  try {
+    stdout = execFileSync(
+      "psql",
+      ["-X", "-v", "ON_ERROR_STOP=1", "-A", "-t", "-F", "|", "-d", dsn, "-c", buildSupplyQuery()],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, env: childEnv() },
+    );
+  } catch (e) {
+    // ⛔ Never print e.message. It is "Command failed: psql … -d <DSN> …".
+    const why = e.code === "ENOENT" ? "psql is not on PATH" : `exit ${e.status ?? e.signal ?? "unknown"}`;
+    const first = redact(e.stderr, dsn).trim().split("\n")[0] ?? "";
+    return unreadable(`psql could not answer the supply query (${why})${first ? `: ${first}` : ""}`);
+  }
+  return { supply: parseSupply(stdout), error: null };
+}
+
+function main(argv) {
+  if (argv.includes("--self-test")) return selfTest();
+  // ⛔ A typo'd flag must not fall through to a probe the caller did not ask for.
+  if (argv.length > 0) {
+    console.error(`::error::unknown argument(s): ${argv.join(" ")}. This probe takes only --self-test`);
+    return EXIT.MEASURE_FAIL;
+  }
+
+  const { texts, error: corpusError } = readCorpus(process.env.SQL_TESTS_DIR || DEFAULT_TESTS_DIR);
+  const corpus = deriveDemand(texts);
+  const { supply, error: supplyError } = readSupply(process.env.STACK_ENV_FILE || DEFAULT_STACK_ENV);
+  const result = judge({ files: corpus.files, demand: corpus.demand, supply });
+
+  // Always printed, whatever the verdict, so "clean" and "did not run" never look alike.
+  console.log(verdictLine(corpus, result));
+  if (corpusError) console.error(`::error::MEASURE_FAIL — ${corpusError}`);
+  if (supplyError) console.error(`::error::MEASURE_FAIL — ${supplyError}`);
+  for (const f of result.findings) {
+    if (f.kind === "unsatisfied") console.log(`  unsatisfied: ${f.class} — ${f.detail}`);
+    else console.error(`::error::${f.kind}${f.class ? ` (${f.class})` : ""} — ${f.detail}`);
+  }
+  return EXIT[result.verdict];
 }
 
 // ── self-test ────────────────────────────────────────────────────────────────
@@ -337,10 +624,21 @@ function selfTest() {
   return 0;
 }
 
-function main(argv) {
-  if (argv.includes("--self-test")) return selfTest();
-  console.error("::error::RED phase — only --self-test is implemented");
-  return 1;
+/**
+ * Realpath-safe main-module guard, the `[VAC04-C2]` lesson. Comparing
+ * `import.meta.url` with `file://${process.argv[1]}` silently does nothing on
+ * symlinked or space-bearing paths, which turns the CLI into a library without
+ * telling anyone. Same idiom as `scripts/check-baseline-currency.mjs`.
+ */
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  }
 }
 
-process.exit(main(process.argv.slice(2)));
+if (invokedDirectly()) {
+  process.exit(main(process.argv.slice(2)));
+}
