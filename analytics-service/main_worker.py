@@ -37,6 +37,7 @@ import os
 import signal
 import socket
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final, TypedDict, cast
@@ -111,7 +112,7 @@ import main_worker_healthz  # top-level module (not in services/); stdlib-only, 
 from sentry_init import init_sentry
 from services.db import db_execute, db_read_with_retry, get_supabase
 from services.encryption import validate_kek_on_startup
-from services.job_worker import DispatchOutcome, JobStatus, Priority, dispatch
+from services.job_worker import DispatchOutcome, ErrorKind, JobStatus, Priority, dispatch
 
 logger = logging.getLogger("quantalyze.analytics.worker")
 
@@ -568,7 +569,7 @@ def _is_undefined_function_structured(exc: BaseException) -> bool:
 # triplicate the same conceptual event for Sentry's severity-based
 # alert pipeline.
 async def _safe_mark(
-    invoke_rpc,
+    invoke_rpc: Callable[[], object],
     *,
     job_id: str,
     claim_token: str | None,
@@ -648,7 +649,7 @@ async def dispatch_tick(worker_id: str) -> None:
     # the metadata stamp are byte-identical to prod's steady state.
     flag_active = True
 
-    def _claim_priority():
+    def _claim_priority() -> Any:
         params: dict[str, Any] = {
             "p_batch_size": 5,
             "p_worker_id": worker_id,
@@ -658,7 +659,7 @@ async def dispatch_tick(worker_id: str) -> None:
         params.update(_claim_kind_args(WORKER_CLAIM_ROLE))
         return supabase.rpc("claim_compute_jobs_with_priority", params).execute()
 
-    def _claim_legacy():
+    def _claim_legacy() -> Any:
         # Pre-migration-086 signature: 2 args, no priority/throttle.
         # Used only as the fallback path when migration 086 has not been
         # applied to this Supabase project (audit-2026-05-07 C-0190).
@@ -935,7 +936,7 @@ async def dispatch_tick(worker_id: str) -> None:
                     pass
 
             if result.outcome == DispatchOutcome.DONE:
-                def _mark_done(jid=job["id"], tok=claim_token):
+                def _mark_done(jid: str = job["id"], tok: str | None = claim_token) -> None:
                     supabase.rpc(
                         "mark_compute_job_done",
                         {"p_job_id": jid, "p_claim_token": tok},
@@ -952,11 +953,11 @@ async def dispatch_tick(worker_id: str) -> None:
 
             elif result.outcome == DispatchOutcome.FAILED:
                 def _mark_failed(
-                    jid=job["id"],
-                    err=result.error_message,
-                    kind=result.error_kind,
-                    tok=claim_token,
-                ):
+                    jid: str = job["id"],
+                    err: str | None = result.error_message,
+                    kind: ErrorKind | None = result.error_kind,
+                    tok: str | None = claim_token,
+                ) -> None:
                     supabase.rpc(
                         "mark_compute_job_failed",
                         {
@@ -1001,8 +1002,8 @@ async def dispatch_tick(worker_id: str) -> None:
             # critical dispatch failure.
             try:
                 def _mark_failed_fallback(
-                    jid=job["id"], err=str(exc)[:500], tok=claim_token,
-                ):
+                    jid: str = job["id"], err: str = str(exc)[:500], tok: str | None = claim_token,
+                ) -> None:
                     supabase.rpc(
                         "mark_compute_job_failed",
                         {
@@ -1072,7 +1073,7 @@ async def watchdog_tick() -> None:
     # Pass the overrides dict directly; PostgREST coerces a JSON object to
     # JSONB. json.dumps() would send a JSON string, which becomes a JSONB
     # scalar and trips jsonb_object_keys() with "cannot call ... on a scalar".
-    def _reset():
+    def _reset() -> Any:
         nonlocal attempts
         attempts += 1
         return supabase.rpc(
@@ -1111,7 +1112,7 @@ async def daily_enqueue_tick() -> None:
     """Call enqueue_poll_positions_for_all_strategies and log the count."""
     supabase = get_supabase()
 
-    def _enqueue():
+    def _enqueue() -> Any:
         return supabase.rpc(
             "enqueue_poll_positions_for_all_strategies", {}
         ).execute()
@@ -1145,7 +1146,7 @@ async def _daily_enqueue_already_ran_today() -> bool:
     try:
         supabase = get_supabase()
 
-        def _query():
+        def _query() -> Any:
             return (
                 supabase.table("compute_jobs")
                 .select("created_at")

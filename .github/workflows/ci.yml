@@ -4653,7 +4653,7 @@ jobs:
       # running service, and gating them would add a types-PyYAML dev-dep plus
       # friction for throwaway scripts. tests/ stays untyped by design.
       - name: Type gate - mypy strict over the running-service surface
-        run: mypy --strict --follow-imports=silent services/ routers/ models/ main.py
+        run: mypy --strict --follow-imports=silent services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py
       # ── THE ORDERING WAIT (Phase 164.9 plan 06, [164.8-PUSH-RACE-VAC08]) ───
       # On a merge push this job's DB work must not begin before the TEST schema
       # apply for the SAME commit has concluded. The mutex below guarantees the
