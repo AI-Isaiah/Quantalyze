@@ -482,6 +482,16 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // admitting a code the route does not currently emit costs nothing;
     // omitting one it does emit renders UNKNOWN.
     "KEY_MUST_BE_RECONNECTED",
+    // 167-CREDTRUST / D-05, D-07 — admitted HERE IN THE SAME COMMIT the
+    // shared classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now
+    // answers for the wire code the narrowed MT5 `except Mt5ClientError`
+    // transient tail raises with `KEY_SIGN_IN_FAILED`; omit this line and the
+    // membership check rejects the honest code, the step renders `UNKNOWN` —
+    // whose copy IS recoverable — and the user gets a Retry control for a
+    // fault the service marked `recoverable=False`. Same trap the notes above
+    // record; `[153.7 review W-153.7-1]` in `wizardErrors.invariant.test.ts`
+    // reds BY NAME when this row is missing.
+    "KEY_SIGN_IN_FAILED",
   ]);
 
 /**

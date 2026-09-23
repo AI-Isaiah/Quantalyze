@@ -8136,14 +8136,43 @@ async def run_poll_positions_job(job: dict[str, Any]) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+# PostgreSQL's check_violation, which PostgREST forwards verbatim as the error
+# ``code``, and the constraint that admits each ``api_keys.sync_status`` value.
+_PG_CHECK_VIOLATION = "23514"
+_API_KEYS_SYNC_STATUS_CHECK = "api_keys_sync_status_check"
+
+
+def _sync_status_write_failure_cause(exc: BaseException) -> str:
+    """Name what refused an ``api_keys.sync_status`` write, for the log only.
+
+    167 SFH-L1 / R2 IN-04. A CHECK rejection means the value is not admitted
+    yet (the worker deployed ahead of its migration): nothing was written. Any
+    other failure is ambiguous: PostgREST may have committed the write before
+    the error reached us. The caller's fallback is the same either way; this
+    only makes the log say which case it was.
+    """
+    code = getattr(exc, "code", None)
+    text = str(getattr(exc, "message", None) or exc)
+    if code == _PG_CHECK_VIOLATION or _API_KEYS_SYNC_STATUS_CHECK in text:
+        return f"CHECK violation: {_API_KEYS_SYNC_STATUS_CHECK} refused the value"
+    return (
+        f"not a CHECK violation ({type(exc).__name__}): the write may have "
+        "committed before the error"
+    )
+
+
 async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResult:
     """INGEST-03: poll allocator holdings (spot + derivatives) via CCXT
     and upsert into allocator_holdings.
 
     Preflight via _allocator_key_preflight — no strategy hop. On
     fetch_allocator_holdings failure, map the exception to
-    api_keys.sync_status per D-07 ('revoked' / 'rate_limited' / 'error')
-    and emit an ``allocator.holdings.sync_failed`` audit event (f7). On
+    api_keys.sync_status per D-07 ('revoked' / 'rate_limited' / 'error'),
+    or, for a venue sign-in refused at the login stage, 'sign_in_failed'
+    (Phase 167 D-11 arm B: ``AllocatorHoldingsSignInFailedError`` carries that
+    status and a ``permanent`` job disposition on the class, and the handler's
+    one typed arm reads both off it), and emit an
+    ``allocator.holdings.sync_failed`` audit event (f7). On
     DONE, update sync_status / last_sync_at and emit
     ``allocator.holdings.sync_completed`` with row_count +
     holding_type_counts metadata.
@@ -8204,10 +8233,14 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             try:
                 await db_execute(_update_rate_limited)
             except Exception as upd_exc:  # noqa: BLE001
-                logger.warning(
+                # 167 SFH-M3 — ERROR with the traceback, like every other failed
+                # sync_status write in this handler: a lost write leaves the key
+                # on its previous (possibly healthy) status with no other signal.
+                logger.error(
                     "poll_allocator_positions: failed to persist sync_status=%r "
-                    "for api_key %s: %s",
-                    sync_status, api_key_id, upd_exc,
+                    "for api_key %s",
+                    sync_status, api_key_id,
+                    exc_info=upd_exc,
                 )
             _emit_audit(
                 allocator_id, api_key_id, "allocator.holdings.sync_failed",
@@ -8227,34 +8260,103 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             # stamped onto all three founder MT5 keys. A non-ccxt venue branch
             # converts its venue-specific exception to END-USER copy and raises
             # this type; str(exc) IS that copy, so we stamp it verbatim.
-            # Classified TRANSIENT (never 'permanent'): an unreachable terminal
+            # The parent type is classified TRANSIENT: an unreachable terminal
             # or a blipping broker API self-heals, so the DB backoff must retry
             # rather than burn the key to a permanent error state.
+            # ⚠️ 167 WR-04 — the sign-in subclass declares `permanent` instead.
+            # Retrying a refused login re-runs the SAME stored password against
+            # the ONE shared MT5 terminal on every rung of the ladder (the D-08
+            # harm). The daily cron still re-enqueues the key once per day,
+            # because it skips only `revoked`. See
+            # `AllocatorHoldingsSignInFailedError`.
             # The [:500] cap mirrors the sibling arms (copy is far shorter).
+            #
+            # ⭐ 167 WR-05 — ONE arm for this type AND its subclasses. What
+            # differs between them (the `sync_status` written and the job's
+            # `error_kind`) is declared as class attributes on the exception
+            # and read here, so `AllocatorHoldingsSignInFailedError` writes
+            # `sign_in_failed` through this same body. The earlier design gave
+            # the subclass its own arm, a line-for-line copy of this one. That
+            # made the arm ORDER load-bearing with a SILENT failure (an arm below
+            # this one is dead code) and left a second copy of the write free to
+            # drift. With one arm there is no order to get wrong.
             human_copy = str(exc)[:500]
+            sync_status = exc.sync_status
+            exc_error_kind = exc.error_kind
 
-            def _update_transient() -> None:
+            def _update_transient(status: str) -> None:
                 # Return value discarded by the caller (see _update_err).
                 ctx.supabase.table("api_keys").update(
-                    {"sync_status": "error", "sync_error": human_copy}
+                    {"sync_status": status, "sync_error": human_copy}
                 ).eq("id", api_key_id).execute()
 
+            # 167 R2 IN-04 / SFH-L1 — the status that actually landed, carried
+            # into the audit event so a fallback downgrade is visible after the
+            # fact. ``None`` means no write succeeded.
+            sync_status_written: str | None = sync_status
             try:
-                await db_execute(_update_transient)
+                await db_execute(lambda: _update_transient(sync_status))
             except Exception as upd_exc:  # noqa: BLE001
-                logger.warning(
-                    "poll_allocator_positions: failed to stamp sync_status='error' "
-                    "for api_key %s: %s",
-                    api_key_id, upd_exc,
-                )
+                sync_status_written = None
+                if sync_status == "error":
+                    # 167 SFH-M3 — ERROR with the traceback: the key keeps its
+                    # previous, possibly healthy, status.
+                    logger.error(
+                        "poll_allocator_positions: failed to stamp "
+                        "sync_status='error' for api_key %s",
+                        api_key_id,
+                        exc_info=upd_exc,
+                    )
+                else:
+                    # ⛔ 167 SFH-H2 — a status the parent does not write can be
+                    # REFUSED by `api_keys_sync_status_check`: Railway deploys
+                    # this worker and the migration that admits
+                    # `sign_in_failed` applies separately, with nothing ordering
+                    # the two. Swallowing that at WARNING left the key reading
+                    # its last healthy or 'syncing' status. So log it LOUDLY and
+                    # fall back to the parent's write, `sync_status='error'`,
+                    # which every deployed CHECK admits. `human_copy` is kept
+                    # (not MT5_UNREACHABLE_NOTE): the 'error' pill renders
+                    # `sync_error` verbatim, and the sign-in copy is the TRUE
+                    # cause. The transport note would bring back the false one.
+                    #
+                    # 167 SFH-L1 / R2 IN-04 — the fallback runs on ANY failure,
+                    # not only a CHECK rejection, and that stays: an ambiguous
+                    # transport error may leave the key on a stale status, which
+                    # is the worse outcome. But the log now says which it was,
+                    # so an operator can tell "the migration has not applied"
+                    # from "the write may have committed and been overwritten".
+                    logger.error(
+                        "poll_allocator_positions: failed to stamp "
+                        "sync_status=%r for api_key %s (%s) — falling back to "
+                        "sync_status='error' so the key does not keep a "
+                        "healthy status",
+                        sync_status, api_key_id,
+                        _sync_status_write_failure_cause(upd_exc),
+                        exc_info=upd_exc,
+                    )
+                    try:
+                        await db_execute(lambda: _update_transient("error"))
+                        sync_status_written = "error"
+                    except Exception as fallback_exc:  # noqa: BLE001
+                        logger.error(
+                            "poll_allocator_positions: fallback stamp "
+                            "sync_status='error' ALSO failed for api_key %s",
+                            api_key_id,
+                            exc_info=fallback_exc,
+                        )
             _emit_audit(
                 allocator_id, api_key_id, "allocator.holdings.sync_failed",
-                {"error_kind": "transient", "sanitized_message": human_copy},
+                {
+                    "error_kind": exc_error_kind,
+                    "sanitized_message": human_copy,
+                    "sync_status_written": sync_status_written,
+                },
             )
             return DispatchResult(
                 outcome=DispatchOutcome.FAILED,
                 error_message=human_copy,
-                error_kind="transient",
+                error_kind=exc_error_kind,
             )
         except Exception as exc:  # noqa: BLE001
             error_kind, msg = classify_exception(exc)
@@ -8281,10 +8383,12 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             try:
                 await db_execute(_update_err)
             except Exception as upd_exc:  # noqa: BLE001
-                logger.warning(
+                # 167 SFH-M3 — ERROR with the traceback (see the arms above).
+                logger.error(
                     "poll_allocator_positions: failed to stamp sync_status='%s' "
-                    "for api_key %s: %s",
-                    status_target, api_key_id, upd_exc,
+                    "for api_key %s",
+                    status_target, api_key_id,
+                    exc_info=upd_exc,
                 )
             _emit_audit(
                 allocator_id, api_key_id, "allocator.holdings.sync_failed",
@@ -8364,10 +8468,13 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                 ).eq("id", api_key_id).execute()
             await db_execute(_update_persist_err)
         except Exception as stamp_exc:  # noqa: BLE001
-            logger.warning(
+            # 167 SFH-M3 — ERROR with the traceback: this write is the only
+            # thing that moves the key off 'syncing' after a persist failure.
+            logger.error(
                 "poll_allocator_positions: failed to stamp sync_status='error' "
-                "for api_key %s after persist failure: %s",
-                api_key_id, stamp_exc,
+                "for api_key %s after persist failure",
+                api_key_id,
+                exc_info=stamp_exc,
             )
         _emit_audit(
             allocator_id, api_key_id, "allocator.holdings.persist_failed",

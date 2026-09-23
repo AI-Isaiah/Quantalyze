@@ -7544,6 +7544,22 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 
 ---
 
+## Phase 167 (CREDTRUST) — post-merge checks (logged 2026-09-22)
+
+- [ ] **`[167-POSTMERGE-CHECKS]` the four 167 checks that are post-merge or founder-only by
+      construction (booked 2026-09-22, `167-UAT.md` tests 1–4).**
+      Owner: **THE FOUNDER**, except (1)'s job-watching, which the shipping session's
+      `/land-and-deploy` does. Trigger: the Phase 167 PR merging.
+      (1) Migration `20260922120000` applies to TEST, then PROD after the `Production` gate.
+      (2) After the first daily holdings poll post-apply, read the status of the two keys the
+          ROADMAP measured: the MT5 key → `sign_in_failed`; the expired venue key → `revoked`.
+      (3) Record the live MT5 gateway's real code for a wrong investor password (RESEARCH A1) and
+          confirm or amend D-17's refusal set.
+      (4) Visual check at 320px and 200% zoom: `AllocatorSyncStatus` pill + helper, the manager key
+          card, and the `KEY_SIGN_IN_FAILED` envelope.
+      **Closed when:** each item's verdict is written into `167-UAT.md` (verdict and counts only —
+      no key id, account number or server name).
+
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
 - **"Do NOT implement" landmines (keep documented, do not touch):** bridge-scoring precompute;
@@ -9834,6 +9850,18 @@ a tail residual section is the same disappearance this residue exists to prevent
       record) over Option B (re-home criterion 8) **on the explicit condition that this recording
       act be booked with a named owner BEFORE the merge.** This entry is that condition.
       **Trigger:** this phase's restore-script changes reaching the default branch.
+      ⛔ **2026-09-21, TRIGGER FIRED AND THE PREFLIGHT REFUSED — THIS ENTRY STAYS OPEN.**
+      Run `35662948549` (`mode=preflight`, from `main` at `594e5471`) concluded **failure**: the
+      restore script refused because `supabase/schema/baseline.sql` is STALE against
+      `supabase/migrations` (dump 2026-09-18T13:51Z, migrations 2026-09-20T14:48Z; two migrations
+      landed in the gap). ⭐ The sha256 check PASSED first — integrity and CURRENCY are different
+      questions and only the second caught it. ⛔ The committing mode was NOT dispatched.
+      ⚠️ **BLOCKED ON A FOUNDER-OWNED PRECONDITION, not on a decision:** the remedy is a baseline
+      re-dump, documented as `supabase db dump --linked` against PRODUCTION, authenticating with
+      the production database password. ⛔ No agent enters, reads, decrypts, logs or echoes a
+      credential — so the delegation recorded above cannot reach this step. Re-dump → five-class
+      secret scan (⚠️ `-a` is not optional) → commit the dump and its sha row → re-preflight →
+      only then the committing mode with a FRESHLY DERIVED token.
       **The act, in order:** (1) confirm the changes are on the default branch — if they are not,
       STOP, because the dispatch would run the OLD script, prove nothing about this phase's
       guards, and still destroy and rebuild a shared schema; (2) derive the confirm token at

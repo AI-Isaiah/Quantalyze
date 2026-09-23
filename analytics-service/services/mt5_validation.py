@@ -47,7 +47,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from services.mt5_client import Mt5ClientError
+from services.mt5_client import Mt5ClientError, Mt5LoginRefusedError
 
 # MT5 order_check retcode meaning "the order request is valid and would be
 # accepted" (TRADE_RETCODE_DONE). A login that can pass an order_check probe is
@@ -379,3 +379,70 @@ def classify_mt5_login_error(
     # ⭐ THE REFUSAL. Unrecognised == transient, NEVER a permanent user-blame
     # stamp. ⛔ Do not "improve" this into a best-guess arm.
     return "transient"
+
+
+# Phase 167 D-17 — the login-stage codes that are NOT a sign-in refusal. This is
+# its OWN set, deliberately not ``_IPC_TRANSPORT_CODES``: that constant is the
+# 164.5.4 classifier's code-gate, locked for every caller of
+# ``classify_mt5_login_error``, and it answers a different question.
+#
+#   * ``-10000`` … ``-10004`` — MetaQuotes' RES_E_INTERNAL_FAIL family (internal
+#     fail, send, receive, init, connect). Each one says OUR bridge failed to
+#     carry the call, so even when ``login()`` itself returned falsy the terminal
+#     told us nothing about the credential. This repo already reads ``-10003`` as
+#     an IPC fault (``Mt5Client.assert_session_authorized``,
+#     ``services/mt5_relogin.py``); the round-2 review measured ``-10000`` …
+#     ``-10003`` being reported as a refused sign-in before this set existed.
+#   * ``1`` — RES_S_OK, "success". A falsy ``login()`` carrying a success code is
+#     not an answer of "no", so it is not a refusal either.
+#
+# ⭐ ``-10005`` (RES_E_INTERNAL_FAIL_TIMEOUT) is deliberately ABSENT. D-08 names it
+# as the measured wrong-password mechanism: a MODAL LOGIN DIALOG that blocks IPC
+# after the terminal received the credential. The marker is only raised after
+# ``initialize()`` succeeded and the credentialed ``login()`` round trip returned,
+# so a terminal that is already wedged fails at ``initialize()``, as a plain
+# ``Mt5ClientError``, and never reaches this predicate as the marker. A login-stage ``-10005`` is therefore the
+# sign-in refusal the phase was written about, and D-17 routes it to
+# ``SIGN_IN_FAILED`` / ``sign_in_failed``.
+_LOGIN_STAGE_NOT_A_REFUSAL_CODES: tuple[int, ...] = (
+    -10000,  # RES_E_INTERNAL_FAIL
+    -10001,  # RES_E_INTERNAL_FAIL_SEND
+    -10002,  # RES_E_INTERNAL_FAIL_RECEIVE
+    -10003,  # RES_E_INTERNAL_FAIL_INIT
+    -10004,  # RES_E_INTERNAL_FAIL_CONNECT ("No IPC connection")
+    1,  # RES_S_OK
+)
+
+
+def is_mt5_login_refusal(err: Mt5ClientError) -> bool:
+    """True only when ``err`` is a SIGN-IN the terminal answered and refused.
+
+    ⭐ THE ONE DEFINITION of "sign-in failed" (Phase 167 CR-01 / WR-01, the code
+    set decided by D-17). Both surfaces that make that claim consult it — the
+    wizard's ``validate_key`` MT5 arm and the holdings poll's MT5 arm — so they
+    cannot disagree about it.
+
+    Two conditions, both required:
+
+      1. **The login stage answered.** ``err`` is ``Mt5LoginRefusedError``, which
+         ``Mt5Client.login`` raises from its falsy-return arm and from nowhere
+         else. An ``initialize()`` failure (no credential sent yet), a transport
+         raise mid-login, a ``last_error()`` answer that was missing or
+         malformed, and every post-login read (``account_info``,
+         ``order_check``) arrive as a plain ``Mt5ClientError``. None of them is a
+         sign-in verdict: the key may be fine and the gateway wedged.
+      2. **The code is not in ``_LOGIN_STAGE_NOT_A_REFUSAL_CODES``** — the
+         ``-10000`` … ``-10004`` IPC-infrastructure family and the success code
+         ``1``. A login-stage ``-10005`` IS a refusal (D-08 / D-17); see the
+         constant for why.
+
+    ⚠️ This predicate does not replace ``classify_mt5_login_error``. The wizard
+    runs the classifier FIRST, so a message that names the credential or the
+    server still gets its confident 400. The classifier's own ``-10005``
+    code-gate answers ``"transient"``, which is exactly the tail this predicate
+    then splits.
+    """
+    return (
+        isinstance(err, Mt5LoginRefusedError)
+        and err.code not in _LOGIN_STAGE_NOT_A_REFUSAL_CODES
+    )
