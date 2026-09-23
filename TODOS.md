@@ -8453,7 +8453,10 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   ✅ **CLOSED IN CODE 2026-09-23 by Phase 164.6.1 (MYPYSTRICT) — and ONLY in code.** The ci.yml
   `python` job's step `Type gate - mypy strict over the running-service surface` now names
   `main.py`, `main_worker.py`, `main_worker_healthz.py` and `sentry_init.py` beside `services/
-  routers/ models/` (96 → 100 source files, 0 errors, real annotations, no ignores, no casts).
+  routers/ models/` (96 → 100 source files, 0 errors, no ignores, no casts). The annotations are
+  real, with one stated exception: the five Supabase closures in `main_worker.py` are typed
+  `-> Any` by the `services/` convention, because `postgrest`'s `APIResponse` takes no type
+  argument at the pinned version and one closure returns a `SimpleNamespace` fallback.
   The false coverage comment was corrected, as were the surface statements in
   `analytics-service/Makefile`, `services/audit.py` and `services/ingestion/__init__.py`.
   `src/__tests__/contracts/ci-mypy-strict-surface.contract.test.ts` pins the invocation to the
