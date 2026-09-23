@@ -2676,6 +2676,31 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       expect(screen.getByTestId("api-key-card-key-r")).toBeInTheDocument();
     });
 
+    it.each([
+      { arm: "the DELETE itself errored", del: { data: null, error: { message: "RAW-PG-DETAIL-sentinel" } }, lookup: undefined },
+      { arm: "the zero-row follow-up lookup errored", del: { data: [], error: null }, lookup: { data: null, error: { message: "RAW-PG-DETAIL-sentinel" } } },
+    ])("a failed Delete renders authored copy, never the raw database message, when $arm (167-06 security delta UF-1)", async ({ del, lookup }) => {
+      routeFetch();
+      const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
+      await renderRows([keyA]);
+      apiKeyDeleteMock.mockReturnValue(del);
+      if (lookup) apiKeyLookupMock.mockReturnValue(lookup);
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await deleteKey("key-a");
+        await waitFor(() => {
+          expect(
+            screen.getByText("Failed to delete key. Try again, and contact support if it keeps failing."),
+          ).toBeInTheDocument();
+        });
+        expect(screen.queryByText(/RAW-PG-DETAIL-sentinel/)).not.toBeInTheDocument();
+        expect(consoleError).toHaveBeenCalled();
+      } finally {
+        consoleError.mockRestore();
+      }
+      expect(screen.getByTestId("api-key-card-key-a")).toBeInTheDocument();
+    });
+
     it("a Delete that removed NO row because the key was ALREADY gone (deleted in another tab) removes the card and reports no failure (167-REVIEW-06-R2 WR-05)", async () => {
       routeFetch();
       const keyA = row({

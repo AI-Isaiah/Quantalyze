@@ -7,6 +7,7 @@ threats_open: 0
 asvs_level: 1
 created: "2026-09-22"
 audited_at_sha: 3bf2f24b8d1efcd8de4ef5df7bc0af92aa30ce7e
+delta_audited_at_sha: f170f7af08ee7a9231acaeeb919a0627a9da6fa3
 ---
 
 # Phase 167 — Security
@@ -54,6 +55,13 @@ audited_at_sha: 3bf2f24b8d1efcd8de4ef5df7bc0af92aa30ce7e
 | T-167-20 | Tampering | planning-hygiene leak | medium | mitigate | `check:planning-hygiene` OK at HEAD; SUMMARYs record verdicts and counts only | closed |
 | T-167-21 | Denial of Service | version-gate | medium | mitigate | release commit touches exactly CHANGELOG/VERSION/package.json; VERSION byte-equal to package.json, no trailing newline | closed |
 | T-167-SC | Tampering | supply chain | high | mitigate | only the version line of package.json changed; lockfile and Python requirement files unchanged | closed |
+| T-167-06-01 | Information Disclosure | manager key card (`ApiKeyManager`) | medium | mitigate | the pill mounts only under `isUntrustedKeySyncStatus`; both reachable arms render authored helpers; the `syncError`-rendering arm is unreachable from this mount; leak case pinned | closed |
+| T-167-06-02 | Information Disclosure | public factsheet (D-04) | high | mitigate | 0 factsheet paths changed; the only mount is the owner- and role-gated edit page | closed |
+| T-167-06-03 | Tampering | untrusted/trusted partition | medium | mitigate | one predicate drives mount and withhold; healthy control covers the full trusted partition + null | closed |
+| T-167-06-04 | Denial of Service (UI dead-lock) | sync panel + remedy controls | medium | mitigate | attempt-scoped marker (`endAttempt` is the only clearer); withhold only a terminal success; bounded terminal re-read; key-scoped disables | closed |
+| T-167-06-05 | Repudiation | a success shown beside a failed sign-in | low | mitigate | R2 withhold + `retireWithheldSuccess` on Update password / Delete / Add Key; ordered key-list reads; residuals routed to Phase 167.2 | closed |
+| T-167-06-06 | Information Disclosure | planning artifacts | low | mitigate | planning hygiene OK; fixtures use placeholders | closed |
+| T-167-06-SC | Tampering (supply chain) | dependencies | low | accept | see AR-167-03 | closed |
 
 *Status: open · closed · open — below high threshold (non-blocking)*
 *Severity: critical > high > medium > low — only open threats at or above workflow.security_block_on count toward threats_open*
@@ -69,6 +77,7 @@ Every row was verified against the code at `audited_at_sha`, after both code-rev
 |---------|------------|-----------|-------------|------|
 | AR-167-01 | T-167-07 | A permanent failure stops retrying rather than retrying under a false promise. Review WR-04 extended this to login-stage sign-in refusals (`error_kind = "permanent"`); D-17 records the accepted cost that a login-stage `-10005` without a modal dialog loses its backoff ladder until the next daily poll. The daily poll and the rotate-secret path still recover it; rate-limit backoff is unaffected. | orchestrator (autonomous, founder-delegated), D-17 | 2026-09-22 |
 | AR-167-02 | T-167-12 | No new column, grant or SECURITY DEFINER function; `ledger_refresh_staleness` is not consumed, so there is no privilege surface to mitigate. | plan 03 | 2026-09-22 |
+| AR-167-03 | T-167-06-SC | Plan 06 adds no dependency: 0 changes to package.json, the lockfile or the Python requirement files between `3bf2f24b` and the delta sha; new imports are `react` (`useRef`) and first-party modules only. | plan 06 | 2026-09-22 |
 
 *Accepted risks do not resurface in future audit runs.*
 
@@ -79,8 +88,11 @@ Every row was verified against the code at `audited_at_sha`, after both code-rev
 | Audit Date | Threats Total | Closed | Open | Run By |
 |------------|---------------|--------|------|--------|
 | 2026-09-22 | 22 | 22 | 0 | gsd-security-auditor (verdict SECURED, ASVS 1, several rows at L2/L3 depth) |
+| 2026-09-22 (delta, plan 06) | 7 | 7 | 0 | gsd-security-auditor (verdict OPEN_THREATS → 0 open once AR-167-03 is logged; ASVS 1, several rows at L2) |
 
-⚠️ The gap-closure plan that follows this audit (manager key-card rendering of the persisted status) is a UI render of an already-audited, authored copy path; it adds no endpoint, auth path or schema change.
+⭐ **Delta audit for plan 06 (gap closure).** Plan 06 grew, through two review and two fix rounds, beyond a pure render (attempt-scoped sync marker, bounded re-read, exact-one-row delete with an already-gone lookup), so it was audited on its own register rather than covered by the note that stood here. Delete path confirmed: owner-scoped browser client under the `api_keys_owner` RLS policy — another owner's id and a non-existent id take the SAME "gone" branch, so there is no existence oracle.
+- **UF-1 (fixed after the audit):** two delete-error arms rendered a raw PostgREST message on the page (one new in fix round 2; one pre-existing but shown more often after round 1). Both now render the authored `DELETE_FAILED_COPY` and log the raw text to the console only; a parametrized case pins it, each arm neuter-proven RED.
+- **UF-2 (informational):** the `.gitleaks.toml` entry added in `6c71b573` is rule-scoped (`generic-api-key`), `condition = "AND"`, one test file, one anchored capture — measured both directions when added.
 
 ---
 

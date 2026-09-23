@@ -158,6 +158,12 @@ interface SyncAttempt {
  */
 const TERMINAL_REREAD_BOUND_MS = 15_000;
 
+
+// 167-06 security delta (UF-1): authored copy for a delete whose outcome we
+// could not confirm. A raw PostgREST message never reaches the page.
+const DELETE_FAILED_COPY =
+  "Failed to delete key. Try again, and contact support if it keeps failing.";
+
 export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: ApiKeyManagerProps) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -647,7 +653,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       .select("id");
     setConfirmDelete(null);
     if (deleteError) {
-      setError("Failed to delete key: " + deleteError.message);
+      // 167-06 security delta (UF-1): the raw PostgREST message goes to the
+      // console only; the page gets authored copy.
+      console.error("[ApiKeyManager] api_keys delete failed:", deleteError.message);
+      setError(DELETE_FAILED_COPY);
       return;
     }
     if (deletedRows?.length !== 1) {
@@ -667,7 +676,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           `[ApiKeyManager] api_keys delete removed ${removed} rows, expected 1, and the follow-up lookup failed:`,
           lookupError.message,
         );
-        setError("Failed to delete key: " + lookupError.message);
+        setError(DELETE_FAILED_COPY);
         return;
       }
       if (!remaining || remaining.length > 0) {
