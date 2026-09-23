@@ -123,6 +123,55 @@ function laneJobBlock(): string {
   return CI.slice(start, end);
 }
 
+// ── Phase 164.4.2 plan 11 (DECISION G): the non-public objects module, driven with
+// synthetic migrations, carried sets and catalogues — no Docker.
+const NONPUBLIC_MODULE = REPO_ROOT + "scripts/local-stack/nonpublic-objects.mjs";
+/** The catalogue's meta rows as the superuser read prints them on a lane with pg_cron. */
+const NONPUBLIC_META = ["meta|superuser|t", "meta|database|postgres", "meta|pg_cron|1"];
+const hex = (s: string) => Buffer.from(s, "utf8").toString("hex");
+/** One `cron|…` catalogue row, free-text fields hex-encoded as the catalogue SQL encodes them. */
+const cronRow = (
+  name: string,
+  schedule: string,
+  command: string,
+  o: { active?: string; username?: string; database?: string } = {},
+) =>
+  ["cron", hex(name), hex(schedule), o.active ?? "t", o.username ?? "postgres", o.database ?? "postgres", hex(command)].join("|");
+
+/**
+ * A throwaway lane: migrations `files`, the carried subset, and a catalogue (null =
+ * an EMPTY file). Runs --emit then --check (as the loading role `postgres`).
+ */
+function nonpublicGate(files: Record<string, string>, carried: string[], catalogue: string[] | null) {
+  const dir = mkdtempSync(join(tmpdir(), "nonpublic-"));
+  try {
+    const mig = join(dir, "migrations");
+    mkdirSync(mig);
+    for (const [name, sql] of Object.entries(files)) writeFileSync(join(mig, name), sql);
+    writeFileSync(join(dir, "carried.txt"), carried.map((c) => `${c}\n`).join(""));
+    writeFileSync(join(dir, "cat.txt"), catalogue === null ? "" : catalogue.join("\n") + "\n");
+    const run = (mode: string[]) => {
+      const r = spawnSync(
+        process.execPath,
+        [NONPUBLIC_MODULE, ...mode, "--migrations", mig, "--carried", join(dir, "carried.txt")],
+        { encoding: "utf8" },
+      );
+      return { status: r.status, out: `${r.stdout}${r.stderr}` };
+    };
+    const emitted = run(["--emit", "--out-dir", join(dir, "out")]);
+    const readOut = (f: string) =>
+      existsSync(join(dir, "out", f)) ? readFileSync(join(dir, "out", f), "utf8") : null;
+    return {
+      emitted,
+      emittedSql: readOut("nonpublic-auth-triggers.sql"),
+      emittedCron: readOut("nonpublic-cron.sql"),
+      ...run(["--check", "--catalogue", join(dir, "cat.txt"), "--cron-owner", "postgres"]),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in the ordinary shards)", () => {
   it("the lane list is non-empty and every file in it exists", () => {
     expect(
@@ -588,49 +637,18 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
   // ARM, each with its OWN migrations directory: a neuter of one branch of the gate
   // must turn exactly its own arm red, never an earlier assertion in a shared block.
   describe("nonpublic-objects.mjs — the auth.users trigger class (D-G)", () => {
-    const MODULE = REPO_ROOT + "scripts/local-stack/nonpublic-objects.mjs";
+    const gate = nonpublicGate;
     const TRIGGER_SQL =
       "CREATE TRIGGER on_signup\n  AFTER INSERT ON auth.users\n  FOR EACH ROW EXECUTE FUNCTION handle_signup();\n";
-    const META = ["meta|superuser|t", "meta|database|postgres"];
+    const META = NONPUBLIC_META;
     const TRIGGER_ROW = "trigger|users|on_signup|5|O|public.handle_signup()";
-
-    /** A throwaway lane: migrations `files`, the carried subset, and a catalogue. */
-    const gate = (
-      files: Record<string, string>,
-      carried: string[],
-      catalogue: string[] | null,
-    ) => {
-      const dir = mkdtempSync(join(tmpdir(), "nonpublic-"));
-      try {
-        const mig = join(dir, "migrations");
-        mkdirSync(mig);
-        for (const [name, sql] of Object.entries(files)) writeFileSync(join(mig, name), sql);
-        writeFileSync(join(dir, "carried.txt"), carried.map((c) => `${c}\n`).join(""));
-        writeFileSync(join(dir, "cat.txt"), catalogue === null ? "" : catalogue.join("\n") + "\n");
-        const run = (mode: string[]) => {
-          const r = spawnSync(
-            process.execPath,
-            [MODULE, ...mode, "--migrations", mig, "--carried", join(dir, "carried.txt")],
-            { encoding: "utf8" },
-          );
-          return { status: r.status, out: `${r.stdout}${r.stderr}` };
-        };
-        const emitted = run(["--emit", "--out-dir", join(dir, "out")]);
-        const emittedSql = existsSync(join(dir, "out", "nonpublic-auth-triggers.sql"))
-          ? readFileSync(join(dir, "out", "nonpublic-auth-triggers.sql"), "utf8")
-          : null;
-        return { emitted, emittedSql, ...run(["--check", "--catalogue", join(dir, "cat.txt")]) };
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
-    };
     const A = "20260101000000_a.sql";
     const B = "20260102000000_b.sql";
 
     it("OK on an exact match, and --emit writes the declaring statement's own bytes", () => {
       const r = gate({ [A]: TRIGGER_SQL }, [A], [...META, TRIGGER_ROW]);
       expect(r.status, r.out).toBe(0);
-      expect(r.out).toMatch(/^nonpublic-fidelity: auth-users-triggers=1\/1 drift=0 verdict OK$/m);
+      expect(r.out).toMatch(/^nonpublic-fidelity: auth-users-triggers=1\/1 cron-jobs=0\/0 drift=0 verdict OK$/m);
       expect(r.emitted.out).toContain(`auth-triggers=1 (on_signup<-${A})`);
       expect(r.emittedSql, "the emitted SQL is not the migration's own bytes").toBe(
         `SET search_path TO public;\n${TRIGGER_SQL.trimEnd()}\n`,
@@ -656,7 +674,7 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
         META,
       );
       expect(r.status, `a dropped trigger is still expected on the lane:\n${r.out}`).toBe(0);
-      expect(r.out).toMatch(/auth-users-triggers=0\/0 drift=0 verdict OK$/m);
+      expect(r.out).toMatch(/auth-users-triggers=0\/0 cron-jobs=0\/0 drift=0 verdict OK$/m);
     });
 
     it("a trigger declared only in a file NOT in the carried set is not expected", () => {
@@ -665,7 +683,7 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
         r.status,
         `a non-carried migration's trigger became expected — the replay would register it a second time:\n${r.out}`,
       ).toBe(0);
-      expect(r.out).toMatch(/auth-users-triggers=0\/0 drift=0 verdict OK$/m);
+      expect(r.out).toMatch(/auth-users-triggers=0\/0 cron-jobs=0\/0 drift=0 verdict OK$/m);
     });
 
     it("MEASURE_FAIL on a trigger carrying a WHEN clause (a shape it cannot prove safe)", () => {
@@ -678,7 +696,11 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
     });
 
     it("MEASURE_FAIL on a catalogue read by a non-superuser (meta|superuser|f)", () => {
-      const r = gate({ [A]: TRIGGER_SQL }, [A], ["meta|superuser|f", "meta|database|postgres", TRIGGER_ROW]);
+      const r = gate(
+        { [A]: TRIGGER_SQL },
+        [A],
+        [...META.filter((l) => !l.startsWith("meta|superuser|")), "meta|superuser|f", TRIGGER_ROW],
+      );
       expect(r.status, `a non-superuser catalogue was trusted:\n${r.out}`).toBe(2);
       expect(r.out).toContain("NON-superuser");
     });
@@ -687,6 +709,140 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       const r = gate({ [A]: TRIGGER_SQL }, [A], null);
       expect(r.status, `an empty catalogue compared instead of refusing:\n${r.out}`).toBe(2);
       expect(r.out).toContain("the catalogue is EMPTY");
+    });
+  });
+
+  // ⭐ Phase 164.4.2 plan 11 (DECISION G), the cron class. Every `cron.schedule` /
+  // `cron.unschedule` of the CARRIED migrations, folded in filename order, and the
+  // lane's cron.job compared BYTE-EXACT (test_retention_crons_safe.sql reads the
+  // command verbatim), registered as the loading role.
+  describe("nonpublic-objects.mjs — the pg_cron class (D-G)", () => {
+    const gate = nonpublicGate;
+    const META = NONPUBLIC_META;
+    const A = "20260101000000_a.sql";
+    const B = "20260102000000_b.sql";
+    const JOB = "DO $$\nBEGIN\n  PERFORM cron.schedule('d_job', '*/5 * * * *', $cron$SELECT 1$cron$);\nEND $$;\n";
+
+    it("folds in filename order: a later schedule supersedes by name, unschedule removes, an unschedule of a never-scheduled name is a named no-op", () => {
+      const r = gate(
+        {
+          [A]:
+            "DO $$\nBEGIN\n  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN\n" +
+            "    PERFORM cron.schedule('j_one', '*/5 * * * *', $cron$SELECT 1$cron$);\n" +
+            "    PERFORM cron.schedule('j_two', '0 * * * *', $cron$SELECT 2$cron$);\n  END IF;\nEND $$;\n",
+          [B]:
+            "DO $$\nBEGIN\n  PERFORM cron.unschedule('j_two');\n  PERFORM cron.unschedule('never_scheduled');\n" +
+            "  PERFORM cron.schedule('j_one', '*/10 * * * *', $cron$SELECT 11$cron$);\nEND $$;\n",
+        },
+        [A, B],
+        [...META, cronRow("j_one", "*/10 * * * *", "SELECT 11")],
+      );
+      expect(r.status, r.out).toBe(0);
+      expect(r.out).toMatch(/cron-jobs=1\/1 drift=0 verdict OK$/m);
+      expect(r.emitted.out).toContain("schedule-calls=3 unschedule-calls=2 cron-jobs=1 (j_one)");
+      expect(r.emitted.out).toContain("no-op-unschedules=1 never-scheduled=1 (never_scheduled)");
+      expect(r.emittedCron, "the emitted registration is not the last declaring call's own literal bytes").toBe(
+        "SELECT cron.schedule('j_one', '*/10 * * * *', $cron$SELECT 11$cron$);\n",
+      );
+    });
+
+    it("extracts every command byte-exact: $tag$ body, '' unescaped, the nested same-tag $$ inside DO $$, and a comment between arguments", () => {
+      const r = gate(
+        {
+          [A]:
+            "SELECT cron.schedule('k_dollar', '1 * * * *', $cron$ SELECT 'x' $cron$);\n" +
+            "SELECT cron.schedule('k_quote', '2 * * * *', 'SELECT ''quoted'' AS q');\n" +
+            "SELECT cron.schedule('k_comment' /* between */, -- and a line comment\n  '3 * * * *', $body$SELECT 3$body$);\n" +
+            "DO $$\nBEGIN\n  PERFORM cron.schedule(\n    'k_nested',\n    '4 * * * *',  -- daily\n" +
+            "    $$DELETE FROM t WHERE sent_at < now() - INTERVAL '90 days';$$\n  );\nEND $$;\n",
+        },
+        [A],
+        [
+          ...META,
+          cronRow("k_dollar", "1 * * * *", " SELECT 'x' "),
+          cronRow("k_quote", "2 * * * *", "SELECT 'quoted' AS q"),
+          cronRow("k_comment", "3 * * * *", "SELECT 3"),
+          cronRow("k_nested", "4 * * * *", "DELETE FROM t WHERE sent_at < now() - INTERVAL '90 days';"),
+        ],
+      );
+      expect(r.status, `a command was not extracted byte-exact:\n${r.out}`).toBe(0);
+      expect(r.out).toMatch(/cron-jobs=4\/4 drift=0 verdict OK$/m);
+    });
+
+    for (const [label, sql] of [
+      ["an identifier argument", "SELECT cron.schedule(v_name, '1 * * * *', 'SELECT 1');\n"],
+      ["a || concatenation", "SELECT cron.schedule('a', '1 * * * *', 'SELECT ' || '1');\n"],
+      ["a format( call", "SELECT cron.schedule('a', '1 * * * *', format('SELECT %s', 1));\n"],
+      [
+        "a variable",
+        "DO $$\nDECLARE v_cmd text := 'SELECT 1';\nBEGIN\n  PERFORM cron.schedule('a', '1 * * * *', v_cmd);\nEND $$;\n",
+      ],
+      ["an unclosed argument list", "SELECT cron.schedule('a', '1 * * * *', 'SELECT 1'\n"],
+      ["the wrong arity", "SELECT cron.schedule('a', 'SELECT 1');\n"],
+      ["a cron.alter_job call site", "SELECT cron.alter_job(1, schedule := '1 * * * *');\n"],
+      ["a cron.schedule_in_database call site", "SELECT cron.schedule_in_database('a', '1 * * * *', 'SELECT 1', 'postgres');\n"],
+      [
+        "a cron call inside a single-quoted string an EXECUTE could run",
+        "DO $$\nBEGIN\n  EXECUTE 'SELECT cron.schedule(''a'', ''1 * * * *'', ''SELECT 1'')';\nEND $$;\n",
+      ],
+      [
+        "a cron call inside another call's arguments",
+        "SELECT cron.schedule('a', '1 * * * *', $c$SELECT cron.schedule('b', '2 * * * *', 'SELECT 2')$c$);\n",
+      ],
+    ] as const) {
+      it(`MEASURE_FAIL, naming the file, on ${label}`, () => {
+        const r = gate({ [A]: sql }, [A], META);
+        expect(r.emitted.status, `--emit accepted ${label}:\n${r.emitted.out}`).toBe(2);
+        expect(r.emitted.out).toContain(A);
+        expect(r.status, `--check accepted ${label}:\n${r.out}`).toBe(2);
+        expect(r.out).toMatch(/verdict MEASURE_FAIL$/m);
+      });
+    }
+
+    it("MEASURE_FAIL when jobs are declared and the lane has no pg_cron", () => {
+      const r = gate({ [A]: JOB }, [A], ["meta|superuser|t", "meta|database|postgres", "meta|pg_cron|0"]);
+      expect(r.status, `declared jobs compared against a lane without pg_cron:\n${r.out}`).toBe(2);
+      expect(r.out).toContain("pg_cron");
+    });
+
+    for (const [label, rows, finding] of [
+      ["a missing job", [] as string[], "MISSING  cron job d_job"],
+      [
+        "an extra job",
+        [cronRow("d_job", "*/5 * * * *", "SELECT 1"), cronRow("undeclared", "* * * * *", "SELECT 1")],
+        "EXTRA    cron job undeclared",
+      ],
+      ["a changed schedule", [cronRow("d_job", "*/6 * * * *", "SELECT 1")], "DIFFERS  cron job d_job: schedule"],
+      ["a command differing by one byte", [cronRow("d_job", "*/5 * * * *", "SELECT 2")], "DIFFERS  cron job d_job: command"],
+      ["active false", [cronRow("d_job", "*/5 * * * *", "SELECT 1", { active: "f" })], "DIFFERS  cron job d_job: active"],
+      [
+        "a username other than the loading role",
+        [cronRow("d_job", "*/5 * * * *", "SELECT 1", { username: "supabase_admin" })],
+        "DIFFERS  cron job d_job: username",
+      ],
+      [
+        "a job in another database",
+        [cronRow("d_job", "*/5 * * * *", "SELECT 1", { database: "other" })],
+        "DIFFERS  cron job d_job: database",
+      ],
+      [
+        "a double registration",
+        [cronRow("d_job", "*/5 * * * *", "SELECT 1"), cronRow("d_job", "*/5 * * * *", "SELECT 1")],
+        "DUPLICATE cron job d_job",
+      ],
+    ] as const) {
+      it(`DRIFT on ${label}`, () => {
+        const r = gate({ [A]: JOB }, [A], [...META, ...rows]);
+        expect(r.status, `the gate passed ${label}:\n${r.out}`).toBe(1);
+        expect(r.out).toContain(finding);
+        expect(r.out, "a command's TEXT reached the output — the CI log is public").not.toContain("SELECT 2");
+      });
+    }
+
+    it("a job declared only in a file NOT in the carried set is not expected", () => {
+      const r = gate({ [A]: "SELECT 1;\n", [B]: JOB }, [A], META);
+      expect(r.status, `a non-carried migration's job became expected:\n${r.out}`).toBe(0);
+      expect(r.out).toMatch(/cron-jobs=0\/0 drift=0 verdict OK$/m);
     });
   });
 
