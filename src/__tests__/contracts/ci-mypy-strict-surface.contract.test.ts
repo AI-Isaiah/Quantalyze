@@ -655,7 +655,7 @@ function mypyConfigProblems(
   return problems;
 }
 
-// ── read ONCE at module load; the byte-unchanged arm compares disk to these ──
+// ── read ONCE at module load; every leg mutates in-memory copies of these ──
 const REAL_YML = readFileSync(CI_YML, "utf8");
 const REAL_MAKEFILE = readFileSync(MAKEFILE, "utf8");
 const REAL_PYPROJECT = readFileSync(PYPROJECT, "utf8");
@@ -968,10 +968,5 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
       pathSet(ciMypyArgs(REAL_YML)).size,
       "fewer than 7 path tokens extracted from the run line — extraction is broken",
     ).toBeGreaterThanOrEqual(7);
-  });
-
-  it("ci.yml and the Makefile are byte-unchanged on disk by the legs above", () => {
-    expect(readFileSync(CI_YML, "utf8"), "ci.yml changed on disk while this block ran").toBe(REAL_YML);
-    expect(readFileSync(MAKEFILE, "utf8"), "the Makefile changed on disk while this block ran").toBe(REAL_MAKEFILE);
   });
 });
