@@ -1,7 +1,7 @@
 ---
 phase: 167-credtrust-an-invalid-venue-credential-is-named-to-the-custom
 verified: 2026-09-23T00:33:44Z
-status: human_needed
+status: passed
 score: 38/40 must-haves verified
 verified_at_sha: 7b3ffe9167cc0477ef9fb48a63640dc154f35a1e
 drift_subjects:
