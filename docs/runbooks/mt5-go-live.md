@@ -230,6 +230,106 @@ Step 2 above is unchanged and still required. This subsection sits BESIDE it, no
   usable credential comes straight back with no usable credential. Only when the variables are
   absent, or the heal is observed not to fire, does Step 2's VNC route become necessary again.
 
+## Step 2b — ⛔ `-10005` differential diagnosis: two known causes, opposite remedies (Phase 164.6.5)
+
+Step 2a is about the heal that re-establishes a LOST session automatically. This section is
+narrower: an operator is looking at a terminal that answers `-10005` ("IPC timeout") right
+now and must decide which of two known causes they have, because the remedies are opposite.
+
+### The two causes
+
+**Cause A — the modal-login-dialog wedge (`MT5-WEDGE-OBS-01`).** PERSISTED state: a login
+dialog is sitting open in the terminal's own UI and is blocking the IPC path behind it. It
+lives with the Wine prefix on the gateway's named persistent volume, so a redeploy brings it
+straight back — the dialog is still there after the container restarts. Clearing it needs a
+human at the VNC console.
+
+**Cause B — the account-switch wedge, measured 2026-09-21.** PROCESS state, not persisted
+state: there was no dialog — the live VNC console was clean and the Alerts tab was empty —
+yet the running terminal answered `-10005` to every IPC call. A human clicked OK on the
+terminal's own Login dialog three separate ways and the terminal's own Journal wrote NOTHING
+for any of the three attempts. A PROCESS restart of `terminal64.exe`, under the same Wine
+prefix, same container and same volume, reached `authorized` in 2.0 s with no human involved
+— Step 2a above records the mechanism that restart relies on (the saved login persisting on
+`/config`).
+
+⛔ **The two causes have OPPOSITE remedies, and the shipped prober remedy string
+(`scripts/prod-prober/arms/mt5.mjs`'s `mt5-ipc-timeout` `REMEDIES` entry) described only
+Cause A until this phase** — it told the reader to clear a modal dialog via VNC and stated a
+redeploy does NOT fix the fault. Under Cause A that is correct. Under Cause B a process
+restart — no VNC, no dialog to clear — is what worked, in 2.0 s.
+
+### Evidence procedure — decide which cause you have
+
+Run this at the gateway before changing anything. It reaches for evidence, not a guess.
+
+1. **Open the terminal's own Journal tab.** A login attempt writes a Journal line EVEN WHEN
+   IT FAILS, so silence in the Journal following a `disconnected` line is itself the
+   reading, not an absence of information. Silence after a disconnect, with no failed-login
+   line ever appearing, is what was observed for Cause B on 2026-09-21.
+2. **Open the Alerts tab.** An empty Alerts tab during the outage is one of the two facts
+   that ruled out Cause A on 2026-09-21 — a modal-dialog wedge typically leaves a trace an
+   operator can see there.
+3. **Look at the live VNC console itself for a modal window.** If a login dialog, an error
+   popup, or any other modal is sitting open on top of the terminal, that is Cause A — clear
+   it and stop here.
+4. **Record the terminal's reported build number.** This does not by itself decide the
+   cause; the candidate-mechanism subsection below is what uses it.
+5. **⛔ Do not read `Config/terminal.ini` for any of the above.** `scripts/mt5-diag.sh`'s own
+   warning applies here too: MT5 only rewrites that file on a CLEAN terminal exit, so it can
+   report stale state while the running terminal disagrees. The Journal, the Alerts tab and
+   the live VNC console are the only live oracles. `scripts/mt5-diag.sh` is the only in-repo,
+   read-only diagnostic and is safe to run alongside this procedure — it never calls
+   `login()`.
+
+### The remedy that is correct under both causes
+
+Try the **PROCESS restart first**: kill and relaunch `terminal64.exe` under the same Wine
+prefix, container and volume — do NOT touch or reset the volume itself. This is cheap,
+unattended, was measured at 2.0 s on 2026-09-21, and it cannot make Cause A worse: if a modal
+dialog was the problem, the restart either clears it along with the process or leaves it
+exactly as it was, so trying the restart first never destroys evidence. **If `-10005`
+returns after the restart, THEN open the VNC console and clear the modal dialog** — that is
+the one step a process restart cannot do for you.
+
+### Candidate mechanisms for Cause B — what would confirm or reject each
+
+These are candidates, not verdicts. Each carries the ONE observation that would confirm it
+and the ONE that would reject it.
+
+- **(a) Terminal self-update.** `deploy/mt5-gateway/railway-gateway.md`'s digest-pin
+  paragraph records, in its own words, that the MetaTrader terminal binary self-updates from
+  the broker independently of the image and cannot be frozen — pinning the image digest pins
+  the Wine/RPyC base only. A terminal that self-updated between the clean switch and the
+  wedged one is a mechanism that predicts the asymmetry, because a binary changing mid-day
+  would behave differently before and after the change.
+  - **Confirms:** the terminal's reported build number differs between a reading taken
+    before the clean switch and one taken after the wedge began, OR the terminal's own
+    update log records a self-update landing in that window.
+  - **Rejects:** the build number is identical across that window and no self-update log
+    entry exists for it.
+- **(b) Same-account re-auth vs. cross-account switch.** The session monitor re-establishes
+  the terminal's session against the house account on a fixed cadence and returns quickly
+  when nothing needs to change; a validate re-establishes the same session against a client
+  account, which is a genuine account change (`analytics-service/services/mt5_relogin.py`,
+  `analytics-service/routers/exchange.py`). If the clean switch was itself a re-auth to the
+  account already logged in, while the wedged switches were changes to a different account,
+  that difference is a mechanism that predicts the asymmetry.
+  - **Confirms:** the captured evidence shows the clean event was a re-auth to the SAME
+    (house) account already logged in, while the wedged events were switches to a DIFFERENT
+    (client) account.
+  - **Rejects:** the captured evidence shows the clean event was ALSO a switch to a
+    different account — i.e., a cross-account switch sometimes succeeds cleanly, which would
+    mean "which account" alone does not predict the asymmetry.
+- **(c) Any further candidate this read establishes.** None beyond (a) and (b) is supported
+  by the repo's own measured record as of this writing. If a future investigation surfaces
+  one, record it here with the same confirms/rejects shape rather than as a bare guess.
+
+⛔ **Public repo, no exceptions.** Refer to accounts only as "the house account" and "a
+client account" — never a number, never a broker server name, never a connection string or a
+local machine path. Timestamps, durations and MT5 error codes (like `-10005`) are safe and
+are kept above because they are the evidence.
+
 ## Step 3 — CREDENTIAL ISOLATION + BROKER ALLOWLISTING (MT5GOLIVE-01)
 
 - The gateway holds ONLY the **one investor login** it syncs (v1 = one serial terminal).
