@@ -8,9 +8,9 @@
 # at the first /process-key call. mypy --strict catches that drift
 # at type-check time before the test pipeline even runs.
 #
-# Scoped via --follow-imports=silent so the strict pass applies ONLY
-# to services/ingestion/; the wider analytics-service codebase has
-# legacy untyped surface that is migrated incrementally.
+# The `lint` target below is a narrow historical subset (the Phase 19
+# MC-3 scope, services/ingestion/ only). The CI gate is the `typecheck`
+# target's path set, which mirrors the ci.yml `python` job's mypy step.
 
 PYTHON ?= python3
 VENV   ?= .venv
@@ -26,10 +26,10 @@ help:
 	@echo "  install   — create .venv on Python 3.12 (if missing) + pip install deps (matches CI)"
 	@echo "  rebuild-venv — force a clean 3.12 venv rebuild (fixes a 3.13/3.14 segfault venv)"
 	@echo "  lock      — regenerate requirements.txt (the pinned lock) from requirements.in"
-	@echo "  lint      — mypy --strict on services/ingestion/ (MC-3 fix; the current CI gate)"
-	@echo "  typecheck — mypy on the full B-mypy floor surface (services/ routers/ models/)"
+	@echo "  lint      — mypy --strict on services/ingestion/ (MC-3 scope; a subset of the CI gate)"
+	@echo "  typecheck — mypy on the CI gate's path set (services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py)"
 	@echo "  test      — pytest with coverage (matches CI ci.yml)"
-	@echo "  ci        — full local CI gauntlet: lint + test"
+	@echo "  ci        — full local CI gauntlet: typecheck + test"
 
 # tech-debt #7: requirements.txt is a generated lock; requirements.in is the
 # source. Always compile against 3.12 (CI/prod) and --universal so the lock
@@ -62,10 +62,10 @@ install: $(VENV)
 lint:
 	$(MYPY) --strict --follow-imports=silent services/ingestion/
 
-# B-mypy: the full type-safety floor. Flags come from pyproject.toml
-# [tool.mypy] (auto-discovered from cwd), so this is byte-for-byte the
-# command the CI gate runs once widened (ci.yml mypy step). Run this to
-# match CI exactly.
+# B-mypy: the full type-safety floor. It names the same paths as the
+# ci.yml mypy step; the flags come from pyproject.toml [tool.mypy]
+# (auto-discovered from cwd), which ci.yml also repeats on its command
+# line. Run this to match CI.
 typecheck:
 	$(MYPY) services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py
 
@@ -74,4 +74,4 @@ test:
 	# fence tests flake under xdist ordering (see .github/workflows/ci.yml python step).
 	$(PYTEST) --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
 
-ci: lint test
+ci: typecheck test

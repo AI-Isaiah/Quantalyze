@@ -4641,14 +4641,25 @@ jobs:
       # @runtime_checkable Protocol only verifies method *presence* at runtime,
       # not signature shape; mypy --strict catches signature drift (e.g.
       # `validate(req)` vs `validate(request)`) at type-check time before the
-      # test pipeline. --follow-imports=silent keeps strictness local to the
-      # gated packages.
+      # test pipeline. --follow-imports=silent has a plain consequence: a
+      # module reached only by import is FOLLOWED with its errors SUPPRESSED,
+      # so a green run cannot tell "checked" from "reached". That is why the
+      # entry modules are named on the command line: main_worker.py was in
+      # exactly that state, reached via services/mt5_session_monitor.py's
+      # import of SHUTDOWN.
       #
       # B-mypy program: the strict floor started at services/ingestion/ (Phase
-      # 19 / BACKBONE-02 / MC-3) and now covers ALL running-service code —
-      # services/ (B-mypy part g, v0.24.15.60), routers/ (part h, v0.24.15.61),
-      # and models/ (part i) — all verified 0 against the CI-pinned deps
-      # (supabase 2.15.1 / postgrest 1.0.2). scripts/ stays ungated: they are
+      # 19 / BACKBONE-02 / MC-3) and widened to services/ (B-mypy part g,
+      # v0.24.15.60), routers/ (part h, v0.24.15.61) and models/ (part i),
+      # all verified 0 against the CI-pinned deps (supabase 2.15.1 /
+      # postgrest 1.0.2). That set was not the whole running service: the
+      # entry module was never on the command line. Phase 164.6.1
+      # (MYPY-MAINPY-01) names the four top-level service modules too:
+      # main.py (the `uvicorn main:app` entry), main_worker.py (merged into
+      # the API process), main_worker_healthz.py and sentry_init.py. Before:
+      # services/ routers/ models/, 96 source files as mypy counts them.
+      # After: that set plus exactly those four, 100. No module left.
+      # scripts/ stays ungated: they are
       # one-off operational tooling (backfills, cassette recording), not the
       # running service, and gating them would add a types-PyYAML dev-dep plus
       # friction for throwaway scripts. tests/ stays untyped by design.

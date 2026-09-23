@@ -62,9 +62,10 @@ class IngestionAdapter(Protocol):
     calls to these methods in sequence.
 
     NOTE: `@runtime_checkable` only verifies method *presence*, not
-    signature shape. CI runs `mypy --strict services/ingestion/` (see
-    Makefile `lint` target — MC-3 fix from 19-REVIEWS.md) to catch
-    signature drift at type-check time before tests would notice.
+    signature shape. The ci.yml `python` job step "Type gate - mypy strict
+    over the running-service surface" covers this package as part of
+    `services/` (MC-3 fix from 19-REVIEWS.md) to catch signature drift at
+    type-check time before tests would notice.
     """
 
     async def validate(self, req: KeySubmissionRequest) -> ValidationResult: ...
