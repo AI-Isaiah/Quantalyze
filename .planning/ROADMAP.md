@@ -859,6 +859,8 @@ Plans:
 
 ⭐ **SCOPE ADDED 2026-09-23 BY FOUNDER DECISION (DECISION F in `164.4.2-CONTEXT.md`):** the ephemeral lane REPLAYS the migrations newer than `baseline.sql` on top of it, and prints which ones it replayed, so that a migration landing after the dump is the normal case and not a red. Without it, every migration merge would leave the lane red until the founder re-dumped from PROD, and a PR could never test its own migration on the lane. Realised by a replan of the remaining plans before plan 06 executes. Plan 05 was mid-execution and is left to finish.
 
+⭐ **SCOPE ADDED 2026-09-23 BY FOUNDER DECISION (DECISION G in `164.4.2-CONTEXT.md`):** the lane replays the PROD objects that live OUTSIDE `public`, which the schema-only dump does not carry: the trigger on `auth.users` and the `pg_cron` job registrations (24 migrations). They are extracted from the migration files, and a check fails the boot if the lane's set drifts from what the migrations declare. Measured by plan 08's SHA-bound CI read: once the lane ACL defect was fixed, 8 of 76 SQL files still failed on the lane for exactly this reason. Plan 04's probe measured that the lane HOSTS these schemas, not that it carries the objects registered in them. Realised as a new plan, executed before plan 08's CI checkpoint is re-read.
+
 ### Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral (INSERTED)
 
 **Goal:** The pg-lane can host pg_cron, so the `[REDUNDER-PGCRON]` deferral is RETIRED
