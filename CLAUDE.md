@@ -87,6 +87,13 @@ about the CLI link and the marker.
   `needs.apply-test.result == 'success'` AND the `Production` environment's HUMAN reviewer gate —
   both were approved by the founder in the GitHub UI on 2026-09-08. A skipped TEST apply is
   turned into a named red check by `apply-test-verdict` rather than passing as grey.
+  ⛔ **CORRECTED 2026-09-23 (Phase 164.4.2):** the `Production` environment's HUMAN reviewer
+  gate is GONE. On 2026-09-23 the founder removed the environment's required reviewer ("it
+  should just apply. I want to develop fast"). **PROD migrations now auto-apply once
+  `apply-test` succeeds.** `needs.apply-test.result == 'success'` is still the ordering between
+  them. There is no human stop between a merge that touches `supabase/migrations/**` and its
+  PROD apply, so every review a migration needs must happen BEFORE the merge. Do not cite the
+  reviewer gate as a stop. The sentence above is kept as lineage.
 - **`scripts/vac08-ledger-baseline.txt` is EMPTY by measurement** (0 non-comment lines,
   `ENTRY_COUNT = 0`), beside an AIM and a dated lineage header. It shrinks only; it grows only by
   founder decision. VAC-08's SHA-bound reading, `sql-tests` job `102416204141` in run
@@ -134,6 +141,18 @@ about the CLI link and the marker.
   (`restore-test-from-baseline.sh`) still REFUSES a dump older than the migrations, through
   the gate's default mode. ⚠️ A re-dump must regenerate the marker in the SAME commit
   (`supabase/schema/BASELINE.md`, `## Regenerating`).
+- ⭐ **2026-09-23 (Phase 164.4.2) — the local-stack lane PINS its Postgres image to
+  `17.6.1.113`, and the pin is load-bearing.** `LANE_PG_VERSION` in `scripts/local-stack/run.sh`
+  is written into the lane's `.temp/postgres-version`, and the boot asserts the running image
+  matches it. Without the pin, each Supabase CLI release picks its own image. Images
+  `17.6.1.104` through `.112` ship supautils 3.2.0, which kills the backend (signal 11) when a
+  `postgres` session `SET ROLE`s to anon/authenticated/service_role and is refused EXECUTE on a
+  function. That is the SQL self-test corpus's own idiom. supautils 3.2.2 fixed it upstream, and
+  `.113` is the first image that ships it. Every boot also runs a function-denial probe of that
+  exact shape before anything loads, so the crash shows up as a named FATAL, never as a
+  mid-corpus `server closed the connection`. ⛔ Do not move the pin below `.113`, or unpin it
+  to follow the CLI. ⚠️ Whether PROD's own image (`.104` per the drift-check log) crashes the
+  same way is UNMEASURED; `TODOS.md` `[164.4.2-PROD-SUPAUTILS-FUNCTION-DENIAL-CRASH]` owns it.
 
 ⚠️ TEST is SHARED with other people's CI. A write there is not private, and a global assertion
 there is NOT reliable — "no stuck jobs exist", "the table is empty" measure other people's rows
