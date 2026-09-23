@@ -1101,3 +1101,58 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
     }
   });
 });
+
+// ── Review 164.4.2 WR-08: ONE parse-based loopback-DSN check. ────────────────
+// The `*@127.0.0.1:*` glob accepted `?host=` / `hostaddr=` overrides (libpq honours
+// them, re-pointing the connection) and `@127.0.0.1:` smuggled into the userinfo.
+// capability-probe.mjs's `refuseNonLocalDsn` parses the URL and refuses both; every
+// DSN gate on the lane now calls that one rule instead of carrying its own glob.
+describe("the lane's loopback-DSN gates all use capability-probe's parse-based rule (WR-08)", () => {
+  const PROBE = REPO_ROOT + "scripts/local-stack/capability-probe.mjs";
+  const refuse = (dsn: string | undefined) => {
+    const env = { ...process.env };
+    delete env.LOOPBACK_DSN;
+    if (dsn !== undefined) env.LOOPBACK_DSN = dsn;
+    const r = spawnSync(process.execPath, [PROBE, "--refuse-nonlocal-dsn"], { encoding: "utf8", env });
+    return { status: r.status, out: `${r.stdout}${r.stderr}` };
+  };
+
+  it("accepts a loopback DSN and refuses the shapes the glob let through, never echoing the DSN", () => {
+    const local = refuse("postgresql://postgres:postgres@127.0.0.1:54322/postgres");
+    expect(local.status, local.out).toBe(0);
+    for (const dsn of [
+      "postgresql://postgres:s3cret@127.0.0.1:54322/postgres?host=db.example.invalid",
+      "postgresql://postgres:s3cret@127.0.0.1:54322/postgres?hostaddr=192.0.2.1",
+      "postgresql://u:s3cret@127.0.0.1:1@db.example.invalid:5432/postgres",
+    ]) {
+      const r = refuse(dsn);
+      expect(r.status, `${dsn} was accepted:\n${r.out}`).toBe(1);
+      expect(r.out).not.toContain("s3cret");
+      expect(r.out).not.toContain("example.invalid");
+    }
+    const unset = refuse(undefined);
+    expect(unset.status, "an unset LOOPBACK_DSN must be refused, never read as local").toBe(1);
+  });
+
+  it("run.sh's load_baseline and probe_function_denial_survives, and sql-tests' corpus step, call it and carry no loopback glob", () => {
+    const lane = read(RUN_SH);
+    const start = CI.indexOf("\n  sql-tests:\n");
+    expect(start, "the sql-tests job is gone from ci.yml").toBeGreaterThan(-1);
+    const end = CI.indexOf("\n  secret-scan:\n", start);
+    expect(end, "could not find the end of the sql-tests block").toBeGreaterThan(start);
+    for (const [where, body] of [
+      ["load_baseline", liveLines(bashFunctionBody(lane, "load_baseline"))],
+      ["probe_function_denial_survives", liveLines(bashFunctionBody(lane, "probe_function_denial_survives"))],
+      ["sql-tests", liveLines(CI.slice(start, end))],
+    ] as const) {
+      expect(
+        body.some((l) => l.includes("*@127.0.0.1:*")),
+        `${where} still carries the '*@127.0.0.1:*' glob, which accepts ?host=/hostaddr= overrides`,
+      ).toBe(false);
+      expect(
+        body.some((l) => l.includes("capability-probe.mjs") && l.includes("--refuse-nonlocal-dsn")),
+        `${where} does not call capability-probe.mjs --refuse-nonlocal-dsn`,
+      ).toBe(true);
+    }
+  });
+});

@@ -341,10 +341,11 @@ EOF
 
   local db_url
   db_url="$(sed -n 's/^DB_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$ENV_FILE" | head -1)"
-  case "$db_url" in
-    *@127.0.0.1:*|*@localhost:*) ;;
-    *) echo "FATAL: refusing to load baseline into a non-local database." >&2; exit 1 ;;
-  esac
+  # Review 164.4.2 WR-08: the ONE parse-based loopback rule (capability-probe.mjs's
+  # refuseNonLocalDsn), not a `*@127.0.0.1:*` glob that accepts ?host= overrides.
+  if ! LOOPBACK_DSN="$db_url" node "${LANE_DIR}/capability-probe.mjs" --refuse-nonlocal-dsn >/dev/null; then
+    echo "FATAL: refusing to load baseline into a non-local database." >&2; exit 1
+  fi
 
   local psql
   psql="$(resolve_psql)"
@@ -715,10 +716,10 @@ assert_lane_pg_image() {
 probe_function_denial_survives() {
   local db_url psql
   db_url="$(sed -n 's/^DB_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$ENV_FILE" | head -1)"
-  case "$db_url" in
-    *@127.0.0.1:*|*@localhost:*) ;;
-    *) echo "FATAL: refusing to run the function-denial probe against a non-local database." >&2; exit 1 ;;
-  esac
+  # Review 164.4.2 WR-08: the same parse-based loopback rule as load_baseline.
+  if ! LOOPBACK_DSN="$db_url" node "${LANE_DIR}/capability-probe.mjs" --refuse-nonlocal-dsn >/dev/null; then
+    echo "FATAL: refusing to run the function-denial probe against a non-local database." >&2; exit 1
+  fi
   psql="$(resolve_psql)"
   if [ -z "$psql" ]; then
     echo "FATAL: psql not found on PATH or at the homebrew postgresql@16 keg" >&2

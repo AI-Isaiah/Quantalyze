@@ -43,8 +43,10 @@
  * ⛔ LOCAL ONLY. The DSN is refused before any connection unless it is a
  * postgres URL naming 127.0.0.1 or localhost with a port and no query string.
  * libpq honours host=/hostaddr=/service= in a query string, which would re-point
- * the connection. That is stricter than `run.sh`'s own `*@127.0.0.1:*` glob,
- * because a glob also matches `@127.0.0.1:` smuggled into the userinfo. psql
+ * the connection. That was stricter than `run.sh`'s old `*@127.0.0.1:*` glob,
+ * because a glob also matches `@127.0.0.1:` smuggled into the userinfo; since
+ * review 164.4.2 WR-08 every lane DSN gate calls this rule through
+ * `--refuse-nonlocal-dsn` instead of carrying that glob. psql
  * gets the DSN as an argv ELEMENT, never through a shell, and runs with every
  * PG* environment variable stripped: PGHOSTADDR, PGSERVICE and the rest would
  * otherwise apply to anything the DSN leaves unset.
@@ -333,11 +335,33 @@ function readSupply(envFile) {
   return { supply: parseSupply(stdout), error: null };
 }
 
+/**
+ * `--refuse-nonlocal-dsn` (review 164.4.2 WR-08): the ONE loopback-DSN gate every
+ * lane caller uses — `run.sh`'s `load_baseline` and `probe_function_denial_survives`,
+ * and `sql-tests`' corpus step — so none carries its own `*@127.0.0.1:*` glob. That
+ * glob accepted a `?host=`/`hostaddr=` override and `@127.0.0.1:` smuggled into the
+ * userinfo. The DSN arrives in `LOOPBACK_DSN`, never argv (argv is visible in a
+ * process listing), and is never printed. Exit 0 = loopback, 1 = refused or unset.
+ */
+function refuseNonLocalDsnCli() {
+  const dsn = process.env.LOOPBACK_DSN;
+  const why = dsn ? refuseNonLocalDsn(dsn) : "LOOPBACK_DSN is unset or empty, so there is no DSN to prove local";
+  if (why) {
+    console.error(`::error::refusing a non-local database: ${why}`);
+    return 1;
+  }
+  console.log("loopback-dsn: OK (127.0.0.1/localhost, a port, no query string)");
+  return 0;
+}
+
 function main(argv) {
   if (argv.includes("--self-test")) return selfTest();
+  if (argv.length === 1 && argv[0] === "--refuse-nonlocal-dsn") return refuseNonLocalDsnCli();
   // ⛔ A typo'd flag must not fall through to a probe the caller did not ask for.
   if (argv.length > 0) {
-    console.error(`::error::unknown argument(s): ${argv.join(" ")}. This probe takes only --self-test`);
+    console.error(
+      `::error::unknown argument(s): ${argv.join(" ")}. This probe takes only --self-test, or --refuse-nonlocal-dsn on its own`,
+    );
     return EXIT.MEASURE_FAIL;
   }
 

@@ -3916,13 +3916,15 @@ jobs:
         run: |
           set -euo pipefail
           # THE DSN IS STILL REQUIRED, AND STILL FAIL-LOUD (Issue 6 is specifically
-          # about the silent-no-op surface). It is read with the SAME sed and refused
-          # by the SAME loopback glob `scripts/local-stack/run.sh`'s own
-          # `load_baseline()` uses on this handoff. The capability probe step above
-          # already refused this handoff under a STRICTER rule (a parsed host, a
-          # port, no query string), and it is fatal, so this glob is the second
-          # check, not the only one. An absent handoff means the boot step did not
-          # finish — never "nothing to test".
+          # about the silent-no-op surface). It is read with the SAME sed
+          # `scripts/local-stack/run.sh`'s own `load_baseline()` uses on this
+          # handoff, and refused by the SAME parse-based rule (a parsed host, a
+          # port, no query string) — review 164.4.2 WR-08 replaced the
+          # `*@127.0.0.1:*` glob here and in run.sh, which accepted a ?host= or
+          # hostaddr= override. The capability probe step above already applied
+          # that rule and is fatal, so this is the second check, not the only one.
+          # An absent handoff means the boot step did not finish — never "nothing
+          # to test".
           lane_env_file="${LANE_ENV_FILE:-scripts/local-stack/.stack-env}"
           LANE_DB_URL="$(sed -n 's/^DB_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${lane_env_file}" 2>/dev/null | head -1 || true)"
           if [ -z "${LANE_DB_URL}" ]; then
@@ -3930,13 +3932,10 @@ jobs:
             echo "::error::It is written by 'bash scripts/local-stack/run.sh up' in the boot step above. If that step failed or was skipped, this corpus has no database, and a run with no database proves NOTHING."
             exit 1
           fi
-          case "${LANE_DB_URL}" in
-            *@127.0.0.1:*|*@localhost:*) ;;
-            *)
-              echo "::error::refusing to run SQL self-tests: the lane handoff's DB_URL does not name 127.0.0.1/localhost. This job is local-only — TEST is shared and PROD is PROD."
-              exit 1
-              ;;
-          esac
+          if ! LOOPBACK_DSN="${LANE_DB_URL}" node "${GITHUB_WORKSPACE}/scripts/local-stack/capability-probe.mjs" --refuse-nonlocal-dsn; then
+            echo "::error::refusing to run SQL self-tests: the lane handoff's DB_URL is not a loopback DSN (127.0.0.1/localhost, a port, no query string). This job is local-only — TEST is shared and PROD is PROD."
+            exit 1
+          fi
           # LANE-ONLY exclusion — a file whose assertion body queries an
           # object that exists ONLY on the throwaway pg-lane
           # (scripts/pg-lane/run.sh's cluster), never on shared TEST — and, since

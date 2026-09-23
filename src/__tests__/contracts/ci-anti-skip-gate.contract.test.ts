@@ -601,7 +601,9 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     try {
       const { code, out } = runGate({ LANE_ENV_FILE: handoff, STUB_INVOCATION_LOG: logPath });
       expect(code).not.toBe(0);
-      expect(out).toContain("does not name 127.0.0.1/localhost");
+      // Review 164.4.2 WR-08: the step's glob was replaced by capability-probe's
+      // parse-based rule, whose refusal is worded as a non-loopback DSN.
+      expect(out).toContain("the lane handoff's DB_URL is not a loopback DSN");
       let logged: string[] = [];
       try {
         logged = readFileSync(logPath, "utf8").split("\n").filter(Boolean);
@@ -609,6 +611,20 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
         logged = [];
       }
       expect(logged, "a non-loopback DSN still handed corpus files to psql").toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a loopback-looking DB_URL whose ?host= would re-point libpq — the glob it replaced accepted it (review 164.4.2 WR-08)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "antiskip-hostq-"));
+    const handoff = join(dir, "stack-env");
+    writeFileSync(handoff, 'DB_URL="postgresql://stub@127.0.0.1:54322/postgres?host=db.example.invalid"\n');
+    try {
+      const { code, out } = runGate({ LANE_ENV_FILE: handoff });
+      expect(code, out).not.toBe(0);
+      expect(out).toContain("the lane handoff's DB_URL is not a loopback DSN");
+      expect(out, "the refusal must never echo the DSN's host").not.toContain("example.invalid");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
