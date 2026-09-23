@@ -679,7 +679,9 @@ function parseTomlTables(text: string): { tables: TomlTable[]; errors: string[] 
   const tables: TomlTable[] = [{ header: "", isArray: false, kv: new Map(), unparsed: [] }];
   const errors: string[] = [];
   let pending: { key: string; value: string; line: number } | null = null;
-  text.split("\n").forEach((raw, i) => {
+  // A `for` loop, not `forEach`: TypeScript narrows `pending` across a loop
+  // body but not across a callback, so the end-of-file check below type-checks.
+  for (const [i, raw] of text.split("\n").entries()) {
     // A multi-line string (`'''` / `"""`) or a backslash line continuation
     // lets a line THIS reader sees as a table header be string content to a
     // real TOML parser — the smuggle files `ignore_errors = true` under a fake
@@ -691,7 +693,7 @@ function parseTomlTables(text: string): { tables: TomlTable[]; errors: string[] 
           `continuation. Its following lines may be string content that this reader would parse as ` +
           `tables and keys, so it cannot vouch that the file sets no mypy option.`,
       );
-      return;
+      continue;
     }
     const line = stripTomlComment(raw).trim();
     if (pending) {
@@ -700,9 +702,9 @@ function parseTomlTables(text: string): { tables: TomlTable[]; errors: string[] 
         tables[tables.length - 1].kv.set(pending.key, pending.value.trim());
         pending = null;
       }
-      return;
+      continue;
     }
-    if (!line) return;
+    if (!line) continue;
     let m: RegExpExecArray | null;
     if ((m = /^\[\[\s*([^\]]+?)\s*\]\]$/.exec(line))) {
       tables.push({ header: m[1], isArray: true, kv: new Map(), unparsed: [] });
@@ -718,7 +720,7 @@ function parseTomlTables(text: string): { tables: TomlTable[]; errors: string[] 
       if (line.startsWith("[") || /mypy/.test(line)) errors.push(msg);
       else tables[tables.length - 1].unparsed.push(msg);
     }
-  });
+  }
   if (pending) {
     errors.push(
       `pyproject.toml: the array opened on line ${pending.line} for the key "${pending.key}" is never ` +
