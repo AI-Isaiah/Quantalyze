@@ -31,6 +31,7 @@ import { join } from "node:path";
  *     `--strict --follow-imports=silent` (an extra flag such as `--exclude=`
  *     narrows the gate while the path set stays equal);
  *   - the Makefile `typecheck` recipe carries NO flag (pyproject.toml supplies them);
+ *   - the Makefile `ci:` target depends on `typecheck`, so `make ci` runs the gate;
  *   - the gate step sets only `name` and `run` (no `if:`, `continue-on-error:`,
  *     `shell:` or `env:` that could switch it off with its run line intact), the
  *     `python` job carries no job-level `continue-on-error:`, and neither the job's
@@ -387,6 +388,18 @@ function surfaceProblems(
       );
     }
   }
+  // `make ci` is the documented local mirror of CI; if it stops depending on
+  // `typecheck`, the local gauntlet goes green without running mypy at all.
+  const ciTarget = makefileText.split("\n").find((l) => /^ci:/.test(l));
+  if (ciTarget === undefined) {
+    problems.push("Makefile: no `ci:` target. It is the local CI gauntlet and must run `typecheck`.");
+  } else if (!ciTarget.slice("ci:".length).trim().split(/\s+/).includes("typecheck")) {
+    problems.push(
+      `Makefile: the \`ci:\` target's prerequisites ${JSON.stringify(ciTarget)} do not include ` +
+        `\`typecheck\`, so \`make ci\` no longer runs the mypy gate.`,
+    );
+  }
+
   const mkTokens = makefileTypecheckArgs(makefileText);
   for (const f of [...flagSet(mkTokens)].sort()) {
     problems.push(
@@ -860,6 +873,13 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     );
     const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
     expect(has(problems, "Makefile:", '"--no-strict-optional"'), problems.join("\n")).toBe(true);
+    expect(has(problems, "ci.yml:"), problems.join("\n")).toBe(false);
+  });
+
+  it("(v) `ci: typecheck test` → `ci: test` in the Makefile → a problem naming the ci target", () => {
+    const mk = mutate(REAL_MAKEFILE, "\nci: typecheck test\n", "\nci: test\n", "(v)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", "`ci:` target", "`typecheck`"), problems.join("\n")).toBe(true);
     expect(has(problems, "ci.yml:"), problems.join("\n")).toBe(false);
   });
 
