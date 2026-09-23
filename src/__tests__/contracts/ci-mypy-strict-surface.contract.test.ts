@@ -28,9 +28,11 @@ import { join } from "node:path";
  *   - the `python` job carries exactly ONE mypy invocation (`mypy` or
  *     `python -m mypy` as a command word, `--strict` or not, backslash
  *     continuations joined), and its flag set is EXACTLY
- *     `--strict --follow-imports=silent` (an extra flag such as `--exclude=`
- *     narrows the gate while the path set stays equal);
- *   - the Makefile `typecheck` recipe carries NO flag (pyproject.toml supplies them);
+ *     `--strict --follow-imports=silent --config-file=pyproject.toml` (an extra
+ *     flag such as `--exclude=` narrows the gate while the path set stays
+ *     equal; `--config-file` makes mypy read pyproject.toml and no other file);
+ *   - the Makefile `typecheck` recipe's flag set is EXACTLY
+ *     `--config-file=pyproject.toml` (pyproject.toml supplies the rest);
  *   - the Makefile `ci:` target depends on `typecheck`, so `make ci` runs the gate;
  *   - the gate step sets only `name` and ONE literal `run:` line — a POSITIVE
  *     rule, so an `if:`, `continue-on-error:`, `shell:` or `env:` that could
@@ -57,6 +59,12 @@ import { join } from "node:path";
  *
  * ⚠️ WHAT IT DOES NOT PIN, stated rather than implied:
  *   - it does NOT prove mypy is green over that set — the `python` job does;
+ *   - it does NOT pin WHICH `mypy` binary runs. An earlier step that prepends a
+ *     fake `mypy` to `GITHUB_PATH`, a job- or workflow-level `env: PATH:`, or a
+ *     `VENV` pointed elsewhere for `make typecheck` substitutes the binary with
+ *     every pin here green. That is adversarial rather than accidental, and
+ *     pinning every earlier step is out of proportion, so it is a DECLARED
+ *     LIMIT, not a gap this file claims to close;
  *   - it does NOT prove the job goes RED on GitHub when a named module breaks.
  *     That is D-06b, OPEN until the phase PR: a neuter commit on the PR, the
  *     step observed RED naming `main.py`, bound to the head SHA, then restored.
@@ -76,8 +84,14 @@ const MAKEFILE = join(ROOT, "analytics-service/Makefile");
 const PYPROJECT = join(ROOT, "analytics-service/pyproject.toml");
 const SERVICE_DIR_REL = "analytics-service";
 
-/** The ci.yml mypy command's flag set, EXACTLY (sorted). */
-const REQUIRED_CI_FLAGS = ["--follow-imports=silent", "--strict"] as const;
+/**
+ * The ci.yml mypy command's flag set, EXACTLY (sorted). `--config-file=pyproject.toml`
+ * makes mypy read that file and NO other, so a `mypy.ini` / `.mypy.ini` written
+ * by an earlier step (tracked or not) cannot take precedence over it.
+ */
+const REQUIRED_CI_FLAGS = ["--config-file=pyproject.toml", "--follow-imports=silent", "--strict"] as const;
+/** The Makefile `typecheck` recipe's flag set, EXACTLY: the same single config as CI, nothing else. */
+const REQUIRED_MAKEFILE_FLAGS = ["--config-file=pyproject.toml"] as const;
 
 /**
  * Top-level directories holding tracked `.py` files that are OUTSIDE the gate
@@ -407,8 +421,8 @@ function surfaceProblems(
   // The flag set is pinned EXACTLY, not by presence. A presence check lets an
   // added `--exclude=services/ingestion/` (or `--allow-untyped-defs`) narrow or
   // weaken the gate while the PATH set, which is all the surface arm reads,
-  // stays equal. The Makefile recipe carries NO flags: its flags come from
-  // pyproject.toml.
+  // stays equal. The Makefile recipe carries only `--config-file=pyproject.toml`:
+  // its other flags come from that file.
   const ciTokens = ciMypyArgs(ymlText);
   const flags = flagSet(ciTokens);
   for (const f of REQUIRED_CI_FLAGS) {
@@ -436,11 +450,23 @@ function surfaceProblems(
   }
 
   const mkTokens = makefileTypecheckArgs(makefileText);
-  for (const f of [...flagSet(mkTokens)].sort()) {
-    problems.push(
-      `Makefile: the \`typecheck\` recipe carries the flag "${f}"; it carries none, because its ` +
-        `flags come from pyproject.toml [tool.mypy]. A flag here can narrow or weaken the local gate.`,
-    );
+  const mkFlags = flagSet(mkTokens);
+  for (const f of REQUIRED_MAKEFILE_FLAGS) {
+    if (!mkFlags.has(f)) {
+      problems.push(
+        `Makefile: the \`typecheck\` recipe lost the flag "${f}", so a stray mypy.ini / .mypy.ini ` +
+          `would be read instead of pyproject.toml and local no longer reads CI's config.`,
+      );
+    }
+  }
+  for (const f of [...mkFlags].sort()) {
+    if (!(REQUIRED_MAKEFILE_FLAGS as readonly string[]).includes(f)) {
+      problems.push(
+        `Makefile: the \`typecheck\` recipe carries the flag "${f}"; exactly ` +
+          `${JSON.stringify(REQUIRED_MAKEFILE_FLAGS)} is allowed, because its other flags come from ` +
+          `pyproject.toml [tool.mypy]. A flag here can narrow or weaken the local gate.`,
+      );
+    }
   }
 
   const surface = diskSurface(listing, excluded);
@@ -745,9 +771,9 @@ describe("[164.6.1 / MYPY-MAINPY-01] the mypy --strict invocation names exactly 
 // ---------------------------------------------------------------------------
 describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", () => {
   const RUN_LINE =
-    "run: mypy --strict --follow-imports=silent services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py";
+    "run: mypy --strict --follow-imports=silent --config-file=pyproject.toml services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py";
   const RECIPE_LINE =
-    "\t$(MYPY) services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py";
+    "\t$(MYPY) --config-file=pyproject.toml services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py";
   const PRE_PHASE_RUN_LINE = "run: mypy --strict --follow-imports=silent services/ routers/ models/";
 
   /**
@@ -978,6 +1004,19 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     );
     const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
     expect(has(problems, "Makefile:", '"--no-strict-optional"'), problems.join("\n")).toBe(true);
+    expect(has(problems, "ci.yml:"), problems.join("\n")).toBe(false);
+  });
+
+  it("(h3) `--config-file=pyproject.toml` removed from ci.yml → a lost-flag problem naming it", () => {
+    const yml = mutate(REAL_YML, RUN_LINE, RUN_LINE.replace(" --config-file=pyproject.toml", ""), "(h3)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'lost the flag "--config-file=pyproject.toml"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(i2) `--config-file=pyproject.toml` removed from the Makefile recipe → a Makefile lost-flag problem", () => {
+    const mk = mutate(REAL_MAKEFILE, RECIPE_LINE, RECIPE_LINE.replace(" --config-file=pyproject.toml", ""), "(i2)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", 'lost the flag "--config-file=pyproject.toml"'), problems.join("\n")).toBe(true);
     expect(has(problems, "ci.yml:"), problems.join("\n")).toBe(false);
   });
 

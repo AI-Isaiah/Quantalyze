@@ -4671,8 +4671,13 @@ jobs:
       # one-off operational tooling (backfills, cassette recording), not the
       # running service, and gating them would add a types-PyYAML dev-dep plus
       # friction for throwaway scripts. tests/ stays untyped by design.
+      # --config-file=pyproject.toml makes mypy read THAT file and no other:
+      # without it, a mypy.ini or .mypy.ini written by an earlier step (or left
+      # untracked in the checkout) is preferred over pyproject.toml and replaces
+      # the pinned [tool.mypy] config wholesale. The Makefile `typecheck`
+      # recipe passes the same flag, so local and CI read one config.
       - name: Type gate - mypy strict over the running-service surface
-        run: mypy --strict --follow-imports=silent services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py
+        run: mypy --strict --follow-imports=silent --config-file=pyproject.toml services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py
       # ── THE ORDERING WAIT (Phase 164.9 plan 06, [164.8-PUSH-RACE-VAC08]) ───
       # On a merge push this job's DB work must not begin before the TEST schema
       # apply for the SAME commit has concluded. The mutex below guarantees the

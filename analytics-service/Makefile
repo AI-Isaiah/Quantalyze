@@ -63,12 +63,13 @@ lint:
 	$(MYPY) --strict --follow-imports=silent services/ingestion/
 
 # B-mypy: the full type-safety floor. It names the same paths as the
-# ci.yml mypy step; the flags come from pyproject.toml [tool.mypy]
-# (auto-discovered from cwd), which ci.yml also repeats on its command
-# line. Run this to match CI.
+# ci.yml mypy step; the flags come from pyproject.toml [tool.mypy], read
+# through --config-file=pyproject.toml exactly as ci.yml reads it, so no
+# stray mypy.ini / .mypy.ini can take precedence. ci.yml also repeats the
+# flags on its command line. Run this to match CI.
 # Pinned by src/__tests__/contracts/ci-mypy-strict-surface.contract.test.ts.
 typecheck:
-	$(MYPY) services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py
+	$(MYPY) --config-file=pyproject.toml services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py
 
 test:
 	# SERIAL (v1.9.1 Phase 97): `-n auto --dist loadgroup` deferred — the global-claim
