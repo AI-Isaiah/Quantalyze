@@ -957,6 +957,13 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     expect(has(problems, "Makefile:"), problems.join("\n")).toBe(false);
   });
 
+  it("(a2) a ci.yml run line naming a path that is not a surface member → a problem naming it", () => {
+    const yml = mutate(REAL_YML, RUN_LINE, RUN_LINE.replace(" services/", " ghost/ services/"), "(a2)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'names "ghost"', "not a service-surface member"), problems.join("\n")).toBe(true);
+    expect(has(problems, "Makefile:"), problems.join("\n")).toBe(false);
+  });
+
   it("(b) a phantom tracked top-level `newmod.py` → a problem naming newmod.py", () => {
     const listing = [...REAL_LISTING, "newmod.py"];
     const problems = surfaceProblems(REAL_YML, REAL_MAKEFILE, listing, EXCLUDED);
