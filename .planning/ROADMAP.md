@@ -2404,6 +2404,12 @@ Plans:
       both ledgers, then ONE release commit carrying the version bump and the CHANGELOG entry.
       [wave 3, depends on all]
 
+⭐ **Merge with Phase 167, 2026-09-23 (D-16/D-17 in `164.6.5-CONTEXT.md`, orchestrator decisions
+awaiting founder confirmation):** 167's sign-in refusal check runs BEFORE this phase's IPC check,
+so a `-10005` at the sign-in step stays `SIGN_IN_FAILED`. Other IPC faults move from a retryable
+424 to the non-retryable `MT5_TERMINAL_UNRESPONSIVE` 500. `KEY_MT5_TERMINAL_UNRESPONSIVE` joins
+`DASHBOARD_DIALOG_ROUTE_CODES` (in scope).
+
 ### Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session (INSERTED)
 
 **Goal:** A client's key validation cannot evict, disturb or expose another client's broker session
