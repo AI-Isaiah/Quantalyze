@@ -854,6 +854,8 @@ Plans:
 - [ ] 164.4.2-08-PLAN.md — Area D wiring: `changed-paths` publishes the subset, `sql-mutation` narrows only on a pull request, and the assert step's fence arms driven RED and GREEN on synthetic logs
 - [ ] 164.4.2-09-PLAN.md — ship: VERSION + CHANGELOG cross-checked commit by commit, `[REDUNDER-SUBSET-SPLIT]` closed by its mechanism, follow-ons booked, and the AFTER protocol laid out for four jobs
 
+⭐ **SCOPE ADDED 2026-09-23 BY FOUNDER DECISION (DECISION F in `164.4.2-CONTEXT.md`):** the ephemeral lane REPLAYS the migrations newer than `baseline.sql` on top of it, and prints which ones it replayed, so that a migration landing after the dump is the normal case and not a red. Without it, every migration merge would leave the lane red until the founder re-dumped from PROD, and a PR could never test its own migration on the lane. Realised by a replan of the remaining plans before plan 06 executes. Plan 05 was mid-execution and is left to finish.
+
 ### Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral (INSERTED)
 
 **Goal:** The pg-lane can host pg_cron, so the `[REDUNDER-PGCRON]` deferral is RETIRED
