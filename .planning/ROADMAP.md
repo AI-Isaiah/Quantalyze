@@ -2395,11 +2395,16 @@ Plans:
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS `MYPY-MAINPY-01`
 
 **Depends on:** Phase 164.6 (ordering only — no code dependency)
-**Plans:** 0 plans
+**Plans:** 2 plans
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 164.6.1 to break down)
+- [ ] 164.6.1-01-PLAN.md — wave 1: annotate `main.py`/`main_worker.py`/`sentry_init.py`, name and widen the ci.yml mypy step and the Makefile to the four top-level modules (96 → 100 files), correct every surface claim, local scratch-copy neuter proof (D-06b CI observation carried OPEN to ship)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 164.6.1-02-PLAN.md — wave 2: `ci-mypy-strict-surface.contract.test.ts` pins CI set == disk set == Makefile set with calibration legs; registry floor 60 → 61; TODOS `[MYPY-MAINPY-01]` closed in code with D-06b OPEN
 
 ### Phase 164.6.2: MT5RELOGIN — the MT5 gateway re-establishes its broker session without a human (INSERTED)
 
