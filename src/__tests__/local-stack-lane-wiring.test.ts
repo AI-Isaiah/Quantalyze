@@ -44,6 +44,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -710,6 +711,107 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       expect(r.status, `an empty catalogue compared instead of refusing:\n${r.out}`).toBe(2);
       expect(r.out).toContain("the catalogue is EMPTY");
     });
+  });
+
+  // ⭐ Phase 164.4.2 plan 11 (DECISION G) — the WIRING. The module above is only a
+  // gate if load_baseline() runs it, in the right place, through the right roles.
+  it("load_baseline() loads the non-public objects after reference data and gates them before the replay, through the superuser for the trigger and the catalogue and the loading role for cron", () => {
+    const lane = read(RUN_SH);
+    const body = liveLines(bashFunctionBody(lane, "load_baseline"));
+    const at = (fn: string) => body.findIndex((l) => new RegExp(`^${fn}\\s+"\\$psql"\\s+"\\$db_url"$`).test(l));
+    const acl = at("check_acl_fidelity");
+    const refdata = at("load_reference_data");
+    const load = at("load_nonpublic_objects");
+    const gate = at("check_nonpublic_fidelity");
+    const replay = at("replay_migrations");
+    expect(
+      load,
+      "load_baseline() no longer calls load_nonpublic_objects — the lane has no auth.users trigger and no cron.job row, and 8 corpus files fail (3 auth-trigger, 5 cron)",
+    ).toBeGreaterThan(-1);
+    expect(
+      gate,
+      "load_baseline() no longer calls check_nonpublic_fidelity — a lane missing (or carrying extra) non-public objects would boot green",
+    ).toBeGreaterThan(-1);
+    expect(acl, "load_baseline() no longer calls check_acl_fidelity").toBeGreaterThan(-1);
+    expect(refdata, "load_baseline() no longer calls load_reference_data").toBeGreaterThan(-1);
+    expect(replay, "load_baseline() no longer calls replay_migrations").toBeGreaterThan(-1);
+    expect(acl < refdata, "check_acl_fidelity no longer runs before load_reference_data").toBe(true);
+    expect(
+      refdata < load,
+      "the non-public objects load BEFORE reference data — the trigger would create the teaser sentinel's profile first, with different values, and the allowlisted profile row would silently no-op",
+    ).toBe(true);
+    expect(load < gate, "check_nonpublic_fidelity runs before load_nonpublic_objects — it would compare a lane that has not been loaded yet").toBe(true);
+    expect(
+      gate < replay,
+      "check_nonpublic_fidelity runs AFTER replay_migrations — a replayed migration may legitimately change these objects, so the gate would compare against a moved fixed point",
+    ).toBe(true);
+
+    // load_nonpublic_objects: the carried set and the lane's migrations dir, the
+    // trigger through the superuser DSN, cron through the loading DSN, all FATAL.
+    const loadBody = liveLines(bashFunctionBody(lane, "load_nonpublic_objects"));
+    const extract = loadBody.find((l) => l.includes("nonpublic-objects.mjs") && l.includes("--emit"));
+    expect(extract, "load_nonpublic_objects no longer runs the extractor's --emit").toBeDefined();
+    expect(
+      extract,
+      "the extractor is not handed the gate's CARRIED set — a replayed migration's cron job or trigger would be registered twice",
+    ).toContain('--carried "$CARRIED_SET_FILE"');
+    expect(
+      extract,
+      "the extractor is not handed --migrations \"$MIGRATIONS_DIR\" — it could fold a different directory than the replay applies",
+    ).toContain('--migrations "$MIGRATIONS_DIR"');
+    const trig = loadBody.find((l) => l.includes("nonpublic-auth-triggers.sql"));
+    expect(trig, "load_nonpublic_objects no longer applies nonpublic-auth-triggers.sql").toBeDefined();
+    expect(trig, "the auth.users trigger is not applied through the superuser DSN").toContain('"$admin_url"');
+    const cronApply = loadBody.find((l) => l.includes("nonpublic-cron.sql"));
+    expect(cronApply, "load_nonpublic_objects no longer applies nonpublic-cron.sql").toBeDefined();
+    expect(
+      cronApply,
+      "the cron jobs are not registered through the LOADING DSN — as the superuser they would be invisible to the corpus's postgres connection (pg_cron RLS) and would run with superuser rights",
+    ).toContain('"$db_url"');
+    expect(cronApply).not.toContain("admin_url");
+    const ifs = (b: string[]) => b.filter((l) => /^if\s/.test(l)).length;
+    const exits = (b: string[]) => b.filter((l) => /^exit\s+[1-9]/.test(l)).length;
+    expect(ifs(loadBody), "load_nonpublic_objects has lost its failure guards").toBeGreaterThanOrEqual(5);
+    expect(
+      exits(loadBody),
+      "load_nonpublic_objects has a failure path that does not exit non-zero — a load that only logs is a lane that boots without the objects",
+    ).toBeGreaterThanOrEqual(ifs(loadBody));
+
+    // check_nonpublic_fidelity: the catalogue through the superuser DSN, the
+    // loading role as --cron-owner, all FATAL.
+    const gateBody = liveLines(bashFunctionBody(lane, "check_nonpublic_fidelity"));
+    const catRead = gateBody.find((l) => l.includes("nonpublic-catalogue.sql"));
+    expect(catRead, "check_nonpublic_fidelity no longer reads nonpublic-catalogue.sql").toBeDefined();
+    expect(
+      catRead,
+      "the catalogue is not read through the superuser DSN — pg_cron's RLS would hide every job registered under another role",
+    ).toContain('"$admin_url"');
+    const check = gateBody.find((l) => l.includes("nonpublic-objects.mjs") && l.includes("--check"));
+    expect(check, "check_nonpublic_fidelity no longer runs the module's --check").toBeDefined();
+    expect(check, "the gate no longer names the role the cron jobs must belong to").toContain('--cron-owner "$owner"');
+    expect(check).toContain('--carried "$CARRIED_SET_FILE"');
+    expect(exits(gateBody), "check_nonpublic_fidelity has a failure path that does not exit non-zero").toBeGreaterThanOrEqual(ifs(gateBody));
+
+    // The catalogue READS everything and names nothing. The names it must not carry
+    // are DERIVED from the migrations, so this cannot go stale with the corpus.
+    const sqlLive = read("scripts/local-stack/nonpublic-catalogue.sql")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("--"))
+      .join("\n");
+    expect(sqlLive, "the catalogue no longer reads cron.job").toMatch(/\bFROM cron\.job\b/);
+    expect(sqlLive, "the catalogue no longer excludes internal triggers").toContain("NOT t.tgisinternal");
+    const migText = readdirSync(REPO_ROOT + "supabase/migrations")
+      .filter((f) => f.endsWith(".sql"))
+      .map((f) => read(`supabase/migrations/${f}`))
+      .join("\n");
+    const declaredNames = new Set([
+      ...[...migText.matchAll(/cron\s*\.\s*schedule\s*\(\s*'([^']+)'/g)].map((m) => m[1]),
+      ...[...migText.matchAll(/CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+(\w+)\s+(?:BEFORE|AFTER)\s[^;]*?\bON\s+auth\.users\b/gi)].map((m) => m[1]),
+    ]);
+    expect(declaredNames.size, "derived no job or trigger name from supabase/migrations — this pin would check nothing").toBeGreaterThan(10);
+    for (const name of declaredNames) {
+      expect(sqlLive.includes(name), `nonpublic-catalogue.sql names \`${name}\` literally — the catalogue must read everything and let the module judge`).toBe(false);
+    }
   });
 
   // ⭐ Phase 164.4.2 plan 11 (DECISION G), the cron class. Every `cron.schedule` /
