@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "164.9"
-current_phase_name: TESTISOLATION — a run’s assertions against the shared TEST project
-status: "Phase 164.9 shipped — PR #837"
+current_phase: 164.4.2
+current_phase_name: SUBSETSPLIT
+status: executing
 stopped_at: "Phase 164.9 TESTISOLATION SHIPPED as PR #837 (v0.85.0.0) — verification passed, security SECURED 66/66 threats_open 0, UAT 2 passed / 0 issues / 1 resolved skip, two review rounds. ⛔ NOT marked complete, deliberately: criterion 8 (the mode=restore dispatch) is POST-MERGE BY CONSTRUCTION and ships PENDING under the founder's Option A, booked as [164.9-CRIT8-RESTORE-DISPATCH-RECORD], owner THE FOUNDER. Next per the founder ordering: land PR #837, then 164.4.2."
-last_updated: "2026-09-21T21:05:25.243Z"
-last_activity: 2026-09-21
-last_activity_desc: Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction
-state_head: 26e88718e709eb5237c879b89872aa9abe86ed17
+last_updated: "2026-09-23T03:12:51.447Z"
+last_activity: 2026-09-23
+last_activity_desc: Phase 164.4.2 execution started
+state_head: 2f5256f40f497339406e6f4ef603fba8decda018
 progress:
   total_phases: 48
   completed_phases: 32
-  total_plans: 238
-  completed_plans: 231
+  total_plans: 247
+  completed_plans: 233
   percent: 67
 ---
 
@@ -179,8 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 159 — RANK — Public-ranking integrity
-Plan: Not started
+Phase: 164.4.2 (SUBSETSPLIT) — EXECUTING
+Plan: 4 of 9 (waves 1–2 complete: plans 01–03)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
@@ -482,7 +482,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Phase 164.5.4 shipped — PR #835
+Status: Executing Phase 164.4.2
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -498,7 +498,7 @@ Status: Phase 164.5.4 shipped — PR #835
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-21 — Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete (criterion 8 is post-merge by construction)
+Last activity: 2026-09-23 — Phase 164.4.2 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
