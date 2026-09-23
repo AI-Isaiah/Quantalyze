@@ -34,6 +34,9 @@ import { join } from "node:path";
  *     equal; `--config-file` makes mypy read pyproject.toml and no other file);
  *   - the Makefile `typecheck` recipe's flag set is EXACTLY
  *     `--config-file=pyproject.toml` (pyproject.toml supplies the rest);
+ *   - neither command line carries a shell operator (`||`, `&&`, `;`, `|`), a
+ *     mypy argfile (`@...`) or a `#` — each reported as able to swallow the
+ *     exit status or inject arguments, never as a missing surface member;
  *   - the Makefile `ci:` target depends on `typecheck`, so `make ci` runs the gate;
  *   - the Makefile carries exactly one `MYPY = $(VENV)/bin/mypy` assignment and
  *     exactly one rule line naming `typecheck` (a `MYPY = true`, or a second,
@@ -399,6 +402,16 @@ function flagSet(tokens: string[]): Set<string> {
 }
 
 /**
+ * A token that is neither a path nor a flag but shell or mypy syntax: a shell
+ * operator or metacharacter (`||`, `&&`, `;`, `|`, `>`, `$(`, a backtick), a
+ * mypy argfile (`@args.txt`, which injects arguments from a file), or a `#`
+ * that turns the rest of the line into a comment. Each can swallow the exit
+ * status or inject arguments, so it is reported as that — never as a missing
+ * surface member — and kept out of the path set.
+ */
+const isShellToken = (t: string): boolean => /[;&|<>`$()]/.test(t) || t.startsWith("@") || t.startsWith("#");
+
+/**
  * Every TRACKED path under `analytics-service/`, relative to it. Read from
  * `git ls-files`, not the working tree, so a developer's untracked scratch
  * file (or a gitignored `__pycache__/`) cannot make this test disagree with
@@ -528,10 +541,23 @@ function surfaceProblems(
     }
   }
 
+  for (const [label, tokens] of [
+    ["ci.yml", ciTokens],
+    ["Makefile", mkTokens],
+  ] as const) {
+    for (const t of tokens.filter(isShellToken)) {
+      problems.push(
+        `${label}: the mypy invocation carries the token ${JSON.stringify(t)}, a shell operator, argfile ` +
+          `or comment that can swallow the exit status or inject arguments. The command must be ` +
+          `\`mypy\`, its pinned flags and its paths, nothing else.`,
+      );
+    }
+  }
+
   const surface = diskSurface(listing, excluded);
   const sets: Array<[string, Set<string>]> = [
-    ["ci.yml", pathSet(ciTokens)],
-    ["Makefile", pathSet(mkTokens)],
+    ["ci.yml", pathSet(ciTokens.filter((t) => !isShellToken(t)))],
+    ["Makefile", pathSet(mkTokens.filter((t) => !isShellToken(t)))],
   ];
   for (const [label, named] of sets) {
     for (const member of [...surface].sort()) {
@@ -1168,6 +1194,67 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     expect(has(problems, "Makefile:", "2 rule line(s) name `typecheck`"), problems.join("\n")).toBe(true);
   });
 
+  it("(h4) `--strict` removed alone from ci.yml → a lost-flag problem naming it", () => {
+    const yml = mutate(REAL_YML, RUN_LINE, RUN_LINE.replace(" --strict", ""), "(h4)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'lost the flag "--strict"'), problems.join("\n")).toBe(true);
+    expect(has(problems, '"--follow-imports=silent"'), problems.join("\n")).toBe(false);
+  });
+
+  it("(sh) `|| true` appended to the ci.yml run line → a shell-token problem, not a surface problem", () => {
+    const yml = insertAfter(REAL_YML, RUN_LINE, " || exit 0", "(sh)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'the token "||"', "swallow the exit status or inject arguments"), problems.join("\n")).toBe(true);
+    expect(has(problems, '"||"', "service-surface member"), problems.join("\n")).toBe(false);
+  });
+
+  it("(sh2) an argfile `@extra-args.txt` on the Makefile recipe → a shell-token problem naming it", () => {
+    const mk = mutate(REAL_MAKEFILE, RECIPE_LINE, RECIPE_LINE.replace(" services/", " @extra-args.txt services/"), "(sh2)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", 'the token "@extra-args.txt"'), problems.join("\n")).toBe(true);
+    expect(has(problems, '"@extra-args.txt"', "service-surface member"), problems.join("\n")).toBe(false);
+  });
+
+  it("(sh3) a `#` in the Makefile recipe (the shell drops everything after it) → a shell-token problem", () => {
+    const mk = mutate(REAL_MAKEFILE, RECIPE_LINE, RECIPE_LINE.replace(" main.py", " # main.py"), "(sh3)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", 'the token "#"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(v2) the Makefile `ci:` target deleted → a missing-target problem", () => {
+    const mk = mutate(REAL_MAKEFILE, "\nci: typecheck test\n", "\n", "(v2)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile: no `ci:` target"), problems.join("\n")).toBe(true);
+  });
+
+  it("(m2) a job-level FLOW-MAPPING `defaults: {run: {shell: ...}}` → a defaults problem", () => {
+    const yml = mutate(
+      REAL_YML,
+      "    defaults:\n      run:\n        working-directory: analytics-service\n",
+      "    defaults: {run: {working-directory: analytics-service, shell: 'bash {0}'}}\n",
+      "(m2)",
+    );
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", "`python` job's `defaults:` sets a `shell:`"), problems.join("\n")).toBe(true);
+  });
+
+  it("(m3) a WORKFLOW-level block `defaults: run: shell:` → a workflow defaults problem", () => {
+    expect(REAL_YML.split("\njobs:\n").length - 1, "CALIBRATION (m3): `jobs:` must occur once").toBe(1);
+    expect(/^defaults\s*:/m.test(REAL_YML), "CALIBRATION (m3): a top-level defaults already exists").toBe(false);
+    const yml = REAL_YML.replace("\njobs:\n", "\ndefaults:\n  run:\n    shell: bash {0}\n\njobs:\n");
+    expect(yml.includes("\ndefaults:\n  run:\n    shell: bash {0}\n"), "CALIBRATION (m3): the block did not land").toBe(true);
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", "workflow's top-level `defaults:` sets a `shell:`"), problems.join("\n")).toBe(true);
+  });
+
+  it("(m4) a WORKFLOW-level one-line `defaults: {run: {shell: bash}}` → a workflow defaults problem", () => {
+    expect(REAL_YML.split("\njobs:\n").length - 1, "CALIBRATION (m4): `jobs:` must occur once").toBe(1);
+    const yml = REAL_YML.replace("\njobs:\n", "\ndefaults: {run: {shell: bash}}\njobs:\n");
+    expect(yml.includes("\ndefaults: {run: {shell: bash}}\n"), "CALIBRATION (m4): the line did not land").toBe(true);
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", "workflow's top-level `defaults:` sets a `shell:`"), problems.join("\n")).toBe(true);
+  });
+
   it("(v) `ci: typecheck test` → `ci: test` in the Makefile → a problem naming the ci target", () => {
     const mk = mutate(REAL_MAKEFILE, "\nci: typecheck test\n", "\nci: test\n", "(v)");
     const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
@@ -1242,6 +1329,40 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
   it("(z2) a backslash line continuation → a problem", () => {
     const problems = cfg(mutate(REAL_PYPROJECT, 'python_version = "3.12"', 'python_version = \\\n  "3.12"', "(z2)"));
     expect(has(problems, "pyproject.toml:", "line continuation"), problems.join("\n")).toBe(true);
+  });
+
+  it("(n2) mypy config as a ROOT dotted key → an outside-table problem", () => {
+    const added = "tool.mypy.ignore_errors = true\n";
+    expect(REAL_PYPROJECT.includes(added), "CALIBRATION (n2): already present").toBe(false);
+    const problems = cfg(added + REAL_PYPROJECT);
+    expect(has(problems, "[(root)] carries mypy configuration"), problems.join("\n")).toBe(true);
+  });
+
+  it("(n3) mypy config as an inline table under `[tool]` → an outside-table problem", () => {
+    const added = "\n[tool]\nmypy = { ignore_errors = true }\n";
+    const problems = cfg(REAL_PYPROJECT + added);
+    expect(has(problems, "[tool] carries mypy configuration"), problems.join("\n")).toBe(true);
+  });
+
+  it("(o2) a second `[tool.mypy]` table → a table-count problem", () => {
+    const problems = cfg(`${REAL_PYPROJECT}\n[tool.mypy]\nstrict = true\n`);
+    expect(has(problems, "2 [tool.mypy] table(s)"), problems.join("\n")).toBe(true);
+  });
+
+  it("(o3) `strict = true` deleted from [tool.mypy] → a lost-key problem naming strict", () => {
+    const problems = cfg(mutate(REAL_PYPROJECT, "\nstrict = true\n", "\n", "(o3)"));
+    expect(has(problems, '[tool.mypy] lost the key "strict"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(s2) the `pandera.*` override deleted → a missing-override problem naming it", () => {
+    const block = '[[tool.mypy.overrides]]\nmodule = ["pandera.*"]\nfollow_imports = "skip"\n';
+    const problems = cfg(mutate(REAL_PYPROJECT, block, "", "(s2)"));
+    expect(has(problems, 'no [[tool.mypy.overrides]] entry names "pandera.*"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(t2) a tracked analytics-service/.mypy.ini → a problem naming it", () => {
+    const problems = cfg(REAL_PYPROJECT, [...REAL_LISTING, ".mypy.ini"]);
+    expect(has(problems, "analytics-service/.mypy.ini is tracked"), problems.join("\n")).toBe(true);
   });
 
   it("(u) a multi-line `module = [...]` in an override is PARSED: the same set passes, an added module is named", () => {
