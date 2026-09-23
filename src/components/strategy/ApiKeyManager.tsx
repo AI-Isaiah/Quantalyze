@@ -120,7 +120,23 @@ function isSyncEnqueued(body: unknown): boolean {
  * marker is cleared). A poll status is ignored until the attempt's enqueue
  * response has resolved, because a read taken before then is about an earlier
  * run. Once a terminal success arrives, later reads are ignored while its
- * re-read settles.
+ * re-read settles, and that re-read is bounded (`TERMINAL_REREAD_BOUND_MS`).
+ *
+ * 167-06 fix round 2 (167-REVIEW-06-R2 CR-01): ignoring a pre-enqueue read was
+ * not enough on its own. The poller's attempt budget is local to its effect,
+ * and the effect used to span `syncing` and `computing`, so pre-enqueue polls
+ * still SPENT that budget and a slow enqueue that succeeded was ended by the
+ * timeout one tick later. `SyncProgress` now polls in `computing` only, which
+ * this component enters only after `enqueued` is set, so there is no
+ * pre-enqueue read and the budget starts at the enqueue. The `enqueued` check
+ * below is kept as a second line: it is what makes this component's rule
+ * independent of how the panel gates its poll.
+ *
+ * ENDED-ATTEMPT BRANCHES. The attempt is registered before any await, so a
+ * failure elsewhere (the post-add catch) sees it as live from the click. A
+ * continuation of an attempt that has already ended (its terminal arrived, then
+ * its own post-enqueue re-read threw, possibly after a NEWER attempt started)
+ * may not write the panel or the marker: `endAttempt` answers false for it.
  */
 interface SyncAttempt {
   keyId: string;
@@ -129,6 +145,18 @@ interface SyncAttempt {
   /** A terminal success arrived and its re-read has not resolved yet. */
   settling: boolean;
 }
+
+/**
+ * 167-06 fix round 2 (SFH2-MED-1 / 167-REVIEW-06-R2 IN-01): how long a terminal
+ * success waits for its re-read. While it waits, the panel spins and the marker
+ * holds, and supabase-js sets no request timeout of its own, so an unbounded
+ * wait could hold both for as long as the network stack keeps the request open.
+ * On the bound the attempt ends exactly as after a FAILED re-read: the success
+ * is withheld (idle) and the load error is shown, because an unverified list
+ * cannot vouch for the subject key. 15 s is five poll intervals, and well past
+ * a normal list read.
+ */
+const TERMINAL_REREAD_BOUND_MS = 15_000;
 
 export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: ApiKeyManagerProps) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
@@ -161,12 +189,23 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   // the one their render closed over, and it never drives a render itself
   // (`syncingKeyId` does).
   const attemptRef = useRef<SyncAttempt | null>(null);
+  // 167-06 fix round 2 (167-REVIEW-06-R2 WR-04): the key-list reads are
+  // ORDERED. Each `loadKeys` call takes the next number; a response older than
+  // the newest one already applied is dropped. Without it, an attempt's own
+  // post-enqueue read could resolve AFTER the terminal arm's re-read and
+  // install the snapshot from before the job ran, lifting R2's withhold beside
+  // a key whose sign-in had failed on the server.
+  const keysReadSeqRef = useRef(0);
+  const appliedKeysReadRef = useRef<{ seq: number; ok: boolean }>({ seq: 0, ok: true });
   const router = useRouter();
 
   // Resolves true when the list was re-read cleanly, false when the read
   // failed (and `loadError` is set). The terminal-success arm needs the answer:
-  // it shows a success only after a re-read that could have withheld it.
+  // it shows a success only after a re-read that could have withheld it. A read
+  // dropped as out of date (WR-04) answers with the outcome of the newer read
+  // that was applied instead, since that is what the list now shows.
   const loadKeys = useCallback(async (opts?: { lastSyncedKeyId?: string }): Promise<boolean> => {
+    const seq = ++keysReadSeqRef.current;
     const supabase = createClient();
     // Project only the allowlist — never `.select("*")` on api_keys from a
     // user-scoped client. Migration 027 (SEC-005) revokes SELECT on the
@@ -180,6 +219,8 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       .from("api_keys")
       .select(API_KEY_USER_COLUMNS)
       .order("created_at", { ascending: false });
+    if (seq < appliedKeysReadRef.current.seq) return appliedKeysReadRef.current.ok;
+    appliedKeysReadRef.current = { seq, ok: !keysErr };
     if (keysErr) {
       console.error("[ApiKeyManager] api_keys fetch failed:", keysErr.message);
       // H-0395: a non-empty error (network/RLS/session) is NOT "no keys".
@@ -249,11 +290,41 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       // cannot vouch for the subject key.
       attempt.settling = true;
       let reread = false;
+      let boundTimer: ReturnType<typeof setTimeout> | undefined;
       try {
+        // 167-06 fix round 2 (SFH2-MED-1): the re-read is raced against
+        // `TERMINAL_REREAD_BOUND_MS`, so a request that never settles cannot
+        // hold `settling`, the spinner and the marker indefinitely.
+        const bound = new Promise<"timed_out">((resolve) => {
+          boundTimer = setTimeout(() => resolve("timed_out"), TERMINAL_REREAD_BOUND_MS);
+        });
         // NEW-C37-04: pass the key that was actually synced so loadKeys can
         // derive lastSyncAt from the correct row, not from currentKeyId.
-        reread = await loadKeys({ lastSyncedKeyId: attempt.keyId });
+        const outcome = await Promise.race([
+          loadKeys({ lastSyncedKeyId: attempt.keyId }),
+          bound,
+        ]);
+        if (outcome === "timed_out") {
+          console.error(
+            `[ApiKeyManager] the terminal re-read did not answer within ${TERMINAL_REREAD_BOUND_MS} ms; the success is withheld:`,
+            { keyId: attempt.keyId },
+          );
+          setLoadError("The key list re-read did not answer in time.");
+        } else {
+          reread = outcome;
+        }
+      } catch (err) {
+        // 167-06 fix round 2 (SFH2-LOW-1 / IN-04): `SyncProgress` drops this
+        // handler's promise, so a throw here was an unhandled rejection and the
+        // attempt ended with neither a success nor an error on screen. Treat it
+        // as a failed re-read: the success stays withheld, the load error shows.
+        console.error(
+          `[ApiKeyManager] the terminal re-read threw; the success is withheld [key_id=${attempt.keyId}]:`,
+          err,
+        );
+        setLoadError(err instanceof Error ? err.message : "The key list re-read failed.");
       } finally {
+        clearTimeout(boundTimer);
         endAttempt(attempt);
         setSyncStatus(reread ? status : "idle");
         router.refresh();
@@ -514,9 +585,19 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           // console only. ⚠️ That loss is a named residual of the post-add sync
           // bypassing the slot (D-18, routed to 167.2), not a claim that the
           // failure does not matter. When no attempt is live the panel is idle
-          // or showing a finished attempt, and the failure is shown there as
-          // before (SEAMUX-05 / B-06).
+          // or showing a finished attempt, and the failure is shown there
+          // (SEAMUX-05 / B-06).
           if (attemptRef.current !== null) return;
+          // 167-06 fix round 2 (167-REVIEW-06-R2 WR-01): the failure shown is
+          // the NEW key's, so the panel's Retry must target the new key. The
+          // gate above `fetch` decided the subject once, at link time, and a
+          // tracked attempt on another key can have started (or been live) and
+          // then ENDED before this failure lands, leaving `lastAttemptedKeyId`
+          // on that key. Retry then re-linked the strategy to it, undoing this
+          // Add Key's link. So the subject moves here, with the failure. An
+          // `error` is never withheld (R2), so this move cannot re-show a
+          // success.
+          setLastAttemptedKeyId(newKeyId);
           setSyncStatus("error");
           setSyncError(
             err instanceof Error ? err.message : SYNC_UNAVAILABLE_COPY,
@@ -568,11 +649,34 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       return;
     }
     if (deletedRows?.length !== 1) {
-      console.error(
-        `[ApiKeyManager] api_keys delete removed ${deletedRows?.length ?? 0} rows, expected 1`,
-      );
-      setError("Failed to delete key: no key was removed.");
-      return;
+      // 167-06 fix round 2 (167-REVIEW-06-R2 WR-05): zero removed rows means
+      // either the delete was refused (RLS) or the row was ALREADY gone (deleted
+      // in another tab). Reporting both as a refusal left a card for a key that
+      // no longer exists, and every later Delete said so again until a reload.
+      // So ask: a row that is still there is a refusal; a row that is gone is
+      // the outcome the user asked for, and takes the success path below.
+      const removed = deletedRows?.length ?? 0;
+      const { data: remaining, error: lookupError } = await supabase
+        .from("api_keys")
+        .select("id")
+        .eq("id", keyId);
+      if (lookupError) {
+        console.error(
+          `[ApiKeyManager] api_keys delete removed ${removed} rows, expected 1, and the follow-up lookup failed:`,
+          lookupError.message,
+        );
+        setError("Failed to delete key: " + lookupError.message);
+        return;
+      }
+      if (!remaining || remaining.length > 0) {
+        console.error(
+          `[ApiKeyManager] api_keys delete removed ${removed} rows, expected 1; the key is still present`,
+        );
+        setError(
+          "Failed to delete key: the key is still connected. Try again, and contact support if it keeps failing.",
+        );
+        return;
+      }
     }
     // Phase 167 / 167-06, R5 (167-CONTEXT D-18): once the row leaves `keys`,
     // R2 reads the missing subject row as "not untrusted", so a success it was

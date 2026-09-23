@@ -67,6 +67,12 @@ const fromTableMock = vi.fn();
 // removed row carrying the id (167-06 fix round, a delete that removed no row
 // is a failure, not a success).
 const apiKeyDeleteMock = vi.fn();
+// 167-06 fix round 2 (WR-05): after a delete that removed no row,
+// `handleDeleteKey` asks whether the row is still there with
+// `from("api_keys").select("id").eq("id", …)`. The spy receives the table and
+// the id; its default answer is "still present", the conservative reading, so
+// a case that means "already gone" has to say so.
+const apiKeyLookupMock = vi.fn();
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -80,6 +86,10 @@ vi.mock("@/lib/supabase/client", () => ({
         select: (_cols: string) => ({
           order: (_col: string, _opts?: unknown) =>
             Promise.resolve(selectResultMock()),
+          eq: (_col: string, val: unknown) =>
+            Promise.resolve(
+              apiKeyLookupMock(table, val) ?? { data: [{ id: val }], error: null },
+            ),
         }),
         // Retained as the negative oracle — see apiKeyInsertMock above.
         insert: (row: unknown) => {
@@ -120,13 +130,18 @@ vi.mock("@/lib/supabase/client", () => ({
 // callback directly (mig 20260707120000 regression: complete_with_warnings must
 // be treated as a terminal SUCCESS, clearing syncingKeyId + refreshing).
 let capturedOnStatusChange: ((s: string) => void) | null = null;
+// 167-06 fix round 2 (WR-01): the panel's Retry, captured the same way, so a
+// case can press it and read which key the strategy is re-linked to.
+let capturedOnRetry: (() => void) | null = null;
 vi.mock("./SyncProgress", () => ({
   SyncProgress: (props: {
     syncStatus?: string;
     syncError?: string | null;
     onStatusChange?: (s: string) => void;
+    onRetry?: () => void;
   }) => {
     capturedOnStatusChange = props.onStatusChange ?? null;
+    capturedOnRetry = props.onRetry ?? null;
     // 140.3-08 / SEAMUX-05: render the two props ApiKeyManager drives on a sync
     // failure. The real SyncProgress renders both (a status label and the
     // syncError detail line), and without them in the DOM a test cannot tell
@@ -1580,6 +1595,7 @@ describe("[167-06] the persisted credential state renders on the manager's key c
     routerRefreshMock.mockReset();
     selectResultMock.mockReset();
     capturedOnStatusChange = null;
+    capturedOnRetry = null;
   });
 
   afterEach(() => {
@@ -1769,6 +1785,7 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       opts: {
         sync?: () => Response | Promise<Response>;
         rotate?: () => Response | Promise<Response>;
+        validate?: () => Response | Promise<Response>;
       } = {},
     ) {
       const fetchMock = vi.fn().mockImplementation((url: string) => {
@@ -1776,6 +1793,7 @@ describe("[167-06] the persisted credential state renders on the manager's key c
           return Promise.resolve((opts.sync ?? syncAccepted)());
         }
         if (url === "/api/keys/validate-and-encrypt") {
+          if (opts.validate) return Promise.resolve(opts.validate());
           return Promise.resolve(
             new Response(
               JSON.stringify({ api_key_id: "key-new", valid: true, read_only: true }),
@@ -1904,6 +1922,7 @@ describe("[167-06] the persisted credential state renders on the manager's key c
 
     beforeEach(() => {
       apiKeyDeleteMock.mockReset();
+      apiKeyLookupMock.mockReset();
       strategiesUpdateMock.mockReset();
     });
 
@@ -2383,7 +2402,11 @@ describe("[167-06] the persisted credential state renders on the manager's key c
         );
 
         // A cold-start enqueue outlasts the 3 s poll: its first read returns
-        // the strategy's EXISTING analytics row.
+        // the strategy's EXISTING analytics row. Since 167-06 fix round 2 the
+        // real panel no longer polls before the enqueue at all (pinned against
+        // the real poller in ApiKeyManager.poll.test.tsx); this case keeps the
+        // component's OWN rule pinned, the `enqueued` check that stays as a
+        // second line whatever the panel does.
         await act(async () => {
           capturedOnStatusChange!(staleStatus);
         });
@@ -2631,21 +2654,389 @@ describe("[167-06] the persisted credential state renders on the manager's key c
         );
       });
 
-      // RLS filtered the DELETE to zero rows: no error, nothing removed.
+      // RLS filtered the DELETE to zero rows: no error, nothing removed. The
+      // follow-up lookup (167-06 fix round 2, WR-05) finds the row still there.
       apiKeyDeleteMock.mockReturnValue({ data: [], error: null });
+      apiKeyLookupMock.mockReturnValue({ data: [{ id: "key-r" }], error: null });
       const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
       try {
         await deleteKey("key-r");
         await waitFor(() => {
           expect(
-            screen.getByText("Failed to delete key: no key was removed."),
+            screen.getByText(
+              "Failed to delete key: the key is still connected. Try again, and contact support if it keeps failing.",
+            ),
           ).toBeInTheDocument();
         });
       } finally {
         consoleError.mockRestore();
       }
       expect(apiKeyDeleteMock).toHaveBeenCalledWith("api_keys");
+      expect(apiKeyLookupMock).toHaveBeenCalledWith("api_keys", "key-r");
       expect(screen.getByTestId("api-key-card-key-r")).toBeInTheDocument();
+    });
+
+    it("a Delete that removed NO row because the key was ALREADY gone (deleted in another tab) removes the card and reports no failure (167-REVIEW-06-R2 WR-05)", async () => {
+      routeFetch();
+      const keyA = row({
+        id: "key-a",
+        exchange: "binance",
+        label: "Key A",
+        sync_status: null,
+        venue_account_id: null,
+      });
+      const keyB = row({
+        id: "key-b",
+        exchange: "binance",
+        label: "Key B",
+        sync_status: null,
+        venue_account_id: null,
+      });
+      await renderRows([keyA, keyB]);
+
+      // The DELETE removed nothing, and the follow-up lookup finds no row.
+      apiKeyDeleteMock.mockReturnValue({ data: [], error: null });
+      apiKeyLookupMock.mockReturnValue({ data: [], error: null });
+      await deleteKey("key-a");
+
+      await waitFor(() => {
+        expect(screen.queryByTestId("api-key-card-key-a")).not.toBeInTheDocument();
+      });
+      expect(apiKeyLookupMock).toHaveBeenCalledWith("api_keys", "key-a");
+      expect(screen.queryByText(/Failed to delete key/)).not.toBeInTheDocument();
+      expect(screen.getByTestId("api-key-card-key-b")).toBeInTheDocument();
+    });
+
+    // ── Retry after a post-add failure targets the key that failed (WR-01) ──
+
+    it.each([
+      {
+        ordering: "an attempt on J was LIVE when the add's link succeeded, and ended before the post-add failure",
+        attemptLiveAtLink: true,
+      },
+      {
+        ordering: "no attempt was live at the add's link; one on J then started and ended before the post-add failure",
+        attemptLiveAtLink: false,
+      },
+    ])(
+      "Retry after a post-add failure re-links the NEW key, never J ($ordering) (167-REVIEW-06-R2 WR-01)",
+      async ({ attemptLiveAtLink }) => {
+        const postAdd = deferred<Response>();
+        const validate = deferred<Response>();
+        const validated = () =>
+          new Response(
+            JSON.stringify({ api_key_id: "key-new", valid: true, read_only: true }),
+            { status: 200, headers: JSON_HEADERS },
+          );
+        // J's own enqueue answers at once; the post-add sync is held open.
+        const syncQueue: Array<() => Response | Promise<Response>> = attemptLiveAtLink
+          ? [syncAccepted, () => postAdd.promise]
+          : [() => postAdd.promise, syncAccepted];
+        routeFetch({
+          sync: () => (syncQueue.shift() ?? syncAccepted)(),
+          validate: attemptLiveAtLink ? () => validate.promise : validated,
+        });
+        const current = row({
+          id: "key-j",
+          exchange: "binance",
+          label: "Key J",
+          sync_status: null,
+          venue_account_id: null,
+        });
+        await renderRows([current], "key-j", "binance");
+        selectResultMock.mockReturnValue({ data: [newRow(), current], error: null });
+
+        if (attemptLiveAtLink) {
+          await addKey(); // validate is held open
+          await resync("key-j");
+          await act(async () => {
+            validate.resolve(validated());
+          });
+        } else {
+          await addKey();
+        }
+        await waitFor(() => {
+          expect(screen.getByTestId("api-key-card-key-new")).toBeInTheDocument();
+        });
+        if (!attemptLiveAtLink) await resync("key-j");
+
+        // J's attempt ends on its own terminal.
+        await finish("complete");
+        expect(cardButton("key-j", "Resync")).toBeEnabled();
+
+        // THEN the post-add sync fails, with no attempt live: it is shown.
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          await act(async () => {
+            postAdd.resolve(syncRefused("Post-add sync failed"));
+          });
+          await waitFor(() => {
+            expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+              "data-sync-status",
+              "error",
+            );
+          });
+        } finally {
+          warn.mockRestore();
+        }
+        expect(screen.getByTestId("sync-progress").textContent).toBe("Post-add sync failed");
+
+        // Retry is the NEW key's: it must re-link the new key, not J.
+        const linksBefore = strategiesUpdateMock.mock.calls.length;
+        await act(async () => {
+          capturedOnRetry!();
+        });
+        await waitFor(() => {
+          expect(strategiesUpdateMock.mock.calls.length).toBeGreaterThan(linksBefore);
+        });
+        const lastLink = strategiesUpdateMock.mock.calls.at(-1)![0] as {
+          table: string;
+          vals: { api_key_id: string };
+        };
+        expect(lastLink.table).toBe("strategies");
+        expect(lastLink.vals.api_key_id).toBe("key-new");
+      },
+    );
+
+    // ── A poll error ends the attempt (WR-02) ───────────────────────────────
+
+    it("a poll error ends the attempt: the timeout copy renders, and Resync, Update password and Delete are usable again (167-REVIEW-06-R2 WR-02)", async () => {
+      routeFetch();
+      await renderRows([row({ id: "key-j" })], "key-j");
+      await resync("key-j");
+      expect(cardButton("key-j", "Update password")).toBeDisabled();
+      expect(cardButton("key-j", "Delete")).toBeDisabled();
+
+      // The poller escalates (its cap or its missing-row grace).
+      await act(async () => {
+        capturedOnStatusChange!("error");
+      });
+
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "error",
+      );
+      expect(screen.getByTestId("sync-progress").textContent).toBe(
+        "Analytics computation timed out. Please retry or contact support.",
+      );
+      expect(cardButton("key-j", "Resync")).toBeEnabled();
+      expect(cardButton("key-j", "Update password")).toBeEnabled();
+      expect(cardButton("key-j", "Delete")).toBeEnabled();
+    });
+
+    // ── One terminal is handled once (WR-03) ────────────────────────────────
+
+    it("one terminal is handled once: reads landing while its re-read settles start no second re-read and cannot end the attempt (167-REVIEW-06-R2 WR-03)", async () => {
+      routeFetch();
+      const healthy = row({ id: "key-h", label: "Healthy MT5", sync_status: "complete" });
+      await renderRows([healthy], "key-h");
+      await resync("key-h");
+
+      const reread = deferred<unknown>();
+      selectResultMock.mockReturnValueOnce(reread.promise);
+      const reads = selectResultMock.mock.calls.length;
+      const refreshes = routerRefreshMock.mock.calls.length;
+      await act(async () => {
+        capturedOnStatusChange!("complete");
+      });
+      // While the re-read is outstanding: a second read of the same terminal,
+      // then the capped poller's escalation, which it sends on every tick.
+      await act(async () => {
+        capturedOnStatusChange!("complete");
+        capturedOnStatusChange!("error");
+      });
+
+      expect(selectResultMock.mock.calls.length).toBe(reads + 1);
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "computing",
+      );
+      expect(cardButton("key-h", "Update password")).toBeDisabled();
+
+      await act(async () => {
+        reread.resolve({ data: [healthy], error: null });
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+          "data-sync-status",
+          "complete",
+        );
+      });
+      // The success, not the escalation's timeout copy.
+      expect(screen.getByTestId("sync-progress").textContent).toBe("");
+      expect(routerRefreshMock.mock.calls.length).toBe(refreshes + 1);
+      expect(cardButton("key-h", "Resync")).toBeEnabled();
+    });
+
+    // ── Key-list reads are ordered (WR-04) ──────────────────────────────────
+
+    it("reads are ordered: the attempt's own post-enqueue read resolving AFTER the terminal re-read cannot lift the withhold (167-REVIEW-06-R2 WR-04)", async () => {
+      routeFetch();
+      const beforeTheJob = row({ id: "key-h", label: "Healthy MT5", sync_status: "complete" });
+      await renderRows([beforeTheJob], "key-h");
+
+      // The post-enqueue read is held open ...
+      const postEnqueueRead = deferred<unknown>();
+      selectResultMock.mockReturnValueOnce(postEnqueueRead.promise);
+      await resync("key-h");
+
+      // ... while the terminal arrives and its re-read shows the sign-in failed.
+      selectResultMock.mockReturnValueOnce({
+        data: [row({ id: "key-h", label: "Healthy MT5", sync_status: "sign_in_failed" })],
+        error: null,
+      });
+      await finish("complete");
+      await waitFor(() => {
+        expect(
+          within(card("key-h")).getByTestId("allocator-sync-pill"),
+        ).toHaveAttribute("data-sync-status", "sign_in_failed");
+      });
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+
+      // NOW the older snapshot, taken before the job ran, lands.
+      await act(async () => {
+        postEnqueueRead.resolve({ data: [beforeTheJob], error: null });
+      });
+      await act(async () => {});
+
+      expect(
+        within(card("key-h")).getByTestId("allocator-sync-pill"),
+      ).toHaveAttribute("data-sync-status", "sign_in_failed");
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+    });
+
+    // ── A throwing terminal re-read (SFH2-LOW-1 / IN-04) ────────────────────
+
+    it("a terminal re-read that THROWS ends the attempt with the success withheld and the load error shown, and is logged with context (SFH2-LOW-1)", async () => {
+      routeFetch();
+      await renderRows(
+        [row({ id: "key-h", label: "Healthy MT5", sync_status: "complete" })],
+        "key-h",
+      );
+      await resync("key-h");
+
+      selectResultMock.mockImplementationOnce(() => {
+        throw new Error("socket hang up");
+      });
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await act(async () => {
+          capturedOnStatusChange!("complete");
+        });
+        await waitFor(() => {
+          expect(
+            screen.getByText(/Couldn't load your API keys/i),
+          ).toBeInTheDocument();
+        });
+        expect(consoleError).toHaveBeenCalledWith(
+          expect.stringContaining("[ApiKeyManager] the terminal re-read threw"),
+          expect.any(Error),
+        );
+      } finally {
+        consoleError.mockRestore();
+      }
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+      expect(cardButton("key-h", "Resync")).toBeEnabled();
+      expect(cardButton("key-h", "Update password")).toBeEnabled();
+    });
+
+    // ── Ended attempts, and registration before any await (IN-02) ───────────
+
+    it("an ENDED attempt's late failure never writes the panel or the marker of the NEWER attempt that followed it (IN-02)", async () => {
+      routeFetch();
+      await renderRows(
+        [row({ id: "key-h", label: "Healthy MT5", sync_status: "complete" })],
+        "key-h",
+      );
+
+      // Attempt A: its post-enqueue re-read is held open and will THROW.
+      let failLateRead!: (err: Error) => void;
+      const lateRead = new Promise((_resolve, reject) => {
+        failLateRead = reject;
+      });
+      selectResultMock.mockReturnValueOnce(lateRead);
+      await resync("key-h");
+      // A's terminal arrives and ends A.
+      await finish("complete");
+      expect(cardButton("key-h", "Resync")).toBeEnabled();
+
+      // Attempt B starts on the same key.
+      await resync("key-h");
+      expect(cardButton("key-h", "Syncing…")).toBeDisabled();
+
+      // A's late re-read now throws, into A's own catch.
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await act(async () => {
+          failLateRead(new Error("late read failed"));
+        });
+        await waitFor(() => {
+          expect(warn).toHaveBeenCalledWith(
+            "[ApiKeyManager] sync failed after its attempt ended:",
+            expect.any(Error),
+          );
+        });
+      } finally {
+        warn.mockRestore();
+      }
+
+      // B is untouched: still computing, still marked, no error written.
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "computing",
+      );
+      expect(screen.getByTestId("sync-progress").textContent).toBe("");
+      expect(cardButton("key-h", "Syncing…")).toBeDisabled();
+      expect(cardButton("key-h", "Update password")).toBeDisabled();
+      expect(screen.queryByText("late read failed")).not.toBeInTheDocument();
+    });
+
+    it("the attempt is live from the CLICK: a post-add failure landing while the attempt's own link write is pending does not touch its panel (IN-02)", async () => {
+      const postAdd = deferred<Response>();
+      routeFetch({ sync: () => postAdd.promise });
+      const current = row({ id: "key-j" });
+      await renderRows([current], "key-j", "binance");
+
+      selectResultMock.mockReturnValue({ data: [newRow(), current], error: null });
+      await addKey();
+      await waitFor(() => {
+        expect(screen.getByTestId("api-key-card-key-new")).toBeInTheDocument();
+      });
+
+      // J's Resync: its LINK write (the first await in the attempt) is held.
+      const jLink = deferred<{ error: null }>();
+      strategiesUpdateMock.mockReturnValueOnce(jLink.promise);
+      await act(async () => {
+        fireEvent.click(cardButton("key-j", "Resync"));
+      });
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "syncing",
+      );
+
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await act(async () => {
+          postAdd.resolve(syncRefused("Post-add sync failed"));
+        });
+        await waitFor(() => {
+          expect(warn).toHaveBeenCalledWith(
+            "[ApiKeyManager] background sync after key add failed:",
+            expect.anything(),
+          );
+        });
+      } finally {
+        warn.mockRestore();
+      }
+
+      // The failure reached the console only: J's panel and marker are its own.
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "syncing",
+      );
+      expect(screen.getByTestId("sync-progress").textContent).toBe("");
+      expect(cardButton("key-j", "Syncing…")).toBeDisabled();
+      expect(cardButton("key-j", "Update password")).toBeDisabled();
     });
   });
 });

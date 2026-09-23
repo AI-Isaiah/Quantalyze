@@ -355,6 +355,17 @@ itself.
     shown. The failed post-add sync did the same through R6 (below). Both are closed by scoping the
     marker to the tracked attempt: only that attempt clears it, and its poll's statuses are ignored
     until its own enqueue has resolved.
+    ⚠️ **Lineage (167-06 fix round 2, 2026-09-23):** "ignored until its own enqueue has resolved"
+    was NOT enough, and the sentence above is kept as the record of that. The poller's attempt
+    budget and missing-row grace are local to its effect, and the effect spanned `syncing` and
+    `computing`, so the ignored pre-enqueue polls still SPENT the budget: a slow enqueue that
+    succeeded (no row and a 36 s enqueue; the previous run's row and a 126 s enqueue) was ended
+    with the timeout copy one tick after its 202, having read the new job zero times
+    (167-REVIEW-06-R2 CR-01 / SFH2-HIGH-1). **The fix:** `SyncProgress` polls in `computing` only,
+    which `ApiKeyManager` (its one caller) enters only after enqueue evidence, so there is no
+    pre-enqueue read and the budget starts at the enqueue. `useStrategySyncPoller` is unchanged,
+    so the wizard is unaffected. The `enqueued` check stays in `ApiKeyManager` as a second line.
+    Pinned against the REAL poller in `ApiKeyManager.poll.test.tsx`.
   - **R5:** the retirement is ONE shared helper, `retireWithheldSuccess`, called on a successful
     `Update password`, a successful `Delete` and a successful `Add Key`. Its guard is read from the
     pre-change list (the render the user clicked in). `Delete` is disabled during that key's own
@@ -375,6 +386,13 @@ itself.
     mid-attempt (167-REVIEW-06 CR-01). The same defect had a second route, the stale pre-enqueue
     read recorded under R4. The fix is the root cause, not the route: the marker is owned by the
     tracked attempt.
+    ⚠️ **Lineage (167-06 fix round 2, 2026-09-23):** "with no attempt live, it reports to the panel
+    as before" was not true in one ordering. The subject was decided once, at the add's link, so a
+    tracked attempt on key J that was live then (or started after) and ENDED before the post-add
+    failure left `lastAttemptedKeyId` on J; the panel's Retry then re-linked the strategy to J,
+    undoing the Add Key's link (167-REVIEW-06-R2 WR-01). **Now:** when the post-add failure is
+    shown, the subject moves to the new key with it, so Retry targets the key that failed. An
+    `error` is never withheld (R2), so the move cannot re-show a success.
   **What it deliberately does NOT do.** No strategy-level causal sentence (D-02, D-03, UI-SPEC §4).
   No factsheet path (D-04). The `/profile` Exchanges tab stays allocator-only.
   ⚠️ **Residual — placement, not copy.** The sentence names the credential and the remedy; it does
@@ -414,6 +432,25 @@ itself.
     spins until its request settles. The route declares `maxDuration = 300`, so the platform ends
     the request within that bound and the attempt then fails through its own catch: a delay, not a
     permanent dead-lock. (The link update that precedes it has no such bound of its own.)
+    ⭐ **Re-read 2026-09-23 (167-06 fix round 2).** (a) is unchanged in kind and not made worse:
+    post-enqueue reads are honoured exactly as before, and the first one now lands one full poll
+    interval after the 202 rather than anywhere inside it. It stays routed to 167.2. (b) holds with
+    a corrected mechanism: no poll runs before the enqueue any more, so nothing but the route's
+    `maxDuration` ends such an attempt. The ignored pre-enqueue cap named in (b) was also what
+    spent the poller's budget for an enqueue that DID answer (R4's round-2 lineage above); that
+    half is fixed.
+  - **Closed in the 167-06 fix round 2 (2026-09-23), each pinned with a neuter:**
+    - **Key-list reads are ordered (WR-04).** Each `loadKeys` call takes the next number, and a
+      response older than the newest one applied is dropped. Before, the attempt's own post-enqueue
+      read could resolve after the terminal re-read and install the pre-job snapshot, lifting R2's
+      withhold beside a key whose sign-in had failed.
+    - **The terminal re-read is bounded (SFH2-MED-1).** `TERMINAL_REREAD_BOUND_MS` (15 s). On the
+      bound the attempt ends as after a failed re-read: success withheld (idle), load error shown.
+      A re-read that THROWS is caught, logged with context and shown the same way (SFH2-LOW-1).
+    - **A Delete that removed no row asks whether the row is still there (WR-05).** Gone (another
+      tab deleted it): removed locally, as a success. Still there: a refusal, reported as
+      "Failed to delete key: the key is still connected. Try again, and contact support if it keeps
+      failing." (IN-03, active voice; it replaced "…: no key was removed.").
   - **A change made in another tab.** R3 and R5 retire on THIS tab's own actions. Another tab's
     `Update password` or `Delete` reaches this tab only through a re-read (the load-error `Retry`, or
     the terminal-success arm's re-read), which can lift R2's withhold. Closing it needs retirement at
@@ -425,7 +462,9 @@ itself.
   — **Reversibility:** reversible — one conditional mount, two derived render rules, one shared
   event-handler helper, two derived `disabled` props and, since the 167-06 fix round, one
   attempt-scoped marker (a ref and its single `endAttempt` clear) in one client component; no data,
-  schema or wire contract moves.
+  schema or wire contract moves. Since the 167-06 fix round 2 also: one poll gate in `SyncProgress`
+  (`computing` only), ordered key-list reads and a bounded terminal re-read in `ApiKeyManager`, and
+  one follow-up existence read after a zero-row delete. Still no data, schema or wire contract.
 
 - **D-19: The key card on the strategy's edit page closes 167's goal; a key-status mark on the
   `/strategies` list rows is routed to Phase 167.2.** *(Orchestrator decision 2026-09-22,

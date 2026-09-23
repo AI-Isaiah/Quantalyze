@@ -34,9 +34,12 @@ tech-stack:
 key-files:
   created:
     - .planning/phases/167-credtrust-an-invalid-venue-credential-is-named-to-the-custom/167-06-SUMMARY.md
+    - src/components/strategy/ApiKeyManager.poll.test.tsx  # fix round 2
   modified:
     - src/components/strategy/ApiKeyManager.tsx
     - src/components/strategy/ApiKeyManager.test.tsx
+    - src/components/strategy/SyncProgress.tsx  # fix round 2: poll gated on computing
+    - src/hooks/useStrategySyncPoller.ts  # fix round 2: options docblock only
     - .planning/phases/167-credtrust-an-invalid-venue-credential-is-named-to-the-custom/167-CONTEXT.md
     - .planning/phases/167-credtrust-an-invalid-venue-credential-is-named-to-the-custom/167-UI-SPEC.md
     - .planning/phases/167-credtrust-an-invalid-venue-credential-is-named-to-the-custom/167-VALIDATION.md
@@ -198,6 +201,9 @@ has resolved, and ignores reads while a terminal success's re-read settles. The 
 touches a live attempt, and `handleAddKey` no longer moves `lastAttemptedKeyId` while one is live.
 `SyncProgress` and `useStrategySyncPoller` are unchanged: the in-component fix closes Route B,
 because the component can tell a pre-enqueue read from a post-enqueue one and the poller cannot.
+⛔ **SUPERSEDED by fix round 2 (below):** ignoring a pre-enqueue read did not close Route B's
+cost. The ignored reads still spent the poller's budget, so a slow enqueue that succeeded was
+ended by the timeout one tick after its 202. `SyncProgress` now polls in `computing` only.
 
 **Also fixed in the round:** the healthy-control case now asserts zero live regions on and inside
 each healthy card (WR-01); a terminal success is shown only after its re-read, and a failed
@@ -210,6 +216,82 @@ their neuters and the gate tails are in the fix round's own report and commit.
 writes `computing`, can still end an attempt with the previous run's result (pre-existing; needs a
 `computed_at` comparison in the poll); and an enqueue that never answers now spins until the route's
 `maxDuration` ends it, because the poll's cap arrives pre-enqueue and is ignored.
+
+## Correction 2026-09-23 — the 167-06 fix round 2 (167-REVIEW-06-R2 and the silent-failure round 2)
+
+⛔ **The two sections above are kept as lineage.** This one records what round 2 found wrong in
+round 1's fix and what replaced it. Code commit: `d65d675f`.
+
+**CR-01 / SFH2-HIGH-1, the root cause.** The poller's attempt counter and missing-row grace are
+local to its effect. The effect was enabled by `isActive`, which spans `syncing` and `computing`,
+so the move to `computing` at the enqueue did not restart it. Round 1 ignored the pre-enqueue
+reads but they still SPENT the budget: a no-row strategy with a 36 s enqueue, or one with the
+previous run's row and a 126 s enqueue, was ended with "Analytics computation timed out" one tick
+after a successful 202, with zero reads of the new job. **Fix:** `SyncProgress` passes
+`enabled: syncStatus === "computing"`. It has one caller (`ApiKeyManager`, by grep), which enters
+`computing` only after enqueue evidence, so there is no pre-enqueue analytics read and the budget
+starts at the enqueue. Scoped there rather than in the hook: `useStrategySyncPoller` is shared with
+the wizard and is unchanged apart from its options docblock. `SyncProgress.poll.test.tsx` drives
+every pin from `computing` and passed with zero edits. The `enqueued` check stays in
+`ApiKeyManager` as a second line. **Why it slipped:** the committed suite mocks `SyncProgress`.
+The new file `ApiKeyManager.poll.test.tsx` runs the REAL panel and poller on fake timers with a
+held enqueue.
+
+**Also fixed in round 2:**
+- **WR-01:** when a post-add failure is shown on the panel, the panel's subject moves to the new
+  key with it, so Retry re-links the new key. Before, Retry could re-link the key of a tracked
+  attempt that had ended in between, which undid the Add Key's link. Both orderings are pinned.
+- **WR-02:** pinned that a poll `error` ends the attempt and frees Resync, Update password and
+  Delete.
+- **WR-03:** pinned the `settling` rule: a second terminal read starts no second re-read, and the
+  escalation cannot end the attempt while the re-read settles.
+- **WR-04:** key-list reads are ordered. A response older than the newest one applied is dropped,
+  so the attempt's pre-job snapshot cannot lift R2's withhold after the terminal re-read.
+- **WR-05:** a zero-row delete asks whether the row is still there. If it is gone it is removed
+  locally, as a success. If it is still there, the delete is reported as refused.
+- **SFH2-MED-1 / IN-01:** the terminal re-read is raced against `TERMINAL_REREAD_BOUND_MS`
+  (15 s). On the bound the attempt ends with the success withheld and the load error shown.
+- **SFH2-LOW-1 / IN-04:** a throwing terminal re-read is caught, logged with context, and shown
+  as the load error. It was an unhandled rejection before.
+- **IN-02:** pinned the ended-attempt branches (`endAttempt`'s identity check and
+  `handleSyncTrades`'s early return) and the "registered before any await" rule.
+- **IN-03:** the refusal copy is now "Failed to delete key: the key is still connected. Try again,
+  and contact support if it keeps failing." It is in the active voice and keeps the existing
+  prefix.
+
+**Neuters, round 2.** Protocol: `cp` a byte backup, apply one exact single-match edit, run
+`ApiKeyManager.test.tsx` and `ApiKeyManager.poll.test.tsx` (81 cases), `cp` the backup back, then
+`cmp` it. Every restore was identical.
+
+| neuter | RED / 81 | failing case(s) |
+|---|---|---|
+| poll gated on `isActive` again | 3 | 36 s enqueue, 126 s enqueue, the grace-boundary control |
+| catch does not move the subject | 2 | both WR-01 orderings |
+| error arm does not end the attempt | 2 | WR-02, the grace-boundary control |
+| `settling` dropped from the guard (M2) | 2 | WR-03, bounded re-read |
+| `settling` never set (M3) | 2 | WR-03, bounded re-read |
+| read ordering removed | 1 | WR-04 |
+| already-gone treated as a refusal | 1 | WR-05 already-gone |
+| still-present treated as gone | 1 | zero-row refusal |
+| terminal re-read unbounded | 1 | bounded re-read |
+| catch rethrows | 1 | throwing re-read |
+| `endAttempt` identity check removed (M6) | 1 | ended attempt vs newer attempt |
+| ended-attempt early return removed (M7) | 1 | ended attempt vs newer attempt |
+| attempt registered after the link await (M17) | 1 | live from the click |
+| refusal copy reverted | 1 | zero-row refusal |
+
+**Gate tails, round 2 (isolated worktree; `node_modules` resolved by walking up to the main
+checkout):**
+- `npx vitest run src/components/strategy/ApiKeyManager.test.tsx`: `Tests  76 passed (76)`.
+- The consumer set (both `ApiKeyManager` files, `SyncProgress.poll.test.tsx`,
+  `SyncProgress.test.ts`, `useStrategySyncPoller.test.ts`, the edit page test, the seam
+  poll-disjointness pin, the complete-status scan, and every `SyncPreviewStep` test):
+  `Test Files  31 passed (31)` / `Tests  675 passed (675)`.
+- `npx tsc --noEmit`: no output. `npm run lint`: exit 0, `[check-planning-hygiene] OK`.
+
+**Still NOT fixed here:** the stale read AFTER the enqueue (D-18 limit (a)) stays routed to
+167.2, and round 2 does not make it worse. The post-add failure that reaches only the console while
+another attempt is live also stays routed to 167.2.
 
 ## Decisions Made
 
