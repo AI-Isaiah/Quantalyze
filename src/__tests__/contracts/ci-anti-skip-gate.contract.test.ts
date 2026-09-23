@@ -620,6 +620,12 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
       // Review 164.4.2 WR-08: the step's glob was replaced by capability-probe's
       // parse-based rule, whose refusal is worded as a non-loopback DSN.
       expect(out).toContain("the lane handoff's DB_URL is not a loopback DSN");
+      // Silent-failure-hunter round 2, WR-06: the step prints the line above
+      // whenever node exits non-zero, a probe that could not LOAD included. Only
+      // refuseNonLocalDsnCli prints the line below, with the rule's own reason.
+      expect(out, "the refusal came from the probe's rule, not from a probe that failed to run").toContain(
+        "::error::refusing a non-local database: the handoff's DB_URL names a host other than 127.0.0.1/localhost",
+      );
       let logged: string[] = [];
       try {
         logged = readFileSync(logPath, "utf8").split("\n").filter(Boolean);
@@ -640,6 +646,11 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
       const { code, out } = runGate({ LANE_ENV_FILE: handoff });
       expect(code, out).not.toBe(0);
       expect(out).toContain("the lane handoff's DB_URL is not a loopback DSN");
+      // Silent-failure-hunter round 2, WR-06: as above, only the probe's own rule
+      // prints this line, so a probe that failed to load cannot pass this test.
+      expect(out, "the refusal came from the probe's rule, not from a probe that failed to run").toContain(
+        "::error::refusing a non-local database: the handoff's DB_URL carries a query string",
+      );
       expect(out, "the refusal must never echo the DSN's host").not.toContain("example.invalid");
     } finally {
       rmSync(dir, { recursive: true, force: true });
