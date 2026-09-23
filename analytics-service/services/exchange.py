@@ -42,6 +42,24 @@ NETWORK_ERROR_DETAIL = (
     "and try again."
 )
 
+# 167-CREDTRUST (D-05, D-07) — the single source of truth for the
+# "sign-in did not complete" detail string. Sibling of AUTH_FAILED_DETAIL /
+# NETWORK_ERROR_DETAIL immediately above: it is the classifier's live input
+# on `POST /api/validate-key` (`classifyKeyValidationError`,
+# src/lib/wizardErrors.ts), a reword changes behaviour, and this is the
+# single source of truth for this arm's detail.
+#
+# It is reached through `VENUE_WIRE_CODE_TO_VERDICT`'s `SIGN_IN_FAILED` row
+# BEFORE the TS substring cascade ever sees it — but the row is the ONLY
+# thing standing between this string and the cascade, so it was still swept
+# against the cascade's needles (services/closed_sets.py's MT5 detail block
+# names the rule and the needle list) before it landed: 0 collisions across
+# every needle checked. Any reword MUST re-run that sweep.
+SIGN_IN_FAILED_DETAIL = (
+    "The sign-in attempt did not complete, and the venue did not confirm "
+    "the credential."
+)
+
 
 # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — per-call transient data-quality
 # flags. Callers (job_worker / reconcile) read these via
@@ -1042,6 +1060,13 @@ PERMANENT_VALIDATION_ERROR_CODES = frozenset(
         "MISSING_SCOPE",
     }
 )
+# 167-CREDTRUST — `SIGN_IN_FAILED` is deliberately NOT a member. Membership
+# here means the venue asserted a PERMANENT rejection, which is exactly the
+# claim `classify_mt5_login_error`'s `transient` verdict refuses to make on
+# this arm (D-07). Its own raise site sets `recoverable=False` directly —
+# this set is not consulted for it, so adding it here would change nothing
+# for that raise site and would be a false membership if anything ever DID
+# read it for this code. Do not "fix" this omission.
 
 
 async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:

@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "164.9"
-current_phase_name: TESTISOLATION — a run’s assertions against the shared TEST project
+current_phase: "167"
+current_phase_name: "CREDTRUST — an invalid venue credential is named to the customer"
 status: "Phase 164.9 shipped — PR #837"
-stopped_at: "Phase 164.9 TESTISOLATION SHIPPED as PR #837 (v0.85.0.0) — verification passed, security SECURED 66/66 threats_open 0, UAT 2 passed / 0 issues / 1 resolved skip, two review rounds. ⛔ NOT marked complete, deliberately: criterion 8 (the mode=restore dispatch) is POST-MERGE BY CONSTRUCTION and ships PENDING under the founder's Option A, booked as [164.9-CRIT8-RESTORE-DISPATCH-RECORD], owner THE FOUNDER. Next per the founder ordering: land PR #837, then 164.4.2."
-last_updated: "2026-09-21T21:05:25.243Z"
-last_activity: 2026-09-21
-last_activity_desc: Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction
-state_head: 26e88718e709eb5237c879b89872aa9abe86ed17
+stopped_at: Completed 167-02-PLAN.md (wave 1) — six MT5/sFOX except-arms in allocator_positions.py now consult the classifier before promising a retry
+last_updated: "2026-09-22T23:17:23.003Z"
+last_activity: 2026-09-22
+last_activity_desc: "Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction. Phase 167 CREDTRUST context locked 2026-09-22. Plan 167-01 (wizard SIGN_IN_FAILED mint) shipped. Plan 167-02 (D-09/D-10, six retry-disposition guards on allocator_positions.py's MT5/sFOX arms + AST roster case) shipped this session, commits 5c48916a + 26c83dc3 — see 167-02-SUMMARY.md."
+state_head: de41a2009d03b6b62288b591223cd12659e51b88
 progress:
-  total_phases: 48
+  total_phases: 50
   completed_phases: 32
-  total_plans: 238
-  completed_plans: 231
-  percent: 67
+  total_plans: 244
+  completed_plans: 237
+  percent: 64
 ---
 
 ## ⭐ STATE lineage
@@ -956,7 +956,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███████░░░] 67%
+Progress: [██████░░░░] 64%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1273,6 +1273,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.5.1.4 inserted after Phase 164.5.1: SYNCCURSOR - per-KEY cursor vs per-STRATEGY stores strands failed strategies' window (URGENT)
 - Phase 164.5.4 edited: added defect (3) KEY_UNDECRYPTABLE routed from 164.5.3; corrected the stale independent-of-164.5.3 clause
 - Phase 164.4.2 edited: scope: also owns the shared-TEST mutex contention (founder 2026-09-21); corrected two stale restated floors
+- Phase 167.1 inserted after Phase 167: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention (from 167 review M2)
+- Phase 167.2 inserted after Phase 167: KEYCARDSYNC — the key card never shows one key's sync result as another key's (from 167-06 D-18 residuals)
+- Phase 167.2 edited: goal widened (founder 2026-09-23) — the owner's still-computing factsheet states the real compute-job state; public lane stays neutral
+- Phase 168 edited: edited fields: requirements (the waiting census dependency met 2026-09-23)
+- Phase 167.2 edited: edited fields: goal (share link for a failed/stalled compute says so)
 
 ### Decisions
 
@@ -2295,9 +2300,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-20T03:35:00.000Z
-**Stopped At:** Phase 164.5.4 complete, ready to plan Phase 159
-**Resume File:** None
+**Last Date:** 2026-09-22T04:13:41.306Z
+**Stopped At:** Phase 167 context gathered
+**Resume File:** .planning/phases/167-credtrust-an-invalid-venue-credential-is-named-to-the-custom/167-CONTEXT.md
 
 **Last Date:** 2026-09-19T20:05:00.000Z
 **Stopped At:** Completed 164.5.1.4-04-PLAN.md (Phase 164.5.1.4 SYNCCURSOR, plan 04 of 4, wave 4 — the closure; isolation `worktree`, branch `feat/164.5.1.4-synccursor`). `files_modified` was `TODOS.md` alone; no code, test, migration, `VERSION`, `package.json` or `CHANGELOG.md` was touched. **`SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01` is disposed of in TWO statements rather than one, deliberately:** CLOSED IN CODE 2026-09-19, and explicitly NOT closed in production, because the thing the entry tracks is the stranding in production and that is not closed until the migration applies there. Its measured history, reachability list and the PRE-EXISTING-AND-DELIBERATE note are kept unchanged; the "not fixable by tweaking `should_advance_cursor`" note is now CONFIRMED rather than inherited (the expression is byte-identical to `origin/main` and 0 removed lines in the branch's whole `cron.py` diff touch it, `synced_count` or `update_data`); and the entry's stale research instruction is ANSWERED instead of left open — migration 045 is an `ALTER TABLE api_keys ADD COLUMN`, so it is per-KEY, the very granularity that causes this defect, and the fenced `advance_sync_cursor` RPC takes `p_api_key_id` first, so it is the right mechanism on the wrong axis. The TRIGGER is re-pointed at production: both new Supabase paths fail open, so while the marker table is absent every strategy falls back to the key cursor and that fall-back state IS the defect; confirm from the `Supabase Migrate` workflow run for the merge commit, never from the file being in the tree. **VERDICT 1 — the per-KEY cursor is SUPPLEMENTED** (not replaced, not merely kept): it is still the fallback for every strategy with no marker row, still carries `account_balance_usdt` on the same `api_keys` UPDATE, and still is the only cursor for a key with no eligible strategies, while the marker took over the resume FLOOR and the per-strategy HOLD; evidence is the byte-identical expression, the 0-removed-lines diff check, the 3 unchanged `TestC0198CursorOnlyAdvancesWhenStored` members and the two calibrated gates. **VERDICT 2 — SYNCADMIT is unblocked BY THE MIGRATION APPLYING TO PROD, not by this branch merging**; the repo has the fix, production does not until `apply-test` and then the `Production`-gated `apply` have run, and a widening deployed ahead of the table re-opens the closed path silently. **NON-REGRESSION, mechanical:** `gate_governor_files_changed = 0` against the branch base across `mutation-runner/run.mjs`, `mutation-runner-floors.test.ts`, `vac08-ledger-baseline.txt`, `lint-app-guc.mjs`, `lint-sql-gates.mjs`; `FILES_FLOOR` 47 / `ARMS_FLOOR` 402 / `WAIVED_CEILING` 0 all UNMOVED; hygiene OK over 6673 tracked files. The SUMMARY carries the written reviewer handoff with all three reviewers named individually, the additive claim re-derived (`functions_created=0 existing_tables_altered=0 destructive_statements=0 create_table=1 cron_schedule=0 raise_arms=7`), the deploy-order skew, and the note that a red VAC-08 or applied-ness probe on this PR is expected by construction and must never be cleared by widening a baseline. ⚠️ **Recorded rather than glossed:** `c93ce86a` closed the migration reviewers' findings but touches the MIGRATION FILE ONLY — the two `cron.py` findings from the same round are NOT in this branch's committed history at `4af31b8f` and must be confirmed committed before the merge. One task commit `4d71155c`, NOT pushed. ⛔ No database command of any kind; nothing applied, merged or pushed. `roadmap.update-plan-progress 164.5.1.4` ran and was CLEAN (3/4 → 4/4 plus the plan-04 checkbox, no collateral); `state.advance-plan` refused on an ambiguous Current Position and wrote nothing; `state.update-progress` NOT run; `completed_phases` 28 and `percent` 62 deliberately unmoved (the phase closes on a VERIFICATION, not on a plan count), `completed_plans` 206 → 207 by hand. Next: the three reviewers' `cron.py` half confirmed on the branch, then ship — and Phase 164.5.1.3 SYNCADMIT may be planned but must not be deployed before the PROD apply succeeds.

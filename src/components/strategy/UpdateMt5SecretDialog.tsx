@@ -119,10 +119,20 @@ export function UpdateMt5SecretDialog({
         // unrostered or unreadable code answers UNKNOWN by design rather
         // than by accident. No local wire-code table here — the roster
         // lives once, in DASHBOARD_DIALOG_ROUTE_CODES.
+        //
+        // 167 review round 1 / WR-02 — `venue: "mt5"`, as the wizard call
+        // sites pass theirs. Without it every `venueIs` / `venueCapability`
+        // bullet on the rostered codes fell back to its venue-unknown answer,
+        // so the one surface GUARANTEED to be MT5 (the route filters
+        // `exchange = 'mt5'`) never showed `KEY_SIGN_IN_FAILED`'s
+        // investor-password remedy, and `KEY_RATE_LIMIT` told an MT5 owner to
+        // "try a different exchange account". A lookup key into the closed
+        // capability record, never interpolated into copy.
         setEnvelope(
           buildEnvelope(
             recogniseDashboardDialogCode(ROUTE, body?.code),
             correlationId,
+            { venue: "mt5" },
           ),
         );
         setSubmitting(false);

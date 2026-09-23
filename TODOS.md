@@ -1325,8 +1325,8 @@ true for 146 and half of 142–145, and **false for 141**.
       it is there to know which one is which"*).**
       **The collision is live, not hypothetical:** the current list renders **two rows both
       named "Alpha Centauri"** (#1 Deribit / Other, #5 mt5 / Long-Short) with no way to tell
-      them apart from the row itself. The factsheet DOES show the field — `MM1 --> Grid FX`
-      renders *"MM1 turning to Grid FX"* as an italic subtitle under the title — so the data
+      them apart from the row itself. The factsheet DOES show the field — `<strategy X>`
+      renders *"<strategy X subtitle>"* as an italic subtitle under the title — so the data
       exists and the list is the only surface that drops it.
       - **Measured at HEAD 2026-09-11.** `getStrategiesByCategory` selects `*` on `strategies`
         (`src/lib/queries.ts:343-344`), so `description` is ALREADY on the row — no query
@@ -1981,7 +1981,7 @@ true for 146 and half of 142–145, and **false for 141**.
       **Measured value:** the newest usable mt5 job is ~2026-09-07 04:0xZ. The MT5 terminal broke at
       **04:05:08** that day — five minutes AFTER the 04:00Z `poll-allocator-positions` tick and
       before the 05:00Z `refresh-allocator-equity` tick — and failed identically for three days
-      (`'34043761': authorization on VantageMarkets-Live 14 failed (Invalid account)`). At the
+      (`'<key A>': authorization on VantageMarkets-Live 14 failed (Invalid account)`). At the
       decision point the gap was ~3.5 days against a 3-day window.
       ⚠️ **Both enqueue jobs are DAILY, not hourly** (`0 4 * * *` jobid 15, `0 5 * * *` jobid 17), so
       no wait inside 2026-09-10 could have closed the gap.
@@ -7543,6 +7543,22 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       or user-facing gap does, and this is test-transport). Interim owner: the founder.
 
 ---
+
+## Phase 167 (CREDTRUST) — post-merge checks (logged 2026-09-22)
+
+- [ ] **`[167-POSTMERGE-CHECKS]` the four 167 checks that are post-merge or founder-only by
+      construction (booked 2026-09-22, `167-UAT.md` tests 1–4).**
+      Owner: **THE FOUNDER**, except (1)'s job-watching, which the shipping session's
+      `/land-and-deploy` does. Trigger: the Phase 167 PR merging.
+      (1) Migration `20260922120000` applies to TEST, then PROD after the `Production` gate.
+      (2) After the first daily holdings poll post-apply, read the status of the two keys the
+          ROADMAP measured: the MT5 key → `sign_in_failed`; the expired venue key → `revoked`.
+      (3) Record the live MT5 gateway's real code for a wrong investor password (RESEARCH A1) and
+          confirm or amend D-17's refusal set.
+      (4) Visual check at 320px and 200% zoom: `AllocatorSyncStatus` pill + helper, the manager key
+          card, and the `KEY_SIGN_IN_FAILED` envelope.
+      **Closed when:** each item's verdict is written into `167-UAT.md` (verdict and counts only —
+      no key id, account number or server name).
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 

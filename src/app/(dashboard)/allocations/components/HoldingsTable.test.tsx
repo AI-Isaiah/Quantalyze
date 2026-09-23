@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { HoldingsTable, type HoldingRow as HoldingRowType } from "./HoldingsTable";
+import { UNTRUSTED_KEY_SET_NOUN } from "@/lib/closed-sets";
 
 /**
  * Phase 08 Plan 02 Task 2 — HoldingsTable tests (MANAGE-02).
@@ -10,15 +11,27 @@ import { HoldingsTable, type HoldingRow as HoldingRowType } from "./HoldingsTabl
  *
  *   - Strikethrough + amber "Key revoked" chip for rows whose source
  *     key has sync_status='revoked'.
- *   - Toggle "Show revoked-key holdings" default ON at render time
+ *   - Toggle "Show holdings from <the untrusted-key set noun>" default ON at
+ *     render time (copy corrected 2026-09-22, D-16 follow-up — see T6)
  *     (the default comes from the caller; the component itself honours
  *     `showRevoked` verbatim).
  *   - Toggle OFF filters revoked rows from the table ONLY (caller's
  *     responsibility to NOT filter KPI / chart inputs).
- *   - Hidden-footer "{N} holding(s) hidden from revoked keys · Show all"
+ *   - Hidden-footer "{N} holding(s) hidden from <the untrusted-key set noun> ·
+ *     Show all" (copy corrected 2026-09-22, D-16 follow-up — see T4/T5/T6)
  *     with the Show-all button firing onShowRevokedChange(true).
  *   - Plural/singular rules for the hidden-footer count.
  */
+
+/**
+ * 167 review round 1 / WR-06 — the noun is DATA, not a pattern. Fed into
+ * `new RegExp` unescaped, a future noun carrying a metacharacter (`.`, `(`,
+ * `+`, `?`) would silently change what T4/T5 match instead of failing.
+ */
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+const NOUN_PATTERN = escapeRegExp(UNTRUSTED_KEY_SET_NOUN);
 
 type HoldingRow = HoldingRowType;
 
@@ -104,7 +117,12 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
     expect(screen.getByText(/SOL/)).toBeInTheDocument();
   });
 
-  it("T4: showRevoked=false + 1 hidden → footer reads '1 holding hidden from revoked keys · Show all'; clicking Show all fires onShowRevokedChange(true)", () => {
+  // ⚠️ T4/T5 copy re-argued 2026-09-22 with T6 (D-16 follow-up): the footer
+  // said "hidden from revoked keys" while the filter also hid `sign_in_failed`,
+  // so it NAMED A NARROWER SET THAN IT HID. Both pins are derived from the same
+  // constant the component renders, so copy and pin cannot drift apart, and the
+  // count/pluralisation half of each assertion is unchanged.
+  it(`T4: showRevoked=false + 1 hidden → footer reads "1 holding hidden from ${UNTRUSTED_KEY_SET_NOUN} · Show all"; clicking Show all fires onShowRevokedChange(true)`, () => {
     const onChange = vi.fn();
     const holdings = [
       makeHolding({ id: "h1", symbol: "BTC" }),
@@ -122,8 +140,14 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
       />,
     );
     expect(
-      screen.getByText(/1 holding hidden from revoked keys/),
+      screen.getByText(
+        new RegExp(`1 holding hidden from\\s+${NOUN_PATTERN}`),
+      ),
     ).toBeInTheDocument();
+    // Anti-vacuity: the superseded string must be gone, not merely unmatched.
+    expect(
+      screen.queryByText(/hidden from revoked keys/),
+    ).not.toBeInTheDocument();
     const showAll = screen.getByRole("button", { name: /Show all/i });
     fireEvent.click(showAll);
     expect(onChange).toHaveBeenCalledWith(true);
@@ -151,11 +175,28 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
       />,
     );
     expect(
-      screen.getByText(/2 holdings hidden from revoked keys/),
+      screen.getByText(
+        new RegExp(`2 holdings hidden from\\s+${NOUN_PATTERN}`),
+      ),
     ).toBeInTheDocument();
   });
 
-  it("T6: toggle label reads 'Show revoked-key holdings' exactly", () => {
+  // ⚠️ CHANGED DELIBERATELY 2026-09-22 (Phase 167 CREDTRUST, D-16 follow-up).
+  // This pin previously asserted the label read "Show revoked-key holdings"
+  // exactly. That string became a LIE when `sign_in_failed` joined the hidden
+  // set: the toggle hid two causes and named one of them, so the surface
+  // NAMED A NARROWER SET THAN IT HID. The pin was doing its job — it went RED
+  // the moment the copy was corrected, which is exactly what a locked-copy pin
+  // is for. It is re-argued here for the string that is now true, never
+  // deleted and never relaxed to a substring match.
+  //
+  // ⛔ It asserts the RENDERED text, and derives it from the same constant the
+  // component renders, so the two cannot drift apart. It still fails if the
+  // label is emptied, reworded at the call site, or unhooked from its input.
+  // ⚠️ It does NOT fail on a rewording made IN THE CONSTANT — the only place
+  // the wording now lives (167 review round 1 / WR-06). That is pinned once,
+  // literally, in `src/lib/closed-sets.untrusted-key-status.test.ts`.
+  it(`T6: toggle label reads "Show holdings from ${UNTRUSTED_KEY_SET_NOUN}" exactly`, () => {
     render(
       <HoldingsTable
         holdings={[makeHolding()]}
@@ -164,8 +205,13 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
       />,
     );
     expect(
-      screen.getByLabelText("Show revoked-key holdings"),
+      screen.getByLabelText(`Show holdings from ${UNTRUSTED_KEY_SET_NOUN}`),
     ).toBeInTheDocument();
+    // Anti-vacuity: the OLD string must be gone, or a stale label would satisfy
+    // a getByLabelText that merely found *some* matching node.
+    expect(
+      screen.queryByLabelText("Show revoked-key holdings"),
+    ).not.toBeInTheDocument();
   });
 
   it("T7: amber chip carries the --color-warning token via inline style (Phase 09.1 IN-01 fix)", () => {

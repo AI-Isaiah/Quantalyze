@@ -796,7 +796,20 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
     // census the mint moves, beside the two `EXPECTED_TABLE_SIZE` literals in
     // `wizardErrors.test.ts` — recorded here because clearing only those two
     // reads as a complete fix while this assertion is the one still red.
-    expect(checked).toBe(32);
+    //
+    // 32 -> 33 at 167-CREDTRUST / plan 01 (D-05, D-07): the rotate-secret
+    // roster gained KEY_SIGN_IN_FAILED — wire SIGN_IN_FAILED, reached via the
+    // SAME `seamCode` mechanism the six rows above it ride, because
+    // `_validate_mt5_key` (called by `rotate_key_secret`) is a thin bracket
+    // over `_validate_mt5_key_probe`, the identical function
+    // `POST /api/validate-key` calls. Measured, not assumed: `grep -n
+    // "_validate_mt5_key\b" analytics-service/routers/internal.py
+    // analytics-service/routers/exchange.py` shows the one caller in each
+    // file. 13 -> 14 on that one roster, 32 -> 33 overall. This pin is a
+    // FOURTH census the mint moves, beside the two `EXPECTED_TABLE_SIZE`
+    // literals and `EXPECTED_EMITTED_CODES` in
+    // `seam-venue-vocabulary.invariant.test.ts`.
+    expect(checked).toBe(33);
   });
 
   it("B. no rostered code is the generic terminal — that would defeat the roster", () => {

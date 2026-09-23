@@ -9,7 +9,7 @@ from typing import Any, Final
 import ccxt
 from fastapi import APIRouter, HTTPException, Request
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
-from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL, PERMANENT_VALIDATION_ERROR_CODES
+from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL, SIGN_IN_FAILED_DETAIL, PERMANENT_VALIDATION_ERROR_CODES
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
 from services.sfox_client import SfoxApiError, SFOX_PROD_BASE_URL
 from services.sfox_factory import make_sfox_client
@@ -43,6 +43,7 @@ from services.mt5_validation import (
     classify_mt5_login_error,
     classify_trade_capability,
     is_ipc_transport_fault,
+    is_mt5_login_refusal,
     parse_mt5_credentials,
     terminal_trade_permission_off,
 )
@@ -750,51 +751,123 @@ async def _validate_mt5_key_probe(
             if kind == "wrong_server":
                 trace.outcome = "wrong_server"
                 raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
-            # 164.6.5 / criterion 5 (D-12/D-13) — an IPC transport fault: OUR OWN
-            # terminal bridge, never the caller's key. `classify_mt5_login_error`
-            # code-gates -10004/-10005 into its "transient" bucket (164.5.4 /
-            # D-02: its three-way contract is pinned and must not grow a fourth
-            # class), so this arm asks the narrower question directly, on the
-            # SAME code tuple, BEFORE the generic transient tail below.
+            # transient. 167-CREDTRUST (D-05, D-07) narrows this tail, and only
+            # this tail, out of the file's nine `NETWORK_UNAVAILABLE` sites. The
+            # other eight (stage timeout, the abandoned-session fence, the
+            # account-mismatch bracket, and the sFOX/ccxt/portfolio arms) are
+            # transport, lease or concurrency faults where no sign-in is
+            # implicated. Their `code=` stays byte-unchanged.
             #
-            # MEASURED 2026-09-21: a wedged gateway terminal answered -10005
-            # across two retries 45s and 55s apart — one with CORRECT
-            # credentials — and stayed wedged 1h39m. The generic transient copy
-            # below says "try again in a moment", which was false both times: no
-            # retry from the wizard could ever have cleared this. 500,
-            # retryable=False, dependency named — an operator, not a retry,
-            # clears it, following the gateway-unconfigured arm's shape above.
-            # Fails CLOSED and reaches no persistence, like every other arm of
-            # this function.
-            if is_ipc_transport_fault(e):
+            # ⭐ WR-01 — and even here, ONLY A LOGIN-STAGE REFUSAL is a sign-in
+            # failure. `run_probe` runs login → account_info → terminal_info →
+            # order_check → account_info inside this one `try`, so a post-login
+            # read failing (an IPC timeout on `order_check`, say) arrives here
+            # AFTER the credential was accepted. `is_mt5_login_refusal` is the
+            # ONE predicate the holdings poll applies to the same boundary: the
+            # terminal answered `login()` itself falsy AND the code is not one
+            # of the -10000…-10004 IPC-infrastructure codes or the success code
+            # 1. Every other transient keeps the pre-167 answer,
+            # NETWORK_UNAVAILABLE with `recoverable=True`.
+            #
+            # ⭐ D-17 — a login-stage -10005 IS a sign-in refusal and reaches
+            # SIGN_IN_FAILED. D-08 names it as the measured wrong-password
+            # mechanism (a modal login dialog blocking IPC). The classifier call
+            # above cannot pre-empt it: its code-gate answers "transient" for
+            # -10005, which is this tail, and only then does the predicate split
+            # it. The marker is raised only after `initialize()` attached, so a
+            # terminal that is already wedged fails at `initialize()` as a plain
+            # `Mt5ClientError` and keeps NETWORK_UNAVAILABLE.
+            # ⚠️ MERGE NOTE 2026-09-23 (164.6.5 MT5VALIDATEWEDGE integrated): that
+            # already-wedged terminal now answers MT5_TERMINAL_UNRESPONSIVE (500,
+            # not retryable) when its code is -10004/-10005, via the 164.6.5 arm
+            # inside the not-a-refusal branch below. It is still NOT a sign-in
+            # failure, which is what D-17 decides; and it no longer offers the
+            # Retry that D-08 names as the harmful action against a wedged
+            # terminal. Every non-IPC transient keeps NETWORK_UNAVAILABLE.
+            #
+            # WARNING with the scrubbed code only.
+            trace.outcome = "transient"
+            if not is_mt5_login_refusal(e):
+                # 164.6.5 / criterion 5 (D-12/D-13) — an IPC transport fault: OUR OWN
+                # terminal bridge, never the caller's key. `classify_mt5_login_error`
+                # code-gates -10004/-10005 into its "transient" bucket (164.5.4 /
+                # D-02: its three-way contract is pinned and must not grow a fourth
+                # class), so this arm asks the narrower question directly, on the
+                # SAME code tuple, BEFORE the generic transient tail below.
+                #
+                # MEASURED 2026-09-21: a wedged gateway terminal answered -10005
+                # across two retries 45s and 55s apart — one with CORRECT
+                # credentials — and stayed wedged 1h39m. The generic transient copy
+                # below says "try again in a moment", which was false both times: no
+                # retry from the wizard could ever have cleared this. 500,
+                # retryable=False, dependency named — an operator, not a retry,
+                # clears it, following the gateway-unconfigured arm's shape above.
+                # Fails CLOSED and reaches no persistence, like every other arm of
+                # this function.
+                #
+                # ⚠️ MERGE NOTE 2026-09-23 — 164.6.5 integrated with Phase 167
+                # CREDTRUST (shipped first, live in PROD). This arm now sits INSIDE
+                # 167's not-a-login-refusal branch, so a login-stage refusal —
+                # including a login-stage -10005, which 167 D-17 routes to
+                # SIGN_IN_FAILED — never reaches it. It decides only the IPC-coded
+                # faults 167 left on the transport answer: an `initialize()`
+                # failure (where an already-wedged terminal answers, which is what
+                # the measured retries above hit), a login-stage -10004, and a
+                # post-login read timing out. The login-stage -10005 overlap is
+                # recorded in the merge commit body for a founder decision.
+                if is_ipc_transport_fault(e):
+                    logger.warning(
+                        "validate_key: MT5 terminal IPC transport fault (code=%s)",
+                        e.code,
+                    )
+                    trace.outcome = "terminal_unresponsive"
+                    raise service_error(
+                        500,
+                        "MT5_TERMINAL_UNRESPONSIVE",
+                        dependency="mt5-gateway",
+                        retryable=False,
+                        detail=(
+                            "The MetaTrader terminal we use to check this key "
+                            "stopped answering. This needs an operator, not a retry."
+                        ),
+                    )
                 logger.warning(
-                    "validate_key: MT5 terminal IPC transport fault (code=%s)",
+                    "validate_key: MT5 transient upstream failure, not a "
+                    "login-stage refusal (code=%s)",
                     e.code,
                 )
-                trace.outcome = "terminal_unresponsive"
-                raise service_error(
-                    500,
-                    "MT5_TERMINAL_UNRESPONSIVE",
-                    dependency="mt5-gateway",
-                    retryable=False,
-                    detail=(
-                        "The MetaTrader terminal we use to check this key "
-                        "stopped answering. This needs an operator, not a retry."
-                    ),
+                # PYAPIFIX2-01 (C5, post-login / transport half) — the pre-167
+                # answer, byte-for-byte.
+                raise VenueTransientHTTPException(
+                    status_code=424,
+                    code="NETWORK_UNAVAILABLE",
+                    detail=NETWORK_ERROR_DETAIL,
+                    recoverable=True,
                 )
-            # transient -> fail CLOSED with the shared NETWORK detail (sfox F4
-            # posture: never auth-failed, never valid). WARNING with the scrubbed
-            # code only.
             logger.warning(
-                "validate_key: MT5 transient upstream failure (code=%s)", e.code
+                "validate_key: MT5 sign-in refused at the login stage (code=%s)",
+                e.code,
             )
-            trace.outcome = "transient"
             # PYAPIFIX2-01 (C5) — see the C1 block for the shape rationale.
+            # ⚠️ `recoverable=False` DIVERGES from the sibling MT5 arms' hardcoded
+            # `recoverable=True` above — deliberately. 167-PATTERNS Pattern
+            # Assignment 5 names the hazard that the wire `recoverable` flag and
+            # the TypeScript-derived Retry (`buildEnvelope`, src/lib/envelope.ts)
+            # can disagree invisibly; here they are made to AGREE. Only a
+            # login-stage refusal reaches this raise: the terminal received the
+            # credential and answered `login()` falsy, either with a sign-in
+            # code (0, -6, …) or with -10005, the modal login dialog a wrong
+            # password raises (D-08, D-17). A retry re-runs the SAME credential
+            # against that terminal, which either refuses it again or puts the
+            # dialog back up, and repeated validate attempts against that one
+            # shared terminal are the operation implicated in wedging and account
+            # eviction (164.6.5 / 164.6.6) — so offering one would be the harmful
+            # action, not merely a useless one (D-08).
             raise VenueTransientHTTPException(
                 status_code=424,
-                code="NETWORK_UNAVAILABLE",
-                detail=NETWORK_ERROR_DETAIL,
-                recoverable=True,
+                code="SIGN_IN_FAILED",
+                detail=SIGN_IN_FAILED_DETAIL,
+                recoverable=False,
             )
 
     # ⭐ D-29 — TAKE THE LEASE. Until this line `routers/exchange.py` acquired the

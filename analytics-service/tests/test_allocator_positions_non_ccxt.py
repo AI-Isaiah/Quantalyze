@@ -1922,3 +1922,372 @@ async def test_ccxt_venue_is_untouched_by_the_dispatch(mt5_enabled, sfox_enabled
     assert warning is None
     assert [r["symbol"] for r in rows] == ["USDT"]
     assert rows[0]["value_usd"] == 4200.0
+
+
+# ===========================================================================
+# Phase 167-04 Task 1 (D-11 arm B) — the END-TO-END wiring case.
+#
+# Plan 03 made `sign_in_failed` REPRESENTABLE (the widened CHECK constraint)
+# and RENDERABLE (the amber pill + authored helper). This case is the proof
+# that the daily holdings poll actually PRODUCES it for the measured failure,
+# and it drives the REAL handler through the REAL MT5 arm rather than
+# monkeypatching `fetch_allocator_holdings` — the two silent failures this
+# plan exists to close (the handler's subclass-shadowing arm order, and
+# `sync_error_copy`'s unknown-status fallback) are BOTH invisible to a case
+# that stubs the chokepoint out.
+#
+# The transport's `login()` returns a falsy value, which is the MEASURED
+# wrong-password shape: `Mt5Client.login` documents that bad credentials and
+# a wrong server "both surface as an opaque False" and routes that to
+# `_raise_last` -> a real `Mt5ClientError`. So the exception under test is
+# produced by the shipped client, not hand-built by the test.
+# ===========================================================================
+class _RefusingLoginMt5Transport(_RecordingMt5Transport):
+    """A terminal that ATTACHES and then REFUSES the sign-in.
+
+    `initialize()` succeeds (the pipe is healthy — this is deliberately NOT a
+    transport fault) and `login()` returns False, the opaque refusal a wrong
+    investor password produces. `account_info` is inherited and would succeed
+    if it were ever reached; that it is NOT reached is what makes the arm
+    under test the sign-in arm.
+    """
+
+    def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
+        self.calls.append("login")
+        return False
+
+    def last_error(self):
+        # The ROADMAP's own measured corpus string for this path. Its TEXT must
+        # never reach the user-visible column — only the authored copy may.
+        return (0, "Invalid account")
+
+
+def _drive_poll_handler(monkeypatch, *, exchange, venue):
+    """Drive the REAL `run_poll_allocator_positions_job` against a real client.
+
+    Returns (coroutine, updates) where `updates` accumulates every
+    `(table, payload)` the handler writes, so the assertion can be made on the
+    `api_keys` write itself rather than on a return value.
+    """
+    import services.job_worker as jw
+    from services import audit as audit_module
+
+    key_row = {
+        "id": API_KEY_ID,
+        "user_id": ALLOCATOR_ID,
+        "exchange": venue,
+        "is_active": True,
+    }
+
+    updates: list[tuple[str, dict]] = []
+    mock_supabase = MagicMock()
+
+    def _table(name: str) -> MagicMock:
+        tbl = MagicMock()
+
+        def _update(payload: dict) -> MagicMock:
+            updates.append((name, payload))
+            chain = MagicMock()
+            chain.eq.return_value = chain
+            chain.execute.return_value = MagicMock(data=[{"id": API_KEY_ID}])
+            return chain
+
+        tbl.update.side_effect = _update
+        return tbl
+
+    mock_supabase.table.side_effect = _table
+
+    fake_ctx = jw._ExchangeContext(
+        supabase=mock_supabase,
+        strategy_row=None,
+        key_row=key_row,
+        exchange=exchange,
+    )
+
+    async def _fake_preflight(job, name):
+        return fake_ctx
+
+    monkeypatch.setattr(jw, "_allocator_key_preflight", _fake_preflight)
+    monkeypatch.setattr(audit_module, "log_audit_event", MagicMock())
+
+    coro = jw.run_poll_allocator_positions_job(
+        {
+            "id": "job-sign-in",
+            "kind": "poll_allocator_positions",
+            "api_key_id": API_KEY_ID,
+        }
+    )
+    return coro, updates
+
+
+@pytest.mark.asyncio
+async def test_mt5_refused_sign_in_writes_sign_in_failed_end_to_end(
+    mt5_enabled, monkeypatch
+):
+    """167-04 Task 1 — the whole chain, in one case.
+
+    A refused MT5 sign-in during the daily holdings poll must land in
+    `api_keys` as sync_status='sign_in_failed' with the AUTHORED sign-in copy
+    — NOT as 'error', and NOT as the generic holdings-sync sentence.
+
+    TWO distinct failures each turn this RED, both MEASURED under their own
+    neuter rather than asserted from the shape of the code:
+      1. the MT5 client-error arm raising the generic transient type again
+         (observed: the write becomes 'error');
+      2. the handler's new `except` arm sitting BELOW its parent — the new type
+         is a SUBCLASS, so a below-parent arm is dead code and every sign-in
+         failure silently reverts to 'error', today's defect restored
+         (observed by physically swapping the two arms).
+
+    ⚠️ AND ONE IT DOES *NOT* CATCH, stated rather than implied because an
+    over-claimed test is worse than a missing one. Deleting the new status's
+    `SYNC_ERROR_COPY_BY_STATUS` row leaves this case GREEN: the handler's
+    typed arm stamps `str(exc)` — the copy constant the venue branch raised —
+    and never consults `sync_error_copy` at all. That fallback is covered by
+    its own fallback-SPECIFIC pin in tests/test_allocator_positions.py
+    (`test_sign_in_copy_is_not_the_unknown_status_FALLBACK`), which asserts
+    against the generic sentence itself, plus the roster pin beside it. The
+    inequality assertion below is a cheap CONSISTENCY check between the two
+    strings, not the fallback gate.
+    """
+    import services.job_worker as jw
+    from services.allocator_positions import (
+        SIGN_IN_FAILED_NOTE,
+        SIGN_IN_FAILED_SYNC_STATUS,
+        SYNC_ERROR_COPY_BY_STATUS,
+    )
+
+    transport = _RefusingLoginMt5Transport(account=_account())
+    session = _session(transport)
+
+    coro, updates = _drive_poll_handler(monkeypatch, exchange=session, venue="mt5")
+    result = await coro
+
+    api_key_updates = [p for (name, p) in updates if name == "api_keys"]
+    assert api_key_updates, f"expected an api_keys write; got {updates!r}"
+    final = api_key_updates[-1]
+
+    assert final["sync_status"] == SIGN_IN_FAILED_SYNC_STATUS, (
+        "a refused sign-in must be NAMED as one. 'error' is the 17-day PROD "
+        f"defect this phase removes; got {final['sync_status']!r}"
+    )
+    assert final["sync_error"] == SIGN_IN_FAILED_NOTE.format(venue="MT5")
+    # The FALLBACK, specifically: a missing copy row renders the generic
+    # holdings-sync sentence, which claims we could not REACH the venue for a
+    # credential the venue actively refused.
+    assert final["sync_error"] != SYNC_ERROR_COPY_BY_STATUS["error"].format(
+        venue="MT5"
+    ), "the new status fell through sync_error_copy's unknown-status fallback"
+    assert "retry" not in final["sync_error"].lower(), (
+        "a refused sign-in must promise NO retry — a later poll cannot guess a "
+        "credential"
+    )
+
+    # The refusal reached the sign-in arm, not a transport arm: the terminal
+    # attached and was asked to log in, and was never asked for the account.
+    assert transport.calls.count("login") == 1
+    assert "account_info" not in transport.calls
+
+    # 167 WR-04 — the job does NOT climb the backoff ladder. Each rung would
+    # re-run the SAME stored password against the one shared MT5 terminal (the
+    # D-08 harm). A rotated credential is still picked up: the daily cron
+    # re-enqueues every non-revoked key, and rotate-secret resets it to idle.
+    assert result.outcome == jw.DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    # And exactly ONE sign-in was attempted in this job.
+    assert transport.calls.count("login") == 1
+
+    # No internal text anywhere in the user-visible column.
+    for banned in BANNED_INTERNALS + ("Invalid account",):
+        assert banned not in final["sync_error"]
+
+
+# ===========================================================================
+# Phase 167 CR-01 — the faults that are NOT a refused sign-in, end to end.
+#
+# The case above proves a login-stage refusal is NAMED. These prove the arm is
+# NARROW: every other way an `Mt5ClientError` reaches it keeps the pre-167
+# write (sync_status='error', MT5_UNREACHABLE_NOTE). Each drives the REAL
+# `Mt5Client` over a transport double, so the stage marker under test is
+# produced (or NOT produced) by the shipped client, never hand-built.
+# A gateway redeploy or wedge hits every MT5 key on the terminal at once;
+# stamping these `sign_in_failed` told every MT5 owner to fix a working
+# credential (D-03).
+# ===========================================================================
+class _StagedFaultMt5Transport(_RecordingMt5Transport):
+    """A terminal that fails at ONE chosen stage.
+
+    `initialize_raises` — the RPyC bridge drops inside `initialize()`, before
+    any credential is sent (a gateway redeploy). `login_ok=False` with
+    `last_error` — the terminal answers the sign-in itself falsy with that
+    code. `account_info_none` — the login SUCCEEDS and the post-login read then
+    returns None (an IPC detach mid-read).
+    """
+
+    def __init__(
+        self,
+        *,
+        initialize_raises: BaseException | None = None,
+        login_ok: bool = True,
+        account_info_none: bool = False,
+        last_error: tuple[int, str] = (0, "unknown"),
+    ) -> None:
+        super().__init__(account=_account())
+        self._initialize_raises = initialize_raises
+        self._login_ok = login_ok
+        self._account_info_none = account_info_none
+        self._last_error = last_error
+
+    def initialize(self, **kwargs):
+        self.calls.append("initialize")
+        if self._initialize_raises is not None:
+            raise self._initialize_raises
+        return True
+
+    def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
+        self.calls.append("login")
+        return self._login_ok
+
+    def account_info(self):
+        if self._account_info_none:
+            self.calls.append("account_info")
+            return None
+        return super().account_info()
+
+    def last_error(self):
+        return self._last_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transport_kwargs, expected_calls",
+    [
+        pytest.param(
+            {"account_info_none": True, "last_error": (-10004, "No IPC connection")},
+            ["initialize", "login", "account_info"],
+            id="account_info-none-after-a-successful-login",
+        ),
+        pytest.param(
+            {"initialize_raises": EOFError("stream has been closed")},
+            ["initialize"],
+            id="initialize-raises-EOFError-before-any-credential",
+        ),
+        pytest.param(
+            {"initialize_raises": ConnectionResetError("connection reset by peer")},
+            ["initialize"],
+            id="initialize-raises-ConnectionResetError-before-any-credential",
+        ),
+        # D-17 — the login stage answered falsy, but with an IPC-infrastructure
+        # code (-10000…-10004) or the success code 1. None of them is a verdict
+        # on the credential. (-10005 is, and is driven in the next test.)
+        pytest.param(
+            {"login_ok": False, "last_error": (-10000, "internal fail")},
+            ["initialize", "login"],
+            id="login-falsy-with-10000-internal-fail",
+        ),
+        pytest.param(
+            {"login_ok": False, "last_error": (-10001, "internal fail send")},
+            ["initialize", "login"],
+            id="login-falsy-with-10001-send",
+        ),
+        pytest.param(
+            {"login_ok": False, "last_error": (-10002, "internal fail receive")},
+            ["initialize", "login"],
+            id="login-falsy-with-10002-receive",
+        ),
+        pytest.param(
+            {"login_ok": False, "last_error": (-10003, "internal fail init")},
+            ["initialize", "login"],
+            id="login-falsy-with-10003-init",
+        ),
+        pytest.param(
+            {"login_ok": False, "last_error": (-10004, "No IPC connection")},
+            ["initialize", "login"],
+            id="login-falsy-with-10004-connect",
+        ),
+        pytest.param(
+            {"login_ok": False, "last_error": (1, "Success")},
+            ["initialize", "login"],
+            id="login-falsy-with-1-res-s-ok",
+        ),
+    ],
+)
+async def test_mt5_fault_that_is_not_a_login_refusal_writes_error_not_sign_in_failed(
+    mt5_enabled, monkeypatch, transport_kwargs, expected_calls
+):
+    """167 CR-01 / D-17 — only a login-stage refusal is a sign-in failure. Each
+    case here is a transport, post-login or IPC-infrastructure fault and must
+    land exactly as it did before Phase 167: sync_status='error' with
+    MT5_UNREACHABLE_NOTE."""
+    from services.allocator_positions import (
+        MT5_UNREACHABLE_NOTE,
+        SIGN_IN_FAILED_SYNC_STATUS,
+    )
+
+    transport = _StagedFaultMt5Transport(**transport_kwargs)
+    session = _session(transport)
+
+    coro, updates = _drive_poll_handler(monkeypatch, exchange=session, venue="mt5")
+    result = await coro
+
+    api_key_updates = [p for (name, p) in updates if name == "api_keys"]
+    assert api_key_updates, f"expected an api_keys write; got {updates!r}"
+    final = api_key_updates[-1]
+
+    assert final["sync_status"] != SIGN_IN_FAILED_SYNC_STATUS, (
+        f"{transport.calls!r} is not a refused sign-in, yet the key was told its "
+        "credentials failed — the D-03 false blame, fleet-wide on a gateway wedge"
+    )
+    assert final["sync_status"] == "error"
+    assert final["sync_error"] == MT5_UNREACHABLE_NOTE
+    # The fault really happened at the stage the case names: the calls the
+    # terminal saw, in order (terminal teardown calls excluded).
+    assert [c for c in transport.calls if c != "transport_close"] == expected_calls
+    assert result.error_kind == "transient"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "last_error",
+    [
+        pytest.param((-10005, "IPC timeout"), id="login-falsy-with-10005-modal-dialog"),
+        pytest.param((0, "authorization failed"), id="login-falsy-with-0"),
+        pytest.param((-6, "Authorization failed"), id="login-falsy-with-6-auth-failed"),
+    ],
+)
+async def test_mt5_login_stage_refusal_code_writes_sign_in_failed_end_to_end(
+    mt5_enabled, monkeypatch, last_error
+):
+    """167 CR-01 / D-17 — the positive half, end to end through the REAL
+    `Mt5Client`: the terminal answers `login()` falsy with -10005, 0 or -6, and
+    the key lands as sync_status='sign_in_failed' with the sign-in copy and a
+    `permanent` job disposition.
+
+    -10005 is the modal login dialog D-08 measured for a wrong MT5 password.
+    Before D-17 it was written 'error' / MT5_UNREACHABLE_NOTE and retried on
+    every backoff rung against the shared terminal."""
+    from services.allocator_positions import (
+        SIGN_IN_FAILED_NOTE,
+        SIGN_IN_FAILED_SYNC_STATUS,
+    )
+
+    transport = _StagedFaultMt5Transport(login_ok=False, last_error=last_error)
+    session = _session(transport)
+
+    coro, updates = _drive_poll_handler(monkeypatch, exchange=session, venue="mt5")
+    result = await coro
+
+    api_key_updates = [p for (name, p) in updates if name == "api_keys"]
+    assert api_key_updates, f"expected an api_keys write; got {updates!r}"
+    final = api_key_updates[-1]
+
+    assert final["sync_status"] == SIGN_IN_FAILED_SYNC_STATUS, (
+        f"login() answered falsy with {last_error[0]}, a sign-in refusal, yet "
+        f"the key was written {final['sync_status']!r}"
+    )
+    assert final["sync_error"] == SIGN_IN_FAILED_NOTE.format(venue="MT5")
+    assert result.error_kind == "permanent"
+    assert [c for c in transport.calls if c != "transport_close"] == [
+        "initialize",
+        "login",
+    ]

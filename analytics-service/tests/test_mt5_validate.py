@@ -65,13 +65,15 @@ from services.closed_sets import (
     MT5_MASTER_PASSWORD_DETAIL,
     MT5_WRONG_SERVER_DETAIL,
 )
-from services.exchange import AUTH_FAILED_DETAIL, NETWORK_ERROR_DETAIL
+from services.exchange import AUTH_FAILED_DETAIL, NETWORK_ERROR_DETAIL, SIGN_IN_FAILED_DETAIL
 from services.mt5_client import (
     MT5_REQUEST_TIMEOUT_S,
     MT5_VALIDATE_REQUEST_TIMEOUT_S,
     Mt5ClientError,
+    Mt5LoginRefusedError,
 )
 from services import mt5_concurrency
+from services.mt5_validation import _IPC_TRANSPORT_CODES
 from tests.limiter_stub import evict_module, patch_shared_limiter
 
 
@@ -421,6 +423,77 @@ def test_ipc_transport_codes_are_transient_never_wrong_server(code, detail):
     from services.mt5_validation import classify_mt5_login_error
 
     assert classify_mt5_login_error(Mt5ClientError(code, detail)) == "transient"
+
+
+# --------------------------------------------------------------------------- #
+# is_mt5_login_refusal — THE code set, tested directly (Phase 167 D-17)
+#
+# Same oracle discipline: every code and verdict is a LITERAL typed here, never
+# read out of services.mt5_validation. The two surfaces that tell a user "we
+# could not sign in" (the wizard's SIGN_IN_FAILED and the holdings poll's
+# sign_in_failed) both branch on this predicate, so a wrong member here is a
+# wrong claim on both at once.
+# --------------------------------------------------------------------------- #
+
+# The MetaQuotes RES_E_INTERNAL_FAIL family minus -10005, plus RES_S_OK. Each
+# says our bridge failed to carry the call (or reported success), so none of
+# them is a verdict on the credential, even when login() itself returned falsy.
+_LOGIN_STAGE_CODES_THAT_ARE_NOT_A_REFUSAL = [
+    pytest.param(-10000, "internal fail", id="-10000-internal-fail"),
+    pytest.param(-10001, "internal fail send", id="-10001-send"),
+    pytest.param(-10002, "internal fail receive", id="-10002-receive"),
+    pytest.param(-10003, "internal fail init", id="-10003-init"),
+    pytest.param(-10004, "No IPC connection", id="-10004-connect"),
+    pytest.param(1, "Success", id="1-res-s-ok"),
+]
+
+# MERGE 2026-09-23 (164.6.5 integrated with 167) — the subset of the list above
+# that 164.6.5's IPC arm does NOT claim. Derived from the SHIPPED tuple, never
+# re-typed, so a change to `_IPC_TRANSPORT_CODES` moves this split with it.
+_LOGIN_STAGE_CODES_NOT_A_REFUSAL_AND_NOT_IPC_TRANSPORT = [
+    p
+    for p in _LOGIN_STAGE_CODES_THAT_ARE_NOT_A_REFUSAL
+    if p.values[0] not in _IPC_TRANSPORT_CODES
+]
+
+# -10005 is the modal login dialog D-08 measured for a wrong MT5 password; 0 and
+# -6 (RES_E_AUTH_FAILED) are the terminal answering the sign-in with no. The
+# texts are deliberately ones the classifier does NOT recognise, so these
+# reach the `transient` tail on the wizard rather than its confident 400.
+_LOGIN_STAGE_CODES_THAT_ARE_A_REFUSAL = [
+    pytest.param(-10005, "IPC timeout", id="-10005-modal-login-dialog"),
+    pytest.param(0, "authorization failed", id="0-no-answer-code"),
+    pytest.param(-6, "Authorization failed", id="-6-res-e-auth-failed"),
+]
+
+
+@pytest.mark.parametrize(("code", "detail"), _LOGIN_STAGE_CODES_THAT_ARE_NOT_A_REFUSAL)
+def test_login_stage_ipc_infrastructure_or_success_code_is_not_a_refusal(
+    code, detail
+):
+    """167 WR-01 / D-17 — a login-stage answer carrying -10000…-10004 or 1 is
+    NOT a sign-in refusal. Before D-17 only -10004/-10005 were excluded, so
+    -10000…-10003 and 1 were reported as a refused sign-in: a failing IPC pipe
+    became a permanent `sign_in_failed` and a Retry-less `SIGN_IN_FAILED`."""
+    from services.mt5_validation import is_mt5_login_refusal
+
+    assert is_mt5_login_refusal(Mt5LoginRefusedError(code, detail)) is False
+
+
+@pytest.mark.parametrize(("code", "detail"), _LOGIN_STAGE_CODES_THAT_ARE_A_REFUSAL)
+def test_login_stage_sign_in_answer_is_a_refusal(code, detail):
+    """167 CR-01 / D-17 — a login-stage -10005 IS a refusal. D-08 names it as
+    the measured wrong-password mechanism, so excluding it would send the
+    phase's headline MT5 case back to the pre-phase answer (a transport note, a
+    retry promise and a Retry control).
+
+    The CONTROL half: the same code on a PLAIN `Mt5ClientError` (an
+    `initialize()` failure, a transport drop, a post-login read) is never a
+    refusal. The stage decides first; the code only splits the login stage."""
+    from services.mt5_validation import is_mt5_login_refusal
+
+    assert is_mt5_login_refusal(Mt5LoginRefusedError(code, detail)) is True
+    assert is_mt5_login_refusal(Mt5ClientError(code, detail)) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -1032,12 +1105,35 @@ async def test_mt5_wrong_server_maps_to_wrong_server_detail(exchange_router):
     client.release.assert_called_once()
 
 
-async def test_mt5_transient_maps_to_network_detail_not_credentials(exchange_router):
-    """F4: an unrecognized (transient) login error must fail CLOSED with the SHARED
-    NETWORK_ERROR_DETAIL — never {"valid": true}, never 'authentication failed'
-    (a transient bridge blip is not the user's key). release() runs."""
+async def test_mt5_transient_maps_to_sign_in_failed_detail_not_credentials(
+    exchange_router,
+):
+    """F4, NARROWED by 167-CREDTRUST plan 01 (D-05, D-07, S-27): an unrecognized
+    (transient) login error must fail CLOSED with SIGN_IN_FAILED_DETAIL — never
+    {"valid": true}, never 'authentication failed' (an ambiguous sign-in is not a
+    confirmed bad key). release() runs.
+
+    ⚠️ THIS CASE'S EXPECTATION MOVED. Until this phase it asserted the SHARED
+    NETWORK_ERROR_DETAIL, like every other MT5 transient arm — but a login WAS
+    attempted here (`classify_mt5_login_error` classified it `transient`, not
+    `auth`/`wrong_server`), which is exactly the claim SIGN_IN_FAILED_DETAIL makes
+    and the shared network detail does not. `recoverable=False` on the raise
+    diverges from the sibling MT5 arms' hardcoded `True` (D-08) — this test only
+    reaches `HTTPException.detail`/`.status_code`, so that flag is asserted at the
+    wire-body layer (`test_validate_key_venue_transient.py::test_c5_...`).
+
+    ⭐ 167 CR-01 / WR-01 — the error is now the LOGIN-STAGE marker
+    (`Mt5LoginRefusedError`, what the real `Mt5Client.login` raises when the
+    terminal answers the sign-in falsy). The same code-0 text from a POST-login
+    stage is NOT a sign-in failure; see
+    `test_mt5_post_login_or_ipc_transient_keeps_the_network_detail`."""
     router = exchange_router
-    err = Mt5ClientError(0, "timeout waiting for response")
+    # 167 SFH-LOW-3 — a NEUTRAL login answer the classifier does not recognise.
+    # This used to be "timeout waiting for response", which pinned
+    # timeout-worded text as a sign-in failure: a reader would take it that a
+    # timeout IS a sign-in refusal. What makes this a refusal is the stage
+    # (the marker type) and the code, not the wording.
+    err = Mt5LoginRefusedError(0, "authorization failed")
     client = _make_client(login_raises=err)
     _install_mt5_client(router, client)
 
@@ -1045,12 +1141,195 @@ async def test_mt5_transient_maps_to_network_detail_not_credentials(exchange_rou
         await _call(router, _make_req())
 
     # 424 = CALLER'S EXCHANGE (C5; see the account-mismatch case for the full
-    # rationale). A transient bridge blip is neither the user's key nor a
+    # rationale). An ambiguous sign-in is neither a confirmed bad key nor a
     # malformed request.
     assert ei.value.status_code == 424
-    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.detail == SIGN_IN_FAILED_DETAIL
     assert ei.value.status_code != 500
     assert "authentication failed" not in ei.value.detail.lower()
+    client.release.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "client_kwargs, reached_order_check",
+    [
+        # The SAME code-0 text as the login-stage case above, but raised by the
+        # probe AFTER `login()` and `account_info()` succeeded: the credential
+        # was accepted, so this is not a sign-in failure.
+        pytest.param(
+            {
+                "account": _INVESTOR_ACCOUNT,
+                "terminal": {"connected": True, "trade_allowed": True},
+                "order_check_raises": Mt5ClientError(0, "authorization failed"),
+            },
+            True,
+            id="post-login-order_check-code-0",
+        ),
+        # ⚠️ MERGE 2026-09-23 (164.6.5 integrated) — the post-login IPC -10005
+        # param that stood here moved to
+        # `test_mt5_post_login_ipc_fault_answers_terminal_unresponsive` below:
+        # an IPC-coded fault that is not a login-stage refusal now answers
+        # 164.6.5's MT5_TERMINAL_UNRESPONSIVE, still never SIGN_IN_FAILED.
+        # The login-stage IPC-infrastructure codes and the success code are
+        # driven by `test_mt5_login_stage_ipc_or_success_code_keeps_the_network_detail`
+        # below; a login-stage -10005 is a refusal (D-17) and is driven by
+        # `test_mt5_login_stage_refusal_code_answers_sign_in_failed`.
+    ],
+)
+async def test_mt5_post_login_or_ipc_transient_keeps_the_network_detail(
+    exchange_router, client_kwargs, reached_order_check
+):
+    """167 WR-01 — `SIGN_IN_FAILED` is answered ONLY for a login-stage refusal
+    (`is_mt5_login_refusal`). A post-login read failure keeps the pre-167
+    answer, `424` with the shared network detail, so the user is not told a
+    working sign-in failed and keeps the Retry (`recoverable=True` is asserted at
+    the wire layer in `test_validate_key_venue_transient.py`)."""
+    router = exchange_router
+    client = _make_client(**client_kwargs)
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail != SIGN_IN_FAILED_DETAIL, (
+        "a fault that is not a login-stage refusal was answered SIGN_IN_FAILED "
+        "— the user is told a sign-in failed and loses the Retry"
+    )
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    client.login.assert_called_once()
+    assert client.order_check.called is reached_order_check
+    client.release.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"), _LOGIN_STAGE_CODES_NOT_A_REFUSAL_AND_NOT_IPC_TRANSPORT
+)
+async def test_mt5_login_stage_ipc_or_success_code_keeps_the_network_detail(
+    exchange_router, code, detail
+):
+    """167 WR-01 / D-17, end to end through `_validate_mt5_key_probe` — a
+    login-stage answer carrying -10000…-10004 or 1 is our bridge failing to
+    carry the call, not a sign-in verdict. It keeps the pre-167 answer:
+    `NETWORK_UNAVAILABLE`, the shared network detail and `recoverable=True`, so
+    the Retry survives and the user is not told a sign-in failed.
+
+    ⚠️ MERGE 2026-09-23 (164.6.5 integrated) — -10004 is driven by
+    `test_mt5_login_stage_ipc_transport_code_answers_terminal_unresponsive`
+    instead: it is in `_IPC_TRANSPORT_CODES`, so 164.6.5's arm answers it
+    MT5_TERMINAL_UNRESPONSIVE. Still never SIGN_IN_FAILED (D-17 holds)."""
+    router = exchange_router
+    client = _make_client(login_raises=Mt5LoginRefusedError(code, detail))
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL, (
+        f"login-stage code {code} is an IPC-infrastructure (or success) code, "
+        "yet the wizard answered a sign-in failure with no Retry"
+    )
+    assert getattr(ei.value, "code", None) == "NETWORK_UNAVAILABLE"
+    assert getattr(ei.value, "recoverable", None) is True
+    client.login.assert_called_once()
+    client.order_check.assert_not_called()
+    client.release.assert_called_once()
+
+
+@pytest.mark.parametrize(("code", "detail"), _LOGIN_STAGE_CODES_THAT_ARE_A_REFUSAL)
+async def test_mt5_login_stage_refusal_code_answers_sign_in_failed(
+    exchange_router, code, detail
+):
+    """167 CR-01 / D-17, end to end through `_validate_mt5_key_probe` — a
+    login-stage -10005, 0 or -6 is a refused sign-in: `424 SIGN_IN_FAILED`,
+    `recoverable=False`. The -10005 case is the one D-08 is written about (the
+    modal login dialog a wrong password raises), and the classifier's own
+    -10005 code-gate must not pre-empt it into `NETWORK_UNAVAILABLE`: it answers
+    `transient`, which is the tail the predicate splits."""
+    router = exchange_router
+    client = _make_client(login_raises=Mt5LoginRefusedError(code, detail))
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == SIGN_IN_FAILED_DETAIL, (
+        f"a login-stage refusal with code {code} was not answered SIGN_IN_FAILED"
+    )
+    assert getattr(ei.value, "code", None) == "SIGN_IN_FAILED"
+    assert getattr(ei.value, "recoverable", None) is False, (
+        "a refused sign-in must not offer a Retry: it re-sends the same "
+        "credential to the one shared terminal (D-08)"
+    )
+    client.login.assert_called_once()
+    client.order_check.assert_not_called()
+    client.release.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# MERGE 2026-09-23 — 164.6.5 (MT5VALIDATEWEDGE) integrated with 167 (CREDTRUST).
+# The router consults 167's `is_mt5_login_refusal` FIRST and 164.6.5's
+# `is_ipc_transport_fault` SECOND. These two cases pin the IPC-coded faults that
+# are NOT a login-stage refusal: 167 D-17 decides they are not a sign-in failure,
+# and 164.6.5 D-12/D-13 decides they answer MT5_TERMINAL_UNRESPONSIVE rather
+# than a Retry against a wedged terminal. The login-stage -10005 overlap stays
+# 167's SIGN_IN_FAILED (`test_mt5_login_stage_refusal_code_answers_sign_in_failed`).
+# --------------------------------------------------------------------------- #
+
+
+async def test_mt5_post_login_ipc_fault_answers_terminal_unresponsive(
+    exchange_router,
+):
+    """A post-login read (`order_check`) timing out on IPC arrives AFTER the
+    credential was accepted, so it is never a sign-in failure (167 WR-01). Its
+    code is in `_IPC_TRANSPORT_CODES`, so it answers 164.6.5's honest,
+    non-retryable 500 — not the Retry the pre-merge transport answer offered."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        terminal={"connected": True, "trade_allowed": True},
+        order_check_raises=Mt5ClientError(-10005, "IPC timeout"),
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 500
+    body = ei.value.detail
+    assert body["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    assert body["retryable"] is False
+    assert body["detail"] != SIGN_IN_FAILED_DETAIL, (
+        "a post-login fault was answered as a refused sign-in"
+    )
+    client.login.assert_called_once()
+    assert client.order_check.called is True
+    client.release.assert_called_once()
+
+
+async def test_mt5_login_stage_ipc_transport_code_answers_terminal_unresponsive(
+    exchange_router,
+):
+    """A login-stage -10004 is NOT a refusal (167 D-17: our bridge failed to
+    carry the call) and IS an IPC transport code (164.6.5), so it answers
+    MT5_TERMINAL_UNRESPONSIVE — never SIGN_IN_FAILED, never a Retry."""
+    router = exchange_router
+    client = _make_client(
+        login_raises=Mt5LoginRefusedError(-10004, "No IPC connection")
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 500
+    body = ei.value.detail
+    assert body["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    assert body["retryable"] is False
+    assert body["detail"] != SIGN_IN_FAILED_DETAIL
+    client.order_check.assert_not_called()
     client.release.assert_called_once()
 
 

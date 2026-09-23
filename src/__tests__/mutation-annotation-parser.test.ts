@@ -953,7 +953,24 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // exactly as it contributes nothing to `needles.length` below. ⛔ Do not
     // "restore" the +1: it is a step the CORPUS has and this DERIVATION does
     // not, and the two are different questions. RUN, not reasoned about.
-    expect(armsSeen).toBe(423);
+    // ⛔ CORRECTED 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix):
+    // 423 -> 426, and `stepsSeen` 441 -> 441, UNMOVED.
+    // THIS PIN WAS ALREADY STALE AND ALREADY RED BEFORE THIS FIX TOUCHED IT.
+    // Plan 03 Task 2 added TWO arms in the new file
+    // test_api_keys_sync_status_sign_in_failed.sql and moved ARMS_FLOOR,
+    // `totalAnchored` and the GREEN_LOG fixture — but not this derivation, nor
+    // the file-count pins below, nor the value-keyed registry in
+    // gate-family-meta.test.ts. So `armsSeen` read 425 against a pin of 423 at
+    // HEAD. The review fix's third arm takes the measurement to 426; the pin
+    // moves once, to the MEASURED value, rather than being walked 423 -> 425
+    // -> 426 through a state nothing was ever at.
+    // `stepsSeen` does NOT move, and that is measured, not reasoned: all three
+    // of this file's arms carry `sql` steps, and a `sql` step has neither a
+    // `find` nor an `anchor`, so this walk — which only enumerates steps it can
+    // read an identity-rewrite out of — sees nothing. Exactly the trap the
+    // 2026-09-21 note above records being predicted wrong and corrected by the
+    // run. RUN, not reasoned about.
+    expect(armsSeen).toBe(426);
     expect(stepsSeen).toBe(441);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
@@ -2347,7 +2364,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
   // behind at 43 and at 44 while `expect(corpus.filesAnnotated)` moved, so a reader
   // following the parse.mjs citation met a green test claiming a number two lower
   // than the corpus (review WR-07 of 164.4.1-REVIEW.md). Bump BOTH or neither.
-  it("scanCorpus reports 48 of 75 files annotated", () => {
+  // ⛔ The TITLE carries no count. It read "48 of 75" against a corpus of
+  // 49/76 — the same title-drifts-from-its-own-assertion class this repo books
+  // as [164.7-CITATION-DRIFT-01], and the same one that left
+  // lint-sql-gates.test.ts titled "75-file" over a 76-file corpus. The numbers
+  // live in the assertions below and nowhere else in this test.
+  it("scanCorpus reports the measured annotated-of-total corpus ratio", () => {
     const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
     // ⛔ The DENOMINATOR stays 71 — every `.sql` in the directory. Phase 164.4
     // reached ITS end state at `files 39/71` (plan 164.4-11, 2026-09-04) with
@@ -2367,7 +2389,13 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // a NEW file (the behavioural RLS gate over public.strategy_sync_cursors, 9
     // arms) — so, as with the 2026-09-18 entry above, the denominator moves with
     // it, 74 -> 75.
-    expect(corpus.filesTotal).toBe(75);
+    // ⛔ CORRECTED 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 75 ->
+    // 76, ALREADY STALE AND ALREADY RED at HEAD. The one added is
+    // supabase/tests/test_api_keys_sync_status_sign_in_failed.sql, a NEW file
+    // (the D-11 arm B CHECK-widening gate) — so, as with the two entries
+    // above, the denominator moves with it, 75 -> 76. MEASURED over
+    // `scanCorpus` at this commit: `filesTotal 76`.
+    expect(corpus.filesTotal).toBe(76);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2398,7 +2426,15 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // pg-lane gained scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql to
     // give it a provable RAISE path on a cluster with no supabase_vault. The
     // 164.2 paragraph above stays as the dated record of the 45-file corpus.
-    expect(corpus.filesAnnotated).toBe(48);
+    // ⛔ CORRECTED 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 48 ->
+    // 49. ALREADY STALE AND ALREADY RED at HEAD — plan 03 Task 2 added the NEW
+    // gate file supabase/tests/test_api_keys_sync_status_sign_in_failed.sql,
+    // moved FILES_FLOOR 48 -> 49, and left this census, the denominator below,
+    // the by-name list below that, the five-class partition further down and
+    // the gate-family-meta registry all reading the pre-plan-03 corpus.
+    // MEASURED over `scanCorpus` at this commit: `filesTotal 76`,
+    // `filesAnnotated 49`.
+    expect(corpus.filesAnnotated).toBe(49);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2411,6 +2447,15 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_analytics_service_settings_and_vault_tick.sql",
       "test_api_keys_exchange_not_user_writable.sql",
       "test_api_keys_insert_not_client_writable.sql",
+      // ⛔ ADDED 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix) — the
+      // FORTY-NINTH annotated file, and it was MISSING from this by-name list
+      // since plan 03 Task 2 landed it. The list is a set-for-set check, so it
+      // would have reddened the moment the `filesTotal` pin above was
+      // corrected; both were stale together and are corrected together.
+      // Three arms: the D-11 arm B CHECK widening (1), the stale re-type that
+      // loses 'revoked' (2), and the prefix-family loss of 'complete' behind
+      // 'complete_with_warnings' (3).
+      "test_api_keys_sync_status_sign_in_failed.sql",
       "test_api_keys_venue_identity_uniq.sql",
       "test_capital_ownership_allocation_guard.sql",
       "test_capital_ownership_column.sql",
@@ -2836,7 +2881,13 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // lane-blocked 0 = 75. One ADDED gate file
     // (supabase/tests/test_strategy_sync_cursors_rls.sql), not a backfill — both
     // halves move together again, and neither may be bumped alone.
-    expect(corpus.filesTotal).toBe(75);
+    // ⛔ CORRECTED 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 75 ->
+    // 76 and 48 -> 49, ALREADY STALE AND ALREADY RED at HEAD. One ADDED gate
+    // file (supabase/tests/test_api_keys_sync_status_sign_in_failed.sql), not
+    // a backfill — both halves move together again, and neither may be bumped
+    // alone. MEASURED off the full lane run: annotated 49 + pending 0 +
+    // unreachable 27 + inert 0 + lane-blocked 0 = 76.
+    expect(corpus.filesTotal).toBe(76);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -2845,7 +2896,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // above (the selftest fixture PAIR, which must still classify exactly
     // `lane-blocked-gate.sql` and NOT its comment-only sibling), and the
     // set-for-set PARTITION check below is the second independent guard.
-    expect(corpus.annotatedFiles).toHaveLength(48);
+    expect(corpus.annotatedFiles).toHaveLength(49);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {
