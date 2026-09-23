@@ -26,8 +26,9 @@ import { join } from "node:path";
  *     every tracked top-level `analytics-service/*.py` file;
  *   - the Makefile `typecheck` recipe names the same set;
  *   - the `python` job carries exactly ONE mypy invocation (`mypy` or
- *     `python -m mypy` as a command word, `--strict` or not, backslash
- *     continuations joined), and its flag set is EXACTLY
+ *     `python -m mypy` at a command start, `--strict` or not, backslash
+ *     continuations joined, `name:` lines and quoted strings ignored; a
+ *     wrapper such as `uv run mypy` is NOT counted), and its flag set is EXACTLY
  *     `--strict --follow-imports=silent --config-file=pyproject.toml` (an extra
  *     flag such as `--exclude=` narrows the gate while the path set stays
  *     equal; `--config-file` makes mypy read pyproject.toml and no other file);
@@ -153,9 +154,14 @@ const MYPY_COMMAND = /(?:^|[;&|(]\s*|\$\(\s*)(?:[\w./-]*\/)?(?:python[\d.]*\s+-m
 /**
  * Every mypy invocation in the job, `--strict` or not: non-comment lines with
  * backslash continuations joined, the YAML `- ` / `run:` / `run: |` prefix
- * stripped, then every command-word match counted. A second, partial
- * invocation split across `mypy \` and a continuation line, or one without
- * `--strict`, is counted like any other.
+ * stripped, YAML `name:` lines skipped and quoted strings blanked, then every
+ * command-word match counted. A second, partial invocation split across
+ * `mypy \` and a continuation line, or one without `--strict`, is counted like
+ * any other; a step NAMED `Lint check (mypy)` or an `echo "done; mypy next"` is
+ * not. ⚠️ LIMIT, stated: a wrapper word before `mypy` (`uv run mypy`,
+ * `timeout 60 mypy`, `if mypy`, a quoted `"$VENV/bin/mypy"`) is NOT counted.
+ * That does not open coverage — the gate step's own paths and flags are pinned
+ * exactly — but the count is "command-start invocations", not "every one".
  */
 function mypyInvocationCount(jobLines: string[]): number {
   const logical: string[] = [];
@@ -172,7 +178,10 @@ function mypyInvocationCount(jobLines: string[]): number {
   }
   if (buf) logical.push(buf);
   return logical
-    .map((t) => t.replace(/^-\s+/, "").replace(/^run:\s*(?:[|>][-+]?)?\s*/, ""))
+    .map((t) => t.replace(/^-\s+/, ""))
+    .filter((t) => !/^name\s*:/.test(t))
+    .map((t) => t.replace(/^run:\s*(?:[|>][-+]?)?\s*/, ""))
+    .map((t) => t.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, " "))
     .reduce((n, t) => n + (t.match(MYPY_COMMAND)?.length ?? 0), 0);
 }
 
@@ -455,7 +464,10 @@ function surfaceProblems(
     problems.push(
       `ci.yml: the \`python\` job carries ${count} mypy invocation(s); exactly ONE is allowed. ` +
         `A second, partial invocation lets the gate's surface be split across steps where no single ` +
-        `line states it.`,
+        `line states it. (Counted: \`mypy\` / \`python -m mypy\` at a command start or after ` +
+        `\`; & | ( $(\`, outside \`name:\` lines and quoted strings. Wrappers such as \`uv run\`, ` +
+        `\`timeout\` or \`if mypy\` are NOT counted; the gate's own paths and flags are pinned ` +
+        `exactly, which is what bounds coverage.)`,
     );
   }
 
@@ -926,6 +938,20 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
       "(e3)",
     );
     const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "carries 2 mypy invocation(s)"), problems.join("\n")).toBe(true);
+  });
+
+  it("(e4) a step NAMED `Lint check (mypy)` running no mypy → NOT counted, no invocation problem", () => {
+    const yml = insertAfter(REAL_YML, RUN_LINE, "\n      - name: Lint check (mypy)\n        run: echo ok", "(e4)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "mypy invocation(s)"), problems.join("\n")).toBe(false);
+  });
+
+  it('(e5) a quoted `echo "done; mypy next"` → NOT counted; the same text unquoted IS counted', () => {
+    const quoted = insertAfter(REAL_YML, RUN_LINE, '\n      - name: Say done\n        run: echo "done; mypy next"', "(e5)");
+    expect(has(surfaceProblems(quoted, REAL_MAKEFILE, REAL_LISTING, EXCLUDED), "mypy invocation(s)")).toBe(false);
+    const bare = insertAfter(REAL_YML, RUN_LINE, "\n      - name: Say done\n        run: echo done; mypy next", "(e5 bare)");
+    const problems = surfaceProblems(bare, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
     expect(has(problems, "carries 2 mypy invocation(s)"), problems.join("\n")).toBe(true);
   });
 
