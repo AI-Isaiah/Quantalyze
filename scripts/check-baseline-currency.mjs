@@ -145,11 +145,13 @@ export function judge({
 }
 
 /**
- * How many `ok()` calls the eight sections below are declared to run.
+ * How many `ok()` calls the sections below are declared to run: 11 across the
+ * eight default-mode sections, plus 20 across the fourteen `--replay-set`
+ * sections (Phase 164.4.2 plan 06).
  * ⛔ Raise it only together with the arm that adds one; lowering it to make a
  * run green is deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 11;
+export const EXPECTED_ASSERTIONS = 31;
 
 function selfTest() {
   let pass = true;
@@ -238,6 +240,120 @@ function selfTest() {
     `DEFECTS names exactly the ${emitted.size} kind(s) observed: ${[...emitted].sort().join(", ")}`,
   );
 
+  // ── --replay-set (DECISION F). Pure-function arms over in-memory facts. ──
+  const SHA = "a".repeat(64);
+  const A = "20260101000000_a.sql";
+  const B = "20260102000000_b.sql";
+  const C = "20260103000000_c.sql";
+  const D = "20260104000000_d.sql";
+  const files = (...names) => names.map((name) => ({ name, isDir: false }));
+  const marker = (entries, { sha = SHA, withSha = true } = {}) =>
+    ["# carried-migrations marker (self-test)", ...(withSha ? [`baseline-sha256: ${sha}`] : []), ...entries].join("\n") + "\n";
+  const replayRun = (over) => judgeReplaySet({ markerText: marker([A, B]), baselineSha: SHA, migrations: files(A, B), ...over });
+  const kindsOf = (r) => r.defects.map((d) => d.kind);
+  const seenKinds = new Set();
+  const see = (r) => {
+    for (const k of kindsOf(r)) seenKinds.add(k);
+    return r;
+  };
+
+  console.log("=== SELF-TEST R1/14: marker current for the directory -> K=0, zero defects, directories ignored");
+  const r1 = see(replayRun({ migrations: [...files(A, B), { name: "down", isDir: true }] }));
+  ok(r1.defects.length === 0 && r1.replay.length === 0, "a marker listing every migration yields zero defects and an EMPTY replay set");
+  ok(r1.markerSha === "match" && r1.carried.join(",") === [A, B].join(","), "the sha binding matches and the carried set is the marker's list");
+
+  console.log("=== SELF-TEST R2/14: two migrations newer than the dump -> K=2, named, sorted by filename");
+  const r2 = see(replayRun({ migrations: files(D, A, C, B) }));
+  ok(r2.defects.length === 0 && r2.replay.join(",") === [C, D].join(","), `replay set is exactly [${C}, ${D}] in filename order`);
+
+  console.log("=== SELF-TEST R3/14: marker absent or unreadable -> marker-unreadable, never an empty carried set");
+  const r3 = see(replayRun({ markerText: null }));
+  ok(kindsOf(r3).includes("marker-unreadable"), "an unreadable marker is refused by name, not read as 'nothing carried'");
+
+  console.log("=== SELF-TEST R4/14: marker without a baseline-sha256 line -> marker-sha-absent");
+  const r4 = see(replayRun({ markerText: marker([A, B], { withSha: false }) }));
+  ok(kindsOf(r4).includes("marker-sha-absent"), "a list bound to no dump is refused");
+
+  console.log("=== SELF-TEST R5/14: marker sha differs from sha256(baseline.sql) -> marker-sha-mismatch naming BOTH prefixes");
+  const r5 = see(replayRun({ baselineSha: "b".repeat(64) }));
+  const d5 = r5.defects.find((d) => d.kind === "marker-sha-mismatch");
+  ok(Boolean(d5) && r5.markerSha === "MISMATCH", "a dump regenerated without its marker is refused");
+  ok(Boolean(d5) && d5.detail.includes("a".repeat(12)) && d5.detail.includes("b".repeat(12)), "the message names the marker's sha prefix AND the dump's");
+
+  console.log("=== SELF-TEST R6/14: marker with zero basenames -> marker-empty");
+  const r6 = see(replayRun({ markerText: marker([]) }));
+  ok(kindsOf(r6).includes("marker-empty"), "an empty carried list is refused — it would replay the whole chain onto the dump");
+
+  console.log("=== SELF-TEST R7/14: malformed and repeated marker lines -> marker-malformed-entry / marker-duplicate-entry");
+  const r7a = see(replayRun({ markerText: marker([A, B, "not a migration line"]) }));
+  ok(
+    r7a.defects.some((d) => d.kind === "marker-malformed-entry" && d.detail.includes("not a migration line")),
+    "a line that is neither comment, sha line nor strict basename is refused and quoted",
+  );
+  const r7b = see(replayRun({ markerText: marker([A, B, A]) }));
+  ok(
+    r7b.defects.some((d) => d.kind === "marker-duplicate-entry" && d.detail.includes(A)),
+    "a repeated basename is refused by name",
+  );
+
+  console.log("=== SELF-TEST R8/14: marker names a migration this checkout lacks -> dump-ahead-of-checkout");
+  const r8 = see(replayRun({ migrations: files(A) }));
+  ok(
+    r8.defects.some((d) => d.kind === "dump-ahead-of-checkout" && d.detail.includes(B) && d.detail.includes("base branch")),
+    "the missing basename is named and the reader is told to bring in the base branch",
+  );
+
+  console.log("=== SELF-TEST R9/14: unreadable dir / unclassifiable file -> migrations-dir-unreadable / migration-unclassifiable");
+  const r9a = see(replayRun({ migrations: null }));
+  ok(kindsOf(r9a).includes("migrations-dir-unreadable"), "'could not list' is refused, never read as 'nothing to replay'");
+  const r9b = see(replayRun({ migrations: files(A, B, "README.md") }));
+  ok(
+    r9b.defects.some((d) => d.kind === "migration-unclassifiable" && d.detail.includes("README.md")),
+    "a top-level FILE that is not a strict migration basename is refused by name",
+  );
+
+  console.log("=== SELF-TEST R10/14: a replayed file with a backslash-led line -> replay-meta-command naming file and line");
+  const r10 = see(
+    replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT 1;\n  \\! echo exfiltrate\n" } }),
+  );
+  ok(
+    r10.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes(C) && d.detail.includes("line 2")),
+    "a psql meta-command in a file the lane would hand to psql is refused before psql opens it",
+  );
+
+  console.log("=== SELF-TEST R11/14: ANY defect -> the pure result carries no set at all");
+  ok(
+    [r3, r4, r5, r6, r7a, r7b, r8, r9a, r9b, r10].every((r) => r.defects.length > 0 && r.replay.length === 0 && r.carried.length === 0),
+    "an undeterminable set is never returned as a set — every defect arm above returns replay=[] and carried=[]",
+  );
+
+  console.log("=== SELF-TEST R12/14: REFDATA_ALLOWLIST_IN unreadable -> refdata-allowlist-unreadable");
+  const r12 = see(replayRun({ refdataAllowlistUnreadable: true }));
+  ok(kindsOf(r12).includes("refdata-allowlist-unreadable"), "no unfiltered or empty allowlist copy is ever handed over");
+
+  console.log("=== SELF-TEST R13/14: the allowlist filter drops exactly the replayed files' lines");
+  const allow = [
+    "# header",
+    "",
+    `${A}\tpublic.t\t1\t# carried; its comment quotes ${C} on purpose`,
+    `${C}\tpublic.t\t1\t# a replayed migration's line`,
+    "",
+  ].join("\n");
+  const f13 = filterRefdataAllowlist(allow, [C]);
+  ok(f13.excluded.join(",") === C && !f13.text.includes(`${C}\tpublic.t`), "the line whose FIRST field is the replay basename is dropped and named");
+  ok(
+    f13.text === ["# header", "", `${A}\tpublic.t\t1\t# carried; its comment quotes ${C} on purpose`, ""].join("\n"),
+    "comment, blank and carried lines are kept byte-identical — a replay basename in a carried line's comment field does not drop it",
+  );
+  const f13k0 = filterRefdataAllowlist(allow, []);
+  ok(f13k0.text === allow && f13k0.excluded.length === 0, "with K=0 the output is the input, byte for byte, excluded=0");
+
+  console.log("=== SELF-TEST R14/14: every kind judgeReplaySet() can emit is named in REPLAY_DEFECTS");
+  ok(
+    seenKinds.size === REPLAY_DEFECTS.length && [...seenKinds].every((k) => REPLAY_DEFECTS.includes(k)),
+    `REPLAY_DEFECTS names exactly the ${seenKinds.size} kind(s) observed: ${[...seenKinds].sort().join(", ")}`,
+  );
+
   console.log("");
   if (asserted !== EXPECTED_ASSERTIONS) {
     console.error(
@@ -252,7 +368,7 @@ function selfTest() {
     return 1;
   }
   console.log(
-    `=== SELF-TEST PASSED: ${asserted}/${EXPECTED_ASSERTIONS} declared assertions across 8 sections, ` +
+    `=== SELF-TEST PASSED: ${asserted}/${EXPECTED_ASSERTIONS} declared assertions across 8 default-mode + 14 replay-set sections, ` +
       `every defect kind fired on its own input ===`,
   );
   return 0;
