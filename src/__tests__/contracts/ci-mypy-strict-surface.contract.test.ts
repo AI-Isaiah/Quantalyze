@@ -409,6 +409,13 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     expect(has(problems, "service-surface member"), problems.join("\n")).toBe(false);
   });
 
+  it("(h2) removing `--follow-imports=silent` alone from ci.yml → a lost-flag problem naming it", () => {
+    const yml = mutate(REAL_YML, RUN_LINE, RUN_LINE.replace(" --follow-imports=silent", ""), "(h2)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'lost the flag "--follow-imports=silent"'), problems.join("\n")).toBe(true);
+    expect(has(problems, '"--strict"'), problems.join("\n")).toBe(false);
+  });
+
   it("(i) a flag on the Makefile `typecheck` recipe → a Makefile flag problem", () => {
     const mk = mutate(
       REAL_MAKEFILE,
