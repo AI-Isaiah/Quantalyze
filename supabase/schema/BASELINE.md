@@ -44,6 +44,42 @@ reasoning is the asset, so it lives here now:
 the *Regenerating* section below; keep the prose claim and the grep pattern identical —
 SP-M03 records what happens when they drift apart.
 
+## ⭐ 2026-09-23 (Phase 164.4.2 DECISION F) — the lane REPLAYS the migrations this dump does not carry
+
+**What changed.** Until now the lane's currency gate REFUSED to boot whenever a migration had
+landed after this dump (Phase 164.4.2 plan 03). That made every migration merge redden every lane
+job until the founder re-dumped PRODUCTION, and it left a PR unable to exercise its own migration
+on the lane at all. Since plan 06, `scripts/local-stack/run.sh up` loads this file and then
+REPLAYS, in filename order, exactly the `supabase/migrations/*.sql` files this dump does not
+carry — each applied as authored, one psql call per file, its
+`supabase_migrations.schema_migrations` row written only after it applied. The set is **named on
+every boot**, the zero case included (`baseline-replay: 0 migration(s) newer than the dump (none)`),
+and a migration newer than the dump is now the normal case, not a red.
+
+**Where the carried set comes from.** `supabase/schema/baseline-carried-migrations.txt` — one
+basename per line, headed by a `baseline-sha256:` line that must equal this file's sha256. It is
+read by `node scripts/check-baseline-currency.mjs --replay-set` (via `run.sh --check-currency`
+and `run.sh up`), never inferred from commit dates. The lane REFUSES to boot when the set cannot
+be determined: marker absent, unbound (`marker-sha-absent`), bound to another dump
+(`marker-sha-mismatch`), empty, malformed, naming a migration this checkout lacks
+(`dump-ahead-of-checkout` — bring in the base branch), or an unclassifiable file in
+`supabase/migrations/`. A replayed migration that errors is FATAL, and the ephemeral stack is torn
+down. Its bootstrap content is the 273 `*.sql` basenames in the tree of merge `2091fea6` — the
+merge whose PRODUCTION apply preceded the 2026-09-23 capture.
+
+**What the marker cannot vouch for.** It records the founder's statement of which migrations had
+applied to PRODUCTION when the dump was taken. It does **not** re-derive the dump's catalogue, and
+nothing checks that the catalogue actually contains every listed migration's effect — that is
+still the content gates' question (`baseline-content-drift-check`, function bodies only).
+
+**Why a full list and not a frontier version.** MEASURED at planning time across
+`git log --diff-filter=A` of `supabase/migrations/`: **5** timestamp-versioned migrations were
+committed AFTER a migration with a higher version already existed (e.g.
+`20260513094906_enable_pg_cron.sql` after `20260515210400_commit_scenario_batch_high_hardening.sql`),
+and `supabase-migrate.yml` applies with `db push --include-all` precisely to apply such files. A
+frontier ("everything up to version V is carried") would classify such a file as carried, never
+replay it, and boot green on a schema missing it. A full list cannot make that mistake.
+
 ## Provenance
 
 | | |
@@ -302,6 +338,12 @@ So the baseline is a dump, not a replay. **Derivation is a one-time act; it is n
 coupling.** This file is pinned in git and reviewed in a PR, so every developer and every CI
 run gets identical bytes — the same relationship a lockfile has to a registry.
 
+⭐ **Dated note, 2026-09-23 (Phase 164.4.2 DECISION F).** The claim above about replaying the chain
+**from EMPTY** stands unchanged — the lane still never does that. What is new is a **TAIL** replay:
+on top of this dump, the lane applies only the migrations the dump does not carry (named by
+`baseline-carried-migrations.txt`), and that is now its normal boot path. See the DECISION F
+section near the top of this file.
+
 ## ✅ GATED as of 2026-09-07 (Phase 164.5) — WINDOWS.md 29 is closed
 
 ⚠️ **This section said the opposite until 2026-09-07 and the claim outlived its truth by nine
@@ -346,6 +388,29 @@ grep -anE 'postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase
 ```
 
 Any hit on the second command means **do not commit**.
+
+⛔ **Then regenerate `supabase/schema/baseline-carried-migrations.txt` in the SAME commit** (Phase
+164.4.2 DECISION F). Take the list from the tree of the merge whose PRODUCTION apply preceded the
+dump — not from your working tree, which may hold migrations PRODUCTION has not received — and
+recompute the sha line:
+
+```
+MERGE=<the merge commit whose Production apply preceded the dump>
+{ sed -n '/^#/p' supabase/schema/baseline-carried-migrations.txt
+  printf 'baseline-sha256: %s\n' "$(shasum -a 256 supabase/schema/baseline.sql | cut -d' ' -f1)"
+  git ls-tree --name-only "$MERGE" supabase/migrations/ | grep '\.sql$' | sed 's#.*/##' | sort
+} > /tmp/carried && mv /tmp/carried supabase/schema/baseline-carried-migrations.txt
+bash scripts/local-stack/run.sh --check-currency   # expect marker-sha=match defects=0
+```
+
+**If this step is skipped,** the lane refuses to boot with `marker-sha-mismatch` — the new dump's
+sha256 no longer matches the marker's — rather than replaying against a list that describes a
+different dump. That refusal is the point.
+
+**Regenerate-then-shrink.** Each regeneration moves the migrations it now carries from the replay
+set into the marker, so the set the lane replays shrinks back toward zero. Refreshing the dump is
+therefore periodic upkeep, **not** a per-migration founder action: between regenerations a new
+migration simply replays on the lane.
 
 ⚠️ **SP-M03 — the CLAIM used to exceed the COMMAND.** The certification above names five
 classes (DSN, `\connect`, `ALTER DATABASE`, JWT, project ref); this grep matched only three

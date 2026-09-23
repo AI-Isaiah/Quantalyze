@@ -28,18 +28,21 @@
  * It also asserts the lane files carry NO skip gate, because a lane job that runs a
  * silently-skipping spec reproduces the tombstone with all the wiring intact.
  *
- * And (Phase 164.4.2) that the lane's boot path REFUSES a baseline dump older than
- * supabase/migrations/ — a lane wired end to end onto a stale schema is green for
- * a catalogue that is not PROD's.
+ * And (Phase 164.4.2) that the lane's boot path DETERMINES WHICH migrations the dump
+ * does not carry before psql reads it, replays exactly those, and refuses when the
+ * set cannot be determined — a lane wired end to end onto a schema missing real
+ * migrations is green for a catalogue that is not PROD's. (Plan 03 pinned a REFUSAL
+ * of any newer migration; DECISION F, plan 06, replaced it with "bound and name".)
  */
 
 // @vitest-environment node
 
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
-  chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -243,14 +246,17 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
     }
   });
 
-  // ⭐ Phase 164.4.2 plan 03. The lane loads a DUMP, and a migration can land
-  // after it was taken. MEASURED (164.4.2 CONTEXT Area A): two migrations sat
-  // after the dump while this lane was green, because nothing in the boot path
-  // compared the two. The claim pinned here is deliberately narrow — the boot
-  // path REFUSES a dump older than supabase/migrations/ before psql reads it.
-  // It says nothing about whether the dump's CONTENT is right; that is
-  // baseline-content-drift-check's question, not this one.
-  it("the lane's boot path measures baseline CURRENCY before psql loads the dump, and the call it makes refuses a stale dump", () => {
+  // ⭐ Phase 164.4.2 plan 03, RE-ARGUED by plan 06 (DECISION F, founder
+  // 2026-09-23). The lane loads a DUMP, and a migration can land after it was
+  // taken. MEASURED (164.4.2 CONTEXT Area A): two migrations sat after the dump
+  // while this lane was green, because nothing in the boot path compared the two.
+  // Plan 03 pinned a REFUSAL of any dump older than supabase/migrations/; D-F
+  // replaced that with "bound and name": the boot path determines, before psql
+  // reads the dump, exactly which migrations the committed marker says the dump
+  // does NOT carry, replays those, and refuses only when the set cannot be
+  // determined. It says nothing about whether the dump's CONTENT is right; that
+  // is baseline-content-drift-check's question, not this one.
+  it("the lane's boot path determines the replay set before psql loads the dump, and replays exactly the migrations the marker does not carry", () => {
     const lane = read(RUN_SH);
 
     // (1) load_baseline() guards on the gate, the guard ABORTS, and it runs
@@ -288,46 +294,179 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       "--check-currency no longer runs check_baseline_currency, so it can pass while load_baseline() refuses (or the reverse)",
     ).toContain("check_baseline_currency");
 
-    // (3) BEHAVIOUR, both directions, through the lane's own FRESHNESS_TS_CMD
-    // pass-through. A check proven in one direction is half a check: the stale
-    // stub must REFUSE with the gate's own phrase, and the fresh stub must pass.
-    const dir = mkdtempSync(join(tmpdir(), "lane-currency-"));
+    // (3) BEHAVIOUR, through the lane's own LANE_MIGRATIONS_DIR /
+    // LANE_CARRIED_MARKER / LANE_REFDATA_ALLOWLIST seams, in a throwaway
+    // directory — no Docker. ⛔ RETIRED here, not inverted silently: plan 03's
+    // stale-epoch stub (FRESHNESS_TS_CMD reporting a dump older than the
+    // migrations -> exit 1) no longer describes the lane. Under D-F a migration
+    // newer than the dump is the NORMAL case and must boot; the refusal now
+    // belongs to an UNDETERMINABLE set, and each shape of that is pinned below.
+    const dir = mkdtempSync(join(tmpdir(), "lane-replay-"));
     try {
-      const stub = (name: string, baselineEpoch: number, migrationsEpoch: number) => {
-        const p = join(dir, `${name}.sh`);
-        writeFileSync(
-          p,
-          `#!/usr/bin/env bash\ncase "$1" in *baseline.sql) echo ${baselineEpoch} ;; *) echo ${migrationsEpoch} ;; esac\n`,
-        );
-        chmodSync(p, 0o755);
-        // The gate splits FRESHNESS_TS_CMD on whitespace, so a spaced tmpdir
-        // would silently run a different binary.
-        expect(/\s/.test(p), `stub path contains whitespace: ${p}`).toBe(false);
+      const A = "20260101000000_lane_pin_a.sql";
+      const B = "20260102000000_lane_pin_b.sql";
+      const C = "20260103000000_lane_pin_c.sql";
+      const dumpSha = createHash("sha256")
+        .update(readFileSync(REPO_ROOT + "supabase/schema/baseline.sql"))
+        .digest("hex");
+      const migrationsDir = (name: string, files: string[]) => {
+        const d = join(dir, name);
+        mkdirSync(d);
+        for (const f of files) writeFileSync(join(d, f), "SELECT 1;\n");
+        return d;
+      };
+      const markerFile = (name: string, entries: string[], sha = dumpSha) => {
+        const p = join(dir, `${name}.txt`);
+        writeFileSync(p, ["# lane pin marker", `baseline-sha256: ${sha}`, ...entries].join("\n") + "\n");
         return p;
       };
-      const ask = (freshnessCmd: string) =>
-        spawnSync("bash", [RUN_SH, "--check-currency"], {
+      const ask = (env: Record<string, string>) => {
+        const r = spawnSync("bash", [RUN_SH, "--check-currency"], {
           cwd: REPO_ROOT,
           encoding: "utf8",
-          env: { ...process.env, FRESHNESS_TS_CMD: freshnessCmd },
+          env: { ...process.env, ...env },
         });
+        return { status: r.status, out: `${r.stdout}${r.stderr}` };
+      };
+      const replayLines = (out: string) => out.split("\n").filter((l) => l.startsWith("baseline-replay:"));
 
-      const stale = ask(stub("stale", 1_000_000_000, 2_000_000_000));
+      // (3a) marker current for the directory -> exit 0, K=0, printed as such.
+      const current = ask({
+        LANE_MIGRATIONS_DIR: migrationsDir("current", [A, B]),
+        LANE_CARRIED_MARKER: markerFile("current", [A, B]),
+      });
+      expect(current.status, `a marker current for its directory was refused:\n${current.out}`).toBe(0);
+      expect(current.out).toContain("carried=2 replay=0 marker-sha=match defects=0");
       expect(
-        stale.status,
-        `the lane did not refuse a baseline OLDER than the migrations (exit ${stale.status}):\n${stale.stdout}${stale.stderr}`,
-      ).toBe(1);
-      expect(stale.stdout + stale.stderr).toContain("the baseline dump is STALE");
+        current.out,
+        "K=0 must be PRINTED as an empty set — a lane that replays silently is indistinguishable from one that never looked",
+      ).toContain("baseline-replay: 0 migration(s) newer than the dump (none)");
+      expect(current.out).toMatch(/baseline-replay: excluded 0 reference-data allowlist line\(s\) naming replayed migrations: \(none\)/);
 
-      const fresh = ask(stub("fresh", 2_000_000_000, 1_000_000_000));
+      // (3b) one migration newer than the dump -> exit 0, named exactly.
+      const newer = ask({
+        LANE_MIGRATIONS_DIR: migrationsDir("newer", [A, B, C]),
+        LANE_CARRIED_MARKER: markerFile("newer", [A, B]),
+      });
       expect(
-        fresh.status,
-        `the lane refused a baseline NEWER than the migrations (exit ${fresh.status}):\n${fresh.stdout}${fresh.stderr}`,
+        newer.status,
+        `a migration newer than the dump was REFUSED — under D-F it is the normal case and must be replayed:\n${newer.out}`,
       ).toBe(0);
-      expect(fresh.stdout).toContain("defects=0");
+      expect(replayLines(newer.out)[0]).toBe(`baseline-replay: 1 migration(s) newer than the dump: ${C}`);
+
+      // (3c) marker bound to a different dump -> exit 1, marker-sha-mismatch, no set printed.
+      const mismatch = ask({
+        LANE_MIGRATIONS_DIR: migrationsDir("mismatch", [A, B]),
+        LANE_CARRIED_MARKER: markerFile("mismatch", [A, B], "0".repeat(64)),
+      });
+      expect(mismatch.status, `a marker bound to another dump booted:\n${mismatch.out}`).toBe(1);
+      expect(mismatch.out).toContain("marker-sha-mismatch");
+      expect(replayLines(mismatch.out), "an undeterminable set must never be printed as a set").toEqual([]);
+
+      // (3d) marker absent -> exit 1, marker-unreadable (never "nothing carried").
+      const absent = ask({
+        LANE_MIGRATIONS_DIR: migrationsDir("absent", [A, B]),
+        LANE_CARRIED_MARKER: join(dir, "no-such-marker.txt"),
+      });
+      expect(absent.status, `an absent marker booted:\n${absent.out}`).toBe(1);
+      expect(absent.out).toContain("marker-unreadable");
+
+      // (3e) the dump carries a migration this checkout lacks -> exit 1, dump-ahead-of-checkout.
+      const ahead = ask({
+        LANE_MIGRATIONS_DIR: migrationsDir("ahead", [A]),
+        LANE_CARRIED_MARKER: markerFile("ahead", [A, B]),
+      });
+      expect(ahead.status, `a dump ahead of the checkout booted:\n${ahead.out}`).toBe(1);
+      expect(ahead.out).toContain("dump-ahead-of-checkout");
+      expect(ahead.out).toContain(B);
+
+      // (3f) a replayed migration's reference-data allowlist line is removed from
+      // what the extractor reads, and named — so it runs once, in the replay.
+      const allow = join(dir, "allow.txt");
+      writeFileSync(
+        allow,
+        readFileSync(REPO_ROOT + "scripts/restore-test-refdata-allowlist.txt", "utf8") +
+          `${C}\tpublic.compute_job_kinds\t1\t# lane pin only\n`,
+      );
+      const refdata = ask({
+        LANE_MIGRATIONS_DIR: migrationsDir("refdata", [A, B, C]),
+        LANE_CARRIED_MARKER: markerFile("refdata", [A, B]),
+        LANE_REFDATA_ALLOWLIST: allow,
+      });
+      expect(refdata.status, `the refdata arm was refused:\n${refdata.out}`).toBe(0);
+      expect(replayLines(refdata.out)).toContain(
+        `baseline-replay: excluded 1 reference-data allowlist line(s) naming replayed migrations: ${C}`,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // ⭐ Phase 164.4.2 plan 06 (DECISION F). The ORDER and SHAPE of the boot path:
+  // the gate, the reference-data filter, the extraction and the replay read ONE
+  // list and ONE migrations directory, and a replayed file is applied as authored.
+  it("load_baseline() replays after the dump and the reference data, the extractor reads the filtered allowlist and the lane's migrations dir, and each replayed file applies with no wrapper before its ledger row", () => {
+    const lane = read(RUN_SH);
+
+    // Order: dump load -> reference data (carried migrations only) -> replay.
+    const body = liveLines(bashFunctionBody(lane, "load_baseline"));
+    const load = body.findIndex((l) => l.includes('-f "$BASELINE_FILE"'));
+    const refdata = body.findIndex((l) => /^load_reference_data\b/.test(l));
+    const replay = body.findIndex((l) => /^replay_migrations\b/.test(l));
+    expect(load, "load_baseline() no longer loads $BASELINE_FILE with psql -f").toBeGreaterThan(-1);
+    expect(refdata, "load_baseline() no longer calls load_reference_data").toBeGreaterThan(load);
+    expect(
+      replay,
+      "load_baseline() does not call replay_migrations AFTER the dump and the reference data — a migration newer than the dump would never reach the lane (or would run before the tables and rows it builds on exist)",
+    ).toBeGreaterThan(refdata);
+
+    // The extractor call: the gate-written FILTERED allowlist, and the SAME
+    // migrations directory the gate classified and the replay applies from.
+    const assign = liveLines(lane).find((l) => l.startsWith("MIGRATIONS_DIR="));
+    expect(
+      assign,
+      "MIGRATIONS_DIR is no longer resolved from LANE_MIGRATIONS_DIR — the gate, the extractor and the replay could then read different directories",
+    ).toMatch(/^MIGRATIONS_DIR="\$\{LANE_MIGRATIONS_DIR:-/);
+    const extract = liveLines(bashFunctionBody(lane, "load_reference_data")).find((l) =>
+      l.includes("extract-reference-inserts.mjs"),
+    );
+    expect(extract, "load_reference_data no longer runs the extractor").toBeDefined();
+    expect(
+      extract,
+      "the extractor is not handed the gate-written FILTERED allowlist — an allowlisted statement in a replayed migration would run twice (a plain VALUES insert: duplicate key, FATAL boot)",
+    ).toContain('--allowlist "$REFDATA_ALLOWLIST_FILTERED"');
+    expect(extract).not.toContain("restore-test-refdata-allowlist.txt");
+    expect(
+      extract,
+      "the extractor is not handed --migrations \"$MIGRATIONS_DIR\" — it would resolve allowlist entries against its repo default and refuse (or silently mis-read) every entry only the lane's directory holds",
+    ).toContain('--migrations "$MIGRATIONS_DIR"');
+    expect(extract).not.toMatch(/--migrations\s+\S*supabase\/migrations/);
+
+    // The replay: no whole-file transaction flag (long or short spelling) and no
+    // lane-added BEGIN on any psql call, and the ledger row is written by a psql
+    // call AFTER the one that applies the file. ⛔ The earlier draft of plan 06
+    // asserted the OPPOSITE (one --single-transaction call carrying both); that
+    // assertion is RETIRED, not inverted silently — a file's own COMMIT; ended
+    // the wrapper early, and a top-level CREATE INDEX CONCURRENTLY errored in it.
+    const replayBody = liveLines(bashFunctionBody(lane, "replay_migrations"));
+    for (const l of replayBody.filter((x) => x.includes('"$psql"'))) {
+      expect(l, `a replay psql call carries a whole-file transaction flag: ${l}`).not.toMatch(
+        /--single-transaction|\s-1(\s|$)/,
+      );
+    }
+    expect(
+      replayBody.some((l) => /\bBEGIN\b/.test(l)),
+      "replay_migrations adds a BEGIN of its own — a replayed file's own transaction control must govern it",
+    ).toBe(false);
+    const apply = replayBody.findIndex((l) => l.includes('"$psql"') && l.includes('-f "${MIGRATIONS_DIR}/${base}"'));
+    const ledger = replayBody.findIndex((l) =>
+      /INSERT INTO supabase_migrations\.schema_migrations .*replayed on the local-stack lane/.test(l),
+    );
+    expect(apply, "replay_migrations no longer applies ${MIGRATIONS_DIR}/${base} with psql -f").toBeGreaterThan(-1);
+    expect(
+      ledger,
+      "the replayed file's ledger row is not written AFTER (and separately from) the psql call that applies it — the ledger could then name a migration that never applied",
+    ).toBeGreaterThan(apply);
   });
 
   // ⭐ Phase 164.4.2 plan 03. The guard above compares `git log -1 --format=%ct`
@@ -336,6 +475,10 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
   // measured nothing — so the arm above would stay green over a CI that no
   // longer measures anything. This pins the CI half: both lane-booting jobs
   // fetch full history, and frontend-local-stack asks the seam before booting.
+  // ⚠️ 2026-09-23 (plan 06, DECISION F): the lane's gate now reads the committed
+  // marker, the dump's sha256 and the migrations directory ON DISK, so the
+  // shallow-clone vacuity above no longer applies to it. The fetch-depth half
+  // is kept, not deleted: it costs nothing, and the named seam step still does.
   it("both lane-booting CI jobs fetch full history, and frontend-local-stack runs the currency seam before the boot", () => {
     const jobBlock = (job: string, nextJob: string) => {
       const start = CI.indexOf(`\n  ${job}:\n`);
