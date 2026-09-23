@@ -64,10 +64,25 @@ export const GATE_FILE_RE = /^supabase\/tests\/test_[a-z0-9_]+\.sql$/;
 
 /**
  * Inputs that feed EVERY gate's mutation verdict, not one gate's. A changed path
- * under any of these forces FULL. Trailing separators inside the literals, so a
- * sibling sharing the prefix (`scripts/pg-lane-notes/`) does not match.
+ * under any of these forces FULL. Trailing separators inside the directory
+ * literals, so a sibling sharing the prefix (`scripts/pg-lane-notes/`) does not
+ * match.
+ *
+ * The three single-file entries (review 164.4.2 WR-02) are machinery that lives
+ * OUTSIDE those directories: this module (`run.mjs` imports `GATE_FILE_RE` from
+ * it, and `judge` decides the subset), `classify-changed-paths.mjs` (the one diff
+ * both callers share), and `ci.yml` (the `sql-mutation` job's pg_cron
+ * provisioning, meta-command preflight and assert step). A PR editing any of
+ * them is judged by the FULL corpus, never by the machinery it is changing.
  */
-export const MACHINERY_PREFIXES = ["scripts/mutation-runner/", "scripts/pg-lane/", "supabase/migrations/"];
+export const MACHINERY_PREFIXES = [
+  "scripts/mutation-runner/",
+  "scripts/pg-lane/",
+  "supabase/migrations/",
+  "scripts/sql-gate-subset.mjs",
+  "scripts/classify-changed-paths.mjs",
+  ".github/workflows/ci.yml",
+];
 
 /**
  * PURE: the verdict. No I/O — `presentFiles` (the changed gate paths that exist
@@ -128,7 +143,7 @@ function emit(verdict) {
 // ---------------------------------------------------------------------------
 
 /** Declared up front; a self-test that shrinks and still says PASSED is the defect. */
-export const EXPECTED_ASSERTIONS = 19;
+export const EXPECTED_ASSERTIONS = 22;
 
 const PR = "pull_request";
 const G1 = "supabase/tests/test_alpha_gate.sql";
@@ -205,6 +220,23 @@ const CASES = [
       let pass = ok(v.mode === "full" && v.reason.includes("scripts/mutation-runner/run.mjs"), "the runner itself forces FULL");
       const m = judge({ event: PR, changedFiles: [G1, "supabase/migrations/20260923000000_x.sql"], presentFiles: [G1] });
       return ok(m.mode === "full", "a migration a gate may apply forces FULL") && pass;
+    },
+  },
+  {
+    claim: "a change to the code that DECIDES the subset, or to the job that runs it -> FULL naming it",
+    run: (ok) => {
+      // Review 164.4.2 WR-02 (+ the silent-failure-hunter widening). run.mjs
+      // imports GATE_FILE_RE from this module, both callers share one diff in
+      // classify-changed-paths.mjs, and ci.yml holds the sql-mutation job's
+      // pg_cron provisioning, meta-command preflight and assert step. Each
+      // feeds every gate's verdict, so a PR touching one plus one gate file
+      // must not be judged by the machinery it is changing.
+      let pass = true;
+      for (const f of ["scripts/sql-gate-subset.mjs", "scripts/classify-changed-paths.mjs", ".github/workflows/ci.yml"]) {
+        const v = judge({ event: PR, changedFiles: [G1, f], presentFiles: [G1] });
+        pass = ok(v.mode === "full" && v.reason.includes(f), `${f} forces FULL, named (got ${v.mode}: ${JSON.stringify(v.reason)})`) && pass;
+      }
+      return pass;
     },
   },
   {
