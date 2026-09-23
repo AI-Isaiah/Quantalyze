@@ -105,6 +105,52 @@ function git(args) {
 }
 
 /**
+ * The merge-base ref a pull request is diffed against: `origin/<GITHUB_BASE_REF>`,
+ * or `origin/main` when the variable is absent.
+ */
+export function baseRefFor(baseRefName = process.env.GITHUB_BASE_REF) {
+  return baseRefName ? `origin/${baseRefName}` : "origin/main";
+}
+
+/**
+ * THE changed-file list against the PR's merge base — the ONE implementation in
+ * this repo (Phase 164.4.2 plan 07). Lifted out of `main()` byte-for-byte in
+ * behaviour so `scripts/sql-gate-subset.mjs` can be a second CALLER rather than
+ * a second diff: two diffs that agree today can disagree tomorrow, one gaining
+ * `--no-renames` and the other not, and a moved gate file would then read as
+ * unchanged to exactly one of them.
+ *
+ * ⛔ THROWS on an unreadable base — a `MEASURE_FAIL:` error, never `[]`. `git
+ * diff` against a missing ref exits non-zero and prints nothing, and "nothing"
+ * is exactly what "no files changed" looks like to a caller that swallows it.
+ *
+ * @param {{baseRefName?: string}} [opts]
+ * @returns {string[]} repo-relative paths, in the order git printed them
+ */
+export function changedFilesAgainstBase({ baseRefName = process.env.GITHUB_BASE_REF } = {}) {
+  const baseRef = baseRefFor(baseRefName);
+  try {
+    // ⚠️ `--no-renames` is MANDATORY, not stylistic. With rename detection a
+    // `src/x.ts` → `.planning/x.md` rename prints ONLY the destination, so a
+    // deleted code file would classify as docs-only and skip the corpus that
+    // would have noticed. `check-version-bump.mjs` carries this same hole today
+    // and is deliberately NOT being changed here — a named, routed divergence
+    // rather than drift, and a behavioural edit to an always-on gate is out of
+    // this phase's scope.
+    //
+    // The base ref is passed as an argv ELEMENT to execFileSync, never
+    // interpolated into a shell string: `GITHUB_BASE_REF` is a branch name and
+    // on a fork PR an untrusted contributor chooses it.
+    return git(["diff", "--name-only", "--no-renames", `${baseRef}...HEAD`])
+      .split("\n")
+      .filter(Boolean);
+  } catch (e) {
+    // ⛔ A gate that cannot read cannot report a pass.
+    throw new Error(`MEASURE_FAIL: could not read ${baseRef} — ${e.message}`);
+  }
+}
+
+/**
  * One machine-readable summary line always; the `$GITHUB_OUTPUT` append only
  * when the variable is present, so a bare local run still works the way every
  * other script in `scripts/` does.
@@ -217,6 +263,29 @@ const CASES = [
       return pass;
     },
   },
+  {
+    claim: "an UNREADABLE diff base THROWS a MEASURE_FAIL — the shared diff never answers `[]` for it",
+    run: (ok) => {
+      // A real `git diff` against a ref that cannot exist: exactly the missing-
+      // base shape, where git exits non-zero and prints no names. The function
+      // is shared with scripts/sql-gate-subset.mjs, so an `[]` here would read
+      // as "no gate file changed" there and as "no file changed" here.
+      let threw = null;
+      let returned;
+      try {
+        returned = changedFilesAgainstBase({ baseRefName: "gsd-self-test-no-such-base-ref" });
+      } catch (e) {
+        threw = e;
+      }
+      let pass = ok(threw !== null, `the diff THREW rather than returning ${JSON.stringify(returned)}`);
+      pass =
+        ok(
+          threw !== null && threw.message.startsWith("MEASURE_FAIL: could not read origin/gsd-self-test-no-such-base-ref"),
+          "and the error is the named MEASURE_FAIL naming the unreadable ref",
+        ) && pass;
+      return pass;
+    },
+  },
 ];
 
 function selfTest() {
@@ -270,26 +339,14 @@ function main() {
     return 0;
   }
 
-  const baseRef = process.env.GITHUB_BASE_REF ? `origin/${process.env.GITHUB_BASE_REF}` : "origin/main";
+  const baseRef = baseRefFor();
   let changedFiles;
   try {
-    // ⚠️ `--no-renames` is MANDATORY, not stylistic. With rename detection a
-    // `src/x.ts` → `.planning/x.md` rename prints ONLY the destination, so a
-    // deleted code file would classify as docs-only and skip the corpus that
-    // would have noticed. `check-version-bump.mjs` carries this same hole today
-    // and is deliberately NOT being changed here — a named, routed divergence
-    // rather than drift, and a behavioural edit to an always-on gate is out of
-    // this phase's scope.
-    //
-    // The base ref is passed as an argv ELEMENT to execFileSync, never
-    // interpolated into a shell string: `GITHUB_BASE_REF` is a branch name and
-    // on a fork PR an untrusted contributor chooses it.
-    changedFiles = git(["diff", "--name-only", "--no-renames", `${baseRef}...HEAD`])
-      .split("\n")
-      .filter(Boolean);
+    changedFiles = changedFilesAgainstBase();
   } catch (e) {
-    // ⛔ A gate that cannot read cannot report a pass.
-    console.error(`MEASURE_FAIL: could not read ${baseRef} — ${e.message}`);
+    // ⛔ A gate that cannot read cannot report a pass. The message is the
+    // `MEASURE_FAIL: could not read <ref> — <cause>` line, printed as before.
+    console.error(e.message);
     return 1;
   }
 
