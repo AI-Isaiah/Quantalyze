@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "167"
-current_phase_name: "CREDTRUST — an invalid venue credential is named to the customer"
+current_phase: "167.1"
+current_phase_name: "AUMTRUST — the headline AUM says when it includes holdings from keys needing attention"
 status: "Phase 164.9 shipped — PR #837"
 stopped_at: Phase 167.1 UI-SPEC approved
-last_updated: "2026-09-23T21:33:49.537Z"
+last_updated: "2026-09-23T22:17:12.904Z"
 last_activity: 2026-09-22
 last_activity_desc: "Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction. Phase 167 CREDTRUST context locked 2026-09-22. Plan 167-01 (wizard SIGN_IN_FAILED mint) shipped. Plan 167-02 (D-09/D-10, six retry-disposition guards on allocator_positions.py's MT5/sFOX arms + AST roster case) shipped this session, commits 5c48916a + 26c83dc3 — see 167-02-SUMMARY.md."
-state_head: cf994639efac09d040b6a8e06bc0c988966cdeb8
+state_head: 84e40f50681107640aee1bd25a02496a5a1a3f17
 progress:
   total_phases: 50
   completed_phases: 32
-  total_plans: 244
+  total_plans: 250
   completed_plans: 237
-  percent: 64
+  percent: 60
 ---
 
 ## ⭐ STATE lineage
@@ -179,7 +179,7 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 159 — RANK — Public-ranking integrity
+Phase: 167.1 (aumtrust-the-headline-aum-says-when-it-includes-holdings-fro) — READY TO EXECUTE
 Plan: Not started
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
@@ -956,7 +956,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [██████░░░░] 64%
+Progress: [██████░░░░] 60%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 

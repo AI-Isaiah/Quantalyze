@@ -2880,11 +2880,29 @@ Plans:
 **Goal:** The allocator KPI strip's headline AUM stops presenting a number as current when part of it comes from keys whose sync is untrusted (`isUntrustedKeySyncStatus`: `revoked`, `sign_in_failed`), while the holdings table on the same page already strikes those rows through as not current.
 **Requirements**: TBD. Source: Phase 167 silent-failure review M2 (2026-09-22); booked as `.planning/WINDOWS.md` entry 66. ⛔ A money-number change — the math in `src/lib/queries.ts` (`emptyLiveBaselineMetrics`, `liveBaselineMetricsFromPerKeyDailies`) is NOT to be changed silently; ⭐ **FOUNDER DECISION 2026-09-22: keep the total and FLAG it** — the headline shows the full number with a marker naming how much comes from keys needing attention (e.g. "includes $X from keys needing attention"). Excluding them was rejected: a password rotation would read as an AUM loss. Nothing silently disappears, and the headline stays reconcilable with the holdings table.
 **Depends on:** Phase 167
-**Plans:** 0 plans
+**Plans:** 6 plans
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 167.1 to break down)
+- [ ] 167.1-01-PLAN.md — composer AUM marker tracer: single-pass `summarizeLiveHoldings`, State A "Includes $X from keys needing attention" beside the field, unit pins (wave 1)
+- [ ] 167.1-02-PLAN.md — Open Positions footer qualifier on "Total unrealized P&L (equity contribution)" (wave 1, D-16)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 167.1-03-PLAN.md — composer marker State B inside the override note, every absence state, tone and the component D-06 pin (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 167.1-04-PLAN.md — premise corrections (closed-sets prose, this entry) and the interim byte-identity gate (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 167.1-05-PLAN.md — D-06 founder decision (`checkpoint:decision`, recommended option b) and its implementation; execution stops here for the answer (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 167.1-06-PLAN.md — WINDOWS 66 closed, final byte-identity gate, and the ONE release commit carrying the D-06 outcome (D-14: the last plan releases) (wave 5)
 
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 
