@@ -180,7 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 164.4.2 (SUBSETSPLIT) — EXECUTING
-Plan: 4 of 9 (waves 1–2 complete: plans 01–03)
+Plan: 5 of 9 (waves 1–3 complete: plans 01–04; plan 04 decision PROCEED)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
