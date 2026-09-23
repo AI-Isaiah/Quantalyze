@@ -28,9 +28,16 @@
  * with a name that matches what it measures.
  *
  * An unreadable timestamp is refused BY NAME before any numeric comparison
- * runs — a shallow clone or a missing path prints nothing, and nothing is
- * not an epoch. Treating "could not measure" as "measured fresh" would let a
- * CI runner with a shallow checkout pass this gate vacuously.
+ * runs — a missing path prints nothing, and nothing is not an epoch.
+ * Treating "could not measure" as "measured fresh" would let a CI runner pass
+ * this gate vacuously.
+ *
+ * ⛔ CORRECTED 2026-09-24 (review 164.4.2 WR-05): this paragraph used to say a
+ * SHALLOW clone "prints nothing" too. It does not — HEAD is a grafted root that
+ * introduces every path, so both epochs print HEAD's time, compare equal, and
+ * equal reads as fresh. A shallow history is now refused by name
+ * (`history-shallow`) before the epochs are compared, whenever the freshness
+ * command reads git history.
  *
  * `--self-test` drives `judge()` directly over every named defect kind,
  * proving the refusal fires rather than assuming it.
@@ -73,7 +80,7 @@ import { readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const DEFECTS = ["baseline-stale", "baseline-epoch-unreadable", "migrations-epoch-unreadable"];
+export const DEFECTS = ["baseline-stale", "baseline-epoch-unreadable", "migrations-epoch-unreadable", "history-shallow"];
 
 const EPOCH_RE = /^[0-9]+$/;
 
@@ -88,20 +95,39 @@ const EPOCH_RE = /^[0-9]+$/;
  * unreadable value would be a comparison against nothing.
  *
  * @param {{baselineEpoch: string, migrationsEpoch: string,
- *          baselineFile?: string, migrationsDir?: string}} facts
+ *          baselineFile?: string, migrationsDir?: string, shallow?: string}} facts
  *   `baselineFile`/`migrationsDir` are labels used only in message text; they
  *   default to generic descriptors so a caller that only has the two epochs
- *   still gets correct decision logic.
+ *   still gets correct decision logic. `shallow` is `git rev-parse
+ *   --is-shallow-repository`'s answer when the epochs come from git history
+ *   ("false" is the only answer that passes; "" means unreadable), and
+ *   `undefined` when the freshness command reads no git history.
  */
 export function judge({
   baselineEpoch,
   migrationsEpoch,
   baselineFile = "the baseline file",
   migrationsDir = "the migrations directory",
+  shallow = undefined,
 }) {
   const defects = [];
   const b = String(baselineEpoch ?? "").trim();
   const m = String(migrationsEpoch ?? "").trim();
+
+  // ⛔ BEFORE the epochs, and it RETURNS (review 164.4.2 WR-05). In a shallow
+  // clone HEAD is a grafted root introducing every path, so both epochs are
+  // HEAD's time, they compare equal, and equal reads as fresh. Two readable,
+  // equal epochs from a shallow history are not a measurement.
+  if (shallow !== undefined && String(shallow).trim() !== "false") {
+    defects.push({
+      kind: "history-shallow",
+      detail:
+        `the git history is SHALLOW (git rev-parse --is-shallow-repository printed '${String(shallow).trim()}'), ` +
+        `so the last-changed epochs of ${baselineFile} and ${migrationsDir} are both the grafted root's time ` +
+        `and cannot be compared. Check out with full history (fetch-depth: 0).`,
+    });
+    return defects;
+  }
 
   // ⛔ FIRST, and it RETURNS: an unreadable epoch is never fresh, and a
   // comparison against it would be a comparison against nothing. Mirrors
@@ -145,13 +171,14 @@ export function judge({
 }
 
 /**
- * How many `ok()` calls the sections below are declared to run: 11 across the
- * eight default-mode sections, plus 25 across the fourteen `--replay-set`
- * sections (Phase 164.4.2 plan 06; +5 in R10 by review 164.4.2 WR-04).
+ * How many `ok()` calls the sections below are declared to run: 15 across the
+ * nine default-mode sections (+4 in section 8 by review 164.4.2 WR-05), plus 25
+ * across the fourteen `--replay-set` sections (Phase 164.4.2 plan 06; +5 in R10
+ * by review 164.4.2 WR-04).
  * ⛔ Raise it only together with the arm that adds one; lowering it to make a
  * run green is deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 36;
+export const EXPECTED_ASSERTIONS = 40;
 
 function selfTest() {
   let pass = true;
@@ -163,19 +190,19 @@ function selfTest() {
     return cond;
   };
 
-  console.log("=== SELF-TEST 1/8: baseline epoch > migrations epoch -> clean");
+  console.log("=== SELF-TEST 1/9: baseline epoch > migrations epoch -> clean");
   ok(
     judge({ baselineEpoch: "2000000000", migrationsEpoch: "1000000000" }).length === 0,
     "no defects when the baseline is newer than the migrations dir",
   );
 
-  console.log("=== SELF-TEST 2/8: baseline epoch == migrations epoch -> clean (the comparator uses -lt, not -le)");
+  console.log("=== SELF-TEST 2/9: baseline epoch == migrations epoch -> clean (the comparator uses -lt, not -le)");
   ok(
     judge({ baselineEpoch: "1500000000", migrationsEpoch: "1500000000" }).length === 0,
     "equal epochs are fresh enough",
   );
 
-  console.log("=== SELF-TEST 3/8: baseline epoch < migrations epoch -> baseline-stale, phrase and both epochs present");
+  console.log("=== SELF-TEST 3/9: baseline epoch < migrations epoch -> baseline-stale, phrase and both epochs present");
   const d3 = judge({
     baselineEpoch: "1000000000",
     migrationsEpoch: "2000000000",
@@ -192,13 +219,13 @@ function selfTest() {
     "the message names BOTH epochs, so a reader can tell which side is behind",
   );
 
-  console.log("=== SELF-TEST 4/8: baseline timestamp empty -> baseline-epoch-unreadable");
+  console.log("=== SELF-TEST 4/9: baseline timestamp empty -> baseline-epoch-unreadable");
   ok(
     judge({ baselineEpoch: "", migrationsEpoch: "1000000000" }).some((d) => d.kind === "baseline-epoch-unreadable"),
     "an empty baseline epoch is refused by name — an unreadable timestamp is not a fresh one",
   );
 
-  console.log("=== SELF-TEST 5/8: baseline timestamp non-numeric -> same defect kind");
+  console.log("=== SELF-TEST 5/9: baseline timestamp non-numeric -> same defect kind");
   ok(
     judge({ baselineEpoch: "not-a-number", migrationsEpoch: "1000000000" }).some(
       (d) => d.kind === "baseline-epoch-unreadable",
@@ -206,7 +233,7 @@ function selfTest() {
     "a non-numeric baseline epoch is the SAME kind as an empty one",
   );
 
-  console.log("=== SELF-TEST 6/8: migrations timestamp empty or non-numeric -> migrations-epoch-unreadable");
+  console.log("=== SELF-TEST 6/9: migrations timestamp empty or non-numeric -> migrations-epoch-unreadable");
   ok(
     judge({ baselineEpoch: "1000000000", migrationsEpoch: "" }).some(
       (d) => d.kind === "migrations-epoch-unreadable",
@@ -220,19 +247,44 @@ function selfTest() {
     "a non-numeric migrations epoch is refused by name",
   );
 
-  console.log("=== SELF-TEST 7/8: an unreadable baseline is checked BEFORE migrations (bash's own order)");
+  console.log("=== SELF-TEST 7/9: an unreadable baseline is checked BEFORE migrations (bash's own order)");
   const d7 = judge({ baselineEpoch: "", migrationsEpoch: "" });
   ok(
     d7.length === 1 && d7[0].kind === "baseline-epoch-unreadable",
     "when BOTH epochs are unreadable, only baseline-epoch-unreadable fires — a comparison against two unreadable values would be a comparison against nothing, twice",
   );
 
-  console.log("=== SELF-TEST 8/8: every kind judge() can emit is named in DEFECTS");
+  // Review 164.4.2 WR-05. In a `--depth 1` clone HEAD is a grafted root that
+  // introduces every path, so `git log -1 --format=%ct -- <path>` prints HEAD's
+  // time for BOTH sides; they compare equal, and equal reads as fresh. The
+  // epochs cannot say so themselves, so shallowness is its own fact, measured
+  // whenever the freshness command reads git history.
+  console.log("=== SELF-TEST 8/9: a SHALLOW history is refused by name, even when its equal epochs would read fresh");
+  const d8 = judge({ baselineEpoch: "1500000000", migrationsEpoch: "1500000000", shallow: "true" });
+  ok(
+    d8.length === 1 && d8[0].kind === "history-shallow",
+    `a shallow clone's equal epochs yield history-shallow, never 'fresh' (got ${JSON.stringify(d8.map((d) => d.kind))})`,
+  );
+  ok(
+    judge({ baselineEpoch: "1500000000", migrationsEpoch: "1500000000", shallow: "" }).some((d) => d.kind === "history-shallow"),
+    "an UNREADABLE shallowness answer is refused the same way — could-not-measure is not measured-deep",
+  );
+  ok(
+    judge({ baselineEpoch: "1500000000", migrationsEpoch: "1500000000", shallow: "false" }).length === 0,
+    "CONTROL: a full history with equal epochs is still fresh",
+  );
+  ok(
+    judge({ baselineEpoch: "1500000000", migrationsEpoch: "1500000000" }).length === 0,
+    "CONTROL: a freshness command that reads no git history (shallow not applicable) is judged on its epochs",
+  );
+
+  console.log("=== SELF-TEST 9/9: every kind judge() can emit is named in DEFECTS");
   const emitted = new Set(
     [
       ...judge({ baselineEpoch: "1000000000", migrationsEpoch: "2000000000" }),
       ...judge({ baselineEpoch: "", migrationsEpoch: "1000000000" }),
       ...judge({ baselineEpoch: "1000000000", migrationsEpoch: "" }),
+      ...judge({ baselineEpoch: "1000000000", migrationsEpoch: "1000000000", shallow: "true" }),
     ].map((d) => d.kind),
   );
   ok(
@@ -407,7 +459,7 @@ function selfTest() {
     return 1;
   }
   console.log(
-    `=== SELF-TEST PASSED: ${asserted}/${EXPECTED_ASSERTIONS} declared assertions across 8 default-mode + 14 replay-set sections, ` +
+    `=== SELF-TEST PASSED: ${asserted}/${EXPECTED_ASSERTIONS} declared assertions across 9 default-mode + 14 replay-set sections, ` +
       `every defect kind fired on its own input ===`,
   );
   return 0;
@@ -428,6 +480,18 @@ function readEpoch(freshnessCmd, path) {
   try {
     const out = execFileSync(bin, [...rest, path], { encoding: "utf8" });
     return (out.split("\n")[0] ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+/** `git rev-parse --is-shallow-repository`, or "" when git could not answer. */
+function readShallow() {
+  try {
+    return execFileSync("git", ["rev-parse", "--is-shallow-repository"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
   } catch {
     return "";
   }
@@ -843,8 +907,13 @@ function main(argv) {
 
   const baselineEpoch = readEpoch(freshnessCmd, baselineFile);
   const migrationsEpoch = readEpoch(freshnessCmd, migrationsDir);
+  // Shallowness is a fact about GIT history, so it is measured only when the
+  // freshness command reads git history; an injected stub (the restore
+  // script's self-test) is judged on its epochs alone.
+  const readsGit = String(freshnessCmd).trim().split(/\s+/)[0] === "git";
+  const shallow = readsGit ? readShallow() : undefined;
 
-  const defects = judge({ baselineEpoch, migrationsEpoch, baselineFile, migrationsDir });
+  const defects = judge({ baselineEpoch, migrationsEpoch, baselineFile, migrationsDir, shallow });
 
   // Never let "clean" and "did not run" look alike: this line prints on
   // every exit, defects=0 included.
