@@ -9895,7 +9895,7 @@ CREATE TABLE IF NOT EXISTS "public"."api_keys" (
     "venue_account_id" "text",
     CONSTRAINT "api_keys_attested_venue_matches_exchange" CHECK ((("attested_venue" IS NULL) OR ("attested_venue" = "exchange"))),
     CONSTRAINT "api_keys_exchange_check" CHECK (("exchange" = ANY (ARRAY['binance'::"text", 'okx'::"text", 'bybit'::"text", 'deribit'::"text", 'sfox'::"text", 'mt5'::"text"]))),
-    CONSTRAINT "api_keys_sync_status_check" CHECK (("sync_status" = ANY (ARRAY['idle'::"text", 'syncing'::"text", 'computing'::"text", 'complete'::"text", 'complete_with_warnings'::"text", 'error'::"text", 'revoked'::"text", 'rate_limited'::"text"]))),
+    CONSTRAINT "api_keys_sync_status_check" CHECK (("sync_status" = ANY (ARRAY['idle'::"text", 'syncing'::"text", 'computing'::"text", 'complete'::"text", 'complete_with_warnings'::"text", 'error'::"text", 'revoked'::"text", 'rate_limited'::"text", 'sign_in_failed'::"text"]))),
     CONSTRAINT "api_keys_venue_account_id_nonblank" CHECK ((("venue_account_id" IS NULL) OR ("btrim"("venue_account_id") <> ''::"text")))
 );
 

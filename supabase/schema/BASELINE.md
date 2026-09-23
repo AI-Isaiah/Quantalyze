@@ -48,10 +48,10 @@ SP-M03 records what happens when they drift apart.
 
 | | |
 |---|---|
-| Taken | 2026-09-22 |
+| Taken | 2026-09-23 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
 | Supabase CLI | 2.84.2 (CI pins 2.98.2 — see the caveat below) |
-| sha256 | `447a3a609b7195ef7e70ee0c0e71c9fbefce07aebac9188bf8672d29df628129` |
+| sha256 | `efe49c155bed58d885e8779d6b54df80d51395cddaf1ef603fb5aae1a6e88aa6` |
 | Shape | 63 tables, 155 policies, 123 function statements (121 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
@@ -59,6 +59,36 @@ Secret-scanned before commit with the exact pattern recorded in
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-09-23 — the Phase 167 apply, one widened CHECK, nothing else
+
+⛔ **A SEPARATE REVIEWED ACT, taken by the founder** with a read-only `supabase db dump --linked`
+(CLI 2.84.2); this checkout runs no database command against a remote. Taken AFTER Phase 167's
+migration had applied to PRODUCTION (Supabase Migrate run `35819065230`, `apply` job success, on
+merge commit `2091fea6`), so the dump carries it rather than predating it.
+
+**Which migrations the new dump now carries** — measured, not assumed, as the complete set added
+since the 2026-09-22 capture:
+
+| migration | what it adds | expected shape delta |
+|---|---|---|
+| `20260922120000_api_keys_sync_status_sign_in_failed.sql` | widens `api_keys_sync_status_check` to admit `sign_in_failed` | none of the counted shapes |
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Diff against the prior capture | **exactly one line** — the `api_keys_sync_status_check` definition, now ending in `'sign_in_failed'`; every prior value still present |
+| Shape | 63 tables, 155 policies, 123 function statements / 121 distinct names — **unchanged**, as a CHECK widening must leave them |
+| Data statements | **0** — unchanged, as a schema-only dump must be |
+| sha256 | `447a3a60…` → `efe49c15…` |
+| Secret scan (all five classes) | **0** matches; gitleaks over the file: no leaks |
+| Home path / local username | 0 matches |
+| File integrity | single `SET client_encoding`, no NUL bytes; leading/trailing whitespace shape (3 / 32) byte-identical to the prior capture |
+
+⚠️ The dump ran while a full vitest run was reading the tree. Per the 2026-09-22 hazard note
+below, `-f` truncates the target for the dump's whole duration, so any baseline-reading test in
+that run is re-run after the dump rather than trusted.
 
 ### Regenerated 2026-09-22 — the two migrations that landed after the 2026-09-18 capture
 
