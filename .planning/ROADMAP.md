@@ -2395,7 +2395,7 @@ Plans:
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS `MYPY-MAINPY-01`
 
 **Depends on:** Phase 164.6 (ordering only — no code dependency)
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans executed
 
 Plans:
 **Wave 1**
@@ -2404,7 +2404,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 164.6.1-02-PLAN.md — wave 2: `ci-mypy-strict-surface.contract.test.ts` pins CI set == disk set == Makefile set with calibration legs; registry floor 60 → 61; TODOS `[MYPY-MAINPY-01]` closed in code with D-06b OPEN
+- [x] 164.6.1-02-PLAN.md — wave 2: `ci-mypy-strict-surface.contract.test.ts` pins CI set == disk set == Makefile set with calibration legs; registry floor 60 → 61; TODOS `[MYPY-MAINPY-01]` closed in code with D-06b OPEN
 
 ### Phase 164.6.2: MT5RELOGIN — the MT5 gateway re-establishes its broker session without a human (INSERTED)
 
