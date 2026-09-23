@@ -2345,6 +2345,11 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("the SUBSET the run printed is not the SUBSET changed-paths derived");
     expect(r.out).toContain("test_allocator_equity_something_else.sql");
+    // Silent-failure-hunter round 2, WR-05: SQL_GATE_FILES is the list the runner
+    // was GIVEN, so this arm proves the runner mutated its input, not that the
+    // derivation was right. The message must claim no more than that.
+    expect(r.out).toContain("than the list changed-paths handed it");
+    expect(r.out).not.toContain("than this pull request changed");
     // A derived list that is absent is a MEASURE_FAIL, never a match.
     const absent = runCountRecheck(SUBSET_LOG, { ...PR, SQL_GATE_FILES: "" });
     expect(absent.status, absent.out).toBe(1);

@@ -2924,6 +2924,13 @@ jobs:
             # a same-sized swap; this compares basenames, sorted and de-duplicated
             # on both sides. The derived list is split with `read -r -a` (no
             # globbing, no eval), as the runner step splits it.
+            # ⚠️ SQL_GATE_FILES is the SAME list the runner step was handed, so
+            # this proves the runner mutated its INPUT, not that the input is
+            # the right subset (silent-failure-hunter round 2, WR-05). The
+            # derivation is proven where it runs: changed-paths runs
+            # `sql-gate-subset.mjs --self-test` before `sql-gate-subset.mjs`.
+            # It is deliberately not re-derived here — one diff implementation,
+            # never two that can drift apart.
             if [ -z "${SQL_GATE_FILES:-}" ]; then
               echo "::error::MEASURE_FAIL: the run says SUBSET but SQL_GATE_FILES (needs.changed-paths.outputs.sql_gate_files) is empty, so what the run SHOULD have mutated is unknown. An unreadable expectation is never a match."
               exit 1
@@ -2932,7 +2939,7 @@ jobs:
             derived_set=$(for p in "${derived_paths[@]}"; do printf '%s\n' "${p##*/}"; done | sort -u | tr '\n' ' ')
             printed_set=$(echo "${scope_line#*annotated files: }" | tr ' ' '\n' | grep -a -v '^$' | sort -u | tr '\n' ' ' || true)
             if [ "$derived_set" != "$printed_set" ]; then
-              echo "::error::MEASURE_FAIL: the SUBSET the run printed is not the SUBSET changed-paths derived. printed: [ ${printed_set}] derived: [ ${derived_set}]. The runner mutated a different set of files than this pull request changed."
+              echo "::error::MEASURE_FAIL: the SUBSET the run printed is not the SUBSET changed-paths derived. printed: [ ${printed_set}] derived: [ ${derived_set}]. The runner mutated a different set of files than the list changed-paths handed it."
               exit 1
             fi
             expected_rows="$subset_claimed"
