@@ -33,7 +33,14 @@ import { join } from "node:path";
  *     `shell:` or `env:` that could switch it off with its run line intact), the
  *     `python` job carries no job-level `continue-on-error:`, and neither the job's
  *     nor the workflow's `defaults:` sets a `shell:`;
- *   - every `EXCLUDED` member still holds a tracked `.py` (a stale exclusion reddens).
+ *   - every `EXCLUDED` member still holds a tracked `.py` (a stale exclusion reddens);
+ *   - the mypy CONFIG it runs under: `analytics-service/pyproject.toml` has one
+ *     `[tool.mypy]` whose keys are EXACTLY `python_version strict follow_imports`
+ *     with `strict = true` and `follow_imports = "silent"` (so no `exclude`,
+ *     `files` or `ignore_errors`), its `[[tool.mypy.overrides]]` name EXACTLY
+ *     the hand-typed third-party set and carry no `ignore_errors`, no tracked
+ *     `mypy.ini` / `.mypy.ini` shadows it, and no surface `.py` file carries a
+ *     `# mypy:` comment or a top-of-file bare `# type: ignore`.
  *   The D-02 before/after record this pin keeps from going stale:
  *     BEFORE: `services/ routers/ models/` — 96 source files as mypy counts them.
  *     AFTER:  that set plus exactly `main.py main_worker.py main_worker_healthz.py
@@ -57,6 +64,7 @@ const ROOT = process.cwd();
 const STEP_NAME = "Type gate - mypy strict over the running-service surface";
 const CI_YML = join(ROOT, ".github/workflows/ci.yml");
 const MAKEFILE = join(ROOT, "analytics-service/Makefile");
+const PYPROJECT = join(ROOT, "analytics-service/pyproject.toml");
 const SERVICE_DIR_REL = "analytics-service";
 
 /** The ci.yml mypy command's flag set, EXACTLY (sorted). */
@@ -398,14 +406,229 @@ function surfaceProblems(
   return problems;
 }
 
+// ── the mypy CONFIG the gate runs under ──────────────────────────────────────
+// CI runs mypy with cwd `analytics-service/`, so pyproject.toml's [tool.mypy]
+// always applies, and the Makefile recipe has no other source of flags. An
+// `ignore_errors` override, an `exclude`/`files` key, `strict = false`, or
+// `follow_imports = "skip"` on a surface module weakens the gate with the ci.yml
+// line unchanged; so does a per-file `# mypy:` comment or a top-of-file bare
+// `# type: ignore`. These are pinned here.
+
+/**
+ * The third-party modules carrying a `[[tool.mypy.overrides]]` entry, EXACTLY.
+ * Hand-typed, equal to today's set: an override is only legitimate for an
+ * untyped third-party boundary, and adding a module here is a decision a
+ * reviewer must see — above all a surface module, which an override can
+ * switch off.
+ */
+const THIRD_PARTY_OVERRIDES = ["ccxt.*", "pandas.*", "pandera.*", "quantstats.*", "scipy.*"] as const;
+/** The keys `[tool.mypy]` carries, EXACTLY. */
+const MYPY_TABLE_KEYS = ["follow_imports", "python_version", "strict"] as const;
+/** The keys an override may carry. `ignore_errors` is deliberately absent. */
+const OVERRIDE_KEYS = ["follow_imports", "ignore_missing_imports", "module"] as const;
+
+interface TomlTable {
+  header: string;
+  isArray: boolean;
+  kv: Map<string, string>;
+}
+
+function stripTomlComment(line: string): string {
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === "#") return line.slice(0, i);
+  }
+  return line;
+}
+
+/**
+ * A deliberately NARROW TOML reader: table headers, array-of-table headers and
+ * single-line `key = value`. Anything else is returned as an error rather than
+ * skipped, because a construct this reader cannot parse (a multi-line array,
+ * an inline table) could carry a mypy setting it would never see.
+ */
+function parseTomlTables(text: string): { tables: TomlTable[]; errors: string[] } {
+  const tables: TomlTable[] = [{ header: "", isArray: false, kv: new Map() }];
+  const errors: string[] = [];
+  text.split("\n").forEach((raw, i) => {
+    const line = stripTomlComment(raw).trim();
+    if (!line) return;
+    let m: RegExpExecArray | null;
+    if ((m = /^\[\[\s*([^\]]+?)\s*\]\]$/.exec(line))) {
+      tables.push({ header: m[1], isArray: true, kv: new Map() });
+    } else if ((m = /^\[\s*([^\]]+?)\s*\]$/.exec(line))) {
+      tables.push({ header: m[1], isArray: false, kv: new Map() });
+    } else if ((m = /^([A-Za-z0-9_.-]+)\s*=\s*(.+)$/.exec(line))) {
+      tables[tables.length - 1].kv.set(m[1], m[2].trim());
+    } else {
+      errors.push(
+        `pyproject.toml: line ${i + 1} ${JSON.stringify(raw)} is neither a table header nor a ` +
+          `single-line \`key = value\`. This pin's reader cannot parse it, so it cannot vouch that it ` +
+          `sets no mypy option.`,
+      );
+    }
+  });
+  return { tables, errors };
+}
+
+const unquote = (v: string): string => v.trim().replace(/^(["'])(.*)\1$/, "$2");
+
+/** A TOML string or single-line string array, as a list of strings. */
+function tomlStrings(v: string): string[] {
+  const t = v.trim();
+  const inner = /^\[(.*)\]$/.exec(t);
+  if (!inner) return [unquote(t)];
+  return inner[1].split(",").map(unquote).filter(Boolean);
+}
+
+/** Every tracked `.py` file the gate checks: top-level files plus those under a surface directory. */
+function surfaceFiles(listing: string[], excluded: Record<string, string>): string[] {
+  return listing.filter((p) => {
+    if (!p.endsWith(".py")) return false;
+    if (!p.includes("/")) return true;
+    const top = pyTopDir(p);
+    return top !== null && !Object.hasOwn(excluded, top);
+  });
+}
+
+/** Every per-file mypy switch in one surface file: a `# mypy:` line, or a bare `# type: ignore` before the first statement. */
+function inlineDirectiveProblems(path: string, text: string): string[] {
+  const problems: string[] = [];
+  const lines = text.split("\n");
+  lines.forEach((l, i) => {
+    if (/^\s*#\s*mypy\s*:/.test(l)) {
+      problems.push(
+        `${path}: line ${i + 1} is an inline \`# mypy:\` config comment, which reconfigures the ` +
+          `gate for this file with the ci.yml line and pyproject.toml unchanged.`,
+      );
+    }
+  });
+  for (const [i, l] of lines.entries()) {
+    if (isContent(l)) break;
+    if (/^\s*#\s*type\s*:\s*ignore\b/.test(l)) {
+      problems.push(
+        `${path}: line ${i + 1} is a \`# type: ignore\` before the first statement, which makes mypy ` +
+          `ignore the WHOLE file.`,
+      );
+    }
+  }
+  return problems;
+}
+
+/** Every way the config or a surface file can weaken the gate unseen by the command-line pin. Empty ⇔ pinned. */
+function mypyConfigProblems(
+  pyprojectText: string,
+  listing: string[],
+  excluded: Record<string, string>,
+  readPy: (rel: string) => string,
+): string[] {
+  const problems: string[] = [];
+
+  for (const f of ["mypy.ini", ".mypy.ini"]) {
+    if (listing.includes(f)) {
+      problems.push(
+        `analytics-service/${f} is tracked. mypy reads it BEFORE pyproject.toml, so it replaces the ` +
+          `pinned [tool.mypy] configuration wholesale.`,
+      );
+    }
+  }
+
+  const { tables, errors } = parseTomlTables(pyprojectText);
+  problems.push(...errors);
+  const mypyTables = tables.filter(
+    (t) => /mypy/.test(t.header) || [...t.kv.keys()].some((k) => /mypy/.test(k)),
+  );
+  const main = mypyTables.filter((t) => t.header === "tool.mypy" && !t.isArray);
+  const overrides = mypyTables.filter((t) => t.header === "tool.mypy.overrides" && t.isArray);
+  for (const t of mypyTables) {
+    if (!main.includes(t) && !overrides.includes(t)) {
+      problems.push(
+        `pyproject.toml: the table [${t.header || "(root)"}] carries mypy configuration outside ` +
+          `[tool.mypy] and [[tool.mypy.overrides]], the only two shapes this pin reads.`,
+      );
+    }
+  }
+
+  if (main.length !== 1) {
+    problems.push(`pyproject.toml: ${main.length} [tool.mypy] table(s); exactly one is pinned.`);
+  } else {
+    const kv = main[0].kv;
+    for (const k of [...kv.keys()].sort()) {
+      if (!(MYPY_TABLE_KEYS as readonly string[]).includes(k)) {
+        problems.push(
+          `pyproject.toml: [tool.mypy] carries the key "${k}"; exactly ${JSON.stringify(MYPY_TABLE_KEYS)} ` +
+            `is allowed. A key such as \`exclude\`, \`files\` or \`ignore_errors\` narrows or weakens ` +
+            `the gate with the ci.yml line unchanged.`,
+        );
+      }
+    }
+    for (const k of MYPY_TABLE_KEYS) {
+      if (!kv.has(k)) problems.push(`pyproject.toml: [tool.mypy] lost the key "${k}".`);
+    }
+    if (kv.has("strict") && kv.get("strict") !== "true") {
+      problems.push(`pyproject.toml: [tool.mypy] sets strict = ${kv.get("strict")}; it must be true.`);
+    }
+    if (kv.has("follow_imports") && unquote(kv.get("follow_imports")!) !== "silent") {
+      problems.push(
+        `pyproject.toml: [tool.mypy] sets follow_imports = ${kv.get("follow_imports")}; it must be "silent".`,
+      );
+    }
+  }
+
+  const modules: string[] = [];
+  for (const t of overrides) {
+    for (const k of [...t.kv.keys()].sort()) {
+      if (!(OVERRIDE_KEYS as readonly string[]).includes(k)) {
+        problems.push(
+          `pyproject.toml: a [[tool.mypy.overrides]] entry carries the key "${k}"; only ` +
+            `${JSON.stringify(OVERRIDE_KEYS)} are allowed (\`ignore_errors\` switches checking off).`,
+        );
+      }
+    }
+    modules.push(...tomlStrings(t.kv.get("module") ?? ""));
+  }
+  for (const m of [...new Set(modules)].sort()) {
+    if (!(THIRD_PARTY_OVERRIDES as readonly string[]).includes(m)) {
+      problems.push(
+        `pyproject.toml: a [[tool.mypy.overrides]] entry names the module "${m}", which is not in the ` +
+          `hand-typed third-party set ${JSON.stringify(THIRD_PARTY_OVERRIDES)}. An override on a ` +
+          `surface module can switch the gate off for it.`,
+      );
+    }
+  }
+  for (const m of THIRD_PARTY_OVERRIDES) {
+    if (!modules.includes(m)) {
+      problems.push(
+        `pyproject.toml: no [[tool.mypy.overrides]] entry names "${m}" any more. Remove it from ` +
+          `THIRD_PARTY_OVERRIDES in the same commit, so the pinned set stays equal to the file.`,
+      );
+    }
+  }
+
+  for (const p of surfaceFiles(listing, excluded)) problems.push(...inlineDirectiveProblems(p, readPy(p)));
+
+  return problems;
+}
+
 // ── read ONCE at module load; the byte-unchanged arm compares disk to these ──
 const REAL_YML = readFileSync(CI_YML, "utf8");
 const REAL_MAKEFILE = readFileSync(MAKEFILE, "utf8");
+const REAL_PYPROJECT = readFileSync(PYPROJECT, "utf8");
 const REAL_LISTING = readTrackedListing();
+const readRealPy = (rel: string): string => readFileSync(join(ROOT, SERVICE_DIR_REL, rel), "utf8");
 
 describe("[164.6.1 / MYPY-MAINPY-01] the mypy --strict invocation names exactly the service surface", () => {
   it("ci.yml path set == disk-derived surface == Makefile `typecheck` set, one invocation", () => {
     const problems = surfaceProblems(REAL_YML, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(problems, problems.join("\n")).toEqual([]);
+  });
+
+  it("pyproject.toml [tool.mypy] and the surface files carry no switch that weakens the gate", () => {
+    const problems = mypyConfigProblems(REAL_PYPROJECT, REAL_LISTING, EXCLUDED, readRealPy);
     expect(problems, problems.join("\n")).toEqual([]);
   });
 });
@@ -588,6 +811,74 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
     expect(has(problems, "Makefile:", '"--no-strict-optional"'), problems.join("\n")).toBe(true);
     expect(has(problems, "ci.yml:"), problems.join("\n")).toBe(false);
+  });
+
+  // ── WR-05: pyproject.toml and inline directives ──
+  const cfg = (pyproject: string, listing = REAL_LISTING, readPy = readRealPy) =>
+    mypyConfigProblems(pyproject, listing, EXCLUDED, readPy);
+  const prepending = (rel: string, head: string) => (p: string) =>
+    p === rel ? `${head}${readRealPy(p)}` : readRealPy(p);
+
+  it("(n) an `ignore_errors = true` override for `main` → problems naming ignore_errors and main", () => {
+    const added = '\n[[tool.mypy.overrides]]\nmodule = ["main"]\nignore_errors = true\n';
+    expect(REAL_PYPROJECT.includes(added), "CALIBRATION (n): already present").toBe(false);
+    const problems = cfg(REAL_PYPROJECT + added);
+    expect(has(problems, "pyproject.toml:", '"ignore_errors"'), problems.join("\n")).toBe(true);
+    expect(has(problems, "pyproject.toml:", 'module "main"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(o) an `exclude` key in [tool.mypy] → a problem naming exclude", () => {
+    const toml = insertAfter(REAL_PYPROJECT, "strict = true\n", 'exclude = ["services/ingestion/"]\n', "(o)");
+    const problems = cfg(toml);
+    expect(has(problems, "[tool.mypy] carries the key", '"exclude"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(p) `strict = false` → a problem naming strict", () => {
+    const problems = cfg(mutate(REAL_PYPROJECT, "strict = true", "strict = false", "(p)"));
+    expect(has(problems, "strict = false"), problems.join("\n")).toBe(true);
+  });
+
+  it('(p2) [tool.mypy] `follow_imports = "skip"` → a problem naming follow_imports', () => {
+    const problems = cfg(mutate(REAL_PYPROJECT, 'follow_imports = "silent"', 'follow_imports = "skip"', "(p2)"));
+    expect(has(problems, "follow_imports", "must be \"silent\""), problems.join("\n")).toBe(true);
+  });
+
+  it("(s) a sixth module added to a third-party override → a problem naming it", () => {
+    const line = 'module = ["ccxt.*", "pandas.*", "scipy.*"]';
+    const problems = cfg(mutate(REAL_PYPROJECT, line, line.replace('"scipy.*"]', '"scipy.*", "numpy.*"]'), "(s)"));
+    expect(has(problems, 'module "numpy.*"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(t) a tracked analytics-service/mypy.ini → a problem naming it", () => {
+    const problems = cfg(REAL_PYPROJECT, [...REAL_LISTING, "mypy.ini"]);
+    expect(has(problems, "mypy.ini is tracked"), problems.join("\n")).toBe(true);
+  });
+
+  it("(u) a multi-line array the reader cannot parse → a parse problem, never a silent skip", () => {
+    const line = 'module = ["ccxt.*", "pandas.*", "scipy.*"]';
+    const problems = cfg(mutate(REAL_PYPROJECT, line, 'module = [\n  "ccxt.*",\n  "pandas.*",\n  "scipy.*",\n]', "(u)"));
+    expect(has(problems, "pyproject.toml:", "neither a table header"), problems.join("\n")).toBe(true);
+  });
+
+  it("(q) an inline `# mypy: ignore-errors` in main.py → a problem naming main.py", () => {
+    const problems = cfg(REAL_PYPROJECT, REAL_LISTING, prepending("main.py", "# mypy: ignore-errors\n"));
+    expect(has(problems, "main.py:", "inline `# mypy:`"), problems.join("\n")).toBe(true);
+  });
+
+  it("(r) a top-of-file bare `# type: ignore` in sentry_init.py → a whole-file problem naming it", () => {
+    const problems = cfg(REAL_PYPROJECT, REAL_LISTING, prepending("sentry_init.py", "# type: ignore\n"));
+    expect(has(problems, "sentry_init.py:", "ignore the WHOLE file"), problems.join("\n")).toBe(true);
+  });
+
+  it("CONFIG NON-VACUITY CONTROL — the real config and files pass; the reader actually read them", () => {
+    expect(cfg(REAL_PYPROJECT)).toEqual([]);
+    const files = surfaceFiles(REAL_LISTING, EXCLUDED);
+    expect(files.includes("main.py") && files.some((f) => f.startsWith("services/")), files.join(" ")).toBe(true);
+    expect(files.some((f) => f.startsWith("tests/")), "an EXCLUDED directory's files were scanned").toBe(false);
+    expect(readRealPy("main.py").length, "main.py read as (nearly) empty — the reader is broken").toBeGreaterThan(1000);
+    const { tables, errors } = parseTomlTables(REAL_PYPROJECT);
+    expect(errors).toEqual([]);
+    expect(tables.filter((t) => t.header === "tool.mypy.overrides").length, "no override table parsed").toBeGreaterThan(0);
   });
 
   // ⛔ WITHOUT THIS THE LEGS ABOVE PROVE NOTHING: a `surfaceProblems` that
