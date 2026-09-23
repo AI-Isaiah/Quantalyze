@@ -2563,6 +2563,60 @@ jobs:
             exit 1
           fi
 
+          # 164.4.2 / DECISION D — WHAT DID THIS RUN COVER? Read FIRST, because a
+          # SUBSET run changes which of the numbers below are comparable. The
+          # runner prints exactly one `scope:` line per corpus run (plan 07):
+          #   scope: FULL <N>/<N> annotated files
+          #   scope: FULL <N>/<N> annotated files (subset fallback: <reason>)
+          #   scope: SUBSET <k>/<N> annotated files: <basename> …
+          #   scope: DIAGNOSTIC <file-or-arm>
+          # Arms, in this step's own discipline:
+          #   (1) the line is ABSENT -> MEASURE_FAIL. A run that did not say what
+          #       it covered is NEVER assumed to have covered everything — this is
+          #       the most load-bearing arm here, because an absent line read as
+          #       FULL is exactly how a narrowed run passes for full coverage.
+          #   (1b) more than one `scope:` line -> MEASURE_FAIL: one run prints one,
+          #       so two means a log spliced from two runs.
+          #   (1c) any form other than FULL/SUBSET (DIAGNOSTIC included, which
+          #       never exits 0 anyway) -> MEASURE_FAIL: it is not this gate.
+          #   (2) SUBSET on an event that is not a pull_request -> MEASURE_FAIL.
+          #       A merge is the moment the full picture is owed; a narrowed run
+          #       on a push is a job failure, not a quiet optimisation.
+          # Arms (3) and (4) — the SUBSET claim-versus-names check, the narrowed
+          # row count, and the ARMS_FLOOR that is NOT compared — sit beside the
+          # assertions they change, below. (5) FULL, fallback form included, is
+          # judged by every existing arm unchanged, ARMS_FLOOR included.
+          set +e
+          scope_count=$(grep -a -c -E '^scope: ' "$RUNNER_LOG")
+          rc=$?
+          set -e
+          [ "$rc" -le 1 ] || { echo "::error::MEASURE_FAIL: grep exited $rc counting 'scope:' lines in $RUNNER_LOG — the log could not be read, which is not the same as a log with no scope line."; exit 1; }
+          case "$scope_count" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not count the 'scope:' lines in $RUNNER_LOG (got '$scope_count')."; exit 1;; esac
+          if [ "$scope_count" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'scope:' line, so what it covered is unknown. A run that did not say what it covered is never assumed to have covered everything: an absent scope line is not a FULL run."
+            exit 1
+          fi
+          if [ "$scope_count" -ne 1 ]; then
+            echo "::error::MEASURE_FAIL: the run printed $scope_count 'scope:' lines. One run of the gate prints exactly one; more than one means this log was not produced by one run."
+            exit 1
+          fi
+          scope_line=$(grep -a -m1 -E '^scope: ' "$RUNNER_LOG" || true)
+          echo "$scope_line"
+          event_name="${GITHUB_EVENT_NAME:-}"
+          if echo "$scope_line" | grep -a -q -E '^scope: FULL [0-9]+/[0-9]+ annotated files( \(subset fallback: .+\))?$'; then
+            scope_mode=full
+          elif echo "$scope_line" | grep -a -q -E '^scope: SUBSET [0-9]+/[0-9]+ annotated files: '; then
+            scope_mode=subset
+          else
+            echo "::error::MEASURE_FAIL: the scope line '$scope_line' is neither the FULL nor the SUBSET form. A DIAGNOSTIC (--file/--arm) run, or a form this step does not know, is not this gate."
+            exit 1
+          fi
+          if [ "$scope_mode" = "subset" ] && [ "$event_name" != "pull_request" ]; then
+            echo "::error::MEASURE_FAIL: the run narrowed to a SUBSET ('$scope_line') on a '${event_name:-unset}' event. A SUBSET is permitted only on a pull_request; every other event owes the FULL corpus and every floor, so a narrowed run here is a job failure, not an optimisation."
+            exit 1
+          fi
+
           floors=$(node -e 'import("./scripts/mutation-runner/run.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR, m.WAIVED_CEILING))')
           files_floor=$(echo "$floors" | cut -d" " -f1)
           arms_floor=$(echo "$floors" | cut -d" " -f2)
@@ -2826,8 +2880,49 @@ jobs:
           fi
           printf '%s\n' "$file_rows"
           file_rows_count=$(printf '%s\n' "$file_rows" | wc -l | tr -d '[:space:]')
-          if [ "$file_rows_count" -ne "$files_annotated" ]; then
-            echo "::error::MEASURE_FAIL: the run printed $file_rows_count per-file row(s) but reported $files_annotated annotated file(s) on its coverage line. Those are two readings of the same loop; a disagreement means a file was counted as coverage without being described, or described without being counted."
+          # 164.4.2 / DECISION D, arm (3). On a SUBSET run the coverage numerator
+          # still comes from the FULL scan (FILES_FLOOR above compares it), but
+          # only the listed files were mutated, so the rows describe k files,
+          # not N. The scope line's own claim is checked against its own names
+          # first — the claim-versus-names discipline the `unreachable:` and
+          # `lane-blocked:` arms use — and its denominator against the coverage
+          # numerator, before k replaces N in the row-count comparison.
+          expected_rows="$files_annotated"
+          if [ "$scope_mode" = "subset" ]; then
+            subset_claimed=$(echo "$scope_line" | sed -E 's|^scope: SUBSET ([0-9]+)/[0-9]+ annotated files: .*|\1|')
+            case "$subset_claimed" in ''|*[!0-9]*)
+              echo "::error::MEASURE_FAIL: could not read the subset file count out of '$scope_line'."; exit 1;; esac
+            subset_total=$(echo "$scope_line" | sed -E 's|^scope: SUBSET [0-9]+/([0-9]+) annotated files: .*|\1|')
+            case "$subset_total" in ''|*[!0-9]*)
+              echo "::error::MEASURE_FAIL: could not read the annotated-file total out of '$scope_line'."; exit 1;; esac
+            # `|| true` for the reason spelled out on `unreachable_named` above.
+            subset_named=$(echo "$scope_line" | grep -a -o -E '[A-Za-z0-9_]+\.sql' | wc -l | tr -d '[:space:]' || true)
+            case "$subset_named" in ''|*[!0-9]*)
+              echo "::error::MEASURE_FAIL: could not count the file names on '$scope_line'."; exit 1;; esac
+            if [ "$subset_claimed" -eq 0 ]; then
+              echo "::error::MEASURE_FAIL: the run claims a SUBSET of ZERO files ('$scope_line'). An empty narrowed scope mutates nothing and is never a pass."
+              exit 1
+            fi
+            if [ "$subset_claimed" -ne "$subset_named" ]; then
+              echo "::error::MEASURE_FAIL: the SUBSET scope line CLAIMS $subset_claimed file(s) but NAMES $subset_named. The count and the names come from the same run and cannot disagree; a claim the log's own evidence contradicts is not a measurement."
+              exit 1
+            fi
+            if [ "$subset_total" -ne "$files_annotated" ]; then
+              echo "::error::MEASURE_FAIL: the SUBSET scope line narrows from $subset_total annotated file(s) but the coverage line reports $files_annotated. Both come from the one full scan of the corpus; a disagreement means this log was not produced by one run."
+              exit 1
+            fi
+            if [ "$subset_claimed" -gt "$subset_total" ]; then
+              echo "::error::MEASURE_FAIL: the SUBSET claims $subset_claimed of $subset_total annotated file(s) — more than exist."
+              exit 1
+            fi
+            expected_rows="$subset_claimed"
+          fi
+          if [ "$file_rows_count" -ne "$expected_rows" ]; then
+            if [ "$scope_mode" = "subset" ]; then
+              echo "::error::MEASURE_FAIL: the run printed $file_rows_count per-file row(s) but its SUBSET scope line names $expected_rows file(s). A SUBSET run describes exactly the files it mutated; a disagreement means a file was mutated without being described, or described without being mutated."
+            else
+              echo "::error::MEASURE_FAIL: the run printed $file_rows_count per-file row(s) but reported $files_annotated annotated file(s) on its coverage line. Those are two readings of the same loop; a disagreement means a file was counted as coverage without being described, or described without being counted."
+            fi
             exit 1
           fi
           per_file_biting=$(printf '%s\n' "$file_rows" | awk '{ for (i = 1; i <= NF; i++) if ($i == "biting") s += $(i + 1) } END { print s + 0 }')
@@ -2836,6 +2931,24 @@ jobs:
           if [ "$per_file_biting" -ne "$biting" ]; then
             echo "::error::MEASURE_FAIL: the per-file rows sum to $per_file_biting biting arm(s) but the aggregate 'biting:' line reports $biting. ARMS_FLOOR is compared against the aggregate, so a breakdown that does not add up to it means the floor is bounding a number the report cannot account for."
             exit 1
+          fi
+
+          # 164.4.2 / DECISION D, arm (4). ARMS_FLOOR bounds the FULL corpus's
+          # biting count. A SUBSET's biting count is over fewer files, so it is
+          # NOT compared — comparing it would always fail, and renormalising the
+          # floor to the narrowed denominator is the floor-laundering the
+          # vacuity fence forbids. The runner states this on its own line; this
+          # step requires that line (the runner knew it ran narrowed) and its
+          # closing sentence says so rather than claiming both floors held.
+          if [ "$scope_mode" = "subset" ]; then
+            arms_floor_note=$(grep -a -m1 -E '^ARMS_FLOOR: NOT compared — this SUBSET run ' "$RUNNER_LOG" || true)
+            if [ -z "$arms_floor_note" ]; then
+              echo "::error::MEASURE_FAIL: the scope line says SUBSET but the run printed NO 'ARMS_FLOOR: NOT compared — this SUBSET run …' line. The runner states the floor it skipped on every SUBSET run; its absence means the scope line and the run that produced the numbers disagree about what ran."
+              exit 1
+            fi
+            echo "$arms_floor_note"
+            echo "SUBSET run on a pull_request: FILES_FLOOR and the waiver ceiling hold and the runner's two tallies agree over the $subset_claimed of $subset_total annotated file(s) this pull request changed: files $files_annotated >= $files_floor, biting arms $biting (of $arms_executed executed, $lane_invocations arm lane(s) spawned), waived $arms_waived <= $waived_ceiling. ARMS_FLOOR ($arms_floor) was NOT compared — a subset's biting count is not the full corpus's; it is compared by the full-corpus run on the push to main. This is NOT full-corpus coverage."
+            exit 0
           fi
 
           if [ "$biting" -lt "$arms_floor" ]; then
