@@ -2947,7 +2947,26 @@ jobs:
               exit 1
             fi
             echo "$arms_floor_note"
-            echo "SUBSET run on a pull_request: FILES_FLOOR and the waiver ceiling hold and the runner's two tallies agree over the $subset_claimed of $subset_total annotated file(s) this pull request changed: files $files_annotated >= $files_floor, biting arms $biting (of $arms_executed executed, $lane_invocations arm lane(s) spawned), waived $arms_waived <= $waived_ceiling. ARMS_FLOOR ($arms_floor) was NOT compared — a subset's biting count is not the full corpus's; it is compared by the full-corpus run on the push to main. This is NOT full-corpus coverage."
+            # Review 164.4.2 WR-03 — what a SUBSET CAN compare. The full
+            # corpus's annotated-minus-waived arm total is a static UPPER BOUND
+            # on the full run's biting count; the runner prints it on every
+            # SUBSET run and exits 1 when it is under the floor. Re-read here out
+            # of process, against the floor read from run.mjs above, so a PR that
+            # deletes arms below the floor fails before merge, not on main.
+            bound_line=$(grep -a -m1 -E '^ARMS_FLOOR \(static upper bound\): [0-9]+ annotated-unwaived (>=|<) floor [0-9]+$' "$RUNNER_LOG" || true)
+            if [ -z "$bound_line" ]; then
+              echo "::error::MEASURE_FAIL: the scope line says SUBSET but the run printed NO 'ARMS_FLOOR (static upper bound): N annotated-unwaived … floor F' line. The runner compares that bound on every SUBSET run; its absence means the check never ran."
+              exit 1
+            fi
+            echo "$bound_line"
+            static_bound=$(echo "$bound_line" | sed -E 's|^ARMS_FLOOR \(static upper bound\): ([0-9]+) .*|\1|')
+            case "$static_bound" in ''|*[!0-9]*)
+              echo "::error::MEASURE_FAIL: could not read the static bound out of '$bound_line'."; exit 1;; esac
+            if [ "$static_bound" -lt "$arms_floor" ]; then
+              echo "::error::ARMS_FLOOR regression (static upper bound): $static_bound annotated-unwaived arm(s) < floor $arms_floor. The full-corpus run on the push to main cannot reach the floor: an annotation was deleted or converted to a waiver without lowering the floor in scripts/mutation-runner/run.mjs."
+              exit 1
+            fi
+            echo "SUBSET run on a pull_request: FILES_FLOOR and the waiver ceiling hold and the runner's two tallies agree over the $subset_claimed of $subset_total annotated file(s) this pull request changed: files $files_annotated >= $files_floor, biting arms $biting (of $arms_executed executed, $lane_invocations arm lane(s) spawned), waived $arms_waived <= $waived_ceiling. ARMS_FLOOR ($arms_floor) was NOT compared against the subset's biting count — it is compared by the full-corpus run on the push to main — but its static upper bound holds: $static_bound annotated-unwaived >= $arms_floor. This is NOT full-corpus coverage."
             exit 0
           fi
 

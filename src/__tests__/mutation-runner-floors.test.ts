@@ -2248,6 +2248,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "per-arm lane time: mean 2.0s over 8 arm run(s)",
     "",
     "ARMS_FLOOR: NOT compared — this SUBSET run covered 2 of 49 annotated files; ARMS_FLOOR is compared by the full-corpus run (push to main).",
+    // Review 164.4.2 WR-03: the static upper bound the runner compares on every
+    // SUBSET run — the full corpus's annotated-minus-waived total, at the floor.
+    "ARMS_FLOOR (static upper bound): 426 annotated-unwaived >= floor 426",
     "",
     "✅ No defects in the SUBSET: every annotated arm of these 2 of 49 annotated files bit its own arm first. NOT full-corpus coverage.",
     "",
@@ -2323,6 +2326,21 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     const r = runCountRecheck(without, PR);
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("the run printed NO 'ARMS_FLOOR: NOT compared");
+  });
+
+  it("RED: a SUBSET log without the static-bound line, or with a bound under ARMS_FLOOR, fails (review 164.4.2 WR-03)", () => {
+    const without = SUBSET_LOG.replace(/^ARMS_FLOOR \(static upper bound\): .*\n/m, "");
+    expect(without, "the deletion must actually change the log").not.toBe(SUBSET_LOG);
+    const r = runCountRecheck(without, PR);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("the run printed NO 'ARMS_FLOOR (static upper bound)");
+    // The bound re-read out of process: a log whose bound is under the floor
+    // fails even if the runner's own verdict was somehow lost.
+    const under = SUBSET_LOG.replace("426 annotated-unwaived >= floor 426", "425 annotated-unwaived >= floor 426");
+    expect(under).not.toBe(SUBSET_LOG);
+    const u = runCountRecheck(under, PR);
+    expect(u.status, u.out).toBe(1);
+    expect(u.out).toContain("ARMS_FLOOR regression (static upper bound): 425 annotated-unwaived arm(s) < floor 426");
   });
 
   it("RED: a FULL-labelled run that mutated only two files fails — the fallback form is judged as FULL", () => {
@@ -2578,11 +2596,18 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
     expect(waivers).toHaveLength(1);
   });
 
-  it("a SUBSET run raises NO ARMS_FLOOR defect though its biting count is far below ARMS_FLOOR — and SAYS the floor was not compared", () => {
+  it("a SUBSET run raises NO biting-count ARMS_FLOOR defect though its biting count is far below ARMS_FLOOR — and SAYS the floor was not compared", () => {
     const { r, lines } = drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 1, armsFloor: ARMS_FLOOR, waivedCeiling: 1 });
     expect(r.subset, "the run must actually have been a SUBSET run").toBe(true);
     expect(r.bitingArms, "AIM: the biting count must sit below the real constant, or the absence proves nothing").toBeLessThan(ARMS_FLOOR);
-    expect(floorDefects(r.defects, /ARMS_FLOOR/)).toEqual([]);
+    // The subset's BITING count is never compared to ARMS_FLOOR…
+    expect(floorDefects(r.defects, /^ARMS_FLOOR regression: \d+ biting arm/)).toEqual([]);
+    // …but since review 164.4.2 WR-03 the corpus-wide static upper bound IS.
+    // This one-file fixture bounds at 2 annotated-unwaived arms, far under the
+    // real floor, so that — and only that — ARMS_FLOOR defect fires.
+    expect(floorDefects(r.defects, /ARMS_FLOOR/).map((d) => d.detail)).toEqual([
+      expect.stringMatching(/^ARMS_FLOOR regression \(static upper bound\): 2 annotated-unwaived arm\(s\) < floor /),
+    ]);
     expect(lines.some((l) => /^ARMS_FLOOR: NOT compared — this SUBSET run covered 1 of 1 annotated files/.test(l))).toBe(true);
     expect(lines.filter((l) => l.startsWith("scope: "))).toEqual(["scope: SUBSET 1/1 annotated files: mini-gate.sql"]);
   });

@@ -24,7 +24,9 @@
  * Exit codes:
  *   0  full gate run, no defects, floors held, the runner's own counts agree —
  *      OR a SUBSET run (`--subset-from`) with no defects, FILES_FLOOR and
- *      WAIVED_CEILING held. A subset run is a gate that can pass, and its
+ *      WAIVED_CEILING held, and the full corpus's annotated-unwaived arm total
+ *      (a static upper bound on biting) at or above ARMS_FLOOR (review
+ *      164.4.2 WR-03). A subset run is a gate that can pass, and its
  *      `scope: SUBSET` line is what stops it reading as full coverage.
  *   1  at least one defect, a coverage floor regression, or an ABSURDITY — the
  *      runner's two independent arm tallies disagree (164.3.1-10, D-09)
@@ -5023,6 +5025,30 @@ export function runCorpus({
         `ARMS_FLOOR: NOT compared — this SUBSET run covered ${targets.length} of ${corpus.filesAnnotated} ` +
           `annotated files; ARMS_FLOOR is compared by the full-corpus run (push to main).`,
       );
+      // Review 164.4.2 WR-03: what a subset CAN check at no lane cost. The
+      // full corpus's annotated-minus-waived arm total bounds the full run's
+      // biting count from ABOVE (only a non-waived arm can bite), so a bound
+      // already under ARMS_FLOOR makes the push-to-main run certain to fail. A
+      // PR that deletes arms from its one changed gate file is caught HERE,
+      // before merge, instead of on main. Parsed from every annotated file,
+      // not only the listed ones — the bound is a full-corpus quantity.
+      let staticUnwaived = 0;
+      for (const name of corpus.annotatedFiles) {
+        const gateAbs = join(scopeDir, name);
+        const structured = parseAnnotations(readFileSync(gateAbs, "utf8"), { file: gateAbs }).structured;
+        staticUnwaived += structured.filter((a) => !a.waiver).length;
+      }
+      const boundHolds = staticUnwaived >= armsFloor;
+      log(`ARMS_FLOOR (static upper bound): ${staticUnwaived} annotated-unwaived ${boundHolds ? ">=" : "<"} floor ${armsFloor}`);
+      if (!boundHolds) {
+        addDefect(
+          "floor",
+          null,
+          scopeDir,
+          `ARMS_FLOOR regression (static upper bound): ${staticUnwaived} annotated-unwaived arm(s) < floor ${armsFloor} ` +
+            `across all ${corpus.filesAnnotated} annotated files — the full-corpus run on the push to main cannot reach the floor.`,
+        );
+      }
     } else if (bitingArms < armsFloor) {
       addDefect("floor", null, scopeDir, `ARMS_FLOOR regression: ${bitingArms} biting arm(s) < floor ${armsFloor}`);
     }
@@ -5994,7 +6020,7 @@ function selfTest() {
   // scenario pins BOTH exit contracts in one place: a future edit cannot make
   // the subset pass by making the diagnostic mode pass too, or the reverse.
   console.log("");
-  console.log("=== SELF-TEST (subset) 1/6: a clean SUBSET run exits 0 AND a clean --file run over the SAME gate still exits 2 ===");
+  console.log("=== SELF-TEST (subset) 1/7: a clean SUBSET run exits 0 AND a clean --file run over the SAME gate still exits 2 ===");
   const sClean = runCorpus({
     scopeDir: FIXTURE_CORPUS,
     subsetFiles: ["mini-gate.sql"],
@@ -6023,7 +6049,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST (subset) 2/6: a SUBSET run with a defect exits 1 ===");
+  console.log("=== SELF-TEST (subset) 2/7: a SUBSET run with a defect exits 1 ===");
   const sBad = runCorpus({
     scopeDir: SELFTEST_DIR,
     subsetFiles: ["nonbiting-gate.sql"],
@@ -6040,7 +6066,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST (subset) 3/6: an unreadable, EMPTY, non-conforming or nonexistent list is REFUSED by name ===");
+  console.log("=== SELF-TEST (subset) 3/7: an unreadable, EMPTY, non-conforming or nonexistent list is REFUSED by name ===");
   const listDir = mkdtempSync(join(tmpdir(), "mutation-runner-subset-"));
   try {
     const writeList = (name, body) => {
@@ -6086,7 +6112,7 @@ function selfTest() {
     rmSync(listDir, { recursive: true, force: true });
   }
 
-  console.log("=== SELF-TEST (subset) 4/6: a list with NO annotated file runs FULL, floors enforced, the fallback naming it ===");
+  console.log("=== SELF-TEST (subset) 4/7: a list with NO annotated file runs FULL, floors enforced, the fallback naming it ===");
   // The lane is stubbed: what is asserted is the MODE (scope line, subset
   // flag, the ARMS_FLOOR comparison happening), never an arm verdict.
   const subsetStub = ({ leg }) =>
@@ -6114,7 +6140,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST (subset) 5/6: a list MIXING annotated and unannotated files runs FULL too — never a subset that silently drops one ===");
+  console.log("=== SELF-TEST (subset) 5/7: a list MIXING annotated and unannotated files runs FULL too — never a subset that silently drops one ===");
   const mixed = runCorpus({
     scopeDir: FIXTURE_CORPUS,
     subsetFiles: ["mini-gate.sql", "mini-migration.sql"],
@@ -6137,7 +6163,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST (subset) 6/6: --subset-from refuses --file, --arm, --parse-only and --fixture-corpus; runCorpus refuses the diagnostic pair ===");
+  console.log("=== SELF-TEST (subset) 6/7: --subset-from refuses --file, --arm, --parse-only and --fixture-corpus; runCorpus refuses the diagnostic pair ===");
   const conflicts = [
     [{ onlyFile: "x.sql" }, "--file"],
     [{ onlyArm: "A 1" }, "--arm"],
@@ -6160,6 +6186,55 @@ function selfTest() {
     threwOnPair = true;
   }
   pass = expect(threwOnPair, "runCorpus throws on subsetFiles + onlyFile rather than picking one contract") && pass;
+
+  // Review 164.4.2 WR-03. A SUBSET cannot compare ITS biting count to
+  // ARMS_FLOOR, but the full corpus's annotated-minus-waived arm total is a
+  // static UPPER BOUND on the full run's biting count. A PR that deletes arms
+  // until that bound is under the floor is certain to fail the push to main,
+  // so the subset run fails now. The fixture's mini-gate.sql carries 3 arms,
+  // one a waiver: bound 2. Lanes stubbed — only the floor verdict is read.
+  console.log("=== SELF-TEST (subset) 7/7: a SUBSET run whose corpus-wide annotated-unwaived bound is under ARMS_FLOOR exits 1 with a static-bound floor defect ===");
+  const boundLines = [];
+  const under = runCorpus({
+    scopeDir: FIXTURE_CORPUS,
+    subsetFiles: ["mini-gate.sql"],
+    filesFloor: 1,
+    armsFloor: 3,
+    waivedCeiling: 1,
+    laneRunner: subsetStub,
+    log: (l) => boundLines.push(l),
+  });
+  const atBound = runCorpus({
+    scopeDir: FIXTURE_CORPUS,
+    subsetFiles: ["mini-gate.sql"],
+    filesFloor: 1,
+    armsFloor: 2,
+    waivedCeiling: 1,
+    laneRunner: subsetStub,
+    log: quiet,
+  });
+  const boundDefect = under.defects.find((d) => d.kind === "floor" && /static upper bound/.test(d.detail));
+  pass =
+    expect(under.subset === true, `AIM: the run narrowed (subset ${under.subset}, ${JSON.stringify(under.scopeLine)})`) &&
+    expect(
+      boundDefect !== undefined && /2 annotated-unwaived arm\(s\) < floor 3/.test(boundDefect.detail),
+      `armsFloor 3 over a bound of 2 adds a floor defect naming both numbers (got ${JSON.stringify(under.defects.map((d) => d.detail))})`,
+    ) &&
+    expect(under.exitCode === 1, `and the run exits 1 (got ${under.exitCode})`) &&
+    expect(
+      boundLines.includes("ARMS_FLOOR (static upper bound): 2 annotated-unwaived < floor 3"),
+      "the run PRINTS the static-bound comparison on its own line",
+    ) &&
+    expect(
+      boundLines.some((l) => /^ARMS_FLOOR: NOT compared — this SUBSET run /.test(l)),
+      "and still prints that the SUBSET's own biting count was NOT compared",
+    ) &&
+    expect(
+      // CONTROL: same corpus, same stub, floor AT the bound.
+      atBound.subset === true && noDefectOfKind(atBound.defects, ["floor"]),
+      `CONTROL: armsFloor 2 at the bound adds no floor defect (got ${JSON.stringify(atBound.defects.filter((d) => d.kind === "floor").map((d) => d.detail))})`,
+    ) &&
+    pass;
 
   console.log("");
   if (pass) {
