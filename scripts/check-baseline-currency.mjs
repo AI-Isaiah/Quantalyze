@@ -551,9 +551,13 @@ export function psqlMetaCommandLines(src) {
       let depth = 1;
       let j = i + 2;
       while (j < n && depth > 0) {
-        if (src[j] === "/" && src[j + 1] === "*") (depth++, (j += 2));
-        else if (src[j] === "*" && src[j + 1] === "/") (depth--, (j += 2));
-        else j++;
+        if (src[j] === "/" && src[j + 1] === "*") {
+          depth++;
+          j += 2;
+        } else if (src[j] === "*" && src[j + 1] === "/") {
+          depth--;
+          j += 2;
+        } else j++;
       }
       if (depth > 0) return { error: "an unterminated block comment", line: start };
       advance(i, j);
