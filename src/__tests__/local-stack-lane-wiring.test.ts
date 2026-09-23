@@ -44,6 +44,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -121,6 +122,55 @@ function laneJobBlock(): string {
     `could not find the end of the ${LANE_JOB} block`,
   ).toBeGreaterThan(start);
   return CI.slice(start, end);
+}
+
+// ── Phase 164.4.2 plan 11 (DECISION G): the non-public objects module, driven with
+// synthetic migrations, carried sets and catalogues — no Docker.
+const NONPUBLIC_MODULE = REPO_ROOT + "scripts/local-stack/nonpublic-objects.mjs";
+/** The catalogue's meta rows as the superuser read prints them on a lane with pg_cron. */
+const NONPUBLIC_META = ["meta|superuser|t", "meta|database|postgres", "meta|pg_cron|1"];
+const hex = (s: string) => Buffer.from(s, "utf8").toString("hex");
+/** One `cron|…` catalogue row, free-text fields hex-encoded as the catalogue SQL encodes them. */
+const cronRow = (
+  name: string,
+  schedule: string,
+  command: string,
+  o: { active?: string; username?: string; database?: string } = {},
+) =>
+  ["cron", hex(name), hex(schedule), o.active ?? "t", o.username ?? "postgres", o.database ?? "postgres", hex(command)].join("|");
+
+/**
+ * A throwaway lane: migrations `files`, the carried subset, and a catalogue (null =
+ * an EMPTY file). Runs --emit then --check (as the loading role `postgres`).
+ */
+function nonpublicGate(files: Record<string, string>, carried: string[], catalogue: string[] | null) {
+  const dir = mkdtempSync(join(tmpdir(), "nonpublic-"));
+  try {
+    const mig = join(dir, "migrations");
+    mkdirSync(mig);
+    for (const [name, sql] of Object.entries(files)) writeFileSync(join(mig, name), sql);
+    writeFileSync(join(dir, "carried.txt"), carried.map((c) => `${c}\n`).join(""));
+    writeFileSync(join(dir, "cat.txt"), catalogue === null ? "" : catalogue.join("\n") + "\n");
+    const run = (mode: string[]) => {
+      const r = spawnSync(
+        process.execPath,
+        [NONPUBLIC_MODULE, ...mode, "--migrations", mig, "--carried", join(dir, "carried.txt")],
+        { encoding: "utf8" },
+      );
+      return { status: r.status, out: `${r.stdout}${r.stderr}` };
+    };
+    const emitted = run(["--emit", "--out-dir", join(dir, "out")]);
+    const readOut = (f: string) =>
+      existsSync(join(dir, "out", f)) ? readFileSync(join(dir, "out", f), "utf8") : null;
+    return {
+      emitted,
+      emittedSql: readOut("nonpublic-auth-triggers.sql"),
+      emittedCron: readOut("nonpublic-cron.sql"),
+      ...run(["--check", "--catalogue", join(dir, "cat.txt"), "--cron-owner", "postgres"]),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in the ordinary shards)", () => {
@@ -581,6 +631,321 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // ⭐ Phase 164.4.2 plan 11 (DECISION G). The non-public objects gate, driven with
+  // synthetic migrations, carried sets and catalogues (no Docker). ⛔ ONE `it(` PER
+  // ARM, each with its OWN migrations directory: a neuter of one branch of the gate
+  // must turn exactly its own arm red, never an earlier assertion in a shared block.
+  describe("nonpublic-objects.mjs — the auth.users trigger class (D-G)", () => {
+    const gate = nonpublicGate;
+    const TRIGGER_SQL =
+      "CREATE TRIGGER on_signup\n  AFTER INSERT ON auth.users\n  FOR EACH ROW EXECUTE FUNCTION handle_signup();\n";
+    const META = NONPUBLIC_META;
+    const TRIGGER_ROW = "trigger|users|on_signup|5|O|public.handle_signup()";
+    const A = "20260101000000_a.sql";
+    const B = "20260102000000_b.sql";
+
+    it("OK on an exact match, and --emit writes the declaring statement's own bytes", () => {
+      const r = gate({ [A]: TRIGGER_SQL }, [A], [...META, TRIGGER_ROW]);
+      expect(r.status, r.out).toBe(0);
+      expect(r.out).toMatch(/^nonpublic-fidelity: auth-users-triggers=1\/1 cron-jobs=0\/0 drift=0 verdict OK$/m);
+      expect(r.emitted.out).toContain(`auth-triggers=1 (on_signup<-${A})`);
+      expect(r.emittedSql, "the emitted SQL is not the migration's own bytes").toBe(
+        `SET search_path TO public;\n${TRIGGER_SQL.trimEnd()}\n`,
+      );
+    });
+
+    it("DRIFT naming MISSING when the lane lacks a declared trigger", () => {
+      const r = gate({ [A]: TRIGGER_SQL }, [A], META);
+      expect(r.status, `the gate passed a lane with NO auth.users trigger:\n${r.out}`).toBe(1);
+      expect(r.out).toContain("MISSING  auth.users trigger on_signup");
+    });
+
+    it("DRIFT naming EXTRA for a trigger no carried migration declares", () => {
+      const r = gate({ [A]: TRIGGER_SQL }, [A], [...META, TRIGGER_ROW, "trigger|users|undeclared|5|O|public.x()"]);
+      expect(r.status, `an undeclared auth.users trigger passed the gate:\n${r.out}`).toBe(1);
+      expect(r.out).toContain("EXTRA    auth.users trigger undeclared");
+    });
+
+    it("a DROP TRIGGER in a later carried file removes the trigger from the fold", () => {
+      const r = gate(
+        { [A]: TRIGGER_SQL, [B]: "DROP TRIGGER IF EXISTS on_signup ON auth.users;\n" },
+        [A, B],
+        META,
+      );
+      expect(r.status, `a dropped trigger is still expected on the lane:\n${r.out}`).toBe(0);
+      expect(r.out).toMatch(/auth-users-triggers=0\/0 cron-jobs=0\/0 drift=0 verdict OK$/m);
+    });
+
+    it("a trigger declared only in a file NOT in the carried set is not expected", () => {
+      const r = gate({ [A]: "SELECT 1;\n", [B]: TRIGGER_SQL }, [A], META);
+      expect(
+        r.status,
+        `a non-carried migration's trigger became expected — the replay would register it a second time:\n${r.out}`,
+      ).toBe(0);
+      expect(r.out).toMatch(/auth-users-triggers=0\/0 cron-jobs=0\/0 drift=0 verdict OK$/m);
+    });
+
+    it("MEASURE_FAIL on a trigger carrying a WHEN clause (a shape it cannot prove safe)", () => {
+      const when =
+        "CREATE TRIGGER on_signup AFTER INSERT ON auth.users FOR EACH ROW WHEN (NEW.email IS NOT NULL) EXECUTE FUNCTION handle_signup();\n";
+      const r = gate({ [A]: when }, [A], [...META, TRIGGER_ROW]);
+      expect(r.status, `a WHEN-clause trigger was folded instead of refused:\n${r.out}`).toBe(2);
+      expect(r.out).toMatch(/verdict MEASURE_FAIL$/m);
+      expect(r.out).toContain(`${A} statement 1`);
+    });
+
+    it("MEASURE_FAIL on a catalogue read by a non-superuser (meta|superuser|f)", () => {
+      const r = gate(
+        { [A]: TRIGGER_SQL },
+        [A],
+        [...META.filter((l) => !l.startsWith("meta|superuser|")), "meta|superuser|f", TRIGGER_ROW],
+      );
+      expect(r.status, `a non-superuser catalogue was trusted:\n${r.out}`).toBe(2);
+      expect(r.out).toContain("NON-superuser");
+    });
+
+    it("MEASURE_FAIL on an empty catalogue, never 'nothing there'", () => {
+      const r = gate({ [A]: TRIGGER_SQL }, [A], null);
+      expect(r.status, `an empty catalogue compared instead of refusing:\n${r.out}`).toBe(2);
+      expect(r.out).toContain("the catalogue is EMPTY");
+    });
+  });
+
+  // ⭐ Phase 164.4.2 plan 11 (DECISION G) — the WIRING. The module above is only a
+  // gate if load_baseline() runs it, in the right place, through the right roles.
+  it("load_baseline() loads the non-public objects after reference data and gates them before the replay, through the superuser for the trigger and the catalogue and the loading role for cron", () => {
+    const lane = read(RUN_SH);
+    const body = liveLines(bashFunctionBody(lane, "load_baseline"));
+    const at = (fn: string) => body.findIndex((l) => new RegExp(`^${fn}\\s+"\\$psql"\\s+"\\$db_url"$`).test(l));
+    const acl = at("check_acl_fidelity");
+    const refdata = at("load_reference_data");
+    const load = at("load_nonpublic_objects");
+    const gate = at("check_nonpublic_fidelity");
+    const replay = at("replay_migrations");
+    expect(
+      load,
+      "load_baseline() no longer calls load_nonpublic_objects — the lane has no auth.users trigger and no cron.job row, and 8 corpus files fail (3 auth-trigger, 5 cron)",
+    ).toBeGreaterThan(-1);
+    expect(
+      gate,
+      "load_baseline() no longer calls check_nonpublic_fidelity — a lane missing (or carrying extra) non-public objects would boot green",
+    ).toBeGreaterThan(-1);
+    expect(acl, "load_baseline() no longer calls check_acl_fidelity").toBeGreaterThan(-1);
+    expect(refdata, "load_baseline() no longer calls load_reference_data").toBeGreaterThan(-1);
+    expect(replay, "load_baseline() no longer calls replay_migrations").toBeGreaterThan(-1);
+    expect(acl < refdata, "check_acl_fidelity no longer runs before load_reference_data").toBe(true);
+    expect(
+      refdata < load,
+      "the non-public objects load BEFORE reference data — the trigger would create the teaser sentinel's profile first, with different values, and the allowlisted profile row would silently no-op",
+    ).toBe(true);
+    expect(load < gate, "check_nonpublic_fidelity runs before load_nonpublic_objects — it would compare a lane that has not been loaded yet").toBe(true);
+    expect(
+      gate < replay,
+      "check_nonpublic_fidelity runs AFTER replay_migrations — a replayed migration may legitimately change these objects, so the gate would compare against a moved fixed point",
+    ).toBe(true);
+
+    // load_nonpublic_objects: the carried set and the lane's migrations dir, the
+    // trigger through the superuser DSN, cron through the loading DSN, all FATAL.
+    const loadBody = liveLines(bashFunctionBody(lane, "load_nonpublic_objects"));
+    const extract = loadBody.find((l) => l.includes("nonpublic-objects.mjs") && l.includes("--emit"));
+    expect(extract, "load_nonpublic_objects no longer runs the extractor's --emit").toBeDefined();
+    expect(
+      extract,
+      "the extractor is not handed the gate's CARRIED set — a replayed migration's cron job or trigger would be registered twice",
+    ).toContain('--carried "$CARRIED_SET_FILE"');
+    expect(
+      extract,
+      "the extractor is not handed --migrations \"$MIGRATIONS_DIR\" — it could fold a different directory than the replay applies",
+    ).toContain('--migrations "$MIGRATIONS_DIR"');
+    const trig = loadBody.find((l) => l.includes("nonpublic-auth-triggers.sql"));
+    expect(trig, "load_nonpublic_objects no longer applies nonpublic-auth-triggers.sql").toBeDefined();
+    expect(trig, "the auth.users trigger is not applied through the superuser DSN").toContain('"$admin_url"');
+    const cronApply = loadBody.find((l) => l.includes("nonpublic-cron.sql"));
+    expect(cronApply, "load_nonpublic_objects no longer applies nonpublic-cron.sql").toBeDefined();
+    expect(
+      cronApply,
+      "the cron jobs are not registered through the LOADING DSN — as the superuser they would be invisible to the corpus's postgres connection (pg_cron RLS) and would run with superuser rights",
+    ).toContain('"$db_url"');
+    expect(cronApply).not.toContain("admin_url");
+    const ifs = (b: string[]) => b.filter((l) => /^if\s/.test(l)).length;
+    const exits = (b: string[]) => b.filter((l) => /^exit\s+[1-9]/.test(l)).length;
+    expect(ifs(loadBody), "load_nonpublic_objects has lost its failure guards").toBeGreaterThanOrEqual(5);
+    expect(
+      exits(loadBody),
+      "load_nonpublic_objects has a failure path that does not exit non-zero — a load that only logs is a lane that boots without the objects",
+    ).toBeGreaterThanOrEqual(ifs(loadBody));
+
+    // check_nonpublic_fidelity: the catalogue through the superuser DSN, the
+    // loading role as --cron-owner, all FATAL.
+    const gateBody = liveLines(bashFunctionBody(lane, "check_nonpublic_fidelity"));
+    const catRead = gateBody.find((l) => l.includes("nonpublic-catalogue.sql"));
+    expect(catRead, "check_nonpublic_fidelity no longer reads nonpublic-catalogue.sql").toBeDefined();
+    expect(
+      catRead,
+      "the catalogue is not read through the superuser DSN — pg_cron's RLS would hide every job registered under another role",
+    ).toContain('"$admin_url"');
+    const check = gateBody.find((l) => l.includes("nonpublic-objects.mjs") && l.includes("--check"));
+    expect(check, "check_nonpublic_fidelity no longer runs the module's --check").toBeDefined();
+    expect(check, "the gate no longer names the role the cron jobs must belong to").toContain('--cron-owner "$owner"');
+    expect(check).toContain('--carried "$CARRIED_SET_FILE"');
+    expect(exits(gateBody), "check_nonpublic_fidelity has a failure path that does not exit non-zero").toBeGreaterThanOrEqual(ifs(gateBody));
+
+    // The catalogue READS everything and names nothing. The names it must not carry
+    // are DERIVED from the migrations, so this cannot go stale with the corpus.
+    const sqlLive = read("scripts/local-stack/nonpublic-catalogue.sql")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("--"))
+      .join("\n");
+    expect(sqlLive, "the catalogue no longer reads cron.job").toMatch(/\bFROM cron\.job\b/);
+    expect(sqlLive, "the catalogue no longer excludes internal triggers").toContain("NOT t.tgisinternal");
+    const migText = readdirSync(REPO_ROOT + "supabase/migrations")
+      .filter((f) => f.endsWith(".sql"))
+      .map((f) => read(`supabase/migrations/${f}`))
+      .join("\n");
+    const declaredNames = new Set([
+      ...[...migText.matchAll(/cron\s*\.\s*schedule\s*\(\s*'([^']+)'/g)].map((m) => m[1]),
+      ...[...migText.matchAll(/CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+(\w+)\s+(?:BEFORE|AFTER)\s[^;]*?\bON\s+auth\.users\b/gi)].map((m) => m[1]),
+    ]);
+    expect(declaredNames.size, "derived no job or trigger name from supabase/migrations — this pin would check nothing").toBeGreaterThan(10);
+    for (const name of declaredNames) {
+      expect(sqlLive.includes(name), `nonpublic-catalogue.sql names \`${name}\` literally — the catalogue must read everything and let the module judge`).toBe(false);
+    }
+  });
+
+  // ⭐ Phase 164.4.2 plan 11 (DECISION G), the cron class. Every `cron.schedule` /
+  // `cron.unschedule` of the CARRIED migrations, folded in filename order, and the
+  // lane's cron.job compared BYTE-EXACT (test_retention_crons_safe.sql reads the
+  // command verbatim), registered as the loading role.
+  describe("nonpublic-objects.mjs — the pg_cron class (D-G)", () => {
+    const gate = nonpublicGate;
+    const META = NONPUBLIC_META;
+    const A = "20260101000000_a.sql";
+    const B = "20260102000000_b.sql";
+    const JOB = "DO $$\nBEGIN\n  PERFORM cron.schedule('d_job', '*/5 * * * *', $cron$SELECT 1$cron$);\nEND $$;\n";
+
+    it("folds in filename order: a later schedule supersedes by name, unschedule removes, an unschedule of a never-scheduled name is a named no-op", () => {
+      const r = gate(
+        {
+          [A]:
+            "DO $$\nBEGIN\n  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN\n" +
+            "    PERFORM cron.schedule('j_one', '*/5 * * * *', $cron$SELECT 1$cron$);\n" +
+            "    PERFORM cron.schedule('j_two', '0 * * * *', $cron$SELECT 2$cron$);\n  END IF;\nEND $$;\n",
+          [B]:
+            "DO $$\nBEGIN\n  PERFORM cron.unschedule('j_two');\n  PERFORM cron.unschedule('never_scheduled');\n" +
+            "  PERFORM cron.schedule('j_one', '*/10 * * * *', $cron$SELECT 11$cron$);\nEND $$;\n",
+        },
+        [A, B],
+        [...META, cronRow("j_one", "*/10 * * * *", "SELECT 11")],
+      );
+      expect(r.status, r.out).toBe(0);
+      expect(r.out).toMatch(/cron-jobs=1\/1 drift=0 verdict OK$/m);
+      expect(r.emitted.out).toContain("schedule-calls=3 unschedule-calls=2 cron-jobs=1 (j_one)");
+      expect(r.emitted.out).toContain("no-op-unschedules=1 never-scheduled=1 (never_scheduled)");
+      expect(r.emittedCron, "the emitted registration is not the last declaring call's own literal bytes").toBe(
+        "SELECT cron.schedule('j_one', '*/10 * * * *', $cron$SELECT 11$cron$);\n",
+      );
+    });
+
+    it("extracts every command byte-exact: $tag$ body, '' unescaped, the nested same-tag $$ inside DO $$, and a comment between arguments", () => {
+      const r = gate(
+        {
+          [A]:
+            "SELECT cron.schedule('k_dollar', '1 * * * *', $cron$ SELECT 'x' $cron$);\n" +
+            "SELECT cron.schedule('k_quote', '2 * * * *', 'SELECT ''quoted'' AS q');\n" +
+            "SELECT cron.schedule('k_comment' /* between */, -- and a line comment\n  '3 * * * *', $body$SELECT 3$body$);\n" +
+            "DO $$\nBEGIN\n  PERFORM cron.schedule(\n    'k_nested',\n    '4 * * * *',  -- daily\n" +
+            "    $$DELETE FROM t WHERE sent_at < now() - INTERVAL '90 days';$$\n  );\nEND $$;\n",
+        },
+        [A],
+        [
+          ...META,
+          cronRow("k_dollar", "1 * * * *", " SELECT 'x' "),
+          cronRow("k_quote", "2 * * * *", "SELECT 'quoted' AS q"),
+          cronRow("k_comment", "3 * * * *", "SELECT 3"),
+          cronRow("k_nested", "4 * * * *", "DELETE FROM t WHERE sent_at < now() - INTERVAL '90 days';"),
+        ],
+      );
+      expect(r.status, `a command was not extracted byte-exact:\n${r.out}`).toBe(0);
+      expect(r.out).toMatch(/cron-jobs=4\/4 drift=0 verdict OK$/m);
+    });
+
+    for (const [label, sql] of [
+      ["an identifier argument", "SELECT cron.schedule(v_name, '1 * * * *', 'SELECT 1');\n"],
+      ["a || concatenation", "SELECT cron.schedule('a', '1 * * * *', 'SELECT ' || '1');\n"],
+      ["a format( call", "SELECT cron.schedule('a', '1 * * * *', format('SELECT %s', 1));\n"],
+      [
+        "a variable",
+        "DO $$\nDECLARE v_cmd text := 'SELECT 1';\nBEGIN\n  PERFORM cron.schedule('a', '1 * * * *', v_cmd);\nEND $$;\n",
+      ],
+      ["an unclosed argument list", "SELECT cron.schedule('a', '1 * * * *', 'SELECT 1'\n"],
+      ["the wrong arity", "SELECT cron.schedule('a', 'SELECT 1');\n"],
+      ["a cron.alter_job call site", "SELECT cron.alter_job(1, schedule := '1 * * * *');\n"],
+      ["a cron.schedule_in_database call site", "SELECT cron.schedule_in_database('a', '1 * * * *', 'SELECT 1', 'postgres');\n"],
+      [
+        "a cron call inside a single-quoted string an EXECUTE could run",
+        "DO $$\nBEGIN\n  EXECUTE 'SELECT cron.schedule(''a'', ''1 * * * *'', ''SELECT 1'')';\nEND $$;\n",
+      ],
+      [
+        "a cron call inside another call's arguments",
+        "SELECT cron.schedule('a', '1 * * * *', $c$SELECT cron.schedule('b', '2 * * * *', 'SELECT 2')$c$);\n",
+      ],
+    ] as const) {
+      it(`MEASURE_FAIL, naming the file, on ${label}`, () => {
+        const r = gate({ [A]: sql }, [A], META);
+        expect(r.emitted.status, `--emit accepted ${label}:\n${r.emitted.out}`).toBe(2);
+        expect(r.emitted.out).toContain(A);
+        expect(r.status, `--check accepted ${label}:\n${r.out}`).toBe(2);
+        expect(r.out).toMatch(/verdict MEASURE_FAIL$/m);
+      });
+    }
+
+    it("MEASURE_FAIL when jobs are declared and the lane has no pg_cron", () => {
+      const r = gate({ [A]: JOB }, [A], ["meta|superuser|t", "meta|database|postgres", "meta|pg_cron|0"]);
+      expect(r.status, `declared jobs compared against a lane without pg_cron:\n${r.out}`).toBe(2);
+      expect(r.out).toContain("pg_cron");
+    });
+
+    for (const [label, rows, finding] of [
+      ["a missing job", [] as string[], "MISSING  cron job d_job"],
+      [
+        "an extra job",
+        [cronRow("d_job", "*/5 * * * *", "SELECT 1"), cronRow("undeclared", "* * * * *", "SELECT 1")],
+        "EXTRA    cron job undeclared",
+      ],
+      ["a changed schedule", [cronRow("d_job", "*/6 * * * *", "SELECT 1")], "DIFFERS  cron job d_job: schedule"],
+      ["a command differing by one byte", [cronRow("d_job", "*/5 * * * *", "SELECT 2")], "DIFFERS  cron job d_job: command"],
+      ["active false", [cronRow("d_job", "*/5 * * * *", "SELECT 1", { active: "f" })], "DIFFERS  cron job d_job: active"],
+      [
+        "a username other than the loading role",
+        [cronRow("d_job", "*/5 * * * *", "SELECT 1", { username: "supabase_admin" })],
+        "DIFFERS  cron job d_job: username",
+      ],
+      [
+        "a job in another database",
+        [cronRow("d_job", "*/5 * * * *", "SELECT 1", { database: "other" })],
+        "DIFFERS  cron job d_job: database",
+      ],
+      [
+        "a double registration",
+        [cronRow("d_job", "*/5 * * * *", "SELECT 1"), cronRow("d_job", "*/5 * * * *", "SELECT 1")],
+        "DUPLICATE cron job d_job",
+      ],
+    ] as const) {
+      it(`DRIFT on ${label}`, () => {
+        const r = gate({ [A]: JOB }, [A], [...META, ...rows]);
+        expect(r.status, `the gate passed ${label}:\n${r.out}`).toBe(1);
+        expect(r.out).toContain(finding);
+        expect(r.out, "a command's TEXT reached the output — the CI log is public").not.toContain("SELECT 2");
+      });
+    }
+
+    it("a job declared only in a file NOT in the carried set is not expected", () => {
+      const r = gate({ [A]: "SELECT 1;\n", [B]: JOB }, [A], META);
+      expect(r.status, `a non-carried migration's job became expected:\n${r.out}`).toBe(0);
+      expect(r.out).toMatch(/cron-jobs=0\/0 drift=0 verdict OK$/m);
+    });
   });
 
   // ⭐ Phase 164.4.2 plan 03. The guard above compares `git log -1 --format=%ct`

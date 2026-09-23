@@ -38,6 +38,15 @@
 # case included), and ledgered in supabase_migrations.schema_migrations only after it
 # applied. An undeterminable set, or a replayed migration that errors, is FATAL.
 #
+# ⭐ DECISION G (Phase 164.4.2, founder 2026-09-23): the dump is of `public` only, so
+# it carries neither the `auth.users` trigger that creates a profile per new user nor
+# any `cron.job` row — 8 corpus files failed on their absence. After the dump and its
+# reference data, and BEFORE the D-F replay, the lane applies those objects EXTRACTED
+# from the carried migrations (scripts/local-stack/nonpublic-objects.mjs), then a
+# gate proves the lane holds exactly the declared set. Drift FAILS THE BOOT; it is
+# never a warning. The dump was NOT widened and sql-tests did NOT move back to shared
+# TEST — both were rejected (see the module's header).
+#
 # INVOCATIONS (CI pastes these verbatim — Pitfall 2: a wrapped run is a different run)
 # -----------------------------------------------------------------------------------
 #   scripts/local-stack/run.sh up            # start + load baseline + write env handoff
@@ -331,6 +340,19 @@ EOF
   # than the dump — PRODUCTION's own chronological order — so they load first.
   load_reference_data "$psql" "$db_url"
 
+  # ⭐ DECISION G — the non-public objects (auth.users trigger, cron.job rows),
+  # extracted from the CARRIED migrations, and the gate that proves them.
+  # AFTER reference data: the allowlist replays the teaser sentinel auth.users row
+  # and then its sentinel profile (ON CONFLICT DO NOTHING). With the trigger already
+  # in place, handle_new_user() would create that profile first, with different
+  # values, and the allowlisted row would silently no-op. This order reproduces the
+  # TEST restore's state, which is what the corpus was green against.
+  # The GATE BEFORE the replay, for check_acl_fidelity's reason: a replayed
+  # migration may legitimately change these objects, so the dump plus the carried
+  # fold is the fixed point the gate can be exact about.
+  load_nonpublic_objects "$psql" "$db_url"
+  check_nonpublic_fidelity "$psql" "$db_url"
+
   replay_migrations "$psql" "$db_url"
 }
 
@@ -394,6 +416,93 @@ check_acl_fidelity() {
   fi
   if ! node "${LANE_DIR}/acl-fidelity.mjs" --dump "$BASELINE_FILE" --catalogue "$rows"; then
     echo "FATAL: the lane's public ACLs are not the ones ${BASELINE_FILE} declares (acl-fidelity above). Privilege and RLS gates on this lane would measure a catalogue that is not PROD's." >&2
+    exit 1
+  fi
+}
+
+# ── Non-public objects (DECISION G, plan 11) ─────────────────────────────────
+#
+# ⛔ WHY. The dump is of `public` only. MEASURED on the lane after plan 08's ACL fix:
+# 0 non-internal triggers on auth.users and 0 rows in cron.job, and 8 of 76 corpus
+# files failing on exactly those absences. scripts/local-stack/nonpublic-objects.mjs
+# folds them out of the CARRIED migrations (the gate's $CARRIED_SET_FILE, read from
+# the SAME $MIGRATIONS_DIR the replay applies from), so a replayed migration's own
+# trigger or cron call runs once, natively, in replay_migrations — never twice.
+#
+# The auth.users trigger is created through the stack SUPERUSER DSN, derived exactly
+# as reset_public_default_acls derives it (the lane's loopback DSN with the role
+# swapped; a DSN not starting with the postgres role is refused). auth.users belongs
+# to the auth service role, and a trigger has no owner, so the object is identical
+# whoever creates it.
+#
+# The cron jobs are registered through the LOADING DSN "$db_url", never the
+# superuser, in one transaction: cron.schedule stamps cron.job.username with
+# current_user and every PROD job carries `postgres`; pg_cron's row-level security
+# shows a non-superuser only its own jobs, so jobs registered as the superuser would
+# be invisible to the corpus files that read them as `postgres`; and a superuser-
+# owned job would RUN with superuser rights, a catalogue wider than PROD's. There is
+# NO fallback role: a refused cron.schedule is FATAL.
+load_nonpublic_objects() {
+  local psql="$1" db_url="$2" admin_url census n_trig n_cron owner
+  admin_url="${db_url/#postgresql:\/\/postgres:/postgresql://supabase_admin:}"
+  if [ "$admin_url" = "$db_url" ]; then
+    echo "FATAL: the lane DSN does not start with postgresql://postgres:, so the superuser DSN the auth.users trigger needs cannot be derived. Refusing to boot a lane without it." >&2
+    exit 1
+  fi
+  if ! census="$(node "${LANE_DIR}/nonpublic-objects.mjs" --emit --migrations "$MIGRATIONS_DIR" --carried "$CARRIED_SET_FILE" --out-dir "$REPLAY_HANDOFF_DIR")"; then
+    printf '%s\n' "$census"
+    echo "FATAL: scripts/local-stack/nonpublic-objects.mjs could not extract the non-public objects from the carried migrations (above). The lane would lack objects PROD carries." >&2
+    exit 1
+  fi
+  printf '%s\n' "$census"
+  n_trig="$(printf '%s\n' "$census" | sed -n 's/^nonpublic-extract: .* auth-triggers=\([0-9][0-9]*\).*$/\1/p')"
+  n_cron="$(printf '%s\n' "$census" | sed -n 's/^nonpublic-extract: .* cron-jobs=\([0-9][0-9]*\).*$/\1/p')"
+  if [ -z "$n_trig" ] || [ -z "$n_cron" ]; then
+    echo "FATAL: the extractor's census line carries no auth-triggers or cron-jobs count; refusing to apply what it cannot count." >&2
+    exit 1
+  fi
+  owner="${db_url#postgresql://}"
+  owner="${owner%%:*}"
+  if ! [[ "$owner" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+    echo "FATAL: could not read the loading role from the lane DSN; the cron jobs' owner would be unknown." >&2
+    exit 1
+  fi
+  if ! "$psql" -X "$admin_url" -v ON_ERROR_STOP=1 -q -1 -f "${REPLAY_HANDOFF_DIR}/nonpublic-auth-triggers.sql" </dev/null; then
+    echo "FATAL: applying the extracted auth.users trigger(s) through the superuser DSN failed." >&2
+    exit 1
+  fi
+  # stdout carries only the job ids cron.schedule returns.
+  if ! "$psql" -X "$db_url" -v ON_ERROR_STOP=1 -q -1 -f "${REPLAY_HANDOFF_DIR}/nonpublic-cron.sql" </dev/null >/dev/null; then
+    echo "FATAL: registering the extracted cron jobs as the loading role ${owner} failed (a refused cron.schedule is not retried as another role)." >&2
+    exit 1
+  fi
+  log "nonpublic-load: ${n_trig} auth.users trigger(s) applied via the superuser role supabase_admin; ${n_cron} cron job(s) registered as the loading role ${owner}"
+}
+
+# The gate: the lane's auth.users triggers compared with the set the carried
+# migrations declare (re-derived by the module, never read back from the SQL it
+# emitted). Read through the SUPERUSER DSN, which the catalogue's meta row must
+# confirm. DRIFT or an unreadable catalogue is FATAL.
+check_nonpublic_fidelity() {
+  local psql="$1" db_url="$2" admin_url rows owner
+  admin_url="${db_url/#postgresql:\/\/postgres:/postgresql://supabase_admin:}"
+  if [ "$admin_url" = "$db_url" ]; then
+    echo "FATAL: the lane DSN does not start with postgresql://postgres:, so the superuser DSN the non-public fidelity gate reads through cannot be derived." >&2
+    exit 1
+  fi
+  owner="${db_url#postgresql://}"
+  owner="${owner%%:*}"
+  if ! [[ "$owner" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+    echo "FATAL: could not read the loading role from the lane DSN; the gate cannot say who the cron jobs must belong to." >&2
+    exit 1
+  fi
+  rows="${REPLAY_HANDOFF_DIR}/nonpublic-catalogue.txt"
+  if ! "$psql" -X "$admin_url" -v ON_ERROR_STOP=1 -q -At -F '|' -f "${LANE_DIR}/nonpublic-catalogue.sql" >"$rows" </dev/null; then
+    echo "FATAL: could not read the lane's non-public catalogue for the fidelity gate." >&2
+    exit 1
+  fi
+  if ! node "${LANE_DIR}/nonpublic-objects.mjs" --check --migrations "$MIGRATIONS_DIR" --carried "$CARRIED_SET_FILE" --catalogue "$rows" --cron-owner "$owner"; then
+    echo "FATAL: the lane's non-public objects are not the set the carried migrations declare (nonpublic-fidelity above). Corpus files that read them would measure a lane that is not PROD's." >&2
     exit 1
   fi
 }
