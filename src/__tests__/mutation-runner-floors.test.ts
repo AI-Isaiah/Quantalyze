@@ -2250,7 +2250,11 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "ARMS_FLOOR: NOT compared — this SUBSET run covered 2 of 49 annotated files; ARMS_FLOOR is compared by the full-corpus run (push to main).",
     // Review 164.4.2 WR-03: the static upper bound the runner compares on every
     // SUBSET run — the full corpus's annotated-minus-waived total, at the floor.
-    "ARMS_FLOOR (static upper bound): 426 annotated-unwaived >= floor 426",
+    // ⭐ Built from the imported ARMS_FLOOR (round-2 review IN-01), because the
+    // count-recheck step re-reads the floor from run.mjs: a literal here would be
+    // one more pin a floor raise must move, failing with a message that blames
+    // the corpus instead of this fixture.
+    `ARMS_FLOOR (static upper bound): ${ARMS_FLOOR} annotated-unwaived >= floor ${ARMS_FLOOR}`,
     "",
     "✅ No defects in the SUBSET: every annotated arm of these 2 of 49 annotated files bit its own arm first. NOT full-corpus coverage.",
     "",
@@ -2276,7 +2280,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
   it("GREEN: a SUBSET log on a pull_request passes and SAYS ARMS_FLOOR was not compared, and where it is", () => {
     const r = runCountRecheck(SUBSET_LOG, PR);
     expect(r.status, r.out).toBe(0);
-    expect(r.out).toContain("ARMS_FLOOR (426) was NOT compared");
+    expect(r.out).toContain(`ARMS_FLOOR (${ARMS_FLOOR}) was NOT compared`);
     expect(r.out).toContain("compared by the full-corpus run on the push to main");
     expect(r.out).toContain("This is NOT full-corpus coverage.");
     // ⛔ It must never print the sentence claiming both floors held.
@@ -2358,11 +2362,16 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(r.out).toContain("the run printed NO 'ARMS_FLOOR (static upper bound)");
     // The bound re-read out of process: a log whose bound is under the floor
     // fails even if the runner's own verdict was somehow lost.
-    const under = SUBSET_LOG.replace("426 annotated-unwaived >= floor 426", "425 annotated-unwaived >= floor 426");
+    const under = SUBSET_LOG.replace(
+      `${ARMS_FLOOR} annotated-unwaived >= floor ${ARMS_FLOOR}`,
+      `${ARMS_FLOOR - 1} annotated-unwaived >= floor ${ARMS_FLOOR}`,
+    );
     expect(under).not.toBe(SUBSET_LOG);
     const u = runCountRecheck(under, PR);
     expect(u.status, u.out).toBe(1);
-    expect(u.out).toContain("ARMS_FLOOR regression (static upper bound): 425 annotated-unwaived arm(s) < floor 426");
+    expect(u.out).toContain(
+      `ARMS_FLOOR regression (static upper bound): ${ARMS_FLOOR - 1} annotated-unwaived arm(s) < floor ${ARMS_FLOOR}`,
+    );
   });
 
   it("RED: a FULL-labelled run that mutated only two files fails — the fallback form is judged as FULL", () => {
