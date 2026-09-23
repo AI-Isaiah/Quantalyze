@@ -955,6 +955,14 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
         "a cron call inside another call's arguments",
         "SELECT cron.schedule('a', '1 * * * *', $c$SELECT cron.schedule('b', '2 * * * *', 'SELECT 2')$c$);\n",
       ],
+      // Review 164.4.2 WR-06: a function body is DEFINED by the migration, never
+      // run by it, so a cron call there registered nothing on PROD. Folding it
+      // would put a job on the lane PROD never had, and --check rebuilds its
+      // expectation from the same fold, so it could not see the error.
+      [
+        "a cron call inside a CREATE FUNCTION body (defined, never run, at migration time)",
+        "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $fn$\nBEGIN\n  PERFORM cron.schedule('a', '1 * * * *', 'SELECT 1');\nEND $fn$;\n",
+      ],
     ] as const) {
       it(`MEASURE_FAIL, naming the file, on ${label}`, () => {
         const r = gate({ [A]: sql }, [A], META);
@@ -964,6 +972,16 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
         expect(r.out).toMatch(/verdict MEASURE_FAIL$/m);
       });
     }
+
+    it("a cron call inside a DO LANGUAGE plpgsql body is folded like a DO $$ body (the WR-06 refusal is scoped to NON-DO bodies)", () => {
+      const r = gate(
+        { [A]: "DO LANGUAGE plpgsql $$\nBEGIN\n  PERFORM cron.schedule('d_job', '*/5 * * * *', $cron$SELECT 1$cron$);\nEND $$;\n" },
+        [A],
+        [...META, cronRow("d_job", "*/5 * * * *", "SELECT 1")],
+      );
+      expect(r.status, r.out).toBe(0);
+      expect(r.out).toMatch(/cron-jobs=1\/1 drift=0 verdict OK$/m);
+    });
 
     it("MEASURE_FAIL when jobs are declared and the lane has no pg_cron", () => {
       const r = gate({ [A]: JOB }, [A], ["meta|superuser|t", "meta|database|postgres", "meta|pg_cron|0"]);

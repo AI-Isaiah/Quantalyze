@@ -46,7 +46,14 @@
  * trigger DDL or a cron call visible only inside a string literal an EXECUTE could run
  * (two independent lexers — `maskSql`'s code positions and `scanSql`'s comment-
  * stripped text — disagree on the per-file count); a carried basename with no file, or
- * a malformed carried line.
+ * a malformed carried line; a cron call inside a dollar body that is not a DO block
+ * (a function or procedure body is defined by its migration, never run by it).
+ *
+ * ⚠️ KNOWN LIMIT, stated rather than implied: a cron call in a DO block is folded
+ * whether or not the branch it sits in RAN on PROD (an `IF … THEN` guard is not
+ * evaluated here). Every carried call site sits in a DO block today (measured
+ * 2026-09-24: 61 of 61), guarded by pg_cron's presence, which PROD has; a branch
+ * PROD did not take would surface as an EXTRA job only against PROD, never here.
  *
  * USAGE
  *   node scripts/local-stack/nonpublic-objects.mjs --emit  --migrations <dir> --carried <file> --out-dir <dir>
@@ -240,6 +247,8 @@ function foldAuthTriggers(files, lexed) {
 const CRON_CALL = /\bcron\s*\.\s*(schedule_in_database|schedule|unschedule|alter_job)\s*\(/gi;
 const DOLLAR_TAG = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/;
 const ARITY = { schedule: 3, unschedule: 1 };
+/** The masked text immediately before a DO block's opening dollar tag. */
+const DO_OPENER = /\bDO(?:\s+LANGUAGE\s+[A-Za-z_][A-Za-z0-9_]*)?\s*$/i;
 
 /** Skip whitespace, `--` line comments and nested block comments from `i`. */
 function skipBlank(src, i) {
@@ -351,6 +360,15 @@ function foldCron(files, lexed) {
       const fn = m[1].toLowerCase();
       const at = `${base} statement ${L.stmtIndex(m.index)}`;
       if (!(fn in ARITY)) measureFail(`${at}: a cron.${fn} call site is not modelled`);
+      // Review 164.4.2 WR-06: a call inside a dollar body RAN at migration time
+      // only when that body is a DO block. Any other body (a CREATE FUNCTION /
+      // PROCEDURE) is DEFINED by the migration, never run by it, so folding its
+      // call would register a job PROD never had — and --check rebuilds its
+      // expectation from this same fold, so it could not see the error.
+      const body = L.ranges.find((r) => m.index >= r[0] && m.index < r[1]);
+      if (body && !DO_OPENER.test(L.code.slice(0, body[0]))) {
+        measureFail(`${at}: a cron.${fn} call inside a dollar body that is not a DO block (a function body is defined, not run, by the migration) is not modelled`);
+      }
       const open = m.index + m[0].length - 1;
       const { args, end } = parseCronArgs(src, open, at);
       if (args.length !== ARITY[fn]) measureFail(`${at}: cron.${fn} with ${args.length} argument(s); exactly ${ARITY[fn]} literal(s) are modelled`);
