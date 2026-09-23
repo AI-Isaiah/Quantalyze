@@ -40,6 +40,8 @@
 #   scripts/local-stack/run.sh --assert-teardown       # run ONLY the teardown assertion
 #   scripts/local-stack/run.sh --print-baseline-path   # print the RESOLVED BASELINE_FILE
 #   scripts/local-stack/run.sh --print-workdir         # print the RESOLVED STACK_DIR
+#   scripts/local-stack/run.sh --check-currency        # run the baseline CURRENCY gate
+#                                                      # exactly as `up` does; exit = its verdict
 #
 # ⚠️ R2-I03: these were dispatched but absent from this block, which is the
 # block `usage()` prints — so `run.sh` with no argument documented neither.
@@ -56,6 +58,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LANE_DIR="${REPO_ROOT}/scripts/local-stack"
 ENV_FILE="${LANE_DIR}/.stack-env"
 BASELINE_FILE="${REPO_ROOT}/supabase/schema/baseline.sql"
+MIGRATIONS_DIR="${REPO_ROOT}/supabase/migrations"
 CONFIG_TOML="${REPO_ROOT}/supabase/config.toml"
 
 # Lane-owned Supabase workdir, generated per run and gitignored.
@@ -190,6 +193,39 @@ write_env_handoff() {
 }
 
 # --- schema -------------------------------------------------------------------
+
+# ── Baseline CURRENCY (Phase 164.4.2 plan 03) ─────────────────────────────────
+#
+# ⛔ WHY. The baseline is a DUMP, and a migration can land after it was taken.
+# Loading a dump that is older than supabase/migrations/ boots a schema missing
+# real migrations — and every spec on this lane then goes green against a
+# catalogue that is not PROD's, with nothing in the green saying so. MEASURED
+# at 164.4.2 CONTEXT Area A: two migrations sat after the dump while this lane
+# and the live-DB lane were both green.
+#
+# `scripts/check-baseline-staleness.mjs` does NOT answer this — despite its
+# name it checks INTEGRITY (sha256 vs BASELINE.md). CURRENCY has exactly one
+# implementation, `scripts/check-baseline-currency.mjs`, shared with the
+# restore script's `refuse_stale_baseline()`. This lane calls it rather than
+# carrying a second copy of the comparison.
+#
+# BASELINE_FILE and MIGRATIONS_DIR are passed EXPLICITLY, so the lane and the
+# gate cannot disagree about which two paths were compared. FRESHNESS_TS_CMD
+# is passed through untouched (empty = the gate's own `git log` default), which
+# is the seam that lets the refusal be driven in both directions without
+# rewriting history.
+#
+# ⚠️ On a SHALLOW clone `git log -1 --format=%ct` reports the clone's own
+# commit time for every path, so the two epochs compare equal and this passes
+# having measured nothing. The CI jobs that boot this lane check out with
+# `fetch-depth: 0` for exactly that reason.
+check_baseline_currency() {
+  BASELINE_FILE="$BASELINE_FILE" \
+  MIGRATIONS_DIR="$MIGRATIONS_DIR" \
+  FRESHNESS_TS_CMD="${FRESHNESS_TS_CMD:-}" \
+    node "${REPO_ROOT}/scripts/check-baseline-currency.mjs"
+}
+
 load_baseline() {
   if [ ! -s "$BASELINE_FILE" ]; then
     cat >&2 <<EOF
@@ -202,6 +238,14 @@ measurement and the exact 'supabase db dump' command a human must run.
 Refusing to continue. This lane does not replay the 193 migrations that
 happen to work — a partially-applied schema is a silently-wrong baseline.
 EOF
+    exit 1
+  fi
+
+  # ⛔ CURRENCY, before the first connection and before psql reads a byte of
+  # the dump. A REFUSAL, never a warning: a lane that logs "stale" and loads
+  # anyway is a gate that measures nothing.
+  if ! check_baseline_currency; then
+    echo "FATAL: refusing to load ${BASELINE_FILE} into the local database: the baseline currency gate above did not pass." >&2
     exit 1
   fi
 
@@ -474,5 +518,11 @@ case "${1:-}" in
   # any ordinary re-spelling of STACK_DIR reads as "unwired" to a substring
   # match, which would let the check stay green while measuring nothing.
   --print-workdir) printf '%s\n' "$STACK_DIR" ;;
+  # Runs the SAME `check_baseline_currency` call `load_baseline()` makes, and
+  # exits with its status. Same argument as the two print seams above: a test
+  # (or a CI step) can ASK the lane whether it would refuse, instead of
+  # pattern-matching a line that any ordinary re-spelling would read as
+  # "unwired". No daemon, no stack — it reads two commit timestamps.
+  --check-currency) check_baseline_currency ;;
   *)           usage; exit 2 ;;
 esac
