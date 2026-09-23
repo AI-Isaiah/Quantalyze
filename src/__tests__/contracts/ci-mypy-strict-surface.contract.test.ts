@@ -590,6 +590,8 @@ interface TomlTable {
   header: string;
   isArray: boolean;
   kv: Map<string, string>;
+  /** Lines inside this table the reader could not parse; reported only for a table carrying mypy config. */
+  unparsed: string[];
 }
 
 function stripTomlComment(line: string): string {
@@ -604,16 +606,39 @@ function stripTomlComment(line: string): string {
   return line;
 }
 
+/** Open `[` / `{` minus close `]` / `}` outside single-line strings. */
+function bracketDepth(text: string): number {
+  let depth = 0;
+  let quote: string | null = null;
+  for (const c of text) {
+    if (quote) {
+      if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === "[" || c === "{") depth++;
+    else if (c === "]" || c === "}") depth--;
+  }
+  return depth;
+}
+
 /**
- * A deliberately NARROW TOML reader: table headers, array-of-table headers and
- * single-line `key = value`. Anything else is returned as an error rather than
- * skipped, because a construct this reader cannot parse (a multi-line array,
- * a multi-line string, a line continuation) could carry a mypy setting it
- * would never see.
+ * A deliberately NARROW TOML reader: table headers, array-of-table headers,
+ * `key = value`, and a value whose array spans several lines (bracket depth
+ * tracked outside strings — strings are single-line, because a multi-line
+ * string is refused below). Two kinds of error:
+ *   - `errors`, ALWAYS reported: a multi-line string or a line continuation
+ *     (which can make a header line string content), an array still open at
+ *     end of file, and any unparseable line that looks like a table header or
+ *     names `mypy`;
+ *   - `unparsed` on the table the line sits in: any other line it cannot parse,
+ *     reported by the caller only for the root table and for tables that carry
+ *     mypy configuration, so a routine `[tool.ruff]` construct cannot red the
+ *     mypy contract. A header cannot occur inside an array, so this keeps the
+ *     fail-closed property for mypy tables.
  */
 function parseTomlTables(text: string): { tables: TomlTable[]; errors: string[] } {
-  const tables: TomlTable[] = [{ header: "", isArray: false, kv: new Map() }];
+  const tables: TomlTable[] = [{ header: "", isArray: false, kv: new Map(), unparsed: [] }];
   const errors: string[] = [];
+  let pending: { key: string; value: string; line: number } | null = null;
   text.split("\n").forEach((raw, i) => {
     // A multi-line string (`'''` / `"""`) or a backslash line continuation
     // lets a line THIS reader sees as a table header be string content to a
@@ -629,28 +654,43 @@ function parseTomlTables(text: string): { tables: TomlTable[]; errors: string[] 
       return;
     }
     const line = stripTomlComment(raw).trim();
+    if (pending) {
+      pending.value += ` ${line}`;
+      if (bracketDepth(pending.value) <= 0) {
+        tables[tables.length - 1].kv.set(pending.key, pending.value.trim());
+        pending = null;
+      }
+      return;
+    }
     if (!line) return;
     let m: RegExpExecArray | null;
     if ((m = /^\[\[\s*([^\]]+?)\s*\]\]$/.exec(line))) {
-      tables.push({ header: m[1], isArray: true, kv: new Map() });
+      tables.push({ header: m[1], isArray: true, kv: new Map(), unparsed: [] });
     } else if ((m = /^\[\s*([^\]]+?)\s*\]$/.exec(line))) {
-      tables.push({ header: m[1], isArray: false, kv: new Map() });
+      tables.push({ header: m[1], isArray: false, kv: new Map(), unparsed: [] });
     } else if ((m = /^([A-Za-z0-9_.-]+)\s*=\s*(.+)$/.exec(line))) {
-      tables[tables.length - 1].kv.set(m[1], m[2].trim());
+      if (bracketDepth(m[2]) > 0) pending = { key: m[1], value: m[2], line: i + 1 };
+      else tables[tables.length - 1].kv.set(m[1], m[2].trim());
     } else {
-      errors.push(
+      const msg =
         `pyproject.toml: line ${i + 1} ${JSON.stringify(raw)} is neither a table header nor a ` +
-          `single-line \`key = value\`. This pin's reader cannot parse it, so it cannot vouch that it ` +
-          `sets no mypy option.`,
-      );
+        `\`key = value\`. This pin's reader cannot parse it, so it cannot vouch that it sets no mypy option.`;
+      if (line.startsWith("[") || /mypy/.test(line)) errors.push(msg);
+      else tables[tables.length - 1].unparsed.push(msg);
     }
   });
+  if (pending) {
+    errors.push(
+      `pyproject.toml: the array opened on line ${pending.line} for the key "${pending.key}" is never ` +
+        `closed, so every line after it was read as part of that value.`,
+    );
+  }
   return { tables, errors };
 }
 
 const unquote = (v: string): string => v.trim().replace(/^(["'])(.*)\1$/, "$2");
 
-/** A TOML string or single-line string array, as a list of strings. */
+/** A TOML string or string array (a multi-line one arrives joined), as a list of strings. */
 function tomlStrings(v: string): string[] {
   const t = v.trim();
   const inner = /^\[(.*)\]$/.exec(t);
@@ -729,6 +769,7 @@ function mypyConfigProblems(
   const mypyTables = tables.filter(
     (t) => /mypy/.test(t.header) || [...t.kv.keys()].some((k) => /mypy/.test(k)),
   );
+  for (const t of tables) if (t.header === "" || mypyTables.includes(t)) problems.push(...t.unparsed);
   const main = mypyTables.filter((t) => t.header === "tool.mypy" && !t.isArray);
   const overrides = mypyTables.filter((t) => t.header === "tool.mypy.overrides" && t.isArray);
   for (const t of mypyTables) {
@@ -1193,10 +1234,37 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     expect(has(problems, "pyproject.toml:", "line continuation"), problems.join("\n")).toBe(true);
   });
 
-  it("(u) a multi-line array the reader cannot parse → a parse problem, never a silent skip", () => {
+  it("(u) a multi-line `module = [...]` in an override is PARSED: the same set passes, an added module is named", () => {
     const line = 'module = ["ccxt.*", "pandas.*", "scipy.*"]';
-    const problems = cfg(mutate(REAL_PYPROJECT, line, 'module = [\n  "ccxt.*",\n  "pandas.*",\n  "scipy.*",\n]', "(u)"));
-    expect(has(problems, "pyproject.toml:", "neither a table header"), problems.join("\n")).toBe(true);
+    const same = cfg(mutate(REAL_PYPROJECT, line, 'module = [\n  "ccxt.*",  # a comment\n  "pandas.*",\n  "scipy.*",\n]', "(u)"));
+    expect(same, same.join("\n")).toEqual([]);
+    const added = cfg(mutate(REAL_PYPROJECT, line, 'module = [\n  "ccxt.*",\n  "pandas.*",\n  "scipy.*",\n  "main",\n]', "(u main)"));
+    expect(has(added, 'module "main"'), added.join("\n")).toBe(true);
+  });
+
+  it("(u2) a multi-line array in an UNRELATED `[tool.ruff]` table → NOT a problem", () => {
+    const added = '\n[tool.ruff.lint]\nselect = [\n  "E",\n  "F",\n]\n';
+    expect(REAL_PYPROJECT.includes(added), "CALIBRATION (u2): already present").toBe(false);
+    const problems = cfg(REAL_PYPROJECT + added);
+    expect(problems, problems.join("\n")).toEqual([]);
+  });
+
+  it("(u3) an array never closed → a problem naming its key", () => {
+    const line = 'module = ["pandera.*"]';
+    const problems = cfg(mutate(REAL_PYPROJECT, line, 'module = [\n  "pandera.*",', "(u3)"));
+    expect(has(problems, "pyproject.toml:", 'for the key "module" is never closed'), problems.join("\n")).toBe(true);
+  });
+
+  it("(u4) an unparseable line inside [tool.mypy] → a parse problem; the same line in [tool.ruff] → none", () => {
+    const inMypy = cfg(insertAfter(REAL_PYPROJECT, "strict = true\n", "warn_unused_ignores\n", "(u4)"));
+    expect(has(inMypy, "pyproject.toml:", '"warn_unused_ignores" is neither a table header'), inMypy.join("\n")).toBe(true);
+    const inRuff = cfg(`${REAL_PYPROJECT}\n[tool.ruff]\nwarn_unused_ignores\n`);
+    expect(inRuff, inRuff.join("\n")).toEqual([]);
+  });
+
+  it("(u5) an unparseable header-shaped line in an unrelated table → a problem, whatever table it sits in", () => {
+    const problems = cfg(`${REAL_PYPROJECT}\n[tool.ruff]\n[tool.mypy\nignore_errors = true\n`);
+    expect(has(problems, "pyproject.toml:", '"[tool.mypy" is neither a table header'), problems.join("\n")).toBe(true);
   });
 
   it("(q) an inline `# mypy: ignore-errors` in main.py → a problem naming main.py", () => {
