@@ -583,6 +583,113 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
     }
   });
 
+  // ⭐ Phase 164.4.2 plan 11 (DECISION G). The non-public objects gate, driven with
+  // synthetic migrations, carried sets and catalogues (no Docker). ⛔ ONE `it(` PER
+  // ARM, each with its OWN migrations directory: a neuter of one branch of the gate
+  // must turn exactly its own arm red, never an earlier assertion in a shared block.
+  describe("nonpublic-objects.mjs — the auth.users trigger class (D-G)", () => {
+    const MODULE = REPO_ROOT + "scripts/local-stack/nonpublic-objects.mjs";
+    const TRIGGER_SQL =
+      "CREATE TRIGGER on_signup\n  AFTER INSERT ON auth.users\n  FOR EACH ROW EXECUTE FUNCTION handle_signup();\n";
+    const META = ["meta|superuser|t", "meta|database|postgres"];
+    const TRIGGER_ROW = "trigger|users|on_signup|5|O|public.handle_signup()";
+
+    /** A throwaway lane: migrations `files`, the carried subset, and a catalogue. */
+    const gate = (
+      files: Record<string, string>,
+      carried: string[],
+      catalogue: string[] | null,
+    ) => {
+      const dir = mkdtempSync(join(tmpdir(), "nonpublic-"));
+      try {
+        const mig = join(dir, "migrations");
+        mkdirSync(mig);
+        for (const [name, sql] of Object.entries(files)) writeFileSync(join(mig, name), sql);
+        writeFileSync(join(dir, "carried.txt"), carried.map((c) => `${c}\n`).join(""));
+        writeFileSync(join(dir, "cat.txt"), catalogue === null ? "" : catalogue.join("\n") + "\n");
+        const run = (mode: string[]) => {
+          const r = spawnSync(
+            process.execPath,
+            [MODULE, ...mode, "--migrations", mig, "--carried", join(dir, "carried.txt")],
+            { encoding: "utf8" },
+          );
+          return { status: r.status, out: `${r.stdout}${r.stderr}` };
+        };
+        const emitted = run(["--emit", "--out-dir", join(dir, "out")]);
+        const emittedSql = existsSync(join(dir, "out", "nonpublic-auth-triggers.sql"))
+          ? readFileSync(join(dir, "out", "nonpublic-auth-triggers.sql"), "utf8")
+          : null;
+        return { emitted, emittedSql, ...run(["--check", "--catalogue", join(dir, "cat.txt")]) };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const A = "20260101000000_a.sql";
+    const B = "20260102000000_b.sql";
+
+    it("OK on an exact match, and --emit writes the declaring statement's own bytes", () => {
+      const r = gate({ [A]: TRIGGER_SQL }, [A], [...META, TRIGGER_ROW]);
+      expect(r.status, r.out).toBe(0);
+      expect(r.out).toMatch(/^nonpublic-fidelity: auth-users-triggers=1\/1 drift=0 verdict OK$/m);
+      expect(r.emitted.out).toContain(`auth-triggers=1 (on_signup<-${A})`);
+      expect(r.emittedSql, "the emitted SQL is not the migration's own bytes").toBe(
+        `SET search_path TO public;\n${TRIGGER_SQL.trimEnd()}\n`,
+      );
+    });
+
+    it("DRIFT naming MISSING when the lane lacks a declared trigger", () => {
+      const r = gate({ [A]: TRIGGER_SQL }, [A], META);
+      expect(r.status, `the gate passed a lane with NO auth.users trigger:\n${r.out}`).toBe(1);
+      expect(r.out).toContain("MISSING  auth.users trigger on_signup");
+    });
+
+    it("DRIFT naming EXTRA for a trigger no carried migration declares", () => {
+      const r = gate({ [A]: TRIGGER_SQL }, [A], [...META, TRIGGER_ROW, "trigger|users|undeclared|5|O|public.x()"]);
+      expect(r.status, `an undeclared auth.users trigger passed the gate:\n${r.out}`).toBe(1);
+      expect(r.out).toContain("EXTRA    auth.users trigger undeclared");
+    });
+
+    it("a DROP TRIGGER in a later carried file removes the trigger from the fold", () => {
+      const r = gate(
+        { [A]: TRIGGER_SQL, [B]: "DROP TRIGGER IF EXISTS on_signup ON auth.users;\n" },
+        [A, B],
+        META,
+      );
+      expect(r.status, `a dropped trigger is still expected on the lane:\n${r.out}`).toBe(0);
+      expect(r.out).toMatch(/auth-users-triggers=0\/0 drift=0 verdict OK$/m);
+    });
+
+    it("a trigger declared only in a file NOT in the carried set is not expected", () => {
+      const r = gate({ [A]: "SELECT 1;\n", [B]: TRIGGER_SQL }, [A], META);
+      expect(
+        r.status,
+        `a non-carried migration's trigger became expected — the replay would register it a second time:\n${r.out}`,
+      ).toBe(0);
+      expect(r.out).toMatch(/auth-users-triggers=0\/0 drift=0 verdict OK$/m);
+    });
+
+    it("MEASURE_FAIL on a trigger carrying a WHEN clause (a shape it cannot prove safe)", () => {
+      const when =
+        "CREATE TRIGGER on_signup AFTER INSERT ON auth.users FOR EACH ROW WHEN (NEW.email IS NOT NULL) EXECUTE FUNCTION handle_signup();\n";
+      const r = gate({ [A]: when }, [A], [...META, TRIGGER_ROW]);
+      expect(r.status, `a WHEN-clause trigger was folded instead of refused:\n${r.out}`).toBe(2);
+      expect(r.out).toMatch(/verdict MEASURE_FAIL$/m);
+      expect(r.out).toContain(`${A} statement 1`);
+    });
+
+    it("MEASURE_FAIL on a catalogue read by a non-superuser (meta|superuser|f)", () => {
+      const r = gate({ [A]: TRIGGER_SQL }, [A], ["meta|superuser|f", "meta|database|postgres", TRIGGER_ROW]);
+      expect(r.status, `a non-superuser catalogue was trusted:\n${r.out}`).toBe(2);
+      expect(r.out).toContain("NON-superuser");
+    });
+
+    it("MEASURE_FAIL on an empty catalogue, never 'nothing there'", () => {
+      const r = gate({ [A]: TRIGGER_SQL }, [A], null);
+      expect(r.status, `an empty catalogue compared instead of refusing:\n${r.out}`).toBe(2);
+      expect(r.out).toContain("the catalogue is EMPTY");
+    });
+  });
+
   // ⭐ Phase 164.4.2 plan 03. The guard above compares `git log -1 --format=%ct`
   // for two paths. On the default SHALLOW checkout both answers are the one
   // fetched commit's time, they compare equal, and the guard passes having
