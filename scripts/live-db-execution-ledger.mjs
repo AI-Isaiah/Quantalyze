@@ -859,6 +859,32 @@ function selfTest() {
     }) === "K2-function-body-role-gate",
   ]);
 
+  // ── 2026-09-23 (Phase 164.4.2 plan 08 checkpoint RED): once the lane stopped
+  //    re-granting EXECUTE through the image's default ACLs, the six wizard arms
+  //    are refused at the GRANT layer — PROD's own state since Migration B
+  //    (20260814120000) withdrew `authenticated` EXECUTE on create_wizard_strategy.
+  //    That is an arm calling a door PROD shut, NOT a baseline that lost a grant,
+  //    so it must not fall into the K1 residue whose closing act is a re-dump. ──
+  cases.push([
+    "classifier: a GRANT-layer refusal of create_wizard_strategy in the wizard module routes to K3, not to the K1 residue",
+    routeKind({
+      file: "src/__tests__/wizard-rpcs-live-db.test.ts",
+      fullName: "x",
+      message: "expected { code: '42501', …(2) } to be null",
+      actual: '{ "code": "42501", "message": "permission denied for function create_wizard_strategy" }',
+    }) === "K3-migration-or-invariant-decision",
+  ]);
+
+  cases.push([
+    "classifier: the same GRANT-layer refusal in ANOTHER module stays in the K1 residue (the rule is module-scoped)",
+    routeKind({
+      file: "src/__tests__/some-other-live-db.test.ts",
+      fullName: "x",
+      message: "expected { code: '42501', …(2) } to be null",
+      actual: '{ "code": "42501", "message": "permission denied for function create_wizard_strategy" }',
+    }) === "K1-baseline-privilege-state-absent",
+  ]);
+
   cases.push([
     "classifier: a SQLSTATE-bearing `to be null` failure carries the state in its class",
     classifySignature({

@@ -575,6 +575,70 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
     expect(sqlLive).toMatch(/IF v_left <> 0 THEN\s+RAISE EXCEPTION/);
   });
 
+  // ── Phase 164.4.2 plan 08 checkpoint RED (2026-09-23): the lane's Postgres IMAGE.
+  // MEASURED: CI run 35914559318's `sql-tests` lost its backend (SIGSEGV) inside
+  // test_api_keys_exchange_not_user_writable.sql. The image was never chosen — it
+  // floated with the CLI version (2.84.2 on a developer box -> 17.6.1.095, 2.98.2 on
+  // CI -> 17.6.1.106), so the box was green on a different Postgres than CI ran.
+  // 17.6.1.104 and .106 ship supautils 3.2.0, whose ExecutorStart hint hook crashes
+  // the backend when a `postgres` session that SET ROLE to a hint role is refused
+  // EXECUTE on a function (fixed upstream in supautils 3.2.2, first shipped in
+  // 17.6.1.113). WHY THIS MATTERS: that is the corpus's own idiom for proving a
+  // REVOKE holds, so a floating image turns a privilege gate into a crashed run.
+  it("the lane PINS its Postgres image, proves the pin took, and proves a function EXECUTE denial does not kill the backend before anything loads", () => {
+    const lane = read(RUN_SH);
+    const pin = lane.match(/^LANE_PG_VERSION="(\d+\.\d+\.\d+\.\d+)"$/m);
+    expect(
+      pin,
+      `${RUN_SH} carries no LANE_PG_VERSION pin — the image floats with the CLI version, and CI and a developer box boot different Postgres builds`,
+    ).not.toBeNull();
+
+    // The CLI splices the file's bytes straight into the image tag, so the write must
+    // carry NO trailing newline — `printf '%s'`, never `echo`.
+    const gen = liveLines(bashFunctionBody(lane, "generate_stack_config"));
+    expect(
+      gen.some((l) => l === `printf '%s' "$LANE_PG_VERSION" >"\${STACK_DIR}/supabase/.temp/postgres-version"`),
+      "generate_stack_config no longer writes the pin to the lane workdir's .temp/postgres-version (the file the CLI reads the db image tag from)",
+    ).toBe(true);
+
+    const up = liveLines(bashFunctionBody(lane, "cmd_up"));
+    const start = up.indexOf("sb start");
+    const assertImage = up.indexOf("assert_lane_pg_image");
+    const probe = up.indexOf("probe_function_denial_survives");
+    const schema = up.findIndex((l) => l === "load_baseline");
+    expect(assertImage, "cmd_up no longer asserts the running image equals the pin").toBeGreaterThan(start);
+    expect(probe, "cmd_up no longer runs the function-denial probe").toBeGreaterThan(assertImage);
+    expect(
+      probe < schema,
+      "the function-denial probe must run BEFORE the schema loads, so --no-schema boots are covered and a crashing image fails at boot rather than mid-corpus",
+    ).toBe(true);
+
+    // Both FATAL — an assertion that only logs measures nothing.
+    const imageBody = liveLines(bashFunctionBody(lane, "assert_lane_pg_image"));
+    expect(imageBody.some((l) => l.includes('"$DOCKER_BIN" ps') && l.includes("supabase_db_${PROJECT_ID}"))).toBe(true);
+    expect(imageBody.filter((l) => /^exit\s+[1-9]/.test(l)).length).toBeGreaterThanOrEqual(2);
+    const probeBody = liveLines(bashFunctionBody(lane, "probe_function_denial_survives"));
+    expect(
+      probeBody.some((l) => l.includes('-f "${LANE_DIR}/function-denial-probe.sql"')),
+      "probe_function_denial_survives no longer runs scripts/local-stack/function-denial-probe.sql",
+    ).toBe(true);
+    expect(probeBody.filter((l) => /^exit\s+[1-9]/.test(l)).length).toBeGreaterThanOrEqual(1);
+
+    // The probe is the crash's exact shape: a `postgres` session, SET ROLE to a hint
+    // role, EXECUTE refused. It must catch ONLY 42501, and raise when the call SUCCEEDS
+    // (a probe that cannot fail measures nothing), and leave nothing behind.
+    const probeSql = read("scripts/local-stack/function-denial-probe.sql")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("--"))
+      .join("\n");
+    expect(probeSql).toMatch(/REVOKE ALL ON FUNCTION public\.lane_function_denial_probe\(\) FROM PUBLIC, anon, authenticated;/);
+    expect(probeSql).toMatch(/SET LOCAL ROLE authenticated;/);
+    expect(probeSql).toMatch(/EXCEPTION WHEN insufficient_privilege THEN/);
+    expect(probeSql).not.toMatch(/WHEN OTHERS/);
+    expect(probeSql).toMatch(/PERFORM public\.lane_function_denial_probe\(\);\s+RAISE EXCEPTION/);
+    expect(probeSql.trim().endsWith("ROLLBACK;"), "the probe must roll back its function").toBe(true);
+  });
+
   // The fidelity gate itself, driven with a synthetic dump and catalogue (no Docker):
   // an exact match is OK, the CI run's exact defect (authenticated TRUNCATE on
   // system_settings, which the dump does not grant) is DRIFT, and a GRANT shape it
