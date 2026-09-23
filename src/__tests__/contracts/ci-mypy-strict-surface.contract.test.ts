@@ -25,6 +25,10 @@ import { join } from "node:path";
  *     flag set is EXACTLY `--strict --follow-imports=silent` (an extra flag
  *     such as `--exclude=` narrows the gate while the path set stays equal);
  *   - the Makefile `typecheck` recipe carries NO flag (pyproject.toml supplies them);
+ *   - the gate step sets only `name` and `run` (no `if:`, `continue-on-error:`,
+ *     `shell:` or `env:` that could switch it off with its run line intact), the
+ *     `python` job carries no job-level `continue-on-error:`, and neither the job's
+ *     nor the workflow's `defaults:` sets a `shell:`;
  *   - every `EXCLUDED` member still exists on disk (a stale exclusion reddens).
  *   The D-02 before/after record this pin keeps from going stale:
  *     BEFORE: `services/ routers/ models/` — 96 source files as mypy counts them.
@@ -110,8 +114,15 @@ function mypyInvocationCount(jobLines: string[]): number {
   }).length;
 }
 
-/** The whitespace tokens after `mypy` on the named step's `run:` line. */
-function ciMypyArgs(ymlText: string): string[] {
+const indentOf = (l: string): number => l.length - l.trimStart().length;
+const isContent = (l: string): boolean => l.trim() !== "" && !l.trim().startsWith("#");
+
+/**
+ * The gate step's own lines: from its `- name:` line up to (not including) the
+ * next content line at the step's dash indentation or shallower — the next
+ * step, whatever key it opens with.
+ */
+function gateStepLines(ymlText: string): string[] {
   const job = pythonJobLines(ymlText);
   const stepAt = job.findIndex((l) => l.trim() === `- name: ${STEP_NAME}`);
   if (stepAt === -1) {
@@ -121,10 +132,84 @@ function ciMypyArgs(ymlText: string): string[] {
         `gate is gone.`,
     );
   }
+  const dash = indentOf(job[stepAt]);
+  let end = stepAt + 1;
+  while (end < job.length && !(isContent(job[end]) && indentOf(job[end]) <= dash)) end++;
+  return job.slice(stepAt, end);
+}
+
+/** The keys the gate step sets, `name` included (read off the `- name:` line). */
+function gateStepKeys(ymlText: string): string[] {
+  const step = gateStepLines(ymlText);
+  const keyIndent = indentOf(step[0]) + 2;
+  const keys = ["name"];
+  for (const l of step.slice(1)) {
+    const m = /^([A-Za-z0-9_-]+):/.exec(l.trimStart());
+    if (m && isContent(l) && indentOf(l) === keyIndent) keys.push(m[1]);
+  }
+  return keys;
+}
+
+/**
+ * The lines of a key's block at a given indentation: the key line plus every
+ * following line indented deeper (blank and comment lines included). Empty
+ * when the key is absent.
+ */
+function keyBlock(lines: string[], indent: number, key: string): string[] {
+  const at = lines.findIndex((l) => indentOf(l) === indent && l.trimStart().startsWith(`${key}:`));
+  if (at === -1) return [];
+  let end = at + 1;
+  while (end < lines.length && !(isContent(lines[end]) && indentOf(lines[end]) <= indent)) end++;
+  return lines.slice(at, end);
+}
+
+/**
+ * Every YAML key that can switch the gate off without touching its `run:`
+ * line: an extra key on the step (`if: false`, `continue-on-error: true`, a
+ * `shell:` that swallows the exit status, an `env:` that repoints mypy), a
+ * job-level `continue-on-error`, or a `shell:` in the job's or the workflow's
+ * `defaults:`.
+ */
+function stepSwitchProblems(ymlText: string): string[] {
+  const problems: string[] = [];
+  for (const k of gateStepKeys(ymlText)) {
+    if (k !== "name" && k !== "run") {
+      problems.push(
+        `ci.yml: step "${STEP_NAME}" carries the key "${k}:"; only \`name\` and \`run\` are allowed. ` +
+          `A key such as \`if: false\`, \`continue-on-error: true\` or \`shell:\` can switch the gate ` +
+          `off while its run line stays pinned.`,
+      );
+    }
+  }
+  const job = pythonJobLines(ymlText);
+  if (keyBlock(job, 4, "continue-on-error").length) {
+    problems.push(
+      "ci.yml: the `python` job carries a job-level `continue-on-error:`, so a red mypy step no " +
+        "longer fails the job.",
+    );
+  }
+  const lines = ymlText.split("\n");
+  for (const [label, block] of [
+    ["the `python` job's", keyBlock(job, 4, "defaults")],
+    ["the workflow's top-level", keyBlock(lines, 0, "defaults")],
+  ] as const) {
+    // `\bshell\s*:` rather than a line-start match, so a flow mapping
+    // (`defaults: {run: {shell: bash}}`) is seen too.
+    if (block.some((l) => isContent(l) && /\bshell\s*:/.test(l))) {
+      problems.push(
+        `ci.yml: ${label} \`defaults:\` sets a \`shell:\`, which applies to the mypy step and can ` +
+          `swallow its exit status.`,
+      );
+    }
+  }
+  return problems;
+}
+
+/** The whitespace tokens after `mypy` on the named step's `run:` line. */
+function ciMypyArgs(ymlText: string): string[] {
   let runLine: string | undefined;
-  for (const l of job.slice(stepAt + 1)) {
+  for (const l of gateStepLines(ymlText).slice(1)) {
     const t = l.trim();
-    if (t.startsWith("- name: ")) break;
     if (t.startsWith("run: ")) {
       runLine = t;
       break;
@@ -215,6 +300,8 @@ function surfaceProblems(
         `line states it.`,
     );
   }
+
+  problems.push(...stepSwitchProblems(ymlText));
 
   // The flag set is pinned EXACTLY, not by presence. A presence check lets an
   // added `--exclude=services/ingestion/` (or `--allow-untyped-defs`) narrow or
@@ -414,6 +501,39 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
     expect(has(problems, "ci.yml:", 'lost the flag "--follow-imports=silent"'), problems.join("\n")).toBe(true);
     expect(has(problems, '"--strict"'), problems.join("\n")).toBe(false);
+  });
+
+  const STEP_LINE = `      - name: ${STEP_NAME}\n`;
+
+  it("(j) `if: false` on the gate step → a step-key problem naming `if`", () => {
+    const yml = insertAfter(REAL_YML, STEP_LINE, "        if: false\n", "(j)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'carries the key "if:"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(k) `continue-on-error: true` on the gate step → a step-key problem naming it", () => {
+    const yml = insertAfter(REAL_YML, STEP_LINE, "        continue-on-error: true  # calibration (k)\n", "(k)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'carries the key "continue-on-error:"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(l) a job-level `continue-on-error: true` on the python job → a job problem", () => {
+    const yml = insertAfter(REAL_YML, "\n  python:\n", "    continue-on-error: true  # calibration (l)\n", "(l)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", "job-level `continue-on-error:`"), problems.join("\n")).toBe(true);
+  });
+
+  it("(m) a `shell:` in the python job's `defaults: run:` → a defaults problem", () => {
+    // The anchor must occur once (insertAfter asserts it): today only the
+    // python job carries this defaults block, so the shell lands in it.
+    const yml = insertAfter(
+      REAL_YML,
+      "    defaults:\n      run:\n        working-directory: analytics-service\n",
+      "        shell: bash {0} || true\n",
+      "(m)",
+    );
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", "`python` job's `defaults:` sets a `shell:`"), problems.join("\n")).toBe(true);
   });
 
   it("(i) a flag on the Makefile `typecheck` recipe → a Makefile flag problem", () => {
