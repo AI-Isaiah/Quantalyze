@@ -41,7 +41,9 @@
  *                         not absent and it is not present.
  *
  * ⛔ LOCAL ONLY. The DSN is refused before any connection unless it is a
- * postgres URL naming 127.0.0.1 or localhost with a port and no query string.
+ * postgres URL naming 127.0.0.1 or localhost with a port and no query string,
+ * whose authority libpq reads as a URL parser does (no whitespace, one '@', no
+ * comma host list; review 164.4.2 round 2 WR-02).
  * libpq honours host=/hostaddr=/service= in a query string, which would re-point
  * the connection. That was stricter than `run.sh`'s old `*@127.0.0.1:*` glob,
  * because a glob also matches `@127.0.0.1:` smuggled into the userinfo; since
@@ -183,14 +185,30 @@ export function parseSupply(stdout) {
  * Otherwise a reason. ⛔ The reason never quotes the DSN, its password or its host.
  */
 export function refuseNonLocalDsn(dsn) {
+  const raw = String(dsn);
+  // Review 164.4.2 round 2, WR-02: every check below reads `new URL()`, but the
+  // connection is made by libpq, and the two parse some authorities differently.
+  // Such a DSN is refused before either reading is trusted:
+  //   - a URL parser strips tab and newline anywhere; libpq keeps them;
+  //   - a URL parser splits userinfo at the LAST '@', libpq at the FIRST, and
+  //     libpq then reads a comma host list and tries its first host. So
+  //     `u@remote,@127.0.0.1:54322` is 127.0.0.1 to the URL parser and `remote`
+  //     to libpq. The authority is read as libpq reads it, up to the first '/'.
+  if (/[\s\x00-\x1f\x7f]/.test(raw)) {
+    return "the handoff's DB_URL carries whitespace or a control character, which a URL parser strips and libpq does not";
+  }
   let u;
   try {
-    u = new URL(String(dsn));
+    u = new URL(raw);
   } catch {
     return "the handoff's DB_URL is not a parseable URL";
   }
   if (u.protocol !== "postgresql:" && u.protocol !== "postgres:") {
     return "the handoff's DB_URL is not a postgres:// or postgresql:// URL";
+  }
+  const authority = raw.replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "").split("/")[0];
+  if ((authority.match(/@/g) ?? []).length > 1 || authority.includes(",")) {
+    return "the handoff's DB_URL carries a second '@' or a host list, which libpq parses differently from a URL parser (it connects to the first host of the list)";
   }
   if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") {
     return "the handoff's DB_URL names a host other than 127.0.0.1/localhost. This probe is local-only: TEST is shared and PROD is PROD";
@@ -350,7 +368,7 @@ function refuseNonLocalDsnCli() {
     console.error(`::error::refusing a non-local database: ${why}`);
     return 1;
   }
-  console.log("loopback-dsn: OK (127.0.0.1/localhost, a port, no query string)");
+  console.log("loopback-dsn: OK (127.0.0.1/localhost, one host, a port, no query string)");
   return 0;
 }
 
@@ -388,7 +406,7 @@ function main(argv) {
  * ⛔ Raise it only together with the arm that adds one; lowering it to make a
  * run green is deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 52;
+export const EXPECTED_ASSERTIONS = 55;
 
 const SECTIONS = 15;
 
@@ -600,6 +618,13 @@ function selfTest() {
       scheme: "mysql://postgres:postgres@127.0.0.1:54322/postgres",
       unparseable: "not a dsn at all",
       portless: "postgresql://postgres:postgres@127.0.0.1/postgres",
+      // Review 164.4.2 round 2, WR-02: a URL parser splits the authority at the
+      // LAST '@', libpq at the FIRST, then reads a comma host list. libpq tries
+      // the remote host first; the URL parser sees only 127.0.0.1.
+      hostList: "postgresql://u@db.example.invalid,@127.0.0.1:54322/postgres",
+      doubleAt: "postgresql://u@db.example.invalid@127.0.0.1:54322/postgres",
+      // A URL parser strips tab and newline anywhere; libpq keeps them.
+      whitespace: "postgresql://postgres@127.0.0.1:54\t322/postgres",
     };
     ok(typeof refuseNonLocalDsn(refusals.remote) === "string", "a remote host is refused");
     ok(
@@ -610,6 +635,12 @@ function selfTest() {
     ok(typeof refuseNonLocalDsn(refusals.scheme) === "string", "a non-postgres scheme is refused");
     ok(typeof refuseNonLocalDsn(refusals.unparseable) === "string", "an unparseable DSN is refused");
     ok(typeof refuseNonLocalDsn(refusals.portless) === "string", "a DSN with no port is refused, matching run.sh's own '@127.0.0.1:' guard");
+    ok(
+      typeof refuseNonLocalDsn(refusals.hostList) === "string",
+      "a comma host list behind a second '@' is refused — libpq connects to its FIRST, remote, host",
+    );
+    ok(typeof refuseNonLocalDsn(refusals.doubleAt) === "string", "a second '@' in the authority is refused — libpq and a URL parser split it differently");
+    ok(typeof refuseNonLocalDsn(refusals.whitespace) === "string", "whitespace inside the DSN is refused — a URL parser strips it, libpq does not");
     ok(
       Object.values(refusals).every((dsn) => {
         const why = String(refuseNonLocalDsn(dsn) ?? "");

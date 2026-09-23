@@ -3933,7 +3933,7 @@ jobs:
             exit 1
           fi
           if ! LOOPBACK_DSN="${LANE_DB_URL}" node "${GITHUB_WORKSPACE}/scripts/local-stack/capability-probe.mjs" --refuse-nonlocal-dsn; then
-            echo "::error::refusing to run SQL self-tests: the lane handoff's DB_URL is not a loopback DSN (127.0.0.1/localhost, a port, no query string). This job is local-only — TEST is shared and PROD is PROD."
+            echo "::error::refusing to run SQL self-tests: the lane handoff's DB_URL is not a loopback DSN (127.0.0.1/localhost, one host, a port, no query string). This job is local-only — TEST is shared and PROD is PROD."
             exit 1
           fi
           # LANE-ONLY exclusion — a file whose assertion body queries an

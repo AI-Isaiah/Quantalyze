@@ -1129,6 +1129,9 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
       "postgresql://postgres@127.0.0.1:54322/postgres?host=db.example.invalid",
       "postgresql://postgres@127.0.0.1:54322/postgres?hostaddr=192.0.2.1",
       "postgresql://u@127.0.0.1:1@db.example.invalid:5432/postgres",
+      // Round-2 WR-02: libpq splits at the FIRST '@' and connects to the first
+      // host of the comma list, db.example.invalid; a URL parser sees 127.0.0.1.
+      "postgresql://u@db.example.invalid,@127.0.0.1:54322/postgres",
     ]) {
       const r = refuse(dsn);
       expect(r.status, `${dsn} was accepted:\n${r.out}`).toBe(1);
