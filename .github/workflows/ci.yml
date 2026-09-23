@@ -692,6 +692,12 @@ jobs:
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # `packages: read` is for the ghcr.io login step (164.4.2-08). A job-level
+    # block REPLACES the workflow-level one, so the workflow's scopes are
+    # restated here unchanged - nothing but `packages: read` is added.
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -764,6 +770,31 @@ jobs:
           # UNMEASURED, and an unmeasured thing is not a passing thing. If this job's
           # first run dies inside `supabase start`, that is the live hypothesis.
           version: 2.98.2
+      - name: Log in to ghcr.io before the CLI pulls its images
+        # 164.4.2-08 checkpoint RED -> fix (2026-09-23). `supabase/setup-cli` exports
+        # SUPABASE_INTERNAL_IMAGE_REGISTRY=ghcr.io, so every image `run.sh up`'s
+        # `supabase start` pulls comes from ghcr.io, and anonymous GHCR pulls from
+        # shared runners are throttled: run 35911761613 lost this job, `sql-tests` and
+        # `frontend-live-db-lane` to `toomanyrequests` at the boot step. The CLI reads
+        # its registry credentials from the docker config file (`GetRegistryAuth`,
+        # CLI 2.98.2), so this plain `docker login` is what authenticates the pull.
+        # WHY `docker login` AND NOT `docker/login-action`: no third-party action is
+        # handed the token (the C-0293 concern at the top of this file), and there is
+        # no new pin to keep current. The token goes in over stdin and is never printed.
+        # A FAILED LOGIN FAILS THE JOB. It is never `continue-on-error` and never
+        # swallowed: a swallowed failure degrades into the anonymous pull this step
+        # exists to prevent, and trades a named red here for an intermittent
+        # throttle-shaped red at the boot step. On a fork PR the token is read-only,
+        # which still reads public packages, so a fork has no reason to fail here; if
+        # one ever does, the red names the cause.
+        # `src/__tests__/contracts/ghcr-login-before-image-pull.contract.test.ts` pins
+        # this step's presence, position and shape, and the job's `packages: read`.
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
       # `scripts/local-stack/run.sh` loads the committed baseline through `psql`,
       # and `resolve_psql`'s ONLY fallback is /opt/homebrew/opt/postgresql@16 — a
       # macOS keg that does not exist on this runner. A miss is not a skip: it is
@@ -1000,6 +1031,12 @@ jobs:
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # `packages: read` is for the ghcr.io login step (164.4.2-08). A job-level
+    # block REPLACES the workflow-level one, so the workflow's scopes are
+    # restated here unchanged - nothing but `packages: read` is added.
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -1064,6 +1101,21 @@ jobs:
           # file — a mention inside a YAML comment reddens it exactly as a real
           # `needs:` edge would.
           version: 2.98.2
+      - name: Log in to ghcr.io before the CLI pulls its images
+        # 164.4.2-08 checkpoint RED -> fix (2026-09-23). `run.sh up` below runs
+        # `supabase start`, which pulls the stack images.
+        # Same step and same reasons as ci.yml's `frontend-local-stack` login: the CLI
+        # pulls from ghcr.io (setup-cli sets SUPABASE_INTERNAL_IMAGE_REGISTRY), anonymous
+        # GHCR pulls from shared runners are throttled, and the CLI reads credentials
+        # from the docker config this writes. A failed login FAILS THE JOB - it never
+        # degrades into the anonymous pull. Pinned by
+        # `src/__tests__/contracts/ghcr-login-before-image-pull.contract.test.ts`.
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
       - name: Install psql client (the lane loads the baseline through it)
         # Same reason as `frontend-local-stack`: `run.sh` loads the committed baseline
         # through `psql`, and `resolve_psql`'s only fallback is a macOS keg that does
@@ -3420,6 +3472,12 @@ jobs:
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # `packages: read` is for the ghcr.io login step (164.4.2-08). A job-level
+    # block REPLACES the workflow-level one, so the workflow's scopes are
+    # restated here unchanged - nothing but `packages: read` is added.
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -3466,6 +3524,21 @@ jobs:
           # "which CLI". The skew note on that job's setup-cli step applies here
           # unchanged.
           version: 2.98.2
+      - name: Log in to ghcr.io before the CLI pulls its images
+        # 164.4.2-08 checkpoint RED -> fix (2026-09-23). `run.sh up` below runs
+        # `supabase start`, which pulls the stack images.
+        # Same step and same reasons as ci.yml's `frontend-local-stack` login: the CLI
+        # pulls from ghcr.io (setup-cli sets SUPABASE_INTERNAL_IMAGE_REGISTRY), anonymous
+        # GHCR pulls from shared runners are throttled, and the CLI reads credentials
+        # from the docker config this writes. A failed login FAILS THE JOB - it never
+        # degrades into the anonymous pull. Pinned by
+        # `src/__tests__/contracts/ghcr-login-before-image-pull.contract.test.ts`.
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
       - name: Install psql client
         # Two consumers now: `run.sh up` loads the baseline through psql, and the
         # capability probe and the corpus loop below connect with it.
