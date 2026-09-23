@@ -110,12 +110,16 @@ jobs:
     # no gate is added, removed, or made to assert anything different.
     #
     # ⛔ NO `if:` — BY CONSTRUCTION, and this is the single most load-bearing
-    # line in the job. Every filtered job depends on this one — eleven in the
-    # inline `needs: [changed-paths]` spelling and five (frontend-coverage,
-    # sql-tests, e2e, e2e-seeded, lighthouse-mobile) as an extra entry in a
-    # `needs:` list they already had; the SPELLING differs, the EDGE does not. And
+    # line in the job. Every filtered job depends on this one — most in the
+    # inline `needs: [changed-paths]` spelling, and five (frontend-coverage,
+    # test-db-drift, e2e, e2e-seeded, lighthouse-mobile) as an extra entry in a
+    # `needs:` list they already had; the SPELLING differs, the EDGE does not.
+    # (⚠️ CORRECTED 2026-09-23, Phase 164.4.2: `sql-tests` moved to the inline
+    # spelling when it dropped `needs: python`, and `test-db-drift`, which inherited
+    # that edge, took its place in the list. The inline count this line used to
+    # state had already drifted before that, so it is no longer restated.) And
     # a skipped `needs:` job SKIPS its dependents — the mechanism this file
-    # already states verbatim in the aggregator's `sql-tests` arm ("a skipped or
+    # already states verbatim in the aggregator's `test-db-drift` arm ("a skipped or
     # failed `needs:` job SKIPS its dependents") and again for `e2e-seeded`. A
     # conditional here would therefore not skip ONE gate, it would silently skip
     # the whole corpus, which is the exact fail-open this phase exists to
@@ -435,7 +439,7 @@ jobs:
     # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
     # ⭐ The conjunct is EXPLICIT even though this job would inherit the skip through
     # `needs: frontend-test`. An inherited skip is indistinguishable in the run log
-    # from the other skip causes the aggregator's `sql-tests` arm already warns it
+    # from the other skip causes the aggregator's `test-db-drift` arm already warns it
     # cannot tell apart; CONTEXT.md requires each job's own classification to be
     # readable, so each filtered job states it for itself.
     if: needs.changed-paths.outputs.docs_only != 'true'
@@ -658,7 +662,7 @@ jobs:
     # same-repo PR, a push and a `workflow_dispatch`; it has no legitimate skip; and a
     # `skipped` result is ALWAYS a real fault. ⇒ It takes the `frontend:` result
     # loop's STRICT DEFAULT ARM with NO tolerance — the `frontend-seam-redis` /
-    # `sql-gate-lint` / `sql-mutation` reasoning, and the OPPOSITE of the `sql-tests` /
+    # `sql-gate-lint` / `sql-mutation` reasoning, and the OPPOSITE of the `test-db-drift` /
     # `e2e-seeded` rows, whose tolerances exist only because those jobs consume a repo
     # variable a fork cannot see.
     # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to this one:
@@ -779,12 +783,14 @@ jobs:
         # ⭐ FIRST AND ONLY CONSUMER of `scripts/local-stack/.stack-env` — the mode-600
         # env handoff `run.sh up` writes (API_URL / ANON_KEY / SERVICE_ROLE_KEY / …).
         # Nothing else in the tree reads it; the lane spec is what made it a seam
-        # rather than a promise. `up` asserts the stack reported a 127.0.0.1/localhost
+        # rather than a promise. (⚠️ No longer true as written: `frontend-live-db-lane`,
+        # the capability probe below and `sql-tests`'s corpus step read it too. The
+        # "first" stands; the "only" is lineage.) `up` asserts the stack reported a 127.0.0.1/localhost
         # API URL and refuses otherwise, and the spec re-asserts it independently.
         run: bash scripts/local-stack/run.sh up
       - name: Capability probe - does the lane supply what the SQL self-test corpus demands
         # Phase 164.4.2 plan 04, RESEARCH Assumption A1, MEASURED here rather than
-        # assumed. `sql-tests` moves onto this lane only if the lane supplies what
+        # assumed. `sql-tests` was to move onto this lane only if the lane supplied what
         # `supabase/tests/test_*.sql` needs: pg_net, the supabase_vault extension,
         # auth.uid()/auth.jwt(), the three platform roles and pg_cron. The probe
         # derives DEMAND from the corpus every run (files mentioning each object,
@@ -796,15 +802,19 @@ jobs:
         # FOR NOW. This step FAILS when the probe could not measure: a MEASURE_FAIL
         # verdict, an absent line, a count or state it cannot read, or an exit status
         # that contradicts the printed verdict. It PASSES with a ::warning:: on
-        # `verdict INSUFFICIENT`. Nothing on this lane depends on those capabilities
-        # yet, and a gate that goes permanently red over a measurement nobody has
-        # acted on is a gate that gets disabled.
-        # ⛔ HAND-OFF: 164.4.2 plan 05 makes INSUFFICIENT FATAL here at the moment it
-        # moves the SQL self-test corpus onto this lane. Until then the tolerance
-        # below is a dated softness, not the design. Do not copy it to another gate.
-        # The line this step prints is the measurement plan 04's decision checkpoint
-        # reads. DECISION C allows the fallback only on a refutation that was
-        # measured and written down with its run id.
+        # `verdict INSUFFICIENT`. Nothing THIS job runs depends on those capabilities,
+        # and a gate that goes red over a capability its own subject does not use is a
+        # gate that gets disabled.
+        # ⭐ HAND-OFF TAKEN, 2026-09-23 (Phase 164.4.2 plan 05) — in `sql-tests`, not
+        # here. Plan 04's decision read this step's line on run 35816624285 (`verdict
+        # SUFFICIENT`) and chose PROCEED. `sql-tests` now boots its own copy of this
+        # lane and runs this probe FATAL on INSUFFICIENT before its corpus, because its
+        # corpus is what consumes the capabilities. This step keeps the tolerance on
+        # purpose: on the same boot a red here would only duplicate `sql-tests`'s red
+        # under a job that does not depend on them. ⛔ The tolerance is not a pattern;
+        # do not copy it to a gate whose subject needs the capabilities.
+        # DECISION C still allows the fallback only on a refutation that was measured
+        # and written down with its run id.
         #
         # Captured to a file and `cat` back rather than piped through `tee`, for the
         # `sql-mutation` reason: a pipe makes `$?` the last command's status.
@@ -867,7 +877,7 @@ jobs:
             exit 1
           fi
           if [ "$verdict" = "INSUFFICIENT" ]; then
-            echo "::warning::stack-probe verdict INSUFFICIENT: this lane lacks a capability the SQL self-test corpus demands (named on the 'unsatisfied:' lines above). Not fatal until 164.4.2 plan 05 moves the corpus onto this lane."
+            echo "::warning::stack-probe verdict INSUFFICIENT: this lane lacks a capability the SQL self-test corpus demands (named on the 'unsatisfied:' lines above). Not fatal in THIS job, whose own specs do not consume these capabilities; the sql-tests job runs the same probe FATAL before its corpus and will fail on the same verdict."
           fi
           echo "stack-probe measured: ${classes} class(es), verdict ${verdict}"
       - name: Run the local-stack lane
@@ -927,8 +937,10 @@ jobs:
     # which is what earns it the `frontend:` result loop's STRICT DEFAULT ARM with no
     # tolerance of its own, the `frontend-seam-redis` / `sql-gate-lint` /
     # `sql-mutation` / `frontend-local-stack` reasoning and the OPPOSITE of the
-    # `sql-tests` / `e2e-seeded` rows, whose tolerances exist only because those jobs
-    # consume a repo variable a fork cannot see.
+    # `test-db-drift` / `e2e-seeded` rows, whose tolerances exist only because those jobs
+    # consume a repo variable a fork cannot see. (`sql-tests` held the first of those
+    # rows until Phase 164.4.2 moved it onto a private database; it now takes the strict
+    # arm this job does.)
     #
     # ⛔ THE LANE REFUSES TO BOOT IN THE PRODUCTION-LINKED CONTEXT, and it is asserted
     # rather than commented. `vitest.livedb.globalsetup.ts` asks `run.sh
@@ -962,7 +974,7 @@ jobs:
     #
     # ⛔ THE COST THIS LANE CANNOT COVER, named so nobody reads it as broader than it
     # is: a local stack cannot catch drift that exists only on the shared project.
-    # That drift has its own gates — VAC-08 (a step of `sql-tests`) for repo-versus-
+    # That drift has its own gates — VAC-08 (the `test-db-drift` job) for repo-versus-
     # shared-project ledger and function bodies, VAC-04 (in `migration-drift-check.yml`)
     # for repo-versus-production bodies. This job is not a substitute for either.
     #
@@ -1406,7 +1418,7 @@ jobs:
     # this gate can never flake, and it runs identically on a fork PR, a
     # same-repo PR, a push and a workflow_dispatch. That property is what earns
     # it the NO-TOLERANCE row in the `frontend` aggregator below: unlike
-    # `sql-tests` and `e2e-seeded`, it has no legitimate reason to be skipped,
+    # `test-db-drift` and `e2e-seeded`, it has no legitimate reason to be skipped,
     # so any non-success is a real fault. Same reasoning as `frontend-seam-redis`.
     #
     # `permissions:` and `concurrency:` are inherited from the workflow level
@@ -1845,7 +1857,9 @@ jobs:
     # PR, a push and a workflow_dispatch, and a `skipped` result is ALWAYS a real
     # fault. It therefore takes the aggregator's STRICT default arm with NO
     # tolerance, exactly like `frontend-seam-redis` and `sql-gate-lint`, and the
-    # OPPOSITE of `sql-tests` / `e2e-seeded`.
+    # OPPOSITE of `test-db-drift` / `e2e-seeded`. (Since Phase 164.4.2 `sql-tests`
+    # is on THIS side: it runs its corpus on a private database and cites this
+    # paragraph for its own strict row.)
     # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply here: that
     # ban exists because those jobs share the TEST advisory-lock mutex and their
     # `if:` conditions diverge, so a chain edge can silently skip a dependent.
@@ -2924,6 +2938,18 @@ jobs:
     # Wall-clock cost is ACCEPTED: this aggregator now waits on `sql-tests`,
     # which itself needs `python` (~7m) plus its mutex wait. The alternative is
     # the present-but-ungating state this requirement exists to kill.
+    # ⚠️ Phase 164.4.2 (2026-09-23) — THE PARAGRAPH ABOVE IS NOW LINEAGE FOR ITS
+    # TOLERANCE AND ITS COST, not for the blocking decision, which stands.
+    # `sql-tests` runs its corpus on a database private to its own runner: no
+    # secret, no repo variable, no `needs: python`, no mutex. It stays wired into
+    # BOTH places below, but its row now takes the STRICT default arm (the
+    # `sql-mutation` argument, cited in `sql-tests`'s own header) and it no longer
+    # queues behind `python`. The tolerance arm and both of its skip causes MOVED to
+    # `test-db-drift`, the job that now carries VAC-08, the secret, the `if:` and the
+    # `needs: python` edge — and so the wait on `python` plus a mutex acquire moved
+    # with it. `test-db-drift` is wired into BOTH places below for the same reason
+    # as every row here: `needs:` alone only makes this aggregator WAIT for a job;
+    # only the result row makes it JUDGE one.
     # Phase 164.3 / VAC-03 (2026-08-29): `sql-gate-lint` is BLOCKING here, wired
     # into BOTH places below — either one alone leaves it advisory, the same trap
     # SEAMCORE-09 recorded for `frontend-seam-redis`. It takes the loop's STRICT
@@ -2932,7 +2958,7 @@ jobs:
     # fork PR, a same-repo PR, a push and a workflow_dispatch. It therefore has
     # no legitimate skip, and a `skipped` result there is always a real fault —
     # exactly the `frontend-seam-redis` reasoning, and the OPPOSITE of the
-    # `sql-tests` / `e2e-seeded` rows, whose tolerances exist only because those
+    # `test-db-drift` / `e2e-seeded` rows, whose tolerances exist only because those
     # jobs consume a repo variable a fork cannot see.
     # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to this
     # one: that ban exists because those jobs share the TEST advisory-lock mutex
@@ -2949,7 +2975,7 @@ jobs:
     # `if:`, so it runs identically on a fork PR, a same-repo PR, a push and a
     # workflow_dispatch. It has no legitimate skip, so a `skipped` there is
     # always a real fault — the `frontend-seam-redis` / `sql-gate-lint`
-    # reasoning, and the OPPOSITE of the `sql-tests` / `e2e-seeded` rows.
+    # reasoning, and the OPPOSITE of the `test-db-drift` / `e2e-seeded` rows.
     # ⭐ WHAT REDDENS IT: an annotated gate arm whose declared mutation no longer
     # makes that arm the FIRST failure. That is the "control that cannot fail"
     # class — every instance of which was GREEN in this workflow before this job
@@ -2977,7 +3003,7 @@ jobs:
     # runs identically on a fork PR and any non-success there is a real fault.
     #
     # NOTE: this `needs:` entry is NOT one of the ⛔-banned chain edges among the
-    # DB-touching jobs (see the notes on `sql-tests` / `e2e-seeded`). Those are
+    # DB-touching jobs (see the notes on `test-db-drift` / `e2e-seeded`). Those are
     # banned because a skipped `needs:` job SKIPS its dependents; this job
     # carries `if: always()`, so an upstream skip reaches the loop below as a
     # RESULT to judge rather than skipping the gate.
@@ -2998,7 +3024,7 @@ jobs:
     # neither shared TEST nor PROD). It therefore runs identically on a fork PR, a
     # same-repo PR, a push and a workflow_dispatch, has no legitimate skip, and a
     # `skipped` there is always a real fault — the `frontend-seam-redis` /
-    # `sql-gate-lint` / `sql-mutation` reasoning, and the OPPOSITE of the `sql-tests` /
+    # `sql-gate-lint` / `sql-mutation` reasoning, and the OPPOSITE of the `test-db-drift` /
     # `e2e-seeded` rows.
     # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to it, for the
     # same reason as `sql-mutation`: that ban exists because those jobs share the TEST
@@ -3022,7 +3048,7 @@ jobs:
     # runner, so it runs identically on a fork PR, a same-repo PR, a push and a
     # workflow_dispatch. It has no legitimate skip, and a `skipped` there is always a
     # real fault — the `frontend-seam-redis` / `sql-gate-lint` / `sql-mutation` /
-    # `frontend-local-stack` reasoning, and the OPPOSITE of the `sql-tests` /
+    # `frontend-local-stack` reasoning, and the OPPOSITE of the `test-db-drift` /
     # `e2e-seeded` rows.
     # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to it, for the
     # same reason as `frontend-local-stack`: that ban exists because those jobs share
@@ -3064,6 +3090,7 @@ jobs:
       - frontend-build
       - e2e-seeded
       - sql-tests
+      - test-db-drift
       - sql-gate-lint
       - sql-mutation
       - plan-anchor-verify
@@ -3089,9 +3116,9 @@ jobs:
           #
           # ⭐ WHY THIS ARM IS FIRST IN THE CHAIN AND NOT APPENDED TO THE END.
           # Appended after the existing arms it would be UNREACHABLE on exactly the
-          # PRs this phase exists to speed up: `e2e-seeded`'s arm and `sql-tests`'
-          # arm both compute `is_fork_pr=false` on a same-repo PR, so a `skipped`
-          # there falls into their `else` and sets fail=1 before control could ever
+          # PRs this phase exists to speed up: `e2e-seeded`'s arm and `test-db-drift`'s
+          # arm (`sql-tests`' until Phase 164.4.2) both compute `is_fork_pr=false`
+          # on a same-repo PR, so a `skipped` there falls into their `else` and sets fail=1 before control could ever
           # reach a later branch. The board would be RED on every docs-only PR.
           # Placing it first is required for correctness, and it is also what makes
           # the "one arm, not a per-row tolerance" claim true on inspection.
@@ -3126,6 +3153,7 @@ jobs:
             "frontend-build=${{ needs.frontend-build.result }}" \
             "e2e-seeded=${{ needs.e2e-seeded.result }}" \
             "sql-tests=${{ needs.sql-tests.result }}" \
+            "test-db-drift=${{ needs.test-db-drift.result }}" \
             "sql-gate-lint=${{ needs.sql-gate-lint.result }}" \
             "sql-mutation=${{ needs.sql-mutation.result }}" \
             "plan-anchor-verify=${{ needs.plan-anchor-verify.result }}"; do
@@ -3146,7 +3174,7 @@ jobs:
               # self-skips ONLY on a FORK PR — a different head repo has no
               # access to the test-DB variable. On a push to main OR a same-repo
               # PR, a `skipped` result means E2E_TEST_DB_CONFIGURED was LOST
-              # (which ALSO silently disables sql-tests), so a skip there is NOT
+              # (which ALSO silently disables test-db-drift, and with it VAC-08), so a skip there is NOT
               # tolerated: the gate must redden rather than green-wash an
               # untested go-live badge (RT-01 red-team H4 — the #1 silent-green).
               is_fork_pr='${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}'
@@ -3155,45 +3183,55 @@ jobs:
               elif [ "$result" = "skipped" ] && [ "$is_fork_pr" = "true" ]; then
                 echo "e2e-seeded skipped (fork PR — no test-DB access); tolerated for this row only."
               else
-                echo "::error::e2e-seeded result=$result on a TRUSTED event (push/same-repo). The go-live badge gate MUST run here — E2E_TEST_DB_CONFIGURED may be unset (this also disables sql-tests). A skip is not tolerated."
+                echo "::error::e2e-seeded result=$result on a TRUSTED event (push/same-repo). The go-live badge gate MUST run here — E2E_TEST_DB_CONFIGURED may be unset (this also disables test-db-drift, and with it VAC-08). A skip is not tolerated."
                 fail=1
               fi
-            elif [ "$name" = "sql-tests" ]; then
-              # Phase 158 / OPS-02: sql-tests is BLOCKING — it is the only gate
-              # that EXECUTEs the real deployed cron bodies. Its `if:` requires
-              # `github.event_name == 'push'` OR a same-repo PR, so unlike
-              # e2e-seeded it ALSO skips by design on `workflow_dispatch` (the
-              # golden-bake route); a strict arm would redden every bake run.
-              # Both skip-by-design routes are tolerated FOR THIS ROW ONLY. A
-              # skip on push/same-repo-PR is NOT tolerated — but it has TWO
-              # possible causes, and this loop cannot tell them apart.
+            elif [ "$name" = "test-db-drift" ]; then
+              # ⭐ `sql-tests` has NO arm of its own since Phase 164.4.2: it runs on a
+              # private database, cannot legitimately skip, and falls to the STRICT
+              # default arm at the bottom — the argument is `sql-mutation`'s, cited
+              # in `sql-tests`'s own header.
               #
-              # 158-REVIEW WR-04: the message used to assert only one of them
+              # Phase 164.4.2: this is the tolerance arm `sql-tests` carried from
+              # Phase 158 / OPS-02 until its corpus moved off shared TEST. It moved
+              # WITH its reason: `test-db-drift` now holds the secret, the
+              # configured-variable gate and the `needs: python` edge, so it is the
+              # job that can legitimately be skipped. It stays BLOCKING — VAC-08 is
+              # the only repo-vs-TEST ledger and function-body drift check.
+              # Its `if:` requires `github.event_name == 'push'` OR a same-repo PR,
+              # so unlike e2e-seeded it ALSO skips by design on `workflow_dispatch`
+              # (the golden-bake route); a strict arm would redden every bake run.
+              # Both skip-by-design routes are tolerated FOR THIS ROW ONLY. A skip
+              # on push/same-repo-PR is NOT tolerated — but it has TWO possible
+              # causes, and this loop cannot tell them apart.
+              #
+              # 158-REVIEW WR-04 (written for `sql-tests`, true here for the same
+              # reason): the message used to assert only one of them
               # ("E2E_TEST_DB_CONFIGURED was LOST"), which is FALSE in the more
-              # common case. `sql-tests` carries `needs: [python]`, and a skipped
-              # or failed `needs:` job SKIPS its dependents — so an ordinary
-              # `python` failure lands here as `sql-tests=skipped` and sent the
-              # operator to check a repository variable when the real signal was
-              # a red `python` check on the very same run. The gate reddening was
-              # right; the stated cause was confidently wrong, which this repo's
-              # fail-loud-and-ACCURATE doctrine treats as a real cost.
+              # common case. This job carries `needs: [python]`, and a skipped or
+              # failed `needs:` job SKIPS its dependents — so an ordinary `python`
+              # failure lands here as `test-db-drift=skipped`, and a message naming
+              # only the variable would send the operator to check it when the real
+              # signal is a red `python` check on the very same run. The gate
+              # reddening is right; a confidently wrong stated cause is a real cost
+              # under this repo's fail-loud-and-ACCURATE doctrine.
               #
               # `python` is deliberately NOT added to this aggregator's `needs:`
-              # just to read its result: the phase's mutex design forbids new
-              # `needs:` edges among the DB-touching jobs (their `if:`
-              # conditions diverge on `workflow_dispatch`). Naming both causes,
-              # cheapest-to-check first, costs nothing and misleads no one.
+              # just to read its result: the mutex design forbids new `needs:`
+              # edges among the DB-touching jobs (their `if:` conditions diverge
+              # on `workflow_dispatch`). Naming both causes, cheapest-to-check
+              # first, costs nothing and misleads no one.
               is_fork_pr='${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}'
               is_dispatch='${{ github.event_name == 'workflow_dispatch' }}'
               if [ "$result" = "success" ]; then
                 :
               elif [ "$result" = "skipped" ] && { [ "$is_fork_pr" = "true" ] || [ "$is_dispatch" = "true" ]; }; then
-                echo "sql-tests skipped (fork PR: $is_fork_pr / workflow_dispatch: $is_dispatch — its if: excludes both); tolerated for this row only."
+                echo "test-db-drift skipped (fork PR: $is_fork_pr / workflow_dispatch: $is_dispatch — its if: excludes both); tolerated for this row only."
               else
                 if [ "$result" = "skipped" ]; then
-                  echo "::error::sql-tests result=skipped on a TRUSTED event (fork_pr=$is_fork_pr, dispatch=$is_dispatch — only a skip on one of those is tolerated). TWO causes produce this, check in order: (1) its \`needs: python\` dependency did not succeed — look at the \`python\` check on THIS run first, and if it is red that is your answer and E2E_TEST_DB_CONFIGURED is NOT implicated; (2) otherwise E2E_TEST_DB_CONFIGURED was LOST, the same silent-disable the e2e-seeded arm above detects — the one that would let a migrations merge reach PROD with this gate quietly absent."
+                  echo "::error::test-db-drift result=skipped on a TRUSTED event (fork_pr=$is_fork_pr, dispatch=$is_dispatch — only a skip on one of those is tolerated). TWO causes produce this, check in order: (1) its \`needs: python\` dependency did not succeed — look at the \`python\` check on THIS run first, and if it is red that is your answer and E2E_TEST_DB_CONFIGURED is NOT implicated; (2) otherwise E2E_TEST_DB_CONFIGURED was LOST, the same silent-disable the e2e-seeded arm above detects — the one that would leave VAC-08's repo-vs-TEST drift check quietly absent from every merge."
                 else
-                  echo "::error::sql-tests result=$result (fork_pr=$is_fork_pr, dispatch=$is_dispatch). The SQL self-tests — the only gate that EXECUTEs the deployed cron bodies (it caught D-19) — did not pass. If this is a mutex acquire timeout, see docs/runbooks/shared-test-db-mutex.md sections 2-3: queue depth and a wedged holder are different faults."
+                  echo "::error::test-db-drift result=$result (fork_pr=$is_fork_pr, dispatch=$is_dispatch). VAC-08 — the repo-vs-TEST ledger and function-body drift check — did not pass. If this is a mutex acquire timeout, see docs/runbooks/shared-test-db-mutex.md sections 2-3: queue depth and a wedged holder are different faults."
                 fi
                 fail=1
               fi
@@ -4384,6 +4422,10 @@ jobs:
     # `python` is the forgotten taker. A docs-only PR must therefore show THREE absent
     # acquires in its run log, not two, and this phase's criterion-5 evidence must
     # account for all three.
+    # ⚠️ CORRECTED 2026-09-23 (Phase 164.4.2): still THREE takers per run, but the
+    # third is now `test-db-drift`, not `sql-tests`. `sql-tests` runs its corpus on a
+    # database private to its own runner and takes no key; VAC-08 moved into
+    # `test-db-drift` together with the mutex.
     needs: [changed-paths]
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
@@ -4412,6 +4454,11 @@ jobs:
     # HEAD and makes Railway skip the analytics deploy, i.e. #616's damage
     # through a new door. The trade is a wider worst-case WEDGED hold (90m);
     # runbook section 3 is the manual override for that.
+    # ⚠️ Phase 164.4.2 (2026-09-23): the third taker is now `test-db-drift`, which
+    # holds the key only across VAC-08's read-only drift check, so "sql-tests the
+    # balance" above names a hold that has moved to a different job and shrunk. The
+    # derivation is kept as the dated reading it is: a smaller per-run lock time only
+    # widens this TTL's headroom, so 90 is not re-derived here.
     # ⛔ The holder's `pg_sleep` must stay ABOVE this number (WR-01) — it is 6000s.
     timeout-minutes: 90
     # Serialize the python job across ALL runs (every PR + every push) against
@@ -4430,7 +4477,8 @@ jobs:
     # check) and let Railway silently skip the analytics deploy (issue #616).
     # ⛔ Do NOT reintroduce that group, in any shape — including a shrunken one.
     # The eviction is CROSS-run, so fewer members only changes which run gets
-    # evicted. See the ⛔ block on `sql-tests` for the full mechanism.
+    # evicted. See the ⛔ block on `test-db-drift` (moved there from `sql-tests` in
+    # Phase 164.4.2) for the full mechanism.
     defaults:
       run:
         working-directory: analytics-service
@@ -4491,7 +4539,8 @@ jobs:
       #
       # ⛔ NO `needs:` EDGE WAS ADDED, AND NONE MAY BE. These three jobs' `if:`
       # conditions diverge and a skipped `needs:` job skips its dependents — the
-      # long ⛔ note on `sql-tests` records why. The ordering IS this wait.
+      # long ⛔ note on `test-db-drift` (moved there from `sql-tests` in Phase
+      # 164.4.2) records why. The ordering IS this wait.
       #
       # Three named outcomes, one log line each. The logic lives ONCE, in
       # scripts/wait-for-test-schema-apply.sh, whose `--self-test` proves all
@@ -4578,8 +4627,8 @@ jobs:
       # from contending. Keep byte-identical with Makefile `test:`.
       #
       # Phase 158 / OPS-01 — the shared-test-db mutex, byte-identical to the step
-      # in `sql-tests` and `e2e-seeded` up to the redaction call (see the long
-      # note on `sql-tests` for the mechanism and the ⛔ constraints). Placed
+      # in `test-db-drift` and `e2e-seeded` up to the redaction call (see the long
+      # note on `test-db-drift` for the mechanism and the ⛔ constraints). Placed
       # immediately before `pytest`, the first DB-touching step of this job.
       # [164.8.4-01] This job's `defaults.run.working-directory:
       # analytics-service` is NOT harmless for the redaction reference below —
@@ -4799,7 +4848,7 @@ jobs:
           CI: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && 'true' || '' }}
       # Best-effort EARLY release of the shared-test-db mutex (Phase 158 /
       # OPS-01), identical in all three DB-touching jobs. See the note on
-      # `sql-tests`: teardown releases the lock anyway, this just hands it over
+      # `test-db-drift`: teardown releases the lock anyway, this just hands it over
       # sooner and never reddens the job.
       - name: Release shared-test-db mutex (best effort)
         if: always()
@@ -4870,8 +4919,8 @@ jobs:
               ;;
           esac
       # [164.9-MUTEX-HOLDER-DIED-UNSERIALIZED] (Phase 164.9 plan 02, ROADMAP
-      # criterion 12; copy of the same verdict step at the sql-tests site
-      # above). The release step above is `if: always()` and its documented
+      # criterion 12; copy of the same verdict step at the test-db-drift
+      # site). The release step above is `if: always()` and its documented
       # invariant is that it must NEVER redden a job whose real work passed
       # — `echo "::error::..."` is a log annotation only and does not change
       # exit status, by design. A dead holder is a DIFFERENT signal from an
@@ -5068,7 +5117,8 @@ jobs:
       #
       # ⛔ NO `needs:` EDGE WAS ADDED, AND NONE MAY BE. These three jobs' `if:`
       # conditions diverge and a skipped `needs:` job skips its dependents — the
-      # long ⛔ note on `sql-tests` records why. The ordering IS this wait.
+      # long ⛔ note on `test-db-drift` (moved there from `sql-tests` in Phase
+      # 164.4.2) records why. The ordering IS this wait.
       #
       # Three named outcomes, one log line each. The logic lives ONCE, in
       # scripts/wait-for-test-schema-apply.sh, whose `--self-test` proves all
@@ -5118,15 +5168,17 @@ jobs:
           # analytics-service, where a bare relative script path does not resolve.
           bash "${GITHUB_WORKSPACE}/scripts/wait-for-test-schema-apply.sh"
 
-      # Phase 158 / OPS-01 — the shared-test-db mutex, IDENTICAL in `sql-tests`,
-      # `python` and `e2e-seeded`. It replaces the GitHub concurrency group those
-      # three jobs used to carry (see the ⛔ note on this job for why that layer
+      # Phase 158 / OPS-01 — the shared-test-db mutex, IDENTICAL in `test-db-drift`,
+      # `python` and `e2e-seeded` (`sql-tests` carried it until Phase 164.4.2).
+      # It replaces the GitHub concurrency group those three jobs used to carry (see the ⛔ note on this job for why that layer
       # had to go). A BACKGROUND psql session takes a Postgres SESSION advisory
       # lock on key 61616158 and holds it for the rest of the job: background
       # processes persist across steps on the same runner, and job teardown drops
       # the TCP session, at which point Postgres releases the lock — that IS the
       # steal path, bounded by this job's `timeout-minutes`. Placed immediately
-      # before the first DB-MUTATING step. Proven end-to-end before adoption by
+      # before the first DB-touching step (in this job, VAC-08's read-only drift
+      # check; in `sql-tests`, where this text was written, the corpus, which
+      # mutated). Proven end-to-end before adoption by
       # .github/workflows/mutex-probe.yml (three simultaneous contenders,
       # pairwise non-overlapping hold windows; the distinct-key neuter of that
       # same assertion was observed RED).
@@ -5344,11 +5396,12 @@ jobs:
       # mutex needs is NOT required — a transaction-mode pooler serves these
       # fine. The DSN is passed through `env:` and never echoed (WR-08).
       #
-      # SKIP SURFACE: none new. This step INHERITS the `sql-tests` job's
+      # SKIP SURFACE: none new. This step INHERITS the `test-db-drift` job's
       # already-documented one — the job's `if:` excludes fork PRs and requires
       # vars.E2E_TEST_DB_CONFIGURED, and the `frontend` aggregator is the sole
       # judge of whether a skipped JOB is tolerable. Within the job the step
-      # follows "Run SQL self-tests"'s contract, not the mutex step's: an absent
+      # follows the SQL self-test corpus step's fail-loud contract (written when
+      # both lived in `sql-tests`), not the mutex step's: an absent
       # TEST_SUPABASE_DB_URL is an `::error::` and exit 1, never a quiet pass.
       #
       # ⛔ The ledger query joins schema_migrations on `name`, NEVER `version`.
@@ -5816,9 +5869,15 @@ jobs:
     # HEAD and makes Railway skip the analytics deploy, i.e. #616's damage
     # through a new door. The trade is a wider worst-case WEDGED hold (90m);
     # runbook section 3 is the manual override for that.
+    # ⚠️ Phase 164.4.2 (2026-09-23): the third taker is now `test-db-drift`, which
+    # holds the key only across VAC-08's read-only drift check, so "sql-tests the
+    # balance" above names a hold that has moved to a different job and shrunk. The
+    # derivation is kept as the dated reading it is: a smaller per-run lock time only
+    # widens this TTL's headroom, so 90 is not re-derived here.
     # ⛔ The holder's `pg_sleep` must stay ABOVE this number (WR-01) — it is 6000s.
     timeout-minutes: 90
-    # Fork-PR composition (same as sql-tests): repo VARIABLES are readable in
+    # Fork-PR composition (same as test-db-drift, and as sql-tests until Phase
+    # 164.4.2): repo VARIABLES are readable in
     # fork-PR runs while secrets are withheld, so the vars gate alone would
     # start the job on a fork and die at the seed step with empty secrets.
     # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
@@ -5831,7 +5890,8 @@ jobs:
     # its two skip causes apart, so an inherited skip would add a third.
     if: ${{ needs.changed-paths.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true' }}
     # v1.16 close-out (2026-08-01): serialize against the `python` job (and
-    # `sql-tests`). All three drive the ONE shared Supabase
+    # `sql-tests`, whose place Phase 164.4.2 gave to `test-db-drift`). All three
+    # drive the ONE shared Supabase
     # test project (`secrets.TEST_SUPABASE_URL`), and `claim_compute_jobs_with_priority`
     # claims a GLOBAL batch of 50 ready rows — it cannot be scoped to a caller.
     # So while this job drives the wizard and enqueues `compute_jobs`, a
@@ -5859,11 +5919,12 @@ jobs:
     # which concluded `cancelled` — a GREY check that Railway read as a failed
     # check-suite, silently skipping the analytics deploy (issue #616). The
     # eviction is CROSS-run, so shrinking only changes which run dies. Full
-    # mechanism in the ⛔ block on `sql-tests`.
-    # ⛔ Do NOT add `sql-tests` to this `needs:` list to serialize the shared test
-    # DB. It looks right and it silently disables THIS job on
+    # mechanism in the ⛔ block on `test-db-drift` (moved there from `sql-tests`).
+    # ⛔ Do NOT add `test-db-drift` to this `needs:` list to serialize the shared test
+    # DB (this warning named `sql-tests` until Phase 164.4.2 moved its `if:` into
+    # `test-db-drift`). It looks right and it silently disables THIS job on
     # every `workflow_dispatch` run: a skipped `needs:` job skips its dependents,
-    # and the two `if:` conditions diverge on manual dispatch — `sql-tests`
+    # and the two `if:` conditions diverge on manual dispatch — `test-db-drift`
     # requires `github.event_name == 'push'` (false) while this job only requires
     # `!= 'pull_request'` (true). The aggregator at the `e2e-seeded result=`
     # check then errors on the skip. Serialization needs no `needs:` edge at all
@@ -5929,7 +5990,8 @@ jobs:
       #
       # ⛔ NO `needs:` EDGE WAS ADDED, AND NONE MAY BE. These three jobs' `if:`
       # conditions diverge and a skipped `needs:` job skips its dependents — the
-      # long ⛔ note on `sql-tests` records why. The ordering IS this wait.
+      # long ⛔ note on `test-db-drift` (moved there from `sql-tests` in Phase
+      # 164.4.2) records why. The ordering IS this wait.
       #
       # Three named outcomes, one log line each. The logic lives ONCE, in
       # scripts/wait-for-test-schema-apply.sh, whose `--self-test` proves all
@@ -5980,7 +6042,7 @@ jobs:
           bash "${GITHUB_WORKSPACE}/scripts/wait-for-test-schema-apply.sh"
 
       # Phase 158 / OPS-01 — the shared-test-db mutex, byte-identical to the step
-      # in `sql-tests` and `python` (see the long note on `sql-tests` for the
+      # in `test-db-drift` and `python` (see the long note on `test-db-drift` for the
       # mechanism and the ⛔ constraints). Placed immediately before the seed
       # step, which is this job's first DB-MUTATING step.
       #
@@ -6505,7 +6567,7 @@ jobs:
           retention-days: 7
       # Best-effort EARLY release of the shared-test-db mutex (Phase 158 /
       # OPS-01), identical in all three DB-touching jobs. See the note on
-      # `sql-tests`: teardown releases the lock anyway, this just hands it over
+      # `test-db-drift`: teardown releases the lock anyway, this just hands it over
       # sooner and never reddens the job.
       - name: Release shared-test-db mutex (best effort)
         if: always()
@@ -6576,8 +6638,8 @@ jobs:
               ;;
           esac
       # [164.9-MUTEX-HOLDER-DIED-UNSERIALIZED] (Phase 164.9 plan 02, ROADMAP
-      # criterion 12; copy of the same verdict step at the sql-tests site
-      # above). The release step above is `if: always()` and its documented
+      # criterion 12; copy of the same verdict step at the test-db-drift
+      # site). The release step above is `if: always()` and its documented
       # invariant is that it must NEVER redden a job whose real work passed
       # — `echo "::error::..."` is a log annotation only and does not change
       # exit status, by design. A dead holder is a DIFFERENT signal from an
