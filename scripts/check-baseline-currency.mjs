@@ -77,7 +77,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const DEFECTS = ["baseline-stale", "baseline-epoch-unreadable", "migrations-epoch-unreadable", "history-shallow"];
@@ -171,15 +171,15 @@ export function judge({
 }
 
 /**
- * How many `ok()` calls the sections below are declared to run: 15 across the
- * nine default-mode sections (+4 in section 8 by review 164.4.2 WR-05), plus 25
- * across the fourteen `--replay-set` sections (Phase 164.4.2 plan 06; +5 in R10
+ * How many `ok()` calls the sections below are declared to run: 17 across the
+ * nine default-mode sections (+4 in section 8 by review 164.4.2 WR-05, +2 by the
+ * round-2 review IN-04), plus 32 across the fourteen `--replay-set` sections (Phase 164.4.2 plan 06; +5 in R10
  * by review 164.4.2 WR-04; +7 in R10 by round-2 WR-01 and the round-2
  * silent-failure-hunter WR-04).
  * ⛔ Raise it only together with the arm that adds one; lowering it to make a
  * run green is deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 47;
+export const EXPECTED_ASSERTIONS = 49;
 
 function selfTest() {
   let pass = true;
@@ -277,6 +277,16 @@ function selfTest() {
   ok(
     judge({ baselineEpoch: "1500000000", migrationsEpoch: "1500000000" }).length === 0,
     "CONTROL: a freshness command that reads no git history (shallow not applicable) is judged on its epochs",
+  );
+  // Round-2 review IN-04: the shallowness fact is measured whenever the command
+  // runs git, whatever path or wrapper it is spelled with.
+  ok(
+    ["git log -1 --format=%ct --", "/usr/bin/git log -1 --format=%ct --", "env git log -1 --format=%ct --"].every(freshnessReadsGit),
+    "`git …`, `/usr/bin/git …` and `env git …` all read git history, so each is checked for shallowness",
+  );
+  ok(
+    !freshnessReadsGit("bash /tmp/stub/freshness.sh") && !freshnessReadsGit("bash /tmp/stub/git-freshness.sh"),
+    "CONTROL: the restore self-test's `bash <stub>` reads no git history, so it is judged on its epochs alone",
   );
 
   console.log("=== SELF-TEST 9/9: every kind judge() can emit is named in DEFECTS");
@@ -550,6 +560,20 @@ function readEpoch(freshnessCmd, path) {
   } catch {
     return "";
   }
+}
+
+/**
+ * PURE: does FRESHNESS_TS_CMD read git history? True when ANY of its words is
+ * the git binary, by basename — `git …`, `/usr/bin/git …` and `env git …` all
+ * read history (round-2 review IN-04: the first-word-is-literally-`git` test
+ * missed the last two, so a depth-1 clone read fresh again). The restore
+ * self-test's `bash <stub>` names no git binary and is judged on its epochs.
+ */
+export function freshnessReadsGit(cmd) {
+  return String(cmd)
+    .trim()
+    .split(/\s+/)
+    .some((word) => basename(word) === "git");
 }
 
 /** `git rev-parse --is-shallow-repository`, or "" when git could not answer. */
@@ -1083,8 +1107,7 @@ function main(argv) {
   // Shallowness is a fact about GIT history, so it is measured only when the
   // freshness command reads git history; an injected stub (the restore
   // script's self-test) is judged on its epochs alone.
-  const readsGit = String(freshnessCmd).trim().split(/\s+/)[0] === "git";
-  const shallow = readsGit ? readShallow() : undefined;
+  const shallow = freshnessReadsGit(freshnessCmd) ? readShallow() : undefined;
 
   const defects = judge({ baselineEpoch, migrationsEpoch, baselineFile, migrationsDir, shallow });
 
