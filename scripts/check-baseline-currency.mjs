@@ -174,11 +174,12 @@ export function judge({
  * How many `ok()` calls the sections below are declared to run: 15 across the
  * nine default-mode sections (+4 in section 8 by review 164.4.2 WR-05), plus 25
  * across the fourteen `--replay-set` sections (Phase 164.4.2 plan 06; +5 in R10
- * by review 164.4.2 WR-04).
+ * by review 164.4.2 WR-04; +7 in R10 by round-2 WR-01 and the round-2
+ * silent-failure-hunter WR-04).
  * ⛔ Raise it only together with the arm that adds one; lowering it to make a
  * run green is deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 40;
+export const EXPECTED_ASSERTIONS = 47;
 
 function selfTest() {
   let pass = true;
@@ -411,10 +412,76 @@ function selfTest() {
     r10f.defects.some((d) => d.kind === "replay-file-unreadable" && d.detail.includes(C)),
     "a replay file whose text could not be read is refused by name — never scanned as empty",
   );
+  // Review 164.4.2 round 2, WR-01: psql lexes a '…' literal by the SERVER's
+  // standard_conforming_strings, reported back after every SET. MEASURED on a
+  // pg-lane: this file ran its `\!` while the static reading saw one literal.
+  const r10g = see(
+    replayRun({
+      migrations: files(A, B, C),
+      migrationTexts: { [C]: "SET standard_conforming_strings = off;\nSELECT 'a\\'' ; \\! echo exfiltrate #'\n;\n" },
+    }),
+  );
+  ok(
+    r10g.defects.some((d) => d.kind === "replay-meta-command" && /cannot be proven/.test(d.detail) && d.detail.includes("standard_conforming_strings")),
+    "a file that switches standard_conforming_strings is refused by name — its lexing is data-dependent",
+  );
+  // psql's lexer also follows client_encoding: in a non-ASCII-safe encoding a
+  // lead byte swallows the next byte, which can be a quote.
+  const r10h = ["SET client_encoding = 'SJIS';\nSELECT 1;\n", "SET NAMES 'SJIS';\nSELECT 1;\n", "SELECT set_config('backslash_quote', 'on', false);\n"].map((t) =>
+    see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: t } })),
+  );
+  ok(
+    r10h.every((r) => r.defects.some((d) => d.kind === "replay-meta-command" && /cannot be proven/.test(d.detail))),
+    "client_encoding, SET NAMES and backslash_quote are refused by name too",
+  );
+  // Silent-failure-hunter round 2, WR-04: psql reads every byte >= 0x80 as an
+  // identifier character, so `é$a$` is ONE identifier, not `é` then a dollar body.
+  const r10i = see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT é$a$\n\\! echo exfiltrate\n, é$a$;\n" } }));
+  ok(
+    r10i.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes("line 2")),
+    "a non-ASCII identifier character before `$a$` does not open a dollar body — the `\\!` on line 2 is refused",
+  );
+  const r10j = see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT $é$ ' $é$; \\! echo exfiltrate; --'\n" } }));
+  ok(
+    r10j.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes("line 1")),
+    "a non-ASCII dollar TAG `$é$` opens and closes a body, so the `\\!` after it is refused",
+  );
+  // psql continues a literal across whitespace holding a newline IN THE SAME
+  // MODE, so the continuation of an E'…' literal honours backslash escapes.
+  const r10k = see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT E'a'\n'\\'' ; \\! echo exfiltrate ; '\n" } }));
+  ok(
+    r10k.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes("line 2")),
+    "the newline-continuation of an E'…' literal is lexed as E'…', so the `\\!` it ends before is refused",
+  );
+  // A number run straight into an identifier character is lexed by
+  // version-dependent junk-token rules: `1E'\'…'` is the junk token `1E` then a
+  // plain literal on one psql, and `1` then an E'…' literal on another. Refused,
+  // never guessed.
+  const r10l = ["SELECT 1E'\\'; \\! echo exfiltrate; '\n", "SELECT $1E'\\'; \\! echo exfiltrate; '\n"].map((t) =>
+    see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: t } })),
+  );
+  ok(
+    r10l.every((r) => r.defects.some((d) => d.kind === "replay-meta-command")),
+    "a number or `$n` parameter run straight into an identifier character is refused, never read as code",
+  );
+  const r10m = see(
+    replayRun({
+      migrations: files(A, B, C),
+      migrationTexts: {
+        [C]:
+          "SELECT a$b$c, é, 1e10, 0.5, $1, E'x\\'y'\n  'z\\\\', \"é\"\"q\";\n" +
+          "CREATE FUNCTION g() RETURNS int LANGUAGE sql AS $é$ SELECT 1 $é$;\n",
+      },
+    }),
+  );
+  ok(
+    r10m.defects.length === 0 && r10m.replay.join(",") === C,
+    `CONTROL: \`$\` inside an identifier, non-ASCII identifiers and tags, numbers, parameters and literal continuations are code psql can read (got ${JSON.stringify(r10m.defects.map((d) => d.detail))})`,
+  );
 
   console.log("=== SELF-TEST R11/14: ANY defect -> the pure result carries no set at all");
   ok(
-    [r3, r4, r5, r6, r7a, r7b, r8, r9a, r9b, r10, r10b, r10c, r10e, r10f].every((r) => r.defects.length > 0 && r.replay.length === 0 && r.carried.length === 0),
+    [r3, r4, r5, r6, r7a, r7b, r8, r9a, r9b, r10, r10b, r10c, r10e, r10f, r10g, ...r10h, r10i, r10j, r10k, ...r10l].every((r) => r.defects.length > 0 && r.replay.length === 0 && r.carried.length === 0),
     "an undeterminable set is never returned as a set — every defect arm above returns replay=[] and carried=[]",
   );
 
@@ -521,12 +588,54 @@ export const MIGRATION_BASENAME_RE = /^[0-9]+_[a-z0-9_]+\.sql$/;
 const SHA_LINE_RE = /^baseline-sha256:[ \t]*(\S*)[ \t]*$/;
 
 /**
+ * Settings that change how psql's CLIENT-side lexer reads the text that follows
+ * them. psql follows the server's `standard_conforming_strings` (reported back
+ * after every SET) to decide whether a backslash inside '…' escapes the next
+ * character, and `client_encoding` to decide how many bytes a character spans
+ * (in a non-ASCII-safe encoding a lead byte swallows the next byte, which can
+ * be a quote). `backslash_quote` is refused beside them because it governs the
+ * same escape. Review 164.4.2 round 2, WR-01.
+ */
+const ESCAPING_MODE_RE = /\bstandard_conforming_strings\b|\bbackslash_quote\b|\bclient_encoding\b|\bSET\s+(?:SESSION\s+|LOCAL\s+)?NAMES\b/i;
+
+/** psqlscan.l's ident_start / ident_cont: ASCII letters, `_`, and every byte
+ * >= 0x80 — which in a UTF-8 file is every code point >= U+0080. `$` continues
+ * an identifier but never starts one. */
+const identStart = (ch) => ch !== undefined && (/[A-Za-z_]/.test(ch) || ch.charCodeAt(0) >= 0x80);
+const identCont = (ch) => ch !== undefined && (/[A-Za-z0-9_$]/.test(ch) || ch.charCodeAt(0) >= 0x80);
+/** psqlscan.l's dolqdelim: `$`, an optional tag (dolq_start dolq_cont*), `$`. No length cap. */
+const DOLQ_DELIM = /\$(?:[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿]*)?\$/y;
+/** A numeric literal's longest run (decimal, fraction, exponent, 0x/0o/0b, `_` separators). */
+const NUMBER = /0[xXoObB][0-9A-Fa-f_]*|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9][0-9_]*)?/y;
+/** psqlscan.l's quotecontinue: whitespace holding a newline (and `--` comments), then a quote. */
+const QUOTE_CONTINUE = /[ \t\f]*[\n\r](?:[ \t\n\r\f\v]+|--[^\n\r]*[\n\r])*'/y;
+
+/**
  * PURE: the 1-based line numbers on which psql would read a backslash as a
  * meta-command — any backslash outside a `--` comment, a (nested) block
- * comment, a '…' or E'…' literal, a "…" identifier and a $tag$…$tag$ body,
- * which is psql's own lexer's view (a meta-command may start mid-line).
- * Returns `{error, line}` when a comment, literal or body never closes: where
- * psql would then see a command is unknowable, and the caller refuses it.
+ * comment, a '…' or E'…' literal (and its newline continuations), a "…"
+ * identifier and a $tag$…$tag$ body. A meta-command may start mid-line.
+ *
+ * ⛔ This is psql's lexer's view ONLY under the settings psql connects with
+ * (`standard_conforming_strings = on`, an ASCII-safe `client_encoding`), and
+ * only for the token shapes modelled here. Everything else is REFUSED, never
+ * guessed, and returned as `{error, line}`:
+ *   - a comment, literal or body that never closes;
+ *   - any mention of a setting in ESCAPING_MODE_RE (review 164.4.2 round 2
+ *     WR-01: a pg-lane run executed a `\!` after `SET standard_conforming_strings
+ *     = off` that the standard-conforming reading placed inside a literal);
+ *   - a number or `$n` parameter run straight into an identifier character or
+ *     `$` (psql's junk-token rules for that shape differ between versions).
+ * Identifiers are consumed whole, so `é$a$` is one identifier as psql reads it,
+ * not `é` followed by a dollar body (silent-failure-hunter round 2, WR-04).
+ *
+ * ⚠️ KNOWN LIMIT, stated rather than implied: the setting refusal is by NAME. A
+ * migration that builds the name at run time (string concatenation, an E'…'
+ * escape, `chr()`, dynamic EXECUTE) is not seen. A PR controls its own workflow,
+ * so this is a guard against accident, not a trust boundary. psql variable
+ * interpolation (`:NAME`) is not a route either: the built-in values carry no
+ * quote or backslash, and LAST_ERROR_MESSAGE needs an error, which the replay's
+ * ON_ERROR_STOP=1 makes fatal.
  *
  * @returns {{lines: number[]} | {error: string, line: number}}
  */
@@ -536,6 +645,31 @@ export function psqlMetaCommandLines(src) {
   let line = 1;
   const advance = (from, to) => {
     for (let k = from; k < to; k++) if (src[k] === "\n") line++;
+  };
+  const mode = ESCAPING_MODE_RE.exec(src);
+  if (mode) {
+    return {
+      error: `a change of psql's string-escaping or client-encoding mode ('${mode[0]}'), after which where psql reads a backslash as a command cannot be proven statically`,
+      line: src.slice(0, mode.index).split("\n").length,
+    };
+  }
+  /** End of the '…' literal opened at `i` (continuations included), or -1. */
+  const literalEnd = (i, escaped) => {
+    let j = i + 1;
+    for (;;) {
+      while (j < n) {
+        if (escaped && src[j] === "\\") j += 2;
+        else if (src[j] === "'" && src[j + 1] === "'") j += 2;
+        else if (src[j] === "'") break;
+        else j++;
+      }
+      if (j >= n) return -1;
+      j++; // past the closing quote
+      QUOTE_CONTINUE.lastIndex = j;
+      const cont = QUOTE_CONTINUE.exec(src);
+      if (!cont) return j;
+      j += cont[0].length; // continue in the SAME mode, as psql does
+    }
   };
   let i = 0;
   while (i < n) {
@@ -564,27 +698,62 @@ export function psqlMetaCommandLines(src) {
       i = j;
       continue;
     }
-    if (c === "'" || c === '"') {
-      // E'…' honours backslash escapes; '…' and "…" do not (standard_conforming_strings).
-      const escaped = c === "'" && /[Ee]/.test(src[i - 1] ?? "") && !/[A-Za-z0-9_$]/.test(src[i - 2] ?? "");
+    if (identStart(c)) {
+      let j = i + 1;
+      while (identCont(src[j])) j++;
+      // psql's xestart `[eE]'` outmatches the one-letter identifier `E`; a
+      // longer identifier ending in E (`xE'…'`) is an identifier, then a '…'.
+      if (j === i + 1 && (c === "E" || c === "e") && src[j] === "'") {
+        const k = literalEnd(j, true);
+        if (k === -1) return { error: "an unterminated string literal", line: start };
+        advance(i, k);
+        i = k;
+        continue;
+      }
+      i = j;
+      continue;
+    }
+    if (/[0-9]/.test(c) || (c === "$" && /[0-9]/.test(src[i + 1] ?? ""))) {
+      let j;
+      if (c === "$") {
+        j = i + 1;
+        while (/[0-9]/.test(src[j] ?? "")) j++;
+      } else {
+        NUMBER.lastIndex = i;
+        j = i + NUMBER.exec(src)[0].length;
+      }
+      if (identCont(src[j])) {
+        return { error: "a number or $n parameter run straight into an identifier character or `$`", line: start };
+      }
+      i = j;
+      continue;
+    }
+    if (c === "'") {
+      const k = literalEnd(i, false);
+      if (k === -1) return { error: "an unterminated string literal", line: start };
+      advance(i, k);
+      i = k;
+      continue;
+    }
+    if (c === '"') {
       let j = i + 1;
       let closed = false;
       while (j < n) {
-        if (escaped && src[j] === "\\") j += 2;
-        else if (src[j] === c && src[j + 1] === c) j += 2;
-        else if (src[j] === c) {
+        if (src[j] === '"' && src[j + 1] === '"') j += 2;
+        else if (src[j] === '"') {
           closed = true;
           j++;
           break;
         } else j++;
       }
-      if (!closed) return { error: `an unterminated ${c === "'" ? "string literal" : "quoted identifier"}`, line: start };
+      if (!closed) return { error: "an unterminated quoted identifier", line: start };
       advance(i, j);
       i = j;
       continue;
     }
-    if (c === "$" && !/[A-Za-z0-9_]/.test(src[i - 1] ?? "")) {
-      const m = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(src.slice(i, i + 80));
+    if (c === "$") {
+      DOLQ_DELIM.lastIndex = i;
+      const m = DOLQ_DELIM.exec(src);
       if (m) {
         const close = src.indexOf(m[0], i + m[0].length);
         if (close === -1) return { error: `an unterminated ${m[0]} dollar-quoted body`, line: start };
