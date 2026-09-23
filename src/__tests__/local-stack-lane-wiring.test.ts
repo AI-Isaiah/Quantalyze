@@ -329,4 +329,43 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // ⭐ Phase 164.4.2 plan 03. The guard above compares `git log -1 --format=%ct`
+  // for two paths. On the default SHALLOW checkout both answers are the one
+  // fetched commit's time, they compare equal, and the guard passes having
+  // measured nothing — so the arm above would stay green over a CI that no
+  // longer measures anything. This pins the CI half: both lane-booting jobs
+  // fetch full history, and frontend-local-stack asks the seam before booting.
+  it("both lane-booting CI jobs fetch full history, and frontend-local-stack runs the currency seam before the boot", () => {
+    const jobBlock = (job: string, nextJob: string) => {
+      const start = CI.indexOf(`\n  ${job}:\n`);
+      expect(start, `the ${job} job is gone from ci.yml`).toBeGreaterThan(-1);
+      const end = CI.indexOf(`\n  ${nextJob}:\n`, start);
+      expect(end, `could not find the end of the ${job} block`).toBeGreaterThan(start);
+      return liveLines(CI.slice(start, end));
+    };
+    const localStack = jobBlock(LANE_JOB, "frontend-live-db-lane");
+    const liveDb = jobBlock("frontend-live-db-lane", "frontend-policy");
+
+    for (const [job, lines] of [
+      [LANE_JOB, localStack],
+      ["frontend-live-db-lane", liveDb],
+    ] as const) {
+      expect(
+        lines.includes("fetch-depth: 0"),
+        `${job} checks out without \`fetch-depth: 0\` — on a shallow clone the baseline currency guard inside \`run.sh up\` compares two identical timestamps and passes vacuously`,
+      ).toBe(true);
+    }
+
+    const seam = localStack.findIndex(
+      (l) => l === "run: bash scripts/local-stack/run.sh --check-currency",
+    );
+    const boot = localStack.findIndex((l) => l === "run: bash scripts/local-stack/run.sh up");
+    expect(
+      seam,
+      `${LANE_JOB} no longer runs the lane's --check-currency seam as its own step — the verdict loses its named log line, and a guard dropped from load_baseline() would boot quietly`,
+    ).toBeGreaterThan(-1);
+    expect(boot, `${LANE_JOB} no longer boots the lane with run.sh up`).toBeGreaterThan(-1);
+    expect(seam < boot, `${LANE_JOB} runs the currency seam AFTER the boot`).toBe(true);
+  });
 });

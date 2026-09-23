@@ -692,10 +692,26 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
+          # ⛔ FULL HISTORY, and the currency guard is meaningless without it (Phase
+          # 164.4.2 plan 03). `run.sh up` refuses a baseline older than
+          # `supabase/migrations/` by comparing `git log -1 --format=%ct` for the two
+          # paths. On the default shallow clone there is ONE commit, so both paths
+          # report that commit's time, compare EQUAL, and the guard passes having
+          # measured nothing.
+          fetch-depth: 0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: 22
           cache: npm
+      - name: Baseline currency - refuse a schema dump older than the migrations
+        # The same `check_baseline_currency` call `run.sh up` makes inside
+        # `load_baseline()`, run on its own through the lane's `--check-currency`
+        # seam. Two reasons it is a separate step rather than left implicit in `up`:
+        # the verdict gets its own named line in this job's log, and an edit that
+        # drops the call out of `load_baseline()` fails HERE instead of booting
+        # quietly on a stale schema. Needs node and git history only — no stack, no
+        # node_modules — so it runs before either is paid for.
+        run: bash scripts/local-stack/run.sh --check-currency
       - name: Restore node_modules
         id: node_modules_cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -874,6 +890,14 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
+          # ⛔ FULL HISTORY, for the same reason as `frontend-local-stack`'s checkout:
+          # `run.sh up` now runs the baseline currency guard inside `load_baseline()`,
+          # and on a shallow clone `git log -1 --format=%ct` reports the one fetched
+          # commit's time for BOTH paths, so the guard compares two identical
+          # timestamps and passes having measured nothing. The explicit
+          # `--check-currency` step lives in `frontend-local-stack` only — one owner
+          # for that assertion, not two copies to keep identical.
+          fetch-depth: 0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: 22
