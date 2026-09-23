@@ -41,6 +41,7 @@ import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -1154,5 +1155,48 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
         `${where} does not call capability-probe.mjs --refuse-nonlocal-dsn`,
       ).toBe(true);
     }
+  });
+});
+
+// ── Review 164.4.2 WR-09: the image-pin check, EXECUTED against a stubbed docker. ──
+// `case "$image" in */postgres:"$LANE_PG_VERSION")` lets `*` match a newline, so a
+// `docker ps` answer of TWO containers passed whenever the LAST line was the pin.
+describe("assert_lane_pg_image accepts exactly one line naming the pinned image (WR-09)", () => {
+  const lane = read(RUN_SH);
+  const pin = lane.match(/^LANE_PG_VERSION="(\d+\.\d+\.\d+\.\d+)"$/m)?.[1] ?? "";
+  const body = bashFunctionBody(lane, "assert_lane_pg_image");
+  const drive = (dockerOut: string) => {
+    const dir = mkdtempSync(join(tmpdir(), "pg-image-"));
+    try {
+      const stub = join(dir, "docker");
+      writeFileSync(stub, `#!/usr/bin/env bash\nprintf '%b' "$STUB_OUT"\n`);
+      chmodSync(stub, 0o755);
+      const script = join(dir, "h.sh");
+      writeFileSync(
+        script,
+        `set -u\nlog() { echo "$*"; }\nPROJECT_ID=lane\nLANE_PG_VERSION="${pin}"\nDOCKER_BIN="${stub}"\n${body}\n}\nassert_lane_pg_image\n`,
+      );
+      const r = spawnSync("bash", [script], { encoding: "utf8", env: { ...process.env, STUB_OUT: dockerOut } });
+      return { status: r.status, out: `${r.stdout}${r.stderr}` };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("CONTROL: the pinned image on one line passes", () => {
+    expect(pin, "AIM: LANE_PG_VERSION was read from run.sh").not.toBe("");
+    const r = drive(`public.ecr.aws/supabase/postgres:${pin}\n`);
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("postgres image pinned");
+  });
+
+  it("two lines, the LAST naming the pin, FAIL — never a match across a newline", () => {
+    const r = drive(`evil.example.invalid/postgres:16.0\npublic.ecr.aws/supabase/postgres:${pin}\n`);
+    expect(r.status, r.out).toBe(1);
+  });
+
+  it("a tag that only starts with the pin, or a different pin, FAILS", () => {
+    expect(drive(`public.ecr.aws/supabase/postgres:${pin}-rc1\n`).status).toBe(1);
+    expect(drive("public.ecr.aws/supabase/postgres:17.6.1.106\n").status).toBe(1);
   });
 });

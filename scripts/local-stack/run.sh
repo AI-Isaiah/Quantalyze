@@ -699,13 +699,18 @@ assert_lane_pg_image() {
     echo "FATAL: MEASURE_FAIL - could not read the lane's db container image ('${DOCKER_BIN} ps' exited ${rc}). Unmeasured is not pinned." >&2
     exit 1
   fi
-  case "$image" in
-    */postgres:"$LANE_PG_VERSION") ;;
-    *)
-      echo "FATAL: the lane booted Postgres image '${image}', not the pinned postgres:${LANE_PG_VERSION}. The CLI ignored the lane workdir's .temp/postgres-version, so CI and a developer box may be running different Postgres builds again." >&2
-      exit 1
-      ;;
-  esac
+  # Review 164.4.2 WR-09: exactly ONE container line, matched by an ANCHORED regex.
+  # The `case */postgres:"$LANE_PG_VERSION"` glob it replaces let `*` match a
+  # newline, so two containers passed whenever the LAST line named the pin. The
+  # quoted version is matched literally (its dots are not wildcards).
+  if [ "$(printf '%s\n' "$image" | wc -l | tr -d '[:space:]')" != "1" ]; then
+    echo "FATAL: MEASURE_FAIL - '${DOCKER_BIN} ps' named more than one lane db container; exactly one is pinned, so which one is running is unknown." >&2
+    exit 1
+  fi
+  if ! [[ "$image" =~ ^[A-Za-z0-9._/:-]+/postgres:"$LANE_PG_VERSION"$ ]]; then
+    echo "FATAL: the lane booted Postgres image '${image}', not the pinned postgres:${LANE_PG_VERSION}. The CLI ignored the lane workdir's .temp/postgres-version, so CI and a developer box may be running different Postgres builds again." >&2
+    exit 1
+  fi
   log "postgres image pinned: ${image}"
 }
 
