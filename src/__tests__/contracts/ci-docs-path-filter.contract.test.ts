@@ -222,6 +222,11 @@ const ROSTER_FILTERED = [
   "python",
   "e2e",
   "sql-tests",
+  // Phase 164.4.2 (DECISION B): VAC-08 left `sql-tests` for a job of its own and
+  // inherited the same docs-only conjunct and `changed-paths` edge `sql-tests`
+  // carries (which `sql-tests` keeps), so it is a FILTERED job by construction. Seventeen became eighteen here, in the
+  // same commit that reads the new ci.yml — not by a silent move between sets.
+  "test-db-drift",
   "e2e-seeded",
   "lighthouse-mobile",
 ];
@@ -428,8 +433,11 @@ describe("[164.6.3 / CI-DOCSPATH-01] the docs-only filter's aggregator arm, EXEC
   });
 
   // ── S7 — COMPOSITION with the two pre-existing tolerance arms ────────────
-  // ⭐ A FORK pull request is the event on which `e2e-seeded` and `sql-tests`
-  // have their OWN legitimate skip. Under a docs-only classification they are
+  // ⭐ A FORK pull request is the event on which `e2e-seeded` and `test-db-drift`
+  // have their OWN legitimate skip. (`test-db-drift` took that skip over from
+  // `sql-tests` in Phase 164.4.2: it holds the shared-TEST secret and the fork
+  // gate now, and `sql-tests` runs on a private lane on every event, so a fork
+  // PR no longer skips it and its per-row tolerance arm is gone.) Under a docs-only classification they are
   // also filterable rows, so both arms have a claim on them. This scenario is
   // the proof that they COMPOSE rather than collide: the uniform arm, being
   // first, claims those rows and prints its own message, the pre-existing arms
@@ -440,7 +448,7 @@ describe("[164.6.3 / CI-DOCSPATH-01] the docs-only filter's aggregator arm, EXEC
   it("S7 — docs-only on a FORK PR: the uniform arm and the two pre-existing arms COMPOSE, board GREEN", () => {
     const docsOnly = String(judge([".planning/ROADMAP.md", ".planning/STATE.md"]));
     expect(docsOnly, "CALIBRATION: S7 is only S7 under a docs-only classification").toBe("true");
-    for (const row of ["e2e-seeded", "sql-tests"]) {
+    for (const row of ["e2e-seeded", "test-db-drift"]) {
       expect(
         FILTERABLE,
         `CALIBRATION: ${row} must be a FILTERABLE row, or S7 does not exercise the collision it exists for`,
@@ -457,7 +465,7 @@ describe("[164.6.3 / CI-DOCSPATH-01] the docs-only filter's aggregator arm, EXEC
     expect(out).toContain("All frontend-* jobs succeeded.");
     // The uniform arm claimed BOTH tolerance-bearing rows, first.
     expect(out).toContain("e2e-seeded: skipped by the docs-only path filter");
-    expect(out).toContain("sql-tests: skipped by the docs-only path filter");
+    expect(out).toContain("test-db-drift: skipped by the docs-only path filter");
     // ⛔ And the per-row vocabulary the four job headers forbid never appeared:
     // control never reached either pre-existing arm for these rows.
     expect(
@@ -624,7 +632,7 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
     expect(sorted([...classified]), "a classified name is not a job key in ci.yml").toEqual(sorted(JOB_KEYS));
   });
 
-  it("the FILTERED set equals its roster of seventeen, in both directions", () => {
+  it("the FILTERED set equals its roster of eighteen, in both directions", () => {
     const gained = DERIVED_FILTERED.filter((k) => !ROSTER_FILTERED.includes(k));
     const lost = ROSTER_FILTERED.filter((k) => !DERIVED_FILTERED.includes(k));
     expect(
@@ -639,7 +647,7 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
         `job that now runs on every docs-only PR (harmless) or — if its \`needs:\` edge also went — ` +
         `a job whose classification is no longer readable in the run log.`,
     ).toEqual([]);
-    expect(DERIVED_FILTERED.length).toBe(17);
+    expect(DERIVED_FILTERED.length).toBe(18);
   });
 
   it("every filtered job ALSO carries the `changed-paths` needs: edge", () => {
@@ -791,7 +799,7 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
       `the uniform docs-only arm is no longer FIRST in the loop's chain — the first per-row branch ` +
         `(\`${perRow.find((m) => (m.index as number) === firstPerRowAt)?.[1]}\`) comes before it. ` +
         `Appended lower it is UNREACHABLE on exactly the PRs this phase speeds up: e2e-seeded's arm ` +
-        `and sql-tests' arm both compute is_fork_pr=false on a same-repo PR and set fail=1 before ` +
+        `and test-db-drift's arm both compute is_fork_pr=false on a same-repo PR and set fail=1 before ` +
         `control could reach a later branch, and every docs-only PR would be RED. Scenario S7 ` +
         `executes the consequence; this pin catches the move even though every string is still present.`,
     ).toBeLessThan(firstPerRowAt);
