@@ -63,7 +63,7 @@ import {
   splitHygiene,
   UNRECORDED_VERDICT,
 } from "../../scripts/prod-prober/arms/cron-drift.mjs";
-import { classifyProbe } from "../../scripts/prod-prober/arms/mt5.mjs";
+import { ARM as MT5_ARM, classifyProbe } from "../../scripts/prod-prober/arms/mt5.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "prod-prober.yml");
@@ -2988,5 +2988,117 @@ describe("[164.1-fix] psql must not print its command tag into the row count", (
     // emits without -q, so the reason for the flag is pinned next to the flag.
     expect(countReturnedRows("1\n")).toBe(1);
     expect(countReturnedRows("1\nINSERT 0 1\n")).toBe(2);
+  });
+});
+
+describe("[164.6.5-03] D-09: the -10005 remedy names both causes and asserts neither", () => {
+  // ⛔ THE DEFECT THIS PINS. Before D-09 the `mt5-ipc-timeout` remedy told the
+  // operator ONE cause (a modal login dialog) and asserted a redeploy would
+  // NOT help — both measured FALSE for the 2026-09-21 incident (VNC console
+  // clean, Alerts tab empty, a 2.0 s process recycle fixed it). The remedy
+  // must now name BOTH known causes, assert neither as the cause of the
+  // reading in hand, and give the ordered procedure that is correct under
+  // both.
+  const remedy = MT5_ARM.REMEDIES["mt5-ipc-timeout"];
+
+  it("names both causes and the ordered procedure (recycle before VNC)", () => {
+    const dialogAt = remedy.indexOf("modal-login-dialog");
+    const accountSwitchAt = remedy.indexOf("account-switch");
+    const recycleAt = remedy.indexOf("recycle");
+    const vncAt = remedy.indexOf("VNC");
+    expect(dialogAt, `the remedy names the persisted modal-login-dialog cause (${JSON.stringify(remedy)})`).toBeGreaterThan(-1);
+    expect(accountSwitchAt, `the remedy names the process-state account-switch cause (${JSON.stringify(remedy)})`).toBeGreaterThan(
+      -1,
+    );
+    expect(recycleAt, "the ordered procedure names the process recycle").toBeGreaterThan(-1);
+    expect(vncAt, "the ordered procedure names the VNC console for the dialog cause").toBeGreaterThan(-1);
+    expect(recycleAt, "the recycle step comes BEFORE the VNC step — cheap and unattended first").toBeLessThan(vncAt);
+  });
+
+  it("⛔ EXPRESSED AS A PROPERTY OF THE REMEDY'S OWN CONTENT: it affirmatively states the reading cannot distinguish the two causes, rather than merely lacking the old single-cause sentence", () => {
+    // A gate that only checks a word is GONE goes green the moment someone
+    // rewords the old sentence without adding the new disclaimer. This checks
+    // for the POSITIVE presence of the ambiguity statement instead.
+    expect(
+      remedy.includes("cannot tell them apart"),
+      `the remedy must affirmatively state that this reading alone cannot distinguish the two causes (${JSON.stringify(remedy)})`,
+    ).toBe(true);
+  });
+
+  it("points at the runbook's -10005 differential section BY SYMBOL, never re-deriving the procedure inline", () => {
+    expect(remedy).toContain("docs/runbooks/mt5-go-live.md");
+    expect(remedy).toContain("differential-diagnosis");
+  });
+
+  it("CALIBRATION: a single-cause revert (the pre-D-09 shape) FAILS the ambiguity-property assertion", () => {
+    // The mutant is the REAL pre-D-09 sentence this arm shipped, not a
+    // paraphrase — so this calibration proves the assertion above is a
+    // reading, not a predicate only ever shown passing input.
+    const preD09 =
+      "The bridge IS ATTACHED but the terminal is NOT ANSWERING (-10005). Open the gateway's VNC console and clear the MODAL LOGIN DIALOG by completing any login — ⛔ a redeploy does NOT fix this, because the Wine prefix and the dialog live on the persistent volume and come straight back. A transient reading is possible while a real validate call holds the terminal's IPC bridge, so a SECOND consecutive hourly hit is the confirmation.";
+    expect(preD09, "the pre-D-09 sentence must actually differ from the shipped remedy").not.toBe(remedy);
+    expect(preD09.includes("cannot tell them apart")).toBe(false);
+    expect(preD09.includes("account-switch")).toBe(false);
+  });
+});
+
+describe("[164.6.5-03] D-10: the mt5 arm's declared environment and the workflow's supplied environment agree", () => {
+  /**
+   * The `Probe production` step — the ONLY step that actually RUNS the arm
+   * (the credential-assert step above is a pre-flight, not the run). Sliced
+   * from its own `- name:` anchor to its `run: |`, exactly like
+   * `credentialStepText` above.
+   */
+  function probeStepEnvText(text: string): string {
+    return sliceBetweenAnchors(text, "- name: Probe production", "\n        run: |");
+  }
+
+  /**
+   * Every RAILWAY_-prefixed env NAME the workflow supplies to that step.
+   *
+   * ⛔ NAMES ONLY — this reads the KEY on the left of each `KEY: value` line
+   * and never the value on the right, so no secret and no scope claim ever
+   * reaches this test. mt5 is the only arm in this workflow that consumes a
+   * RAILWAY_-prefixed var (the others use ANALYTICS_ / SUPABASE_ vars), so
+   * scoping by that prefix reads exactly mt5's slice of a step that aggregates the
+   * env for all four arms — without typing a list of names that could drift
+   * from either real source.
+   */
+  function suppliedMt5EnvNames(text: string): string[] {
+    const block = probeStepEnvText(text);
+    const names = Array.from(block.matchAll(/^\s+([A-Z0-9_]+):/gm)).map((m) => m[1]);
+    return [...new Set(names.filter((n) => n.startsWith("RAILWAY_")))].sort();
+  }
+
+  it("ARM.requiredEnv and the Probe production step's supplied RAILWAY_ names are the SAME SET", () => {
+    const declared = [...MT5_ARM.requiredEnv].sort();
+    const supplied = suppliedMt5EnvNames(WORKFLOW_TEXT);
+    const missing = declared.filter((n) => !supplied.includes(n));
+    const extra = supplied.filter((n) => !declared.includes(n));
+    expect(
+      missing.length === 0 && extra.length === 0,
+      `the mt5 arm's requiredEnv and the workflow's supplied names disagree — missing from the workflow: [${missing.join(", ")}], supplied but not declared by the arm: [${extra.join(", ")}]. A dropped or renamed name here does not fail loudly at run time: it makes the arm credential-blocked, or makes every hourly run report mt5-ssh-transport — a transport verdict that measured NOTHING about the terminal — which is exactly the state D-10 found and exactly the state that let the unproven MT5-WEDGE-OBS-01 classification be treated as proven. declared=[${declared.join(", ")}] supplied=[${supplied.join(", ")}]`,
+    ).toBe(true);
+  });
+
+  it("CALIBRATION: the same predicate reports the removed member BY NAME", () => {
+    // ⛔ THE SAME LINE ALSO APPEARS in the credential-assert pre-flight step
+    // above `Probe production`, so a plain `WORKFLOW_TEXT.replace(...)` would
+    // silently remove the WRONG occurrence (the pre-flight's, not the run
+    // step's) and this calibration would prove nothing. Scoped to the probe
+    // step's OWN slice, exactly like `probeStepEnvText` reads it, so the
+    // mutation lands on the occurrence that actually feeds the arm.
+    const start = anchorIndex(WORKFLOW_TEXT, "- name: Probe production");
+    const end = anchorIndex(WORKFLOW_TEXT, "\n        run: |", start);
+    const block = WORKFLOW_TEXT.slice(start, end);
+    const mutatedBlock = block.replace('          RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}\n', "");
+    expect(mutatedBlock, "the removal must actually change the probe step's own slice").not.toBe(block);
+    const mutated = WORKFLOW_TEXT.slice(0, start) + mutatedBlock + WORKFLOW_TEXT.slice(end);
+    expect(mutated, "the removal must actually change the full text").not.toBe(WORKFLOW_TEXT);
+    const declared = [...MT5_ARM.requiredEnv].sort();
+    const supplied = suppliedMt5EnvNames(mutated);
+    expect(supplied).not.toContain("RAILWAY_ENVIRONMENT");
+    const missing = declared.filter((n) => !supplied.includes(n));
+    expect(missing, "the removed member is named in the diff").toEqual(["RAILWAY_ENVIRONMENT"]);
   });
 });
