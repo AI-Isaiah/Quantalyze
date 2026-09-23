@@ -30,3 +30,21 @@ SELECT 'trigger|' || c.relname || '|' || t.tgname || '|' || t.tgtype::text || '|
    AND c.relname = 'users'
    AND NOT t.tgisinternal
  ORDER BY t.tgname;
+
+-- pg_cron: whether it is installed, and then EVERY cron.job row. The free-text fields
+-- (jobname, schedule, command) are hex-encoded because commands carry newlines and
+-- `|`. cron.job exists only with the extension, so it is read behind \if. An UNNAMED
+-- job (NULL jobname) would null the whole concatenation and print as a blank line the
+-- gate skips, so it is given a visible placeholder name and surfaces as EXTRA.
+SELECT count(*) AS has_pg_cron FROM pg_extension WHERE extname = 'pg_cron' \gset
+SELECT 'meta|pg_cron|' || :has_pg_cron;
+\if :has_pg_cron
+SELECT 'cron|' || encode(convert_to(coalesce(j.jobname, '(unnamed jobid ' || j.jobid || ')'), 'UTF8'), 'hex')
+       || '|' || encode(convert_to(j.schedule, 'UTF8'), 'hex')
+       || '|' || CASE WHEN j.active THEN 't' ELSE 'f' END
+       || '|' || j.username
+       || '|' || j.database
+       || '|' || encode(convert_to(j.command, 'UTF8'), 'hex')
+  FROM cron.job j
+ ORDER BY j.jobid;
+\endif

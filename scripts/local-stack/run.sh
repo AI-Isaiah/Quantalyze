@@ -434,8 +434,16 @@ check_acl_fidelity() {
 # swapped; a DSN not starting with the postgres role is refused). auth.users belongs
 # to the auth service role, and a trigger has no owner, so the object is identical
 # whoever creates it.
+#
+# The cron jobs are registered through the LOADING DSN "$db_url", never the
+# superuser, in one transaction: cron.schedule stamps cron.job.username with
+# current_user and every PROD job carries `postgres`; pg_cron's row-level security
+# shows a non-superuser only its own jobs, so jobs registered as the superuser would
+# be invisible to the corpus files that read them as `postgres`; and a superuser-
+# owned job would RUN with superuser rights, a catalogue wider than PROD's. There is
+# NO fallback role: a refused cron.schedule is FATAL.
 load_nonpublic_objects() {
-  local psql="$1" db_url="$2" admin_url census n_trig
+  local psql="$1" db_url="$2" admin_url census n_trig n_cron owner
   admin_url="${db_url/#postgresql:\/\/postgres:/postgresql://supabase_admin:}"
   if [ "$admin_url" = "$db_url" ]; then
     echo "FATAL: the lane DSN does not start with postgresql://postgres:, so the superuser DSN the auth.users trigger needs cannot be derived. Refusing to boot a lane without it." >&2
@@ -447,16 +455,28 @@ load_nonpublic_objects() {
     exit 1
   fi
   printf '%s\n' "$census"
-  n_trig="$(printf '%s\n' "$census" | sed -n 's/^nonpublic-extract: .*auth-triggers=\([0-9][0-9]*\).*$/\1/p')"
-  if [ -z "$n_trig" ]; then
-    echo "FATAL: the extractor's census line carries no auth-triggers count; refusing to apply what it cannot count." >&2
+  n_trig="$(printf '%s\n' "$census" | sed -n 's/^nonpublic-extract: .* auth-triggers=\([0-9][0-9]*\).*$/\1/p')"
+  n_cron="$(printf '%s\n' "$census" | sed -n 's/^nonpublic-extract: .* cron-jobs=\([0-9][0-9]*\).*$/\1/p')"
+  if [ -z "$n_trig" ] || [ -z "$n_cron" ]; then
+    echo "FATAL: the extractor's census line carries no auth-triggers or cron-jobs count; refusing to apply what it cannot count." >&2
+    exit 1
+  fi
+  owner="${db_url#postgresql://}"
+  owner="${owner%%:*}"
+  if ! [[ "$owner" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+    echo "FATAL: could not read the loading role from the lane DSN; the cron jobs' owner would be unknown." >&2
     exit 1
   fi
   if ! "$psql" -X "$admin_url" -v ON_ERROR_STOP=1 -q -1 -f "${REPLAY_HANDOFF_DIR}/nonpublic-auth-triggers.sql" </dev/null; then
     echo "FATAL: applying the extracted auth.users trigger(s) through the superuser DSN failed." >&2
     exit 1
   fi
-  log "nonpublic-load: ${n_trig} auth.users trigger(s) applied via the superuser role supabase_admin"
+  # stdout carries only the job ids cron.schedule returns.
+  if ! "$psql" -X "$db_url" -v ON_ERROR_STOP=1 -q -1 -f "${REPLAY_HANDOFF_DIR}/nonpublic-cron.sql" </dev/null >/dev/null; then
+    echo "FATAL: registering the extracted cron jobs as the loading role ${owner} failed (a refused cron.schedule is not retried as another role)." >&2
+    exit 1
+  fi
+  log "nonpublic-load: ${n_trig} auth.users trigger(s) applied via the superuser role supabase_admin; ${n_cron} cron job(s) registered as the loading role ${owner}"
 }
 
 # The gate: the lane's auth.users triggers compared with the set the carried
@@ -464,10 +484,16 @@ load_nonpublic_objects() {
 # emitted). Read through the SUPERUSER DSN, which the catalogue's meta row must
 # confirm. DRIFT or an unreadable catalogue is FATAL.
 check_nonpublic_fidelity() {
-  local psql="$1" db_url="$2" admin_url rows
+  local psql="$1" db_url="$2" admin_url rows owner
   admin_url="${db_url/#postgresql:\/\/postgres:/postgresql://supabase_admin:}"
   if [ "$admin_url" = "$db_url" ]; then
     echo "FATAL: the lane DSN does not start with postgresql://postgres:, so the superuser DSN the non-public fidelity gate reads through cannot be derived." >&2
+    exit 1
+  fi
+  owner="${db_url#postgresql://}"
+  owner="${owner%%:*}"
+  if ! [[ "$owner" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+    echo "FATAL: could not read the loading role from the lane DSN; the gate cannot say who the cron jobs must belong to." >&2
     exit 1
   fi
   rows="${REPLAY_HANDOFF_DIR}/nonpublic-catalogue.txt"
@@ -475,7 +501,7 @@ check_nonpublic_fidelity() {
     echo "FATAL: could not read the lane's non-public catalogue for the fidelity gate." >&2
     exit 1
   fi
-  if ! node "${LANE_DIR}/nonpublic-objects.mjs" --check --migrations "$MIGRATIONS_DIR" --carried "$CARRIED_SET_FILE" --catalogue "$rows"; then
+  if ! node "${LANE_DIR}/nonpublic-objects.mjs" --check --migrations "$MIGRATIONS_DIR" --carried "$CARRIED_SET_FILE" --catalogue "$rows" --cron-owner "$owner"; then
     echo "FATAL: the lane's non-public objects are not the set the carried migrations declare (nonpublic-fidelity above). Corpus files that read them would measure a lane that is not PROD's." >&2
     exit 1
   fi

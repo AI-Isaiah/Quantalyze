@@ -29,37 +29,54 @@
  *     on `auth.users`, found in CODE positions (`maskSql` + `statements` from
  *     scripts/lint-sql-gates.mjs) and excluded from dollar-quoted bodies
  *     (`dollarBodyRanges` / `insideBody` from scripts/extract-reference-inserts.mjs).
+ *   - The pg_cron class: every `cron.schedule` / `cron.unschedule` call site, found in
+ *     code positions (dollar bodies ARE code to `maskSql`, so every call inside a `DO`
+ *     block is found), its arguments parsed LOCALLY from the call's own `(` in the
+ *     original text. A later schedule of a name supersedes the earlier one (pg_cron
+ *     upserts by name); an unschedule removes it; an unschedule of a name not folded
+ *     at that point is a no-op, and a name NO carried call ever schedules is named.
  *
  * ⛔ IT REFUSES BY DEFAULT. A shape this module cannot prove safe is MEASURE_FAIL (exit
  * 2), never skipped: a trigger carrying a WHEN clause, `UPDATE OF`, REFERENCING or
  * CONSTRAINT; ENABLE/DISABLE TRIGGER on an auth table; a trigger on any auth table
- * other than `users`; auth trigger DDL inside a dollar body; trigger DDL visible only
- * inside a string literal (two independent lexers disagree); a carried basename with no
- * file, or a malformed carried line.
+ * other than `users`; auth trigger DDL inside a dollar body; a cron argument that is
+ * not a `'…'` or `$tag$…$tag$` literal (an identifier, `||`, a cast, `format(`, a
+ * variable), an unclosed argument list, the wrong arity, a `cron.alter_job` or
+ * `cron.schedule_in_database` call site, a cron call inside another call's arguments;
+ * trigger DDL or a cron call visible only inside a string literal an EXECUTE could run
+ * (two independent lexers — `maskSql`'s code positions and `scanSql`'s comment-
+ * stripped text — disagree on the per-file count); a carried basename with no file, or
+ * a malformed carried line.
  *
  * USAGE
  *   node scripts/local-stack/nonpublic-objects.mjs --emit  --migrations <dir> --carried <file> --out-dir <dir>
- *   node scripts/local-stack/nonpublic-objects.mjs --check --migrations <dir> --carried <file> --catalogue <rows>
+ *   node scripts/local-stack/nonpublic-objects.mjs --check --migrations <dir> --carried <file> --catalogue <rows> --cron-owner <role>
  *   (<rows> is `psql -X -q -At -F '|' -f scripts/local-stack/nonpublic-catalogue.sql`, read
- *    through the stack SUPERUSER DSN)
+ *    through the stack SUPERUSER DSN; <role> is the loading role the jobs must belong to)
  *
- * --emit writes <out-dir>/nonpublic-auth-triggers.sql: `SET search_path TO public;` and
- * then each surviving statement's ORIGINAL bytes, sliced by offset — nothing is
- * re-rendered. It prints one census line starting `nonpublic-extract:`.
+ * --emit writes <out-dir>/nonpublic-auth-triggers.sql (`SET search_path TO public;` then
+ * each surviving statement's ORIGINAL bytes, sliced by offset) and
+ * <out-dir>/nonpublic-cron.sql (one `SELECT cron.schedule(<name>, <schedule>, <command>);`
+ * per surviving job, from the literals' ORIGINAL bytes, ordered by each job's last
+ * declaring call). Nothing is re-rendered. It prints one census line starting
+ * `nonpublic-extract:` (counts and names, never a command).
  *
  * --check RE-DERIVES the declared set from the migrations. ⛔ It never reads the SQL
- * `--emit` wrote, so a partly applied or altered emit file cannot vouch for itself. It
- * prints one MISSING / EXTRA / DIFFERS line per finding, then
- *   nonpublic-fidelity: auth-users-triggers=<lane>/<declared> drift=<n> verdict OK|DRIFT|MEASURE_FAIL
+ * `--emit` wrote, so a partly applied or altered emit file cannot vouch for itself. Cron
+ * jobs are compared BYTE-EXACT on name, schedule and command (sha256 prefixes printed,
+ * never the text), plus `active`, `username = --cron-owner` and `database`. It prints one
+ * MISSING / EXTRA / DIFFERS / DUPLICATE line per finding, then
+ *   nonpublic-fidelity: auth-users-triggers=<lane>/<declared> cron-jobs=<lane>/<declared> drift=<n> verdict OK|DRIFT|MEASURE_FAIL
  * EXIT 0 = OK, 1 = DRIFT, 2 = MEASURE_FAIL (also: an empty catalogue, a missing meta
- * row, or a meta row saying the reader is not a superuser — a non-superuser cannot see
- * every row it would need to).
+ * row, a meta row saying the reader is not a superuser — pg_cron's row-level security
+ * shows a non-superuser only its own jobs — or declared jobs on a lane without pg_cron).
  *
  * ⛔ THE REPO IS PUBLIC and CI logs are world-readable. Output carries file names,
  * statement indexes, trigger names, counts and sha256 prefixes only — never statement
  * text, a DSN or a password.
  */
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { maskSql, statements } from "../lint-sql-gates.mjs";
 import { dollarBodyRanges, insideBody } from "../extract-reference-inserts.mjs";
@@ -216,21 +233,187 @@ function foldAuthTriggers(files, lexed) {
   return fold;
 }
 
+// ── the pg_cron class ────────────────────────────────────────────────────────
+// Call sites are found in CODE positions. `maskSql` scans dollar bodies as code, which
+// is why every call inside a `DO` block is found. `schedule_in_database` is listed
+// before `schedule` only for readability: the `\s*\(` already keeps them apart.
+const CRON_CALL = /\bcron\s*\.\s*(schedule_in_database|schedule|unschedule|alter_job)\s*\(/gi;
+const DOLLAR_TAG = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/;
+const ARITY = { schedule: 3, unschedule: 1 };
+
+/** Skip whitespace, `--` line comments and nested block comments from `i`. */
+function skipBlank(src, i) {
+  for (;;) {
+    while (i < src.length && /\s/.test(src[i])) i++;
+    if (src.startsWith("--", i)) {
+      const nl = src.indexOf("\n", i);
+      i = nl < 0 ? src.length : nl + 1;
+      continue;
+    }
+    if (src.startsWith("/*", i)) {
+      let depth = 1;
+      let j = i + 2;
+      while (j < src.length && depth > 0) {
+        if (src.startsWith("/*", j)) {
+          depth++;
+          j += 2;
+        } else if (src.startsWith("*/", j)) {
+          depth--;
+          j += 2;
+        } else j++;
+      }
+      i = j;
+      continue;
+    }
+    return i;
+  }
+}
+
+/**
+ * The arguments of one cron call, parsed LOCALLY from its own `(` in the ORIGINAL
+ * text. ⛔ Only a plain `'…'` literal or a `$tag$…$tag$` literal is accepted, with
+ * whitespace and comments between them; anything else — an identifier, `||`, a cast,
+ * a function call, a variable, an unclosed list — is MEASURE_FAIL. Parsing from the
+ * call's own parenthesis is what recovers the command of
+ * 20260515113637_resend_message_correlation.sql, whose `$$` command sits inside a
+ * `DO $$` body (PostgreSQL rejects that file as authored; PROD carries the job with
+ * exactly the inner command).
+ * @returns {{ args: Array<{value: string, raw: string}>, end: number }}
+ */
+function parseCronArgs(src, open, at) {
+  const args = [];
+  let i = skipBlank(src, open + 1);
+  if (src[i] === ")") return { args, end: i + 1 };
+  for (;;) {
+    const start = i;
+    let value;
+    if (src[i] === "'") {
+      let j = i + 1;
+      for (;;) {
+        const q = src.indexOf("'", j);
+        if (q < 0) measureFail(`${at}: an unterminated '…' argument`);
+        if (src[q + 1] === "'") {
+          j = q + 2;
+          continue;
+        }
+        i = q + 1;
+        break;
+      }
+      value = src.slice(start + 1, i - 1).replace(/''/g, "'");
+    } else if (src[i] === "$" && DOLLAR_TAG.test(src.slice(i, i + 80))) {
+      const tag = DOLLAR_TAG.exec(src.slice(i, i + 80))[0];
+      const close = src.indexOf(tag, i + tag.length);
+      if (close < 0) measureFail(`${at}: an unterminated dollar-quoted argument`);
+      value = src.slice(i + tag.length, close);
+      i = close + tag.length;
+    } else if (i >= src.length) {
+      measureFail(`${at}: an unclosed argument list`);
+    } else {
+      measureFail(`${at}: argument ${args.length + 1} is not a '…' or $tag$ literal (an identifier, expression, variable or call is not modelled)`);
+    }
+    args.push({ value, raw: src.slice(start, i) });
+    i = skipBlank(src, i);
+    if (src[i] === ",") {
+      i = skipBlank(src, i + 1);
+      continue;
+    }
+    if (src[i] === ")") return { args, end: i + 1 };
+    if (i >= src.length) measureFail(`${at}: an unclosed argument list`);
+    measureFail(`${at}: argument ${args.length} is followed by something other than ',' or ')' (a concatenation, cast or expression is not modelled)`);
+  }
+}
+
+/**
+ * Fold every cron.schedule / cron.unschedule over the carried files, in filename
+ * order: a later schedule of a name supersedes the earlier one (pg_cron's
+ * `cron.schedule` upserts by name), an unschedule removes it, and an unschedule of a
+ * name not folded at that point is a no-op the census names.
+ */
+function foldCron(files, lexed) {
+  const jobs = new Map(); // insertion order = order of each job's LAST declaring call
+  const noops = [];
+  const everScheduled = new Set();
+  let scheduleCalls = 0;
+  let unscheduleCalls = 0;
+  for (const { base, src } of files) {
+    const L = lexed.get(base);
+    const inCode = count(L.code, CRON_CALL);
+    const inText = count(L.stripped, CRON_CALL);
+    if (inCode !== inText) {
+      measureFail(
+        `${base}: cron call-site counts disagree between the two lexers (code positions ${inCode}, comment-stripped text ${inText}) — a cron call sits inside a string literal an EXECUTE could run`,
+      );
+    }
+    const calls = [];
+    CRON_CALL.lastIndex = 0;
+    let m;
+    while ((m = CRON_CALL.exec(L.code)) !== null) {
+      const fn = m[1].toLowerCase();
+      const at = `${base} statement ${L.stmtIndex(m.index)}`;
+      if (!(fn in ARITY)) measureFail(`${at}: a cron.${fn} call site is not modelled`);
+      const open = m.index + m[0].length - 1;
+      const { args, end } = parseCronArgs(src, open, at);
+      if (args.length !== ARITY[fn]) measureFail(`${at}: cron.${fn} with ${args.length} argument(s); exactly ${ARITY[fn]} literal(s) are modelled`);
+      calls.push({ fn, at, start: m.index, open, end, args });
+    }
+    for (const c of calls) {
+      if (calls.some((o) => o !== c && c.start > o.open && c.start < o.end)) {
+        measureFail(`${c.at}: a cron call inside another cron call's arguments is not modelled`);
+      }
+    }
+    for (const c of calls) {
+      const name = c.args[0].value;
+      if (c.fn === "schedule") {
+        scheduleCalls++;
+        everScheduled.add(name);
+        jobs.delete(name);
+        jobs.set(name, {
+          name,
+          schedule: c.args[1].value,
+          command: c.args[2].value,
+          base,
+          sql: `SELECT cron.schedule(${c.args.map((a) => a.raw).join(", ")});`,
+        });
+      } else {
+        unscheduleCalls++;
+        if (jobs.has(name)) jobs.delete(name);
+        else noops.push(name);
+      }
+    }
+  }
+  return { jobs, noops, everScheduled, scheduleCalls, unscheduleCalls };
+}
+
 function derive(migrationsDir, carriedFile) {
   const files = readCarried(migrationsDir, carriedFile);
   const lexed = new Map(files.map(({ base, src }) => [base, lex(base, src)]));
-  return { files, triggers: foldAuthTriggers(files, lexed) };
+  return { files, triggers: foldAuthTriggers(files, lexed), cron: foldCron(files, lexed) };
 }
+
+const sha12 = (s) => createHash("sha256").update(s, "utf8").digest("hex").slice(0, 12);
 
 // ── --emit ──────────────────────────────────────────────────────────────────
 function emit() {
   const outDir = arg("--out-dir");
-  const { files, triggers } = derive(arg("--migrations"), arg("--carried"));
+  const { files, triggers, cron } = derive(arg("--migrations"), arg("--carried"));
   mkdirSync(outDir, { recursive: true });
   const trig = ["SET search_path TO public;", ...[...triggers.values()].map((t) => `${t.sql};`)].join("\n") + "\n";
   writeFileSync(join(outDir, "nonpublic-auth-triggers.sql"), trig);
-  const names = [...triggers.values()].map((t) => `${t.name}<-${t.base}`).join(" ");
-  console.log(`nonpublic-extract: carried-files=${files.length} auth-triggers=${triggers.size}${names ? ` (${names})` : ""}`);
+  // One registration per surviving job, from the literals' ORIGINAL bytes, ordered by
+  // each job's last declaring call (file, then offset).
+  writeFileSync(join(outDir, "nonpublic-cron.sql"), [...cron.jobs.values()].map((j) => `${j.sql}\n`).join(""));
+  const list = (xs) => (xs.length ? ` (${xs.join(" ")})` : "");
+  const trigNames = [...triggers.values()].map((t) => `${t.name}<-${t.base}`);
+  // A no-op unschedule is usually the house unschedule-if-exists guard ahead of a
+  // job's FIRST schedule, so the count alone is printed for those. A name that NO
+  // carried call ever schedules is named: it is the one a reader should look at.
+  const neverScheduled = [...new Set(cron.noops)].filter((n) => !cron.everScheduled.has(n));
+  console.log(
+    `nonpublic-extract: carried-files=${files.length} auth-triggers=${triggers.size}${list(trigNames)}` +
+      ` schedule-calls=${cron.scheduleCalls} unschedule-calls=${cron.unscheduleCalls}` +
+      ` cron-jobs=${cron.jobs.size}${list([...cron.jobs.keys()])}` +
+      ` no-op-unschedules=${cron.noops.length} never-scheduled=${neverScheduled.length}${list(neverScheduled)}`,
+  );
   return 0;
 }
 
@@ -238,6 +421,7 @@ function emit() {
 function parseCatalogue(text) {
   const meta = new Map();
   const triggers = new Map();
+  const cron = [];
   const rows = text.split("\n").filter((l) => l !== "");
   for (const raw of rows) {
     const f = raw.split("|");
@@ -247,16 +431,24 @@ function parseCatalogue(text) {
     } else if (f[0] === "trigger" && f.length === 6 && f[1] === "users" && /^\d+$/.test(f[3])) {
       if (triggers.has(f[2])) measureFail(`the catalogue lists auth.users trigger ${f[2]} twice`);
       triggers.set(f[2], { name: f[2], tgtype: Number(f[3]), enabled: f[4], fn: f[5] });
+    } else if (f[0] === "cron" && f.length === 7 && [f[1], f[2], f[6]].every(isHex) && /^[tf]$/.test(f[3])) {
+      // Free-text fields are hex-encoded by the catalogue SQL: commands carry newlines and `|`.
+      cron.push({ name: unhex(f[1]), schedule: unhex(f[2]), active: f[3], username: f[4], database: f[5], command: unhex(f[6]) });
     } else {
       measureFail(`unrecognised catalogue line ${rows.indexOf(raw) + 1} (it is not this gate's query output)`);
     }
   }
-  return { rows, meta, triggers };
+  return { rows, meta, triggers, cron };
 }
+
+const isHex = (s) => /^(?:[0-9a-f]{2})*$/.test(s);
+const unhex = (s) => Buffer.from(s, "hex").toString("utf8");
 
 function check() {
   const catPath = arg("--catalogue");
-  const { triggers: declared } = derive(arg("--migrations"), arg("--carried"));
+  // The role cron jobs must be registered as: the loading role, whose DSN run.sh reads.
+  const cronOwner = arg("--cron-owner");
+  const { triggers: declared, cron } = derive(arg("--migrations"), arg("--carried"));
   let text;
   try {
     text = readFileSync(catPath, "utf8");
@@ -268,7 +460,7 @@ function check() {
   // (A) PRESENCE. An empty catalogue, or one without its meta rows, is not this
   // gate's query output — and "read nothing" must never compare as "nothing there".
   if (cat.rows.length === 0) measureFail("the catalogue is EMPTY — an unread lane is not a faithful one");
-  for (const k of ["superuser", "database"]) {
+  for (const k of ["superuser", "database", "pg_cron"]) {
     if (!cat.meta.has(k)) measureFail(`the catalogue carries no meta|${k} row — it is not this gate's query output`);
   }
   // (B) THE READER. pg_cron's row-level security on cron.job shows a non-superuser
@@ -292,8 +484,47 @@ function check() {
     if (!declared.has(got.name)) findings.push(`EXTRA    auth.users trigger ${got.name} (on the lane, declared by no carried migration)`);
   }
 
+  // ── cron.job, BYTE-EXACT (test_retention_crons_safe.sql reads the command
+  // verbatim, so a normalised comparison would pass a lane that file fails on).
+  const pgCron = cat.meta.get("pg_cron");
+  if (pgCron !== undefined && !/^[01]$/.test(pgCron)) measureFail("meta|pg_cron is neither 0 nor 1");
+  if (pgCron === "0" && cron.jobs.size > 0) {
+    measureFail(`the carried migrations declare ${cron.jobs.size} cron job(s) and the lane has no pg_cron extension to hold them`);
+  }
+  const laneJobs = new Map();
+  for (const row of cat.cron) {
+    if (laneJobs.has(row.name)) laneJobs.get(row.name).push(row);
+    else laneJobs.set(row.name, [row]);
+  }
+  for (const [name, rows] of laneJobs) {
+    if (rows.length > 1) findings.push(`DUPLICATE cron job ${name}: ${rows.length} rows on the lane (a double registration)`);
+  }
+  for (const d of cron.jobs.values()) {
+    const got = laneJobs.get(d.name)?.[0];
+    if (!got) {
+      findings.push(`MISSING  cron job ${d.name} (declared last by ${d.base}; absent on the lane)`);
+      continue;
+    }
+    if (got.schedule !== d.schedule) findings.push(`DIFFERS  cron job ${d.name}: schedule lane=${got.schedule} declared=${d.schedule}`);
+    if (got.command !== d.command) {
+      findings.push(`DIFFERS  cron job ${d.name}: command lane sha256=${sha12(got.command)}… declared sha256=${sha12(d.command)}…`);
+    }
+    if (got.active !== "t") findings.push(`DIFFERS  cron job ${d.name}: active lane=${got.active} declared=t`);
+    if (got.username !== cronOwner) findings.push(`DIFFERS  cron job ${d.name}: username lane=${got.username} declared=${cronOwner} (the loading role)`);
+    if (got.database !== cat.meta.get("database")) {
+      findings.push(`DIFFERS  cron job ${d.name}: database lane=${got.database} declared=${cat.meta.get("database")}`);
+    }
+  }
+  for (const name of laneJobs.keys()) {
+    if (!cron.jobs.has(name)) findings.push(`EXTRA    cron job ${name} (on the lane, declared by no carried migration)`);
+  }
+
   for (const f of findings) console.log(`nonpublic-drift: ${f}`);
-  const fields = [`auth-users-triggers=${cat.triggers.size}/${declared.size}`, `drift=${findings.length}`].join(" ");
+  const fields = [
+    `auth-users-triggers=${cat.triggers.size}/${declared.size}`,
+    `cron-jobs=${cat.cron.length}/${cron.jobs.size}`,
+    `drift=${findings.length}`,
+  ].join(" ");
   if (findings.length > 0) {
     console.error(
       `::error::nonpublic-fidelity DRIFT: ${findings.length} difference(s) between the lane's non-public objects and the set the carried migrations declare. Corpus files that read them would measure a lane that is not PROD's.`,
