@@ -146,10 +146,28 @@ jobs:
     # sufficient here — the `git diff` route was chosen over a third-party
     # changed-files action precisely so no permission uplift and no new action
     # SHA are needed.
+    #
+    # ⭐ Phase 164.4.2 / DECISION D — this job ALSO publishes the SQL gate
+    # SUBSET that `sql-mutation` narrows to on a pull request:
+    # `sql_gate_mode` (`full` | `subset`) and `sql_gate_files` (space-separated
+    # repo-relative `supabase/tests/test_*.sql` paths, empty on `full`), both
+    # computed by `scripts/sql-gate-subset.mjs`. WHY HERE and not in a job of
+    # its own: this job is already a `needs:` of `sql-mutation`, already checks
+    # out with `fetch-depth: 0` for the three-dot diff, and already owns "what
+    # changed against the merge base" — the derivation calls the SAME
+    # `changedFilesAgainstBase()` the docs classifier does. A second job
+    # computing it would be a second deep clone and a second diff to keep
+    # identical. The derivation hard-codes FULL for every event that is not a
+    # pull_request, and forces FULL when the mutation machinery or a migration
+    # changed; `sql-mutation` refuses the subset on a non-PR event independently.
+    # ⛔ Adding these two outputs changes nothing about `docs_only` and adds no
+    # `if:` — the no-`if:` paragraph above binds this derivation too.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
+      sql_gate_mode: ${{ steps.sql_gate_subset.outputs.sql_gate_mode }}
+      sql_gate_files: ${{ steps.sql_gate_subset.outputs.sql_gate_files }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -165,6 +183,13 @@ jobs:
       - run: node scripts/classify-changed-paths.mjs --self-test
       - id: classify
         run: node scripts/classify-changed-paths.mjs
+      # Same red-path-first shape for the SQL gate subset derivation: its
+      # self-test drives every verdict (including an unreadable base, which is
+      # a MEASURE_FAIL and never an empty change set) before the real run. A
+      # wrong `subset` would leave gate files unmutated on a pull request.
+      - run: node scripts/sql-gate-subset.mjs --self-test
+      - id: sql_gate_subset
+        run: node scripts/sql-gate-subset.mjs
 
   # CI speedup PR-B (v0.22.1.2+): the prior monolithic `frontend` job ran
   # typecheck → lint → test → policy-checks → audit → build serially
@@ -2455,10 +2480,52 @@ jobs:
         #     report `dirty-checkout` on a log file written beside the corpus.
         # argv is unchanged either way — only the stdout fd differs, which in CI
         # is a file regardless.
+        #
+        # ⭐ MODE IDENTITY, EXTENDED 2026-09-23 (Phase 164.4.2 / DECISION D). The
+        # step now has TWO named invocations, and the rule above binds both:
+        #   * FULL — the LAST command below, byte-identical to before this
+        #     extension and to the runner header's bare command. Every push,
+        #     every workflow_dispatch, and every pull request whose derivation
+        #     said `full` runs it. A merge is the moment the full picture is
+        #     owed, so the push to main always runs the whole corpus and
+        #     enforces every floor.
+        #   * SUBSET — `--subset-from <list>`, the runner header's documented
+        #     SUBSET gate command, taken ONLY when `changed-paths` said `subset`
+        #     AND this event is a pull_request. ⛔ Two independent controls on
+        #     the event: the derivation already forces `full` for a non-PR
+        #     event, and this step refuses the subset branch on its own —
+        #     because the derivation is a script this job does not own.
+        # ⛔ The name list is NEVER interpolated into a shell command. It
+        # crosses the job boundary as an `env:` value, is split by `read -r -a`
+        # (no globbing, no eval), and is written one path per line with
+        # `printf` into RUNNER_TEMP — not the workspace, for the
+        # `dirty-checkout` reason above. The runner re-validates every line
+        # against the same strict pattern the derivation emitted it under.
+        # Whichever branch ran, the runner prints exactly one `scope:` line,
+        # and the assert step below judges it.
         env:
           RUNNER_LOG: ${{ runner.temp }}/mutation-runner.log
+          SQL_GATE_MODE: ${{ needs.changed-paths.outputs.sql_gate_mode }}
+          SQL_GATE_FILES: ${{ needs.changed-paths.outputs.sql_gate_files }}
         run: |
           set -uo pipefail
+          if [ "${SQL_GATE_MODE:-}" = "subset" ]; then
+            if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+              subset_list="$RUNNER_TEMP/sql-gate-subset.txt"
+              read -r -a subset_names <<< "${SQL_GATE_FILES:-}"
+              if [ "${#subset_names[@]}" -gt 0 ]; then
+                printf '%s\n' "${subset_names[@]}" > "$subset_list"
+              else
+                : > "$subset_list"
+              fi
+              echo "SUBSET requested by changed-paths on a pull_request: ${#subset_names[@]} gate file(s) -> $subset_list"
+              node scripts/mutation-runner/run.mjs --subset-from "$subset_list" > "$RUNNER_LOG" 2>&1
+              status=$?
+              cat "$RUNNER_LOG"
+              exit $status
+            fi
+            echo "::warning::changed-paths said sql_gate_mode=subset on a '${GITHUB_EVENT_NAME:-unset}' event. A SUBSET is taken only on a pull_request, so this step REFUSES it and runs the full corpus."
+          fi
           node scripts/mutation-runner/run.mjs > "$RUNNER_LOG" 2>&1
           status=$?
           cat "$RUNNER_LOG"
