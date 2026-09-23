@@ -25,9 +25,11 @@ import { join } from "node:path";
  *     dot-directories skipped), minus the hand-typed `EXCLUDED` record, plus
  *     every tracked top-level `analytics-service/*.py` file;
  *   - the Makefile `typecheck` recipe names the same set;
- *   - the `python` job carries exactly ONE mypy --strict invocation, and its
- *     flag set is EXACTLY `--strict --follow-imports=silent` (an extra flag
- *     such as `--exclude=` narrows the gate while the path set stays equal);
+ *   - the `python` job carries exactly ONE mypy invocation (`mypy` or
+ *     `python -m mypy` as a command word, `--strict` or not, backslash
+ *     continuations joined), and its flag set is EXACTLY
+ *     `--strict --follow-imports=silent` (an extra flag such as `--exclude=`
+ *     narrows the gate while the path set stays equal);
  *   - the Makefile `typecheck` recipe carries NO flag (pyproject.toml supplies them);
  *   - the gate step sets only `name` and `run` (no `if:`, `continue-on-error:`,
  *     `shell:` or `env:` that could switch it off with its run line intact), the
@@ -113,16 +115,42 @@ function pythonJobLines(ymlText: string): string[] {
   return lines.slice(start, end);
 }
 
-/** Non-comment lines in the job that invoke mypy with --strict. */
-function mypyInvocationCount(jobLines: string[]): number {
-  return jobLines.filter((l) => {
-    const t = l.trim();
-    return !t.startsWith("#") && /\bmypy\b/.test(t) && /(^|\s)--strict(\s|$)/.test(t);
-  }).length;
-}
-
 const indentOf = (l: string): number => l.length - l.trimStart().length;
 const isContent = (l: string): boolean => l.trim() !== "" && !l.trim().startsWith("#");
+
+/**
+ * `mypy` (optionally path-qualified) or `python -m mypy` as a COMMAND WORD: at
+ * the start of a command, or after `;`, `&`, `|`, `(` or `$(`. The step's own
+ * name ("Type gate - mypy strict …"), `pip install mypy` and `mypy.ini` are
+ * not command words and do not count.
+ */
+const MYPY_COMMAND = /(?:^|[;&|(]\s*|\$\(\s*)(?:[\w./-]*\/)?(?:python[\d.]*\s+-m\s+)?mypy(?=$|[\s;&|)])/g;
+
+/**
+ * Every mypy invocation in the job, `--strict` or not: non-comment lines with
+ * backslash continuations joined, the YAML `- ` / `run:` / `run: |` prefix
+ * stripped, then every command-word match counted. A second, partial
+ * invocation split across `mypy \` and a continuation line, or one without
+ * `--strict`, is counted like any other.
+ */
+function mypyInvocationCount(jobLines: string[]): number {
+  const logical: string[] = [];
+  let buf = "";
+  for (const l of jobLines) {
+    if (!isContent(l) && buf === "") continue;
+    const t = l.trim();
+    if (t.endsWith("\\")) {
+      buf += `${t.slice(0, -1)} `;
+      continue;
+    }
+    logical.push(buf + t);
+    buf = "";
+  }
+  if (buf) logical.push(buf);
+  return logical
+    .map((t) => t.replace(/^-\s+/, "").replace(/^run:\s*(?:[|>][-+]?)?\s*/, ""))
+    .reduce((n, t) => n + (t.match(MYPY_COMMAND)?.length ?? 0), 0);
+}
 
 /**
  * The gate step's own lines: from its `- name:` line up to (not including) the
@@ -332,7 +360,7 @@ function surfaceProblems(
   const count = mypyInvocationCount(pythonJobLines(ymlText));
   if (count !== 1) {
     problems.push(
-      `ci.yml: the \`python\` job carries ${count} mypy --strict invocation(s); exactly ONE is allowed. ` +
+      `ci.yml: the \`python\` job carries ${count} mypy invocation(s); exactly ONE is allowed. ` +
         `A second, partial invocation lets the gate's surface be split across steps where no single ` +
         `line states it.`,
     );
@@ -729,7 +757,29 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
       "(e)",
     );
     const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
-    expect(has(problems, "carries 2 mypy --strict invocation(s)"), problems.join("\n")).toBe(true);
+    expect(has(problems, "carries 2 mypy invocation(s)"), problems.join("\n")).toBe(true);
+  });
+
+  it("(e2) a second invocation split across `mypy \\` and a continuation line in a `run: |` block → counted", () => {
+    const yml = insertAfter(
+      REAL_YML,
+      RUN_LINE,
+      "\n      - name: Partial type gate (multi-line)\n        run: |\n          mypy \\\n            --strict services/",
+      "(e2)",
+    );
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "carries 2 mypy invocation(s)"), problems.join("\n")).toBe(true);
+  });
+
+  it("(e3) a second `python -m mypy` invocation WITHOUT --strict → counted", () => {
+    const yml = insertAfter(
+      REAL_YML,
+      RUN_LINE,
+      "\n      - name: Loose type gate\n        run: python -m mypy services/",
+      "(e3)",
+    );
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "carries 2 mypy invocation(s)"), problems.join("\n")).toBe(true);
   });
 
   it("(f) HISTORICAL — the pre-phase command names none of the four top-level modules", () => {
