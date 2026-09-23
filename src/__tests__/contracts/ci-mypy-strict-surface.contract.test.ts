@@ -21,8 +21,10 @@ import { join } from "node:path";
  *     `analytics-service/` carrying an `__init__.py`, minus the hand-typed
  *     `EXCLUDED` record, plus every top-level `analytics-service/*.py` file;
  *   - the Makefile `typecheck` recipe names the same set;
- *   - the `python` job carries exactly ONE mypy --strict invocation, with both
- *     `--strict` and `--follow-imports=silent` on it;
+ *   - the `python` job carries exactly ONE mypy --strict invocation, and its
+ *     flag set is EXACTLY `--strict --follow-imports=silent` (an extra flag
+ *     such as `--exclude=` narrows the gate while the path set stays equal);
+ *   - the Makefile `typecheck` recipe carries NO flag (pyproject.toml supplies them);
  *   - every `EXCLUDED` member still exists on disk (a stale exclusion reddens).
  *   The D-02 before/after record this pin keeps from going stale:
  *     BEFORE: `services/ routers/ models/` — 96 source files as mypy counts them.
@@ -48,6 +50,9 @@ const STEP_NAME = "Type gate - mypy strict over the running-service surface";
 const CI_YML = join(ROOT, ".github/workflows/ci.yml");
 const MAKEFILE = join(ROOT, "analytics-service/Makefile");
 const SERVICE_DIR = join(ROOT, "analytics-service");
+
+/** The ci.yml mypy command's flag set, EXACTLY (sorted). */
+const REQUIRED_CI_FLAGS = ["--follow-imports=silent", "--strict"] as const;
 
 /**
  * Packages that carry an `__init__.py` but are OUTSIDE the gate BY STATED
@@ -211,16 +216,37 @@ function surfaceProblems(
     );
   }
 
+  // The flag set is pinned EXACTLY, not by presence. A presence check lets an
+  // added `--exclude=services/ingestion/` (or `--allow-untyped-defs`) narrow or
+  // weaken the gate while the PATH set, which is all the surface arm reads,
+  // stays equal. The Makefile recipe carries NO flags: its flags come from
+  // pyproject.toml.
   const ciTokens = ciMypyArgs(ymlText);
   const flags = flagSet(ciTokens);
-  for (const f of ["--strict", "--follow-imports=silent"]) {
+  for (const f of REQUIRED_CI_FLAGS) {
     if (!flags.has(f)) problems.push(`ci.yml: the mypy invocation lost the flag "${f}"`);
+  }
+  for (const f of [...flags].sort()) {
+    if (!(REQUIRED_CI_FLAGS as readonly string[]).includes(f)) {
+      problems.push(
+        `ci.yml: the mypy invocation carries the flag "${f}"; exactly ` +
+          `${JSON.stringify(REQUIRED_CI_FLAGS)} is allowed. Any other flag can narrow or weaken the ` +
+          `gate while its path set stays equal.`,
+      );
+    }
+  }
+  const mkTokens = makefileTypecheckArgs(makefileText);
+  for (const f of [...flagSet(mkTokens)].sort()) {
+    problems.push(
+      `Makefile: the \`typecheck\` recipe carries the flag "${f}"; it carries none, because its ` +
+        `flags come from pyproject.toml [tool.mypy]. A flag here can narrow or weaken the local gate.`,
+    );
   }
 
   const surface = diskSurface(listing, excluded);
   const sets: Array<[string, Set<string>]> = [
     ["ci.yml", pathSet(ciTokens)],
-    ["Makefile", pathSet(makefileTypecheckArgs(makefileText))],
+    ["Makefile", pathSet(mkTokens)],
   ];
   for (const [label, named] of sets) {
     for (const member of [...surface].sort()) {
@@ -367,6 +393,32 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     expect(listing.length, "CALIBRATION (g): `scripts` was not in the real listing").toBe(REAL_LISTING.length - 1);
     const problems = surfaceProblems(REAL_YML, REAL_MAKEFILE, listing, EXCLUDED);
     expect(has(problems, "EXCLUDED:", '"scripts"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(h) an added `--exclude=services/ingestion/` in ci.yml → a flag problem, with the path set still equal", () => {
+    const yml = mutate(
+      REAL_YML,
+      RUN_LINE,
+      RUN_LINE.replace("--follow-imports=silent ", "--follow-imports=silent --exclude=services/ingestion/ "),
+      "(h)",
+    );
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", '"--exclude=services/ingestion/"'), problems.join("\n")).toBe(true);
+    // The path set did not change, so the surface arm must stay quiet: the flag
+    // arm is the ONLY thing that sees this narrowing.
+    expect(has(problems, "service-surface member"), problems.join("\n")).toBe(false);
+  });
+
+  it("(i) a flag on the Makefile `typecheck` recipe → a Makefile flag problem", () => {
+    const mk = mutate(
+      REAL_MAKEFILE,
+      RECIPE_LINE,
+      RECIPE_LINE.replace("$(MYPY) ", "$(MYPY) --no-strict-optional "),
+      "(i)",
+    );
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", '"--no-strict-optional"'), problems.join("\n")).toBe(true);
+    expect(has(problems, "ci.yml:"), problems.join("\n")).toBe(false);
   });
 
   // ⛔ WITHOUT THIS THE LEGS ABOVE PROVE NOTHING: a `surfaceProblems` that
