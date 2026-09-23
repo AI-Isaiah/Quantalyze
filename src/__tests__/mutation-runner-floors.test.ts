@@ -2255,7 +2255,12 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "✅ No defects in the SUBSET: every annotated arm of these 2 of 49 annotated files bit its own arm first. NOT full-corpus coverage.",
     "",
   ].join("\n");
-  const PR = { GITHUB_EVENT_NAME: "pull_request" };
+  // Review 164.4.2 WR-07: the step now compares the SUBSET's printed names with
+  // the list changed-paths derived, so a pull_request run carries that list —
+  // exactly the two files SUBSET_LOG names.
+  const SUBSET_FILES =
+    "supabase/tests/test_allocator_equity_derived_rls.sql supabase/tests/test_allocator_equity_pre_terminus_flag.sql";
+  const PR = { GITHUB_EVENT_NAME: "pull_request", SQL_GATE_FILES: SUBSET_FILES };
   const PUSH = { GITHUB_EVENT_NAME: "push" };
 
   it("GREEN: a FULL log passes on a push AND on a pull request — every existing arm, ARMS_FLOOR included", () => {
@@ -2326,6 +2331,23 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     const r = runCountRecheck(without, PR);
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("the run printed NO 'ARMS_FLOOR: NOT compared");
+  });
+
+  it("RED: a SUBSET whose printed names differ from the list changed-paths derived fails, quoting both (review 164.4.2 WR-07)", () => {
+    // Same count, different file: the claim-versus-names arm cannot see this.
+    const swapped = { ...PR, SQL_GATE_FILES: SUBSET_FILES.replace("derived_rls", "something_else") };
+    expect(swapped.SQL_GATE_FILES).not.toBe(SUBSET_FILES);
+    const r = runCountRecheck(SUBSET_LOG, swapped);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("the SUBSET the run printed is not the SUBSET changed-paths derived");
+    expect(r.out).toContain("test_allocator_equity_something_else.sql");
+    // A derived list that is absent is a MEASURE_FAIL, never a match.
+    const absent = runCountRecheck(SUBSET_LOG, { ...PR, SQL_GATE_FILES: "" });
+    expect(absent.status, absent.out).toBe(1);
+    expect(absent.out).toContain("MEASURE_FAIL: the run says SUBSET but SQL_GATE_FILES");
+    // Order and duplicates do not matter: it is a SET comparison.
+    const reordered = runCountRecheck(SUBSET_LOG, { ...PR, SQL_GATE_FILES: SUBSET_FILES.split(" ").reverse().join(" ") });
+    expect(reordered.status, reordered.out).toBe(0);
   });
 
   it("RED: a SUBSET log without the static-bound line, or with a bound under ARMS_FLOOR, fails (review 164.4.2 WR-03)", () => {

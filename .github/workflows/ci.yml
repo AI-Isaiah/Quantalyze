@@ -2555,6 +2555,10 @@ jobs:
         # CLI entry point.
         env:
           RUNNER_LOG: ${{ runner.temp }}/mutation-runner.log
+          # Review 164.4.2 WR-07: the list the SUBSET run must have mutated, as
+          # changed-paths derived it. Compared as a SET with the scope line's
+          # names below; read only on a SUBSET run.
+          SQL_GATE_FILES: ${{ needs.changed-paths.outputs.sql_gate_files }}
         run: |
           set -euo pipefail
 
@@ -2913,6 +2917,22 @@ jobs:
             fi
             if [ "$subset_claimed" -gt "$subset_total" ]; then
               echo "::error::MEASURE_FAIL: the SUBSET claims $subset_claimed of $subset_total annotated file(s) — more than exist."
+              exit 1
+            fi
+            # Review 164.4.2 WR-07 — the names the run printed must be the SET
+            # changed-paths derived. The count-versus-names arm above cannot see
+            # a same-sized swap; this compares basenames, sorted and de-duplicated
+            # on both sides. The derived list is split with `read -r -a` (no
+            # globbing, no eval), as the runner step splits it.
+            if [ -z "${SQL_GATE_FILES:-}" ]; then
+              echo "::error::MEASURE_FAIL: the run says SUBSET but SQL_GATE_FILES (needs.changed-paths.outputs.sql_gate_files) is empty, so what the run SHOULD have mutated is unknown. An unreadable expectation is never a match."
+              exit 1
+            fi
+            read -r -a derived_paths <<< "$SQL_GATE_FILES"
+            derived_set=$(for p in "${derived_paths[@]}"; do printf '%s\n' "${p##*/}"; done | sort -u | tr '\n' ' ')
+            printed_set=$(echo "${scope_line#*annotated files: }" | tr ' ' '\n' | grep -a -v '^$' | sort -u | tr '\n' ' ' || true)
+            if [ "$derived_set" != "$printed_set" ]; then
+              echo "::error::MEASURE_FAIL: the SUBSET the run printed is not the SUBSET changed-paths derived. printed: [ ${printed_set}] derived: [ ${derived_set}]. The runner mutated a different set of files than this pull request changed."
               exit 1
             fi
             expected_rows="$subset_claimed"
