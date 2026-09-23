@@ -525,12 +525,26 @@ function stripTomlComment(line: string): string {
  * A deliberately NARROW TOML reader: table headers, array-of-table headers and
  * single-line `key = value`. Anything else is returned as an error rather than
  * skipped, because a construct this reader cannot parse (a multi-line array,
- * an inline table) could carry a mypy setting it would never see.
+ * a multi-line string, a line continuation) could carry a mypy setting it
+ * would never see.
  */
 function parseTomlTables(text: string): { tables: TomlTable[]; errors: string[] } {
   const tables: TomlTable[] = [{ header: "", isArray: false, kv: new Map() }];
   const errors: string[] = [];
   text.split("\n").forEach((raw, i) => {
+    // A multi-line string (`'''` / `"""`) or a backslash line continuation
+    // lets a line THIS reader sees as a table header be string content to a
+    // real TOML parser — the smuggle files `ignore_errors = true` under a fake
+    // table here while `tomllib` puts it in `[[tool.mypy.overrides]]`. Refused
+    // wherever it appears, comments included, before anything else is read.
+    if (/'''|"""/.test(raw) || /\\$/.test(stripTomlComment(raw).trimEnd())) {
+      errors.push(
+        `pyproject.toml: line ${i + 1} ${JSON.stringify(raw)} opens a multi-line string or a line ` +
+          `continuation. Its following lines may be string content that this reader would parse as ` +
+          `tables and keys, so it cannot vouch that the file sets no mypy option.`,
+      );
+      return;
+    }
     const line = stripTomlComment(raw).trim();
     if (!line) return;
     let m: RegExpExecArray | null;
@@ -1026,6 +1040,21 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     const problems = cfg(REAL_PYPROJECT, [...REAL_LISTING, "main.pyi", "tests/helper.pyi"]);
     expect(has(problems, "analytics-service/main.pyi is a tracked stub", "main.py,"), problems.join("\n")).toBe(true);
     expect(has(problems, "tests/helper.pyi"), problems.join("\n")).toBe(false);
+  });
+
+  it("(z) a multi-line string that smuggles `ignore_errors = true` past the reader → a problem", () => {
+    const tail = '[[tool.mypy.overrides]]\nmodule = ["pandera.*"]\nfollow_imports = "skip"\n';
+    // tomllib reads this as follow_imports = "skip\n[tool.fake]\nx = 1 " followed
+    // by ignore_errors = true INSIDE the pandera override; a line reader sees a
+    // [tool.fake] table holding x and ignore_errors.
+    const smuggled = '[[tool.mypy.overrides]]\nmodule = ["pandera.*"]\nfollow_imports = """skip\n[tool.fake]\nx = 1 """\nignore_errors = true\n';
+    const problems = cfg(mutate(REAL_PYPROJECT, tail, smuggled, "(z)"));
+    expect(has(problems, "pyproject.toml:", "opens a multi-line string"), problems.join("\n")).toBe(true);
+  });
+
+  it("(z2) a backslash line continuation → a problem", () => {
+    const problems = cfg(mutate(REAL_PYPROJECT, 'python_version = "3.12"', 'python_version = \\\n  "3.12"', "(z2)"));
+    expect(has(problems, "pyproject.toml:", "line continuation"), problems.join("\n")).toBe(true);
   });
 
   it("(u) a multi-line array the reader cannot parse → a parse problem, never a silent skip", () => {
