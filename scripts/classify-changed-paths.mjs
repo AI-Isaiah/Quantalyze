@@ -323,6 +323,14 @@ const CASES = [
           stdio: ["ignore", "pipe", "pipe"],
         });
       const odd = "supabase/tests/test_\u00e9.sql";
+      // Silent-failure-hunter round 2, WR-07: on a machine whose git config sets
+      // `core.quotePath=false`, git never quotes this path, so the old no-`-z`
+      // code passed this row too. Pin quotePath ON for the row through git's
+      // env-config seam (it outranks every config file), and prove below that
+      // git DOES quote here without `-z` — otherwise the row measures nothing.
+      const pinned = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.quotePath", GIT_CONFIG_VALUE_0: "true" };
+      const saved = Object.fromEntries(Object.keys(pinned).map((k) => [k, process.env[k]]));
+      Object.assign(process.env, pinned);
       try {
         g(["init", "-q"]);
         writeFileSync(join(dir, "base.txt"), "base\n");
@@ -334,12 +342,21 @@ const CASES = [
         writeFileSync(join(dir, "supabase/tests/test_ok.sql"), "select 1;\n");
         g(["add", "."]);
         g(["commit", "-q", "-m", "head"]);
+        const quoted = g(["diff", "--name-only", "--no-renames", "origin/gsd-self-test-base...HEAD"]);
+        let pass = ok(
+          quoted.includes('"supabase/tests/test_\\303\\251.sql"'),
+          `CALIBRATION: without -z, git QUOTES the path here, so this row can fail (got ${JSON.stringify(quoted)})`,
+        );
         const files = changedFilesAgainstBase({ baseRefName: "gsd-self-test-base", cwd: dir });
-        let pass = ok(files.length === 2, `CALIBRATION: both committed paths came back (got ${JSON.stringify(files)})`);
+        pass = ok(files.length === 2, `CALIBRATION: both committed paths came back (got ${JSON.stringify(files)})`) && pass;
         pass = ok(files.includes(odd), "the non-ASCII gate path is returned byte-verbatim") && pass;
         pass = ok(!files.some((f) => f.startsWith('"')), "no returned path is a git-quoted escape") && pass;
         return pass;
       } finally {
+        for (const [k, v] of Object.entries(saved)) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
         rmSync(dir, { recursive: true, force: true });
       }
     },
