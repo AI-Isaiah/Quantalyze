@@ -33,7 +33,8 @@ import { join } from "node:path";
  *   - the Makefile `typecheck` recipe carries NO flag (pyproject.toml supplies them);
  *   - the Makefile `ci:` target depends on `typecheck`, so `make ci` runs the gate;
  *   - the gate step sets only `name` and `run` (no `if:`, `continue-on-error:`,
- *     `shell:` or `env:` that could switch it off with its run line intact), the
+ *     `shell:` or `env:` that could switch it off with its run line intact), no
+ *     deeper-indented continuation line folds `|| true` or a flag into `run:`, the
  *     `python` job carries no job-level `continue-on-error:`, and neither the job's
  *     nor the workflow's `defaults:` sets a `shell:`;
  *   - every `EXCLUDED` member still holds a tracked `.py` (a stale exclusion reddens);
@@ -208,6 +209,20 @@ function keyBlock(lines: string[], indent: number, key: string): string[] {
  */
 function stepSwitchProblems(ymlText: string): string[] {
   const problems: string[] = [];
+  // A content line indented DEEPER than the step's keys is a YAML plain-scalar
+  // continuation: it folds into the `run:` value (`|| true`, `--exclude=...`),
+  // and the single-line extractor below never sees it. Refused outright.
+  const step = gateStepLines(ymlText);
+  const keyIndent = indentOf(step[0]) + 2;
+  for (const l of step.slice(1)) {
+    if (isContent(l) && indentOf(l) > keyIndent) {
+      problems.push(
+        `ci.yml: step "${STEP_NAME}" carries the continuation line ${JSON.stringify(l.trim())}. It folds ` +
+          `into the \`run:\` value, where it can swallow the exit status or narrow the gate, and the ` +
+          `single-line extractor cannot see it. Keep the whole command on the \`run:\` line.`,
+      );
+    }
+  }
   for (const k of gateStepKeys(ymlText)) {
     if (k !== "name" && k !== "run") {
       problems.push(
@@ -843,6 +858,18 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     const yml = insertAfter(REAL_YML, STEP_LINE, "        continue-on-error: true  # calibration (k)\n", "(k)");
     const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
     expect(has(problems, "ci.yml:", 'carries the key "continue-on-error:"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(w) a folded continuation line `|| true` under the gate's run line → a continuation problem", () => {
+    const yml = insertAfter(REAL_YML, RUN_LINE, "\n          || true", "(w)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'continuation line "|| true"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(w2) a folded continuation line `--exclude=services/ingestion/` → a continuation problem", () => {
+    const yml = insertAfter(REAL_YML, RUN_LINE, "\n          --exclude=services/ingestion/", "(w2)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'continuation line "--exclude=services/ingestion/"'), problems.join("\n")).toBe(true);
   });
 
   it("(l) a job-level `continue-on-error: true` on the python job → a job problem", () => {
