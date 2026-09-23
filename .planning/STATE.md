@@ -4,12 +4,12 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "164.6.1"
 current_phase_name: "MYPYSTRICT — the strict gate claims to cover all running-service code"
-status: "Phase 164.9 shipped — PR #837"
+status: executing
 stopped_at: Phase 164.6.1 context gathered
-last_updated: "2026-09-23T22:02:17.462Z"
-last_activity: 2026-09-22
-last_activity_desc: "Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction. Phase 167 CREDTRUST context locked 2026-09-22. Plan 167-01 (wizard SIGN_IN_FAILED mint) shipped. Plan 167-02 (D-09/D-10, six retry-disposition guards on allocator_positions.py's MT5/sFOX arms + AST roster case) shipped this session, commits 5c48916a + 26c83dc3 — see 167-02-SUMMARY.md."
-state_head: bf84dd2136b99c8c47085395c946759696cdb8e0
+last_updated: "2026-09-23T22:04:22.345Z"
+last_activity: 2026-09-24
+last_activity_desc: "Phase 164.6.1 execution started"
+state_head: 0f272e32402dd244ed69e495fc5399f58550bbf0
 progress:
   total_phases: 50
   completed_phases: 32
@@ -179,8 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.6.1 (mypystrict-the-strict-gate-claims-to-cover-all-running-serv) — READY TO EXECUTE
-Plan: Not started
+Phase: 164.6.1 (MYPYSTRICT — the strict gate claims to cover all running-service code) — EXECUTING
+Plan: 1 of 2
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
@@ -482,7 +482,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Phase 164.5.4 shipped — PR #835
+Status: Executing Phase 164.6.1
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -498,7 +498,7 @@ Status: Phase 164.5.4 shipped — PR #835
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-21 — Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete (criterion 8 is post-merge by construction)
+Last activity: 2026-09-24 — Phase 164.6.1 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
