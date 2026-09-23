@@ -34,6 +34,9 @@ import { join } from "node:path";
  *   - the Makefile `typecheck` recipe's flag set is EXACTLY
  *     `--config-file=pyproject.toml` (pyproject.toml supplies the rest);
  *   - the Makefile `ci:` target depends on `typecheck`, so `make ci` runs the gate;
+ *   - the Makefile carries exactly one `MYPY = $(VENV)/bin/mypy` assignment and
+ *     exactly one rule line naming `typecheck` (a `MYPY = true`, or a second,
+ *     later `typecheck:` rule whose recipe GNU make would run instead, reddens);
  *   - the gate step sets only `name` and ONE literal `run:` line — a POSITIVE
  *     rule, so an `if:`, `continue-on-error:`, `shell:` or `env:` that could
  *     switch it off with its run line intact is refused in any quoting or
@@ -335,6 +338,46 @@ function makefileTypecheckArgs(makefileText: string): string[] {
   return recipe.slice(prefix.length).split(/\s+/).filter(Boolean);
 }
 
+/** The one `MYPY` assignment the `typecheck` recipe's `$(MYPY)` must expand from. */
+const MAKEFILE_MYPY_ASSIGNMENT = /^MYPY\s*=\s*\$\(VENV\)\/bin\/mypy\s*$/;
+
+/**
+ * Two ways to neutralise `make typecheck` with its recipe line intact: repoint
+ * `$(MYPY)` (`MYPY = true`, a second `MYPY :=`, an `override`/`define`), or add a
+ * second `typecheck:` rule — GNU make runs the LATER recipe, and a
+ * target-specific `typecheck: MYPY = true` line is a second rule line too. The
+ * `MYPY` assignment is pinned to exactly `$(VENV)/bin/mypy` and exactly one
+ * rule line may name `typecheck` as a target.
+ */
+function makefileBinaryProblems(makefileText: string): string[] {
+  const problems: string[] = [];
+  const lines = makefileText.split("\n").filter((l) => !l.startsWith("\t"));
+  const assignments = lines.filter((l) =>
+    /^\s*(?:(?:override|export|private)\s+)*(?:define\s+MYPY\b|MYPY\s*(?::::?=|::=|[:?+!]?=))/.test(l),
+  );
+  if (assignments.length !== 1 || !MAKEFILE_MYPY_ASSIGNMENT.test(assignments[0])) {
+    problems.push(
+      `Makefile: the \`MYPY\` variable is assigned by ${JSON.stringify(assignments)}; exactly one ` +
+        `\`MYPY = $(VENV)/bin/mypy\` is allowed. Any other value (\`MYPY = true\`) makes the ` +
+        `\`typecheck\` recipe run something that is not mypy with its line unchanged.`,
+    );
+  }
+  const rules = lines.filter((l) => {
+    const head = l.replace(/#.*/, "");
+    const colon = head.indexOf(":");
+    if (colon === -1 || head.startsWith(".")) return false;
+    return head.slice(0, colon).trim().split(/\s+/).includes("typecheck");
+  });
+  if (rules.length !== 1) {
+    problems.push(
+      `Makefile: ${rules.length} rule line(s) name \`typecheck\` as a target ` +
+        `(${JSON.stringify(rules)}); exactly one is allowed. GNU make runs the LATER recipe, and a ` +
+        `target-specific \`typecheck: MYPY = ...\` line repoints the binary.`,
+    );
+  }
+  return problems;
+}
+
 /** Path tokens only (flags dropped), one trailing `/` stripped. */
 function pathSet(tokens: string[]): Set<string> {
   return new Set(tokens.filter((t) => !t.startsWith("--")).map((t) => t.replace(/\/$/, "")));
@@ -448,6 +491,8 @@ function surfaceProblems(
         `\`typecheck\`, so \`make ci\` no longer runs the mypy gate.`,
     );
   }
+
+  problems.push(...makefileBinaryProblems(makefileText));
 
   const mkTokens = makefileTypecheckArgs(makefileText);
   const mkFlags = flagSet(mkTokens);
@@ -1018,6 +1063,32 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
     expect(has(problems, "Makefile:", 'lost the flag "--config-file=pyproject.toml"'), problems.join("\n")).toBe(true);
     expect(has(problems, "ci.yml:"), problems.join("\n")).toBe(false);
+  });
+
+  it("(x) `MYPY = true` in the Makefile → a MYPY-assignment problem", () => {
+    const mk = mutate(REAL_MAKEFILE, "MYPY    = $(VENV)/bin/mypy", "MYPY    = true", "(x)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", "`MYPY` variable is assigned by", "MYPY    = true"), problems.join("\n")).toBe(true);
+    expect(has(problems, "ci.yml:"), problems.join("\n")).toBe(false);
+  });
+
+  it("(x2) a second `MYPY := true` below the real one → a MYPY-assignment problem", () => {
+    const mk = insertAfter(REAL_MAKEFILE, "MYPY    = $(VENV)/bin/mypy\n", "MYPY := true\n", "(x2)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", "`MYPY` variable is assigned by", "MYPY := true"), problems.join("\n")).toBe(true);
+  });
+
+  it("(x3) a second, later `typecheck:` rule → a rule-count problem", () => {
+    const mk = `${REAL_MAKEFILE}\ntypecheck:\n\ttrue\n`;
+    expect(REAL_MAKEFILE.endsWith("\ntypecheck:\n\ttrue\n"), "CALIBRATION (x3): already present").toBe(false);
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", "2 rule line(s) name `typecheck`"), problems.join("\n")).toBe(true);
+  });
+
+  it("(x4) a target-specific `typecheck: MYPY = true` → a rule-count problem", () => {
+    const mk = `${REAL_MAKEFILE}\ntypecheck: MYPY = true\n`;
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", "2 rule line(s) name `typecheck`"), problems.join("\n")).toBe(true);
   });
 
   it("(v) `ci: typecheck test` → `ci: test` in the Makefile → a problem naming the ci target", () => {
