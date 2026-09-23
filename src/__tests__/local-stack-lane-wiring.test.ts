@@ -479,7 +479,41 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
   // marker, the dump's sha256 and the migrations directory ON DISK, so the
   // shallow-clone vacuity above no longer applies to it. The fetch-depth half
   // is kept, not deleted: it costs nothing, and the named seam step still does.
-  it("both lane-booting CI jobs fetch full history, and frontend-local-stack runs the currency seam before the boot", () => {
+  // ⛔ CORRECTED 2026-09-23 (plan 08, D-F): the fetch-depth half is now RE-SUBJECTED,
+  // not kept. MEASURED per job: no step in `frontend-local-stack`,
+  // `frontend-live-db-lane` or `sql-tests` runs `git`, and none of the scripts or
+  // lane spec files they run spawns it, so all three dropped `fetch-depth: 0` (the
+  // epoch guard was its only stated consumer). What keeps a shallow clone SAFE there
+  // is that the lane's gate reads no git history, so that is what the history half
+  // now pins. The seam half covers all three jobs, since each now names its own
+  // replay set before its boot.
+  it("the lane's currency gate reads no git history (so a shallow clone cannot vacate it), and all three lane-booting CI jobs run the currency seam before the boot", () => {
+    // (1) History. The lane calls the gate in --replay-set mode, and that mode's
+    // body never reaches the epoch reader — the only git consumer in the gate. If
+    // either half moves, a shallow-cloned lane job would compare two identical
+    // commit times again and pass vacuously.
+    const lane = read(RUN_SH);
+    const gateCall = liveLines(bashFunctionBody(lane, "check_baseline_currency")).filter((l) =>
+      l.includes("check-baseline-currency.mjs"),
+    );
+    expect(
+      gateCall,
+      "check_baseline_currency() no longer calls the gate exactly once in --replay-set mode — the default mode reads `git log`, which a shallow-cloned lane job cannot answer",
+    ).toEqual([expect.stringMatching(/check-baseline-currency\.mjs" --replay-set$/)]);
+    const gate = read("scripts/check-baseline-currency.mjs");
+    const replayStart = gate.indexOf("\nfunction replayMain() {\n");
+    expect(replayStart, "replayMain() is gone from check-baseline-currency.mjs").toBeGreaterThan(-1);
+    const replayEnd = gate.indexOf("\n}\n", replayStart);
+    expect(replayEnd, "could not find the end of replayMain()").toBeGreaterThan(replayStart);
+    const replayBody = gate.slice(replayStart, replayEnd);
+    for (const needle of ["readEpoch", "FRESHNESS_TS_CMD", "git", "child_process", "execFileSync"]) {
+      expect(
+        replayBody.includes(needle),
+        `replayMain() mentions \`${needle}\` — the lane's gate may read git history again, and the lane jobs check out SHALLOW (plan 08 dropped fetch-depth: 0 on the measurement that nothing needed it)`,
+      ).toBe(false);
+    }
+
+    // (2) Seam before boot, in EVERY lane-booting job, matched by the `run:` line.
     const jobBlock = (job: string, nextJob: string) => {
       const start = CI.indexOf(`\n  ${job}:\n`);
       expect(start, `the ${job} job is gone from ci.yml`).toBeGreaterThan(-1);
@@ -487,28 +521,22 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       expect(end, `could not find the end of the ${job} block`).toBeGreaterThan(start);
       return liveLines(CI.slice(start, end));
     };
-    const localStack = jobBlock(LANE_JOB, "frontend-live-db-lane");
-    const liveDb = jobBlock("frontend-live-db-lane", "frontend-policy");
-
-    for (const [job, lines] of [
-      [LANE_JOB, localStack],
-      ["frontend-live-db-lane", liveDb],
+    for (const [job, next] of [
+      [LANE_JOB, "frontend-live-db-lane"],
+      ["frontend-live-db-lane", "frontend-policy"],
+      ["sql-tests", "secret-scan"],
     ] as const) {
+      const lines = jobBlock(job, next);
+      const seam = lines.findIndex(
+        (l) => l === "run: bash scripts/local-stack/run.sh --check-currency",
+      );
+      const boot = lines.findIndex((l) => l === "run: bash scripts/local-stack/run.sh up");
       expect(
-        lines.includes("fetch-depth: 0"),
-        `${job} checks out without \`fetch-depth: 0\` — on a shallow clone the baseline currency guard inside \`run.sh up\` compares two identical timestamps and passes vacuously`,
-      ).toBe(true);
+        seam,
+        `${job} no longer runs the lane's --check-currency seam as its own step — its log loses the named replay set, and a guard dropped from load_baseline() would boot quietly`,
+      ).toBeGreaterThan(-1);
+      expect(boot, `${job} no longer boots the lane with run.sh up`).toBeGreaterThan(-1);
+      expect(seam < boot, `${job} runs the currency seam AFTER the boot`).toBe(true);
     }
-
-    const seam = localStack.findIndex(
-      (l) => l === "run: bash scripts/local-stack/run.sh --check-currency",
-    );
-    const boot = localStack.findIndex((l) => l === "run: bash scripts/local-stack/run.sh up");
-    expect(
-      seam,
-      `${LANE_JOB} no longer runs the lane's --check-currency seam as its own step — the verdict loses its named log line, and a guard dropped from load_baseline() would boot quietly`,
-    ).toBeGreaterThan(-1);
-    expect(boot, `${LANE_JOB} no longer boots the lane with run.sh up`).toBeGreaterThan(-1);
-    expect(seam < boot, `${LANE_JOB} runs the currency seam AFTER the boot`).toBe(true);
   });
 });
