@@ -411,8 +411,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
    * key's OWN sync is in flight, is closed by R4: that key's `Update password`
    * (and, by R5, its `Delete`) is disabled for exactly that window.
    *
-   * ⛔ This is the ONLY place in the component that maps a terminal success to
-   * `idle`. It runs from event handlers only; it is not an effect.
+   * ⛔ This is the only EVENT-HANDLER path that maps a terminal success to
+   * `idle`; the terminal arm of `handleSyncStatusChange` also lands on `idle`
+   * when its bounded re-read fails or times out. It runs from event handlers
+   * only; it is not an effect.
    */
   function retireWithheldSuccess() {
     if (!panelSubjectUntrusted) return;
@@ -684,8 +686,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     // here, AFTER the error return (a failed delete leaves the row, so the
     // withhold still holds) and BEFORE the row is filtered out. The guard is
     // the pre-delete derivation from the render the user clicked in, which
-    // still holds the row; the list cannot move during the delete await,
-    // because the confirm is open and opened modally. ⛔ Do not re-derive it
+    // still holds the row. The user cannot move the list during the delete
+    // await (the confirm is modal), but an async re-read from another key's
+    // attempt, or the zero-row lookup below, can; the worst case is retiring
+    // a truthful success line, never showing a false one. ⛔ Do not re-derive it
     // from the filtered list: that answers false and re-shows the success.
     retireWithheldSuccess();
     setKeys((prev) => prev.filter((k) => k.id !== keyId));
