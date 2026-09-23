@@ -47,7 +47,9 @@
  * (two independent lexers — `maskSql`'s code positions and `scanSql`'s comment-
  * stripped text — disagree on the per-file count); a carried basename with no file, or
  * a malformed carried line; a cron call inside a dollar body that is not a DO block
- * (a function or procedure body is defined by its migration, never run by it).
+ * (a function or procedure body is defined by its migration, never run by it); a
+ * cron call inside a dollar body NESTED in a DO block (a function defined there is
+ * never run; a string there runs only if EXECUTEd — round-2 review IN-02).
  *
  * ⚠️ KNOWN LIMIT, stated rather than implied: a cron call in a DO block is folded
  * whether or not the branch it sits in RAN on PROD (an `IF … THEN` guard is not
@@ -368,6 +370,22 @@ function foldCron(files, lexed) {
       const body = L.ranges.find((r) => m.index >= r[0] && m.index < r[1]);
       if (body && !DO_OPENER.test(L.code.slice(0, body[0]))) {
         measureFail(`${at}: a cron.${fn} call inside a dollar body that is not a DO block (a function body is defined, not run, by the migration) is not modelled`);
+      }
+      // Round-2 review IN-02: `dollarBodyRanges` returns OUTERMOST bodies only,
+      // so a function body NESTED in a DO block reads as the DO block above.
+      // Re-scan the DO body's interior: a call inside any nested dollar body is
+      // refused — a function body there is defined, not run, and a string there
+      // runs only if something EXECUTEs it. Measured 2026-09-24: 0 of the 61
+      // carried call sites in dollar bodies sit in a nested one.
+      if (body) {
+        const tag = DOLLAR_TAG.exec(src.slice(body[0]))?.[0] ?? "";
+        const from = body[0] + tag.length;
+        const inner = dollarBodyRanges(src.slice(from, body[1] - tag.length));
+        if (inner.error || inner.ranges.some(([s, e]) => m.index - from >= s && m.index - from < e)) {
+          measureFail(
+            `${at}: a cron.${fn} call inside a dollar body nested in a DO block (a function body there is defined, not run; a string there runs only if EXECUTEd) is not modelled`,
+          );
+        }
       }
       const open = m.index + m[0].length - 1;
       const { args, end } = parseCronArgs(src, open, at);

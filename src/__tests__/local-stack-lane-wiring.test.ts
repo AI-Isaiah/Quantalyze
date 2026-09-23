@@ -968,6 +968,19 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
         "a cron call inside a CREATE FUNCTION body (defined, never run, at migration time)",
         "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $fn$\nBEGIN\n  PERFORM cron.schedule('a', '1 * * * *', 'SELECT 1');\nEND $fn$;\n",
       ],
+      // Round-2 review IN-02: the dollar-body scan returns OUTERMOST bodies only,
+      // so a function body NESTED in a DO block read as the DO block and its
+      // call was folded, though it is defined and never run. A dollar body
+      // nested in a DO block is refused whatever it holds: a string there runs
+      // only if something EXECUTEs it.
+      [
+        "a cron call inside a function body nested in a DO block (defined, never run, at migration time)",
+        "DO $$\nBEGIN\n  CREATE FUNCTION g() RETURNS void LANGUAGE plpgsql AS $f$\n  BEGIN\n    PERFORM cron.schedule('a', '1 * * * *', 'SELECT 1');\n  END $f$;\nEND $$;\n",
+      ],
+      [
+        "a cron call inside a dollar-quoted string nested in a DO block",
+        "DO $$\nBEGIN\n  EXECUTE $q$SELECT cron.schedule('a', '1 * * * *', 'SELECT 1')$q$;\nEND $$;\n",
+      ],
     ] as const) {
       it(`MEASURE_FAIL, naming the file, on ${label}`, () => {
         const r = gate({ [A]: sql }, [A], META);
