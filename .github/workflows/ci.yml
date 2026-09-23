@@ -782,6 +782,94 @@ jobs:
         # rather than a promise. `up` asserts the stack reported a 127.0.0.1/localhost
         # API URL and refuses otherwise, and the spec re-asserts it independently.
         run: bash scripts/local-stack/run.sh up
+      - name: Capability probe - does the lane supply what the SQL self-test corpus demands
+        # Phase 164.4.2 plan 04, RESEARCH Assumption A1, MEASURED here rather than
+        # assumed. `sql-tests` moves onto this lane only if the lane supplies what
+        # `supabase/tests/test_*.sql` needs: pg_net, the supabase_vault extension,
+        # auth.uid()/auth.jwt(), the three platform roles and pg_cron. The probe
+        # derives DEMAND from the corpus every run (files mentioning each object,
+        # LANE-ONLY files excluded) and reads SUPPLY from this lane's own catalogue
+        # through the mode-600 `.stack-env` handoff `run.sh up` just wrote. It prints
+        # ONE `stack-probe:` line with both sides on it. The DSN is never printed.
+        #
+        # ⚠️ INFORMATIONAL ABOUT CAPABILITY, FATAL ABOUT MEASUREMENT, ON PURPOSE AND
+        # FOR NOW. This step FAILS when the probe could not measure: a MEASURE_FAIL
+        # verdict, an absent line, a count or state it cannot read, or an exit status
+        # that contradicts the printed verdict. It PASSES with a ::warning:: on
+        # `verdict INSUFFICIENT`. Nothing on this lane depends on those capabilities
+        # yet, and a gate that goes permanently red over a measurement nobody has
+        # acted on is a gate that gets disabled.
+        # ⛔ HAND-OFF: 164.4.2 plan 05 makes INSUFFICIENT FATAL here at the moment it
+        # moves the SQL self-test corpus onto this lane. Until then the tolerance
+        # below is a dated softness, not the design. Do not copy it to another gate.
+        # The line this step prints is the measurement plan 04's decision checkpoint
+        # reads. DECISION C allows the fallback only on a refutation that was
+        # measured and written down with its run id.
+        #
+        # Captured to a file and `cat` back rather than piped through `tee`, for the
+        # `sql-mutation` reason: a pipe makes `$?` the last command's status.
+        env:
+          PROBE_LOG: ${{ runner.temp }}/capability-probe.log
+        run: |
+          set -euo pipefail
+          set +e
+          node scripts/local-stack/capability-probe.mjs > "$PROBE_LOG" 2>&1
+          status=$?
+          set -e
+          cat "$PROBE_LOG"
+          # `|| true` is LOAD-BEARING under `set -euo pipefail`, not tidiness. grep
+          # exits 1 on an absent line, which would abort the step with no ::error::
+          # and leave the named MEASURE_FAIL below unreachable.
+          probe_line=$(grep -a -m1 -E '^stack-probe: ' "$PROBE_LOG" || true)
+          if [ -z "$probe_line" ]; then
+            echo "::error::MEASURE_FAIL: the capability probe printed NO 'stack-probe:' line (exit ${status}), so what this lane supplies against what the SQL self-test corpus demands is unknown. An absent line is never a zero and never a pass."
+            exit 1
+          fi
+          verdict=$(echo "$probe_line" | sed -n -E 's/^stack-probe: .* verdict ([A-Z_]+)$/\1/p')
+          case "$verdict" in
+            SUFFICIENT) expected_status=0 ;;
+            INSUFFICIENT) expected_status=2 ;;
+            MEASURE_FAIL)
+              echo "::error::MEASURE_FAIL: the capability probe could not measure the lane or the corpus (exit ${status}). Its ::error:: lines above name the cause. Unknown is not absent and it is not present."
+              exit 1 ;;
+            *)
+              echo "::error::MEASURE_FAIL: could not read a verdict out of '${probe_line}'."
+              exit 1 ;;
+          esac
+          if [ "$status" -ne "$expected_status" ]; then
+            echo "::error::MEASURE_FAIL: the probe printed 'verdict ${verdict}' but exited ${status} (expected ${expected_status}). The line and the status come from one run and cannot disagree; a claim its own exit status contradicts is not a measurement."
+            exit 1
+          fi
+          # Every token must read, or the line is not a measurement. The class list
+          # is NOT restated here: the probe owns it, so a class added there needs
+          # no edit here.
+          read -r -a probe_tokens <<< "${probe_line#stack-probe: }"
+          classes=0
+          for tok in "${probe_tokens[@]}"; do
+            case "$tok" in
+              verdict|SUFFICIENT|INSUFFICIENT) ;;
+              corpus=*|lane-only-excluded=*)
+                case "${tok#*=}" in ''|*[!0-9]*)
+                  echo "::error::MEASURE_FAIL: unreadable count '${tok}' on '${probe_line}'."; exit 1 ;; esac ;;
+              *=*/*)
+                classes=$((classes + 1))
+                demand="${tok#*=}"; demand="${demand%%/*}"; state="${tok##*/}"
+                case "$demand" in ''|*[!0-9]*)
+                  echo "::error::MEASURE_FAIL: unreadable demand in '${tok}' on '${probe_line}'."; exit 1 ;; esac
+                case "$state" in present|absent) ;; *)
+                  echo "::error::MEASURE_FAIL: unreadable supply state in '${tok}' on '${probe_line}'."; exit 1 ;; esac ;;
+              *)
+                echo "::error::MEASURE_FAIL: unrecognised token '${tok}' on '${probe_line}'."; exit 1 ;;
+            esac
+          done
+          if [ "$classes" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the 'stack-probe:' line names NO capability class, so nothing was compared."
+            exit 1
+          fi
+          if [ "$verdict" = "INSUFFICIENT" ]; then
+            echo "::warning::stack-probe verdict INSUFFICIENT: this lane lacks a capability the SQL self-test corpus demands (named on the 'unsatisfied:' lines above). Not fatal until 164.4.2 plan 05 moves the corpus onto this lane."
+          fi
+          echo "stack-probe measured: ${classes} class(es), verdict ${verdict}"
       - name: Run the local-stack lane
         # NO --coverage, deliberately. `frontend-coverage` merges the two
         # frontend-test shards' blob reports and enforces the ratchet on the merged
