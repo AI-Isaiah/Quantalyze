@@ -66,6 +66,7 @@ lint:
 # ci.yml mypy step; the flags come from pyproject.toml [tool.mypy]
 # (auto-discovered from cwd), which ci.yml also repeats on its command
 # line. Run this to match CI.
+# Pinned by src/__tests__/contracts/ci-mypy-strict-surface.contract.test.ts.
 typecheck:
 	$(MYPY) services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py
 

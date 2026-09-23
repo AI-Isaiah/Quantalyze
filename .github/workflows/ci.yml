@@ -4659,6 +4659,10 @@ jobs:
       # the API process), main_worker_healthz.py and sentry_init.py. Before:
       # services/ routers/ models/, 96 source files as mypy counts them.
       # After: that set plus exactly those four, 100. No module left.
+      # src/__tests__/contracts/ci-mypy-strict-surface.contract.test.ts pins
+      # this command's path set to the service surface derived from disk and
+      # to the Makefile `typecheck` set, so a top-level module or package
+      # added without widening this line is a RED check, not a stale comment.
       # scripts/ stays ungated: they are
       # one-off operational tooling (backfills, cassette recording), not the
       # running service, and gating them would add a types-PyYAML dev-dep plus
