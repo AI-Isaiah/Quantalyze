@@ -402,7 +402,13 @@ export const REPLAY_DEFECTS = [
   "marker-unreadable",
   "marker-sha-absent",
   "marker-sha-mismatch",
+  "marker-empty",
+  "marker-malformed-entry",
+  "marker-duplicate-entry",
+  "dump-ahead-of-checkout",
   "migrations-dir-unreadable",
+  "migration-unclassifiable",
+  "replay-meta-command",
   "refdata-allowlist-unreadable",
 ];
 
@@ -496,17 +502,76 @@ export function judgeReplaySet({
   } else {
     markerSha = "match";
   }
+  for (const extra of parsed.shas.slice(1)) {
+    push("marker-malformed-entry", `${markerLabel} carries a SECOND baseline-sha256 line ('${extra}'); one dump, one binding.`);
+  }
+  for (const m of parsed.malformed) {
+    push(
+      "marker-malformed-entry",
+      `${markerLabel} line ${m.lineNo} is neither a comment, the baseline-sha256 line, nor a strict ` +
+        `migration basename: '${m.raw.slice(0, 120)}'`,
+    );
+  }
+  if (parsed.entries.length === 0) {
+    push(
+      "marker-empty",
+      `${markerLabel} lists no migration at all. Read literally, that would replay the whole chain onto a ` +
+        `dump that already carries it — the chain does not even replay from empty (REPLAY-SPIKE.md).`,
+    );
+  }
+  const seen = new Set();
+  for (const e of parsed.entries) {
+    if (seen.has(e)) push("marker-duplicate-entry", `${markerLabel} lists ${e} more than once.`);
+    seen.add(e);
+  }
 
-  const carried = [...parsed.entries].sort();
-  const carriedSet = new Set(carried);
-  const replay =
-    migrations === null
-      ? []
-      : migrations
-          .filter((m) => !m.isDir && MIGRATION_BASENAME_RE.test(m.name) && !carriedSet.has(m.name))
-          .map((m) => m.name)
-          .sort();
+  const carried = [...seen].sort();
+  let replay = [];
+  if (migrations !== null) {
+    const onDisk = new Set();
+    for (const m of migrations) {
+      if (m.isDir) continue; // e.g. `down/` — not part of the forward chain
+      if (!MIGRATION_BASENAME_RE.test(m.name)) {
+        push(
+          "migration-unclassifiable",
+          `${migrationsLabel} holds '${m.name}', which is not a strict migration basename ` +
+            `(${MIGRATION_BASENAME_RE}). It can be neither carried nor replayed, so the set is not determinable.`,
+        );
+        continue;
+      }
+      onDisk.add(m.name);
+    }
+    for (const c of carried) {
+      if (!onDisk.has(c)) {
+        push(
+          "dump-ahead-of-checkout",
+          `${markerLabel} says the dump carries ${c}, but ${migrationsLabel} has no such file: the dump is ` +
+            `AHEAD of this checkout, so the lane would test this code against a schema its own migrations ` +
+            `do not produce. Bring in the base branch (merge or rebase onto it) and re-run.`,
+        );
+      }
+    }
+    replay = [...onDisk].filter((n) => !seen.has(n)).sort();
+    // psql meta-commands are CLIENT-side: the server cannot refuse them, and
+    // `db push` — the shape being mirrored — never interprets one. Refuse any
+    // backslash-led line in a file the lane is about to hand to psql.
+    for (const r of replay) {
+      const lines = String(migrationTexts[r] ?? "").split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (/^[ \t]*\\/.test(lines[i])) {
+          push(
+            "replay-meta-command",
+            `${r} line ${i + 1} begins with a backslash — a psql meta-command, which would run on the ` +
+              `runner, not in the database: '${lines[i].trim().slice(0, 80)}'`,
+          );
+        }
+      }
+    }
+  }
 
+  // ⛔ An undeterminable set is never RETURNED as a set, so no caller can print
+  // or hand over a partial one by mistake.
+  if (defects.length > 0) return { carried: [], replay: [], markerSha, defects };
   return { carried, replay, markerSha, defects };
 }
 
