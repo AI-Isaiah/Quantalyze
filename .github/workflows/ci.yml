@@ -696,25 +696,39 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
-          # ⛔ FULL HISTORY, and the currency guard is meaningless without it (Phase
-          # 164.4.2 plan 03). `run.sh up` refuses a baseline older than
-          # `supabase/migrations/` by comparing `git log -1 --format=%ct` for the two
-          # paths. On the default shallow clone there is ONE commit, so both paths
-          # report that commit's time, compare EQUAL, and the guard passes having
-          # measured nothing.
-          fetch-depth: 0
+          # 📜 LINEAGE (Phase 164.4.2 plan 03): this checkout used to fetch FULL
+          # HISTORY (`fetch-depth: 0`), because the lane's currency guard then
+          # compared `git log -1 --format=%ct` for the dump and the migrations
+          # directory, and on a shallow clone both report the one fetched commit's
+          # time, compare equal, and the guard measures nothing.
+          # ⛔ CORRECTED 2026-09-23 (Phase 164.4.2 plan 08, D-F): the lane no longer
+          # runs that comparison. Its gate (`check-baseline-currency.mjs
+          # --replay-set`) reads the committed carried-migrations marker, the dump's
+          # sha256 and the migrations directory ON DISK. MEASURED per job: no step
+          # here runs `git`, and none of the scripts or lane spec files it runs
+          # spawns one. So the default shallow clone is enough, and full history was
+          # dropped. `local-stack-lane-wiring.test.ts` pins that the lane's gate reads
+          # no git history, which is what keeps a shallow clone safe here.
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: 22
           cache: npm
-      - name: Baseline currency - refuse a schema dump older than the migrations
+      - name: Baseline currency - name the migrations the lane replays on top of the dump
         # The same `check_baseline_currency` call `run.sh up` makes inside
         # `load_baseline()`, run on its own through the lane's `--check-currency`
-        # seam. Two reasons it is a separate step rather than left implicit in `up`:
-        # the verdict gets its own named line in this job's log, and an edit that
-        # drops the call out of `load_baseline()` fails HERE instead of booting
-        # quietly on a stale schema. Needs node and git history only — no stack, no
-        # node_modules — so it runs before either is paid for.
+        # seam. Since DECISION F (Phase 164.4.2 plan 06) the lane does not reject a
+        # dump that predates the newest migration: it determines the REPLAY SET from
+        # the committed marker `supabase/schema/baseline-carried-migrations.txt`
+        # (bound to the dump's sha256), prints it on a `baseline-replay:` line, and
+        # `run.sh up` replays exactly those migrations after the dump. It FAILS LOUD
+        # when the set cannot be determined (marker absent, unreadable or bound to
+        # another dump; a dump carrying a migration this checkout lacks), and `up`
+        # fails loud when a replayed migration errors.
+        # Two reasons it is a separate step rather than left implicit in `up`: the
+        # replay set gets its own named line in this job's log BEFORE any container
+        # starts, and an edit that drops the call out of `load_baseline()` fails
+        # HERE instead of booting quietly. Needs node only — no stack, no
+        # node_modules, no git history — so it runs before either is paid for.
         run: bash scripts/local-stack/run.sh --check-currency
       - name: Restore node_modules
         id: node_modules_cache
@@ -990,14 +1004,24 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
-          # ⛔ FULL HISTORY, for the same reason as `frontend-local-stack`'s checkout:
+          # 📜 LINEAGE: this checkout used to fetch FULL HISTORY (`fetch-depth: 0`),
+          # for the same reason as `frontend-local-stack`'s checkout:
           # `run.sh up` now runs the baseline currency guard inside `load_baseline()`,
           # and on a shallow clone `git log -1 --format=%ct` reports the one fetched
           # commit's time for BOTH paths, so the guard compares two identical
           # timestamps and passes having measured nothing. The explicit
           # `--check-currency` step lives in `frontend-local-stack` only — one owner
           # for that assertion, not two copies to keep identical.
-          fetch-depth: 0
+          # ⛔ CORRECTED 2026-09-23 (Phase 164.4.2 plan 08, D-F) — BOTH halves of that
+          # comment are superseded. (1) The guard no longer reads git: its
+          # `--replay-set` mode reads the committed marker, the dump's sha256 and the
+          # migrations directory on disk, and no step or script this job runs spawns
+          # `git` (measured), so full history was dropped. (2) This job now runs its
+          # OWN `--check-currency` step, below. "One owner" argued from a REFUSAL — a
+          # single verdict that one job could own. Under D-F the step NAMES the
+          # migrations THIS job's lane is about to replay on top of the dump, which is
+          # a per-job printout: a reader of this job's log should not have to open
+          # another job to learn what schema its 49 specs ran against.
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: 22
@@ -1018,6 +1042,18 @@ jobs:
             echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
             sleep $((n*5))
           done
+      - name: Baseline currency - name the migrations the lane replays on top of the dump
+        # Phase 164.4.2 plan 08 (D-F). The SAME `--check-currency` seam
+        # `frontend-local-stack` runs, and the same function `load_baseline()` calls
+        # inside `run.sh up`. It determines the replay set from the committed marker
+        # `supabase/schema/baseline-carried-migrations.txt` (bound to the dump's
+        # sha256) and prints it on a `baseline-replay:` line, so this job's own log
+        # names the migrations its lane replays after the dump, before any container
+        # starts. It FAILS LOUD when the set cannot be determined; a replayed
+        # migration that errors fails the boot step below. Placed after node_modules
+        # only by order of the job's preamble — the seam itself runs `node` with
+        # built-ins and needs neither node_modules nor git history.
+        run: bash scripts/local-stack/run.sh --check-currency
       - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
         with:
           # The SAME pin `frontend-local-stack` uses, so this file keeps ONE answer to
@@ -1073,6 +1109,10 @@ jobs:
           fi
           echo "Lane corpus: ${files} file(s)"
       - name: Boot the local-stack lane (Supabase CLI stack + committed baseline)
+        # `up` loads the committed dump, then replays the migrations the currency
+        # step above named (printing the set again in this step's log, and a
+        # `replay complete:` line once every one applied), and fails loud on the
+        # first replayed migration that errors.
         # ⛔ Through `run.sh` ONLY — never a bare CLI invocation. `up` asserts the
         # stack reported a 127.0.0.1/localhost API URL and refuses otherwise, the lane
         # re-asserts it independently in `vitest.livedb.globalsetup.ts`, and that same
@@ -3281,6 +3321,14 @@ jobs:
     # `supabase/schema/baseline.sql` behind the lane's currency guard), runs the
     # corpus against it, and tears it down. The database is private to this job's
     # runner: nobody else's CI can see it, and this job can see nobody else's.
+    # ⛔ CORRECTED 2026-09-23 (Phase 164.4.2 plan 08, D-F): "behind the lane's
+    # currency guard" now means the guard NAMES a replay set rather than rejecting
+    # a dump that predates the newest migration. `run.sh up` loads the dump, then
+    # replays exactly the `supabase/migrations/` files the committed marker
+    # `supabase/schema/baseline-carried-migrations.txt` says it does not carry,
+    # and fails loud when that set cannot be determined or a replayed migration
+    # errors. A PR that ADDS a migration therefore has that migration on this
+    # job's lane BEFORE merge — the corpus runs against the PR's own schema.
     #
     # WHERE THE SHARED-TEST MACHINERY WENT. Everything here that existed only
     # because this job wrote the shared TEST project is GONE from this job: the
@@ -3379,14 +3427,20 @@ jobs:
           # GITHUB_TOKEN cred from .git/config. This job does no git op beyond
           # the currency guard's read-only `git log`; the persisted cred is pure
           # attack surface.
+          # ⛔ CORRECTED 2026-09-23 (Phase 164.4.2 plan 08, D-F): this job does NO
+          # git op at all now — the currency guard's `--replay-set` mode reads the
+          # committed marker, the dump's sha256 and the migrations directory on
+          # disk, not `git log`. The persisted cred stays dropped for the same reason.
           persist-credentials: false
-          # ⛔ FULL HISTORY, and the currency guard is meaningless without it — the
-          # reason `frontend-local-stack` checks out the same way. `run.sh up`
-          # refuses a baseline older than `supabase/migrations/` by comparing
-          # `git log -1 --format=%ct` for the two paths; on the default shallow
-          # clone both report the one clone commit, compare EQUAL, and the guard
-          # passes having measured nothing.
-          fetch-depth: 0
+          # 📜 LINEAGE: this checkout used to fetch FULL HISTORY (`fetch-depth: 0`),
+          # the reason `frontend-local-stack` checked out the same way: the lane's
+          # currency guard then compared `git log -1 --format=%ct` for the dump and
+          # the migrations directory, and on a shallow clone both report the one
+          # clone commit, compare equal, and the guard measures nothing.
+          # ⛔ CORRECTED 2026-09-23 (Phase 164.4.2 plan 08, D-F): MEASURED per job, no
+          # step here runs `git`, and neither `run.sh` (with the currency gate and the
+          # reference-data extractor it calls) nor the capability probe spawns one.
+          # The default shallow clone is enough; full history was dropped.
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: 22
@@ -3397,11 +3451,14 @@ jobs:
           # calls, and the capability probe) — measured by reading their imports.
           # Installing node_modules here would be work nothing consumes, on the job
           # whose own wall clock Area E clause (b) measures.
-      - name: Baseline currency - refuse a schema dump older than the migrations
+      - name: Baseline currency - name the migrations the lane replays on top of the dump
         # The same `--check-currency` seam `frontend-local-stack` runs, for the same
-        # two reasons: the verdict gets its own named line in this job's log, and an
-        # edit that drops the call out of `load_baseline()` fails HERE instead of
-        # booting quietly on a stale schema. Needs node and git history only.
+        # two reasons: the replay set gets its own named `baseline-replay:` line in
+        # this job's log before any container starts, and an edit that drops the
+        # call out of `load_baseline()` fails HERE instead of booting quietly. It
+        # determines that set from the committed marker (D-F, Phase 164.4.2 plan 06)
+        # and FAILS LOUD when it cannot. Needs node built-ins only — no
+        # node_modules, no git history.
         run: bash scripts/local-stack/run.sh --check-currency
       - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
         with:
@@ -3468,8 +3525,10 @@ jobs:
       - name: Boot the local-stack lane (Supabase CLI stack + committed baseline)
         # The same boot `frontend-local-stack` runs, pasted verbatim (a wrapped run is
         # a different run). `up` starts the stack in a lane-owned workdir, refuses a
-        # non-local API URL, refuses a baseline older than `supabase/migrations/`,
-        # loads the committed baseline and the allowlisted reference data, and writes
+        # non-local API URL, determines and prints the replay set (refusing when it
+        # cannot be determined), loads the committed baseline and the allowlisted
+        # reference data, replays the named migrations on top (FATAL on the first
+        # one that errors, then a `replay complete:` line), and writes
         # the mode-600 `scripts/local-stack/.stack-env` handoff the next two steps
         # read. On a failed `up`, run.sh's own trap stops the stack.
         run: bash scripts/local-stack/run.sh up
@@ -3702,6 +3761,9 @@ jobs:
           # database. The consequence moves again and the conclusion does not: a
           # whole-file bail-out now re-arms whenever the committed baseline next gains
           # the object it bails on, silently. ONLY the marker check below stops it.
+          # (Since D-F, 2026-09-23, the lane also replays migrations newer than the
+          # dump, so "gains the object" includes a PR's own new migration — sooner,
+          # and the conclusion is unchanged.)
           #
           # Three files were fixed individually (they now RAISE EXCEPTION on an
           # absent object). This block is the mechanical closure for the rest and
