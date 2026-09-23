@@ -146,12 +146,12 @@ export function judge({
 
 /**
  * How many `ok()` calls the sections below are declared to run: 11 across the
- * eight default-mode sections, plus 20 across the fourteen `--replay-set`
- * sections (Phase 164.4.2 plan 06).
+ * eight default-mode sections, plus 25 across the fourteen `--replay-set`
+ * sections (Phase 164.4.2 plan 06; +5 in R10 by review 164.4.2 WR-04).
  * ⛔ Raise it only together with the arm that adds one; lowering it to make a
  * run green is deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 31;
+export const EXPECTED_ASSERTIONS = 36;
 
 function selfTest() {
   let pass = true;
@@ -263,7 +263,7 @@ function selfTest() {
   ok(r1.markerSha === "match" && r1.carried.join(",") === [A, B].join(","), "the sha binding matches and the carried set is the marker's list");
 
   console.log("=== SELF-TEST R2/14: two migrations newer than the dump -> K=2, named, sorted by filename");
-  const r2 = see(replayRun({ migrations: files(D, A, C, B) }));
+  const r2 = see(replayRun({ migrations: files(D, A, C, B), migrationTexts: { [C]: "SELECT 1;\n", [D]: "SELECT 1;\n" } }));
   ok(r2.defects.length === 0 && r2.replay.join(",") === [C, D].join(","), `replay set is exactly [${C}, ${D}] in filename order`);
 
   console.log("=== SELF-TEST R3/14: marker absent or unreadable -> marker-unreadable, never an empty carried set");
@@ -320,10 +320,49 @@ function selfTest() {
     r10.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes(C) && d.detail.includes("line 2")),
     "a psql meta-command in a file the lane would hand to psql is refused before psql opens it",
   );
+  // Review 164.4.2 WR-04: psql honours a backslash command ANYWHERE on a line
+  // outside quotes, not only at its start, and an unreadable replay file is
+  // not an empty one.
+  const r10b = see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT 1; \\! echo exfiltrate\n" } }));
+  ok(
+    r10b.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes("line 1")),
+    "a MID-LINE `SELECT 1; \\! cmd` is refused too — psql reads it as a meta-command",
+  );
+  const r10c = see(
+    replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "BEGIN;\nSELECT 1 \\i other.sql\nCOMMIT; \\o /tmp/x\n" } }),
+  );
+  ok(
+    r10c.defects.filter((d) => d.kind === "replay-meta-command").map((d) => d.detail.match(/line (\d+)/)?.[1]).join(",") === "2,3",
+    "`\\i` and `\\o` after code on lines 2 and 3 are each refused, by line",
+  );
+  const r10d = see(
+    replayRun({
+      migrations: files(A, B, C),
+      migrationTexts: {
+        [C]:
+          "-- a comment may say \\! freely\n/* so may \\o a block */\nSELECT '\\d', E'\\n', \"a\\b\";\n" +
+          "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $fn$ SELECT '^\\d+$' $fn$;\n",
+      },
+    }),
+  );
+  ok(
+    r10d.defects.length === 0 && r10d.replay.join(",") === C,
+    `CONTROL: backslashes inside comments, literals, identifiers and dollar bodies are NOT meta-commands (got ${JSON.stringify(r10d.defects.map((d) => d.detail))})`,
+  );
+  const r10e = see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT $x$ never closed\n" } }));
+  ok(
+    r10e.defects.some((d) => d.kind === "replay-meta-command" && /cannot be proven/.test(d.detail)),
+    "a file whose quoting never closes cannot be proven free of meta-commands, and is refused",
+  );
+  const r10f = see(replayRun({ migrations: files(A, B, C), migrationTexts: {} }));
+  ok(
+    r10f.defects.some((d) => d.kind === "replay-file-unreadable" && d.detail.includes(C)),
+    "a replay file whose text could not be read is refused by name — never scanned as empty",
+  );
 
   console.log("=== SELF-TEST R11/14: ANY defect -> the pure result carries no set at all");
   ok(
-    [r3, r4, r5, r6, r7a, r7b, r8, r9a, r9b, r10].every((r) => r.defects.length > 0 && r.replay.length === 0 && r.carried.length === 0),
+    [r3, r4, r5, r6, r7a, r7b, r8, r9a, r9b, r10, r10b, r10c, r10e, r10f].every((r) => r.defects.length > 0 && r.replay.length === 0 && r.carried.length === 0),
     "an undeterminable set is never returned as a set — every defect arm above returns replay=[] and carried=[]",
   );
 
@@ -409,12 +448,90 @@ export const REPLAY_DEFECTS = [
   "migrations-dir-unreadable",
   "migration-unclassifiable",
   "replay-meta-command",
+  "replay-file-unreadable",
   "refdata-allowlist-unreadable",
 ];
 
 /** A migration basename the lane will hand to psql: digits, underscore, lower snake, .sql. */
 export const MIGRATION_BASENAME_RE = /^[0-9]+_[a-z0-9_]+\.sql$/;
 const SHA_LINE_RE = /^baseline-sha256:[ \t]*(\S*)[ \t]*$/;
+
+/**
+ * PURE: the 1-based line numbers on which psql would read a backslash as a
+ * meta-command — any backslash outside a `--` comment, a (nested) block
+ * comment, a '…' or E'…' literal, a "…" identifier and a $tag$…$tag$ body,
+ * which is psql's own lexer's view (a meta-command may start mid-line).
+ * Returns `{error, line}` when a comment, literal or body never closes: where
+ * psql would then see a command is unknowable, and the caller refuses it.
+ *
+ * @returns {{lines: number[]} | {error: string, line: number}}
+ */
+export function psqlMetaCommandLines(src) {
+  const n = src.length;
+  const lines = new Set();
+  let line = 1;
+  const advance = (from, to) => {
+    for (let k = from; k < to; k++) if (src[k] === "\n") line++;
+  };
+  let i = 0;
+  while (i < n) {
+    const c = src[i];
+    const start = line;
+    if (c === "-" && src[i + 1] === "-") {
+      let j = src.indexOf("\n", i);
+      if (j === -1) j = n;
+      i = j;
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      let depth = 1;
+      let j = i + 2;
+      while (j < n && depth > 0) {
+        if (src[j] === "/" && src[j + 1] === "*") (depth++, (j += 2));
+        else if (src[j] === "*" && src[j + 1] === "/") (depth--, (j += 2));
+        else j++;
+      }
+      if (depth > 0) return { error: "an unterminated block comment", line: start };
+      advance(i, j);
+      i = j;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      // E'…' honours backslash escapes; '…' and "…" do not (standard_conforming_strings).
+      const escaped = c === "'" && /[Ee]/.test(src[i - 1] ?? "") && !/[A-Za-z0-9_$]/.test(src[i - 2] ?? "");
+      let j = i + 1;
+      let closed = false;
+      while (j < n) {
+        if (escaped && src[j] === "\\") j += 2;
+        else if (src[j] === c && src[j + 1] === c) j += 2;
+        else if (src[j] === c) {
+          closed = true;
+          j++;
+          break;
+        } else j++;
+      }
+      if (!closed) return { error: `an unterminated ${c === "'" ? "string literal" : "quoted identifier"}`, line: start };
+      advance(i, j);
+      i = j;
+      continue;
+    }
+    if (c === "$" && !/[A-Za-z0-9_]/.test(src[i - 1] ?? "")) {
+      const m = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(src.slice(i, i + 80));
+      if (m) {
+        const close = src.indexOf(m[0], i + m[0].length);
+        if (close === -1) return { error: `an unterminated ${m[0]} dollar-quoted body`, line: start };
+        const j = close + m[0].length;
+        advance(i, j);
+        i = j;
+        continue;
+      }
+    }
+    if (c === "\\") lines.add(line);
+    if (c === "\n") line++;
+    i++;
+  }
+  return { lines: [...lines].sort((a, b) => a - b) };
+}
 
 /** Parse the marker's text into its sha line and its basename entries. */
 function parseMarker(text) {
@@ -554,17 +671,34 @@ export function judgeReplaySet({
     replay = [...onDisk].filter((n) => !seen.has(n)).sort();
     // psql meta-commands are CLIENT-side: the server cannot refuse them, and
     // `db push` — the shape being mirrored — never interprets one. Refuse any
-    // backslash-led line in a file the lane is about to hand to psql.
+    // backslash psql would read as a meta-command in a file the lane is about
+    // to hand to psql — ANYWHERE on a line, not only at its start (review
+    // 164.4.2 WR-04: `SELECT 1; \! cmd` is a meta-command too).
     for (const r of replay) {
-      const lines = String(migrationTexts[r] ?? "").split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        if (/^[ \t]*\\/.test(lines[i])) {
-          push(
-            "replay-meta-command",
-            `${r} line ${i + 1} begins with a backslash — a psql meta-command, which would run on the ` +
-              `runner, not in the database: '${lines[i].trim().slice(0, 80)}'`,
-          );
-        }
+      if (typeof migrationTexts[r] !== "string") {
+        push(
+          "replay-file-unreadable",
+          `${r} is in the replay set but its text could not be read, so it cannot be scanned for psql ` +
+            `meta-commands. An unreadable file is not an empty one.`,
+        );
+        continue;
+      }
+      const lines = migrationTexts[r].split("\n");
+      const scan = psqlMetaCommandLines(migrationTexts[r]);
+      if (scan.error) {
+        push(
+          "replay-meta-command",
+          `${r} cannot be proven free of psql meta-commands: ${scan.error} at line ${scan.line}, so where ` +
+            `psql would treat a backslash as a command is unknowable.`,
+        );
+        continue;
+      }
+      for (const lineNo of scan.lines) {
+        push(
+          "replay-meta-command",
+          `${r} line ${lineNo} carries a backslash outside any comment, literal or dollar body — a psql ` +
+            `meta-command, which would run on the runner, not in the database: '${lines[lineNo - 1].trim().slice(0, 80)}'`,
+        );
       }
     }
   }
