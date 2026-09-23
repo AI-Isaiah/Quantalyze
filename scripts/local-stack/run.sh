@@ -478,6 +478,22 @@ check_acl_fidelity() {
 # be invisible to the corpus files that read them as `postgres`; and a superuser-
 # owned job would RUN with superuser rights, a catalogue wider than PROD's. There is
 # NO fallback role: a refused cron.schedule is FATAL.
+#
+# ⚠️ WALL-CLOCK DEPENDENCE (review 164.4.2 IN-03), stated so a flaky-test triage
+# knows it. The jobs are registered ACTIVE — the fidelity gate requires
+# `active = t`, because that is how PROD and shared TEST carry them — so pg_cron
+# RUNS them on their schedules for as long as the lane is up. Four fire every 15
+# minutes or hourly (measured 2026-09-24 from the emitted registrations: the
+# stuck-computing reaper `*/15`, the match engine `0 *`, the dropped-enqueue sweep
+# `35 *`, the orphaned-running retention `50 *`); the reaper, sweep and retention
+# write `compute_jobs` / `strategy_analytics`. A
+# corpus or live-DB run that crosses one of those minutes has a real background
+# writer in the database, exactly as on PROD. Files that work inside their own
+# transaction are insulated; a file that reads committed rows across statements
+# is not. Deliberately NOT disabled: a lane whose jobs are inactive is not PROD's,
+# and the files that read cron.job (test_retention_crons_safe among them) would be
+# measuring a catalogue PROD does not have. If a corpus file fails once and passes
+# on re-run, check whether its run spanned one of the schedules in cron.job first.
 load_nonpublic_objects() {
   local psql="$1" db_url="$2" admin_url census n_trig n_cron owner
   admin_url="${db_url/#postgresql:\/\/postgres:/postgresql://supabase_admin:}"
