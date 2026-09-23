@@ -1125,17 +1125,23 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
   it("accepts a loopback DSN and refuses the shapes the glob let through, never echoing the DSN", () => {
     const local = refuse("postgresql://postgres@127.0.0.1:54322/postgres");
     expect(local.status, local.out).toBe(0);
+    // Round-2 review WR-03: the DSNs carry no password (the pre-push credential
+    // scan refuses one), so the no-echo check keys on a userinfo MARKER that is
+    // not credential-shaped. An assertion on a string no input contains could
+    // never fail.
+    const MARKER = "nonecho_marker_user";
     for (const dsn of [
-      "postgresql://postgres@127.0.0.1:54322/postgres?host=db.example.invalid",
-      "postgresql://postgres@127.0.0.1:54322/postgres?hostaddr=192.0.2.1",
-      "postgresql://u@127.0.0.1:1@db.example.invalid:5432/postgres",
+      `postgresql://${MARKER}@127.0.0.1:54322/postgres?host=db.example.invalid`,
+      `postgresql://${MARKER}@127.0.0.1:54322/postgres?hostaddr=192.0.2.1`,
+      `postgresql://${MARKER}@127.0.0.1:1@db.example.invalid:5432/postgres`,
       // Round-2 WR-02: libpq splits at the FIRST '@' and connects to the first
       // host of the comma list, db.example.invalid; a URL parser sees 127.0.0.1.
-      "postgresql://u@db.example.invalid,@127.0.0.1:54322/postgres",
+      `postgresql://${MARKER}@db.example.invalid,@127.0.0.1:54322/postgres`,
     ]) {
       const r = refuse(dsn);
       expect(r.status, `${dsn} was accepted:\n${r.out}`).toBe(1);
-      expect(r.out).not.toContain("s3cret");
+      expect(r.out, "AIM: the refusal was printed, so the no-echo checks below read real output").toContain("refusing a non-local database");
+      expect(r.out).not.toContain(MARKER);
       expect(r.out).not.toContain("example.invalid");
     }
     const unset = refuse(undefined);
@@ -1262,8 +1268,13 @@ describe("sql-corpus-report.mjs (IN-05, and the WR-08 loopback rule)", () => {
   });
 
   it("refuses a loopback-looking DSN whose ?host= re-points libpq (the parse-based rule, not a regex)", () => {
-    const r = drive("postgresql://postgres@127.0.0.1:54322/postgres?host=db.example.invalid");
+    // Round-2 review WR-03: a non-credential userinfo MARKER, so the no-echo
+    // check can fail (the DSN carries no password for it to key on).
+    const MARKER = "nonecho_marker_user";
+    const r = drive(`postgresql://${MARKER}@127.0.0.1:54322/postgres?host=db.example.invalid`);
     expect(r.status, r.out).toBe(2);
-    expect(r.out).not.toContain("s3cret");
+    expect(r.out, "the refusal names the query string it refused").toContain("query string");
+    expect(r.out).not.toContain(MARKER);
+    expect(r.out).not.toContain("example.invalid");
   });
 });
