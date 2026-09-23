@@ -113,7 +113,11 @@ const EXCLUDED: Record<string, string> = {
     "gating it would add a types-PyYAML dev-dep for throwaway scripts",
 };
 
-/** The raw lines of the `python` job's block, from its key line to the line before the next job key. */
+/**
+ * The raw lines of the `python` job's block: from its key line up to (not
+ * including) the next content line at indentation 2 or less — the next job's
+ * key, whether or not it carries a trailing `# comment` or quotes.
+ */
 function pythonJobLines(ymlText: string): string[] {
   const lines = ymlText.split("\n");
   const jobsIdx = lines.indexOf("jobs:");
@@ -123,20 +127,18 @@ function pythonJobLines(ymlText: string): string[] {
         "trigger key cannot leak into it; without the anchor the `python` job cannot be located.",
     );
   }
-  const keyPositions = lines
-    .map((l, i) => [l, i] as [string, number])
-    .filter(([l, i]) => i > jobsIdx && /^ {2}[a-z0-9-]+:$/.test(l))
-    .map(([l, i]) => [l.trim().replace(/:$/, ""), i] as [string, number]);
-  const at = keyPositions.findIndex(([k]) => k === "python");
-  if (at === -1) {
+  const start = lines.findIndex(
+    (l, i) => i > jobsIdx && /^ {2}(["']?)python\1\s*:\s*(?:#.*)?$/.test(l),
+  );
+  if (start === -1) {
     throw new Error(
       "ci.yml has no `python:` job key. That job carries the analytics-service mypy --strict gate; " +
         "if it was renamed, update this test in the same commit — if it was deleted, the type gate " +
         "is gone and this test is the only thing that says so.",
     );
   }
-  const start = keyPositions[at][1];
-  const end = at + 1 < keyPositions.length ? keyPositions[at + 1][1] : lines.length;
+  let end = start + 1;
+  while (end < lines.length && !(isContent(lines[end]) && indentOf(lines[end]) <= 2)) end++;
   return lines.slice(start, end);
 }
 
@@ -994,6 +996,14 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
     const bare = insertAfter(REAL_YML, RUN_LINE, "\n      - name: Say done\n        run: echo done; mypy next", "(e5 bare)");
     const problems = surfaceProblems(bare, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
     expect(has(problems, "carries 2 mypy invocation(s)"), problems.join("\n")).toBe(true);
+  });
+
+  it("(g2) the NEXT job's key carries a trailing comment → its job-level keys are not read as the python job's", () => {
+    const afterPython = REAL_YML.split("\n  python:\n")[1].split("\n").find((l) => /^ {0,2}\S/.test(l) && !l.trim().startsWith("#"));
+    expect(afterPython, "CALIBRATION (g2): `e2e` is no longer the job after `python`; re-anchor the leg").toBe("  e2e:");
+    const yml = mutate(REAL_YML, "\n  e2e:\n", "\n  e2e:  # calibration (g2)\n    continue-on-error: true\n", "(g2)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(problems, problems.join("\n")).toEqual([]);
   });
 
   it("(f) HISTORICAL — the pre-phase command names none of the four top-level modules", () => {
