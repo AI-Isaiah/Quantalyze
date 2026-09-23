@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -599,6 +600,21 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     const logPath = join(dir, "invocation.log");
     writeFileSync(handoff, 'DB_URL="postgresql://stub@db.example.invalid:5432/postgres"\n');
     try {
+      // NON-VACUITY CONTROL (review 164.4.2 WR-10). The refusal below is judged by
+      // an EMPTY invocation log, and a log that is missing reads as `[]` too — so a
+      // stub that stopped logging, or a harness that never reached psql, would pass
+      // it while measuring nothing. The SAME harness with the loopback handoff must
+      // leave a NON-EMPTY log first.
+      const controlLog = join(dir, "control-invocation.log");
+      runGate({ STUB_INVOCATION_LOG: controlLog });
+      const controlLogged = existsSync(controlLog)
+        ? readFileSync(controlLog, "utf8").split("\n").filter(Boolean)
+        : [];
+      expect(
+        controlLogged.length,
+        "CONTROL: a loopback handoff through the same harness handed NO file to psql — the invocation log measures nothing, so the empty log below proves nothing",
+      ).toBeGreaterThan(0);
+
       const { code, out } = runGate({ LANE_ENV_FILE: handoff, STUB_INVOCATION_LOG: logPath });
       expect(code).not.toBe(0);
       // Review 164.4.2 WR-08: the step's glob was replaced by capability-probe's
