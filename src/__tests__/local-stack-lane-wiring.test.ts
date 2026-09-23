@@ -27,12 +27,26 @@
  *
  * It also asserts the lane files carry NO skip gate, because a lane job that runs a
  * silently-skipping spec reproduces the tombstone with all the wiring intact.
+ *
+ * And (Phase 164.4.2) that the lane's boot path REFUSES a baseline dump older than
+ * supabase/migrations/ — a lane wired end to end onto a stale schema is green for
+ * a catalogue that is not PROD's.
  */
 
 // @vitest-environment node
 
 import { describe, it, expect } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LOCAL_STACK_LANE_FILES } from "../../vitest.local-stack-files";
 
@@ -41,6 +55,30 @@ const read = (rel: string) => readFileSync(REPO_ROOT + rel, "utf8");
 
 const CI = read(".github/workflows/ci.yml");
 const LANE_JOB = "frontend-local-stack";
+const RUN_SH = "scripts/local-stack/run.sh";
+
+/** Non-blank, non-comment lines, trimmed — what bash will actually EXECUTE. */
+const liveLines = (block: string) =>
+  block
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !l.startsWith("#"));
+
+/**
+ * A top-level bash function's body, from `name() {` to its first column-0 `}`.
+ * ⛔ A missing anchor FAILS by name: `indexOf` returns -1 and `slice(-1)` is the
+ * last character, so a renamed function would otherwise leave every assertion
+ * below running over an empty subject — and passing.
+ */
+function bashFunctionBody(src: string, name: string): string {
+  const start = src.indexOf(`\n${name}() {\n`);
+  expect(start, `${RUN_SH} no longer defines ${name}()`).toBeGreaterThan(-1);
+  const end = src.indexOf("\n}\n", start);
+  expect(end, `could not find the end of ${name}() in ${RUN_SH}`).toBeGreaterThan(
+    start,
+  );
+  return src.slice(start, end);
+}
 
 /**
  * The `frontend:` aggregator block, sliced out so "appears in the needs: list" is
@@ -202,6 +240,93 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
           `${f} contains \`${gate}\`. Lane specs must FAIL when their substrate is absent, never skip: a skipped live-DB case is indistinguishable from a passing one in CI output, which is exactly how csv-finalize-rpc.test.ts's six cases survived a DROPped function.`,
         ).toBe(false);
       }
+    }
+  });
+
+  // ⭐ Phase 164.4.2 plan 03. The lane loads a DUMP, and a migration can land
+  // after it was taken. MEASURED (164.4.2 CONTEXT Area A): two migrations sat
+  // after the dump while this lane was green, because nothing in the boot path
+  // compared the two. The claim pinned here is deliberately narrow — the boot
+  // path REFUSES a dump older than supabase/migrations/ before psql reads it.
+  // It says nothing about whether the dump's CONTENT is right; that is
+  // baseline-content-drift-check's question, not this one.
+  it("the lane's boot path measures baseline CURRENCY before psql loads the dump, and the call it makes refuses a stale dump", () => {
+    const lane = read(RUN_SH);
+
+    // (1) load_baseline() guards on the gate, the guard ABORTS, and it runs
+    // before the psql load. A guard that only logged would be a gate that
+    // measures nothing — so the guarded block must contain an `exit`.
+    const body = liveLines(bashFunctionBody(lane, "load_baseline"));
+    const guard = body.findIndex((l) =>
+      /^if\s+!\s+check_baseline_currency\s*;\s*then$/.test(l),
+    );
+    const load = body.findIndex((l) => l.includes('-f "$BASELINE_FILE"'));
+    expect(
+      guard,
+      "load_baseline() no longer guards on check_baseline_currency — the lane would boot a dump older than the migrations and every spec on it would go green against a catalogue that is not PROD's",
+    ).toBeGreaterThan(-1);
+    expect(load, "load_baseline() no longer loads $BASELINE_FILE with psql -f").toBeGreaterThan(-1);
+    expect(
+      guard < load,
+      "the currency guard runs AFTER the psql load — by then the stale schema is already in the database",
+    ).toBe(true);
+    const fi = body.indexOf("fi", guard);
+    expect(fi, "the currency guard's `if` has no closing `fi`").toBeGreaterThan(guard);
+    expect(
+      body.slice(guard + 1, fi).some((l) => /^exit\s+[1-9]/.test(l)),
+      "the currency guard's block does not exit non-zero — a lane that logs 'stale' and loads anyway is the gate-that-measures-nothing class",
+    ).toBe(true);
+
+    // (2) The `--check-currency` seam dispatches the SAME function, so driving
+    // the seam below drives the call load_baseline() makes — not a copy of it.
+    const at = lane.indexOf('\ncase "${1:-}" in\n');
+    expect(at, `${RUN_SH}'s top-level dispatcher is gone`).toBeGreaterThan(-1);
+    const seam = liveLines(lane.slice(at)).find((l) => l.startsWith("--check-currency)"));
+    expect(seam, "the --check-currency seam is no longer dispatched").toBeDefined();
+    expect(
+      seam,
+      "--check-currency no longer runs check_baseline_currency, so it can pass while load_baseline() refuses (or the reverse)",
+    ).toContain("check_baseline_currency");
+
+    // (3) BEHAVIOUR, both directions, through the lane's own FRESHNESS_TS_CMD
+    // pass-through. A check proven in one direction is half a check: the stale
+    // stub must REFUSE with the gate's own phrase, and the fresh stub must pass.
+    const dir = mkdtempSync(join(tmpdir(), "lane-currency-"));
+    try {
+      const stub = (name: string, baselineEpoch: number, migrationsEpoch: number) => {
+        const p = join(dir, `${name}.sh`);
+        writeFileSync(
+          p,
+          `#!/usr/bin/env bash\ncase "$1" in *baseline.sql) echo ${baselineEpoch} ;; *) echo ${migrationsEpoch} ;; esac\n`,
+        );
+        chmodSync(p, 0o755);
+        // The gate splits FRESHNESS_TS_CMD on whitespace, so a spaced tmpdir
+        // would silently run a different binary.
+        expect(/\s/.test(p), `stub path contains whitespace: ${p}`).toBe(false);
+        return p;
+      };
+      const ask = (freshnessCmd: string) =>
+        spawnSync("bash", [RUN_SH, "--check-currency"], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+          env: { ...process.env, FRESHNESS_TS_CMD: freshnessCmd },
+        });
+
+      const stale = ask(stub("stale", 1_000_000_000, 2_000_000_000));
+      expect(
+        stale.status,
+        `the lane did not refuse a baseline OLDER than the migrations (exit ${stale.status}):\n${stale.stdout}${stale.stderr}`,
+      ).toBe(1);
+      expect(stale.stdout + stale.stderr).toContain("the baseline dump is STALE");
+
+      const fresh = ask(stub("fresh", 2_000_000_000, 1_000_000_000));
+      expect(
+        fresh.status,
+        `the lane refused a baseline NEWER than the migrations (exit ${fresh.status}):\n${fresh.stdout}${fresh.stderr}`,
+      ).toBe(0);
+      expect(fresh.stdout).toContain("defects=0");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
