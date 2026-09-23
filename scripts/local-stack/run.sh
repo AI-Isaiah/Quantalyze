@@ -110,6 +110,37 @@ CONFIG_TOML="${REPO_ROOT}/supabase/config.toml"
 # directory, so the lane cannot drift from the real config and cannot corrupt it.
 STACK_DIR="${LANE_DIR}/.stack"
 STACK_CONFIG="${STACK_DIR}/supabase/config.toml"
+
+# ── The lane's Postgres IMAGE is PINNED (Phase 164.4.2 plan 08 checkpoint RED) ──
+#
+# ⛔ WHY. The image used to FLOAT with the CLI version: each CLI release pins its own
+# supabase/postgres tag, so a developer box on CLI 2.84.2 booted 17.6.1.095 while CI
+# on 2.98.2 booted 17.6.1.106, and the box's green said nothing about CI's Postgres.
+# MEASURED, CI run 35914559318 attempt 2: `sql-tests` lost its backend to SIGSEGV
+# inside test_api_keys_exchange_not_user_writable.sql (assertion 5d), and the same
+# file passed on the box. Reproduced on 17.6.1.104 and .106, not on .095 or .113.
+# The shape: a `postgres` session that SET ROLE to one of supautils.hint_roles
+# (anon, authenticated, service_role) is refused EXECUTE on a function. supautils
+# 3.2.0 (shipped in .104 through .112) crashes in its ExecutorStart hint hook on a
+# non-relation privilege error; supautils 3.2.2 ("Fix crash in
+# supautils_executor_start") fixed it, and 17.6.1.113 is the first image carrying
+# it. Emptying supautils.hint_roles made the crash stop, which confirms the cause.
+# That shape is this corpus's idiom for proving a REVOKE holds.
+#
+# ⭐ WHY THIS TAG. It is the nearest image to the one PRODUCTION's link metadata
+# records (17.6.1.104) that does not crash on the corpus. Both carry supautils's
+# hint feature, so privilege errors read the way PROD's do. The older .095 would
+# also pass, but it carries supautils 3.0.1, which has no hint feature at all.
+# ⚠️ .104 itself is refused, not chosen: a lane that kills its backend mid-corpus
+# measures nothing about PROD.
+#
+# HOW. The CLI takes the db image tag from <workdir>/supabase/.temp/postgres-version
+# when that file exists (the file `supabase link` writes to match a remote). It
+# splices the file's bytes straight into the tag, so the file is written with NO
+# trailing newline. assert_lane_pg_image proves the pin took. Then
+# probe_function_denial_survives runs the crash's exact shape before anything loads,
+# so a pin moved to a crashing image fails loud at boot, with the cause named.
+LANE_PG_VERSION="17.6.1.113"
 # The currency gate's handover files (replay set, carried set, filtered
 # reference-data allowlist). Inside the gitignored lane workdir, and emptied
 # before every gate run, so a gate that refuses leaves NO file for a later
@@ -154,6 +185,10 @@ generate_stack_config() {
   fi
   # The lane workdir must have NO migrations dir — belt and braces.
   rm -rf "${STACK_DIR}/supabase/migrations"
+  # The Postgres image pin (see LANE_PG_VERSION). No trailing newline: the CLI
+  # splices these bytes into the image tag.
+  mkdir -p "${STACK_DIR}/supabase/.temp"
+  printf '%s' "$LANE_PG_VERSION" >"${STACK_DIR}/supabase/.temp/postgres-version"
   log "derived lane config: ${STACK_CONFIG} ([db.migrations] disabled)"
 }
 
@@ -652,6 +687,49 @@ resolve_psql() {
   fi
 }
 
+# --- the pinned image, proven (see LANE_PG_VERSION) ----------------------------
+# The running db container's image must end in :$LANE_PG_VERSION. Measured from
+# Docker, not assumed from the file written above: a CLI that stopped honouring
+# .temp/postgres-version would otherwise boot its own tag again, silently.
+assert_lane_pg_image() {
+  local image rc=0
+  image="$("$DOCKER_BIN" ps --filter "name=^supabase_db_${PROJECT_ID}\$" --format '{{.Image}}')" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$image" ]; then
+    echo "FATAL: MEASURE_FAIL - could not read the lane's db container image ('${DOCKER_BIN} ps' exited ${rc}). Unmeasured is not pinned." >&2
+    exit 1
+  fi
+  case "$image" in
+    */postgres:"$LANE_PG_VERSION") ;;
+    *)
+      echo "FATAL: the lane booted Postgres image '${image}', not the pinned postgres:${LANE_PG_VERSION}. The CLI ignored the lane workdir's .temp/postgres-version, so CI and a developer box may be running different Postgres builds again." >&2
+      exit 1
+      ;;
+  esac
+  log "postgres image pinned: ${image}"
+}
+
+# The crash's exact shape, before anything loads (so --no-schema boots are covered
+# too): a `postgres` session, SET ROLE to a supautils hint role, EXECUTE refused.
+# On a crashing image psql loses its connection and exits non-zero. The probe
+# RAISEs if the call is NOT refused, rolls back its function, and leaves nothing.
+probe_function_denial_survives() {
+  local db_url psql
+  db_url="$(sed -n 's/^DB_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$ENV_FILE" | head -1)"
+  case "$db_url" in
+    *@127.0.0.1:*|*@localhost:*) ;;
+    *) echo "FATAL: refusing to run the function-denial probe against a non-local database." >&2; exit 1 ;;
+  esac
+  psql="$(resolve_psql)"
+  if [ -z "$psql" ]; then
+    echo "FATAL: psql not found on PATH or at the homebrew postgresql@16 keg" >&2
+    exit 1
+  fi
+  if ! "$psql" -X "$db_url" -v ON_ERROR_STOP=1 -q -f "${LANE_DIR}/function-denial-probe.sql" </dev/null; then
+    echo "FATAL: the function-denial probe failed on postgres:${LANE_PG_VERSION}. If psql lost its connection, the backend CRASHED on a function EXECUTE denial (supautils hint hook, fixed in supautils 3.2.2): the SQL self-test corpus proves REVOKEs in exactly this shape, and would die mid-run. Move LANE_PG_VERSION to an image that survives." >&2
+    exit 1
+  fi
+}
+
 # --- commands -----------------------------------------------------------------
 cmd_up() {
   local with_schema=1
@@ -684,6 +762,8 @@ cmd_up() {
   log "starting supabase local stack (project_id=${PROJECT_ID})"
   sb start
   write_env_handoff
+  assert_lane_pg_image
+  probe_function_denial_survives
 
   if [ "$with_schema" = "1" ]; then
     load_baseline
