@@ -72,6 +72,18 @@ import { join } from "node:path";
  *     every pin here green. That is adversarial rather than accidental, and
  *     pinning every earlier step is out of proportion, so it is a DECLARED
  *     LIMIT, not a gap this file claims to close;
+ *   - it does NOT pin the `python` job's own `if:` or a job- or workflow-level
+ *     `env:` (DECIDED, round-2 review). A skipped `python` job is caught
+ *     downstream instead — `sql-tests` needs `python`, and the `frontend`
+ *     aggregator reds a `sql-tests` skip on a trusted event — though not on a
+ *     fork PR or a `workflow_dispatch`, and not by this file. An `env:` that
+ *     repoints `PATH` or sets a `MYPY*` variable is the binary-substitution
+ *     limit above;
+ *   - it does NOT count a mypy invocation hidden behind a wrapper word
+ *     (`uv run mypy`, `timeout 60 mypy`, `if mypy`, a quoted
+ *     `"$VENV/bin/mypy"`). The one-invocation count is of command-start
+ *     invocations; the gate's own paths and flags are pinned exactly, so a
+ *     missed second invocation cannot shrink the gate's coverage;
  *   - it does NOT prove the job goes RED on GitHub when a named module breaks.
  *     That is D-06b, OPEN until the phase PR: a neuter commit on the PR, the
  *     step observed RED naming `main.py`, bound to the head SHA, then restored.
