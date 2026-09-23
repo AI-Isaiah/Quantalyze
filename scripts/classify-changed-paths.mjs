@@ -60,10 +60,11 @@
  * phase exists to remove — and this classifier is the single point of trust for
  * the whole path filter, so its own table is the first thing that must be true.
  */
-import { appendFileSync, realpathSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 /**
  * ⛔ AN ALLOW-LIST. It must never become a deny-list of code paths: under a
@@ -100,8 +101,8 @@ export function judge(changedFiles) {
   return changedFiles.every((f) => DOCS_ONLY_PREFIXES.some((p) => f.startsWith(p)));
 }
 
-function git(args) {
-  return execFileSync("git", args, { encoding: "utf8" });
+function git(args, cwd) {
+  return execFileSync("git", args, { encoding: "utf8", ...(cwd ? { cwd } : {}) });
 }
 
 /**
@@ -124,10 +125,11 @@ export function baseRefFor(baseRefName = process.env.GITHUB_BASE_REF) {
  * diff` against a missing ref exits non-zero and prints nothing, and "nothing"
  * is exactly what "no files changed" looks like to a caller that swallows it.
  *
- * @param {{baseRefName?: string}} [opts]
+ * @param {{baseRefName?: string, cwd?: string}} [opts] — `cwd` exists for the
+ *   self-test's scratch repository; every production caller omits it.
  * @returns {string[]} repo-relative paths, in the order git printed them
  */
-export function changedFilesAgainstBase({ baseRefName = process.env.GITHUB_BASE_REF } = {}) {
+export function changedFilesAgainstBase({ baseRefName = process.env.GITHUB_BASE_REF, cwd } = {}) {
   const baseRef = baseRefFor(baseRefName);
   try {
     // ⚠️ `--no-renames` is MANDATORY, not stylistic. With rename detection a
@@ -141,8 +143,14 @@ export function changedFilesAgainstBase({ baseRefName = process.env.GITHUB_BASE_
     // The base ref is passed as an argv ELEMENT to execFileSync, never
     // interpolated into a shell string: `GITHUB_BASE_REF` is a branch name and
     // on a fork PR an untrusted contributor chooses it.
-    return git(["diff", "--name-only", "--no-renames", `${baseRef}...HEAD`])
-      .split("\n")
+    //
+    // ⚠️ `-z` is MANDATORY too (review 164.4.2 WR-01). Without it git QUOTES
+    // any path holding a non-ASCII byte, a tab, a newline, a backslash or a
+    // double quote (`core.quotePath`), so `supabase/tests/test_é.sql` prints
+    // as `"supabase/tests/test_\303\251.sql"` and every `startsWith` caller
+    // misses it. NUL-separated names are never quoted.
+    return git(["diff", "--name-only", "--no-renames", "-z", `${baseRef}...HEAD`], cwd)
+      .split("\0")
       .filter(Boolean);
   } catch (e) {
     // ⛔ A gate that cannot read cannot report a pass.
@@ -284,6 +292,44 @@ const CASES = [
           "and the error is the named MEASURE_FAIL naming the unreadable ref",
         ) && pass;
       return pass;
+    },
+  },  {
+    claim: "a path git would QUOTE (non-ASCII byte) comes back VERBATIM — never as a `\"…\"` escape",
+    run: (ok) => {
+      // Review 164.4.2 WR-01. `git diff --name-only` quotes any path holding a
+      // non-ASCII byte, a tab, a newline, a backslash or a double quote
+      // (`core.quotePath`), printing e.g. `"supabase/tests/test_\303\251.sql"`.
+      // The leading `"` defeats every `startsWith` caller: sql-gate-subset.mjs
+      // then drops the file from BOTH its gate list and its non-conforming
+      // list, and a SUBSET run silently omits it. A real scratch repository,
+      // because the defect lives in git's output format, not in our parsing.
+      const dir = mkdtempSync(join(tmpdir(), "gsd-classify-quote-"));
+      const g = (args) =>
+        execFileSync("git", ["-c", "user.name=self-test", "-c", "user.email=self-test@invalid", "-c", "commit.gpgsign=false", ...args], {
+          cwd: dir,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      const odd = "supabase/tests/test_\u00e9.sql";
+      try {
+        g(["init", "-q"]);
+        writeFileSync(join(dir, "base.txt"), "base\n");
+        g(["add", "base.txt"]);
+        g(["commit", "-q", "-m", "base"]);
+        g(["update-ref", "refs/remotes/origin/gsd-self-test-base", "HEAD"]);
+        mkdirSync(join(dir, "supabase/tests"), { recursive: true });
+        writeFileSync(join(dir, odd), "select 1;\n");
+        writeFileSync(join(dir, "supabase/tests/test_ok.sql"), "select 1;\n");
+        g(["add", "."]);
+        g(["commit", "-q", "-m", "head"]);
+        const files = changedFilesAgainstBase({ baseRefName: "gsd-self-test-base", cwd: dir });
+        let pass = ok(files.length === 2, `CALIBRATION: both committed paths came back (got ${JSON.stringify(files)})`);
+        pass = ok(files.includes(odd), "the non-ASCII gate path is returned byte-verbatim") && pass;
+        pass = ok(!files.some((f) => f.startsWith('"')), "no returned path is a git-quoted escape") && pass;
+        return pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     },
   },
 ];
