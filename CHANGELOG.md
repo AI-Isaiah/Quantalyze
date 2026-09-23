@@ -11,223 +11,237 @@ wrong MT5 password raises a MODAL LOGIN DIALOG on the terminal, which blocks IPC
 reports as a transport failure — so the product blamed the network for a credential.
 
 This release gives that condition a name the product carries end to end: a wire code, a wizard
-terminal with no Retry control, a database status, an amber pill, and a writer that puts the two
-together. ⭐ **The copy claims no cause the classifier refused to claim.** It does not say the
-exchange rejected the credentials, and it does not say the fault is ours — from the outside those
-look the same, and guessing between them is the defect this phase removes, not the fix.
+terminal with no Retry control, a database status, an amber pill on the allocator's AND the
+manager's key surfaces, and a writer that puts them together. ⭐ **The copy claims no cause the
+classifier refused to claim.** It does not say the exchange rejected the credentials, and it does
+not say the fault is ours — from the outside those look the same, and guessing between them is the
+defect this phase removes, not the fix. ⭐ **And "sign-in failed" is claimed only when the terminal
+actually answered a sign-in** — two review rounds narrowed the first cut, which also blamed the
+credentials for a wedged gateway.
 
 ### Added
 
-- **`SIGN_IN_FAILED`, minted across the language boundary in one path** (plan 01): the Python wire
-  code emitted from the ONE `validate_key` arm where a login was actually attempted, a
-  `VENUE_WIRE_CODE_TO_VERDICT` row so it routes to its own terminal rather than to `UNKNOWN`, and
-  the `KEY_SIGN_IN_FAILED` wizard entry both wizard rosters admit.
-  ⭐ **No Retry renders, and the absence is DERIVED rather than declared** — `buildEnvelope`
-  computes `recoverable` from `actions` against `RECOVERABLE_ACTIONS`, and this entry carries
-  neither member, so the control does not exist. No `recoverable: false` was written anywhere.
+- **`SIGN_IN_FAILED`, minted across the language boundary in one path** (plan 01): a Python wire
+  code, a `VENUE_WIRE_CODE_TO_VERDICT` row so it routes to its own terminal rather than to
+  `UNKNOWN`, and the `KEY_SIGN_IN_FAILED` wizard entry both wizard rosters and the rotate-secret
+  dialog admit. ⭐ **No Retry renders, and the absence is DERIVED rather than declared** —
+  `buildEnvelope` computes `recoverable` from `actions` against `RECOVERABLE_ACTIONS`, and this
+  entry carries neither member.
 - **`api_keys.sync_status = 'sign_in_failed'`** — migration
   `20260922120000_api_keys_sync_status_sign_in_failed.sql`, with a self-verifying `DO` block and a
   permanent SQL gate over the widened CHECK. ⚠️ Merging this applies the constraint change to
   production; the founder approved it at the phase's human-verify gate on 2026-09-22, after three
   reviewers ran twice.
-- **An amber "Sign-in failed" pill** in `AllocatorSyncStatus`, with an authored owner-facing helper
-  that ignores `syncError` and can never fall back to the neutral idle style. `PILL_STYLES` is now
-  exported so a roster test can prove every styled status renders a non-empty label.
-- **The writer** (plan 04): `AllocatorHoldingsSignInFailedError`, `SIGN_IN_FAILED_NOTE` and
-  `SIGN_IN_FAILED_SYNC_STATUS` with its `SYNC_ERROR_COPY_BY_STATUS` row. The daily holdings poll now
-  writes the new status for a refused MT5 sign-in, with copy that names the remedy and promises
-  nothing. ⭐ The exception SUBCLASSES the transient one on purpose: the job still backs off and
-  retries, because a rotated credential is exactly what a later poll should pick up. Only the
-  user-facing CLAIM changed.
-- **`isUntrustedKeySyncStatus` / `untrustedKeyChipLabel`** in `src/lib/closed-sets.ts` — one
-  definition of "this key's data is not to be trusted as current" (D-16), replacing seven hand-kept
-  equalities. No third chip vocabulary was minted: both labels already shipped.
-- **`STATUS_CONTRACT` S-27** — the first row in that site map reachable from two endpoints, and the
-  first that is never 5xx.
+- **An amber "Sign-in failed" pill** in `AllocatorSyncStatus`, with the authored helper *"Update
+  this account's credentials — they may have changed."* (58 characters, inside the UI contract's
+  60-character budget). It ignores `syncError` and can never fall back to the neutral idle style.
+  Its style map now lives in its own plain module, `allocator-sync-pill-styles.ts`, so the client
+  component exports only a component.
+- **The writer** (plan 04): `AllocatorHoldingsSignInFailedError`, `SIGN_IN_FAILED_NOTE` (*"Couldn't
+  sign in to {venue} with these credentials — update them to resume syncing."*) and
+  `SIGN_IN_FAILED_SYNC_STATUS` with its `SYNC_ERROR_COPY_BY_STATUS` row.
+- **`Mt5LoginRefusedError` and `is_mt5_login_refusal`** — the one definition both the wizard and the
+  holdings poll use for "the terminal answered the sign-in itself, and said no" (review round 1,
+  narrowed by D-17 in round 2 — see Changed).
+- **The manager sees it too** (plan 06, gap closure): a manager's key card on the strategy's own
+  edit page now shows the same pill and helper when that key's saved status is `sign_in_failed` or
+  `revoked`. Before this, the state was written for every key but rendered only on the
+  allocator-only profile tab — so the factsheet owners the phase exists for were never told.
+- **`isUntrustedKeySyncStatus` / `untrustedKeyChipLabel`** plus the declared trusted partition
+  `TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES` in `src/lib/closed-sets.ts` — one definition of "this key's
+  data is not to be trusted as current" (D-16), replacing seven hand-kept equalities. A CHECK-parity
+  row now fails CI when the database's allowed statuses and the two partitions disagree.
+- **`STATUS_CONTRACT` S-27** — a second raise split out of the existing MT5 transient arm, reachable
+  from two endpoints, and the first row in that site map that is never 5xx.
 
 ### Changed
 
+- **Only a login-stage refusal is a sign-in failure** (review round 1 CR-01, both reviewers
+  independently; D-17 in round 2). The first cut caught every `Mt5ClientError` in the holdings read,
+  so one gateway wedge or redeploy would have told every MT5 owner their password was wrong. Now:
+  the terminal must have answered the `login()` call itself, with a code outside the IPC
+  infrastructure family `-10000…-10004`, not the success code `1`, and not a malformed
+  `last_error` shape. ⭐ **A login-stage `-10005` IS a refusal** — D-08 names it as the measured
+  wrong-password mechanism, and the marker is reached only after `initialize()` succeeded, so a
+  terminal-wide wedge lands on the transport path instead. `initialize()` failures, transport
+  raises and post-login read failures keep the pre-167 answer, on both surfaces.
+- **A refused sign-in no longer climbs the retry ladder** (WR-04): each retry repeated a
+  wrong-password login against the ONE shared terminal — the harm D-08 names. The job now ends
+  `permanent`; the daily poll still re-checks the key once a day, and rotating the secret resets
+  it. ⚠️ This reverses the first cut's "the exception subclasses the transient one so the job still
+  retries" — that reasoning was wrong for a shared terminal.
+- **One handler arm, not two** (WR-05): the exception declares its `sync_status` and `error_kind`,
+  so no arm ORDER can be wrong.
 - **Six MT5/sFOX `except` arms now consult the retry DISPOSITION before promising a retry**
   (plan 02): `_must_reach_handler_unwrapped` → `job_worker.classify_exception`, the same placement
-  the two ccxt arms already had. The mechanism existed and was half-applied; this finishes it as a
-  class rather than patching the one measured string. ⭐ The upstream pattern document cited six
-  unguarded arms; re-measuring by grep found TEN raise sites, six of which could structurally take
-  the guard. The run was right and the document was stale.
+  the two ccxt arms already had. ⭐ The upstream pattern document cited six unguarded arms;
+  re-measuring by grep found TEN raise sites, six of which could structurally take the guard.
 - **The two money surfaces answer a predicate** — `HoldingsTable` and `OpenPositionsTable` route
-  their six + one former `=== "revoked"` equalities through the closed set, so a key whose sign-in
-  was refused no longer renders as trusted live data. It landed in the SAME commit as the writer, so
-  no window exists in which the value is writable and the surface lies about it.
-- **The `### Phase 167` `Depends on:` attribution in `ROADMAP.md` is corrected** (D-01). It credited
-  Phase 164.7 with activating the 161.1 ledger refresh. Measured: 164.7 plan 07 took the DEFERRED
-  path — applied DORMANT with nothing scheduled — and the activation was taken by **164.5.1 plan
-  09** on 2026-09-17, evidenced by `scripts/prod-prober/cron-manifest.json` (jobid 40,
-  `ledger_refresh_fanout`, `25 * * * *`, active). A reader checking 164.7's status reached the right
-  answer for the wrong reason; a reader reading 164.7 plan 07 in full would have stalled the phase.
+  their former `=== "revoked"` equalities through the closed set, in the SAME commit as the writer,
+  so no window exists in which the value is writable and the surface lies about it.
+- **The holdings poll and the wizard agree** (SFH-L2): a credential-blaming MT5 verdict from the
+  login classifier now writes `sign_in_failed` on the poll, as it already answered `AUTH_FAILED` in
+  the wizard.
+- **The sign-in copy points at the control that fixes it** (WR-03): it said "Reconnect", but the
+  card's Reconnect retries the SAVED credential — the one that just failed.
+- **The MT5 "Update password" dialog builds its errors with the MT5 venue** (WR-02), so the
+  investor-password hint finally shows on the one dialog that only handles MT5, and a rate-limit
+  line no longer points an MT5 user at "a different exchange account".
+- **The manager's sync panel is tied to the attempt it belongs to** (plan 06 and its two review
+  rounds): only the attempt that owns the "syncing" marker can clear it; the panel polls only once
+  the sync is actually enqueued (`SyncProgress` now polls in `computing` only — its sole importer
+  is `ApiKeyManager`, and the shared hook the wizard uses is unchanged); a success is shown only
+  after an ordered, 15-second-bounded re-read of the key list, and never beside a "Sign-in failed"
+  pill; Update password and Delete are disabled for the key whose own sync is running.
+- **The `### Phase 167` `Depends on:` attribution in `ROADMAP.md` is corrected** (D-01): the 161.1
+  ledger refresh was activated by **164.5.1 plan 09** on 2026-09-17, not by Phase 164.7, whose plan
+  07 took the DEFERRED path.
+- **Every GSD agent inherits the session model.** `.planning/config.json` moves from
+  `model_profile: quality` with 34 agents pinned to `sonnet` by `model_overrides` to
+  `model_profile: inherit` with no overrides — the overrides beat the profile, so executors,
+  reviewers and verifiers had been running on a smaller model than the session.
 - **What deliberately did NOT change, each with a control case still green:** ccxt
   `AuthenticationError` / `PermissionDenied` still writes `revoked` — the VENUE asserted the
-  rejection, and a confident claim the venue itself made stays confident. MT5 stage timeout,
-  abandoned-session fence and account mismatch still write `error`: no sign-in is implicated, and
-  telling the owner of a wedged terminal that their credentials may have changed would be the same
-  false blame pointed at a different cause.
+  rejection. MT5 stage timeout, abandoned-session fence and account mismatch still write `error`.
 
 ### Fixed
 
 - **The holdings filter named a narrower set than it hid.** The allocator's toggle read *"Show
-  revoked-key holdings"* and its footer *"hidden from revoked keys"*, while the predicate behind
-  them already withheld `sign_in_failed` too — so a holding kept back because a sign-in was refused
-  was reported to the allocator as hidden for revocation, a cause that had not occurred. A single
-  cause-NEUTRAL collective noun now sits beside the set it names and feeds all four call sites: a
-  filter hiding two causes cannot honestly name one of them. The per-row chips are unchanged and
-  still name the specific state, so precision moves to the row, where the customer can act on it.
-  ⚠️ Three LOCKED copy pins went red on the correction — which is a pin working — and each was
-  RE-ARGUED for the string that is now true, never deleted and never relaxed to a substring, each
-  deriving its expectation from the same constant the component renders. Proven able to fail: the
-  superseded literals were pasted back at two sites, 3 of 15 cases reddened, restored from a
-  `cmp`-verified byte backup.
-- **The "no prior value was lost" guard could not see the loss it existed to catch.** Both the
-  migration's self-verify block and its SQL gate probed with a bare substring `LIKE`. Fixed as an
-  IDIOM in both files: every probe now matches the quoted, delimited, cast token as
-  `pg_get_constraintdef` renders it, read off a throwaway lane verbatim rather than assumed, with
-  `position()` replacing `LIKE`. A third `RED-UNDER-M` arm carries exactly the mutation the old
-  shape could not catch, with its own failure identity so the runner can tell it from its sibling.
-- **Two `ACCESS EXCLUSIVE` statements had no `lock_timeout`** — bound at three seconds, then
-  corrected from a session `SET` to `SET LOCAL` when the fix round's own regression was caught in
-  review.
-- **The migration's `DO` block resolved its constraint by name alone** — now scoped by `conrelid`,
-  with the DDL schema-qualified.
-- **`pillLabel`'s switch was non-exhaustive by construction** — a roster test now proves every
-  styled status renders a non-empty pill.
-- **EIGHT stale restatements of one census count**, found across four passes: three in plan 01's
-  mint, one in the fix round's first sweep, five more in its second, a seventh inside the very file
-  that sweep had been editing, and an eighth at the release gate — the TypeScript half of the
-  cross-language venue-transient contract guard, which lives under `tests/` rather than `src/` and
-  so was reached by neither `eslint src/` nor any plan's targeted test run.
+  revoked-key holdings"* while the predicate behind it also withheld `sign_in_failed`. A single
+  cause-NEUTRAL noun, *"keys needing attention"*, now feeds all four call sites and is pinned
+  literally (WR-06); the per-row chips still name the specific state.
+- **A rejected `sign_in_failed` write no longer leaves a broken key looking healthy** (SFH-H2). If
+  the worker deploys before the migration reaches production, the CHECK refuses the new value; the
+  poll now falls back to the pre-167 `error` status with the sign-in copy, logs the refusal at ERROR
+  with its cause (CHECK violation or not), and records which status actually landed.
+- **Every failed status write in the holdings poll handler logs at ERROR** with its traceback, and
+  a classifier that raises is logged at ERROR rather than WARNING (SFH-M3, SFH-L1).
+- **A post-add sync failure no longer leaves every Resync disabled until a reload** (plan 06 R6) —
+  and, after review, no longer clears a DIFFERENT key's live sync either.
+- **A slow but successful sync start is no longer reported as a timeout** (plan-06 review round 2,
+  reproduced with the real poller): the poll budget was spent on reads taken before the sync
+  started.
+- **A delete that removed nothing is no longer treated as a success**: an RLS-filtered zero-row
+  delete dropped the card locally and the key came back on reload. A delete must now remove exactly
+  one row; a key that is already gone is removed as a success; a failed delete renders authored
+  copy and never the raw database message.
+- **A failed re-read after a remedy is visible even while the Add Key form is open.**
+- **The "no prior value was lost" guard could not see the loss it existed to catch** — one healthy
+  status value is a substring of another. Every probe now matches the quoted, cast token with
+  `position()`, and a third `RED-UNDER-M` arm carries exactly the mutation the old shape missed.
+- **Two `ACCESS EXCLUSIVE` statements had no `lock_timeout`** — bound at three seconds with
+  `SET LOCAL`; the migration's constraint lookup is scoped by `conrelid` and its DDL qualified.
+- **`pillLabel`'s switch was non-exhaustive by construction** — a roster test proves every styled
+  status renders a non-empty pill.
+- **EIGHT stale restatements of one census count**, found across four passes and the release gate.
+- **The broken-windows ledger accepts entries again**: an earlier hand edit of its RENDERED table
+  had made `gsd-tools windows append` refuse every new entry. 925 characters of evidence that
+  existed only in that table were lifted into the JSON before the table was regenerated.
+- **The error-contract document's raise-site list was already stale on `main`** (it said six; `main`
+  has 11): it now points at the grep instead of a count, and its tally counts S-27.
 
 ### Root cause
 
-- **One healthy status value is a SUBSTRING of another.** A stale re-typed value list that dropped
-  the most frequently written healthy status still satisfied the guard whose entire job was to prove
-  nothing had been dropped. Reproduced on a throwaway PostgreSQL lane BEFORE the fix: the gate
-  printed `Part 1 OK` and exited 0 over a constraint missing that value. ⭐ A second and quieter
-  ambiguity sat in the same check — `_` is a `LIKE` wildcard, and three of the nine values carry
-  one.
-- **A session `SET` survives `COMMIT`.** The lock bound was added session-scoped in a file with no
-  explicit transaction, so it would have leaked into every later migration in the same
-  `db push --include-all`. The precedent the fix round cited wraps in a transaction this file does
-  not have — a mis-cited analog, caught because review round 2 was briefed to hunt what the fixes
-  broke rather than to re-confirm them.
-- **Adding a subclass BLINDED the gate that guards its parent.** The AST check enforcing "every
-  construction of the verbatim-stamped exception passes a copy constant, never an interpolated
-  exception" scanned exactly one constructor NAME, so the new type opened a hole in it by existing.
-  The gate now derives the SET of such types from the class hierarchy in the same AST, with a
-  per-type anti-vacuity control so a type with zero construction sites cannot report coverage it
-  does not have.
-- ⛔ **The eight stale pins are not eight mistakes; they are one defect with eight faces.** The count
-  is RESTATED in eight places rather than DERIVED in one. Each pass believed it had swept the
-  surface, and each was working from the previous pass's list instead of from a run. ⚠️ **That root
-  cause is NOT fixed by this release** — every restatement is now correct, and the next file to move
-  will make some of them wrong again.
+- **The first cut read "a sign-in was attempted" as "the sign-in was refused".** `_mt5_read` runs
+  `login()` — which runs `initialize()` first — and `account_info()` in one `try`, so the arm could
+  not tell a refused credential from a wedged bridge. The fix marks the answer at the one raise site
+  that carries the terminal's own reply, rather than guessing from the exception type.
+- **A premise in an agent brief became a shipped decision.** The first fix round routed the measured
+  wrong-password case back to the old copy, crediting a D-07 "acceptance" that `167-CONTEXT.md` never
+  recorded — the claim came from the orchestrator's own brief. Round 2 caught it; D-17 now records
+  the decision with its reason and its accepted cost.
+- **The sync marker was not scoped to the attempt it described**, so a failure or a stale poll read
+  belonging to something else could end it. Fixed at the cause (an explicit attempt record) rather
+  than by adding more one-line clears — which is how the first plan-06 fix had introduced the bug.
+- **One healthy status value is a SUBSTRING of another**, and `_` is a `LIKE` wildcard — so a
+  re-typed value list missing the most-written healthy status passed the guard built to catch it.
+- **A session `SET` survives `COMMIT`** — the lock bound would have leaked into every later
+  migration in the same `db push`.
+- **Adding a subclass BLINDED the gate that guards its parent**; the AST gate now derives the set of
+  guarded types from the class hierarchy, with a per-type anti-vacuity control.
+- ⛔ **The eight stale census pins are one defect with eight faces**: the count is RESTATED in eight
+  places rather than DERIVED in one. ⚠️ Not fixed by this release.
 
 ### Tests
 
-- An AST-derived roster over every retry-promising raise site, so a seventh unguarded arm fails BY
-  NAME rather than by count; plus a pin confirming the one note whose retry promise is legitimate
-  (`rate_limited`) keeps it.
-- A permanent SQL gate over the widened `sync_status` CHECK, and a `PILL_STYLES` roster proving no
-  styled status can ship an empty pill.
-- Three pins on the writer: a BEHAVIOURAL one on handler-arm ORDER that drives the real handler and
-  reads the real write (never source-text order), a copy pin asserting against the unknown-status
-  FALLBACK VALUE with a control proving the fallback is live, and an AST roster over every status
-  the module can write.
-- The cross-language venue-transient parity roster gains the minted code, and its negatives arm now
-  pins the SITE each permanent case belongs to rather than comparing a flat list that a new code
-  could dilute.
-- ⭐ **Every guard and pin above was neutered, observed RED, and restored** from a `cp` byte backup
-  verified with `cmp` and a digest. One neuter falsified a test's own docstring: deleting the copy
-  row leaves the end-to-end case GREEN, because the typed handler arm never consults the fallback at
-  all. An over-claimed test is worse than a missing one, and only running the neuter found it.
+- An AST-derived roster over every retry-promising raise site; a pin that `rate_limited` keeps its
+  retry promise.
+- A permanent SQL gate over the widened CHECK; a `PILL_STYLES` roster; a CHECK-parity row for the
+  trusted/untrusted partition.
+- Login-stage refusal cases for every IPC code `-10000…-10005`, the success code, a malformed
+  `last_error`, `initialize()` failures and post-login failures — at the predicate, the wizard router
+  and end to end through the real `Mt5Client`.
+- Test hygiene from review round 2: the login-stage refusal fixtures use a neutral login answer
+  rather than timeout wording (SFH-L3), and the helper's hyphen-minus guard targets the shipped
+  wording (IN-03); `OpenPositionsTable`'s local `isRevoked` is renamed `isUntrusted` (IN-04).
+- `ApiKeyManager.poll.test.tsx`: the real `SyncProgress` and the real poller with fake timers and a
+  held enqueue — the regression the mocked suite let through.
+- ⭐ **Every new guard and pin was neutered, observed RED, and restored** from a `cp` byte backup
+  verified with `cmp` — 23 neuters for plan 06 alone, plus the review rounds'. Mutations that
+  SURVIVED the first suites (an `error` retired to idle, a non-functional state updater, an attempt
+  registered after an await) each became a test.
 - ⭐ **The ratchets moved the right way and nothing was relaxed:** `FILES_FLOOR` 48 → 49,
-  `ARMS_FLOOR` 423 → 426, **`WAIVED_CEILING` still 0**. No floor lowered, no ceiling raised, no
-  timeout relaxed, no waiver added, no red cleared by widening an allowlist.
+  `ARMS_FLOOR` 423 → 426, **`WAIVED_CEILING` still 0**.
+- Final measurement at the ship head: 15,183 TypeScript tests and 6,109 Python tests passed, mypy
+  `--strict` clean over 96 files, tsc and lint clean.
 
 ### Security
 
-- **No venue exception's own text reaches customer-facing copy.** The poll handler derives
-  `human_copy` from the STATUS via `sync_error_copy(status_target, venue)`, never from the
-  exception; the classifier's sanitized output reaches only `compute_jobs.last_error` and the audit
-  metadata, both operator surfaces. That was already structurally true — this release is what makes
-  the confirmation apply to six more failure classes instead of zero.
-- ⛔ **Promoting sFOX's auth-rejection statuses to `revoked` was considered and NOT taken.** A 4xx
-  behind the shared static-egress proxy can be a transient IP or WAF block rather than a dead key,
-  the ambiguity applies identically to two shipped surfaces, and the repo already records that
-  changing it is a founder decision which must move `validate_key` and the finalize probe TOGETHER.
-  Adding a third surface with a different answer is precisely what that note forbids. A `revoked`
-  write is also more consequential here: the daily enqueue skips `revoked` keys, so it would STOP
-  the poll. The measurement and its reasoning are recorded at the sFOX arm in source, not only in a
-  summary that scrolls out of context.
+- **No venue exception's own text reaches customer-facing copy**, and no raw database message
+  reaches the page on the delete path. The delete lookup runs under the owner's own RLS policy: a key
+  someone else owns and a key that does not exist take the same branch, so the page cannot be used
+  to learn whether a key exists.
+- ⛔ **Promoting sFOX's auth-rejection statuses to `revoked` was considered and NOT taken** — a 4xx
+  behind the shared static-egress proxy can be a transient block rather than a dead key, and a
+  `revoked` write would STOP the daily poll.
+- **A gitleaks false positive is scoped, not exempted**: one test helper call is captured by the
+  generic API-key rule as a key assignment. The allowlist entry is limited to that rule, that file
+  AND that exact capture; measured both ways — the false positives clear, and a planted high-entropy
+  literal in the same file is still reported.
+- Threat register: 22 + 7 threats, all closed (`167-SECURITY.md`, `threats_open: 0`).
 
 ### Notes
 
-⚠️ **Known limits, recorded because they are decisions rather than oversights.**
+⚠️ **Known limits and routed work, recorded because they are decisions rather than oversights.**
 
-- **Proactive notification is NOT in this release** (D-14). The 17-day silence is evidence of the
-  gap, not a mandate for an alerting channel; an `api_key_rotation_reminder` cron already exists and
-  a second notifier designed here would collide with it. Deferred to its own phase, named, not lost.
-- **The wider D-16 class is not closed.** `HoldingsTabPanel`'s `keyStatusById` map and
-  `ApiKeyManager.tsx`'s `SyncProgress` still default an unknown status to healthy, so a key whose
-  sign-in was refused can still read as healthy there. D-16 named them out of scope for the plan
-  that closed the two money surfaces; both are mechanical to fix now that the predicate exists.
-- **The word "revoked" survives in `HoldingsTable`'s toggle label and hidden-count footer**, which
-  now describe a wider set than they name. Left unchanged on purpose: the label carries a locked pin
-  on a surface documented as preserved byte-for-byte, and the phase's UI contract authors no copy
-  for these tables. It needs a copy decision, not an executor's guess.
-- **A key's status still does not attach a cause to a specific STRATEGY's factsheet.** The daily
-  poll writes a fact about a KEY and surfaces it on the account-wide keys surface; the
-  factsheet-feeding pipelines write nothing to `api_keys`. The copy is bound to that limit rather
-  than overreaching past it.
-- **Four arms of the retry-copy family could NOT take the classifier guard**, and the reason is
-  structural rather than an omission: each is a plain `if` with no exception in scope, so there is
-  nothing for the classifier to consult. All four are internal data-shape refusals that no retry
-  disposition can affect. Named rather than silently skipped.
-- ⚠️ **The migration's lock bound cannot be proven by the mutation lane.** The lane applies
-  migrations outside a transaction, so `SET LOCAL` warns and binds nothing there, and the gate still
-  passes because an idle throwaway cluster never contends. The bound is real under `db push`, whose
-  per-migration transaction wrap is ASSERTED by an existing migration and was not measured from this
-  checkout — no database command may be run against a remote from here.
-- ⭐ **`gsd-tools windows append` had been refusing EVERY new entry, and is now repaired.** Two
-  failures in sequence, both from one earlier commit that closed a ledger entry by hand-editing the
-  RENDERED TABLE — the one thing `broken-windows.cjs` forbids, since the fenced JSON is its sole
-  source of truth. First `parseLedger` threw on a count drift (frontmatter 50/0/13/63 against
-  entries yielding 51/0/12/63); once that agreed, a BYTE-EXACT comparison of `renderTable(entries)`
-  against the on-disk table failed too. ⛔ **The obvious repair would have destroyed evidence:**
-  that commit had written 925 characters of verified-closed justification — the hours-apart
-  thread-reap readings and their contiguity counts — into a column the renderer emits EMPTY, and it
-  existed nowhere else. It was lifted into the JSON's `reason` field and verified intact BEFORE the
-  table was regenerated from the JSON with the tool's own renderer. The register now parses, its
-  table is byte-equal to its rendering, and the two residuals below are FILED rather than stranded.
-  ⚠️ `workflow.windows_enforce` remains OFF: with 51 entries open it would block every ship.
-- **Two pre-existing visual findings were surfaced and not fixed**, per the phase's own UI contract:
-  two existing pills measure below the 4.5:1 contrast bar, and `AllocatorSyncStatus` and
-  `HoldingsTable` disagree today about red versus amber for the same condition. Out of scope by
-  decision; recorded so the next copy or palette pass inherits them rather than rediscovering them.
-- **Two environment-only reds in a worktree, neither a regression and neither to be "fixed" by
-  relaxing a gate:** the GDPR export coverage hook MEASURE_FAILs because it spawns the repo's pinned
-  `tsx` by absolute path ON PURPOSE and refuses a registry fallback, and two shell-out-heavy corpus
-  cases exceed their own in-file timeouts on a loaded machine. Both pass in CI, which installs at
-  the repo root, and both were re-measured passing in isolation here.
+- **Four checks happen after merge or need the founder** — the migration applying to TEST then
+  PROD, the two measured keys' status after the first daily poll, the live gateway's real
+  wrong-password code, and a visual check at 320px and 200% zoom. Recorded as resolved skips in
+  `167-UAT.md` and booked as TODOS `[167-POSTMERGE-CHECKS]`; none was attempted by an agent.
+  Verification was canonicalized to `passed` with the founder's explicit approval.
+- **The manager sees the credential problem on the strategy's edit page, not on the factsheet**
+  (D-19). An honest "your factsheet stopped because of this credential" cannot be written under
+  D-02/D-03/D-12. A key-level mark on the `/strategies` list rows is allowed and is routed to
+  **Phase 167.2 KEYCARDSYNC**.
+- **Phase 167.2 KEYCARDSYNC also owns** a post-add sync failure during another key's live sync
+  reaching only the console, a change in another tab re-surfacing a withheld success, a stale read
+  after the enqueue (likely on most resyncs of a strategy with a prior result — pre-existing, not
+  worse after this release), and an enqueue that never answers spinning until the route's
+  300-second bound.
+- **Phase 167.1 AUMTRUST owns the headline AUM**, which still counts holdings from keys needing
+  attention. Founder decision: keep the total and flag the untrusted share.
+- **`HoldingsTabPanel`'s status map still defaults an unknown status to healthy** — the rest of the
+  D-16 class is closed.
+- **Proactive notification is NOT in this release** (D-14): an `api_key_rotation_reminder` cron
+  already exists and a second notifier would collide with it.
+- **The migration's lock bound cannot be proven by the mutation lane**, which applies migrations
+  outside a transaction; the bound is real under `db push`.
+- **Two pre-existing visual findings were surfaced and not fixed**: two pills below the 4.5:1
+  contrast bar, and red versus amber disagreeing between two surfaces for the same condition.
+- **A requirements-ID collision was recorded as D-15b before it could corrupt the ledger**, and
+  broken-windows entry 65 (the holdings filter copy) is closed by D-16.
 - **The phase's planning record is tracked alongside the code** — context, research, the UI
-  contract, the pattern map, the validation strategy, five plans and their summaries. It carries
-  what went wrong too: an executor terminated mid-task by a rate limit, whose record was rebuilt by
-  re-measuring at HEAD rather than taken on its word; a requirements-ID collision booked as D-15b
-  before it could corrupt the ledger; and a Python suite result deliberately re-bound to the FINAL
-  tree rather than the mid-plan one it was first measured against.
+  contract, the pattern map, six plans and their summaries, three review reports, the verification,
+  the security register and the UAT. It carries what went wrong too, including the orchestrator's
+  own unsourced brief premise and a phase inserted by hand before it was redone with the tool.
 
 ### Why
 
 ⭐ **A MINOR bump, not a patch.** This release adds a customer-visible state that did not exist —
-new copy on two surfaces, a new wizard terminal, a new wire code — and widens a CHECK constraint
-that auto-applies to production on merge. The releases before it that shipped a phase's worth of
-user-visible behaviour change all moved the same digit; the one that did not was docs-only.
+new copy on three surfaces, a new wizard terminal, a new wire code — and widens a CHECK constraint
+that auto-applies to production on merge. The review fixes and the gap closure ship inside the same
+unreleased version because they complete the same user-visible change rather than adding a second
+one.
 
 ## [0.85.0.1] - 2026-09-21 — the criterion 8 preflight refused, and the refusal is the record
 
