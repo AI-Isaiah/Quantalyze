@@ -4651,8 +4651,11 @@ jobs:
       # B-mypy program: the strict floor started at services/ingestion/ (Phase
       # 19 / BACKBONE-02 / MC-3) and widened to services/ (B-mypy part g,
       # v0.24.15.60), routers/ (part h, v0.24.15.61) and models/ (part i),
-      # all verified 0 against the CI-pinned deps (supabase 2.15.1 /
-      # postgrest 1.0.2). That set was not the whole running service: the
+      # all verified 0 at the time (lineage: then against supabase 2.15.1 /
+      # postgrest 1.0.2, which CI no longer installs). Phase 164.6.1's
+      # 96 -> 100 reading below was taken against the deps
+      # analytics-service/requirements.txt pins today; read the pins there,
+      # not here. That set was not the whole running service: the
       # entry module was never on the command line. Phase 164.6.1
       # (MYPY-MAINPY-01) names the four top-level service modules too:
       # main.py (the `uvicorn main:app` entry), main_worker.py (merged into
