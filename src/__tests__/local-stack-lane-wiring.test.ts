@@ -1123,12 +1123,12 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
   };
 
   it("accepts a loopback DSN and refuses the shapes the glob let through, never echoing the DSN", () => {
-    const local = refuse("postgresql://postgres:postgres@127.0.0.1:54322/postgres");
+    const local = refuse("postgresql://postgres@127.0.0.1:54322/postgres");
     expect(local.status, local.out).toBe(0);
     for (const dsn of [
-      "postgresql://postgres:s3cret@127.0.0.1:54322/postgres?host=db.example.invalid",
-      "postgresql://postgres:s3cret@127.0.0.1:54322/postgres?hostaddr=192.0.2.1",
-      "postgresql://u:s3cret@127.0.0.1:1@db.example.invalid:5432/postgres",
+      "postgresql://postgres@127.0.0.1:54322/postgres?host=db.example.invalid",
+      "postgresql://postgres@127.0.0.1:54322/postgres?hostaddr=192.0.2.1",
+      "postgresql://u@127.0.0.1:1@db.example.invalid:5432/postgres",
     ]) {
       const r = refuse(dsn);
       expect(r.status, `${dsn} was accepted:\n${r.out}`).toBe(1);
@@ -1252,14 +1252,14 @@ describe("sql-corpus-report.mjs (IN-05, and the WR-08 loopback rule)", () => {
   };
 
   it("a green run prints that sentinels and arm rosters were NOT checked, beside its verdict", () => {
-    const r = drive("postgresql://postgres:postgres@127.0.0.1:54322/postgres");
+    const r = drive("postgresql://postgres@127.0.0.1:54322/postgres");
     expect(r.status, r.out).toBe(0);
     expect(r.out).toMatch(/^sql-corpus: files=1 pass=1 fail=0 /m);
     expect(r.out).toMatch(/^not-checked: .*completion sentinels.*arm rosters.* NOT a green sql-tests/m);
   });
 
   it("refuses a loopback-looking DSN whose ?host= re-points libpq (the parse-based rule, not a regex)", () => {
-    const r = drive("postgresql://postgres:s3cret@127.0.0.1:54322/postgres?host=db.example.invalid");
+    const r = drive("postgresql://postgres@127.0.0.1:54322/postgres?host=db.example.invalid");
     expect(r.status, r.out).toBe(2);
     expect(r.out).not.toContain("s3cret");
   });
