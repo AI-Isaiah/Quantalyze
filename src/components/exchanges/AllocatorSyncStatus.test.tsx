@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { AllocatorSyncStatus } from "./AllocatorSyncStatus";
+import { PILL_STYLES } from "./allocator-sync-pill-styles";
 
 /**
  * Phase 06 Plan 04 Task 1 — AllocatorSyncStatus sub-component test suite.
@@ -190,6 +191,58 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
     expect(helper.textContent).toContain("HTTP 502 from binance");
   });
 
+  it("renders 'Sign-in failed' pill + authored helper (D-05/D-11 arm B)", () => {
+    render(
+      <AllocatorSyncStatus
+        syncStatus="sign_in_failed"
+        syncError={null}
+        lastSyncAt={null}
+        exchange="binance"
+      />,
+    );
+    const pill = screen.getByTestId("allocator-sync-pill");
+    expect(pill.textContent).toBe("Sign-in failed");
+    const helper = screen.getByTestId("allocator-sync-helper");
+    expect(helper.textContent).toBe(
+      "Update this account's credentials \u2014 they may have changed.",
+    );
+    // Hyphen-minus guard on the SHIPPED wording (167 R2 IN-03). It used to
+    // target "credentials - the saved", an intermediate wording that never
+    // shipped, so it could not fail whatever the dash was.
+    expect(helper.textContent).not.toContain("credentials - they");
+    // 167 review round 1 / WR-03: the remedy must not name "Reconnect". That
+    // control re-runs the SAVED credential this sign-in just failed with; the
+    // fixing control is "Update password". A reword back to "Reconnect" reds.
+    expect(helper.textContent).not.toMatch(/reconnect/i);
+    // aria-live contract: helper line is the announcement channel; the pill
+    // itself carries no aria-live.
+    expect(helper).toHaveAttribute("role", "status");
+    expect(helper).toHaveAttribute("aria-live", "polite");
+    expect(pill).not.toHaveAttribute("aria-live");
+  });
+
+  // ⭐ Non-vacuity control (T-167-08 / D-05): the whole point of the
+  // authored helper is that it IGNORES syncError. Without this control the
+  // case above cannot fail the way the shipped defect failed — a
+  // pass-through implementation would still print "Sign-in failed" and a
+  // sentence, just the WRONG one.
+  it("sign_in_failed helper IGNORES syncError — non-vacuity control", () => {
+    render(
+      <AllocatorSyncStatus
+        syncStatus="sign_in_failed"
+        syncError="MT5 terminal unreachable \u2014 sync will retry automatically."
+        lastSyncAt={null}
+        exchange="mt5"
+      />,
+    );
+    const helper = screen.getByTestId("allocator-sync-helper");
+    expect(helper.textContent).toBe(
+      "Update this account's credentials \u2014 they may have changed.",
+    );
+    expect(helper.textContent).not.toContain("MT5 terminal unreachable");
+    expect(helper.textContent).not.toContain("will retry automatically");
+  });
+
   it("renders '{exchange title-case} cooldown remaining' helper for rate_limited", () => {
     render(
       <AllocatorSyncStatus
@@ -315,6 +368,27 @@ describe("AllocatorSyncStatus — pill color class map", () => {
     const pill = screen.getByTestId("allocator-sync-pill");
     expect(pill.className).toMatch(/bg-negative\/10/);
     expect(pill.className).toMatch(/text-negative/);
+  });
+
+  it("sign_in_failed pill uses the opaque amber trio and NEVER the idle fallback classes (T-167-08)", () => {
+    render(
+      <AllocatorSyncStatus
+        syncStatus="sign_in_failed"
+        syncError={null}
+        lastSyncAt={null}
+        exchange="binance"
+      />,
+    );
+    const pill = screen.getByTestId("allocator-sync-pill");
+    expect(pill.className).toMatch(/bg-warning-bg/);
+    expect(pill.className).toMatch(/\btext-warning\b/);
+    expect(pill.className).toMatch(/border-warning-border/);
+    // Guard against the PILL_STYLES unknown-key fallback (T-167-08): a
+    // partial rollout must NEVER render this broken-key state as the
+    // neutral idle style.
+    expect(pill.className).not.toMatch(/bg-\[#F1F5F9\]/);
+    expect(pill.className).not.toMatch(/text-text-secondary/);
+    expect(pill.getAttribute("data-sync-status")).toBe("sign_in_failed");
   });
 
   it("falls back to idle neutral pill for unknown sync_status (including 'computing' and null)", () => {
@@ -550,4 +624,61 @@ describe("AllocatorSyncStatus — motion + spinner respects prefers-reduced-moti
     expect(svg!.getAttribute("class") ?? "").toMatch(/motion-safe:animate-spin/);
     expect(svg!.getAttribute("aria-hidden")).toBe("true");
   });
+});
+
+/**
+ * ROSTER — every status that has a PILL_STYLES row must also have a `switch`
+ * case that produces a visible label.
+ *
+ * ⛔ THE DEFECT THIS EXISTS TO CATCH, and why the compiler cannot.
+ * `PILL_STYLES` is typed `Record<string, …>`, so `keyof typeof PILL_STYLES`
+ * widens to `string`; `normalized` is therefore a `string` and the component's
+ * `switch (normalized)` is NON-EXHAUSTIVE BY CONSTRUCTION. `pillLabel` is
+ * declared `let pillLabel: React.ReactNode`, which admits `undefined`, so no
+ * definite-assignment error fires either. A status added to `PILL_STYLES` but
+ * NOT to the switch therefore type-checks, lints, and renders a correctly
+ * COLOURED, completely EMPTY pill — the silent failure, in the surface whose
+ * whole job is telling an allocator that a key is broken.
+ *
+ * ⛔ THE ROSTER IS DERIVED FROM THE LIVE MAP, NEVER HAND-LISTED. A literal
+ * array here would be a second list that can fall out of step with the first,
+ * which is the very defect being guarded — the next status would be missing
+ * from BOTH the switch and the roster, and this test would stay green.
+ * `Object.keys(PILL_STYLES)` means adding a style row is what arms the guard.
+ */
+describe("AllocatorSyncStatus — PILL_STYLES roster is fully labelled", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-19T12:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Non-vacuity: if the map were ever emptied or the import went undefined,
+  // the `it.each` below would run zero cases and report green over nothing.
+  it("walks a non-empty roster", () => {
+    expect(Object.keys(PILL_STYLES).length).toBeGreaterThan(0);
+  });
+
+  it.each(Object.keys(PILL_STYLES))(
+    "status %s renders a non-empty pill label",
+    (status) => {
+      render(
+        <AllocatorSyncStatus
+          syncStatus={status}
+          syncError={null}
+          lastSyncAt={null}
+          exchange="binance"
+        />,
+      );
+      const pill = screen.getByTestId("allocator-sync-pill");
+      // The status must round-trip: a key present in PILL_STYLES must never be
+      // normalised away to the `idle` fallback, or the assertion below would
+      // be measuring the fallback's label instead of this status'.
+      expect(pill.getAttribute("data-sync-status")).toBe(status);
+      expect((pill.textContent ?? "").trim()).not.toBe("");
+    },
+  );
 });

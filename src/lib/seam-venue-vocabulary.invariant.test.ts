@@ -778,6 +778,14 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   "SCORING_FAILED",
   "SERVICE_KEY_ABSENT",
   "SERVICE_KEY_UNCONFIGURED",
+  // 167-CREDTRUST / plan 01 (D-05, D-07) — minted by
+  // `_validate_mt5_key_probe`'s narrowed `except Mt5ClientError` transient
+  // arm (routers/exchange.py). ⭐ THIS IS WHERE 167 IS BIGGER THAN ITS
+  // ANALOG (164.5.4-02 routed an EXISTING wire code and never touched this
+  // file): this phase MINTS a Python-emitted code, so the set comparison
+  // reds BY NAME without this row. Takes a KEY_SIGN_IN_FAILED verdict row in
+  // `VENUE_WIRE_CODE_TO_VERDICT` (wizardErrors.ts).
+  "SIGN_IN_FAILED",
   "SIMULATION_FAILED",
   "TRADE_SCOPE",
   "UNAUTHENTICATED",
@@ -815,8 +823,17 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * what this phase exists to close, and under-reach is invisible to every
  * absence assertion in this file — the hand-typed roster above, the reach pin
  * and the both-shapes assertion are what stand against it.
+ *
+ * 24 -> 25 (167-CREDTRUST / plan 01): 0.6 × 42 measured codes (`SIGN_IN_FAILED`
+ * arrived) = 25.2, floored to 25 — same rule. ⚠️ THIS ASSERTION IS
+ * `toBeGreaterThanOrEqual`, so 24 would have kept passing silently at 42
+ * members and NOTHING would have told the next reader to move it — moved
+ * anyway per the file's own stated rule, in the same commit as the roster
+ * row. The lineage prose above this constant's neighbours had already
+ * drifted once at 41 members (it said "0.6 × 40"); corrected to 42 here
+ * rather than left to drift a second time.
  */
-const DERIVED_FLOOR = 24;
+const DERIVED_FLOOR = 25;
 
 /**
  * ⭐ THE REACH PIN — hand-typed, because today nothing else asserts WHERE the

@@ -622,8 +622,23 @@ describe("corpus re-derivation", () => {
     // database-identity marker names TEST and measures the allow-list constraint
     // where nobody has hand-set a marker. No file joined the annotated set, so
     // FILES_FLOOR and the 48/75 coverage ratio are unchanged.
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2): 423 -> 425,
+    // and the 48/75 coverage ratio MOVES to 49/76 — a NEW file,
+    // supabase/tests/test_api_keys_sync_status_sign_in_failed.sql, with TWO new
+    // arms (the D-11 arm B CHECK-widening gate). MEASURED over `scanCorpus` at
+    // this commit (the fast static re-derivation, no lane): `filesTotal 76`,
+    // `annotated 49`, `totalAnchored 425`, `twins 425`, `waivers 0`.
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 425 ->
+    // 426. ONE new arm, 3, in the now-already-annotated
+    // test_api_keys_sync_status_sign_in_failed.sql — the arm carrying the
+    // mutation that file's pre-fix SUBSTRING probe passed clean (drop
+    // 'complete', keep 'complete_with_warnings'). No file joined the annotated
+    // set, so FILES_FLOOR and the 49/76 coverage ratio are UNCHANGED.
+    // MEASURED over `scanCorpus` at this commit (the fast static re-derivation,
+    // no lane): `filesTotal 76`, `annotated 49`, `totalAnchored 426`,
+    // `twins 426`, `waivers 0`.
     const totalAnchored = annotated.reduce((n, f) => n + f.prose, 0);
-    expect(totalAnchored).toBe(423);
+    expect(totalAnchored).toBe(426);
   });
 });
 
@@ -1573,7 +1588,13 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  arm SHAPE 1                  exit   3  RED (identity ok)  (1.7s)",
     "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
     "",
-    "coverage: files 48/75",
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2): 48/75 ->
+    // 49/76 — the arrival of supabase/tests/test_api_keys_sync_status_sign_in_
+    // failed.sql (D-11 arm B CHECK-widening gate, two arms). The paired
+    // arms:/biting:/lane-invocations: move and the new per-file row are below;
+    // see FILES_FLOOR / ARMS_FLOOR in scripts/mutation-runner/run.mjs for the
+    // full measured run this fixture is copied from.
+    "coverage: files 49/76",
     // 164.4-01: the exclusion, named. Two synthetic basenames rather than the
     // real 27 — the arms below mutate the COUNT against the NAMES, and a
     // fixture carrying the live corpus would have to move on every batch.
@@ -1730,9 +1751,41 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // and refused on any disagreement, so a `.replace()` whose pattern silently
     // stopped matching — which would return the GREEN log UNCHANGED and let a
     // RED arm pass on a log it never mutated — could not happen quietly.
-    "arms: 423/423/0   (executed/annotated/waived)",
-    "biting: 423   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 423   (arm lanes actually spawned — tallied inside runLane, independent of the 423 the verdict loop counted; plus 48 baseline / 48 restore leg(s))",
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2): 423 -> 425,
+    // and TWO rows ADDED rather than any existing row moving — the new file
+    // test_api_keys_sync_status_sign_in_failed.sql's own two arms (1: revert
+    // the widened CHECK to the pre-migration 8-value list; 2: re-type from a
+    // stale list that lost 'revoked' while still admitting 'sign_in_failed').
+    // `coverage: files 49/76` above and the `plus 49 baseline / 49 restore
+    // leg(s)` half of the lane-invocations line below both move because a NEW
+    // file joined the annotated set — unlike every prior currency note in this
+    // block, which moved arms without moving files. MEASURED via a full lane
+    // run, `node scripts/mutation-runner/run.mjs`: `arms: 425/425/0`,
+    // `biting: 425`, `lane-invocations: 425` (the two independent tallies
+    // AGREE), `✅ No defects. Every annotated arm bit its own arm first.`,
+    // exit 0. THE HAZARD IS STILL THE SUBSTITUTION, not the number — see the
+    // 2026-09-17 note above for the full argument. THE THREE DELIBERATE
+    // MISMATCHES below are UNCHANGED by this edit — this addition is a new
+    // row, not a re-numbering of any existing row.
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 425 ->
+    // 426, and NO row is added — the EXISTING
+    // test_api_keys_sync_status_sign_in_failed.sql row moves 2 -> 3, because
+    // arm 3 landed in a file this fixture already listed. That is the opposite
+    // of the entry directly above, and the distinction is the whole reason
+    // `plus 49 baseline / 49 restore leg(s)` does NOT move here: those legs
+    // count FILES, and no file joined the annotated set.
+    // MEASURED via a full lane run, `node scripts/mutation-runner/run.mjs`:
+    // `coverage: files 49/76`, `arms: 426/426/0`, `biting: 426`,
+    // `lane-invocations: 426` (the two independent tallies AGREE),
+    // `✅ No defects. Every annotated arm bit its own arm first.`, exit 0.
+    // ⛔ THE HAZARD IS STILL THE SUBSTITUTION, not the number. Every
+    // `.replace()` below was re-derived and moved INDIVIDUALLY — a blanket
+    // 425 -> 426 would have silently destroyed the THREE DELIBERATE MISMATCHES
+    // (lane-invocations 426, biting 426 and the row-sum) by turning each into
+    // an agreement, leaving those arms passing on a log they no longer mutate.
+    "arms: 426/426/0   (executed/annotated/waived)",
+    "biting: 426   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 426   (arm lanes actually spawned — tallied inside runLane, independent of the 426 the verdict loop counted; plus 49 baseline / 49 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -1774,6 +1827,17 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_analytics_service_settings_and_vault_tick.sql: sections 14 / judged 14 / annotated 14 / waived 0 / biting 14",
     "  file test_api_keys_exchange_not_user_writable.sql: sections 4 / judged 4 / annotated 4 / waived 0 / biting 4",
     "  file test_api_keys_insert_not_client_writable.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
+    // ⭐ ADDED 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2) — the D-11
+    // arm B CHECK-widening gate: arm 1 (revert to the pre-migration 8-value
+    // list) and arm 2 (stale re-type losing 'revoked' while still admitting
+    // 'sign_in_failed'). No mismatch — sections/judged/annotated/biting all
+    // agree at 2, unlike the deliberate mismatches elsewhere in this fixture.
+    // ⭐ MOVED 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix), 2 -> 3 —
+    // arm 3, the prefix-family mutation (drop 'complete', keep
+    // 'complete_with_warnings') that this file's pre-fix substring probe passed
+    // clean. Still no mismatch: all four columns agree at 3. MEASURED off the
+    // full lane run's own per-file line.
+    "  file test_api_keys_sync_status_sign_in_failed.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
     "  file test_api_keys_venue_identity_uniq.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
     "  file test_capital_ownership_allocation_guard.sql: sections 10 / judged 10 / annotated 10 / waived 0 / biting 10",
     "  file test_capital_ownership_column.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
@@ -1817,7 +1881,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_wizard_composite_fence.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_wizard_composite_members.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_wizard_session_idempotency.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
-    "per-arm lane time: mean 2.0s over 423 arm run(s)",
+    "per-arm lane time: mean 2.0s over 426 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -1827,7 +1891,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     const r = runCountRecheck(GREEN_LOG);
     expect(r.status, r.out).toBe(0);
     expect(r.out).toContain("the runner's two tallies agree");
-    expect(r.out).toContain("423 arm lane(s) spawned");
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2): 423 -> 425.
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 425 -> 426.
+    expect(r.out).toContain("426 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2020,7 +2086,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(extra).not.toBe(GREEN_LOG);
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("printed 49 per-file row(s) but reported 48 annotated file(s)");
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2): 49/48 ->
+    // 50/49 — GREEN_LOG now carries 49 real per-file rows (one more, the new
+    // gate file), so the injected 50th row is caught against a numerator of 49.
+    expect(r.out).toContain("printed 50 per-file row(s) but reported 49 annotated file(s)");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2029,8 +2098,16 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(short, "the mutation must actually change the log").not.toBe(GREEN_LOG);
     const r = runCountRecheck(short);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("rows sum to 422 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 423");
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2): 422/423 ->
+    // 424/425.
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix):
+    // 424/425 -> 425/426. BOTH halves move, and the GAP OF ONE is the point —
+    // the `biting 45 -> 44` mutation above removes exactly one biting arm, so
+    // the row sum must stay exactly one BELOW the aggregate. Moving only one of
+    // these two numbers would either close the gap (the arm stops failing) or
+    // widen it to two (it fails for the wrong reason).
+    expect(r.out).toContain("rows sum to 425 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 426");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2045,24 +2122,37 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
   });
 
   it("RED: the parse-only shape — 361 executed claimed, 0 lanes counted — fails naming all three numbers", () => {
-    const severed = GREEN_LOG.replace(/^lane-invocations: 423 /m, "lane-invocations: 0 ");
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2): 423 -> 425
+    // in every regex/assertion in this block.
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 425 ->
+    // 426 in the NEEDLE and in `executed`/`biting`. The severed value stays 0 —
+    // it is the parse-only shape being simulated, not a count.
+    const severed = GREEN_LOG.replace(/^lane-invocations: 426 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("GATE failing, not the corpus");
-    expect(r.out).toContain("executed=423 lane-invocations=0 biting=423");
+    expect(r.out).toContain("executed=426 lane-invocations=0 biting=426");
     expect(r.out).not.toContain("two tallies agree");
   });
 
   it("RED: a single unaccounted lane also fails — the relation is exact", () => {
-    const extra = GREEN_LOG.replace(/^lane-invocations: 423 /m, "lane-invocations: 424 ");
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): the
+    // NEEDLE moves 425 -> 426 and the DELIBERATE MISMATCH moves 426 -> 427.
+    // ⛔ Both halves, or neither. Moving only the needle would substitute
+    // `lane-invocations: 426` for `426` — a NO-OP that yields the GREEN log
+    // unchanged, and this arm would then assert an exit 1 that never comes. It
+    // has no `.not.toBe(GREEN_LOG)` calibration; that `expect(status).toBe(1)`
+    // IS the calibration, per the 2026-09-20 note above.
+    const extra = GREEN_LOG.replace(/^lane-invocations: 426 /m, "lane-invocations: 427 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("executed=423 lane-invocations=424 biting=423");
+    expect(r.out).toContain("executed=426 lane-invocations=427 biting=426");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 423 /m, "lane-invocations: abc ");
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 425 -> 426.
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 426 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -2081,7 +2171,12 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // longer matches returns the GREEN log unchanged, and the RED arm then
     // passes on a log it never mutated. The `.not.toBe(GREEN_LOG)` assertions
     // beside each one exist for exactly that, and they are what caught this.
-    const waived = GREEN_LOG.replace(/^arms: 423\/423\/0 /m, `arms: 423/423/${WAIVED_CEILING + 1} `);
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2): 423 -> 425.
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 425 ->
+    // 426 in BOTH the needle and the replacement. Only the W field differs
+    // between them — executed and biting are untouched on purpose, so nothing
+    // but the waiver count can be what fires.
+    const waived = GREEN_LOG.replace(/^arms: 426\/426\/0 /m, `arms: 426/426/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -2095,14 +2190,22 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // Calibration for the extract-and-run harness itself: if the extraction
     // returned an empty or truncated block, these established arms would not
     // fire either, and the GREEN arm above would be passing on nothing.
-    const zero = GREEN_LOG.replace(/^arms: 423\/423\/0 /m, "arms: 0/423/0 ");
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2): 423 -> 425
+    // in both regexes/assertions below.
+    // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 425 ->
+    // 426 throughout, moved INDIVIDUALLY. The executed-is-zero arm keeps its
+    // literal 0 (that is the defect, not a count) and moves only the annotated
+    // field; the biting-above-executed arm moves its NEEDLE 425 -> 426 and its
+    // DELIBERATE MISMATCH 426 -> 427, because a mismatch that becomes an
+    // agreement is a no-op substitution and stops exercising anything.
+    const zero = GREEN_LOG.replace(/^arms: 426\/426\/0 /m, "arms: 0/426/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
-    const spliced = GREEN_LOG.replace(/^biting: 423 /m, "biting: 424 ");
+    const spliced = GREEN_LOG.replace(/^biting: 426 /m, "biting: 427 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
-    expect(s.out).toContain("biting (424) exceeds executed (423)");
+    expect(s.out).toContain("biting (427) exceeds executed (426)");
   });
 });
 

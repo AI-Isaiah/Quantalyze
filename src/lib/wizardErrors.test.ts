@@ -2071,8 +2071,26 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * never counted off the table. The comment at the head of this file argues
    * why at length: an expectation built by reading the subject is an oracle
    * that cannot fail.
+   *
+   * ⚠️ 94 → 95 (167-CREDTRUST / plan 01, D-05, D-07). ONE entry —
+   * `KEY_SIGN_IN_FAILED`, the honest answer to the wire code the narrowed
+   * MT5 `except Mt5ClientError` transient tail raises, which until now had
+   * no verdict row and reached the founder as the `KEY_NETWORK_TIMEOUT`
+   * terminal with a Retry control that would re-run the identical validate
+   * against a wedged terminal.
+   *
+   * THIS GUARD IS THE DESTRUCTIVE-ACTION SCAN, so its question is "does the
+   * new entry fall INSIDE the population this scan walks?", and the
+   * reasoning was re-run over the entry BEFORE the number moved:
+   *   · the new entry's `actions` are `["request_call", "expand_log"]`;
+   *   · `DESTRUCTIVE_ACTIONS` above holds exactly ONE member, `start_fresh`;
+   *   · neither action is that member, so the entry sits OUTSIDE the scanned
+   *     population by construction and the destructive class below is
+   *     UNCHANGED at four members.
+   * 95 was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 95 to be
+   * 94"), never counted off the table.
    */
-  const EXPECTED_TABLE_SIZE = 94;
+  const EXPECTED_TABLE_SIZE = 95;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2616,8 +2634,26 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * ⚠️ AND THE BASELINE WAS RE-MEASURED AT HEAD BEFORE IT MOVED — 93 is what
    * 164.5.3-02 left, and 94 was READ OFF THE TWIN GUARD'S FAILURE MESSAGE
    * ("expected 94 to be 93") rather than counted off the table.
+   *
+   * ⚠️ 94 → 95 (167-CREDTRUST / plan 01, D-05, D-07), for `KEY_SIGN_IN_FAILED`.
+   * THIS guard is the banned-claims honesty scan, so its question is a
+   * different one from its twin's, and the entry was walked against all four
+   * FORBIDDEN fragments by hand — title, cause and every fix line — BEFORE
+   * the number moved:
+   *   · "been notified" — ABSENT. The fourth fix line names who to email;
+   *     it says nobody has been told yet, the opposite claim.
+   *   · "we fetched your trades" — ABSENT. The entry says nothing about any
+   *     fetch or trade stage; it is about a sign-in, not a sync.
+   *   · "wizard_session_id idempotency" — ABSENT. The entry names no
+   *     column, no env variable and no internal subsystem.
+   *   · "data is unchanged" — ABSENT, and deliberately so: the entry makes
+   *     NO storage claim in either direction (167-UI-SPEC § Open Question 5
+   *     — whether the validate arm stores anything was not measured for
+   *     this arm, so the copy does not assert it).
+   * 95 was READ OFF THE TWIN GUARD'S FAILURE MESSAGE ("expected 95 to be
+   * 94") rather than counted off the table.
    */
-  const EXPECTED_TABLE_SIZE = 94;
+  const EXPECTED_TABLE_SIZE = 95;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -5848,5 +5884,141 @@ describe("[164.5.4-02 / D-03] an unreadable stored key routes to a remedy, with 
       "the copy tells the user to retry while the envelope offers no control " +
         "to do it with — the two halves of this fix have to agree",
     ).not.toMatch(/try again/);
+  });
+});
+
+/**
+ * ⭐ 167-CREDTRUST / D-05, D-07 — THE WIZARD HALF OF THE FIX, pinned by the
+ * MECHANISM that produces it rather than by restating a table. Same four
+ * techniques as the [164.5.4-02 / D-03] describe above; new subject.
+ *
+ * THE DEFECT, measured before the fix. `routers/exchange.py`'s MT5
+ * `except Mt5ClientError` transient tail answered `424 NETWORK_UNAVAILABLE`;
+ * `VENUE_WIRE_CODE_TO_VERDICT` mapped that to `KEY_NETWORK_TIMEOUT`, whose
+ * `actions` include `clear_and_retry` — a member of `RECOVERABLE_ACTIONS` —
+ * so `buildEnvelope` derived `recoverable: true` and `ErrorEnvelope` rendered
+ * a Retry against a terminal a wrong password may have wedged behind a modal
+ * login dialog (D-08). The Retry was rendered by TypeScript, not by the
+ * Python detail string (D-05) — a Python-only change would have been
+ * user-invisible.
+ */
+describe("[167-01 / D-05, D-07] KEY_SIGN_IN_FAILED — an ambiguous MT5 sign-in failure routes to a remedy, with no Retry", () => {
+  /**
+   * The EXACT shape the seam client attaches to a thrown
+   * `AnalyticsUpstreamError` for a `VenueTransientHTTPException` body: a
+   * plain error carrying `seamCode` as an own data property, read with
+   * `typeof` — never `instanceof` — so it survives every wholesale seam
+   * mock, mirroring the [164.5.4-02 / D-03] describe's `rotateSecretThrow`.
+   */
+  function venueTransientThrow(message: string, seamCode: string): Error {
+    return Object.assign(new Error(message), { seamCode });
+  }
+
+  /**
+   * Byte-identical to the `detail=` argument at the Python emitter
+   * (`_validate_mt5_key_probe`'s `except Mt5ClientError` transient tail,
+   * analytics-service/routers/exchange.py's `SIGN_IN_FAILED_DETAIL`). Typed
+   * here as a literal so the "without the row this lands somewhere else"
+   * control below is a measurement rather than a claim.
+   */
+  const SIGN_IN_FAILED_DETAIL_LITERAL =
+    "The sign-in attempt did not complete, and the venue did not confirm the credential.";
+
+  it("the wire code routes to the minted member — NOT UNKNOWN, NOT KEY_NETWORK_TIMEOUT, NOT KEY_AUTH_FAILED", () => {
+    const verdict = classifyKeyValidationError(
+      venueTransientThrow(SIGN_IN_FAILED_DETAIL_LITERAL, "SIGN_IN_FAILED"),
+    );
+
+    expect(verdict).toEqual({ code: "KEY_SIGN_IN_FAILED", status: 424 });
+
+    // ⭐ THE THREE WRONG ANSWERS, NAMED — the class D-07 rules out on CAUSE
+    // grounds, asserted against rather than merely not-produced.
+    expect(
+      verdict.code,
+      "fell back to the terminal that admits knowing nothing, for a fault " +
+        "the service had classified precisely",
+    ).not.toBe("UNKNOWN");
+    expect(
+      verdict.code,
+      "KEY_NETWORK_TIMEOUT renders a Retry (clear_and_retry) against a " +
+        "terminal that may be wedged behind a modal login dialog — the " +
+        "harmful action D-08 exists to suppress",
+    ).not.toBe("KEY_NETWORK_TIMEOUT");
+    expect(
+      verdict.code,
+      "KEY_AUTH_FAILED asserts the exchange REJECTED the credentials — a " +
+        "confident claim classify_mt5_login_error deliberately refuses to " +
+        "make on this arm",
+    ).not.toBe("KEY_AUTH_FAILED");
+  });
+
+  it("it is the ROW that moved the verdict — the same sentence with no wire code still lands on UNKNOWN", () => {
+    // The control that makes the case above falsifiable. The detail string
+    // was swept clean of every needle the substring cascade matches on (see
+    // SIGN_IN_FAILED_DETAIL's docblock in services/exchange.py), so the
+    // identical human sentence carrying NO machine code is exactly what a
+    // founder would have gotten without the row — proof it was the ROW, not
+    // a reworded cascade branch, that moved the verdict above.
+    expect(
+      classifyKeyValidationError(new Error(SIGN_IN_FAILED_DETAIL_LITERAL)),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("the envelope the browser receives is NOT recoverable, so no Retry control renders", () => {
+    const envelope = buildEnvelope("KEY_SIGN_IN_FAILED", "cid-167-01");
+
+    expect(
+      envelope.recoverable,
+      "a Retry against this arm re-runs the identical validate against a " +
+        "terminal a wrong password may have wedged behind a modal login " +
+        "dialog — repeated attempts against that one shared terminal are " +
+        "the operation implicated in wedging and account eviction " +
+        "(164.6.5 / 164.6.6). Offering it IS the harmful action D-08 names.",
+    ).toBe(false);
+
+    // NON-VACUITY: the derivation really can answer `true`.
+    expect(
+      buildEnvelope("KEY_NETWORK_TIMEOUT", "cid-167-01").recoverable,
+      "the nearest member by wire vocabulary is still recoverable — if this " +
+        "flipped, the contrast the case above rests on is gone and so is " +
+        "the derivation",
+    ).toBe(true);
+  });
+
+  it("MT5 renders all four fix bullets; every other venue and no venue render three", () => {
+    const mt5 = formatKeyError("KEY_SIGN_IN_FAILED", { venue: "mt5" });
+    expect(mt5.fix).toHaveLength(4);
+    expect(mt5.fix.join(" ")).toContain("investor (read-only) password");
+
+    const binance = formatKeyError("KEY_SIGN_IN_FAILED", { venue: "binance" });
+    expect(binance.fix).toHaveLength(3);
+    expect(
+      binance.fix.join(" "),
+      "the MT5-specific bullet must not reach a venue we know is not MT5",
+    ).not.toContain("investor (read-only) password");
+
+    const unnamed = formatKeyError("KEY_SIGN_IN_FAILED");
+    expect(
+      unnamed.fix,
+      "absent venue must SUPPRESS the venue-specific bullet — a bullet " +
+        "naming one venue, rendered with the venue unknown, is a specific " +
+        "claim about a user we cannot identify (REQUIRES_MT5's own rule)",
+    ).toHaveLength(3);
+  });
+
+  it("the copy is honest about uncertainty and asserts neither banned claim", () => {
+    const copy = formatKeyError("KEY_SIGN_IN_FAILED");
+    const blob = `${copy.title} ${copy.cause} ${copy.fix.join(" ")}`.toLowerCase();
+
+    expect(blob).toContain("we will not guess between them");
+    // ⛔ NEITHER claim D-07 rules out for this arm.
+    expect(
+      blob,
+      "must not assert the venue REJECTED the credentials — KEY_AUTH_FAILED's claim",
+    ).not.toContain("rejected these credentials");
+    expect(
+      blob,
+      "must not assert a fault on our side of the store — KEY_MUST_BE_RECONNECTED's claim",
+    ).not.toContain("fault on our side");
   });
 });

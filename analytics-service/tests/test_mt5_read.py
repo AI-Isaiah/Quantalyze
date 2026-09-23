@@ -223,10 +223,16 @@ def test_login_rejection_passes_through_unchanged() -> None:
     )
     session = _session(transport)
 
+    from services.mt5_client import Mt5LoginRefusedError
+
     with pytest.raises(Mt5ClientError) as excinfo:
         read_mt5_deal_ledger(session, now=_NOW)
 
-    assert type(excinfo.value) is Mt5ClientError, (
+    # Phase 167 CR-01 — `Mt5Client.login` itself now raises its login-stage
+    # marker subclass for a falsy sign-in, so "unchanged" means exactly THAT
+    # type reaches the caller: the helper neither re-wraps it nor erases the
+    # stage marker by re-raising the base class.
+    assert type(excinfo.value) is Mt5LoginRefusedError, (
         "the helper must not re-signal a login rejection as some other type; "
         f"got {type(excinfo.value).__name__}"
     )

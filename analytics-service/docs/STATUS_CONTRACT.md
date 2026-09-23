@@ -140,6 +140,22 @@ TypeScript caller and is closed on class-integrity grounds only. (Re-derive thes
 `grep -n "raise VenueTransientHTTPException"` before trusting them — they move whenever
 anything above them in either router does.)
 
+⚠️ **The enumeration above is STALE and is kept as lineage** (167 review IN-01): measured
+2026-09-22, `grep -c "raise VenueTransientHTTPException"` finds 11 in `routers/exchange.py`
+on `main` and 12 at the 167 head — not six. Re-derive by grep; never trust a count here.
+
+**A second raise in the MT5 transient-client-error arm (167-CREDTRUST plan 01, S-27), cited
+BY SYMBOL rather than by line number** — it SPLITS that existing arm (the MT5
+transient-client-error entry in the stale enumeration above) rather than adding a new
+failure: `routers/exchange.py`'s
+`_validate_mt5_key_probe()`, the narrowed transient tail of its
+`except Mt5ClientError` arm — code `SIGN_IN_FAILED`, `recoverable=False`. Reached from
+the SAME `POST /api/validate-key` path AND from `/internal/keys/{id}/rotate-secret`
+(`routers/internal.py`'s `rotate_key_secret`, whose `_validate_mt5_key` call is a thin
+bracket over the same probe function) — the first site in this class to be reachable from
+two endpoints. The arm's other raise keeps the pre-167 `NETWORK_UNAVAILABLE`,
+`recoverable=True` answer for every fault that is not a login-stage refusal (167 WR-01).
+
 The class is a **CALLER-class 4xx by construction** and refuses anything outside
 `400 <= status < 500`: it carries no `dependency`, no `Retry-After` and no
 `correlation_id`, so a 5xx in this shape would violate R-2 and mis-key 140.2's
@@ -355,13 +371,20 @@ nullified if 140.2 gets it wrong.
 
 ---
 
-## 7. The full S-01…S-26 site map
+## 7. The full S-01…S-27 site map
 
 The authoritative enumeration of every 5xx-capable site reachable from the seam.
 `140.2` can diff its assumptions against this table.
 
+⚠️ **S-27 is the first row that is never 5xx** — `VenueTransientHTTPException`'s
+CALLER-class construction guard refuses anything outside `4xx` (§2.1), so it is a
+424-only site. Recorded here rather than silently widening the header above: §8's
+"add the row to §7" instruction makes no 5xx-only exception, and this table is the
+one place a reader diffs assumptions against, so a 3b site earns a row on the same
+footing as a 3a one even though the table's own opening sentence predates that case.
+
 **Legend.** *Plan* is the Phase 140.1 plan that owns the edit, except where a
-later phase is named. `✅` = implemented. All **23 explicit sites are ✅**; the
+later phase is named. `✅` = implemented. All **24 explicit sites are ✅**; the
 three remaining rows (S-21, S-22, S-24) are `n/a` by construction, not pending.
 
 ⛔ **The `routers/match.py` rows cite by SYMBOL, not by `file:line`.** They read
@@ -399,12 +422,16 @@ reviewer diffs their assumptions against.
 | S-24 | `main.py:299` | `/health` | 503 `{status:"stale"}` | worker heartbeat stale | SERVICE-TRANSIENT | **unchanged** — `/health` is outside the seam; see O-7 | — | n/a |
 | S-25 | `routers/match.py` `recompute()`, the `_kill_switch_state == KILL_SWITCH_UNAVAILABLE` arm | `/api/match/recompute` | — (new) | the kill-switch read exhausted `db_read_with_retry` — the engine stops FAIL-CLOSED rather than guessing | SERVICE-TRANSIENT | **503** `KILL_SWITCH_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | **164.5.1** | ✅ |
 | S-26 | `routers/match.py` `cron_recompute()`, the `except` around `_read_cron_cursor()` | `/api/match/cron-recompute` | **500 `text/plain`** (unhandled) | the batching-cursor read exhausted `db_read_with_retry` | SERVICE-TRANSIENT | **503** `CURSOR_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | **164.5.1** | ✅ |
+| S-27 | `routers/exchange.py` `_validate_mt5_key_probe()`, the `except Mt5ClientError` transient tail (also reached via `rotate_key_secret`'s `_validate_mt5_key` call) | `/api/validate-key`, `/internal/keys/{id}/rotate-secret` | 424 `NETWORK_UNAVAILABLE` | `classify_mt5_login_error` classified the caught `Mt5ClientError` `transient` AND `is_mt5_login_refusal` holds — the terminal answered the sign-in itself falsy with a code outside `_LOGIN_STAGE_NOT_A_REFUSAL_CODES` (the `-10000`…`-10004` IPC-infrastructure family and the success code `1`), and never told us why. A login-stage `-10005` IS such a refusal (D-17: the modal login dialog D-08 measured for a wrong password). **167 WR-01 / D-17:** a post-login read failure, an `initialize()` failure, or a login-stage `-10000`…`-10004` / `1` reaching the same arm keeps the pre-167 424 `NETWORK_UNAVAILABLE`, `recoverable:true` | CALLER'S EXCHANGE (3b FLAT — §2.1) | **424** `SIGN_IN_FAILED`, **`recoverable:false`** — DIVERGES from this class's `recoverable:true` default: a retry re-sends the same credential to a terminal that refused it, or that a wrong password put behind a modal login dialog (D-08, D-17) | **167-CREDTRUST plan 01** | ✅ |
 
-**Tally:** 26 rows = **23 explicit editable sites** (S-01…S-20 plus S-25/S-26
-`HTTPException` raises, plus S-23 the `JSONResponse` literal) + 2 implicit
+**Tally:** 27 rows = **24 explicit editable sites** (S-01…S-20 plus S-25/S-26
+`HTTPException` raises, plus S-23 the `JSONResponse` literal, plus S-27 the
+`VenueTransientHTTPException` `SIGN_IN_FAILED` raise Phase 167 split out of the existing
+MT5 transient-client-error arm — a new raise, not a new failure) + 2 implicit
 unhandled-500s (S-21, S-22, no edit possible or needed) + 1 deliberately unchanged
-(S-24). The `23` is the number that an `HTTPException` grep sweep under-counts by
-one, because S-23 is not an `HTTPException`.
+(S-24). A `raise HTTPException` grep sweep over these rows finds **22** of the 24, not
+24: it misses S-23, which is not an `HTTPException` at all, and S-27, whose raise is
+spelled `raise VenueTransientHTTPException`.
 
 **S-25 and S-26 were added by Phase 164.5.1**, and both are the same shape: a
 Supabase read that has already exhausted `db_read_with_retry`'s gateway-timeout

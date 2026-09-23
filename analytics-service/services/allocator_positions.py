@@ -52,7 +52,7 @@ import json
 import logging
 import math
 import re
-from typing import Any, Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable, ClassVar, Literal, cast
 
 import ccxt.async_support as ccxt
 from supabase import Client
@@ -72,6 +72,7 @@ from services.mt5_client import (
     Mt5SessionAbandoned,
     Mt5Session,
 )
+from services.mt5_validation import classify_mt5_login_error, is_mt5_login_refusal
 # MT5CONC-02 — the ONE terminal-lock registry, imported from the leaf module
 # plan 151-01 extracted it into. NEVER re-declare a terminal-lock dict here: a
 # second registry hands out perfectly functional Locks while the derive job and
@@ -198,6 +199,37 @@ DERIVATIVE_FETCH_FAILED_NOTE = (
 SPOT_FETCH_FAILED_NOTE = (
     "Couldn't read balances from {venue} — sync will retry automatically."
 )
+# Phase 167 / D-11 arm B — the SIGN-IN failure's end-user copy, and the ONE
+# string behind both its raise site and its ``SYNC_ERROR_COPY_BY_STATUS`` row.
+#
+# ⛔ It deliberately PROMISES NO RETRY, and that is the whole point of the
+# phase: the PROD defect this replaces sat on a founder's MT5 key for 17 days
+# reading "MT5 terminal unreachable — sync will retry automatically", a
+# sentence that named the wrong cause AND made a promise no later poll could
+# keep, because nothing a retry does can guess a credential the owner changed.
+# The remedy is named instead. ⚠️ It is NOT what the owner's pill renders —
+# 167-UI-SPEC S1 specifies an AUTHORED TypeScript helper that ignores
+# ``sync_error`` entirely. This string exists because ``sync_error`` has OTHER
+# readers, so it has to stand on its own.
+#
+# ⭐ 167 WR-03 — the remedy is "update them", NOT "reconnect". On the owner's
+# card, "Reconnect" names a control that re-runs the STORED credential — the
+# very one this arm just failed to sign in with — so following the old wording
+# literally could not fix the condition it described. The control that does
+# fix it replaces the credential ("Update password" for MT5), so the copy names
+# that action, venue-agnostically.
+SIGN_IN_FAILED_NOTE = (
+    "Couldn't sign in to {venue} with these credentials — update them to "
+    "resume syncing."
+)
+
+# Phase 167 / D-11 arm B — the api_keys.sync_status value the sign-in arm
+# writes, admitted by the CHECK constraint since migration 20260922120000
+# (plan 03). Declared HERE and imported by ``services.job_worker`` rather than
+# re-spelled at the write: a second spelling of a CHECK-constrained literal is
+# a constraint violation waiting for a typo, and the violation would abort the
+# very write that clears the UI's 'syncing' spinner.
+SIGN_IN_FAILED_SYNC_STATUS = "sign_in_failed"
 
 # Product casing for the venues this module names in copy. Kept LOCAL and
 # private (see the note above): a small display helper, not a registry. Only
@@ -232,7 +264,74 @@ class AllocatorHoldingsSyncTransientError(Exception):
     three founder accounts (AUM-02).
 
     Callers MUST pass a fixed copy constant, never an interpolated exception.
+
+    ⭐ 167 WR-05 — the exception CARRIES what the handler writes. The worker's
+    ONE arm for this type (and its subclass) reads ``sync_status`` and
+    ``error_kind`` off the instance, so a subclass that changes the status or
+    the job disposition declares it here rather than through a second,
+    order-sensitive ``except`` arm that duplicates the write.
     """
+
+    #: The ``api_keys.sync_status`` value the handler writes for this failure.
+    sync_status: ClassVar[str] = "error"
+    #: The ``compute_jobs`` disposition the handler returns. ``transient`` sends
+    #: the job up the DB backoff ladder, the right answer for a transport blip.
+    error_kind: ClassVar[Literal["transient", "permanent"]] = "transient"
+
+
+class AllocatorHoldingsSignInFailedError(AllocatorHoldingsSyncTransientError):
+    """A venue SIGN-IN that was attempted and did not succeed (D-11 arm B).
+
+    VENUE-NEUTRAL by construction: it names no venue, carries no venue-specific
+    field, and any venue arm may raise it. The venue reaches the copy through
+    ``{venue}`` interpolation at the raise site, exactly like every sibling
+    note.
+
+    ⭐ **The two honesty levels, and why they must not be collapsed.** This
+    type is the LESS confident of two claims the holdings path can make about a
+    credential:
+
+      * ``revoked`` — the VENUE ASSERTED the rejection. ccxt's
+        ``AuthenticationError`` / ``PermissionDenied`` are exactly that, and
+        ``_map_exception_to_sync_status`` keeps sending them there with copy
+        that says the venue rejected the credentials. A confident claim the
+        venue itself made stays confident; ⛔ do NOT re-route it here.
+      * ``sign_in_failed`` (this type) — WE could not sign in and cannot say
+        why. The measured case is an MT5 login that returns an opaque False:
+        a wrong investor password and a wrong server are indistinguishable at
+        that boundary, so naming a cause would be a guess.
+
+    SUBCLASS of ``AllocatorHoldingsSyncTransientError`` so it shares the
+    parent's handler arm and its copy contract: ``str(self)`` IS end-user copy.
+    It differs in two declared ways, both below.
+
+    ⭐ 167 WR-04 (orchestrator decision under the founder's standing
+    instruction) — the job disposition is ``permanent``, NOT the parent's
+    ``transient``. A transient disposition sent the job up the full 30s → 6h
+    backoff ladder, and every rung re-ran ``login()`` with the SAME stored
+    password against the ONE shared MT5 terminal. D-08 names exactly that as
+    the harm: repeated validate attempts against that terminal are the
+    operation implicated in wedging and account eviction (164.6.5 / 164.6.6).
+    The ladder bought nothing a later check does not already give: the daily
+    ``enqueue_poll_allocator_positions_for_all_keys`` cron re-enqueues every
+    active key that is not ``revoked`` (``sign_in_failed`` included), so a
+    rotated credential is still re-checked ONCE PER DAY, and ``rotate-secret``
+    resets the key to ``idle`` with fresh ciphertext. ⚠️ Only a login-stage
+    refusal reaches this type (CR-01), so a transport fault never loses its
+    retry ladder here.
+
+    ⭐ 167 WR-05 — the difference is DECLARED on the class (``sync_status``
+    below), and ``run_poll_allocator_positions_job`` has ONE arm for the parent
+    that reads it off the instance. The first version gave this type its own
+    ``except`` arm, a line-for-line copy of the parent's, which made the arm
+    ORDER load-bearing and its failure SILENT (an arm below the parent's is
+    dead code, and every sign-in failure reverts to ``error``). With one arm
+    there is no order to get wrong. The behavioural pin in
+    tests/test_allocator_positions.py still drives the real handler.
+    """
+
+    sync_status: ClassVar[str] = SIGN_IN_FAILED_SYNC_STATUS
+    error_kind: ClassVar[Literal["transient", "permanent"]] = "permanent"
 
 
 def _extract_bybit_unified_walletbalances(info: dict[str, Any]) -> dict[str, float]:
@@ -318,9 +417,9 @@ def _must_reach_handler_unwrapped(exc: Exception) -> bool:
        and ``ccxt.BadRequest``. Downgrading either buys the full 30s→6h retry
        ladder plus the daily cron re-enqueue against a host that will never
        answer, under the copy "sync will retry automatically" — a promise that
-       cannot be kept. The handler's transient arm hardcodes
-       ``error_kind='transient'`` and never re-reads the ``__cause__`` chain,
-       so a downgrade here is FINAL.
+       cannot be kept. The handler's transient arm returns the exception's
+       declared ``error_kind`` (``transient`` for the parent type) and never
+       re-reads the ``__cause__`` chain, so a downgrade here is FINAL.
     2. **``ccxt.RateLimitExceeded``**, which the classifier calls transient but
        the handler has a DEDICATED arm for (``_stamp_429`` + the per-exchange
        cooldown shared with strategy-side ``poll_positions``). Swallowing it
@@ -340,7 +439,11 @@ def _must_reach_handler_unwrapped(exc: Exception) -> bool:
 
         kind, _ = classify_exception(exc)
     except Exception:  # noqa: BLE001 - never let classification break the copy path
-        logger.warning(
+        # 167 SFH-L1 — ERROR, not WARNING. The classifier raising is a defect in
+        # OUR code, and its fallback decides the retry disposition: a permanent
+        # failure lost here is retried for good under a retry-promising note.
+        # That has to reach Sentry rather than sit at a level nobody alerts on.
+        logger.error(
             "fetch_allocator_holdings: could not classify %s — treating it as "
             "retryable and surfacing end-user copy",
             type(exc).__name__,
@@ -358,6 +461,17 @@ def _map_exception_to_sync_status(exc: Exception) -> str:
       RateLimitExceeded                       → 'rate_limited'
       everything else (Network, ExchangeNotAvailable,
         generic Exception, ...)               → 'error'
+
+    ⛔ Phase 167 / D-11 arm B did NOT touch the 'revoked' row, and that is a
+    decision rather than an omission. A ccxt ``AuthenticationError`` is the
+    VENUE ASSERTING that it rejected the credentials — a confident claim the
+    venue itself made — so it keeps the confident status and the copy that
+    names it. ``sign_in_failed`` is the LESS confident sibling, for the arm
+    where a login was attempted, did not succeed, and the boundary cannot say
+    why (see ``AllocatorHoldingsSignInFailedError``). Collapsing the two would
+    re-introduce the false permanent blame 164.5.4 removed; it does not reach
+    this function at all, because the sign-in arms raise a typed exception
+    that carries its own ``sync_status`` to the handler.
     """
     if isinstance(exc, (ccxt.AuthenticationError, ccxt.PermissionDenied)):
         return "revoked"
@@ -410,6 +524,16 @@ SYNC_ERROR_COPY_BY_STATUS: dict[str, str] = {
         "Couldn't sync holdings from {venue} — the balances shown are from the "
         "last successful sync."
     ),
+    # ⛔ Phase 167 / D-11 arm B — THIS ROW IS NOT OPTIONAL, and its absence is
+    # SILENT. ``sync_error_copy`` below answers an unknown status with
+    # ``SYNC_ERROR_COPY_BY_STATUS["error"]``, so a status written WITHOUT its
+    # row renders "Couldn't sync holdings from {venue}" — a sentence claiming
+    # we could not REACH the venue, for a credential the venue actively
+    # refused. Keyed by the module's own status constant rather than a second
+    # spelling of the literal. Pinned by a FALLBACK-SPECIFIC case and by a
+    # roster case over every status this module can write; ⛔ a case that only
+    # asserts the key exists cannot fail the way the fallback fails.
+    SIGN_IN_FAILED_SYNC_STATUS: SIGN_IN_FAILED_NOTE,
 }
 
 
@@ -680,6 +804,10 @@ async def _fetch_mt5_account_rows(
                 asyncio.to_thread(_mt5_read), timeout=_MT5_DERIVE_READ_TIMEOUT_S
             )
         except asyncio.TimeoutError as exc:
+            # D-09/D-10 (167-02) — see the Mt5ClientError arm below for why
+            # this is consulted before anything else in the arm.
+            if _must_reach_handler_unwrapped(exc):
+                raise
             # A blocked RPyC/Wine pipe does NOT self-unblock, so actively (and
             # boundedly) restart the terminal before the transient, or every
             # retry inherits the same wedge and burns to failed_final.
@@ -691,6 +819,9 @@ async def _fetch_mt5_account_rows(
             await _mt5_bounded_restart(session.client, log_prefix="poll_allocator_positions")
             raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
         except Mt5SessionAbandoned as exc:
+            # D-09/D-10 (167-02) — see the Mt5ClientError arm below.
+            if _must_reach_handler_unwrapped(exc):
+                raise
             # ⭐ WIZFORM-ABANDON / D-40. `Mt5SessionAbandoned` is a plain
             # `Exception` (D-42), so it matches none of the three sibling arms
             # here; without this one it left `fetch_allocator_holdings` as a raw
@@ -716,6 +847,9 @@ async def _fetch_mt5_account_rows(
             )
             raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
         except Mt5AccountMismatchError as exc:
+            # D-09/D-10 (167-02) — see the Mt5ClientError arm below.
+            if _must_reach_handler_unwrapped(exc):
+                raise
             # A mis-routed / stale terminal is an INFRA fault, never user blame:
             # nothing is returned, nothing is persisted, and the restart heals
             # exactly the stale pipe that causes it. The mismatch detail (two
@@ -730,15 +864,85 @@ async def _fetch_mt5_account_rows(
             await _mt5_bounded_restart(session.client, log_prefix="poll_allocator_positions")
             raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
         except Mt5ClientError as exc:
-            # The key already validated at connect, so a read-time client error
-            # is a transport/terminal condition, not a credential verdict:
-            # retry. Its text is already secret-scrubbed at construction, but it
-            # is still INTERNAL text — only the fixed copy constant is surfaced.
+            # D-09/D-10 (167-02) — consult the same authority the two ccxt
+            # arms below already do, ahead of anything else in this arm. This
+            # is the MEASURED wrong-password path (`Mt5ClientError(0, "Invalid
+            # account")` — services/mt5_validation.py's `_AUTH_PHRASES`
+            # corpus). `job_worker.classify_exception` has no MT5-specific
+            # branch today, so a real instance still falls to its generic
+            # 'unknown' bucket and this stays a structural fix rather than a
+            # behavior change for THAT shape — see 167-02-SUMMARY.md. It stops
+            # being a no-op the day a future classifier addition (or a later
+            # phase) makes an MT5 read-time failure classify permanent.
+            if _must_reach_handler_unwrapped(exc):
+                raise
+            # ⭐ Phase 167 / D-11 arm B, NARROWED by CR-01 — ONLY A LOGIN-STAGE
+            # REFUSAL IS A SIGN-IN FAILURE. This arm sees every `Mt5ClientError`
+            # `_mt5_read` can produce, and most of them are NOT one:
+            # `initialize()` failing or its transport dropping (no credential
+            # sent yet — a gateway redeploy or wedge hits every MT5 key on the
+            # terminal at once), the transport dropping mid-login, and
+            # `account_info()` failing AFTER a successful login. Stamping those
+            # `sign_in_failed` told every owner to fix a working credential.
+            #
+            # `is_mt5_login_refusal` is the ONE predicate the wizard's
+            # `validate_key` applies to the same boundary: the terminal answered
+            # the `login()` call itself falsy (`Mt5LoginRefusedError`, the shape
+            # a wrong investor password and a wrong server BOTH produce) AND the
+            # code is not one of the -10000…-10004 IPC-infrastructure codes or
+            # the success code 1. A login-stage -10005 IS a refusal (D-17: the
+            # modal login dialog D-08 measured for a wrong password). Everything
+            # else keeps the pre-167 posture byte-unchanged:
+            # MT5_UNREACHABLE_NOTE, transient.
+            #
+            # ⭐ 167 SFH-LOW-2 — and a message the ONE classifier reads as
+            # naming the credential or the broker server (`"auth"` /
+            # `"wrong_server"` from `classify_mt5_login_error`) is a sign-in
+            # failure too, whatever stage raised it. The wizard answers that
+            # verdict with a confident 400 (AUTH_FAILED / wrong server) at any
+            # stage; before this, the holdings poll called the SAME error a
+            # transport blip and promised a retry. Same copy and `permanent`
+            # disposition as the login-stage refusal: the terminal's own text
+            # blamed the credential, so re-sending it on every backoff rung is
+            # the D-08 harm.
+            #
+            # The exception's own text is already secret-scrubbed at
+            # construction, but it is still INTERNAL text (it can echo the
+            # terminal's `last_error()` back at us); only the authored copy
+            # constant is surfaced, and only the numeric code is logged.
+            login_verdict = classify_mt5_login_error(exc)
+            names_credential_or_server = login_verdict in ("auth", "wrong_server")
+            if not (names_credential_or_server or is_mt5_login_refusal(exc)):
+                logger.warning(
+                    "poll_allocator_positions: mt5 holdings read hit a client "
+                    "error that is not a login-stage refusal (code=%s) — "
+                    "classified transient, retrying",
+                    exc.code,
+                )
+                raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
+            #
+            # ⛔ The three SIBLING arms above are deliberately NOT moved. A
+            # stage timeout, an abandoned-session fence refusal and an
+            # account mismatch are transport, lease and concurrency faults in
+            # which no sign-in is implicated; telling their owner that their
+            # credentials may have changed would be the same false blame this
+            # phase exists to remove, pointed at a different cause. They keep
+            # MT5_UNREACHABLE_NOTE and sync_status='error', byte-unchanged.
+            #
+            # ⛔ The ccxt `AuthenticationError` path is NOT moved either. The
+            # VENUE asserted that rejection, so it stays the confident
+            # `revoked` claim — see `AllocatorHoldingsSignInFailedError` for
+            # the two-honesty-level split this preserves.
             logger.warning(
-                "poll_allocator_positions: mt5 holdings read hit a client "
-                "error — classified transient, retrying"
+                "poll_allocator_positions: mt5 holdings sign-in failed "
+                "(code=%s, login_verdict=%s) — surfacing the sign-in copy "
+                "(D-11 arm B)",
+                exc.code,
+                login_verdict,
             )
-            raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
+            raise AllocatorHoldingsSignInFailedError(
+                SIGN_IN_FAILED_NOTE.format(venue=_venue_display(exchange_name))
+            ) from exc
 
     # (f) Currency gate — [A3] fail-loud. An account denominated in anything but
     # USD cannot be valued here without an FX rate we do not have, and silently
@@ -809,6 +1013,12 @@ async def _fetch_mt5_account_rows(
     try:
         equity = float(info["equity"])
     except (KeyError, TypeError, ValueError) as exc:
+        # D-09/D-10 (167-02) — a malformed/missing payload field is the same
+        # class of failure the ccxt arms' `KeyError`/`TypeError` params already
+        # cover (see the module-level oracle in test_allocator_positions.py);
+        # see the Mt5ClientError arm above for why this is consulted first.
+        if _must_reach_handler_unwrapped(exc):
+            raise
         logger.warning(
             "poll_allocator_positions: mt5 account_info missing/non-numeric "
             "equity — refusing to emit a row"
@@ -1002,6 +1212,37 @@ async def _fetch_sfox_balance_rows(
             client.get_balances(), timeout=_SFOX_HOLDINGS_READ_TIMEOUT_S
         )
     except (SfoxApiError, asyncio.TimeoutError) as exc:
+        # D-09/D-10 (167-02) — see the Mt5ClientError arm's comment in
+        # `_fetch_mt5_account_rows` above for why this is consulted first.
+        if _must_reach_handler_unwrapped(exc):
+            raise
+        # ⭐ 167-04 Task 2 — THE sFOX MEASUREMENT, recorded at the site so the
+        # next reader does not re-open a closed question. sFOX is the second
+        # NON-CCXT venue, so "does D-11 arm B's two-honesty-level split apply
+        # here too?" is the venue-agnostic question this phase had to answer.
+        #
+        # MEASURED: `SfoxApiError` DOES carry an auth-distinguishable shape —
+        # it stores the HTTP `status`, and THREE shipped call sites already
+        # dispose of 401/403 as a DEFINITIVE credential rejection
+        # (`routers/exchange._validate_sfox_key`, the `routers/internal`
+        # finalize probe, `services/ingestion/sfox`). But that disposition is
+        # the VENUE ASSERTING the rejection, which this phase routes to the
+        # CONFIDENT level (`revoked`), not to `sign_in_failed`. sFOX has no arm
+        # of the ambiguous kind the new status exists for: it either tells us
+        # (401/403) or the failure is transport (status 0 shape violation, 429,
+        # 5xx, timeout). So the split does not apply, and this arm is left
+        # exactly as plan 02 left it — guarded, still writing `error`.
+        #
+        # ⛔ AND PROMOTING 401/403 TO `revoked` HERE IS NOT AN EXECUTOR'S CALL.
+        # `routers/internal.py`'s own note records that a 4xx behind the shared
+        # static-egress proxy can be a transient IP/WAF block rather than a
+        # revoked key, that the ambiguity applies to every surface identically,
+        # and that changing it is a FOUNDER decision which must move
+        # `validate_key` and the finalize probe together — never a unilateral
+        # split at one new site. A `revoked` write is also consequential in a
+        # way the validate surfaces' verdicts are not: the daily cron enqueues
+        # only keys `WHERE sync_status IS DISTINCT FROM 'revoked'`, so it stops
+        # the poll. Named in 167-04-SUMMARY.md, not silently skipped.
         # SfoxApiError's detail is already secret-scrubbed at construction, but
         # it is still INTERNAL text (upstream bodies, status codes). Only the
         # fixed copy constant is surfaced; the detail survives in the log and in

@@ -250,7 +250,15 @@ EXPECTED_HTTPEXCEPTION_SUBCLASSES = 1
 #: ``VenueTransientHTTPException(424)`` construction; no new user-facing code is
 #: minted (153.1 owns the TS code table) and it is a 4xx like every other site, so
 #: blind spot (b) stays LATENT rather than live.
-EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 12
+#: 12 -> 13 (2026-09-22, Phase 167 WR-01): the MT5 validate probe's
+#: ``except Mt5ClientError`` transient tail now answers in TWO ways. A login-stage
+#: refusal with a non-IPC code (``is_mt5_login_refusal``) keeps the 167
+#: ``SIGN_IN_FAILED`` site. Every other transient, meaning a post-login read failure
+#: or an IPC code, gets back the pre-167 ``NETWORK_UNAVAILABLE`` answer, which is
+#: this ninth ``VenueTransientHTTPException(424)`` construction. It reuses an
+#: EXISTING code (no new user-facing code is minted) and it is a 4xx, so blind spot
+#: (b) stays LATENT rather than live.
+EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 13
 
 #: Vacuity fence. A scanner that matched nothing would report agreement with the
 #: quarantine forever, so the scan must prove it saw the tree. Loose floors on

@@ -7544,6 +7544,22 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 
 ---
 
+## Phase 167 (CREDTRUST) — post-merge checks (logged 2026-09-22)
+
+- [ ] **`[167-POSTMERGE-CHECKS]` the four 167 checks that are post-merge or founder-only by
+      construction (booked 2026-09-22, `167-UAT.md` tests 1–4).**
+      Owner: **THE FOUNDER**, except (1)'s job-watching, which the shipping session's
+      `/land-and-deploy` does. Trigger: the Phase 167 PR merging.
+      (1) Migration `20260922120000` applies to TEST, then PROD after the `Production` gate.
+      (2) After the first daily holdings poll post-apply, read the status of the two keys the
+          ROADMAP measured: the MT5 key → `sign_in_failed`; the expired venue key → `revoked`.
+      (3) Record the live MT5 gateway's real code for a wrong investor password (RESEARCH A1) and
+          confirm or amend D-17's refusal set.
+      (4) Visual check at 320px and 200% zoom: `AllocatorSyncStatus` pill + helper, the manager key
+          card, and the `KEY_SIGN_IN_FAILED` envelope.
+      **Closed when:** each item's verdict is written into `167-UAT.md` (verdict and counts only —
+      no key id, account number or server name).
+
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
 - **"Do NOT implement" landmines (keep documented, do not touch):** bridge-scoring precompute;

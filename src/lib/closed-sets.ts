@@ -852,6 +852,151 @@ export function deriveEmptySeriesState(
   return "empty";
 }
 
+// --- Untrusted key sync_status (Phase 167 CREDTRUST / D-16) ----------------
+// THE ONE DEFINITION of "this key's data is not to be trusted as current".
+//
+// MEASURED DEFECT THIS REPLACES (founder decision D-16, 2026-09-22; found
+// independently by `rls-policy-auditor` and `silent-failure-hunter`): the
+// holdings and open-positions surfaces answered that question with SEVEN
+// hand-kept equalities against the single literal `revoked` — six in
+// `HoldingsTable.tsx`, one in `OpenPositionsTable.tsx`. There was no
+// allow-list, no enum and no closed set over `api_keys.sync_status` anywhere,
+// so EVERY status that was not `revoked` fell to the healthy branch by
+// default. The moment the holdings poll gained a second failed-credential
+// value (`sign_in_failed`, 167-04), a holding sourced from a key the venue has
+// stopped accepting would have rendered un-chipped and un-filtered.
+//
+// ⚠️ WHAT THIS PREDICATE DOES NOT REACH (review round 1, SFH-M2 — an earlier
+// version of this comment claimed otherwise): the HEADLINE AUM. The chip and
+// the `HoldingsTable` filter are its only consumers. The AUM is summed in
+// `src/lib/queries.ts` (`emptyLiveBaselineMetrics` /
+// `liveBaselineMetricsFromPerKeyDailies`, `totalAum = holdingsSummary.reduce`)
+// over holdings with no key-status test at all, so a holding from a `revoked`
+// or `sign_in_failed` key IS counted there — true before Phase 167 for
+// `revoked`, and unchanged by it. Flagging the AUM as partial when an
+// untrusted key contributes is a money-number change and is booked as a
+// follow-up, not made here.
+//
+// ⛔ THE EQUALITY SHAPE WAS THE DEFECT, NOT THE MISSING VALUE. Appending
+// `|| status === "sign_in_failed"` beside each `=== "revoked"` reproduces it
+// for the tenth status. Every one of those sites is now a CALLER of the
+// predicate below; ⛔ do not re-introduce a local equality on this column.
+//
+// The TWO members are two different CLAIMS with one shared consequence:
+//   * `revoked`        — the VENUE asserted the rejection (ccxt
+//                        AuthenticationError / PermissionDenied).
+//   * `sign_in_failed` — WE could not sign in and cannot say why (the MT5
+//                        login that returns an opaque False).
+// Both mean the same thing to a money surface: the numbers on this row are
+// not current. They are NOT interchangeable in COPY, which is why the label
+// map below is per-status rather than one shared sentence.
+//
+// ⚠️ SCOPE, stated rather than implied: this set governs the ROW-LEVEL trust
+// question on the allocator money surfaces. It is NOT the pill vocabulary —
+// `AllocatorSyncStatus`'s PILL_STYLES covers all nine statuses including the
+// healthy ones, and is a different question (what state is this key in?) from
+// this one (may I show this key's numbers as current?).
+export const UNTRUSTED_KEY_SYNC_STATUSES = [
+  "revoked",
+  "sign_in_failed",
+] as const;
+export type UntrustedKeySyncStatus =
+  (typeof UNTRUSTED_KEY_SYNC_STATUSES)[number];
+
+// The OTHER half of the partition: every `api_keys.sync_status` value a money
+// surface may render as current (healthy, in flight, or failed-but-transient).
+// Declared so that the partition is TOTAL and CHECKED, not implied by "whatever
+// the set above does not list".
+//
+// ⛔ WHY THIS EXISTS (review round 1, SFH-M1). `isUntrustedKeySyncStatus`
+// answers `false` for a value it has never heard of, so a FUTURE
+// credential-failure value added to `api_keys_sync_status_check` would render
+// as healthy with nothing going red. The runtime default is deliberately NOT
+// flipped (a null status is the legitimate no-key case, and striking through a
+// healthy book on a value drift is its own false claim). The guard is at CI
+// time instead: the B9 CHECK parity matrix
+// (`src/__tests__/contracts/check-zod-db-check-parity.test.ts`, row
+// `api_keys.sync_status`) resolves the LATEST `api_keys_sync_status_check`
+// from `supabase/migrations/` and asserts it equals the UNION of these two
+// lists, and `closed-sets.untrusted-key-status.test.ts` asserts they are
+// DISJOINT. Together: every value the CHECK admits is in EXACTLY ONE
+// partition, and neither partition holds a value the CHECK lacks. A migration
+// that widens the CHECK therefore reds CI until someone decides which side the
+// new value is on.
+export const TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES = [
+  "idle",
+  "syncing",
+  "computing",
+  "complete",
+  "complete_with_warnings",
+  "error",
+  "rate_limited",
+] as const;
+
+// Per-status chip copy. `satisfies Record<UntrustedKeySyncStatus, string>`
+// makes a missing label a COMPILE error, so a future member of the set above
+// physically cannot ship rendering an EMPTY chip — a correctly-coloured blank,
+// which is the silent failure the sibling `PILL_STYLES`/`pillLabel` pair had
+// to be pinned by a runtime roster test to catch.
+//
+// ⛔ NEITHER STRING IS NEW, and that is deliberate (167-UI-SPEC § Copywriting
+// Contract — do not invent a third vocabulary for a state that already has
+// one): "Key revoked" is the byte-unchanged Phase 08 MANAGE-02 chip, and
+// "Sign-in failed" is the pill label plan 167-03 shipped in
+// `AllocatorSyncStatus`. The chip names the STATE; the remedy sentence lives
+// on the owner's key surface, which is the only surface that can act on it.
+export const UNTRUSTED_KEY_STATUS_CHIP_LABEL = {
+  revoked: "Key revoked",
+  sign_in_failed: "Sign-in failed",
+} as const satisfies Record<UntrustedKeySyncStatus, string>;
+
+// The COLLECTIVE noun for the set, for surfaces that filter on it rather than
+// label one row. ⛔ This is not a third state vocabulary: the per-state chips
+// above still name the specific cause ("Key revoked" / "Sign-in failed") on the
+// row itself. This names the SET, and it must stay cause-neutral — a filter that
+// hides two causes cannot honestly name one of them.
+//
+// ⚠️ IT REPLACES "revoked" IN USER-FACING FILTER COPY, and that was a real
+// defect: the toggle said "Show revoked-key holdings" and the footer said
+// "hidden from revoked keys" while the predicate already hid `sign_in_failed`
+// too, so the surface NAMED A NARROWER SET THAN IT HID. Derived from one
+// constant here rather than restated at each call site, because this phase has
+// a dated record of the same count drifting across seven restatements.
+export const UNTRUSTED_KEY_SET_NOUN = "keys needing attention";
+
+/**
+ * Whether a row's source key is in a state that forbids showing its numbers as
+ * current. A known untrusted status is never admitted to the healthy branch.
+ *
+ * ⚠️ It does NOT fail closed on an UNKNOWN value, and says so: an unknown /
+ * null / empty status answers `false` (trusted). `null` is the legitimate
+ * no-source-key case, and a value drift must not strike through a healthy
+ * book. The cost of that default — a NEW credential-failure value would read
+ * as healthy — is closed at CI time, not here: see
+ * `TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES`, whose partition test reds the moment
+ * `api_keys_sync_status_check` admits a value neither list declares.
+ */
+export function isUntrustedKeySyncStatus(
+  status: string | null | undefined,
+): status is UntrustedKeySyncStatus {
+  return (UNTRUSTED_KEY_SYNC_STATUSES as readonly string[]).includes(
+    status ?? "",
+  );
+}
+
+/**
+ * The chip copy for an untrusted status, or `null` for anything a money
+ * surface may render as current. Returning null (rather than an empty string)
+ * keeps the caller's `{label ? <chip/> : null}` honest.
+ */
+export function untrustedKeyChipLabel(
+  status: string | null | undefined,
+): string | null {
+  return isUntrustedKeySyncStatus(status)
+    ? UNTRUSTED_KEY_STATUS_CHIP_LABEL[status]
+    : null;
+}
+
 // --- Signup roles (SECURITY BOUNDARY) --------------------------------------
 // SECURITY BOUNDARY (NEW-C15-05): the AUTHORITATIVE allowlist for the role a
 // new user receives is the SQL trigger handle_new_user

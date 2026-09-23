@@ -1,0 +1,646 @@
+# Phase 167: CREDTRUST — an invalid venue credential is named to the customer - Context
+
+**Gathered:** 2026-09-22
+**Status:** locked — ready for planning
+**Decided at sha:** 956f663f
+**Mode:** Autonomous (every decision below is taken from repo evidence measured at that sha and
+recorded with the evidence; no founder prompts were issued, and none were owed — see D-15)
+
+<domain>
+## Phase Boundary
+
+**This phase adds a CAUSE to a staleness signal that is already correct.**
+
+That framing is the single most useful thing measured during this discussion, and it narrows the
+phase sharply. The product already detects and renders "this track record has stopped moving", on
+the right signal, with the right tone ladder:
+
+- `FreshnessChip` in `src/app/factsheet/[id]/v2/FactsheetView.tsx` already computes a
+  `fresh | unknown | stale | old | future | neutral` verdict and already takes **the staler of the
+  job-age arm and the series-age arm** (`seriesIsBinding`), so the same "a signal no status
+  transition can advance" principle the SQL view uses is already the binding one on screen.
+- `public.ledger_refresh_staleness` (`supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql`)
+  already carries a server-side verdict keyed on `max((e->>'date')::date)` over `returns_series`,
+  with a `stale_reason` of `no_analytics_row | status_not_success | no_return_date | series_behind`.
+- `AllocatorSyncStatus` (`src/components/exchanges/AllocatorSyncStatus.tsx`) already renders a
+  7-state owner-facing pill, and its `revoked` arm already carries the correct SHAPE: an authored
+  remedy line, `"Re-add a read-only key from your exchange."`
+
+**What is missing is the sentence that connects the two.** The customer is told the track record is
+stale; they are never told that the reason is a credential that no longer works, and on the owner
+surface they are told the opposite — that a retry is coming.
+
+**In scope:** naming a credential failure as the cause of a stalled factsheet, on the two surfaces
+the ROADMAP names — the **owner-facing key/sync surface** and the **wizard validate surface** —
+venue-agnostically, and suppressing the copy that promises a retry that cannot succeed.
+
+**Out of scope:** the OPS-facing prober vocabulary (Phase 164.8.3 PROBERAUTH owns it — same root,
+two audiences, explicitly not merged); changing which failures classify as `auth` versus `transient`
+(the A-04 classification is a locked decision from 164.5.4 and is not reverted here — see D-05);
+email/push notification of the condition (D-14); and any change to the ledger-refresh pipeline
+itself.
+
+</domain>
+
+<decisions>
+## Implementation Decisions
+
+### The blocking dependency — settled, and the ROADMAP's attribution of it is WRONG
+
+- **D-01: The 161.1 ledger refresh IS LIVE in production, so this phase is unblocked on the
+  substance and not merely on the phase status.** ⛔ **But it was NOT activated by Phase 164.7.**
+  Measured at `956f663f`: `164.7-07-SUMMARY.md` records the **DEFERRED** path — the founder declined
+  the activation on a failed pre-flight (`P3-C`), `20260907130000` reported
+  `applied DORMANT (system_flags.ledger_refresh_enabled = false; NOTHING scheduled)`, and the
+  committed manifest held 14 jobs with `ledger_refresh_fanout` **absent**. The activation was taken
+  later, by **Phase 164.5.1 plan 09** (commit `d6607a88`, executed 2026-09-17): `provides:` records
+  *"the 161.1 ledger refresh ACTIVATED in production: ledger_refresh_enabled = true,
+  ledger_refresh_fanout registered as jobid 40 on 25 \* \* \* \*"*, preconditions read before the
+  write, and the oracle re-captured **by script** rather than by hand.
+  **The live evidence in this repo is `scripts/prod-prober/cron-manifest.json`**, captured from
+  PRODUCTION at `2026-09-18T18:02:50Z` with a `database_marker` naming PRODUCTION: jobid 40,
+  `ledger_refresh_fanout`, `25 * * * *`, `active: true`,
+  `SELECT public.enqueue_ledger_refresh_for_strategies();`.
+  ⚠️ **The ROADMAP's `Depends on:` line should be corrected to name 164.5.1 plan 09 rather than
+  164.7 plan 07.** A reader who checks 164.7 and finds `Complete` will conclude the dependency is
+  met for the right reason by accident; a reader who reads 164.7 plan 07 in full will conclude it is
+  NOT met and stall the phase. Both readings are wrong. ⛔ Do not edit the ROADMAP inside the
+  planning run — it is a phase-owned correction, made when the phase ships.
+
+- **D-02: A live SCHEDULE is not a live REFRESH, and this phase must not treat it as one.** The
+  fan-out body's first act is to read `system_flags.ledger_refresh_enabled`; when it is not TRUE the
+  function logs `dormant … enqueued 0` and the cron row still reports success. That is the repo's
+  own recorded trap (`pg_net` is async, so a green cron proves ENQUEUE and nothing more). 164.5.1
+  plan 09 records the flag as `true` at activation, but nothing in this repository re-reads it, and
+  ⛔ no database command may be run from this checkout to re-read it.
+  **Therefore the product must never infer "your credential is broken" from staleness alone.**
+  See D-03 for the rule this produces. — **Reversibility:** reversible — a rule about how a verdict
+  is composed, local to the new code.
+
+- **D-03: The credential verdict is a CONJUNCTION, and each conjunct must be independently
+  observable.** A customer is told a credential is the cause only when BOTH hold: (a) the freshness
+  substrate says the track record has stopped advancing, and (b) there is a credential-shaped
+  failure attached to the key that fed it. Staleness alone answers "we do not know why" — which is
+  an honest state the chip already has a tone for (`unknown`). This is the exact harm the ROADMAP
+  names: the measured strategy with perfect credentials and a frozen `computed_at` must not be told
+  to fix a key that is not broken.
+  ⭐ The (b) conjunct is what the phase mostly has to build; (a) is consumed, never reinvented.
+
+### Where it renders — and the constraint that decides it
+
+- **D-04: The cause renders on OWNER surfaces only. It must NOT enter the public factsheet
+  payload.** ⛔ **This is the hardest constraint in the phase and it is measured, not inferred.**
+  `src/app/factsheet/[id]/v2/page.tsx` runs a public lane and an owner lane, and the payload is
+  served through an `unstable_cache` whose **effective key is the strategy id ONLY**, with a 3600 s
+  TTL; the file's own header states that a viewer-dependent payload routed through that wrapper
+  *"would be served to every subsequent ANONYMOUS visitor … for the full 3600s TTL, silently, with
+  the poisoning request being the owner's own and therefore rendering correctly."* There is a
+  dedicated regression guard (`phase-148-owner-lane-cache-isolation.test.ts`) and a second public
+  surface (`src/app/factsheet-share/`) whose header forbids widening the projection toward
+  `api_keys` at all.
+  ⇒ Putting "this manager's credential stopped working" into the cached factsheet payload would
+  publish it to anonymous readers, and would do so intermittently and invisibly. The public
+  factsheet keeps its existing tone-only chip; the CAUSE belongs to the owner's own surfaces.
+  — **Reversibility:** one-way — undoing a leak is impossible; the cache TTL means the disclosure
+  is already distributed before anyone observes it. ⭐ A plan that touches
+  `fetchAndBuildPayload`, the cached wrapper, or the share route earns a `checkpoint:decision`.
+
+- **D-05: The user-visible defect lives in TypeScript, and a Python-side string change does not
+  reach the user.** Two independent instances, both measured:
+  1. **Owner surface.** `AllocatorSyncStatus`'s `error` arm is
+     `pillLabel = "Sync failed"` with `helperText = syncError ?? ""` — it renders the RAW
+     `api_keys.sync_error` DB string. That is how
+     `MT5_UNREACHABLE_NOTE` (`analytics-service/services/allocator_positions.py`) reaches a
+     customer verbatim. The `revoked` arm, by contrast, ignores `syncError` and renders an
+     AUTHORED constant. **The fix shape is already in the file.**
+  2. **Wizard surface.** `routers/exchange.py::validate_key` answers the transient arm with
+     `424 NETWORK_UNAVAILABLE`; `VENUE_WIRE_CODE_TO_VERDICT` maps that to `KEY_NETWORK_TIMEOUT`,
+     whose `actions` include `clear_and_retry`, which is in `RECOVERABLE_ACTIONS`
+     (`src/lib/envelope.ts`), so `buildEnvelope` derives `recoverable: true` and
+     `ErrorEnvelope` renders the Retry. **The Retry is rendered by TypeScript, not by the detail
+     string.**
+  ⚠️ The A-04 classification is NOT reverted. Refusing to guess is correct; the defect is the copy
+  the refusal lands on.
+
+- **D-06: The wizard fix is the full cross-language treatment plan 02 used for
+  `KEY_UNDECRYPTABLE`, and there is an existing mechanism that FORCES the `VENUE_WIRE_CODE_TO_VERDICT`
+  row rather than leaving it to diligence.** `src/lib/seam-venue-vocabulary.invariant.test.ts`
+  derives the Python emitter's `error_code` vocabulary from `analytics-service/**/*.py` and compares
+  it **as a SET** against the hand-typed dispositions, so a newly emitted code with no disposition
+  row reds **by name**. ⭐ That is the A-05 lesson already mechanised — the planner should lean on
+  it, not re-invent a checklist. The pins that move: **two** hand-typed `EXPECTED_TABLE_SIZE`
+  constants in `src/lib/wizardErrors.test.ts` (⛔ grep them — `grep -an 'const EXPECTED_TABLE_SIZE'`
+  — never count), both currently `94`, plus a third self-referential assertion in the same file that
+  reads them back out of the source with a regex.
+
+- **D-07: Mint a new `WizardErrorCode`; do NOT reuse `KEY_MUST_BE_RECONNECTED`, and do NOT route at
+  `KEY_AUTH_FAILED`.** Measured:
+  - `KEY_MUST_BE_RECONNECTED` has exactly the right ACTION shape
+    (`actions: ["request_call", "expand_log"]` — neither `RECOVERABLE_ACTIONS` member, so no Retry
+    renders) and exactly the wrong COPY: it asserts *"a fault on our side of the store rather than a
+    sign that anything is wrong with the account or its password"* — the opposite cause. Reusing it
+    would trade one wrong cause for another. **Copy its shape, not its entry.**
+  - `KEY_AUTH_FAILED` carries `clear_and_retry` and says *"The exchange rejected these
+    credentials."* — a confident claim the classifier deliberately refuses to make on this arm
+    (D-05, A-04). Routing here would re-introduce the false-permanent-blame that 164.5.4 removed.
+  ⇒ The new code's copy must be honest about UNCERTAINTY — the terminal could not be reached, and a
+  credential that no longer works is one of the reasons — while suppressing the Retry.
+  — **Reversibility:** costly — a wire code plus a disposition row plus two copy-table pins plus
+  both wizard rosters; removing it later reds the same set of guards.
+
+- **D-08: Suppressing the wizard Retry is affirmatively correct here, not merely prescribed.**
+  On this arm the terminal is unreachable, and the measured mechanism for a wrong MT5 password is a
+  MODAL LOGIN DIALOG blocking IPC (the `-10005` class). A Retry re-runs the same validate against a
+  wedged terminal — and phases 164.6.5 / 164.6.6 establish that repeated validate attempts against
+  that one shared terminal are the operation implicated in wedging and account eviction. So the
+  Retry is not just useless, it is the harmful action. Record the reason; do not present the
+  suppression as taste.
+
+### Venue-agnosticism — where it actually lives
+
+- **D-09: The defect is a COPY FAMILY, not a string, and the family is already venue-agnostic.**
+  `analytics-service/services/allocator_positions.py` carries at least five end-user notes ending in
+  *"— sync will retry automatically."* (MT5 unreachable, MT5 unidentified account, sFOX balances,
+  a `{venue}`-templated balances note, a `{venue}`-templated positions note) plus a rate-limit note.
+  ⛔ A plan that fixes the MT5 string alone is a scope error. The `bybit` evidence
+  (`retCode 33004 "Your api key has expired."`, failing since 2026-08-14, unsurfaced) is the second
+  venue of the same class.
+
+- **D-10: The retry PROMISE must be a function of the retry DISPOSITION, and the authority already
+  exists and is already consulted.** `services.job_worker.classify_exception` is named in
+  `allocator_positions.py` as *"THE AUTHORITY on retry disposition"*, deliberately consulted rather
+  than mirrored — because a hand-copied allow-list is what broke this before, downgrading two
+  permanent failures to transient *"under the copy 'sync will retry automatically' — a promise that
+  cannot be kept."* ⇒ the end-user note must not promise a retry the classifier calls permanent.
+  ⚠️ **This alone does NOT close the phase**, and the planner must not treat it as if it does: the
+  measured MT5 wrong-password case arrives as a TRANSPORT failure and classifies **transient**, so
+  the note stays truthful-but-useless. Closing it needs the D-03 conjunction — a transient failure
+  that has REPEATED while the refresh was demonstrably running is no longer a blip.
+
+### The one decision left genuinely OPEN
+
+- **D-11 ⛔ OPEN — does a credential failure get an EXISTING `api_keys.sync_status` value, or a new
+  one?** The planner closes this behind a `checkpoint:decision`. Both arms are costed here so the
+  choice is made on measurement, not on which is fewer characters.
+  - **Arm A — route onto the existing `revoked`.** Cheapest by far: `revoked` already has authored
+    copy, a red pill, and chips on `HoldingsTable` and `OpenPositionsTable`. ⛔ **But `revoked` is
+    not only a label — it is a FILTER.** `HoldingsTable` does
+    `holdings.filter(h => h.source_key_sync_status !== "revoked")`, and both ledger-refresh
+    enqueuers carry `sync_status IS DISTINCT FROM 'revoked'`
+    (`src/app/api/keys/[id]/rotate-secret/route.ts` documents both). Routing an MT5 wrong-password
+    onto `revoked` would therefore **hide that key's holdings from the allocator dashboard and stop
+    enqueueing its refresh** — side effects nobody asked for, arriving silently. Its copy is also
+    venue-wrong for MT5 ("Re-add a read-only key from your exchange" — MT5 has a password, not a
+    key).
+  - **Arm B — mint a new `sync_status` value.** `sync_status` is a CHECK constraint on `api_keys`
+    (`20260406065011`, widened by `20260420073003` to add `revoked` and `rate_limited`), so this is
+    a `DROP CONSTRAINT` / `ADD CONSTRAINT` migration — and `supabase/migrations/**` AUTO-APPLIES to
+    PROD on merge. It also touches every reader that switches on the value, including
+    `AllocatorSyncStatus`'s `PILL_STYLES` map whose unknown-value fallback is a silent **neutral
+    idle pill** — i.e. a half-done rollout renders a broken key as healthy.
+  - **Arm C — leave `sync_status` alone and carry the cause in a separate, additive column or in
+    the authored helper only.** Avoids both side effects; costs a second source of truth.
+  — **Reversibility:** Arm A is `costly` (it silently changes the meaning of a value two filters
+  already act on); Arm B is `one-way` (a CHECK-constraint migration against PROD, and 3 reviewers
+  are required before any apply); Arm C is `reversible`.
+  ⛔ Whichever arm is chosen, the `AllocatorSyncStatus` copy table is **LOCKED VERBATIM** with
+  character-for-character unit tests (including the U+2026 and U+2014 code points) — the table is
+  EXTENDED deliberately and its pins updated in the same change, never reworded in passing.
+
+### Discipline
+
+- ⛔⛔ **D-15b (ADDED 2026-09-22, MEASURED during execution) — THE `requirements:` IDS IN THIS
+  PHASE'S PLANS COLLIDE WITH THE GLOBAL `REQUIREMENTS.md` LEDGER. NEVER RUN
+  `requirements.mark-complete` WITH THEM.**
+  This phase has no v1.20 requirement IDs, so its plans use the phase-local decision IDs (D-01…D-15)
+  from THIS file as their `requirements:` frontmatter. Three of those strings also exist in the
+  global `.planning/REQUIREMENTS.md`, meaning something entirely different:
+
+  | id | global `REQUIREMENTS.md` meaning | this phase's meaning | carried by |
+  |---|---|---|---|
+  | **D-09** | the composite `stitch_composite` re-run mechanism / "composite healer" | "the defect is a COPY FAMILY, not a string" | plans 01, 02, 04 |
+  | **D-03** | a per-venue capability-flag precedent (`passphraseSecret`) | "the credential verdict is a CONJUNCTION" | plans 03, 04 |
+
+  ⇒ **`requirements.mark-complete D-09` would tick off the composite healer** — a phase-scale item
+  nobody in 167 has touched — and the ledger would then claim delivered work that does not exist.
+  ⭐ **Caught by 167-02's executor, which tried the handler, read the refusal, checked what the
+  global id actually meant, and declined rather than forcing it.** That is the correct behaviour and
+  the reason this entry exists.
+  ⚠️ `D-14` looks like a third collision under a naive grep but is NOT — the only global hit is the
+  substring inside `D-146-4`. ⛔ Do not "fix" it.
+  **Disposition:** the phase's own completion is tracked by its SUMMARY files and this CONTEXT, not
+  by the global ledger. ⛔ Leave `REQUIREMENTS.md` untouched for the whole of Phase 167.
+
+- **D-12: The staleness view is `service_role` only and `security_invoker = true`.** A customer-facing
+  reader cannot select it as `authenticated`. Any consumption path must be designed for that —
+  and if a SECURITY DEFINER wrapper is chosen, this repo has two dated traps to honour: a SECDEF
+  function used inside a `{public}` RLS policy needs `anon EXECUTE` or anon reads become a clean,
+  silent zero-row `[]`; and delete-guards must exempt `sanitize_user`. — **Reversibility:** costly.
+
+- **D-13: Any migration this phase produces goes through `migration-reviewer` +
+  `rls-policy-auditor` + `silent-failure-hunter` BEFORE it is proposed for apply.** Standing repo
+  rule, restated because D-11 arm B would produce one.
+
+- **D-14: In-product only. Email/push notification of the condition is NOT in this phase.** The
+  ROADMAP goal says *"in the product, on the surface where they notice the symptom"*. The 17-day
+  silence is evidence of the gap, not a mandate for an alerting channel; an
+  `api_key_rotation_reminder` cron already exists and a second notifier designed here would collide
+  with it. Deferred, named, not lost.
+
+- **D-15: No founder question was suppressed to produce this document.** Every area above resolved
+  against measured repo evidence. D-11 is left OPEN because it is genuinely open — it has a
+  one-way arm with a PROD migration and two measured silent side-effects — and not because leaving
+  one open looks careful.
+
+- **D-16: The holdings surfaces' "healthy" test is an EQUALITY against `revoked`, and it is
+  widened to a shared predicate in the SAME commit as the writer — founder decision 2026-09-22.**
+  Found independently by `rls-policy-auditor` and `silent-failure-hunter` during plan 03's D-13
+  review round, and re-measured by the orchestrator: **7 sites**, six in
+  `src/app/(dashboard)/allocations/components/HoldingsTable.tsx` and one in
+  `OpenPositionsTable.tsx`, each of the shape `source_key_sync_status !== "revoked"` or
+  `=== "revoked"`. There is no allow-list, no enum and no closed set over the column anywhere, so
+  **every status that is not `revoked` defaults to the healthy branch**. The consequence once
+  `167-04` lands the writer: a holding sourced from a key the venue has stopped accepting renders
+  un-chipped, un-filtered and counted in the headline AUM — the exact false-confidence failure this
+  phase exists to remove, reproduced one surface over. Within-tenant only; the ADR-0022 two-layer
+  gate is intact and unweakened.
+  ⛔ **Not deferred, and not folded into plan 03.** The harm exists only once a row can carry the
+  value, so the fix belongs with the writer: `167-04`'s `files_modified` gains the two components
+  and the equality is replaced by ONE shared predicate rather than a third and fourth hand-kept
+  copy. Landing both in one commit means there is never a window in which the value exists and the
+  surface lies about it. ⚠️ Plan 03 was deliberately NOT widened at its gate — three reviewers had
+  already signed off on its scope, and reopening a reviewed scope to append an unreviewed change is
+  how a fix round becomes a regression.
+  ⚠️ **The class is wider than the two files.** `HoldingsTabPanel`'s `keyStatusById` map and
+  `ApiKeyManager.tsx`'s `SyncProgress` (`syncStatus !== "idle"`, no `sign_in_failed` branch, and
+  NOT confirmed to be fed from `api_keys.sync_status`) carry the same shape. `167-04` closes the two
+  money surfaces; anything it does not reach is named in its SUMMARY rather than left implied.
+
+- **D-17: A login-stage `-10005` IS a sign-in refusal; the IPC-infrastructure codes are NOT.**
+  *(Added 2026-09-22 after code-review round 2, which found the fix round had silently routed the
+  measured wrong-password case back to the pre-167 copy, crediting a D-07 "acceptance" that this
+  file never recorded — that premise came from the orchestrator's own fixer brief, and was wrong.)*
+  "Sign-in failed" is stamped only when the terminal ANSWERED the `login()` call itself falsy —
+  `Mt5LoginRefusedError`, which `Mt5Client.login` raises only after `initialize()` succeeded — and
+  the answer's code is not `-10000…-10004` (the MetaQuotes internal-IPC family below `-10005`; the
+  repo already treats `-10003` as IPC in `assert_session_authorized` and `mt5_relogin`), not the
+  success code `1`, and not a malformed `last_error` shape. Everything else — an `initialize()`
+  failure, a transport raise, a post-login read failure — keeps the pre-167 transport answer.
+  **Why `-10005` stays in:** D-08 names it as the measured wrong-password mechanism (a modal login
+  dialog blocking IPC), and reaching the marker already implies the bridge answered `initialize()`,
+  so a terminal-wide wedge lands on the transport path instead. ⚠️ Accepted cost: a login-stage
+  `-10005` WITHOUT a dialog (measured once, per the ROADMAP) is shown the hedged sign-in copy
+  ("they may have changed") until the next daily poll re-checks it. Excluding it instead would
+  re-open the 17-day silence this phase exists to close. — **Reversibility:** reversible (one
+  named constant in `services/mt5_validation.py`).
+
+- **D-18: The manager-role surface for the persisted credential state is the key card in
+  `ApiKeyManager`, on `/strategies/[id]/edit`. RESEARCH Open Question 2 is CLOSED.**
+  *(Added 2026-09-22, gap closure 167-06. It closes verification gap 1: the state this phase writes
+  for a key was rendered only on a surface a manager-role owner cannot reach.)*
+  **Why this surface: five reasons, each measured.**
+  1. **Who has the symptom.** A manager owns the factsheet whose staleness is the symptom. The
+     initial-schema `role` DEFAULT is `manager`, so a manager-role owner is the common case. The
+     daily holdings poll (`enqueue_poll_allocator_positions_for_all_keys`, no role filter) stamps
+     that owner's key, and before 167-06 no page they could reach rendered it.
+  2. **Where the manager meets the key.** The edit page is gated by ownership AND by role: it reads the
+     strategy with `.eq("user_id", user.id)`, and it sits under `strategies/layout.tsx`, whose
+     `requireRolePage(…, "manager")` admits `manager` and `both` — both of which own strategies, so
+     the conclusion holds. *(Corrected 2026-09-22 per re-verification: this line said "ownership
+     only"; the page itself reads nothing from `profiles`, but its layout is role-gated.)* The dashboard layout
+     reads `role` only to choose nav chrome, and `src/proxy.ts` gates admin routes only. The page
+     mounts `ApiKeyManager` with `currentKeyId = strategy.api_key_id`, so the key that feeds THIS
+     strategy is shown on THIS strategy's page, marked by its `Resync` control.
+  3. **The remedy is on the same card.** The helper's imperative names an action the card can
+     perform: `Update password` for MT5, which goes to `rotate-secret`, whose validated write sets
+     `sync_status` to `idle` (the only place the column is cleared); `Add Key` and `Delete` for the
+     ccxt re-add that the `revoked` helper asks for.
+  4. **Why not the factsheet.** D-04 is one-way and the owner lane shares the id-keyed payload. A
+     strategy-level causal sentence would also need the D-03 staleness conjunct, which
+     `ledger_refresh_staleness` exposes only to `service_role` (D-12), and 167-UI-SPEC §4 binds S1 to
+     claim only what was written for the key.
+  5. **Why not open the `/profile` Exchanges tab to managers.** It is the allocator's
+     holdings-and-balance surface (`ProfileTabs` marks it `allocatorOnly`; `profile/page.tsx` loads
+     its keys only for an allocator). Un-gating it changes a role boundary on an unrelated surface,
+     and it would still not be the page where a manager manages a strategy's key.
+  **What renders.** The EXISTING `AllocatorSyncStatus` is mounted on a key card only when
+  `isUntrustedKeySyncStatus(key.sync_status)`. No new copy, colour, token or component (D-05, D-11
+  arm B). Every trusted-or-neutral status stays unrendered on that card.
+  **Coexistence with the card's local `SyncProgress` panel, one line each.** (`SyncProgress` is a
+  local state machine, never fed from `api_keys.sync_status`, and an MT5 resync can reach a terminal
+  success whatever the password, because `run_sync_trades_job`'s MT5 branch makes the daily-PnL
+  fetch a no-op.)
+  - **R1:** the pill block mounts from the server value only; while that key's own sync is in
+    flight its DISPLAYED status is `syncing` (neutral pill, silent helper), and the block stays
+    mounted, so the card keeps one stable live region.
+  - **R2:** the panel's terminal-success render is withheld while its subject key
+    (`lastAttemptedKeyId`) is untrusted in the loaded keys. Its error render is kept, and it is
+    never withheld in flight, because its poll is what clears `syncingKeyId`.
+  - **R3:** a successful `Update password` retires a withheld success rather than letting the
+    re-read re-show it. One guarded functional update; in-flight and error values are unchanged.
+  - **R4:** a key's `Update password` is disabled while that key's own sync is in flight, key-scoped
+    (`syncingKeyId === key.id`). `Modal`'s `showModal()` stops a sync starting while the dialog is
+    open. Together, one key's attempt and its rotation never overlap, which closes the in-flight
+    rotation window. ⚠️ **Lineage:** plan revision 1 said closing this window needed a record tying
+    the withhold to the attempt's credential. That was WRONG: the window exists only if the two
+    overlap, and existing state prevents the overlap, so nothing has to be recorded.
+    ⚠️ **Lineage (167-06 fix round, 2026-09-23):** "existing state prevents the overlap" held only
+    while the marker lasted as long as the attempt, and before this fix it did not. `SyncProgress`
+    polls while `syncing`, BEFORE the attempt's own `/api/keys/sync` has answered, so a slow enqueue
+    (a cold start past the 3 s poll) let the poll read the strategy's PREVIOUS analytics row. That
+    row's terminal status ended the attempt's marker early; the 202 then moved the same attempt to
+    `computing`, which ran on unmarked. So the same stale pre-enqueue read could end a `computing`
+    attempt's marker early, and for the rest of that attempt R4's disable was open: a rotation could
+    set the key to `idle` and the attempt's later success, made under the replaced password, was
+    shown. The failed post-add sync did the same through R6 (below). Both are closed by scoping the
+    marker to the tracked attempt: only that attempt clears it, and its poll's statuses are ignored
+    until its own enqueue has resolved.
+    ⚠️ **Lineage (167-06 fix round 2, 2026-09-23):** "ignored until its own enqueue has resolved"
+    was NOT enough, and the sentence above is kept as the record of that. The poller's attempt
+    budget and missing-row grace are local to its effect, and the effect spanned `syncing` and
+    `computing`, so the ignored pre-enqueue polls still SPENT the budget: a slow enqueue that
+    succeeded (no row and a 36 s enqueue; the previous run's row and a 126 s enqueue) was ended
+    with the timeout copy one tick after its 202, having read the new job zero times
+    (167-REVIEW-06-R2 CR-01 / SFH2-HIGH-1). **The fix:** `SyncProgress` polls in `computing` only,
+    which `ApiKeyManager` (its one caller) enters only after enqueue evidence, so there is no
+    pre-enqueue read and the budget starts at the enqueue. `useStrategySyncPoller` is unchanged,
+    so the wizard is unaffected. The `enqueued` check stays in `ApiKeyManager` as a second line.
+    Pinned against the REAL poller in `ApiKeyManager.poll.test.tsx`.
+  - **R5:** the retirement is ONE shared helper, `retireWithheldSuccess`, called on a successful
+    `Update password`, a successful `Delete` and a successful `Add Key`. Its guard is read from the
+    pre-change list (the render the user clicked in). `Delete` is disabled during that key's own
+    sync, for R4's reason. ⚠️ **Lineage:** plan revision 2 retired on `Update password` only, and a
+    withheld success re-appeared once its key was deleted or superseded by an added key.
+  - **R6 (corrected 2026-09-23, 167-06 fix round):** a failed post-add sync never ends, and never
+    dead-locks, a live tracked attempt. While an attempt is live the post-add catch leaves the panel
+    and the marker alone and reaches the console only; the attempt keeps polling and ends itself.
+    With no attempt live, it reports to the panel as before. `handleAddKey` also no longer moves
+    `lastAttemptedKeyId` while an attempt is live, so that attempt's success is judged against its
+    own key. ⚠️ **Lineage:** R6 as first shipped read "every transition of the panel to `error`
+    clears the in-flight marker", and the post-add catch cleared it. At HEAD before 167-06 that
+    catch dead-locked every `Resync` and `Use & Sync` until a reload, and R6 removed the dead-lock.
+    But its justification, that once the marker was clear "nothing polls it any more", was WRONG
+    when the post-add failure landed while the tracked attempt was still awaiting its own enqueue:
+    the attempt's 202 then resumed polling with no marker, so its key's pill claimed
+    `sign_in_failed` under a spinner and its `Update password` and `Delete` were enabled
+    mid-attempt (167-REVIEW-06 CR-01). The same defect had a second route, the stale pre-enqueue
+    read recorded under R4. The fix is the root cause, not the route: the marker is owned by the
+    tracked attempt.
+    ⚠️ **Lineage (167-06 fix round 2, 2026-09-23):** "with no attempt live, it reports to the panel
+    as before" was not true in one ordering. The subject was decided once, at the add's link, so a
+    tracked attempt on key J that was live then (or started after) and ENDED before the post-add
+    failure left `lastAttemptedKeyId` on J; the panel's Retry then re-linked the strategy to J,
+    undoing the Add Key's link (167-REVIEW-06-R2 WR-01). **Now:** when the post-add failure is
+    shown, the subject moves to the new key with it, so Retry targets the key that failed. An
+    `error` is never withheld (R2), so the move cannot re-show a success.
+  **What it deliberately does NOT do.** No strategy-level causal sentence (D-02, D-03, UI-SPEC §4).
+  No factsheet path (D-04). The `/profile` Exchanges tab stays allocator-only.
+  ⚠️ **Residual — placement, not copy.** The sentence names the credential and the remedy; it does
+  not say "your factsheet stopped updating because…". The tie to the factsheet is carried by
+  PLACEMENT (the strategy's own page, with its current key marked), because no signal ties a
+  strategy's staleness to a key's failure, and authoring one would be the inference this phase
+  forbids. If re-verification judges placement insufficient, the only remaining routes are a founder
+  override or a new phase that builds a strategy-level write boundary.
+  ⚠️ **Two residuals, named and NOT fixed.** ⭐ **Destination (added 2026-09-22): Phase 167.2 KEYCARDSYNC**, inserted in the ROADMAP for both.
+  - **The post-add sync bypasses the one sync slot.** `handleAddKey` moves the panel's subject to the
+    new key while another key's attempt may still be polling, so that attempt's terminal success is
+    judged against the new key and reads as being about it. Between two healthy keys it shows as a
+    premature "Up to date". ⚠️ **The UNTRUSTED-key variant can show a success beside a "Sign-in
+    failed" pill:** key J is untrusted and syncing, the user adds a key, `lastAttemptedKeyId` moves
+    to the healthy new key, and J's later success is shown beside J's own pill. R6 closes the
+    dead-lock half of this race. Closing the subject half means routing the post-add sync through
+    the tracked slot, which changes the add flow the `SEAMUX-05` describe block pins. Routed, not
+    fixed. The `handleAddKey` retirement's guard also reads the subject's trust status as of the
+    submit click, so a re-read landing during its validate or link awaits can make it stale; only a
+    success line is affected, because the updater is functional.
+    ⭐ **NARROWED 2026-09-23 (167-06 fix round) — the paragraph above is kept as lineage.** The
+    subject no longer moves while a tracked attempt is live, so the untrusted-key variant above (J's
+    success beside J's own pill) is closed and pinned by the corrected R6 case. What REMAINS of this
+    residual, still routed to 167.2: the post-add sync is still outside the tracked slot, so (a) its
+    FAILURE while another attempt is live reaches only the console, because the panel and the marker
+    belong to that attempt; and (b) its own outcome is never polled. Closing either still means
+    routing it through the slot.
+  - **Two limits of the attempt scoping, named 2026-09-23 (167-06 fix round), not fixed.**
+    (a) **A stale read AFTER the enqueue.** The poll's statuses are honoured once the attempt's own
+    `/api/keys/sync` has answered, but the route only enqueues; the worker writes `computing`
+    later. A poll landing in that gap still reads the previous run's row, and a terminal there ends
+    the attempt early with the previous run's result. This is pre-existing and not specific to
+    167-06; closing it needs the poll to compare the row's `computed_at` against the attempt's
+    start, which is a `SyncProgress` / `useStrategySyncPoller` change. (b) **An enqueue that never
+    settles.** Before the fix, the poll's 40-attempt cap could end an attempt whose request never
+    answered; the cap's `error` now arrives before the enqueue and is ignored, so such an attempt
+    spins until its request settles. The route declares `maxDuration = 300`, so the platform ends
+    the request within that bound and the attempt then fails through its own catch: a delay, not a
+    permanent dead-lock. (The link update that precedes it has no such bound of its own.)
+    ⭐ **Re-read 2026-09-23 (167-06 fix round 2).** (a) is unchanged in kind and not made worse:
+    post-enqueue reads are honoured exactly as before, and the first one now lands one full poll
+    interval after the 202 rather than anywhere inside it. It stays routed to 167.2. (b) holds with
+    a corrected mechanism: no poll runs before the enqueue any more, so nothing but the route's
+    `maxDuration` ends such an attempt. The ignored pre-enqueue cap named in (b) was also what
+    spent the poller's budget for an enqueue that DID answer (R4's round-2 lineage above); that
+    half is fixed.
+  - **Closed in the 167-06 fix round 2 (2026-09-23), each pinned with a neuter:**
+    - **Key-list reads are ordered (WR-04).** Each `loadKeys` call takes the next number, and a
+      response older than the newest one applied is dropped. Before, the attempt's own post-enqueue
+      read could resolve after the terminal re-read and install the pre-job snapshot, lifting R2's
+      withhold beside a key whose sign-in had failed.
+    - **The terminal re-read is bounded (SFH2-MED-1).** `TERMINAL_REREAD_BOUND_MS` (15 s). On the
+      bound the attempt ends as after a failed re-read: success withheld (idle), load error shown.
+      A re-read that THROWS is caught, logged with context and shown the same way (SFH2-LOW-1).
+    - **A Delete that removed no row asks whether the row is still there (WR-05).** Gone (another
+      tab deleted it): removed locally, as a success. Still there: a refusal, reported as
+      "Failed to delete key: the key is still connected. Try again, and contact support if it keeps
+      failing." (IN-03, active voice; it replaced "…: no key was removed.").
+  - **A change made in another tab.** R3 and R5 retire on THIS tab's own actions. Another tab's
+    `Update password` or `Delete` reaches this tab only through a re-read (the load-error `Retry`, or
+    the terminal-success arm's re-read), which can lift R2's withhold. Closing it needs retirement at
+    the moment of withholding, a redesign of R2.
+  **The D-16 residual it closes.** The `ApiKeyManager` half of 167-04-SUMMARY residual 2 is closed:
+  the component now answers the persisted status through `isUntrustedKeySyncStatus`, and its
+  `SyncProgress` check against `idle` was measured to be local state, never the column, so it was
+  never a member of the class. `HoldingsTabPanel`'s `keyStatusById` stays named and out of scope.
+  — **Reversibility:** reversible — one conditional mount, two derived render rules, one shared
+  event-handler helper, two derived `disabled` props and, since the 167-06 fix round, one
+  attempt-scoped marker (a ref and its single `endAttempt` clear) in one client component; no data,
+  schema or wire contract moves. Since the 167-06 fix round 2 also: one poll gate in `SyncProgress`
+  (`computing` only), ordered key-list reads and a bounded terminal re-read in `ApiKeyManager`, and
+  one follow-up existence read after a zero-row delete. Still no data, schema or wire contract.
+
+- **D-19: The key card on the strategy's edit page closes 167's goal; a key-status mark on the
+  `/strategies` list rows is routed to Phase 167.2.** *(Orchestrator decision 2026-09-22,
+  founder-delegated, after re-verification left goal truth 1 as a founder call.)* An honest
+  "your factsheet stopped because of the credential" sentence cannot be written under D-02, D-03
+  and D-12, so 167 delivers the credential-level signal where the owner manages that key: the
+  strategy's own edit page, on the card of the key that feeds it (marked by its Resync control),
+  beside the remedy control. The re-verifier showed a stronger placement is ALSO allowed:
+  `StrategiesPage` (`/strategies`), where a manager lands, already selects each owned strategy's
+  `api_key_id`, is owner-scoped and uncached, and touches no D-04 path — a key-level mark on a
+  strategy row there makes no causal claim. It is not built here because it is a new surface with
+  its own design questions, not a closure of 167's measured gap; it is the same family as 167.2's
+  key-card work, so it joins that phase rather than getting a third one. — **Reversibility:**
+  reversible (additive UI).
+
+### Claude's Discretion
+
+- The exact wording of the new `WizardErrorCode` copy and the authored owner-surface helper line,
+  within DESIGN.md's constraints (below).
+- Whether the owner-surface cause renders as an extra helper line, a distinct pill state, or both —
+  downstream of D-11.
+
+</decisions>
+
+<canonical_refs>
+## Canonical References
+
+**Downstream agents MUST read these before planning or implementing.**
+
+### The freshness substrate (consume — do not reinvent)
+- `supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql` — the server-side freshness
+  verdict keyed on `max(date)` inside `returns_series`, with `is_stale` / `stale_reason`; also the
+  single SQL home of the ledger venue set, and its access-control posture (service_role only,
+  `security_invoker`).
+- `src/app/factsheet/[id]/v2/FactsheetView.tsx` — `FreshnessChip`, `bucketByAge`, `TONE_RANK`,
+  `seriesIsBinding`, and `SeriesRecencyLine`: the client-side verdict that already renders.
+- `src/lib/freshness.ts` — where the threshold constants live (`computeFreshness`, the 12h/48h and
+  3d/7d ladders).
+
+### The public/owner cache boundary (D-04 — read before touching any factsheet path)
+- `src/app/factsheet/[id]/v2/page.tsx` — the owner-lane / public-lane split and the id-only
+  `unstable_cache` key with its 3600 s TTL.
+- `src/app/factsheet-share/` (the tokenized public route) — its SECURITY BOUNDARY header, including
+  the explicit prohibition on widening the projection toward `api_keys`.
+- `src/__tests__/` → `phase-148-owner-lane-cache-isolation.test.ts` — the existing regression guard.
+
+### The owner-facing sync surface
+- `src/components/exchanges/AllocatorSyncStatus.tsx` — the 7-state pill, the LOCKED copy table, the
+  `revoked` authored helper, and the `error` arm that passes `sync_error` through verbatim.
+- `src/components/exchanges/AllocatorExchangeManager.tsx` — its caller.
+- `src/app/(dashboard)/allocations/components/HoldingsTable.tsx` and `OpenPositionsTable.tsx` — the
+  `source_key_sync_status !== "revoked"` FILTER and the amber revoked chip (D-11 arm A's hidden cost).
+- `src/app/api/keys/[id]/rotate-secret/route.ts` — the one place `sync_status` is cleared back to
+  `idle`, and the documented note that the worker never writes it back.
+
+### The wizard cross-language contract
+- `src/lib/wizardErrors.ts` — `VENUE_WIRE_CODE_TO_VERDICT`, the copy table,
+  `KEY_MUST_BE_RECONNECTED` (the shape to copy), `KEY_AUTH_FAILED` and `KEY_NETWORK_TIMEOUT` (the
+  two codes NOT to route at).
+- `src/lib/envelope.ts` — `RECOVERABLE_ACTIONS` and `buildEnvelope`; where `recoverable` is derived.
+- `src/components/error/ErrorEnvelope.tsx` — the canonical renderer; Retry renders iff
+  `envelope.recoverable && onRetry`.
+- `src/lib/wizardErrors.test.ts` — the two `EXPECTED_TABLE_SIZE` pins (grep, never count) and the
+  self-referential regex assertion that reads them back out of the source.
+- `src/lib/seam-venue-vocabulary.invariant.test.ts` — the Python-emitter ↔ TS-disposition SET
+  comparison that reds by name on an undispositioned new code.
+- `src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.tsx` and
+  `MultiKeyConnectStep.tsx` — the two wizard rosters, `KNOWN_CREATE_WITH_KEY_CODES` and
+  `KNOWN_ADD_KEY_CODES` (and the `ROSTER-DERIVE-01` note on why they are duplicated).
+  > ⛔ **CORRECTED 2026-09-22 by the orchestrator, against a measurement.** This line named
+  > `SyncPreviewStep.tsx` as the second roster. It is not. Measured at `36216917`: the two
+  > `ReadonlySet<WizardErrorCode>` rosters are `KNOWN_CREATE_WITH_KEY_CODES` (`ConnectKeyStep.tsx`)
+  > and `KNOWN_ADD_KEY_CODES` (`MultiKeyConnectStep.tsx`). `SyncPreviewStep.tsx` carries a THIRD,
+  > differently-typed roster — `KNOWN_KICKOFF_CODES: Readonly<Record<string, WizardErrorCode>>` —
+  > governing post-connect job kickoff, a different failure surface from connect-time validate.
+  > A planner that edited `SyncPreviewStep.tsx` and skipped `MultiKeyConnectStep.tsx` would have
+  > left the multi-key connect path rendering the UNKNOWN terminal for the new code.
+- `src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx` — `KNOWN_KICKOFF_CODES`,
+  the third roster; in scope only if the kickoff surface is in scope.
+
+### The Python side
+- `analytics-service/routers/exchange.py` — `validate_key`, the `424 NETWORK_UNAVAILABLE` /
+  `recoverable=True` transient arms, and `VenueTransientHTTPException`.
+- `analytics-service/services/allocator_positions.py` — `MT5_UNREACHABLE_NOTE` and the rest of the
+  *"sync will retry automatically"* copy family; `_map_exception_to_sync_status`;
+  `_must_reach_handler_unwrapped` and its "THE AUTHORITY on retry disposition" note.
+- `analytics-service/services/job_worker.py` — `classify_exception`, the authority itself.
+- `analytics-service/services/equity_reconstruction.py` — the second
+  `_map_exception_to_sync_status`, identical table.
+
+### Dependency evidence (D-01)
+- `.planning/phases/164.7-.../164.7-07-SUMMARY.md` — the DEFERRED activation and its measured cause.
+- `.planning/phases/164.5.1-.../164.5.1-09-SUMMARY.md` — the activation that actually happened,
+  2026-09-17, with its preconditions and the by-script oracle re-capture.
+- `scripts/prod-prober/cron-manifest.json` — the PROD reading: jobid 40, `25 * * * *`, active.
+
+### Design
+- `DESIGN.md` — §Error Envelope (visual contract; the authoring rule that every error path MUST call
+  `buildEnvelope`, no inline-string envelopes), §Color semantic gates (**red = permanent / hard
+  error; amber = recoverable and deliberate** — the 2026-07-02 decision states red is *forbidden*
+  for a recoverable exclusion), §Generative Principle (*"a freshness stamp toned by age, and copy
+  that states its own limits"*), and §9-State Matrix (`stale` is a declared state on every API-key
+  surface).
+- `.planning/ROADMAP.md` → `### Phase 167` — every claim in it is a PROD measurement; do not
+  re-derive them.
+
+</canonical_refs>
+
+<code_context>
+## Existing Code Insights
+
+### Reusable Assets
+- **`public.ledger_refresh_staleness`** — a ready-made per-strategy `is_stale` + `stale_reason`.
+  Consume it; do not build a second freshness rule (D-12 notes its grant posture).
+- **`FreshnessChip` / `SeriesRecencyLine`** — the staleness render already exists and already takes
+  the staler of two arms. This phase adds a reason beside it, on owner surfaces only.
+- **`KEY_MUST_BE_RECONNECTED`** — the exact action-shape for a non-retryable reconnect remedy
+  (`["request_call", "expand_log"]`, neither `RECOVERABLE_ACTIONS` member).
+- **`AllocatorSyncStatus`'s `revoked` arm** — the exact shape for an authored helper that ignores
+  the raw DB error string.
+- **`classify_exception`** — the venue-agnostic retry-disposition authority, already imported
+  lazily inside the function to keep the import graph acyclic.
+
+### Established Patterns
+- **Copy tables are hand-typed rosters pinned by size constants**, and a new code must move every
+  pin in the same change. Grep the pins; never count them.
+- **Wire vocabulary is derived, not trusted**: the Python emitter's code set is compared as a SET
+  against the TS dispositions, so a new code without a row fails by name.
+- **Locked-verbatim copy** is a real convention here, asserted character-for-character down to the
+  U+2026 / U+2014 code points. Extending such a table is a deliberate act with its pins updated.
+- **The public factsheet payload is cached by id alone**; viewer-dependent content in it is a leak.
+
+### Integration Points
+- Python → DB: `api_keys.sync_status` / `sync_error` written by the allocator worker's failure arm.
+- DB → owner UI: `AllocatorExchangeManager` → `AllocatorSyncStatus`; allocations dashboard →
+  `HoldingsTable` / `OpenPositionsTable` chips.
+- Python → wizard: `routers/exchange.py` wire code → `VENUE_WIRE_CODE_TO_VERDICT` →
+  `WizardErrorCode` → `buildEnvelope` → `ErrorEnvelope`.
+- SQL → (undecided consumer): `ledger_refresh_staleness`, service_role only today.
+
+</code_context>
+
+<specifics>
+## Specific Ideas
+
+- The phrase to beat, and the reason this phase exists: the owner is currently told
+  *"…— sync will retry automatically."* while the retry provably cannot succeed. Any replacement
+  copy must survive DESIGN.md's five-second test — *would this screen survive being printed and
+  handed to an LP?* — and must state its own limits rather than assert a cause the classifier
+  refused to assert.
+- Tone: a credential the customer can rotate is **recoverable**, so the owner-surface treatment sits
+  in the amber family alongside the existing revoked-key chip, not in red. DESIGN.md's 2026-07-02
+  decision forbids red for a recoverable state.
+
+</specifics>
+
+<deferred>
+## Deferred Ideas
+
+- **Proactive notification (email/in-app inbox) when a key crosses into the credential-failure
+  state.** The 17-day silence is real, but the ROADMAP's goal is explicitly in-product, an
+  `api_key_rotation_reminder` cron already exists, and a second notifier designed here would collide
+  with it. → its own phase (D-14).
+- **Correcting `### Phase 167`'s `Depends on:` attribution** from 164.7 plan 07 to 164.5.1 plan 09
+  (D-01). A one-line ROADMAP edit, made when this phase ships — not inside the planning run.
+- **A repo-side or CI-side liveness assertion that `system_flags.ledger_refresh_enabled` is still
+  TRUE and jobid 40 is still active** (D-02). Today the only evidence is a manifest captured on
+  2026-09-18, and nothing re-reads it. Valuable, and genuinely a different phase: it is an
+  ops-observability gate, not a customer-facing surface.
+- **Re-reading the second `_map_exception_to_sync_status` in `equity_reconstruction.py`** — an
+  identical duplicated table, a drift hazard of the class this repo already names. Not this phase's
+  scope; worth its own de-duplication.
+
+</deferred>
+
+---
+
+*Phase: 167-CREDTRUST*
+*Context gathered: 2026-09-22*

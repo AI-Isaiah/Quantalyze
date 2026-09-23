@@ -213,8 +213,21 @@ export function SyncProgress({
   // SyncProgress.poll.test.tsx prove zero behavior change. Everything below stays
   // SURFACE policy: the toSyncStatus forward filter (idle-drop) and the "error"
   // escalation sink are passed as callbacks — the hook never imports toSyncStatus.
+  //
+  // Phase 167 / 167-06 fix round 2 (167-REVIEW-06-R2 CR-01): the poll runs in
+  // `computing` ONLY, not across `syncing` as well. `syncing` is the caller's
+  // state for "our own sync request has not answered yet" (`ApiKeyManager`, this
+  // component's one caller, moves to `computing` only once that request returned
+  // enqueue evidence), so a read taken in `syncing` is about the strategy's
+  // PREVIOUS run. Worse, the attempt counter and the missing-row grace are local
+  // to the poll effect, and `isActive` spans both states, so the effect did not
+  // restart at the enqueue: a slow enqueue spent the whole budget before its job
+  // existed, and the first tick after it escalated to the timeout copy having
+  // read the new job zero times. Gating on `computing` starts the budget at the
+  // enqueue. The exchange-name fetch and the elapsed timer still span both.
+  // The hook is unchanged, so the wizard (which calls it directly) is unaffected.
   useStrategySyncPoller({
-    enabled: isActive,
+    enabled: syncStatus === "computing",
     strategyId,
     schedule: 3000,
     maxAttempts: POLL_MAX_ATTEMPTS,

@@ -1065,7 +1065,12 @@ const DOCS_ONLY_TOLERANT_JOBS = [
 const NEVER_TOLERANT_JOBS = ["frontend-lint"] as const;
 
 describe("lint-sql-gates: the CI invocation (mode identity)", () => {
-  it("exits 0 over the real 75-file corpus with the allowlist applied", () => {
+  // ⛔ The TITLE deliberately carries NO file count. It said "72-file" while the
+  // pin said 73, and "75-file" while the pin said 75 and the corpus held 76 —
+  // twice the same [164.7-CITATION-DRIFT-01] class. A title that restates the
+  // pin is a second copy of the constant with nothing keeping the two in step,
+  // so the count now lives in ONE place in this test: the `toMatch` below.
+  it("exits 0 over the real supabase/tests corpus with the allowlist applied", () => {
     const res = runCli([]);
     // ⚠️ CURRENCY 2026-09-06 (phase 164.2 plan 07): 71 -> 72. The corpus gained
     // test_sync_status_curated_sentence_survives.sql. The number is pinned
@@ -1091,7 +1096,14 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // 402 -> 412 in scripts/mutation-runner/run.mjs) while missing this one —
     // caught only by CI. If you add a gate file, grep for every census that
     // counts supabase/tests, not just the two floors.
-    expect(res.out).toMatch(/scanned 75 file/);
+    // MOVED 2026-09-22 (Phase 167 CREDTRUST plan 03), 75 -> 76: supabase/tests/
+    // test_api_keys_sync_status_sign_in_failed.sql joined the corpus — the gate
+    // over the widened api_keys.sync_status CHECK.
+    // ⚠️ AND IT HAPPENED AGAIN: plan 03 moved three census pins and missed this
+    // fourth one, leaving CI red at HEAD. That is the SECOND time this exact
+    // pin was the one left behind (see the 164.5.1.4 note above). The title no
+    // longer restates it, so at least the two can no longer disagree.
+    expect(res.out).toMatch(/scanned 76 file/);
     expect(res.status, res.out).toBe(0);
   });
 

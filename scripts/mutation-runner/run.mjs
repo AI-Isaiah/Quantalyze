@@ -919,7 +919,28 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //                still 47. Raise FILES_FLOOR in scripts/mutation-runner/run.mjs
 //                to 48.` and FAILS; FILES_FLOOR=48 PASSES. WAIVED_CEILING stays
 //                0 (0 waivers, corpus-wide).
-export const FILES_FLOOR = 48;
+//
+// ⭐ RE-DERIVED 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2) — the arrival
+//                of supabase/tests/test_api_keys_sync_status_sign_in_failed.sql
+//                (the D-11 arm B CHECK-widening gate, two arms), moving
+//                FILES_FLOOR 48 -> 49. The paired ARMS_FLOOR move (423 -> 425)
+//                is in the block below.
+//                MEASURED via a full lane run,
+//                `node scripts/mutation-runner/run.mjs`: `coverage: files
+//                49/76`, `arms: 425/425/0`, `biting: 425`,
+//                `lane-invocations: 425` (the two independent tallies AGREE),
+//                `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`,
+//                `✅ No defects. Every annotated arm bit its own arm first.`,
+//                exit 0. Per-file line: `test_api_keys_sync_status_sign_in_
+//                failed.sql: sections 2 / judged 2 / annotated 2 / waived 0 /
+//                biting 2`. WAIVED_CEILING stays 0 — no waiver was added.
+//                SEPARATED on `src/__tests__/mutation-runner-floors.test.ts`'s
+//                fast re-derivation, run BEFORE this edit (the pre-edit value
+//                48 is the stale-low direction): `RATCHET STALE: 49 of 76 gate
+//                files are now annotated but FILES_FLOOR is still 48. Raise
+//                FILES_FLOOR in scripts/mutation-runner/run.mjs to 49.` FAILS
+//                at the old value; FILES_FLOOR=49 PASSES.
+export const FILES_FLOOR = 49;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2132,7 +2153,47 @@ export const FILES_FLOOR = 48;
 //    `DROP CONSTRAINT`: the drop is arm U2's twin, U2 runs FIRST in the same
 //    file, and two arms cannot share one mutation because only one of them can
 //    be the FIRST failure.
-export const ARMS_FLOOR = 423;
+//
+// ⭐ RE-DERIVED 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2): 423 -> 425.
+//    TWO new arms in the NEW file
+//    supabase/tests/test_api_keys_sync_status_sign_in_failed.sql: arm 1
+//    (revert the widened api_keys_sync_status_check to the pre-migration
+//    8-value list) and arm 2 (re-type the CHECK from a stale list that lost
+//    the prior value 'revoked' while still admitting 'sign_in_failed' — the
+//    exact DROP+ADD-re-types-a-stale-list hazard the migration itself is
+//    written to guard against). Both files AND arms move together here — the
+//    file is new, not an addition to an existing one. See the FILES_FLOOR
+//    block above for the full run's headline numbers (`coverage: files
+//    49/76`, `arms: 425/425/0`, `biting: 425`, `lane-invocations: 425`,
+//    exit 0); this entry adds only the per-file `sections 2 / judged 2 /
+//    annotated 2 / waived 0 / biting 2` line and the arm-level attribution.
+//
+// ⭐ RE-DERIVED 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 425 ->
+//    426. ONE new arm, 3, in the now-EXISTING annotated file
+//    supabase/tests/test_api_keys_sync_status_sign_in_failed.sql. It carries
+//    the mutation that the file's pre-fix SUBSTRING probe passed clean: re-type
+//    the CHECK dropping 'complete' while KEEPING 'complete_with_warnings', so
+//    the shorter value is lost and a bare `position('complete' …)` still finds
+//    it inside the longer one. The gate's "no prior value was lost" claim was
+//    blind to exactly that, and this arm is what keeps the repaired idiom
+//    honest.
+//    ⚠️ Arm 3 gets its OWN check (c) and its OWN `TEST FAILED (3)` identity
+//    rather than riding on (2): the runner scores an arm by the FIRST
+//    `TEST FAILED (…)` in the lane output, so an arm whose mutation reddened
+//    (2) could never be told apart from arm 2 itself.
+//    So ARMS moves and FILES does not: FILES_FLOOR stays 49 (the file was
+//    already annotated by the time this arm landed) and WAIVED_CEILING stays 0.
+//    MEASURED via a full lane run, `node scripts/mutation-runner/run.mjs`:
+//    `coverage: files 49/76`, `arms: 426/426/0`, `biting: 426`,
+//    `lane-invocations: 426` (the two independent tallies AGREE),
+//    `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`,
+//    `unreachable: 27 file(s)`, `pending: 0`,
+//    `✅ No defects. Every annotated arm bit its own arm first.`, exit 0.
+//    Per-file line: `test_api_keys_sync_status_sign_in_failed.sql: sections 3 /
+//    judged 3 / annotated 3 / waived 0 / biting 3`. Arm 3 itself scored
+//    `RED (identity ok)` — not NO-IDENTITY, so its `TEST FAILED (3)` marker is
+//    the shape the runner reads.
+export const ARMS_FLOOR = 426;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

@@ -386,6 +386,16 @@ const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // the wire code behind it is `retryable=False` at its emitter and a Retry
     // would re-read the identical stored bytes.
     "KEY_MUST_BE_RECONNECTED",
+    // 167-CREDTRUST / D-05, D-07 — the same addition as
+    // `KNOWN_CREATE_WITH_KEY_CODES` (full reasoning there), taken together
+    // because both rosters are checked against the SAME
+    // `classifyKeyValidationError` population and
+    // `[153.7 review W-153.7-1]` reds on both by name. Copy verified present
+    // in `WIZARD_ERROR_COPY`, and it is deliberately NOT recoverable — the
+    // wire code behind it is `recoverable=False` at its emitter and a Retry
+    // would re-run the identical validate against a terminal a wrong
+    // password may have wedged.
+    "KEY_SIGN_IN_FAILED",
   ]);
 
 /**

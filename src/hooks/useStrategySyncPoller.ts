@@ -49,7 +49,12 @@ export type ComputationStatus = StrategyAnalytics["computation_status"];
  * exchange-name fetch/step-dots/`toSyncStatus` forward filter/elapsed timer.
  */
 export interface UseStrategySyncPollerOptions {
-  /** Gate: SyncProgress `isActive`; wizard `phase === "waiting_for_complete"`. */
+  /**
+   * Gate: SyncProgress `syncStatus === "computing"` (since 167-06 fix round 2;
+   * it was `isActive`, which also spanned the pre-enqueue `syncing` state and
+   * spent this hook's attempt budget before the job existed); wizard
+   * `phase === "waiting_for_complete"`.
+   */
   enabled: boolean;
   strategyId: string;
   /**
