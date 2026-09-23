@@ -167,6 +167,63 @@ quantstats — it derives from dailies), any annualization-convention change not
   already renders null as an absence (e.g. "—") and lists them. A surface that would render `None`
   as `0` or crash is a finding the plan fixes minimally, without new copy.
 
+### Post-research amendment (2026-09-24, orchestrator, `--auto`) — decisions forced by `166-RESEARCH.md`
+
+These settle the research Open Questions. Each cites the research section it rests on; none weakens
+a decision above.
+
+- **D-03 outcome (not a new decision — D-03's own rule applied):** the preparer-spy matrix
+  (`166-RESEARCH.md` §Q2) shows `prepare_returns=False` is honoured by NONE of the eleven new sites
+  (`recovery_factor`, `kelly_criterion`, `common_sense_ratio`, `cpc_index` transitively; the benchmark
+  leg of `r_squared`, `greeks`, `rolling_greeks`; plus the four kwarg-less scalars). All eleven go to
+  the inline arm. The "kwarg-closable" wording in `.planning/WINDOWS.md` entry 9 and the
+  `159-05-SUMMARY.md` Residual table is REFUTED by measurement; the closing commit and SUMMARY say so.
+  The D-14 gate allowlists named leaf FUNCTIONS, each pinned by a behavioural test — never the
+  literal keyword text (research F-5).
+- **D-15 — F-3 is fixed in this phase, disclosed under D-10.** Research measured a LIVE fabricated
+  value introduced by Phase 159: 0.0.81 `greeks` ends in `.fillna(0)`, so since RANK-05 passed
+  `prepare_returns=False` a NaN-bearing benchmarked series persists `alpha = 0.0`, `beta = 0.0`
+  (rendered as `0.000` in the Benchmark greeks table; `treynor` silently disappears). This is a
+  user-facing, data-integrity lie on the exact site D-05 inlines, so leaving it would ship a known
+  wrong value through new code. The inlined greeks compute alpha/beta over PAIRWISE-COMPLETE
+  observations (the convention the sibling `correlation` in the same M1 block already uses) and
+  emit `None`, never `0.0`, when beta is undefined (fewer than 2 complete pairs or zero benchmark
+  variance) — D-09's rule. NaN-free series stay bit-identical (research §Q3 parity 0.0). The
+  NaN-bearing class gets its own before/after row. — **Reversibility:** reversible.
+- **D-16 — F-2 (PSR kurtosis double-subtraction) is fixed in this phase, disclosed under D-10.**
+  0.0.81 feeds pandas EXCESS kurtosis into a term that expects the non-excess fourth moment
+  (`166-RESEARCH.md` §Q5 F-2, cited to Bailey & López de Prado), which makes live PSR `None` on a
+  steadily winning series. Project rule: a finding that is not user-facing is fixed or dropped, never
+  parked (PSR has no reader under `src/`, research §Q6), and the fix is one term inside a function
+  this phase already mirrors. The PSR mirror uses the non-excess moment; its correctness anchor is an
+  independent in-test computation of the published formula from sample moments, NOT live quantstats;
+  the benign-fixture parity test for PSR is replaced by that anchor and the change is a D-10 row.
+- **D-17 — F-4 (rolling alpha uses full-sample means) is fixed in this phase, disclosed under D-10.**
+  0.0.81's `rolling_greeks` computes `alpha_t = mean(r_all) − β_t·mean(b_all)`, so the rendered
+  `rolling_alpha` is a linear transform of rolling beta, not a windowed intercept. It is user-facing
+  (`RollingAlphaBetaChart`), and routing it would leave a known-wrong rendered series for no gain,
+  since `rolling_greeks` is inlined here anyway (D-06). The mirror computes the windowed intercept
+  `mean_w(r) − β_t·mean_w(b)` over the same 90-day window, still UNANNUALIZED (Phase 34 note kept).
+  `rolling_beta` is unchanged. The before/after is a D-10 row. — **Reversibility:** reversible.
+  ⚠️ D-08 still binds everything else: F-1 (alpha annualized on the frequency clock) is RECORDED in
+  the SUMMARY, not changed.
+- **D-18 — D-12's single source is the existing exported `PERCENTILE_METRICS`
+  (`src/lib/percentile-core.ts`)** (research §Q7: same seven columns, same order, already exported,
+  no imports). No new array. Because no test pins either literal today ("byte-frozen" is prose-only),
+  the D-12 plan FIRST adds a byte pin on the current `PERCENTILE_ANALYTICS_COLUMNS` string and
+  `CLOCK_SAFETY_KPI_COLUMNS` array (observed GREEN on the literals, then still GREEN after derivation),
+  so the derivation is proven byte-neutral rather than asserted.
+- **D-19 — TS verification in a worktree uses a symlinked `node_modules`, tested.** Module resolution
+  from a sibling worktree does not reach the main checkout's `node_modules` (research Open Q3), and
+  `npm install` is forbidden (disk). The executor links the main checkout's `node_modules` into the
+  worktree root before running `vitest`/`tsc` and removes the link before every commit (it must never
+  be committed). Measured 2026-09-24: `./node_modules/.bin/vitest --version` resolves (`vitest/4.1.10`)
+  through the link. A TS verify command that exits 127 or "command not found" is a FAIL, never a skip.
+- **Recorded, not changed (D-08):** F-1 (greeks alpha annualized on the frequency clock), and
+  `recovery_factor`'s arithmetic numerator vs `upi`'s compounded one. Both appear in the SUMMARY's
+  findings list. Research's Phase-165 notes (`scipy` imported directly but only a transitive pin;
+  `requirements.in` `pandas==2.2.3` vs lock `3.0.3`) are for Phase 165 and change nothing here.
+
 ### Claude's Discretion
 
 - Plan/wave split, naming of the extracted primitives beyond the TODOS 0f names, and fixture helper
@@ -186,6 +243,9 @@ quantstats — it derives from dailies), any annualization-convention change not
   fixes both preparers. Taking a git-URL or forked dependency into production money math is a
   supply-chain and maintenance one-way door. The plan proceeds on D-01's default regardless; this
   only decides whether a later phase switches.
+  ⭐ **MOOT after research (2026-09-24):** `166-RESEARCH.md` §Q1 found upstream `main` identical to
+  `v0.0.81` and the only maintained fork carrying both heuristics — there is nothing to adopt, so
+  OPEN-1 generates no checkpoint in this phase's plans.
 - **OPEN-2 — recomputing existing PRODUCTION rows.** Whether to enqueue recomputes for strategies the
   D-11 census finds affected, and when. A PRODUCTION data write, visible in users' rows.
 
