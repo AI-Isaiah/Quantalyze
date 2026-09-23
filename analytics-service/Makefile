@@ -67,7 +67,7 @@ lint:
 # command the CI gate runs once widened (ci.yml mypy step). Run this to
 # match CI exactly.
 typecheck:
-	$(MYPY) services/ routers/ models/
+	$(MYPY) services/ routers/ models/ main.py
 
 test:
 	# SERIAL (v1.9.1 Phase 97): `-n auto --dist loadgroup` deferred — the global-claim
