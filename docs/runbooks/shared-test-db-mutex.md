@@ -12,6 +12,11 @@ lock**. This page covers "what is holding the lock", "how do I break a stuck
 hold", "what happens on forks", and the drill that proves serialization still
 works.
 
+📜 **LINEAGE, 2026-09-23:** the Phase 158 trio above (`sql-tests`, `python`,
+`e2e-seeded`) is a dated framing, kept as it was. It was superseded by Phase
+164.4.2, which took `sql-tests` off the key; the current holder set is in the
+first section below.
+
 ⭐ **ADDENDUM 2026-09-21 (Phase 164.9) — THERE ARE NOW TWO KEYS, AND SECTIONS 1–6
 DESCRIBE ONLY THE FIRST.** A second advisory key, the *schema-apply-in-flight
 FLAG*, protects a different unit and **nothing blocks on it**; three reader jobs
@@ -29,11 +34,47 @@ deploy — the downstream damage this mutex prevents),
 [`compute-queue.md`](./compute-queue.md), and the deploy invariants in
 [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
+## 0. What changed on 2026-09-23 (Phase 164.4.2 SUBSETSPLIT) — read before section 1
+
+⭐ **`sql-tests` NO LONGER HOLDS THE KEY.** Everything below that names it as a holder
+is kept as dated lineage; the corrections sit beside each one.
+
+- **One holder removed.** `sql-tests` runs the `supabase/tests/test_*.sql` corpus on
+  a local Supabase stack private to its own runner, booted by
+  `scripts/local-stack/run.sh up`. It uses no secret, no repository variable and no
+  advisory key, and it cannot reach shared TEST. If you are triaging the lock, you
+  do not need to look at `sql-tests`.
+- **VAC-08 moved, and its new job holds the key.** The repo-vs-TEST ledger and
+  function-body drift check is about shared TEST by definition, so it could not move
+  with the corpus. It now runs in a new `ci.yml` job, **`test-db-drift`**. That job
+  took over the schema-apply wait, the mutex acquire / release / dead-holder-verdict
+  steps, the fork-author and configured-variable gate, and a `needs: python` stagger.
+- **The `ci.yml` holders are now `python`, `e2e-seeded` and `test-db-drift`.**
+  Measured 2026-09-23 by occurrence of the key literal per job: `test-db-drift` 12,
+  `python` 9, `e2e-seeded` 8, `sql-tests` 0. Each of the three has an acquire step and
+  `timeout-minutes: 90`. `apply-test` and `restore` (section 1, below) are unchanged,
+  so there are still five holders. The one that changed is `sql-tests`, replaced by
+  `test-db-drift`. `src/__tests__/critical-regressions.test.ts` measures the `ci.yml`
+  holder set from the file and compares it as an exact set, so a new holder cannot
+  appear unlisted.
+- **Contention is reduced, NOT eliminated.** Three `ci.yml` jobs and the two writers
+  still share the key across every run and every workflow. The cross-run queue in
+  section 2 still exists, with a shorter per-run lock-time.
+- **The numbers live in the phase's `164.4.2-MEASUREMENT.md`**, under
+  `.planning/phases/164.4.2-subsetsplit-sql-mutation-runs-only-the-changed-gate-files-on/`.
+  That covers the BEFORE table, the prediction, the refutation condition decided in
+  advance, and the AFTER table for all four jobs, which is filled in once merge-push
+  runs exist at the new head. Read them there. None of them is restated here. When
+  this section was written, the AFTER table had not been captured yet.
+
 ## 1. Mechanism
 
 `sql-tests`, `python` and `e2e-seeded` each acquire **session advisory lock key
 `61616158`** (issue #616 / phase 158) before their first DB-touching step, and
-hold it for the rest of the job. Waiters block inside `pg_advisory_lock`, so
+hold it for the rest of the job.
+⛔ **CORRECTED 2026-09-23 (Phase 164.4.2):** the `ci.yml` jobs that acquire the key
+are **`python`, `e2e-seeded` and `test-db-drift`**. `sql-tests` no longer does (see
+section 0). The sentence above is kept as lineage. Waiters block inside `pg_advisory_lock`, so
 contending runs queue instead of racing. Every mutex session opens with **both
 session GUCs**: `SET statement_timeout = 0` — the TEST project's server-wide
 `statement_timeout=120000` would otherwise kill a contended lock wait *and*
@@ -91,7 +132,11 @@ Two jobs outside `ci.yml` now take key `61616158`, and both write to shared TEST
    far only committed run: `34274355596` at head `88581b8b`.
 
 ⚠️ **BOTH ARE INDISTINGUISHABLE FROM `sql-tests` IN `pg_stat_activity`, and that is a
-choice.** Each sets the *same* `PGAPPNAME=ci-shared-test-db-mutex`, because each acquire
+choice.** ⛔ **CORRECTED 2026-09-23 (Phase 164.4.2):** read "from `sql-tests`" as "from
+the `ci.yml` holders (`python`, `e2e-seeded`, `test-db-drift`)". `sql-tests` no longer
+opens a session on shared TEST at all, so in an incident census it never appears. The
+five-holder argument below is unchanged. `test-db-drift`'s acquire step is the same
+byte-identical copy, which `critical-regressions.test.ts` asserts. Each sets the *same* `PGAPPNAME=ci-shared-test-db-mutex`, because each acquire
 step is a byte-for-byte copy of `ci.yml`'s (the copy is deliberate and is pinned by
 `src/__tests__/critical-regressions.test.ts`, which asserts the acquire steps are pairwise
 identical). So in a census you can tell the five apart only by `query` and by timing, never
@@ -181,7 +226,9 @@ There is **no lock-reaper cron, and none is needed.**
   > the server-wide `statement_timeout=120000` was the ACCIDENTAL janitor that
   > reaped such orphans at ~120 s; zeroing it made them immortal —
   > `sql-tests` and `e2e-seeded` starved on the lock and `e2e-seeded` failed
-  > at its 3600 s acquire cap ("Lock census: 1 granted, 2 waiting"). The same
+  > at its 3600 s acquire cap ("Lock census: 1 granted, 2 waiting"). (📜 A
+  > 2026-08-21 incident record, kept as lineage. `sql-tests` left the key on
+  > 2026-09-23 — section 0.) The same
   > mechanism leaves a waiter whose client died as a zombie queued on the lock
   > (a lock wait does not read the client socket either). Fixed two ways:
   > every mutex session now also sets
@@ -228,6 +275,12 @@ lock), `e2e-seeded` (~8-9 min, spanning `npm run build` *and* the Playwright
 batch), and `sql-tests` — so ~20 min of lock-time per run. The phase's success
 criterion is that **three simultaneous runs serialize and all succeed**, which
 is what the 3600 s cap is sized from.
+📜 **LINEAGE — the Phase 158 lock-time arithmetic, superseded 2026-09-23 (Phase
+164.4.2).** `sql-tests`' share of that ~20 min has left the key. `test-db-drift`
+(VAC-08 only) took its place, with a different hold time. The cap and TTLs were
+**not** re-derived, and that is deliberate: a shorter per-run hold only makes the
+3600 s cap more conservative. The measured per-job holds are in
+`164.4.2-MEASUREMENT.md` (section 0).
 
 ⭐ **THE FOURTH NUMBER WAS DELETED 2026-09-19. Do not re-derive it — do not
 change anything in `analytics-deploy-verify.yml` when you move the acquire cap.**
@@ -257,7 +310,13 @@ the acquire cap must not propagate there.**
 A waiter that exhausts the cap fails its job. Because `sql-tests` is now
 blocking the `frontend` aggregator, that means a red required check — and on a
 push to `main`, a check-suite that is not green, so Railway skips the analytics
-deploy. That is why the cap is sized for queue depth rather than left at a value
+deploy.
+⛔ **CORRECTED 2026-09-23 (Phase 164.4.2):** `sql-tests` no longer waits on the key,
+so it cannot exhaust the cap. The waiters that can are `python`, `e2e-seeded` and
+`test-db-drift`. `test-db-drift` is in the `frontend` aggregator's `needs:` and result
+loop. Its row tolerates only a SKIP on a fork PR or a `workflow_dispatch`, so a
+`failure` from an acquire timeout is a red required check on every event. The
+consequence above therefore still holds; only the job name changed. That is why the cap is sized for queue depth rather than left at a value
 comparable to the work it has to absorb. The timeout message deliberately names
 **both** queue depth and a wedged holder, and prints a `pg_locks` census
 (granted/waiting counts) so triage starts from a measurement.
@@ -386,6 +445,11 @@ This is safe rather than a hole, because the DB work itself already self-skips
 on forks, independently of the mutex:
 
 - `sql-tests` — its job-level `if:` excludes fork PRs outright.
+  ⛔ **CORRECTED 2026-09-23 (Phase 164.4.2):** it no longer has that clause, and it
+  no longer needs one. `sql-tests` reads no secret and touches only its own
+  runner's local stack. The fork-author clause moved with the secret to
+  **`test-db-drift`**, whose job-level `if:` admits only a push or a same-repo PR,
+  and requires the configured-TEST repository variable.
 - `python` — its live-DB tests demote to skipped via the `E2E_TEST_DB_CONFIGURED`
   env gate.
 - `e2e-seeded` — its job-level `if:` excludes fork PRs outright.
@@ -592,6 +656,12 @@ Plus four scripts that name it: `scripts/classify-changed-paths.mjs`,
 ⛔ Regenerate rather than trust this table — `grep -rlF 61616158
 .github/workflows scripts` — and note that a reader planning a key change who
 works from section 1's three-job picture will miss most of the call sites.
+⛔ **CORRECTED 2026-09-23 (Phase 164.4.2): the table above is the 2026-09-21
+reading, kept as lineage.** Re-measured with `grep -c 61616158` on 2026-09-23:
+`ci.yml` **29** (`test-db-drift` 12, `python` 9, `e2e-seeded` 8, `sql-tests` 0),
+`test-restore-from-baseline.yml` 8, `supabase-migrate.yml` 7, `mutex-probe.yml`
+**5**, `analytics-deploy-verify.yml` 1. The rule above still applies: regenerate
+this reading, don't trust it.
 
 ### 7.3 The ordering wait, and its three outcomes
 
@@ -603,6 +673,10 @@ goes FIRST. On a merge push, `ci.yml`'s reader jobs and `supabase-migrate.yml`'s
 **`Wait for the TEST schema apply to conclude (merge pushes only)`**
 IMMEDIATELY BEFORE their acquire step, invoking
 `scripts/wait-for-test-schema-apply.sh`.
+⛔ **CORRECTED 2026-09-23 (Phase 164.4.2):** the jobs that run that wait are now
+**`python`, `e2e-seeded` and `test-db-drift`**. The wait moved out of `sql-tests`
+together with its acquire step. `sql-tests` reads no shared schema, so it has nothing
+to wait for.
 
 ⛔ **It waits BEFORE taking the key, never while holding it.** A job that waited
 while holding `61616158` would starve every other contender on a database other
