@@ -348,7 +348,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # unhandled exception in a background task still gets logged with
     # full traceback and sets SHUTDOWN so the remaining loops (and the
     # API) terminate rather than silently drifting.
-    def _crash_handler(task: asyncio.Task) -> None:
+    def _crash_handler(task: asyncio.Task[None]) -> None:
         if task.cancelled():
             return
         exc = task.exception()
