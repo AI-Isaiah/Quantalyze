@@ -15836,6 +15836,39 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     );
   });
 
+  it("AUMTRUST review IN-02: the disclosed part may EXCEED the total it qualifies — a trusted losing derivative beside an untrusted spot holding prints $5,000 beside 1000, unclamped (D-07: amount <= total is not an invariant)", () => {
+    //   trusted        (key-a, derivative, unrealized)  -4,000
+    //   sign_in_failed (key-b, spot)                      5,000
+    //   live total                                        1,000
+    // Pinned so a later "clamp the part to the whole" change is deliberate:
+    // clamping would under-state the dollars from keys needing attention.
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "deribit",
+        symbol: "AUMTRUST-A-PERP",
+        derivPnlUsd: -4_000,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "sign_in_failed",
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: 5_000,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe("1000");
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Includes $5,000 from keys needing attention.",
+    );
+  });
+
   it("AUMTRUST D-15 pin 4 (component): a sign_in_failed key that is allocator-eligible but NOT contributing adds nothing to the field and renders no marker", () => {
     const payload = atBook([
       {
