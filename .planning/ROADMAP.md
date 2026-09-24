@@ -2906,7 +2906,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 167.1-01-PLAN.md — composer AUM marker tracer: single-pass `summarizeLiveHoldings`, State A "Includes $X from keys needing attention" beside the field, unit pins (wave 1)
+- [x] 167.1-01-PLAN.md — composer AUM marker tracer: single-pass `summarizeLiveHoldings`, State A "Includes $X from keys needing attention" beside the field, unit pins (wave 1) — DONE 2026-09-24 (`7eff1d43a` feat, `197bd3bf0` test; `167.1-01-SUMMARY.md`)
 - [ ] 167.1-02-PLAN.md — Open Positions footer qualifier on "Total unrealized P&L (equity contribution)" (wave 1, D-16)
 
 **Wave 2** *(blocked on Wave 1 completion)*
