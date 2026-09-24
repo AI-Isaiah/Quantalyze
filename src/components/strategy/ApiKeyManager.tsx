@@ -193,6 +193,18 @@ const TERMINAL_REREAD_BOUND_MS = 15_000;
  */
 const BASELINE_READ_BOUND_MS = 15_000;
 
+/**
+ * Phase 167.2 / KCS-04: what one key-list read tells the terminal arm. `ok` is
+ * whether the list now on screen came from a clean read; `subjectStatus` is the
+ * `sync_status` of the sync panel's subject key (`lastAttemptedKeyId`) in the
+ * rows that were APPLIED, or null when the subject is not among them. A read
+ * dropped as out of date (WR-04) answers with the applied read's outcome.
+ */
+interface KeysReadOutcome {
+  ok: boolean;
+  subjectStatus: string | null;
+}
+
 
 // 167-06 security delta (UF-1): authored copy for a delete whose outcome we
 // could not confirm. A raw PostgREST message never reaches the page.
@@ -235,6 +247,10 @@ export function ApiKeyManager({
   // target. Without it, the retry closure would see null and no-op
   // (pre-existing bug found in Task 1.2 Phase 3 eng review).
   const [lastAttemptedKeyId, setLastAttemptedKeyId] = useState<string | null>(null);
+  // Phase 167.2 / KCS-04: the same subject, mirrored into a ref wherever the
+  // state is set. `loadKeys` is a useCallback keyed on `currentKeyId` only, so
+  // it reads the subject here rather than from the render it closed over.
+  const lastAttemptedKeyIdRef = useRef<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -272,15 +288,27 @@ export function ApiKeyManager({
   // install the snapshot from before the job ran, lifting R2's withhold beside
   // a key whose sign-in had failed on the server.
   const keysReadSeqRef = useRef(0);
-  const appliedKeysReadRef = useRef<{ seq: number; ok: boolean }>({ seq: 0, ok: true });
+  // KCS-04: the applied read also records its subject status, so a dropped
+  // read answers with what the list on screen actually shows.
+  const appliedKeysReadRef = useRef<{ seq: number } & KeysReadOutcome>({
+    seq: 0,
+    ok: true,
+    subjectStatus: null,
+  });
   const router = useRouter();
 
-  // Resolves true when the list was re-read cleanly, false when the read
-  // failed (and `loadError` is set). The terminal-success arm needs the answer:
-  // it shows a success only after a re-read that could have withheld it. A read
-  // dropped as out of date (WR-04) answers with the outcome of the newer read
-  // that was applied instead, since that is what the list now shows.
-  const loadKeys = useCallback(async (opts?: { lastSyncedKeyId?: string }): Promise<boolean> => {
+  // Resolves `{ ok, subjectStatus }` (see `KeysReadOutcome`): `ok` is false
+  // when the read failed (and `loadError` is set), and `subjectStatus` is the
+  // panel subject's status in the rows this read APPLIED. The terminal-success
+  // arm needs both: it shows a success only after a clean re-read whose rows
+  // show the subject trusted (KCS-04). A read dropped as out of date (WR-04)
+  // answers with the outcome of the newer read that was applied instead, since
+  // that is what the list now shows.
+  //
+  // Phase 167.2 / KCS-04: every applied read also retires a shown success
+  // whose subject it finds untrusted (`retireWithheldSuccess`), so a success
+  // never outlives the moment the list shows its key untrusted.
+  const loadKeys = useCallback(async (opts?: { lastSyncedKeyId?: string }): Promise<KeysReadOutcome> => {
     const seq = ++keysReadSeqRef.current;
     const supabase = createClient();
     // Project only the allowlist — never `.select("*")` on api_keys from a
@@ -295,16 +323,27 @@ export function ApiKeyManager({
       .from("api_keys")
       .select(API_KEY_USER_COLUMNS)
       .order("created_at", { ascending: false });
-    if (seq < appliedKeysReadRef.current.seq) return appliedKeysReadRef.current.ok;
-    appliedKeysReadRef.current = { seq, ok: !keysErr };
+    if (seq < appliedKeysReadRef.current.seq) {
+      const { ok, subjectStatus } = appliedKeysReadRef.current;
+      return { ok, subjectStatus };
+    }
     if (keysErr) {
+      // The rows on screen are unchanged, so is their subject status.
+      appliedKeysReadRef.current = {
+        seq,
+        ok: false,
+        subjectStatus: appliedKeysReadRef.current.subjectStatus,
+      };
       console.error("[ApiKeyManager] api_keys fetch failed:", keysErr.message);
       // H-0395: a non-empty error (network/RLS/session) is NOT "no keys".
       // Surface a distinct, retryable error state and keep whatever keys we
       // had — never let the failure collapse into the empty "no keys" UI.
       setLoadError(keysErr.message);
-      return false;
+      return { ok: false, subjectStatus: appliedKeysReadRef.current.subjectStatus };
     }
+    const subjectStatus =
+      data?.find((k) => k.id === lastAttemptedKeyIdRef.current)?.sync_status ?? null;
+    appliedKeysReadRef.current = { seq, ok: true, subjectStatus };
     // Reached only on a clean response: clear any prior load error so a
     // successful retry restores the normal list / genuine-empty state.
     setLoadError(null);
@@ -320,7 +359,16 @@ export function ApiKeyManager({
       const targetKey = data.find((k) => k.id === targetKeyId);
       if (targetKey?.last_sync_at) setLastSyncAt(targetKey.last_sync_at);
     }
-    return true;
+    // KCS-04: the new call site of the one retirement helper. It judges by
+    // THESE rows, never by a render's copy, and its updater leaves every
+    // in-flight value (syncing, computing) and every non-success alone.
+    retireWithheldSuccess(isUntrustedKeySyncStatus(subjectStatus));
+    return { ok: true, subjectStatus };
+    // `retireWithheldSuccess` is deliberately not a dependency: called with an
+    // explicit argument it reads nothing from its render (only the stable
+    // `setSyncStatus`), and making it one would re-key this callback, and so
+    // re-run the list-read effect, on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentKeyId]);
 
   useEffect(() => {
@@ -365,7 +413,7 @@ export function ApiKeyManager({
       // goes idle) and surfaces the load error instead: an unverified list
       // cannot vouch for the subject key.
       attempt.settling = true;
-      let reread = false;
+      let reread: KeysReadOutcome | null = null;
       let boundTimer: ReturnType<typeof setTimeout> | undefined;
       try {
         // 167-06 fix round 2 (SFH2-MED-1): the re-read is raced against
@@ -402,7 +450,15 @@ export function ApiKeyManager({
       } finally {
         clearTimeout(boundTimer);
         endAttempt(attempt);
-        setSyncStatus(reread ? status : "idle");
+        // Phase 167.2 / KCS-04: the moment of withholding is the moment of
+        // retirement. A success is set only when the re-read resolved cleanly
+        // AND its applied rows show the subject key trusted. Beside an
+        // untrusted subject the panel lands on idle, as after a failed re-read,
+        // so no later re-read (the load-error Retry, a refresh, another tab's
+        // fix or delete) can lift a render-time withhold and re-show it.
+        const subjectTrusted =
+          reread !== null && !isUntrustedKeySyncStatus(reread.subjectStatus);
+        setSyncStatus(reread?.ok && subjectTrusted ? status : "idle");
         router.refresh();
       }
     } else if (status === "no_result") {
@@ -458,6 +514,15 @@ export function ApiKeyManager({
    * that mirrors other state. 167-UI-SPEC S1 / S1b: the retry-in-flight cell
    * (no credential claim under a spinner) and the optimistic cell (a claim
    * renders only from a status read back from the server).
+   *
+   * Phase 167.2 / KCS-04 (KCS-05 names the replacement): R2's "withheld" is now
+   * "RETIRED". The terminal arm of `handleSyncStatusChange` lands on idle when
+   * its re-read's applied rows show the subject untrusted, and every applied
+   * list read retires a shown success whose subject it finds untrusted. This
+   * render-time derivation stays as a BACKSTOP only: it should never find a
+   * success to hide, and it is no longer what keeps a success off screen,
+   * because a withhold lapsed the moment a later re-read (another tab's fix or
+   * delete, the load-error Retry) stopped reading the key as untrusted.
    */
   const panelSubjectUntrusted = isUntrustedKeySyncStatus(
     keys.find((k) => k.id === lastAttemptedKeyId)?.sync_status,
@@ -506,9 +571,25 @@ export function ApiKeyManager({
    * `idle`; the terminal arm of `handleSyncStatusChange` also lands on `idle`
    * when its bounded re-read fails or times out. It runs from event handlers
    * only; it is not an effect.
+   *
+   * Phase 167.2 / KCS-04 (KCS-05: R2's "withheld" becomes "retired"). The
+   * residual this closes (167 D-18 residual 2): the guard above reads THIS
+   * tab's view, so a change made in another tab (the key's password fixed, the
+   * key deleted) reached this tab only through a later re-read, which lifted
+   * R2's withhold and re-showed the success without passing through here. Now:
+   *   - the terminal arm never SETS a success beside an untrusted subject (it
+   *     lands on idle, see `handleSyncStatusChange`), which is the moment of
+   *     withholding becoming the moment of retirement;
+   *   - `loadKeys` calls this with `subjectUntrusted` taken from the rows it
+   *     APPLIED, a new call site of this one helper and not a second
+   *     mechanism, so a success shown for a healthy key is retired by the
+   *     first read that shows that key untrusted, before any later heal read.
+   * The optional argument is what lets `loadKeys` judge by its own rows; every
+   * event-handler caller omits it and keeps the render-time guard above. Still
+   * no effect: `withholdPanelSuccess` is watched by nothing.
    */
-  function retireWithheldSuccess() {
-    if (!panelSubjectUntrusted) return;
+  function retireWithheldSuccess(subjectUntrusted: boolean = panelSubjectUntrusted) {
+    if (!subjectUntrusted) return;
     setSyncStatus((prev) => (isComputedAnalytics(prev) ? "idle" : prev));
   }
 
@@ -812,6 +893,7 @@ export function ApiKeyManager({
     setPanelStopReason(null);
     setSyncingKeyId(keyId);
     setLastAttemptedKeyId(keyId);
+    lastAttemptedKeyIdRef.current = keyId;
     setSyncStatus("syncing");
     setSyncError(null);
     setError(null);
