@@ -407,3 +407,80 @@ def test_qstats_gate_green_needle_is_silent(source: str) -> None:
     violations, census, nodes = scan_source(NEEDLE_MODULE, textwrap.dedent(source))
     assert violations == [], violations
     assert nodes > 0 and len(census) == nodes, (nodes, census)
+
+
+# ---------------------------------------------------------------------------
+# Plan 166-08 (D-03 / research F-5): KWARG_PROVEN is proven by BEHAVIOUR.
+#
+# The gate trusts ``prepare_returns=False`` only on the leaves in KWARG_PROVEN.
+# That trust is a claim about quantstats' code, not about the keyword's text:
+# ``cvar`` and ``payoff_ratio`` both accept the keyword and still reach a
+# preparer. So each allowlisted leaf is called on the RANK-05 trigger fixture
+# (an all-winning series whose +150% first day trips both preparer guesses)
+# with both preparers spied, and must reach neither. The pins are parametrized
+# over ``sorted(KWARG_PROVEN)``, so an allowlisted leaf with no pin cannot exist.
+# The calibration rows run the SAME spy on the two known non-honouring
+# functions and must see a call: a spy that could not see one would pass every
+# pin vacuously.
+# ---------------------------------------------------------------------------
+
+
+def _preparer_calls(monkeypatch: pytest.MonkeyPatch, name: str) -> list[str]:
+    """Call ``quantstats.stats.<name>(trigger, prepare_returns=False)``; return preparer hits.
+
+    quantstats 0.0.81's stats functions reach the preparers as attributes of
+    ``quantstats.utils`` at call time, so patching that module's attributes is
+    what the library itself looks up.
+    """
+    import quantstats as qs
+    from quantstats import utils as qs_utils
+
+    from tests.test_metrics import _rank05_trigger_series
+
+    assert qs.stats._utils is qs_utils, "quantstats.stats no longer reaches the preparers via utils"
+    calls: list[str] = []
+    real_returns = qs_utils._prepare_returns
+    real_prices = qs_utils._prepare_prices
+
+    def spy_returns(*args: object, **kwargs: object) -> object:
+        calls.append("_prepare_returns")
+        return real_returns(*args, **kwargs)
+
+    def spy_prices(*args: object, **kwargs: object) -> object:
+        calls.append("_prepare_prices")
+        return real_prices(*args, **kwargs)
+
+    monkeypatch.setattr(qs_utils, "_prepare_returns", spy_returns)
+    monkeypatch.setattr(qs_utils, "_prepare_prices", spy_prices)
+    getattr(qs.stats, name)(_rank05_trigger_series(), prepare_returns=False)
+    return calls
+
+
+@pytest.mark.parametrize("name", sorted(KWARG_PROVEN))
+def test_qstats_gate_kwarg_proven_leaf_never_reaches_a_preparer(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An allowlisted leaf called with prepare_returns=False never runs a preparer."""
+    calls = _preparer_calls(monkeypatch, name)
+    assert calls == [], (
+        f"{name}(prepare_returns=False) still reached {calls} on the trigger fixture: "
+        "it is not a closure, and KWARG_PROVEN must not allowlist it"
+    )
+
+
+@pytest.mark.parametrize("name", ["cvar", "payoff_ratio"])
+def test_qstats_gate_calibration_non_honouring_functions_do_reach_a_preparer(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The spy sees a function that accepts the keyword and drops it.
+
+    Expected RED for the pin above, kept as its own GREEN row: if quantstats ever
+    fixes these, the row fails and the fix gets read, rather than the spy
+    silently losing its only proof that it can fail.
+    """
+    assert name not in KWARG_PROVEN
+    calls = _preparer_calls(monkeypatch, name)
+    assert calls, (
+        f"{name}(prepare_returns=False) reached no preparer: either quantstats now "
+        "honours the keyword (re-measure; it may join KWARG_PROVEN) or the spy is blind"
+    )
