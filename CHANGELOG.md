@@ -54,7 +54,28 @@ through the normal job path.
   beta of `-1.92` over a constant benchmark; and a serenity of `-2.2e-18`. The new
   `_dispersion_is_residue` helper treats a standard deviation at or below `1e-12 x |mean|` as no
   dispersion. It is used in `_annualized_vol_sharpe`, `_greeks_no_guess` and `_serenity_index`, so
-  each of those ratios is undefined (`None`) on constant input, never a synthesized number.
+  each of those ratios is undefined (`None`) on constant input, never a synthesized number. Round 2
+  (next bullet) found that floor too low for NAV-derived returns and made it absolute.
+- **Code review round 2: the residue floor is absolute, and every divisor site uses it**
+  (`bf47b6e4c`, disclosed under D-10 in `3bdc59ff6`). Returns taken as `pct_change` of an exactly
+  compounding NAV carry a residue of about `1e-16` in ABSOLUTE terms, whatever the yield, so
+  round 1's `1e-12 x |mean|` sank under it below about 5% APY. A `1e-4` daily yield (about 3.7%
+  APY, a stablecoin-lending shape) still persisted a headline Sharpe of `1.49e13` with status `ok`
+  and a PSR of `1.0`. `_residue_floor` is now `1e-12 x max(1, |mean|)`, and it guards every site
+  that divides by a standard deviation: the headline Sharpe, the backbone, `info_ratio`, PSR,
+  `smart_sharpe` (review WR-01: `4.6e15` on round 1's own constant fixture), the rolling Sharpe
+  series, scalar and rolling greeks, the headline and rolling correlation, the outlier ratios, and
+  serenity. A constant strategy's beta is the true `0.0`, so treynor is no longer a `1e15`
+  quotient. The headline `volatility` reports the same `0.0` as the backbone (IN-02). `r_squared`
+  asks whether the pair defines an R^2 before regressing (WR-02): a constant non-zero benchmark
+  gave about `1e-34` with status `ok`, and a two-row pair gave `1.0` whatever the data. The other
+  side is pinned too (SFH R2-MED-2): a cent-rounded NAV keeps its exact Sharpe, and a wider floor
+  goes RED.
+- **Code review round 2: a strategy and benchmark labelled in different time zones are refused,
+  not paired a day apart** (`5f75633a4`, IN-03). A naive strategy against an Asia/Tokyo benchmark
+  persisted `r_squared = 0.009` with status `ok` on a one-day shift. The pair now raises by name,
+  and `r_squared_status` is `error` with a WARNING. Naive pairs, same-zone pairs and a naive leg
+  with a UTC leg give identical values.
 - **The benchmark mirrors accept a tz-aware pair** (`7c1e8863c`). `_align_benchmark_like_qs`
   normalises the benchmark before comparing indexes, the same way every caller already normalises
   the strategy leg. A UTC pair used to raise `TypeError`, and the fan-out `except` would have turned
@@ -99,6 +120,16 @@ These values move on each affected strategy's next compute. Figures are from `16
   `-1.9200000000000002` to `None`, alpha from `0.3386020485210516` to `None`, and treynor from
   present to absent. The golden, parity and trigger fixtures do not move. The rows are in the
   `166-09-SUMMARY.md` D-10 section.
+- **Ratios over a NAV-derived constant yield, and R^2 over pairs that define none (code review
+  round 2).** On 366 days of a compounding `1e-4` daily yield, the headline Sharpe went from
+  `14947982154235.418` to `None`, the backbone from `ok` to `zero_volatility`, PSR from `1.0` to
+  `None`, smart_sharpe from `8648671718935.608` to `None`, the rolling Sharpe series from 337, 277
+  and 2 points (around `1e13`) to empty, correlation from `0.0467` to `None`, beta from `2.2e-16`
+  to `0.0`, and treynor from `1.7e14` to absent. Against a constant-yield benchmark the rendered
+  rolling beta went from 277 points up to `4.3e13` to empty, and beta and alpha from `-8.9e12` and
+  `3.3e11` to `None`. `r_squared` over a constant non-zero benchmark went from `3.2e-34` (`ok`) to
+  `None` (`error`). The golden, parity and trigger fixtures do not move, and a cent-rounded NAV
+  moves on no key. Every row is in the `166-09-SUMMARY.md` D-10 section.
 
 ### Added
 
@@ -128,13 +159,34 @@ These values move on each affected strategy's next compute. Figures are from `16
   binding RED, reading the bound names from the covered module itself. There are now 26 RED
   needles, 8 re-export needles, a `scan_tree` re-export needle, and a GREEN needle for legitimate
   `services.metrics` use. The real corpus still reads clean at 13 nodes. One limit is recorded: an
-  attribute name computed at run time.
+  attribute name computed at run time. Round 2 closed it (next bullet).
+- **Code review round 2: the gate follows the module object, and a computed name fails closed**
+  (`577bd8582`, review WR-03 / SFH R2-LOW-4). Each of these reached `services.metrics`' `qs` with
+  `nodes=0, violations=[]`: `import_module("services.metrics").qs`, `__import__`,
+  `sys.modules[...]`, `vars(metrics)["qs"]`, `metrics.__dict__["qs"]`, `f.__globals__["qs"]`,
+  `getattr(sys.modules[__name__], "qs")` inside the covered module, `globals()["q" + "s"]`, and a
+  module alias rebound by assignment or walrus. The gate now resolves module-shaped expressions,
+  applies Rule A' inside covered modules too, and makes a covered namespace read with a computed
+  name, or handed on as a value, RED. The shapes a static walk still cannot follow (a module
+  object passed through a parameter or container, `operator.attrgetter`, `pkgutil.resolve_name`,
+  `eval` and similar) are listed exactly under KNOWN LIMITS. Two more needles pin arms round 1 left
+  unpinned (`863c8d04e`, SFH R2-LOW-3): `globals().get("qs")` and a two-level relative import.
+  B6 no longer turns `importlib.metadata.version("quantstats")` or
+  `logging.getLogger("quantstats.stats")` RED (`6300e2646`, IN-01). The exemption matches the
+  callee's resolved path, so a look-alike local function stays RED.
 - **A broken mirror logs a named WARNING, and a legitimately undefined ratio does not**
   (`7bd93b80c`). `_every_mirror_ratio_is_defined` names the inputs on which all eight dispatched
   mirrors are defined: a loss, a gain, a negative 5% quantile, and at least 4 observations. All
   eight mirrors were finite on 11,843 random series with that shape (measured). A non-finite mirror
   on such a series now logs `... the mirror is suspect`. `r_squared_status = "error"` logs the same
   way when both legs vary. A D-09 `None` stays silent.
+- **Code review round 2: that signal is per mirror** (`3c2562c5e`, SFH R2-MED-1). Round 1's single
+  predicate required a NEGATIVE 5% quantile, so a strategy losing on fewer than 5% of days (a carry
+  or option-selling shape, where all eight mirrors are finite) had no signal for any mirror.
+  `_mirror_keys_defined_by` returns the keys the input defines, each on its own mirror's
+  precondition. Fuzzing measured 164,357 key-and-series checks with no mirror non-finite where its
+  precondition held. A predicate that raises now logs by name instead of silently switching the
+  signal off (`9366a512f`, SFH R2-LOW-1).
 - **A census that cannot be built prints one named line instead of an INTERNALERROR**
   (`562a6d139`). `safe_census_lines` guards the `pytest_terminal_summary` hook. The gate tests
   still fail on the same cause.
@@ -177,6 +229,14 @@ These values move on each affected strategy's next compute. Figures are from `16
   Before, it passed on a crashed fan-out. Both `_serenity_index` undefined arms are pinned
   (`a6bd778d9`). Every new guard was neutered, observed RED, restored and `cmp`-verified. The
   review's surviving drills N8, N10, N11, N12 and N15 now go RED.
+- **Code review round 2.** 30 metrics drills and 19 gate drills, each neutered, observed RED,
+  restored and `cmp`-verified. Three first survived and were answered at the root: serenity's
+  separate loss test was redundant (a real drawdown dispersion implies a loss) and was removed,
+  and the PSR-dispersion and walrus arms each got the needle that turns them RED. The review's surviving drills M7, M8, M9, M10, M12, M16a, G1 and
+  G3 now go RED. With round 1's floor restored, 7 of the 11 constant-yield fixtures go RED (daily
+  `1e-5` and `1e-4`, and APY 0.01% through 5%); daily `1e-3` and APY 10%, 50% and 100% were already
+  caught by it and stay as the pin for that end of the scale. Every intermediate commit's tree was
+  assembled in a scratch directory and passed the metrics, gate and parity suites.
 
 ### Root cause
 
@@ -225,6 +285,15 @@ These values move on each affected strategy's next compute. Figures are from `16
   `7bd93b80c`, `6ed841c11`, `5183ca295`, `edaf8ad33`, `dbefdca56`, `b6e914c05`, `562a6d139` and
   `09cd04bd1`. Each one is cited in a bullet above. The version is not bumped, because round 1
   folds into this release.
+- **Code review round 2** added 8 `fix(166)` commits and this CHANGELOG fold: `bf47b6e4c`,
+  `3c2562c5e`, `9366a512f`, `5f75633a4`, `577bd8582`, `863c8d04e`, `6300e2646` and `3bdc59ff6`,
+  each cited in a bullet above. Two planning commits between the folds changed no shipped code:
+  the round-1 fix report (`c6f32f95f`) and the round-2 review reports (`dcbd1749f`). The version
+  is not bumped, because round 2 also folds into this release.
+- **Observed in round 2, outside this phase's files, not changed.** Other modules still guard a
+  standard deviation with an exact `== 0` or `> 0` (`services/portfolio_optimizer.py`,
+  `services/csv_validator.py`, `services/allocated_capital.py`, `services/equity_reconstruction.py`,
+  `services/optimizer.py`). They are not quantstats-derived, and no review finding names them.
 
 ## [0.90.0.0] - 2026-09-24 — GATEHYGIENE: a lost 40001 race is retried once, an inherited refresh marker is retracted, and a failed ledger fan-out candidate is counted, named and watched
 
