@@ -56,6 +56,7 @@ vi.mock("@/lib/queries", () => ({
 }));
 
 import FactsheetV2Page from "./page";
+import { OwnerUnpublishedPanel } from "./FactsheetView";
 import { unstable_cache } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -678,3 +679,196 @@ describe("KCS-09 — an unreadable read never claims progress", () => {
     expect(stateLine!.textContent).toBe(UNREADABLE_LINE);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 3 — the owner share note (KCS-12, S7) and the public sentence (KCS-10)
+// ---------------------------------------------------------------------------
+
+// Locked copy, typed as literals (UI-SPEC § B / § KCS-12 and § KCS-10).
+const MINT_A =
+  "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.";
+const MINT_B =
+  "Right now, a private link to this strategy shows that its factsheet is not available yet. The numbers appear there once a computation succeeds.";
+const MINT_UNREADABLE =
+  "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
+const PUBLIC_SENTENCE =
+  "The detailed factsheet for this strategy is not available yet.";
+const SHARE_NOTE_CLASS = "mt-2 text-fixed-12 text-text-muted";
+
+/** The OwnerUnpublishedPanel root: the parent of its visibility notice. */
+function panelOf(container: HTMLElement): HTMLElement {
+  const note = container.querySelector('[role="note"]');
+  expect(note, "the owner pending page must mount the owner panel").not.toBeNull();
+  return note!.parentElement as HTMLElement;
+}
+
+describe("KCS-12 (S7) — the owner's share panel says what a recipient sees right now", () => {
+  it("SHARE-NOTE-A: a running job -> the panel's last child is KCS12-MINT-A", async () => {
+    givenOwnerPendingDraft();
+    givenJobs([chainJob("process_key_long", "running")]);
+
+    const { container } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.tagName).toBe("P");
+    expect(last.textContent).toBe(MINT_A);
+    expect(last.className).toBe(SHARE_NOTE_CLASS);
+  });
+
+  it("SHARE-NOTE-B: a failed job -> the panel's last child is KCS12-MINT-B", async () => {
+    givenOwnerPendingDraft();
+    givenJobs(TRIGGER_ROWS);
+
+    const { container } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(MINT_B);
+    expect(last.className).toBe(SHARE_NOTE_CLASS);
+  });
+
+  it("SHARE-NOTE-UNREADABLE: an unreadable read -> the panel's last child is KCS12-UNREADABLE", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft();
+      STATE.rpcResult = { data: null, error: { code: "500", message: "boom" } };
+
+      const { container } = await renderOwnerPending();
+      const last = panelOf(container).lastElementChild as HTMLElement;
+
+      expect(last.textContent).toBe(MINT_UNREADABLE);
+      expect(container.textContent).not.toContain("being prepared");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("FULL-RENDER-NO-NOTE: the panel without shareNote renders no note, and the full owner render runs neither owner read", async () => {
+    // Component level: absent prop -> no element (the full factsheet path and
+    // every pre-167.2 mount are byte-identical).
+    const { container } = render(
+      <OwnerUnpublishedPanel strategyId={STRATEGY_ID} />,
+    );
+    const panel = panelOf(container);
+    expect(panel.children).toHaveLength(2);
+    expect(panel.lastElementChild!.tagName).toBe("DIV");
+    expect(panel.querySelector("p.mt-2")).toBeNull();
+    for (const note of [MINT_A, MINT_B, MINT_UNREADABLE]) {
+      expect(container.textContent).not.toContain(note);
+    }
+
+    // Page level: a buildable owner draft takes the FULL render, where neither
+    // the compute-job read nor the member count runs.
+    givenOwnerPendingDraft();
+    STATE.adminRow = buildableAdminRow();
+    const jsx = await FactsheetV2Page({
+      params: Promise.resolve({ id: STRATEGY_ID }),
+    });
+    expect(findViewPayload(jsx), "the full render must carry a payload").not.toBeNull();
+    expect(STATE.observed.rpcCalls).toEqual([]);
+    expect(STATE.observed.requestTables).not.toContain("strategy_keys");
+    expect(vi.mocked(unstable_cache)).toHaveBeenCalledTimes(0);
+  });
+});
+
+describe("KCS-10 (S8) — the public pending placeholder says one neutral sentence", () => {
+  it("PUBLIC-PENDING: masthead, H1 and exactly one sentence; no italic, no banner, no owner read", async () => {
+    STATE.sessionUser = null;
+    STATE.publishedRow = {
+      id: STRATEGY_ID,
+      name: STRATEGY_NAME,
+      codename: null,
+      disclosure_tier: "exploratory",
+      strategy_analytics: { computed_at: "2026-09-01T00:00:00.000Z" },
+    };
+    STATE.adminRow = null;
+
+    const jsx = await FactsheetV2Page({
+      params: Promise.resolve({ id: STRATEGY_ID }),
+    });
+    const { container } = render(jsx as ReactElement);
+    const article = container.querySelector("article")!;
+    const h1 = article.querySelector("h1")!;
+    const after: Element[] = [];
+    for (let el = h1.nextElementSibling; el; el = el.nextElementSibling) {
+      after.push(el);
+    }
+
+    expect(h1.textContent).toBe(STRATEGY_NAME);
+    expect(after).toHaveLength(1);
+    expect(after[0].tagName).toBe("P");
+    expect(after[0].textContent).toBe(PUBLIC_SENTENCE);
+    expect(after[0].className).toBe("mt-6 text-fixed-13 text-text-secondary");
+    expect(article.querySelector(".italic")).toBeNull();
+    expect(article.querySelector('[role="note"]')).toBeNull();
+    expect(article.querySelector('section[aria-label="Computation status"]')).toBeNull();
+    const text = article.textContent ?? "";
+    for (const forbidden of [
+      "still computing",
+      "few minutes",
+      "Some strategies stay in this state",
+      "dev-server console",
+      "bundled benchmark window",
+      "2023-04-26",
+      "failed",
+      "error",
+    ]) {
+      expect(text, `the public sentence must not contain "${forbidden}"`).not.toContain(forbidden);
+    }
+    // The public lane reads no owner state at all.
+    expect(STATE.observed.rpcCalls).toEqual([]);
+    expect(STATE.observed.requestTables).not.toContain("strategy_keys");
+  });
+});
+
+// --- Task 3 helpers ---------------------------------------------------------
+
+/** A buildable admin row (the same 10-point cash series the owner-lane suite
+ *  builds from), so the owner lane takes the FULL render. */
+function buildableAdminRow() {
+  const daily = [0.01, -0.02, 0.015, 0.005, -0.01, 0.02, -0.005, 0.03, -0.015, 0.01].map(
+    (value, i) => ({ date: `2025-08-${String(i + 1).padStart(2, "0")}`, value }),
+  );
+  return {
+    id: STRATEGY_ID,
+    name: STRATEGY_NAME,
+    codename: null,
+    disclosure_tier: "exploratory",
+    status: "draft",
+    markets: ["BTC"],
+    strategy_types: ["options"],
+    description: null,
+    subtypes: [],
+    supported_exchanges: ["deribit"],
+    leverage_range: null,
+    aum: null,
+    max_capacity: null,
+    avg_daily_turnover: null,
+    start_date: null,
+    benchmark: null,
+    asset_class: "crypto",
+    returns_denominator_config: null,
+    strategy_analytics: {
+      daily_returns: daily,
+      returns_series: null,
+      computed_at: "2026-09-01T00:00:00.000Z",
+      data_quality_flags: {},
+      metrics_json_by_basis: null,
+      computation_status: "complete",
+    },
+  };
+}
+
+/** Depth-first search of an RSC element tree for the FactsheetView payload. */
+function findViewPayload(node: unknown): unknown {
+  if (node == null || typeof node !== "object") return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const hit = findViewPayload(child);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  const el = node as { props?: { payload?: unknown; children?: unknown } };
+  if (el.props?.payload != null) return el.props.payload;
+  return findViewPayload(el.props?.children ?? null);
+}
