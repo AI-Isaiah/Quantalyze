@@ -80,6 +80,14 @@ const STATE = vi.hoisted(() => ({
   strategySelectEqFilters: [] as Array<{ column: string; value: unknown }>,
   // RPC call capture (user-scoped).
   rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
+  // SUBMITFIX — the owner-scoped `select("status, source")` re-read that
+  // `callFinalizeWizardRpc` issues after a 22023, driven SEPARATELY from
+  // `strategyRow` so a test can fail the re-read without failing the initial
+  // draft lookup. `null` means the re-read falls back to `strategyRow`.
+  strategyStatusRead: null as null | { data: unknown; error: unknown },
+  // SUBMITFIX — one shared, ordered log of the finalize RPC and the
+  // postProcessKey dispatch, so the ORDER of the two is assertable.
+  callOrder: [] as string[],
   rpcResult: { data: null as unknown, error: null as unknown },
   // #597 — capture the user-scoped strategies.asset_class UPDATE patch(es) so
   // tests can assert the manager's asset-class choice is persisted; the forced
@@ -230,15 +238,18 @@ vi.mock("@/lib/supabase/server", () => ({
       }
       // Chainable .eq() so we can capture each filter the route applies
       // (id + user_id) and assert the belt-and-braces ownership filter.
-      const buildEqChain = () => ({
+      const buildEqChain = (columns: string) => ({
         eq: (column: string, value: unknown) => {
           STATE.strategySelectEqFilters.push({ column, value });
-          return buildEqChain();
+          return buildEqChain(columns);
         },
-        maybeSingle: async () => ({
-          data: STATE.strategyRow,
-          error: STATE.strategyError,
-        }),
+        maybeSingle: async () =>
+          columns.includes("status") && STATE.strategyStatusRead
+            ? STATE.strategyStatusRead
+            : {
+                data: STATE.strategyRow,
+                error: STATE.strategyError,
+              },
       });
       // #597 — the route persists strategies.asset_class via a user-scoped
       // update().eq().eq() (owner-scoped) before finalize. Chainable + awaitable
@@ -273,7 +284,7 @@ vi.mock("@/lib/supabase/server", () => ({
         return chain;
       };
       return {
-        select: () => buildEqChain(),
+        select: (columns: string) => buildEqChain(columns),
         update: (patch: Record<string, unknown>) => {
           STATE.assetClassUpdates.push(patch);
           const record = { patch, eqs: [] as Array<{ column: string; value: unknown }> };
@@ -284,6 +295,7 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
       STATE.rpcCalls.push({ name, args });
+      STATE.callOrder.push(`rpc:${name}`);
       return STATE.rpcResult;
     },
   }),
@@ -466,6 +478,7 @@ vi.mock("@/lib/process-key-client", () => ({
     // 140.3-14 / TS-33 — capture the OUTBOUND payload. Without this the
     // dedupe id is unobservable from a route test at all.
     STATE.processKeyCalls.push(args);
+    STATE.callOrder.push("postProcessKey");
     return (
       STATE.processKeyResult ?? {
         ok: true,
@@ -601,6 +614,8 @@ beforeEach(async () => {
   STATE.capitalOwnershipUpdateRows = [{ id: STRATEGY_ID }];
   STATE.rpcCalls = [];
   STATE.rpcResult = { data: STRATEGY_ID, error: null };
+  STATE.strategyStatusRead = null;
+  STATE.callOrder = [];
   STATE.adminApiKeyId = API_KEY_ID;
   STATE.adminStrategyName = "Alpha Centauri";
   STATE.adminStrategiesError = null;
@@ -2973,10 +2988,13 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(200);
-    // The single-key legacy finalize RPC MUST NOT fire — dispatch is unified.
+    // SUBMITFIX — dispatch is unified, AND the unified arm promotes the draft.
+    // This line used to assert the RPC was NOT called, which pinned the bug:
+    // the arm answered 'pending_review' over a row left at 'draft'.
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
-    ).toBeUndefined();
+    ).toBeDefined();
+    expect(STATE.processKeyCalls).toHaveLength(1);
     // No composite failed stamp on the single-key unified path.
     expect(
       STATE.strategyAnalyticsUpserts.find(
@@ -3352,10 +3370,14 @@ describe("POST /api/strategies/finalize-wizard — CONTRIB-02 private-by-default
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe("pending_review");
-    // Manager single-key stays on the unified arm — legacy RPC untouched.
+    // Manager single-key stays on the unified arm, which now promotes through
+    // the same RPC with the manager terminal status. (SUBMITFIX: this used to
+    // assert the RPC was untouched, which pinned the never-promoted bug.)
     expect(
-      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
-    ).toBeUndefined();
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy")?.args
+        .p_terminal_status,
+    ).toBe("pending_review");
+    expect(STATE.processKeyCalls).toHaveLength(1);
     fetchSpy.mockRestore();
   });
 
@@ -3960,12 +3982,11 @@ describe("POST /api/strategies/finalize-wizard — OWN-03 capital-ownership mark
     expect(res.status).toBe(200);
 
     const body = await res.json();
-    // Non-vacuity: this really is the unified arm, not the legacy one — the
-    // legacy RPC never ran and no mark UPDATE was issued, which is precisely
-    // why the mark is lost here.
-    expect(
-      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
-    ).toBeUndefined();
+    // Non-vacuity: this really is the unified arm, not the legacy one. Only the
+    // unified arm dispatches to postProcessKey, and no mark UPDATE was issued,
+    // which is precisely why the mark is lost here. (SUBMITFIX: this used to
+    // key on the finalize RPC being ABSENT; the unified arm now calls it too.)
+    expect(STATE.processKeyCalls).toHaveLength(1);
     expect(markWrite()).toBeUndefined();
     expect(body.queued).toBe(true);
 
@@ -4913,6 +4934,248 @@ describe("[153.7-03 / WIZFORM-02-CLASS] every finalize rejection carries its cod
       ),
     ).toBeDefined();
 
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// SUBMITFIX (2026-09-24) — a single-key MANAGER submit must PROMOTE the draft.
+//
+// THE BUG THESE ROWS EXIST TO CATCH. From Phase 106 Stage B until this fix, the
+// unified arm (`unifiedFinalizeWizardHandler`) called only `postProcessKey`,
+// and both of its 200 bodies carried a hard-coded `status: "pending_review"`.
+// Nothing on that path called `finalize_wizard_strategy`, and Python never
+// writes `strategies.status`. The row stayed at `(source='wizard',
+// status='draft')`: its metadata was dropped, it never reached the admin
+// queue, and the `cleanup-wizard-drafts` cron deleted it (and revoked the key)
+// after 7 days, all while the user was told the submission succeeded. Two
+// rows in this file ASSERTED the RPC was not called, so the suite pinned the
+// defect instead of catching it.
+//
+// Each row below names the property it defends. Measured on 2026-09-24 by
+// neutering the fix and restoring it byte-identically: removing the unified
+// arm's RPC call reddens every row here except the legacy control; turning the
+// unified arm's replay opt-in off reddens both replay rows; dropping fields on
+// the way to the RPC reddens the metadata row; answering 'pending_review' over
+// an RPC failure reddens the failure rows.
+// ══════════════════════════════════════════════════════════════════════════
+describe("[SUBMITFIX] the unified single-key manager arm promotes the draft", () => {
+  it("calls finalize_wizard_strategy with p_terminal_status='pending_review', BEFORE postProcessKey", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    const rpc = STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy");
+    // Without this call the row is never promoted and the cron deletes it.
+    expect(rpc, "the single-key manager submit never promoted the draft").toBeDefined();
+    expect(rpc!.args.p_terminal_status).toBe("pending_review");
+    // ORDER: the RPC is the transactional gate, so it runs first. A refused
+    // promotion must never leave an analytics job queued behind it.
+    expect(STATE.callOrder).toEqual([
+      "rpc:finalize_wizard_strategy",
+      "postProcessKey",
+    ]);
+    const body = await res.json();
+    expect(body.status).toBe("pending_review");
+    fetchSpy.mockRestore();
+  });
+
+  it("forwards the VALIDATED wizard metadata to the RPC (the fields the old arm dropped)", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    const { canonicalizeExchangeList } = await import("@/lib/constants");
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    const rpc = STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy");
+    expect(rpc).toBeDefined();
+    // Every column the RPC writes. If any is missing, that field of the
+    // manager's submission never reaches the row.
+    expect(rpc!.args).toEqual({
+      p_strategy_id: STRATEGY_ID,
+      p_user_id: USER.id,
+      p_name: VALID_BODY.name,
+      p_description: VALID_BODY.description,
+      p_category_id: CATEGORY_ID,
+      p_strategy_types: ["trend"],
+      p_subtypes: ["breakout"],
+      p_markets: ["BTC/USDT"],
+      p_supported_exchanges: canonicalizeExchangeList(["binance"]),
+      p_leverage_range: "1x-3x",
+      p_aum: 100_000,
+      p_max_capacity: 10_000_000,
+      p_terminal_status: "pending_review",
+    });
+    fetchSpy.mockRestore();
+  });
+
+  it("a REPLAY (row already pending_review, RPC raises 22023) answers 200 and still dispatches", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => {});
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    // The RPC's own refusal for a non-draft row.
+    STATE.rpcResult = {
+      data: null,
+      error: {
+        code: "22023",
+        message: "finalize_wizard_strategy: strategy x has status=pending_review (expected draft)",
+      },
+    };
+    STATE.strategyStatusRead = {
+      data: { status: "pending_review", source: "wizard" },
+      error: null,
+    };
+    // The double-submit dedupe answer Python gives the second request.
+    STATE.processKeyResult = {
+      ok: true,
+      body: {
+        queued: false,
+        code: "WIZARD_DUPLICATE",
+        idempotent: true,
+        verification_id: "ver-existing",
+      },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // A double click or a reload must not turn a successful submit into a
+    // "not in a finalizable state" failure.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.status).toBe("pending_review");
+    expect(body.code).toBe("WIZARD_DUPLICATE");
+    // The promotion was ATTEMPTED (a replay is recognised from the RPC's own
+    // refusal, never assumed), and the retry still reaches postProcessKey: that
+    // is how a submit whose dispatch failed AFTER a successful promotion
+    // recovers.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeDefined();
+    expect(STATE.processKeyCalls).toHaveLength(1);
+    // The re-read is owner-scoped, like every other read on this route.
+    expect(STATE.strategySelectEqFilters).toContainEqual({
+      column: "user_id",
+      value: USER.id,
+    });
+    consoleInfo.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("a 22023 over a row that is STILL a draft is not a replay: 409, no dispatch", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.rpcResult = {
+      data: null,
+      error: { code: "22023", message: "finalize_wizard_strategy: source=legacy (expected wizard)" },
+    };
+    STATE.strategyStatusRead = {
+      data: { status: "draft", source: "legacy" },
+      error: null,
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("DRAFT_STATE_INVALID");
+    expect(body.status).toBeUndefined();
+    expect(STATE.processKeyCalls).toHaveLength(0);
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("a replay whose re-read FAILS cannot confirm either way: the generic 500 tail, no dispatch", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.rpcResult = {
+      data: null,
+      error: { code: "22023", message: "finalize_wizard_strategy: status=pending_review (expected draft)" },
+    };
+    STATE.strategyStatusRead = {
+      data: null,
+      error: { message: "connection reset", code: "08006" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    // Not DRAFT_STATE_INVALID: that claims the draft moved past finalize, which
+    // the failed re-read did not establish.
+    expect(body.code).toBe("DRAFT_FINALIZE_FAILED");
+    expect(body.status).toBeUndefined();
+    expect(STATE.processKeyCalls).toHaveLength(0);
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it.each([
+    ["XX001", 500, "DRAFT_FINALIZE_FAILED"],
+    ["42501", 403, "GUARD_BLOCKED"],
+    ["P0002", 404, "GATE_DRAFT_GONE"],
+  ])(
+    "an RPC failure (%s) is NEVER reported as pending_review, and nothing is dispatched",
+    async (sqlstate, httpStatus, code) => {
+      const fetchSpy = mockProbeReadOnly();
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      STATE.strategyRow = { api_key_id: API_KEY_ID };
+      STATE.strategyKeysCount = 0;
+      STATE.rpcResult = {
+        data: null,
+        error: { code: sqlstate, message: "finalize_wizard_strategy: refused" },
+      };
+
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status).toBe(httpStatus);
+      const body = await res.json();
+      expect(body.code).toBe(code);
+      expect(body.ok).toBeUndefined();
+      expect(body.status).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain("pending_review");
+      expect(STATE.processKeyCalls).toHaveLength(0);
+      consoleErr.mockRestore();
+      fetchSpy.mockRestore();
+    },
+  );
+
+  it("the LEGACY arm keeps its replay answer: a 22023 there is still 409 with no re-read", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    routeThroughLegacyFinalize();
+    STATE.rpcResult = {
+      data: null,
+      error: { code: "22023", message: "finalize_wizard_strategy: status=pending_review (expected draft)" },
+    };
+    // Would read as a replay if the legacy arm opted in; it must not.
+    STATE.strategyStatusRead = {
+      data: { status: "pending_review", source: "wizard" },
+      error: null,
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("DRAFT_STATE_INVALID");
     consoleErr.mockRestore();
     fetchSpy.mockRestore();
   });
