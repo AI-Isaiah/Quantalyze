@@ -2943,6 +2943,7 @@ describe("[167-06] the persisted credential state renders on the manager's key c
     ])(
       "Retry after a post-add failure re-links the NEW key, never J ($ordering) (167-REVIEW-06-R2 WR-01)",
       async ({ refusedDuringValidate }) => {
+        // KCS-01: both orderings now pin J's refusal; see the note above.
         const postAdd = deferred<Response>();
         const validate = deferred<Response>();
         const syncQueue: Array<() => Response | Promise<Response>> = [
