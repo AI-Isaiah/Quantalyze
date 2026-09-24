@@ -1280,6 +1280,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.2 edited: edited fields: goal (share link for a failed/stalled compute says so)
 - Phase 164.6.7 COMPOSITECLAIMSNAPSHOT inserted after Phase 164.6 on 2026-09-24 (via `/gsd-phase --insert`, founder-authorized): the composite run reads the live job marker, not its claim-time snapshot (`[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]`, data-integrity).
 - Phase 167.1.1 HOLDINGKEYSCOPE inserted after Phase 167.1 on 2026-09-24 (via `/gsd-phase --insert`, founder-authorized): `holdingScopeKey` carries no `api_key_id`, so two accounts on one venue holding the same asset merge into one holding (data-integrity).
+- Phase 167.2.1 FACTSHEETBUILDABLE inserted after Phase 167.2 on 2026-09-24 (via `/gsd-phase --insert`, founder-authorized): a computed row whose factsheet cannot build reads as "has a factsheet" while its recipient sees the pending page (167.2 review WR-02, user-facing).
 
 ### Decisions
 
