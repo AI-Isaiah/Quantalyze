@@ -36,6 +36,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Annotated, Any
 
+import sentry_sdk
 import structlog
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -796,6 +797,56 @@ def _chain_kinds_from(head: str) -> frozenset[str]:
 # This is `FACTSHEET_CHAIN_KINDS` in `src/lib/compute-state.ts` minus the
 # legacy `compute_analytics` kind, which nothing enqueues any more.
 _RESYNC_CHAIN_KINDS = _chain_kinds_from("process_key_long")
+
+# Review-fix round 1 (HIGH-1) — how old a non-terminal chain job may be and
+# still count as LIVE for the resync chain-in-flight guard in `process_key`. An
+# older row reads as absent, so it cannot refuse a resync for ever.
+#
+# DERIVED, the same way as `_RESYNC_DRAFT_RESUME_WINDOW` above. Each
+# compute_jobs row is ONE hop of the chain: a follow-on hop is a NEW row with
+# its own `created_at`. So the most a healthy row can age is the single-hop
+# ceiling. `process_key_long` has the largest `TIMEOUT_PER_KIND` of the four
+# chain kinds (1800 s), so its 13,230 s (~3.7 h) single-hop figure bounds every
+# kind, and the house sizing rule gives 8 hours. That is strictly below
+# `STRATEGY_ANALYTICS_REAP_THRESHOLD` ("16 hours").
+#
+# ⚠️ Err loose, as the draft window does: too tight lets a slow but healthy
+# hop admit a second chain, which is the defect this guard closes.
+_RESYNC_CHAIN_JOB_LIVE_WINDOW = timedelta(hours=8)
+
+# The only `last_error` that `reset_stalled_compute_jobs` writes when it puts
+# a stuck `running` row back to `pending` (migration
+# 20260516104201_compute_jobs_audit_2026_05_07_residual.sql). A claim clears
+# `last_error`, so only a reset row that has not been re-claimed carries it.
+_WORKER_STALLED_LAST_ERROR = "worker_stalled"
+
+
+def _chain_job_dead_reason(job: dict[str, Any]) -> str | None:
+    """Why a non-terminal chain job is NOT live evidence of a running chain, or
+    None when it is live.
+
+    `reset_stalled_compute_jobs` puts a stuck `running` row back to `pending`
+    without touching `attempts`, and the claim increments `attempts` with no
+    cap. So a job whose worker keeps dying cycles running -> pending for ever
+    and never reaches a terminal status. Such a row must not refuse a resync.
+    - ``worker_stalled``: the watchdog reset it; the last worker died on it.
+    - ``attempts_exhausted``: it has used its whole attempt budget and is not
+      running. A normal failure at that count goes `failed_final`, so only a
+      stall reset leaves such a row claimable.
+    - ``attempts_over_budget``: it is running past its budget, which only a
+      stall reset plus a re-claim can produce. A `running` row AT its budget
+      is its legitimate final attempt (the claim counts it), so it stays live.
+    """
+    if job.get("last_error") == _WORKER_STALLED_LAST_ERROR:
+        return "worker_stalled"
+    attempts = job.get("attempts")
+    max_attempts = job.get("max_attempts")
+    if isinstance(attempts, int) and isinstance(max_attempts, int):
+        if attempts > max_attempts:
+            return "attempts_over_budget"
+        if attempts >= max_attempts and job.get("status") != "running":
+            return "attempts_exhausted"
+    return None
 
 
 def _resume_duplicate_job(
@@ -1560,17 +1611,25 @@ async def process_key(
     # context: a read failure must never become a bare 500 on a user's Retry.
     # The cost is the pre-guard behaviour (a possible second chain), not a
     # stuck user.
+    #
+    # A job that is non-terminal is not always LIVE (review-fix round 1,
+    # HIGH-1). A row older than `_RESYNC_CHAIN_JOB_LIVE_WINDOW` reads as absent,
+    # and a crash-looping row (`_chain_job_dead_reason`) is logged at warning
+    # and reported to Sentry, then skipped, so the resync goes through. Without
+    # both, a job whose worker keeps dying would refuse every resync for ever.
     if body.flow_type == "resync":
+        live_cutoff = datetime.now(timezone.utc) - _RESYNC_CHAIN_JOB_LIVE_WINDOW
         try:
-            inflight_chain_job = rows(
+            chain_job_rows = rows(
                 await db_read_with_retry(
                     lambda: supabase.table("compute_jobs")
-                    .select("id,kind,status")
+                    .select("id,kind,status,attempts,max_attempts,last_error,created_at")
                     .eq("strategy_id", strategy_id)
                     .in_("kind", sorted(_RESYNC_CHAIN_KINDS))
                     .in_("status", sorted(_NON_TERMINAL_JOB_STATUSES))
+                    .gte("created_at", live_cutoff.isoformat())
                     .order("created_at", desc=True)
-                    .limit(1)
+                    .limit(20)
                     .execute()
                 )
             )
@@ -1582,7 +1641,32 @@ async def process_key(
                 error_type=type(exc).__name__,
                 error=str(exc)[:200],
             )
-            inflight_chain_job = []
+            chain_job_rows = []
+        inflight_chain_job: list[dict[str, Any]] = []
+        for chain_job in chain_job_rows:
+            dead_reason = _chain_job_dead_reason(chain_job)
+            if dead_reason is None:
+                inflight_chain_job = [chain_job]
+                break
+            log.warning(
+                "process_key.resync_chain_job_not_live",
+                strategy_id=strategy_id,
+                correlation_id=correlation_id,
+                job_id=str(chain_job.get("id")),
+                job_kind=chain_job.get("kind"),
+                job_status=chain_job.get("status"),
+                attempts=chain_job.get("attempts"),
+                max_attempts=chain_job.get("max_attempts"),
+                reason=dead_reason,
+            )
+            try:
+                sentry_sdk.capture_message(
+                    f"resync chain guard skipped a non-live {chain_job.get('kind')} "
+                    f"job ({dead_reason})",
+                    level="warning",
+                )
+            except Exception:  # noqa: BLE001
+                pass  # never mask the resync this is reporting on
         if inflight_chain_job:
             try:
                 latest_verification = one(

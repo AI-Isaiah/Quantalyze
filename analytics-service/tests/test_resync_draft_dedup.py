@@ -40,7 +40,7 @@ Harness discipline (mirrors `tests/test_process_key_onboard_contract.py`)
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -462,7 +462,12 @@ _NON_TERMINAL_LITERAL = ("pending", "running", "failed_retry", "done_pending_chi
 
 
 def _seed_advanced_session(
-    sb: _StatefulSupabase, strategy_id: str, *, job_kind: str, job_status: str
+    sb: _StatefulSupabase,
+    strategy_id: str,
+    *,
+    job_kind: str,
+    job_status: str,
+    **job_fields: Any,
 ) -> dict[str, Any]:
     """A first resync whose verification has LEFT draft, with one chain job of
     `job_kind` at `job_status`. The shape the live incident had."""
@@ -485,6 +490,7 @@ def _seed_advanced_session(
             "kind": job_kind,
             "status": job_status,
             "created_at": datetime.now(timezone.utc).isoformat(),
+            **job_fields,
         }
     )
     return ver
@@ -656,4 +662,110 @@ def test_resync_verification_read_failure_still_refuses_the_second_chain(
     payload = r.json()
     assert payload.get("code") == "WIZARD_DUPLICATE", payload
     assert payload["status"] is None, payload
+    assert "enqueue_compute_job" not in sb.rpc_calls
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 1 (HIGH-1) — "non-terminal" is not "live". A job whose
+# worker keeps dying cycles running -> pending for ever (the watchdog reset
+# leaves `attempts` alone and the claim does not cap it), so it must not refuse
+# a resync for ever. Nor may a row older than the single-hop window.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("job_status", "job_fields"),
+    [
+        pytest.param(
+            "pending",
+            {"attempts": 1, "max_attempts": 3, "last_error": "worker_stalled"},
+            id="watchdog-reset-worker-stalled",
+        ),
+        pytest.param(
+            "pending",
+            {"attempts": 3, "max_attempts": 3, "last_error": None},
+            id="pending-with-its-budget-spent",
+        ),
+        pytest.param(
+            "running",
+            {"attempts": 5, "max_attempts": 3, "last_error": None},
+            id="running-past-its-budget",
+        ),
+        pytest.param(
+            "running",
+            {
+                "attempts": 1,
+                "max_attempts": 3,
+                "created_at": (datetime.now(timezone.utc) - timedelta(hours=9)).isoformat(),
+            },
+            id="older-than-the-live-window",
+        ),
+    ],
+)
+def test_resync_is_not_refused_by_a_chain_job_that_is_not_live(
+    full_stack_client: TestClient, job_status: str, job_fields: dict[str, Any]
+) -> None:
+    sb = make_supabase(_STRATEGY_A)
+    _seed_advanced_session(
+        sb, _STRATEGY_A, job_kind="sync_trades", job_status=job_status, **job_fields
+    )
+    with (
+        patch("routers.process_key.get_supabase", return_value=sb),
+        patch("routers.process_key.sentry_sdk.capture_message") as capture,
+    ):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.status_code == 200, r.text
+    assert r.json().get("code") != "WIZARD_DUPLICATE", (
+        f"a {job_status} row {job_fields} is not a live chain; refusing the resync "
+        f"would strand the user. got {r.json()}"
+    )
+    assert len(_resync_drafts(sb, _STRATEGY_A)) == 1
+    assert "enqueue_compute_job" in sb.rpc_calls
+    if "created_at" not in job_fields:
+        # A crash-looping row is reported, not skipped silently.
+        assert capture.call_count == 1, capture.call_args_list
+
+
+def test_a_running_job_on_its_final_attempt_is_still_live(
+    full_stack_client: TestClient,
+) -> None:
+    """Control: the claim counts the attempt it starts, so a running row AT its
+    budget is its legitimate last try and must still refuse a second chain."""
+    sb = make_supabase(_STRATEGY_A)
+    _seed_advanced_session(
+        sb, _STRATEGY_A, job_kind="sync_trades", job_status="running",
+        attempts=3, max_attempts=3, last_error=None,
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.json().get("code") == "WIZARD_DUPLICATE", r.json()
+    assert "enqueue_compute_job" not in sb.rpc_calls
+
+
+def test_a_live_job_still_refuses_beside_a_dead_one(full_stack_client: TestClient) -> None:
+    """Control: skipping a dead row must not skip the live row behind it."""
+    sb = make_supabase(_STRATEGY_A)
+    _seed_advanced_session(
+        sb, _STRATEGY_A, job_kind="derive_broker_dailies", job_status="running",
+        attempts=1, max_attempts=3, last_error=None,
+        created_at=(datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
+    )
+    sb.store["compute_jobs"].append(
+        {
+            "id": "job-dead",
+            "strategy_id": _STRATEGY_A,
+            "kind": "sync_trades",
+            "status": "pending",
+            "attempts": 1,
+            "max_attempts": 3,
+            "last_error": "worker_stalled",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.json().get("code") == "WIZARD_DUPLICATE", r.json()
     assert "enqueue_compute_job" not in sb.rpc_calls
