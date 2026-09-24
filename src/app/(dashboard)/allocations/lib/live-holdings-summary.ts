@@ -112,6 +112,15 @@ export interface LiveHoldingsSummary {
    *  (revoked, soft-disconnected or inactive) cannot be told apart, so its
    *  untrusted holdings may be counted. That over-discloses and never hides.
    *
+   *  ⚠️ What `$Y` does NOT carry (review round 2 IN-04): a dropped holding
+   *  whose key is missing from `statusByKeyId` has no known status, so it
+   *  fails the untrusted test and lands in no part. It is not in `total`
+   *  either, so no figure on screen contains it. Under D-06 (b) the
+   *  "excludes" clause therefore says nothing about it. A D-06 answer that
+   *  wants it named needs its own `excludedUnknownStatus` part beside
+   *  `unknownStatus`, not a wider reading of this one. The "missing-key
+   *  holding the narrowing drops" unit case pins today's behaviour.
+   *
    *  Nothing renders this yet. It exists so the D-06 pin can measure the
    *  exclusion, and the founder's D-06 answer decides whether it is ever
    *  disclosed. */
