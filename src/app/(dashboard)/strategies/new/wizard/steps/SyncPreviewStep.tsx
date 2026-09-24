@@ -164,6 +164,8 @@ const IN_FLIGHT_TRUST_CEILING_MS = 3_600_000;
  * clock, which was measured when the first version of this used it.
  */
 const MOUNT_PROBE_TIMEOUT_MS = 5_000;
+// Round-2 review (LOW-5): the deadline covers BOTH probe reads, the strategies
+// read (raced against it) and the sync-progress read (aborted by it).
 
 /**
  * Status-poll backoff schedule. Each entry is the delay BEFORE the next
@@ -716,65 +718,102 @@ export function SyncPreviewStep({
     startedAtRef.current = Date.now();
     resetInFlightEvidence();
     /**
-     * True only when the strategy is proven single-key AND a real
-     * sync-progress read says a factsheet job is in flight. Every failure,
-     * absence or doubt answers false, which means "POST as before".
+     * Round-2 review (reviewer #2, LOW-5) — what the server already holds for
+     * this strategy, asked on a first mount before any kickoff POST:
+     *   - "in_flight": a real read says a chain job is in flight, or a chain
+     *     row exists and a non-factsheet job still holds `computing`
+     *     (`otherJobInFlight`, the SQL status bridge's view);
+     *   - "settled": a chain row EXISTS but nothing is in flight (done, or
+     *     failed, with or without a factsheet). A reload must not start a sync
+     *     here either: the wait's own gates (the status poll, the settled
+     *     grace and its Retry) decide, and the Retry is the user's choice;
+     *   - "none": no chain row yet, the one state a mount may POST in.
+     * Only a PROVEN single-key strategy is probed (`strategies.api_key_id` is
+     * set, the rule `/api/keys/sync` routes on); a composite's arm comes from
+     * the kickoff itself, so it answers "none" and POSTs, and its stitch enqueue
+     * dedups. A read that fails, times out (`MOUNT_PROBE_TIMEOUT_MS`, on both
+     * reads) or answers unreadably cannot tell, so it answers "none" and is
+     * LOGGED; the server's chain-in-flight guard then refuses a duplicate.
      */
-    const chainAlreadyInFlight = async (
+    const probeExistingChain = async (
       supabase: ReturnType<typeof createClient>,
-    ): Promise<boolean> => {
+    ): Promise<"in_flight" | "settled" | "none"> => {
+      const probeAbort = new AbortController();
+      const probeTimer = window.setTimeout(
+        () => probeAbort.abort(),
+        MOUNT_PROBE_TIMEOUT_MS,
+      );
+      // The strategies read cannot take the signal through every client the
+      // step runs with, so it RACES the same deadline instead.
+      const probeDeadline = new Promise<never>((_resolve, reject) => {
+        probeAbort.signal.addEventListener("abort", () =>
+          reject(new Error("in-flight probe timed out")),
+        );
+      });
       try {
-        const { data: strategyRow, error: strategyErr } = await supabase
-          .from("strategies")
-          .select("api_key_id")
-          .eq("id", strategyId)
-          .maybeSingle();
-        const linkedKey = (strategyRow as { api_key_id?: unknown } | null)
-          ?.api_key_id;
+        const { data: strategyRow, error: strategyErr } = await Promise.race([
+          supabase
+            .from("strategies")
+            .select("api_key_id")
+            .eq("id", strategyId)
+            .maybeSingle(),
+          probeDeadline,
+        ]);
         if (strategyErr) {
           console.warn(
             "[wizard:SyncPreviewStep] in-flight probe could not read the strategy; kicking off as before:",
             scrubSeamError(strategyErr),
           );
-          return false;
+          return "none";
         }
+        const linkedKey = (strategyRow as { api_key_id?: unknown } | null)
+          ?.api_key_id;
         if (typeof linkedKey !== "string" || linkedKey === "") {
-          return false;
+          return "none";
         }
-        const probeAbort = new AbortController();
-        const probeTimer = window.setTimeout(
-          () => probeAbort.abort(),
-          MOUNT_PROBE_TIMEOUT_MS,
+        const progressRes = await wizardFetch(
+          `/api/strategies/${strategyId}/sync-progress`,
+          { signal: probeAbort.signal },
         );
-        let progress: SyncProgressResponse | null;
-        try {
-          const progressRes = await wizardFetch(
-            `/api/strategies/${strategyId}/sync-progress`,
-            { signal: probeAbort.signal },
+        if (!progressRes.ok) {
+          console.warn(
+            `[wizard:SyncPreviewStep] in-flight probe got HTTP ${progressRes.status} from sync-progress; kicking off as before`,
           );
-          if (!progressRes.ok) return false;
-          progress = (await progressRes
-            .json()
-            .catch(() => null)) as SyncProgressResponse | null;
-        } finally {
-          window.clearTimeout(probeTimer);
+          return "none";
         }
-        if (
-          !progress ||
-          progress.degraded === true ||
-          !isJobInFlight(progress.jobStatus ?? null)
-        ) {
-          return false;
+        const progress = (await progressRes
+          .json()
+          .catch(() => null)) as SyncProgressResponse | null;
+        if (!progress) {
+          console.warn(
+            "[wizard:SyncPreviewStep] in-flight probe could not parse the sync-progress body; kicking off as before",
+          );
+          return "none";
         }
-        lastInFlightReadAtRef.current = Date.now();
-        notInFlightSinceRef.current = null;
-        return true;
+        if (progress.degraded === true) {
+          console.warn(
+            "[wizard:SyncPreviewStep] in-flight probe read a degraded sync-progress answer; kicking off as before",
+          );
+          return "none";
+        }
+        const jobStatus = progress.jobStatus ?? null;
+        if (jobStatus === null) return "none";
+        const readAt = Date.now();
+        if (isJobInFlight(jobStatus) || progress.otherJobInFlight === true) {
+          lastInFlightReadAtRef.current = readAt;
+          notInFlightSinceRef.current = null;
+          return "in_flight";
+        }
+        notInFlightSinceRef.current = readAt;
+        return "settled";
       } catch (probeErr) {
         console.warn(
           "[wizard:SyncPreviewStep] in-flight probe failed; kicking off as before:",
           scrubSeamError(probeErr),
         );
-        return false;
+        return "none";
+      } finally {
+        window.clearTimeout(probeTimer);
       }
     };
     (async () => {
@@ -941,7 +980,14 @@ export function SyncPreviewStep({
         //     status of `computing` alone is NOT enough: a dead chain can leave
         //     it there, and then the POST is exactly what restarts the work.
         // Any failed read falls through to the POST.
-        if (kickoffNonce === 0 && (await chainAlreadyInFlight(supabase))) {
+        //
+        // Round-2 review (reviewer #2) — and it skips whenever a chain row
+        // EXISTS, not only while one is in flight. A reload after a failed or
+        // done-without-factsheet chain used to POST, starting a sync the user
+        // never asked for. Now the wait decides (the status poll, the settled
+        // grace and the Retry it offers), so the only mount that POSTs is the
+        // very first kickoff, with no chain row yet (`probeExistingChain`).
+        if (kickoffNonce === 0 && (await probeExistingChain(supabase)) !== "none") {
           if (!mountedRef.current) return;
           setPhase("waiting_for_complete");
           return;

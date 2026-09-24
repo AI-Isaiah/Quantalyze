@@ -47,6 +47,7 @@ function installClient(opts: {
   linkedKey: string | null;
   pollStatus: string;
   strategyReadError?: { message: string };
+  strategyReadHangs?: boolean;
 }) {
   currentClientFactory = () => ({
     from: (table: string) => ({
@@ -55,7 +56,9 @@ function installClient(opts: {
           return {
             eq: () => ({
               maybeSingle: () =>
-                Promise.resolve(
+                opts.strategyReadHangs
+                  ? new Promise(() => {})
+                  : Promise.resolve(
                   opts.strategyReadError
                     ? { data: null, error: opts.strategyReadError }
                     : { data: { api_key_id: opts.linkedKey }, error: null },
@@ -106,6 +109,10 @@ let kickoffStatus = 202;
 // When true, the sync-progress read never answers on its own; it settles only
 // by rejecting when its request's AbortSignal fires.
 let progressHangs = false;
+// When set, the NEXT sync-progress read answers this raw status and body once.
+let progressRaw: { status: number; body: string } | null = null;
+// Bodies served, in order, before `progressBody` (one per sync-progress read).
+let progressQueue: SyncProgressResponse[] = [];
 let kickoffBody: Record<string, unknown> = {
   ok: true,
   accepted: true,
@@ -130,7 +137,13 @@ function installFetchMock() {
         return new Response(JSON.stringify(kickoffBody), { status: kickoffStatus });
       }
       if (url.includes("/sync-progress")) {
-        return new Response(JSON.stringify(progressBody), { status: 200 });
+        if (progressRaw) {
+          const raw = progressRaw;
+          progressRaw = null;
+          return new Response(raw.body, { status: raw.status });
+        }
+        const next = progressQueue.shift() ?? progressBody;
+        return new Response(JSON.stringify(next), { status: 200 });
       }
       return new Response("{}", { status: 200 });
     });
@@ -173,6 +186,8 @@ describe("SyncPreviewStep — no second sync, and Retry only when the server nee
     progressBody = { jobStatus: "running", stalled: false, memberProgress: [] };
     kickoffStatus = 202;
     progressHangs = false;
+    progressRaw = null;
+    progressQueue = [];
     kickoffBody = {
       ok: true,
       accepted: true,
@@ -201,12 +216,70 @@ describe("SyncPreviewStep — no second sync, and Retry only when the server nee
     );
   });
 
-  it("(a) control: with no job in flight the mount still kicks off", async () => {
+  it("(a) control: with NO chain row yet (the very first kickoff) the mount kicks off", async () => {
     installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
-    progressBody = { jobStatus: "done", stalled: false, memberProgress: [] };
+    progressBody = { jobStatus: null, stalled: false, memberProgress: [] };
     await mountAndSettle();
     expect(kickoffPosts(fetchSpy)).toHaveLength(1);
   });
+
+  it.each(["done", "failed_final"] as const)(
+    "round-2 review (reviewer #2): a reload when a %s chain row exists does NOT POST; the wait offers Retry instead",
+    async (jobStatus) => {
+      // Before round 2 a settled chain row let the mount POST, starting a
+      // sync on a reload that nobody asked for.
+      installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
+      progressBody = { jobStatus, stalled: false, memberProgress: [] };
+      await mountAndSettle();
+      expect(kickoffPosts(fetchSpy)).toHaveLength(0);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+      expect(kickoffPosts(fetchSpy)).toHaveLength(0);
+      expect(screen.getByRole("button", { name: /retry sync/i })).toBeInTheDocument();
+    },
+  );
+
+  it("round-2 review (reviewer #2): a finished chain with a recurring job holding `computing` counts as in flight on mount", async () => {
+    installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
+    // Only the mount probe gets a real answer; every poll read after it is
+    // degraded (no evidence either way), so the probe's reading is what counts.
+    progressQueue = [
+      { jobStatus: "done", stalled: false, memberProgress: [], otherJobInFlight: true },
+    ];
+    progressBody = { jobStatus: null, stalled: false, memberProgress: [], degraded: true };
+    await mountAndSettle();
+    expect(kickoffPosts(fetchSpy)).toHaveLength(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(90_000);
+    });
+    expect(screen.queryByTestId("wizard-sync-interrupted")).not.toBeInTheDocument();
+  });
+
+  it("round-2 review (LOW-5): a strategies read that never answers times out and the mount kicks off", async () => {
+    installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing", strategyReadHangs: true });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await mountAndSettle();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(kickoffPosts(fetchSpy)).toHaveLength(1);
+  });
+
+  it.each([
+    ["a non-ok sync-progress answer", { status: 503, body: "{}" }, "HTTP 503"],
+    ["an unparseable sync-progress body", { status: 200, body: "not json" }, "could not parse"],
+  ] as const)(
+    "round-2 review (LOW-5): %s is logged and the mount kicks off",
+    async (_label, answer, logged) => {
+      installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
+      progressRaw = answer;
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await mountAndSettle();
+      expect(kickoffPosts(fetchSpy)).toHaveLength(1);
+      expect(warn.mock.calls.some((c) => String(c[0]).includes(logged))).toBe(true);
+    },
+  );
 
   it("(a) control: a degraded sync-progress read is no evidence, so the mount kicks off", async () => {
     installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
