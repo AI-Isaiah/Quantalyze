@@ -1,6 +1,6 @@
 import httpx
 import pandas as pd
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 import logging
 
@@ -79,6 +79,18 @@ async def _fetch_from_coingecko(days: int) -> pd.Series:
     return pd.Series(closes, index=pd.DatetimeIndex(dates), name="BTC")
 
 
+def _utc_today() -> date:
+    """Today's UTC date: the day whose daily close does not exist yet."""
+    return datetime.now(timezone.utc).date()
+
+
+def _completed_days_only(prices: pd.Series, today: date) -> pd.Series:
+    """Drop the row for ``today`` (and anything later). A daily source's row for
+    the current UTC day is the price so far, a partial-day close, not a close.
+    It is never cached or served (review-fix round 1, MEDIUM-5)."""
+    return prices[prices.index < pd.Timestamp(today)]
+
+
 def prices_to_returns(prices: pd.Series) -> pd.Series:
     """Convert daily prices to daily returns."""
     return prices.pct_change().dropna()
@@ -95,6 +107,11 @@ async def get_benchmark_returns(
     if symbol != "BTC":
         raise ValueError(f"Unsupported benchmark: {symbol}")
 
+    # Only COMPLETED UTC days are ever served or cached: today's row is a
+    # partial-day close (review-fix round 1, MEDIUM-5).
+    today = _utc_today()
+    yesterday = today - timedelta(days=1)
+
     # Try cache first (with freshness check)
     try:
         supabase = get_supabase()
@@ -103,20 +120,25 @@ async def get_benchmark_returns(
                 "symbol", symbol
             ).order("date", desc=True).limit(days).execute()
         )
+        # A row for today (cached before this rule existed) is dropped here, so
+        # it can neither be served nor count as fresh.
+        cached = [
+            row for row in rows(result) if str(row["date"])[:10] < today.isoformat()
+        ]
 
-        if result.data and len(result.data) > 10:
-            # Freshness check: reject cache older than 48 hours
-            most_recent_date = max(row["date"] for row in rows(result))
-            most_recent = pd.Timestamp(most_recent_date)
-            staleness = datetime.now(timezone.utc) - most_recent.tz_localize(timezone.utc)
+        if len(cached) > 10:
+            # Freshness: the newest completed day must be cached, i.e. the
+            # newest cached date is yesterday (UTC) or later.
+            most_recent_date = max(str(row["date"])[:10] for row in cached)
 
-            if staleness > timedelta(hours=48):
+            if date.fromisoformat(most_recent_date) < yesterday:
                 logger.warning(
-                    "Benchmark cache stale (most recent: %s, %s old). Fetching fresh data.",
-                    most_recent_date, staleness
+                    "Benchmark cache stale (most recent completed day: %s, needs %s). "
+                    "Fetching fresh data.",
+                    most_recent_date, yesterday.isoformat(),
                 )
             else:
-                df = pd.DataFrame(result.data)
+                df = pd.DataFrame(cached)
                 prices = pd.Series(
                     df["close_price"].astype(float).values,
                     index=pd.DatetimeIndex(pd.to_datetime(df["date"])),
@@ -128,7 +150,7 @@ async def get_benchmark_returns(
 
     # Fetch fresh
     try:
-        prices = await fetch_btc_daily_prices(days)
+        prices = _completed_days_only(await fetch_btc_daily_prices(days), today)
         returns = prices_to_returns(prices)
 
         # Cache for next time

@@ -19,9 +19,15 @@ These tests target the highest-leverage failure modes in the file:
 
 5. The fresh-cache hit — proves a fresh cache is served without a refetch.
 
+6. Completed days only (review-fix round 1, MEDIUM-5) — today's UTC row is a
+   partial-day close: it is never served from the cache, never cached after a
+   fetch, and never counts as fresh.
+
 Skipped intentionally:
 - The CoinGecko fallback parse (mirror of Binance — would just be a duplicate test)
-- The 48-hour cache freshness gate (would need freezegun, marginal value)
+- The 48-hour cache freshness gate (would need freezegun, marginal value).
+  Superseded: the freshness rule is now "newest completed day >= yesterday",
+  tested below with `_utc_today` patched to a fixed synthetic date.
 - The cache-write round trip (mock-on-mock, low value)
 - httpx pagination loop internals (testing the mock, not the code)
 """
@@ -156,9 +162,11 @@ async def test_get_benchmark_returns_serves_a_fresh_cache_without_fetching():
     returns come from the cached closes.
     """
     today = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
+    # Completed days only, newest yesterday: today's row is a partial-day close
+    # and is never served (review-fix round 1, MEDIUM-5).
     cached = [
         {
-            "date": (today - pd.Timedelta(days=i)).strftime("%Y-%m-%d"),
+            "date": (today - pd.Timedelta(days=i + 1)).strftime("%Y-%m-%d"),
             "symbol": "BTC",
             "close_price": 100.0 + (20 - i),
         }
@@ -179,3 +187,110 @@ async def test_get_benchmark_returns_serves_a_fresh_cache_without_fetching():
     assert len(returns) == 19
     # Oldest close is 101, next is 102: the first return is 1/101.
     assert returns.iloc[0] == pytest.approx(1 / 101)
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 1 (MEDIUM-5) — today's UTC row is a partial-day close.
+# `_utc_today` is patched to a fixed synthetic date so the tests never depend
+# on the wall clock.
+# ---------------------------------------------------------------------------
+
+_TODAY = pd.Timestamp("2026-07-12")
+_PARTIAL_CLOSE = 1_000_000_000.0  # absurd on purpose: a leak is unmissable
+
+
+def _cache_rows(days_back: list[int], *, today_close: float | None = None) -> list[dict]:
+    out = [
+        {
+            "date": (_TODAY - pd.Timedelta(days=d)).strftime("%Y-%m-%d"),
+            "symbol": "BTC",
+            "close_price": 100.0 + (100 - d),
+        }
+        for d in days_back
+    ]
+    if today_close is not None:
+        out.insert(0, {"date": _TODAY.strftime("%Y-%m-%d"), "symbol": "BTC", "close_price": today_close})
+    return out
+
+
+async def _run_sync(fn):
+    return fn()
+
+
+@pytest.mark.asyncio
+async def test_todays_partial_close_is_never_served_from_the_cache():
+    cached = _cache_rows(list(range(1, 21)), today_close=_PARTIAL_CLOSE)
+    supabase = MagicMock()
+    supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=cached
+    )
+    fetch = AsyncMock(side_effect=AssertionError("a fresh cache must not refetch"))
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=supabase
+    ), patch("services.benchmark.db_execute", side_effect=_run_sync), patch(
+        "services.benchmark.fetch_btc_daily_prices", fetch
+    ):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    fetch.assert_not_awaited()
+    assert is_stale is False and returns is not None
+    assert returns.index.max() < _TODAY, "today's partial-day row was served"
+    assert returns.abs().max() < 1.0, "the partial-day close leaked into the returns"
+
+
+@pytest.mark.asyncio
+async def test_a_cache_without_yesterday_is_stale_even_with_a_row_for_today():
+    """Freshness is the newest COMPLETED day. A cache holding today's partial
+    row but not yesterday's close is stale and is refetched."""
+    cached = _cache_rows(list(range(2, 22)), today_close=_PARTIAL_CLOSE)
+    supabase = MagicMock()
+    supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=cached
+    )
+    fresh = pd.Series(
+        [100.0 + i for i in range(20)],
+        index=pd.DatetimeIndex([_TODAY - pd.Timedelta(days=20 - i) for i in range(20)]),
+        name="BTC",
+    )
+    fetch = AsyncMock(return_value=fresh)
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=supabase
+    ), patch("services.benchmark.db_execute", side_effect=_run_sync), patch(
+        "services.benchmark.fetch_btc_daily_prices", fetch
+    ):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    fetch.assert_awaited_once()
+    assert is_stale is False and returns is not None
+
+
+@pytest.mark.asyncio
+async def test_todays_partial_close_is_never_cached_or_served_after_a_fetch():
+    supabase = MagicMock()
+    supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=[]
+    )
+    fetched = pd.Series(
+        [100.0 + i for i in range(20)] + [_PARTIAL_CLOSE],
+        index=pd.DatetimeIndex(
+            [_TODAY - pd.Timedelta(days=20 - i) for i in range(20)] + [_TODAY]
+        ),
+        name="BTC",
+    )
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=supabase
+    ), patch("services.benchmark.db_execute", side_effect=_run_sync), patch(
+        "services.benchmark.fetch_btc_daily_prices", AsyncMock(return_value=fetched)
+    ):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    assert is_stale is False and returns is not None
+    assert returns.index.max() < _TODAY, "today's partial-day row was served"
+    upserted = supabase.table.return_value.upsert.call_args.args[0]
+    assert upserted, "the completed days must still be cached"
+    assert all(r["date"] < _TODAY.strftime("%Y-%m-%d") for r in upserted), (
+        "today's partial-day close was written to the cache"
+    )
