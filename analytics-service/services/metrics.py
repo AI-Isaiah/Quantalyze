@@ -396,6 +396,82 @@ def sanitize_metrics(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# RANK-05 / Phase 166 primitives — the money-math that Phase 159 hand-copied
+# inline, extracted ONCE (TODOS 0f `[159-SIMPLIFY-DEFER]`, Phase 166 D-04).
+# Each reproduces the operation order of the site it came from EXACTLY (D-08:
+# no convention change), so the extraction is byte-neutral against the golden
+# parity file. They return RAW floats (NaN/inf allowed); every caller keeps its
+# own `_safe_float` wrapper and its own status / "undefined" handling.
+# ---------------------------------------------------------------------------
+
+
+def _max_drawdown_from_wealth(wealth: pd.Series) -> float:
+    """Max drawdown of a WEALTH curve — quantstats 0.0.81 ``max_drawdown`` minus the price guess.
+
+    Caller: ``compute_all_metrics`` geometric-path ``max_dd`` (wealth built from
+    ``returns.fillna(0)``, UNCLIPPED). Plan 166-03's ``_recovery_factor`` reuses it.
+
+    RANK-05 (Phase 159) — WHY INLINE, NOT quantstats. ``max_drawdown`` and
+    ``to_drawdown_series`` route through ``_utils._prepare_prices``, the mirror
+    image of the ``_prepare_returns`` price guess documented at the headline
+    sharpe/sortino site in ``compute_all_metrics``::
+
+        elif data.min() < 0 or data.max() < 1:
+            data = to_prices(data, base)
+
+    A series is converted returns->prices ONLY when it has a negative day or
+    stays under 1. An all-non-negative daily-RETURNS series with one >100% day
+    fails BOTH tests and is therefore consumed AS a price path. Measured pre-fix
+    on the 60-day ALL-WINNING fixture: max_drawdown = -0.9973 — a 99.7% drawdown
+    reported for a series that never lost a single day. Neither function carries
+    a ``prepare_returns=`` kwarg in the pinned 0.0.81 (in-env signature sweep,
+    2026-08-21), so inline pandas is the only closure (D-04 / the P114 pattern).
+
+    MATH PARITY — quantstats 0.0.81 ``max_drawdown`` / ``to_drawdown_series``
+    minus the guess. ``_prepare_prices(r, base=1.0)`` calls ``to_prices``, which
+    is ``base + base * compsum(r)`` == ``(1 + r).cumprod()``; both functions then
+    prepend a phantom inception point at the baseline and take
+    ``price / expanding-max - 1``. Prepending is equivalent to flooring the
+    running peak at the baseline — the phantom's own ratio is exactly 1.0 and
+    every other ratio is <= 1, so it can never be the minimum — hence
+    ``cummax().clip(lower=1.0)``.
+
+    ONE DELIBERATE DIVERGENCE, recorded: quantstats' ``_get_baseline_value``
+    GUESSES the inception capital from the first price (>1000 -> 1e5,
+    >10 -> 100.0, else 1.0). That ladder exists for series that arrive as real
+    prices. The wealth curve is BUILT by the caller with base 1.0, so inception
+    capital is known exactly and the ladder can only misfire — it would fabricate
+    a ~-100% drawdown for an account whose first day gained more than +900%.
+    Baseline is pinned at 1.0. Benign parity is untouched: the ladder returns 1.0
+    for every first price <= 10.
+
+    OPERATION ORDER (load-bearing): ``min`` of the ratio, THEN ``- 1.0``, with NO
+    inf/-0.0 replace — a zero drawdown stays ``+0.0`` (RESEARCH Pitfall 6).
+    Takes a WEALTH curve, not returns: the caller owns the NaN convention and
+    any clip, and the two ``compute_all_metrics`` callers deliberately build
+    different wealth curves.
+    """
+    return float((wealth / wealth.cummax().clip(lower=1.0)).min()) - 1.0
+
+
+def _drawdown_series_from_wealth(wealth: pd.Series) -> pd.Series:
+    """Drawdown (underwater) SERIES of a WEALTH curve — quantstats 0.0.81 ``to_drawdown_series`` minus the price guess.
+
+    Caller: ``compute_all_metrics`` geometric-path ``dd_series`` (wealth is the
+    chart ``cumulative``, derived from ``returns_for_chart`` floored at
+    ``_LOG_RETURN_FLOOR``). Plan 166-03's ulcer / UPI / serenity mirrors reuse it.
+
+    Same WHY-INLINE, MATH PARITY and baseline-pinned-at-1.0 rationale as
+    ``_max_drawdown_from_wealth``. The trailing ``replace`` mirrors quantstats'
+    own inf/-0 cleanup and is part of this primitive's operation order (it is
+    deliberately ABSENT from ``_max_drawdown_from_wealth``).
+    """
+    return (wealth / wealth.cummax().clip(lower=1.0) - 1.0).replace(
+        [np.inf, -np.inf, -0.0], 0.0
+    )
+
+
 def compute_all_metrics(
     returns: pd.Series,
     benchmark_returns: pd.Series | None = None,
@@ -697,57 +773,20 @@ def compute_all_metrics(
             insufficient_window = True
         else:
             insufficient_window = _elapsed_days < MIN_ANNUALIZATION_DAYS
-        # RANK-05 (Phase 159) — WHY INLINE, NOT quantstats. `max_drawdown` and
-        # `to_drawdown_series` route through `_utils._prepare_prices`, the mirror
-        # image of the `_prepare_returns` price guess documented at the headline
-        # sharpe/sortino site below:
-        #
-        #     elif data.min() < 0 or data.max() < 1:
-        #         data = to_prices(data, base)
-        #
-        # A series is converted returns->prices ONLY when it has a negative day or
-        # stays under 1. An all-non-negative daily-RETURNS series with one >100%
-        # day fails BOTH tests and is therefore consumed AS a price path. Measured
-        # pre-fix on the 60-day ALL-WINNING fixture: max_drawdown = -0.9973 — a
-        # 99.7% drawdown reported for a series that never lost a single day.
-        # Neither function carries a `prepare_returns=` kwarg in the pinned 0.0.81
-        # (in-env signature sweep, 2026-08-21), so inline pandas is the only
-        # closure (D-04 / the P114 pattern).
-        #
-        # MATH PARITY — quantstats 0.0.81 `max_drawdown` / `to_drawdown_series`
-        # minus the guess. `_prepare_prices(r, base=1.0)` calls `to_prices`, which
-        # is `base + base * compsum(r)` == `(1 + r).cumprod()`; both functions then
-        # prepend a phantom inception point at the baseline and take
-        # `price / expanding-max - 1`. Prepending is equivalent to flooring the
-        # running peak at the baseline — the phantom's own ratio is exactly 1.0 and
-        # every other ratio is <= 1, so it can never be the minimum — hence
-        # `cummax().clip(lower=1.0)`.
-        #
-        # ONE DELIBERATE DIVERGENCE, recorded: quantstats' `_get_baseline_value`
-        # GUESSES the inception capital from the first price (>1000 -> 1e5,
-        # >10 -> 100.0, else 1.0). That ladder exists for series that arrive as
-        # real prices. The wealth curve is BUILT here with base 1.0, so inception
-        # capital is known exactly and the ladder can only misfire — it would
-        # fabricate a ~-100% drawdown for an account whose first day gained more
-        # than +900%. Baseline is pinned at 1.0. Benign parity is untouched: the
-        # ladder returns 1.0 for every first price <= 10.
-        #
-        # NaN CONVENTION at this site: fillna(0), UNCHANGED and deliberate. A gap
-        # day must carry the equity curve FORWARD — a cumulative product cannot
+        # RANK-05 (Phase 159) — WHY INLINE, NOT quantstats: see the docstring of
+        # `_max_drawdown_from_wealth` (price guess, math parity, baseline pinned at
+        # 1.0). NaN CONVENTION at this site: fillna(0), UNCHANGED and deliberate. A
+        # gap day must carry the equity curve FORWARD — a cumulative product cannot
         # skip a NaN without truncating every later point — which is the same
         # rationale `returns_for_chart` documents at F3 above. This is exactly what
         # `_prepare_prices` did, so no fixture can move on this account.
         _wealth = (1.0 + returns.fillna(0)).cumprod()
-        max_dd = _safe_float(
-            float((_wealth / _wealth.cummax().clip(lower=1.0)).min()) - 1.0
-        )
+        max_dd = _safe_float(_max_drawdown_from_wealth(_wealth))
         # Drawdown series — chart continuity per F3 (same fillna(0) rationale);
-        # `returns_for_chart` is already NaN-free and floored above -100%. The
-        # trailing `replace` mirrors quantstats' own inf/-0 cleanup. Reuses the
-        # `cumulative` wealth curve bound above (same operand, same block).
-        dd_series = (
-            cumulative / cumulative.cummax().clip(lower=1.0) - 1.0
-        ).replace([np.inf, -np.inf, -0.0], 0.0)
+        # `returns_for_chart` is already NaN-free and floored above -100%. See
+        # `_drawdown_series_from_wealth`. Reuses the `cumulative` wealth curve bound
+        # above (same operand, same block); the two wealth curves are NOT unified.
+        dd_series = _drawdown_series_from_wealth(cumulative)
 
     # Headline annualized RISK on the day-basis series (Fix A): `stat_returns` IS
     # `returns` on the calendar basis (byte-identical), or the nonzero-day series on
