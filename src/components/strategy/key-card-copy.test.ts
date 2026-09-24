@@ -1,0 +1,110 @@
+/**
+ * Phase 167.2 KEYCARDSYNC / KCS-14: every locked S1-S2 key-card string, pinned
+ * character for character.
+ *
+ * WHY THIS FILE EXISTS. The strings in `key-card-copy.ts` are the card's claims
+ * about a sync it cannot see the end of: that a sync is blocking a new key,
+ * that the panel stopped checking, that a bound expired before the sync was
+ * confirmed. Each one was authored once, in `167.2-UI-SPEC.md`, so that none of
+ * them says more than the card knows (above all, none of the KCS-03 lines may
+ * say the sync failed). A paraphrase in code is how such a claim drifts, so
+ * every expected value below is a HAND-TYPED literal copied from the UI-SPEC,
+ * never imported from the module under test: an import would make the oracle
+ * agree with whatever the module says.
+ */
+import { describe, it, expect } from "vitest";
+import {
+  addKeyBlockedReason,
+  formatBoundDuration,
+  PANEL_STOP_COPY,
+} from "./key-card-copy";
+
+describe("KCS-01 (S1): why Connect Key is blocked", () => {
+  it("KCS01-BLOCKED: names the attempt's key label inside ASCII double quotes", () => {
+    const text = addKeyBlockedReason("Synthetic Key A");
+    expect(text).toBe(
+      'Wait for the sync of "Synthetic Key A" to finish before connecting another key.',
+    );
+    // The quotes are U+0022, not typographic quotes.
+    expect(text.charCodeAt(text.indexOf("Synthetic") - 1)).toBe(0x22);
+    expect(text).not.toMatch(/[“”]/);
+  });
+
+  it("KCS01-BLOCKED: a label carrying replacement patterns is inserted literally", () => {
+    // A string replacement would expand `$&` into the placeholder itself.
+    expect(addKeyBlockedReason("Key $& one")).toBe(
+      'Wait for the sync of "Key $& one" to finish before connecting another key.',
+    );
+  });
+
+  it.each([null, undefined, "", "   "])(
+    "KCS01-BLOCKED-NOLABEL: a %j label selects the no-label line",
+    (label) => {
+      expect(addKeyBlockedReason(label)).toBe(
+        "Wait for the current sync to finish before connecting another key.",
+      );
+    },
+  );
+});
+
+describe("KCS-22 (S2): the panel stopped checking", () => {
+  it("KCS22-CAP: label and detail", () => {
+    expect(PANEL_STOP_COPY.poll_cap.label).toBe("No result yet");
+    expect(PANEL_STOP_COPY.poll_cap.detail).toBe(
+      "This panel stopped checking after 2 minutes. The sync may still be running: reload this page later to see its result.",
+    );
+  });
+
+  it("KCS22-NOROW: label and detail", () => {
+    expect(PANEL_STOP_COPY.missing_row.label).toBe("No result yet");
+    expect(PANEL_STOP_COPY.missing_row.detail).toBe(
+      "This panel stopped checking after 30 seconds with nothing recorded yet. The sync may still be running: reload this page later to see its result.",
+    );
+  });
+});
+
+describe("KCS-03 (S2): a client-side bound expired before the sync was confirmed", () => {
+  it("KCS03-LINK: label and detail", () => {
+    expect(PANEL_STOP_COPY.link_bound.label).toBe("Sync not started");
+    expect(PANEL_STOP_COPY.link_bound.detail).toBe(
+      "This sync did not start: linking the key to this strategy did not answer within 15 seconds. Reload this page to check which key is linked before you sync again.",
+    );
+  });
+
+  it("KCS03-ENQUEUE: label and detail", () => {
+    expect(PANEL_STOP_COPY.enqueue_bound.label).toBe("Sync not confirmed");
+    expect(PANEL_STOP_COPY.enqueue_bound.detail).toBe(
+      "We could not confirm this sync started: the request did not answer within 3 minutes, so it may still be running. Reload this page to see the latest status before you sync again.",
+    );
+  });
+
+  it("neither KCS03 line claims a failure the card cannot know", () => {
+    for (const reason of ["link_bound", "enqueue_bound"] as const) {
+      const { label, detail } = PANEL_STOP_COPY[reason];
+      expect(`${label} ${detail}`).not.toMatch(/fail|error/i);
+    }
+  });
+});
+
+describe("PANEL_STOP_COPY covers exactly the pinned reasons", () => {
+  it("a new stop reason cannot ship without a pin in this file", () => {
+    expect(Object.keys(PANEL_STOP_COPY).sort()).toEqual(
+      ["enqueue_bound", "link_bound", "missing_row", "poll_cap"],
+    );
+  });
+});
+
+describe("formatBoundDuration: the durations the sentences state", () => {
+  it.each([
+    [15_000, "15 seconds"],
+    [30_000, "30 seconds"],
+    [120_000, "2 minutes"],
+    [180_000, "3 minutes"],
+  ])("%d ms reads as %j", (ms, text) => {
+    expect(formatBoundDuration(ms)).toBe(text);
+  });
+
+  it("90 000 ms is not a whole number of minutes, so it throws rather than round", () => {
+    expect(() => formatBoundDuration(90_000)).toThrow();
+  });
+});

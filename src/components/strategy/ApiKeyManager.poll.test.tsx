@@ -70,6 +70,11 @@ const mockState = vi.hoisted(() => ({
    */
   jobStatuses: [] as Array<string | null>,
   jobReadCount: 0,
+  /**
+   * Phase 167.2 / KCS-03: what the link update (`strategies.update(...).eq(...)`)
+   * answers. Null answers `{ error: null }` at once, as before.
+   */
+  linkResult: null as Promise<{ error: unknown }> | null,
 }));
 
 vi.mock("@/lib/supabase/client", () => ({
@@ -104,7 +109,7 @@ vi.mock("@/lib/supabase/client", () => ({
         }),
       }),
       update: () => ({
-        eq: () => Promise.resolve({ error: null }),
+        eq: () => mockState.linkResult ?? Promise.resolve({ error: null }),
       }),
     }),
   }),
@@ -130,6 +135,11 @@ const KCS03_ENQUEUE =
   "We could not confirm this sync started: the request did not answer within 3 minutes, so it may still be running. Reload this page to see the latest status before you sync again.";
 /** 180 s, hand-typed: the enqueue bound the KCS03-ENQUEUE sentence states. */
 const ENQUEUE_BOUND = 180_000;
+const KCS03_LINK_LABEL = "Sync not started";
+const KCS03_LINK =
+  "This sync did not start: linking the key to this strategy did not answer within 15 seconds. Reload this page to check which key is linked before you sync again.";
+/** 15 s, hand-typed: the link bound the KCS03-LINK sentence states. */
+const LINK_BOUND = 15_000;
 
 function healthyRow() {
   return {
@@ -259,6 +269,7 @@ beforeEach(() => {
   mockState.hangNextKeysRead = false;
   mockState.jobStatuses = [];
   mockState.jobReadCount = 0;
+  mockState.linkResult = null;
 });
 
 afterEach(() => {
@@ -707,5 +718,62 @@ describe("ApiKeyManager + the REAL poller: an enqueue that never answers is boun
     expect(screen.getByText(KCS03_ENQUEUE)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
     expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining("answered after its"));
+  });
+});
+
+describe("ApiKeyManager + the REAL poller: a link update that never answers is bounded, and nothing is enqueued (Phase 167.2 / KCS-03)", () => {
+  /** How many `/api/keys/sync` requests this test's fetch mock has seen. */
+  function enqueueRequests() {
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    return fetchMock.mock.calls.filter(([url]) => url === "/api/keys/sync").length;
+  }
+
+  it("LINK-HANG: at 15 s the attempt ends as Sync not started with the KCS03-LINK sentence, and no enqueue was ever sent", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockState.linkResult = new Promise(() => {});
+    await startResyncWithHeldEnqueue();
+
+    await tick(LINK_BOUND - 1_000);
+    expect(screen.queryByText(KCS03_LINK_LABEL)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Syncing…" })).toBeDisabled();
+
+    await tick(1_000);
+    expect(screen.getByText(KCS03_LINK_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(KCS03_LINK)).toBeInTheDocument();
+    expect(screen.queryByText("Sync failed")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
+    expect(screen.getByText(KCS03_LINK_LABEL).className).toContain("text-warning");
+    // "Sync not started" is true only because nothing was sent: no baseline
+    // read and no enqueue for this attempt.
+    expect(enqueueRequests(), "an enqueue was sent after the link bound expired").toBe(0);
+    expect(mockState.baselineReadCount).toBe(0);
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("15000 ms"));
+  });
+
+  it("LINK-LATE: a link update that answers after its bound writes nothing and sends no enqueue", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const link = deferred<{ error: unknown }>();
+    mockState.linkResult = link.promise;
+    await startResyncWithHeldEnqueue();
+
+    await tick(LINK_BOUND);
+    expect(screen.getByText(KCS03_LINK_LABEL)).toBeInTheDocument();
+
+    // The link answers 5 s late, successfully.
+    await tick(5_000);
+    await act(async () => {
+      link.resolve({ error: null });
+    });
+    await tick(0);
+    await tick(POLL_MS * 3);
+
+    expect(enqueueRequests(), "a late link answer resumed an ended attempt").toBe(0);
+    expect(mockState.baselineReadCount).toBe(0);
+    expect(screen.getByText(KCS03_LINK_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(KCS03_LINK)).toBeInTheDocument();
+    expect(screen.queryByText("Fetching trades from Binance...")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
   });
 });

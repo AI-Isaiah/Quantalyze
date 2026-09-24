@@ -671,3 +671,40 @@ describe("SyncProgress — the job-state check fails closed (Phase 167.2 / KCS-1
     },
   );
 });
+
+describe("SyncProgress — the S2 live region (Phase 167.2 / KCS-03, UI-SPEC § Accessibility)", () => {
+  it("LIVE-REGION: the status label is the panel's one polite, atomic live region; the elapsed counter is outside it; the same node persists from syncing to a terminal state", async () => {
+    // `unconfirmed` and `no_result` arrive minutes after the click, unprompted,
+    // so they must be announced. A region inserted with its text already
+    // inside is generally not announced (the 167 IN-01 lesson), so the label
+    // node must stay mounted and only its text may change.
+    const props = { ...baseProps, onStatusChange: vi.fn() };
+    const { container, rerender } = render(<SyncProgress {...props} syncStatus="syncing" />);
+    await tick(0);
+
+    const LIVE = '[role="status"], [aria-live]';
+    expect(container.querySelectorAll(LIVE)).toHaveLength(1);
+    const region = container.querySelector('[role="status"]');
+    expect(region).not.toBeNull();
+    expect(region?.getAttribute("aria-live")).toBe("polite");
+    expect(region?.getAttribute("aria-atomic")).toBe("true");
+    expect(region?.textContent).toMatch(/^Fetching trades/);
+
+    // The elapsed counter ticks every second; it must not be read out.
+    await tick(2_000);
+    const counter = Array.from(container.querySelectorAll("span")).find(
+      (el) => el.textContent === "2s",
+    );
+    expect(counter, "the elapsed counter did not render").toBeDefined();
+    expect(region?.contains(counter ?? null)).toBe(false);
+
+    rerender(<SyncProgress {...props} syncStatus="computing" />);
+    expect(container.querySelector('[role="status"]')).toBe(region);
+    expect(region?.textContent).toBe("Computing analytics...");
+
+    rerender(<SyncProgress {...props} syncStatus="unconfirmed" stopReason="enqueue_bound" />);
+    expect(container.querySelector('[role="status"]')).toBe(region);
+    expect(region?.textContent).toBe("Sync not confirmed");
+    expect(container.querySelectorAll(LIVE)).toHaveLength(1);
+  });
+});
