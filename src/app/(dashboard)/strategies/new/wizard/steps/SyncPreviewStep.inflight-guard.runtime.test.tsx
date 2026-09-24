@@ -97,6 +97,7 @@ let progressBody: SyncProgressResponse = {
   stalled: false,
   memberProgress: [],
 };
+let kickoffStatus = 202;
 let kickoffBody: Record<string, unknown> = {
   ok: true,
   accepted: true,
@@ -111,7 +112,7 @@ function installFetchMock() {
     .mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/keys/sync")) {
-        return new Response(JSON.stringify(kickoffBody), { status: 202 });
+        return new Response(JSON.stringify(kickoffBody), { status: kickoffStatus });
       }
       if (url.includes("/sync-progress")) {
         return new Response(JSON.stringify(progressBody), { status: 200 });
@@ -155,6 +156,7 @@ describe("SyncPreviewStep — no second sync, and Retry only when the server nee
   beforeEach(() => {
     vi.useFakeTimers();
     progressBody = { jobStatus: "running", stalled: false, memberProgress: [] };
+    kickoffStatus = 202;
     kickoffBody = {
       ok: true,
       accepted: true,
@@ -348,6 +350,45 @@ describe("SyncPreviewStep — no second sync, and Retry only when the server nee
     ).not.toBeInTheDocument();
     expect(
       screen.queryByTestId("wizard-sync-already-running"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("review-fix round 1: the envelope Retry starts a fresh settled grace, not the previous attempt's", async () => {
+    // Attempt N: the chain ends without a factsheet and reads say nothing is in
+    // flight, so the settled grace runs out and the banner shows.
+    installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
+    await mountAndSettle();
+    progressBody = { jobStatus: "failed_final", stalled: false, memberProgress: [] };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(90_000);
+    });
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+
+    // The banner Retry fails, so the step shows the error envelope.
+    kickoffStatus = 500;
+    kickoffBody = { ok: false, code: "SYNC_FAILED" };
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /retry sync/i }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByTestId("error-envelope")).toBeInTheDocument();
+
+    // Attempt N+1: the envelope Retry re-runs the kickoff, which enqueues.
+    kickoffStatus = 202;
+    kickoffBody = { ok: true, accepted: true, status: "syncing", composite: false, queued: true };
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+
+    // Attempt N's settled grace must not carry over: a new sync was just
+    // started, so no Retry banner may show seconds later.
+    expect(screen.queryByTestId("error-envelope")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("wizard-sync-interrupted"),
     ).not.toBeInTheDocument();
   });
 

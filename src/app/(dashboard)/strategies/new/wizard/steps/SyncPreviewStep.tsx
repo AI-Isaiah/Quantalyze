@@ -689,10 +689,18 @@ export function SyncPreviewStep({
   // Mirrors of the two refs for the render, refreshed on the 1 s tick.
   const [serverSaysInFlight, setServerSaysInFlight] = useState(false);
   const [settledPastGrace, setSettledPastGrace] = useState(false);
+  // Review-fix round 1 — forget the previous attempt's in-flight evidence. Run
+  // at the start of every kickoff (the effect below) and by the envelope Retry.
+  const resetInFlightEvidence = useCallback(() => {
+    lastInFlightReadAtRef.current = Number.NEGATIVE_INFINITY;
+    notInFlightSinceRef.current = null;
+    setSettledPastGrace(false);
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
     startedAtRef.current = Date.now();
+    resetInFlightEvidence();
     /**
      * True only when the strategy is proven single-key AND a real
      * sync-progress read says a factsheet job is in flight. Every failure,
@@ -1056,7 +1064,7 @@ export function SyncPreviewStep({
     // kickoffNonce: B-22's retry re-runs this effect deliberately. The effect
     // re-arms `mountedRef` on entry (first line), so a re-run behaves exactly
     // like a fresh mount rather than writing into a torn-down closure.
-  }, [strategyId, cachedSnapshot, kickoffNonce]);
+  }, [strategyId, cachedSnapshot, kickoffNonce, resetInFlightEvidence]);
 
   // SF-1 backstop — record when the observed computation_status last advanced.
   // Fires on mount (null) and on every change; a status frozen for the whole
@@ -2168,9 +2176,15 @@ export function SyncPreviewStep({
     // let a second failure on a DIFFERENT path render the first one's id, which
     // is worse than rendering none: it points support at the wrong request.
     setUpstreamCorrelationId(null);
+    // Review-fix round 1 — a new attempt starts with no in-flight evidence and
+    // no settled grace. Without this the previous attempt's grace, frozen while
+    // the envelope showed (the 1 s tick runs only while waiting), put the Retry
+    // banner straight back up over the sync this click just started.
+    resetInFlightEvidence();
+    setRetryFoundRunningSync(false);
     setPhase("kicking_off");
     setKickoffNonce((n) => n + 1);
-  }, []);
+  }, [resetInFlightEvidence]);
 
   /**
    * ⚠️ 140.4-11 / SEAMRIM-07 — TRAP-4, RESTATED AS A PROPERTY.
