@@ -828,6 +828,14 @@ def _payoff_ratio_no_guess(p: pd.Series) -> float:
     ``avg_loss`` is the mean of the negative days. An empty set gives NaN,
     which propagates.
 
+    UNREACHABLE ARM, KEPT ON PURPOSE (SFH INFO-1): ``avg_loss_val == 0`` cannot
+    happen, because a mean of strictly negative values is negative, or NaN when
+    there are none. Drill N14 (the arm returning 0.0) therefore survives the
+    suite, and that is expected. The arm is kept because it is a line of the
+    0.0.81 body this mirror reproduces (D-08 parity), and it is the right answer
+    should a future ``avg_loss`` ever return 0: an undefined payoff, not a
+    division by zero.
+
     Callers: ``_kelly_criterion`` and ``_cpc_index``.
     """
     avg_loss_val = qs.stats.avg_loss(p, prepare_returns=False)
