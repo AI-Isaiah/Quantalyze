@@ -6415,6 +6415,11 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   money-path plumbing. Route to a future milestone as B-mypy part j, or close as WON'T-FIX if
   the untyped-tests posture is reaffirmed. Surfaced because a Phase 142 executor ran
   `mypy --strict` on a path the gate excludes; **zero errors fell in Phase 142's added ranges.**
+  ⛔ **CORRECTED 2026-09-23 — the gate command quoted above is no longer the gate.** As of Phase
+  164.6.1 it ALSO names the four top-level modules `main.py`, `main_worker.py`,
+  `main_worker_healthz.py` and `sentry_init.py` (100 source files). `tests/` and `scripts/`
+  remain outside for the same stated reasons; the policy question is unchanged and is NOT
+  carried by 164.6.1. The quoted command is kept as lineage.
 - **All 16 Phase 142 review/verification items are OWNED BY PHASE 142.1** — not tracked here.
   Full text with per-item failure scenarios: `.planning/STATE.md` § "Phase 142.1 scope".
   Raised by three independent passes (high-effort workflow review, blind `gsd-code-reviewer`,
@@ -8455,8 +8460,13 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   newest), or record tests/ as permanently out of strict scope in a mypy config comment so
   the next session doesn't re-derive this. Never widen the gate in the same commit as a
   behavior change.
+  ⛔ **CORRECTED 2026-09-23 — the gate command quoted above is no longer the gate.** As of Phase
+  164.6.1 it ALSO names the four top-level modules `main.py`, `main_worker.py`,
+  `main_worker_healthz.py` and `sentry_init.py` (100 source files). `tests/` and `scripts/`
+  remain outside for the same stated reasons; the policy question in this entry is unchanged
+  and is NOT carried by 164.6.1. The quoted command is kept as lineage.
 
-- [ ] **`[MYPY-MAINPY-01]` the `mypy --strict` gate's own comment claims running-service
+- [x] **`[MYPY-MAINPY-01]` the `mypy --strict` gate's own comment claims running-service
   coverage it does not have — `main.py` is outside it (logged 2026-09-06, Phase 164.1-02).**
   `ci.yml:3209-3216` states the strict floor "now covers ALL running-service code —
   `services/` (part g), `routers/` (part h), and `models/` (part i)". `analytics-service/main.py`
@@ -8476,6 +8486,23 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   its duplicate at `:3263`, are DELIBERATELY NOT carried with it: 5,439 errors across 182 files
   is a milestone-sized policy decision, and merging it into a hygiene item would hide it.
   Source: `.planning/phases/164.1-prod-observability-…/deferred-items.md`.
+  ✅ **CLOSED IN CODE 2026-09-23 by Phase 164.6.1 (MYPYSTRICT) — and ONLY in code.** The ci.yml
+  `python` job's step `Type gate - mypy strict over the running-service surface` now names
+  `main.py`, `main_worker.py`, `main_worker_healthz.py` and `sentry_init.py` beside `services/
+  routers/ models/` (96 → 100 source files, 0 errors; the phase added no `# type: ignore` and no
+  `cast(`, and the four existing casts predate it). The annotations are
+  real, with one stated exception: the five Supabase closures in `main_worker.py` are typed
+  `-> Any` by the `services/` convention, because `postgrest`'s `APIResponse` takes no type
+  argument at the pinned version and one closure returns a `SimpleNamespace` fallback.
+  The false coverage comment was corrected, as were the surface statements in
+  `analytics-service/Makefile`, `services/audit.py` and `services/ingestion/__init__.py`.
+  `src/__tests__/contracts/ci-mypy-strict-surface.contract.test.ts` pins the invocation to the
+  on-disk service surface, and the local neuter proof (D-06a) was observed: the widened command
+  exits 1 naming `main.py` and `main_worker.py` while the old one stays green on the same copy.
+  ⚠️ **STILL OPEN: ROADMAP SC-3's CI half, D-06b** — the `python` job observed RED naming
+  `main.py` on the phase PR, bound to the head SHA, then restored and observed GREEN. It is a
+  ship-time step and this closure does not discharge it. The line numbers quoted in the body
+  above (`ci.yml:3209-3216`, `:255`, `:309`, `:741`, `:891`) are stale; cite by symbol.
 
 - [ ] **`[CI-DOCSPATH-01]` a PR that changes NO code runs the entire gate corpus — ~50 job-minutes
   and THREE shared-TEST-DB mutex holds for a markdown edit (logged 2026-09-06, at the PR #750

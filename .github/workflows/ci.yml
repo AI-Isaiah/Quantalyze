@@ -4874,18 +4874,43 @@ jobs:
       # @runtime_checkable Protocol only verifies method *presence* at runtime,
       # not signature shape; mypy --strict catches signature drift (e.g.
       # `validate(req)` vs `validate(request)`) at type-check time before the
-      # test pipeline. --follow-imports=silent keeps strictness local to the
-      # gated packages.
+      # test pipeline. --follow-imports=silent has a plain consequence: a
+      # module reached only by import is FOLLOWED with its errors SUPPRESSED,
+      # so a green run cannot tell "checked" from "reached". That is why the
+      # entry modules are named on the command line: main_worker.py was in
+      # exactly that state, reached via services/mt5_session_monitor.py's
+      # import of SHUTDOWN.
       #
       # B-mypy program: the strict floor started at services/ingestion/ (Phase
-      # 19 / BACKBONE-02 / MC-3) and now covers ALL running-service code —
-      # services/ (B-mypy part g, v0.24.15.60), routers/ (part h, v0.24.15.61),
-      # and models/ (part i) — all verified 0 against the CI-pinned deps
-      # (supabase 2.15.1 / postgrest 1.0.2). scripts/ stays ungated: they are
+      # 19 / BACKBONE-02 / MC-3) and widened to services/ (B-mypy part g,
+      # v0.24.15.60), routers/ (part h, v0.24.15.61) and models/ (part i),
+      # all verified 0 at the time (lineage: then against supabase 2.15.1 /
+      # postgrest 1.0.2, which CI no longer installs). Phase 164.6.1's
+      # 96 -> 100 reading below was taken against the deps
+      # analytics-service/requirements.txt pins today; read the pins there,
+      # not here. That set was not the whole running service: the
+      # entry module was never on the command line. Phase 164.6.1
+      # (MYPY-MAINPY-01) names the four top-level service modules too:
+      # main.py (the `uvicorn main:app` entry), main_worker.py (merged into
+      # the API process), main_worker_healthz.py and sentry_init.py. Before:
+      # services/ routers/ models/, 96 source files as mypy counts them.
+      # After: that set plus exactly those four, 100. No module left.
+      # src/__tests__/contracts/ci-mypy-strict-surface.contract.test.ts pins
+      # this command's path set to the service surface derived from the
+      # tracked tree (git ls-files) and to the Makefile `typecheck` set, so a
+      # top-level module or package (namespace packages included) added
+      # without widening this line is a RED check, not a stale comment.
+      # scripts/ stays ungated: they are
       # one-off operational tooling (backfills, cassette recording), not the
       # running service, and gating them would add a types-PyYAML dev-dep plus
       # friction for throwaway scripts. tests/ stays untyped by design.
-      - run: mypy --strict --follow-imports=silent services/ routers/ models/
+      # --config-file=pyproject.toml makes mypy read THAT file and no other:
+      # without it, a mypy.ini or .mypy.ini written by an earlier step (or left
+      # untracked in the checkout) is preferred over pyproject.toml and replaces
+      # the pinned [tool.mypy] config wholesale. The Makefile `typecheck`
+      # recipe passes the same flag, so local and CI read one config.
+      - name: Type gate - mypy strict over the running-service surface
+        run: mypy --strict --follow-imports=silent --config-file=pyproject.toml services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py
       # ── THE ORDERING WAIT (Phase 164.9 plan 06, [164.8-PUSH-RACE-VAC08]) ───
       # On a merge push this job's DB work must not begin before the TEST schema
       # apply for the SAME commit has concluded. The mutex below guarantees the
