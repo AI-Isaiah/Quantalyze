@@ -50,6 +50,7 @@ from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
 from services.closed_sets import CRYPTO_VENUES as _CRYPTO_VENUES
 from services.closed_sets import sfox_enabled_server
 from services.closed_sets import mt5_enabled_server
+from services.job_worker import CLAIMABLE_STATUSES, JOB_CHAIN_FOLLOW_ON
 from services.metrics import periods_per_year_for_asset_class
 # WIZFORM-ABANDON / D-40 — imported from the module that OWNS it
 # (`services.mt5_client`, a leaf whose only in-tree import is `services.redact`),
@@ -60,7 +61,6 @@ from services.metrics import periods_per_year_for_asset_class
 from services.mt5_client import Mt5SessionAbandoned
 from services.rate_limit import limiter, platform_ceiling_key, tenant_rate_limit_key
 from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
-from services.job_worker import CLAIMABLE_STATUSES, JOB_CHAIN_FOLLOW_ON
 
 if TYPE_CHECKING:
     import pandas as pd
