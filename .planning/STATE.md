@@ -5,8 +5,8 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "164.6"
 current_phase_name: "GATE-HYGIENE — pruned to criteria 2, 3, 4"
 status: "Phase 164.9 shipped — PR #837"
-stopped_at: Completed 164.6-04-PLAN.md
-last_updated: "2026-09-24T05:30:00.000Z"
+stopped_at: Completed 164.6-05-PLAN.md
+last_updated: "2026-09-24T05:45:00.000Z"
 last_activity: 2026-09-24
 last_activity_desc: "Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction. Phase 167 CREDTRUST context locked 2026-09-22. Plan 167-01 (wizard SIGN_IN_FAILED mint) shipped. Plan 167-02 (D-09/D-10, six retry-disposition guards on allocator_positions.py's MT5/sFOX arms + AST roster case) shipped this session, commits 5c48916a + 26c83dc3 — see 167-02-SUMMARY.md."
 state_head: 93d2ab394092fca23d41972ae4e573f84d58fe99
@@ -180,7 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 164.6 (gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers) — EXECUTING
-Plan: 4 of 5 DONE (`164.6-01-SUMMARY.md`, OPS-08-TS: a 40001 is retried once at csv-finalize and holdings sync; `164.6-02-SUMMARY.md`, 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker; `164.6-03-SUMMARY.md`, OPS-08-F2 SQL layer: migration 20260924120000 makes both fan-outs write one counted cron_runs row naming failed candidates, arm N in both ledger gates, 36 twins re-pointed; `164.6-04-SUMMARY.md`, OPS-08-F2 pins: ARMS_FLOOR 428 from a full lane run with no defects, parser/floors/registry censuses at 428 arms and 443 steps/needles, ci.yml sentinel rows 16/19 and ARMS_FLOOR 215)
+Plan: 5 of 5 DONE (`164.6-01-SUMMARY.md`, OPS-08-TS: a 40001 is retried once at csv-finalize and holdings sync; `164.6-02-SUMMARY.md`, 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker; `164.6-03-SUMMARY.md`, OPS-08-F2 SQL layer: migration 20260924120000 makes both fan-outs write one counted cron_runs row naming failed candidates, arm N in both ledger gates, 36 twins re-pointed; `164.6-04-SUMMARY.md`, OPS-08-F2 pins: ARMS_FLOOR 428 from a full lane run with no defects, parser/floors/registry censuses at 428 arms and 443 steps/needles, ci.yml sentinel rows 16/19 and ARMS_FLOOR 215; `164.6-05-SUMMARY.md`, runbooks read the candidate_enqueue_failed row counts-only and carry the BLOCKING precondition [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT] owned by Phase 164.6.7, phase-level vitest/typecheck/lint/anchors green)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
@@ -498,7 +498,7 @@ Status: Executing Phase 164.6.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-24 — Phase 164.6 plan 04 (OPS-08-F2 floors and pins) executed
+Last activity: 2026-09-24 — Phase 164.6 plan 05 (runbooks and phase-level suite pass) executed
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1170,6 +1170,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.6 P02 | ~11 min | 3 tasks | 2 created, 4 modified |
 | Phase 164.6 P03 | ~20 min | 3 tasks | 1 created, 5 modified |
 | Phase 164.6 P04 | ~26 min | 2 tasks | 6 modified |
+| Phase 164.6 P05 | ~9 min | 2 tasks | 2 modified |
 
 ## Accumulated Context
 
