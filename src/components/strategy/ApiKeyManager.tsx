@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "./ApiKeyForm";
+import { addKeyBlockedReason } from "./key-card-copy";
 import { SyncProgress, type SyncStatus } from "./SyncProgress";
 import { UpdateMt5SecretDialog } from "./UpdateMt5SecretDialog";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
@@ -197,6 +198,13 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   // the one their render closed over, and it never drives a render itself
   // (`syncingKeyId` does).
   const attemptRef = useRef<SyncAttempt | null>(null);
+  // Phase 167.2 / KCS-01 (RESEARCH P7, the reverse overlap): true while an
+  // Add Key is in flight, from before its validate request until it hands off
+  // to its own tracked attempt. A ref, not `loading`: `loading` is async
+  // state, so a handler running before the re-render would read it stale
+  // (the NEW-C37-02 lesson). While it is set, `handleSyncTrades` registers
+  // nothing, so no attempt can start that the add would then collide with.
+  const addInFlightRef = useRef(false);
   // 167-06 fix round 2 (167-REVIEW-06-R2 WR-04): the key-list reads are
   // ORDERED. Each `loadKeys` call takes the next number; a response older than
   // the newest one already applied is dropped. Without it, an attempt's own
@@ -443,8 +451,11 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     // inside an <Input> submits the form regardless and setLoading is async.
     // Phase 167.2 / KCS-01: nor while a tracked attempt is live. The post-add
     // sync runs AS the tracked attempt, and the card holds one attempt at a
-    // time, so an add during a live attempt could only collide with it.
-    if (loading || attemptRef.current !== null) return;
+    // time, so an add during a live attempt could only collide with it. This
+    // is defence in depth behind the disabled Connect Key. `addInFlightRef` is
+    // checked too because, unlike `loading`, it is never read stale.
+    if (loading || addInFlightRef.current || attemptRef.current !== null) return;
+    addInFlightRef.current = true;
     setLoading(true);
     setError(null);
 
@@ -550,12 +561,16 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       // KCS-01 closes that residual: this sync IS the tracked attempt, and the
       // overlap that made it untracked cannot start (Add Key is blocked while
       // an attempt is live; no second attempt starts during an add).
+      // The add hands off to its own attempt here, so the reverse-overlap
+      // guard is lifted immediately before the call it would otherwise block.
+      addInFlightRef.current = false;
       void handleSyncTrades(newKeyId);
       await loadKeys();
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add key");
     } finally {
+      addInFlightRef.current = false;
       setLoading(false);
     }
   }
@@ -645,9 +660,11 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
 
   async function handleSyncTrades(keyId: string) {
     // Phase 167.2 / KCS-01: the card never starts a second sync while one is
-    // live. Every Resync / Use & Sync is disabled then too; this is the handler
-    // guard behind that disable, and the one that protects the post-add call.
-    if (attemptRef.current !== null) return;
+    // live, nor while an Add Key is in flight (RESEARCH P7: the add would then
+    // collide with it). Every Resync / Use & Sync is disabled in both windows;
+    // this is the handler guard behind those disables, and the one that covers
+    // the panel's Retry and the post-add call, which no card button gates.
+    if (addInFlightRef.current || attemptRef.current !== null) return;
     // The attempt is registered BEFORE any await, so `handleSyncStatusChange`
     // and anything else that checks `attemptRef` see it as live from the first
     // click.
@@ -754,6 +771,13 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           loading={loading}
           error={error}
           defaultExchange={defaultExchange}
+          // Phase 167.2 / KCS-01: Connect Key is blocked for the whole of a
+          // live attempt, and says which key's sync it is waiting for.
+          submitBlockedReason={
+            syncingKeyId
+              ? addKeyBlockedReason(keys.find((k) => k.id === syncingKeyId)?.label)
+              : null
+          }
         />
       )}
 
@@ -816,7 +840,8 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
                   size="sm"
                   variant="ghost"
                   onClick={() => handleSyncTrades(key.id)}
-                  disabled={!!syncingKeyId}
+                  // KCS-01 / RESEARCH P7: also while an Add Key is in flight.
+                  disabled={!!syncingKeyId || loading}
                 >
                   {syncingKeyId === key.id ? "Syncing\u2026" : "Resync"}
                 </Button>
@@ -825,7 +850,8 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
                   size="sm"
                   variant="ghost"
                   onClick={() => handleSyncTrades(key.id)}
-                  disabled={!!syncingKeyId}
+                  // KCS-01 / RESEARCH P7: also while an Add Key is in flight.
+                  disabled={!!syncingKeyId || loading}
                 >
                   {syncingKeyId === key.id ? "Syncing\u2026" : "Use & Sync"}
                 </Button>
