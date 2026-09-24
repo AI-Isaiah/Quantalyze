@@ -1,0 +1,42 @@
+{
+  "_comment": "RED (Phase 164.6 round 2). ok.json's green match_engine_cron window, plus one ledger fan-out run that started more than 30 minutes ago and has no end time. Every value here is synthetic.",
+  "now": "2026-09-05T12:00:00Z",
+  "ttl": "6 hours",
+  "jobCount": 1,
+  "ledgerFanout": {
+    "runs": 3,
+    "stuck": 1
+  },
+  "rows": [
+    [
+      "901003",
+      "2026-09-05T11:30:00Z",
+      "70003",
+      "200",
+      "f",
+      "",
+      "2026-09-05T11:30:04Z",
+      "{\"ok\":true}"
+    ],
+    [
+      "901002",
+      "2026-09-05T10:30:00Z",
+      "70002",
+      "200",
+      "f",
+      "",
+      "2026-09-05T10:30:05Z",
+      "{\"ok\":true}"
+    ],
+    [
+      "901001",
+      "2026-09-05T09:30:00Z",
+      "70001",
+      "200",
+      "f",
+      "",
+      "2026-09-05T09:30:03Z",
+      "{\"ok\":true}"
+    ]
+  ]
+}

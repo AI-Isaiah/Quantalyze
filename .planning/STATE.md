@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "167.1"
-current_phase_name: "AUMTRUST — the headline AUM says when it includes holdings from keys needing attention"
-status: executing
-stopped_at: Completed 167.1-06-PLAN.md
-last_updated: "2026-09-24T06:17:00.000Z"
+current_phase: "164.6"
+current_phase_name: "GATE-HYGIENE — pruned to criteria 2, 3, 4"
+status: "Phase 164.9 shipped — PR #837"
+stopped_at: Completed 164.6-05-PLAN.md
+last_updated: "2026-09-24T05:45:00.000Z"
 last_activity: 2026-09-24
-last_activity_desc: Phase 167.1 plan 06 complete (WINDOWS 66 fixed, release v0.89.0.0 committed; phase human_needed)
-state_head: b64cb3002c4e017e389de4bafb29dcf8fa39edf6
+last_activity_desc: "Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction. Phase 167 CREDTRUST context locked 2026-09-22. Plan 167-01 (wizard SIGN_IN_FAILED mint) shipped. Plan 167-02 (D-09/D-10, six retry-disposition guards on allocator_positions.py's MT5/sFOX arms + AST roster case) shipped this session, commits 5c48916a + 26c83dc3 — see 167-02-SUMMARY.md."
+state_head: 93d2ab394092fca23d41972ae4e573f84d58fe99
 progress:
   total_phases: 50
   completed_phases: 32
@@ -179,8 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 167.1 (aumtrust-the-headline-aum-says-when-it-includes-holdings-fro) — EXECUTING
-Plan: 6 of 6 (plans 01-06 DONE — `167.1-01-SUMMARY.md` … `167.1-06-SUMMARY.md`; D-06 answered (b) and D-18 reopened by the founder 2026-09-24, both implemented in plan 05; plan 06 released v0.89.0.0 (`7c0e57f7a`) and fixed WINDOWS 66. Phase stays human_needed until the three browser checks, run after deploy)
+Phase: 164.6 (gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers) — EXECUTING
+Plan: 5 of 5 DONE (`164.6-01-SUMMARY.md`, OPS-08-TS: a 40001 is retried once at csv-finalize and holdings sync; `164.6-02-SUMMARY.md`, 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker; `164.6-03-SUMMARY.md`, OPS-08-F2 SQL layer: migration 20260924120000 makes both fan-outs write one counted cron_runs row naming failed candidates, arm N in both ledger gates, 36 twins re-pointed; `164.6-04-SUMMARY.md`, OPS-08-F2 pins: ARMS_FLOOR 428 from a full lane run with no defects, parser/floors/registry censuses at 428 arms and 443 steps/needles, ci.yml sentinel rows 16/19 and ARMS_FLOOR 215; `164.6-05-SUMMARY.md`, runbooks read the candidate_enqueue_failed row counts-only and carry the BLOCKING precondition [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT] owned by Phase 164.6.7, phase-level vitest/typecheck/lint/anchors green)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
@@ -498,7 +498,7 @@ Status: Executing Phase 167.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-24 — Phase 167.1 plan 06 complete (WINDOWS 66 fixed; release commit `7c0e57f7a`, v0.89.0.0, unified CHANGELOG entry, 58/58 commits mapped)
+Last activity: 2026-09-24 — Phase 164.6 plan 05 (runbooks and phase-level suite pass) executed
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1166,6 +1166,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.1.1.1 P01 | ~50 min | 3 tasks | 1 created, 3 modified |
 | Phase 164.5.1.4 P01 | ~41 min | 2 tasks | 1 created |
 | Phase 164.5.1.3 P01 | ~20 min | 3 tasks | 3 modified |
+| Phase 164.6 P01 | ~11 min | 3 tasks | 2 created, 4 modified |
+| Phase 164.6 P02 | ~11 min | 3 tasks | 2 created, 4 modified |
+| Phase 164.6 P03 | ~20 min | 3 tasks | 1 created, 5 modified |
+| Phase 164.6 P04 | ~26 min | 2 tasks | 6 modified |
+| Phase 164.6 P05 | ~9 min | 2 tasks | 2 modified |
 
 ## Accumulated Context
 
@@ -2336,6 +2341,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md
 **Resume File:** None
+
+**Last Date:** 2026-09-24T04:36:00.000Z
+**Stopped At:** Completed 164.6-02-PLAN.md
+**Resume File:** .planning/phases/164.6-gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers/164.6-03-PLAN.md
 
 **Last Date:** 2026-09-24T03:57:00.000Z
 **Stopped At:** Completed 167.2-06-PLAN.md (wave 6; three commits `4de1ba074`, `df83f863a`, `2b6079c7a`, not pushed). No migration (the KCS-17 checkpoint did not fire). All ten 167.2 plans have a SUMMARY. Finding for review, logged to the phase's `deferred-items.md`: the locked KCS23-COMPOSITE line says the composite "reads from every key below" while the card lists all of the owner's keys. Pending founder visual checks: the S2 sync panel and the KCS23-COMPOSITE line at 320px. Next: 167.2 review and verification.
