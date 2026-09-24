@@ -2783,11 +2783,26 @@ Phase 164.9 plan 10 normalised shared TEST's `analytics_service_url` row to a lo
 
 **Requirements**: `[164.9-FANIN-STATUS-NEVER-SET]` (`TODOS.md`, `## FIX NOW`), `[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]`, `[164.9-TEST-ANALYTICS-URL-REARM]`
 **Depends on:** Phase 164.9
-**Plans:** 0 plans
+**Plans:** 14 plans (10 waves; planned 2026-09-24, plan-checker passed after 3 revision rounds, 1 info advisory open)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.1 to break down)
+⚠️ 164.4.2 pins (ledger counts, lane image, job names, mutex-key counts) are re-measured by whichever of 164.4.2 / 164.9.1 merges second; 164.4.2 is already on `main` as #842, so plan 01 re-measures them after bringing `main` in.
+
+- [ ] 164.9.1-01-PLAN.md — wave 1 — bring `main` (incl. 164.4.2) in, re-measure pins, record the pre-fix harm verdict on the local lane (criterion 1)
+- [ ] 164.9.1-02-PLAN.md — wave 2 — tracer: M1 (ten-arg `_enqueue_compute_job_internal` computes and inserts the initial status), P12 green by execution (criteria 2, 3)
+- [ ] 164.9.1-03-PLAN.md — wave 3 — P12 calibrated neuter -> RED -> restore; dedupe-gate twins re-pointed (criterion 6)
+- [ ] 164.9.1-04-PLAN.md — wave 2 — single-sourced analytics-URL normalisation emitter (REARM)
+- [ ] 164.9.1-05-PLAN.md — wave 3 — restore transaction concatenates the emitter output, identical in both modes (REARM)
+- [ ] 164.9.1-06-PLAN.md — wave 4 — restore static pins re-measured (REARM)
+- [ ] 164.9.1-07-PLAN.md — wave 4 — M2: `request_allocator_holdings_sync` regains 067's in-flight prefetch and 075's disconnected refusal (criterion 4)
+- [ ] 164.9.1-08-PLAN.md — wave 5 — sync route maps the disconnected refusal to 409 (D-23)
+- [ ] 164.9.1-09-PLAN.md — wave 5 — M3 catalog comments + XOR arm asserts the current bridge_outcomes invariant (criterion 5)
+- [ ] 164.9.1-10-PLAN.md — wave 6 — live-DB ledger shrinks by three, ceiling lowered in the same commit; whole-phase gate sweep
+- [ ] 164.9.1-11-PLAN.md — wave 7 — three-reviewer gate round 1 (orchestrator dispatches; not autonomous)
+- [ ] 164.9.1-12-PLAN.md — wave 8 — three-reviewer gate round 2 + gate re-run (not autonomous)
+- [ ] 164.9.1-13-PLAN.md — wave 9 — ⛔ FOUNDER CHECKPOINT FC-2 (merge order) + re-sync onto `main`
+- [ ] 164.9.1-14-PLAN.md — wave 10 — release record; ⛔ FOUNDER CHECKPOINTS FC-1 (merge = auto-apply TEST then PROD) and FC-3 (live restore dispatch, not a completion gate)
 
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
