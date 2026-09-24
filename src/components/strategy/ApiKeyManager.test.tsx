@@ -3241,6 +3241,256 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
     });
 
+    // ── KCS-04: a withheld success is RETIRED when it is withheld ───────────
+    //
+    // 167.2 KCS-04 (replacing R2's "withheld" with "retired", KCS-05): R2 only
+    // hid the terminal success in render, so any later re-read that lifted the
+    // withhold (the load-error Retry, a router refresh that re-runs the list
+    // read, another tab's `Update password` or `Delete`) re-showed "Up to date"
+    // for an attempt judged beside an untrusted key. The retirement now happens
+    // at the moment of judgement: the terminal arm lands on idle when its
+    // re-read's APPLIED rows show the subject untrusted, and every applied read
+    // retires a shown success whose subject it finds untrusted. The re-reads
+    // below are the ones that run NO event-handler retirement (R3 / R5 already
+    // cover Update password, Delete and Add Key on this tab): the load-error
+    // Retry and the list read the component re-runs when the page re-renders
+    // it with a new `currentKeyId` (router.refresh after another tab re-links).
+
+    /** Re-render the card as a router refresh would, which re-runs its list read. */
+    function refreshWith(
+      utils: ReturnType<typeof render>,
+      currentKeyId: string | null,
+    ) {
+      utils.rerender(
+        <ApiKeyManager strategyId="strat-1" currentKeyId={currentKeyId} />,
+      );
+    }
+
+    it("CROSS-TAB-HEAL: a success retired beside a failed sign-in is not re-shown when a Retry re-read finds the key fixed in another tab", async () => {
+      routeFetch();
+      const healthy = row({ id: "key-k", label: "Key K", sync_status: "complete" });
+      const utils = await renderRows([healthy], "key-k");
+      await resync("key-k");
+
+      // The terminal re-read shows K's sign-in failed: the success is retired.
+      selectResultMock.mockReturnValueOnce({
+        data: [row({ id: "key-k", label: "Key K", sync_status: "sign_in_failed" })],
+        error: null,
+      });
+      await finish("complete");
+      await waitFor(() => {
+        expect(
+          within(card("key-k")).getByTestId("allocator-sync-pill"),
+        ).toHaveAttribute("data-sync-status", "sign_in_failed");
+      });
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+      expect(cardButton("key-k", "Resync")).toBeEnabled();
+
+      // A refresh's list read fails, which is what puts a Retry on screen.
+      selectResultMock.mockReturnValueOnce({
+        data: null,
+        error: { message: "network error" },
+      });
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await act(async () => {
+          refreshWith(utils, null);
+        });
+        await waitFor(() => {
+          expect(screen.getByText(/Couldn't load your API keys/i)).toBeInTheDocument();
+        });
+      } finally {
+        consoleError.mockRestore();
+      }
+
+      // Another tab fixed K's password: the Retry reads K as idle.
+      selectResultMock.mockReturnValue({
+        data: [row({ id: "key-k", label: "Key K", sync_status: "idle" })],
+        error: null,
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      });
+      // FIRST: the heal landed (K's pill cleared, the banner went) ...
+      await waitFor(() => {
+        expect(
+          within(card("key-k")).queryByTestId("allocator-sync-pill"),
+        ).not.toBeInTheDocument();
+      });
+      expect(screen.queryByText(/Couldn't load your API keys/i)).not.toBeInTheDocument();
+      // ... THEN: the retired success is not resurrected.
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+    });
+
+    it("CROSS-TAB-DELETE: a success retired beside a revoked key is not re-shown when a later re-read no longer contains the key", async () => {
+      routeFetch();
+      const k = row({
+        id: "key-k",
+        exchange: "binance",
+        label: "Key K",
+        sync_status: "complete",
+        venue_account_id: null,
+      });
+      const other = row({ id: "key-o", label: "Other MT5", sync_status: "complete" });
+      const utils = await renderRows([k, other], "key-k");
+      await resync("key-k");
+
+      selectResultMock.mockReturnValueOnce({
+        data: [{ ...k, sync_status: "revoked" }, other],
+        error: null,
+      });
+      await finish("complete");
+      await waitFor(() => {
+        expect(
+          within(card("key-k")).getByTestId("allocator-sync-pill"),
+        ).toHaveAttribute("data-sync-status", "revoked");
+      });
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+
+      // Another tab deleted K; the refresh's list read no longer holds it.
+      selectResultMock.mockReturnValue({ data: [other], error: null });
+      await act(async () => {
+        refreshWith(utils, null);
+      });
+      // FIRST: the row left ...
+      await waitFor(() => {
+        expect(screen.queryByTestId("api-key-card-key-k")).not.toBeInTheDocument();
+      });
+      // ... THEN: a missing subject row does not re-show the retired success.
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+    });
+
+    it("LATER-UNTRUST: a success shown for a healthy key is retired when a later re-read shows the key revoked, and a heal after that does not re-show it", async () => {
+      routeFetch();
+      const k = row({
+        id: "key-k",
+        exchange: "binance",
+        label: "Key K",
+        sync_status: "complete",
+        venue_account_id: null,
+      });
+      const utils = await renderRows([k], "key-k");
+      await resync("key-k");
+      await finish("complete");
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "complete",
+      );
+
+      // A later applied read shows K revoked: the success is retired then.
+      selectResultMock.mockReturnValue({
+        data: [{ ...k, sync_status: "revoked" }],
+        error: null,
+      });
+      await act(async () => {
+        refreshWith(utils, null);
+      });
+      await waitFor(() => {
+        expect(
+          within(card("key-k")).getByTestId("allocator-sync-pill"),
+        ).toHaveAttribute("data-sync-status", "revoked");
+      });
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+
+      // A further read shows K healthy again: nothing brings the success back.
+      selectResultMock.mockReturnValue({ data: [k], error: null });
+      await act(async () => {
+        refreshWith(utils, "key-k");
+      });
+      await waitFor(() => {
+        expect(
+          within(card("key-k")).queryByTestId("allocator-sync-pill"),
+        ).not.toBeInTheDocument();
+      });
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+    });
+
+    it("DROPPED-READ-SUBJECT: a terminal re-read dropped as out of date (WR-04) is judged by the NEWER applied read's subject status", async () => {
+      routeFetch();
+      const healthy = row({ id: "key-k", label: "Key K", sync_status: "complete" });
+      const utils = await renderRows([healthy], "key-k");
+      await resync("key-k");
+
+      // The terminal re-read is held open ...
+      const reread = deferred<unknown>();
+      selectResultMock.mockReturnValueOnce(reread.promise);
+      await act(async () => {
+        capturedOnStatusChange!("complete");
+      });
+      // ... while a NEWER read (a refresh) applies, showing K's sign-in failed.
+      selectResultMock.mockReturnValueOnce({
+        data: [row({ id: "key-k", label: "Key K", sync_status: "sign_in_failed" })],
+        error: null,
+      });
+      const reads = selectResultMock.mock.calls.length;
+      await act(async () => {
+        refreshWith(utils, "key-k-relinked");
+      });
+      await waitFor(() => {
+        expect(selectResultMock.mock.calls.length).toBeGreaterThan(reads);
+      });
+      // The newer read applied while the attempt still holds its marker, so
+      // the card shows R1's neutral in-flight pill over K's stored status.
+      await waitFor(() => {
+        expect(
+          within(card("key-k")).getByTestId("allocator-sync-pill"),
+        ).toHaveAttribute("data-sync-status", "syncing");
+      });
+
+      // The stale terminal re-read lands with the healthy snapshot and is
+      // dropped; the arm must answer with the APPLIED read's subject status.
+      await act(async () => {
+        reread.resolve({ data: [healthy], error: null });
+      });
+      await waitFor(() => {
+        expect(cardButton("key-k", "Use & Sync")).toBeEnabled();
+      });
+      expect(
+        within(card("key-k")).getByTestId("allocator-sync-pill"),
+      ).toHaveAttribute("data-sync-status", "sign_in_failed");
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+
+      // A heal read afterwards cannot bring the success back.
+      selectResultMock.mockReturnValue({ data: [healthy], error: null });
+      await act(async () => {
+        refreshWith(utils, "key-k");
+      });
+      await waitFor(() => {
+        expect(
+          within(card("key-k")).queryByTestId("allocator-sync-pill"),
+        ).not.toBeInTheDocument();
+      });
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+    });
+
+    it("IN-FLIGHT-UNTOUCHED: an applied read showing the subject untrusted while the panel is computing leaves computing and the marker alone", async () => {
+      routeFetch();
+      const k = row({ id: "key-k", label: "Key K", sync_status: "complete" });
+      const utils = await renderRows([k], "key-k");
+      await resync("key-k");
+
+      selectResultMock.mockReturnValue({
+        data: [{ ...k, sync_status: "sign_in_failed" }],
+        error: null,
+      });
+      const reads = selectResultMock.mock.calls.length;
+      await act(async () => {
+        refreshWith(utils, "key-k-relinked");
+      });
+      await waitFor(() => {
+        expect(selectResultMock.mock.calls.length).toBeGreaterThan(reads);
+      });
+      await act(async () => {});
+
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "computing",
+      );
+      // The marker holds: K's own controls stay in flight.
+      expect(cardButton("key-k", "Syncing…")).toBeDisabled();
+      expect(cardButton("key-k", "Update password")).toBeDisabled();
+    });
+
     // ── A throwing terminal re-read (SFH2-LOW-1 / IN-04) ────────────────────
 
     it("a terminal re-read that THROWS ends the attempt with the success withheld and the load error shown, and is logged with context (SFH2-LOW-1)", async () => {
