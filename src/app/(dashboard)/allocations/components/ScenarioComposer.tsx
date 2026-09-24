@@ -4699,11 +4699,17 @@ export function ScenarioComposer({
   //                             value exactly equal to it (state 6).
   //   • overrideNoteShowsLive — a manual value differs from a positive live
   //                             total, so only the override note quotes it.
-  //   • hintShowsLive         — no manual value and a live total <= 0: the
+  //   • fieldBlankHintShows   — no manual value and a live total <= 0: the
   //                             field is blank and the "Required to size and
   //                             commit." hint shows (state 4). With a marker
   //                             the hint names the live total itself, so the
-  //                             clause has a number to qualify.
+  //                             clause has a number to qualify. ⚠️ Review
+  //                             round 3 IN-02: this flag says the HINT
+  //                             renders, in any mode, and NOT that the live
+  //                             total is on screen. The hint names the live
+  //                             total only when `showUntrustedMarker` is also
+  //                             true (which requires book mode). It was named
+  //                             `hintShowsLive` until 2026-09-24.
   // ⛔ D-18 REOPENED 2026-09-24 by the founder ("Reopen, show the marker"):
   // whenever the figure on screen includes untrusted dollars, the marker
   // shows. Until then state 6 (review IN-06) and state 4 (review WR-04) were
@@ -4723,14 +4729,15 @@ export function ScenarioComposer({
     sanitizedManualAum !== undefined &&
     liveHoldingsSum > 0 &&
     sanitizedManualAum !== liveHoldingsSum;
-  const hintShowsLive = sanitizedManualAum === undefined && liveHoldingsSum <= 0;
+  const fieldBlankHintShows =
+    sanitizedManualAum === undefined && liveHoldingsSum <= 0;
   const showUntrustedMarker =
     entryMode === "book" &&
     (liveHoldingsSummary.untrusted.count > 0 ||
       liveHoldingsSummary.unknownStatus.count > 0 ||
       liveHoldingsSummary.excludedUntrusted.count > 0 ||
       liveHoldingsSummary.excludedUnknownStatus.count > 0) &&
-    (fieldShowsLive || overrideNoteShowsLive || hintShowsLive);
+    (fieldShowsLive || overrideNoteShowsLive || fieldBlankHintShows);
   // Review WR-02 — the note that qualifies the field's value is its accessible
   // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the
   // qualification with the number and not only in linear reading order.
@@ -4748,7 +4755,9 @@ export function ScenarioComposer({
         ? "scenario-aum-untrusted-note"
         : null,
       overrideNoteShowsLive ? "scenario-aum-override-note" : null,
-      showUntrustedMarker && hintShowsLive ? "scenario-aum-required-note" : null,
+      showUntrustedMarker && fieldBlankHintShows
+        ? "scenario-aum-required-note"
+        : null,
     ]
       .filter((id): id is string => id !== null)
       .join(" ") || undefined;
@@ -5019,7 +5028,7 @@ export function ScenarioComposer({
             marker, the hint names the live total and carries the clause on it,
             the State B construction; without one it is byte-identical to
             before. The nested span has no class, as in State B (D-09). */}
-        {hintShowsLive && (
+        {fieldBlankHintShows && (
           <span
             id="scenario-aum-required-note"
             data-testid="scenario-aum-required-note"
