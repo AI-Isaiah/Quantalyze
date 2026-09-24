@@ -2718,7 +2718,7 @@ true for 146 and half of 142–145, and **false for 141**.
       `TEST FAILED (…)` and scores NO-IDENTITY — concrete evidence for the rename this item
       proposes.
 
-- [ ] **`[REDUNDER-SUBSET-SPLIT]` `sql-mutation`'s ubuntu wall clock reached the ~10 min trigger, so `timeout-minutes` has taken its ONE allowed raise to 20. The next escalation is a subset split, NOT another raise (booked 2026-09-05, Phase 164.4.1).**
+- [x] **`[REDUNDER-SUBSET-SPLIT]` `sql-mutation`'s ubuntu wall clock reached the ~10 min trigger, so `timeout-minutes` has taken its ONE allowed raise to 20. The next escalation is a subset split, NOT another raise (booked 2026-09-05, Phase 164.4.1).**
       MEASURED on ubuntu, SHA-bound, both runs of this branch:
         * run 33961609382 @ `1aa8bb70` — 363 arms / 451 legs — **567 s** (9.45 min), under the trigger.
         * run 33973362161 @ `ab0d5644` — 361 arms / 449 legs — **646 s** (10.8 min), OVER it.
@@ -2744,6 +2744,42 @@ true for 146 and half of 142–145, and **false for 141**.
       ⚠️ **The trend moved again during Phase 164.1.1**, both readings recorded in `ci.yml`'s own
       dated block: plan 01 measured 491 legs / ~975 s and plan 02 measured 496 legs / ~1020 s on
       local macOS, each flagged as closer to the 20-minute ceiling than any prior reading.
+      ✅ **CLOSED 2026-09-24 by its owner, Phase 164.4.2 SUBSETSPLIT (plans 07 and 09).** The text
+      above is kept as lineage. **THE MECHANISM THAT CLOSES IT:**
+        * **the runner's `--subset-from <list>` mode** (`scripts/mutation-runner/run.mjs`). It is a
+          SUBSET gate mode that can exit 0, separate from the diagnostic `--file`/`--arm` mode,
+          which still cannot. An empty list, a missing or non-conforming path, and a list that
+          combines with `--parse-only`/`--arm`/`--fixture-corpus` are each refused by name. A list
+          whose files are all unannotated, or partly unannotated, falls back to FULL and says why.
+        * **one merge-base diff, two callers.** `changedFilesAgainstBase()` in
+          `scripts/classify-changed-paths.mjs` THROWS on an unreadable base and never returns an
+          empty set for one. `scripts/sql-gate-subset.mjs` derives the gate files from it and forces
+          FULL on a push, on a deleted or moved gate file, and on any change to the mutation
+          machinery (`scripts/mutation-runner/`, `scripts/pg-lane/`, `supabase/migrations/`).
+        * **the pull-request-only event rule.** `changed-paths` publishes `sql_gate_mode` and
+          `sql_gate_files` after the derivation's own `--self-test`. `sql-mutation` narrows only when
+          the mode is `subset` AND the event is `pull_request`. Every other event runs the
+          full-corpus command, byte-identical to before. A push to `main` is the full run, and the
+          full run is what owes `FILES_FLOOR`/`ARMS_FLOOR`. That replaces the separate scheduled
+          job this entry once proposed (CONTEXT DECISION D).
+        * **the `scope:` line.** Every corpus run prints exactly one: `FULL`, `FULL … (subset
+          fallback: …)`, `SUBSET k/N annotated files: …` or `DIAGNOSTIC`. A SUBSET run adds
+          `ARMS_FLOOR: NOT compared …` and closes with `NOT full-corpus coverage.`
+        * **the assert-step arms that make a narrowed run unmistakable.** `sql-mutation`'s assert
+          step MEASURE_FAILs on no `scope:` line, on more than one, on a DIAGNOSTIC or unknown form,
+          on a SUBSET on any event other than `pull_request`, on a SUBSET whose k disagrees with
+          the names it prints, on k = 0, on an N different from the coverage numerator, and on a
+          SUBSET without the runner's ARMS_FLOOR-not-compared line. Nine extract-and-run arms in
+          `src/__tests__/mutation-runner-floors.test.ts` drive those branches on every CI run.
+      ⛔ **`timeout-minutes` was NOT raised.** It is still 20 on the `sql-mutation:` job, the
+      same value as `main` (read by symbol on 2026-09-24). `FILES_FLOOR`, `ARMS_FLOOR` and
+      `WAIVED_CEILING` did not move either (read by symbol from `scripts/mutation-runner/run.mjs`,
+      identical to `main`).
+      **SHA-bound reading:** CI run `35926142486` at `0ca0dc6c` printed `scope: FULL 49/49 annotated
+      files`, with 426 biting arms and both floors held. ⚠️ That is the FULL form. This branch
+      changes `run.mjs`, so the derivation correctly chose FULL on its own pull request. **The SUBSET
+      arm has not yet been observed in CI.** The synthetic-log arms above are what cover it until a
+      pull request that touches only gate files runs.
 
 - [ ] **`[REDUNDER-GATESELF-UNBOUNDED]` The "mutate the gate's own setup" twin class has NO ceiling, while waivers have `WAIVED_CEILING = 0` — and Phase 164.4.1 more than doubled it (booked 2026-09-05, Phase 164.4.1 code review IN-03).**
       ⛔ **BOOKED, NOT FIXED — deliberately, and the reason is the point.** Introducing a ceiling is
@@ -9981,3 +10017,152 @@ a tail residual section is the same disappearance this residue exists to prevent
       **Owner / destination: the same NEW phase as `[164.9-FANIN-STATUS-NEVER-SET]`, proposed
       JOBRPCTRUTH, surfaced in `164.9-11-SUMMARY.md` for `/gsd-phase --insert`. ⚠️ Until that
       phase exists the owner is THE FOUNDER, who inserts it.**
+
+## Phase 164.4.2 (SUBSETSPLIT) — closing residue (logged 2026-09-24, plan 10)
+
+⚠️ **What this phase did NOT do, booked as decisions rather than left implied.** The phase closed
+`[REDUNDER-SUBSET-SPLIT]` (above, in place) and moved `sql-tests` off the shared-TEST key. The
+entries below are what it knowingly left. None is data-integrity or user-facing on current
+evidence, so none earns a phase by that rule; each is fix-or-drop here, with an owner, a trigger
+and a date. The one exception to watch is `[164.4.2-PROD-SUPAUTILS-FUNCTION-DENIAL-CRASH]`: if
+its measurement confirms the crash on PROD, it moves to `## 🔴 FIX NOW` and gets a phase.
+
+- [ ] **`[164.4.2-REMAINING-KEY-HOLDERS]` `python`, `e2e-seeded` and now `test-db-drift` still hold
+      the shared-TEST advisory key `61616158`; whether they move off it is decided by the AFTER
+      numbers, not assumed (booked 2026-09-24, Phase 164.4.2 plan 10).**
+      This phase moved ONE holder, `sql-tests`, as a tracer (CONTEXT DECISION B), and created one,
+      `test-db-drift`, which keeps VAC-08 on shared TEST because VAC-08 measures shared TEST's
+      drift. The key is ALSO taken outside `ci.yml` (`supabase-migrate.yml`,
+      `test-restore-from-baseline.yml`, `mutex-probe.yml`, `analytics-deploy-verify.yml`), so the
+      cross-run pile-up that produced the 62-minute BEFORE runs is reduced, not removed.
+      **Trigger:** the `## AFTER` table in `164.4.2-MEASUREMENT.md` is filled from admissible
+      merge-push runs. If clause (c) shows the remaining holders absorbed the freed time, or the
+      critical path did not fall, this entry is the next move. If (a)-(c) all pass, record the
+      numbers here and decide whether the next holder is worth moving.
+      **Owner:** THE FOUNDER, reading the AFTER table (CONTEXT "Noted for later": the follow-on is
+      "decided by the tracer's measured result, not assumed by it").
+
+- [ ] **`[164.4.2-LANE-ONLY-REASON-STALE]` The one `-- LANE-ONLY:` marker in the gate corpus
+      argues from shared TEST, but the job that reads it no longer runs there (booked 2026-09-24,
+      Phase 164.4.2 plan 10; found by plan 05, Findings 2).**
+      `supabase/tests/test_prod_prober_cadence.sql` carries a marker whose `reason` says shared
+      TEST "carries the real pg_net", so running the file there would send real outbound HTTP.
+      Since plan 05, `sql-tests` runs on a local-stack lane private to its runner, not shared TEST.
+      The exclusion still holds on the lane, for a DIFFERENT reason: the file asserts against
+      `net._lane_posts`, a pg-lane stand-in that no Supabase stack has. `sql-tests`' job header in
+      `ci.yml` states the new reason. The marker's `reason` text and the matching `why` string in
+      `LANE_ONLY_SITES` (`src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts`) were
+      deliberately NOT edited: `supabase/tests/` is pin-counted, and a text edit there moves pins
+      this phase had no reason to move.
+      **Trigger:** the next edit to that file or to `LANE_ONLY_SITES`, or the first reader who
+      takes the marker's stated reason at its word.
+      **Owner:** THE FOUNDER. Fix (re-word both strings together, in the same commit as any pin
+      they move) or drop (accept the divergence, recorded here).
+
+- [ ] **`[164.4.2-RESTORE-CURRENCY-BY-EPOCH]` The shared-TEST restore path still judges baseline
+      CURRENCY by commit dates, which DECISION F forbids for the lane, and on a depth-1 clone that
+      judgement is vacuous (booked 2026-09-24, Phase 164.4.2 plan 10).**
+      DECISION F built the carried-migrations marker for the LANE only.
+      `refuse_stale_baseline()` in `scripts/restore-test-from-baseline.sh` still calls
+      `scripts/check-baseline-currency.mjs` in its DEFAULT mode. There, `judge` compares two
+      last-commit epochs that `readEpoch` reads through the default `FRESHNESS_TS_CMD`
+      (`git log -1 --format=%ct --`), once on `supabase/schema/baseline.sql` and once on
+      `supabase/migrations`.
+      **(a) Read from the source:** the restore path infers currency from WHEN `baseline.sql` was
+      last committed, not from WHICH migrations the dump carries. A later commit anywhere under the
+      migrations directory does raise its epoch, so an out-of-order migration IS caught. The defect
+      is the inference itself, which is the one DECISION F forbids for the lane.
+      **(b) MEASURED 2026-09-24:** a `git clone --depth 1` of this repository into a `mktemp -d`
+      directory, then the default mode run there. `git rev-parse --is-shallow-repository` printed
+      `true`, with one commit. Verbatim:
+      `baseline-currency: baseline=1790202342 migrations=1790202342 defects=0`, exit 0. Both
+      `git log -1` reads return the one grafted commit's epoch, compare EQUAL, and pass under
+      "equal is fresh enough", so the check measured nothing. The same mode in a full-history
+      checkout printed two different epochs (`baseline=1790144053 migrations=1790138229`).
+      `test-restore-from-baseline.yml` checks out with `fetch-depth: 0` (its comment names the
+      freshness refusal as a reason), so its CI run is NOT shallow today. A local or
+      differently configured caller can be.
+      **Candidate fixes, decide rather than drift:** point the restore path at the marker (the
+      lane's `--replay-set` reading, where "the dump is older than the migrations" becomes "the
+      marker names a replay set"), or have the default mode refuse by name on a shallow repository
+      when `FRESHNESS_TS_CMD` is the git default (plan 03's recommendation). ⚠️ A repo-wide sweep of
+      `baseline.sql` consumers is out of scope here (CONTEXT "Noted for later").
+      **Trigger:** the next change to `restore-test-from-baseline.sh`, to that workflow's
+      checkout, or to `check-baseline-currency.mjs`'s default mode.
+      **Owner:** THE FOUNDER.
+
+- [ ] **`[164.4.2-LANE-REPLAY-REFUSES-ON-EMPTY-DB]` D-F's known consequence: a migration newer
+      than the dump that refuses on an empty or unidentified database reddens EVERY lane-booting
+      job until the dump is regenerated after its PRODUCTION apply (booked 2026-09-24, Phase
+      164.4.2 plan 10).**
+      This is the lane analogue of `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`, and it does not
+      duplicate that entry: read the escape entry for the house style (a data-reading `DO` block
+      that `RAISE EXCEPTION`s on an unexpected count) and for its candidate shapes. The lane
+      replays every migration the committed marker says the dump does not carry, in filename
+      order, as authored, and a replayed migration that errors is FATAL by design. So a migration
+      that reads PROD-populated rows, or checks which database it is on, applies on PROD, refuses
+      on the lane, and turns `sql-tests`, `frontend-local-stack` and `frontend-live-db-lane` red on
+      every run until a founder re-dump (with its marker, in the same commit) takes it off the
+      replay set.
+      ⚠️ **What the lane's reference data is.** The lane's reference-data rows come ONLY from
+      CARRIED migrations, through the FILTERED allowlist plan 06 hands the extractor. A replayed
+      migration's own reference INSERTs run once, inside its replay. Anything that reasons about
+      "the lane's reference data" must not assume the full allowlist.
+      **Interim remedy:** revert the merge or re-dump, the same as the escape entry. ⛔ Never make
+      the replay tolerate a failing migration: a replay that skips an error is a lane that no longer
+      matches what PROD applied.
+      **Trigger:** the first lane boot that prints `FATAL: replayed migration <file> failed` on a
+      migration PROD applied cleanly.
+      **Owner:** THE FOUNDER; the same decision as the escape entry's candidate shapes.
+
+- [ ] **`[164.4.2-WIZARD-ARMS-SEED-AS-AUTHENTICATED]` Six `wizard-rpcs-live-db` arms set up their
+      data as `authenticated`, which PROD correctly refuses; re-point them or retire them (booked
+      2026-09-24, Phase 164.4.2 plan 10; found at plan 08's ledger reconciliation).**
+      After plan 08 reset the lane's default ACLs, the lane holds exactly the dump's grants. The
+      dump grants `create_wizard_strategy` to `service_role` only, as PROD does since Migration B
+      (`20260814120000`) withdrew `authenticated` EXECUTE. The six arms now fail at the GRANT
+      layer (`permission denied for function create_wizard_strategy`). The lane is right and the
+      arms are stale, as the test module's own header predicted. They are ledgered as **K3** in
+      `scripts/live-db-execution-ledger.txt` (re-kinded from K2 by plan 08, `ENTRY_CEILING` 18 →
+      10), so the lane stays green only because the failing set matches the ledger exactly.
+      This supersedes the K2 reading of these six in `[164.9-LIVEDB-LANE-EXECUTION-CENSUS]`.
+      **The decision owed:** re-point the six arms' setup at a `service_role` seed, keeping what
+      each arm asserts, or retire them in favour of the SQL gate that already covers the grant.
+      ⛔ Not closed by widening the ledger or granting `authenticated` EXECUTE back.
+      **Trigger:** the next edit to `src/__tests__/wizard-rpcs-live-db.test.ts` or to the ledger.
+      **Owner:** THE FOUNDER.
+
+- [ ] **`[164.4.2-PROD-SUPAUTILS-FUNCTION-DENIAL-CRASH]` PROD may run a Postgres image whose
+      supautils kills a backend on a function EXECUTE denial after SET ROLE; UNMEASURED on PROD
+      (booked 2026-09-24, Phase 164.4.2 plan 10; found at plan 08's checkpoint).**
+      Measured on the LANE: `supabase/postgres` images `17.6.1.104` through `.112` ship supautils
+      3.2.0. On those images, a `postgres` session that `SET ROLE`s to a role named in
+      `supautils.hint_roles` and is refused EXECUTE on a function ends with
+      `terminated by signal 11: Segmentation fault`. Postgres then restarts every connection.
+      Emptying `hint_roles` removed the crash, which confirms the cause. supautils 3.2.2 fixed it
+      upstream, and `17.6.1.113` is the first image that ships 3.2.2. The lane now pins `.113` and
+      probes the crash shape at every boot. PostgREST-shaped traffic (`authenticator` plus
+      `set_config('role', …)`) did NOT crash on the same image.
+      ⚠️ **Why it may concern PROD:** migration-drift-check's log showed the linked project pulling
+      `17.6.1.104`. Whether hosted PROD's supautils configuration matches the image default was
+      NOT measured, and no remote was touched.
+      **The act:** check PROD's Postgres logs for `terminated by signal 11`, and consider upgrading
+      PROD's Postgres to `17.6.1.113` or later. On a confirmed crash, move this entry to
+      `## 🔴 FIX NOW` and give it a phase.
+      **Trigger:** now. It is a measurement, and only the founder can take it.
+      **Owner:** THE FOUNDER.
+
+- [ ] **`[164.4.2-DERIVE-KEY-DAILIES-TEST-VS-ROADMAP]` The lane registers
+      `derive-allocator-key-dailies` because a corpus file asserts it, while PROD deliberately
+      lacks that job (booked 2026-09-24, Phase 164.4.2 plan 10; surfaced by plan 11).**
+      DECISION G replays every `cron.schedule` the carried migrations declare, so the lane
+      registers the job, and `supabase/tests/test_derive_allocator_keys_fanout.sql` case (6)
+      passes because it asserts the job is registered. The ROADMAP says not to re-register it on
+      PROD, and PROD lacks it on purpose (unscheduled by hand at the v1.11 recovery). The lane is
+      ephemeral and runs no worker, so registering the job there carries none of PROD's risk. The
+      contradiction is between the test and the ROADMAP, and D-G forbids editing the test to
+      resolve it.
+      **The decision owed:** which of the two states the invariant, the test or the ROADMAP.
+      **Trigger:** the next edit to that test, to the migration that schedules the job, or to
+      `scripts/prod-prober/cron-manifest.json`.
+      **Owner:** THE FOUNDER.

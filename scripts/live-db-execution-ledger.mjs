@@ -67,7 +67,8 @@
  *    re-dump will close this" is not a thing a test run can observe. `routeKind`
  *    below holds the routing rules, each with the evidence it turns on; two of
  *    the three rules ARE evidence-keyed, and the third is an explicit list of
- *    three arms whose root causes the fix round derived one at a time.
+ *    arms whose root causes were derived one at a time (three keyed by an arm
+ *    token, and since 2026-09-23 one module keyed by its measured refusal).
  *
  * ── USAGE ──────────────────────────────────────────────────────────────────
  *   bash scripts/local-stack/run.sh up           # the lane needs a booted stack
@@ -118,7 +119,10 @@ export const DESTINATION = "[164.9-LIVEDB-LANE-EXECUTION-CENSUS]";
  * repo's floor idiom inverted: the gate holds the upper bound, the vitest
  * ratchet holds the staleness.
  */
-export const ENTRY_CEILING = 18;
+// SHRUNK 2026-09-23 (Phase 164.4.2 plan 08 checkpoint RED, CI run 35914559318
+// attempt 2): 18 -> 10, in the commit that deleted the eight entries the lane's
+// default-ACL reset and non-public objects stopped reproducing.
+export const ENTRY_CEILING = 10;
 
 /**
  * THE ARM-COUNT FLOOR. `counts.files` alone cannot detect a module that reported
@@ -185,11 +189,13 @@ export function classifySignature(failure) {
  */
 
 /**
- * K3 — the three arms the fix round derived one at a time. Each needs a
+ * K3 — the arms whose root causes were derived one at a time. Each needs a
  * migration against a production catalogue or a decision about which invariant
  * is current; neither is a fixture's or a ledger's call. Keyed on the module
  * plus a short stable token of the arm name rather than the whole title, so a
- * prose edit to a test name does not silently re-route it.
+ * prose edit to a test name does not silently re-route it — or, where every arm
+ * of a module fails through one shared call, on the module plus the measured
+ * refusal (`evidence`).
  */
 const K3_ARMS = [
   {
@@ -210,6 +216,20 @@ const K3_ARMS = [
     token: "Queued path",
     why: "the Queued shape is returned only from an exception handler the RPC's optimistic look-up prevents from ever firing. Needs an RPC change or a decision that the shape is retired.",
   },
+  {
+    // ⭐ EVIDENCE-KEYED, not token-keyed: every arm in this module seeds through
+    // the same call, so the measured refusal is the discriminator, scoped to the
+    // module so the same text elsewhere still lands in the K1 residue.
+    // RECLASSIFIED 2026-09-23 (Phase 164.4.2 plan 08 checkpoint RED, CI run
+    // 35914559318 attempt 2). These six were K2 while the image's default ACLs
+    // re-granted EXECUTE and the call reached the body's role gate. With those
+    // defaults reset, the lane holds the dump's grants, which are PROD's: Migration
+    // B (20260814120000) withdrew `authenticated` EXECUTE, and the refusal now
+    // comes from the GRANT layer. The lane is RIGHT; the arms call a door PROD shut.
+    module: "src/__tests__/wizard-rpcs-live-db.test.ts",
+    evidence: /permission denied for function create_wizard_strategy\b/,
+    why: "the arms seed as `authenticated` through create_wizard_strategy, whose authenticated EXECUTE Migration B (20260814120000) withdrew — PROD's state, reproduced by the lane. Needs the arms re-pointed at a service_role seed, or retired in favour of the SQL gate, as the module's own header prescribes.",
+  },
 ];
 
 /** K2's measured discriminator: the FUNCTION BODY's own role gate answered. */
@@ -226,11 +246,17 @@ export function routeKind(failure) {
   // role gate refused it — which is NOT the EXECUTE denial the other nine
   // failures are, and is why the fix round insisted these six be treated as a
   // separate question. A baseline re-dump may not close them.
+  // ⚠️ 2026-09-23: this rule currently routes NOTHING. The six stopped reaching
+  // the body once the lane's default-ACL reset made the GRANT layer answer, and
+  // were re-routed to K3 (see K3_ARMS). The rule stays: it is evidence-keyed, so
+  // a body-gate refusal that reappears is still named for what it is.
   if (BODY_ROLE_GATE_RE.test(blob)) return "K2-function-body-role-gate";
 
-  // R-K3, ARM-KEYED. See K3_ARMS.
+  // R-K3, ARM-KEYED (a token of the arm name) or, for one module, EVIDENCE-KEYED
+  // (the measured refusal). See K3_ARMS.
   for (const arm of K3_ARMS) {
-    if (failure.file === arm.module && failure.fullName.includes(arm.token)) {
+    if (failure.file !== arm.module) continue;
+    if (arm.token ? failure.fullName.includes(arm.token) : arm.evidence.test(blob)) {
       return "K3-migration-or-invariant-decision";
     }
   }
@@ -857,6 +883,32 @@ function selfTest() {
       message: "expected { code: '42501', …(2) } to be null",
       actual: '{ "code": "42501", "message": "create_wizard_strategy: caller role (authenticated) may not write wizard drafts" }',
     }) === "K2-function-body-role-gate",
+  ]);
+
+  // ── 2026-09-23 (Phase 164.4.2 plan 08 checkpoint RED): once the lane stopped
+  //    re-granting EXECUTE through the image's default ACLs, the six wizard arms
+  //    are refused at the GRANT layer — PROD's own state since Migration B
+  //    (20260814120000) withdrew `authenticated` EXECUTE on create_wizard_strategy.
+  //    That is an arm calling a door PROD shut, NOT a baseline that lost a grant,
+  //    so it must not fall into the K1 residue whose closing act is a re-dump. ──
+  cases.push([
+    "classifier: a GRANT-layer refusal of create_wizard_strategy in the wizard module routes to K3, not to the K1 residue",
+    routeKind({
+      file: "src/__tests__/wizard-rpcs-live-db.test.ts",
+      fullName: "x",
+      message: "expected { code: '42501', …(2) } to be null",
+      actual: '{ "code": "42501", "message": "permission denied for function create_wizard_strategy" }',
+    }) === "K3-migration-or-invariant-decision",
+  ]);
+
+  cases.push([
+    "classifier: the same GRANT-layer refusal in ANOTHER module stays in the K1 residue (the rule is module-scoped)",
+    routeKind({
+      file: "src/__tests__/some-other-live-db.test.ts",
+      fullName: "x",
+      message: "expected { code: '42501', …(2) } to be null",
+      actual: '{ "code": "42501", "message": "permission denied for function create_wizard_strategy" }',
+    }) === "K1-baseline-privilege-state-absent",
   ]);
 
   cases.push([
