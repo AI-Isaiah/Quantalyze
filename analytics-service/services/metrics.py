@@ -2773,7 +2773,16 @@ def compute_qstats_scalars(
     defined_keys: frozenset[str]
     try:
         defined_keys = _mirror_keys_defined_by(returns)
-    except Exception:  # noqa: BLE001 - the mirrors below log their own failure
+    except Exception as exc:  # noqa: BLE001
+        # SFH R2-LOW-1: a failing predicate switches the broken-mirror signal
+        # off for every key, so it is logged by name. The mirrors below still
+        # log their own failures; this line is about the predicate itself.
+        logger.warning(
+            "qstats mirror predicate failed (returns_len=%s): %s; the broken-mirror "
+            "warning is off for this series",
+            returns_len, exc,
+            exc_info=_should_emit_traceback("mirror_predicate", exc),
+        )
         defined_keys = frozenset()
     for result_key, fn in _QSTATS_SINGLE_ARG_SCALARS:
         result[result_key] = _safe_qstats_scalar(

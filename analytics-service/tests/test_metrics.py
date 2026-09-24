@@ -4363,3 +4363,20 @@ def test_q166r2_every_mirror_is_finite_wherever_its_precondition_holds():
                 failures.append((key, s.tolist()))
     assert checked > 1000, checked
     assert failures == [], failures[:5]
+
+
+def test_q166r2_a_failing_mirror_predicate_is_logged(caplog, monkeypatch):
+    """SFH R2-LOW-1: the predicate's ``except`` switched the broken-mirror
+    signal off for the whole series with no log line (drill M10 survived). It
+    must name itself; the mirrors still run and still persist."""
+    import services.metrics as metrics_module
+
+    def _boom(_r):
+        raise RuntimeError("predicate exploded")
+
+    monkeypatch.setattr(metrics_module, "_mirror_keys_defined_by", _boom)
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    out = compute_qstats_scalars(_rank05_benign_mixed(), None)
+    lines = [r.getMessage() for r in caplog.records if "mirror predicate failed" in r.getMessage()]
+    assert len(lines) == 1 and "predicate exploded" in lines[0], lines
+    assert out["recovery_factor"] is not None
