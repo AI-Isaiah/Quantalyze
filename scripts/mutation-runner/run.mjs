@@ -2210,7 +2210,29 @@ export const FILES_FLOOR = 49;
 //    judged 3 / annotated 3 / waived 0 / biting 3`. Arm 3 itself scored
 //    `RED (identity ok)` — not NO-IDENTITY, so its `TEST FAILED (3)` marker is
 //    the shape the runner reads.
-export const ARMS_FLOOR = 426;
+//
+// ⭐ RE-DERIVED 2026-09-24 (Phase 164.6 GATE-HYGIENE, plans 03/04, OPS-08-F2):
+//    426 -> 428. TWO new arms, both named N, one in each of the
+//    already-annotated supabase/tests/test_ledger_refresh_fanout.sql and
+//    supabase/tests/test_ledger_refresh_composite_arm.sql: one poisoned
+//    candidate beside a healthy one, proving each fan-out counts and names a
+//    failed enqueue in one cron_runs row. Each twin neuters the failure count
+//    (`v_failed := v_failed + 1;` -> `+ 0;`) in migration 20260924120000.
+//    So ARMS moves and FILES does not: FILES_FLOOR stays 49 (both files were
+//    already annotated) and WAIVED_CEILING stays 0.
+//    MEASURED via a full lane run, `node scripts/mutation-runner/run.mjs`:
+//    `scope: FULL 49/49 annotated files`, `coverage: files 49/76`,
+//    `arms: 428/428/0`, `biting: 428`, `lane-invocations: 428` (the two
+//    independent tallies AGREE), `lane-blocked: 0 file(s)`,
+//    `lane-probe: pg_cron AVAILABLE`, `unreachable: 27 file(s)`, `pending: 0`.
+//    Per-file lines: `test_ledger_refresh_composite_arm.sql: sections 21 /
+//    judged 21 / annotated 21 / waived 0 / biting 21` and
+//    `test_ledger_refresh_fanout.sql: sections 24 / judged 24 / annotated 24 /
+//    waived 0 / biting 24`. Both arms N scored `RED (identity ok)`.
+//    That run was taken with this constant ALREADY at 428, so it also shows the
+//    floor holding at the measured value: `✅ No defects. Every annotated arm
+//    bit its own arm first.`, exit 0.
+export const ARMS_FLOOR = 428;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

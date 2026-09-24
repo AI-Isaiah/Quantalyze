@@ -970,8 +970,17 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // read an identity-rewrite out of — sees nothing. Exactly the trap the
     // 2026-09-21 note above records being predicted wrong and corrected by the
     // run. RUN, not reasoned about.
-    expect(armsSeen).toBe(426);
-    expect(stepsSeen).toBe(441);
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): `armsSeen`
+    // 426 -> 428 and `stepsSeen` 441 -> 443. TWO new arms, both named N, one
+    // in each of the already-annotated test_ledger_refresh_fanout.sql and
+    // test_ledger_refresh_composite_arm.sql (plan 03, OPS-08-F2: one poisoned
+    // candidate beside a healthy one). Unlike the `sql`-step arms above, each
+    // carries ONE `edit` step with a `find` (`v_failed := v_failed + 1;` ->
+    // `+ 0;`), so this walk DOES see it and both pins move by two. MEASURED:
+    // this file's own run read `expected 428 to be 426` at the pre-move pin,
+    // and `stepsSeen` was re-run separately after `armsSeen` moved.
+    expect(armsSeen).toBe(428);
+    expect(stepsSeen).toBe(443);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1837,7 +1846,13 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // no needle: the same divergence the 2026-09-20 entry above records. ⛔ An
     // UNMOVED pin is still a MEASURED one, and "it did not move" is the claim
     // most easily asserted without measuring: RUN SEPARATELY at this commit.
-    expect(needles.length).toBe(441);
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 441 -> 443,
+    // moving WITH `stepsSeen` this time. The two new arms N (one each in
+    // test_ledger_refresh_fanout.sql and test_ledger_refresh_composite_arm.sql)
+    // each carry one `edit` step whose `find` is `v_failed := v_failed + 1;`,
+    // so each contributes one needle. RUN SEPARATELY: `expected 443 to be 441`
+    // at the pre-move pin.
+    expect(needles.length).toBe(443);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
