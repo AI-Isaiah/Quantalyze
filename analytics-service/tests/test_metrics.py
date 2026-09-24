@@ -2920,8 +2920,9 @@ def test_rank05_inlined_scalars_are_failure_soft_without_quantstats(
 
 def test_rank05_drawdown_details_is_heuristic_free():
     """`qs.stats.drawdown_details` is the ONE quantstats call left in
-    compute_all_metrics without `prepare_returns=False`, and the region gate
-    below excludes it BY NAME. That exclusion is only legitimate while the
+    compute_all_metrics without `prepare_returns=False`, and the Phase 166 AST
+    gate (`tests/qstats_gate.py`, `EXEMPT`) excludes it BY NAME. That exclusion
+    is only legitimate while the
     function (and the helper it calls) provably never routes its input through
     either preparer — it consumes an already-computed underwater curve, not a
     return or price series. Scan the INSTALLED source so a future quantstats
@@ -2935,52 +2936,6 @@ def test_rank05_drawdown_details_is_heuristic_free():
         assert "_prepare_prices" not in src, f"{fn.__name__} now prepares prices"
     # And it still takes the drawdown curve, not returns.
     assert "drawdown" in inspect.signature(qs.stats.drawdown_details).parameters
-
-
-def test_rank05_no_unclosed_quantstats_call_survives_in_compute_all_metrics():
-    """REGION GATE, executable in CI rather than only in a shell one-liner.
-
-    Every quantstats call inside compute_all_metrics' body must either carry
-    `prepare_returns=False` or be the source-scanned `drawdown_details`
-    exception above. Anything else is a reopened RANK-05 hole. Scanning
-    `inspect.getsource` scopes to the function exactly and is immune to line
-    drift; comment lines are skipped because prose cannot invoke anything.
-
-    ⭐ ANTI-VACUITY: `offenders == []` is ALSO what an empty scan produces. A
-    rename, a refactor that moves the calls into a helper, or a signature change
-    that made `compute_all_metrics` resolve to something else would leave this
-    gate scanning NOTHING and reporting a clean pass — a test that cannot fail.
-    So the scan COUNTS what it examined and asserts the count is non-zero: this
-    gate is only meaningful while there are quantstats calls in the region for
-    it to have judged.
-    """
-    import inspect
-    import re
-
-    scanned = 0
-    offenders = []
-    for line in inspect.getsource(compute_all_metrics).splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            continue
-        if not re.search(r"qs\.stats\.[a-z_]+\(", line):
-            continue
-        scanned += 1
-        if "prepare_returns=False" in line:
-            continue
-        if "qs.stats.drawdown_details(" in line:
-            continue
-        offenders.append(stripped)
-    assert scanned > 0, (
-        "the scan found no qs.stats call at all — blind, not clean. This gate "
-        "reads compute_all_metrics' own source; zero matches means the region "
-        "moved (rename, extracted helper, wrapper) and the gate is now watching "
-        "an empty room. Re-point it at wherever the quantstats calls live."
-    )
-    assert offenders == [], (
-        "quantstats calls in compute_all_metrics without prepare_returns=False "
-        f"(RANK-05 price heuristic reopened): {offenders}"
-    )
 
 
 # ---------------------------------------------------------------------------
