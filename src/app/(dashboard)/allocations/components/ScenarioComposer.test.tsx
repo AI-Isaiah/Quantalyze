@@ -15895,6 +15895,32 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     expect(note?.hasAttribute("aria-live")).toBe(false);
   });
 
+  it("AUMTRUST a11y (review WR-02): the PORTFOLIO AUM input's accessible description is whichever note qualifies its value — the State A disclosure, then the override note once a manual value is committed", () => {
+    renderAt(atStateBBook());
+    // State A: focus on the field announces the disclosure beside it. The
+    // expected text is typed, never read back from the DOM node.
+    expect(aumField()).toHaveAccessibleDescription(
+      "Includes $12,345 from keys needing attention.",
+    );
+
+    commitAum("75000");
+    // State B: the field shows the allocator's own number, and the note that
+    // qualifies it (and carries the nested clause) is the description.
+    expect(aumField()).toHaveAccessibleDescription(
+      "Overrides live-holdings total $50,000, which includes $12,345 from keys needing attention.",
+    );
+  });
+
+  it("AUMTRUST a11y (review WR-02): with no untrusted holding and no override the input carries no aria-describedby, so it never points at an element that is not rendered", () => {
+    renderAt(atStateBBook(null));
+    expect(aumField().hasAttribute("aria-describedby")).toBe(false);
+
+    commitAum("75000");
+    expect(aumField()).toHaveAccessibleDescription(
+      "Overrides live-holdings total $50,000.",
+    );
+  });
+
   it("D-06 (component pin, decision OPEN): a revoked key's holding outside the eligible and contributing sets is silently absent from the field, and nothing says 'excludes'", () => {
     // ⚠️ CONTEXT D-06 is OPEN. Plan 05 records the founder's answer. This test
     // pins TODAY's behaviour: a revoked key's holdings are silently absent

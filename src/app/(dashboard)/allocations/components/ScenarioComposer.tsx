@@ -4669,6 +4669,21 @@ export function ScenarioComposer({
     entryMode === "book" &&
     liveHoldingsSummary.untrusted.count > 0 &&
     (fieldShowsLive || overrideNoteShowsLive);
+  // Review WR-02 — the note that qualifies the field's value is its accessible
+  // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the
+  // qualification with the number and not only in linear reading order.
+  // Derived from the SAME two flags that render the notes, so it can never
+  // point at an element that is not on screen. No role or live region is
+  // added (D-09); this supersedes UI-SPEC U-07's "no aria-describedby".
+  const aumInputDescribedBy =
+    [
+      showUntrustedMarker && fieldShowsLive
+        ? "scenario-aum-untrusted-note"
+        : null,
+      overrideNoteShowsLive ? "scenario-aum-override-note" : null,
+    ]
+      .filter((id): id is string => id !== null)
+      .join(" ") || undefined;
 
   return (
     <div
@@ -4884,6 +4899,7 @@ export function ScenarioComposer({
         </label>
         <input
           id="scenario-aum"
+          aria-describedby={aumInputDescribedBy}
           data-testid="scenario-aum-input"
           type="number"
           min="0"
@@ -4921,6 +4937,7 @@ export function ScenarioComposer({
             the Holdings tab and the key card, not here (D-09). */}
         {showUntrustedMarker && fieldShowsLive && (
           <span
+            id="scenario-aum-untrusted-note"
             data-testid="scenario-aum-untrusted-note"
             className="text-xs text-text-muted"
           >
@@ -4947,6 +4964,7 @@ export function ScenarioComposer({
             to before: `Overrides live-holdings total $X.` */}
         {overrideNoteShowsLive && (
           <span
+            id="scenario-aum-override-note"
             data-testid="scenario-aum-override-note"
             className="text-xs text-text-muted"
           >
