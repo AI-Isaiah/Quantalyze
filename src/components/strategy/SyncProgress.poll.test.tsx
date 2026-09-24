@@ -600,8 +600,28 @@ describe("SyncProgress — the job-state check fails closed (Phase 167.2 / KCS-1
     await tick(0);
 
     await tick(POLL_MS);
-    expect(onStatusChange.mock.calls).toEqual([["error"]]);
+    // Moved by Phase 167.2 / KCS-22: the failure now carries the row's
+    // computation_error (null here). Lineage: `[["error"]]`.
+    expect(onStatusChange.mock.calls).toEqual([["error", { computationError: null }]]);
     expect(mockState.jobReadCount).toBe(0);
+  });
+
+  it("FAILED-CARRIES-REASON: an evidenced failed row forwards its own computation_error (KCS-22)", async () => {
+    mockState.analyticsResult = {
+      data: {
+        computation_status: "failed",
+        computation_error: "Example curated reason.",
+        computed_at: T1,
+      },
+      error: null,
+    };
+    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    await tick(0);
+
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([
+      ["error", { computationError: "Example curated reason." }],
+    ]);
   });
 
   it("ONE-IN-FLIGHT: while a sync-progress request has not answered, the next evidenced ticks make no second request", async () => {

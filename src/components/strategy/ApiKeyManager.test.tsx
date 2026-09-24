@@ -148,7 +148,10 @@ vi.mock("@/lib/supabase/client", () => ({
 // Capture SyncProgress's onStatusChange so a test can drive the terminal
 // callback directly (mig 20260707120000 regression: complete_with_warnings must
 // be treated as a terminal SUCCESS, clearing syncingKeyId + refreshing).
-let capturedOnStatusChange: ((s: string) => void) | null = null;
+// Phase 167.2 / KCS-22: the second argument is the panel's `SyncStatusInfo`.
+let capturedOnStatusChange:
+  | ((s: string, info?: { stopReason?: string; computationError?: string | null }) => void)
+  | null = null;
 // 167-06 fix round 2 (WR-01): the panel's Retry, captured the same way, so a
 // case can press it and read which key the strategy is re-linked to.
 let capturedOnRetry: (() => void) | null = null;
@@ -156,7 +159,10 @@ vi.mock("./SyncProgress", () => ({
   SyncProgress: (props: {
     syncStatus?: string;
     syncError?: string | null;
-    onStatusChange?: (s: string) => void;
+    onStatusChange?: (
+      s: string,
+      info?: { stopReason?: string; computationError?: string | null },
+    ) => void;
     onRetry?: () => void;
   }) => {
     capturedOnStatusChange = props.onStatusChange ?? null;
@@ -3082,14 +3088,61 @@ describe("[167-06] the persisted credential state renders on the manager's key c
 
     // ── A poll error ends the attempt (WR-02) ───────────────────────────────
 
-    it("a poll error ends the attempt: the timeout copy renders, and Resync, Update password and Delete are usable again (167-REVIEW-06-R2 WR-02)", async () => {
+    // Moved by Phase 167.2 / KCS-22. Lineage: this case drove
+    // `("error")` as the poller's escalation and asserted the timeout sentence
+    // as the panel's detail. A give-up is now `no_result`, which is not a
+    // failure, so it carries no error detail; the controls it frees are the
+    // same ones.
+    it("a poll give-up ends the attempt as no_result: no failure detail, and Resync, Update password and Delete are usable again (167-REVIEW-06-R2 WR-02, KCS-22)", async () => {
       routeFetch();
       await renderRows([row({ id: "key-j" })], "key-j");
       await resync("key-j");
       expect(cardButton("key-j", "Update password")).toBeDisabled();
       expect(cardButton("key-j", "Delete")).toBeDisabled();
 
-      // The poller escalates (its cap or its missing-row grace).
+      // The poller gives up (its cap or its missing-row grace).
+      await act(async () => {
+        capturedOnStatusChange!("no_result", { stopReason: "poll_cap" });
+      });
+
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "no_result",
+      );
+      // No error detail reaches the panel: a give-up claims no failure.
+      expect(screen.getByTestId("sync-progress").textContent).toBe("");
+      expect(screen.queryByText(/Sync failed/)).not.toBeInTheDocument();
+      expect(cardButton("key-j", "Resync")).toBeEnabled();
+      expect(cardButton("key-j", "Update password")).toBeEnabled();
+      expect(cardButton("key-j", "Delete")).toBeEnabled();
+    });
+
+    // ── An evidenced failure carries the server's own reason (KCS-22) ──────
+
+    it("FAILED-DETAIL: an evidenced failed status shows the row's computation_error as the panel's detail", async () => {
+      routeFetch();
+      await renderRows([row({ id: "key-j" })], "key-j");
+      await resync("key-j");
+
+      await act(async () => {
+        capturedOnStatusChange!("error", { computationError: "Example curated reason." });
+      });
+
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "error",
+      );
+      expect(screen.getByTestId("sync-progress").textContent).toBe(
+        "Example curated reason.",
+      );
+      expect(cardButton("key-j", "Resync")).toBeEnabled();
+    });
+
+    it("FAILED-NO-DETAIL: an evidenced failed status with no computation_error shows no detail, and never the retired timeout sentence", async () => {
+      routeFetch();
+      await renderRows([row({ id: "key-j" })], "key-j");
+      await resync("key-j");
+
       await act(async () => {
         capturedOnStatusChange!("error");
       });
@@ -3098,12 +3151,13 @@ describe("[167-06] the persisted credential state renders on the manager's key c
         "data-sync-status",
         "error",
       );
-      expect(screen.getByTestId("sync-progress").textContent).toBe(
-        "Analytics computation timed out. Please retry or contact support.",
-      );
-      expect(cardButton("key-j", "Resync")).toBeEnabled();
-      expect(cardButton("key-j", "Update password")).toBeEnabled();
-      expect(cardButton("key-j", "Delete")).toBeEnabled();
+      expect(screen.getByTestId("sync-progress").textContent).toBe("");
+      // Hand-typed: the sentence KCS-22 retired. No element may carry it.
+      expect(
+        screen.queryByText(/Analytics computation timed out/),
+        "a failure with no reason was given a timeout claim no timeout stood behind",
+      ).not.toBeInTheDocument();
+      expect(document.body.textContent).not.toContain("Analytics computation timed out");
     });
 
     // ── One terminal is handled once (WR-03) ────────────────────────────────
