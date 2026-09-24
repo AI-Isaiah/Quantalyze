@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.90.1.0] - 2026-09-24 — WIZRESYNC: a wizard reload no longer starts a second sync, and Retry shows only when the server needs one
+## [0.90.1.0] - 2026-09-24 — WIZRESYNC: a wizard reload no longer starts a second sync, Retry shows only when the server needs one, and Submit promotes the strategy
 
 ⭐ **What changed for whoever reads this next.** Four defects found live on 2026-09-24 while a
 manager ran the strategy wizard on a Bybit key, plus one misleading log line. The stall had one root
@@ -19,6 +19,28 @@ unchanged.**
 
 ### Fixed
 
+- **A single-key manager's Submit now actually moves the strategy to `pending_review`**
+  (`unifiedFinalizeWizardHandler`, merged from `fix/wizard-submit-promote`, 2a054b692). The unified
+  single-key finalize arm called only `postProcessKey` and answered a hard-coded
+  `pending_review`. Nothing on it called `finalize_wizard_strategy`, and Python never writes
+  `strategies.status`. So the row stayed `source='wizard'`, `status='draft'`: its wizard metadata
+  was dropped, it never reached the admin queue, and after 7 days the `cleanup-wizard-drafts` cron
+  deleted it and revoked its key. The bug had been latent since Phase 106 Stage B. The fix:
+  - The RPC call is extracted as `callFinalizeWizardRpc`, the one caller, carrying the argument
+    list and the SQLSTATE-to-envelope mapping byte-identical to `runLegacyFinalize`'s.
+  - The unified arm calls it with `p_terminal_status='pending_review'` before `postProcessKey`.
+    A refused promotion answers the RPC's own envelope and dispatches nothing.
+  - A replay (the RPC's 22023 on a non-draft row) is accepted through `acceptAlreadyPromoted`: a
+    row already at (wizard, pending_review) answers success and still dispatches, so a Retry after
+    a failed dispatch recovers. The legacy arm keeps its 409, so its founder email is not re-fired.
+- **LOW-8: a recurring job holding `computing` after the chain finishes no longer raises Retry.**
+  The SQL status bridge `sync_strategy_analytics_status` holds `computing` while ANY job of the
+  strategy is non-terminal (`v_nonterminal_count`), but the sync-progress route read chain kinds
+  only. So a finished chain plus a pending `reconcile_strategy` or `poll_positions` showed Retry
+  after the 60 s grace on a healthy completion. The route now adds `otherJobInFlight: true` when a
+  non-factsheet job is in flight (`isNonFactsheetJobInFlight`), and omits it otherwise so existing
+  bodies stay byte-identical. `SyncPreviewStep` counts it as in-flight evidence, still under the
+  60-minute ceiling. `jobStatus` keeps its factsheet-only meaning for the key card's gate.
 - **A resync while the factsheet chain is running starts no second chain** (`process_key`, the
   resync chain-in-flight guard). A resync `/process-key` now answers `WIZARD_DUPLICATE` with
   `queued: true` and `job_state: "running"`, mints no draft and enqueues nothing while any job of
@@ -127,6 +149,14 @@ unchanged.**
 - Review round 1, `SyncPreviewStep.inflight-guard.runtime.test.tsx`: the 60-minute ceiling, a
   duplicate-answered Retry with its control, the envelope-retry flow, the probe timeout and the
   logged strategies read.
+- `src/app/api/strategies/finalize-wizard/route.test.ts` (submit fix): three rows that asserted
+  the RPC was NOT called on the unified arm pinned the defect, and now assert it is. New rows cover
+  the call and its order, the forwarded metadata, the replay, a non-replay 22023, a failed re-read,
+  RPC failures never answering `pending_review`, and the legacy arm's unchanged replay answer.
+- LOW-8: `SyncPreviewStep.inflight-guard.runtime.test.tsx` (chain done, a pending recurring job,
+  status `computing` for 120 s: no banner; control with nothing else in flight: Retry), and
+  `sync-progress/route.test.ts` (the flag beside a pending `reconcile_strategy`, and absent beside
+  finished recurring jobs). Both were RED without the fix.
 - Review round 1, `tests/test_benchmark.py` and `tests/test_benchmark_extras.py`: today's partial
   close never served, cached or counted as fresh; a gappy, short or sparse cache is refetched; a
   programming error is logged at error and captured, and a DB error is not.
@@ -164,6 +194,11 @@ unchanged.**
   alone decides the Retry branch, and no TS reader would use them.
 - Review round 1, style only: the `services.job_worker` import in `process_key.py` now sits in
   alphabetical order.
+- **Known limit (submit fix): the founder notification email is not sent on the unified arm.**
+  Only `runLegacyFinalize`'s `after()` fan-out calls `notifyFounderNewStrategy`, and the unified
+  arm has no such fan-out. Email is disabled anyway (RESEND off), so nothing is lost today.
+- **Known limit (submit fix): drafts already stranded at `status='draft'` are not repaired.** Only
+  test data was affected. The fix applies to submits from this release on.
 - **Known limit: a partial-day benchmark close cached BEFORE this release can still be served.**
   A row cached on day D for date D held D's price so far. From D+1 it is a completed-day row in
   every respect this code can see, so it is served until a fresh fetch overwrites it by upsert. A
