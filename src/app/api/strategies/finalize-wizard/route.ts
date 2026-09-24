@@ -1850,6 +1850,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
  * with that status. Any other state keeps the 409. A failed re-read cannot
  * confirm either way, so it takes the generic 500 tail, whose copy does not
  * claim nothing was saved.
+ *
+ * ⚠️ A REPLAY WRITES NOTHING. The RPC refuses the non-draft row before any
+ * write, so form fields the user edited between the first submit and the
+ * Retry are silently NOT applied: the row keeps what the first submit wrote.
  */
 async function callFinalizeWizardRpc(args: {
   supabase: Awaited<ReturnType<typeof createClient>>;
