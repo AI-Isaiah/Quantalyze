@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import Link from "next/link";
 import type { Metadata } from "next";
 import { unstable_cache } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
@@ -19,7 +20,29 @@ import {
 // that makes the cached wrapper safe lives in this file, and only here.
 import { fetchAndBuildPayload } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
+import {
+  COMPUTE_STATE_READ_LIMIT,
+  deriveComputeState,
+  type ComputeJobRow,
+  type ComputeState,
+} from "@/lib/compute-state";
+import {
+  ownerRemedy,
+  ownerStateLine,
+  type StateLineTone,
+} from "@/lib/status-surface-copy";
 import { FactsheetView, OwnerUnpublishedPanel } from "./FactsheetView";
+
+/**
+ * Phase 167.2 / KCS-09 — the owner state line's colour, by the tone its copy
+ * row carries (DESIGN.md § Semantic-color gates): muted for steady or in
+ * progress, amber for recoverable, red for a permanent failure only.
+ */
+const STATE_LINE_TONE_CLASS = {
+  muted: "text-text-secondary",
+  amber: "text-warning",
+  red: "text-negative",
+} as const satisfies Record<StateLineTone, string>;
 
 // Pin to dynamic rendering. This route's render output already depends on the
 // per-request authentication state (cookies → supabase.auth.getUser() inside
@@ -132,6 +155,60 @@ export async function generateMetadata({
       images: [ogImage],
     },
   };
+}
+
+/**
+ * Phase 167.2 / KCS-09 — the owner's compute state for a strategy, read on the
+ * REQUEST-scoped client through the owner-scoped SECURITY DEFINER RPC (it
+ * resolves auth.uid() from the session and returns last_error as NULL).
+ *
+ * A module-level function rather than inline in the page: the server clock is
+ * read here (`nowMs`), never inside the component body.
+ *
+ * ⛔ error-absent ≠ legit-absent (Rule 12). An RPC error, an answer that is not
+ * a rows array, or a throw (a client with no rpc member included) derives
+ * `unreadable`, logged server-side. It never derives an in-progress state.
+ */
+async function readOwnerComputeState(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  strategyId: string,
+): Promise<ComputeState> {
+  try {
+    const { data: jobRows, error: jobsError } = await supabase.rpc(
+      "get_user_compute_jobs",
+      { p_strategy_id: strategyId, p_limit: COMPUTE_STATE_READ_LIMIT },
+    );
+    if (jobsError || !Array.isArray(jobRows)) {
+      const readFailure = jobsError ?? {
+        code: undefined,
+        message: "compute job read returned no rows array and no error",
+      };
+      console.error("[factsheet/v2/page] compute-state read failed", {
+        id: strategyId,
+        code: readFailure.code,
+        message: readFailure.message,
+      });
+      captureToSentry(readFailure, {
+        tags: { route: "factsheet/v2/page", stage: "compute-state" },
+      });
+      return deriveComputeState({ readError: true });
+    }
+    return deriveComputeState({
+      rows: jobRows as unknown as ComputeJobRow[],
+      readExhaustive: jobRows.length < COMPUTE_STATE_READ_LIMIT,
+      nowMs: Date.now(),
+    });
+  } catch (err) {
+    console.error("[factsheet/v2/page] compute-state read failed", {
+      id: strategyId,
+      code: undefined,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    captureToSentry(err, {
+      tags: { route: "factsheet/v2/page", stage: "compute-state" },
+    });
+    return deriveComputeState({ readError: true });
+  }
 }
 
 export default async function FactsheetV2Page({
@@ -388,6 +465,27 @@ export default async function FactsheetV2Page({
         codename: null,
         disclosure_tier: (signature.disclosure_tier ?? null) as DisclosureTier | null,
       });
+
+    // Phase 167.2 / KCS-09 — on the OWNER lane, say what is actually happening
+    // to this strategy's computation instead of a fixed "still computing". The
+    // measured trigger was a composite whose stitch had failed permanently
+    // while this page promised a compute that was not coming.
+    //
+    // ⛔ D-04: the read runs on the REQUEST-scoped client (the RPC is SECURITY
+    // DEFINER and auth.uid()-scoped, and it nulls last_error), and its result is
+    // a lane-local value handed only to the JSX below, exactly like
+    // `ownershipMark` and `hasActiveShare`. It never enters the payload, the
+    // builder or the id-keyed cached wrapper. The public lane reads nothing.
+    //
+    // A read that cannot answer derives `unreadable` (see the helper), which
+    // never renders an in-progress claim.
+    const ownerComputeState =
+      lane === "owner"
+        ? await readOwnerComputeState(supabase, signature.id)
+        : null;
+    const ownerLine = ownerComputeState && ownerStateLine(ownerComputeState);
+    const ownerRemedyLine =
+      ownerComputeState && ownerRemedy(ownerComputeState, "unknown", signature.id);
     return (
       <article className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12">
         {/* WR-02: the owner lane's placeholder must carry the visibility
@@ -408,22 +506,49 @@ export default async function FactsheetV2Page({
         <h1 className="mt-2 font-serif text-fixed-28 sm:text-fixed-36 leading-tight text-text-primary">
           {pendingName}
         </h1>
-        <p className="mt-6 text-fixed-13 text-text-secondary">
-          The detailed factsheet for this strategy is still computing.
-          Daily-return data hasn&apos;t been ingested yet — once the
-          analytics service finishes the first compute pass, the full panel
-          set will render here.
-        </p>
-        {/* Criterion 9 (phase 164.2): a visitor has no developer console to
-            open, and this arm cannot know which of the three gates fired — so
-            it names none. The gate detail stays in the `console.warn` hint
-            above, which is the developer's channel. Not lane-gated: the owner
-            has no console on PROD either. */}
-        <p className="mt-3 text-fixed-12 text-text-muted italic">
-          This factsheet has not been computed yet. Some strategies stay in
-          this state, and this page is all there is until one has been
-          computed.
-        </p>
+        {ownerLine && ownerRemedyLine ? (
+          // KCS-09: one state line and one remedy line, read together. The
+          // remedy is an instruction, not an aside, so it is not italic.
+          <section aria-label="Computation status">
+            <p
+              className={
+                "mt-6 text-fixed-13 " + STATE_LINE_TONE_CLASS[ownerLine.tone]
+              }
+            >
+              {ownerLine.text}
+            </p>
+            <p className="mt-3 text-fixed-12 text-text-muted">
+              {ownerRemedyLine.before}
+              {ownerRemedyLine.link && (
+                <Link
+                  href={ownerRemedyLine.link.href}
+                  className="text-accent underline underline-offset-4"
+                >
+                  {ownerRemedyLine.link.text}
+                </Link>
+              )}
+              {ownerRemedyLine.after}
+            </p>
+          </section>
+        ) : (
+          <>
+            <p className="mt-6 text-fixed-13 text-text-secondary">
+              The detailed factsheet for this strategy is still computing.
+              Daily-return data hasn&apos;t been ingested yet — once the
+              analytics service finishes the first compute pass, the full panel
+              set will render here.
+            </p>
+            {/* Criterion 9 (phase 164.2): a visitor has no developer console to
+                open, and this arm cannot know which of the three gates fired — so
+                it names none. The gate detail stays in the `console.warn` hint
+                above, which is the developer's channel. */}
+            <p className="mt-3 text-fixed-12 text-text-muted italic">
+              This factsheet has not been computed yet. Some strategies stay in
+              this state, and this page is all there is until one has been
+              computed.
+            </p>
+          </>
+        )}
       </article>
     );
   }
