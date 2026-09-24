@@ -122,6 +122,19 @@
 #                             trio above. The raise names the row and the
 #                             column and the two values' SHAPES, never the
 #                             values themselves.
+#   REARM_EMITTER             default scripts/test-only-normalize-analytics-url.sh
+#                             beside this script — the ONE source of the
+#                             analytics_service_url normalisation SQL (Phase
+#                             164.9.1 plan 05, [164.9-TEST-ANALYTICS-URL-REARM],
+#                             D-16/D-17). Run with --emit-restore-sql inside
+#                             `build_transaction` and given this script's own
+#                             two marker predicates (the TEST and PROD seams
+#                             above), so the fragment re-reads the marker with the
+#                             SAME predicates the pre-transaction refusal used. A
+#                             non-zero exit is a refusal, never a skip. A seam
+#                             only because the self-test runs scratch copies of
+#                             this script from its mktemp dir, where the default
+#                             path beside the copy does not exist.
 #   PGBIN                     (self-test only) server binaries for the throwaway lane
 #
 # ⚠️ psql's STDERR IS printed for the transaction — and it does NOT only name SQL
@@ -382,6 +395,16 @@ REFDATA_WRONGSTATE_TABLE="${REFDATA_WRONGSTATE_TABLE:-public.profiles}"
 REFDATA_WRONGSTATE_ID="${REFDATA_WRONGSTATE_ID:-00000000-0000-0000-0000-000000000000}"
 REFDATA_WRONGSTATE_COL="${REFDATA_WRONGSTATE_COL:-manager_status}"
 REFDATA_WRONGSTATE_EXPECTED="${REFDATA_WRONGSTATE_EXPECTED:-verified}"
+
+# ── THE ANALYTICS DESTINATION RE-NORMALISATION (Phase 164.9.1 plan 05) ─────
+# The replay above restores `system_settings.analytics_service_url` FAITHFULLY,
+# which means a PROD-shaped host (see L-03 in scripts/restore-test-refdata-allowlist.txt).
+# On shared TEST that is the destination a scheduled tick posts the Vault-held
+# service key to. `build_transaction` therefore concatenates the normalize
+# script's fragment INSIDE the transaction, after the reference-data gate, so the
+# PROD-shaped value is never committed. The SQL is not copied here: it is emitted
+# by the one script that owns it (D-17), and so is the sink.
+REARM_EMITTER="${REARM_EMITTER:-$SCRIPT_DIR/test-only-normalize-analytics-url.sh}"
 
 OWNED_OUT_DIR=""
 cleanup_out_dir() {
@@ -1627,6 +1650,36 @@ TXN_REFDATA_GATE
 
   note "refdata: ${refdata_n} statement(s) replayed into ${#REFDATA_TABLES[@]} table(s), gated inside the transaction against each table's pinned statement count (count(*) >= expected, not merely non-empty) and against ${REFDATA_KIND_CHECK} over ${REFDATA_KIND_REGISTRY}"
 
+  # ── the analytics destination: re-normalised INSIDE the transaction ──────
+  # Phase 164.9.1 plan 05, [164.9-TEST-ANALYTICS-URL-REARM], D-16 / D-16a / D-17.
+  # The replay just restored analytics_service_url to the PROD-shaped host its
+  # migration seeds, and the gate above proved the row is there. The fragment
+  # rewrites it to the loopback discard sink before anything can commit, so the
+  # window a separate post-restore step would leave open never exists. It is
+  # obtained from the normalize script, the one owner of this SQL and of the
+  # sink, and it re-reads the identity marker with THIS script's predicates.
+  #
+  # ⛔ NO MODE TEST AROUND IT. Both modes emit it byte-identically; preflight's
+  # ROLLBACK below is what makes a preflight write nothing, and the two modes
+  # still differ only in their terminator. A mode-conditional fragment would
+  # make a green preflight evidence about a transaction the restore never runs.
+  #
+  # ⛔ A REFUSED EMIT IS A REFUSED RESTORE. The emitter prints nothing when it
+  # refuses (every refusal fires before its first byte), and its exit code is
+  # captured the refdata extractor's way, so there is no path on which the
+  # restore commits without the fragment.
+  local rearm_rc=0 rearm_sql
+  rearm_sql=$(NORMALIZE_EXPECT_MARKER_RE="$RESTORE_EXPECT_MARKER_RE" \
+              NORMALIZE_REFUSE_MARKER_RE="$RESTORE_REFUSE_MARKER_RE" \
+              bash "$REARM_EMITTER" --emit-restore-sql) || rearm_rc=$?
+  if [ "$rearm_rc" -ne 0 ]; then
+    fail "the analytics_service_url normalisation emitter refused (exit ${rearm_rc}, ${REARM_EMITTER} --emit-restore-sql); no transaction was assembled, because a restore without it would commit the PROD-shaped destination the replay just restored."
+  fi
+  [ -n "$rearm_sql" ] \
+    || fail "the analytics_service_url normalisation emitter exited 0 and printed nothing; no transaction was assembled. An empty fragment is not a normalisation."
+  printf '%s\n' "$rearm_sql" >> "$out"
+  note "rearm: the analytics_service_url normalisation fragment is in the transaction after the reference-data gate. It re-reads the identity marker, rewrites that one row to the loopback discard sink, and checks ROW_COUNT = 1 and the read-back. The row is committed only if the transaction COMMITs, and it is never printed."
+
   # ── the ledger ───────────────────────────────────────────────────────────
   # The DDL is the CLI's OWN (supabase/cli v2.98.2, its migration-history package).
   # A ledger this script invented would be a ledger `supabase db push` does not read.
@@ -2223,8 +2276,14 @@ main() {
 # wrong-state/correct-state discrimination (31-32). All five falsifiers were
 # observed RED before being fixed and are recorded verbatim in this plan's
 # SUMMARY, the same posture arms 19-27 are held to.
-# MEASURED 2026-09-21 — `--self-test` prints 32/32 and exits 0 on a throwaway cluster.
-EXPECTED_ARMS=32
+#
+# Arms 33-34 are Phase 164.9.1 plan 05's ([164.9-TEST-ANALYTICS-URL-REARM]): the
+# analytics destination re-normalised inside the transaction, COMMITTED as the
+# sink in restore mode (33) and rolled back to the seeded stand-in in preflight
+# (34). Arm 33's falsifier (the concatenation deleted, observed RED, restored by
+# cp and cmp) is recorded in 164.9.1-05-SUMMARY.md.
+# MEASURED 2026-09-25 — `--self-test` prints 34/34 and exits 0 on a throwaway cluster.
+EXPECTED_ARMS=34
 
 SELFTEST_MUTEX_HOLDER_PID=""
 SELFTEST_TMPD=""
@@ -2491,6 +2550,7 @@ FRESHSTUB
     REFDATA_WRONGSTATE_ID="$ARM_WRONGSTATE_ID" \
     REFDATA_WRONGSTATE_COL="$ARM_WRONGSTATE_COL" \
     REFDATA_WRONGSTATE_EXPECTED="$ARM_WRONGSTATE_EXPECTED" \
+    REARM_EMITTER="$SCRIPT_DIR/test-only-normalize-analytics-url.sh" \
       bash "$script" --run --mode "$mode"
   }
   arm_env() { run_leg "$0" "$1" "${2:-$1}"; }
@@ -2810,7 +2870,7 @@ FRESHSTUB
     arm_env restore > "$out" 2>&1 || rc=$?
     cat "$out"
     [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: --run --mode restore exited ${rc}, expected 0"; return 1; }
-    grep -aqxF 'restore: tables=2 policies=1 functions=2 ledger_rows=3 survivors=3/3 filtered=1 mode=restore' "$out" \
+    grep -aqxF 'restore: tables=3 policies=1 functions=2 ledger_rows=3 survivors=3/3 filtered=1 mode=restore' "$out" \
       || { echo "MEASURE_FAIL: the exact summary line is absent from the output"; return 1; }
     local n
     n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
@@ -2863,10 +2923,11 @@ FRESHSTUB
     run_leg "$shape_script" restore a11 > "$out" 2>&1 || rc=$?
     cat "$out"
     [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: an expected-shape mismatch exited ${rc}, expected 1"; return 1; }
-    grep -aq 'table(s) after the replay, expected 3' "$out" \
-      || { echo "MEASURE_FAIL: the abort does not report the TABLE count against the mutated expectation of 3"; return 1; }
-    grep -aq 'public holds 2 table(s)' "$out" \
-      || { echo "MEASURE_FAIL: the abort does not report the ACTUAL count of 2 — a reader cannot see which side moved"; return 1; }
+    # 164.9.1-05: 3 and 4, not 2 and 3 — the fixture dump gained public.system_settings.
+    grep -aq 'table(s) after the replay, expected 4' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not report the TABLE count against the mutated expectation of 4"; return 1; }
+    grep -aq 'public holds 3 table(s)' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not report the ACTUAL count of 3 — a reader cannot see which side moved"; return 1; }
     local n
     n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
     [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — a wrong shape COMMITTED instead of rolling back."; return 1; }
@@ -2880,7 +2941,7 @@ FRESHSTUB
     arm_env restore a12 > "$out" 2>&1 || rc=$?
     cat "$out"
     [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: the unqualified-survivor restore exited ${rc}, expected 0 — the census lost it and the derived closure aborted"; return 1; }
-    grep -aqxF 'restore: tables=2 policies=1 functions=2 ledger_rows=3 survivors=4/4 filtered=1 mode=restore' "$out" \
+    grep -aqxF 'restore: tables=3 policies=1 functions=2 ledger_rows=3 survivors=4/4 filtered=1 mode=restore' "$out" \
       || { echo "MEASURE_FAIL: the summary line does not report survivors=4/4 — the fourth survivor was never censused"; return 1; }
     local n
     n=$(lane_q "SELECT count(*) FROM pg_policies WHERE schemaname='storage' AND tablename='objects' AND policyname='unqualified_ref';")
@@ -2986,7 +3047,7 @@ FRESHSTUB
     arm_env restore a18 > "$out" 2>&1 || rc=$?
     cat "$out"
     [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: a default ACL on public exited ${rc}, expected 0. Without the pg_default_acl CARRIER branch the closure cannot resolve its owning schema and ABORTS naming an object the dump WOULD have restored — a FALSE abort that stops the first real preflight."; return 1; }
-    grep -aqxF 'restore: tables=2 policies=1 functions=2 ledger_rows=3 survivors=3/3 filtered=1 mode=restore' "$out" \
+    grep -aqxF 'restore: tables=3 policies=1 functions=2 ledger_rows=3 survivors=3/3 filtered=1 mode=restore' "$out" \
       || { echo "MEASURE_FAIL: the exact summary line is absent — a default ACL must not change the survivor accounting"; return 1; }
     n=$(lane_q "SELECT count(*) FROM pg_default_acl WHERE defaclnamespace='public'::regnamespace;")
     [ "$n" = "1" ] || { echo "MEASURE_FAIL: the default ACL is absent after the restore (count=${n}) — the dump's ALTER DEFAULT PRIVILEGES line did not replay, so this arm's premise is broken."; return 1; }
@@ -3136,7 +3197,7 @@ FRESHSTUB
     [ "$n" = "0" ] || { echo "MEASURE_FAIL: the stray table survived (count=${n}) — this arm did not run a real restore."; return 1; }
     # The summary line must be BYTE-IDENTICAL to arm 9's: counts belong in the
     # census, and a `refdata=` field here would break three arms' exact pins.
-    grep -aqxF 'restore: tables=2 policies=1 functions=2 ledger_rows=3 survivors=3/3 filtered=1 mode=restore' "$out" \
+    grep -aqxF 'restore: tables=3 policies=1 functions=2 ledger_rows=3 survivors=3/3 filtered=1 mode=restore' "$out" \
       || { echo "MEASURE_FAIL: the exact summary line changed — the reference-data replay must not add a field to it"; return 1; }
     return 0
   }
@@ -3170,7 +3231,9 @@ FRESHSTUB
     run_leg "$copy" restore a23a > "$out" 2>&1 || rc=$?
     cat "$out"
     [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (a): a restore whose reference replay was deleted exited ${rc}, expected 1. This is the Phase 164.8 defect committing: a ledger that swears every seed migration applied over tables with no rows."; return 1; }
-    grep -aq 'reference table(s) public.fx_keep are EMPTY after the replay' "$out" \
+    # 164.9.1-05: the fixture allowlist names public.system_settings too, and the
+    # gate collects every empty table before it raises, so both are named.
+    grep -aq 'reference table(s) public.fx_keep, public.system_settings are EMPTY after the replay' "$out" \
       || { echo "MEASURE_FAIL (a): the abort is not the reference-data gate's, and does not NAME the empty table — some other guard fired, so the gate is still unmeasured"; return 1; }
     n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
     [ "$n" = "1" ] || { echo "MEASURE_FAIL (a): the stray table is gone (count=${n}) — the gate REFUSED but the transaction did not ROLL BACK, so TEST was left half-restored."; return 1; }
@@ -3803,6 +3866,102 @@ FRESHSTUB
     return 0
   }
 
+  # ═══ ARMS 33/34 — the analytics destination is re-normalised INSIDE the ═════
+  # transaction (Phase 164.9.1 plan 05, [164.9-TEST-ANALYTICS-URL-REARM],
+  # D-16 / D-16a / D-17). The replay restores analytics_service_url to the
+  # fixture's PROD-shaped stand-in, and `build_transaction` concatenates the
+  # normalize script's fragment after the reference-data gate.
+  #
+  # ⛔ THE EXPECTED SINK IS READ, NEVER TYPED (D-17). It comes from the emitter's
+  # own --print-sink, with its exit status checked, so this file carries no copy
+  # of it and an empty read FAILS the arm instead of being compared against an
+  # empty string. Neither arm prints the value, only a length.
+  rearm_expected_sink() {
+    local s rc=0
+    s=$(bash "$SCRIPT_DIR/test-only-normalize-analytics-url.sh" --print-sink) || rc=$?
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: --print-sink exited ${rc}; there is no expected sink to compare against, so this arm cannot pass." >&2; return 1; }
+    [ -n "$s" ] || { echo "MEASURE_FAIL: --print-sink printed nothing; an empty expected value would compare equal to an empty row." >&2; return 1; }
+    printf '%s' "$s"
+  }
+  local REARM_STANDIN='https://selftest-stand-in.up.railway.app'
+
+  # ARM 33 — GREEN, --mode restore: the COMMITTED row is the sink. The premise
+  # is checked first: before the restore the database has no system_settings at
+  # all, so the row the arm reads afterwards can only have come from this
+  # transaction, whose replay wrote the stand-in and whose fragment rewrote it.
+  # Delete the concatenation and this arm reads the stand-in and FAILS naming
+  # the row (the calibration in 164.9.1-05-SUMMARY.md).
+  arm_rearm_restore_commits_sink() {
+    local sink
+    sink=$(rearm_expected_sink) || return 1
+    setup_lane || return 1
+    local n0
+    n0=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='system_settings';")
+    [ "$n0" = "0" ] || { echo "MEASURE_FAIL: the premise is broken — public.system_settings exists before the restore, so the row read afterwards would not evidence this transaction."; return 1; }
+    local out="$SELFTEST_TMPD/a33.out" rc=0
+    arm_env restore a33 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: --run --mode restore exited ${rc}, expected 0 — the normalisation fragment, or something before it, aborted the restore"; return 1; }
+    # The DATABASE first: the committed row is the claim, the log and restore.sql
+    # only say how it got there.
+    local v
+    v=$(psql "$lane_dsn" -X -q -A -t -v ON_ERROR_STOP=1 -c "SELECT value FROM public.system_settings WHERE key = 'analytics_service_url';")
+    if [ "$v" != "$sink" ]; then
+      echo "MEASURE_FAIL: after a COMMITTED restore the analytics_service_url row in public.system_settings is NOT the loopback sink (it reads as a value of length ${#v}). The PROD-shaped destination the replay restored was committed."
+      return 1
+    fi
+    grep -aq 'rearm: the analytics_service_url normalisation fragment is in the transaction' "$out" \
+      || { echo "MEASURE_FAIL: the output does not carry the rearm note, so the fragment was never assembled into the transaction"; return 1; }
+    [ "$(grep -ac '^-- test-only-normalize-analytics-url --emit-restore-sql:' "$SELFTEST_TMPD/out-a33/restore.sql")" = "1" ] \
+      || { echo "MEASURE_FAIL: restore.sql does not carry the emitter's fragment exactly once"; return 1; }
+    grep -aqxF 'restore: tables=3 policies=1 functions=2 ledger_rows=3 survivors=3/3 filtered=1 mode=restore' "$out" \
+      || { echo "MEASURE_FAIL: the exact summary line changed — the normalisation must not add a field to it"; return 1; }
+    return 0
+  }
+
+  # ARM 34 — GREEN, --mode preflight: the SAME fragment ran and ROLLED BACK. The
+  # arm puts the stand-in row on the database BEFORE the preflight; the
+  # transaction drops public, replays, rewrites the row to the sink and then
+  # ROLLS BACK, so the stand-in must be what is there afterwards, and the census
+  # byte-compare must still hold. restore.sql is read to prove the fragment WAS
+  # in the rolled-back transaction, so this is a rollback observed and not a
+  # fragment that was simply absent.
+  arm_rearm_preflight_writes_nothing() {
+    local sink
+    sink=$(rearm_expected_sink) || return 1
+    setup_lane || return 1
+    # The row, present and PROD-shaped, BEFORE the preflight: without it there
+    # would be nothing to read back and "the preflight wrote nothing" would be
+    # unmeasured. Written inline rather than as a `fixtures/arm-<name>.sql`
+    # overlay, because the overlay directory is a pinned census of its own. The
+    # table carries the fixture dump's shape, CHECK included, with the loopback
+    # half as a port PATTERN (the sink has one copy, in the emitter, D-17).
+    psql "$lane_dsn" -X -q -v ON_ERROR_STOP=1 \
+      -c "CREATE TABLE public.system_settings (key text NOT NULL PRIMARY KEY, value text NOT NULL, CONSTRAINT system_settings_analytics_service_url_allowed CHECK (key <> 'analytics_service_url' OR value ~ '^(https://[a-z0-9][a-z0-9.-]*\\.up\\.railway\\.app|http://127\\.0\\.0\\.1:[0-9]+)\$'));" \
+      -c "INSERT INTO public.system_settings (key, value) VALUES ('analytics_service_url', '${REARM_STANDIN}');" >/dev/null
+    local v0
+    v0=$(psql "$lane_dsn" -X -q -A -t -v ON_ERROR_STOP=1 -c "SELECT value FROM public.system_settings WHERE key = 'analytics_service_url';")
+    [ "$v0" = "$REARM_STANDIN" ] || { echo "MEASURE_FAIL: the premise is broken — the overlay did not seed the stand-in row (it reads as a value of length ${#v0})."; return 1; }
+    local out="$SELFTEST_TMPD/a34.out" rc=0
+    arm_env preflight a34 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: --run --mode preflight exited ${rc}, expected 0"; return 1; }
+    grep -aq 'post-census == pre-census' "$out" \
+      || { echo "MEASURE_FAIL: the preflight did not report 'post-census == pre-census' — the census byte-compare no longer holds with the fragment in the transaction"; return 1; }
+    grep -aq 'rearm: the analytics_service_url normalisation fragment is in the transaction' "$out" \
+      || { echo "MEASURE_FAIL: the output does not carry the rearm note, so the preflight never assembled the fragment and its rollback proves nothing about it"; return 1; }
+    [ "$(grep -ac '^-- test-only-normalize-analytics-url --emit-restore-sql:' "$SELFTEST_TMPD/out-a34/restore.sql")" = "1" ] \
+      || { echo "MEASURE_FAIL: the preflight's restore.sql does not carry the emitter's fragment exactly once"; return 1; }
+    local v
+    v=$(psql "$lane_dsn" -X -q -A -t -v ON_ERROR_STOP=1 -c "SELECT value FROM public.system_settings WHERE key = 'analytics_service_url';")
+    if [ "$v" = "$sink" ]; then
+      echo "MEASURE_FAIL: after a PREFLIGHT the analytics_service_url row holds the loopback sink. The preflight WROTE to the database it exists to leave unchanged."
+      return 1
+    fi
+    [ "$v" = "$REARM_STANDIN" ] || { echo "MEASURE_FAIL: after a preflight the analytics_service_url row is neither the seeded stand-in nor the sink (a value of length ${#v}); the rollback did not restore it."; return 1; }
+    return 0
+  }
+
   run_arm "1  RED   credential absent — a missing DSN is a hard failure, never a skip" 0 arm_credential_absent
   run_arm "2  RED   identity marker NULL — refused before any write" 0 arm_marker_null
   run_arm "3  RED   identity marker names PROD — refused, loudly" 0 arm_marker_prod
@@ -3836,6 +3995,8 @@ FRESHSTUB
   run_arm "30 GREEN the extension guard is QUIET when public is unchanged — it discriminates (164.9-07)" 0 arm_ext_unchanged
   run_arm "31 RED   the reference-data value-pinning leg fires on a row restored in the WRONG STATE (164.9-07, [164.8.1-REPLAY-INSERT-ONLY-SCOPE])" 0 arm_wrongstate_red
   run_arm "32 GREEN the reference-data value-pinning leg is QUIET when the row holds its pinned value (164.9-07)" 0 arm_wrongstate_green
+  run_arm "33 GREEN restore — the analytics destination is re-normalised INSIDE the transaction and the COMMITTED row is the sink (164.9.1-05)" 0 arm_rearm_restore_commits_sink
+  run_arm "34 GREEN preflight — the same fragment runs and ROLLS BACK: the seeded stand-in survives and the census still matches (164.9.1-05)" 0 arm_rearm_preflight_writes_nothing
 
   release_mutex
 
@@ -3890,7 +4051,7 @@ FRESHSTUB
   # short: `refuse_backticks_in_txn_heredocs` arrived with its arm and the sentence
   # did not move. A narrative that miscounts or overstates its own guards is the same
   # defect class as a stale floor, so it is corrected rather than extended.
-  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — TEN refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, a credential in any of the four PUBLISHED .sql files is refused BY CLASS before the transaction runs, a short scan refuses too, and the one scoped-out pair (refdata.sql x ALTER DATABASE) is proven to be an exemption rather than a deleted class, harness calibrated)"
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — TEN refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, a credential in any of the four PUBLISHED .sql files is refused BY CLASS before the transaction runs, a short scan refuses too, and the one scoped-out pair (refdata.sql x ALTER DATABASE) is proven to be an exemption rather than a deleted class, the analytics destination is re-normalised INSIDE the transaction so a restore commits the loopback sink and a preflight rolls the same fragment back, harness calibrated)"
   return 0
 }
 
