@@ -1458,8 +1458,21 @@ describe("Critical regression guards", () => {
     // (b) they share ONE lock key (a diverged key serializes a job only
     // against itself and re-opens the exact cross-job races above), and
     // (c) the evictable group never comes back.
+    //
+    // Re-subjected by Phase 164.4.2 (DECISION B, the tracer). `sql-tests` no
+    // longer touches the shared project at all: its corpus runs on a
+    // local-stack database private to its own runner, so there is nothing
+    // for it to serialize against and it holds NO key. The one part of that
+    // job that is inherently ABOUT shared TEST — the VAC-08 repo-vs-TEST drift
+    // check — moved into its own job, `test-db-drift`, which kept the acquire
+    // step, the wait and the TTL verbatim. The D-05 intent is unchanged: the
+    // shared database is written by ONE job at a time. What changed is WHICH
+    // jobs write it, so DB_JOBS names the holders that exist, and a pin below
+    // asserts that set EXACTLY against ci.yml in both directions — a new
+    // holder that is not listed here, or `sql-tests` re-acquiring the key,
+    // fails rather than passing unexamined.
     describe("shared-test-db serialization via the advisory-lock mutex (D-05 / Phase 158)", () => {
-      const DB_JOBS = ["sql-tests", "python", "e2e-seeded"] as const;
+      const DB_JOBS = ["python", "e2e-seeded", "test-db-drift"] as const;
       // Same job-slicing idiom as the supabase-migrate describes above:
       // anchor on the start-of-line job key, stop at the next top-level one.
       const jobSlice = (src: string, job: string): string =>
@@ -1468,6 +1481,36 @@ describe("Critical regression guards", () => {
           new RegExp(`^ {2}${job}:\\s*\\n([\\s\\S]*?)(?=\\n {2}[a-z])`, "m"),
           `ci.yml: ${job} job not found`,
         );
+
+      // The holder set is MEASURED from ci.yml, never assumed. Every job whose
+      // body carries an acquire step or names the shared key must be in
+      // DB_JOBS, and every DB_JOBS entry must carry one — otherwise every
+      // per-job pin below iterates a list that silently disagrees with the
+      // workflow (a holder nobody pins, or a pin over a job that no longer
+      // holds). `sql-tests` is named explicitly because leaving the mutex is
+      // this phase's own invariant: re-acquiring would re-serialize the
+      // tracer behind the key it was moved off, erasing the measured win
+      // without any other test noticing.
+      it("the set of jobs holding the shared-test-db key is EXACTLY DB_JOBS, and sql-tests is not among them", () => {
+        const src = readText(".github/workflows/ci.yml");
+        const jobKeys = [...src.matchAll(/^ {2}([a-z0-9-]+):\s*$/gm)].map((m) => m[1]);
+        const holders = jobKeys
+          .filter((job) => {
+            const body = src.match(
+              new RegExp(`^ {2}${job}:\\s*\\n([\\s\\S]*?)(?=\\n {2}[a-z]|$(?![\\s\\S]))`, "m"),
+            )?.[1] ?? "";
+            return /- name: Acquire shared-test-db mutex|61616158/.test(body);
+          })
+          .sort();
+        expect(
+          holders,
+          `ci.yml: the jobs that hold (or name) shared-test-db key 61616158 are [${holders.join(", ")}], but DB_JOBS pins [${[...DB_JOBS].sort().join(", ")}]. A holder missing from DB_JOBS runs a mutex protocol no pin below inspects; a DB_JOBS entry that no longer holds means the list describes a mechanism that moved. Update DB_JOBS in the same commit as the ci.yml change, with its reason (D-05 / Phase 164.4.2 DECISION B)`,
+        ).toEqual([...DB_JOBS].sort());
+        expect(
+          holders.includes("sql-tests"),
+          "ci.yml sql-tests acquires (or names) shared-test-db key 61616158 again — Phase 164.4.2 DECISION B moved its corpus onto a database private to its own runner precisely so it would wait on no key; re-acquiring re-serializes the tracer behind every other holder and silently erases the measured win (8.02 min of waiting for 0.78 min of work)",
+        ).toBe(false);
+      });
 
       it("all three DB-touching jobs acquire the mutex on ONE shared advisory-lock key", () => {
         const src = readText(".github/workflows/ci.yml");
@@ -1690,6 +1733,31 @@ describe("Critical regression guards", () => {
           agg,
           /"sql-tests=\$\{\{ needs\.sql-tests\.result \}\}"/,
           "ci.yml frontend aggregator dropped the sql-tests row from its result loop — `needs:` alone only makes the aggregator WAIT for the job, it does not judge its result, so a failing sql-tests would once again gate nothing (OPS-02)",
+        );
+      });
+
+      // The same OPS-02 argument, for the job VAC-08 moved into (Phase 164.4.2
+      // DECISION B). VAC-08 used to be gated because it was a step of
+      // `sql-tests`; as a job of its own it is gated ONLY if the aggregator both
+      // waits for it and judges it. Dropping either half turns the one check
+      // that measures repo-vs-shared-TEST drift into a present-but-ungating job.
+      it("test-db-drift gates the frontend aggregator in BOTH needs: and the result loop", () => {
+        const src = readText(".github/workflows/ci.yml");
+        const agg = jobSlice(src, "frontend");
+        const needsBlock = findOrFail(
+          agg,
+          /^ {4}needs:\n(?: {6}- [\w-]+\n)+/m,
+          "ci.yml frontend aggregator: no needs: list found",
+        );
+        expectMatch(
+          needsBlock,
+          /^ {6}- test-db-drift$/m,
+          "ci.yml frontend aggregator dropped `- test-db-drift` from needs: — VAC-08 (repo-vs-shared-TEST ledger and function-body drift) regressed to present-but-ungating; without this edge the aggregator does not wait for it and a red drift check merges clean (OPS-02)",
+        );
+        expectMatch(
+          agg,
+          /"test-db-drift=\$\{\{ needs\.test-db-drift\.result \}\}"/,
+          "ci.yml frontend aggregator dropped the test-db-drift row from its result loop — `needs:` alone only makes the aggregator WAIT for the job, it does not judge its result, so a failing VAC-08 would gate nothing (OPS-02)",
         );
       });
 

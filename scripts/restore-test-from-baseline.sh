@@ -61,6 +61,15 @@
 #                             a red rather than a reader's dead end.)
 #   FRESHNESS_TS_CMD          default `git log -1 --format=%ct --`; invoked as
 #                             `$FRESHNESS_TS_CMD <path>` and must print an epoch
+#   CURRENCY_CHECK            default scripts/check-baseline-currency.mjs — the ONE
+#                             baseline CURRENCY implementation in this repo (164.4.2
+#                             plan 02). `refuse_stale_baseline` passes the three
+#                             seams immediately above through to it unchanged and
+#                             calls this script's own `fail` on a non-zero exit, so
+#                             the refusal keeps this script's message shape and exit
+#                             discipline. A relocation, not a behaviour change: same
+#                             two paths, same comparison direction, same refusal on
+#                             an unreadable epoch.
 #   RESTORE_EXPECT_MARKER_RE  default: `test` as a whole word, case-insensitive
 #   RESTORE_REFUSE_MARKER_RE  default: `prod`, case-insensitive
 #   RESTORE_OUT_DIR           where the census / survivors / transaction files are
@@ -307,6 +316,7 @@ BASELINE_DOC="${BASELINE_DOC:-supabase/schema/BASELINE.md}"
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-supabase/migrations}"
 NORMALIZER="${NORMALIZER:-scripts/sql-body-normalize.mjs}"
 FRESHNESS_TS_CMD="${FRESHNESS_TS_CMD:-git log -1 --format=%ct --}"
+CURRENCY_CHECK="${CURRENCY_CHECK:-scripts/check-baseline-currency.mjs}"
 # Whole-word `test`, case-insensitive. A marker reading "quantalyze-testing-sandbox"
 # is NOT a whole-word match and is refused: the marker is the only thing standing
 # between this script and production (CLAUDE.md § Which database am I on?).
@@ -649,16 +659,25 @@ refuse_wrong_baseline_sha() {
 # 3 — freshness. A migration committed AFTER the last baseline regeneration means
 # the dump no longer describes PROD, so restoring TEST from it would seed a ledger
 # claiming migrations the schema does not carry.
+#
+# ⛔ 164.4.2 plan 02 — RELOCATED, not rewritten. The decision logic used to live
+# inline here; it now lives in `$CURRENCY_CHECK` (scripts/check-baseline-currency.mjs
+# by default), the ONE currency implementation this repo owns (CONTEXT.md Area A).
+# BASELINE_FILE, MIGRATIONS_DIR and FRESHNESS_TS_CMD are passed through UNCHANGED —
+# same two paths, same comparison direction, same refusal on an unreadable epoch —
+# so this arm still drives the real decision logic through the new callee. A
+# non-zero exit is handed to this script's own `fail`, keeping the ::error:: shape
+# and exit-1 discipline every other refusal in this file uses.
 refuse_stale_baseline() {
-  local b_ts m_ts
-  b_ts=$($FRESHNESS_TS_CMD "$BASELINE_FILE" 2>/dev/null | head -1 | tr -d '[:space:]')
-  m_ts=$($FRESHNESS_TS_CMD "$MIGRATIONS_DIR" 2>/dev/null | head -1 | tr -d '[:space:]')
-  case "$b_ts" in ''|*[!0-9]*) fail "FRESHNESS_TS_CMD printed no epoch for ${BASELINE_FILE} (got '${b_ts}'). An unreadable timestamp is not a fresh one." ;; esac
-  case "$m_ts" in ''|*[!0-9]*) fail "FRESHNESS_TS_CMD printed no epoch for ${MIGRATIONS_DIR} (got '${m_ts}'). An unreadable timestamp is not a fresh one." ;; esac
-  if [ "$b_ts" -lt "$m_ts" ]; then
-    fail "the baseline dump is STALE: ${BASELINE_FILE} last changed at epoch ${b_ts}, ${MIGRATIONS_DIR} at ${m_ts}. A migration landed after the last dump regeneration, so this dump does not describe PROD. Regenerate the baseline first."
+  local out rc=0
+  out=$(BASELINE_FILE="$BASELINE_FILE" MIGRATIONS_DIR="$MIGRATIONS_DIR" FRESHNESS_TS_CMD="$FRESHNESS_TS_CMD" node "$CURRENCY_CHECK" 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "$out"
   fi
-  note "baseline freshness OK — baseline epoch ${b_ts} >= migrations epoch ${m_ts}"
+  # The caller must still say, in its own log, that currency was measured and
+  # what it measured — a caller that goes quiet on success cannot be
+  # distinguished from one that stopped calling.
+  note "$out"
 }
 
 # 4 — the migration corpus. Non-recursive, charset-refused before any basename is

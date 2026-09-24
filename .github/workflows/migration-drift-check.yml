@@ -75,6 +75,12 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: Production
+    # `packages: read` is for the ghcr.io login step (164.4.2-08). A job-level
+    # block REPLACES the workflow-level one, so the workflow's scopes are
+    # restated here unchanged - nothing but `packages: read` is added.
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -122,6 +128,22 @@ jobs:
       - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
         with:
           version: 2.98.2
+      - name: Log in to ghcr.io before the CLI pulls its images
+        # 164.4.2-08 checkpoint RED -> fix (2026-09-23). VAC-04 below runs
+        # `supabase db dump`, which pulls supabase/postgres; run 35911761546 failed
+        # there on `toomanyrequests`.
+        # Same step and same reasons as ci.yml's `frontend-local-stack` login: the CLI
+        # pulls from ghcr.io (setup-cli sets SUPABASE_INTERNAL_IMAGE_REGISTRY), anonymous
+        # GHCR pulls from shared runners are throttled, and the CLI reads credentials
+        # from the docker config this writes. A failed login FAILS THE JOB - it never
+        # degrades into the anonymous pull. Pinned by
+        # `src/__tests__/contracts/ghcr-login-before-image-pull.contract.test.ts`.
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
       - name: Drift check (db push dry-run)
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}

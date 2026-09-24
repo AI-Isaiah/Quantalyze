@@ -21,6 +21,11 @@ marker was lost — re-set it before writing, do not proceed on a guess.
 
 Guard coverage, measured 2026-09-01: the TS/e2e path is safe (`assertNotProductionSupabaseUrl`
 throws before any write via `getAdmin()`), and CI's `sql-tests` uses its own `TEST_SUPABASE_DB_URL`.
+⛔ **CORRECTED 2026-09-23 (Phase 164.4.2):** `sql-tests` uses **no secret** now. It runs
+the `supabase/tests` corpus on a local Supabase stack private to its runner
+(`scripts/local-stack/run.sh up`, loopback-only DSN), so it cannot reach TEST or PROD. The
+CI job that reads `TEST_SUPABASE_DB_URL` for VAC-08 is **`test-db-drift`**. The sentence
+before this note is kept as lineage.
 The **CLI** and the **browser SQL editor** have no automated guard at all. The marker above is the
 only thing standing between a dashboard tab and production.
 ⭐ **ADDENDUM 2026-09-09 (Phase 164.8) — that last sentence is now narrower, and only there.** The
@@ -82,11 +87,22 @@ about the CLI link and the marker.
   `needs.apply-test.result == 'success'` AND the `Production` environment's HUMAN reviewer gate —
   both were approved by the founder in the GitHub UI on 2026-09-08. A skipped TEST apply is
   turned into a named red check by `apply-test-verdict` rather than passing as grey.
+  ⛔ **CORRECTED 2026-09-23 (Phase 164.4.2):** the `Production` environment's HUMAN reviewer
+  gate is GONE. On 2026-09-23 the founder removed the environment's required reviewer ("it
+  should just apply. I want to develop fast"). **PROD migrations now auto-apply once
+  `apply-test` succeeds.** `needs.apply-test.result == 'success'` is still the ordering between
+  them. There is no human stop between a merge that touches `supabase/migrations/**` and its
+  PROD apply, so every review a migration needs must happen BEFORE the merge. Do not cite the
+  reviewer gate as a stop. The sentence above is kept as lineage.
 - **`scripts/vac08-ledger-baseline.txt` is EMPTY by measurement** (0 non-comment lines,
   `ENTRY_COUNT = 0`), beside an AIM and a dated lineage header. It shrinks only; it grows only by
   founder decision. VAC-08's SHA-bound reading, `sql-tests` job `102416204141` in run
   **`34335526540`** at head **`b8951132`**: `ledger presence: 0 absent, all 0 baselined (see
   scripts/vac08-ledger-baseline.txt); 0 NEW drift.`
+  ⛔ **CORRECTED 2026-09-23 (Phase 164.4.2):** that reading is historical and stays true
+  as lineage. VAC-08 was then a step of `sql-tests`. It now runs in the **`test-db-drift`**
+  job (step `VAC-08 - repo-vs-TEST ledger and function body drift`), so take any FUTURE
+  SHA-bound VAC-08 reading from `test-db-drift`, never from `sql-tests`.
 - ⚠️ **TWO NEW COUPLINGS, both accepted at decision time, both booked as
   `[164.8-PUSH-RACE-VAC08]` and routed to Phase 164.9.** (a) On a merge push, `ci.yml`'s
   `sql-tests` and `apply-test` contend for the SAME advisory key with nothing ordering them —
@@ -97,6 +113,46 @@ about the CLI link and the marker.
   (b) On a PR that ADDS a migration, gates carrying applied-ness probes are RED until merge, by
   construction, because apply-on-merge was chosen over apply-on-PR. A ledger-frontier exemption
   (PR #767) narrows (b) for VAC-08's own verdict and for nothing else.
+  ⛔ **CORRECTED 2026-09-23 (Phase 164.4.2) — both halves, originals kept as lineage.**
+  (a) The `ci.yml` job that contends with `apply-test` is now **`test-db-drift`**, not
+  `sql-tests`. `sql-tests` holds no key. The `ci.yml` jobs that do hold it are `python`,
+  `e2e-seeded` and `test-db-drift`, and each runs the schema-apply wait before its acquire
+  step. Re-measured 2026-09-23 with `grep -c 61616158`: **29×** in `ci.yml` (`test-db-drift`
+  12, `python` 9, `e2e-seeded` 8, `sql-tests` 0), **7×** in `supabase-migrate.yml`. This
+  supersedes the 27× reading above.
+  (b) **Narrowed for `sql-tests`** by DECISION F. Its lane replays a PR's own new migration
+  on top of the committed dump BEFORE merge (see the D-F note below), so its corpus gates
+  run against the PR's schema instead of being red until merge. Nothing else about (b)
+  changed. Gates that probe SHARED TEST's applied-ness — VAC-08 in `test-db-drift` among
+  them — still see the migration only after apply-on-merge.
+- ⭐ **D-F, 2026-09-23 (Phase 164.4.2 DECISION F, founder) — the local-stack lane REPLAYS
+  migrations newer than its dump.** `scripts/local-stack/run.sh up` (the lane behind
+  `sql-tests`, `frontend-local-stack` and `frontend-live-db-lane`) loads
+  `supabase/schema/baseline.sql`. It then applies, in filename order, exactly the
+  `supabase/migrations/*.sql` files the dump does not already carry, and writes a
+  migration-ledger row after each one applies. **The carried set is recorded in
+  `supabase/schema/baseline-carried-migrations.txt`**, bound to the dump's sha256.
+  `scripts/check-baseline-currency.mjs --replay-set` reads that marker. It prints the replay
+  set on a `baseline-replay:` line every run, and fails loud when the set cannot be
+  determined: marker absent or bound to another dump, or a dump carrying a migration the
+  checkout lacks. A replayed migration that errors is FATAL. Each lane job runs that seam
+  as its own step, `Baseline currency - name the migrations the lane replays on top of the
+  dump`, before booting. ⚠️ This is the LANE only. The shared-TEST restore path
+  (`restore-test-from-baseline.sh`) still REFUSES a dump older than the migrations, through
+  the gate's default mode. ⚠️ A re-dump must regenerate the marker in the SAME commit
+  (`supabase/schema/BASELINE.md`, `## Regenerating`).
+- ⭐ **2026-09-23 (Phase 164.4.2) — the local-stack lane PINS its Postgres image to
+  `17.6.1.113`, and the pin is load-bearing.** `LANE_PG_VERSION` in `scripts/local-stack/run.sh`
+  is written into the lane's `.temp/postgres-version`, and the boot asserts the running image
+  matches it. Without the pin, each Supabase CLI release picks its own image. Images
+  `17.6.1.104` through `.112` ship supautils 3.2.0, which kills the backend (signal 11) when a
+  `postgres` session `SET ROLE`s to anon/authenticated/service_role and is refused EXECUTE on a
+  function. That is the SQL self-test corpus's own idiom. supautils 3.2.2 fixed it upstream, and
+  `.113` is the first image that ships it. Every boot also runs a function-denial probe of that
+  exact shape before anything loads, so the crash shows up as a named FATAL, never as a
+  mid-corpus `server closed the connection`. ⛔ Do not move the pin below `.113`, or unpin it
+  to follow the CLI. ⚠️ Whether PROD's own image (`.104` per the drift-check log) crashes the
+  same way is UNMEASURED; `TODOS.md` `[164.4.2-PROD-SUPAUTILS-FUNCTION-DENIAL-CRASH]` owns it.
 
 ⚠️ TEST is SHARED with other people's CI. A write there is not private, and a global assertion
 there is NOT reliable — "no stuck jobs exist", "the table is empty" measure other people's rows
@@ -159,6 +215,12 @@ Two more gates live outside the aggregator: **VAC-04** (repo-vs-PROD function
 body diff) is a step in `migration-drift-check.yml` on migration PRs, and
 **VAC-08** (repo-vs-TEST ledger + body drift) runs in `sql-tests`. Both exit 1
 when their credential is absent — neither ever skips.
+⛔ **CORRECTED 2026-09-23 (Phase 164.4.2):** VAC-08 runs in the **`test-db-drift`** job
+now, not `sql-tests`. `sql-tests` moved to a database private to its own runner, and a
+private database has no drift to measure. `test-db-drift` keeps the secret, the
+schema-apply wait, the mutex and the `needs: python` stagger. Its `frontend` aggregator
+row tolerates only a skip on a fork PR or a `workflow_dispatch`. The original sentence is
+kept as lineage.
 
 ### Current reading — ⛔ SUPERSEDED. The block below is the 2026-09-07 reading and it is STALE.
 

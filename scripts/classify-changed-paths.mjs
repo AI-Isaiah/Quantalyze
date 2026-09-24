@@ -60,10 +60,11 @@
  * phase exists to remove — and this classifier is the single point of trust for
  * the whole path filter, so its own table is the first thing that must be true.
  */
-import { appendFileSync, realpathSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 /**
  * ⛔ AN ALLOW-LIST. It must never become a deny-list of code paths: under a
@@ -100,8 +101,65 @@ export function judge(changedFiles) {
   return changedFiles.every((f) => DOCS_ONLY_PREFIXES.some((p) => f.startsWith(p)));
 }
 
-function git(args) {
-  return execFileSync("git", args, { encoding: "utf8" });
+function git(args, cwd) {
+  // stderr is PIPED, never inherited (review 164.4.2 IN-02): a failing git's
+  // `fatal:` line travels inside the caller's MEASURE_FAIL instead of printing
+  // raw into the log above whatever verdict follows.
+  return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...(cwd ? { cwd } : {}) });
+}
+
+/**
+ * The merge-base ref a pull request is diffed against: `origin/<GITHUB_BASE_REF>`,
+ * or `origin/main` when the variable is absent.
+ */
+export function baseRefFor(baseRefName = process.env.GITHUB_BASE_REF) {
+  return baseRefName ? `origin/${baseRefName}` : "origin/main";
+}
+
+/**
+ * THE changed-file list against the PR's merge base — the ONE implementation in
+ * this repo (Phase 164.4.2 plan 07). Lifted out of `main()` byte-for-byte in
+ * behaviour so `scripts/sql-gate-subset.mjs` can be a second CALLER rather than
+ * a second diff: two diffs that agree today can disagree tomorrow, one gaining
+ * `--no-renames` and the other not, and a moved gate file would then read as
+ * unchanged to exactly one of them.
+ *
+ * ⛔ THROWS on an unreadable base — a `MEASURE_FAIL:` error, never `[]`. `git
+ * diff` against a missing ref exits non-zero and prints nothing, and "nothing"
+ * is exactly what "no files changed" looks like to a caller that swallows it.
+ *
+ * @param {{baseRefName?: string, cwd?: string}} [opts] — `cwd` exists for the
+ *   self-test's scratch repository; every production caller omits it.
+ * @returns {string[]} repo-relative paths, in the order git printed them
+ */
+export function changedFilesAgainstBase({ baseRefName = process.env.GITHUB_BASE_REF, cwd } = {}) {
+  const baseRef = baseRefFor(baseRefName);
+  try {
+    // ⚠️ `--no-renames` is MANDATORY, not stylistic. With rename detection a
+    // `src/x.ts` → `.planning/x.md` rename prints ONLY the destination, so a
+    // deleted code file would classify as docs-only and skip the corpus that
+    // would have noticed. `check-version-bump.mjs` carries this same hole today
+    // and is deliberately NOT being changed here — a named, routed divergence
+    // rather than drift, and a behavioural edit to an always-on gate is out of
+    // this phase's scope.
+    //
+    // The base ref is passed as an argv ELEMENT to execFileSync, never
+    // interpolated into a shell string: `GITHUB_BASE_REF` is a branch name and
+    // on a fork PR an untrusted contributor chooses it.
+    //
+    // ⚠️ `-z` is MANDATORY too (review 164.4.2 WR-01). Without it git QUOTES
+    // any path holding a non-ASCII byte, a tab, a newline, a backslash or a
+    // double quote (`core.quotePath`), so `supabase/tests/test_é.sql` prints
+    // as `"supabase/tests/test_\303\251.sql"` and every `startsWith` caller
+    // misses it. NUL-separated names are never quoted.
+    return git(["diff", "--name-only", "--no-renames", "-z", `${baseRef}...HEAD`], cwd)
+      .split("\0")
+      .filter(Boolean);
+  } catch (e) {
+    // ⛔ A gate that cannot read cannot report a pass.
+    const why = String(e.stderr ?? "").trim() || e.message;
+    throw new Error(`MEASURE_FAIL: could not read ${baseRef} — ${why}`);
+  }
 }
 
 /**
@@ -217,6 +275,92 @@ const CASES = [
       return pass;
     },
   },
+  {
+    claim: "an UNREADABLE diff base THROWS a MEASURE_FAIL — the shared diff never answers `[]` for it",
+    run: (ok) => {
+      // A real `git diff` against a ref that cannot exist: exactly the missing-
+      // base shape, where git exits non-zero and prints no names. The function
+      // is shared with scripts/sql-gate-subset.mjs, so an `[]` here would read
+      // as "no gate file changed" there and as "no file changed" here.
+      let threw = null;
+      let returned;
+      try {
+        returned = changedFilesAgainstBase({ baseRefName: "gsd-self-test-no-such-base-ref" });
+      } catch (e) {
+        threw = e;
+      }
+      let pass = ok(threw !== null, `the diff THREW rather than returning ${JSON.stringify(returned)}`);
+      pass =
+        ok(
+          threw !== null && threw.message.startsWith("MEASURE_FAIL: could not read origin/gsd-self-test-no-such-base-ref"),
+          "and the error is the named MEASURE_FAIL naming the unreadable ref",
+        ) && pass;
+      // Review 164.4.2 IN-02: git's own reason travels INSIDE the MEASURE_FAIL,
+      // and is not printed raw above a PASSED verdict where a reader triaging a
+      // red run could take it for the cause.
+      pass =
+        ok(
+          threw !== null && /fatal: /.test(threw.message),
+          `and it carries git's own stderr reason (got ${JSON.stringify(threw?.message ?? null)})`,
+        ) && pass;
+      return pass;
+    },
+  },  {
+    claim: "a path git would QUOTE (non-ASCII byte) comes back VERBATIM — never as a `\"…\"` escape",
+    run: (ok) => {
+      // Review 164.4.2 WR-01. `git diff --name-only` quotes any path holding a
+      // non-ASCII byte, a tab, a newline, a backslash or a double quote
+      // (`core.quotePath`), printing e.g. `"supabase/tests/test_\303\251.sql"`.
+      // The leading `"` defeats every `startsWith` caller: sql-gate-subset.mjs
+      // then drops the file from BOTH its gate list and its non-conforming
+      // list, and a SUBSET run silently omits it. A real scratch repository,
+      // because the defect lives in git's output format, not in our parsing.
+      const dir = mkdtempSync(join(tmpdir(), "gsd-classify-quote-"));
+      const g = (args) =>
+        execFileSync("git", ["-c", "user.name=self-test", "-c", "user.email=self-test@invalid", "-c", "commit.gpgsign=false", ...args], {
+          cwd: dir,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      const odd = "supabase/tests/test_\u00e9.sql";
+      // Silent-failure-hunter round 2, WR-07: on a machine whose git config sets
+      // `core.quotePath=false`, git never quotes this path, so the old no-`-z`
+      // code passed this row too. Pin quotePath ON for the row through git's
+      // env-config seam (it outranks every config file), and prove below that
+      // git DOES quote here without `-z` — otherwise the row measures nothing.
+      const pinned = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.quotePath", GIT_CONFIG_VALUE_0: "true" };
+      const saved = Object.fromEntries(Object.keys(pinned).map((k) => [k, process.env[k]]));
+      Object.assign(process.env, pinned);
+      try {
+        g(["init", "-q"]);
+        writeFileSync(join(dir, "base.txt"), "base\n");
+        g(["add", "base.txt"]);
+        g(["commit", "-q", "-m", "base"]);
+        g(["update-ref", "refs/remotes/origin/gsd-self-test-base", "HEAD"]);
+        mkdirSync(join(dir, "supabase/tests"), { recursive: true });
+        writeFileSync(join(dir, odd), "select 1;\n");
+        writeFileSync(join(dir, "supabase/tests/test_ok.sql"), "select 1;\n");
+        g(["add", "."]);
+        g(["commit", "-q", "-m", "head"]);
+        const quoted = g(["diff", "--name-only", "--no-renames", "origin/gsd-self-test-base...HEAD"]);
+        let pass = ok(
+          quoted.includes('"supabase/tests/test_\\303\\251.sql"'),
+          `CALIBRATION: without -z, git QUOTES the path here, so this row can fail (got ${JSON.stringify(quoted)})`,
+        );
+        const files = changedFilesAgainstBase({ baseRefName: "gsd-self-test-base", cwd: dir });
+        pass = ok(files.length === 2, `CALIBRATION: both committed paths came back (got ${JSON.stringify(files)})`) && pass;
+        pass = ok(files.includes(odd), "the non-ASCII gate path is returned byte-verbatim") && pass;
+        pass = ok(!files.some((f) => f.startsWith('"')), "no returned path is a git-quoted escape") && pass;
+        return pass;
+      } finally {
+        for (const [k, v] of Object.entries(saved)) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
 ];
 
 function selfTest() {
@@ -270,26 +414,14 @@ function main() {
     return 0;
   }
 
-  const baseRef = process.env.GITHUB_BASE_REF ? `origin/${process.env.GITHUB_BASE_REF}` : "origin/main";
+  const baseRef = baseRefFor();
   let changedFiles;
   try {
-    // ⚠️ `--no-renames` is MANDATORY, not stylistic. With rename detection a
-    // `src/x.ts` → `.planning/x.md` rename prints ONLY the destination, so a
-    // deleted code file would classify as docs-only and skip the corpus that
-    // would have noticed. `check-version-bump.mjs` carries this same hole today
-    // and is deliberately NOT being changed here — a named, routed divergence
-    // rather than drift, and a behavioural edit to an always-on gate is out of
-    // this phase's scope.
-    //
-    // The base ref is passed as an argv ELEMENT to execFileSync, never
-    // interpolated into a shell string: `GITHUB_BASE_REF` is a branch name and
-    // on a fork PR an untrusted contributor chooses it.
-    changedFiles = git(["diff", "--name-only", "--no-renames", `${baseRef}...HEAD`])
-      .split("\n")
-      .filter(Boolean);
+    changedFiles = changedFilesAgainstBase();
   } catch (e) {
-    // ⛔ A gate that cannot read cannot report a pass.
-    console.error(`MEASURE_FAIL: could not read ${baseRef} — ${e.message}`);
+    // ⛔ A gate that cannot read cannot report a pass. The message is the
+    // `MEASURE_FAIL: could not read <ref> — <cause>` line, printed as before.
+    console.error(e.message);
     return 1;
   }
 
