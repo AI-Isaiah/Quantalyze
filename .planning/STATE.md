@@ -4,18 +4,18 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "164.6"
 current_phase_name: "GATE-HYGIENE — pruned to criteria 2, 3, 4"
-status: "Phase 164.9 shipped — PR #837"
+status: "Phase 166 in code review; wizard fix + baseline re-dump shipping"
 stopped_at: Completed 164.6-05-PLAN.md
-last_updated: "2026-09-24T05:45:00.000Z"
+last_updated: "2026-09-24T21:30:00.000Z"
 last_activity: 2026-09-24
-last_activity_desc: "Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction. Phase 167 CREDTRUST context locked 2026-09-22. Plan 167-01 (wizard SIGN_IN_FAILED mint) shipped. Plan 167-02 (D-09/D-10, six retry-disposition guards on allocator_positions.py's MT5/sFOX arms + AST roster case) shipped this session, commits 5c48916a + 26c83dc3 — see 167-02-SUMMARY.md."
+last_activity_desc: "2026-09-24: 164.6 (v0.90.0.0), 167.1, 167.2 shipped; 166 executed 10/10 (v0.91.0.0) and in review; PROD baseline re-dumped after the 164.6 apply (v0.90.0.1). Census by VERIFICATION status==passed across all worktrees: 35/54 phases."
 state_head: 93d2ab394092fca23d41972ae4e573f84d58fe99
 progress:
-  total_phases: 50
-  completed_phases: 32
-  total_plans: 254
-  completed_plans: 249
-  percent: 64
+  total_phases: 54
+  completed_phases: 35
+  total_plans: 310
+  completed_plans: 299
+  percent: 65
 ---
 
 ## ⭐ STATE lineage
