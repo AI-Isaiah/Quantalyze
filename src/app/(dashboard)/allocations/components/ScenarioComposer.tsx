@@ -4734,8 +4734,10 @@ export function ScenarioComposer({
   // Review WR-02 — the note that qualifies the field's value is its accessible
   // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the
   // qualification with the number and not only in linear reading order.
-  // Derived from the SAME two flags that render the notes, so it can never
-  // point at an element that is not on screen. No role or live region is
+  // Derived from the SAME flags that render the notes, so it can never point
+  // at an element that is not on screen. Review round 3 IN-01: that is three
+  // contributors since the D-18 reopen, not two: State A, the override note,
+  // and State C's hint. No role or live region is
   // added (D-09); this supersedes UI-SPEC U-07's "no aria-describedby".
   // D-18 REOPENED: in state 4 the blank field's description is the hint that
   // now names the live total and its untrusted part (only when it does, so a

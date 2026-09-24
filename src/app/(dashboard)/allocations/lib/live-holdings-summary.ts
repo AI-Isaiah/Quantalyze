@@ -161,6 +161,10 @@ export interface LiveHoldingsSummary {
  * composer (review round 2 WR-01): `excludedUntrusted` renders nowhere until
  * the founder answers D-06, so a wrong direction or a dropped argument here
  * would ship green unless the derivation is pinned where it is written.
+ * ⭐ SUPERSEDED 2026-09-24 (D-06 answered (b); review round 3 IN-01): the
+ * composer now renders `excludedUntrusted` as "excludes $Y from keys needing
+ * attention". The sentence above is kept as lineage. The pin matters more
+ * now: a wrong direction here would mis-state a rendered figure.
  *
  * ⛔ A MISSING field yields NO manager-side key (review round 2 WR-06). Reading
  * an absent `allocatorEligibleApiKeyIds` as `[]` would make every eligible key
