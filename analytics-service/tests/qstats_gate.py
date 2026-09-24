@@ -92,12 +92,12 @@ EXEMPT: dict[str, str] = {
 MIRRORED: dict[str, tuple[str, str]] = {
     "recovery_factor": (
         "_recovery_factor",
-        "max_drawdown ignores prepare_returns (transitive _prepare_prices)",
+        "max_drawdown (which runs _prepare_prices) is called without the kwarg",
     ),
     "ulcer_index": ("_ulcer_index", "no prepare_returns kwarg; to_drawdown_series guesses"),
     "ulcer_performance_index": (
         "_ulcer_performance_index",
-        "no prepare_returns kwarg; ulcer_index/comp guess",
+        "no prepare_returns kwarg; ulcer_index and comp guess",
     ),
     "kelly_criterion": (
         "_kelly_criterion",
@@ -111,8 +111,14 @@ MIRRORED: dict[str, tuple[str, str]] = {
         "_common_sense_ratio",
         "profit_factor/tail_ratio called without forwarding the kwarg",
     ),
-    "cpc_index": ("_cpc_index", "profit_factor/win_rate/payoff_ratio not forwarded the kwarg"),
-    "serenity_index": ("_serenity_index", "no prepare_returns kwarg; drawdown VaR guesses"),
+    "cpc_index": (
+        "_cpc_index",
+        "profit_factor/win_rate/win_loss_ratio called without forwarding the kwarg",
+    ),
+    "serenity_index": (
+        "_serenity_index",
+        "no prepare_returns kwarg; to_drawdown_series and cvar guess",
+    ),
     "r_squared": ("_r_squared", "benchmark leg runs _prepare_benchmark unconditionally"),
     "greeks": (
         "_greeks_no_guess",
@@ -120,7 +126,7 @@ MIRRORED: dict[str, tuple[str, str]] = {
     ),
     "rolling_greeks": (
         "_rolling_greeks",
-        "both legs prepared with the guess; D-17 windowed alpha intercept",
+        "benchmark leg runs _prepare_benchmark unconditionally; D-17 windowed alpha intercept",
     ),
 }
 
@@ -499,3 +505,67 @@ def scan_tree(
         census.extend(c)
         nodes += s
     return violations, census, nodes, frozenset(importers)
+
+
+#: The one module whose text the reconciliation line counts (D-07, research P-2).
+RECONCILED_MODULE = "services/metrics.py"
+
+
+def mirror_rows(root: Path = SERVICE_ROOT) -> list[CensusRow]:
+    """One ``inline`` census row per ``MIRRORED`` entry, verified against the real module.
+
+    The arm is ``inline`` only when the mirror is a module-level function of
+    ``services/metrics.py``; a renamed or deleted mirror is printed as ``MISSING``
+    (and ``test_qstats_gate_census_accounts_for_every_node`` turns RED on it).
+    """
+    tree = ast.parse((root / RECONCILED_MODULE).read_text(encoding="utf-8"))
+    defined = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return [
+        CensusRow(
+            RECONCILED_MODULE,
+            mirror,
+            qs_name,
+            "mirror",
+            "inline" if mirror in defined else "MISSING",
+            reason,
+        )
+        for qs_name, (mirror, reason) in sorted(MIRRORED.items())
+    ]
+
+
+def census_lines(root: Path = SERVICE_ROOT) -> list[str]:
+    """The lines ``pytest_terminal_summary`` writes on every run, green or red (D-07).
+
+    Header, one row per quantstats node, one row per mirror, any violations, then the
+    30-vs-9 reconciliation. A pure function of source text, so the xdist controller
+    computes it directly with no worker aggregation.
+    """
+    violations, census, nodes, importers = scan_tree(root)
+    mirrors = mirror_rows(root)
+    rows = census + mirrors
+    arms = {arm: sum(r.arm == arm for r in rows) for arm in ("kwarg-proven", "exempt", "inline")}
+    lines = [
+        "qstats-gate census: "
+        f"{nodes} quantstats node(s) in {', '.join(sorted(importers)) or 'NO module'}, "
+        f"{len(mirrors)} mirror(s), {len(violations)} violation(s); "
+        f"arms kwarg-proven={arms['kwarg-proven']} exempt={arms['exempt']} "
+        f"inline={arms['inline']}"
+    ]
+    lines.extend(
+        f"  {r.module} | {r.function} | {r.qs_name} | {r.shape} | {r.arm} | {r.reason}"
+        for r in rows
+    )
+    lines.extend(
+        f"  VIOLATION {v.module}:{v.function}:{v.qs_name}:{v.lineno} | {v.shape} | {v.reason}"
+        for v in violations
+    )
+    text = (root / RECONCILED_MODULE).read_text(encoding="utf-8")
+    module_nodes = scan_source(RECONCILED_MODULE, text)[2]
+    lines.append(
+        "qstats-gate reconciliation: "
+        f"{RECONCILED_MODULE} has {text.count('qs.stats.')} text occurrence(s) of "
+        f"'qs.stats.' vs {module_nodes} AST quantstats node(s); the text count "
+        "includes comments and docstrings, which cannot call anything "
+        f"(phase start: {PHASE_START_TEXT_OCCURRENCES} vs {PHASE_START_AST_NODES})"
+    )
+    return lines

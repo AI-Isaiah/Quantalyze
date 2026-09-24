@@ -310,3 +310,13 @@ def live_db_retry_summary_line() -> str:
 
 def pytest_terminal_summary(terminalreporter):
     terminalreporter.write_line(live_db_retry_summary_line())
+    # Phase 166 D-07: the quantstats AST gate's census, printed on EVERY run. A
+    # print() inside a passing test is captured and never reaches a green CI log
+    # (166-RESEARCH Pitfall 5), so the census is written here. It is a pure
+    # function of source text, so the controller computes it directly; no xdist
+    # aggregation is needed. Extend THIS hook: a second definition in this file
+    # would silently shadow it.
+    from tests.qstats_gate import census_lines
+
+    for line in census_lines():
+        terminalreporter.write_line(line)
