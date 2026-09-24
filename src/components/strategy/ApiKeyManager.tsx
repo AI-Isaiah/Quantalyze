@@ -383,11 +383,17 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     } else if (status === "error") {
       endAttempt(attempt);
       setSyncStatus("error");
-      // FINDING-8: when the poller times out (SyncProgress fires onStatusChange("error")
-      // after POLL_MAX_ATTEMPTS without any syncError from the catch block),
-      // syncError stays null and the UI shows "Sync failed" with no detail text.
-      // Fill a default message for the timeout case so the user has actionable context.
-      setSyncError((prev) => prev ?? "Analytics computation timed out. Please retry or contact support.");
+      // Phase 167.2 / KCS-22 (lineage: FINDING-8). This arm used to fill a
+      // default timeout sentence whenever syncError was null, because the
+      // poller's give-up arrived here as "error". A give-up is now `no_result`
+      // (the arm above), so the only thing that reaches this arm from the panel
+      // is an evidenced failed row, and it carries its own reason: the row's
+      // server-scrubbed `computation_error`, the field the wizard's
+      // SyncPreviewStep already renders. With no reason the panel shows "Sync
+      // failed" with no detail line; a timeout claim with no timeout behind it
+      // was a false line. An enqueue failure's message (set by
+      // `handleSyncTrades`' catch) is never overwritten.
+      setSyncError((prev) => prev ?? info?.computationError ?? null);
     } else {
       setSyncStatus(status);
     }

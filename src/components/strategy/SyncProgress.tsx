@@ -342,7 +342,7 @@ export function SyncProgress({
     schedule: POLL_INTERVAL_MS,
     maxAttempts: POLL_MAX_ATTEMPTS,
     missingRowGracePolls: MISSING_ROW_GRACE_POLLS,
-    onStatus: (db, _error, computedAt) => {
+    onStatus: (db, computationError, computedAt) => {
       // audit-2026-05-07 C-0142: route DB status → UI status via the
       // discriminated converter. We only forward states that map cleanly to a
       // UI-visible transition (computing / complete / error); "idle" (from DB
@@ -378,9 +378,11 @@ export function SyncProgress({
           (computedAt ?? null) !== evidenceBaseline.computedAt;
         if (!sawComputingRef.current && !changed) return;
         // An evidenced failure is forwarded as it stands: it needs no job-state
-        // read (KCS-18 covers successes only).
+        // read (KCS-18 covers successes only). Phase 167.2 / KCS-22: it carries
+        // the row's server-scrubbed `computation_error`, the caller's only
+        // detail for it (React renders it as escaped text).
         if (next === "error") {
-          onStatusChange?.(next);
+          onStatusChange?.(next, { computationError });
           return;
         }
         // Phase 167.2 / KCS-18 — THE JOB-STATE CHECK (RESEARCH P1). The SQL
