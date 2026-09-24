@@ -1,7 +1,7 @@
 // SECURITY BOUNDARY:
 // This is a PUBLIC, sessionless route and the ONLY tokenized factsheet surface
 // (ruling D-04 — the tearsheet and PDF routes are deliberately OUT of scope and
-// still 404 for a recipient). Three reads happen here, all on the admin
+// still 404 for a recipient). Four reads happen here, all on the admin
 // (service_role) transport:
 //   (1) `strategy_shares(strategy_id, generation, nonce)` filtered to
 //       `revoked_at IS NULL` — the candidate set for the constant-time scan.
@@ -22,12 +22,17 @@
 //       card says. The five fields are exactly what `deriveComputeState` needs:
 //       never `last_error`, never `error_kind`, never `metadata` whole (it
 //       carries source and correlation ids), never owner identity.
+//   (4) `strategy_keys` — a head-only COUNT (`countCompositeMembers`) filtered
+//       to `strategy_id = <the matched strategy id>`, inside (3)'s pending
+//       branch only. It returns no rows and no columns, only whether the
+//       strategy has composite members, so (3)'s job selection can prefer the
+//       stitch job (Phase 167.2 review IN-03/IN-05). Added 2026-09-24.
 //
 // ⛔ THE CONSTANT-TIME HMAC MATCH IS THE AUTHORIZATION. There is no session, no
 // RLS gate, and no status predicate on the payload read — deliberately, because
 // the whole point is that an UNPUBLISHED strategy renders for the holder of a
 // valid capability. If you are about to add a query here, ask what bounds it:
-// (1) is bounded by `revoked_at IS NULL`, (2) and (3) are bounded by the
+// (1) is bounded by `revoked_at IS NULL`, (2), (3) and (4) are bounded by the
 // matched strategy id. NEVER read an arbitrary id, never widen the projection to owner
 // identity / api_keys / holdings / AUM.
 //

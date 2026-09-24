@@ -19,6 +19,9 @@
   `grep -n "167\.2\.1" .planning/ROADMAP.md` gives 0 hits, so that phase is
   not in the ROADMAP yet. The orchestrator has to add it (`/gsd-phase`). This
   entry is the only record until then.
+  ⭐ **CORRECTED 2026-09-24 (orchestrator):** that reading predates PR #850. Phase 167.2.1
+  FACTSHEETBUILDABLE is now in the ROADMAP (merged into this branch), and this item was added to
+  its success criteria as (5) the same day. The lines above are kept as lineage.
 
 ## Found during 167.2-07 (2026-09-24)
 
