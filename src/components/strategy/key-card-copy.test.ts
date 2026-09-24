@@ -16,7 +16,10 @@ import { describe, it, expect } from "vitest";
 import {
   addKeyBlockedReason,
   formatBoundDuration,
+  DELETE_COMPOSITE_MEMBER_COPY,
+  EMPTY_NOLINK_COPY,
   PANEL_STOP_COPY,
+  SHAPE_UNKNOWN_CARD_NOTE,
   SYNC_SLOW_NOTE,
 } from "./key-card-copy";
 
@@ -114,6 +117,24 @@ describe("KCS-SLOW (167.2-REVIEW WR-07): the in-flight panel names its own limit
   it("KCS-SLOW: the line and the poll budget it states", () => {
     expect(SYNC_SLOW_NOTE).toBe(
       "Large accounts can take longer. This panel checks for 2 minutes; the sync may still be running after that.",
+    );
+  });
+});
+
+describe("Review-fix round 1 (2026-09-24): the S3 strings authored for the review findings", () => {
+  it("KCS-SHAPE-UNKNOWN (SFH H-2)", () => {
+    expect(SHAPE_UNKNOWN_CARD_NOTE).toBe(
+      "We could not confirm how this strategy's keys are set up, so syncing and adding keys are paused on this page. Reload this page to try again.",
+    );
+  });
+
+  it("KCS-EMPTY-NOLINK (SFH H-2)", () => {
+    expect(EMPTY_NOLINK_COPY).toBe("No API keys connected.");
+  });
+
+  it("KCS-DELETE-COMPOSITE (REVIEW WR-05)", () => {
+    expect(DELETE_COMPOSITE_MEMBER_COPY).toBe(
+      "This key is part of a composite strategy, so it is not deleted here. Contact support@quantalyze.com to change which keys the composite uses.",
     );
   });
 });

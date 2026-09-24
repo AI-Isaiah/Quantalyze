@@ -82,6 +82,12 @@ const apiKeyLookupMock = vi.fn();
 // computed_at. The real evidence gate lives in `SyncProgress`, which this file
 // mocks; it is exercised in ApiKeyManager.poll.test.tsx.
 const analyticsBaselineMock = vi.fn();
+// 167.2-REVIEW WR-05: before a Delete, `handleDeleteKey` asks whether the key
+// is a composite member with `from("strategy_keys").select("strategy_id")
+// .eq("api_key_id", …)`. The spy receives the key id; its default answer is
+// "a member of nothing", so every Delete case that predates the guard is
+// unchanged, and a case that means "member" has to say so.
+const strategyKeysMemberMock = vi.fn();
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -106,9 +112,11 @@ vi.mock("@/lib/supabase/client", () => ({
                       },
                     ),
                 }
-              : Promise.resolve(
-                  apiKeyLookupMock(table, val) ?? { data: [{ id: val }], error: null },
-                ),
+              : table === "strategy_keys"
+                ? Promise.resolve(strategyKeysMemberMock(val) ?? { data: [], error: null })
+                : Promise.resolve(
+                    apiKeyLookupMock(table, val) ?? { data: [{ id: val }], error: null },
+                  ),
         }),
         // Retained as the negative oracle — see apiKeyInsertMock above.
         insert: (row: unknown) => {
@@ -2983,6 +2991,57 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       expect(apiKeyLookupMock).toHaveBeenCalledWith("api_keys", "key-a");
       expect(screen.queryByText(/Failed to delete key/)).not.toBeInTheDocument();
       expect(screen.getByTestId("api-key-card-key-b")).toBeInTheDocument();
+    });
+
+    // ── 167.2-REVIEW WR-05: a composite member is never deleted from a card ──
+    //
+    // `strategy_keys.api_key_id` cascades on an api_keys DELETE, and the DB
+    // guard refuses only for a PUBLISHED composite. So a Delete on a member of
+    // a draft or pending composite silently shrank it (the last member made it
+    // "unlinked"), from ANY card that lists the key, while KCS23-COMPOSITE says
+    // the card does not change which keys a composite uses. Orchestrator
+    // decision: refuse, on every card, with authored copy pointing at support.
+    // Hand-typed from the UI-SPEC review-fix row KCS-DELETE-COMPOSITE.
+    const DELETE_COMPOSITE_ORACLE =
+      "This key is part of a composite strategy, so it is not deleted here. Contact support@quantalyze.com to change which keys the composite uses.";
+
+    it("WR05-MEMBER-REFUSED: a key that is a composite member is not deleted, the card stays, and the refusal says why", async () => {
+      routeFetch();
+      const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
+      await renderRows([keyA]);
+      strategyKeysMemberMock.mockReturnValue({ data: [{ strategy_id: "strat-composite-x" }], error: null });
+      try {
+        await deleteKey("key-a");
+        await waitFor(() => {
+          expect(screen.getByText(DELETE_COMPOSITE_ORACLE)).toBeInTheDocument();
+        });
+        expect(strategyKeysMemberMock).toHaveBeenCalledWith("key-a");
+        expect(apiKeyDeleteMock).not.toHaveBeenCalled();
+        expect(screen.getByTestId("api-key-card-key-a")).toBeInTheDocument();
+      } finally {
+        strategyKeysMemberMock.mockReset();
+      }
+    });
+
+    it("WR05-MEMBERSHIP-UNREADABLE: a membership read that fails refuses the Delete with the authored failure copy (fail closed)", async () => {
+      routeFetch();
+      const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
+      await renderRows([keyA]);
+      strategyKeysMemberMock.mockReturnValue({ data: null, error: { message: "RAW-PG-DETAIL-sentinel" } });
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await deleteKey("key-a");
+        await waitFor(() => {
+          expect(
+            screen.getByText("Failed to delete key. Try again, and contact support if it keeps failing."),
+          ).toBeInTheDocument();
+        });
+        expect(apiKeyDeleteMock).not.toHaveBeenCalled();
+        expect(screen.queryByText(/RAW-PG-DETAIL-sentinel/)).not.toBeInTheDocument();
+      } finally {
+        consoleError.mockRestore();
+        strategyKeysMemberMock.mockReset();
+      }
     });
 
     // ── Retry after a post-add failure targets the key that failed (WR-01) ──

@@ -200,3 +200,14 @@ export const SHAPE_UNKNOWN_CARD_NOTE =
  * card does not offer.
  */
 export const EMPTY_NOLINK_COPY = "No API keys connected.";
+
+/**
+ * KCS-DELETE-COMPOSITE (UI-SPEC § Review-fix amendments, 167.2-REVIEW WR-05).
+ * A Delete refused because the key is a member of a composite strategy. The
+ * `strategy_keys` row cascades on the key's DELETE and the database refuses
+ * only for a PUBLISHED composite, so an unrefused Delete silently shrank a
+ * draft composite. `support@quantalyze.com` is plain text, as in
+ * KCS23-COMPOSITE.
+ */
+export const DELETE_COMPOSITE_MEMBER_COPY =
+  "This key is part of a composite strategy, so it is not deleted here. Contact support@quantalyze.com to change which keys the composite uses.";

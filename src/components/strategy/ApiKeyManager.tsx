@@ -10,6 +10,7 @@ import { ApiKeyForm } from "./ApiKeyForm";
 import {
   addKeyBlockedReason,
   COMPOSITE_CARD_NOTE,
+  DELETE_COMPOSITE_MEMBER_COPY,
   EMPTY_NOLINK_COPY,
   SHAPE_UNKNOWN_CARD_NOTE,
   ENQUEUE_BOUND_MS,
@@ -27,6 +28,7 @@ import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus"
 import type { ApiKey } from "@/lib/types";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 import { isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 interface ApiKeyManagerProps {
   strategyId: string;
@@ -783,6 +785,38 @@ export function ApiKeyManager({
 
   async function handleDeleteKey(keyId: string) {
     const supabase = createClient();
+    // 167.2-REVIEW WR-05: a composite member is never deleted from a card.
+    // `strategy_keys.api_key_id` cascades on this DELETE, and the database's
+    // integrity guard refuses only for a PUBLISHED composite, so deleting a
+    // member of a draft or pending composite silently shrank it (the last
+    // member turned it "unlinked"), from ANY card that lists the key, while
+    // KCS23-COMPOSITE says the card does not change which keys a composite
+    // uses. Orchestrator decision (autonomous round): REFUSE, on every card,
+    // rather than hide the control. Hiding it only on a composite card would
+    // leave the same cascade one click away on any single-key card listing the
+    // key. One owner-scoped read (RLS `strategy_keys_owner`), bounded by the
+    // key's own memberships. A read that fails refuses too (fail closed): an
+    // unknown membership cannot vouch for the delete.
+    const { data: memberships, error: membershipError } = await (
+      supabase as unknown as SupabaseClient
+    )
+      .from("strategy_keys")
+      .select("strategy_id")
+      .eq("api_key_id", keyId);
+    if (membershipError || !Array.isArray(memberships)) {
+      setConfirmDelete(null);
+      console.error(
+        "[ApiKeyManager] composite membership read failed; the delete is refused:",
+        membershipError?.message ?? "no rows array and no error",
+      );
+      setError(DELETE_FAILED_COPY);
+      return;
+    }
+    if (memberships.length > 0) {
+      setConfirmDelete(null);
+      setError(DELETE_COMPOSITE_MEMBER_COPY);
+      return;
+    }
     // 167-06 fix round: `.select("id")` returns the rows the DELETE removed.
     // Without it, a delete that RLS filtered down to zero rows answers with no
     // error, the row was dropped locally, R5 retired a withheld success, and
