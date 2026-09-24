@@ -862,6 +862,32 @@ Plans:
 
 ⭐ **SCOPE ADDED 2026-09-23 BY FOUNDER DECISION (DECISION G in `164.4.2-CONTEXT.md`):** the lane replays the PROD objects that live OUTSIDE `public`, which the schema-only dump does not carry: the trigger on `auth.users` and the `pg_cron` job registrations (24 migrations). They are extracted from the migration files, and a check fails the boot if the lane's set drifts from what the migrations declare. Measured by plan 08's SHA-bound CI read: once the lane ACL defect was fixed, 8 of 76 SQL files still failed on the lane for exactly this reason. Plan 04's probe measured that the lane HOSTS these schemas, not that it carries the objects registered in them. Realised as a new plan, executed before plan 08's CI checkpoint is re-read.
 
+### Phase 164.4.2.1: DRIFTOFFMUTEX — `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work, so a merge push's critical path falls back inside its BEFORE band (INSERTED)
+
+**Goal:** A merge push to `main` is no slower than before Phase 164.4.2. `test-db-drift` (VAC-08, read-only against shared TEST's migration ledger and function bodies) stops queueing behind `python` and `e2e-seeded` for the advisory key, without weakening VAC-08's verdict and without breaking the ordering against `supabase-migrate.yml`'s `apply-test`.
+**Requirements**: the Phase 164.4.2 speed goal, clauses (a) and (c) of `164.4.2-MEASUREMENT.md`.
+**Depends on:** Phase 164.4.2
+**Plans:** 0 plans
+
+⭐ **Founder decision, 2026-09-24 (AskUserQuestion): "Book the phase if it holds."** It held.
+
+**Evidence.** `164.4.2-MEASUREMENT.md` `## AFTER`, merge-push runs 1–5 (CI `35939061930`, `35943402509`, `35943407413`, `35957479474`, `35958026743`):
+- (a) critical path: FAIL. Non-degenerate run-totals were 18m26s, 32m32s and 32m30s, against a band of 16m18s–18m50s.
+- (b) `sql-tests` job: PASS, about 2m20s.
+- (c) combined lock-wait: FAIL. It was 13m26s, 39m51s and 27m17s, against a band of 12m05s–14m56s.
+
+`test-db-drift` waited up to 20m31s to hold the key for seconds of work. Phase 164.4.2 moved the wait off `sql-tests` without removing it.
+
+## Success Criteria
+1. `test-db-drift` no longer holds, or waits for, advisory key `61616158` for its read-only VAC-08 reads. Alternatively, it waits in a way that is off the merge push's critical path. The choice is recorded with its reason.
+2. VAC-08's verdict is unchanged: it still reads shared TEST after `apply-test`'s schema apply, a red stays red, and a missing credential still exits 1.
+3. The five non-degenerate merge-push runs after the merge meet 164.4.2's clauses (a) and (c), measured with that file's own method and bands.
+4. No timeout is raised, no gate is skipped and no job leaves the `frontend` aggregator.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.4.2.1 to break down)
+
 ### Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral (INSERTED)
 
 **Goal:** The pg-lane can host pg_cron, so the `[REDUNDER-PGCRON]` deferral is RETIRED
