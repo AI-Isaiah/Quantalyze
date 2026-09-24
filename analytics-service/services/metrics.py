@@ -216,22 +216,28 @@ def _format_series_points(
 
 def _safe_qstats_scalar(
     name: str,
-    fn: Any,
+    fn: Callable[[pd.Series], float],
     returns: pd.Series,
     returns_len: int | None,
 ) -> float | None:
-    """Run a single-arg qs.stats scalar, returning None and logging on failure.
+    """Run one single-arg scalar mirror, returning None and logging on failure.
+
+    Since Phase 166 every ``fn`` is a module mirror from
+    ``_QSTATS_SINGLE_ARG_SCALARS`` (quantstats 0.0.81 minus the price guess),
+    not a ``qs.stats`` function. Its only remaining quantstats calls are the
+    kwarg-proven leaves.
 
     Failure-soft contract (H-0710 / H-0713 / H-0723): one failing scalar must
-    not take down the other nine. Logs include the scalar `name` so operators
+    not take down the others. Logs include the scalar `name` so operators
     can spot silent regressions in Railway logs without inferring from latency.
 
     PR #181 take-2 red-team F16: traceback attachment is process-deduped via
-    `_should_emit_traceback` so a fundamental qs upgrade tripping multiple
-    scalars doesn't multiply Railway retention pressure linearly with call
-    volume. First occurrence per (scalar_name, exc-type) pair emits
-    exc_info=True; subsequent occurrences emit the WARNING text without
-    traceback. Operators still get the full first-incident traceback.
+    `_should_emit_traceback`, so one defect shared by several mirrors (for
+    example a pandas or quantstats-leaf upgrade that changes a return shape)
+    does not multiply Railway retention pressure linearly with call volume.
+    First occurrence per (scalar_name, exc-type) pair emits exc_info=True;
+    subsequent occurrences emit the WARNING text without traceback. Operators
+    still get the full first-incident traceback.
     """
     try:
         return _safe_float(fn(returns))
