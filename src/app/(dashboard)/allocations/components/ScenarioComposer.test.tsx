@@ -15401,6 +15401,8 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
   // Synthetic identifiers only — the repo and `.planning/` are public.
   const AT_KEY_TRUSTED = "aumtrust-key-a";
   const AT_KEY_SIGN_IN_FAILED = "aumtrust-key-b";
+  /** The D-06 pin's key. Its own id, so the name says the status it carries. */
+  const AT_KEY_REVOKED = "aumtrust-key-d";
   const AT_ALL_KEYS = [AT_KEY_TRUSTED, AT_KEY_SIGN_IN_FAILED];
 
   // ── THE HAND-COMPUTED BOOK ────────────────────────────────────────────────
@@ -16115,7 +16117,7 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
         spotUsd: AT_TRUSTED_USD,
       },
       {
-        id: AT_KEY_SIGN_IN_FAILED,
+        id: AT_KEY_REVOKED,
         status: "revoked",
         venue: "okx",
         symbol: "AUMTRUST-B",
@@ -16125,10 +16127,8 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     ]);
     expectDistinctTriples(payload);
     // Fixture self-proof: the revoked key is in neither set.
-    expect(payload.allocatorEligibleApiKeyIds).not.toContain(
-      AT_KEY_SIGN_IN_FAILED,
-    );
-    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_SIGN_IN_FAILED);
+    expect(payload.allocatorEligibleApiKeyIds).not.toContain(AT_KEY_REVOKED);
+    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_REVOKED);
     renderAt(payload);
 
     expect(aumField().value).toBe(String(AT_TRUSTED_USD));
