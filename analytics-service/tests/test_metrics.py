@@ -3123,13 +3123,18 @@ def _q166_golden_with_nan_days(s: pd.Series) -> pd.Series:
 
 # (metrics_json key, LIVE quantstats 0.0.81 oracle on the raw series). On the
 # benign fixtures below the price guess cannot fire, so live quantstats is the
-# non-self-referential correctness anchor (D-08). Plan 166-04 extends this SAME
-# tuple with its four loss/Sharpe-family keys.
+# non-self-referential correctness anchor (D-08). The first four rows are the
+# drawdown family (plan 166-03), the last four the loss/Sharpe family (plan
+# 166-04).
 _Q166_PARITY_SITES = (
     ("recovery_factor", lambda s: qs.stats.recovery_factor(s)),
     ("ulcer_index", lambda s: qs.stats.ulcer_index(s)),
     ("upi", lambda s: qs.stats.ulcer_performance_index(s)),
     ("serenity_index", lambda s: qs.stats.serenity_index(s)),
+    ("kelly_criterion", lambda s: qs.stats.kelly_criterion(s)),
+    ("probabilistic_sharpe_ratio", lambda s: qs.stats.probabilistic_ratio(s)),
+    ("common_sense_ratio", lambda s: qs.stats.common_sense_ratio(s)),
+    ("cpc_index", lambda s: qs.stats.cpc_index(s)),
 )
 
 _Q166_BENIGN_FIXTURES = (
@@ -3314,3 +3319,38 @@ def test_q166_shuffle_order_independent_scalars():
             assert perm[key] == pytest.approx(base[key], rel=1e-9, abs=0.0), (
                 f"{key} changed under a pure reordering: {base[key]} -> {perm[key]}"
             )
+
+
+def test_q166_composed_leaf_fault_is_failure_soft(golden_returns, caplog, monkeypatch):
+    """A fault inside a quantstats LEAF that a mirror composes must stay
+    failure-soft and named (H-0710 contract), exactly as a fault in a whole
+    quantstats scalar was before the mirrors.
+
+    `win_rate` is a real leaf of exactly two mirrors: `_kelly_criterion` and
+    `_cpc_index`. Detonating it must make those two None, each with a WARNING
+    naming its key, and must leave the other six scalars computed. A mirror that
+    silently stopped calling `win_rate` (or a wrapper that swallowed the fault
+    without logging) fails here.
+    """
+    import services.metrics as metrics_module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("simulated win_rate failure")
+
+    monkeypatch.setattr(metrics_module.qs.stats, "win_rate", boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_qstats_scalars(golden_returns, None)
+
+    affected = ("kelly_criterion", "cpc_index")
+    for key in affected:
+        assert result[key] is None, f"{key}={result[key]} with its win_rate leaf detonated"
+        assert [
+            r for r in caplog.records
+            if key in r.getMessage() and r.levelno == logging.WARNING
+        ], f"a fault inside {key}'s win_rate leaf must log a WARNING naming {key!r}"
+    others = [k for k, _ in _QSTATS_SINGLE_ARG_SCALARS if k not in affected]
+    assert len(others) == 6
+    assert all(result[k] is not None for k in others), (
+        "a win_rate fault must not take down scalars that do not use it: "
+        f"{ {k: result[k] for k in others} }"
+    )
