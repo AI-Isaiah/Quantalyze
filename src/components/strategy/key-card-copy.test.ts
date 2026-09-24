@@ -17,6 +17,7 @@ import {
   addKeyBlockedReason,
   formatBoundDuration,
   PANEL_STOP_COPY,
+  SYNC_SLOW_NOTE,
 } from "./key-card-copy";
 
 describe("KCS-01 (S1): why Connect Key is blocked", () => {
@@ -106,5 +107,13 @@ describe("formatBoundDuration: the durations the sentences state", () => {
 
   it("90 000 ms is not a whole number of minutes, so it throws rather than round", () => {
     expect(() => formatBoundDuration(90_000)).toThrow();
+  });
+});
+
+describe("KCS-SLOW (167.2-REVIEW WR-07): the in-flight panel names its own limit, never a sync duration", () => {
+  it("KCS-SLOW: the line and the poll budget it states", () => {
+    expect(SYNC_SLOW_NOTE).toBe(
+      "Large accounts can take longer. This panel checks for 2 minutes; the sync may still be running after that.",
+    );
   });
 });

@@ -708,3 +708,29 @@ describe("SyncProgress — the S2 live region (Phase 167.2 / KCS-03, UI-SPEC § 
     expect(container.querySelectorAll(LIVE)).toHaveLength(1);
   });
 });
+
+describe("SyncProgress — the in-flight hints promise no duration (167.2-REVIEW WR-07)", () => {
+  // WHY. RESEARCH P2 measured healthy first crawls far longer than this
+  // panel's 120 s poll budget (`process_key_long` may run for 30 minutes). The
+  // panel used to say "Usually takes 15–30 seconds" and, at 61 s, "Large
+  // accounts can take up to 2 minutes": a promise the phase's own evidence
+  // contradicts, in the component that then says "stopped checking after 2
+  // minutes. The sync may still be running". Hand-typed from the UI-SPEC
+  // review-fix row KCS-SLOW, never imported.
+  const KCS_SLOW =
+    "Large accounts can take longer. This panel checks for 2 minutes; the sync may still be running after that.";
+
+  it("NO-DURATION-PROMISE: no estimate before 60 s, the KCS-SLOW line after it, and never a duration the sync is said to take", async () => {
+    const { container } = render(
+      <SyncProgress {...baseProps} syncStatus="syncing" onStatusChange={vi.fn()} />,
+    );
+    await tick(0);
+    expect(container.textContent).not.toMatch(/Usually takes/);
+    expect(container.textContent).not.toContain(KCS_SLOW);
+
+    await tick(61_000);
+    expect(container.textContent).toContain(KCS_SLOW);
+    expect(container.textContent).not.toMatch(/up to 2 minutes/);
+    expect(container.textContent).not.toMatch(/taking longer than usual/);
+  });
+});

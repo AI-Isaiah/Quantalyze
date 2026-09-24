@@ -82,6 +82,18 @@ export function formatBoundDuration(ms: number): string {
   return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
 }
 
+/**
+ * KCS-SLOW (UI-SPEC § Review-fix amendments, 167.2-REVIEW WR-07). Shown by
+ * the in-flight panel once more than 60 s have passed. It names the panel's
+ * OWN limit (the poll budget above) and promises no duration for the sync:
+ * RESEARCH P2 measured healthy first crawls far longer than 2 minutes. It
+ * replaces "Usually takes 15–30 seconds" and "Large accounts can take up to
+ * 2 minutes", both estimates the phase's evidence contradicts.
+ */
+export const SYNC_SLOW_NOTE = `Large accounts can take longer. This panel checks for ${formatBoundDuration(
+  POLL_MAX_ATTEMPTS * POLL_INTERVAL_MS,
+)}; the sync may still be running after that.`;
+
 // ---------------------------------------------------------------------------
 // KCS-03 (UI-SPEC § KCS-03, S2): the client-side bounds on the two awaits ahead
 // of the poll, and what the panel says when one expires. An expiry is not a

@@ -11,6 +11,7 @@ import {
   PANEL_STOP_COPY,
   POLL_INTERVAL_MS,
   POLL_MAX_ATTEMPTS,
+  SYNC_SLOW_NOTE,
   type PanelStopReason,
 } from "./key-card-copy";
 
@@ -522,16 +523,14 @@ export function SyncProgress({
             </span>
           </div>
 
-          {/* Hint text */}
-          <p className="text-xs text-text-muted mt-1">
-            Usually takes 15–30 seconds
-          </p>
-
-          {/* Slow sync warning */}
+          {/* 167.2-REVIEW WR-07: no duration estimate. The hint that stood
+              here ("Usually takes 15–30 seconds") and the 60 s warning ("…up
+              to 2 minutes") both promised a duration RESEARCH P2 measured to
+              be false for a long first crawl. After 60 s the panel states its
+              OWN limit instead (KCS-SLOW), in muted text: nothing is known to
+              be wrong, and amber-500 fails AA at this size. */}
           {elapsedSeconds > 60 && (
-            <p className="text-xs text-amber-500 mt-0.5">
-              This is taking longer than usual. Large accounts can take up to 2 minutes.
-            </p>
+            <p className="text-xs text-text-muted mt-1">{SYNC_SLOW_NOTE}</p>
           )}
         </div>
       )}
