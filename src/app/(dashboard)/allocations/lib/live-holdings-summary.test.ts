@@ -70,6 +70,7 @@ const KEY_SIGN_IN_FAILED_DERIV = "aumtrust-key-c";
 const KEY_REVOKED = "aumtrust-key-d";
 const KEY_ERROR = "aumtrust-key-e";
 const KEY_SIGN_IN_FAILED_OUTSIDE = "aumtrust-key-f";
+const KEY_SIGN_IN_FAILED_NO_PNL = "aumtrust-key-g";
 
 const STATUS_BY_KEY_ID: ReadonlyMap<string, string | null> = new Map<
   string,
@@ -81,6 +82,7 @@ const STATUS_BY_KEY_ID: ReadonlyMap<string, string | null> = new Map<
   [KEY_REVOKED, "revoked"],
   [KEY_ERROR, "error"],
   [KEY_SIGN_IN_FAILED_OUTSIDE, "sign_in_failed"],
+  [KEY_SIGN_IN_FAILED_NO_PNL, "sign_in_failed"],
 ]);
 
 /** A SPOT holding: its equity contribution IS its `value_usd`. */
@@ -145,6 +147,19 @@ const H_SIGN_IN_FAILED_OUTSIDE = buildHolding({
   api_key_id: KEY_SIGN_IN_FAILED_OUTSIDE,
 });
 
+/** A derivative whose unrealized P&L the venue did not report: it sums as 0,
+ *  and that 0 is not a known figure (review WR-03). */
+const H_SIGN_IN_FAILED_NO_PNL = buildHolding({
+  venue: "venue-g",
+  symbol: "AUMTRUST-G-PERP",
+  holding_type: "derivative",
+  value_usd: 800_000,
+  unrealized_pnl_usd: null,
+  side: "short",
+  entry_price: 100,
+  api_key_id: KEY_SIGN_IN_FAILED_NO_PNL,
+});
+
 const ALL_HOLDINGS = [
   H_TRUSTED,
   H_SIGN_IN_FAILED,
@@ -152,6 +167,7 @@ const ALL_HOLDINGS = [
   H_REVOKED,
   H_ERROR,
   H_SIGN_IN_FAILED_OUTSIDE,
+  H_SIGN_IN_FAILED_NO_PNL,
 ];
 
 const ref = (h: DashboardHolding) => buildHoldingRef(h);
@@ -217,7 +233,7 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     // The rejected alternative (drop the untrusted holding) is a different
     // number, and must not be what the helper returns.
     expect(s.total).not.toBe(480_000);
-    expect(s.untrusted).toEqual({ amount: 12_345, count: 1 });
+    expect(s.untrusted).toEqual({ amount: 12_345, count: 1, unavailable: 0 });
   });
 
   it("pin 2 (D-04 / D-07): the untrusted amount is exactly the untrusted subset on the EQUITY basis — a derivative adds its -2,500 P&L, never its 900,000 notional, and is COUNTED although its amount is <= 0", () => {
@@ -229,7 +245,7 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     //              + (-2,500) (sign_in_failed derivative P&L) = 489,845.
     expect(s.total).toBe(489_845);
     // Hand-listed untrusted subset: 12,345 + (-2,500) = 9,845, two holdings.
-    expect(s.untrusted).toEqual({ amount: 9_845, count: 2 });
+    expect(s.untrusted).toEqual({ amount: 9_845, count: 2, unavailable: 0 });
   });
 
   it("pin 2 (D-07): a book whose ONLY untrusted holding is a losing derivative still counts it — the disclosure gate reads the count, and the amount is signed as it comes", () => {
@@ -238,7 +254,7 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
       contributing: [KEY_TRUSTED, KEY_SIGN_IN_FAILED_DERIV],
     });
     expect(s.total).toBe(477_500);
-    expect(s.untrusted).toEqual({ amount: -2_500, count: 1 });
+    expect(s.untrusted).toEqual({ amount: -2_500, count: 1, unavailable: 0 });
   });
 
   it("pin 4: an untrusted holding that is toggled OFF, or whose key is outside a non-empty contributing set, adds nothing to the total or the untrusted amount; non-holding refs and refs missing from holdingByRef are ignored", () => {
@@ -256,7 +272,7 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
       },
     });
     expect(s.total).toBe(480_000);
-    expect(s.untrusted).toEqual({ amount: 0, count: 0 });
+    expect(s.untrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
   });
 
   it("pin 5 (D-05): the membership test is the SHARED predicate — an `error` key is trusted under the real module, and counted once the double widens the set", () => {
@@ -268,13 +284,13 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
 
     const real = run();
     expect(real.total).toBe(487_000);
-    expect(real.untrusted).toEqual({ amount: 0, count: 0 });
+    expect(real.untrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
 
     WIDEN.toError = true;
     const widened = run();
     // The total never moves — the disclosure is not a subtraction.
     expect(widened.total).toBe(487_000);
-    expect(widened.untrusted).toEqual({ amount: 7_000, count: 1 });
+    expect(widened.untrusted).toEqual({ amount: 7_000, count: 1, unavailable: 0 });
   });
 
   it("degrade branch (D-05 / Pitfall 5): with an EMPTY contributing set the whole book is summed, so a revoked holding is in the total AND flagged", () => {
@@ -283,9 +299,9 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
       contributing: [],
     });
     expect(s.total).toBe(483_210);
-    expect(s.untrusted).toEqual({ amount: 3_210, count: 1 });
+    expect(s.untrusted).toEqual({ amount: 3_210, count: 1, unavailable: 0 });
     // Nothing was narrowed away, so nothing is recorded as excluded.
-    expect(s.excludedUntrusted).toEqual({ amount: 0, count: 0 });
+    expect(s.excludedUntrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
   });
 
   it("D-06: a revoked key outside a non-empty contributing set is ABSENT from the total and from the untrusted amount, and is recorded in excludedUntrusted — pinned so the founder's D-06 answer changes it deliberately and visibly", () => {
@@ -294,8 +310,19 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
       contributing: [KEY_TRUSTED],
     });
     expect(s.total).toBe(480_000);
-    expect(s.untrusted).toEqual({ amount: 0, count: 0 });
-    expect(s.excludedUntrusted).toEqual({ amount: 3_210, count: 1 });
+    expect(s.untrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
+    expect(s.excludedUntrusted).toEqual({ amount: 3_210, count: 1, unavailable: 0 });
+  });
+
+  it("review WR-03: an untrusted holding whose equity the venue did not report sums as 0 and is COUNTED as unavailable, so the disclosure never presents that 0 as a known figure", () => {
+    const s = summarize({
+      holdings: [H_TRUSTED, H_SIGN_IN_FAILED, H_SIGN_IN_FAILED_NO_PNL],
+      contributing: [KEY_TRUSTED, KEY_SIGN_IN_FAILED, KEY_SIGN_IN_FAILED_NO_PNL],
+    });
+    // D-03: the total is unchanged — the null P&L still sums as 0, and the
+    // 800,000 notional never leaks in.
+    expect(s.total).toBe(492_345);
+    expect(s.untrusted).toEqual({ amount: 12_345, count: 2, unavailable: 1 });
   });
 
   it("D-20 (review WR-01): excludedUntrusted is D-20's $Y — a sign_in_failed MANAGER-SIDE key outside the contributing set is not the allocator's book and is left out, while an allocator-eligible sign_in_failed key with no series and an indistinguishable revoked key stay in", () => {
@@ -310,11 +337,11 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     });
     // The total is the contributing book only, unchanged by the narrowing.
     expect(s.total).toBe(480_000);
-    expect(s.untrusted).toEqual({ amount: 0, count: 0 });
+    expect(s.untrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
     // Hand-listed: 12,345 (allocator-eligible sign_in_failed) + 3,210
     // (revoked) = 15,555, two holdings. NOT 71,110 = 15,555 + 55,555, which is
     // what counting the manager-side holding would give.
-    expect(s.excludedUntrusted).toEqual({ amount: 15_555, count: 2 });
+    expect(s.excludedUntrusted).toEqual({ amount: 15_555, count: 2, unavailable: 0 });
     expect(s.excludedUntrusted.amount).not.toBe(71_110);
   });
 });

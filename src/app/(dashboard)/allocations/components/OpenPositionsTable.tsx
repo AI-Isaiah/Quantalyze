@@ -120,17 +120,23 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
   // an untrusted row's P&L stays in `totalUnrealized` (D-03, "keep the total
   // and flag it"). Same finite-else-0 rule for both sums, and the untrusted
   // test is the shared predicate the row chip answers, never a local equality.
+  //
+  // Review WR-03: a null or non-finite P&L still sums as 0 (the total is
+  // unchanged), but an untrusted row whose P&L was defaulted is COUNTED, so the
+  // qualifier says the P&L is unavailable instead of presenting that 0 as a
+  // known figure.
   let totalUnrealized = 0;
   let untrustedUnrealized = 0;
   let untrustedCount = 0;
+  let untrustedUnavailableCount = 0;
   for (const r of rows) {
-    const pnl = Number.isFinite(r.unrealized_pnl_usd ?? NaN)
-      ? (r.unrealized_pnl_usd as number)
-      : 0;
+    const known = Number.isFinite(r.unrealized_pnl_usd ?? NaN);
+    const pnl = known ? (r.unrealized_pnl_usd as number) : 0;
     totalUnrealized += pnl;
     if (isUntrustedKeySyncStatus(r.source_key_sync_status)) {
       untrustedUnrealized += pnl;
       untrustedCount += 1;
+      if (!known) untrustedUnavailableCount += 1;
     }
   }
 
@@ -256,7 +262,13 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                   className="px-4 pb-2 text-xs text-text-muted"
                 >
                   Includes {formatPnl(untrustedUnrealized)} from{" "}
-                  {UNTRUSTED_KEY_SET_NOUN}.
+                  {UNTRUSTED_KEY_SET_NOUN}
+                  {untrustedUnavailableCount > 0
+                    ? ` (P&L unavailable for ${untrustedUnavailableCount} ${
+                        untrustedUnavailableCount === 1 ? "position" : "positions"
+                      })`
+                    : null}
+                  .
                 </td>
               </tr>
             ) : null}

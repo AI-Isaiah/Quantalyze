@@ -53,6 +53,32 @@ export function holdingEquityContributionLocal(h: DashboardHolding): number {
   return Number.isFinite(h.value_usd) ? h.value_usd : 0;
 }
 
+/**
+ * Review WR-03 — whether `holdingEquityContributionLocal` returned a REPORTED
+ * figure, or the 0 it substitutes for a missing one (a derivative with a null
+ * or non-finite `unrealized_pnl_usd`, a spot holding with a non-finite
+ * `value_usd`). Same branches as that function, so the two cannot disagree
+ * about which holdings were defaulted. It never changes the sum.
+ */
+export function holdingEquityIsReported(h: DashboardHolding): boolean {
+  if (h.holding_type === "derivative") {
+    return h.unrealized_pnl_usd != null && Number.isFinite(h.unrealized_pnl_usd);
+  }
+  return Number.isFinite(h.value_usd);
+}
+
+/** A disclosed part of the live-holdings total. */
+export interface LiveHoldingsPart {
+  /** Summed equity contribution, signed as it comes. */
+  amount: number;
+  /** Holdings summed. This, never `amount`, gates a disclosure (D-07). */
+  count: number;
+  /** Of `count`, the holdings whose equity was not reported and was summed as
+   *  0 (review WR-03). A disclosure must say so rather than present that 0 as
+   *  a known figure. */
+  unavailable: number;
+}
+
 /** The composer's live-holdings total and its untrusted-key parts. */
 export interface LiveHoldingsSummary {
   /** The live-holdings total. Byte-identical to the composer's pre-167.1
@@ -62,7 +88,7 @@ export interface LiveHoldingsSummary {
    *  the disclosure, never `amount`: a derivative's contribution can be zero
    *  or negative and is still sourced from a key whose numbers are not current
    *  (D-07). Because of that, `amount <= total` is NOT an invariant. */
-  untrusted: { amount: number; count: number };
+  untrusted: LiveHoldingsPart;
   /** CONTEXT D-20's `$Y`: holdings the contributing-set narrowing dropped from
    *  `total` whose key is untrusted, MINUS the keys the payload names as
    *  manager-side (`managerSideApiKeyIds`). A manager-side key's holdings are
@@ -75,7 +101,7 @@ export interface LiveHoldingsSummary {
    *  Nothing renders this yet. It exists so the D-06 pin can measure the
    *  exclusion, and the founder's D-06 answer decides whether it is ever
    *  disclosed. */
-  excludedUntrusted: { amount: number; count: number };
+  excludedUntrusted: LiveHoldingsPart;
 }
 
 export function summarizeLiveHoldings(args: {
@@ -116,8 +142,13 @@ export function summarizeLiveHoldings(args: {
   const narrowToModelledBook = contributing.size > 0;
   const out: LiveHoldingsSummary = {
     total: 0,
-    untrusted: { amount: 0, count: 0 },
-    excludedUntrusted: { amount: 0, count: 0 },
+    untrusted: { amount: 0, count: 0, unavailable: 0 },
+    excludedUntrusted: { amount: 0, count: 0, unavailable: 0 },
+  };
+  const addTo = (part: LiveHoldingsPart, h: DashboardHolding, equity: number) => {
+    part.amount += equity;
+    part.count += 1;
+    if (!holdingEquityIsReported(h)) part.unavailable += 1;
   };
   for (const [scopeRef, on] of Object.entries(args.toggleByScopeRef)) {
     if (!on) continue;
@@ -136,16 +167,12 @@ export function summarizeLiveHoldings(args: {
       // book, so its holdings are not part of what the narrowing excluded from
       // THEIR AUM. Only the indistinguishable remainder may over-disclose.
       if (untrusted && !managerSide.has(h.api_key_id)) {
-        out.excludedUntrusted.amount += equity;
-        out.excludedUntrusted.count += 1;
+        addTo(out.excludedUntrusted, h, equity);
       }
       continue;
     }
     out.total += equity;
-    if (untrusted) {
-      out.untrusted.amount += equity;
-      out.untrusted.count += 1;
-    }
+    if (untrusted) addTo(out.untrusted, h, equity);
   }
   return out;
 }

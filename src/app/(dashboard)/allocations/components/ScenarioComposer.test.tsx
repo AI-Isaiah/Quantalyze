@@ -15479,8 +15479,9 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     /** Spot holding: its `value_usd` IS its equity contribution. */
     spotUsd?: number;
     /** Derivative holding: its equity contribution is `unrealized_pnl_usd`.
-     *  `value_usd` is a far-away notional, so a wrong-field read shows. */
-    derivPnlUsd?: number;
+     *  `value_usd` is a far-away notional, so a wrong-field read shows.
+     *  `null` is a derivative whose P&L the venue did not report. */
+    derivPnlUsd?: number | null;
     /** Defaults true. False drops the key from `contributingApiKeyIds` and
      *  gives it no return series. */
     contributing?: boolean;
@@ -15893,6 +15894,49 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     expect(cls).not.toMatch(/warning|amber|danger|destructive|accent/i);
     expect(note?.hasAttribute("role")).toBe(false);
     expect(note?.hasAttribute("aria-live")).toBe(false);
+  });
+
+  it("AUMTRUST review WR-03: an untrusted derivative with no reported P&L is disclosed as unavailable, never as a known $0 — in State A and inside the override note", () => {
+    // trusted spot 37,655 + sign_in_failed spot 12,345 + sign_in_failed
+    // derivative with a null P&L (sums as 0) = 50,000, unchanged (D-03).
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "sign_in_failed",
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: AT_B_UNTRUSTED_USD,
+      },
+      {
+        id: "aumtrust-key-c",
+        status: "sign_in_failed",
+        venue: "deribit",
+        symbol: "AUMTRUST-C-PERP",
+        derivPnlUsd: null,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+
+    const stateA = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(stateA).toHaveLength(1);
+    expect(stateA[0].textContent).toBe(
+      "Includes $12,345 from keys needing attention (value unavailable for 1 holding).",
+    );
+
+    commitAum("75000");
+    expect(screen.getByTestId("scenario-aum-override-note").textContent).toBe(
+      "Overrides live-holdings total $50,000, which includes $12,345 from keys needing attention (value unavailable for 1 holding).",
+    );
+    expect(screen.getAllByTestId("scenario-aum-untrusted-note")).toHaveLength(1);
   });
 
   it("AUMTRUST a11y (review WR-02): the PORTFOLIO AUM input's accessible description is whichever note qualifies its value — the State A disclosure, then the override note once a manual value is committed", () => {

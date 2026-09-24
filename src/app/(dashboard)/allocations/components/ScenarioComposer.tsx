@@ -157,6 +157,7 @@ import { buildHoldingRef } from "../lib/holding-outcome-adapter";
 import {
   holdingEquityContributionLocal,
   summarizeLiveHoldings,
+  type LiveHoldingsPart,
 } from "../lib/live-holdings-summary";
 import {
   solveLeverageForMaxDD,
@@ -706,8 +707,14 @@ type AddedMetricsState = "pending" | "settled" | "unavailable";
  * or sync error is interpolated: the clause carries a dollar sum and a constant
  * noun, nothing a venue supplied.
  */
-function buildUntrustedAumClause(includedAmount: number): string {
-  return `includes ${formatUsd(includedAmount)} from ${UNTRUSTED_KEY_SET_NOUN}`;
+function buildUntrustedAumClause(included: LiveHoldingsPart): string {
+  const clause = `includes ${formatUsd(included.amount)} from ${UNTRUSTED_KEY_SET_NOUN}`;
+  // Review WR-03: a holding whose equity was not reported is summed as 0, and
+  // the amount above cannot show that. Say how many, so a defaulted 0 is
+  // never read as a known figure.
+  if (included.unavailable === 0) return clause;
+  const noun = included.unavailable === 1 ? "holding" : "holdings";
+  return `${clause} (value unavailable for ${included.unavailable} ${noun})`;
 }
 
 /** Sentence-cases a clause built above, for the standalone sentence form. */
@@ -4942,7 +4949,7 @@ export function ScenarioComposer({
             className="text-xs text-text-muted"
           >
             {capitalizeFirst(
-              buildUntrustedAumClause(liveHoldingsSummary.untrusted.amount),
+              buildUntrustedAumClause(liveHoldingsSummary.untrusted),
             )}
             .
           </span>
@@ -4973,7 +4980,7 @@ export function ScenarioComposer({
               <>
                 , which{" "}
                 <span data-testid="scenario-aum-untrusted-note">
-                  {buildUntrustedAumClause(liveHoldingsSummary.untrusted.amount)}
+                  {buildUntrustedAumClause(liveHoldingsSummary.untrusted)}
                 </span>
               </>
             )}

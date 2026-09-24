@@ -396,13 +396,59 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
     );
   });
 
-  it("null P&L on an untrusted row still renders: the qualifier follows the count, not the amount (D-07)", () => {
+  it("null P&L on an untrusted row still renders (D-07), and says the P&L is unavailable rather than claiming a known zero (review WR-03)", () => {
     render(
       <OpenPositionsTable
         rows={[
           makePosition({
             unrealized_pnl_usd: null,
             source_key_sync_status: "revoked",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$0 from keys needing attention (P&L unavailable for 1 position).",
+    );
+  });
+
+  it("review WR-03: a known untrusted P&L beside unknown ones keeps its amount and names how many rows had none — NaN counts as unavailable too, and a trusted null row does not", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({ id: "pos-t-null", unrealized_pnl_usd: null }),
+          makePosition({
+            id: "pos-u-known",
+            unrealized_pnl_usd: 300,
+            source_key_sync_status: "sign_in_failed",
+          }),
+          makePosition({
+            id: "pos-u-null",
+            unrealized_pnl_usd: null,
+            source_key_sync_status: "revoked",
+          }),
+          makePosition({
+            id: "pos-u-nan",
+            unrealized_pnl_usd: Number.NaN,
+            source_key_sync_status: "sign_in_failed",
+          }),
+        ]}
+      />,
+    );
+    // D-03: the total is unchanged — the unknown rows still sum as 0.
+    expect(footerTotal(container)).toBe("+$300");
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$300 from keys needing attention (P&L unavailable for 2 positions).",
+    );
+  });
+
+  it("review WR-03: a known zero untrusted P&L is a real zero and carries no unavailable note", () => {
+    render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({
+            unrealized_pnl_usd: 0,
+            source_key_sync_status: "sign_in_failed",
           }),
         ]}
       />,
