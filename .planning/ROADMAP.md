@@ -2257,6 +2257,18 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.6 to break down)
 
+### Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot (INSERTED)
+
+**Goal:** A composite (`stitch_composite`) run decides whether it is a background ledger refresh from the job row as it stands when the decision is made, not from the metadata snapshot taken when the worker claimed the job. Found by Phase 164.6 plan 02 (`[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]`, founder queue 164.6 item a): the TS routes now retract an inherited refresh marker from a reused composite job, but Python's composite guard reads the claim-time snapshot, so a retraction that lands after the claim does not stand down that run's guard, while the SQL `is_protected` check does see it. The two layers disagree about the same job. **Data-integrity.** Latent today (the composite fan-out has no schedule, and a runbook precondition blocks scheduling it); this phase removes the precondition's reason to exist. Inserted 2026-09-24 under the founder's authorization to add phases.
+**Success criteria:** (1) the harm is shown on the local lane first (claim, then retract, then observe the run's decision), or the phase shrinks; (2) the composite guard and `is_protected` reach the same verdict for a marker retracted after the claim, proven by execution; (3) a regression test observed RED when the fix is neutered; (4) the runbook precondition is removed or restated to match.
+**Requirements**: TBD
+**Depends on:** Phase 164.6
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.6.7 to break down)
+
 ### Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals (INSERTED)
 
 **Goal:** A client can add an MT5 key, repeatedly, without taking MT5 validation down for
@@ -2907,6 +2919,18 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1 to break down)
 
+### Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding (INSERTED)
+
+**Goal:** Every holdings consumer keeps two keys' positions apart. `holdingScopeKey` (`holding:venue:symbol:type`) carries no `api_key_id`, so the latest-as-of holdings collapse in `src/lib/queries.ts` merges two accounts on the same venue holding the same asset into one row, and one key's position silently vanishes from the headline AUM, the Open Positions total and Phase 167.1's untrusted-key marker. Found by Phase 167.1's silent-failure-hunter (founder queue item 11); the defect predates 167.1. **Data-integrity.** Inserted 2026-09-24 under the founder's authorization to add phases.
+**Success criteria:** (1) a test with two keys holding the same asset on one venue shows both positions surviving the collapse, in AUM, in Open Positions and in the 167.1 marker, observed RED against today's key; (2) every consumer of `holdingScopeKey` is enumerated by symbol and each is either re-keyed or shown not to need it; (3) the discuss step records how a soft-disconnected key's holdings are counted (founder queue item 11's second question); (4) no change to the analytics service's own math unless the collapse lives there too.
+**Requirements**: TBD
+**Depends on:** Phase 167.1
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 167.1.1 to break down)
+
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 
 **Goal:** On a manager's key card (`ApiKeyManager`), a sync result is only ever shown about the key it came from, and a success the card withheld beside a "Sign-in failed" pill cannot reappear through a re-read. ⭐ **Widened 2026-09-22 (167 D-19):** the `/strategies` list, where a manager lands, marks each strategy row whose feeding key is untrusted (`isUntrustedKeySyncStatus`) with the same key-level pill — no causal claim, no D-04 path. ⭐ **Widened 2026-09-23 (founder decision, folded in as a second surface): the owner's "still computing" factsheet says what is actually happening.** Observed live on a freshly created three-key composite strategy: while its first sync job was actively fetching trades (key 2 of 3, progress rows being written), the owner's factsheet (`src/app/factsheet/[id]/v2/page.tsx`, the `!payload` placeholder branch) showed fixed copy — "still computing … once the analytics service finishes the first compute pass" and "This factsheet has not been computed yet. Some strategies stay in this state, and this page is all there is until one has been computed." Founder verdict: *"This is very confusing. It should clearly say what is happening."* The placeholder cannot tell running from queued, failed, stalled or never-enqueued, although the worker already writes `set_compute_job_progress` and the wizard already reads it via `/api/strategies/[id]/sync-progress` (`SyncPreviewStep`). **In scope:** on the OWNER lane only, the pending factsheet reads the strategy's latest compute job and states its real state in authored copy — queued, fetching trades (key N of M for a composite), computing, failed (the authored reason for its error kind, never raw exception text), or stalled / never started (with what the owner can do) — and the "Some strategies stay in this state" sentence goes. **Fenced:** the PUBLIC lane stays neutral and names no internal state (Phase 164.2 criterion 9's reasoning still holds there), and no new job states are invented. Read DESIGN.md before any copy decision. ⭐ **Widened again 2026-09-23 (founder-approved): the SHARE LINK for a strategy whose compute failed or stalled must say so too.** Observed the same day: the owner could create a share link while the first compute job was running; that job then failed permanently (Phase 168's Deribit `assignment` refusal), yet the share page (`src/app/factsheet-share/[token]/page.tsx`) keeps saying "This factsheet isn't ready yet — The link works — the strategy's performance data is still being computed. Try again in a few minutes." That is a promise that will not come true. Founder: *"weird that i can already post or copy a link but cant see it."* **In scope:** the share page and the owner's share affordance tell a compute that is genuinely running apart from one that failed or stalled, and never promise "a few minutes" for a terminal failure. The viewer-facing copy stays neutral about internal causes (Phase 164.2 criterion 9) but must not claim the data is being computed when it is not. **Open, for this phase's discuss step (record it, do not assume it):** whether creating a share link should be allowed before the first successful compute at all.
@@ -2943,6 +2967,18 @@ Plans:
 **Wave 6** *(blocked on Wave 5 completion)*
 
 - [x] 167.2-06-PLAN.md — a composite's key card offers no link control; a withheld success is retired at the applied re-read (KCS-23/04)
+
+### Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build (INSERTED)
+
+**Goal:** The owner's `/strategies` list and every "has a factsheet" signal agree with what a share-link recipient actually sees. Today a strategy whose `strategy_analytics.computation_status` reads computed, but whose series cannot build (`fetchAndBuildPayload` in `src/lib/factsheet/fetch-and-build-payload.ts` returns no payload), is shown on the list as having a factsheet with no share note, while its recipient lands on the pending page. Only the service-role builder can decide buildability (the series sit behind deny-all RLS) and no owner-readable field records the outcome, so Phase 167.2 could not fix it without a migration or an admin read (167.2 review WR-02, recorded UNFIXABLE-IN-PHASE 2026-09-24). **User-facing.** Inserted 2026-09-24 under the founder's authorization to add phases.
+**Success criteria:** (1) the mismatch is reproduced first (a computed row whose payload does not build) on the local lane, or the phase shrinks; (2) buildability is recorded where the owner lane can read it (e.g. a bridge-maintained column written by the compute path), or decided server-side for the list; (3) the list, the share note and the share page agree for that row, proven by a test observed RED against today's code; (4) any migration passes the three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before merge, because merge auto-applies to PROD.
+**Requirements**: TBD
+**Depends on:** Phase 167.2
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 167.2.1 to break down)
 
 ### Phase 168: DRBOPTIONS — a Deribit options account ingests end to end
 
