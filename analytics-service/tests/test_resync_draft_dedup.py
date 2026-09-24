@@ -662,14 +662,26 @@ def test_resync_chain_read_failure_falls_through_to_a_new_chain(
     draft and an enqueue."""
     sb = make_supabase(_STRATEGY_A)
     _seed_advanced_session(sb, _STRATEGY_A, job_kind="sync_trades", job_status="running")
-    sb.select_failures["compute_jobs"] = [RuntimeError("synthetic read failure")]
-    with patch("routers.process_key.get_supabase", return_value=sb):
+    bug = RuntimeError("synthetic read failure")
+    sb.select_failures["compute_jobs"] = [bug]
+    with (
+        patch("routers.process_key.get_supabase", return_value=sb),
+        patch("routers.process_key.sentry_sdk.capture_exception") as capture_exc,
+        patch("routers.process_key.sentry_sdk.capture_message") as capture_msg,
+    ):
         r = _post(full_stack_client, _resync_body(_STRATEGY_A))
 
     assert r.status_code == 200, r.text
     assert r.json().get("code") != "WIZARD_DUPLICATE", r.json()
     assert len(_resync_drafts(sb, _STRATEGY_A)) == 1
     assert "enqueue_compute_job" in sb.rpc_calls
+    # Round-2 review (SFH MED-2): a non-DB error is captured, and the
+    # fall-through itself (the guard was skipped, so a second chain may start)
+    # is reported too.
+    capture_exc.assert_called_once_with(bug)
+    assert any(
+        "resync chain guard skipped" in str(c.args[0]) for c in capture_msg.call_args_list
+    ), capture_msg.call_args_list
 
 
 def test_resync_chain_read_gateway_timeout_is_retried(
@@ -853,3 +865,52 @@ def test_chain_reply_does_not_borrow_a_newer_unrelated_verifications_status(
     assert payload["verification_id"] == "ver-advanced", payload
     assert payload["status"] is None, payload
     assert payload["trust_tier"] is None, payload
+
+
+
+def test_resync_chain_read_db_error_is_quiet_but_the_fall_through_is_reported(
+    full_stack_client: TestClient,
+) -> None:
+    """Round-2 review (SFH MED-2): a DB or network error is an expected
+    failure, so it is not captured as an exception. The guard still fell
+    through, which can admit a second chain, and that is reported."""
+    sb = make_supabase(_STRATEGY_A)
+    _seed_advanced_session(sb, _STRATEGY_A, job_kind="sync_trades", job_status="running")
+    sb.select_failures["compute_jobs"] = [ConnectionError("synthetic connection reset")]
+    with (
+        patch("routers.process_key.get_supabase", return_value=sb),
+        patch("routers.process_key.sentry_sdk.capture_exception") as capture_exc,
+        patch("routers.process_key.sentry_sdk.capture_message") as capture_msg,
+    ):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.status_code == 200, r.text
+    capture_exc.assert_not_called()
+    assert any(
+        "resync chain guard skipped" in str(c.args[0]) for c in capture_msg.call_args_list
+    ), capture_msg.call_args_list
+
+
+def test_a_failing_sentry_report_is_logged_and_never_breaks_the_resync(
+    full_stack_client: TestClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-2 review (LOW-6): the Sentry call around a skipped dead row used
+    to sit in a bare ``except: pass``. A failing report must neither break the
+    resync nor vanish: it is logged."""
+    sb = make_supabase(_STRATEGY_A)
+    _seed_advanced_session(
+        sb, _STRATEGY_A, job_kind="sync_trades", job_status="pending",
+        attempts=1, max_attempts=3, last_error="worker_stalled",
+    )
+    with (
+        patch("routers.process_key.get_supabase", return_value=sb),
+        patch(
+            "routers.process_key.sentry_sdk.capture_message",
+            side_effect=RuntimeError("synthetic sentry transport failure"),
+        ),
+    ):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.status_code == 200, r.text
+    assert len(_resync_drafts(sb, _STRATEGY_A)) == 1
+    assert "process_key.sentry_report_failed" in capsys.readouterr().out

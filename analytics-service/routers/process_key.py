@@ -36,10 +36,12 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Annotated, Any
 
+import httpx
 import sentry_sdk
 import structlog
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
+from postgrest.exceptions import APIError
 from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
 
 from services import exchange as exchange_svc
@@ -819,6 +821,70 @@ _RESYNC_CHAIN_JOB_LIVE_WINDOW = timedelta(hours=8)
 # 20260516104201_compute_jobs_audit_2026_05_07_residual.sql). A claim clears
 # `last_error`, so only a reset row that has not been re-claimed carries it.
 _WORKER_STALLED_LAST_ERROR = "worker_stalled"
+
+
+# Round-2 review (SFH MED-2) — the failures a resync chain-guard read may meet
+# and still be reported QUIETLY (a warning, no exception capture): a PostgREST
+# error, and a transport or timeout error. The same split as
+# `services/benchmark.py`'s `_CACHE_READ_ERRORS`. Anything else is a
+# programming or infrastructure error: it logs at error level and is captured.
+_GUARD_READ_QUIET_ERRORS: tuple[type[BaseException], ...] = (
+    APIError,
+    httpx.HTTPError,
+    OSError,
+)
+
+
+def _sentry_report(send: Any, *, what: str) -> None:
+    """Run one Sentry call without ever masking the request it reports on, and
+    say so in the log when it fails (round-2 review, LOW-6: this used to be a
+    bare ``except: pass``)."""
+    try:
+        send()
+    except Exception as sentry_exc:  # noqa: BLE001 — the report must not break the resync
+        log.warning(
+            "process_key.sentry_report_failed",
+            what=what,
+            error_type=type(sentry_exc).__name__,
+        )
+
+
+def _report_guard_read_failure(
+    exc: BaseException,
+    *,
+    event: str,
+    strategy_id: Any,
+    correlation_id: str,
+    guard_skipped: bool,
+) -> None:
+    """Log and report a failed resync chain-guard read (round-2 review, SFH
+    MED-2).
+
+    A DB or network error (`_GUARD_READ_QUIET_ERRORS`) logs at warning. Any
+    other exception logs at error level and is captured. When the failure
+    makes the guard SKIP (``guard_skipped``), that fall-through is itself
+    reported to Sentry whatever the error, because it can admit a second
+    chain."""
+    fields: dict[str, Any] = {
+        "strategy_id": strategy_id,
+        "correlation_id": correlation_id,
+        "error_type": type(exc).__name__,
+        "error": str(exc)[:200],
+    }
+    if isinstance(exc, _GUARD_READ_QUIET_ERRORS):
+        log.warning(event, **fields)
+    else:
+        log.error(event, **fields)
+        _sentry_report(lambda: sentry_sdk.capture_exception(exc), what=event)
+    if guard_skipped:
+        _sentry_report(
+            lambda: sentry_sdk.capture_message(
+                "resync chain guard skipped: its compute_jobs read failed "
+                f"({type(exc).__name__}); a second chain may start",
+                level="warning",
+            ),
+            what=event,
+        )
 
 
 def _chain_job_dead_reason(job: dict[str, Any]) -> str | None:
@@ -1617,7 +1683,10 @@ async def process_key(
     # Both reads go through `db_read_with_retry` (a gateway 504 is retried inside
     # one gateway window). If the job read still fails, the guard is SKIPPED and
     # the resync takes the path it took before this guard existed, logged with
-    # context: a read failure must never become a bare 500 on a user's Retry.
+    # context and reported (`_report_guard_read_failure`: a DB or network error
+    # at warning, anything else at error with an exception capture, and the
+    # fall-through itself always to Sentry): a read failure must never become a
+    # bare 500 on a user's Retry.
     # The cost is the pre-guard behaviour (a possible second chain), not a
     # stuck user.
     #
@@ -1644,13 +1713,13 @@ async def process_key(
                     .execute()
                 )
             )
-        except Exception as exc:  # noqa: BLE001 — fall through, logged below
-            log.warning(
-                "process_key.resync_chain_inflight_read_failed",
+        except Exception as exc:  # noqa: BLE001 — classified and reported below
+            _report_guard_read_failure(
+                exc,
+                event="process_key.resync_chain_inflight_read_failed",
                 strategy_id=strategy_id,
                 correlation_id=correlation_id,
-                error_type=type(exc).__name__,
-                error=str(exc)[:200],
+                guard_skipped=True,
             )
             chain_job_rows = []
         inflight_chain_job: list[dict[str, Any]] = []
@@ -1670,14 +1739,14 @@ async def process_key(
                 max_attempts=chain_job.get("max_attempts"),
                 reason=dead_reason,
             )
-            try:
-                sentry_sdk.capture_message(
+            _sentry_report(
+                lambda: sentry_sdk.capture_message(
                     f"resync chain guard skipped a non-live {chain_job.get('kind')} "
                     f"job ({dead_reason})",
                     level="warning",
-                )
-            except Exception:  # noqa: BLE001
-                pass  # never mask the resync this is reporting on
+                ),
+                what="process_key.resync_chain_job_not_live",
+            )
         if inflight_chain_job:
             try:
                 latest_verification = one(
@@ -1692,12 +1761,12 @@ async def process_key(
                     )
                 )
             except Exception as exc:  # noqa: BLE001 — a job IS in flight; reply without it
-                log.warning(
-                    "process_key.resync_chain_inflight_verification_read_failed",
+                _report_guard_read_failure(
+                    exc,
+                    event="process_key.resync_chain_inflight_verification_read_failed",
                     strategy_id=strategy_id,
                     correlation_id=correlation_id,
-                    error_type=type(exc).__name__,
-                    error=str(exc)[:200],
+                    guard_skipped=False,
                 )
                 latest_verification = None
             live_job = inflight_chain_job[0]
