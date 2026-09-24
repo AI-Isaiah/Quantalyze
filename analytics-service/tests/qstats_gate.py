@@ -50,18 +50,57 @@ and ``from quantstats import stats [as X]`` bind a stats-namespace alias. Then:
   ``__import__("quantstats")``, ``sys.modules["quantstats"]``) is RED, and so is
   ``import_module`` / ``__import__`` with a non-constant first argument, because it
   cannot be proven not to load quantstats (no production module imports dynamically,
-  measured 2026-09-24). A ``globals()`` / ``vars()`` / ``locals()`` lookup of a
-  quantstats alias by name (``globals()["qs"]``) is RED.
-- **Rule A', re-export.** A module outside ``COVERED_MODULES`` that reaches a
-  quantstats name BOUND in a covered module is RED: ``from services.metrics import qs``,
-  ``from services.metrics import *``, ``metrics.qs`` after ``from services import
-  metrics``, ``services.metrics.qs``, ``getattr(metrics, "qs")``, and the relative forms.
-  Without this a module could bypass Rule A by borrowing the covered module's alias.
-  The bound names are read from the covered module itself (``quantstats_bindings``).
+  measured 2026-09-24). A ``globals()`` / ``vars()`` / ``locals()``
+  lookup of a quantstats alias by name (``globals()["qs"]``, ``globals().get("qs")``)
+  is RED, and in a module that binds quantstats so is any such dict read with a
+  COMPUTED key (``globals()["q" + "s"]``) or handed on as a value (``ns = globals()``).
+- **Rule A', the alias reached through the MODULE OBJECT.** A quantstats name BOUND
+  in a covered module (read from the covered module itself, ``quantstats_bindings``)
+  reached through that module's object is RED. From an uncovered module that is a
+  borrowed alias, which would bypass Rule A; inside a covered module it is a
+  self-reference the B rules, which judge the bare alias name, cannot see. ``resolve``
+  follows the module object through:
 
-KNOWN LIMIT, RECORDED: an attribute name computed at run time
-(``getattr(metrics, name)`` with a non-constant ``name``) cannot be resolved by a static
-walk. No production module does that today.
+  - imports: ``from services.metrics import qs`` / ``*``, ``metrics.qs`` after
+    ``from services import metrics``, ``services.metrics.qs``, the relative forms at
+    any level;
+  - run-time lookups with a constant name: ``importlib.import_module("services.metrics")``,
+    ``__import__("services.metrics")``, ``sys.modules["services.metrics"]``,
+    ``sys.modules[__name__]``;
+  - namespace dicts: ``vars(metrics)[...]``, ``metrics.__dict__[...]`` and ``.get(...)``,
+    ``getattr(metrics, "__dict__")``, and ``f.__globals__[...]`` for any function of a
+    covered module (imported, or defined in it);
+  - ``getattr(<module>, "qs")``;
+  - plain rebinding, followed to a fixpoint: ``m = services.metrics``, ``m2 = metrics``,
+    ``a, b = metrics, x``, ``(m := metrics)``, ``d = vars(metrics)``.
+
+  A covered module's namespace read with a COMPUTED name (``getattr(metrics, name)``,
+  ``vars(metrics)[name]``) or handed on as a value (``ns = metrics.__dict__``) is RED:
+  it cannot be proven not to reach the alias. That closes round 1's one recorded
+  limit.
+
+KNOWN LIMITS, RECORDED (review round 2, WR-03 / SFH R2-LOW-4). A static walk cannot
+follow a value through data flow it does not model. Each shape below reaches a
+covered module's quantstats alias with ``nodes=0, violations=[]``; none exists in the
+tree today (measured 2026-09-25: no production module uses ``__dict__`` of a covered
+module, ``globals()``, ``vars()``, ``import_module``, ``__import__``, ``eval`` or
+``exec``):
+
+1. the module object passed through a value the walk does not follow: a function
+   parameter or return value (``def f(m): return m.qs``), a container element
+   (``[metrics][0].qs``), an object attribute (``self.m = metrics``), a ``for`` or
+   ``with`` target, a starred or augmented assignment, or a default argument;
+2. attribute access by anything other than ``getattr`` or ``.``:
+   ``operator.attrgetter("qs")(metrics)``, ``metrics.__getattribute__("qs")``,
+   ``object.__getattribute__(metrics, "qs")``, ``inspect.getmembers(metrics)``,
+   ``inspect.getattr_static(metrics, "qs")``;
+3. a module located by anything other than an import statement, ``import_module`` /
+   ``__import__`` with a constant ABSOLUTE name, or ``sys.modules[<constant or
+   __name__>]``: a relative ``import_module(".metrics", package="services")``,
+   ``pkgutil.resolve_name("services.metrics:qs")``, ``runpy``, or a spec built by
+   ``importlib.util`` and executed;
+4. source text run at run time: ``eval``, ``exec``, ``compile`` (in ANY module,
+   covered ones included: ``eval("qs.stats.sharpe(r)")`` is invisible to every rule).
 
 WHY ``KWARG_PROVEN`` IS A SET OF LEAF FUNCTIONS, NOT A KEYWORD CHECK
 --------------------------------------------------------------------
@@ -339,6 +378,26 @@ def _dotted(node: ast.AST) -> list[str] | None:
     return parts[::-1]
 
 
+def _namespace_read_by_constant(call: ast.Call, parent: dict[ast.AST, ast.AST]) -> bool:
+    """True when a namespace-dict call (``globals()``) is only read by a CONSTANT key.
+
+    ``globals()["x"]`` and ``globals().get("x")`` qualify. A computed key, or the
+    dict handed on as a value (``ns = globals()``, ``f(vars())``), does not.
+    """
+    par = parent.get(call)
+    if isinstance(par, ast.Subscript) and par.value is call:
+        return isinstance(par.slice, ast.Constant)
+    if isinstance(par, ast.Attribute) and par.value is call and par.attr == "get":
+        get_call = parent.get(par)
+        return (
+            isinstance(get_call, ast.Call)
+            and get_call.func is par
+            and bool(get_call.args)
+            and isinstance(get_call.args[0], ast.Constant)
+        )
+    return False
+
+
 def _resolve_from(module_name: str, node: ast.ImportFrom) -> str:
     """The absolute dotted module an ``ImportFrom`` reads, relative levels resolved."""
     if not node.level:
@@ -463,6 +522,134 @@ def scan_source(
                 "imports quantstats but is not in COVERED_MODULES",
             )
         )
+
+    # Module-object resolution (Rule A' and B6, review round 2 WR-03 / SFH
+    # R2-LOW-4). ``module_aliases`` maps a local name to the dotted paths it may
+    # hold: imports, module-level defs (``<module>.<name>``, so a function's
+    # ``__globals__`` is known to be its module's namespace), and every plain
+    # ``name = <resolvable expr>`` assignment, followed to a fixpoint. Flow- and
+    # scope-insensitive on purpose: a name that MAY hold a covered module is
+    # treated as holding it (fail closed).
+    own_dotted = module_name[: -len(".py")].replace("/", ".")
+    module_aliases: dict[str, set[str]] = {}
+
+    def bind(name: str, paths: set[str]) -> bool:
+        before = module_aliases.setdefault(name, set())
+        grown = paths - before
+        before |= grown
+        return bool(grown)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    bind(alias.asname, {alias.name})
+                else:
+                    root_name = alias.name.split(".")[0]
+                    bind(root_name, {root_name})
+        elif isinstance(node, ast.ImportFrom):
+            source_module = _resolve_from(module_name, node)
+            for alias in node.names:
+                if alias.name != "*":
+                    bind(
+                        alias.asname or alias.name,
+                        {f"{source_module}.{alias.name}" if source_module else alias.name},
+                    )
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bind(stmt.name, {f"{own_dotted}.{stmt.name}"})
+
+    def ns_owner(path: str) -> str | None:
+        """The module whose namespace dict ``path`` names, or None."""
+        if path.endswith(".__dict__"):
+            return path[: -len(".__dict__")]
+        if path.endswith(".__globals__"):
+            function = path[: -len(".__globals__")]
+            covered = [c for c in COVERED_DOTTED if function.startswith(c + ".")]
+            return max(covered, key=len) if covered else function.rsplit(".", 1)[0]
+        return None
+
+    def const_key(expr: ast.AST | None) -> str | None:
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+            return expr.value
+        if isinstance(expr, ast.Name) and expr.id == "__name__":
+            return own_dotted
+        return None
+
+    def resolve(expr: ast.AST, depth: int = 0) -> set[str]:
+        """The dotted paths ``expr`` may evaluate to, for module-shaped expressions."""
+        if depth > 50:
+            return set()
+        if isinstance(expr, ast.Name):
+            return set(module_aliases.get(expr.id, ()))
+        if isinstance(expr, ast.Attribute):
+            return {f"{p}.{expr.attr}" for p in resolve(expr.value, depth + 1)}
+        if isinstance(expr, ast.NamedExpr):
+            return resolve(expr.value, depth + 1)
+        if isinstance(expr, ast.Subscript):
+            key = const_key(expr.slice)
+            if key is None:
+                return set()
+            out: set[str] = set()
+            for p in resolve(expr.value, depth + 1):
+                if p == "sys.modules":
+                    out.add(key)
+                owner = ns_owner(p)
+                if owner is not None:
+                    out.add(f"{owner}.{key}")
+            return out
+        if isinstance(expr, ast.Call):
+            func = expr.func
+            fname = (
+                func.id if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute) else ""
+            )
+            first = expr.args[0] if expr.args else None
+            if fname == "import_module":
+                key = const_key(first)
+                return {key} if key else set()
+            if fname == "__import__":
+                key = const_key(first)
+                return {key.split(".")[0], key} if key else set()
+            if fname == "getattr" and isinstance(func, ast.Name) and len(expr.args) > 1:
+                key = const_key(expr.args[1])
+                if key is None or first is None:
+                    return set()
+                return {f"{p}.{key}" for p in resolve(first, depth + 1)}
+            if fname == "vars" and isinstance(func, ast.Name) and len(expr.args) == 1:
+                return {f"{p}.__dict__" for p in resolve(expr.args[0], depth + 1)}
+            if fname == "get" and isinstance(func, ast.Attribute):
+                key = const_key(first)
+                if key is None:
+                    return set()
+                owners = {ns_owner(p) for p in resolve(func.value, depth + 1)}
+                return {f"{o}.{key}" for o in owners if o is not None}
+        return set()
+
+    # Propagate plain aliases (`m = services.metrics`, `d = vars(metrics)`,
+    # `a, b = metrics, x`, `(m := metrics)`) to a fixpoint.
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            pairs: list[tuple[ast.AST, ast.AST]] = []
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if (
+                        isinstance(target, (ast.Tuple, ast.List))
+                        and isinstance(node.value, (ast.Tuple, ast.List))
+                        and len(target.elts) == len(node.value.elts)
+                    ):
+                        pairs.extend(zip(target.elts, node.value.elts))
+                    else:
+                        pairs.append((target, node.value))
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+                pairs.append((node.target, node.value))
+            for target, value in pairs:
+                if isinstance(target, ast.Name):
+                    paths = resolve(value)
+                    if paths and bind(target.id, paths):
+                        changed = True
 
     def is_qs(node: ast.AST) -> bool:
         return isinstance(node, ast.Name) and node.id in qs_aliases
@@ -682,6 +869,25 @@ def scan_source(
                         f"{fname}()[{key!r}] reaches a quantstats alias by name, out of "
                         "the gate's sight",
                     )
+            # Review round 2 (SFH R2-LOW-4): in a module that binds quantstats, a
+            # namespace dict read with a COMPUTED key (`globals()["q" + "s"]`) or
+            # handed on as a value (`ns = globals()`) cannot be proven not to
+            # reach an alias.
+            if (
+                fname in NAMESPACE_DICTS
+                and isinstance(func, ast.Name)
+                and not node.args
+                and (qs_aliases or stats_aliases or utils_aliases)
+                and not _namespace_read_by_constant(node, parent)
+            ):
+                scanned += 1
+                violate(
+                    node,
+                    f"{fname}()",
+                    "string-named access",
+                    f"{fname}() read with a computed key, or passed on as a value, in a "
+                    "module that binds quantstats: it cannot be proven not to reach the alias",
+                )
         elif (
             isinstance(node, ast.Subscript)
             and isinstance(node.slice, ast.Constant)
@@ -697,68 +903,96 @@ def scan_source(
                 "the gate's sight",
             )
 
-    # Rule A': an uncovered module borrowing a covered module's quantstats alias.
-    if module_name not in COVERED_MODULES and reexported:
-        module_aliases: dict[str, str] = {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.asname:
-                        module_aliases[alias.asname] = alias.name
-                    else:
-                        root_name = alias.name.split(".")[0]
-                        module_aliases[root_name] = root_name
-            elif isinstance(node, ast.ImportFrom):
-                source_module = _resolve_from(module_name, node)
-                for alias in node.names:
-                    if source_module in COVERED_DOTTED and (
-                        alias.name == "*" or alias.name in reexported
-                    ):
-                        violate(
-                            node,
-                            alias.name,
-                            "re-export import",
-                            f"from {source_module} import {alias.name} borrows a covered "
-                            "module's quantstats alias; the gate does not judge this module",
-                        )
-                    elif alias.name != "*":
-                        module_aliases[alias.asname or alias.name] = (
-                            f"{source_module}.{alias.name}" if source_module else alias.name
-                        )
+    # Rule A': a covered module's quantstats alias reached THROUGH THE MODULE
+    # OBJECT. In an uncovered module that is a borrowed alias (the gate does not
+    # judge the module). In a covered module it is a self-reference
+    # (`getattr(sys.modules[__name__], "qs")`, `f.__globals__["qs"]`) that the
+    # B rules, which judge the bare alias name, cannot see. Review round 2
+    # (WR-03 / SFH R2-LOW-4) widened the shapes from dotted names and
+    # `getattr` to everything ``resolve`` follows.
+    covered_module = module_name in COVERED_MODULES
+    bindings = reexported | qs_aliases | stats_aliases | utils_aliases
+    where = (
+        "through the module object, out of the gate's sight"
+        if covered_module
+        else "from an uncovered module; the gate does not judge this module"
+    )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            source_module = _resolve_from(module_name, node)
+            for alias in node.names:
+                if source_module in COVERED_DOTTED and (
+                    alias.name == "*" or alias.name in bindings
+                ):
+                    violate(
+                        node,
+                        alias.name,
+                        "re-export import",
+                        f"from {source_module} import {alias.name} borrows a covered "
+                        "module's quantstats alias; the gate does not judge this module",
+                    )
 
-        def resolves_to_covered(expr: ast.AST) -> bool:
-            parts = _dotted(expr)
-            if not parts or parts[0] not in module_aliases:
-                return False
-            full = ".".join([module_aliases[parts[0]], *parts[1:]])
-            return full in COVERED_DOTTED
+    def covered_namespace(paths: set[str]) -> bool:
+        return any(
+            (owner := ns_owner(p)) is not None and owner in COVERED_DOTTED for p in paths
+        )
 
+    if bindings:
         for node in ast.walk(tree):
-            target: str | None = None
+            if not isinstance(node, (ast.Attribute, ast.Subscript, ast.Call, ast.Name)):
+                continue
+            if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+                continue
+            paths = resolve(node)
+            hits = sorted(
+                p.rsplit(".", 1)[1]
+                for p in paths
+                if "." in p
+                and p.rsplit(".", 1)[0] in COVERED_DOTTED
+                and p.rsplit(".", 1)[1] in bindings
+            )
+            if hits and not isinstance(node, ast.Name):
+                scanned += 1
+                violate(
+                    node,
+                    hits[0],
+                    "re-export",
+                    f"reaches the covered module's quantstats alias {hits[0]!r} {where}",
+                )
+                continue
+            par = parent.get(node)
+            computed = False
             if (
-                isinstance(node, ast.Attribute)
-                and node.attr in reexported
-                and resolves_to_covered(node.value)
-            ):
-                target = node.attr
-            elif (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
                 and node.func.id == "getattr"
                 and len(node.args) > 1
-                and resolves_to_covered(node.args[0])
-                and isinstance(node.args[1], ast.Constant)
-                and node.args[1].value in reexported
+                and const_key(node.args[1]) is None
+                and any(p in COVERED_DOTTED for p in resolve(node.args[0]))
             ):
-                target = str(node.args[1].value)
-            if target is not None:
+                computed = True
+            elif covered_namespace(paths):
+                get_call = parent.get(par) if isinstance(par, ast.Attribute) else None
+                if isinstance(par, ast.Subscript) and par.value is node:
+                    computed = const_key(par.slice) is None
+                elif (
+                    isinstance(par, ast.Attribute)
+                    and par.attr == "get"
+                    and isinstance(get_call, ast.Call)
+                    and get_call.func is par
+                ):
+                    computed = const_key(get_call.args[0] if get_call.args else None) is None
+                else:
+                    computed = True
+            if computed:
                 scanned += 1
                 violate(
                     node,
-                    target,
+                    "<computed>",
                     "re-export",
-                    f"reaches the covered module's quantstats alias {target!r} from an "
-                    "uncovered module; the gate does not judge this module",
+                    "a covered module's namespace is read with a computed name, or handed "
+                    f"on as a value, so it cannot be proven not to reach its quantstats alias "
+                    f"{where}",
                 )
 
     violations.sort(key=lambda v: v.lineno)

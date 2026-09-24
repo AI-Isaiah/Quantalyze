@@ -461,6 +461,51 @@ RED_NEEDLES: dict[str, tuple[str, str, str, str]] = {
         "quantstats",
         "reaches quantstats by name",
     ),
+    # Review round 2 (SFH R2-LOW-4 / WR-03): the covered module reaching its OWN
+    # alias through the module object, invisible to the B rules, which judge
+    # the bare alias name.
+    "needle_getattr_of_sys_modules_dunder_name": (
+        """
+        import sys
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return getattr(sys.modules[__name__], "qs").stats.sharpe(r)
+        """,
+        "compute_all_metrics",
+        "qs",
+        "through the module object",
+    ),
+    "needle_own_function_globals": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return compute_all_metrics.__globals__["qs"].stats.sharpe(r)
+        """,
+        "compute_all_metrics",
+        "qs",
+        "through the module object",
+    ),
+    "needle_globals_computed_key": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return globals()["q" + "s"].stats.sharpe(r)
+        """,
+        "compute_all_metrics",
+        "globals()",
+        "computed key, or passed on as a value",
+    ),
+    "needle_globals_escapes_as_a_value": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            ns = globals()
+            return ns["qs"].stats.sharpe(r)
+        """,
+        "compute_all_metrics",
+        "globals()",
+        "computed key, or passed on as a value",
+    ),
 }
 
 
@@ -601,6 +646,153 @@ REEXPORT_NEEDLES: dict[str, tuple[str, str, str, str]] = {
         "qs",
         "from an uncovered module",
     ),
+    # Review round 2 (WR-03 / SFH R2-LOW-4): each of these returned nodes=0,
+    # violations=[] before, with every key a constant.
+    "reexport_import_module_of_the_covered_module": (
+        """
+        import importlib
+        def score(r):
+            return importlib.import_module("services.metrics").qs.stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_dunder_import_of_the_covered_module": (
+        """
+        def score(r):
+            return __import__("services.metrics").metrics.qs.stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_sys_modules_of_the_covered_module": (
+        """
+        import sys
+        def score(r):
+            return sys.modules["services.metrics"].qs.stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_vars_of_the_module": (
+        """
+        from services import metrics
+        def score(r):
+            return vars(metrics)["qs"].stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_dunder_dict_of_the_module": (
+        """
+        from services import metrics
+        def score(r):
+            return metrics.__dict__["qs"].stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_dunder_dict_get": (
+        """
+        from services import metrics
+        def score(r):
+            return metrics.__dict__.get("qs").stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_getattr_dunder_dict": (
+        """
+        from services import metrics
+        def score(r):
+            return getattr(metrics, "__dict__")["qs"].stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_function_globals": (
+        """
+        from services.metrics import compute_all_metrics
+        def score(r):
+            return compute_all_metrics.__globals__["qs"].stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_module_alias_rebound_in_a_function": (
+        """
+        import services.metrics
+        def score(r):
+            m = services.metrics
+            return m.qs.stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_module_alias_rebound_at_module_level": (
+        """
+        from services import metrics
+        m2 = metrics
+        def score(r):
+            return m2.qs.stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_module_alias_rebound_by_walrus": (
+        """
+        from services import metrics
+        def score(r):
+            if (m := metrics) is not None:
+                return m.qs.stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    # The round-1 KNOWN LIMIT, closed: a computed name on the covered module
+    # fails closed instead of being unresolvable.
+    "reexport_getattr_computed_name": (
+        """
+        from services import metrics
+        def score(r, name):
+            return getattr(metrics, name).stats.sharpe(r)
+        """,
+        "score",
+        "<computed>",
+        "read with a computed name",
+    ),
+    "reexport_vars_computed_key": (
+        """
+        from services import metrics
+        def score(r, name):
+            return vars(metrics)[name].stats.sharpe(r)
+        """,
+        "score",
+        "<computed>",
+        "read with a computed name",
+    ),
+    "reexport_namespace_escapes_as_a_value": (
+        """
+        from services import metrics
+        def score(r):
+            ns = metrics.__dict__
+            return ns
+        """,
+        "score",
+        "<computed>",
+        "handed on as a value",
+    ),
 }
 
 
@@ -654,6 +846,17 @@ def test_qstats_gate_reexport_green_needle_is_silent() -> None:
                 services.metrics.compute_qstats_scalars(r, None),
                 sibling.compute_all_metrics(r),
                 getattr(metrics, "compute_all_metrics"),
+            )
+        def resolved_the_long_way(r):
+            import importlib
+            import sys
+            alias = metrics
+            return (
+                importlib.import_module("services.metrics").compute_all_metrics(r),
+                sys.modules["services.metrics"].compute_all_metrics(r),
+                vars(metrics)["compute_all_metrics"](r),
+                metrics.__dict__.get("compute_all_metrics")(r),
+                alias.compute_all_metrics(r),
             )
         """
     )
