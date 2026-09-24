@@ -162,6 +162,19 @@ function isSyncEnqueued(body: unknown): boolean {
 }
 
 /**
+ * 167.2-REVIEW-SFH-R2 R2-L2: did this enqueued answer queue a NEW job for this
+ * attempt? `/api/keys/sync` answers `ok: true` for a duplicate submission
+ * (`code: "WIZARD_DUPLICATE"`) and can carry `queued: false`; neither is a job
+ * this attempt started. Only a new job lets the panel's give-up attribute a
+ * `failed_final` chain to this attempt (KCS-02: per-attempt evidence). The
+ * composite branch carries no `queued` field and did enqueue.
+ */
+function enqueuedNewJob(body: unknown): boolean {
+  const fields = body as Record<string, unknown>;
+  return fields.queued !== false && fields.code !== "WIZARD_DUPLICATE";
+}
+
+/**
  * Phase 167 / 167-06 fix round (167-CONTEXT D-18): the ONE tracked sync
  * attempt, started by `handleSyncTrades`. `syncingKeyId` is its render-side
  * marker; this record is what decides who may end it.
@@ -333,6 +346,9 @@ export function ApiKeyManager({
   // key its "has read computing" evidence would carry into the next attempt.
   const [evidenceBaseline, setEvidenceBaseline] = useState<EvidenceBaseline>("unknown");
   const [attemptSeq, setAttemptSeq] = useState(0);
+  // 167.2-REVIEW-SFH-R2 R2-L2: whether the live attempt's enqueue queued a NEW
+  // job (see `enqueuedNewJob`). Reset at every registration.
+  const [attemptEnqueuedNewJob, setAttemptEnqueuedNewJob] = useState(false);
   // Phase 167.2 / KCS-22: which give-up ended the attempt as `no_result` (the
   // reason the panel forwarded), so the panel says how long it waited. Reset
   // at every attempt's registration.
@@ -1179,6 +1195,7 @@ export function ApiKeyManager({
     // KCS-02: a fresh panel and no baseline until this attempt has read one.
     setAttemptSeq((seq) => seq + 1);
     setEvidenceBaseline("unknown");
+    setAttemptEnqueuedNewJob(false);
     setPanelStopReason(null);
     setFinishUnverified(false);
     setSyncingKeyId(keyId);
@@ -1339,7 +1356,7 @@ export function ApiKeyManager({
 
       // The enqueue exchange: the request, its failure message, its body and
       // the enqueue evidence, as one unit so ONE bound covers all of it.
-      const enqueueExchange = async (): Promise<"enqueued"> => {
+      const enqueueExchange = async (): Promise<{ newJob: boolean }> => {
         const res = await fetch("/api/keys/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1364,7 +1381,7 @@ export function ApiKeyManager({
         if (!isSyncEnqueued(body)) {
           throw new EnqueueAnswerError(SYNC_UNAVAILABLE_COPY, "unrecognized");
         }
-        return "enqueued";
+        return { newJob: enqueuedNewJob(body) };
       };
 
       // Phase 167.2 / KCS-03 (RESEARCH Q2, P5): the exchange is raced against
@@ -1382,7 +1399,7 @@ export function ApiKeyManager({
       // starts no poll and writes nothing.
       const enqueued = enqueueExchange();
       let enqueueTimer: ReturnType<typeof setTimeout> | undefined;
-      let enqueueOutcome: "enqueued" | "timed_out";
+      let enqueueOutcome: { newJob: boolean } | "timed_out";
       try {
         const bound = new Promise<"timed_out">((resolve) => {
           enqueueTimer = setTimeout(() => resolve("timed_out"), ENQUEUE_BOUND_MS);
@@ -1458,6 +1475,7 @@ export function ApiKeyManager({
       // ended) starts no poll and moves no state.
       if (attemptRef.current !== attempt) return;
       attempt.enqueued = true;
+      setAttemptEnqueuedNewJob(enqueueOutcome.newJob);
       setSyncStatus("computing");
       // NEW-C37-04: pass the key being synced so lastSyncAt reads from
       // the correct row.
@@ -1746,6 +1764,7 @@ export function ApiKeyManager({
           key={attemptSeq}
           strategyId={strategyId}
           evidenceBaseline={evidenceBaseline}
+          attemptEnqueuedNewJob={attemptEnqueuedNewJob}
           syncStatus={syncStatus}
           stopReason={panelStopReason}
           lastSyncAt={lastSyncAt}

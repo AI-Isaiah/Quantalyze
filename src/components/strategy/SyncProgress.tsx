@@ -146,6 +146,15 @@ interface SyncProgressProps {
    * `key`), so the computing evidence below never carries into the next one.
    */
   evidenceBaseline?: EvidenceBaseline;
+  /**
+   * 167.2-REVIEW-SFH-R2 R2-L2: did THIS attempt's enqueue queue a new job?
+   * False for a duplicate submission (`code: "WIZARD_DUPLICATE"`) and for
+   * `queued: false`. Only then may the give-up attribute a `failed_final`
+   * chain to this attempt; otherwise that chain is a previous run's, and the
+   * give-up keeps `no_result`. Defaults to false, the reading that claims
+   * least.
+   */
+  attemptEnqueuedNewJob?: boolean;
 }
 
 const STATUS_CONFIG: Record<
@@ -218,6 +227,7 @@ export function SyncProgress({
   onStatusChange,
   evidenceBaseline = "unknown",
   stopReason = null,
+  attemptEnqueuedNewJob = false,
 }: SyncProgressProps) {
   const [showWarnings, setShowWarnings] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -452,10 +462,27 @@ export function SyncProgress({
           : reason === "unreadable"
             ? "unreadable"
             : "poll_cap";
+      // 167.2-REVIEW-SFH-R2 R2-L3: a whole attempt with no clean read (the
+      // session expired, every read errored) is an operational signal, not
+      // only a panel state. Tags only: no strategy id.
+      if (reason === "unreadable") {
+        captureToSentry(
+          new Error("the sync panel could not read the analytics row for a whole attempt"),
+          { level: "warning", tags: { component: "SyncProgress", stage: "poll-unreadable" } },
+        );
+      }
       const token = computingTokenRef.current;
       void readChainJobState(strategyId).then((read) => {
         if (token === null || computingTokenRef.current !== token) return;
-        if (read.kind === "settled" && read.jobStatus === "failed_final") {
+        // 167.2-REVIEW-SFH-R2 R2-L2: a failed chain is this attempt's only
+        // when this attempt queued a new job (KCS-02: a terminal needs
+        // per-attempt evidence). A duplicate or `queued: false` answer queued
+        // nothing, so the newest failed chain is a previous run's.
+        if (
+          attemptEnqueuedNewJob &&
+          read.kind === "settled" &&
+          read.jobStatus === "failed_final"
+        ) {
           onStatusChange?.("error", { computationError: null });
         } else {
           onStatusChange?.("no_result", { stopReason });

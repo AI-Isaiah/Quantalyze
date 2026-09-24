@@ -674,6 +674,48 @@ describe("ApiKeyManager + the REAL poller: a give-up is not a failure (Phase 167
     expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
   });
 
+  // 167.2-REVIEW-SFH-R2 R2-L2: the give-up attributes a failed_final chain to
+  // this attempt only when this attempt's enqueue queued a NEW job.
+  it.each([
+    {
+      arm: "a new job (queued: true) -> Sync failed",
+      body: { ok: true, accepted: true, status: "syncing", queued: true },
+      failed: true,
+    },
+    {
+      arm: "a duplicate (WIZARD_DUPLICATE, queued: false) -> No result yet",
+      body: { ok: true, code: "WIZARD_DUPLICATE", idempotent: true, queued: false },
+      failed: false,
+    },
+    {
+      arm: "queued: false -> No result yet",
+      body: { ok: true, queued: false },
+      failed: false,
+    },
+  ])("R2-L2-GIVEUP: at the cap with the job queue saying failed_final, $arm", async ({ body, failed }) => {
+    mockState.analyticsResult = analyticsRow("computing");
+    // The gate reads first (settled), then the give-up reads failed_final.
+    mockState.jobStatuses = ["done", "failed_final"];
+    const enqueue = await startResyncWithHeldEnqueue();
+    await act(async () => {
+      enqueue.resolve({
+        ok: true,
+        status: 202,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => body,
+      } as unknown as Response);
+    });
+    await tick(0);
+    await tick(POLL_MS * 41);
+    await tick(0);
+    if (failed) {
+      expect(screen.getByText("Sync failed")).toBeInTheDocument();
+    } else {
+      expect(screen.queryByText("Sync failed")).not.toBeInTheDocument();
+      expect(screen.getByText(NO_RESULT_LABEL)).toBeInTheDocument();
+    }
+  });
+
   it("NOROW-NOT-ON-ERROR: computing rows, then a failed read on every tick from tick 4: no nothing-recorded claim at tick 15, KCS22-CAP after tick 41", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     mockState.analyticsResult = analyticsRow("computing");

@@ -132,7 +132,11 @@ const baseProps = {
  * Render the real `SyncProgress`. Returns the RTL `rerender` plus the
  * `onStatusChange` spy so pins can assert forwarded transitions.
  */
-function renderPoller(syncStatus: SyncStatus, evidenceBaseline?: EvidenceBaseline) {
+function renderPoller(
+  syncStatus: SyncStatus,
+  evidenceBaseline?: EvidenceBaseline,
+  attemptEnqueuedNewJob?: boolean,
+) {
   const onStatusChange = vi.fn();
   const { rerender } = render(
     <SyncProgress
@@ -140,6 +144,7 @@ function renderPoller(syncStatus: SyncStatus, evidenceBaseline?: EvidenceBaselin
       syncStatus={syncStatus}
       onStatusChange={onStatusChange}
       evidenceBaseline={evidenceBaseline}
+      attemptEnqueuedNewJob={attemptEnqueuedNewJob}
     />,
   );
   const rerenderStatus = (next: SyncStatus) =>
@@ -795,7 +800,9 @@ describe("SyncProgress — the give-up asks the job queue once before it says \"
   // FAILED chain is forwarded as a failure; anything else keeps its reason.
   it("GIVEUP-FAILED-FINAL: the cap with the job queue saying failed_final forwards a failure, not no_result", async () => {
     mockState.analyticsResult = analyticsRow("computing");
-    const { onStatusChange } = renderPoller("computing");
+    // 167.2-REVIEW-SFH-R2 R2-L2: the attempt enqueued a NEW job, so the
+    // failed chain is its own.
+    const { onStatusChange } = renderPoller("computing", undefined, true);
     await tick(0);
     await tick(POLL_MS * 40);
     mockState.jobAnswers = [jobState("failed_final")];
@@ -803,6 +810,36 @@ describe("SyncProgress — the give-up asks the job queue once before it says \"
     await tick(0);
     expect(onStatusChange.mock.calls.at(-1)).toEqual(["error", { computationError: null }]);
     expect(callsWith(onStatusChange, "no_result")).toBe(0);
+  });
+
+  it("R2-L2-NO-NEW-JOB: at the cap, a failed_final chain is NOT this attempt's when the enqueue queued nothing new (duplicate / queued:false): no_result, never Sync failed", async () => {
+    mockState.analyticsResult = analyticsRow("computing");
+    const { onStatusChange } = renderPoller("computing", undefined, false);
+    await tick(0);
+    await tick(POLL_MS * 40);
+    mockState.jobAnswers = [jobState("failed_final")];
+    await tick(POLL_MS);
+    await tick(0);
+    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(onStatusChange.mock.calls.at(-1)).toEqual(["no_result", { stopReason: "poll_cap" }]);
+  });
+
+  it("R2-L3-CAPTURE: a give-up with no clean read in the whole attempt is captured (tags only)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      mockState.analyticsResult = { data: null, error: { message: "synthetic JWT expired" } };
+      renderPoller("computing", undefined, true);
+      await tick(0);
+      await tick(POLL_MS * 41);
+      await tick(0);
+      expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+        level: "warning",
+        tags: { component: "SyncProgress", stage: "poll-unreadable" },
+      });
+      expect(JSON.stringify(captureToSentryMock.mock.calls)).not.toContain("strat-1");
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   it("GIVEUP-IN-FLIGHT: the cap with the job still running keeps no_result / poll_cap, once", async () => {
