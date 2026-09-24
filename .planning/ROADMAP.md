@@ -2258,7 +2258,7 @@ Plans:
 **Wave 1** *(three file-disjoint plans, parallel worktrees)*
 - [x] 164.6-01-PLAN.md — OPS-08-TS: retry a 40001 exactly once at csv-finalize and allocator holdings sync (criterion 2)
 - [x] 164.6-02-PLAN.md — 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker (criterion 4)
-- [ ] 164.6-03-PLAN.md — OPS-08-F2: both fan-outs record failed targets and a failure count in a cron_runs row; one migration plus gate arms and twin re-points in one commit (criterion 3)
+- [x] 164.6-03-PLAN.md — OPS-08-F2: both fan-outs record failed targets and a failure count in a cron_runs row; one migration plus gate arms and twin re-points in one commit (criterion 3)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 164.6-04-PLAN.md — OPS-08-F2: move every floor, census and sentinel pin to its MEASURED value
