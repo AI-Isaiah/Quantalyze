@@ -427,6 +427,71 @@ describe("[154-01 / STALE-01a] useStrategySyncPoller — an absent row is not a 
   });
 
   // ═════════════════════════════════════════════════════════════════════════
+  // Phase 167.2 / KCS-02 — the interval arm forwards the row's server-written
+  // `computed_at` as a THIRD `onStatus` argument (SyncProgress compares it with
+  // its pre-enqueue baseline); the ladder arm, the wizard's, is byte-unchanged
+  // and still calls `onStatus` with exactly two. Hand-typed expected value: the
+  // row `installRowClient` serves.
+  // ═════════════════════════════════════════════════════════════════════════
+  it("INTERVAL-COMPUTED-AT: the interval arm's onStatus third argument is the row's computed_at", async () => {
+    const onStatus = vi.fn();
+    const onError = vi.fn();
+    installRowClient("complete");
+
+    renderHook(() =>
+      useStrategySyncPoller({
+        enabled: true,
+        strategyId: STRATEGY_ID,
+        schedule: INTERVAL_CADENCE_MS,
+        maxAttempts: 40,
+        missingRowGracePolls: 10,
+        onStatus,
+        onError,
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ADVANCE_MS);
+    });
+
+    expect(onStatus.mock.calls.length).toBeGreaterThan(0);
+    expect(onStatus.mock.calls[0]).toEqual([
+      "complete",
+      null,
+      "2026-08-04T11:39:35.342759+00:00",
+    ]);
+  });
+
+  it("LADDER-TWO-ARGS: the ladder arm's onStatus is called with exactly two arguments", async () => {
+    const onStatus = vi.fn();
+    const onTerminal = vi.fn(() => "done" as const);
+    const onError = vi.fn();
+    installRowClient("complete");
+
+    renderHook(() =>
+      useStrategySyncPoller({
+        enabled: true,
+        strategyId: STRATEGY_ID,
+        schedule: LADDER_SCHEDULE,
+        maxConsecutiveErrors: 3,
+        onStatus,
+        onTerminal,
+        onError,
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ADVANCE_MS);
+    });
+
+    expect(onStatus.mock.calls.length).toBeGreaterThan(0);
+    for (const call of onStatus.mock.calls) {
+      expect(call).toHaveLength(2);
+    }
+    expect(onStatus.mock.calls[0]).toEqual(["complete", null]);
+  });
+
+  // ═════════════════════════════════════════════════════════════════════════
   // SYM-interval — TWIN-3, THE DIVERGENCE. PASSES AT HEAD.
   //
   // Its own `it()`, never a loop over the two arms (154-PATTERNS.md §11.3): the

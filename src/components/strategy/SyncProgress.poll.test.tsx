@@ -19,7 +19,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, cleanup, act } from "@testing-library/react";
-import { SyncProgress, type SyncStatus } from "./SyncProgress";
+import { SyncProgress, type EvidenceBaseline, type SyncStatus } from "./SyncProgress";
 
 // ---------------------------------------------------------------------------
 // Supabase client mock.
@@ -70,16 +70,20 @@ vi.mock("@/lib/supabase/client", () => ({
 // --- Helpers ---------------------------------------------------------------
 
 /** A present, non-terminal-or-terminal analytics row keyed by DB status. */
-function analyticsRow(status: string) {
+function analyticsRow(status: string, computedAt: string | null = null) {
   return {
     data: {
       computation_status: status,
       computation_error: null,
-      computed_at: null,
+      computed_at: computedAt,
     },
     error: null,
   };
 }
+
+// Phase 167.2 / KCS-02: a synthetic server-written computed_at for a row this
+// attempt's job wrote (it differs from a `{ computedAt: null }` baseline).
+const T1 = "2026-04-19T12:03:00.000000+00:00";
 
 const baseProps = {
   strategyId: "strat-1",
@@ -92,10 +96,15 @@ const baseProps = {
  * Render the real `SyncProgress`. Returns the RTL `rerender` plus the
  * `onStatusChange` spy so pins can assert forwarded transitions.
  */
-function renderPoller(syncStatus: SyncStatus) {
+function renderPoller(syncStatus: SyncStatus, evidenceBaseline?: EvidenceBaseline) {
   const onStatusChange = vi.fn();
   const { rerender } = render(
-    <SyncProgress {...baseProps} syncStatus={syncStatus} onStatusChange={onStatusChange} />,
+    <SyncProgress
+      {...baseProps}
+      syncStatus={syncStatus}
+      onStatusChange={onStatusChange}
+      evidenceBaseline={evidenceBaseline}
+    />,
   );
   const rerenderStatus = (next: SyncStatus) =>
     rerender(
@@ -209,6 +218,13 @@ describe("SyncProgress poll loop — timing (characterization)", () => {
 // Task 2 — semantic pins (forwarding contract, asymmetry, inactivity)
 // ===========================================================================
 describe("SyncProgress poll loop — forwarding contract (characterization)", () => {
+  // Moved by Phase 167.2 / KCS-02: a terminal is forwarded only with this
+  // attempt's evidence. Lineage: this pin rendered with no baseline and a row
+  // carrying computed_at null, and asserted every DB terminal was forwarded on
+  // the first read. That is exactly the previous run's row the gate now drops
+  // (PIN 5b). Each row now carries this attempt's evidence (b): a computed_at
+  // that differs from a known `{ computedAt: null }` baseline. The mapping it
+  // characterizes (toSyncStatus through the forward filter) is unchanged.
   it.each([
     ["computing", "computing"],
     ["complete", "complete"],
@@ -217,13 +233,38 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
   ])(
     "PIN 5 — FORWARDED: DB %s maps to onStatusChange(%s)",
     async (dbStatus, uiStatus) => {
-      mockState.analyticsResult = analyticsRow(dbStatus);
-      const { onStatusChange } = renderPoller("computing");
+      mockState.analyticsResult = analyticsRow(dbStatus, T1);
+      const { onStatusChange } = renderPoller("computing", { computedAt: null });
       await tick(0);
       await tick(POLL_MS);
       expect(callsWith(onStatusChange, uiStatus)).toBe(1);
     },
   );
+
+  it("PIN 5b — NO-EVIDENCE: with an unknown baseline and no computing read, a terminal is never forwarded (KCS-02)", async () => {
+    // The previous run's `complete` row, as the poll reads it for the whole first
+    // hop of a resync. Neither piece of evidence exists, so nothing is forwarded
+    // and the loop keeps reading.
+    mockState.analyticsResult = analyticsRow("complete", T1);
+    const { onStatusChange } = renderPoller("computing");
+    await tick(0);
+
+    await tick(POLL_MS * 5);
+    expect(mockState.analyticsSelectCount).toBe(5);
+    expect(onStatusChange).not.toHaveBeenCalled();
+  });
+
+  it("PIN 5c — COMPUTING-ADMITS: one computing read, then complete: computing forwarded, then complete forwarded once (KCS-02)", async () => {
+    mockState.analyticsResult = analyticsRow("computing");
+    const { onStatusChange } = renderPoller("computing");
+    await tick(0);
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([["computing"]]);
+
+    mockState.analyticsResult = analyticsRow("complete");
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([["computing"], ["complete"]]);
+  });
 
   it("PIN 6 — NON-PROPAGATION: DB 'pending' (UI 'idle') is never forwarded", async () => {
     // toSyncStatus('pending') === 'idle', which is NOT in the forward filter
