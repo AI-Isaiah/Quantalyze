@@ -3022,11 +3022,44 @@ Plans:
 **Success criteria:** (1) a test with two keys holding the same asset on one venue shows both positions surviving the collapse, in AUM, in Open Positions and in the 167.1 marker, observed RED against today's key; (2) every consumer of `holdingScopeKey` is enumerated by symbol and each is either re-keyed or shown not to need it; (3) the discuss step records how a soft-disconnected key's holdings are counted (founder queue item 11's second question); (4) no change to the analytics service's own math unless the collapse lives there too.
 **Requirements**: TBD
 **Depends on:** Phase 167.1
+⚠️ **2026-09-24 correction (read-only root-cause trace at `96b5db4c`):** the collapse also lives in the analytics-side unique index `(allocator_id, venue, symbol, asof)` on `allocator_holdings`, and for ONE account behind several keys it merges CORRECTLY but attributes the row to whichever key polled last. Adding `api_key_id` to the key as framed above would triple-count that case. Phase 167.1.2 ACCOUNTTRUTH decides account identity first (founder: refuse a second key on the same account); re-scope this phase against it before planning.
 **Plans:** 0 plans
 
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.1 to break down)
+
+### Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports (INSERTED)
+
+**Goal:** An allocator's book counts each exchange ACCOUNT exactly once, and "My Allocation" never shows an equity curve, return or ratio that the data does not support. A second key on an account that is already connected is refused. The equity history is rebuilt as one series per account from per-key returns and flows, and hidden until that series exists.
+**Requirements**: TBD. Source: founder browser UAT 2026-09-24 on the founder's own allocator book ("completely wrong, obviously"), with a read-only root-cause trace at `96b5db4c`.
+**Depends on:** Phase 167.1
+**Plans:** 0 plans
+
+⭐ **Founder decisions, 2026-09-24 (AskUserQuestion):**
+- (1) Several keys on the SAME exchange account: **"Refuse a second key."**
+- (2) The broken curve: **"Hide it until correct."**
+
+**Evidence (root cause, by symbol; measured in code, not yet on PROD rows):**
+- **Equity writes.** `allocator_equity_snapshots` holds one row per `(allocator_id, asof)`, written first-writer-wins (`persist_equity_snapshots`, `ignore_duplicates=True`) by the daily refresh (`run_refresh_allocator_equity_daily_job`, which sums only holdings with `asof = today`, so a key that did not poll today counts as $0) and by the per-key backfill (`run_reconstruct_allocator_history_job`). The history is therefore a patchwork of writers. It produces a +100% jump, a flicker in May, and a −50% "crash" on the day two revoked keys stopped polling.
+- **Returns.** `equityCurveToDailyReturns` (`src/lib/factsheet/resolve-series.ts`) turns those level jumps into returns with no flow or key-set adjustment. That is why the page showed Sharpe 1.44 beside −42.8% cumulative.
+- **Holdings attribution.** The `allocator_holdings` unique index `(allocator_id, venue, symbol, asof)` attributes a shared account to the last-polling key. The Scenario composer then gets zero weight mass: `computeScenario` normalises to 0 instead of returning an honest empty, so it shows all +0.00% over 100 days. `summarizeLiveHoldings` silently drops a trusted but non-contributing key's dollars ("live-holdings total is $0").
+- **Account identity.** `api_keys.venue_account_id` is NULL for every ccxt venue, so "same account" cannot be detected today.
+
+## Success Criteria
+1. **Detect and refuse duplicates.** Connecting a key reads the exchange's account identity (for example the OKX/Bybit uid) into `venue_account_id`. A key whose account is already connected for this user is refused with a clear message. Existing duplicate keys get a named cleanup path; nothing is silently deleted.
+2. **Hide the broken curve now.** Until criterion 3 ships, "My Allocation" shows an honest "history is being rebuilt" state instead of the legacy snapshot curve and its KPIs. There are no invented numbers. This lands first, as its own plan.
+3. **Rebuild the history.** It is rebuilt as one series per account: carried forward over missing polls, never read as $0, and flow-adjusted so that deposits, withdrawals and keys joining or leaving are not returns. The KPIs derive from that series. There is a test for each: a revoked key's stop, a duplicate-writer date, and a deposit.
+4. **No fabricated zeros or silent drops.** `computeScenario` returns an honest empty on zero weight mass. `summarizeLiveHoldings` never drops trusted dollars silently; every excluded dollar sits in a disclosed part.
+5. **Small fixes on the same surface.**
+   - The Scenario UI shows no raw key id: `buildPerKeyStrategyForBuilderSet` names a key through `apiKeyLabelById`, and so do the correlation headers.
+   - `MetricsColumn`'s years derive from `periodsPerYear`, not `/252`.
+   - A tab switch on /allocations does not re-run the whole server render.
+6. **Recompute on PROD.** Affected rows are recomputed after the merge, behind a read-only census first.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 167.1.2 to break down)
 
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 
