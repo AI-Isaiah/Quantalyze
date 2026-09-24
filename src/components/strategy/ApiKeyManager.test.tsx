@@ -1994,6 +1994,17 @@ describe("[167-06] the persisted credential state renders on the manager's key c
         venue_account_id: null,
       });
 
+    /** The form's submit button (its label never changes while blocked). */
+    function connectKey() {
+      return screen.getByRole("button", { name: "Connect Key" });
+    }
+
+    /** The line Connect Key's aria-describedby points at, or null. */
+    function blockedLine() {
+      const id = connectKey().getAttribute("aria-describedby");
+      return id ? document.getElementById(id) : null;
+    }
+
     beforeEach(() => {
       apiKeyDeleteMock.mockReset();
       apiKeyLookupMock.mockReset();
@@ -2381,6 +2392,11 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       selectResultMock.mockReturnValue({ data: [newRow(), current], error: null });
       await addKey();
 
+      // Connect Key is blocked, and says why, naming the attempt's key.
+      expect(connectKey()).toBeDisabled();
+      expect(connectKey()).toHaveAccessibleDescription(
+        'Wait for the sync of "Manager MT5" to finish before connecting another key.',
+      );
       // The add never started: no validate request was sent.
       expect(
         fetchMock.mock.calls.some((c) => c[0] === "/api/keys/validate-and-encrypt"),
@@ -2400,6 +2416,9 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       expect(cardButton("key-j", "Resync")).toBeEnabled();
       expect(cardButton("key-j", "Update password")).toBeEnabled();
       expect(cardButton("key-j", "Delete")).toBeEnabled();
+      // The form is still open; its reason line unmounted and it submits again.
+      expect(blockedLine()).toBeNull();
+      expect(connectKey()).toBeEnabled();
       // And its success is judged against J, the key it synced: J is
       // untrusted, so R2 withholds it and J's pill returns.
       expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
@@ -2408,9 +2427,100 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       ).toHaveAttribute("data-sync-status", "sign_in_failed");
     });
 
+    // ── KCS-01 locked copy (167.2-UI-SPEC § KCS-01, S1) ─────────────────────
+    //
+    // Hand-typed, never imported: an oracle that reads its subject cannot
+    // detect its subject changing. The quotes are ASCII U+0022.
+
+    it("KCS01-BLOCKED: with an attempt live on a labelled key, the open form names that key, verbatim", async () => {
+      const fetchMock = routeFetch();
+      await renderRows(
+        [
+          row({
+            id: "key-b",
+            exchange: "bybit",
+            label: "Example Bybit",
+            sync_status: null,
+            venue_account_id: null,
+          }),
+        ],
+        "key-b",
+        "binance",
+      );
+      await resync("key-b");
+
+      // The header Add Key stays enabled: opening the form is harmless.
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /Add Key/i }));
+      });
+      expect(connectKey()).toBeDisabled();
+      expect(blockedLine()?.textContent).toBe(
+        'Wait for the sync of "Example Bybit" to finish before connecting another key.',
+      );
+      expect(connectKey()).toHaveAccessibleDescription(
+        'Wait for the sync of "Example Bybit" to finish before connecting another key.',
+      );
+      await act(async () => {
+        fireEvent.click(connectKey());
+      });
+      expect(
+        fetchMock.mock.calls.some((c) => c[0] === "/api/keys/validate-and-encrypt"),
+      ).toBe(false);
+    });
+
+    it.each([
+      { shape: "empty", label: "" },
+      { shape: "whitespace-only", label: "   " },
+    ])(
+      "KCS01-BLOCKED-NOLABEL: an attempt on a key with an $shape label reads the no-label sentence, verbatim",
+      async ({ label }) => {
+        routeFetch();
+        await renderRows(
+          [
+            row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null }),
+            row({ id: "key-w", exchange: "binance", label, sync_status: null, venue_account_id: null }),
+          ],
+          "key-w",
+          "binance",
+        );
+        await resync("key-w");
+        await act(async () => {
+          fireEvent.click(screen.getByRole("button", { name: /Add Key/i }));
+        });
+        expect(connectKey()).toBeDisabled();
+        expect(blockedLine()?.textContent).toBe(
+          "Wait for the current sync to finish before connecting another key.",
+        );
+      },
+    );
+
+    it("long-text: a 200-character label renders the whole sentence as escaped text, instruction intact", async () => {
+      // Synthetic, and carrying markup and a replacement pattern: the label is
+      // user text, so it must render as text and must not be rewritten.
+      const longLabel = `<b>$&</b>${"x".repeat(191)}`;
+      expect(longLabel).toHaveLength(200);
+      routeFetch();
+      await renderRows(
+        [row({ id: "key-l", exchange: "binance", label: longLabel, sync_status: null, venue_account_id: null })],
+        "key-l",
+        "binance",
+      );
+      await resync("key-l");
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /Add Key/i }));
+      });
+      const line = blockedLine()!;
+      expect(line.textContent).toBe(
+        `Wait for the sync of "${longLabel}" to finish before connecting another key.`,
+      );
+      expect(line.textContent!.endsWith("before connecting another key.")).toBe(true);
+      expect(line.querySelector("b")).toBeNull();
+      expect(line.className).not.toMatch(/truncate|line-clamp|overflow-hidden/);
+    });
+
     // ── ATTEMPT SCOPE (167-06 fix round) ────────────────────────────────────
 
-    it("an add cannot start while an attempt awaits its own enqueue (KCS-01)", async () => {
+    it("an add cannot start while an attempt awaits its own enqueue (Connect Key disabled, Enter blocked) (KCS-01)", async () => {
       // Lineage: "ATTEMPT SCOPE, post-add route: a post-add sync that fails
       // while another key's attempt still awaits its own enqueue does not end
       // that attempt (167-REVIEW-06 CR-01)". KCS-01 removed the premise: an add
@@ -2431,9 +2541,14 @@ describe("[167-06] the persisted credential state renders on the manager's key c
         "syncing",
       );
 
-      // 2. An add submitted now (the Enter-key path) sends nothing.
+      // 2. An add submitted now (the Enter-key path) sends nothing, and the
+      //    click path is closed too: Connect Key is disabled.
       selectResultMock.mockReturnValue({ data: [newRow(), current], error: null });
       await addKey();
+      expect(connectKey()).toBeDisabled();
+      await act(async () => {
+        fireEvent.click(connectKey());
+      });
       expect(
         fetchMock.mock.calls.some((c) => c[0] === "/api/keys/validate-and-encrypt"),
       ).toBe(false);
@@ -2818,16 +2933,27 @@ describe("[167-06] the persisted credential state renders on the manager's key c
 
     it.each([
       {
+        ordering: "J's Resync is refused while the add's validate is pending (P7)",
+        refusedDuringValidate: true,
+      },
+      {
         ordering: "no attempt was live at the add; J's Resync is refused while the new key's attempt holds the slot",
+        refusedDuringValidate: false,
       },
     ])(
       "Retry after a post-add failure re-links the NEW key, never J ($ordering) (167-REVIEW-06-R2 WR-01)",
-      async () => {
+      async ({ refusedDuringValidate }) => {
         const postAdd = deferred<Response>();
+        const validate = deferred<Response>();
         const syncQueue: Array<() => Response | Promise<Response>> = [
           () => postAdd.promise,
         ];
-        routeFetch({ sync: () => (syncQueue.shift() ?? syncAccepted)() });
+        const fetchMock = routeFetch({
+          sync: () => (syncQueue.shift() ?? syncAccepted)(),
+          validate: refusedDuringValidate
+            ? () => validate.promise
+            : undefined,
+        });
         const current = row({
           id: "key-j",
           exchange: "binance",
@@ -2839,6 +2965,23 @@ describe("[167-06] the persisted credential state renders on the manager's key c
         selectResultMock.mockReturnValue({ data: [newRow(), current], error: null });
 
         await addKey();
+        if (refusedDuringValidate) {
+          // P7: the add's validate is pending, and J's Resync is refused.
+          expect(cardButton("key-j", "Resync")).toBeDisabled();
+          await act(async () => {
+            fireEvent.click(cardButton("key-j", "Resync"));
+          });
+          expect(strategiesUpdateMock).not.toHaveBeenCalled();
+          expect(fetchMock.mock.calls.some((c) => c[0] === "/api/keys/sync")).toBe(false);
+          await act(async () => {
+            validate.resolve(
+              new Response(
+                JSON.stringify({ api_key_id: "key-new", valid: true, read_only: true }),
+                { status: 200, headers: JSON_HEADERS },
+              ),
+            );
+          });
+        }
         await waitFor(() => {
           expect(screen.getByTestId("api-key-card-key-new")).toBeInTheDocument();
         });
@@ -3073,23 +3216,48 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       expect(screen.queryByText("late read failed")).not.toBeInTheDocument();
     });
 
-    it("the post-add attempt is live from the CLICK: while the new key's link write is pending, J's Resync is refused and the panel is the new key's (IN-02, moved by KCS-01)", async () => {
+    it("a Resync cannot start while an add's validate is pending (P7), and the post-add attempt is live from the CLICK (IN-02, moved by KCS-01)", async () => {
       // Lineage: "the attempt is live from the CLICK: a post-add failure
       // landing while the attempt's own link write is pending does not touch
       // its panel (IN-02)". KCS-01 made the post-add sync the tracked attempt,
-      // so the attempt registered before its first await is now the ADD's own.
-      // IN-02's rule is kept and pinned from the other side: from the moment
-      // the add calls `handleSyncTrades`, with its link write still pending,
-      // the slot is held, so no other key's sync can start.
-      const fetchMock = routeFetch();
-      const current = row({ id: "key-j" });
-      await renderRows([current], "key-j", "binance");
+      // so its premise (an untracked post-add failure beside a live attempt)
+      // cannot occur. It now pins both halves of the prevention: (1) P7, while
+      // the add's validate is pending every Resync and Use & Sync is disabled
+      // and a click links nothing and sends nothing; (2) IN-02's rule from the
+      // other side, the add's own attempt holds the slot from the moment it is
+      // registered, with its link write still pending.
+      const validate = deferred<Response>();
+      const fetchMock = routeFetch({ validate: () => validate.promise });
+      const current = row({ id: "key-j", label: "Key J" });
+      const other = row({ id: "key-k", label: "Key K" });
+      await renderRows([current, other], "key-j", "binance");
 
-      // The new key's LINK write (the first await in its attempt) is held.
+      selectResultMock.mockReturnValue({ data: [newRow(), current, other], error: null });
+      await addKey();
+      expect(screen.getByRole("button", { name: "Validating..." })).toBeDisabled();
+
+      // (1) P7: every key's sync control is disabled while the add is in flight.
+      expect(cardButton("key-j", "Resync")).toBeDisabled();
+      expect(cardButton("key-k", "Use & Sync")).toBeDisabled();
+      await act(async () => {
+        fireEvent.click(cardButton("key-j", "Resync"));
+        fireEvent.click(cardButton("key-k", "Use & Sync"));
+      });
+      expect(strategiesUpdateMock).not.toHaveBeenCalled();
+      expect(fetchMock.mock.calls.some((c) => c[0] === "/api/keys/sync")).toBe(false);
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+
+      // (2) The validate answers; the new key's LINK write is held.
       const newLink = deferred<{ error: null }>();
       strategiesUpdateMock.mockReturnValueOnce(newLink.promise);
-      selectResultMock.mockReturnValue({ data: [newRow(), current], error: null });
-      await addKey();
+      await act(async () => {
+        validate.resolve(
+          new Response(
+            JSON.stringify({ api_key_id: "key-new", valid: true, read_only: true }),
+            { status: 200, headers: JSON_HEADERS },
+          ),
+        );
+      });
       await waitFor(() => {
         expect(screen.getByTestId("api-key-card-key-new")).toBeInTheDocument();
       });
@@ -3105,6 +3273,10 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       });
       // Only the add's own link was attempted; J was never linked.
       expect(strategiesUpdateMock).toHaveBeenCalledTimes(1);
+      expect(strategiesUpdateMock.mock.calls[0][0]).toEqual({
+        table: "strategies",
+        vals: { api_key_id: "key-new" },
+      });
       expect(fetchMock.mock.calls.some((c) => c[0] === "/api/keys/sync")).toBe(false);
 
       await act(async () => {
@@ -3120,6 +3292,73 @@ describe("[167-06] the persisted credential state renders on the manager's key c
         fetchMock.mock.calls.filter((c) => c[0] === "/api/keys/sync"),
       ).toHaveLength(1);
       expect(cardButton("key-new", "Syncing…")).toBeDisabled();
+    });
+
+    it("P7 handler guard: the panel's Retry starts no attempt while an add's validate is pending", async () => {
+      // The disabled Resync / Use & Sync buttons are the first line. The
+      // panel's Retry reaches `handleSyncTrades` through no card button, so
+      // this pins the handler guard behind them (a ref, because `loading` is
+      // async state: the NEW-C37-02 lesson).
+      const validate = deferred<Response>();
+      let syncCalls = 0;
+      const fetchMock = routeFetch({
+        validate: () => validate.promise,
+        sync: () => {
+          syncCalls += 1;
+          return syncCalls === 1 ? syncRefused("Sync could not start") : syncAccepted();
+        },
+      });
+      const current = row({ id: "key-j", label: "Key J" });
+      await renderRows([current], "key-j", "binance");
+
+      // J's own sync fails, so the panel shows its error and its Retry.
+      await act(async () => {
+        fireEvent.click(cardButton("key-j", "Resync"));
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+          "data-sync-status",
+          "error",
+        );
+      });
+      const linksBefore = strategiesUpdateMock.mock.calls.length;
+      const syncsBefore = syncCalls;
+
+      selectResultMock.mockReturnValue({ data: [newRow(), current], error: null });
+      await addKey();
+      expect(screen.getByRole("button", { name: "Validating..." })).toBeDisabled();
+
+      await act(async () => {
+        capturedOnRetry!();
+      });
+      // No attempt registered: nothing linked, nothing sent, panel unchanged.
+      expect(strategiesUpdateMock.mock.calls.length).toBe(linksBefore);
+      expect(syncCalls).toBe(syncsBefore);
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "error",
+      );
+
+      // The add then runs its own attempt, for the new key.
+      await act(async () => {
+        validate.resolve(
+          new Response(
+            JSON.stringify({ api_key_id: "key-new", valid: true, read_only: true }),
+            { status: 200, headers: JSON_HEADERS },
+          ),
+        );
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+          "data-sync-status",
+          "computing",
+        );
+      });
+      expect(strategiesUpdateMock.mock.calls.at(-1)![0]).toEqual({
+        table: "strategies",
+        vals: { api_key_id: "key-new" },
+      });
+      expect(fetchMock.mock.calls.filter((c) => c[0] === "/api/keys/sync")).toHaveLength(2);
     });
   });
 });
