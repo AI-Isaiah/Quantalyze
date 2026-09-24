@@ -5008,9 +5008,9 @@ export function ScenarioComposer({
                 , which{" "}
                 <span data-testid="scenario-aum-untrusted-note">
                   {buildUntrustedAumClause(
-                liveHoldingsSummary.untrusted,
-                liveHoldingsSummary.unknownStatus,
-              )}
+                    liveHoldingsSummary.untrusted,
+                    liveHoldingsSummary.unknownStatus,
+                  )}
                 </span>
               </>
             )}
