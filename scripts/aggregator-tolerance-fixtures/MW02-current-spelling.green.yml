@@ -39,6 +39,15 @@
 # ROW IS A BEHAVIOUR THE FIXTURE STOPS MODELLING. Every row the real loop
 # iterates is carried here, and the fidelity arm compares every one of them.
 #
+# RE-QUOTED 2026-09-23 (Phase 164.4.2, DECISION B). The real loop gained a
+# `test-db-drift` row, and the fork-PR / workflow_dispatch tolerance arm moved
+# from `sql-tests` to `test-db-drift` WITH its reason: `sql-tests` now runs on a
+# database private to its own runner and consumes no secret, so it has no event
+# it may legitimately skip on and falls to the strict default arm; the VAC-08
+# drift check that still needs shared TEST is the job that can be skipped. The
+# arm's CONDITION lines are unchanged apart from the row name, which is what the
+# fidelity arms compare.
+#
 # Pair member: MW02-alternate-spelling.red.yml
 # House contract (`scripts/lint-sql-gates.mjs:33-40`): a rule without a firing
 # fixture does not merge.
@@ -66,6 +75,7 @@
             "frontend-build=${{ needs.frontend-build.result }}" \
             "e2e-seeded=${{ needs.e2e-seeded.result }}" \
             "sql-tests=${{ needs.sql-tests.result }}" \
+            "test-db-drift=${{ needs.test-db-drift.result }}" \
             "sql-gate-lint=${{ needs.sql-gate-lint.result }}" \
             "sql-mutation=${{ needs.sql-mutation.result }}" \
             "plan-anchor-verify=${{ needs.plan-anchor-verify.result }}"; do
@@ -84,18 +94,18 @@
                 echo "::error::e2e-seeded result=$result on a TRUSTED event."
                 fail=1
               fi
-            elif [ "$name" = "sql-tests" ]; then
+            elif [ "$name" = "test-db-drift" ]; then
               is_fork_pr='${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}'
               is_dispatch='${{ github.event_name == 'workflow_dispatch' }}'
               if [ "$result" = "success" ]; then
                 :
               elif [ "$result" = "skipped" ] && { [ "$is_fork_pr" = "true" ] || [ "$is_dispatch" = "true" ]; }; then
-                echo "sql-tests skipped (fork PR / workflow_dispatch); tolerated for this row only."
+                echo "test-db-drift skipped (fork PR / workflow_dispatch); tolerated for this row only."
               else
                 if [ "$result" = "skipped" ]; then
-                  echo "::error::sql-tests result=skipped on a TRUSTED event."
+                  echo "::error::test-db-drift result=skipped on a TRUSTED event."
                 else
-                  echo "::error::sql-tests result=$result."
+                  echo "::error::test-db-drift result=$result."
                 fi
                 fail=1
               fi
