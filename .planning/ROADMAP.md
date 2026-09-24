@@ -2903,6 +2903,7 @@ Plans:
 **Requirements**: TBD. Source: Phase 167 silent-failure review M2 (2026-09-22); booked as `.planning/WINDOWS.md` entry 66. ⛔ A money-number change — the math in `src/lib/queries.ts` (`emptyLiveBaselineMetrics`, `liveBaselineMetricsFromPerKeyDailies`) is NOT to be changed silently; ⭐ **FOUNDER DECISION 2026-09-22: keep the total and FLAG it** — the headline shows the full number with a marker naming how much comes from keys needing attention (e.g. "includes $X from keys needing attention"). Excluding them was rejected: a password rotation would read as an AUM loss. Nothing silently disappears, and the headline stays reconcilable with the holdings table.
   ⛔ **CORRECTED 2026-09-23 (Phase 167.1 D-03).** The "money-number change" framing above is lineage, not current. This phase changes NO money number: every total keeps its value and discloses the untrusted part. `src/lib/queries.ts`, the scenario commit route, `supabase/` and `analytics-service/` were byte-unchanged on the branch when plan 04 measured them (plan 06 re-measures after the D-06 answer).
 **Depends on:** Phase 167
+**Founder decisions 2026-09-24:** D-06 answered (b) — the composer says what it excludes from keys needing attention; D-18 REOPENED — the marker shows whenever the on-screen figure includes untrusted dollars, including a live total ≤ 0 (review WR-04) and a manual value equal to the live total (review IN-06). Both land in plan 05. Recorded in `167.1-CONTEXT.md`.
 **Plans:** 6 plans
 
 Plans:
