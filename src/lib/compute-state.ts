@@ -72,6 +72,9 @@ export interface ComputeJobRow {
   error_kind?: string | null;
   claimed_at?: string | null;
   created_at?: string;
+  /** Round-2 review: read by `computeJobDeadReason` (the RPC returns both). */
+  attempts?: number | null;
+  max_attempts?: number | null;
   metadata?: {
     member_progress?: unknown;
     member_progress_at?: string | null;
@@ -79,6 +82,77 @@ export interface ComputeJobRow {
 }
 
 const STITCH_KIND = "stitch_composite";
+
+/**
+ * Review-fix round 1 (HIGH-1 c) — how much OLDER than the newest finished
+ * chain row an in-flight chain row may be and still answer over it in
+ * `selectFactsheetJob`. Past this, the in-flight row is treated as stale (a
+ * job whose worker keeps dying cycles running -> pending and never reaches a
+ * terminal status) and the newest chain row answers, as it did before the
+ * in-flight-first rule.
+ *
+ * 8 hours mirrors `_RESYNC_CHAIN_JOB_LIVE_WINDOW` in
+ * `analytics-service/routers/process_key.py`, where it is derived: each job
+ * row is one hop, and `process_key_long`'s single-hop ceiling (~3.7 h) bounds
+ * every chain kind. The bound is measured between two rows' `created_at`, so
+ * this module still never reads the clock.
+ */
+export const IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS = 8 * 60 * 60 * 1000;
+
+/**
+ * Round-2 review — how old an in-flight job row may be (at the caller's
+ * `nowMs`) and still count as live. The TS mirror of
+ * `_RESYNC_CHAIN_JOB_LIVE_WINDOW` in `analytics-service/routers/process_key.py`,
+ * where the 8 hours are derived; `tests/test_resync_draft_dedup.py` pins the
+ * two equal.
+ */
+export const CHAIN_JOB_LIVE_WINDOW_MS = 8 * 60 * 60 * 1000;
+
+/** Why an in-flight job row is NOT live evidence (see `computeJobDeadReason`). */
+export type ComputeJobDeadReason =
+  | "attempts_over_budget"
+  | "attempts_exhausted"
+  | "older_than_live_window";
+
+/**
+ * Round-2 review — the OBSERVABLE half of Python's `_chain_job_dead_reason`
+ * (`analytics-service/routers/process_key.py`), so a surface never reports as
+ * running a job the resync guard would treat as dead, and so a Retry shows
+ * exactly when the server would act on it.
+ *
+ * `reset_stalled_compute_jobs` puts a stuck `running` job back to `pending`
+ * without counting it, and the claim does not cap `attempts`, so a job whose
+ * worker keeps dying never goes terminal. A row in flight is dead when:
+ *   - it is running PAST its budget (`attempts > max_attempts`);
+ *   - it has spent its budget and is not running (`attempts >= max_attempts`);
+ *     a running row AT its budget is its legitimate final attempt;
+ *   - it was created `CHAIN_JOB_LIVE_WINDOW_MS` or more before `nowMs`. This
+ *     arm needs the caller's clock, so it applies only when `nowMs` is given
+ *     (this module never reads the clock itself).
+ * Python's fourth arm, `last_error = 'worker_stalled'`, is NOT observable here:
+ * `get_user_compute_jobs` redacts `last_error` to NULL for every caller.
+ * A row that is not in flight (finished, or an unknown status) is never dead.
+ */
+export function computeJobDeadReason(
+  row: ComputeJobRow,
+  nowMs?: number,
+): ComputeJobDeadReason | null {
+  if (!isFactsheetJobInFlight(row.status)) return null;
+  const { attempts, max_attempts: maxAttempts } = row;
+  if (typeof attempts === "number" && typeof maxAttempts === "number") {
+    if (attempts > maxAttempts) return "attempts_over_budget";
+    if (attempts >= maxAttempts && row.status !== "running") {
+      return "attempts_exhausted";
+    }
+  }
+  if (nowMs !== undefined) {
+    const createdMs = Date.parse(row.created_at ?? "");
+    if (Number.isFinite(createdMs) && nowMs - createdMs >= CHAIN_JOB_LIVE_WINDOW_MS) {
+      return "older_than_live_window";
+    }
+  }
+  return null;
+}
 
 function isFactsheetChainKind(kind: string | undefined): boolean {
   return (FACTSHEET_CHAIN_KINDS as readonly string[]).includes(kind as string);
@@ -89,6 +163,28 @@ function isFactsheetChainKind(kind: string | undefined): boolean {
  * `created_at`, else the latest row whose kind is in FACTSHEET_CHAIN_KINDS,
  * else null. The RPC already orders `created_at` DESC, but the reduce is
  * explicit so the rule does not silently depend on RPC ordering.
+ *
+ * IN-FLIGHT FIRST among chain rows (2026-09-24): when any chain row is still
+ * in flight (`isFactsheetJobInFlight`), the latest IN-FLIGHT chain row
+ * answers, even if a finished chain row was created after it. Two chains can
+ * overlap (a duplicate resync used to start a second one), and the newest row
+ * can be the first chain's finished compute while the second chain's
+ * `process_key_long` is still running. Reporting that `done` told the wizard
+ * and KCS-18's success gate the chain had settled while the SQL status bridge
+ * still held the strategy at `computing`. A stitch row is not affected: the
+ * in-flight unique index allows one non-terminal row per kind, so the newest
+ * stitch is already the in-flight one whenever one exists.
+ *
+ * BOUNDED (review-fix round 1): the in-flight row answers over a newer finished
+ * chain row only while it was created less than
+ * `IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS` before it. An older in-flight row
+ * is stale evidence, and the newest chain row answers.
+ *
+ * DEAD ROWS ARE SKIPPED (round-2 review): a chain row `computeJobDeadReason`
+ * calls dead (at `opts.nowMs` when given) takes no part in the selection, the
+ * same rows the resync guard ignores. So a crash-looping job never reads as
+ * running, and with nothing live the strategy reads as settled, which is when
+ * the server would act on a Retry.
  *
  * Stitch-PREFERRING (154-04): the stitch row is the only row that carries
  * member progress or a heartbeat, so whenever one exists it answers even if a
@@ -107,25 +203,76 @@ function isFactsheetChainKind(kind: string | undefined): boolean {
  */
 export function selectFactsheetJob(
   rows: readonly (ComputeJobRow | null | undefined)[],
-  opts: { preferStitch?: boolean } = {},
+  opts: { preferStitch?: boolean; nowMs?: number } = {},
 ): ComputeJobRow | null {
   const isNewer = (row: ComputeJobRow, current: ComputeJobRow | null) =>
     current === null ||
     Date.parse(row.created_at ?? "") > Date.parse(current.created_at ?? "");
   let latestStitch: ComputeJobRow | null = null;
   let latestChain: ComputeJobRow | null = null;
+  let latestInFlightChain: ComputeJobRow | null = null;
   for (const row of rows) {
     if (!row) continue;
     if (row.kind === STITCH_KIND) {
       if (isNewer(row, latestStitch)) latestStitch = row;
-    } else if (isFactsheetChainKind(row.kind) && isNewer(row, latestChain)) {
-      latestChain = row;
+    } else if (isFactsheetChainKind(row.kind)) {
+      if (computeJobDeadReason(row, opts.nowMs) !== null) continue;
+      if (isNewer(row, latestChain)) latestChain = row;
+      if (isFactsheetJobInFlight(row.status) && isNewer(row, latestInFlightChain)) {
+        latestInFlightChain = row;
+      }
     }
   }
-  if (opts.preferStitch === false && latestStitch !== null && latestChain !== null) {
-    return isNewer(latestChain, latestStitch) ? latestChain : latestStitch;
+  if (
+    latestInFlightChain !== null &&
+    latestChain !== null &&
+    latestChain !== latestInFlightChain &&
+    Date.parse(latestChain.created_at ?? "") -
+      Date.parse(latestInFlightChain.created_at ?? "") >=
+      IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS
+  ) {
+    latestInFlightChain = null;
   }
-  return latestStitch ?? latestChain;
+  const chain = latestInFlightChain ?? latestChain;
+  if (opts.preferStitch === false && latestStitch !== null && chain !== null) {
+    // An in-flight chain row outranks a finished stitch whatever their ages:
+    // the stale stitch this option exists for must not read as settled over
+    // a chain that is still running.
+    if (latestInFlightChain !== null && !isFactsheetJobInFlight(latestStitch.status)) {
+      return latestInFlightChain;
+    }
+    return isNewer(chain, latestStitch) ? chain : latestStitch;
+  }
+  return latestStitch ?? chain;
+}
+
+/**
+ * LOW-8 — is a job that is NOT part of the factsheet (neither a chain kind nor
+ * `stitch_composite`) still in flight? The SQL status bridge
+ * `sync_strategy_analytics_status` counts every non-terminal job of the
+ * strategy, of any kind, when it holds `computing`
+ * (migration 20260906120000, `v_nonterminal_count`), and `selectFactsheetJob`
+ * deliberately looks at the factsheet kinds only. This is the other half, so a
+ * reader can tell "the chain is done and a recurring job holds the status"
+ * from "nothing is running and the status is stuck".
+ *
+ * Round-2 review (SFH MED-4): a row `computeJobDeadReason` calls dead (at
+ * `nowMs` when given) does not count. A crash-looping or 8-hour-old recurring
+ * job is not work the server will finish, so it must not hold the Retry back
+ * for an hour behind the in-flight ceiling.
+ */
+export function isNonFactsheetJobInFlight(
+  rows: readonly (ComputeJobRow | null | undefined)[],
+  nowMs?: number,
+): boolean {
+  return rows.some(
+    (row) =>
+      !!row &&
+      row.kind !== STITCH_KIND &&
+      !isFactsheetChainKind(row.kind) &&
+      isFactsheetJobInFlight(row.status) &&
+      computeJobDeadReason(row, nowMs) === null,
+  );
 }
 
 /**
@@ -232,7 +379,12 @@ export function isWindowFullWithoutFactsheetJob(
   rows: readonly (ComputeJobRow | null | undefined)[],
   readExhaustive: boolean,
 ): boolean {
-  return !readExhaustive && selectFactsheetJob(rows) === null;
+  // Presence, not selection: a window holding only dead chain rows still holds
+  // a chain row, so it is not the "full with no chain row" case.
+  return (
+    !readExhaustive &&
+    !rows.some((r) => !!r && (r.kind === STITCH_KIND || isFactsheetChainKind(r.kind)))
+  );
 }
 
 /**
@@ -375,7 +527,10 @@ export function deriveComputeState(
     | { readError: true },
 ): ComputeState {
   if ("readError" in input) return { state: "unreadable" };
-  const row = selectFactsheetJob(input.rows, { preferStitch: input.preferStitch });
+  const row = selectFactsheetJob(input.rows, {
+    preferStitch: input.preferStitch,
+    nowMs: input.nowMs,
+  });
   if (row === null) {
     return input.readExhaustive
       ? { state: "never_started" }

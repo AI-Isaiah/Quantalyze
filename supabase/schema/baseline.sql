@@ -3704,6 +3704,20 @@ DECLARE
   v_read_failed BOOLEAN := FALSE;
   v_sqlstate    TEXT;
   v_cause       TEXT;
+  -- ---- the failure instrument's locals (164.6 OPS-08-F2) ---------------
+  -- How many candidates failed to enqueue this tick, and which. Filled by
+  -- the per-candidate handler (assignments only) and written ONCE, after
+  -- the lock is released, by the failure instrument below.
+  v_failed         INTEGER := 0;
+  v_failed_targets JSONB   := '[]'::jsonb;
+  -- ---- the lost-race count (164.6 review fix, MEDIUM-2) -----------------
+  -- A candidate whose enqueue raised serialization_failure (40001) lost a
+  -- race to another writer that is already serving it. It is counted HERE,
+  -- beside the failure count and never in it, so it is never named in the
+  -- failed-target list, never put on the failed-attempt cooldown, and never
+  -- by itself writes a failure row. ⚠️ A deadlock (40P01) is NOT counted
+  -- here since the 164.6 round-2 review fix: see the handler below.
+  v_lost_race      INTEGER := 0;
 BEGIN
   -- ---- the fail-closed activation switch (164.7 D-01) --------------------
   -- FIRST statement in the body, deliberately, and it reads the SAME key the
@@ -3869,8 +3883,10 @@ BEGIN
       --
       -- ⛔ FORCE ROW LEVEL SECURITY on public.cron_runs IS THE CLAUSE THAT
       -- BREAKS THIS WRITE. The definer is exempt from row security on this table
-      -- by OWNERSHIP ALONE (see check 3's derivation: the table carries no FORCE
-      -- clause at baseline.sql:9864, and neither policy admits this role), and
+      -- by OWNERSHIP ALONE (see check 3's derivation: the table's
+      -- `ALTER TABLE "public"."cron_runs" ENABLE ROW LEVEL SECURITY` statement in
+      -- supabase/schema/baseline.sql carries no FORCE clause, and neither policy
+      -- admits this role), and
       -- FORCE is the one clause under which owning a table stops being an
       -- exemption. Add it at STEP 2b — which is where a future hardener will be
       -- standing — and every dormant-with-cause tick loses its row. Before the
@@ -3976,6 +3992,35 @@ BEGIN
                    AND cj.kind = 'stitch_composite'
                    AND cj.created_at > now() - INTERVAL '20 hours'
               )
+          -- Failed-attempt cooldown (164.6 review fix, HIGH-2). A candidate
+          -- whose enqueue RAISED inserted no compute_jobs row, so the attempt
+          -- cooldown above never sees it, and stalest-first ordering then hands
+          -- it the same slot on every tick: two poisoned candidates would hold
+          -- their share of the per-tick bound for good and starve the healthy
+          -- candidates behind them. The failure instrument below names every
+          -- such candidate in `failed_targets`, so a candidate named there
+          -- inside the same 20-hour window is excluded exactly as a prior
+          -- ATTEMPT is, and a healthy candidate takes its slot.
+          -- ⭐ EVERY TICK WITH A FAILURE KEEPS ITS ROW, the tick in which
+          -- every candidate failed included (164.6 round-2 review fix). The
+          -- round-1 fix raised at the end of such a tick, and the raise rolled
+          -- this very row back: two poisoned candidates on one venue, or two
+          -- poisoned composites, then took the same slots on every tick and
+          -- starved the healthy candidates behind them for good. That raise is
+          -- gone, so this conjunct engages on every tick. The one path that
+          -- still loses the row is the row's own write failing; see the
+          -- failure instrument's write below.
+          -- The read is bounded by cron_name and completed_at, the two columns
+          -- the heartbeat table's own recent-run index is built on.
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM public.cron_runs cr
+                 WHERE cr.cron_name = 'ledger_refresh_fanout'
+                   AND cr.error = 'candidate_enqueue_failed'
+                   AND cr.completed_at > now() - INTERVAL '20 hours'
+                   AND cr.metadata->'failed_targets'
+                       @> jsonb_build_array(jsonb_build_object('strategy_id', lrs.strategy_id))
+              )
           -- Non-terminal in-flight guard, the same shape and the same widened
           -- status set as the single-key arm. 'failed_retry' is INCLUDED
           -- deliberately: `CLAIMABLE_STATUSES = ("pending", "failed_retry")`
@@ -4063,7 +4108,25 @@ BEGIN
         IF v_existing = 0 AND v_job_id IS NOT NULL THEN
           v_enqueued := v_enqueued + 1;
         END IF;
-      EXCEPTION WHEN OTHERS THEN
+      EXCEPTION WHEN serialization_failure THEN
+        -- ---- a LOST RACE, not a failure (164.6 review fix, MEDIUM-2) -------
+        -- 40001 is what the enqueue RPC raises when another writer's enqueue
+        -- for this strategy won the in-flight race. It says nothing is wrong
+        -- with the candidate: another enqueue is already serving it. Counting
+        -- it as a failure would name a healthy strategy in the failed-target
+        -- list and put it on the failed-attempt cooldown. ⛔ This branch sits
+        -- BEFORE the catch-all below, which would otherwise take it.
+        -- ⚠️ 40P01 (deadlock) is DELIBERATELY NOT HERE (164.6 round-2 review
+        -- fix, L3 / IN-05). A deadlock victim's other party can be ANY lock
+        -- holder, a worker updating the row among them, so nothing guarantees
+        -- another enqueue is serving the candidate. Counted as a lost race, a
+        -- recurring deadlock never named the candidate, never cooled it down
+        -- and retook its slot on every tick in silence. It falls to the
+        -- catch-all instead, where it is counted, named with its SQLSTATE and
+        -- put on the failed-attempt cooldown.
+        -- Assignment only, the rule every handler in this body follows.
+        v_lost_race := v_lost_race + 1;
+      WHEN OTHERS THEN
         -- ⛔ Deliberately NOT `WHEN unique_violation`: that condition cannot fire
         -- here (see the counter comment above), and an exception block that cannot
         -- fire is indistinguishable from one that is protecting something — the
@@ -4071,6 +4134,17 @@ BEGIN
         -- poisoned row from aborting the whole tick. The SQLSTATE is carried; no
         -- identifier is (T-161.1-19).
         RAISE WARNING 'enqueue_ledger_composite_refresh: one candidate failed to enqueue (SQLSTATE %); continuing', SQLSTATE;
+        -- ---- the failure instrument (164.6 OPS-08-F2, D-11) ---------------
+        -- ASSIGNMENTS ONLY, the rule the activation handler above states:
+        -- no read and no write in a handler. The failure is COUNTED and the
+        -- candidate RECORDED here, and written once, after the unlock, below.
+        -- SQLSTATE is defined only inside a handler, so it is captured here
+        -- or nowhere. The id goes into the recorded list and NEVER into RAISE
+        -- text (T-161.1-19): the WARNING above stays byte-identical.
+        v_failed := v_failed + 1;
+        v_failed_targets := v_failed_targets
+          || jsonb_build_array(jsonb_build_object('strategy_id', v_row.strategy_id,
+                                                  'sqlstate', SQLSTATE));
       END;
     END LOOP;
   EXCEPTION WHEN OTHERS THEN
@@ -4082,7 +4156,67 @@ BEGIN
 
   PERFORM pg_advisory_unlock(hashtext('ledger_refresh_composite_fanout'));
 
-  RAISE NOTICE 'enqueue_ledger_composite_refresh: enqueued % composite refresh job(s) this tick', v_enqueued;
+  -- ---- the failure instrument's write (164.6 OPS-08-F2, D-10 / D-11) ----
+  -- ⛔ AFTER THE UNLOCK ABOVE, NEVER INSIDE THE LOCK-HOLDING BLOCK. There a
+  -- failing INSERT would reach that block's handler, which unlocks and
+  -- RE-RAISES, and the whole tick would roll back with every good enqueue in
+  -- it. Here the lock is already released on every path, by construction.
+  -- The migration's apply-time block refuses a body whose failure block
+  -- precedes the last unlock.
+  --
+  -- ONE row per tick in which a candidate failed; a tick with no failure
+  -- writes nothing, and a lost race alone is not a failure. Same cron_name as
+  -- the dormancy rows, told apart by `error` and metadata->>'cause'. The list
+  -- is bounded by the per-tick limit above. The strategy ids go ONLY into
+  -- `metadata`, which row security lets platform admins and service_role
+  -- read, never into RAISE text. The RETURN below is unchanged: it counts jobs
+  -- INSERTED (D-10). The candidate CTE reads this row back as the
+  -- failed-attempt cooldown.
+  IF v_failed > 0 THEN
+    BEGIN
+      INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+      VALUES ('ledger_refresh_fanout', 'error', now(), 'candidate_enqueue_failed',
+              jsonb_build_object('function', 'enqueue_ledger_composite_refresh',
+                                 'cause', 'candidate_enqueue_failed',
+                                 'failed_count', v_failed,
+                                 'enqueued_count', v_enqueued,
+                                 'lost_race_count', v_lost_race,
+                                 'failed_targets', v_failed_targets));
+    EXCEPTION WHEN OTHERS THEN
+      -- (164.6 review fix, MEDIUM-1) A failed write costs the row, and on a
+      -- tick that ENQUEUED something that is the whole cost: raising here
+      -- would roll the good enqueues back, which D-10 refuses. On a tick that
+      -- enqueued NOTHING there is nothing to roll back, so the failure is
+      -- re-raised with its own SQLSTATE and the scheduler records the run as
+      -- failed, instead of a WARNING nothing reads being the only trace. The
+      -- message names this function and carries counts only (T-161.1-10).
+      -- ⭐ Since the 164.6 round-2 review fix this is the ONLY raise a tick
+      -- with failed candidates can end in. The failure row is the signal:
+      -- the prod prober counts it and the candidate CTE reads it back as the
+      -- cooldown. So a row that cannot be written on a tick with nothing
+      -- enqueued must still fail loudly.
+      IF v_enqueued = 0 THEN
+        RAISE EXCEPTION 'enqueue_ledger_composite_refresh: failure instrument write failed (SQLSTATE %) on a tick that enqueued nothing; % candidate(s) failed', SQLSTATE, v_failed
+          USING ERRCODE = SQLSTATE;
+      END IF;
+      RAISE WARNING 'enqueue_ledger_composite_refresh: failure instrument write failed (SQLSTATE %); % candidate(s) failed this tick', SQLSTATE, v_failed;
+    END;
+  END IF;
+
+  -- ---- NO all-candidates-failed raise (164.6 round-2 review fix) ---------
+  -- The round-1 fix raised here when every candidate failed, so the scheduler
+  -- would record a failed run. That raise rolled back the failure row written
+  -- just above, which is the row the candidate CTE's failed-attempt cooldown
+  -- reads: on exactly the tick HIGH-2 named (two poisoned candidates holding
+  -- a venue's cap, or the composite cohort's burst cap) the cooldown could
+  -- never engage and the healthy candidates starved. It is removed. The row
+  -- now commits on every tick with a failure, and the prod prober's cron-obs
+  -- arm counts those rows directly (scripts/prod-prober/arms/cron-obs.mjs,
+  -- the prober half of this fix round), which also covers the tick that
+  -- failed PARTLY and so never raised. ⛔ Do not re-add a raise here: its
+  -- gate arm U (both ledger gates) reddens under exactly that re-addition.
+
+  RAISE NOTICE 'enqueue_ledger_composite_refresh: enqueued % composite refresh job(s) this tick; % candidate(s) failed to enqueue; % lost an enqueue race', v_enqueued, v_failed, v_lost_race;
   RETURN v_enqueued;
 END;
 $$;
@@ -4091,7 +4225,7 @@ $$;
 ALTER FUNCTION "public"."enqueue_ledger_composite_refresh"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."enqueue_ledger_composite_refresh"() IS 'Phase 161.1 / LEDGER-01: the recurring COMPOSITE refresh arm for ledger-backed venues. Parameterless SECURITY DEFINER; returns the number of jobs ACTUALLY INSERTED this tick. DORMANT unless public.system_flags holds the key ''ledger_refresh_enabled'' with enabled = TRUE (Phase 164.7 / D-01) — the SAME row the single-key arm reads, so one reset kills both, and the read is fail-CLOSED on a missing row, a FALSE row and a failing read alike. Selects stale COMPOSITE strategies from public.ledger_refresh_staleness — declaring no venue of its own — excludes any composite with a member on the deferred venue (D-01/D-13), and enqueues stitch_composite, which is chain-terminal and writes the headline strategy_analytics row directly. Bounded by a 20-hour ATTEMPT cooldown (the binding constraint), a non-terminal in-flight guard, and a per-tick BURST cap. Registers no schedule; activation is a founder LIVE op per docs/runbooks/ledger-refresh-go-live.md. Phase 164.8.6: a dormant tick whose cause is a MISSING or INVISIBLE activation row, or a read that RAISED, also writes one counted public.cron_runs row (cron_name ''ledger_refresh_fanout'', status ''error'') naming that cause in `error` and, with this function''s own name, in `metadata`; the healthy FALSE row writes nothing.';
+COMMENT ON FUNCTION "public"."enqueue_ledger_composite_refresh"() IS 'Phase 161.1 / LEDGER-01: the recurring COMPOSITE refresh arm for ledger-backed venues. Parameterless SECURITY DEFINER; returns the number of jobs ACTUALLY INSERTED this tick. DORMANT unless public.system_flags holds the key ''ledger_refresh_enabled'' with enabled = TRUE (Phase 164.7 / D-01) — the SAME row the single-key arm reads, so one reset kills both, and the read is fail-CLOSED on a missing row, a FALSE row and a failing read alike. Selects stale COMPOSITE strategies from public.ledger_refresh_staleness — declaring no venue of its own — excludes any composite with a member on the deferred venue (D-01/D-13), and enqueues stitch_composite, which is chain-terminal and writes the headline strategy_analytics row directly. Bounded by a 20-hour ATTEMPT cooldown (the binding constraint), a non-terminal in-flight guard, and a per-tick BURST cap. Registers no schedule; activation is a founder LIVE op per docs/runbooks/ledger-refresh-go-live.md. Phase 164.8.6: a dormant tick whose cause is a MISSING or INVISIBLE activation row, or a read that RAISED, also writes one counted public.cron_runs row (cron_name ''ledger_refresh_fanout'', status ''error'') naming that cause in `error` and, with this function''s own name, in `metadata`; the healthy FALSE row writes nothing. Phase 164.6: a tick in which at least one candidate failed to enqueue writes one public.cron_runs row under the same cron_name with error ''candidate_enqueue_failed'' and, with this function''s own name, the failed count, the enqueued count and the failed strategy ids in `metadata`; the return value still counts only the jobs inserted.';
 
 
 
@@ -4123,6 +4257,20 @@ DECLARE
   v_read_failed BOOLEAN := FALSE;
   v_sqlstate    TEXT;
   v_cause       TEXT;
+  -- ---- the failure instrument's locals (164.6 OPS-08-F2) ---------------
+  -- How many candidates failed to enqueue this tick, and which. Filled by
+  -- the per-candidate handler (assignments only) and written ONCE, after
+  -- the lock is released, by the failure instrument below.
+  v_failed         INTEGER := 0;
+  v_failed_targets JSONB   := '[]'::jsonb;
+  -- ---- the lost-race count (164.6 review fix, MEDIUM-2) -----------------
+  -- A candidate whose enqueue raised serialization_failure (40001) lost a
+  -- race to another writer that is already serving it. It is counted HERE,
+  -- beside the failure count and never in it, so it is never named in the
+  -- failed-target list, never put on the failed-attempt cooldown, and never
+  -- by itself writes a failure row. ⚠️ A deadlock (40P01) is NOT counted
+  -- here since the 164.6 round-2 review fix: see the handler below.
+  v_lost_race      INTEGER := 0;
 BEGIN
   -- ---- Lock B (D-08, 164.7 D-01): the fail-closed activation switch ------
   -- FIRST statement in the body, deliberately — unchanged from the form this
@@ -4313,8 +4461,10 @@ BEGIN
       --
       -- ⛔ FORCE ROW LEVEL SECURITY on public.cron_runs IS THE CLAUSE THAT
       -- BREAKS THIS WRITE. The definer is exempt from row security on this table
-      -- by OWNERSHIP ALONE (see check 3's derivation: the table carries no FORCE
-      -- clause at baseline.sql:9864, and neither policy admits this role), and
+      -- by OWNERSHIP ALONE (see check 3's derivation: the table's
+      -- `ALTER TABLE "public"."cron_runs" ENABLE ROW LEVEL SECURITY` statement in
+      -- supabase/schema/baseline.sql carries no FORCE clause, and neither policy
+      -- admits this role), and
       -- FORCE is the one clause under which owning a table stops being an
       -- exemption. Add it at STEP 2b — which is where a future hardener will be
       -- standing — and every dormant-with-cause tick loses its row. Before the
@@ -4423,6 +4573,35 @@ BEGIN
                    AND cj.kind IN ('derive_broker_dailies', 'compute_analytics_from_csv')
                    AND cj.created_at > now() - INTERVAL '20 hours'
               )
+          -- Failed-attempt cooldown (164.6 review fix, HIGH-2). A candidate
+          -- whose enqueue RAISED inserted no compute_jobs row, so the attempt
+          -- cooldown above never sees it, and stalest-first ordering then hands
+          -- it the same slot on every tick: two poisoned candidates would hold
+          -- their share of the per-tick bound for good and starve the healthy
+          -- candidates behind them. The failure instrument below names every
+          -- such candidate in `failed_targets`, so a candidate named there
+          -- inside the same 20-hour window is excluded exactly as a prior
+          -- ATTEMPT is, and a healthy candidate takes its slot.
+          -- ⭐ EVERY TICK WITH A FAILURE KEEPS ITS ROW, the tick in which
+          -- every candidate failed included (164.6 round-2 review fix). The
+          -- round-1 fix raised at the end of such a tick, and the raise rolled
+          -- this very row back: two poisoned candidates on one venue, or two
+          -- poisoned composites, then took the same slots on every tick and
+          -- starved the healthy candidates behind them for good. That raise is
+          -- gone, so this conjunct engages on every tick. The one path that
+          -- still loses the row is the row's own write failing; see the
+          -- failure instrument's write below.
+          -- The read is bounded by cron_name and completed_at, the two columns
+          -- the heartbeat table's own recent-run index is built on.
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM public.cron_runs cr
+                 WHERE cr.cron_name = 'ledger_refresh_fanout'
+                   AND cr.error = 'candidate_enqueue_failed'
+                   AND cr.completed_at > now() - INTERVAL '20 hours'
+                   AND cr.metadata->'failed_targets'
+                       @> jsonb_build_array(jsonb_build_object('strategy_id', lrs.strategy_id))
+              )
           -- In-flight guard. Belt-and-braces over enqueue_compute_job's own
           -- optimistic in-flight lookup and over the partial unique index: this
           -- one also covers a strategy busy with a DIFFERENT kind, which the
@@ -4526,7 +4705,25 @@ BEGIN
         IF v_existing = 0 AND v_job_id IS NOT NULL THEN
           v_enqueued := v_enqueued + 1;
         END IF;
-      EXCEPTION WHEN OTHERS THEN
+      EXCEPTION WHEN serialization_failure THEN
+        -- ---- a LOST RACE, not a failure (164.6 review fix, MEDIUM-2) -------
+        -- 40001 is what the enqueue RPC raises when another writer's enqueue
+        -- for this strategy won the in-flight race. It says nothing is wrong
+        -- with the candidate: another enqueue is already serving it. Counting
+        -- it as a failure would name a healthy strategy in the failed-target
+        -- list and put it on the failed-attempt cooldown. ⛔ This branch sits
+        -- BEFORE the catch-all below, which would otherwise take it.
+        -- ⚠️ 40P01 (deadlock) is DELIBERATELY NOT HERE (164.6 round-2 review
+        -- fix, L3 / IN-05). A deadlock victim's other party can be ANY lock
+        -- holder, a worker updating the row among them, so nothing guarantees
+        -- another enqueue is serving the candidate. Counted as a lost race, a
+        -- recurring deadlock never named the candidate, never cooled it down
+        -- and retook its slot on every tick in silence. It falls to the
+        -- catch-all instead, where it is counted, named with its SQLSTATE and
+        -- put on the failed-attempt cooldown.
+        -- Assignment only, the rule every handler in this body follows.
+        v_lost_race := v_lost_race + 1;
+      WHEN OTHERS THEN
         -- ⛔ Deliberately NOT `WHEN unique_violation`: that condition cannot fire
         -- here (see the counter comment above), and an exception block that
         -- cannot fire is indistinguishable from one that is protecting
@@ -4534,6 +4731,17 @@ BEGIN
         -- Catching OTHERS keeps one poisoned row from aborting the whole tick.
         -- The SQLSTATE is carried; no identifier is (T-161.1-10).
         RAISE WARNING 'enqueue_ledger_refresh_for_strategies: one candidate failed to enqueue (SQLSTATE %); continuing', SQLSTATE;
+        -- ---- the failure instrument (164.6 OPS-08-F2, D-11) ---------------
+        -- ASSIGNMENTS ONLY, the rule the activation handler above states:
+        -- no read and no write in a handler. The failure is COUNTED and the
+        -- candidate RECORDED here, and written once, after the unlock, below.
+        -- SQLSTATE is defined only inside a handler, so it is captured here
+        -- or nowhere. The id goes into the recorded list and NEVER into RAISE
+        -- text (T-161.1-10): the WARNING above stays byte-identical.
+        v_failed := v_failed + 1;
+        v_failed_targets := v_failed_targets
+          || jsonb_build_array(jsonb_build_object('strategy_id', v_row.strategy_id,
+                                                  'sqlstate', SQLSTATE));
       END;
     END LOOP;
   EXCEPTION WHEN OTHERS THEN
@@ -4545,7 +4753,67 @@ BEGIN
 
   PERFORM pg_advisory_unlock(hashtext('ledger_refresh_fanout'));
 
-  RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: enqueued % refresh job(s) this tick', v_enqueued;
+  -- ---- the failure instrument's write (164.6 OPS-08-F2, D-10 / D-11) ----
+  -- ⛔ AFTER THE UNLOCK ABOVE, NEVER INSIDE THE LOCK-HOLDING BLOCK. There a
+  -- failing INSERT would reach that block's handler, which unlocks and
+  -- RE-RAISES, and the whole tick would roll back with every good enqueue in
+  -- it. Here the lock is already released on every path, by construction.
+  -- The migration's apply-time block refuses a body whose failure block
+  -- precedes the last unlock.
+  --
+  -- ONE row per tick in which a candidate failed; a tick with no failure
+  -- writes nothing, and a lost race alone is not a failure. Same cron_name as
+  -- the dormancy rows, told apart by `error` and metadata->>'cause'. The list
+  -- is bounded by the per-tick limit above. The strategy ids go ONLY into
+  -- `metadata`, which row security lets platform admins and service_role
+  -- read, never into RAISE text. The RETURN below is unchanged: it counts jobs
+  -- INSERTED (D-10). The candidate CTE reads this row back as the
+  -- failed-attempt cooldown.
+  IF v_failed > 0 THEN
+    BEGIN
+      INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+      VALUES ('ledger_refresh_fanout', 'error', now(), 'candidate_enqueue_failed',
+              jsonb_build_object('function', 'enqueue_ledger_refresh_for_strategies',
+                                 'cause', 'candidate_enqueue_failed',
+                                 'failed_count', v_failed,
+                                 'enqueued_count', v_enqueued,
+                                 'lost_race_count', v_lost_race,
+                                 'failed_targets', v_failed_targets));
+    EXCEPTION WHEN OTHERS THEN
+      -- (164.6 review fix, MEDIUM-1) A failed write costs the row, and on a
+      -- tick that ENQUEUED something that is the whole cost: raising here
+      -- would roll the good enqueues back, which D-10 refuses. On a tick that
+      -- enqueued NOTHING there is nothing to roll back, so the failure is
+      -- re-raised with its own SQLSTATE and the scheduler records the run as
+      -- failed, instead of a WARNING nothing reads being the only trace. The
+      -- message names this function and carries counts only (T-161.1-10).
+      -- ⭐ Since the 164.6 round-2 review fix this is the ONLY raise a tick
+      -- with failed candidates can end in. The failure row is the signal:
+      -- the prod prober counts it and the candidate CTE reads it back as the
+      -- cooldown. So a row that cannot be written on a tick with nothing
+      -- enqueued must still fail loudly.
+      IF v_enqueued = 0 THEN
+        RAISE EXCEPTION 'enqueue_ledger_refresh_for_strategies: failure instrument write failed (SQLSTATE %) on a tick that enqueued nothing; % candidate(s) failed', SQLSTATE, v_failed
+          USING ERRCODE = SQLSTATE;
+      END IF;
+      RAISE WARNING 'enqueue_ledger_refresh_for_strategies: failure instrument write failed (SQLSTATE %); % candidate(s) failed this tick', SQLSTATE, v_failed;
+    END;
+  END IF;
+
+  -- ---- NO all-candidates-failed raise (164.6 round-2 review fix) ---------
+  -- The round-1 fix raised here when every candidate failed, so the scheduler
+  -- would record a failed run. That raise rolled back the failure row written
+  -- just above, which is the row the candidate CTE's failed-attempt cooldown
+  -- reads: on exactly the tick HIGH-2 named (two poisoned candidates holding
+  -- a venue's cap, or the composite cohort's burst cap) the cooldown could
+  -- never engage and the healthy candidates starved. It is removed. The row
+  -- now commits on every tick with a failure, and the prod prober's cron-obs
+  -- arm counts those rows directly (scripts/prod-prober/arms/cron-obs.mjs,
+  -- the prober half of this fix round), which also covers the tick that
+  -- failed PARTLY and so never raised. ⛔ Do not re-add a raise here: its
+  -- gate arm U (both ledger gates) reddens under exactly that re-addition.
+
+  RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: enqueued % refresh job(s) this tick; % candidate(s) failed to enqueue; % lost an enqueue race', v_enqueued, v_failed, v_lost_race;
   RETURN v_enqueued;
 END;
 $$;
@@ -4554,7 +4822,7 @@ $$;
 ALTER FUNCTION "public"."enqueue_ledger_refresh_for_strategies"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."enqueue_ledger_refresh_for_strategies"() IS 'Phase 161.1 / LEDGER-01,-02,-04: the recurring single-key refresh fan-out for ledger-backed venues. Parameterless SECURITY DEFINER; returns the number of jobs ACTUALLY INSERTED this tick. DORMANT unless public.system_flags holds the key ''ledger_refresh_enabled'' with enabled = TRUE (Phase 164.7 / D-01; the read is fail-CLOSED — a missing row, a FALSE row and a failing read are all dormant). Selects stale, non-composite, key-eligible strategies from public.ledger_refresh_staleness — declaring no venue of its own — and enqueues derive_broker_dailies in strategy-mode (the chain TAIL, which auto-chains to compute_analytics_from_csv; the chain HEAD is a provable no-op on a published strategy). Bounded by a 20-hour ATTEMPT cooldown (the binding constraint), an in-flight conjunct, a per-venue rank cap and a per-tick burst LIMIT. Registers no schedule; activation is a founder LIVE op per docs/runbooks/ledger-refresh-go-live.md. Phase 164.8.6: a dormant tick whose cause is a MISSING or INVISIBLE activation row, or a read that RAISED, also writes one counted public.cron_runs row (cron_name ''ledger_refresh_fanout'', status ''error'') naming that cause in `error` and in `metadata`; the healthy FALSE row writes nothing.';
+COMMENT ON FUNCTION "public"."enqueue_ledger_refresh_for_strategies"() IS 'Phase 161.1 / LEDGER-01,-02,-04: the recurring single-key refresh fan-out for ledger-backed venues. Parameterless SECURITY DEFINER; returns the number of jobs ACTUALLY INSERTED this tick. DORMANT unless public.system_flags holds the key ''ledger_refresh_enabled'' with enabled = TRUE (Phase 164.7 / D-01; the read is fail-CLOSED — a missing row, a FALSE row and a failing read are all dormant). Selects stale, non-composite, key-eligible strategies from public.ledger_refresh_staleness — declaring no venue of its own — and enqueues derive_broker_dailies in strategy-mode (the chain TAIL, which auto-chains to compute_analytics_from_csv; the chain HEAD is a provable no-op on a published strategy). Bounded by a 20-hour ATTEMPT cooldown (the binding constraint), an in-flight conjunct, a per-venue rank cap and a per-tick burst LIMIT. Registers no schedule; activation is a founder LIVE op per docs/runbooks/ledger-refresh-go-live.md. Phase 164.8.6: a dormant tick whose cause is a MISSING or INVISIBLE activation row, or a read that RAISED, also writes one counted public.cron_runs row (cron_name ''ledger_refresh_fanout'', status ''error'') naming that cause in `error` and in `metadata`; the healthy FALSE row writes nothing. Phase 164.6: a tick in which at least one candidate failed to enqueue writes one public.cron_runs row under the same cron_name with error ''candidate_enqueue_failed'' and the failed count, the enqueued count and the failed strategy ids in `metadata`; the return value still counts only the jobs inserted.';
 
 
 

@@ -294,6 +294,313 @@ These values move on each affected strategy's next compute. Figures are from `16
   standard deviation with an exact `== 0` or `> 0` (`services/portfolio_optimizer.py`,
   `services/csv_validator.py`, `services/allocated_capital.py`, `services/equity_reconstruction.py`,
   `services/optimizer.py`). They are not quantstats-derived, and no review finding names them.
+## [0.90.1.0] - 2026-09-24 — WIZRESYNC: a wizard reload no longer starts a second sync, Retry shows only when the server needs one, and Submit promotes the strategy
+
+⭐ **What changed for whoever reads this next.** Four defects found live on 2026-09-24 while a
+manager ran the strategy wizard on a Bybit key, plus one misleading log line. The stall had one root
+cause: a resync only deduped against a verification still in `draft`, and `process_key_long` moves
+it out of draft within about 3 s. So every wizard reload or Retry during a ~16-minute chain started a
+whole second chain. The SQL bridge `sync_strategy_analytics_status` then wrote `computing` back
+while any job of the strategy was non-terminal. The first chain's `complete` lived about half a
+second, and the wizard poll (every 10 s) never saw it. **No migration; the SQL bridge is
+unchanged.**
+
+### Root cause
+
+- **The resync dedup looked at the wrong object.** It matched a `draft` verification, which lives
+  for seconds. The chain it was meant to protect lives for minutes. The fix below keys the dedup on
+  the chain's own jobs.
+
+### Fixed
+
+- **A single-key manager's Submit now actually moves the strategy to `pending_review`**
+  (`unifiedFinalizeWizardHandler`, merged from `fix/wizard-submit-promote`, 2a054b692). The unified
+  single-key finalize arm called only `postProcessKey` and answered a hard-coded
+  `pending_review`. Nothing on it called `finalize_wizard_strategy`, and Python never writes
+  `strategies.status`. So the row stayed `source='wizard'`, `status='draft'`: its wizard metadata
+  was dropped, it never reached the admin queue, and after 7 days the `cleanup-wizard-drafts` cron
+  deleted it and revoked its key. The bug had been latent since Phase 106 Stage B. The fix:
+  - The RPC call is extracted as `callFinalizeWizardRpc`, the one caller, carrying the argument
+    list and the SQLSTATE-to-envelope mapping byte-identical to `runLegacyFinalize`'s.
+  - The unified arm calls it with `p_terminal_status='pending_review'` before `postProcessKey`.
+    A refused promotion answers the RPC's own envelope and dispatches nothing.
+  - A replay (the RPC's 22023 on a non-draft row) is accepted through `acceptAlreadyPromoted`: a
+    row already at (wizard, pending_review) answers success and still dispatches, so a Retry after
+    a failed dispatch recovers. The legacy arm keeps its 409, so its founder email is not re-fired.
+- **LOW-8: a recurring job holding `computing` after the chain finishes no longer raises Retry.**
+  The SQL status bridge `sync_strategy_analytics_status` holds `computing` while ANY job of the
+  strategy is non-terminal (`v_nonterminal_count`), but the sync-progress route read chain kinds
+  only. So a finished chain plus a pending `reconcile_strategy` or `poll_positions` showed Retry
+  after the 60 s grace on a healthy completion. The route now adds `otherJobInFlight: true` when a
+  non-factsheet job is in flight (`isNonFactsheetJobInFlight`), and omits it otherwise so existing
+  bodies stay byte-identical. `SyncPreviewStep` counts it as in-flight evidence, still under the
+  60-minute ceiling. `jobStatus` keeps its factsheet-only meaning for the key card's gate.
+- **A resync while the factsheet chain is running starts no second chain** (`process_key`, the
+  resync chain-in-flight guard). A resync `/process-key` now answers `WIZARD_DUPLICATE` with
+  `queued: true` and `job_state: "running"`, mints no draft and enqueues nothing while any job of
+  the chain it would start is non-terminal for that strategy. The kinds are walked from
+  `JOB_CHAIN_FOLLOW_ON` starting at `process_key_long`. The statuses are `CLAIMABLE_STATUSES` plus
+  `_IN_FLIGHT_JOB_STATUSES`. Neither set is re-listed. The existing draft pre-check still runs first,
+  so a wedged draft is still resumed.
+- **`sync-progress` no longer reports `done` while a second chain is still running.**
+  `selectFactsheetJob` picked the newest-created chain job, which could be the first chain's
+  finished compute. It now prefers the newest in-flight chain job and falls back to the newest one.
+  With `preferStitch: false`, an in-flight chain job also outranks a finished stitch. Every caller
+  shares this selection: the sync-progress route, `deriveComputeState` (owner factsheet, share page,
+  `/strategies` list) and `readChainJobState` (the key card gate and KCS-18's success gate).
+- **A wizard reload no longer re-kicks a running sync.** On a first mount the sync step skips the
+  `/api/keys/sync` POST when the strategy is proven single-key (`strategies.api_key_id` is set,
+  the rule `/api/keys/sync` routes on) and a real sync-progress read says a job is in flight. An
+  analytics status of `computing` alone is not treated as evidence, because a dead chain can leave
+  it there and the POST is then what restarts the work. A composite, an unreadable row, a degraded
+  read and an explicit retry all POST as before, and the server dedups them.
+- **"Retry sync" shows only when the server says a retry is needed** (founder, 2026-09-24:
+  "Shouldn't the system check and only show it, if it is absolutely necessary"). The analytics
+  status holds at `computing` for a whole chain, so the 15-minute wall-clock backstop fired on a
+  healthy run that was simply long (sync_trades 4.7 min, derive 9.7 min). The banner now comes up
+  for a stalled stitch; after real reads have said nothing is in flight for a 60 s grace while the
+  status is still not computed; for a kickoff that queued nothing when no read says a job runs; or
+  from the backstop, which now fires only with no in-flight evidence from the last minute. A dead
+  sync-progress channel still reaches the backstop.
+- **The progress row always shows a stage label while polling.** At 1061 s it rendered empty
+  beside the seconds counter, because the backstop's banner hid the in-flight label and nothing
+  replaced it. A healthy chain now keeps its label. When the banner is up the row reads
+  `Checking for progress…`. The "Usually takes 15–30 seconds" copy is unchanged.
+- **The benchmark cache is used again.** `get_benchmark_returns` called the imported `rows()`
+  helper in its cache-read branch and bound a local `rows` list later in the same function, so
+  every cache read with more than 10 rows raised `UnboundLocalError`. The broad `except` SWALLOWED
+  it: it logged only a generic "cache read failed" warning, and every compute refetched Binance
+  klines, from v0.35.0.4 (PR #536) until now. The local list is `cache_rows`.
+- **Review round 1: a crash-looping or ancient chain job no longer refuses every resync.**
+  `reset_stalled_compute_jobs` puts a stuck `running` job back to `pending` without counting it,
+  and the claim does not cap `attempts`, so such a job never goes terminal. The guard now skips a
+  row whose `last_error` is `worker_stalled`, one that has spent its attempt budget and is not
+  running, one running past its budget, and one older than `_RESYNC_CHAIN_JOB_LIVE_WINDOW` (8 h,
+  derived beside the constant). Each skipped row is logged at warning and captured to Sentry. A
+  running job AT its budget is its legitimate final attempt and still refuses.
+- **Review round 1: a failed guard read never becomes a 500.** Both guard reads go through
+  `db_read_with_retry`. If the job read still fails, the guard is skipped and the resync takes its
+  pre-guard path, logged with context. If only the verification read fails, the reply is still a
+  duplicate with no verification status.
+- **Review round 1: the duplicate reply never borrows another verification's status.** Only a
+  `process_key_long` job carries its session's `verification_id`. The reply carries the newest
+  verification's status only when that id matches. Otherwise it carries the job's own id (None for
+  a follow-on hop) and `status: None`, and logs a warning. The comment that said the reply names
+  the chain's own session was false and is replaced.
+- **Review round 1: `selectFactsheetJob`'s in-flight preference is bounded.** An in-flight chain
+  row answers over a newer finished one only while it was created less than
+  `IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS` (8 h) before it, so a dead job cannot read as running
+  for ever once a later chain finishes.
+- **Review round 1: the wizard trusts "in flight" for 60 minutes at most.** Past
+  `IN_FLIGHT_TRUST_CEILING_MS` with the analytics status unchanged, the banner shows even while
+  reads say a job is in flight: "A sync is still queued or running on our side; it may be stuck."
+  (Round 2 removed the Retry this banner carried: see below.)
+- **Review round 1: a Retry answered `WIZARD_DUPLICATE` keeps the banner.** It resets no clock
+  and clears nothing, and the banner says "A sync is already running." Before, each press hid the
+  banner for a full grace window for a Retry that started nothing.
+- **Review round 1: the envelope Retry starts a fresh settled grace.** `handleKickoffRetry` and
+  the kickoff effect now clear the in-flight evidence refs and `settledPastGrace`. Before, the
+  previous attempt's grace put the Retry banner straight back up over the sync just started.
+- **Review round 1: the mount's in-flight probe times out after 5 s** (`MOUNT_PROBE_TIMEOUT_MS`),
+  so a hanging sync-progress read cannot hold the kickoff back. A failed `strategies` read is now
+  logged instead of dropped.
+- **Review round 1: today's partial-day benchmark close is never cached, served or counted as
+  fresh.** Freshness is now "the newest completed day cached is yesterday (UTC) or later", in place
+  of the 48-hour age check.
+- **Review round 1: a benchmark cache that does not span the requested days is a miss, and a code
+  bug in the read is loud.** The newest `days` completed dates must be a contiguous run ending
+  yesterday or later. The read's `except` is narrowed to DB and network errors
+  (`_CACHE_READ_ERRORS`). Any other exception still falls back to a fetch, but logs at error level
+  and is captured to Sentry, so the `UnboundLocalError` class above can no longer pass as a miss.
+- **Review round 2: a dispatch failure after the Submit promotion says the submission is saved**
+  (SFH HIGH-1). When `callFinalizeWizardRpc` committed and `postProcessKey` then failed, the route
+  forwarded the dispatch's own copy, which told a manager whose strategy WAS submitted that nothing
+  was. `answerDispatchFailedAfterPromotion` now answers `SUBMITTED_ANALYTICS_NOT_QUEUED`: 503,
+  recoverable, relays `Retry-After`, with new `wizardErrors` copy ("Your strategy is submitted, but
+  its analytics are not queued yet"; retrying is safe) admitted to `KNOWN_FINALIZE_CODES`. It logs
+  one line built from our own tokens and captures the hoisted Error with `strategy_id` and
+  `upstream_code`. The Retry replays the finalize (`acceptAlreadyPromoted`) and runs the dispatch
+  again, so a promoted strategy gets its job.
+- **Review round 2: no Retry renders that the server would refuse** (reviewer #1, SFH MED-3). While
+  reads say a job is in flight (the 60-minute ceiling, a stalled stitch) the banner says "A sync is
+  still queued or running on our side; it may be stuck." with no Retry control, and after a
+  duplicate-refused Retry it says "A sync is already running" with none either.
+- **Review round 2: the surfaces skip a job the resync guard would call dead.**
+  `computeJobDeadReason` mirrors the observable arms of Python's `_chain_job_dead_reason` (budget
+  spent and not running, running past it, 8 h old at the caller's `nowMs`).
+  - `selectFactsheetJob` skips a dead chain row.
+  - `isNonFactsheetJobInFlight` skips a dead recurring row (SFH MED-4).
+  - Python's `worker_stalled` arm is not observable: `get_user_compute_jobs` redacts `last_error`.
+- **Review round 2: a reload never starts a sync once a chain row exists** (reviewer #2, LOW-5).
+  `probeExistingChain` answers `in_flight` (including `otherJobInFlight`), `settled` or `none`, and
+  only `none` (no chain row yet) lets a first mount POST. A done or failed chain on reload now waits
+  and offers Retry. The 5 s probe deadline covers the strategies read too. A non-ok answer, an
+  unparseable body and a degraded answer are logged.
+- **Review round 2: the "already running" note clears once a read says nothing is in flight**
+  (reviewer #3), so the Retry returns exactly when the server would act. And a WIZARD_DUPLICATE with
+  `queued: true` and `job_state: "enqueued"` (the resumed wedge) is treated as queued work that
+  resets the clocks (SFH LOW-8). `/api/keys/sync` now forwards `job_state`.
+- **Review round 2: a failed chain-guard read is classified and the fall-through is reported**
+  (SFH MED-2, LOW-6). `APIError`, `httpx.HTTPError` and `OSError` log at warning, anything else logs
+  at error and is captured, and the skip itself always reaches Sentry. The bare `except: pass`
+  around a Sentry call is gone (`_sentry_report` logs a failed report).
+- **Review round 2: a failed benchmark fetch serves the recent cached days, flagged stale**
+  (reviewer #4). When the cache misses and the fetch fails, the completed days already read are
+  served with `is_stale=True` if the newest is at most 48 h old, never None. `RuntimeError` left
+  `_CACHE_READ_ERRORS` (SFH LOW-7): only `get_supabase`'s "not configured" raise stays quiet, caught
+  at that call.
+
+### Removed
+
+- **The discarded position reconstruction in `process_key_long` step 5, and the same call in the
+  synchronous `process_key` pipeline.** Both awaited `adapter.reconstruct_positions(trades)` and
+  threw the result away (the sync-path comment said "persisted in P8"; it never was). Each call
+  still logged "equity understated" for every open position without a mark price. Every adapter's
+  implementation is pure (an in-memory FIFO match plus logging, or `[]` for CSV), so nothing
+  depended on it. The call was removed rather than the warning downgraded, because
+  `EquityCurveBuilder` also feeds the equity curve, where a missing mark really does understate
+  equity. That warning stays as it is.
+
+### Tests
+
+- `tests/test_resync_draft_dedup.py`: 16 parametrised cases (4 chain kinds by 4 non-terminal
+  statuses) plus controls for a terminal job, a non-chain kind, another strategy's chain, and a
+  drift pin of the derived kinds against `FACTSHEET_CHAIN_KINDS`. Both supabase fakes gained a real
+  `in_` filter, so deleting the guard's kind or status filter turns a test RED.
+- `tests/test_benchmark.py`: a fresh-cache hit that asserts no fetch. On the old code it failed on
+  `fetch.assert_not_awaited()`: the `except` swallowed the `UnboundLocalError`, so the only visible
+  symptom was the refetch. Round 1 moved it to 30 completed days, the full requested window.
+- Review round 1, `tests/test_resync_draft_dedup.py`: four not-live job shapes let a resync
+  through, and two controls still refuse (a running job on its final attempt, and a live job beside
+  a newer dead one). Read failures fall through, a single 504 is retried, and a failed verification
+  read still refuses. A newer unrelated verification's status is never borrowed. The drift pin now
+  also reads `IN_FLIGHT_JOB_STATUSES` against `_NON_TERMINAL_JOB_STATUSES`. The fake gained a
+  per-table, per-call read-failure queue.
+- Review round 1, `src/lib/compute-state.test.ts`: an in-flight row 9 h older than a finished one
+  does not answer, with a control just inside the window.
+- Review round 1, `SyncPreviewStep.inflight-guard.runtime.test.tsx`: the 60-minute ceiling, a
+  duplicate-answered Retry with its control, the envelope-retry flow, the probe timeout and the
+  logged strategies read.
+- `src/app/api/strategies/finalize-wizard/route.test.ts` (submit fix): three rows that asserted
+  the RPC was NOT called on the unified arm pinned the defect, and now assert it is. New rows cover
+  the call and its order, the forwarded metadata, the replay, a non-replay 22023, a failed re-read,
+  RPC failures never answering `pending_review`, and the legacy arm's unchanged replay answer.
+- LOW-8: `SyncPreviewStep.inflight-guard.runtime.test.tsx` (chain done, a pending recurring job,
+  status `computing` for 120 s: no banner; control with nothing else in flight: Retry), and
+  `sync-progress/route.test.ts` (the flag beside a pending `reconcile_strategy`, and absent beside
+  finished recurring jobs). Both were RED without the fix.
+- Review round 1, `tests/test_benchmark.py` and `tests/test_benchmark_extras.py`: today's partial
+  close never served, cached or counted as fresh; a gappy, short or sparse cache is refetched; a
+  programming error is logged at error and captured, and a DB error is not.
+- `tests/test_long_fetch.py` and `tests/test_process_key.py`: the reconstruction is asserted NOT
+  awaited on both paths.
+- `src/lib/compute-state.test.ts`: two overlapping chains (newest done, older running) in both
+  orders and all four in-flight statuses, a nothing-in-flight control, and the `preferStitch: false`
+  case.
+- `SyncPreviewStep.inflight-guard.runtime.test.tsx` (new): the reload guard with three
+  POST-as-before controls, a healthy chain at 1061 s and at 40 min with its label and no Retry,
+  Retry after the server reports the chain finished without a factsheet, and a queued-nothing
+  kickoff with a running job. Four of its seven cases fail against the original component.
+- Two `SyncPreviewStep.progress.render.test.tsx` cases pinned a Retry on a live, running chain. They
+  now drive the backstop through a channel that goes dark, which is the case the backstop is for.
+- Every new guard was neutered, observed RED, and restored from a byte backup confirmed with `cmp`.
+- Review round 2:
+  - `finalize-wizard/route.test.ts` `[SUBMITFIX-R2]`: RATE_LIMITED, CIRCUIT_OPEN and
+    SEAM_MISCONFIGURED after a successful RPC, with the rendered title, Retry and Sentry tags. Also
+    replay-then-dispatch, and replay-then-failed-dispatch.
+  - `wizardErrors.invariant.test.ts`: the rejection-site pins move 32 -> 33 for the new CODED site.
+  - `compute-state.test.ts`: the dead-row selection, the final-attempt control, and the age arm
+    with and without `nowMs`.
+  - `test_resync_draft_dedup.py`: pins `CHAIN_JOB_LIVE_WINDOW_MS` to
+    `_RESYNC_CHAIN_JOB_LIVE_WINDOW`, and covers the classified guard-read failures and the logged
+    Sentry failure.
+  - `sync-progress/route.test.ts`: a dead recurring job leaves `otherJobInFlight` off.
+  - `keys/sync/route.test.ts`: forwards `job_state`.
+  - `SyncPreviewStep.inflight-guard.runtime.test.tsx`: no Retry at the ceiling or after a
+    duplicate, the note clearing, the resumed wedge, no POST on reload over a done or failed chain,
+    `otherJobInFlight` on mount, the strategies-read timeout, and the logged fallbacks.
+  - `SyncPreviewStep.progress.render.test.tsx`: a single-key RUNNING-and-stalled read now asserts
+    the may-be-stuck copy and no Retry, not the Retry it used to pin.
+  - `test_benchmark.py`: the stale fallback, its 48 h bound, a loud RuntimeError, and a quiet
+    unconfigured client.
+  - Every round-2 guard was neutered, observed RED, and restored via `cp`/`cmp`.
+  - CI fix (run 36063849235):
+    - `wizardErrors.test.ts`: both copy-table size pins move 95 -> 96 for the new entry, each
+      after its own reasoning was re-run over it.
+    - `factsheet-share/[token]/page.test.tsx` and `strategies/page.key-pill.test.tsx`: in-flight
+      job fixtures now sit on the real clock. Their fixed past dates had aged past the 8 h
+      dead-row window. The rule is right for those cards, so the fixtures were fixed and the rule
+      was not loosened. Each file gains a DEAD-ROW test: a 9-hour-old "running" job never gets
+      the "being prepared" copy.
+
+### Notes
+
+- **The server guard is the real one.** The client reload guard only skips a request whose answer
+  is already known. A composite still POSTs on reload. Its `stitch_composite` enqueue is deduped by
+  the per-kind in-flight index, and the cross-kind second-chain defect never applied to it.
+- **The 60 s evidence window and the 60 s settled grace are new constants in `SyncPreviewStep`**
+  (`IN_FLIGHT_EVIDENCE_TTL_MS`, `SETTLED_WITHOUT_COMPLETE_GRACE_MS`). Each is documented beside its
+  definition. Review round 1 added `IN_FLIGHT_TRUST_CEILING_MS` (60 min) and
+  `MOUNT_PROBE_TIMEOUT_MS` (5 s) there, `_RESYNC_CHAIN_JOB_LIVE_WINDOW` (8 h) in `process_key.py`,
+  and `IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS` (8 h, mirroring it) in `compute-state.ts`.
+- **Review round 1 decisions, recorded so they read as decisions.** (1) For `selectFactsheetJob`
+  the staleness bound was taken over "prefer an in-flight row only when newer than the latest
+  terminal row", which reduces to newest-row-wins and would revert the in-flight-first rule.
+  (2) A running job AT its attempt budget stays live. The claim counts the attempt it starts, so
+  treating `attempts >= max_attempts` as dead for a running row would admit a second chain during
+  a legitimate final attempt. (3) The probe timeout uses an `AbortController` and
+  `window.setTimeout`, not `AbortSignal.timeout`, which does not run on the test's fake clock
+  (measured). (4) The job's kind and status were not added to the duplicate reply. The code
+  alone decides the Retry branch, and no TS reader would use them.
+- Review round 1, style only: the `services.job_worker` import in `process_key.py` now sits in
+  alphabetical order.
+- **Known limit (submit fix): the founder notification email is not sent on the unified arm.**
+  Only `runLegacyFinalize`'s `after()` fan-out calls `notifyFounderNewStrategy`, and the unified
+  arm has no such fan-out. Email is disabled anyway (RESEND off), so nothing is lost today.
+- **Known limit (submit fix): drafts already stranded at `status='draft'` are not repaired.** Only
+  test data was affected. The fix applies to submits from this release on.
+- **Known limit, now documented (round 2, SFH LOW-9): a Submit replay writes nothing.**
+  `callFinalizeWizardRpc`'s docblock says so: form fields edited between the first submit and a
+  Retry are not applied, and the row keeps what the first submit wrote.
+- **Review round 2 decisions.**
+  - (1) `SUBMITTED_ANALYTICS_NOT_QUEUED` also answers a SEAM_MISCONFIGURED dispatch failure,
+    recoverable. A Retry cannot win until we redeploy, but it is safe, and the submission IS saved;
+    the upstream code rides along for support.
+  - (2) Hiding the Retry at the ceiling means that brief's "ceiling, then Retry, then duplicate"
+    sequence cannot occur. It is covered as its two halves.
+  - (3) A mount whose probe cannot tell (failed, timed out, unreadable) still POSTs, logged. The
+    server's chain-in-flight guard refuses a duplicate there, and not POSTing would strand a first
+    kickoff.
+  - (4) The `worker_stalled` arm has no TS mirror, because the RPC redacts `last_error`.
+- **Known limit: a partial-day benchmark close cached BEFORE this release can still be served.**
+  A row cached on day D for date D held D's price so far. From D+1 it is a completed-day row in
+  every respect this code can see, so it is served until a fresh fetch overwrites it by upsert. A
+  full cache is not refetched, so that may not happen. Recorded, not fixed: telling such a row
+  from a true close needs a write timestamp the table does not carry.
+## [0.90.0.1] - 2026-09-24 — the committed baseline catches up with the Phase 164.6 apply
+
+Same shape as v0.77.51.1 and v0.77.46.1: a read-only re-dump taken after a migration reached
+PRODUCTION, so the local-stack lane loads a dump that already carries it.
+
+### Changed
+- **`supabase/schema/baseline.sql` regenerated from PROD**, read-only `supabase db dump --linked`
+  taken by the founder AFTER Supabase Migrate run `36040151966` applied
+  `20260924120000_ledger_fanout_failure_count.sql` on merge commit `762c03c8`. sha256
+  `efe49c15…` → `b473ab7e…`, recorded in `BASELINE.md` with a dated section of what was measured.
+  Shape unchanged: 63 tables, 155 policies, 123 function statements, **0** data statements, as a
+  body-only `CREATE OR REPLACE` must leave it.
+- **`supabase/schema/baseline-carried-migrations.txt` regenerated in the same commit** (DECISION F)
+  from the tree of `762c03c8`: one migration added, sha line rebound.
+  `baseline-currency: carried=274 replay=0 marker-sha=match defects=0` — the lane's replay set is
+  back to zero.
+
+### Notes
+- **Secret-scanned before commit** with all five classes from `BASELINE.md`'s own command: **0**
+  matches; gitleaks over the file: no leaks; no home path or local username; one
+  `SET client_encoding`, no NUL bytes.
+- Gates re-run on the new dump: `dump-sql-functions.ts --check` current (121 functions, 0 ratcheted
+  disagreements); `baseline-content-drift` findings 0 (the three `[DRIFT-06]` allowlisted rows
+  unchanged, as expected).
 
 ## [0.90.0.0] - 2026-09-24 — GATEHYGIENE: a lost 40001 race is retried once, an inherited refresh marker is retracted, and a failed ledger fan-out candidate is counted, named and watched
 

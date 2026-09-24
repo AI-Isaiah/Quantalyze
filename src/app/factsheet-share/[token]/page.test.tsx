@@ -256,10 +256,22 @@ const ROW = {
   nonce: NONCE,
 };
 
+/** An ISO instant `m` minutes before the REAL clock the page reads. */
+const isoMinutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
+
 /**
  * One `compute_jobs` row in the five-field projection read (3) asks for.
- * Timestamps default to a fixed past instant; stall cases pass their own
- * relative to the real clock the page reads.
+ * Timestamps default to a RECENT instant on the real clock the page reads
+ * (`Date.now()`), as do the stall cases' own.
+ *
+ * ⚠️ They used to default to a fixed calendar instant (2026-09-20T10:00Z).
+ * WIZRESYNC review round 2 taught `selectFactsheetJob` the resync guard's
+ * dead-row rule (`computeJobDeadReason`): an in-flight row created 8 h or more
+ * before `nowMs` is dead, because the server would no longer treat it as work
+ * in progress. That rule is right for this card too (arm (a) promises the
+ * factsheet is "being prepared", which a days-old stuck job will never do), so
+ * a fixed date that silently aged past 8 h stopped meaning "a job in flight".
+ * The fixture's clock was the defect, not the rule.
  */
 function jobRow(
   overrides: Partial<{
@@ -273,8 +285,8 @@ function jobRow(
   return {
     kind: "process_key_long",
     status: "running",
-    created_at: "2026-09-20T10:00:00.000Z",
-    claimed_at: "2026-09-20T10:00:05.000Z",
+    created_at: isoMinutesAgo(10),
+    claimed_at: isoMinutesAgo(9.9),
     member_progress_at: null,
     ...overrides,
   };
@@ -512,8 +524,10 @@ describe("KCS-11 — the pending card promises nothing when no job will finish t
     memberCountValue.value = 0;
     jobsReadMock.mockResolvedValue({
       data: [
-        jobRow({ kind: "process_key_long", status: "running", created_at: "2026-09-20T12:00:00.000Z" }),
-        jobRow({ kind: "stitch_composite", status: "done", created_at: "2026-09-10T12:00:00.000Z" }),
+        // The running chain job is recent (in flight on the real clock); the
+        // done stitch is ten days older, the converted-strategy shape.
+        jobRow({ kind: "process_key_long", status: "running", created_at: isoMinutesAgo(5) }),
+        jobRow({ kind: "stitch_composite", status: "done", created_at: isoMinutesAgo(10 * 24 * 60) }),
       ],
       error: null,
     });
@@ -773,6 +787,18 @@ describe("KCS-11 — every way read (3) can fail renders the arm that promises n
     } finally {
       errSpy.mockRestore();
     }
+  });
+
+  it("DEAD-ROW-B (WIZRESYNC round 2): a 'running' chain job 9 h old will not finish the factsheet, so the card promises nothing", async () => {
+    // The resync guard treats an in-flight row older than 8 h as dead, and so
+    // does the selection. Arm (a) would promise "being prepared" over it.
+    jobsReadMock.mockResolvedValue({
+      data: [jobRow({ status: "running", created_at: isoMinutesAgo(9 * 60), claimed_at: isoMinutesAgo(9 * 60) })],
+      error: null,
+    });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).not.toContain(KCS11_A_HEADING);
+    expect(out).toContain(KCS11_B_HEADING);
   });
 
   it("FULL-WINDOW-B: 100 rows with no factsheet-chain job prove nothing and render KCS11-B", async () => {

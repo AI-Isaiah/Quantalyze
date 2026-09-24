@@ -1,6 +1,6 @@
 """Tests for analytics-service/services/benchmark.py.
 
-These four tests target the highest-leverage failure modes in the file:
+These tests target the highest-leverage failure modes in the file:
 
 1. The pure-math function `prices_to_returns` — small but it's the foundation
    of every Sharpe number on every factsheet. A regression here is invisible
@@ -17,9 +17,17 @@ These four tests target the highest-leverage failure modes in the file:
    (None, True) instead of raising when both data sources are down. This
    is the contract that lets factsheet code degrade gracefully.
 
+5. The fresh-cache hit — proves a fresh cache is served without a refetch.
+
+6. Completed days only (review-fix round 1, MEDIUM-5) — today's UTC row is a
+   partial-day close: it is never served from the cache, never cached after a
+   fetch, and never counts as fresh.
+
 Skipped intentionally:
 - The CoinGecko fallback parse (mirror of Binance — would just be a duplicate test)
-- The 48-hour cache freshness gate (would need freezegun, marginal value)
+- The 48-hour cache freshness gate (would need freezegun, marginal value).
+  Superseded: the freshness rule is now "newest completed day >= yesterday",
+  tested below with `_utc_today` patched to a fixed synthetic date.
 - The cache-write round trip (mock-on-mock, low value)
 - httpx pagination loop internals (testing the mock, not the code)
 """
@@ -137,3 +145,325 @@ async def test_get_benchmark_returns_returns_none_when_all_sources_fail():
 
     assert result is None
     assert is_stale is True
+
+
+@pytest.mark.asyncio
+async def test_get_benchmark_returns_serves_a_fresh_cache_without_fetching():
+    """A fresh cache (more than 10 rows, newest under 48 h old) must be SERVED,
+    not refetched.
+
+    Why this matters: from v0.35.0.4 until this test existed, the cache-read
+    branch called the imported ``rows()`` helper while the same function later
+    bound a LOCAL ``rows`` list. Python then treats ``rows`` as local for the
+    whole function, so every cache read raised UnboundLocalError, the broad
+    ``except`` swallowed it as "cache read failed", and every compute
+    refetched Binance klines. Nothing failed loud; the cache was simply never
+    used. This test asserts the observable contract: no network fetch, and the
+    returns come from the cached closes.
+    """
+    today = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
+    # Completed days only, newest yesterday: today's row is a partial-day close
+    # and is never served (review-fix round 1, MEDIUM-5).
+    cached = [
+        {
+            "date": (today - pd.Timedelta(days=i + 1)).strftime("%Y-%m-%d"),
+            "symbol": "BTC",
+            "close_price": 100.0 + (30 - i),
+        }
+        # All 30 requested days: a shorter cache is a miss (MEDIUM-6).
+        for i in range(30)
+    ]
+    result = MagicMock()
+    result.data = cached
+    fetch = AsyncMock(side_effect=AssertionError("fresh cache must not refetch"))
+
+    with patch("services.benchmark.get_supabase", return_value=MagicMock()), patch(
+        "services.benchmark.db_execute", AsyncMock(return_value=result)
+    ), patch("services.benchmark.fetch_btc_daily_prices", fetch):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=30)
+
+    fetch.assert_not_awaited()
+    assert is_stale is False
+    assert returns is not None
+    assert len(returns) == 29
+    # Oldest close is 101, next is 102: the first return is 1/101.
+    assert returns.iloc[0] == pytest.approx(1 / 101)
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 1 (MEDIUM-5) — today's UTC row is a partial-day close.
+# `_utc_today` is patched to a fixed synthetic date so the tests never depend
+# on the wall clock.
+# ---------------------------------------------------------------------------
+
+_TODAY = pd.Timestamp("2026-07-12")
+_PARTIAL_CLOSE = 1_000_000_000.0  # absurd on purpose: a leak is unmissable
+
+
+def _cache_rows(days_back: list[int], *, today_close: float | None = None) -> list[dict]:
+    out = [
+        {
+            "date": (_TODAY - pd.Timedelta(days=d)).strftime("%Y-%m-%d"),
+            "symbol": "BTC",
+            "close_price": 100.0 + (100 - d),
+        }
+        for d in days_back
+    ]
+    if today_close is not None:
+        out.insert(0, {"date": _TODAY.strftime("%Y-%m-%d"), "symbol": "BTC", "close_price": today_close})
+    return out
+
+
+async def _run_sync(fn):
+    return fn()
+
+
+@pytest.mark.asyncio
+async def test_todays_partial_close_is_never_served_from_the_cache():
+    cached = _cache_rows(list(range(1, 21)), today_close=_PARTIAL_CLOSE)
+    supabase = MagicMock()
+    supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=cached
+    )
+    fetch = AsyncMock(side_effect=AssertionError("a fresh cache must not refetch"))
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=supabase
+    ), patch("services.benchmark.db_execute", side_effect=_run_sync), patch(
+        "services.benchmark.fetch_btc_daily_prices", fetch
+    ):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    fetch.assert_not_awaited()
+    assert is_stale is False and returns is not None
+    assert returns.index.max() < _TODAY, "today's partial-day row was served"
+    assert returns.abs().max() < 1.0, "the partial-day close leaked into the returns"
+
+
+@pytest.mark.asyncio
+async def test_a_cache_without_yesterday_is_stale_even_with_a_row_for_today():
+    """Freshness is the newest COMPLETED day. A cache holding today's partial
+    row but not yesterday's close is stale and is refetched."""
+    cached = _cache_rows(list(range(2, 22)), today_close=_PARTIAL_CLOSE)
+    supabase = MagicMock()
+    supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=cached
+    )
+    fresh = pd.Series(
+        [100.0 + i for i in range(20)],
+        index=pd.DatetimeIndex([_TODAY - pd.Timedelta(days=20 - i) for i in range(20)]),
+        name="BTC",
+    )
+    fetch = AsyncMock(return_value=fresh)
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=supabase
+    ), patch("services.benchmark.db_execute", side_effect=_run_sync), patch(
+        "services.benchmark.fetch_btc_daily_prices", fetch
+    ):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    fetch.assert_awaited_once()
+    assert is_stale is False and returns is not None
+
+
+@pytest.mark.asyncio
+async def test_todays_partial_close_is_never_cached_or_served_after_a_fetch():
+    supabase = MagicMock()
+    supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=[]
+    )
+    fetched = pd.Series(
+        [100.0 + i for i in range(20)] + [_PARTIAL_CLOSE],
+        index=pd.DatetimeIndex(
+            [_TODAY - pd.Timedelta(days=20 - i) for i in range(20)] + [_TODAY]
+        ),
+        name="BTC",
+    )
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=supabase
+    ), patch("services.benchmark.db_execute", side_effect=_run_sync), patch(
+        "services.benchmark.fetch_btc_daily_prices", AsyncMock(return_value=fetched)
+    ):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    assert is_stale is False and returns is not None
+    assert returns.index.max() < _TODAY, "today's partial-day row was served"
+    upserted = supabase.table.return_value.upsert.call_args.args[0]
+    assert upserted, "the completed days must still be cached"
+    assert all(r["date"] < _TODAY.strftime("%Y-%m-%d") for r in upserted), (
+        "today's partial-day close was written to the cache"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 1 (MEDIUM-6) — a cache that does not span the requested
+# days is a miss, and only DB/network errors pass quietly.
+# ---------------------------------------------------------------------------
+
+
+def _fresh_series(n: int) -> pd.Series:
+    return pd.Series(
+        [100.0 + i for i in range(n)],
+        index=pd.DatetimeIndex([_TODAY - pd.Timedelta(days=n - i) for i in range(n)]),
+        name="BTC",
+    )
+
+
+def _supabase_returning(cached: list[dict]) -> MagicMock:
+    supabase = MagicMock()
+    supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=cached
+    )
+    return supabase
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "days_back",
+    [
+        pytest.param([d for d in range(1, 22) if d != 7], id="a-gap-inside-the-window"),
+        pytest.param(list(range(1, 16)), id="shorter-than-the-requested-days"),
+        pytest.param([1, 5, 10, 20], id="sparse-rows-spanning-the-full-window"),
+    ],
+)
+async def test_a_cache_that_does_not_span_the_requested_days_is_a_miss(days_back):
+    """Before this rule, any fresh cache of more than 10 rows was served, so
+    returns built across a missing day (one "daily" return spanning two days)
+    or over a shorter window than asked for reached the factsheet."""
+    fetch = AsyncMock(return_value=_fresh_series(21))
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=_supabase_returning(_cache_rows(days_back))
+    ), patch("services.benchmark.db_execute", side_effect=_run_sync), patch(
+        "services.benchmark.fetch_btc_daily_prices", fetch
+    ):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    fetch.assert_awaited_once()
+    assert is_stale is False and returns is not None
+
+
+@pytest.mark.asyncio
+async def test_a_programming_error_in_the_cache_read_is_loud():
+    """A non-DB error in the cache read (the UnboundLocalError class that hid
+    the cache for months) falls back to a fetch, but at error level with a
+    Sentry capture, never as a quiet "cache read failed"."""
+    fetch = AsyncMock(return_value=_fresh_series(21))
+    bug = TypeError("synthetic programming error")
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=MagicMock()
+    ), patch("services.benchmark.db_execute", AsyncMock(side_effect=[bug, None])), patch(
+        "services.benchmark.fetch_btc_daily_prices", fetch
+    ), patch("services.benchmark.sentry_sdk.capture_exception") as capture, patch(
+        "services.benchmark.logger"
+    ) as log:
+        returns, _ = await get_benchmark_returns(symbol="BTC", days=20)
+
+    capture.assert_called_once_with(bug)
+    assert log.error.called, "a programming error must log at error level"
+    fetch.assert_awaited_once()
+    assert returns is not None
+
+
+@pytest.mark.asyncio
+async def test_a_db_error_in_the_cache_read_stays_a_quiet_fallback():
+    """Control: a DB-side failure is an expected miss, a warning, no Sentry."""
+    fetch = AsyncMock(return_value=_fresh_series(21))
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=MagicMock()
+    ), patch(
+        "services.benchmark.db_execute",
+        AsyncMock(side_effect=[ConnectionError("synthetic connection reset"), None]),
+    ), patch("services.benchmark.fetch_btc_daily_prices", fetch), patch(
+        "services.benchmark.sentry_sdk.capture_exception"
+    ) as capture:
+        returns, _ = await get_benchmark_returns(symbol="BTC", days=20)
+
+    capture.assert_not_called()
+    fetch.assert_awaited_once()
+    assert returns is not None
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_error_in_the_cache_read_is_loud_now():
+    """Round-2 review (SFH LOW-7): `RuntimeError` left the quiet tuple. Only
+    `get_supabase`'s own "not configured" raise stays quiet (next test)."""
+    fetch = AsyncMock(return_value=_fresh_series(21))
+    bug = RuntimeError("synthetic runtime error")
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=MagicMock()
+    ), patch("services.benchmark.db_execute", AsyncMock(side_effect=[bug, None])), patch(
+        "services.benchmark.fetch_btc_daily_prices", fetch
+    ), patch("services.benchmark.sentry_sdk.capture_exception") as capture:
+        returns, _ = await get_benchmark_returns(symbol="BTC", days=20)
+
+    capture.assert_called_once_with(bug)
+    assert returns is not None
+
+
+@pytest.mark.asyncio
+async def test_an_unconfigured_cache_is_a_quiet_miss():
+    fetch = AsyncMock(return_value=_fresh_series(21))
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase",
+        side_effect=RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY required"),
+    ), patch("services.benchmark.fetch_btc_daily_prices", fetch), patch(
+        "services.benchmark.sentry_sdk.capture_exception"
+    ) as capture:
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    capture.assert_not_called()
+    fetch.assert_awaited_once()
+    assert returns is not None and is_stale is False
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review (reviewer #4) — the cache misses AND the fetch fails: serve the
+# completed days already read, flagged stale, within 48 h. Never None then.
+# ---------------------------------------------------------------------------
+
+_NOW = pd.Timestamp("2026-07-12T10:00:00Z").to_pydatetime()
+
+
+@pytest.mark.asyncio
+async def test_cache_miss_and_failed_fetch_serve_the_cached_days_flagged_stale():
+    # Short (15 of 20 days) so it is a miss, but the newest is yesterday.
+    supabase = _supabase_returning(_cache_rows(list(range(1, 16))))
+    with patch("services.benchmark._utc_now", return_value=_NOW), patch(
+        "services.benchmark.get_supabase", return_value=supabase
+    ), patch("services.benchmark.db_execute", side_effect=_run_sync), patch(
+        "services.benchmark.fetch_btc_daily_prices",
+        AsyncMock(side_effect=httpx_error()),
+    ):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    assert returns is not None, "a recent cache in hand must be served, not None"
+    assert is_stale is True
+    assert len(returns) == 14
+    assert returns.index.max() < _TODAY
+
+
+@pytest.mark.asyncio
+async def test_cache_older_than_48h_and_failed_fetch_still_answer_none():
+    # Newest cached completed day is 3 days before today: past the 48 h bound.
+    supabase = _supabase_returning(_cache_rows(list(range(3, 23))))
+    with patch("services.benchmark._utc_now", return_value=_NOW), patch(
+        "services.benchmark.get_supabase", return_value=supabase
+    ), patch("services.benchmark.db_execute", side_effect=_run_sync), patch(
+        "services.benchmark.fetch_btc_daily_prices",
+        AsyncMock(side_effect=httpx_error()),
+    ):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    assert returns is None and is_stale is True
+
+
+def httpx_error() -> Exception:
+    import httpx
+
+    return httpx.ConnectError("synthetic: both sources down")
