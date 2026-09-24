@@ -148,7 +148,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 84;
+export const SELF_TEST_SCENARIOS = 91;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -172,6 +172,11 @@ export const SELF_TEST_SCENARIOS = 84;
  * and both scenario counters in ONE commit. cron-obs raises it when a run of
  * the ledger refresh fan-out ended in an error of that function, which the
  * fan-out now does on purpose when every candidate of a tick failed.
+ * ⭐ Phase 164.6 round 2 re-scoped it and added THREE MORE the same way:
+ * `cron-ledger-fanout-failed` now counts every run that finished outside the
+ * success form; `cron-ledger-fanout-stuck` (a hung run), `-absent` (fewer than
+ * 2 runs in 3h) and `-candidate-failed` (committed `candidate_enqueue_failed`
+ * rows, since the fan-out no longer raises when every candidate fails).
  */
 export const DEFECT_KINDS = [
   // harness-wide
@@ -188,6 +193,9 @@ export const DEFECT_KINDS = [
   "cron-non-2xx",
   "cron-transport-error",
   "cron-ledger-fanout-failed",
+  "cron-ledger-fanout-stuck",
+  "cron-ledger-fanout-absent",
+  "cron-ledger-fanout-candidate-failed",
   "cron-drift",
   "cron-secret-in-command",
   "manifest-invalid",
@@ -923,11 +931,14 @@ const sqlOk = (stdout) => ({ status: 0, stdout, stderr: "", timedOut: false, mea
  * @param {object} data
  * @param {{jobCount:number, rows:Array<Array<string>>}} [data.cronObs]
  * @param {string} [data.ttl]                 answer for TTL_SQL ("" = NULL/unset)
- * @param {{runs:number, errored:number}|string} [data.ledgerFanout]
- *                                            answer for LEDGER_FANOUT_SQL; a
- *                                            string is rendered RAW (the
- *                                            unparsable case). Default: 3 runs,
- *                                            0 errored — green.
+ * @param {object|string} [data.ledgerFanout]
+ *                                            answer for LEDGER_FANOUT_SQL: any of
+ *                                            {runs, errored, named, stuck,
+ *                                            failureRows} over the GREEN default
+ *                                            (3 runs, every count 0); a string
+ *                                            is rendered RAW (the unparsable
+ *                                            case); {measureFail} is a psql that
+ *                                            could not run.
  * @param {Array<object>} [data.cronJobRows]  answer for CRON_JOB_SQL
  * @param {string|null} [data.marker]         answer for DB_MARKER_SQL
  */
@@ -938,6 +949,9 @@ function fixtureSql(data) {
     const q = String(query);
 
     if (q.includes("pg_net.ttl")) {
+      if (data.ttlMeasureFail) {
+        return { status: null, stdout: "", stderr: "", timedOut: false, measureFail: data.ttlMeasureFail };
+      }
       return sqlOk(`${data.ttl === undefined ? "6 hours" : data.ttl}\n`);
     }
 
@@ -965,9 +979,13 @@ function fixtureSql(data) {
     // answer it with cron-drift's rows. The default is GREEN so every existing
     // bundle stays green without opting in.
     if (q.includes("job_run_details") && q.includes("ledger_refresh_fanout")) {
-      const lf = data.ledgerFanout === undefined ? { runs: 3, errored: 0 } : data.ledgerFanout;
+      const lf = data.ledgerFanout === undefined ? {} : data.ledgerFanout;
       if (typeof lf === "string") return sqlOk(lf);
-      return sqlOk(`${lf.runs}${fieldSep}${lf.errored}\n`);
+      if (lf.measureFail) {
+        return { status: null, stdout: "", stderr: "", timedOut: false, measureFail: lf.measureFail };
+      }
+      const v = { runs: 3, errored: 0, named: 0, stuck: 0, failureRows: 0, ...lf };
+      return sqlOk(`${[v.runs, v.errored, v.named, v.stuck, v.failureRows].join(fieldSep)}\n`);
     }
 
     // The prober's own contact write (D-02) — see recordProberContact and
@@ -1078,7 +1096,15 @@ const ARM_FIXTURE_TABLE = [
     // issuing it would silently stop honouring pg_net's pruning. The third is
     // the ledger fan-out's failed-run read (Phase 164.6).
     greenSeamCalls: 3,
-    kinds: ["cron-no-observation", "cron-non-2xx", "cron-transport-error", "cron-ledger-fanout-failed"],
+    kinds: [
+      "cron-no-observation",
+      "cron-non-2xx",
+      "cron-transport-error",
+      "cron-ledger-fanout-failed",
+      "cron-ledger-fanout-stuck",
+      "cron-ledger-fanout-absent",
+      "cron-ledger-fanout-candidate-failed",
+    ],
     makeSeams: (data) =>
       createSeams({
         sqlRunner: fixtureSql({ cronObs: data, ttl: data.ttl, ledgerFanout: data.ledgerFanout }),
@@ -1096,6 +1122,12 @@ const ARM_FIXTURE_TABLE = [
       // Phase 164.6: an otherwise GREEN window (the match_engine_cron rows of
       // ok.json) in which one ledger fan-out run ended in the fan-out's error.
       "ledger-fanout-failed.json": "cron-ledger-fanout-failed",
+      // Phase 164.6 round 2: the same green window, one fault each. A run
+      // hung past 30 minutes; fewer than 2 runs in 3h; a committed
+      // candidate_enqueue_failed row in the last 21h.
+      "ledger-fanout-stuck.json": "cron-ledger-fanout-stuck",
+      "ledger-fanout-too-few-runs.json": "cron-ledger-fanout-absent",
+      "ledger-fanout-failure-rows.json": "cron-ledger-fanout-candidate-failed",
     },
   },
   {
@@ -1245,6 +1277,9 @@ export async function selfTest() {
     "cron-non-2xx": (d) => d.kind === "cron-non-2xx",
     "cron-transport-error": (d) => d.kind === "cron-transport-error",
     "cron-ledger-fanout-failed": (d) => d.kind === "cron-ledger-fanout-failed",
+    "cron-ledger-fanout-stuck": (d) => d.kind === "cron-ledger-fanout-stuck",
+    "cron-ledger-fanout-absent": (d) => d.kind === "cron-ledger-fanout-absent",
+    "cron-ledger-fanout-candidate-failed": (d) => d.kind === "cron-ledger-fanout-candidate-failed",
     "cron-drift": (d) => d.kind === "cron-drift",
     "cron-secret-in-command": (d) => d.kind === "cron-secret-in-command",
     "manifest-invalid": (d) => d.kind === "manifest-invalid",
@@ -1437,6 +1472,100 @@ export async function selfTest() {
         expect(r.defects.some((x) => x.kind === "pyapi06-absent-accepted"), "the FIRST fault is in the table") &&
         expect(r.defects.some((x) => x.kind === "pyapi06-health-degraded"), "the SECOND fault is in the table — the run did not stop at the first") &&
         expect(r.seamInvocationsByKind.fetch === 4, `all four requests were still issued after the first fault (got ${r.seamInvocationsByKind.fetch})`) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 164.6 round 2 (review N5 / IN-03 / N4). The cron-obs ledger fan-out
+  // step's own guards, which the isolation loop cannot reach: its measure-fail
+  // paths carry no remedy, and the always-run rule needs TWO defects at once.
+  // Each is built on ok.json's green match_engine_cron window, so any defect
+  // beyond the expected ones is the step misbehaving.
+  // -------------------------------------------------------------------------
+  {
+    const okFx = loadFixture("cron-obs", "ok.json");
+    const LF_JOB = CRON_OBS_MOD.LEDGER_FANOUT_JOB;
+    const runCronObs = async (overrides) => {
+      const data = { ...clone(okFx.data), ...overrides };
+      const seams = createSeams({
+        sqlRunner: fixtureSql({ cronObs: data, ttl: data.ttl, ttlMeasureFail: data.ttlMeasureFail, ledgerFanout: data.ledgerFanout }),
+        clock: () => new Date(data.now),
+      });
+      return runProber({ arms: [CRON_OBS_MOD.ARM], env: { ...SELFTEST_ENV }, seams, armsFloor: 1, log: quiet });
+    };
+    const onlyLfMeasureFail = (r, label) =>
+      expect(r.exitCode === 1, `${label}: exits 1 (got ${r.exitCode})`) &&
+      expect(r.defects.length === 1, `${label}: exactly one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
+      expect(r.defects[0] && r.defects[0].kind === "measure-fail", `${label}: the defect is a measure-fail, never zero failures (got ${r.defects[0] && r.defects[0].kind})`) &&
+      expect(r.defects[0] && r.defects[0].subject === LF_JOB, `${label}: the measure-fail names ${LF_JOB} (got ${r.defects[0] && r.defects[0].subject})`) &&
+      expect(r.defects[0] && r.defects[0].arm === "cron-obs", `${label}: attributed to cron-obs`);
+
+    scenario("cron-obs ledger fan-out: an UNPARSABLE answer is a measure-fail naming the job, never zero failures");
+    if (!okFx.ok) {
+      pass = expect(false, okFx.reason) && pass;
+    } else {
+      // One field where five are expected: exactly the shape a changed query
+      // or a psql format flag would produce.
+      pass = onlyLfMeasureFail(await runCronObs({ ledgerFanout: "3\n" }), "unparsable") && pass;
+    }
+
+    scenario("cron-obs ledger fan-out: a psql that could not run is a measure-fail naming the job, never zero failures");
+    if (!okFx.ok) {
+      pass = expect(false, okFx.reason) && pass;
+    } else {
+      const r = await runCronObs({ ledgerFanout: { measureFail: "psql exited 2" } });
+      pass =
+        onlyLfMeasureFail(r, "psql failure") &&
+        // The parser's null path would ALSO yield a measure-fail on the empty
+        // stdout, so without this the psql guard could vanish unnoticed: the
+        // detail must carry psql's own reason, which only that guard reports.
+        expect(
+          r.defects[0] && r.defects[0].detail.includes("psql exited 2"),
+          `psql failure: the detail carries psql's own reason, not the parser's (got ${r.defects[0] && r.defects[0].detail})`,
+        ) &&
+        pass;
+    }
+
+    scenario("cron-obs ledger fan-out: runs:0 fires cron-ledger-fanout-absent, and exactly the floor (2) is green");
+    if (!okFx.ok) {
+      pass = expect(false, okFx.reason) && pass;
+    } else {
+      const zero = await runCronObs({ ledgerFanout: { runs: 0 } });
+      const atFloor = await runCronObs({ ledgerFanout: { runs: CRON_OBS_MOD.LEDGER_FANOUT_MIN_RUNS } });
+      pass =
+        expect(zero.exitCode === 1, `runs:0 exits 1 (got ${zero.exitCode})`) &&
+        expect(
+          zero.defects.length === 1 && zero.defects[0].kind === "cron-ledger-fanout-absent",
+          `runs:0 raises exactly cron-ledger-fanout-absent (got ${zero.defects.map((x) => x.kind).join(", ") || "nothing"})`,
+        ) &&
+        expect(
+          atFloor.exitCode === 0 && atFloor.defects.length === 0,
+          `runs at the floor (${CRON_OBS_MOD.LEDGER_FANOUT_MIN_RUNS}) is green (got ${atFloor.defects.map((x) => x.kind).join(", ") || "nothing"}) — the pair proves the floor is a boundary`,
+        ) &&
+        pass;
+    }
+
+    scenario("cron-obs: an EARLIER step's measure-fail does not hide a failing fan-out — BOTH defects are reported");
+    if (!okFx.ok) {
+      pass = expect(false, okFx.reason) && pass;
+    } else {
+      const r = await runCronObs({ ttlMeasureFail: "psql exited 2", ledgerFanout: { errored: 1, named: 1 } });
+      pass =
+        expect(r.exitCode === 1, `exits 1 (got ${r.exitCode})`) &&
+        expect(r.defects.length === 2, `exactly two defects (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
+        expect(
+          r.defects.some((x) => x.kind === "measure-fail" && x.subject === "pg_net.ttl"),
+          "the pg_net.ttl measure-fail is reported",
+        ) &&
+        expect(
+          r.defects.some((x) => x.kind === "cron-ledger-fanout-failed"),
+          "AND the fan-out's failed run is reported — step (4) ran after the earlier step gave up",
+        ) &&
+        expect(
+          r.tallyByArm["cron-obs"] === 2,
+          `the arm issued the TTL read and the fan-out read, and skipped only the pg_net join (got ${r.tallyByArm["cron-obs"]})`,
+        ) &&
         pass;
     }
   }
@@ -1669,10 +1798,26 @@ export async function selfTest() {
     const mf = r.defects.filter((x) => x.kind === "measure-fail");
     pass =
       expect(r.exitCode === 1, `a failing psql exits 1, never 0 (got ${r.exitCode})`) &&
-      expect(mf.length === 1, `exactly one measure-fail defect (got ${mf.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
-      expect((mf[0] || {}).arm === "cron-obs", `attributed to cron-obs (got ${(mf[0] || {}).arm})`) &&
+      // ⭐ TWO since Phase 164.6 round 2 (review N4): the ledger fan-out step
+      // runs even after the pg_net steps gave up, so a psql that fails for
+      // every query yields one measure-fail per INDEPENDENT step, each naming
+      // what it could not read.
+      expect(mf.length === 2, `exactly two measure-fail defects, one per independent step (got ${mf.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
+      expect(mf.every((x) => x.arm === "cron-obs"), `all attributed to cron-obs (got ${mf.map((x) => x.arm).join(", ")})`) &&
       expect(
-        noDefectOfKind(r.defects, ["cron-no-observation", "cron-non-2xx", "cron-transport-error"]),
+        JSON.stringify(mf.map((x) => x.subject).sort()) === JSON.stringify(["ledger_refresh_fanout", "pg_net.ttl"]),
+        `one names pg_net.ttl and one names ledger_refresh_fanout (got ${mf.map((x) => x.subject).join(", ")})`,
+      ) &&
+      expect(
+        noDefectOfKind(r.defects, [
+          "cron-no-observation",
+          "cron-non-2xx",
+          "cron-transport-error",
+          "cron-ledger-fanout-failed",
+          "cron-ledger-fanout-stuck",
+          "cron-ledger-fanout-absent",
+          "cron-ledger-fanout-candidate-failed",
+        ]),
         "and NO cron verdict of any kind — an empty stdout from a failed psql is not zero problems",
       ) &&
       pass;
