@@ -1,7 +1,7 @@
 // SECURITY BOUNDARY:
 // This is a PUBLIC, sessionless route and the ONLY tokenized factsheet surface
 // (ruling D-04 — the tearsheet and PDF routes are deliberately OUT of scope and
-// still 404 for a recipient). Two reads happen here, both on the admin
+// still 404 for a recipient). Three reads happen here, all on the admin
 // (service_role) transport:
 //   (1) `strategy_shares(strategy_id, generation, nonce)` filtered to
 //       `revoked_at IS NULL` — the candidate set for the constant-time scan.
@@ -12,14 +12,23 @@
 //       destroyed-and-recreated share row unforgeable, so leaking it hands an
 //       attacker the only database-side value they cannot otherwise obtain;
 //   (2) `fetchAndBuildPayload(strategy_id, <identity predicate>)` — the SAME
-//       builder the owner lane calls, invoked DIRECTLY.
+//       builder the owner lane calls, invoked DIRECTLY;
+//   (3) `compute_jobs(status, kind, created_at, claimed_at,
+//       member_progress_at:metadata->>member_progress_at)` filtered to
+//       `strategy_id = <the matched strategy id>`, newest first, limited to
+//       COMPUTE_STATE_READ_LIMIT rows (Phase 167.2, KCS-11). It runs ONLY when
+//       the payload is pending, after the match, and never through the cached
+//       wrapper. Its sole output is which of two neutral sentences the pending
+//       card says. The five fields are exactly what `deriveComputeState` needs:
+//       never `last_error`, never `error_kind`, never `metadata` whole (it
+//       carries source and correlation ids), never owner identity.
 //
 // ⛔ THE CONSTANT-TIME HMAC MATCH IS THE AUTHORIZATION. There is no session, no
 // RLS gate, and no status predicate on the payload read — deliberately, because
 // the whole point is that an UNPUBLISHED strategy renders for the holder of a
 // valid capability. If you are about to add a query here, ask what bounds it:
-// (1) is bounded by `revoked_at IS NULL`, (2) is bounded by the matched
-// strategy id. NEVER read an arbitrary id, never widen the projection to owner
+// (1) is bounded by `revoked_at IS NULL`, (2) and (3) are bounded by the
+// matched strategy id. NEVER read an arbitrary id, never widen the projection to owner
 // identity / api_keys / holdings / AUM.
 //
 // ⛔ SL-1 — THIS MODULE HAS NO CACHE REACH, AND THAT IS THE STRUCTURAL ARGUMENT.
@@ -43,6 +52,14 @@ import {
   fetchAndBuildPayload,
   type StrategyVisibility,
 } from "@/lib/factsheet/fetch-and-build-payload";
+import {
+  COMPUTE_STATE_READ_LIMIT,
+  deriveComputeState,
+  recipientArm,
+  type ComputeJobRow,
+  type ComputeState,
+} from "@/lib/compute-state";
+import { SHARE_CARD_COPY } from "@/lib/status-surface-copy";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { FactsheetView } from "@/app/factsheet/[id]/v2/FactsheetView";
 
@@ -187,6 +204,79 @@ async function findShareMatch(token: string): Promise<ShareCandidate | null> {
   return null;
 }
 
+/**
+ * One row of read (3), in the projection the read asks for. The heartbeat is
+ * lifted out of `metadata` by a PostgREST JSON-path alias, so the rest of that
+ * column (source, correlation ids) never leaves the database.
+ */
+type ShareComputeJobRow = {
+  status: string | null;
+  kind: string | null;
+  created_at: string | null;
+  claimed_at: string | null;
+  member_progress_at: string | null;
+};
+
+/**
+ * Read (3) of the header: the matched strategy's compute state, for the
+ * pending card only (KCS-11).
+ *
+ * ⛔ BOUNDED BY THE MATCHED STRATEGY ID AND NOTHING ELSE, projecting five
+ * fields. A widened projection or a second bound on this public route is a
+ * founder decision (167.2 KCS-17), not an edit.
+ *
+ * Every way this can fail derives `unreadable`, which the page folds into the
+ * sentence that promises nothing. A PostgREST error, a throw, and an answer
+ * that is not a row array are logged by message only, like `findShareMatch`:
+ * error-absent is not legit-absent, and a failed read read as "no jobs" would
+ * be a claim with no evidence behind it.
+ *
+ * A module-level function rather than inline code so the server clock is read
+ * outside the component body.
+ */
+async function readShareComputeState(
+  strategyId: string,
+): Promise<ComputeState> {
+  try {
+    const admin = createAdminClient();
+    const { data, error } = await admin
+      .from("compute_jobs")
+      .select(
+        "status, kind, created_at, claimed_at, member_progress_at:metadata->>member_progress_at",
+      )
+      .eq("strategy_id", strategyId)
+      .order("created_at", { ascending: false })
+      .limit(COMPUTE_STATE_READ_LIMIT);
+
+    if (error || !Array.isArray(data)) {
+      console.error("[factsheet-share/page] compute-state read failed", {
+        message: error?.message ?? "compute_jobs answer was not a row array",
+      });
+      return deriveComputeState({ readError: true });
+    }
+
+    // Re-shaped into `ComputeJobRow` so the stitch heartbeat rule in
+    // `isStitchStalled` applies unchanged.
+    const rows: ComputeJobRow[] = (data as ShareComputeJobRow[]).map((r) => ({
+      status: r.status ?? undefined,
+      kind: r.kind ?? undefined,
+      created_at: r.created_at ?? undefined,
+      claimed_at: r.claimed_at,
+      metadata: { member_progress_at: r.member_progress_at },
+    }));
+    return deriveComputeState({
+      rows,
+      readExhaustive: rows.length < COMPUTE_STATE_READ_LIMIT,
+      nowMs: Date.now(),
+    });
+  } catch (err) {
+    console.error("[factsheet-share/page] compute-state read failed", {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return deriveComputeState({ readError: true });
+  }
+}
+
 export default async function FactsheetSharePage({
   params,
 }: {
@@ -245,11 +335,20 @@ export default async function FactsheetSharePage({
     console.warn("[factsheet-share/page] valid token, payload pending", {
       strategyId: match.strategy_id,
     });
+    // KCS-11: say "being prepared" ONLY when a job will still do work. Every
+    // other state, the unreadable one included, gets the sentence that
+    // promises nothing: a link over a failed compute must not tell its
+    // recipient the data is on its way.
+    const computeState = await readShareComputeState(match.strategy_id);
+    const arm =
+      recipientArm(computeState) === "in_progress"
+        ? "in_progress"
+        : "not_available";
     return (
       <main className="mx-auto max-w-3xl px-4 py-16">
         <EmptyStateCard
-          heading="This factsheet isn't ready yet"
-          body="The link works — the strategy's performance data is still being computed. Try again in a few minutes."
+          heading={SHARE_CARD_COPY[arm].heading}
+          body={SHARE_CARD_COPY[arm].body}
         />
       </main>
     );

@@ -86,6 +86,30 @@ const sharesReadMock = vi.hoisted(() =>
     error: null as { message?: string } | null,
   })),
 );
+/**
+ * Read (3), the pending card's compute-state read (Phase 167.2, KCS-11). The
+ * builder RECORDS every call made on it, so the projection, every `eq` bound,
+ * the order and the limit are asserted from what the page actually sent, and
+ * answers whatever `{ data, error }` the test queued at `.limit()`.
+ */
+type JobsReadCall = {
+  cols: string | null;
+  eqs: Array<[string, unknown]>;
+  order: [string, unknown] | null;
+  limit: number | null;
+};
+type JobsReadAnswer = {
+  data: Array<Record<string, unknown>> | null;
+  error: { message?: string } | null;
+};
+const jobsReadMock = vi.hoisted(() =>
+  vi.fn(
+    async (_call: JobsReadCall): Promise<JobsReadAnswer> => ({
+      data: [],
+      error: null,
+    }),
+  ),
+);
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => {
     createAdminMock();
@@ -99,6 +123,33 @@ vi.mock("@/lib/supabase/admin", () => ({
                 sharesReadMock(cols, isCol, isVal),
             }),
           };
+        }
+        if (table === "compute_jobs") {
+          const call: JobsReadCall = {
+            cols: null,
+            eqs: [],
+            order: null,
+            limit: null,
+          };
+          const builder = {
+            select: (cols: string) => {
+              call.cols = cols;
+              return builder;
+            },
+            eq: (col: string, val: unknown) => {
+              call.eqs.push([col, val]);
+              return builder;
+            },
+            order: (col: string, opts: unknown) => {
+              call.order = [col, opts];
+              return builder;
+            },
+            limit: (n: number) => {
+              call.limit = n;
+              return jobsReadMock(call);
+            },
+          };
+          return builder;
         }
         // Any other table on this page is a disclosure bug by construction:
         // nothing here is bounded except the shares read and the matched id.
@@ -172,6 +223,60 @@ const ROW = {
   nonce: NONCE,
 };
 
+/**
+ * One `compute_jobs` row in the five-field projection read (3) asks for.
+ * Timestamps default to a fixed past instant; stall cases pass their own
+ * relative to the real clock the page reads.
+ */
+function jobRow(
+  overrides: Partial<{
+    kind: string;
+    status: string;
+    created_at: string;
+    claimed_at: string | null;
+    member_progress_at: string | null;
+  }> = {},
+): Record<string, unknown> {
+  return {
+    kind: "process_key_long",
+    status: "running",
+    created_at: "2026-09-20T10:00:00.000Z",
+    claimed_at: "2026-09-20T10:00:05.000Z",
+    member_progress_at: null,
+    ...overrides,
+  };
+}
+
+/**
+ * The two recipient arms (UI-SPEC KCS11-A / KCS11-B), as literals and as
+ * `renderToStaticMarkup` escapes them (the apostrophe becomes `&#x27;`).
+ * Typed out rather than imported from the copy module, so a change to the
+ * copy has to be made twice to stay green.
+ */
+const escaped = (s: string) => s.replaceAll("'", "&#x27;");
+const KCS11_A_HEADING = escaped("This factsheet isn't ready yet");
+const KCS11_A_BODY = escaped(
+  "The link works \u2014 the strategy's performance data is being prepared. Try again later.",
+);
+const KCS11_B_HEADING = escaped("This factsheet isn't available yet");
+const KCS11_B_BODY = escaped(
+  "The link works \u2014 the strategy's performance data is not available yet. Check with the person who shared this link before trying again.",
+);
+
+/**
+ * Words no pending card may carry (KCS-11, 164.2 criterion 9): nothing names
+ * an internal cause, job state or error kind, and nothing promises a time.
+ */
+const NEVER_ON_THE_CARD = [
+  "failed",
+  "error",
+  "computed",
+  "minutes",
+  "permanent",
+  "stitch",
+  "stalled",
+] as const;
+
 async function loadPage() {
   return (await import("./page")).default;
 }
@@ -196,6 +301,7 @@ beforeEach(() => {
   checkLimitMock.mockResolvedValue({ success: true });
   sharesReadMock.mockResolvedValue({ data: [], error: null });
   buildMock.mockResolvedValue({ strategyId: "stub" } as never);
+  jobsReadMock.mockResolvedValue({ data: [], error: null });
 });
 
 // ---------------------------------------------------------------------------
@@ -347,12 +453,77 @@ describe("a valid token whose payload is not built yet is PENDING, not dead", ()
       error: null,
     });
     buildMock.mockResolvedValue(null);
+    // Arm (a) since KCS-11: "ready yet" is said only while a job is working.
+    jobsReadMock.mockResolvedValue({
+      data: [jobRow({ kind: "process_key_long", status: "running" })],
+      error: null,
+    });
     const html = await renderPage(VALID_TOKEN);
     expect(html).toContain("isn&#x27;t ready yet");
     expect(redirectMock).not.toHaveBeenCalled();
     // Content-free: the pending state must not name the strategy or leak a
     // metric while the recipient waits.
     expect(html).not.toContain(STRATEGY_ID);
+  });
+});
+
+describe("KCS-11 — the pending card promises nothing when no job will finish the factsheet", () => {
+  beforeEach(() => {
+    sharesReadMock.mockResolvedValue({ data: [ROW], error: null });
+    buildMock.mockResolvedValue(null);
+  });
+
+  it("TRIGGER-SHAPE-B: a permanently failed composite stitch renders 'not available yet', never 'ready yet'", async () => {
+    // The measured founder trigger: the link said "still being computed … try
+    // again in a few minutes" over a stitch_composite that had failed for good.
+    // The older chain rows are the members' finished fetches; the stitch row is
+    // preferred whenever one exists, so it answers.
+    jobsReadMock.mockResolvedValue({
+      data: [
+        jobRow({
+          kind: "stitch_composite",
+          status: "failed_final",
+          created_at: "2026-09-20T12:00:00.000Z",
+        }),
+        jobRow({
+          kind: "compute_analytics_from_csv",
+          status: "done",
+          created_at: "2026-09-20T11:00:00.000Z",
+        }),
+        jobRow({
+          kind: "process_key_long",
+          status: "done",
+          created_at: "2026-09-20T10:00:00.000Z",
+        }),
+      ],
+      error: null,
+    });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain(KCS11_B_HEADING);
+    expect(out).toContain(KCS11_B_BODY);
+    expect(out).not.toContain("ready yet");
+    expect(out).not.toContain("being prepared");
+    for (const word of NEVER_ON_THE_CARD) {
+      expect(out.toLowerCase()).not.toContain(word);
+    }
+    expect(redirectMock).not.toHaveBeenCalled();
+    // The read really ran, once, on the matched strategy.
+    expect(jobsReadMock).toHaveBeenCalledTimes(1);
+    expect(adminFromMock).toHaveBeenCalledWith("compute_jobs");
+  });
+
+  it("a running fetch renders arm (a), with no number of minutes", async () => {
+    jobsReadMock.mockResolvedValue({
+      data: [jobRow({ kind: "process_key_long", status: "running" })],
+      error: null,
+    });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain(KCS11_A_HEADING);
+    expect(out).toContain(KCS11_A_BODY);
+    expect(out).not.toContain("available yet");
+    for (const word of NEVER_ON_THE_CARD) {
+      expect(out.toLowerCase()).not.toContain(word);
+    }
   });
 });
 
