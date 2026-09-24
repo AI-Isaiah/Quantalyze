@@ -732,6 +732,16 @@ export type WizardErrorCode =
   // above answers as `DRAFT_STATE_INVALID` rather than creating a second
   // strategy. Both halves are why the control is offered.
   | "DRAFT_FINALIZE_FAILED"
+  // Round-2 review (SFH HIGH-1) — the SUBMISSION IS SAVED, the analytics job is
+  // not queued. `finalize-wizard`'s unified arm answers it when
+  // `finalize_wizard_strategy` committed (or a replay confirmed the row is
+  // already promoted) and the `postProcessKey` dispatch that follows failed.
+  // Before it, that failure forwarded the dispatch's own copy (for example the
+  // rate-limit card), which told a user whose strategy WAS submitted that
+  // nothing was. RECOVERABLE: a Retry replays the finalize (the row is already
+  // promoted, so `acceptAlreadyPromoted` answers success) and runs the dispatch
+  // again, so it can win and cannot submit twice.
+  | "SUBMITTED_ANALYTICS_NOT_QUEUED"
   // Phase 17 NEW — CSV branch absorption (DESIGN-05).
   | "CSV_PARSE_FAILED"
   | "CSV_SCHEMA_VIOLATION"
@@ -3118,6 +3128,20 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // SQL raise and false for that case, and shipping it would be the same
     // unobservable claim the `FORBIDDEN` list's "data is unchanged" entry
     // exists to ban.
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  SUBMITTED_ANALYTICS_NOT_QUEUED: {
+    title: "Your strategy is submitted, but its analytics are not queued yet.",
+    cause:
+      "Your submission is saved: the strategy is waiting for review. The step that queues its analytics did not go through, so the factsheet will not start computing until it does. The fault is on our side, not in your key or your exchange.",
+    fix: [
+      "Try again. Retrying is safe: your submission is already saved, so it will not be submitted twice, and the retry only queues the analytics.",
+      "If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ],
+    docsHref: "/security",
+    // RECOVERABLE: the Retry replays the finalize, which recognises the
+    // already-promoted row as success, and then re-runs the dispatch.
     actions: ["clear_and_retry", "request_call"],
   },
 

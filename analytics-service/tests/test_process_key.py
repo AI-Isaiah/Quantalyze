@@ -1376,6 +1376,10 @@ def test_process_key_teaser_injects_anchor_when_strategy_id_missing(client):
     body = r.json()
     assert body["verification_id"] == "ver-teaser-x5"
     assert body["status"] == "published"
+    # 2026-09-24: the synchronous pipeline no longer runs a position
+    # reconstruction whose result it discards (see the long_fetch pin in
+    # tests/test_long_fetch.py for the why).
+    okx_adapter.reconstruct_positions.assert_not_awaited()
 
     # The strategy_verifications INSERT received the sentinel anchor as
     # strategy_id. Walk the recorded .table('strategy_verifications')
@@ -3457,6 +3461,7 @@ class _RecordingBuilder:
         self._op = "select"
         self._filters = {}
         self._gte = {}
+        self._in = {}
         self._payload = None
 
     def select(self, *_args, **_kwargs):
@@ -3488,6 +3493,14 @@ class _RecordingBuilder:
         assertion can pin the bound without loosening the equality pins.
         """
         self._gte[column] = value
+        return self
+
+    def in_(self, column, values):
+        """Recorded SEPARATELY from `.eq()`, for the same reason as `.gte()`:
+        the resync chain-in-flight guard (2026-09-24) filters compute_jobs by
+        kind and status with IN lists, and folding those into `self._filters`
+        would widen the equality-pinned shapes below."""
+        self._in[column] = list(values)
         return self
 
     def maybe_single(self):
@@ -4025,6 +4038,8 @@ def test_seam06_resync_dedups_on_strategy_scoped_draft_key(client):
             # flow falls through to a normal queued insert.
             ("strategy_verifications", "select"): [None],
             ("strategy_verifications", "insert"): [[{"id": "ver-resync"}]],
+            # No chain job in flight, so the chain-in-flight guard misses too.
+            ("compute_jobs", "select"): [[]],
         },
         rpc_responses={"enqueue_compute_job": ["job-resync-1"]},
     )
