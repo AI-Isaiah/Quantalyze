@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.87.1.0] - 2026-09-24 — MYPYSTRICT: the strict type gate covers the module that IS the service
+
+⭐ **What changed for whoever reads this next.** CI's `mypy --strict` gate said it covered "all running-service code", but it never read `analytics-service/main.py`, the FastAPI app itself, nor the three top-level modules that run inside that process. It now does. The `python` job's step "Type gate - mypy strict over the running-service surface" checks `services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py`: **100 files, 0 errors, where it checked 96**. A contract test pins that path set to the service surface derived from the tracked tree, so the gate cannot be narrowed quietly again.
+
+### Added
+- **The four top-level service modules enter the strict gate** with real annotations, in `main.py`, `main_worker.py` and `sentry_init.py`. The phase adds no `# type: ignore` and no `cast(`. Five Supabase closures are typed `-> Any`, because a narrower type would have meant changing runtime code.
+- **`src/__tests__/contracts/ci-mypy-strict-surface.contract.test.ts`** (70 tests). It parses the CI `run:` line and the Makefile recipe into tokens and derives the surface from `git ls-files`, including namespace packages. It requires exactly one mypy invocation and pins the flag set exactly, the gate step's own YAML keys, `--config-file=pyproject.toml`, and the Makefile's `MYPY` assignment and single `typecheck` rule. It refuses a folded continuation line under `run:`, a tracked `.pyi` stub shadowing a surface module, and TOML multi-line strings or continuations in `pyproject.toml`. Each check has a calibration leg: two review rounds switched each of the 47 checks off in turn, and every one went red. The `CONTRACT_GUARDS` floor moves from 60 to 61 in the same commit.
+
+### Changed
+- **`/health` declares `response_model=None`.** Without it, FastAPI fails at import once the return type is annotated. The OpenAPI document hash is unchanged before and after.
+- **The gate runs under `--config-file=pyproject.toml`** in CI and the Makefile, so an untracked `mypy.ini` cannot override the settings.
+- **`make ci` runs `typecheck`**, not `lint`.
+- **Every statement of what the gate covers now names the real surface:** the `ci.yml` comment, the Makefile header, help text and targets, `services/audit.py`, the `services/ingestion/__init__.py` docstring, and the `pyproject.toml` header.
+
+### Fixed
+- `TODOS.md` `[MYPY-MAINPY-01]` is closed in code. The closure keeps ROADMAP criterion 3's CI half (D-06b) open until it is observed on the PR.
+- After merging Phase 164.4.2, contract calibration leg (g2) is re-anchored on `test-db-drift`, now the job after `python`. The downstream-catch prose names `test-db-drift`, not `sql-tests`.
+
+### Tests
+- The CI mypy line reports 100 source files and 0 issues. Neutering `_crash_handler`'s `Task[None]` leaves the old command green and turns the new one red with a `main.py` `type-arg` error. A second neuter, on `health`'s return type, also turns it red.
+- Full pytest from `analytics-service/`: 6109 passed, coverage 91.50%. Contract and registry tests: 135 passed.
+
+### Notes — known limits, declared rather than enforced
+- The contract test does not pin a PATH swap of the mypy binary, a job-level `if:` or `env:`, or command wrappers its counter does not recognise. A skipped `python` job is still caught downstream, because `test-db-drift` needs `python` and the `frontend` aggregator reds a trusted-event skip.
+- D-06b, the CI job observed red and then green on this PR, is recorded in `164.6.1-UAT.md`.
+
 ## [0.87.0.0] - 2026-09-24 — SUBSETSPLIT: `sql-tests` stops queueing for shared TEST, and `sql-mutation` checks only what a pull request changed
 
 ⭐ **What changed for whoever reads this next.** Phase 164.4.2 has two halves, and both are about
