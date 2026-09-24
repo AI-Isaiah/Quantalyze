@@ -2904,6 +2904,7 @@ Plans:
   ⛔ **CORRECTED 2026-09-23 (Phase 167.1 D-03).** The "money-number change" framing above is lineage, not current. This phase changes NO money number: every total keeps its value and discloses the untrusted part. `src/lib/queries.ts`, the scenario commit route, `supabase/` and `analytics-service/` were byte-unchanged on the branch when plan 04 measured them (plan 06 re-measures after the D-06 answer).
 **Depends on:** Phase 167
 **Founder decisions 2026-09-24:** D-06 answered (b) — the composer says what it excludes from keys needing attention; D-18 REOPENED — the marker shows whenever the on-screen figure includes untrusted dollars, including a live total ≤ 0 (review WR-04) and a manual value equal to the live total (review IN-06). Both land in plan 05. Recorded in `167.1-CONTEXT.md`.
+  ⭐ **2026-09-24: plan 05 implemented both** (`943e72d9f`). The composer's one marker now says "excludes $Y from keys needing attention" when the modelled-book narrowing leaves untrusted holdings out, and it shows in state 6 (State A) and state 4 (State C, in the "Required to size and commit." hint). The total is unchanged (D-03).
 **Plans:** 6 plans
 
 Plans:
@@ -2922,7 +2923,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 167.1-05-PLAN.md — D-06 founder decision (`checkpoint:decision`, recommended option b) and its implementation; execution stops here for the answer (wave 4)
+- [x] 167.1-05-PLAN.md — D-06 founder decision (`checkpoint:decision`, recommended option b) and its implementation; execution stops here for the answer (wave 4) — DONE 2026-09-24: founder answered (b) and reopened D-18 (`943e72d9f` feat; `167.1-05-SUMMARY.md`)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
