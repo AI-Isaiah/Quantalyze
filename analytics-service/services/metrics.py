@@ -2105,7 +2105,7 @@ def compute_all_metrics(
     # Heavy-series storage per D-02 — these go to strategy_analytics_series via
     # the atomic batch RPC (M-Grok-1) at the runner level, NOT into metrics_json.
     has_benchmark = benchmark_returns is not None and len(benchmark_returns) > 0
-    # H-0711: compute rolling alpha + beta from ONE rolling_greeks pass.
+    # H-0711: compute rolling alpha + beta from ONE _rolling_greeks pass.
     if has_benchmark:
         rolling_alpha_series, rolling_beta_series = _rolling_alpha_beta(
             returns, benchmark_returns, 90
@@ -2707,28 +2707,92 @@ def _rolling_volatility(
     return _finalize_rolling(returns.rolling(window).std() * np.sqrt(periods_per_year))
 
 
+def _rolling_greeks(
+    returns: pd.Series, benchmark: pd.Series, window: int
+) -> pd.DataFrame:
+    """Rolling (alpha, beta): quantstats 0.0.81 ``rolling_greeks`` minus the price guess on BOTH legs, with a windowed alpha (D-06, D-17).
+
+    WHY INLINE: 0.0.81 ``rolling_greeks`` runs the benchmark through
+    ``_prepare_benchmark`` -> ``_prepare_returns`` unconditionally, whatever
+    ``prepare_returns=`` says, so no keyword closes the benchmark leg (research
+    Q2). The strategy leg took no keyword at the old call site at all. On the
+    benchmark trigger (an all-non-negative benchmark with a +150% day) live
+    quantstats' last rolling beta was -0.08887237598396791; the rolling
+    cov/var of the raw pair over the same 90 rows is -0.7554623350323423.
+
+    MATH PARITY (0.0.81 body, ``periods`` is the rolling window)::
+
+        returns = _prepare_returns(returns)
+        df = DataFrame({"returns": returns,
+                        "benchmark": _prepare_benchmark(benchmark, returns.index)})
+        df = df.fillna(0)
+        corr = df.rolling(periods).corr().unstack()["returns"]["benchmark"]
+        std = df.rolling(periods).std()
+        beta = corr * std["returns"] / std["benchmark"].replace(0, nan)
+        alpha = df["returns"].mean() - beta * df["benchmark"].mean()
+        return DataFrame(index=returns.index, data={"beta": beta, "alpha": alpha})
+
+    ``_prepare_returns`` becomes ``_prepared_returns_no_guess`` plus its tz
+    step (``_tz_naive_like_qs``), and ``_prepare_benchmark`` becomes
+    ``_align_benchmark_like_qs``. Beta keeps 0.0.81's expression order, so a
+    benign pair's rolling beta is bit-identical to live quantstats.
+
+    D-17 (founder-approved 2026-09-24, disclosed under D-10): ALPHA IS THE
+    WINDOWED INTERCEPT ``mean_w(r) - beta_t * mean_w(b)`` over the same window
+    as beta. 0.0.81 used FULL-SAMPLE means (research F-4), which made the
+    rendered ``rolling_alpha`` a linear transform of rolling beta rather than a
+    rolling alpha. Rolling beta is unchanged.
+
+    NOTE (Phase 34): quantstats 0.0.81 ``rolling_greeks(returns, benchmark,
+    periods=252)`` uses ``periods`` as the ROLLING WINDOW length (its source
+    says "Calculate rolling alpha (not annualized for rolling version)"), so
+    there is no annualization factor to thread. Rolling alpha stays
+    UNANNUALIZED (a per-period intercept) and rolling beta is a unitless ratio;
+    ``periods_per_year`` deliberately does not apply here. Only the SCALAR
+    greeks alpha is annualized.
+    """
+    prepared = _tz_naive_like_qs(_prepared_returns_no_guess(returns))
+    df = pd.DataFrame(
+        data={
+            "returns": prepared,
+            "benchmark": _align_benchmark_like_qs(benchmark, prepared.index),
+        }
+    ).fillna(0)
+    rolling = df.rolling(int(window))
+    corr = rolling.corr().unstack()["returns"]["benchmark"]
+    std = rolling.std()
+    beta = corr * std["returns"] / std["benchmark"].replace(0, np.nan)
+    means = rolling.mean()
+    alpha = means["returns"] - beta * means["benchmark"]
+    return pd.DataFrame(index=prepared.index, data={"beta": beta, "alpha": alpha})
+
+
 def _rolling_alpha_beta(
     returns: pd.Series, benchmark: pd.Series, window: int = 90
 ) -> tuple[list[SeriesPoint], list[SeriesPoint]]:
-    """Rolling (alpha, beta) projections from ONE `qs.stats.rolling_greeks` call.
+    """Rolling (alpha, beta) projections from ONE ``_rolling_greeks`` pass.
 
     Audit 2026-05-07 H-0711: previously `_rolling_alpha` and `_rolling_beta`
-    each independently called `qs.stats.rolling_greeks(returns, benchmark, window)`
+    each independently ran the rolling greeks (then `qs.stats.rolling_greeks`)
     — doubling the rolling OLS regression work on every analytics run. The
     expensive part is the regression; alpha and beta come out of the SAME pass
     on the same DataFrame. This helper computes greeks once and returns both
     projections.
 
     Audit 2026-05-07 H-0726: scalar greeks computation upstream aligns returns
-    and benchmark via `returns.align(benchmark, join='inner')` before calling
-    qs; the rolling pair was passing raw un-aligned series, letting qs internally
-    NaN-pad or shift across mismatched trading calendars. We now (1) align the
-    two series before calling rolling_greeks, (2) validate that BOTH the
-    strategy AND the benchmark have at least `window` aligned observations
-    (the old guard only checked `len(returns) < window`, allowing a too-short
-    benchmark to slip through), and (3) log a WARNING when the qs DataFrame
-    is missing the expected alpha/beta columns instead of silently returning
-    empty lists — that path masked qs version drift.
+    and benchmark via `returns.align(benchmark, join='inner')`; the rolling
+    pair was passing raw un-aligned series, letting the rolling math NaN-pad or
+    shift across mismatched trading calendars. We (1) align the two series
+    before the rolling pass, (2) validate that BOTH the strategy AND the
+    benchmark have at least `window` aligned observations (the old guard only
+    checked `len(returns) < window`, allowing a too-short benchmark to slip
+    through), and (3) log a WARNING and return ``([], [])`` when the rolling
+    pass fails, instead of propagating.
+
+    Phase 166 (D-06): the rolling pass is the inline ``_rolling_greeks``, closed
+    on both legs. The old "missing alpha/beta columns" branch guarded a
+    quantstats column rename; the frame is now built here, so that branch could
+    no longer run and was removed together with its test.
     """
     if returns is None or benchmark is None:
         return [], []
@@ -2737,40 +2801,20 @@ def _rolling_alpha_beta(
     if aligned_n < window:
         return [], []
     try:
-        # NOTE (Phase 34): quantstats 0.0.81 `rolling_greeks(returns, benchmark,
-        # periods=252)` uses `periods` as the ROLLING WINDOW length (the source
-        # comments "Calculate rolling alpha (not annualized for rolling version)"
-        # — there is NO annualization factor here to thread). `window` (90) is
-        # passed as that window arg. So `periods_per_year` deliberately does NOT
-        # apply to the rolling alpha/beta path: rolling alpha is unannualized,
-        # rolling beta is a unitless ratio. This corrects the RESEARCH claim that
-        # rolling_greeks annualizes alpha (that is only true for the SCALAR
-        # `greeks()` at site #5).
-        greeks = qs.stats.rolling_greeks(aligned_returns, aligned_benchmark, window)
+        greeks = _rolling_greeks(aligned_returns, aligned_benchmark, window)
     except Exception as exc:  # noqa: BLE001
-        # H-0726.3: surface qs-side rolling_greeks failures explicitly instead
-        # of letting them propagate to the caller's `except Exception` (or worse,
-        # to an uncaught path on a new qs version).
+        # H-0726.3: surface rolling_greeks failures explicitly instead of
+        # letting them propagate to the caller's `except Exception`.
         logger.warning(
             "rolling_greeks failed (aligned_n=%s, window=%s): %s",
             aligned_n, window, exc, exc_info=True,
-        )
-        return [], []
-    columns = set(getattr(greeks, "columns", []))
-    if "alpha" not in columns or "beta" not in columns:
-        # H-0726.3: silent fallback on missing columns previously masked qs
-        # version drift (column rename). Log it so a future qs bump that drops
-        # one of the columns produces an operator-visible signal.
-        logger.warning(
-            "rolling_greeks missing expected alpha/beta columns (got %s)",
-            sorted(columns),
         )
         return [], []
     return _finalize_rolling(greeks["alpha"]), _finalize_rolling(greeks["beta"])
 
 
 def _rolling_alpha(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[SeriesPoint]:
-    """Rolling alpha vs benchmark via qs.stats.rolling_greeks.
+    """Rolling alpha vs benchmark via the inline ``_rolling_greeks`` (windowed intercept, D-17).
 
     Thin wrapper around `_rolling_alpha_beta` retained for backward compat with
     tests that import the public helper directly. Production code paths
@@ -2779,15 +2823,15 @@ def _rolling_alpha(returns: pd.Series, benchmark: pd.Series, window: int = 90) -
 
     Window default 90d trading per UC#6 BTC-only scope.
 
-    No `periods_per_year` here: rolling alpha is unannualized in quantstats
-    0.0.81 (see `_rolling_alpha_beta`).
+    No `periods_per_year` here: rolling alpha is unannualized, as in quantstats
+    0.0.81 (see `_rolling_greeks`).
     """
     alpha, _ = _rolling_alpha_beta(returns, benchmark, window)
     return alpha
 
 
 def _rolling_beta(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[SeriesPoint]:
-    """Rolling beta vs benchmark via qs.stats.rolling_greeks.
+    """Rolling beta vs benchmark via the inline ``_rolling_greeks``.
 
     Thin wrapper around `_rolling_alpha_beta` retained for backward compat.
     See `_rolling_alpha` docstring for rationale. Beta is a unitless ratio, so

@@ -929,29 +929,31 @@ def test_rolling_beta_returns_finalized_list(golden_returns, benchmark_returns):
 def test_rolling_alpha_beta_single_rolling_greeks_call(
     golden_returns, benchmark_returns, monkeypatch
 ):
-    """Audit 2026-05-07 H-0711: rolling alpha + beta must share ONE
-    qs.stats.rolling_greeks pass. Previously _rolling_alpha and _rolling_beta
-    each called rolling_greeks independently, doubling the rolling-OLS work.
+    """Audit 2026-05-07 H-0711: rolling alpha + beta must share ONE rolling
+    greeks pass. Previously _rolling_alpha and _rolling_beta each ran it
+    independently, doubling the rolling-OLS work.
+
+    Phase 166 (D-06): the pass is the inline `_rolling_greeks` now, so the spy
+    counts that helper. Counting `qs.stats.rolling_greeks` would see 0 calls
+    and could no longer fail on a double pass.
     """
     import services.metrics as metrics_module
 
     call_count = {"n": 0}
-    real_rg = metrics_module.qs.stats.rolling_greeks
+    real_rg = metrics_module._rolling_greeks
 
     def counting_rolling_greeks(*args, **kwargs):
         call_count["n"] += 1
         return real_rg(*args, **kwargs)
 
-    monkeypatch.setattr(
-        metrics_module.qs.stats, "rolling_greeks", counting_rolling_greeks
-    )
+    monkeypatch.setattr(metrics_module, "_rolling_greeks", counting_rolling_greeks)
     result = compute_all_metrics(golden_returns, benchmark_returns)
     # The siblings should still be populated...
     assert len(result.sibling_kinds["rolling_alpha"]) > 0
     assert len(result.sibling_kinds["rolling_beta"]) > 0
-    # ...from EXACTLY ONE rolling_greeks pass.
+    # ...from EXACTLY ONE rolling greeks pass.
     assert call_count["n"] == 1, (
-        f"rolling_greeks should be called once per analytics run; got {call_count['n']}"
+        f"_rolling_greeks should be called once per analytics run; got {call_count['n']}"
     )
 
 
@@ -1002,18 +1004,21 @@ def test_rolling_alpha_beta_short_benchmark_returns_empty():
 def test_rolling_alpha_beta_logs_warning_on_qs_failure(
     golden_returns, benchmark_returns, monkeypatch, caplog
 ):
-    """Audit 2026-05-07 H-0726.3: when qs.stats.rolling_greeks raises (e.g.
-    qs version drift, missing columns), the helper must emit a WARNING and
-    return ([], []) — NOT swallow it silently as before.
+    """Audit 2026-05-07 H-0726.3: when the rolling greeks pass raises, the
+    helper must emit a WARNING and return ([], []) — NOT swallow it silently
+    and NOT propagate it.
+
+    Phase 166 (D-06): the fault is injected into the inline `_rolling_greeks`,
+    the code production now runs. The M-0682 missing-columns test was deleted
+    with its branch: the frame is built in this module, so a quantstats column
+    rename can no longer reach `_rolling_alpha_beta`.
     """
     import services.metrics as metrics_module
 
     def boom_rolling_greeks(_returns, _benchmark, _window):
-        raise RuntimeError("simulated qs.stats.rolling_greeks failure")
+        raise RuntimeError("simulated _rolling_greeks failure")
 
-    monkeypatch.setattr(
-        metrics_module.qs.stats, "rolling_greeks", boom_rolling_greeks
-    )
+    monkeypatch.setattr(metrics_module, "_rolling_greeks", boom_rolling_greeks)
 
     with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
         alpha, beta = _rolling_alpha_beta(golden_returns, benchmark_returns, 90)
@@ -1021,40 +1026,6 @@ def test_rolling_alpha_beta_logs_warning_on_qs_failure(
     assert beta == []
     matching = [r for r in caplog.records if "rolling_greeks" in r.getMessage()]
     assert matching, "rolling_greeks failure must emit WARNING with helper name"
-
-
-def test_rolling_alpha_beta_missing_columns_returns_empty_and_logs(
-    golden_returns, benchmark_returns, monkeypatch, caplog
-):
-    """M-0682: when qs.stats.rolling_greeks SUCCEEDS but the returned
-    DataFrame is missing the expected 'alpha'/'beta' columns (a qs version
-    that renames them), the helper must return ([], []) AND emit a WARNING.
-    This is a DISTINCT branch from the qs-raises path — the call returns
-    cleanly, but the columns aren't there. Previously the silent
-    empty-return masked qs column drift.
-    """
-    import services.metrics as metrics_module
-
-    def greeks_without_alpha_beta(returns, _benchmark, _window):
-        # A DataFrame with the right index but the wrong column name.
-        return pd.DataFrame({"gamma": [1.0] * len(returns)}, index=returns.index)
-
-    monkeypatch.setattr(
-        metrics_module.qs.stats, "rolling_greeks", greeks_without_alpha_beta
-    )
-
-    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
-        alpha, beta = _rolling_alpha_beta(golden_returns, benchmark_returns, 90)
-    assert alpha == []
-    assert beta == []
-    matching = [
-        r for r in caplog.records
-        if "missing expected alpha/beta columns" in r.getMessage()
-    ]
-    assert matching, (
-        "missing alpha/beta columns must emit a WARNING so a qs column "
-        "rename is operator-visible, not silently swallowed."
-    )
 
 
 def test_rolling_alpha_beta_none_benchmark_returns_empty():
@@ -3683,3 +3654,97 @@ def test_q166_parity_greeks_match_live_quantstats_on_nan_free_series(
     mj = compute_all_metrics(strategy, benchmark)["metrics_json"]
     assert mj["beta"] == pytest.approx(float(live["beta"]), rel=1e-12, abs=0.0)
     assert mj["alpha"] == pytest.approx(float(live["alpha"]), rel=1e-12, abs=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 plan 06: the ROLLING benchmark leg (rolling alpha/beta).
+#
+# quantstats 0.0.81 `rolling_greeks` runs the benchmark through
+# `_prepare_benchmark` -> `_prepare_returns` unconditionally (research Q2), so
+# the benchmark trigger's +150% day is re-read as a price series there too.
+# These tests go through `_rolling_alpha_beta`, the production entry that
+# feeds the rendered `rolling_alpha` / `rolling_beta` sibling kinds.
+# ---------------------------------------------------------------------------
+
+_Q166_ROLLING_WINDOW = 90
+# `_finalize_rolling` writes values with `round(float(v), 4)`, so a written
+# point is within half a unit of the 4th decimal of the unrounded value. The
+# 1e-12 slack absorbs only the binary representation of that bound.
+_Q166_WRITTEN_TOLERANCE = 0.5e-4 + 1e-12
+
+
+def _q166_windowed_regression(
+    r: pd.Series, b: pd.Series, window: int
+) -> pd.DataFrame:
+    """In-test anchor, written from the definition with no pandas rolling and
+    no quantstats: for each `window`-row window ending at t,
+    beta_t = cov_w(r, b) / var_w(b) and alpha_t = mean_w(r) - beta_t * mean_w(b).
+    The inputs must already be one aligned frame."""
+    assert r.index.equals(b.index)
+    rv, bv = r.to_numpy(dtype=float), b.to_numpy(dtype=float)
+    dates, alphas, betas = [], [], []
+    for end in range(window, len(rv) + 1):
+        rw, bw = rv[end - window : end], bv[end - window : end]
+        m = np.cov(rw, bw)
+        beta = m[0, 1] / m[1, 1]
+        dates.append(r.index[end - 1])
+        betas.append(beta)
+        alphas.append(rw.mean() - beta * bw.mean())
+    return pd.DataFrame(
+        {"alpha": alphas, "beta": betas}, index=pd.DatetimeIndex(dates)
+    )
+
+
+def test_q166_rolling_beta_is_the_rolling_regression_slope():
+    """ECONOMIC ANCHOR (SC-4): the rendered rolling beta at t is the OLS slope
+    of the strategy on the benchmark over the 90 rows ending at t. On the
+    trigger both legs share one index and carry no NaN, so the window is the
+    raw pair as given.
+
+    Pre-mirror: live quantstats `rolling_greeks` `pct_change`d the benchmark
+    first, and the last beta point was -0.08887237598396791 against a raw-pair
+    slope of -0.7554623350323423 (research Q4).
+    """
+    strategy, benchmark = _q166_benchmark_trigger()
+    tail_r = strategy.iloc[-_Q166_ROLLING_WINDOW:].to_numpy()
+    tail_b = benchmark.iloc[-_Q166_ROLLING_WINDOW:].to_numpy()
+    m = np.cov(tail_r, tail_b)
+    expected = float(m[0, 1] / m[1, 1])
+
+    _, beta = _rolling_alpha_beta(strategy, benchmark, _Q166_ROLLING_WINDOW)
+    assert beta, "rolling beta is empty on a 250-row pair"
+    last = beta[-1]
+    assert last["date"] == strategy.index[-1].strftime("%Y-%m-%d")
+    assert abs(last["value"] - expected) <= _Q166_WRITTEN_TOLERANCE, (
+        f"rolling beta last point={last['value']}; rolling cov/var of the raw "
+        f"pair over the last {_Q166_ROLLING_WINDOW} rows is {expected}"
+    )
+
+
+def test_q166_rolling_alpha_is_the_windowed_intercept():
+    """ECONOMIC ANCHOR (D-17): every rendered rolling alpha point is the
+    intercept of the regression over ITS OWN 90-row window,
+    mean_w(r) - beta_t * mean_w(b). It is still UNANNUALIZED (Phase 34): a
+    per-period intercept, not a periods-scaled return.
+
+    Pre-fix, quantstats 0.0.81 computed `mean(r_all) - beta_t * mean(b_all)`
+    with FULL-SAMPLE means (research F-4), so the chart showed a linear
+    transform of rolling beta, not a rolling alpha. On the trigger the frame
+    quantstats builds (`fillna(0)` of the aligned pair) is the raw pair, since
+    neither leg has a NaN.
+    """
+    strategy, benchmark = _q166_benchmark_trigger()
+    assert not strategy.isna().any() and not benchmark.isna().any()
+    anchor = _q166_windowed_regression(strategy, benchmark, _Q166_ROLLING_WINDOW)
+
+    alpha, _ = _rolling_alpha_beta(strategy, benchmark, _Q166_ROLLING_WINDOW)
+    assert [p["date"] for p in alpha] == anchor.index.strftime("%Y-%m-%d").tolist()
+    misses = [
+        (p["date"], p["value"], float(e))
+        for p, e in zip(alpha, anchor["alpha"], strict=True)
+        if abs(p["value"] - e) > _Q166_WRITTEN_TOLERANCE
+    ]
+    assert not misses, (
+        f"{len(misses)}/{len(alpha)} rolling alpha points are not the windowed "
+        f"intercept; last (date, written, windowed intercept): {misses[-1]}"
+    )
