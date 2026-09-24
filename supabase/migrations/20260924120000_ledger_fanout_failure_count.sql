@@ -47,9 +47,11 @@
 -- breaks the scheduled command and every gate that reads the integer. RAISING
 -- at the end of a tick that had failures rolls back the enqueues that DID
 -- succeed, turning one poisoned row back into a lost tick: the exact thing the
--- per-candidate handler exists to prevent. ⭐ The review fix below raises ONLY
--- on a tick that enqueued NOTHING, where there is no good enqueue to lose, so
--- it does not reopen this rejection.
+-- per-candidate handler exists to prevent. ⭐ The round-1 review fix raised
+-- ONLY on a tick that enqueued NOTHING, where there is no good enqueue to
+-- lose; the round-2 review fix removed that raise too (see the next section),
+-- and the one raise left is a failure row that cannot itself be written on a
+-- tick that enqueued nothing.
 --
 -- ══════════════════════════════════════════════════════════════════════════
 -- THE 164.6 REVIEW FIX — four more behaviours, same file, before any apply
@@ -59,13 +61,18 @@
 -- reviewers (164.6-MIGRATION-REVIEW.md) found four ways the instrument above
 -- could still leave a failure unseen or self-perpetuating, and each is closed
 -- in BOTH bodies:
---   * HIGH-1, a tick in which EVERY selected candidate failed now RAISES at its
---     end, after the unlock, so the scheduler records a FAILED run and the
---     prod prober's cron-obs arm (scripts/prod-prober/arms/cron-obs.mjs,
---     `LEDGER_FANOUT_SQL`) reports it. The raise carries counts only.
---     ⚠️ It rolls back that tick's own failure row, which is the price: on
---     that path the failed-attempt cooldown below does not engage, and every
---     such tick fails loudly until a human looks.
+--   * HIGH-1, the failure row now has a reader. ⛔ SUPERSEDED IN THE ROUND-2
+--     REVIEW FIX (164.6-REVIEW-R2 WR-01, 164.6-REVIEW-SFH-R2 N2/N3): round 1
+--     made a tick in which EVERY selected candidate failed RAISE at its end.
+--     That raise rolled back the tick's own failure row, so on exactly the
+--     tick HIGH-2 names (two poisoned candidates holding one venue's cap, or
+--     the composite cohort's burst cap) the cooldown below could never
+--     engage, and the healthy candidates behind them starved for good. The
+--     raise is GONE from both bodies. Every tick with a failure commits its
+--     row, all-fail included, and the prod prober's cron-obs arm
+--     (scripts/prod-prober/arms/cron-obs.mjs) counts those rows directly by
+--     `error` and `completed_at`, never reading `metadata`. That read also
+--     sees a tick that failed only PARTLY, which the raise never did.
 --   * HIGH-2 (and the migration-reviewer LOW), a candidate named in a failure
 --     row written inside the last 20 hours is excluded from selection, the
 --     same window the attempt cooldown uses. A poisoned candidate therefore
@@ -74,11 +81,16 @@
 --     nothing is re-raised with its own SQLSTATE under a message naming the
 --     function, instead of leaving only a WARNING. On a tick that DID enqueue,
 --     it stays a WARNING: raising there would roll the good enqueues back.
---   * MEDIUM-2, a lost enqueue race (serialization_failure, deadlock_detected)
---     is caught BEFORE the catch-all and counted apart as `lost_race_count`.
---     It is not a failure: it names nothing, writes no row by itself, puts
---     nothing on the cooldown and never makes a tick raise.
--- Each has its own arm in both ledger gates (U; T; V1 and V2; W), and IN-02
+--   * MEDIUM-2, a lost enqueue race (serialization_failure, 40001) is caught
+--     BEFORE the catch-all and counted apart as `lost_race_count`. It is not
+--     a failure: it names nothing, writes no row by itself and puts nothing
+--     on the cooldown. ⚠️ NARROWED IN THE ROUND-2 REVIEW FIX (L3 / IN-05): a
+--     deadlock (40P01) was counted here too, but its other party can be any
+--     lock holder, so nothing guarantees another enqueue is serving the
+--     candidate. It now falls to the catch-all and is counted, named and
+--     cooled down like any other failure.
+-- Each has its own arm in both ledger gates (U; T; V1 and V2; W and
+-- W/deadlock), and IN-02
 -- split arm N's precision and boundary halves into arms N2 and N3 so each has
 -- its own twin. The apply-time block gained two needles (checks 10d and 10e)
 -- and check 7 now asserts the exact count of heartbeat writes.
@@ -158,8 +170,9 @@
 -- ⭐ The review fix (section above) then added, to each body: a lost-race
 -- local and a lost-race handler branch; a failed-attempt conjunct in the
 -- candidate CTE; a lost-race key in the failure row; a re-raise in the failure
--- write's handler; the closing all-candidates-failed raise; and a lost-race
--- count in the closing NOTICE. The carried comment that cited a line number of
+-- write's handler; and a lost-race count in the closing NOTICE. Round 1 also
+-- added a closing all-candidates-failed raise, which round 2 removed again;
+-- a comment block now stands where it was, saying why it must not return. The carried comment that cited a line number of
 -- the committed dump for "no FORCE on cron_runs" now cites the statement.
 -- Plus, outside the bodies: COMMENT ON FUNCTION re-issued for both with one
 -- added sentence about the failure row, and the REVOKE re-issued for both.
@@ -182,8 +195,8 @@
 -- disjointness those files measured. The new needles are disjoint by
 -- construction: the failure-instrument needle is the quoted metadata KEY of the
 -- failed-target list; the ordering needles are the failure row's count KEY and
--- the unlock call; the review fix's two are the all-candidates-failed MESSAGE
--- and the cooldown's heartbeat read, by its alias. ⚠️ The ordering needle was
+-- the unlock call; the review fix's two are the failure-row write's own
+-- re-raise MESSAGE and the cooldown's heartbeat read, by its alias. ⚠️ The ordering needle was
 -- the failure block's opening IF until the review fix gave that IF a gate twin
 -- (arm N3); it moved to the count key so the twin cannot abort the apply. Every
 -- gate twin against this file mutates an increment, a condition, an interval,
@@ -229,13 +242,16 @@
 -- The bounds (per-venue cap, per-tick burst limits, the 20-hour attempt
 -- cooldown, the in-flight guard), the lock keys, the activation guard and the
 -- return value are all unchanged. The new effects on PROD are three:
---   * AT MOST ONE extra cron_runs row per tick in which a candidate failed and
---     another enqueued, whose failed-target list is bounded by that function's
---     per-tick limit (4 for the single-key body, 2 for the composite);
+--   * AT MOST ONE extra cron_runs row per tick in which a candidate failed,
+--     whose failed-target list is bounded by that function's per-tick limit
+--     (4 for the single-key body, 2 for the composite);
 --   * a candidate named in such a row is skipped for 20 hours, which can only
 --     REMOVE candidates from a tick, never add one;
---   * a tick in which every selected candidate failed now ends in an ERROR, so
---     pg_cron records that run as failed instead of succeeded.
+--   * a deadlock (40P01) on an enqueue is now counted as a failure instead of
+--     a lost race, so it too is named and cooled down.
+-- ⚠️ A tick ends in an ERROR on one new path only: every candidate failed AND
+-- the failure row itself could not be written. pg_cron then records that run
+-- as failed.
 -- The composite fan-out has no schedule; this file registers none and runs
 -- neither function.
 --
@@ -290,11 +306,12 @@ DECLARE
   v_failed         INTEGER := 0;
   v_failed_targets JSONB   := '[]'::jsonb;
   -- ---- the lost-race count (164.6 review fix, MEDIUM-2) -----------------
-  -- A candidate whose enqueue raised serialization_failure or
-  -- deadlock_detected lost a race to another writer that is already serving
-  -- it. It is counted HERE, beside the failure count and never in it, so it
-  -- is never named in the failed-target list, never put on the failed-attempt
-  -- cooldown, and never by itself writes a failure row.
+  -- A candidate whose enqueue raised serialization_failure (40001) lost a
+  -- race to another writer that is already serving it. It is counted HERE,
+  -- beside the failure count and never in it, so it is never named in the
+  -- failed-target list, never put on the failed-attempt cooldown, and never
+  -- by itself writes a failure row. ⚠️ A deadlock (40P01) is NOT counted
+  -- here since the 164.6 round-2 review fix: see the handler below.
   v_lost_race      INTEGER := 0;
 BEGIN
   -- ---- Lock B (D-08, 164.7 D-01): the fail-closed activation switch ------
@@ -607,12 +624,15 @@ BEGIN
           -- such candidate in `failed_targets`, so a candidate named there
           -- inside the same 20-hour window is excluded exactly as a prior
           -- ATTEMPT is, and a healthy candidate takes its slot.
-          -- ⚠️ ONLY A TICK THAT ALSO ENQUEUED SOMETHING KEEPS ITS FAILURE ROW.
-          -- A tick in which every candidate failed RAISES at its end (see the
-          -- all-candidates-failed block below), and the raise rolls the row
-          -- back, so those candidates are retried on the next tick, which
-          -- fails again. That is loud by design: the scheduler records every
-          -- such tick as a FAILED run.
+          -- ⭐ EVERY TICK WITH A FAILURE KEEPS ITS ROW, the tick in which
+          -- every candidate failed included (164.6 round-2 review fix). The
+          -- round-1 fix raised at the end of such a tick, and the raise rolled
+          -- this very row back: two poisoned candidates on one venue, or two
+          -- poisoned composites, then took the same slots on every tick and
+          -- starved the healthy candidates behind them for good. That raise is
+          -- gone, so this conjunct engages on every tick. The one path that
+          -- still loses the row is the row's own write failing; see the
+          -- failure instrument's write below.
           -- The read is bounded by cron_name and completed_at, the two columns
           -- the heartbeat table's own recent-run index is built on.
           AND NOT EXISTS (
@@ -727,15 +747,22 @@ BEGIN
         IF v_existing = 0 AND v_job_id IS NOT NULL THEN
           v_enqueued := v_enqueued + 1;
         END IF;
-      EXCEPTION WHEN serialization_failure OR deadlock_detected THEN
+      EXCEPTION WHEN serialization_failure THEN
         -- ---- a LOST RACE, not a failure (164.6 review fix, MEDIUM-2) -------
         -- 40001 is what the enqueue RPC raises when another writer's enqueue
-        -- for this strategy won the in-flight race, and 40P01 is the same
-        -- contention seen by the lock manager. Neither says anything is wrong
+        -- for this strategy won the in-flight race. It says nothing is wrong
         -- with the candidate: another enqueue is already serving it. Counting
-        -- either as a failure would name a healthy strategy in the failed-target
+        -- it as a failure would name a healthy strategy in the failed-target
         -- list and put it on the failed-attempt cooldown. ⛔ This branch sits
-        -- BEFORE the catch-all below, which would otherwise take both.
+        -- BEFORE the catch-all below, which would otherwise take it.
+        -- ⚠️ 40P01 (deadlock) is DELIBERATELY NOT HERE (164.6 round-2 review
+        -- fix, L3 / IN-05). A deadlock victim's other party can be ANY lock
+        -- holder, a worker updating the row among them, so nothing guarantees
+        -- another enqueue is serving the candidate. Counted as a lost race, a
+        -- recurring deadlock never named the candidate, never cooled it down
+        -- and retook its slot on every tick in silence. It falls to the
+        -- catch-all instead, where it is counted, named with its SQLSTATE and
+        -- put on the failed-attempt cooldown.
         -- Assignment only, the rule every handler in this body follows.
         v_lost_race := v_lost_race + 1;
       WHEN OTHERS THEN
@@ -802,6 +829,11 @@ BEGIN
       -- re-raised with its own SQLSTATE and the scheduler records the run as
       -- failed, instead of a WARNING nothing reads being the only trace. The
       -- message names this function and carries counts only (T-161.1-10).
+      -- ⭐ Since the 164.6 round-2 review fix this is the ONLY raise a tick
+      -- with failed candidates can end in. The failure row is the signal:
+      -- the prod prober counts it and the candidate CTE reads it back as the
+      -- cooldown. So a row that cannot be written on a tick with nothing
+      -- enqueued must still fail loudly.
       IF v_enqueued = 0 THEN
         RAISE EXCEPTION 'enqueue_ledger_refresh_for_strategies: failure instrument write failed (SQLSTATE %) on a tick that enqueued nothing; % candidate(s) failed', SQLSTATE, v_failed
           USING ERRCODE = SQLSTATE;
@@ -810,21 +842,18 @@ BEGIN
     END;
   END IF;
 
-  -- ---- the all-candidates-failed tick RAISES (164.6 review fix, HIGH-1) ----
-  -- A tick that selected candidates and enqueued NONE of them, because every
-  -- one of them failed, is not a quiet tick: returning 0 made the scheduler
-  -- record `succeeded` over it, and a failure row nothing reads was the only
-  -- trace. Raising here costs no good enqueue (there is none), leaves no lock
-  -- held (it was released above) and makes the scheduler record the run as
-  -- FAILED, with this function's name in the recorded message, which the prod
-  -- prober's cron-obs arm reads. ⚠️ The raise rolls back the failure row
-  -- written just above, so on this path the failed-attempt cooldown does not
-  -- engage and the next tick retries the same candidates: every such tick
-  -- fails loudly until a human looks. A lost race is not a failure and never
-  -- triggers this. Counts only, never an identifier.
-  IF v_enqueued = 0 AND v_failed > 0 THEN
-    RAISE EXCEPTION 'enqueue_ledger_refresh_for_strategies: every candidate this tick failed to enqueue (% failed, % lost a race, 0 enqueued); raising so the scheduler records this run as failed', v_failed, v_lost_race;
-  END IF;
+  -- ---- NO all-candidates-failed raise (164.6 round-2 review fix) ---------
+  -- The round-1 fix raised here when every candidate failed, so the scheduler
+  -- would record a failed run. That raise rolled back the failure row written
+  -- just above, which is the row the candidate CTE's failed-attempt cooldown
+  -- reads: on exactly the tick HIGH-2 named (two poisoned candidates holding
+  -- a venue's cap, or the composite cohort's burst cap) the cooldown could
+  -- never engage and the healthy candidates starved. It is removed. The row
+  -- now commits on every tick with a failure, and the prod prober's cron-obs
+  -- arm counts those rows directly (scripts/prod-prober/arms/cron-obs.mjs,
+  -- the prober half of this fix round), which also covers the tick that
+  -- failed PARTLY and so never raised. ⛔ Do not re-add a raise here: its
+  -- gate arm U (both ledger gates) reddens under exactly that re-addition.
 
   RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: enqueued % refresh job(s) this tick; % candidate(s) failed to enqueue; % lost an enqueue race', v_enqueued, v_failed, v_lost_race;
   RETURN v_enqueued;
@@ -909,11 +938,12 @@ DECLARE
   v_failed         INTEGER := 0;
   v_failed_targets JSONB   := '[]'::jsonb;
   -- ---- the lost-race count (164.6 review fix, MEDIUM-2) -----------------
-  -- A candidate whose enqueue raised serialization_failure or
-  -- deadlock_detected lost a race to another writer that is already serving
-  -- it. It is counted HERE, beside the failure count and never in it, so it
-  -- is never named in the failed-target list, never put on the failed-attempt
-  -- cooldown, and never by itself writes a failure row.
+  -- A candidate whose enqueue raised serialization_failure (40001) lost a
+  -- race to another writer that is already serving it. It is counted HERE,
+  -- beside the failure count and never in it, so it is never named in the
+  -- failed-target list, never put on the failed-attempt cooldown, and never
+  -- by itself writes a failure row. ⚠️ A deadlock (40P01) is NOT counted
+  -- here since the 164.6 round-2 review fix: see the handler below.
   v_lost_race      INTEGER := 0;
 BEGIN
   -- ---- the fail-closed activation switch (164.7 D-01) --------------------
@@ -1198,12 +1228,15 @@ BEGIN
           -- such candidate in `failed_targets`, so a candidate named there
           -- inside the same 20-hour window is excluded exactly as a prior
           -- ATTEMPT is, and a healthy candidate takes its slot.
-          -- ⚠️ ONLY A TICK THAT ALSO ENQUEUED SOMETHING KEEPS ITS FAILURE ROW.
-          -- A tick in which every candidate failed RAISES at its end (see the
-          -- all-candidates-failed block below), and the raise rolls the row
-          -- back, so those candidates are retried on the next tick, which
-          -- fails again. That is loud by design: the scheduler records every
-          -- such tick as a FAILED run.
+          -- ⭐ EVERY TICK WITH A FAILURE KEEPS ITS ROW, the tick in which
+          -- every candidate failed included (164.6 round-2 review fix). The
+          -- round-1 fix raised at the end of such a tick, and the raise rolled
+          -- this very row back: two poisoned candidates on one venue, or two
+          -- poisoned composites, then took the same slots on every tick and
+          -- starved the healthy candidates behind them for good. That raise is
+          -- gone, so this conjunct engages on every tick. The one path that
+          -- still loses the row is the row's own write failing; see the
+          -- failure instrument's write below.
           -- The read is bounded by cron_name and completed_at, the two columns
           -- the heartbeat table's own recent-run index is built on.
           AND NOT EXISTS (
@@ -1302,15 +1335,22 @@ BEGIN
         IF v_existing = 0 AND v_job_id IS NOT NULL THEN
           v_enqueued := v_enqueued + 1;
         END IF;
-      EXCEPTION WHEN serialization_failure OR deadlock_detected THEN
+      EXCEPTION WHEN serialization_failure THEN
         -- ---- a LOST RACE, not a failure (164.6 review fix, MEDIUM-2) -------
         -- 40001 is what the enqueue RPC raises when another writer's enqueue
-        -- for this strategy won the in-flight race, and 40P01 is the same
-        -- contention seen by the lock manager. Neither says anything is wrong
+        -- for this strategy won the in-flight race. It says nothing is wrong
         -- with the candidate: another enqueue is already serving it. Counting
-        -- either as a failure would name a healthy strategy in the failed-target
+        -- it as a failure would name a healthy strategy in the failed-target
         -- list and put it on the failed-attempt cooldown. ⛔ This branch sits
-        -- BEFORE the catch-all below, which would otherwise take both.
+        -- BEFORE the catch-all below, which would otherwise take it.
+        -- ⚠️ 40P01 (deadlock) is DELIBERATELY NOT HERE (164.6 round-2 review
+        -- fix, L3 / IN-05). A deadlock victim's other party can be ANY lock
+        -- holder, a worker updating the row among them, so nothing guarantees
+        -- another enqueue is serving the candidate. Counted as a lost race, a
+        -- recurring deadlock never named the candidate, never cooled it down
+        -- and retook its slot on every tick in silence. It falls to the
+        -- catch-all instead, where it is counted, named with its SQLSTATE and
+        -- put on the failed-attempt cooldown.
         -- Assignment only, the rule every handler in this body follows.
         v_lost_race := v_lost_race + 1;
       WHEN OTHERS THEN
@@ -1377,6 +1417,11 @@ BEGIN
       -- re-raised with its own SQLSTATE and the scheduler records the run as
       -- failed, instead of a WARNING nothing reads being the only trace. The
       -- message names this function and carries counts only (T-161.1-10).
+      -- ⭐ Since the 164.6 round-2 review fix this is the ONLY raise a tick
+      -- with failed candidates can end in. The failure row is the signal:
+      -- the prod prober counts it and the candidate CTE reads it back as the
+      -- cooldown. So a row that cannot be written on a tick with nothing
+      -- enqueued must still fail loudly.
       IF v_enqueued = 0 THEN
         RAISE EXCEPTION 'enqueue_ledger_composite_refresh: failure instrument write failed (SQLSTATE %) on a tick that enqueued nothing; % candidate(s) failed', SQLSTATE, v_failed
           USING ERRCODE = SQLSTATE;
@@ -1385,21 +1430,18 @@ BEGIN
     END;
   END IF;
 
-  -- ---- the all-candidates-failed tick RAISES (164.6 review fix, HIGH-1) ----
-  -- A tick that selected candidates and enqueued NONE of them, because every
-  -- one of them failed, is not a quiet tick: returning 0 made the scheduler
-  -- record `succeeded` over it, and a failure row nothing reads was the only
-  -- trace. Raising here costs no good enqueue (there is none), leaves no lock
-  -- held (it was released above) and makes the scheduler record the run as
-  -- FAILED, with this function's name in the recorded message, which the prod
-  -- prober's cron-obs arm reads. ⚠️ The raise rolls back the failure row
-  -- written just above, so on this path the failed-attempt cooldown does not
-  -- engage and the next tick retries the same candidates: every such tick
-  -- fails loudly until a human looks. A lost race is not a failure and never
-  -- triggers this. Counts only, never an identifier.
-  IF v_enqueued = 0 AND v_failed > 0 THEN
-    RAISE EXCEPTION 'enqueue_ledger_composite_refresh: every candidate this tick failed to enqueue (% failed, % lost a race, 0 enqueued); raising so the scheduler records this run as failed', v_failed, v_lost_race;
-  END IF;
+  -- ---- NO all-candidates-failed raise (164.6 round-2 review fix) ---------
+  -- The round-1 fix raised here when every candidate failed, so the scheduler
+  -- would record a failed run. That raise rolled back the failure row written
+  -- just above, which is the row the candidate CTE's failed-attempt cooldown
+  -- reads: on exactly the tick HIGH-2 named (two poisoned candidates holding
+  -- a venue's cap, or the composite cohort's burst cap) the cooldown could
+  -- never engage and the healthy candidates starved. It is removed. The row
+  -- now commits on every tick with a failure, and the prod prober's cron-obs
+  -- arm counts those rows directly (scripts/prod-prober/arms/cron-obs.mjs,
+  -- the prober half of this fix round), which also covers the tick that
+  -- failed PARTLY and so never raised. ⛔ Do not re-add a raise here: its
+  -- gate arm U (both ledger gates) reddens under exactly that re-addition.
 
   RAISE NOTICE 'enqueue_ledger_composite_refresh: enqueued % composite refresh job(s) this tick; % candidate(s) failed to enqueue; % lost an enqueue race', v_enqueued, v_failed, v_lost_race;
   RETURN v_enqueued;
@@ -1529,10 +1571,17 @@ DECLARE
   --      to the count key inside the same INSERT, which no twin touches.
   v_block_needle TEXT := '''failed_' || 'count''';
   v_lock_needle  TEXT := 'pg_advisory_' || 'unlock(';
-  -- (11) ⭐ NEW in the 164.6 review fix (HIGH-1): the all-candidates-failed
-  --      RAISE, needled on its MESSAGE. Its gate twin mutates the IF that
-  --      guards it and leaves this text intact, so the apply survives.
-  v_raise_needle TEXT := 'every candidate ' || 'this tick failed';
+  -- (11) ⭐ AMENDED in the 164.6 round-2 review fix: the re-raise of a
+  --      failure row that could not be written on a tick that enqueued
+  --      nothing, needled on its MESSAGE. It was the all-candidates-failed
+  --      raise's message until round 2 removed that raise; this re-raise is
+  --      now the only way such a tick can end loudly when its row is lost.
+  --      Its gate twins (V1, V2) mutate the IF that guards it and leave this
+  --      text intact, so the apply survives.
+  --      ⛔ The removed raise is deliberately NOT asserted absent here: arm
+  --      U's twin in both ledger gates re-adds it, and a needle that twin
+  --      trips would abort the apply before arm U could be the first failure.
+  v_raise_needle TEXT := 'on a tick that ' || 'enqueued nothing';
   -- (12) ⭐ NEW in the 164.6 review fix (HIGH-2): the failed-attempt
   --      cooldown's read of the heartbeat table, needled on its alias. Its
   --      gate twin mutates the interval and leaves this text intact.
@@ -1691,15 +1740,15 @@ BEGIN
       RAISE EXCEPTION 'Migration 20260924120000: public.% no longer reads the failure rows back as a cooldown (looked for "%"). A candidate whose enqueue raises then takes the same slot on every tick and starves the healthy candidates behind it', v_fn, v_cool_needle;
     END IF;
 
-    -- 10e. ⭐ NEW (164.6 review fix, HIGH-1): a tick that enqueued nothing
-    --      because every candidate failed still RAISES, and raises AFTER the
-    --      last unlock, so the lock is never held across the raise.
+    -- 10e. ⭐ AMENDED (164.6 round-2 review fix): a tick that enqueued
+    --      nothing and could not write its failure row still RAISES, and
+    --      raises AFTER the last unlock, so the lock is never held across it.
     v_raise_pos := position(v_raise_needle IN v_def);
     IF v_raise_pos = 0 THEN
-      RAISE EXCEPTION 'Migration 20260924120000: public.% no longer raises on a tick in which every candidate failed (looked for "%"). Such a tick then returns 0 and the scheduler records it as succeeded, which is the silent failure this raise exists to end', v_fn, v_raise_needle;
+      RAISE EXCEPTION 'Migration 20260924120000: public.% no longer re-raises a failure-row write that failed on a tick that enqueued nothing (looked for "%"). Such a tick then returns 0 with no row and a WARNING nothing reads, so both the prober and the failed-attempt cooldown lose it', v_fn, v_raise_needle;
     END IF;
     IF position(v_lock_needle IN substr(v_def, v_raise_pos)) <> 0 THEN
-      RAISE EXCEPTION 'Migration 20260924120000: public.%''s all-candidates-failed raise ("%") is not after the LAST advisory unlock ("%"). Raised before it, the tick can end holding the lock', v_fn, v_raise_needle, v_lock_needle;
+      RAISE EXCEPTION 'Migration 20260924120000: public.%''s failure-row re-raise ("%") is not after the LAST advisory unlock ("%"). Raised before it, the tick can end holding the lock', v_fn, v_raise_needle, v_lock_needle;
     END IF;
 
     -- 11. THE WHOLE EXECUTE GRANTEE SET IS EXACTLY THE OWNER. aclexplode over
@@ -1729,7 +1778,7 @@ BEGIN
     END IF;
   END LOOP;
 
-  RAISE NOTICE 'Migration 20260924120000: both ledger fan-outs re-based — a tick in which a candidate fails now writes one counted row naming the failed candidates, after the lock is released, and a candidate named there is skipped for 20 hours; a tick in which every candidate failed raises; a lost enqueue race is counted apart; the return value is unchanged. NOTHING scheduled, NOTHING activated';
+  RAISE NOTICE 'Migration 20260924120000: both ledger fan-outs re-based — a tick in which a candidate fails now writes one counted row naming the failed candidates, after the lock is released, and a candidate named there is skipped for 20 hours, on every such tick; a tick that cannot write that row and enqueued nothing raises; a lost enqueue race (40001) is counted apart and a deadlock is a failure; the return value is unchanged. NOTHING scheduled, NOTHING activated';
 END $verify$;
 
 COMMIT;

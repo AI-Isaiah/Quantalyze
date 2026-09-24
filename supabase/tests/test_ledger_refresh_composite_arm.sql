@@ -21,6 +21,13 @@
 -- U, V1, V2 and W beside arm N (see each arm's own header), and moved the
 -- `INTERVAL '20 hours'` twins (F, G) to `occurrences: 4, nth: 3`, because each
 -- body now carries a second 20-hour window. 16 arms -> 23; 21 twins -> 28.
+-- ⭐ The ROUND-2 review fix (same migration, in place) REMOVED the
+-- all-candidates-failed raise, so arm U now proves the opposite of what it
+-- proved in round 1: an all-fail composite tick COMMITS its failure row and
+-- the next tick's cooldown excludes those composites, so a healthy one takes
+-- the burst slot. It also took 40P01 out of the lost-race branch, and the new
+-- W/deadlock sub-arm (like D/precondition is D's) proves a deadlock is NAMED
+-- while a lost race beside it is only counted. 23 arms; 28 twins -> 29.
 --
 -- ⛔ WHICH FILE THE ARMS ACTUALLY MEASURE (Phase 164.7 plan 04, TRAP E / C-02;
 -- RE-POINTED ONE MIGRATION FURTHER BY Phase 164.8.6 plan 03). This gate's apply
@@ -345,12 +352,17 @@ DECLARE
   s_t2         UUID;     -- arm T: … the less-stale one the cooldown must admit
   s_u1         UUID;     -- arm U: poisoned
   s_u2         UUID;     -- arm U: poisoned
-  s_v1         UUID;     -- arm V1: poisoned
+  s_u3         UUID;     -- arm U: healthy, behind the poisoned pair in the burst cap
+  v_meta_u     JSONB;    -- arm U: the all-fail tick's committed failure row
+  s_v1        UUID;     -- arm V1: poisoned
   s_v2         UUID;     -- arm V1: healthy
   s_v3         UUID;     -- arm V2: poisoned
   s_v4         UUID;     -- arm V2: poisoned
   s_w1         UUID;     -- arm W: loses a race with 40001
   s_w2         UUID;     -- arm W: healthy
+  s_w3         UUID;     -- arm W/deadlock: a deadlock victim (40P01), a FAILURE since round 2
+  s_w4         UUID;     -- arm W/deadlock: loses a race with 40001 beside it
+  v_meta_w     JSONB;    -- arm W/deadlock: that tick's failure row
   v_err_state  TEXT;     -- arms U, V1, V2: the SQLSTATE that escaped, if any
   v_err_msg    TEXT;     -- arms U, V2: … and its message
   v_locks_pre  INTEGER;  -- arm U: advisory locks this backend holds BEFORE the tick
@@ -1686,30 +1698,55 @@ BEGIN
   UPDATE strategies SET status = 'draft' WHERE id IN (s_n1, s_n2, s_t1, s_t2);
 
   -- ======================================================================
-  -- ARM U — A COMPOSITE TICK IN WHICH EVERY CANDIDATE FAILED RAISES (164.6
-  -- review fix, HIGH-1). It raises AFTER the unlock with the function's own
-  -- counted message and no strategy id, and enqueues nothing. Placed after
-  -- arm N: under arm N's twin the failure count never rises, so this tick
-  -- would not raise either and would steal arm N's first failure.
+  -- ARM U — A COMPOSITE TICK IN WHICH EVERY CANDIDATE FAILED KEEPS ITS
+  -- FAILURE ROW, AND THE NEXT TICK'S COOLDOWN SKIPS THOSE COMPOSITES (164.6
+  -- round-2 review fix, 164.6-REVIEW-R2 WR-01 / 164.6-REVIEW-SFH-R2 N2).
+  --
+  -- ⛔ THIS ARM WAS INVERTED IN ROUND 2. In round 1 it asserted that such a
+  -- tick RAISES. That raise rolled back the tick's own failure row, which is
+  -- the row the failed-attempt cooldown reads, and the composite burst cap
+  -- (LIMIT 2) has no partition: two poisoned composites made EVERY tick
+  -- all-fail, so the cooldown never engaged and the whole composite cohort
+  -- starved. This arm builds that scenario: two poisoned composites are the
+  -- stalest and hold both burst slots, and a healthy third sits behind them.
+  -- Tick 1 must return 0 without raising, commit ONE failure row naming both
+  -- with their SQLSTATEs, and release the lock. Tick 2 runs with the poison
+  -- gone, so only the cooldown can keep the pair out, and the healthy
+  -- composite must take a slot.
+  -- Placed after arm N: under arm N's twin the failure count never rises, so
+  -- tick 1 here would write no row either and would steal arm N's first
+  -- failure.
   -- ======================================================================
-  -- RED-UNDER: make the composite body's all-candidates-failed condition
-  --            unsatisfiable (`v_enqueued = 0` becomes `v_enqueued < 0`). The
-  --            all-poisoned tick below then returns 0 in silence.
-  -- ⚠️ `occurrences: 2, nth: 2`, composite body second. Not a migration needle:
-  --    that file's apply-time block needles this raise by its MESSAGE.
-  -- RED-UNDER-M: {"arm":"U","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_enqueued = 0 AND v_failed > 0 THEN","replace":"IF v_enqueued < 0 AND v_failed > 0 THEN","occurrences":2,"nth":2}]}
+  -- RED-UNDER: re-add the round-1 all-candidates-failed raise to the
+  --            composite body, just before its closing NOTICE. Tick 1 below
+  --            then raises, its failure row rolls back with it, and the
+  --            no-raise read below fails. That re-addition is exactly the
+  --            regression this arm exists to refuse.
+  -- ⚠️ The find is the composite body's closing NOTICE, which occurs ONCE
+  --    (the single-key body's NOTICE names that function). Not a migration
+  --    needle, and the apply-time block deliberately does not assert the
+  --    raise ABSENT, so the apply survives and the ARM is the first failure.
+  --    No earlier arm in this file runs an all-fail composite tick, so none
+  --    can steal the first failure.
+  -- RED-UNDER-M: {"arm":"U","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"RAISE NOTICE 'enqueue_ledger_composite_refresh: enqueued %","replace":"IF v_enqueued = 0 AND v_failed > 0 THEN\n    RAISE EXCEPTION 'enqueue_ledger_composite_refresh: every candidate this tick failed to enqueue (% failed, 0 enqueued)', v_failed;\n  END IF;\n  RAISE NOTICE 'enqueue_ledger_composite_refresh: enqueued %","occurrences":1}]}
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, NULL, 'lrc U1', 'draft') RETURNING id INTO s_u1;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, NULL, 'lrc U2', 'draft') RETURNING id INTO s_u2;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, NULL, 'lrc U3', 'draft') RETURNING id INTO s_u3;
   INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
-  SELECT fid, k_led, uid, CURRENT_DATE - 400, 0 FROM unnest(ARRAY[s_u1, s_u2]) AS fid;
+  SELECT fid, k_led, uid, CURRENT_DATE - 400, 0 FROM unnest(ARRAY[s_u1, s_u2, s_u3]) AS fid;
   INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
   SELECT fid, 'complete_with_warnings', now(),
          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 23, 'YYYY-MM-DD'), 'value', 0.002))
     FROM unnest(ARRAY[s_u1, s_u2]) AS fid;
+  -- The healthy one is LESS stale, so stalest-first ordering puts it behind
+  -- the poisoned pair and the burst cap of two cuts it from tick 1.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_u3, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 22, 'YYYY-MM-DD'), 'value', 0.002)));
 
   CREATE FUNCTION pg_temp.lrc_poison_u() RETURNS TRIGGER LANGUAGE plpgsql AS $poison_u$
   BEGIN
-    IF EXISTS (SELECT 1 FROM strategies WHERE id = NEW.strategy_id AND name LIKE 'lrc U%') THEN
+    IF EXISTS (SELECT 1 FROM strategies WHERE id = NEW.strategy_id AND name IN ('lrc U1', 'lrc U2')) THEN
       RAISE EXCEPTION 'arm U: the poisoned composite refuses to enqueue';
     END IF;
     RETURN NEW;
@@ -1717,7 +1754,7 @@ BEGIN
   CREATE TRIGGER lrc_poison_u_trg BEFORE INSERT ON compute_jobs
     FOR EACH ROW EXECUTE FUNCTION pg_temp.lrc_poison_u();
 
-  UPDATE strategies SET status = 'published' WHERE id IN (s_u1, s_u2);
+  UPDATE strategies SET status = 'published' WHERE id IN (s_u1, s_u2, s_u3);
   SELECT count(*) INTO v_locks_pre FROM pg_locks
    WHERE locktype = 'advisory' AND pid = pg_backend_pid();
   v_ret := NULL;
@@ -1733,26 +1770,53 @@ BEGIN
   SELECT count(*) INTO v_locks_post FROM pg_locks
    WHERE locktype = 'advisory' AND pid = pg_backend_pid();
 
-  IF v_err_msg IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (U): every composite this tick failed and the composite arm RETURNED % instead of raising. The scheduler records such a tick as succeeded, so a fan-out whose every enqueue fails is invisible to the prober.', v_ret;
+  IF v_err_msg IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (U): a composite tick in which every candidate failed RAISED (SQLSTATE %) instead of returning 0. The raise rolls back the tick''s own failure row, which is the row the failed-attempt cooldown reads, so two poisoned composites hold both burst slots on every tick and the whole composite cohort starves (164.6-REVIEW-R2 WR-01).', v_err_state;
   END IF;
-  IF v_err_state IS DISTINCT FROM 'P0001'
-     OR v_err_msg NOT LIKE 'enqueue_ledger_composite_refresh: every candidate this tick failed to enqueue (2 failed, 0 lost a race, 0 enqueued)%' THEN
-    RAISE EXCEPTION 'TEST FAILED (U): the all-candidates-failed composite tick raised SQLSTATE % with a message that is not the function''s own counted verdict. The scheduler records this message, and the prober attributes the failed run by the function name that leads it.', v_err_state;
-  END IF;
-  IF position(s_u1::text IN v_err_msg) > 0 OR position(s_u2::text IN v_err_msg) > 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (U): the all-candidates-failed message carries a strategy id. Raise text reaches the scheduler''s run log, which is not guarded by row security; ids belong only in the failure row''s metadata (T-161.1-19).';
+  IF v_ret IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (U): every composite this tick was poisoned, so the composite arm must report 0 enqueued; it reported %.', v_ret;
   END IF;
   IF v_locks_post <> v_locks_pre THEN
-    RAISE EXCEPTION 'TEST FAILED (U): the composite arm held % advisory lock(s) before the raising tick and % after it. The raise must come after the unlock.', v_locks_pre, v_locks_post;
+    RAISE EXCEPTION 'TEST FAILED (U): the composite arm held % advisory lock(s) before the all-fail tick and % after it. The lock leaked, so every later tick takes the already-running exit.', v_locks_pre, v_locks_post;
   END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id IN (s_u1, s_u2, s_u3) AND kind = 'stitch_composite';
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (U): the all-fail composite tick left % stitch_composite row(s) across its poisoned pair and the healthy composite behind them, expected 0. Either the poison did not fire or the burst cap did not bind, and the scenario this arm needs was never built.', v_cnt;
+  END IF;
+  SELECT metadata INTO v_meta_u
+    FROM public.cron_runs
+   WHERE cron_name = 'ledger_refresh_fanout'
+     AND error = 'candidate_enqueue_failed'
+     AND metadata->>'function' = 'enqueue_ledger_composite_refresh'
+     AND metadata->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_u1))
+     AND metadata->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_u2));
+  IF v_meta_u IS NULL
+     OR (v_meta_u->>'failed_count')::int IS DISTINCT FROM 2
+     OR (v_meta_u->>'enqueued_count')::int IS DISTINCT FROM 0
+     OR NOT (v_meta_u->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_u1, 'sqlstate', 'P0001')))
+     OR NOT (v_meta_u->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_u2, 'sqlstate', 'P0001'))) THEN
+    RAISE EXCEPTION 'TEST FAILED (U): the all-fail composite tick did not commit one failure row naming both poisoned composites with their SQLSTATEs (failed_count %, enqueued_count %). That row is what the prod prober counts and what the next tick''s cooldown reads.', v_meta_u->>'failed_count', v_meta_u->>'enqueued_count';
+  END IF;
+
+  -- Tick 2, with the poison gone.
+  BEGIN
+    v_ret := public.enqueue_ledger_composite_refresh();
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (U): the composite tick after the all-fail one raised (SQLSTATE %) instead of running. Same identity rule as arm N''s wrapper.', SQLSTATE;
+  END;
   SELECT count(*) INTO v_cnt FROM compute_jobs
    WHERE strategy_id IN (s_u1, s_u2) AND kind = 'stitch_composite';
   IF v_cnt <> 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (U): the raising composite tick left % stitch_composite row(s) for its poisoned candidates, expected 0.', v_cnt;
+    RAISE EXCEPTION 'TEST FAILED (U): after an all-fail composite tick, the next tick selected the failed composites AGAIN (% stitch_composite row(s)) inside the failed-attempt cooldown.', v_cnt;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_u3 AND kind = 'stitch_composite';
+  IF v_cnt <> 1 OR v_ret IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (U): after an all-fail composite tick, the healthy composite behind the failed pair holds % stitch_composite row(s) (expected 1) and the tick enqueued % (expected 1). Two poisoned composites must not starve the cohort.', v_cnt, v_ret;
   END IF;
 
-  UPDATE strategies SET status = 'draft' WHERE id IN (s_u1, s_u2);
+  UPDATE strategies SET status = 'draft' WHERE id IN (s_u1, s_u2, s_u3);
 
   -- ======================================================================
   -- ARMS V1 / V2 — THE COMPOSITE FAILURE ROW'S OWN WRITE FAILS (164.6 review
@@ -1825,8 +1889,9 @@ BEGIN
   -- RED-UNDER: make the composite body's instrument handler NEVER re-raise
   --            (`v_enqueued = 0` becomes `v_enqueued < 0`). On the all-failed
   --            tick below the refused write is then only a WARNING, and the
-  --            tick raises with the all-candidates-failed verdict's SQLSTATE
-  --            instead of the instrument's own.
+  --            tick returns 0 with no failure row at all: neither the prober
+  --            nor the cooldown ever sees it (round 2 removed the
+  --            all-candidates-failed raise, so nothing else makes it loud).
   -- ⚠️ `occurrences: 2, nth: 2`, composite body second. Not a migration needle.
   -- RED-UNDER-M: {"arm":"V2","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_enqueued = 0 THEN","replace":"IF v_enqueued < 0 THEN","occurrences":2,"nth":2}]}
   UPDATE strategies SET status = 'published' WHERE id IN (s_v3, s_v4);
@@ -1851,14 +1916,15 @@ BEGIN
   -- MEDIUM-2). One composite loses a race with 40001 beside a healthy one:
   -- the tick returns 1 and writes NO failure row, because a lost race is not
   -- a failure. The burst cap of two leaves no room for a third candidate, so
-  -- the lost-race count itself is read by the sibling gate's arm W, not here.
+  -- the lost-race count itself is read by the W/deadlock sub-arm below, whose
+  -- all-fail tick keeps its row since the round-2 review fix.
   -- ======================================================================
   -- RED-UNDER: route the composite body's lost races to the catch-all by
   --            pointing their handler at a SQLSTATE nothing raises. The lost
   --            race is then counted as a failure and a failure row naming it
   --            is written, which the reads below refuse.
   -- ⚠️ `occurrences: 2, nth: 2`, composite body second. Not a migration needle.
-  -- RED-UNDER-M: {"arm":"W","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"WHEN serialization_failure OR deadlock_detected THEN","replace":"WHEN SQLSTATE 'LRW00' THEN","occurrences":2,"nth":2}]}
+  -- RED-UNDER-M: {"arm":"W","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"WHEN serialization_failure THEN","replace":"WHEN SQLSTATE 'LRW00' THEN","occurrences":2,"nth":2}]}
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, NULL, 'lrc W1', 'draft') RETURNING id INTO s_w1;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, NULL, 'lrc W2', 'draft') RETURNING id INTO s_w2;
   INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
@@ -1901,7 +1967,78 @@ BEGIN
 
   UPDATE strategies SET status = 'draft' WHERE id IN (s_w1, s_w2);
 
-  RAISE NOTICE 'ALL 23 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, S1, T, U, V1, V2, W) and passed — the composite refresh arm is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row naming this function, partitioned from the single-key arm, bounded, its exclusions are falsifiable, a composite that fails to enqueue is counted and named in one exact cron_runs row while its sibling still enqueues and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every composite failed raises after releasing its lock, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race is not a failure, and its EXECUTE grantee set and DEFINER exemption both still hold.';
+  -- ======================================================================
+  -- ARM W/deadlock — A DEADLOCK IS A COMPOSITE FAILURE, AND A LOST RACE BESIDE
+  -- IT IS ONLY COUNTED (164.6 round-2 review fix, 164.6-REVIEW-R2 IN-04 and
+  -- IN-05, 164.6-REVIEW-SFH-R2 L3). A sub-arm of W, like D/precondition is D's.
+  --
+  -- Two composites and no healthy one, so the burst cap of two holds both:
+  -- one is a deadlock victim (40P01), one loses a race (40001). A deadlock's
+  -- other party can be ANY lock holder, so nothing says another enqueue is
+  -- serving the composite: it must be counted, named with its SQLSTATE and
+  -- put on the cooldown. The lost race must be counted beside it and never
+  -- named. This also reads `lost_race_count` in the COMPOSITE body, which
+  -- arm W alone cannot: with the raise gone, this all-fail tick commits its
+  -- row, and that row carries the count.
+  -- ======================================================================
+  -- RED-UNDER: put deadlock_detected back in the composite body's lost-race
+  --            branch, the round-1 shape. The 40P01 composite is then counted
+  --            as a lost race, the tick writes no failure row at all, and the
+  --            read below fails.
+  -- ⚠️ `occurrences: 2, nth: 2`, composite body second. Not a migration needle.
+  --    Arm W's own assertions above still pass under this twin (its tick has
+  --    no deadlock), so this read is the first failure.
+  -- RED-UNDER-M: {"arm":"W/deadlock","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"WHEN serialization_failure THEN","replace":"WHEN serialization_failure OR deadlock_detected THEN","occurrences":2,"nth":2}]}
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, NULL, 'lrc W3', 'draft') RETURNING id INTO s_w3;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, NULL, 'lrc W4', 'draft') RETURNING id INTO s_w4;
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+  SELECT fid, k_led, uid, CURRENT_DATE - 400, 0 FROM unnest(ARRAY[s_w3, s_w4]) AS fid;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  SELECT fid, 'complete_with_warnings', now(),
+         jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 21, 'YYYY-MM-DD'), 'value', 0.002))
+    FROM unnest(ARRAY[s_w3, s_w4]) AS fid;
+
+  CREATE FUNCTION pg_temp.lrc_deadlock_w() RETURNS TRIGGER LANGUAGE plpgsql AS $deadlock_w$
+  DECLARE
+    v_name TEXT;
+  BEGIN
+    SELECT name INTO v_name FROM strategies WHERE id = NEW.strategy_id;
+    IF v_name = 'lrc W3' THEN
+      RAISE EXCEPTION 'arm W/deadlock: a deadlock victim' USING ERRCODE = 'deadlock_detected';
+    ELSIF v_name = 'lrc W4' THEN
+      RAISE EXCEPTION 'arm W/deadlock: a lost enqueue race' USING ERRCODE = 'serialization_failure';
+    END IF;
+    RETURN NEW;
+  END $deadlock_w$;
+  CREATE TRIGGER lrc_deadlock_w_trg BEFORE INSERT ON compute_jobs
+    FOR EACH ROW EXECUTE FUNCTION pg_temp.lrc_deadlock_w();
+
+  UPDATE strategies SET status = 'published' WHERE id IN (s_w3, s_w4);
+  v_ret := NULL;
+  BEGIN
+    v_ret := public.enqueue_ledger_composite_refresh();
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (W/deadlock): a composite tick with one deadlock and one lost race RAISED (SQLSTATE %) instead of returning 0 and keeping its failure row.', SQLSTATE;
+  END;
+  DROP TRIGGER lrc_deadlock_w_trg ON compute_jobs;
+
+  SELECT metadata INTO v_meta_w
+    FROM public.cron_runs
+   WHERE cron_name = 'ledger_refresh_fanout'
+     AND error = 'candidate_enqueue_failed'
+     AND metadata->>'function' = 'enqueue_ledger_composite_refresh'
+     AND metadata->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_w3, 'sqlstate', '40P01'));
+  IF v_meta_w IS NULL
+     OR (v_meta_w->>'failed_count')::int IS DISTINCT FROM 1
+     OR (v_meta_w->>'lost_race_count')::int IS DISTINCT FROM 1
+     OR v_meta_w->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_w4))
+     OR v_ret IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (W/deadlock): no composite failure row names the deadlock victim with 40P01 as the only failure beside one counted lost race (failed_count %, lost_race_count %, tick returned %; expected 1, 1, 0). A deadlock is not proof another enqueue serves the composite, so it must be counted, named and cooled down, or a recurring deadlock retakes a burst slot every tick in silence.', v_meta_w->>'failed_count', v_meta_w->>'lost_race_count', v_ret;
+  END IF;
+
+  UPDATE strategies SET status = 'draft' WHERE id IN (s_w3, s_w4);
+
+  RAISE NOTICE 'ALL 23 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, S1, T, U, V1, V2, W) and passed — the composite refresh arm is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row naming this function, partitioned from the single-key arm, bounded, its exclusions are falsifiable, a composite that fails to enqueue is counted and named in one exact cron_runs row while its sibling still enqueues and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every composite failed returns 0 without raising, keeps its failure row and puts those composites on the cooldown so a healthy composite behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is not a failure while a deadlock is counted and named as one, and its EXECUTE grantee set and DEFINER exemption both still hold.';
 END $$;
 
 ROLLBACK;
