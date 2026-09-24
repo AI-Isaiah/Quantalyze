@@ -461,6 +461,17 @@ RED_NEEDLES: dict[str, tuple[str, str, str, str]] = {
         "quantstats",
         "reaches quantstats by name",
     ),
+    # Review round 2 (SFH R2-LOW-3): the B6 `.get` arm had no needle (G1 survived).
+    "needle_globals_get_of_the_alias": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return globals().get("qs").stats.sharpe(r)
+        """,
+        "compute_all_metrics",
+        "globals()",
+        "reaches a quantstats alias by name",
+    ),
     # Review round 2 (SFH R2-LOW-4 / WR-03): the covered module reaching its OWN
     # alias through the module object, invisible to the B rules, which judge
     # the bare alias name.
@@ -861,6 +872,25 @@ def test_qstats_gate_reexport_green_needle_is_silent() -> None:
         """
     )
     assert scan_source(REEXPORT_MODULE, source) == ([], [], 0)
+
+
+def test_qstats_gate_reexport_two_level_relative_import_is_named() -> None:
+    """Review round 2 (SFH R2-LOW-3): ``_resolve_from``'s ``level > 1`` slice had
+    no needle (G3 survived). ``from ..metrics import qs`` in a module one package
+    below ``services`` must resolve to ``services.metrics``, not to
+    ``services.ingestion.metrics``, or the borrow goes unseen."""
+    module = "services/ingestion/feeder.py"
+    source = textwrap.dedent(
+        """
+        from ..metrics import qs
+        def score(r):
+            return qs.stats.sharpe(r)
+        """
+    )
+    violations, _census, _nodes = scan_source(module, source)
+    assert [(v.module, v.qs_name, v.shape) for v in violations] == [
+        (module, "qs", "re-export import")
+    ], violations
 
 
 def test_qstats_gate_reexport_through_scan_tree_reads_the_covered_alias(tmp_path: Path) -> None:
