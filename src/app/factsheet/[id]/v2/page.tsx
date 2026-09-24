@@ -31,6 +31,12 @@ import {
   ownerStateLine,
   type StateLineTone,
 } from "@/lib/status-surface-copy";
+import {
+  countCompositeMembers,
+  resolveStrategyShape,
+  type StrategyShape,
+} from "@/lib/strategy-shape";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { FactsheetView, OwnerUnpublishedPanel } from "./FactsheetView";
 
 /**
@@ -157,60 +163,6 @@ export async function generateMetadata({
   };
 }
 
-/**
- * Phase 167.2 / KCS-09 — the owner's compute state for a strategy, read on the
- * REQUEST-scoped client through the owner-scoped SECURITY DEFINER RPC (it
- * resolves auth.uid() from the session and returns last_error as NULL).
- *
- * A module-level function rather than inline in the page: the server clock is
- * read here (`nowMs`), never inside the component body.
- *
- * ⛔ error-absent ≠ legit-absent (Rule 12). An RPC error, an answer that is not
- * a rows array, or a throw (a client with no rpc member included) derives
- * `unreadable`, logged server-side. It never derives an in-progress state.
- */
-async function readOwnerComputeState(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  strategyId: string,
-): Promise<ComputeState> {
-  try {
-    const { data: jobRows, error: jobsError } = await supabase.rpc(
-      "get_user_compute_jobs",
-      { p_strategy_id: strategyId, p_limit: COMPUTE_STATE_READ_LIMIT },
-    );
-    if (jobsError || !Array.isArray(jobRows)) {
-      const readFailure = jobsError ?? {
-        code: undefined,
-        message: "compute job read returned no rows array and no error",
-      };
-      console.error("[factsheet/v2/page] compute-state read failed", {
-        id: strategyId,
-        code: readFailure.code,
-        message: readFailure.message,
-      });
-      captureToSentry(readFailure, {
-        tags: { route: "factsheet/v2/page", stage: "compute-state" },
-      });
-      return deriveComputeState({ readError: true });
-    }
-    return deriveComputeState({
-      rows: jobRows as unknown as ComputeJobRow[],
-      readExhaustive: jobRows.length < COMPUTE_STATE_READ_LIMIT,
-      nowMs: Date.now(),
-    });
-  } catch (err) {
-    console.error("[factsheet/v2/page] compute-state read failed", {
-      id: strategyId,
-      code: undefined,
-      message: err instanceof Error ? err.message : String(err),
-    });
-    captureToSentry(err, {
-      tags: { route: "factsheet/v2/page", stage: "compute-state" },
-    });
-    return deriveComputeState({ readError: true });
-  }
-}
-
 export default async function FactsheetV2Page({
   params,
 }: {
@@ -286,6 +238,12 @@ export default async function FactsheetV2Page({
   // fail-closed value, not a claim. A read error degrades to false with a
   // server-side log rather than crashing the owner's own factsheet.
   let hasActiveShare = false;
+  // Phase 167.2 / KCS-21 — the shape inputs of the owner pending page's remedy
+  // (CSV upload, linked key or not), read on the OWNER PROBE only and
+  // lane-local for the same reason as the two facts above. `signature` is
+  // typed by Lane A's column list, which does not carry them.
+  let ownerSource: string | null = null;
+  let ownerApiKeyId: string | null = null;
   if (signRes.error || !signature) {
     const {
       data: { user },
@@ -317,10 +275,13 @@ export default async function FactsheetV2Page({
     // (review WR-01 — `withPublishedOrOwner` also matches PUBLISHED rows for
     // ANY authed viewer via its `status.eq.published` arm, so "Lane B matched"
     // must not be read as "viewer owns an unpublished row").
+    // Phase 167.2 / KCS-21 adds `source, api_key_id`, the shape inputs of the
+    // owner's pending-page remedy. They are read on THIS probe only (Lane A's
+    // list is unchanged) and held lane-locally below, never on the payload.
     const { data: ownRow, error: probeError } = await withPublishedOrOwner(
       supabase
         .from("strategies")
-        .select("id, name, codename, disclosure_tier, status, capital_ownership, strategy_analytics ( computed_at )")
+        .select("id, name, codename, disclosure_tier, status, capital_ownership, source, api_key_id, strategy_analytics ( computed_at )")
         .eq("id", id),
       user.id,
     ).maybeSingle();
@@ -368,6 +329,8 @@ export default async function FactsheetV2Page({
       ownershipMark = isCapitalOwnership(ownRow.capital_ownership)
         ? ownRow.capital_ownership
         : null;
+      ownerSource = ownRow.source;
+      ownerApiKeyId = ownRow.api_key_id;
       // Share-link EXISTENCE, on the REQUEST-scoped client (RLS on — the owner
       // may read their own strategy's share row; nobody else's predicate can
       // reach it). Deliberately NOT the admin client: this fact is only ever
@@ -477,15 +440,21 @@ export default async function FactsheetV2Page({
     // `ownershipMark` and `hasActiveShare`. It never enters the payload, the
     // builder or the id-keyed cached wrapper. The public lane reads nothing.
     //
-    // A read that cannot answer derives `unreadable` (see the helper), which
-    // never renders an in-progress claim.
-    const ownerComputeState =
+    // A read that cannot answer derives `unreadable` (see
+    // `readOwnerPendingStatus` at the end of this file), which never renders an
+    // in-progress claim. The remedy is keyed on the strategy's SHAPE (KCS-21),
+    // so it names only a control this strategy's edit page actually paints.
+    const ownerStatus =
       lane === "owner"
-        ? await readOwnerComputeState(supabase, signature.id)
+        ? await readOwnerPendingStatus(supabase, signature.id, {
+            source: ownerSource,
+            apiKeyId: ownerApiKeyId,
+          })
         : null;
-    const ownerLine = ownerComputeState && ownerStateLine(ownerComputeState);
+    const ownerLine = ownerStatus && ownerStateLine(ownerStatus.state);
     const ownerRemedyLine =
-      ownerComputeState && ownerRemedy(ownerComputeState, "unknown", signature.id);
+      ownerStatus &&
+      ownerRemedy(ownerStatus.state, ownerStatus.shape, signature.id);
     return (
       <article className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12">
         {/* WR-02: the owner lane's placeholder must carry the visibility
@@ -632,4 +601,88 @@ export default async function FactsheetV2Page({
       />
     </>
   );
+}
+
+/**
+ * Phase 167.2 / KCS-09 + KCS-21 — the owner pending page's two facts: the
+ * strategy's compute state and its shape. Called only from the owner `!payload`
+ * branch above (a function declaration, hoisted), so neither read runs on the
+ * full render or on the public lane.
+ *
+ * Both reads use the REQUEST-scoped client: the compute jobs through the
+ * owner-scoped SECURITY DEFINER RPC (it resolves auth.uid() from the session
+ * and returns last_error as NULL), and the member head count under the
+ * `strategy_keys_owner` policy. A module-level function rather than inline in
+ * the page: the server clock is read here (`nowMs`), never in the component.
+ *
+ * ⛔ error-absent ≠ legit-absent (Rule 12). An RPC error, an answer that is not
+ * a rows array, or a throw (a client with no rpc member included) derives
+ * `unreadable`; a member count that cannot be read leaves the shape
+ * `unknown`, so no control is guessed. Each is logged server-side, and none
+ * derives an in-progress state.
+ */
+async function readOwnerPendingStatus(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  strategyId: string,
+  shapeInputs: { source: string | null; apiKeyId: string | null },
+): Promise<{ state: ComputeState; shape: StrategyShape | "unknown" }> {
+  let shape: StrategyShape | "unknown" = "unknown";
+  try {
+    const [{ data: jobRows, error: jobsError }, memberCount] = await Promise.all([
+      supabase.rpc("get_user_compute_jobs", {
+        p_strategy_id: strategyId,
+        p_limit: COMPUTE_STATE_READ_LIMIT,
+      }),
+      // The generated types predate `strategy_keys`; the cast is type-only and
+      // RLS still applies to this request client (see strategy-shape.ts).
+      countCompositeMembers(supabase as unknown as SupabaseClient, strategyId),
+    ]);
+    if (!memberCount.ok) {
+      console.error("[factsheet/v2/page] strategy-shape read failed", {
+        id: strategyId,
+        message: memberCount.message,
+      });
+      captureToSentry(new Error(memberCount.message), {
+        tags: { route: "factsheet/v2/page", stage: "strategy-shape" },
+      });
+    }
+    shape = resolveStrategyShape({
+      source: shapeInputs.source,
+      apiKeyId: shapeInputs.apiKeyId,
+      memberCount,
+    });
+    if (jobsError || !Array.isArray(jobRows)) {
+      const readFailure = jobsError ?? {
+        code: undefined,
+        message: "compute job read returned no rows array and no error",
+      };
+      console.error("[factsheet/v2/page] compute-state read failed", {
+        id: strategyId,
+        code: readFailure.code,
+        message: readFailure.message,
+      });
+      captureToSentry(readFailure, {
+        tags: { route: "factsheet/v2/page", stage: "compute-state" },
+      });
+      return { state: deriveComputeState({ readError: true }), shape };
+    }
+    return {
+      state: deriveComputeState({
+        rows: jobRows as unknown as ComputeJobRow[],
+        readExhaustive: jobRows.length < COMPUTE_STATE_READ_LIMIT,
+        nowMs: Date.now(),
+      }),
+      shape,
+    };
+  } catch (err) {
+    console.error("[factsheet/v2/page] compute-state read failed", {
+      id: strategyId,
+      code: undefined,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    captureToSentry(err, {
+      tags: { route: "factsheet/v2/page", stage: "compute-state" },
+    });
+    return { state: deriveComputeState({ readError: true }), shape };
+  }
 }
