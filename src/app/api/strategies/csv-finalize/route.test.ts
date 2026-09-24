@@ -683,12 +683,15 @@ describe("[OPS-06] csv-finalize: a missing service-role key fails LOUD and PRE-C
  * invented its own sentence fails here even if that sentence were jargon-free.
  *
  * ⛔ AND THE COPY MUST NOT PROMISE AN AUTOMATIC RETRY. The review that raised
- * WR-07 proposed "…and will retry automatically". Nothing in this repo retries
- * a 40001 — the one classifier that recognises the code
- * (analytics-service/main_worker.py:392) has a single call site, wrapping the
- * MARK RPCs, never an enqueue. That wording would trade operator jargon for a
- * FALSE PROMISE, which is the same honesty defect one layer along rather than
- * a fix for it. The /automatic/i assertion exists to keep it out.
+ * WR-07 proposed "…and will retry automatically". Since Phase 164.6
+ * (OPS-08-TS) the route retries a 40001 exactly ONCE, immediately, and the
+ * curated copy is written only after that single retry is exhausted — so by
+ * the time the owner reads it, no further automatic retry exists. That wording
+ * would trade operator jargon for a FALSE PROMISE, which is the same honesty
+ * defect one layer along rather than a fix for it. The /automatic/i assertion
+ * exists to keep it out. The retry itself is pinned by the call-count cases
+ * below: 40001 twice → 2 enqueue calls and 1 Sentry capture; 40001 then ok →
+ * 2 calls, no placeholder, no Sentry.
  *
  * ⭐ RED DEMO — see the per-case notes at the end of this describe.
  */
@@ -764,6 +767,16 @@ describe("[WR-07] csv-finalize: a lost enqueue race tells the OWNER something tr
     await scheduled();
   }
 
+  /**
+   * How many times the service-role `enqueue_compute_job` RPC was issued.
+   * Filtered by name so an unrelated admin RPC on the same double cannot
+   * inflate the count the OPS-08-TS retry assertions rest on.
+   */
+  function enqueueCalls(): number {
+    return adminRpcMock.mock.calls.filter((c) => c[0] === "enqueue_compute_job")
+      .length;
+  }
+
   /** The single string the strategy's owner ends up reading. */
   function copyWrittenToUser(): string {
     expect(
@@ -801,18 +814,30 @@ describe("[WR-07] csv-finalize: a lost enqueue race tells the OWNER something tr
   });
 
   it("a 40001 lost race → the owner reads curated copy: no operator jargon, no SQL text, no promise of an automatic retry", async () => {
-    adminRpcMock.mockResolvedValueOnce({
+    // Shaped like the real RAISE in mig 20260826150000: operator text,
+    // deliberately carrying no ids. TWICE, because since Phase 164.6 the
+    // route retries a 40001 once — the curated copy is what the owner reads
+    // only when that single retry ALSO loses the race.
+    const lostRace = {
       error: {
         code: "40001",
-        // Shaped like the real RAISE in mig 20260826150000: operator text,
-        // deliberately carrying no ids.
         message: "enqueue lost the in-flight race; the winner already advanced",
       },
-    });
+    };
+    adminRpcMock.mockResolvedValueOnce(lostRace).mockResolvedValueOnce(lostRace);
 
     const res = await POST(makeRequest(validBody()));
     expect(res.status).toBe(200);
     await runScheduledEnqueue();
+
+    expect(
+      enqueueCalls(),
+      "a 40001 must be retried exactly once — never zero, never twice",
+    ).toBe(2);
+    expect(
+      vi.mocked(captureToSentry),
+      "only the failure that SURVIVED the retry is captured — once, not per attempt",
+    ).toHaveBeenCalledTimes(1);
 
     const copy = copyWrittenToUser();
 
@@ -830,8 +855,9 @@ describe("[WR-07] csv-finalize: a lost enqueue race tells the OWNER something tr
     ).not.toMatch(/40001|sqlstate|serialization|mvcc|in-flight|rpc|postgres/i);
     expect(
       copy,
-      "NOTHING in this repo retries a 40001 — promising one is a FALSE PROMISE, " +
-        "which is the same defect as the jargon, not a fix for it",
+      "the single retry is already exhausted when this copy is written — promising " +
+        "another automatic retry is a FALSE PROMISE, which is the same defect as the " +
+        "jargon, not a fix for it",
     ).not.toMatch(/automatic/i);
 
     // ── and it is the project's sentence, not one this route invented ──
@@ -852,9 +878,47 @@ describe("[WR-07] csv-finalize: a lost enqueue race tells the OWNER something tr
     await runScheduledEnqueue();
 
     expect(
+      enqueueCalls(),
+      "a NON-40001 enqueue failure was retried — only a lost race may be",
+    ).toBe(1);
+    expect(
       copyWrittenToUser(),
       "the non-40001 arm lost its operator diagnostic — a blanket rewrite, not a branch",
     ).toBe("compute job enqueue failed: JWT expired");
+  });
+
+  it("OPS-08-TS — a 40001 then a successful retry self-heals: no failure placeholder, no Sentry, two enqueue calls", async () => {
+    // The point of the retry. A lost MVCC race used to reach the owner as a
+    // failed strategy; the race's winner has already advanced past the
+    // in-flight statuses, so an immediate re-issue succeeds and the owner
+    // never sees an error.
+    adminRpcMock.mockResolvedValueOnce({
+      error: {
+        code: "40001",
+        message: "enqueue lost the in-flight race; the winner already advanced",
+      },
+    });
+
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(200);
+    await runScheduledEnqueue();
+
+    expect(
+      enqueueCalls(),
+      "the lost race was not re-issued — the retry is missing",
+    ).toBe(2);
+    expect(
+      placeholderUpserts,
+      "a `failed` placeholder was written although the retry SUCCEEDED",
+    ).toHaveLength(0);
+    expect(
+      vi.mocked(captureToSentry),
+      "a retried race is an expected MVCC outcome — it must not alert",
+    ).not.toHaveBeenCalled();
+    expect(
+      warnSpy.mock.calls.some((c) => /retrying once/.test(String(c[0]))),
+      "the retried attempt must leave a console.warn trail",
+    ).toBe(true);
   });
 
   it("CONTROL — a successful enqueue writes no failure placeholder at all", async () => {
