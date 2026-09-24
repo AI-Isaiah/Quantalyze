@@ -27,6 +27,8 @@ import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError, scrubSeamString } from "@/lib/seam-redaction";
 import { logAuditEventAsUser } from "@/lib/audit";
+import { getCorrelationId } from "@/lib/correlation-id";
+import { retractInheritedRefreshMarker } from "@/lib/ledger-refresh-marker";
 // Phase 140.1.1 / PYAPIFIX-01 — the onboard-reply narrow lives in a
 // dependency-free leaf so the cross-process parity test can exercise THIS
 // predicate with zero mocks. Do not re-inline it here.
@@ -2014,6 +2016,11 @@ async function runLegacyFinalize(args: {
     }
   }
 
+  // Phase 164.6 / 161.1-D13 — resolved in request scope, BEFORE after() is
+  // scheduled, and closed over: the composite marker retraction below records
+  // it, and this keeps the value independent of after()'s header semantics.
+  const correlationId = await getCorrelationId();
+
   // Both side effects are fire-and-forget: the row is already in
   // pending_review, so failures to notify or touch last_sync_at must
   // not block the response or reverse the finalize.
@@ -2136,7 +2143,7 @@ async function runLegacyFinalize(args: {
             // queue flag was not "true") was deleted; that guard is dormant
             // with the ratified prod pins. Enqueue stitch_composite
             // unconditionally.
-            const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
+            const { data: jobId, error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
               p_strategy_id: resolvedId,
               p_kind: "stitch_composite",
               p_metadata: { source: "finalize-wizard" },
@@ -2145,6 +2152,37 @@ async function runLegacyFinalize(args: {
               throw new Error(
                 `enqueue_compute_job failed: ${enqueueErr.message}`,
               );
+            }
+            // Phase 164.6 / 161.1-D13 — the enqueue may have DEDUPED onto an
+            // in-flight ledger-refresh job; retract its marker, as keys/sync and
+            // Python's `_retract_refresh_marker_on_reuse` do. OWN try/catch: an
+            // escaping error would reject this side effect and be captured under
+            // the ENQUEUE's tag, reporting a successful enqueue as a failed one.
+            // The read-modify-write residual is inherited (161.1-D12); see
+            // `retractInheritedRefreshMarker`'s JSDoc.
+            try {
+              // @audit-skip: job-row provenance metadata; user intent is audited by the sync.start event below.
+              const retraction = await retractInheritedRefreshMarker(admin, jobId, correlationId);
+              if (retraction.retracted) {
+                console.warn(
+                  `[strategies/finalize-wizard] retracted inherited ${retraction.marker} marker on job=${jobId} for strategy=${resolvedId}`,
+                );
+              }
+            } catch (err) {
+              console.error(
+                `[strategies/finalize-wizard] composite refresh-marker retraction failed for ${resolvedId}: ${scrubSeamError(err)}`,
+              );
+              captureToSentry(err, {
+                tags: {
+                  surface: "finalize-wizard-after",
+                  side_effect: "composite_refresh_marker_retract",
+                },
+                extra: {
+                  strategy_id: resolvedId,
+                  job_id: jobId,
+                  correlation_id: correlationId,
+                },
+              });
             }
             // Phase 89 — audit the composite dispatch, mirroring the
             // keys/sync composite-first stitch_composite kickoff (in keys/sync/route.ts):
