@@ -1,30 +1,50 @@
 /**
- * Live-DB regression test — ISSUE-008 (f8 Queued helper RPC path).
+ * Live-DB regression test — ISSUE-008 (f8 Queued helper RPC path) and the
+ * disconnected-key refusal of `public.request_allocator_holdings_sync(uuid)`.
  *
- * Pre-migration 067: request_allocator_holdings_sync could never return
- * `{already_inflight: true, next_attempt_at: ...}`. The dead
- * `EXCEPTION WHEN unique_violation` handler never fired because
- * `_enqueue_compute_job_internal` uses optimistic lookup + ON CONFLICT DO
- * NOTHING — neither path raises 23505.
+ * LINEAGE. Migration 067 (20260420103104) added a pre-enqueue SELECT on
+ * compute_jobs keyed by (api_key_id, kind='poll_allocator_positions', status IN
+ * pending/running/done_pending_children), so the RPC returns
+ * `{already_inflight: true, next_attempt_at}` when a live job exists and the UI
+ * can render "Queued — exchange cooldown, retry in {N}s". The alternative, an
+ * `EXCEPTION WHEN unique_violation` handler around the enqueue, never fires:
+ * `_enqueue_compute_job_internal` answers a duplicate with an optimistic
+ * look-up and ON CONFLICT DO NOTHING, and neither raises 23505.
+ * Migration 070 (20260420213754) was re-based on a body older than 067 and
+ * lost the prefetch; 076 (20260422122720) inherited 070's shape. From then on
+ * the RPC returned `{ok, job_id}` for every call, and this file's first arm
+ * never saw the Queued shape.
+ * Migration 075 (20260422101911) added a refusal of a soft-disconnected key
+ * (`api_key_disconnected`, SQLSTATE P0001); 076 was re-based on 070, not on
+ * 075, and lost it.
+ * Phase 164.9.1 migration 20260924233749 (allocator_sync_restore_inflight_prefetch)
+ * re-bases on 076 and restores both.
  *
- * Migration 067 added a pre-enqueue SELECT on compute_jobs keyed by
- * (api_key_id, kind='poll_allocator_positions', status IN pending/running/
- * done_pending_children). When an inflight job exists, the RPC now returns
- * the queued shape so the UI can render "Queued — exchange cooldown, retry
- * in {N}s".
+ * WHY THESE ARMS COULD NOT CATCH IT BEFORE. Each arm used to `return` quietly
+ * when the password sign-in failed, so a lane without password grant reported
+ * the arm as passed without calling the RPC. A failed sign-in now THROWS.
  *
- * This test asserts the contract two ways:
- *   1. With a pinned inflight job: response is {already_inflight, next_attempt_at}.
- *   2. Without a pinned job: response is {ok, job_id}.
+ * This file asserts the contract three ways, each against rows it seeded:
+ *   1. With a pinned in-flight job: `{already_inflight, next_attempt_at}`, and
+ *      sync_status is not flipped to 'syncing'.
+ *   2. Without a pinned job: `{ok, job_id}`, and sync_status is 'syncing'.
+ *   3. With the key soft-disconnected (and a live job pinned): the call is
+ *      refused with P0001 `api_key_disconnected`, is not reported as queued,
+ *      and adds no poll job.
  *
  * Together these guard against:
- *   - Accidental reversion to the dead-handler shape (regression test #1).
+ *   - A re-base that loses the prefetch again (#1 goes RED).
  *   - A buggy always-queued pre-check breaking happy-path syncs (#2).
+ *   - A re-base that loses the refusal again, or moves it after the in-flight
+ *     look-up (#3 goes RED).
+ * The accepted race recorded in the migration header (two concurrent callers
+ * that both pass the look-up share one row, and the loser gets `{ok, job_id}`)
+ * is not exercised, and no arm is taught to accept `{ok, job_id}` for a live
+ * job.
  *
- * Run locally:
- *   export NEXT_PUBLIC_SUPABASE_URL=...
- *   export SUPABASE_SERVICE_ROLE_KEY=...
- *   npx vitest run src/__tests__/request-allocator-holdings-sync-queued.test.ts
+ * Run locally against the local stack (`bash scripts/local-stack/run.sh up`):
+ *   npx vitest run --config vitest.livedb.config.ts \
+ *     src/__tests__/request-allocator-holdings-sync-queued.test.ts
  */
 
 import { describe, it, expect } from "vitest";
@@ -90,7 +110,7 @@ async function pinInflightJob(
 async function createAuthedClient(
   email: string,
   password: string,
-): Promise<SupabaseClient | null> {
+): Promise<SupabaseClient> {
   const anon = createClient(LIVE_DB_URL!, LIVE_DB_SERVICE_ROLE_KEY!, {
     auth: { persistSession: false },
   });
@@ -99,11 +119,11 @@ async function createAuthedClient(
     error,
   } = await anon.auth.signInWithPassword({ email, password });
   if (error || !session) {
-    console.warn(
-      "[issue-008] signInWithPassword failed (password-grant may be disabled):",
-      error?.message,
+    // Never a skip: an arm that cannot sign in has not called the RPC, and
+    // reporting it as passed is how the lost prefetch went unnoticed.
+    throw new Error(
+      `[issue-008] signInWithPassword failed, so the RPC was never called: ${error?.message ?? "no session"}`,
     );
-    return null;
   }
   return createClient(LIVE_DB_URL!, LIVE_DB_SERVICE_ROLE_KEY!, {
     auth: { persistSession: false },
@@ -137,7 +157,6 @@ describe("ISSUE-008 — request_allocator_holdings_sync f8 Queued path", () => {
         jobIds.push(pinnedJobId);
 
         const authed = await createAuthedClient(email, password);
-        if (!authed) return; // password-grant disabled — graceful skip
 
         const { data, error } = await authed.rpc(
           "request_allocator_holdings_sync",
@@ -208,7 +227,6 @@ describe("ISSUE-008 — request_allocator_holdings_sync f8 Queued path", () => {
         apiKeyIds.push(keyId);
 
         const authed = await createAuthedClient(email, password);
-        if (!authed) return;
 
         const { data, error } = await authed.rpc(
           "request_allocator_holdings_sync",
@@ -240,6 +258,78 @@ describe("ISSUE-008 — request_allocator_holdings_sync f8 Queued path", () => {
           } catch (err) {
             console.warn(
               `[issue-008] cleanup compute_jobs ${freshlyEnqueuedId}: ${(err as Error).message}`,
+            );
+          }
+        }
+        await cleanupLiveDbRow(admin, {
+          apiKeyIds,
+          userIds: cleanup.userIds,
+        });
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "refuses a soft-disconnected key with P0001 api_key_disconnected, before the in-flight look-up",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const cleanup = { userIds: [] as string[] };
+      const apiKeyIds: string[] = [];
+      let keyId: string | null = null;
+
+      try {
+        const email = `issue-008-disconnected-${ts}@test.sec`;
+        const password = `Issue008Disconnected${ts}!`;
+        const userId = await createTestUser(admin, email, password);
+        cleanup.userIds.push(userId);
+
+        keyId = await seedApiKey(admin, userId, `disconnected-${ts}`);
+        apiKeyIds.push(keyId);
+
+        // A live job is pinned too, so this arm also fails if the refusal is
+        // moved after the in-flight look-up: that order would answer
+        // {already_inflight} for a disconnected key.
+        const pinnedJobId = await pinInflightJob(admin, keyId, 600);
+
+        const { error: discErr } = await admin
+          .from("api_keys")
+          .update({ disconnected_at: new Date().toISOString() } as never)
+          .eq("id", keyId);
+        if (discErr) {
+          throw new Error(`disconnect ${keyId}: ${discErr.message}`);
+        }
+
+        const authed = await createAuthedClient(email, password);
+        const { data, error } = await authed.rpc(
+          "request_allocator_holdings_sync",
+          { p_api_key_id: keyId },
+        );
+        expect(error).not.toBeNull();
+        expect(error?.code).toBe("P0001");
+        expect(error?.message).toBe("api_key_disconnected");
+        expect(
+          (data as Record<string, unknown> | null)?.already_inflight,
+        ).toBeUndefined();
+
+        // No poll job was added for THIS key: the only one is the pinned one.
+        const { data: pollRows, error: pollErr } = await admin
+          .from("compute_jobs")
+          .select("id")
+          .eq("api_key_id", keyId)
+          .eq("kind", "poll_allocator_positions");
+        if (pollErr) throw new Error(`read poll jobs: ${pollErr.message}`);
+        expect((pollRows as { id: string }[]).map((r) => r.id)).toEqual([
+          pinnedJobId,
+        ]);
+      } finally {
+        if (keyId) {
+          try {
+            await admin.from("compute_jobs").delete().eq("api_key_id", keyId);
+          } catch (err) {
+            console.warn(
+              `[issue-008] cleanup compute_jobs for ${keyId}: ${(err as Error).message}`,
             );
           }
         }
