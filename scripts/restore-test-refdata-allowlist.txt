@@ -214,3 +214,8 @@
 20260717233529_allocator_equity_derived_surface.sql	public.compute_job_kinds	1	# :134-135 derive_allocator_equity. The :47 mention is a COMMENT (C1). Consumer: the compute_jobs.kind FK.
 20260907120000_analytics_service_settings_and_vault_tick.sql	public.system_settings	1	# :294-296 analytics_service_url. Consumer: match_engine_cron_tick() at :301+ of this same file. ⚠️ See the L-03 block above before touching this line.
 20260907130000_ledger_refresh_switch_to_system_flags.sql	public.system_flags	1	# :188-190 ledger_refresh_enabled=FALSE. Consumer: the fan-out function in this same file.
+
+# ── C5 LINES (Phase 164.9.2) — top-level literal UPDATEs on a replayed public table ──
+# Deliberately BELOW every INSERT line: the emit orders by (migration filename,
+# byte offset), never by the order of the lines in this file.
+20260521150000_universal_signup_approval_gate.sql	public.profiles	update:3	# C5 — its three top-level UPDATEs of profiles: SET allocator_status = 'verified' (role IN allocator/both), SET manager_status = 'verified' (role IN manager/both), and SET both statuses WHERE is_admin = true. The manager_status one moves the teaser sentinel profile (role manager, replayed from 20260515095804) to the value the restore's wrong-state leg reads.

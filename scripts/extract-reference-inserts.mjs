@@ -107,11 +107,24 @@ export function schemaAllowed(qualified) {
 }
 
 /**
- * @returns {{ entries: Array<{lineNo:number,file:string,qualified:string,schema:string,table:string,count:number,consumer:string}>, malformed: Array<{lineNo:number,reason:string}> }}
+ * Field 3 spells the entry's CLASS as well as its pinned count (Phase 164.9.2):
+ *   `<n>`          kind `insert`  — C1-C4, unchanged grammar;
+ *   `update:<n>`   kind `update`  — C5, top-level literal UPDATEs replayed;
+ *   `decline:<n>`  kind `decline` — C5, top-level NON-literal UPDATEs accounted
+ *                                   for by name and never replayed.
+ */
+const COUNT_RE = /^(?:(update|decline):)?([1-9][0-9]*)$/;
+
+/**
+ * @returns {{ entries: Array<{lineNo:number,file:string,qualified:string,schema:string,table:string,count:number,consumer:string,kind:"insert"|"update"|"decline"}>, malformed: Array<{lineNo:number,reason:string}> }}
  */
 export function parseAllowlist(text) {
   const entries = [];
   const malformed = [];
+  // ⛔ At most ONE `update:` and ONE `decline:` line per (file, table): two lines
+  // of one kind would double-pin a single measured count (plan-checker I2). One of
+  // EACH is legal — a file can hold a literal and a joined UPDATE on one table.
+  const c5Seen = new Map(); // `${kind}|${file}|${qualified}` -> first lineNo
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
@@ -136,14 +149,28 @@ export function parseAllowlist(text) {
       bad(`field 2 "${qualified.slice(0, 60)}" is not a lower-case <schema>.<table>`);
       continue;
     }
-    if (!schemaAllowed(qualified)) {
+    const cm = COUNT_RE.exec(countRaw);
+    const kind = cm ? (cm[1] ?? "insert") : null;
+    if (kind === "update" || kind === "decline") {
+      // ⛔ C5 is `public` ONLY. The C3 `auth.users` exception is INSERT-only and
+      // does not carry over: auth.users SURVIVES the DROP, so a replayed UPDATE
+      // there would mutate shared TEST's live row, not a row the replay just wrote.
+      if (q[1] !== "public") {
+        bad(
+          `field 2 "${qualified}" carries a ${kind}: count, and C5 targets public only — ${qualified} survives the restore's DROP, so an UPDATE replayed there would mutate a live row on shared TEST rather than a row the replay just wrote. The auth.users exception is C3's and is INSERT-only`,
+        );
+        continue;
+      }
+    } else if (!schemaAllowed(qualified)) {
       bad(
         `field 2 "${qualified}" targets a schema outside \`public\` — the restore drops ONLY public, so rows elsewhere survive and need no replay (C3). The ONE exception is auth.users in the teaser file; it is documented in the allowlist header`,
       );
       continue;
     }
-    if (!/^[1-9][0-9]*$/.test(countRaw)) {
-      bad(`field 3 "${countRaw.slice(0, 20)}" is not a positive integer statement count`);
+    if (!cm) {
+      bad(
+        `field 3 "${countRaw.slice(0, 20)}" is not a positive integer statement count (spelled <n> for an INSERT line, update:<n> or decline:<n> for a C5 line)`,
+      );
       continue;
     }
     if (!consumer.startsWith("#") || consumer.replace(/^#+/, "").trim().length === 0) {
@@ -152,14 +179,25 @@ export function parseAllowlist(text) {
       );
       continue;
     }
+    if (kind !== "insert") {
+      const key = `${kind}|${file}|${qualified}`;
+      if (c5Seen.has(key)) {
+        bad(
+          `duplicate C5 line: a second ${kind}: line for ${file} ${qualified} (the first is line ${c5Seen.get(key)}). One (file, table) carries at most one ${kind}: line, because two would double-pin one measured count`,
+        );
+        continue;
+      }
+      c5Seen.set(key, lineNo);
+    }
     entries.push({
       lineNo,
       file,
       qualified,
       schema: q[1],
       table: q[2],
-      count: Number(countRaw),
+      count: Number(cm[2]),
       consumer,
+      kind,
     });
   }
   return { entries, malformed };
@@ -469,9 +507,244 @@ export function matchTable(src, prep, qualified) {
       rejected.push({ line: s.line, reason: why });
       continue;
     }
-    ok.push({ line: s.line, sql: src.slice(s.first, s.end + 1) });
+    // `first` is the byte offset of the statement's first token: the emit sorts
+    // on (basename, first), never on allowlist-line order (Phase 164.9.2, C5).
+    ok.push({ line: s.line, first: s.first, sql: src.slice(s.first, s.end + 1) });
   }
   return { ok, body, rejected };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// C5 — TOP-LEVEL LITERAL UPDATE ON A REPLAYED PUBLIC TABLE (Phase 164.9.2).
+// The allowlist header carries the criterion text; this is its machine half.
+// ───────────────────────────────────────────────────────────────────────────
+
+function targetPfx(schema) {
+  return schema === "public"
+    ? `(?:${quotedId("public")}[\\t\\n ]*\\.[\\t\\n ]*)?`
+    : `${quotedId(schema)}[\\t\\n ]*\\.[\\t\\n ]*`;
+}
+
+function splitQualified(qualified) {
+  const dot = qualified.indexOf(".");
+  return [qualified.slice(0, dot), qualified.slice(dot + 1)];
+}
+
+/**
+ * C5's literal check, over the MASKED statement (string interiors are already
+ * blanked, so what remains is code). Column references in SET and WHERE are
+ * admitted — that is the one real difference from C2's VALUES-tuple rule.
+ * @returns {string|null} the refusal reason, or null when the UPDATE is literal.
+ */
+export function updateLiteralCheck(masked) {
+  const word = /\b(FROM|USING|SELECT|RETURNING|WITH)\b/i.exec(masked);
+  if (word) {
+    return `carries the token ${word[1].toUpperCase()} — a joined, sub-selected or RETURNING UPDATE is not a literal C5 update; decline it with a reason, this extractor does not replay joins (C5)`;
+  }
+  if (masked.includes("$")) {
+    return "carries a `$` (a dollar-quoted body or a positional parameter) — not a literal C5 update (C5)";
+  }
+  // Any `identifier(` is a call, except the IN-list and now(). That bans
+  // current_setting(), net.http_*(), pg_notify() and every other side effect.
+  const call = /([A-Za-z_][A-Za-z0-9_]*)[\t\n ]*\(/g;
+  for (let m; (m = call.exec(masked)) !== null; ) {
+    if (m[1].toUpperCase() === "IN" || m[1].toLowerCase() === "now") continue;
+    return `makes the non-literal call \`${m[1]}(\` — only literals, column references, IN lists and now() are replayable (C5)`;
+  }
+  return null;
+}
+
+function updateHeadRe(schema, table) {
+  return new RegExp(
+    `^UPDATE[\\t\\n ]+(?:ONLY[\\t\\n ]+)?${targetPfx(schema)}${quotedId(table)}(?![A-Za-z0-9_])`,
+    "i",
+  );
+}
+
+/** `UPDATE [ONLY] <target> [[AS] alias] SET` — the only head shape C5 replays. */
+function updateShapeRe(schema, table) {
+  return new RegExp(
+    `^UPDATE[\\t\\n ]+(?:ONLY[\\t\\n ]+)?${targetPfx(schema)}${quotedId(table)}(?:[\\t\\n ]+(?:AS[\\t\\n ]+)?"?[A-Za-z_][A-Za-z0-9_]*"?)?[\\t\\n ]+SET(?![A-Za-z0-9_])`,
+    "i",
+  );
+}
+
+// A CTE-prefixed data-modifying statement (`WITH x AS (…) UPDATE t …`) does not
+// start with UPDATE, so the head regex never sees it. It is refused by name,
+// mirroring `cteHeadRe` on the INSERT side (RESEARCH Pitfall 7).
+function cteUpdateHeadRe(schema, table) {
+  return new RegExp(
+    `^WITH\\b[\\s\\S]*\\bUPDATE[\\t\\n ]+(?:ONLY[\\t\\n ]+)?${targetPfx(schema)}${quotedId(table)}(?![A-Za-z0-9_])`,
+    "i",
+  );
+}
+
+/**
+ * Classify one file's top-level UPDATE spans against one target table.
+ * @returns {{ ok: Array, body: Array, rejected: Array }}
+ *   ok       — top-level literal UPDATEs, replayable under an `update:` line
+ *   body     — hits excluded by C1 (inside a dollar-quoted body)
+ *   rejected — top-level hits C5 will not replay. `nonLiteral: true` marks the
+ *              ones a `decline:` line may account for; every other rejection
+ *              (CTE-prefixed, unterminated, off-shape) is a hard refusal.
+ */
+export function matchUpdate(src, prep, qualified) {
+  const [schema, table] = splitQualified(qualified);
+  const re = updateHeadRe(schema, table);
+  const shape = updateShapeRe(schema, table);
+  const cteRe = cteUpdateHeadRe(schema, table);
+  const ok = [];
+  const body = [];
+  const rejected = [];
+  for (const s of prep.spans) {
+    if (!re.test(s.masked)) {
+      if (!s.inBody && cteRe.test(s.masked)) {
+        rejected.push({
+          line: s.line,
+          nonLiteral: false,
+          reason:
+            "the statement is a CTE-prefixed UPDATE (`WITH … UPDATE`) — a CTE can read existing rows, so C5 cannot classify it; classify it by hand rather than let it be skipped in silence (C5)",
+        });
+      }
+      continue;
+    }
+    if (s.inBody) {
+      body.push({ line: s.line });
+      continue;
+    }
+    if (!s.terminated) {
+      rejected.push({ line: s.line, nonLiteral: false, reason: "the statement is not terminated by `;`" });
+      continue;
+    }
+    if (!shape.test(s.masked)) {
+      rejected.push({
+        line: s.line,
+        nonLiteral: false,
+        reason: `the statement is not of the shape UPDATE [ONLY] ${qualified} [[AS] alias] SET … (C5)`,
+      });
+      continue;
+    }
+    if (s.hasTag) {
+      rejected.push({
+        line: s.line,
+        nonLiteral: true,
+        reason:
+          "the statement carries a dollar-quoted body — the replay section is kept body-free so the restore's redaction grep has nothing to find (C5)",
+      });
+      continue;
+    }
+    const why = updateLiteralCheck(s.masked);
+    if (why) {
+      rejected.push({ line: s.line, nonLiteral: true, reason: why });
+      continue;
+    }
+    ok.push({ line: s.line, first: s.first, sql: src.slice(s.first, s.end + 1) });
+  }
+  return { ok, body, rejected };
+}
+
+/**
+ * Top-level DELETE / TRUNCATE / MERGE on one target table. C5 replays UPDATE
+ * only, so `--audit` refuses every hit here on a table an INSERT entry fills.
+ * @returns {Array<{line:number, verb:string}>}
+ */
+export function matchOtherDml(prep, qualified) {
+  const [schema, table] = splitQualified(qualified);
+  const pfx = targetPfx(schema);
+  const id = `${pfx}${quotedId(table)}(?![A-Za-z0-9_])`;
+  const heads = [
+    ["DELETE", new RegExp(`^DELETE[\\t\\n ]+FROM[\\t\\n ]+(?:ONLY[\\t\\n ]+)?${id}`, "i")],
+    [
+      "TRUNCATE",
+      new RegExp(
+        `^TRUNCATE(?:[\\t\\n ]+TABLE)?[\\t\\n ]+(?:[^;]*?,[\\t\\n ]*)?(?:ONLY[\\t\\n ]+)?${id}`,
+        "i",
+      ),
+    ],
+    ["MERGE", new RegExp(`^MERGE[\\t\\n ]+INTO[\\t\\n ]+(?:ONLY[\\t\\n ]+)?${id}`, "i")],
+    [
+      "CTE-prefixed DELETE/MERGE",
+      new RegExp(
+        `^WITH\\b[\\s\\S]*\\b(?:DELETE[\\t\\n ]+FROM|MERGE[\\t\\n ]+INTO)[\\t\\n ]+(?:ONLY[\\t\\n ]+)?${id}`,
+        "i",
+      ),
+    ],
+  ];
+  const hits = [];
+  for (const s of prep.spans) {
+    if (s.inBody) continue;
+    for (const [verb, re] of heads) {
+      if (re.test(s.masked)) {
+        hits.push({ line: s.line, verb });
+        break;
+      }
+    }
+  }
+  return hits;
+}
+
+/**
+ * THE ONE C5 VERDICT, shared by emit and `--audit` so the two can never
+ * disagree. `upd` / `dec` are the pair's `update:` / `decline:` entries (either
+ * may be absent; in `--audit` both may be).
+ * @returns {{ refusals: Array<{line:number|null, reason:string}>, replay: Array, declined: number }}
+ */
+export function c5Verdict(m, qualified, upd, dec) {
+  const refusals = [];
+  const hard = m.rejected.filter((r) => !r.nonLiteral);
+  const nonLit = m.rejected.filter((r) => r.nonLiteral);
+  for (const r of hard) refusals.push({ line: r.line, reason: r.reason });
+  const publicOnly = qualified.startsWith("public.");
+
+  // Literal (replayable) spans.
+  if (upd) {
+    if (m.ok.length !== upd.count) {
+      refusals.push({
+        line: m.ok[0]?.line ?? m.body[0]?.line ?? null,
+        reason:
+          m.ok.length === 0 && m.body.length > 0
+            ? `the C5 line pins update:${upd.count} but the only UPDATE of ${qualified} in this file is inside a dollar-quoted body at line ${m.body[0].line} (C1)`
+            : `the C5 line pins update:${upd.count} top-level statement(s) but ${m.ok.length} were measured. A pinned count moves ONLY when an applied migration is edited — understand the edit, do not re-pin the number`,
+      });
+    }
+  } else {
+    for (const s of m.ok) {
+      refusals.push({
+        line: s.line,
+        reason: !publicOnly
+          ? `a top-level UPDATE of ${qualified}, which an INSERT entry replays, and C5 targets public only — no allowlist line can account for it, because ${qualified} survives the restore and replaying the UPDATE would mutate a live row on shared TEST. Move the change out of the migration's top level, or take it to review`
+          : dec
+            ? `a literal UPDATE is replayed, not declined — this (file, table) carries a decline: line but the statement is literal. Add an update: line for it; a decline must never hide a replayable effect (C5)`
+            : `NO C5 allowlist line; add an update: line for this top-level literal UPDATE of a table the replay fills, with the reason it matters (C5)`,
+      });
+    }
+  }
+
+  // Non-literal spans.
+  if (dec) {
+    if (nonLit.length !== dec.count) {
+      refusals.push({
+        line: nonLit[0]?.line ?? null,
+        reason: `the C5 line pins decline:${dec.count} top-level statement(s) but ${nonLit.length} were measured. A pinned count moves ONLY when an applied migration is edited — understand the edit, do not re-pin the number`,
+      });
+    }
+  } else {
+    for (const r of nonLit) {
+      refusals.push({
+        line: r.line,
+        reason: !publicOnly
+          ? `a top-level non-literal UPDATE of ${qualified}, and C5 targets public only — no allowlist line can account for it (C5)`
+          : upd
+            ? r.reason
+            : `classify by hand: decline it with a reason, this extractor does not replay joins — ${r.reason}`,
+      });
+    }
+  }
+  return {
+    refusals,
+    replay: upd && refusals.length === 0 ? m.ok : [],
+    declined: dec && refusals.length === 0 ? nonLit.length : 0,
+  };
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -513,6 +786,18 @@ function loadEntries(io, allowlistPath, migrationsDir) {
     });
     return null;
   }
+  if (
+    parsed.malformed.length === 0 &&
+    parsed.entries.length > 0 &&
+    !parsed.entries.some((e) => e.kind === "insert")
+  ) {
+    refuse(io, {
+      file: rel(allowlistPath),
+      reason:
+        "the allowlist carries C5 lines but NO INSERT line. C5 replays UPDATEs onto rows the INSERT replay wrote, so with no INSERT line it replays nothing the restore's count floor can measure — the same defect as an empty allowlist, not a clean run",
+    });
+    return null;
+  }
   for (const e of parsed.entries) {
     if (!existsSync(join(migrationsDir, e.file))) {
       refuse(io, {
@@ -526,23 +811,62 @@ function loadEntries(io, allowlistPath, migrationsDir) {
   return parsed.malformed.length > 0 || io.err.length > 0 ? null : parsed.entries;
 }
 
-/** Classify one allowlist entry, pushing every refusal it earns. */
-function classifyEntry(io, migrationsDir, cache, e) {
-  const path = join(migrationsDir, e.file);
-  if (!cache.has(e.file)) {
-    const src = readFileSync(path, "utf8");
-    cache.set(e.file, { src, prep: prepareFile(src) });
+/**
+ * Group the C5 entries by (file, table): each pair carries at most one `update:`
+ * and one `decline:` entry (parse refuses a duplicate), and the C5 verdict is a
+ * property of the PAIR — a literal span is legal only beside an `update:` line,
+ * a non-literal one only beside a `decline:` line.
+ * @returns {Map<string, {file:string, qualified:string, upd?:object, dec?:object}>}
+ */
+function c5Pairs(entries) {
+  const pairs = new Map();
+  for (const e of entries) {
+    if (e.kind === "insert") continue;
+    const key = `${e.file}|${e.qualified}`;
+    if (!pairs.has(key)) pairs.set(key, { file: e.file, qualified: e.qualified });
+    pairs.get(key)[e.kind === "update" ? "upd" : "dec"] = e;
   }
-  const { src, prep } = cache.get(e.file);
-  if (prep.error) {
+  return pairs;
+}
+
+function loadFile(io, migrationsDir, cache, file, qualified) {
+  if (!cache.has(file)) {
+    const src = readFileSync(join(migrationsDir, file), "utf8");
+    cache.set(file, { src, prep: prepareFile(src) });
+  }
+  const got = cache.get(file);
+  if (got.prep.error) {
     refuse(io, {
-      file: e.file,
-      line: prep.line,
-      table: e.qualified,
-      reason: `the file could not be lexed (${prep.error}) — "could not measure" is never a pass`,
+      file,
+      line: got.prep.line,
+      table: qualified,
+      reason: `the file could not be lexed (${got.prep.error}) — "could not measure" is never a pass`,
     });
     return null;
   }
+  return got;
+}
+
+/**
+ * Classify one C5 (file, table) pair for emit: the replayable UPDATE spans, or
+ * null after pushing every refusal. Same `c5Verdict` as `--audit`.
+ */
+function classifyC5Pair(io, migrationsDir, cache, pair) {
+  const got = loadFile(io, migrationsDir, cache, pair.file, pair.qualified);
+  if (!got) return null;
+  const m = matchUpdate(got.src, got.prep, pair.qualified);
+  const v = c5Verdict(m, pair.qualified, pair.upd, pair.dec);
+  for (const r of v.refusals) {
+    refuse(io, { file: pair.file, line: r.line, table: pair.qualified, reason: r.reason });
+  }
+  return v.refusals.length > 0 ? null : v;
+}
+
+/** Classify one INSERT allowlist entry, pushing every refusal it earns. */
+function classifyEntry(io, migrationsDir, cache, e) {
+  const got = loadFile(io, migrationsDir, cache, e.file, e.qualified);
+  if (!got) return null;
+  const { src, prep } = got;
   const m = matchTable(src, prep, e.qualified);
   for (const r of m.rejected) {
     refuse(io, { file: e.file, line: r.line, table: e.qualified, reason: r.reason });
@@ -579,21 +903,58 @@ function modeEmit(io, allowlistPath, migrationsDir) {
   const entries = loadEntries(io, allowlistPath, migrationsDir);
   if (!entries) return 1;
   const cache = new Map();
-  const blocks = [];
-  const perTable = new Map();
+  const blocks = []; // {file, first, text}
+  const perTable = new Map(); // ⛔ INSERT statements ONLY — see the trailer note below
+  const insertEntries = entries.filter((e) => e.kind === "insert");
+  let insertN = 0;
+  let updateN = 0;
+  const updateTables = new Set();
   let bad = 0;
-  for (const e of entries) {
+  for (const e of insertEntries) {
     const ok = classifyEntry(io, migrationsDir, cache, e);
     if (!ok) {
       bad = 1;
       continue;
     }
     for (const s of ok) {
-      blocks.push(`${s.sql}\n-- refdata: ${e.file}:${s.line} ${e.qualified}`);
+      blocks.push({ file: e.file, first: s.first, text: `${s.sql}\n-- refdata: ${e.file}:${s.line} ${e.qualified}` });
     }
+    insertN += ok.length;
     perTable.set(e.qualified, (perTable.get(e.qualified) ?? 0) + ok.length);
   }
+  // C5. Membership ("the table is one an INSERT entry fills") is NOT checked
+  // here, only in `--audit`: the local-stack lane hands this mode a FILTERED
+  // allowlist that can legitimately drop the INSERT line while keeping an older
+  // UPDATE line (RESEARCH Pitfall 6). Emit checks `public.*` alone (at parse).
+  const pairs = Array.from(c5Pairs(entries).values());
+  for (const pair of pairs) {
+    const v = classifyC5Pair(io, migrationsDir, cache, pair);
+    if (!v) {
+      bad = 1;
+      continue;
+    }
+    // ⛔ UPDATE blocks carry ONLY a `-- refdata-update:` trailer and add NOTHING
+    // to `perTable`. The restore's in-transaction count floor is built from the
+    // `-- refdata-expect:` trailers and asserts `count(*) >= expected`; an UPDATE
+    // adds no row, so counting one there makes `public.profiles` read SHORT and
+    // aborts every restore (RESEARCH Pitfall 2).
+    for (const s of v.replay) {
+      blocks.push({
+        file: pair.file,
+        first: s.first,
+        text: `${s.sql}\n-- refdata-update: ${pair.file}:${s.line} ${pair.qualified}`,
+      });
+    }
+    updateN += v.replay.length;
+    if (v.replay.length > 0) updateTables.add(pair.qualified);
+  }
   if (bad) return 1;
+
+  // ⛔ EMIT ORDER IS (migration basename, byte offset), NEVER ALLOWLIST-LINE
+  // ORDER. Basename order is the order the migrations ran; within a file, byte
+  // offset is authored order. An UPDATE emitted before the INSERT it follows in
+  // migration history reaches no row, and the count gates cannot see that.
+  blocks.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.first - b.first));
 
   io.out.push(
     "-- ─────────────────────────────────────────────────────────────────────────",
@@ -604,13 +965,16 @@ function modeEmit(io, allowlistPath, migrationsDir) {
     "-- Each statement below is the ORIGINAL bytes of an allowlisted migration",
     "-- statement, sliced by offset. Nothing is rewritten, re-ordered within a",
     "-- file, or made idempotent here — the idempotence is the migration's own.",
+    "-- Blocks run in (migration filename, byte offset) order: INSERTs end with",
+    "-- a `-- refdata:` trailer, C5 UPDATEs with a `-- refdata-update:` trailer.",
     "-- ─────────────────────────────────────────────────────────────────────────",
   );
-  for (const b of blocks) io.out.push(b);
+  for (const b of blocks) io.out.push(b.text);
   const tables = Array.from(perTable.keys()).sort();
   for (const t of tables) io.out.push(`-- refdata-expect: ${t}=${perTable.get(t)}`);
   io.err.push(
-    `extract-reference-inserts: emitted ${blocks.length} statement(s) over ${tables.length} table(s) from ${entries.length} allowlist entr(ies).`,
+    `extract-reference-inserts: emitted ${insertN} statement(s) over ${tables.length} table(s) from ${insertEntries.length} allowlist entr(ies).`,
+    `extract-reference-inserts: emitted ${updateN} C5 update statement(s) over ${updateTables.size} table(s) from ${pairs.filter((p) => p.upd).length} update: line(s); ${pairs.filter((p) => p.dec).length} decline: line(s) emit nothing.`,
   );
   return 0;
 }
@@ -620,8 +984,11 @@ function modeEmit(io, allowlistPath, migrationsDir) {
 // ───────────────────────────────────────────────────────────────────────────
 
 function modeAudit(io, allowlistPath, migrationsDir) {
-  const entries = loadEntries(io, allowlistPath, migrationsDir);
-  if (!entries) return 1;
+  const allEntries = loadEntries(io, allowlistPath, migrationsDir);
+  if (!allEntries) return 1;
+  // The INSERT census below (and its `audit OK:` line) counts INSERT entries
+  // ONLY, byte-stable since 164.8.1 (decision D-03). C5 is audited separately.
+  const entries = allEntries.filter((e) => e.kind === "insert");
 
   // ⛔ `|` AND NOT A RAW NUL. This key was built with a literal U+0000 separator,
   // which src/__tests__/drift-check-scripts.test.ts refuses in any scanned script:
