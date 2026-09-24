@@ -2804,6 +2804,86 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       expect(cardButton("key-h", "Resync")).toBeEnabled();
     });
 
+    // ── 167.2-REVIEW-SFH L-1 / L-2: a withheld success leaves a trace ─────
+    // Hand-typed from the UI-SPEC review-fix row KCS-FINISH-UNVERIFIED.
+    const FINISH_UNVERIFIED =
+      "This sync finished, but the key list could not be re-read to confirm the key's status. Reload this page to see it.";
+
+    it("L1-NOTE-SURVIVES: a success withheld for an unverified list leaves a note that the late clean re-read does not clear, and the next attempt does", async () => {
+      routeFetch();
+      await renderRows([row({ id: "key-h", label: "Healthy MT5", sync_status: "complete" })], "key-h");
+      await resync("key-h");
+
+      selectResultMock.mockReturnValue({ data: null, error: { message: "network error" } });
+      await finish("complete");
+      await waitFor(() => {
+        expect(screen.getByText(FINISH_UNVERIFIED)).toBeInTheDocument();
+      });
+
+      // The load-error Retry reads cleanly and clears the banner, NOT the note.
+      selectResultMock.mockReturnValue({
+        data: [row({ id: "key-h", label: "Healthy MT5", sync_status: "complete" })],
+        error: null,
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      });
+      await waitFor(() => {
+        expect(screen.queryByText(/Couldn't load your API keys/i)).not.toBeInTheDocument();
+      });
+      expect(screen.getByText(FINISH_UNVERIFIED)).toBeInTheDocument();
+
+      // A new attempt replaces it.
+      await resync("key-h");
+      expect(screen.queryByText(FINISH_UNVERIFIED)).not.toBeInTheDocument();
+    });
+
+    it("L1-CONTROL: a success withheld beside an UNTRUSTED subject leaves no such note (the pill is the signal)", async () => {
+      routeFetch();
+      await renderRows([row({ id: "key-h", label: "Healthy MT5", sync_status: "complete" })], "key-h");
+      await resync("key-h");
+      selectResultMock.mockReturnValue({
+        data: [row({ id: "key-h", label: "Healthy MT5", sync_status: "sign_in_failed" })],
+        error: null,
+      });
+      await finish("complete");
+      expect(screen.queryByText(FINISH_UNVERIFIED)).not.toBeInTheDocument();
+    });
+
+    it("L2-NULL-DATA: a re-read answering neither rows nor an error is not a clean read: the success is withheld and the load error shows", async () => {
+      routeFetch();
+      await renderRows([row({ id: "key-h", label: "Healthy MT5", sync_status: "complete" })], "key-h");
+      await resync("key-h");
+      selectResultMock.mockReturnValue({ data: null, error: null });
+      await finish("complete");
+      await waitFor(() => {
+        expect(screen.getByText(/Couldn't load your API keys/i)).toBeInTheDocument();
+      });
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+    });
+
+    it("L2-SUBJECT-ABSENT: a clean re-read that no longer holds the subject key shows no success for it", async () => {
+      routeFetch();
+      await renderRows(
+        [
+          row({ id: "key-h", label: "Healthy MT5", sync_status: "complete" }),
+          row({ id: "key-o", label: "Other", sync_status: "complete" }),
+        ],
+        "key-h",
+      );
+      await resync("key-h");
+      // Deleted in another tab: the re-read holds only the other key.
+      selectResultMock.mockReturnValue({
+        data: [row({ id: "key-o", label: "Other", sync_status: "complete" })],
+        error: null,
+      });
+      await finish("complete");
+      await waitFor(() => {
+        expect(screen.queryByTestId("api-key-card-key-h")).not.toBeInTheDocument();
+      });
+      expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
+    });
+
     // ── R3's retirement leaves `error` alone (SFH MEDIUM-1, MEDIUM-2) ───────
 
     it("R3 keeps an error: after J's own sync fails, a successful Update password leaves the panel's error and its message in place", async () => {

@@ -270,3 +270,12 @@ export const EMPTY_NOLINK_COPY = "No API keys connected.";
  */
 export const DELETE_COMPOSITE_MEMBER_COPY =
   "This key is part of a composite strategy, so it is not deleted here. Contact support@quantalyze.com to change which keys the composite uses.";
+
+/**
+ * KCS-FINISH-UNVERIFIED (UI-SPEC § Review-fix amendments, 167.2-REVIEW-SFH
+ * L-1). A terminal success was withheld because the key list could not be
+ * re-read (it failed, threw or timed out), so the card cannot vouch for the
+ * key. Shown once the panel is idle, and kept until the next attempt.
+ */
+export const FINISH_UNVERIFIED_NOTE =
+  "This sync finished, but the key list could not be re-read to confirm the key's status. Reload this page to see it.";

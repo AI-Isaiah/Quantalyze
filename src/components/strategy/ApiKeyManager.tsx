@@ -12,6 +12,7 @@ import {
   COMPOSITE_CARD_NOTE,
   DELETE_COMPOSITE_MEMBER_COPY,
   EMPTY_NOLINK_COPY,
+  FINISH_UNVERIFIED_NOTE,
   SHAPE_UNKNOWN_CARD_NOTE,
   ENQUEUE_BOUND_MS,
   LINK_UPDATE_BOUND_MS,
@@ -217,6 +218,13 @@ const BASELINE_READ_BOUND_MS = 15_000;
 interface KeysReadOutcome {
   ok: boolean;
   subjectStatus: string | null;
+  /**
+   * 167.2-REVIEW-SFH L-2: whether the subject key is among the applied rows at
+   * all. A subject missing from them (deleted in another tab) used to read as
+   * `subjectStatus: null`, i.e. "not untrusted", and the panel showed "Up to
+   * date" for a key the list no longer held.
+   */
+  subjectPresent: boolean;
 }
 
 
@@ -314,7 +322,14 @@ export function ApiKeyManager({
     seq: 0,
     ok: true,
     subjectStatus: null,
+    subjectPresent: false,
   });
+  // 167.2-REVIEW-SFH L-1: a terminal SUCCESS was withheld because the list
+  // could not be re-read (not because its key is untrusted). The panel lands
+  // on idle and unmounts, so without this nothing said a sync had just
+  // finished once a later read cleared the load-error banner. Cleared only by
+  // the next attempt's registration, never by a list read.
+  const [finishUnverified, setFinishUnverified] = useState(false);
   const router = useRouter();
 
   // Resolves `{ ok, subjectStatus }` (see `KeysReadOutcome`): `ok` is false
@@ -344,26 +359,33 @@ export function ApiKeyManager({
       .select(API_KEY_USER_COLUMNS)
       .order("created_at", { ascending: false });
     if (seq < appliedKeysReadRef.current.seq) {
-      const { ok, subjectStatus } = appliedKeysReadRef.current;
-      return { ok, subjectStatus };
+      const { ok, subjectStatus, subjectPresent } = appliedKeysReadRef.current;
+      return { ok, subjectStatus, subjectPresent };
     }
-    if (keysErr) {
+    // 167.2-REVIEW-SFH L-2: `data: null` with no error is not a clean read
+    // either (it used to be recorded as `ok: true`), so it takes the error arm.
+    if (keysErr || !data) {
       // The rows on screen are unchanged, so is their subject status.
+      const { subjectStatus: prevStatus, subjectPresent: prevPresent } =
+        appliedKeysReadRef.current;
       appliedKeysReadRef.current = {
         seq,
         ok: false,
-        subjectStatus: appliedKeysReadRef.current.subjectStatus,
+        subjectStatus: prevStatus,
+        subjectPresent: prevPresent,
       };
-      console.error("[ApiKeyManager] api_keys fetch failed:", keysErr.message);
+      const message = keysErr?.message ?? "the key list read returned no rows and no error";
+      console.error("[ApiKeyManager] api_keys fetch failed:", message);
       // H-0395: a non-empty error (network/RLS/session) is NOT "no keys".
       // Surface a distinct, retryable error state and keep whatever keys we
       // had — never let the failure collapse into the empty "no keys" UI.
-      setLoadError(keysErr.message);
-      return { ok: false, subjectStatus: appliedKeysReadRef.current.subjectStatus };
+      setLoadError(message);
+      return { ok: false, subjectStatus: prevStatus, subjectPresent: prevPresent };
     }
-    const subjectStatus =
-      data?.find((k) => k.id === lastAttemptedKeyIdRef.current)?.sync_status ?? null;
-    appliedKeysReadRef.current = { seq, ok: true, subjectStatus };
+    const subjectRow = data.find((k) => k.id === lastAttemptedKeyIdRef.current);
+    const subjectStatus = subjectRow?.sync_status ?? null;
+    const subjectPresent = subjectRow !== undefined;
+    appliedKeysReadRef.current = { seq, ok: true, subjectStatus, subjectPresent };
     // Reached only on a clean response: clear any prior load error so a
     // successful retry restores the normal list / genuine-empty state.
     setLoadError(null);
@@ -383,7 +405,7 @@ export function ApiKeyManager({
     // THESE rows, never by a render's copy, and its updater leaves every
     // in-flight value (syncing, computing) and every non-success alone.
     retireWithheldSuccess(isUntrustedKeySyncStatus(subjectStatus));
-    return { ok: true, subjectStatus };
+    return { ok: true, subjectStatus, subjectPresent };
     // `retireWithheldSuccess` is deliberately not a dependency: called with an
     // explicit argument it reads nothing from its render (only the stable
     // `setSyncStatus`), and making it one would re-key this callback, and so
@@ -476,9 +498,17 @@ export function ApiKeyManager({
         // untrusted subject the panel lands on idle, as after a failed re-read,
         // so no later re-read (the load-error Retry, a refresh, another tab's
         // fix or delete) can lift a render-time withhold and re-show it.
+        // 167.2-REVIEW-SFH L-2: and only while the subject is still among the
+        // applied rows; a subject deleted elsewhere shows no success.
         const subjectTrusted =
-          reread !== null && !isUntrustedKeySyncStatus(reread.subjectStatus);
+          reread !== null &&
+          reread.subjectPresent &&
+          !isUntrustedKeySyncStatus(reread.subjectStatus);
         setSyncStatus(reread?.ok && subjectTrusted ? status : "idle");
+        // 167.2-REVIEW-SFH L-1: withheld because the LIST is unverified (a
+        // failed, thrown or timed-out re-read), not because of the key: say
+        // that the sync finished, in a note the later reads do not clear.
+        if (reread === null || !reread.ok) setFinishUnverified(true);
         router.refresh();
       }
     } else if (status === "no_result") {
@@ -1002,6 +1032,7 @@ export function ApiKeyManager({
     setAttemptSeq((seq) => seq + 1);
     setEvidenceBaseline("unknown");
     setPanelStopReason(null);
+    setFinishUnverified(false);
     setSyncingKeyId(keyId);
     setLastAttemptedKeyId(keyId);
     lastAttemptedKeyIdRef.current = keyId;
@@ -1546,6 +1577,15 @@ export function ApiKeyManager({
           onRetry={() => lastAttemptedKeyId && handleSyncTrades(lastAttemptedKeyId)}
           onStatusChange={handleSyncStatusChange}
         />
+      )}
+
+      {/* 167.2-REVIEW-SFH L-1 (UI-SPEC KCS-FINISH-UNVERIFIED): a terminal
+          success withheld for an unverified list leaves this muted note,
+          which a later list read does not clear. */}
+      {finishUnverified && syncStatus === "idle" && (
+        <p data-testid="sync-finish-unverified" className="text-xs text-text-muted">
+          {FINISH_UNVERIFIED_NOTE}
+        </p>
       )}
 
       <Modal

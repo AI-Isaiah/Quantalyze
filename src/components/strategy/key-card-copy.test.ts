@@ -18,6 +18,7 @@ import {
   formatBoundDuration,
   DELETE_COMPOSITE_MEMBER_COPY,
   EMPTY_NOLINK_COPY,
+  FINISH_UNVERIFIED_NOTE,
   PANEL_STOP_COPY,
   SHAPE_UNKNOWN_CARD_NOTE,
   SYNC_SLOW_NOTE,
@@ -200,5 +201,13 @@ describe("KCS-LATE-STARTED (167.2-REVIEW-SFH M-1): the enqueue answered after it
     );
     const { label, detail } = PANEL_STOP_COPY.enqueue_late_started;
     expect(`${label} ${detail}`).not.toMatch(/fail|error/i);
+  });
+});
+
+describe("KCS-FINISH-UNVERIFIED (167.2-REVIEW-SFH L-1)", () => {
+  it("the note a success withheld for an unverified list leaves", () => {
+    expect(FINISH_UNVERIFIED_NOTE).toBe(
+      "This sync finished, but the key list could not be re-read to confirm the key's status. Reload this page to see it.",
+    );
   });
 });
