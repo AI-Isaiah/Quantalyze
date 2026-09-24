@@ -194,6 +194,7 @@ describe("SyncProgress poll loop — timing (characterization)", () => {
   });
 
   it("PIN 2 — MISSING-ROW GRACE: 10 polls tolerated, 11th escalates once", async () => {
+    // Moved by Phase 167.2 / KCS-22: a give-up ends the attempt as "no_result", not "error" (the timing is unchanged).
     // PGRST116 = 0 rows via .single() (the expected 'row not yet created' case).
     mockState.analyticsResult = { data: null, error: { code: "PGRST116" } };
     const { onStatusChange } = renderPoller("computing");
@@ -201,41 +202,45 @@ describe("SyncProgress poll loop — timing (characterization)", () => {
 
     // Polls 1..10 (SyncProgress.tsx:244 — attempts > 10 is false): silent.
     await tick(POLL_MS * 10);
-    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
 
     // Poll 11 (attempts = 11 > MISSING_ROW_GRACE_POLLS): escalates exactly once.
     await tick(POLL_MS);
-    expect(callsWith(onStatusChange, "error")).toBe(1);
+    expect(callsWith(onStatusChange, "no_result")).toBe(1);
   });
 
   it("PIN 3 — 120s CAP: 40 polls with a present row never error, 41st does", async () => {
+    // Moved by Phase 167.2 / KCS-22: a give-up ends the attempt as "no_result", not "error" (the timing is unchanged).
     // A present, non-terminal row so the grace path (:243) never fires and the
     // ONLY escalation source is the outer cap (:216).
     mockState.analyticsResult = analyticsRow("computing");
     const { onStatusChange } = renderPoller("computing");
     await tick(0);
 
-    // Polls 1..40 forward "computing" but never "error" (attempts !> 40).
+    // Polls 1..40 forward "computing" but never escalate (attempts !> 40).
     await tick(POLL_MS * 40);
-    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
     expect(callsWith(onStatusChange, "computing")).toBe(40);
 
     // Poll 41 (attempts = 41 > POLL_MAX_ATTEMPTS): escalates before the query,
     // so the select counter does NOT advance on this tick.
     const beforeCount = mockState.analyticsSelectCount;
     await tick(POLL_MS);
-    expect(callsWith(onStatusChange, "error")).toBe(1);
+    expect(callsWith(onStatusChange, "no_result")).toBe(1);
+    expect(onStatusChange.mock.calls.at(-1)).toEqual(["no_result", { stopReason: "poll_cap" }]);
+    expect(callsWith(onStatusChange, "error")).toBe(0);
     expect(mockState.analyticsSelectCount).toBe(beforeCount);
   });
 
   it("PIN 4 — COUNTER RESET: re-activation restarts the attempt counter (:272)", async () => {
+    // Moved by Phase 167.2 / KCS-22: a give-up ends the attempt as "no_result", not "error" (the timing is unchanged).
     mockState.analyticsResult = { data: null, error: { code: "PGRST116" } };
     const { onStatusChange, rerenderStatus } = renderPoller("computing");
     await tick(0);
 
     // Drive 5 missing-row polls (attempts 1..5 — below the grace boundary).
     await tick(POLL_MS * 5);
-    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
 
     // Go inactive (interval cleared), then active again (pollAttemptsRef = 0).
     rerenderStatus("complete");
@@ -246,7 +251,7 @@ describe("SyncProgress poll loop — timing (characterization)", () => {
     // 10 more missing-row polls. If the counter had NOT reset, attempts would
     // run 6..15 and escalate at the 6th tick; a fresh 1..10 stays silent.
     await tick(POLL_MS * 10);
-    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
   });
 });
 
@@ -314,6 +319,7 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
   });
 
   it("PIN 7 — NO CONSECUTIVE-ERROR ESCALATION: a non-PGRST116 error consumes grace like a missing row", async () => {
+    // Moved by Phase 167.2 / KCS-22: a give-up ends the attempt as "no_result", not "error" (the timing is unchanged).
     // Load-bearing asymmetry vs the wizard's MAX_CONSECUTIVE_POLL_ERRORS=3
     // (95-RESEARCH Pitfall 6): SyncProgress has NO consecutive-error counter.
     // A Supabase error with data:null falls through the same `if (!data)` grace
@@ -332,11 +338,11 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
 
     // Still silent right up to the grace boundary (polls 4..10).
     await tick(POLL_MS * 7);
-    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
 
     // Escalation happens ONLY at the missing-row grace boundary (poll 11).
     await tick(POLL_MS);
-    expect(callsWith(onStatusChange, "error")).toBe(1);
+    expect(callsWith(onStatusChange, "no_result")).toBe(1);
     errSpy.mockRestore();
   });
 
@@ -364,6 +370,7 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
   // asymmetry vs the wizard that PIN 7 pins for the error-valued shape).
   // ═══════════════════════════════════════════════════════════════════════
   it("PIN 9 — CLEAN ZERO-ROWS: {data:null,error:null} consumes grace unchanged (interval arm, 154-04)", async () => {
+    // Moved by Phase 167.2 / KCS-22: a give-up ends the attempt as "no_result", not "error" (the timing is unchanged).
     // PostgREST's zero-rows answer with NO error — not PGRST116, not a throw.
     mockState.analyticsResult = { data: null, error: null };
     const { onStatusChange } = renderPoller("computing");
@@ -376,12 +383,12 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
 
     // Polls 4..10 — still inside the grace window: no status, no escalation.
     await tick(POLL_MS * 7);
-    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
     expect(onStatusChange).not.toHaveBeenCalled();
 
     // Poll 11 — the grace boundary, and the ONLY escalation source here.
     await tick(POLL_MS);
-    expect(callsWith(onStatusChange, "error")).toBe(1);
+    expect(callsWith(onStatusChange, "no_result")).toBe(1);
 
     // The read DID happen on every tick — otherwise the absences above would be
     // satisfied by a loop that never ran.

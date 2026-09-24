@@ -116,6 +116,11 @@ const POLL_MS = 3000;
 // Hand-typed, never imported: the copy `handleSyncStatusChange` fills in when
 // the poller escalates without a message of its own.
 const TIMEOUT_COPY = "Analytics computation timed out. Please retry or contact support.";
+// Phase 167.2 / KCS-22: hand-typed from 167.2-UI-SPEC.md § KCS-22, never
+// imported from key-card-copy.ts (the house rule for locked copy).
+const NO_RESULT_LABEL = "No result yet";
+const KCS22_CAP =
+  "This panel stopped checking after 2 minutes. The sync may still be running: reload this page later to see its result.";
 
 function healthyRow() {
   return {
@@ -221,10 +226,17 @@ async function startResyncWithHeldEnqueue() {
   return enqueue;
 }
 
+/**
+ * Did the attempt end on a give-up or a failure? Moved by Phase 167.2 / KCS-22:
+ * a give-up now renders "No result yet" instead of the timeout copy, so the
+ * absences below would pass vacuously unless that label counts too. Lineage:
+ * this checked "Sync failed" and TIMEOUT_COPY only.
+ */
 function panelShowsTimeout() {
   return (
     screen.queryByText("Sync failed") !== null ||
-    screen.queryByText(TIMEOUT_COPY) !== null
+    screen.queryByText(TIMEOUT_COPY) !== null ||
+    screen.queryByText(NO_RESULT_LABEL) !== null
   );
 }
 
@@ -319,11 +331,13 @@ describe("ApiKeyManager + the REAL poller: the budget starts at the enqueue (167
     await tick(POLL_MS * 10);
     expect(panelShowsTimeout()).toBe(false);
 
-    // Poll 11 after the enqueue escalates: the panel shows the timeout copy,
-    // and the attempt ends (Resync is usable again).
+    // Poll 11 after the enqueue escalates, and the attempt ends (Resync is
+    // usable again). Moved by Phase 167.2 / KCS-22: the give-up renders
+    // "No result yet", not "Sync failed" with the timeout copy. Lineage: this
+    // asserted both of those.
     await tick(POLL_MS);
-    expect(screen.getByText("Sync failed")).toBeInTheDocument();
-    expect(screen.getByText(TIMEOUT_COPY)).toBeInTheDocument();
+    expect(screen.getByText(NO_RESULT_LABEL)).toBeInTheDocument();
+    expect(screen.queryByText("Sync failed")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
   });
 
@@ -556,6 +570,36 @@ describe("ApiKeyManager + the REAL poller: a success waits for the job queue (Ph
     await tick(0);
     expect(mockState.jobReadCount).toBe(3);
     expect(screen.getByText("Synced with warnings")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
+  });
+});
+
+describe("ApiKeyManager + the REAL poller: a give-up is not a failure (Phase 167.2 / KCS-22)", () => {
+  it("CAP-GIVEUP: a job still computing after 40 polls ends as No result yet with the KCS22-CAP sentence, no Sync failed and no Retry", async () => {
+    mockState.analyticsResult = analyticsRow("computing");
+    const enqueue = await startResyncWithHeldEnqueue();
+    await act(async () => {
+      enqueue.resolve(accepted());
+    });
+    await tick(0);
+
+    // Polls 1..40 read the healthy computing row: still computing.
+    await tick(POLL_MS * 40);
+    expect(screen.getByText("Computing analytics...")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Syncing…" })).toBeDisabled();
+
+    // Poll 41 is the cap: the panel stops checking, and says so.
+    await tick(POLL_MS);
+    expect(screen.getByText(NO_RESULT_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(KCS22_CAP)).toBeInTheDocument();
+    expect(
+      screen.queryByText("Sync failed"),
+      "the panel's own give-up was rendered as a failure",
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(TIMEOUT_COPY)).not.toBeInTheDocument();
+    // No Retry: a re-POST while the job may still be live can insert a second job.
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    // The attempt ended, so the key's Resync is usable again.
     expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
   });
 });

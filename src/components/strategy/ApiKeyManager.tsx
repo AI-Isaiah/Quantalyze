@@ -7,8 +7,13 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "./ApiKeyForm";
-import { addKeyBlockedReason } from "./key-card-copy";
-import { SyncProgress, type EvidenceBaseline, type SyncStatus } from "./SyncProgress";
+import { addKeyBlockedReason, type PanelStopReason } from "./key-card-copy";
+import {
+  SyncProgress,
+  type EvidenceBaseline,
+  type SyncStatus,
+  type SyncStatusInfo,
+} from "./SyncProgress";
 import { UpdateMt5SecretDialog } from "./UpdateMt5SecretDialog";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 import type { ApiKey } from "@/lib/types";
@@ -215,6 +220,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   // key its "has read computing" evidence would carry into the next attempt.
   const [evidenceBaseline, setEvidenceBaseline] = useState<EvidenceBaseline>("unknown");
   const [attemptSeq, setAttemptSeq] = useState(0);
+  // Phase 167.2 / KCS-22: which give-up ended the attempt as `no_result` (the
+  // reason the panel forwarded), so the panel says how long it waited. Reset
+  // at every attempt's registration.
+  const [panelStopReason, setPanelStopReason] = useState<PanelStopReason | null>(null);
   // Phase 167.2 / KCS-01 (RESEARCH P7, the reverse overlap): true while an
   // Add Key is in flight, from before its validate request until it hands off
   // to its own tracked attempt. A ref, not `loading`: `loading` is async
@@ -296,7 +305,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     return true;
   }, []);
 
-  const handleSyncStatusChange = useCallback(async (status: SyncStatus) => {
+  const handleSyncStatusChange = useCallback(async (status: SyncStatus, info?: SyncStatusInfo) => {
     // Only the live attempt's poll may move the panel, and only after its own
     // enqueue response resolved: a read taken before then is the strategy's
     // PREVIOUS analytics row, and its terminal status would end this attempt
@@ -362,6 +371,15 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         setSyncStatus(reread ? status : "idle");
         router.refresh();
       }
+    } else if (status === "no_result") {
+      // Phase 167.2 / KCS-22: the panel stopped checking (its poll cap or its
+      // missing-row grace ran out) with no accepted result. That ends the
+      // attempt, so Resync, Update password and Delete are usable again, but it
+      // is not a failure: no "Sync failed", no Retry, no error detail.
+      endAttempt(attempt);
+      setSyncStatus("no_result");
+      setPanelStopReason(info?.stopReason ?? null);
+      setSyncError(null);
     } else if (status === "error") {
       endAttempt(attempt);
       setSyncStatus("error");
@@ -737,6 +755,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     // KCS-02: a fresh panel and no baseline until this attempt has read one.
     setAttemptSeq((seq) => seq + 1);
     setEvidenceBaseline("unknown");
+    setPanelStopReason(null);
     setSyncingKeyId(keyId);
     setLastAttemptedKeyId(keyId);
     setSyncStatus("syncing");
@@ -1043,6 +1062,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           strategyId={strategyId}
           evidenceBaseline={evidenceBaseline}
           syncStatus={syncStatus}
+          stopReason={panelStopReason}
           lastSyncAt={lastSyncAt}
           syncError={syncError}
           onRetry={() => lastAttemptedKeyId && handleSyncTrades(lastAttemptedKeyId)}

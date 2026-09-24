@@ -6,6 +6,13 @@ import { useStrategySyncPoller } from "@/hooks/useStrategySyncPoller";
 import { isFactsheetJobInFlight } from "@/lib/compute-state";
 import { Button } from "@/components/ui/Button";
 import type { StrategyAnalytics } from "@/lib/types";
+import {
+  MISSING_ROW_GRACE_POLLS,
+  PANEL_STOP_COPY,
+  POLL_INTERVAL_MS,
+  POLL_MAX_ATTEMPTS,
+  type PanelStopReason,
+} from "./key-card-copy";
 
 /**
  * audit-2026-05-07 C-0142 — `ComputationStatus` is the source-of-truth DB
@@ -16,19 +23,10 @@ import type { StrategyAnalytics } from "@/lib/types";
  */
 export type ComputationStatus = StrategyAnalytics["computation_status"];
 
-// I2: module-level constants so they are not re-created on every render and
-// are not captured in useCallback closures as reactive values. These are
-// non-reactive (not derived from props/state) so placing them inside the
-// component body was misleading — a future engineer adding a prop shadow
-// would create a confusing closure-vs-constant ambiguity.
-// After ~120 s (40 polls × 3 s) call onStatusChange("error").
-const POLL_MAX_ATTEMPTS = 40;
-// After a few initial polls a missing row is treated as a failure so
-// the user sees a recoverable error instead of "Computing…" forever.
-// RED-TEAM-M2: raised from 3 (9 s) to 10 (30 s) to accommodate Railway
-// cold-start latency (15–30 s typical). The 120 s outer cap (POLL_MAX_ATTEMPTS)
-// is unchanged; this only widens the missing-row grace window.
-const MISSING_ROW_GRACE_POLLS = 10;
+// The poll budget (POLL_INTERVAL_MS, POLL_MAX_ATTEMPTS, MISSING_ROW_GRACE_POLLS)
+// and the copy that states it live in key-card-copy.ts (Phase 167.2 / KCS-22),
+// so the "stopped checking after N" sentences are computed from the bounds the
+// poll actually uses.
 
 export type SyncStatus =
   | "idle"
@@ -36,7 +34,22 @@ export type SyncStatus =
   | "computing"
   | "complete"
   | "complete_with_warnings"
-  | "error";
+  | "error"
+  // Phase 167.2 / KCS-22: UI-only. The panel stopped checking (its poll cap or
+  // its missing-row grace ran out) with no accepted result. Not a failure: it
+  // renders no "Sync failed" and no Retry (a re-POST while a job may be live
+  // can insert a second job). `toSyncStatus` never returns it.
+  | "no_result";
+
+/**
+ * Phase 167.2 / KCS-22: what the panel knows about a status it forwards.
+ * `stopReason` names which give-up ended a `no_result`; `computationError` is
+ * an evidenced failed row's server-written `computation_error`.
+ */
+export type SyncStatusInfo = {
+  stopReason?: PanelStopReason;
+  computationError?: string | null;
+};
 
 /**
  * Compile-time exhaustiveness guard. If a new `ComputationStatus` variant is
@@ -140,7 +153,12 @@ interface SyncProgressProps {
   syncError: string | null;
   syncWarnings?: string | null;
   onRetry: () => void;
-  onStatusChange?: (status: SyncStatus) => void;
+  onStatusChange?: (status: SyncStatus, info?: SyncStatusInfo) => void;
+  /**
+   * KCS-22: which give-up a `no_result` status came from (the caller stores the
+   * reason the panel forwarded). Absent or null reads as `poll_cap`.
+   */
+  stopReason?: PanelStopReason | null;
   /**
    * KCS-02: the pre-enqueue baseline for this attempt (see `EvidenceBaseline`).
    * Defaults to `"unknown"`. The caller mounts one panel per attempt (a React
@@ -189,6 +207,15 @@ const STATUS_CONFIG: Record<
     bgColor: "bg-negative/10",
     label: "Sync failed",
   },
+  // KCS-22 (UI-SPEC § Color): muted like `idle`, because nothing is known to be
+  // wrong. It does NOT copy `complete_with_warnings`' amber-500 pair (not a
+  // DESIGN.md token, fails AA). The label shown is PANEL_STOP_COPY's.
+  no_result: {
+    icon: <IdleIcon />,
+    color: "text-text-secondary",
+    bgColor: "bg-page",
+    label: PANEL_STOP_COPY.poll_cap.label,
+  },
 };
 
 export function SyncProgress({
@@ -200,6 +227,7 @@ export function SyncProgress({
   onRetry,
   onStatusChange,
   evidenceBaseline = "unknown",
+  stopReason = null,
 }: SyncProgressProps) {
   const [showWarnings, setShowWarnings] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -311,7 +339,7 @@ export function SyncProgress({
   useStrategySyncPoller({
     enabled: syncStatus === "computing",
     strategyId,
-    schedule: 3000,
+    schedule: POLL_INTERVAL_MS,
     maxAttempts: POLL_MAX_ATTEMPTS,
     missingRowGracePolls: MISSING_ROW_GRACE_POLLS,
     onStatus: (db, _error, computedAt) => {
@@ -385,7 +413,11 @@ export function SyncProgress({
         });
       }
     },
-    onError: () => onStatusChange?.("error"),
+    // Phase 167.2 / KCS-22: a give-up is the panel running out of patience, not
+    // evidence of a failure, so it ends the attempt as `no_result` (muted, no
+    // Retry). Lineage: this forwarded "error", which the caller rendered as
+    // "Sync failed" with a timeout sentence no timeout stood behind.
+    onError: () => onStatusChange?.("no_result", { stopReason: "poll_cap" }),
   });
 
   // Step-based label for active states
@@ -399,7 +431,13 @@ export function SyncProgress({
   }
 
   const config = STATUS_CONFIG[syncStatus];
-  const activeLabel = isActive ? getActiveLabel() : config.label;
+  const stopCopy =
+    syncStatus === "no_result" ? PANEL_STOP_COPY[stopReason ?? "poll_cap"] : null;
+  const activeLabel = isActive
+    ? getActiveLabel()
+    : stopCopy
+      ? stopCopy.label
+      : config.label;
 
   // Step tracking: syncing = step 1-2, computing = step 3
   const currentStep = syncStatus === "syncing" ? 1 : syncStatus === "computing" ? 3 : 0;
@@ -463,6 +501,11 @@ export function SyncProgress({
             Last synced {formatRelativeTime(lastSyncAt)}
           </p>
         )}
+
+      {/* KCS-22: the panel stopped checking. Muted detail, no Retry. */}
+      {stopCopy && (
+        <p className="text-xs text-text-secondary mt-1 ml-6">{stopCopy.detail}</p>
+      )}
 
       {/* Warnings detail */}
       {syncStatus === "complete_with_warnings" && syncWarnings && (
