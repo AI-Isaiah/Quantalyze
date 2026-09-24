@@ -24,7 +24,11 @@ import { ResponsiveTable } from "@/components/ResponsiveTable";
 // and the only one on this surface. Shared with HoldingsTable so the two money
 // surfaces cannot drift on what "trusted" means. ⛔ Do not re-introduce a
 // local equality on `sync_status` here.
-import { untrustedKeyChipLabel } from "@/lib/closed-sets";
+import {
+  UNTRUSTED_KEY_SET_NOUN,
+  isUntrustedKeySyncStatus,
+  untrustedKeyChipLabel,
+} from "@/lib/closed-sets";
 
 const AMBER_CHIP_STYLE: CSSProperties = {
   color: "var(--color-warning)",
@@ -109,10 +113,26 @@ function pnlColor(pnl: number | null): string | undefined {
 }
 
 export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
-  const totalUnrealized = rows.reduce(
-    (sum, r) => sum + (Number.isFinite(r.unrealized_pnl_usd ?? NaN) ? (r.unrealized_pnl_usd as number) : 0),
-    0,
-  );
+  // Phase 167.1 AUMTRUST / D-16 — the footer total and its untrusted part.
+  // They MUST come from this ONE pass: a total and a disclosed subset summed by
+  // two loops with two filters can drift, and then the footer states a part
+  // the whole does not contain (D-04). The pass DISCLOSES, it never subtracts:
+  // an untrusted row's P&L stays in `totalUnrealized` (D-03, "keep the total
+  // and flag it"). Same finite-else-0 rule for both sums, and the untrusted
+  // test is the shared predicate the row chip answers, never a local equality.
+  let totalUnrealized = 0;
+  let untrustedUnrealized = 0;
+  let untrustedCount = 0;
+  for (const r of rows) {
+    const pnl = Number.isFinite(r.unrealized_pnl_usd ?? NaN)
+      ? (r.unrealized_pnl_usd as number)
+      : 0;
+    totalUnrealized += pnl;
+    if (isUntrustedKeySyncStatus(r.source_key_sync_status)) {
+      untrustedUnrealized += pnl;
+      untrustedCount += 1;
+    }
+  }
 
   return (
     <section className="mt-6 rounded-sm border border-border bg-surface">
@@ -224,6 +244,22 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                 {formatPnl(totalUnrealized)}
               </td>
             </tr>
+            {/* Renders on the untrusted COUNT, not the amount (D-07): an
+                untrusted row with a null P&L is summed as 0 and still says so.
+                Muted, sentence case, no role (D-09). Its own row, so the
+                uppercase label cell above is not overridden. */}
+            {untrustedCount > 0 ? (
+              <tr className="bg-page/40">
+                <td
+                  colSpan={7}
+                  data-testid="open-positions-untrusted-note"
+                  className="px-4 pb-2 text-xs text-text-muted"
+                >
+                  Includes {formatPnl(untrustedUnrealized)} from{" "}
+                  {UNTRUSTED_KEY_SET_NOUN}.
+                </td>
+              </tr>
+            ) : null}
           </tfoot>
         </table>
         </ResponsiveTable>

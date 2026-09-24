@@ -281,3 +281,43 @@ describe("[D-16] OpenPositionsTable — the derivative surface answers the predi
     }
   });
 });
+
+/**
+ * Phase 167.1 AUMTRUST / D-16 (amendment 2026-09-23) — the Open Positions
+ * footer total "Total unrealized P&L (equity contribution)" sums EVERY
+ * derivative row, including the ones struck through above with an untrusted
+ * chip. The founder's rule is "keep the total and flag it" (D-03): the total
+ * must not move, and a muted sentence under it names the untrusted part.
+ *
+ * ORACLE INDEPENDENCE: every expected string is typed literally. Neither the
+ * noun constant nor the file-local formatter is imported, so a drift in either
+ * turns this block RED instead of moving the oracle with it.
+ */
+describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
+  function footerTotal(container: HTMLElement): string {
+    const tfoot = container.querySelector("tfoot")!;
+    const totalRow = tfoot.querySelectorAll("tr")[0];
+    const cells = totalRow.querySelectorAll("td");
+    return cells[cells.length - 1].textContent ?? "";
+  }
+
+  it("tracer: a sign_in_failed position stays in the footer total and the footer says so", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({ id: "pos-trusted", unrealized_pnl_usd: 1_000 }),
+          makePosition({
+            id: "pos-untrusted",
+            unrealized_pnl_usd: 300,
+            source_key_sync_status: "sign_in_failed",
+          }),
+        ]}
+      />,
+    );
+    // D-03: the untrusted row is still counted — disclose, never subtract.
+    expect(footerTotal(container)).toBe("+$1,300");
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$300 from keys needing attention.",
+    );
+  });
+});
