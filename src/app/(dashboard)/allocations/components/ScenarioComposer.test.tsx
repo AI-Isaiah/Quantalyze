@@ -16145,6 +16145,40 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     ).toHaveLength(0);
   });
 
+  it("AUMTRUST review round 2 IN-01 / IN-05: with both parts present, \"(value unavailable for N …)\" follows the part it belongs to — an untrusted holding's missing P&L never reads as qualifying the unknown-status amount", () => {
+    // The untrusted key's one holding is a derivative whose P&L the venue did
+    // not report (sums as 0). Live total: 480,000 + 0 + 4,444 = 484,444.
+    const base = atMissingKeyBook("sign_in_failed");
+    const payload: MyAllocationDashboardPayload = {
+      ...base,
+      holdingsSummary: base.holdingsSummary.map((h) =>
+        h.api_key_id === AT_KEY_SIGN_IN_FAILED
+          ? {
+              ...h,
+              symbol: "AUMTRUST-B-PERP",
+              holding_type: "derivative" as const,
+              value_usd: 900_000,
+              unrealized_pnl_usd: null,
+              side: "long" as const,
+            }
+          : h,
+      ),
+    };
+    expectDistinctTriples(payload);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderAt(payload);
+      expect(aumField().value).toBe("484444");
+      const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+      expect(markers).toHaveLength(1);
+      expect(markers[0].textContent).toBe(
+        "Includes $0 from keys needing attention (value unavailable for 1 holding) and $4,444 from keys with an unknown sync status.",
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
   it("AUMTRUST review WR-05: a missing-key holding alone (every listed key trusted) still renders the marker — the gate counts unknown-status holdings too", () => {
     const payload = atMissingKeyBook(null);
     expectDistinctTriples(payload);

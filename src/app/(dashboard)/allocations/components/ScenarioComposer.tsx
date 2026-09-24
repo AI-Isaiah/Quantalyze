@@ -710,21 +710,26 @@ function buildUntrustedAumClause(
   // Review WR-05: a summed holding whose key is missing from `apiKeys` has an
   // UNKNOWN status. It is named as such, never folded into the untrusted noun
   // (that noun is the Holdings tab filter's, and those rows are not in it).
+  //
+  // Review WR-03: a holding whose equity was not reported is summed as 0, and
+  // the amount cannot show that. Say how many, so a defaulted 0 is never read
+  // as a known figure. Review round 2 IN-01 / IN-05: the count follows the
+  // PART it belongs to, so with two parts it never reads as qualifying the
+  // other part's amount.
+  const phrase = (part: LiveHoldingsPart, noun: string): string => {
+    const base = `${formatUsd(part.amount)} from ${noun}`;
+    if (part.unavailable === 0) return base;
+    const unit = part.unavailable === 1 ? "holding" : "holdings";
+    return `${base} (value unavailable for ${part.unavailable} ${unit})`;
+  };
   const parts: string[] = [];
   if (untrusted.count > 0) {
-    parts.push(`${formatUsd(untrusted.amount)} from ${UNTRUSTED_KEY_SET_NOUN}`);
+    parts.push(phrase(untrusted, UNTRUSTED_KEY_SET_NOUN));
   }
   if (unknownStatus.count > 0) {
-    parts.push(`${formatUsd(unknownStatus.amount)} from keys with an unknown sync status`);
+    parts.push(phrase(unknownStatus, "keys with an unknown sync status"));
   }
-  const clause = `includes ${parts.join(" and ")}`;
-  // Review WR-03: a holding whose equity was not reported is summed as 0, and
-  // the amount above cannot show that. Say how many, so a defaulted 0 is
-  // never read as a known figure.
-  const unavailable = untrusted.unavailable + unknownStatus.unavailable;
-  if (unavailable === 0) return clause;
-  const noun = unavailable === 1 ? "holding" : "holdings";
-  return `${clause} (value unavailable for ${unavailable} ${noun})`;
+  return `includes ${parts.join(" and ")}`;
 }
 
 /** Sentence-cases a clause built above, for the standalone sentence form. */
