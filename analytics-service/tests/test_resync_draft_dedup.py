@@ -602,6 +602,14 @@ def test_resync_chain_kinds_match_the_typescript_factsheet_chain() -> None:
     assert ts_kinds - {"compute_analytics"} == set(_RESYNC_CHAIN_KINDS)
     assert set(_RESYNC_CHAIN_KINDS) == set(_CHAIN_KINDS_LITERAL)
     assert set(_NON_TERMINAL_JOB_STATUSES) == set(_NON_TERMINAL_LITERAL)
+    # The status half (review-fix round 1): the wizard reads "in flight" off
+    # `IN_FLIGHT_JOB_STATUSES`, and the server refuses a resync over
+    # `_NON_TERMINAL_JOB_STATUSES`. If they differ, the client and the server
+    # disagree about whether a chain is running.
+    status_block = re.search(r"IN_FLIGHT_JOB_STATUSES = \[(.*?)\] as const", ts, re.S)
+    assert status_block is not None, "IN_FLIGHT_JOB_STATUSES not found in compute-state.ts"
+    ts_statuses = set(re.findall(r'"([a-z_]+)"', status_block.group(1)))
+    assert ts_statuses == set(_NON_TERMINAL_JOB_STATUSES), (ts_statuses, _NON_TERMINAL_JOB_STATUSES)
 
 
 # ---------------------------------------------------------------------------
