@@ -2042,8 +2042,9 @@ async def process_key(
         },
     ).execute()
 
-    # reconstruct_positions (BACKBONE-09 wiring); persisted in P8.
-    await adapter.reconstruct_positions(trades)
+    # No reconstruct_positions call here (removed 2026-09-24): its result was
+    # discarded, never persisted, and its missing-mark warning misreported
+    # a diagnostic as understated equity. Same removal as long_fetch step 5.
 
     # Final transition
     supabase.rpc(

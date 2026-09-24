@@ -140,7 +140,12 @@ async def test_drain_unified_claim_runs_pipeline():
     rpc_names = [c.args[0] for c in sb.rpc.call_args_list]
     assert rpc_names.count("transition_strategy_verification") >= 5
     fake_adapter.fetch_raw.assert_awaited_once()
-    fake_adapter.reconstruct_positions.assert_awaited_once_with(fake_trades)
+    # 2026-09-24: the handler used to await adapter.reconstruct_positions and
+    # throw the result away. Nothing persisted it, yet each call logged
+    # "equity understated" for every open position without a mark, which read
+    # like a data problem in the factsheet. The call is gone; this pins that a
+    # discarded reconstruction does not come back.
+    fake_adapter.reconstruct_positions.assert_not_awaited()
 
 
 @pytest.mark.asyncio

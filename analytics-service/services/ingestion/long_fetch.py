@@ -613,13 +613,12 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
         },
     ).execute()
 
-    # 5. reconstruct_positions (BACKBONE-09 wiring) — runs after report_queued
-    # because positions are a derived view; trades are the SoT. Skipped for a
-    # ledger-backed source: there are no reconstructed fills to derive from.
-    if not is_ledger_backed:
-        # Invariant: trades is non-None on the fill path (see above).
-        assert trades is not None
-        await adapter.reconstruct_positions(trades)
+    # 5. (removed 2026-09-24) This step used to await
+    # adapter.reconstruct_positions(trades) and discard the result. Nothing
+    # persisted it, and each call logged "equity understated" for every open
+    # position without a mark price, which misreported a diagnostic as a data
+    # defect. Positions are derived where they are used (the equity curve and
+    # services/position_reconstruction.py), not here.
 
     # Final transition
     supabase.rpc(

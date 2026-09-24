@@ -1376,6 +1376,10 @@ def test_process_key_teaser_injects_anchor_when_strategy_id_missing(client):
     body = r.json()
     assert body["verification_id"] == "ver-teaser-x5"
     assert body["status"] == "published"
+    # 2026-09-24: the synchronous pipeline no longer runs a position
+    # reconstruction whose result it discards (see the long_fetch pin in
+    # tests/test_long_fetch.py for the why).
+    okx_adapter.reconstruct_positions.assert_not_awaited()
 
     # The strategy_verifications INSERT received the sentinel anchor as
     # strategy_id. Walk the recorded .table('strategy_verifications')
