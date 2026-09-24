@@ -687,12 +687,6 @@ type AddedMetricsEntry =
 /** The render-facing projection of the above (see `AddedMetricsEntry`). */
 type AddedMetricsState = "pending" | "settled" | "unavailable";
 
-// DSRC-02 (D2) — `holdingEquityContributionLocal`, the per-holding equity
-// contribution (the per-key WEIGHT source), now lives in
-// `../lib/live-holdings-summary` (Phase 167.1), body unchanged, so
-// `equityByApiKeyId` below and `summarizeLiveHoldings` read ONE definition. Its
-// docblock there records why it is a local copy of the SSR helper.
-
 /**
  * Phase 167.1 AUMTRUST — the ONE clause that names the part of the live
  * holdings total sourced from keys needing attention, lower-case, e.g.
