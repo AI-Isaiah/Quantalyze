@@ -179,6 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
+Phase: 166 (QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given) — READY TO EXECUTE
+Plan: Not started
 Phase: 164.6 (gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers) — EXECUTING
 Plan: 5 of 5 DONE (`164.6-01-SUMMARY.md`, OPS-08-TS: a 40001 is retried once at csv-finalize and holdings sync; `164.6-02-SUMMARY.md`, 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker; `164.6-03-SUMMARY.md`, OPS-08-F2 SQL layer: migration 20260924120000 makes both fan-outs write one counted cron_runs row naming failed candidates, arm N in both ledger gates, 36 twins re-pointed; `164.6-04-SUMMARY.md`, OPS-08-F2 pins: ARMS_FLOOR 428 from a full lane run with no defects, parser/floors/registry censuses at 428 arms and 443 steps/needles, ci.yml sentinel rows 16/19 and ARMS_FLOOR 215; `164.6-05-SUMMARY.md`, runbooks read the candidate_enqueue_failed row counts-only and carry the BLOCKING precondition [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT] owned by Phase 164.6.7, phase-level vitest/typecheck/lint/anchors green)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
@@ -2337,6 +2339,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-09-23T22:48:56.456Z
+**Stopped At:** Phase 166 context gathered
+**Resume File:** .planning/phases/166-qstats-truth-every-quantstats-derived-number-reflects-the-re/166-CONTEXT.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md

@@ -2856,6 +2856,8 @@ Plans:
 
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
+⭐ **Founder answers, 2026-09-24:** D-15, D-16 and D-17 are APPROVED. OPEN-2: after merge, run plan 10's read-only census, then queue a recompute of the affected PROD rows.
+
 **Goal:** No metric persisted to `metrics_json` or rendered in a chart is the output of quantstats'
 price-detection heuristic misreading a return series as prices. RANK-05 (Phase 159) closed that
 heuristic in `compute_all_metrics` only; this phase closes the rest of the surface and settles
@@ -2917,11 +2919,57 @@ hand-copy is added, and derive `PERCENTILE_ANALYTICS_COLUMNS` + csv-finalize's
 `CLOCK_SAFETY_KPI_COLUMNS` from one exported KPI array. TODOS 0f explicitly says to do this extraction
 as part of the scalars closure, not before.
 
-**Plans:** 0 plans
+**Plans:** 10 plans (planned 2026-09-24; decisions in `166-CONTEXT.md` D-01…D-19)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 166 to break down)
+**Wave 1**
+- [ ] 166-01-PLAN.md — D-04: extract the shared money-math primitives from `compute_all_metrics`, byte-neutral (zero golden movement)
+- [ ] 166-02-PLAN.md — D-12/D-18: byte-pin, then derive `PERCENTILE_ANALYTICS_COLUMNS` and `CLOCK_SAFETY_KPI_COLUMNS` from `PERCENTILE_METRICS` (TS, file-disjoint from 01)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 166-03-PLAN.md — drawdown-family scalar mirrors (recovery_factor, ulcer_index, ulcer_performance_index, serenity_index) and the dispatch table retyped off `getattr(qs.stats, …)`
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 166-04-PLAN.md — kelly_criterion, probabilistic_ratio, common_sense_ratio, cpc_index mirrors; D-16 PSR kurtosis fix (golden PSR moves, disclosed)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 166-05-PLAN.md — r_squared and scalar greeks on the benchmark leg (D-05); D-15 NaN-greeks: complete pairs, None never 0.0
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 166-06-PLAN.md — rolling greeks on both legs (D-06); D-17 windowed rolling alpha (golden rolling_alpha moves, disclosed)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 166-07-PLAN.md — D-14 AST gate over every production quantstats importer, printed census; the line gate deleted
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 166-08-PLAN.md — per-shape red/green needles, behavioural kwarg pins with calibration rows, neuter drills on the real module
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 166-09-PLAN.md — D-10 measured before/after table, D-11 read-only census SQL, closes WINDOWS 5 and 9 and TODOS 0f
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 166-10-PLAN.md — full gate sweep, the one release commit, OPEN-2 recorded as a founder `checkpoint:decision` (no production write)
+
+**Cross-cutting constraints:**
+
+- the SUMMARY passed the planning-hygiene check while staged, before it was committed
+
+### Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go (INSERTED)
+
+**Goal:** Every persisted `strategy_analytics` row that Phase 166 changes is recomputed on PROD, so stored numbers match what the fixed code would produce. The same fabricated-ratio class is also closed outside quantstats: exact `== 0` / `> 0` standard-deviation guards.
+**Requirements**: Phase 166 OPEN-2 (founder answer 2026-09-24: "Recompute affected rows after merge", AskUserQuestion). The round-2 fixer measured the non-quantstats sites.
+**Depends on:** Phase 166
+**Plans:** 0 plans
+
+## Success Criteria
+1. **Census first.** The five read-only census SELECTs in `166-09-SUMMARY.md` run on PROD. The founder runs them, or they run read-only and are recorded as counts only. The recompute set is derived from them.
+2. **Normal job path.** Affected rows are recomputed through the normal compute-job path, never by a hand-written UPDATE. Each is verified against the D-10 before/after rows, and the rendered rolling alpha/beta chart and greeks table show the new values.
+3. **Exact-zero guards close.** They exist today in `portfolio_optimizer.py`, `csv_validator.py`, `allocated_capital.py`, `equity_reconstruction.py` and `optimizer.py`. They move to the relative dispersion floor (`_dispersion_is_residue` semantics), and each gets a red test built from a compounding-NAV constant yield.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 166.1 to break down)
 
 ### Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error
 
