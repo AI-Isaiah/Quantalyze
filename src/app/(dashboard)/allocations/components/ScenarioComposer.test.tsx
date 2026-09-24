@@ -16100,6 +16100,12 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
           String(c[0]).includes("missing from the key list"),
         ),
       ).toBe(true);
+      // Review round 2 IN-02: the log carries a count, never a key id — not
+      // the missing key's, nor either listed key's.
+      const logged = errSpy.mock.calls.flat().map(String).join(" ");
+      for (const keyId of [AT_KEY_MISSING, AT_KEY_TRUSTED, AT_KEY_SIGN_IN_FAILED]) {
+        expect(logged).not.toContain(keyId);
+      }
     } finally {
       errSpy.mockRestore();
     }
