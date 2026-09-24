@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "167.1"
 current_phase_name: "AUMTRUST — the headline AUM says when it includes holdings from keys needing attention"
 status: executing
-stopped_at: Completed 167.1-03-PLAN.md
-last_updated: "2026-09-24T01:57:30.000Z"
+stopped_at: Completed 167.1-04-PLAN.md
+last_updated: "2026-09-24T02:02:00.000Z"
 last_activity: 2026-09-24
-last_activity_desc: Phase 167.1 plan 03 complete (State B marker + absence-state pins)
+last_activity_desc: Phase 167.1 plan 04 complete (premise corrections + interim byte-identity gate)
 state_head: b64cb3002c4e017e389de4bafb29dcf8fa39edf6
 progress:
   total_phases: 50
   completed_phases: 32
   total_plans: 250
-  completed_plans: 240
+  completed_plans: 241
   percent: 64
 ---
 
@@ -180,7 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 167.1 (aumtrust-the-headline-aum-says-when-it-includes-holdings-fro) — EXECUTING
-Plan: 4 of 6 (plans 01, 02 and 03 DONE — `167.1-01-SUMMARY.md`, `167.1-02-SUMMARY.md`, `167.1-03-SUMMARY.md`)
+Plan: 5 of 6 (plans 01-04 DONE — `167.1-01-SUMMARY.md` … `167.1-04-SUMMARY.md`; plan 05 is the D-06 founder `checkpoint:decision`)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
@@ -498,7 +498,7 @@ Status: Executing Phase 167.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-24 — Phase 167.1 plan 03 complete (State B marker + absence-state pins)
+Last activity: 2026-09-24 — Phase 167.1 plan 04 complete (premise corrections + interim byte-identity gate)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1288,6 +1288,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
      The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
      FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 04, premise corrections and the interim byte-identity gate, 2026-09-24)*
+
+- **D-167.1-04-A — the ROADMAP D-03 correction is dated to plan 04's measurement, not stated as a standing fact.** It says `queries.ts`, the commit route, `supabase/` and `analytics-service/` WERE byte-unchanged when plan 04 measured them and names plan 06 as the re-measure, because plan 05 option (b) edits source.
 
 *(execution-time, Phase 167.1 AUMTRUST — plan 03, State B and the marker's absence states, 2026-09-24)*
 

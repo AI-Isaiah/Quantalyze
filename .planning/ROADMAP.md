@@ -2917,7 +2917,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 167.1-04-PLAN.md — premise corrections (closed-sets prose, this entry) and the interim byte-identity gate (wave 3)
+- [x] 167.1-04-PLAN.md — premise corrections (closed-sets prose, this entry) and the interim byte-identity gate (wave 3) — DONE 2026-09-24 (`7e3360f11` docs; `167.1-04-SUMMARY.md`)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
