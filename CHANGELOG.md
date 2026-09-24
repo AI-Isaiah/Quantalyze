@@ -230,6 +230,14 @@ unchanged.**
   - `test_benchmark.py`: the stale fallback, its 48 h bound, a loud RuntimeError, and a quiet
     unconfigured client.
   - Every round-2 guard was neutered, observed RED, and restored via `cp`/`cmp`.
+  - CI fix (run 36063849235):
+    - `wizardErrors.test.ts`: both copy-table size pins move 95 -> 96 for the new entry, each
+      after its own reasoning was re-run over it.
+    - `factsheet-share/[token]/page.test.tsx` and `strategies/page.key-pill.test.tsx`: in-flight
+      job fixtures now sit on the real clock. Their fixed past dates had aged past the 8 h
+      dead-row window. The rule is right for those cards, so the fixtures were fixed and the rule
+      was not loosened. Each file gains a DEAD-ROW test: a 9-hour-old "running" job never gets
+      the "being prepared" copy.
 
 ### Notes
 
