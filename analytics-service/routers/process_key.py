@@ -1599,8 +1599,17 @@ async def process_key(
     # start is non-terminal for this strategy. No draft is minted and nothing is
     # enqueued. `queued` is True because a non-terminal job does exist, and
     # `job_state` is "running" because it was in flight before this call (the
-    # PYAPI-09 contract above). The reply names the newest verification of the
-    # strategy, which is the session that chain belongs to.
+    # PYAPI-09 contract above).
+    #
+    # WHICH VERIFICATION THE REPLY NAMES (review-fix round 1, MEDIUM-4). Only a
+    # `process_key_long` row carries its session's `verification_id` (in
+    # `metadata`); the follow-on hops are enqueued with none. The newest
+    # verification of the strategy is NOT necessarily that chain's session, so
+    # its status is reported only when its id equals the job's own
+    # `verification_id`. Otherwise (a follow-on hop, or a newer unrelated
+    # verification) the reply carries the job's verification id, which may be
+    # None, and `status: None`, and a warning is logged. An unrelated
+    # verification's status is never presented as this chain's.
     #
     # Tenant scope is the same as the draft pre-check's: this runs after the
     # `_caller_owns_strategy` gate, so the strategy_id filter carries it.
@@ -1623,7 +1632,9 @@ async def process_key(
             chain_job_rows = rows(
                 await db_read_with_retry(
                     lambda: supabase.table("compute_jobs")
-                    .select("id,kind,status,attempts,max_attempts,last_error,created_at")
+                    .select(
+                        "id,kind,status,attempts,max_attempts,last_error,created_at,metadata"
+                    )
                     .eq("strategy_id", strategy_id)
                     .in_("kind", sorted(_RESYNC_CHAIN_KINDS))
                     .in_("status", sorted(_NON_TERMINAL_JOB_STATUSES))
@@ -1689,15 +1700,44 @@ async def process_key(
                     error=str(exc)[:200],
                 )
                 latest_verification = None
+            live_job = inflight_chain_job[0]
+            job_metadata = live_job.get("metadata")
+            chain_verification_id = (
+                job_metadata.get("verification_id")
+                if isinstance(job_metadata, dict)
+                else None
+            )
+            if (
+                chain_verification_id is not None
+                and latest_verification is not None
+                and latest_verification.get("id") == chain_verification_id
+            ):
+                reply_verification: dict[str, Any] = latest_verification
+            else:
+                log.warning(
+                    "process_key.resync_chain_inflight_verification_unmatched",
+                    strategy_id=strategy_id,
+                    correlation_id=correlation_id,
+                    job_id=str(live_job.get("id")),
+                    job_kind=live_job.get("kind"),
+                    chain_verification_id=chain_verification_id,
+                    latest_verification_id=(
+                        latest_verification.get("id") if latest_verification else None
+                    ),
+                )
+                reply_verification = {
+                    "id": chain_verification_id,
+                    "status": None,
+                    "trust_tier": None,
+                }
             log.info(
                 "process_key.resync_chain_inflight_dedup_hit",
-                job_id=str(inflight_chain_job[0].get("id")),
-                job_kind=inflight_chain_job[0].get("kind"),
-                job_status=inflight_chain_job[0].get("status"),
+                job_id=str(live_job.get("id")),
+                job_kind=live_job.get("kind"),
+                job_status=live_job.get("status"),
             )
             return _wizard_duplicate_reply(
-                existing=latest_verification
-                or {"id": None, "status": None, "trust_tier": None},
+                existing=reply_verification,
                 correlation_id=correlation_id,
                 queued=True,
                 job_state="running",

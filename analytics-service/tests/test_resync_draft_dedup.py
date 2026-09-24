@@ -505,7 +505,16 @@ def test_resync_while_a_chain_job_is_non_terminal_starts_no_second_chain(
     of the chain is still non-terminal, is a WIZARD_DUPLICATE: no new draft,
     no enqueue call. This is the reload/Retry case from the live incident."""
     sb = make_supabase(_STRATEGY_A)
-    ver = _seed_advanced_session(sb, _STRATEGY_A, job_kind=job_kind, job_status=job_status)
+    # Only process_key_long carries its session's verification_id (the
+    # follow-on hops are enqueued with no metadata), as in production.
+    job_fields: dict[str, Any] = (
+        {"metadata": {"verification_id": "ver-advanced"}}
+        if job_kind == "process_key_long"
+        else {}
+    )
+    ver = _seed_advanced_session(
+        sb, _STRATEGY_A, job_kind=job_kind, job_status=job_status, **job_fields
+    )
     with patch("routers.process_key.get_supabase", return_value=sb):
         r = _post(full_stack_client, _resync_body(_STRATEGY_A))
 
@@ -516,7 +525,15 @@ def test_resync_while_a_chain_job_is_non_terminal_starts_no_second_chain(
         f"now must not start a second chain. got {payload}"
     )
     assert payload["queued"] is True and payload["job_state"] == "running", payload
-    assert payload["verification_id"] == ver["id"], payload
+    if job_kind == "process_key_long":
+        # The job names its own session, and it is the newest: its status holds.
+        assert payload["verification_id"] == ver["id"], payload
+        assert payload["status"] == ver["status"], payload
+    else:
+        # A follow-on hop names no session, so no verification's status is
+        # presented as this chain's (review-fix round 1, MEDIUM-4).
+        assert payload["verification_id"] is None, payload
+        assert payload["status"] is None, payload
     assert _resync_drafts(sb, _STRATEGY_A) == [], "no new draft may be minted"
     assert "enqueue_compute_job" not in sb.rpc_calls, (
         f"no job may be enqueued while the chain is in flight; rpc_calls={sb.rpc_calls}"
@@ -769,3 +786,40 @@ def test_a_live_job_still_refuses_beside_a_dead_one(full_stack_client: TestClien
 
     assert r.json().get("code") == "WIZARD_DUPLICATE", r.json()
     assert "enqueue_compute_job" not in sb.rpc_calls
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 1 (MEDIUM-4) — the reply never presents an unrelated
+# verification's status as the running chain's.
+# ---------------------------------------------------------------------------
+
+
+def test_chain_reply_does_not_borrow_a_newer_unrelated_verifications_status(
+    full_stack_client: TestClient,
+) -> None:
+    """The running chain belongs to an OLDER verification; a newer one exists
+    (for example a failed onboard attempt). The reply names the chain's own
+    session and carries no status, never the newer row's `failed`."""
+    sb = make_supabase(_STRATEGY_A)
+    _seed_advanced_session(
+        sb, _STRATEGY_A, job_kind="process_key_long", job_status="running",
+        metadata={"verification_id": "ver-advanced"},
+    )
+    sb.store["strategy_verifications"].append(
+        {
+            "id": "ver-newer-unrelated",
+            "strategy_id": _STRATEGY_A,
+            "status": "failed",
+            "trust_tier": "api_verified",
+            "flow_type": "resync",
+            "created_at": (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat(),
+        }
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    payload = r.json()
+    assert payload.get("code") == "WIZARD_DUPLICATE", payload
+    assert payload["verification_id"] == "ver-advanced", payload
+    assert payload["status"] is None, payload
+    assert payload["trust_tier"] is None, payload
