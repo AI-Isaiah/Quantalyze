@@ -53,7 +53,13 @@ from tests.qstats_gate import (
 
 
 def test_qstats_gate_real_corpus_is_clean() -> None:
-    """Every quantstats node in every production module is closed or exempt."""
+    """Every quantstats node in every production module is closed or exempt.
+
+    "Every" is bounded by the shapes the gate recognises: Rules A, A', B1-B6 in
+    ``tests/qstats_gate.py``, which fail CLOSED on any quantstats surface other
+    than ``<qs>.stats`` and on any import form other than the three green ones.
+    The one recorded limit is an attribute name computed at run time.
+    """
     violations, _census, _nodes, _importers = scan_tree(SERVICE_ROOT)
     assert violations == [], (
         "quantstats nodes that are not a kwarg-closed allowlisted leaf, not the "
@@ -183,7 +189,7 @@ def test_qstats_gate_census_is_printed_on_a_real_run() -> None:
 NEEDLE_MODULE = "services/metrics.py"
 
 #: id -> (source, enclosing function, quantstats name the violation must carry,
-#: substring its reason must carry). Twelve shapes the gate claims to see.
+#: substring its reason must carry). One entry per shape the gate claims to see.
 RED_NEEDLES: dict[str, tuple[str, str, str, str]] = {
     "needle_direct_unclosed_call": (
         """
@@ -313,6 +319,148 @@ RED_NEEDLES: dict[str, tuple[str, str, str, str]] = {
         "sharpe",
         "not a kwarg-proven leaf",
     ),
+    # Phase 166 review round 1 (WR-01 / SFH HIGH-2): every shape below returned
+    # `violations=[]` and `nodes=0` before Rule B5/B6 existed (measured).
+    "needle_reports_namespace": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return qs.reports.metrics(r, mode="full", display=False)
+        """,
+        "compute_all_metrics",
+        "reports",
+        "outside qs.stats",
+    ),
+    "needle_plots_namespace": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return qs.plots.snapshot(r)
+        """,
+        "compute_all_metrics",
+        "plots",
+        "outside qs.stats",
+    ),
+    "needle_extend_pandas": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            qs.extend_pandas()
+            return r.max_drawdown()
+        """,
+        "compute_all_metrics",
+        "extend_pandas",
+        "monkeypatches every guessing stats function",
+    ),
+    "needle_qs_passed_as_a_value": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return helper(qs, r)
+        """,
+        "compute_all_metrics",
+        "helper()",
+        "outside qs.stats",
+    ),
+    "needle_vars_of_the_alias": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return vars(qs)["stats"].sharpe(r)
+        """,
+        "compute_all_metrics",
+        "vars()",
+        "outside qs.stats",
+    ),
+    "needle_globals_lookup_of_the_alias": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return globals()["qs"].stats.sharpe(r)
+        """,
+        "compute_all_metrics",
+        "globals()",
+        "reaches a quantstats alias by name",
+    ),
+    "needle_star_import": (
+        """
+        from quantstats import *
+        def compute_all_metrics(r):
+            return stats.sharpe(r)
+        """,
+        "<module>",
+        "*",
+        "star import",
+    ),
+    "needle_from_quantstats_import_reports": (
+        """
+        from quantstats import reports
+        def compute_all_metrics(r):
+            return reports.metrics(r)
+        """,
+        "<module>",
+        "reports",
+        "only the stats namespace is judged",
+    ),
+    "needle_from_quantstats_submodule_import": (
+        """
+        from quantstats.reports import metrics
+        def compute_all_metrics(r):
+            return metrics(r)
+        """,
+        "<module>",
+        "metrics",
+        "only the stats namespace is judged",
+    ),
+    "needle_import_submodule_as_alias": (
+        """
+        import quantstats.reports as R
+        def compute_all_metrics(r):
+            return R.metrics(r)
+        """,
+        "<module>",
+        "quantstats.reports",
+        "only the stats namespace is judged",
+    ),
+    "needle_importlib_import_module": (
+        """
+        import importlib
+        def compute_all_metrics(r):
+            return importlib.import_module("quantstats").stats.sharpe(r)
+        """,
+        "compute_all_metrics",
+        "quantstats",
+        "reaches quantstats by name",
+    ),
+    "needle_dunder_import": (
+        """
+        def compute_all_metrics(r):
+            return __import__("quantstats.stats").stats.sharpe(r)
+        """,
+        "compute_all_metrics",
+        "quantstats.stats",
+        "reaches quantstats by name",
+    ),
+    "needle_import_module_computed_name": (
+        """
+        import importlib
+        def compute_all_metrics(r, name):
+            return importlib.import_module(name).stats.sharpe(r)
+        """,
+        "compute_all_metrics",
+        "import_module",
+        "cannot be proven not to load quantstats",
+    ),
+    "needle_sys_modules_lookup": (
+        """
+        import sys
+        def compute_all_metrics(r):
+            return sys.modules["quantstats"].stats.sharpe(r)
+        """,
+        "compute_all_metrics",
+        "quantstats",
+        "reaches quantstats by name",
+    ),
 }
 
 
@@ -364,6 +512,173 @@ def test_qstats_gate_importer_needle_names_the_uncovered_module(tmp_path: Path) 
     assert importers == frozenset({"services/metrics.py", "services/other.py"})
     assert [(v.module, v.shape) for v in violations] == [
         ("services/other.py", "uncovered importer")
+    ], violations
+
+
+#: Rule A' (Phase 166 review WR-01): a module OUTSIDE COVERED_MODULES that borrows
+#: the covered module's quantstats alias. Before Rule A' each returned no violation,
+#: because a re-export is not an ``import quantstats``. id -> (source, function,
+#: name the violation must carry, substring its reason must carry).
+REEXPORT_MODULE = "services/other.py"
+REEXPORT_NEEDLES: dict[str, tuple[str, str, str, str]] = {
+    "reexport_from_import_of_the_alias": (
+        """
+        from services.metrics import qs
+        def score(r):
+            return qs.stats.sharpe(r)
+        """,
+        "<module>",
+        "qs",
+        "borrows a covered module's quantstats alias",
+    ),
+    "reexport_star_import_of_the_covered_module": (
+        """
+        from services.metrics import *
+        def score(r):
+            return qs.stats.sharpe(r)
+        """,
+        "<module>",
+        "*",
+        "borrows a covered module's quantstats alias",
+    ),
+    "reexport_relative_from_import": (
+        """
+        from .metrics import qs
+        def score(r):
+            return qs.stats.sharpe(r)
+        """,
+        "<module>",
+        "qs",
+        "borrows a covered module's quantstats alias",
+    ),
+    "reexport_module_attribute": (
+        """
+        from services import metrics
+        def score(r):
+            return metrics.qs.stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_relative_module_attribute": (
+        """
+        from . import metrics
+        def score(r):
+            return metrics.qs.stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_dotted_module_attribute": (
+        """
+        import services.metrics
+        def score(r):
+            return services.metrics.qs.stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_module_alias_attribute": (
+        """
+        import services.metrics as m
+        def score(r):
+            return m.qs.stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+    "reexport_getattr_on_the_module": (
+        """
+        from services import metrics
+        def score(r):
+            return getattr(metrics, "qs").stats.sharpe(r)
+        """,
+        "score",
+        "qs",
+        "from an uncovered module",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("source", "function", "qs_name", "reason"),
+    list(REEXPORT_NEEDLES.values()),
+    ids=list(REEXPORT_NEEDLES),
+)
+def test_qstats_gate_reexport_needle_is_named(
+    source: str, function: str, qs_name: str, reason: str
+) -> None:
+    """Rule A' names each re-export shape, in the borrowing module.
+
+    Without it any module could reach quantstats through ``services.metrics``'s
+    own ``qs`` and bypass Rule A's importer coverage (D-14). The re-exported
+    names are read from the real covered module, so this also proves that read.
+    """
+    violations, _census, _nodes = scan_source(REEXPORT_MODULE, textwrap.dedent(source))
+    matching = [
+        v
+        for v in violations
+        if v.module == REEXPORT_MODULE
+        and v.function == function
+        and v.qs_name == qs_name
+        and reason in v.reason
+    ]
+    assert matching, (
+        f"the gate did not name {REEXPORT_MODULE}:{function}:{qs_name} ({reason!r}); "
+        f"it reported {violations}"
+    )
+
+
+def test_qstats_gate_reexport_green_needle_is_silent() -> None:
+    """Legitimate uses of the covered module from elsewhere are not re-exports.
+
+    Every router imports ``services.metrics`` for its functions; only the
+    quantstats alias it binds is off limits.
+    """
+    source = textwrap.dedent(
+        """
+        import services.metrics
+        import services.metrics as m
+        from services import metrics
+        from services.metrics import compute_all_metrics
+        from . import metrics as sibling
+        def score(r):
+            return (
+                compute_all_metrics(r),
+                m.compute_all_metrics(r),
+                metrics.sharpe_vol_status_from_backbone(r),
+                services.metrics.compute_qstats_scalars(r, None),
+                sibling.compute_all_metrics(r),
+                getattr(metrics, "compute_all_metrics"),
+            )
+        """
+    )
+    assert scan_source(REEXPORT_MODULE, source) == ([], [], 0)
+
+
+def test_qstats_gate_reexport_through_scan_tree_reads_the_covered_alias(tmp_path: Path) -> None:
+    """Rule A' through ``scan_tree``: the borrowed name is read from the covered
+    module ITSELF. A covered module aliasing quantstats as ``Q`` makes ``Q`` the
+    off-limits name, and ``qs`` (which it no longer binds) stops being one."""
+    services = tmp_path / "services"
+    services.mkdir()
+    (services / "metrics.py").write_text(
+        "import quantstats as Q\n"
+        "def compute_all_metrics(r):\n"
+        "    return Q.stats.volatility(r, prepare_returns=False)\n",
+        encoding="utf-8",
+    )
+    (services / "other.py").write_text(
+        "from services.metrics import Q, qs\n", encoding="utf-8"
+    )
+    violations, _census, _nodes, importers = scan_tree(tmp_path)
+    assert importers == frozenset({"services/metrics.py"})
+    assert [(v.module, v.qs_name, v.shape) for v in violations] == [
+        ("services/other.py", "Q", "re-export import")
     ], violations
 
 

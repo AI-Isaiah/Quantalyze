@@ -35,6 +35,33 @@ and ``from quantstats import stats [as X]`` bind a stats-namespace alias. Then:
   / ``<stats>._utils``, any attribute or name starting ``_prepare_`` reached from
   quantstats, and any ``from quantstats.stats import ...`` /
   ``from quantstats.utils import ...`` / ``from quantstats import utils`` is RED.
+- **Rule B5, fail closed on every other quantstats surface** (Phase 166 review WR-01 /
+  SFH HIGH-2). Any use of a quantstats alias other than ``<qs>.stats`` is RED:
+  ``qs.reports``, ``qs.plots``, ``qs.extend_pandas()`` (which monkeypatches every
+  guessing stats function onto pandas, so each later call is invisible), ``vars(qs)``,
+  ``qs.__dict__``, passing ``qs`` as a value. So is every import shape the gate does
+  not positively recognise: the ONLY green import forms are ``import quantstats [as X]``,
+  ``import quantstats.stats [as X]`` and ``from quantstats import stats [as X]``. A star
+  import, ``from quantstats import reports``, ``from quantstats.reports import ...`` and
+  ``import quantstats.reports as R`` are RED.
+- **Rule B6, string-named access.** A string constant naming quantstats
+  (``"quantstats"`` or ``"quantstats.<sub>"``) passed as a call's first argument or
+  used as a subscript (``importlib.import_module("quantstats")``,
+  ``__import__("quantstats")``, ``sys.modules["quantstats"]``) is RED, and so is
+  ``import_module`` / ``__import__`` with a non-constant first argument, because it
+  cannot be proven not to load quantstats (no production module imports dynamically,
+  measured 2026-09-24). A ``globals()`` / ``vars()`` / ``locals()`` lookup of a
+  quantstats alias by name (``globals()["qs"]``) is RED.
+- **Rule A', re-export.** A module outside ``COVERED_MODULES`` that reaches a
+  quantstats name BOUND in a covered module is RED: ``from services.metrics import qs``,
+  ``from services.metrics import *``, ``metrics.qs`` after ``from services import
+  metrics``, ``services.metrics.qs``, ``getattr(metrics, "qs")``, and the relative forms.
+  Without this a module could bypass Rule A by borrowing the covered module's alias.
+  The bound names are read from the covered module itself (``quantstats_bindings``).
+
+KNOWN LIMIT, RECORDED: an attribute name computed at run time
+(``getattr(metrics, name)`` with a non-constant ``name``) cannot be resolved by a static
+walk. No production module does that today.
 
 WHY ``KWARG_PROVEN`` IS A SET OF LEAF FUNCTIONS, NOT A KEYWORD CHECK
 --------------------------------------------------------------------
@@ -132,7 +159,19 @@ MIRRORED: dict[str, tuple[str, str]] = {
 
 #: Violation shapes that describe an IMPORT statement, not a use of the namespace.
 #: They are not counted as scanned quantstats nodes.
-IMPORT_SHAPES = frozenset({"uncovered importer", "from-import"})
+IMPORT_SHAPES = frozenset(
+    {"uncovered importer", "from-import", "non-stats import", "re-export import"}
+)
+
+#: The dotted module name of each covered module (``services/metrics.py`` ->
+#: ``services.metrics``), for Rule A'.
+COVERED_DOTTED = frozenset(m[: -len(".py")].replace("/", ".") for m in COVERED_MODULES)
+
+#: Calls whose first argument names a module to import at run time (Rule B6).
+DYNAMIC_IMPORTERS = frozenset({"import_module", "__import__"})
+
+#: Builtins that expose a namespace as a dict, so ``globals()["qs"]`` reaches an alias.
+NAMESPACE_DICTS = frozenset({"globals", "vars", "locals"})
 
 #: Phase-start measurement (166-RESEARCH P-2), kept beside the live counts so the
 #: success criterion's "30" is answered, not silently re-counted.
@@ -260,13 +299,71 @@ def _dispatched_names(
     return []
 
 
-def scan_source(module_name: str, source: str) -> tuple[list[Violation], list[CensusRow], int]:
+def quantstats_bindings(source: str) -> frozenset[str]:
+    """The module-level names a module binds to quantstats (``qs``, a stats alias, ...).
+
+    Rule A' reads these from each covered module, so the re-export check follows
+    the alias the covered module really uses instead of a hard-coded ``"qs"``.
+    """
+    bound: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_quantstats(alias.name):
+                    bound.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and _is_quantstats(node.module):
+            for alias in node.names:
+                bound.add(alias.asname or alias.name)
+    return frozenset(bound)
+
+
+def covered_bindings(root: Path = SERVICE_ROOT) -> frozenset[str]:
+    """Union of ``quantstats_bindings`` over the covered modules present under ``root``."""
+    names: set[str] = set()
+    for module in COVERED_MODULES:
+        path = root / module
+        if path.is_file():
+            names |= quantstats_bindings(path.read_text(encoding="utf-8"))
+    return frozenset(names)
+
+
+def _dotted(node: ast.AST) -> list[str] | None:
+    """``a.b.c`` as ``["a", "b", "c"]`` for a pure Name/Attribute chain, else None."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return parts[::-1]
+
+
+def _resolve_from(module_name: str, node: ast.ImportFrom) -> str:
+    """The absolute dotted module an ``ImportFrom`` reads, relative levels resolved."""
+    if not node.level:
+        return node.module or ""
+    package = module_name[: -len(".py")].split("/")[:-1]
+    base = package[: len(package) - (node.level - 1)] if node.level > 1 else package
+    return ".".join(base + (node.module.split(".") if node.module else []))
+
+
+def scan_source(
+    module_name: str, source: str, reexported: frozenset[str] | None = None
+) -> tuple[list[Violation], list[CensusRow], int]:
     """Judge one module's source. Returns (violations, census rows, scanned node count).
 
     ``scanned`` counts every USE of quantstats (namespace attribute, getattr on it,
-    bare namespace reference, utils/preparer reference). Import statements are judged
-    (Rule A, from-imports) but are not uses, so they are not counted.
+    bare namespace reference, utils/preparer reference, any other quantstats
+    surface, string-named access, a re-exported alias). Import statements are judged
+    (Rule A, from-imports, Rule A' re-export imports) but are not uses, so they are
+    not counted.
+
+    ``reexported`` is the set of quantstats names bound in the covered modules
+    (Rule A'). ``None`` reads it from the real covered modules under SERVICE_ROOT.
     """
+    if reexported is None:
+        reexported = covered_bindings(SERVICE_ROOT)
     tree = ast.parse(source, filename=module_name)
     enclosing = _enclosing_function_resolver(tree)
     parent = _parent_map(tree)
@@ -311,6 +408,14 @@ def scan_source(module_name: str, source: str) -> tuple[list[Violation], list[Ce
                 elif alias.name in ("quantstats.utils", "quantstats._utils"):
                     utils_aliases.add(alias.asname)
                     violate(node, alias.name, "from-import", "imports the quantstats preparers")
+                else:
+                    violate(
+                        node,
+                        alias.name,
+                        "non-stats import",
+                        f"import {alias.name} as {alias.asname}: only the stats namespace "
+                        "is judged, and this one runs the preparers out of the gate's sight",
+                    )
         elif isinstance(node, ast.ImportFrom) and _is_quantstats(node.module):
             imports_quantstats = True
             first_import_line = first_import_line or node.lineno
@@ -330,6 +435,22 @@ def scan_source(module_name: str, source: str) -> tuple[list[Violation], list[Ce
                     )
                 elif alias.name.startswith("_prepare_"):
                     violate(node, alias.name, "from-import", "imports a quantstats preparer")
+                elif alias.name == "*":
+                    violate(
+                        node,
+                        "*",
+                        "from-import",
+                        f"a star import from {node.module} binds quantstats names the "
+                        "gate cannot see",
+                    )
+                else:
+                    violate(
+                        node,
+                        alias.name,
+                        "from-import",
+                        f"from {node.module} import {alias.name}: only the stats namespace "
+                        "is judged, and this one runs the preparers out of the gate's sight",
+                    )
 
     if imports_quantstats and module_name not in COVERED_MODULES:
         violations.append(
@@ -473,6 +594,173 @@ def scan_source(module_name: str, source: str) -> tuple[list[Violation], list[Ce
             "the quantstats stats namespace escapes as a value; its calls are invisible",
         )
 
+    # B5: fail closed on any quantstats alias use that is not `<qs>.stats` and was
+    # not already judged (getattr's first argument, `<qs>.utils`).
+    for node in ast.walk(tree):
+        if not is_qs(node) or id(node) in handled:
+            continue
+        par = parent.get(node)
+        if isinstance(par, ast.Attribute) and par.value is node and par.attr == "stats":
+            continue
+        scanned += 1
+        assert isinstance(node, ast.Name)
+        if isinstance(par, ast.Attribute):
+            surface = par.attr
+        elif isinstance(par, ast.Call) and isinstance(par.func, ast.Name) and node in par.args:
+            surface = f"{par.func.id}()"
+        else:
+            surface = node.id
+        detail = (
+            "monkeypatches every guessing stats function onto pandas, so each later "
+            "call is invisible"
+            if surface == "extend_pandas"
+            else "runs the quantstats preparers out of the gate's sight"
+        )
+        violate(
+            node,
+            surface,
+            "non-stats namespace",
+            f"quantstats reached outside qs.stats ({surface}): {detail}",
+        )
+
+    # B6: string-named access to quantstats, and dynamic imports it cannot rule out.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            fname = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute) else ""
+            )
+            first = node.args[0] if node.args else None
+            first_str = (
+                first.value
+                if isinstance(first, ast.Constant) and isinstance(first.value, str)
+                else None
+            )
+            if first_str is not None and _is_quantstats(first_str):
+                scanned += 1
+                violate(
+                    node,
+                    first_str,
+                    "string-named access",
+                    f"{fname or 'a call'}({first_str!r}) reaches quantstats by name, "
+                    "out of the gate's sight",
+                )
+            elif fname in DYNAMIC_IMPORTERS and first_str is None:
+                scanned += 1
+                violate(
+                    node,
+                    fname,
+                    "string-named access",
+                    f"{fname}() with a computed module name cannot be proven not to load "
+                    "quantstats",
+                )
+            elif (
+                fname in NAMESPACE_DICTS
+                and isinstance(func, ast.Name)
+                and isinstance(parent.get(node), (ast.Subscript, ast.Attribute))
+            ):
+                par = parent.get(node)
+                key: object = None
+                if isinstance(par, ast.Subscript) and isinstance(par.slice, ast.Constant):
+                    key = par.slice.value
+                elif isinstance(par, ast.Attribute) and par.attr == "get":
+                    call = parent.get(par)
+                    if (
+                        isinstance(call, ast.Call)
+                        and call.args
+                        and isinstance(call.args[0], ast.Constant)
+                    ):
+                        key = call.args[0].value
+                if key in (qs_aliases | stats_aliases | utils_aliases):
+                    scanned += 1
+                    violate(
+                        node,
+                        f"{fname}()",
+                        "string-named access",
+                        f"{fname}()[{key!r}] reaches a quantstats alias by name, out of "
+                        "the gate's sight",
+                    )
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+            and _is_quantstats(node.slice.value)
+        ):
+            scanned += 1
+            violate(
+                node,
+                node.slice.value,
+                "string-named access",
+                f"[{node.slice.value!r}] reaches quantstats by name (sys.modules), out of "
+                "the gate's sight",
+            )
+
+    # Rule A': an uncovered module borrowing a covered module's quantstats alias.
+    if module_name not in COVERED_MODULES and reexported:
+        module_aliases: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.asname:
+                        module_aliases[alias.asname] = alias.name
+                    else:
+                        root_name = alias.name.split(".")[0]
+                        module_aliases[root_name] = root_name
+            elif isinstance(node, ast.ImportFrom):
+                source_module = _resolve_from(module_name, node)
+                for alias in node.names:
+                    if source_module in COVERED_DOTTED and (
+                        alias.name == "*" or alias.name in reexported
+                    ):
+                        violate(
+                            node,
+                            alias.name,
+                            "re-export import",
+                            f"from {source_module} import {alias.name} borrows a covered "
+                            "module's quantstats alias; the gate does not judge this module",
+                        )
+                    elif alias.name != "*":
+                        module_aliases[alias.asname or alias.name] = (
+                            f"{source_module}.{alias.name}" if source_module else alias.name
+                        )
+
+        def resolves_to_covered(expr: ast.AST) -> bool:
+            parts = _dotted(expr)
+            if not parts or parts[0] not in module_aliases:
+                return False
+            full = ".".join([module_aliases[parts[0]], *parts[1:]])
+            return full in COVERED_DOTTED
+
+        for node in ast.walk(tree):
+            target: str | None = None
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr in reexported
+                and resolves_to_covered(node.value)
+            ):
+                target = node.attr
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and len(node.args) > 1
+                and resolves_to_covered(node.args[0])
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in reexported
+            ):
+                target = str(node.args[1].value)
+            if target is not None:
+                scanned += 1
+                violate(
+                    node,
+                    target,
+                    "re-export",
+                    f"reaches the covered module's quantstats alias {target!r} from an "
+                    "uncovered module; the gate does not judge this module",
+                )
+
     violations.sort(key=lambda v: v.lineno)
     census = [row for _line, _col, row in sorted(placed, key=lambda t: (t[0], t[1]))]
     return violations, census, scanned
@@ -490,6 +778,7 @@ def scan_tree(
     census: list[CensusRow] = []
     nodes = 0
     importers: set[str] = set()
+    reexported = covered_bindings(root)
     for path in scanned_files(root):
         source = path.read_text(encoding="utf-8")
         module = _module_name(path, root)
@@ -500,7 +789,7 @@ def scan_tree(
             for n in ast.walk(tree)
         ):
             importers.add(module)
-        v, c, s = scan_source(module, source)
+        v, c, s = scan_source(module, source, reexported)
         violations.extend(v)
         census.extend(c)
         nodes += s
