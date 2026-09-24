@@ -866,16 +866,24 @@ export function deriveEmptySeriesState(
 // value (`sign_in_failed`, 167-04), a holding sourced from a key the venue has
 // stopped accepting would have rendered un-chipped and un-filtered.
 //
-// ⚠️ WHAT THIS PREDICATE DOES NOT REACH (review round 1, SFH-M2 — an earlier
-// version of this comment claimed otherwise): the HEADLINE AUM. The chip and
-// the `HoldingsTable` filter are its only consumers. The AUM is summed in
-// `src/lib/queries.ts` (`emptyLiveBaselineMetrics` /
-// `liveBaselineMetricsFromPerKeyDailies`, `totalAum = holdingsSummary.reduce`)
-// over holdings with no key-status test at all, so a holding from a `revoked`
-// or `sign_in_failed` key IS counted there — true before Phase 167 for
-// `revoked`, and unchanged by it. Flagging the AUM as partial when an
-// untrusted key contributes is a money-number change and is booked as a
-// follow-up, not made here.
+// ⚠️ WHAT THIS PREDICATE REACHES, AND HOW (review round 1, SFH-M2 — an earlier
+// version of this comment claimed otherwise; ⛔ CORRECTED by Phase 167.1
+// AUMTRUST). Phase 167 left the chip and the `HoldingsTable` filter as its
+// only consumers. Since Phase 167.1 it also reaches the two RENDERED
+// holdings-derived dollar totals, as a DISCLOSURE and never a subtraction:
+//   * `summarizeLiveHoldings` (`allocations/lib/live-holdings-summary.ts`)
+//     feeds the Scenario composer's `scenario-aum-untrusted-note`;
+//   * the `OpenPositionsTable` footer pass feeds
+//     `open-positions-untrusted-note`.
+// Both totals keep their value and name the untrusted part (founder decision
+// 2026-09-22: keep the total and flag it). No money number changed.
+// `src/lib/queries.ts` still sums `totalAum = holdingsSummary.reduce` over
+// every holding with no key-status test, but `liveBaselineMetrics.aum` is
+// rendered nowhere — Phase 64 PRESENT-01 removed the KPI-strip AUM cell — so
+// that sum is not a surface. In book mode a `revoked` key's holdings are
+// outside the composer's summed set, because `isPerKeyDailiesEligibleKey`
+// excludes that key; whether to disclose that ABSENCE is Phase 167.1 D-06, a
+// founder decision.
 //
 // ⛔ THE EQUALITY SHAPE WAS THE DEFECT, NOT THE MISSING VALUE. Appending
 // `|| status === "sign_in_failed"` beside each `=== "revoked"` reproduces it
