@@ -2,12 +2,12 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260917120000_ledger_fanout_admit_private.sql
+-- source migration: 20260924120000_ledger_fanout_failure_count.sql
 -- --------------------------------------------------------------------------
--- STEP 1: the single-key fan-out, re-based with one edit
+-- STEP 1: the single-key fan-out, re-based with four edits
 -- --------------------------------------------------------------------------
 -- Re-based on supabase/schema/functions/enqueue_ledger_refresh_for_strategies.sql
--- (source migration 20260911130000). The ONE edit enumerated in the RE-BASE
+-- (source migration 20260917120000). The four edits enumerated in the RE-BASE
 -- DISCIPLINE section above and nothing else; every other line of the body is
 -- that snapshot's, byte for byte.
 CREATE OR REPLACE FUNCTION public.enqueue_ledger_refresh_for_strategies()
@@ -40,6 +40,12 @@ DECLARE
   v_read_failed BOOLEAN := FALSE;
   v_sqlstate    TEXT;
   v_cause       TEXT;
+  -- ---- the failure instrument's locals (164.6 OPS-08-F2) ---------------
+  -- How many candidates failed to enqueue this tick, and which. Filled by
+  -- the per-candidate handler (assignments only) and written ONCE, after
+  -- the lock is released, by the failure instrument below.
+  v_failed         INTEGER := 0;
+  v_failed_targets JSONB   := '[]'::jsonb;
 BEGIN
   -- ---- Lock B (D-08, 164.7 D-01): the fail-closed activation switch ------
   -- FIRST statement in the body, deliberately — unchanged from the form this
@@ -451,6 +457,17 @@ BEGIN
         -- Catching OTHERS keeps one poisoned row from aborting the whole tick.
         -- The SQLSTATE is carried; no identifier is (T-161.1-10).
         RAISE WARNING 'enqueue_ledger_refresh_for_strategies: one candidate failed to enqueue (SQLSTATE %); continuing', SQLSTATE;
+        -- ---- the failure instrument (164.6 OPS-08-F2, D-11) ---------------
+        -- ASSIGNMENTS ONLY, the rule the activation handler above states:
+        -- no read and no write in a handler. The failure is COUNTED and the
+        -- candidate RECORDED here, and written once, after the unlock, below.
+        -- SQLSTATE is defined only inside a handler, so it is captured here
+        -- or nowhere. The id goes into the recorded list and NEVER into RAISE
+        -- text (T-161.1-10): the WARNING above stays byte-identical.
+        v_failed := v_failed + 1;
+        v_failed_targets := v_failed_targets
+          || jsonb_build_array(jsonb_build_object('strategy_id', v_row.strategy_id,
+                                                  'sqlstate', SQLSTATE));
       END;
     END LOOP;
   EXCEPTION WHEN OTHERS THEN
@@ -462,7 +479,37 @@ BEGIN
 
   PERFORM pg_advisory_unlock(hashtext('ledger_refresh_fanout'));
 
-  RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: enqueued % refresh job(s) this tick', v_enqueued;
+  -- ---- the failure instrument's write (164.6 OPS-08-F2, D-10 / D-11) ----
+  -- ⛔ AFTER THE UNLOCK ABOVE, NEVER INSIDE THE LOCK-HOLDING BLOCK. There a
+  -- failing INSERT would reach that block's handler, which unlocks and
+  -- RE-RAISES, and the whole tick would roll back with every good enqueue in
+  -- it. Here the lock is already released on every path, by construction,
+  -- and the write is best-effort wrapped like the dormancy instrument's, so
+  -- a failed write costs the row and never the tick. The migration's
+  -- apply-time block refuses a body whose failure block precedes the last
+  -- unlock.
+  --
+  -- ONE row per tick in which a candidate failed; a tick with no failure
+  -- writes nothing. Same cron_name as the dormancy rows, told apart by
+  -- `error` and metadata->>'cause'. The list is bounded by the per-tick
+  -- limit above. The strategy ids go ONLY into `metadata`, which row
+  -- security lets platform admins and service_role read, never into RAISE
+  -- text. The RETURN below is unchanged: it counts jobs INSERTED (D-10).
+  IF v_failed > 0 THEN
+    BEGIN
+      INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+      VALUES ('ledger_refresh_fanout', 'error', now(), 'candidate_enqueue_failed',
+              jsonb_build_object('function', 'enqueue_ledger_refresh_for_strategies',
+                                 'cause', 'candidate_enqueue_failed',
+                                 'failed_count', v_failed,
+                                 'enqueued_count', v_enqueued,
+                                 'failed_targets', v_failed_targets));
+    EXCEPTION WHEN OTHERS THEN
+      RAISE WARNING 'enqueue_ledger_refresh_for_strategies: failure instrument write failed (SQLSTATE %); % candidate(s) failed this tick', SQLSTATE, v_failed;
+    END;
+  END IF;
+
+  RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: enqueued % refresh job(s) this tick; % candidate(s) failed to enqueue', v_enqueued, v_failed;
   RETURN v_enqueued;
 END;
 $fanout$;
