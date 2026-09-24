@@ -15470,6 +15470,114 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     return screen.getByTestId("scenario-aum-input") as HTMLInputElement;
   }
 
+  /** One key and its one holding, for the state-by-state cases (plan 03). */
+  interface AtKeySpec {
+    id: string;
+    status: string | null;
+    venue: string;
+    symbol: string;
+    /** Spot holding: its `value_usd` IS its equity contribution. */
+    spotUsd?: number;
+    /** Derivative holding: its equity contribution is `unrealized_pnl_usd`.
+     *  `value_usd` is a far-away notional, so a wrong-field read shows. */
+    derivPnlUsd?: number;
+    /** Defaults true. False drops the key from `contributingApiKeyIds` and
+     *  gives it no return series. */
+    contributing?: boolean;
+    /** Defaults true. False drops the key from BOTH eligibility sets (and
+     *  therefore from the contributing set too). */
+    eligible?: boolean;
+  }
+
+  /** A book built from `AtKeySpec`s. Every spec carries its OWN
+   *  (venue, symbol), so each holding has a distinct `buildHoldingRef` triple
+   *  (see `atPayload`); each case asserts that as its self-proof. */
+  function atBook(specs: AtKeySpec[]): MyAllocationDashboardPayload {
+    const eligible = specs.filter((s) => s.eligible !== false).map((s) => s.id);
+    const contributing = specs
+      .filter((s) => s.eligible !== false && s.contributing !== false)
+      .map((s) => s.id);
+    return makePayload({
+      apiKeys: specs.map((s) => ({ ...winApiKey(s.id), sync_status: s.status })),
+      holdingsSummary: specs.map((s) =>
+        s.derivPnlUsd !== undefined
+          ? {
+              ...HOLDING_BTC,
+              venue: s.venue,
+              symbol: s.symbol,
+              holding_type: "derivative" as const,
+              value_usd: 900_000,
+              unrealized_pnl_usd: s.derivPnlUsd,
+              side: "long" as const,
+              api_key_id: s.id,
+            }
+          : {
+              ...HOLDING_BTC,
+              venue: s.venue,
+              symbol: s.symbol,
+              holding_type: "spot" as const,
+              value_usd: s.spotUsd ?? 0,
+              api_key_id: s.id,
+            },
+      ),
+      perKeyReturnsByApiKeyId: Object.fromEntries(
+        contributing.map((id, i) => [
+          id,
+          i % 2 === 0 ? AT_SERIES_A : AT_SERIES_B,
+        ]),
+      ),
+      perKeyDailiesGateSatisfied: contributing.length === eligible.length,
+      eligibleApiKeyIds: eligible,
+      allocatorEligibleApiKeyIds: eligible,
+      contributingApiKeyIds: contributing,
+      bookEntryGateSatisfied: contributing.length > 0,
+    });
+  }
+
+  /** Fixture self-proof: no two holdings share a triple, so none collapses
+   *  out of `holdingByRef` and silently vanishes from the sum. */
+  function expectDistinctTriples(payload: MyAllocationDashboardPayload) {
+    expect(new Set(payload.holdingsSummary.map(buildHoldingRef)).size).toBe(
+      payload.holdingsSummary.length,
+    );
+  }
+
+  /** A COMMITTED manual AUM: a change, then the blur that commits it. */
+  function commitAum(value: string) {
+    const el = aumField();
+    fireEvent.change(el, { target: { value } });
+    fireEvent.blur(el);
+  }
+
+  // ── THE STATE B BOOK ──────────────────────────────────────────────────────
+  //   trusted        (key-a, spot)   37,655
+  //   untrusted      (key-b, spot)   12,345
+  //   live total                     50,000   ← what the override note quotes
+  //   committed manual override      75,000   ← what the field then shows
+  const AT_B_TRUSTED_USD = 37_655;
+  const AT_B_UNTRUSTED_USD = 12_345;
+  const AT_B_LIVE_TOTAL = 50_000;
+  function atStateBBook(
+    secondKeyStatus: string | null = "sign_in_failed",
+  ): MyAllocationDashboardPayload {
+    return atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: secondKeyStatus,
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: AT_B_UNTRUSTED_USD,
+      },
+    ]);
+  }
+
   beforeEach(() => {
     lsStore.clear();
     vi.clearAllMocks();
@@ -15514,5 +15622,79 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     expect(notes[0].textContent).toBe(
       "Includes $12,345 from keys needing attention.",
     );
+  });
+
+  it("AUMTRUST State B (D-08/D-18): a committed override moves the disclosure INTO the override note, as a clause on the live total it quotes — one marker, never two", () => {
+    const payload = atStateBBook();
+    expectDistinctTriples(payload);
+    expect(AT_B_TRUSTED_USD + AT_B_UNTRUSTED_USD).toBe(AT_B_LIVE_TOTAL);
+    renderAt(payload);
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+
+    commitAum("75000");
+
+    // The field now shows the allocator's own number, so a standalone
+    // "Includes …" beside it would read as qualifying the MANUAL value, which
+    // is false. The disclosure follows the live total into the note.
+    expect(aumField().value).toBe("75000");
+    const note = screen.getByTestId("scenario-aum-override-note");
+    expect(note.textContent).toBe(
+      "Overrides live-holdings total $50,000, which includes $12,345 from keys needing attention.",
+    );
+    // D-08: exactly ONE marker for the one number, and it is the nested one.
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "includes $12,345 from keys needing attention",
+    );
+    expect(
+      markers[0].closest('[data-testid="scenario-aum-override-note"]'),
+    ).toBe(note);
+  });
+
+  it("AUMTRUST State B regression (UI-SPEC § 1): with no untrusted holding the override note is byte-identical to today and no marker exists", () => {
+    // Same book, second key trusted: the one difference from the State B case.
+    const payload = atStateBBook(null);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+
+    commitAum("75000");
+
+    expect(screen.getByTestId("scenario-aum-override-note").textContent).toBe(
+      "Overrides live-holdings total $50,000.",
+    );
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+  });
+
+  it("AUMTRUST placement follows the COMMITTED value (RESEARCH Pitfall 3): typing without a blur neither moves nor removes the marker", () => {
+    const payload = atStateBBook();
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    // Mid-typing: the field text is the allocator's, but nothing is committed,
+    // so the marker stays standalone (State A) and no override note exists.
+    fireEvent.change(aumField(), { target: { value: "75000" } });
+    expect(aumField().value).toBe("75000");
+    expect(screen.queryByTestId("scenario-aum-override-note")).toBeNull();
+    const typing = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(typing).toHaveLength(1);
+    expect(typing[0].textContent).toBe(
+      "Includes $12,345 from keys needing attention.",
+    );
+    expect(
+      typing[0].closest('[data-testid="scenario-aum-override-note"]'),
+    ).toBeNull();
+
+    // The blur commits, and only then does the marker move (State B).
+    fireEvent.blur(aumField());
+    const committed = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(committed).toHaveLength(1);
+    expect(committed[0].textContent).toBe(
+      "includes $12,345 from keys needing attention",
+    );
+    expect(
+      committed[0].closest('[data-testid="scenario-aum-override-note"]'),
+    ).not.toBeNull();
   });
 });

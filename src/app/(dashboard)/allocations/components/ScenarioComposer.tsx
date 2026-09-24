@@ -4923,12 +4923,31 @@ export function ScenarioComposer({
             Required to size and commit.
           </span>
         )}
+        {/* Phase 167.1 AUMTRUST — State B: a committed manual value differs from
+            the live total, so the field shows the allocator's own number and
+            only this note quotes the live total. A standalone "Includes …"
+            beside the field would then read as qualifying the MANUAL value,
+            which is false, so the disclosure follows the live total in here as
+            a relative clause on it (D-18). State A above renders only when the
+            field shows the live total, so one number never carries two markers
+            (D-08). The nested span has no class: it inherits this note's muted
+            voice (D-09). With no untrusted holding the text is byte-identical
+            to before: `Overrides live-holdings total $X.` */}
         {overrideNoteShowsLive && (
           <span
             data-testid="scenario-aum-override-note"
             className="text-xs text-text-muted"
           >
-            Overrides live-holdings total {formatUsd(liveHoldingsSum)}.
+            Overrides live-holdings total {formatUsd(liveHoldingsSum)}
+            {showUntrustedMarker && (
+              <>
+                , which{" "}
+                <span data-testid="scenario-aum-untrusted-note">
+                  {buildUntrustedAumClause(liveHoldingsSummary.untrusted.amount)}
+                </span>
+              </>
+            )}
+            .
           </span>
         )}
         {/* Review round 2 F2 — the DISCLOSURE that pays for the narrowing above.
