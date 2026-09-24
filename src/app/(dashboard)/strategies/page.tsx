@@ -112,6 +112,9 @@ function computationStatusOf(embed: unknown): string | null {
 async function readRecipientArm(
   supabase: Awaited<ReturnType<typeof createClient>>,
   strategyId: string,
+  // 167.2-REVIEW IN-03: false only when the member read succeeded and found no
+  // member for this strategy (see `selectFactsheetJob`).
+  preferStitch: boolean,
 ): Promise<RecipientArm> {
   // 167.2-REVIEW-SFH M-5: the shared bounded read, which re-asks once at the
   // RPC's cap when the first window is full of non-chain rows. A throw is
@@ -156,6 +159,7 @@ async function readRecipientArm(
       rows: read.rows,
       readExhaustive: read.readExhaustive,
       nowMs: Date.now(),
+      preferStitch,
     }),
   );
 }
@@ -249,6 +253,7 @@ export default async function StrategiesPage() {
   // captured and sets this flag, which renders one page-level line saying the
   // status could not be checked.
   let keyStatusUnreadable = false;
+  let membersReadFailed = false;
   const membersByStrategy = new Map<string, StrategyKeyMemberRow[]>();
   if (strategyIds.length > 0) {
     // The generated types predate `strategy_keys`; the cast is type-only (as in
@@ -265,6 +270,7 @@ export default async function StrategiesPage() {
         tags: { route: "strategies/page", stage: "strategy-keys" },
       });
       keyStatusUnreadable = true;
+      membersReadFailed = true;
     } else {
       for (const m of (memberRows ?? []) as StrategyKeyMemberRow[]) {
         const list = membersByStrategy.get(m.strategy_id);
@@ -325,7 +331,12 @@ export default async function StrategiesPage() {
           const arm: RecipientArm =
             mode === "public-url"
               ? "not_available"
-              : await readRecipientArm(supabase, s.id);
+              : await readRecipientArm(
+                  supabase,
+                  s.id,
+                  // IN-03: a failed member read keeps stitch preference.
+                  membersReadFailed || membersByStrategy.has(s.id),
+                );
           return [s.id, recipientShareNote(mode, arm)] as const;
         }),
     ),

@@ -80,6 +80,7 @@ import {
   selectFactsheetJob,
 } from "@/lib/compute-state";
 import { readOwnerComputeJobs } from "@/lib/compute-jobs-read";
+import { countCompositeMembers } from "@/lib/strategy-shape";
 import { captureToSentry } from "@/lib/sentry-capture";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -202,11 +203,18 @@ export async function GET(
       };
 
       let read: Awaited<ReturnType<typeof readOwnerComputeJobs>>;
+      // 167.2-REVIEW IN-03: stitch preference only while the strategy HAS
+      // members. A strategy converted from a composite to a single key before
+      // KCS-23 keeps its old stitch rows, and a stale `done` stitch answered for
+      // the single-key chain running now, so the key card's KCS-18 gate read it
+      // as settled mid-chain. A count that cannot be read keeps the old rule
+      // (never fail toward dropping a live composite's member progress).
+      let memberCount: Awaited<ReturnType<typeof countCompositeMembers>>;
       try {
-        read = await readOwnerComputeJobs(
-          supabase as unknown as SupabaseClient,
-          id,
-        );
+        [read, memberCount] = await Promise.all([
+          readOwnerComputeJobs(supabase as unknown as SupabaseClient, id),
+          countCompositeMembers(supabase as unknown as SupabaseClient, id),
+        ]);
       } catch (err) {
         return degrade(
           "compute-jobs-read",
@@ -231,7 +239,9 @@ export async function GET(
       // is the latest FACTSHEET-CHAIN job, no longer the latest of any kind: a
       // newer recurring cron row (`reconcile_strategy`, `sync_funding`) must not
       // hide a failed chain job behind its own `done`.
-      const latest = selectFactsheetJob(read.rows);
+      const latest = selectFactsheetJob(read.rows, {
+        preferStitch: !(memberCount.ok && memberCount.count === 0),
+      });
 
       if (latest === null) {
         return NextResponse.json(IDLE, { status: 200, headers: NO_STORE_HEADERS });

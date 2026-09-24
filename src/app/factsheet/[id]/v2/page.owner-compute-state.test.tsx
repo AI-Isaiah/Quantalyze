@@ -703,6 +703,20 @@ describe("KCS-09 — an unreadable read never claims progress", () => {
     }
   });
 
+  it("IN03-CONVERTED (167.2-REVIEW IN-03): zero members, an old failed stitch and a newer running chain job state the running job", async () => {
+    givenOwnerPendingDraft();
+    STATE.memberCountResult = { count: 0, error: null };
+    givenJobs([
+      job({ kind: "process_key_long", status: "running", created_at: minutesAgo(2) }),
+      job({ kind: "stitch_composite", status: "failed_final", error_kind: "permanent", created_at: minutesAgo(600) }),
+    ]);
+
+    const { stateLine } = await renderOwnerPending();
+
+    expect(stateLine!.textContent).not.toBe(FAIL_PERMANENT);
+    expect(stateLine!.className).not.toContain("text-negative");
+  });
+
   it("REASK (167.2-REVIEW-SFH M-5): a full 100-row window of cron rows re-asks once at the cap and states the real answer", async () => {
     givenOwnerPendingDraft();
     givenJobs(

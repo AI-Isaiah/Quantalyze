@@ -71,6 +71,9 @@ vi.mock("@/lib/ratelimit", () => ({
 // be asserted as "the client was never even constructed" — a stronger and much
 // less fakeable claim than counting queries.
 const createAdminMock = vi.hoisted(() => vi.fn());
+// 167.2-REVIEW IN-03: the head count's answer and its filters.
+const memberCountValue = vi.hoisted(() => ({ value: 1 as number }));
+const memberCountCalls = vi.hoisted(() => [] as Array<[string, unknown]>);
 const adminFromMock = vi.hoisted(() => vi.fn());
 const sharesReadMock = vi.hoisted(() =>
   vi.fn(async (_cols?: string, _isCol?: string, _isVal?: unknown) => ({
@@ -157,6 +160,26 @@ vi.mock("@/lib/supabase/admin", () => ({
             },
           };
           return builder;
+        }
+        // 167.2-REVIEW IN-03: a HEAD count of the matched strategy's members
+        // (no row, no column). Any other projection on it throws. Default 1,
+        // so every case before it keeps the stitch-preferring selection.
+        if (table === "strategy_keys") {
+          const countChain = {
+            select: (_cols: string, opts?: { count?: string; head?: boolean }) => {
+              if (opts?.count !== "exact" || opts?.head !== true) {
+                throw new Error("strategy_keys must be head-counted on this page");
+              }
+              return countChain;
+            },
+            eq: (col: string, val: unknown) => {
+              memberCountCalls.push([col, val]);
+              return countChain;
+            },
+            then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
+              Promise.resolve({ count: memberCountValue.value, error: null }).then(resolve, reject),
+          };
+          return countChain;
         }
         // Any other table on this page is a disclosure bug by construction:
         // nothing here is bounded except the shares read and the matched id.
@@ -309,6 +332,8 @@ beforeEach(() => {
   sharesReadMock.mockResolvedValue({ data: [], error: null });
   buildMock.mockResolvedValue({ strategyId: "stub" } as never);
   jobsReadMock.mockResolvedValue({ data: [], error: null });
+  memberCountValue.value = 1;
+  memberCountCalls.length = 0;
 });
 
 // ---------------------------------------------------------------------------
@@ -478,6 +503,20 @@ describe("KCS-11 — the pending card promises nothing when no job will finish t
   beforeEach(() => {
     sharesReadMock.mockResolvedValue({ data: [ROW], error: null });
     buildMock.mockResolvedValue(null);
+  });
+
+  it("IN03-CONVERTED (167.2-REVIEW IN-03): with no members, an old done stitch does not hide a newer running chain job, and the count is bounded by the matched id", async () => {
+    memberCountValue.value = 0;
+    jobsReadMock.mockResolvedValue({
+      data: [
+        jobRow({ kind: "process_key_long", status: "running", created_at: "2026-09-20T12:00:00.000Z" }),
+        jobRow({ kind: "stitch_composite", status: "done", created_at: "2026-09-10T12:00:00.000Z" }),
+      ],
+      error: null,
+    });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain(KCS11_A_HEADING);
+    expect(memberCountCalls).toEqual([["strategy_id", STRATEGY_ID]]);
   });
 
   it("TRIGGER-SHAPE-B: a permanently failed composite stitch renders 'not available yet', never 'ready yet'", async () => {

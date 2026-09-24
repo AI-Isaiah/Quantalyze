@@ -568,6 +568,21 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC);
   });
 
+  it("IN03-CONVERTED (167.2-REVIEW IN-03): a row with no members is judged by its newer chain job, not an old stitch", async () => {
+    state.strategies = [row("s-1", { status: "draft", api_key_id: "k-1", strategy_analytics: null })];
+    state.members = [];
+    state.jobs = {
+      "s-1": [
+        { kind: "process_key_long", status: "running", created_at: "2026-02-02T00:00:00.000Z" },
+        { kind: "stitch_composite", status: "failed_final", created_at: "2026-01-01T00:00:00.000Z" },
+      ],
+    };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-1")).toBe(MINT_A);
+  });
+
   it("PUBLIC-NO-READ (167.2-REVIEW IN-04): a published row's note is the public-URL line whatever the arm, so its jobs are never read", async () => {
     state.strategies = [
       row("s-pub", { status: "published", strategy_analytics: { computation_status: "failed" } }),

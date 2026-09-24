@@ -93,9 +93,21 @@ function isFactsheetChainKind(kind: string | undefined): boolean {
  * Stitch-PREFERRING (154-04): the stitch row is the only row that carries
  * member progress or a heartbeat, so whenever one exists it answers even if a
  * chain row ran afterwards (PIN-COMPOSITE-WINS in the route test).
+ *
+ * 167.2-REVIEW IN-03: `preferStitch: false` is for a strategy that has NO
+ * `strategy_keys` members now. A strategy converted from a composite to a
+ * single key before KCS-23 keeps its old stitch rows for their 30/90-day
+ * retention, and stitch preference made that stale stitch answer for the
+ * single-key chain running now (and read its `done` as "settled" in KCS-18's
+ * success gate). With it false, the stitch answers only when it is at least as
+ * new as the newest chain row. The default (true) is the rule above, unchanged,
+ * and is what a caller passes when the member count is above zero OR could not
+ * be read: a composite whose members' chain rows run after its stitch must keep
+ * its stitch projection.
  */
 export function selectFactsheetJob(
   rows: readonly (ComputeJobRow | null | undefined)[],
+  opts: { preferStitch?: boolean } = {},
 ): ComputeJobRow | null {
   const isNewer = (row: ComputeJobRow, current: ComputeJobRow | null) =>
     current === null ||
@@ -109,6 +121,9 @@ export function selectFactsheetJob(
     } else if (isFactsheetChainKind(row.kind) && isNewer(row, latestChain)) {
       latestChain = row;
     }
+  }
+  if (opts.preferStitch === false && latestStitch !== null && latestChain !== null) {
+    return isNewer(latestChain, latestStitch) ? latestChain : latestStitch;
   }
   return latestStitch ?? latestChain;
 }
@@ -354,11 +369,13 @@ export function deriveComputeState(
         rows: readonly (ComputeJobRow | null | undefined)[];
         readExhaustive: boolean;
         nowMs: number;
+        /** 167.2-REVIEW IN-03: see `selectFactsheetJob`. Default true. */
+        preferStitch?: boolean;
       }
     | { readError: true },
 ): ComputeState {
   if ("readError" in input) return { state: "unreadable" };
-  const row = selectFactsheetJob(input.rows);
+  const row = selectFactsheetJob(input.rows, { preferStitch: input.preferStitch });
   if (row === null) {
     return input.readExhaustive
       ? { state: "never_started" }

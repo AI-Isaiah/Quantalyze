@@ -688,6 +688,9 @@ async function readOwnerPendingStatus(
         rows: jobsRead.rows,
         readExhaustive: jobsRead.readExhaustive,
         nowMs: Date.now(),
+        // 167.2-REVIEW IN-03: an old stitch answers only while the strategy
+        // has members (or the count could not be read).
+        preferStitch: !(memberCount.ok && memberCount.count === 0),
       }),
       shape,
     };

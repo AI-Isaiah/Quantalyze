@@ -90,6 +90,32 @@ describe("selectFactsheetJob", () => {
     expect(selectFactsheetJob([chain, s])).toBe(s);
   });
 
+  it("167.2-REVIEW IN-03: with preferStitch false (no members now), a NEWER chain row answers over an old stitch", () => {
+    // A strategy converted from a composite to a single key before KCS-23
+    // keeps its stitch rows (30/90-day retention). Stitch-preferring selection
+    // made that stale stitch answer for the single-key chain running now.
+    const oldStitch = stitch({ created_at: "2026-07-12T11:00:00.000Z", status: "done" });
+    const chain = row("process_key_long", { created_at: "2026-07-12T11:59:00.000Z", status: "running" });
+    expect(selectFactsheetJob([oldStitch, chain], { preferStitch: false })).toBe(chain);
+    // Default (members, or a count that could not be read): stitch-preferring, unchanged.
+    expect(selectFactsheetJob([oldStitch, chain])).toBe(oldStitch);
+  });
+
+  it("167.2-REVIEW IN-03: with preferStitch false, a stitch at least as new as the newest chain row still answers", () => {
+    const s = stitch({ created_at: "2026-07-12T11:59:00.000Z", status: "failed_final" });
+    const chain = row("process_key_long", { created_at: "2026-07-12T11:00:00.000Z", status: "done" });
+    expect(selectFactsheetJob([chain, s], { preferStitch: false })).toBe(s);
+    expect(selectFactsheetJob([s], { preferStitch: false })).toBe(s);
+  });
+
+  it("167.2-REVIEW IN-03: deriveComputeState passes preferStitch through to the selection", () => {
+    const oldStitch = stitch({ created_at: "2026-07-12T11:00:00.000Z", status: "done" });
+    const chain = row("process_key_long", { created_at: "2026-07-12T11:59:00.000Z", status: "running" });
+    expect(
+      deriveComputeState({ rows: [oldStitch, chain], readExhaustive: true, nowMs: 0, preferStitch: false }).state,
+    ).toBe("running");
+  });
+
   it("picks the LATEST stitch by created_at, whatever the array order", () => {
     const older = stitch({ created_at: "2026-07-12T11:40:00.000Z", status: "done" });
     const newer = stitch({ created_at: "2026-07-12T11:55:00.000Z", status: "running" });

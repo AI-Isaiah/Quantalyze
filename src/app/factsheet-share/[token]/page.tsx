@@ -61,6 +61,8 @@ import {
   type ComputeState,
 } from "@/lib/compute-state";
 import { SHARE_CARD_COPY } from "@/lib/status-surface-copy";
+import { countCompositeMembers } from "@/lib/strategy-shape";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { FactsheetView } from "@/app/factsheet/[id]/v2/FactsheetView";
 
@@ -254,6 +256,13 @@ async function readShareComputeState(
       .order("created_at", { ascending: false })
       .limit(COMPUTE_STATE_READ_LIMIT);
 
+    // 167.2-REVIEW IN-03: a head count bounded by the same matched id (no row
+    // and no column leaves it), so an old stitch answers only while the
+    // strategy has members. A count that cannot be read keeps the stitch rule.
+    const memberCount = await countCompositeMembers(
+      admin as unknown as SupabaseClient,
+      strategyId,
+    );
     if (error || !Array.isArray(data)) {
       console.error("[factsheet-share/page] compute-state read failed", {
         message: error?.message ?? "compute_jobs answer was not a row array",
@@ -274,6 +283,7 @@ async function readShareComputeState(
       rows,
       readExhaustive: rows.length < COMPUTE_STATE_READ_LIMIT,
       nowMs: Date.now(),
+      preferStitch: !(memberCount.ok && memberCount.count === 0),
     });
   } catch (err) {
     console.error("[factsheet-share/page] compute-state read failed", {
