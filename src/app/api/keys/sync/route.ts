@@ -16,6 +16,7 @@ import { isUuid } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
+import { retractInheritedRefreshMarker } from "@/lib/ledger-refresh-marker";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -365,6 +366,32 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       console.log(
         `[keys/sync] enqueued stitch_composite job=${rpcData} for strategy=${strategy_id}`,
       );
+
+      // Phase 164.6 / 161.1-D13 — the enqueue may have DEDUPED onto an in-flight
+      // ledger-refresh job, whose marker would keep a stale factsheet published
+      // over a failure of a request the user is watching. Retract it, exactly as
+      // Python's `_retract_refresh_marker_on_reuse` does. Best-effort: the enqueue
+      // already succeeded, so a failed retraction never changes the 202, but it
+      // is LOUD under its own tag. The read-modify-write residual (161.1-D12) is
+      // inherited; see `retractInheritedRefreshMarker`'s JSDoc.
+      try {
+        // @audit-skip: job-row provenance metadata; user intent is audited by the sync.start event below.
+        const retraction = await retractInheritedRefreshMarker(admin, rpcData, correlation_id);
+        if (retraction.retracted) {
+          console.warn(
+            `[keys/sync] retracted inherited ${retraction.marker} marker on job=${rpcData} for strategy=${strategy_id}`,
+          );
+        }
+      } catch (err) {
+        console.error(
+          `[keys/sync] composite refresh-marker retraction failed for ${strategy_id}:`,
+          scrubSeamError(err),
+        );
+        captureToSentry(err, {
+          tags: { op: "keys-sync.composite_refresh_marker_retract" },
+          extra: { strategy_id, job_id: rpcData, correlation_id },
+        });
+      }
 
       // Idempotent double-submit is handled by the compute_jobs partial unique
       // index (finalize comment :860-864); repeated preview mounts re-POST safely.
