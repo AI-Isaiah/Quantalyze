@@ -776,6 +776,78 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     expect(fromCalls).toContain("strategies");
   });
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // 167.2 KCS-20 — THE NON-STITCH FALLBACK IS FACTSHEET-CHAIN ONLY.
+  //
+  // "Latest job of ANY kind" let a recurring cron row (`reconcile_strategy`,
+  // `sync_funding`) that has nothing to do with the factsheet become the answer,
+  // so a strategy whose chain job had FAILED read `done` the moment the daily
+  // reconcile finished. The fallback now considers only the chain kinds
+  // (process_key_long, sync_trades, derive_broker_dailies,
+  // compute_analytics_from_csv, compute_analytics); `jobStatus: null` means no
+  // factsheet-chain job is visible. The stitch arm and PIN-COMPOSITE-* are
+  // untouched.
+  // ═══════════════════════════════════════════════════════════════════════
+  it("CHAIN-FILTER-FAILED-WINS: a NEWER done reconcile_strategy does not hide a failed_final process_key_long", async () => {
+    rpcResult.data = [
+      otherKindRow("reconcile_strategy", {
+        status: "done",
+        created_at: "2026-07-12T11:59:00.000Z", // newest overall
+      }),
+      otherKindRow("process_key_long", {
+        status: "failed_final",
+        created_at: "2026-07-12T11:30:00.000Z",
+      }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body).toEqual({
+      jobStatus: "failed_final",
+      stalled: false,
+      memberProgress: [],
+    });
+  });
+
+  it("CHAIN-FILTER-FUNDING-IGNORED: a NEWER running sync_funding does not displace a done compute_analytics_from_csv", async () => {
+    rpcResult.data = [
+      otherKindRow("sync_funding", {
+        status: "running",
+        created_at: "2026-07-12T11:59:00.000Z", // newest overall
+      }),
+      otherKindRow("compute_analytics_from_csv", {
+        status: "done",
+        created_at: "2026-07-12T11:40:00.000Z",
+      }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body.jobStatus).toBe("done");
+    expect(body.stalled).toBe(false);
+  });
+
+  it("CHAIN-FILTER-ONLY-NON-CHAIN: rows of only non-chain kinds answer the IDLE body", async () => {
+    rpcResult.data = [
+      otherKindRow("reconcile_strategy", { status: "done" }),
+      otherKindRow("sync_funding", { status: "running" }),
+      otherKindRow("compute_intro_snapshot", { status: "failed_final" }),
+      otherKindRow("poll_positions", { status: "pending" }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(await res.json())).toBe(
+      '{"jobStatus":null,"stalled":false,"memberProgress":[]}',
+    );
+  });
+
+  it("CHAIN-FILTER-READ-WINDOW: the RPC is asked for COMPUTE_STATE_READ_LIMIT (100) rows, not 20", async () => {
+    // A chain-filtered fallback over a 20-row window can be hidden behind a
+    // run of daily cron rows (RESEARCH P11). Typed as a literal here, never
+    // imported from the module under test.
+    rpcResult.data = [];
+    await call(TEST_STRATEGY_ID);
+    expect(rpcCalls).toEqual([
+      ["get_user_compute_jobs", { p_strategy_id: TEST_STRATEGY_ID, p_limit: 100 }],
+    ]);
+  });
+
   // ── SF-3: a REAL read is NOT degraded (distinct from the couldn't-read blip) ──
   it("a real read (running job) is degraded:false/absent, unlike the RPC-degrade branch", async () => {
     rpcResult.data = [
