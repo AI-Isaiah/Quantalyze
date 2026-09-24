@@ -385,6 +385,21 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     expect(s.excludedUntrusted).toEqual({ amount: 15_555, count: 2, unavailable: 0 });
     expect(s.excludedUntrusted.amount).not.toBe(71_110);
   });
+
+  it("D-20 residual (review round 2 WR-03): a manager-side key OUTSIDE eligibleApiKeyIds (here soft-disconnected, so in neither eligible set) cannot be told apart, so its untrusted holdings ARE counted in excludedUntrusted — over-disclosed, never hidden", () => {
+    // The payload's eligible sets both omit the manager key: a soft-disconnect
+    // (like a revoke or an inactive key) fails `isPerKeyDailiesEligibleKey`,
+    // so the difference that names manager-side keys cannot name it.
+    const managerSide = managerSideKeyIds([KEY_TRUSTED], [KEY_TRUSTED]);
+    expect(managerSide).toEqual([]);
+    const s = summarize({
+      holdings: [H_TRUSTED, H_SIGN_IN_FAILED_OUTSIDE],
+      contributing: [KEY_TRUSTED],
+      managerSide,
+    });
+    expect(s.total).toBe(480_000);
+    expect(s.excludedUntrusted).toEqual({ amount: 55_555, count: 1, unavailable: 0 });
+  });
 });
 
 // ---------------------------------------------------------------------------

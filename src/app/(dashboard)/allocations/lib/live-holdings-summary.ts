@@ -101,11 +101,16 @@ export interface LiveHoldingsSummary {
   /** CONTEXT D-20's `$Y`: holdings the contributing-set narrowing dropped from
    *  `total` whose key is untrusted, MINUS the keys the payload names as
    *  manager-side (`managerSideApiKeyIds`). A manager-side key's holdings are
-   *  not the allocator's book, so a `sign_in_failed` one is left out. A
-   *  `revoked` manager-side key cannot be told apart (it is in neither eligible
-   *  set), so its holdings may be counted: that over-discloses and never
-   *  hides. An allocator-eligible untrusted key that has no return series yet
-   *  IS counted, per D-20.
+   *  not the allocator's book, so one the payload names is left out. An
+   *  allocator-eligible untrusted key that has no return series yet IS
+   *  counted, per D-20.
+   *
+   *  The residual, stated by its predicate (review round 2 WR-03): the payload
+   *  names a manager-side key only while it is in `eligibleApiKeyIds`, which
+   *  `isPerKeyDailiesEligibleKey` restricts to active, non-`revoked`,
+   *  not-disconnected keys. A manager-side key outside `eligibleApiKeyIds`
+   *  (revoked, soft-disconnected or inactive) cannot be told apart, so its
+   *  untrusted holdings may be counted. That over-discloses and never hides.
    *
    *  Nothing renders this yet. It exists so the D-06 pin can measure the
    *  exclusion, and the founder's D-06 answer decides whether it is ever
