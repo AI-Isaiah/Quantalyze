@@ -22,6 +22,9 @@
 -- the other 9 still match once and carry no `nth`. The composite gate was
 -- re-pointed to the same file in the same commit (its twins keep `nth: 2`).
 -- Arm N, the failure-count arm, is new in that phase.
+-- ⭐ The phase's review fix (in place, same migration) added arms N2, N3, T,
+-- U, V1, V2 and W, split out of or beside arm N, and amended arm R: see each
+-- arm's own header. 19 arms -> 26; 24 twins -> 31.
 --
 -- ⛔ WHICH FILE THE ARMS ACTUALLY MEASURE (Phase 164.7 plan 04, TRAP E / C-02;
 -- RE-POINTED ONE MIGRATION FURTHER BY Phase 164.8.6 plan 03, AND ONE FURTHER
@@ -190,7 +193,7 @@
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 19 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 26 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -400,6 +403,28 @@ DECLARE
   v_meta_n     JSONB;    -- arm N: … and that one row's metadata
   v_fail_pre   INTEGER;  -- arm N: this function's failure rows before the clean tick
   v_fail_post  INTEGER;  -- arm N: … and after it. Equal, or a clean tick wrote one.
+  -- ⛔ The 164.6 review fix's arms (R's fresh wedge candidate, N's third
+  --    candidate, and arms T, U, V1, V2, W) add these under the SAME rule as
+  --    arm J's three above: a missing DECLARE is a 42601 that stops the WHOLE
+  --    block compiling, so every arm would vanish together.
+  s_r3         UUID;     -- arm R: a FRESH healthy candidate for the wedge check
+  s_n3         UUID;     -- arm N: a second HEALTHY sibling, on the other venue
+  s_t1         UUID;     -- arm T: healthy, competes for the failed one's slot
+  s_t2         UUID;     -- arm T: … the less-stale one the cooldown must admit
+  s_u1         UUID;     -- arm U: poisoned
+  s_u2         UUID;     -- arm U: poisoned
+  s_v1         UUID;     -- arm V1: poisoned
+  s_v2         UUID;     -- arm V1: healthy
+  s_v3         UUID;     -- arm V2: poisoned
+  s_v4         UUID;     -- arm V2: poisoned
+  s_w1         UUID;     -- arm W: loses a race with 40001
+  s_w2         UUID;     -- arm W: loses a race with 40P01
+  s_w3         UUID;     -- arm W: fails for real
+  s_w4         UUID;     -- arm W: healthy
+  v_err_state  TEXT;     -- arms R, U, V1, V2: the SQLSTATE that escaped, if any
+  v_err_msg    TEXT;     -- arms R, U, V2: … and its message
+  v_meta_w     JSONB;    -- arm W: the real failure's row
+  v_cnt_w      INTEGER;  -- arm W: failure rows naming a lost-race candidate
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
   -- RED-UNDER: DROP the function on the live lane after the migrations have
@@ -981,7 +1006,7 @@ BEGIN
   --    leaving every other line of it intact, and the APPLY SURVIVES (the
   --    deletion is not a migration needle) while this arm is the FIRST failure —
   --    `TEST FAILED (M2): … wrote 0 instrument row(s) …`, lane exit 3. Unmutated,
-  --    the same lane prints ALL 19 ARMS EXECUTED and exits 0.
+  --    the same lane prints ALL 26 ARMS EXECUTED and exits 0.
   -- ⛔ THE TWO PROSE MENTIONS ABOVE CARRY THE COUNT ON PURPOSE AND MUST MOVE
   -- WITH IT. The anti-skip gate reads this file's sentinel with a
   -- `grep -aoE "ALL [0-9]+ ARMS EXECUTED" | head -1`, so the FIRST match in
@@ -1065,7 +1090,11 @@ BEGIN
   --    `occurrences: 1` makes the runner report occurrence-mismatch (the
   --    mutation not applied, so the arm not tested), and `nth: 2` would mutate
   --    the COMPOSITE body, which no arm in this file calls.
-  -- RED-UNDER-M: {"arm":"E","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '0 hours'","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"AND cj2.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')","replace":"AND cj2.status IN ('cancelled')","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_existing = 0 AND v_job_id IS NOT NULL THEN","replace":"IF v_job_id IS NOT NULL THEN","occurrences":2,"nth":1}]}
+  -- ⭐ RE-COUNTED in the 164.6 review fix: each body now also carries a
+  --    failed-attempt cooldown with the same 20-hour window, placed AFTER
+  --    its attempt cooldown, so the interval step reads `occurrences: 4`
+  --    and `nth: 1` still selects THIS body's attempt cooldown.
+  -- RED-UNDER-M: {"arm":"E","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '0 hours'","occurrences":4,"nth":1},{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"AND cj2.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')","replace":"AND cj2.status IN ('cancelled')","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_existing = 0 AND v_job_id IS NOT NULL THEN","replace":"IF v_job_id IS NOT NULL THEN","occurrences":2,"nth":1}]}
   -- ARM E — DEDUPE. A second tick while the job is in flight adds nothing.
   -- ======================================================================
   v_ret := public.enqueue_ledger_refresh_for_strategies();
@@ -1356,7 +1385,11 @@ BEGIN
   --    `occurrences: 1` makes the runner report occurrence-mismatch (the
   --    mutation not applied, so the arm not tested), and `nth: 2` would mutate
   --    the COMPOSITE body, which no arm in this file calls.
-  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '1 hour'","occurrences":2,"nth":1}]}
+  -- ⭐ RE-COUNTED in the 164.6 review fix: each body now also carries a
+  --    failed-attempt cooldown with the same 20-hour window, placed AFTER
+  --    its attempt cooldown, so the interval step reads `occurrences: 4`
+  --    and `nth: 1` still selects THIS body's attempt cooldown.
+  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '1 hour'","occurrences":4,"nth":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_f;
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
@@ -1747,14 +1780,25 @@ BEGIN
   -- before writing this: NO gate in the whole corpus referenced
   -- `advisory_unlock`, and none carried the handler's warning text — the branch
   -- was entirely ungated.
+  --
+  -- ⭐ AMENDED in the 164.6 review fix (HIGH-1). An all-candidates-failed tick
+  -- now RAISES at its end, after the unlock, so the scheduler records it as a
+  -- failed run. That raise is the TICK'S OWN verdict, not a candidate escaping,
+  -- and it is told apart by its message: this arm accepts exactly that message
+  -- (or no raise at all, which is what it sees under arm U's twin) and refuses
+  -- any other escape. Whether the raise HAPPENS is arm U's property, not this
+  -- one's. The wedge check below now proves the mechanism on a FRESH candidate,
+  -- because under arm U's twin the poisoned pair keeps its failure row and sits
+  -- on the failed-attempt cooldown, which is correct and is not a wedge.
   -- ======================================================================
   -- RED-UNDER: make the per-candidate handler RE-RAISE instead of continuing.
   --            The first poisoned candidate then propagates out of the loop,
   --            the outer handler unlocks and re-raises, and the fan-out aborts
-  --            instead of returning 0 — so the `v_ret` read below fails in the
-  --            lane. That mutation is EXACTLY the regression this arm exists to
-  --            catch: it is the difference between "one bad row is skipped" and
-  --            "one bad row kills the tick".
+  --            on the HANDLER'S message instead of on the tick's own
+  --            all-candidates-failed verdict — so the message read below fails
+  --            in the lane. That mutation is EXACTLY the regression this arm
+  --            exists to catch: it is the difference between "one bad row is
+  --            skipped" and "one bad row kills the tick".
   --
   -- ⛔ DISJOINTNESS, checked rather than assumed: 20260917120000's apply-time
   --    `DO $verify$` block holds eight needles (system_flags, the NULL-safe
@@ -1762,11 +1806,13 @@ BEGIN
   --    'archived', the GET DIAGNOSTICS read and the retired app-namespace GUC).
   --    ⭐ RE-CHECKED 2026-09-24 (Phase 164.6 plan 03) when this twin moved to
   --    20260924120000: that file's block carries the same eight plus three new
-  --    ones (the failed-target metadata key, the failure block's opening IF and
-  --    the advisory unlock call, the last two for its ordering check).
-  --    NONE of them matches the handler text mutated here, so the twin cannot
-  --    abort the apply before the arms run and report a `no-red` that measured
-  --    nothing — the trap GRAMMAR.md rule 2 records.
+  --    ones (the failed-target metadata key, the failure row's count key and
+  --    the advisory unlock call, the last two for its ordering check), and the
+  --    review fix added two more (the all-candidates-failed message and the
+  --    cooldown's heartbeat read). NONE of them matches the handler text
+  --    mutated here, so the twin cannot abort the apply before the arms run
+  --    and report a `no-red` that measured nothing — the trap GRAMMAR.md rule 2
+  --    records.
   -- RED-UNDER-M: {"arm":"R","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"RAISE WARNING 'enqueue_ledger_refresh_for_strategies: one candidate failed to enqueue (SQLSTATE %); continuing', SQLSTATE;","replace":"RAISE EXCEPTION 'enqueue_ledger_refresh_for_strategies: one candidate failed to enqueue (SQLSTATE %); continuing', SQLSTATE;","occurrences":1}]}
   CREATE FUNCTION pg_temp.lrf_poison() RETURNS TRIGGER LANGUAGE plpgsql AS $poison$
   BEGIN
@@ -1791,13 +1837,22 @@ BEGIN
   -- and the runner rightly refuses to count the arm as biting. A gate that goes
   -- red for someone else's reason has not measured itself. Converting any
   -- escape into this arm's own TEST FAILED (R) is what makes the red
-  -- ATTRIBUTABLE — which is the property `biting` actually counts.
+  -- ATTRIBUTABLE — which is the property `biting` actually counts. The handler
+  -- only RECORDS what escaped; the verdict is raised below, outside it.
+  v_ret := NULL;
+  v_err_state := NULL;
+  v_err_msg := NULL;
   BEGIN
     v_ret := public.enqueue_ledger_refresh_for_strategies();
   EXCEPTION WHEN OTHERS THEN
-    RAISE EXCEPTION 'TEST FAILED (R): a poisoned candidate propagated OUT of the fan-out (SQLSTATE %) instead of being skipped. The per-candidate handler is the whole mitigation for T-164.5.1-09-07: one bad row must not kill the tick, because a tick that dies here leaves every later tick facing a lock it never released.', SQLSTATE;
+    v_err_state := SQLSTATE;
+    v_err_msg := SQLERRM;
   END;
-  IF v_ret <> 0 THEN
+  IF v_err_msg IS NOT NULL
+     AND v_err_msg NOT LIKE 'enqueue_ledger_refresh_for_strategies: every candidate this tick failed to enqueue%' THEN
+    RAISE EXCEPTION 'TEST FAILED (R): a poisoned candidate propagated OUT of the fan-out (SQLSTATE %) instead of being skipped: what escaped was not the tick''s own all-candidates-failed verdict. The per-candidate handler is the whole mitigation for T-164.5.1-09-07: one bad row must not kill the tick, because a tick that dies here leaves every later tick facing a lock it never released.', v_err_state;
+  END IF;
+  IF v_err_msg IS NULL AND v_ret <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (R): every candidate this tick was poisoned, so the fan-out must report 0 enqueued; it reported %. Either the poison trigger did not fire or a candidate was counted that never landed a row.', v_ret;
   END IF;
 
@@ -1816,40 +1871,56 @@ BEGIN
   DROP TRIGGER lrf_poison_trg ON compute_jobs;
 
   -- THE WEDGE CHECK. The delta above says the books balance; this says the
-  -- mechanism actually still works. A later tick must enqueue again.
+  -- mechanism actually still works: a later tick enqueues a FRESH, healthy
+  -- candidate on the other ledger venue, so the venue cap cannot be what
+  -- decides it. Seeded here, by INSERT only, so no earlier arm sees it.
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2, 'lrf R3', 'draft') RETURNING id INTO s_r3;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_r3, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 25, 'YYYY-MM-DD'), 'value', 0.002)));
+  UPDATE strategies SET status = 'published' WHERE id = s_r3;
   BEGIN
     v_ret := public.enqueue_ledger_refresh_for_strategies();
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION 'TEST FAILED (R): the tick AFTER the all-candidates-failed one raised (SQLSTATE %) instead of running. Same identity rule as the wrapper above.', SQLSTATE;
   END;
-  IF v_ret < 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (R): after a tick in which every candidate failed, the NEXT tick enqueued % job(s) — the fan-out is wedged, which is precisely the denial of service T-164.5.1-09-07 names.', v_ret;
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_r3 AND kind = 'derive_broker_dailies';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (R): after a tick in which every candidate failed, the NEXT tick left a fresh healthy candidate with % derive_broker_dailies row(s), expected 1 — the fan-out is wedged, which is precisely the denial of service T-164.5.1-09-07 names.', v_cnt;
   END IF;
 
-  UPDATE strategies SET status = 'draft' WHERE id IN (s_r1, s_r2);
+  UPDATE strategies SET status = 'draft' WHERE id IN (s_r1, s_r2, s_r3);
 
   -- ======================================================================
-  -- ARM N — ONE POISONED CANDIDATE BESIDE A HEALTHY ONE: THE FAILURE IS
+  -- ARM N — ONE POISONED CANDIDATE BESIDE TWO HEALTHY ONES: THE FAILURE IS
   -- COUNTED AND NAMED (Phase 164.6 / OPS-08-F2, D-10 / D-11 / D-13).
   --
   -- Arm R proves one bad row cannot kill the tick. It cannot prove anybody
-  -- would ever KNOW a row went bad: its tick returns 0, pg_cron records
-  -- `succeeded`, and until 20260924120000 the only trace was a WARNING nothing
-  -- reads. This arm poisons exactly ONE of two candidates and asserts that the
-  -- tick leaves ONE counted cron_runs row naming it, that the healthy sibling
-  -- still enqueues, and that the return value still counts only the jobs
-  -- actually inserted (D-10). Then, with the poison gone, that a tick with no
-  -- failure writes NOTHING (the boundary edge).
+  -- would ever KNOW a row went bad in a tick that ALSO did useful work: that
+  -- tick returns its enqueued count, pg_cron records `succeeded`, and until
+  -- 20260924120000 the only trace was a WARNING nothing reads. This arm poisons
+  -- exactly ONE of three candidates and asserts that the tick leaves ONE
+  -- counted cron_runs row naming it, and that both healthy siblings still
+  -- enqueue. Arms N2, T and N3 below read the same tick's row and the tick
+  -- after it; each is its own arm because each has its own twin.
+  --
+  -- ⭐ THREE candidates, not two, since the 164.6 review fix (IN-02): with one
+  -- poisoned beside ONE healthy the tick enqueued 1 and failed 1, so an
+  -- enqueued count that carried the FAILED count read exactly right and arm
+  -- N2's precision check could not see it. Two healthy siblings make the two
+  -- counts differ. The third sits on the other ledger venue, so the per-venue
+  -- cap of two cannot drop it.
   --
   -- ⛔ PLACED AFTER ARM R, deliberately. Under R's twin the per-candidate
   -- handler re-raises; placed BEFORE R, this arm's poisoned candidate would
   -- propagate first and steal R's first failure (`wrong-first-failure`). Under
   -- THIS arm's twin, R asserts nothing about cron_runs and stays green.
   --
-  -- ⛔ NARROWED BY THIS ARM'S OWN TARGET. Arm R's all-poisoned tick writes a
-  -- failure row too (two failed targets), so counting every
-  -- 'candidate_enqueue_failed' row would count R's. The row read below is keyed
-  -- on the poisoned fixture's id inside failed_targets.
+  -- ⛔ NARROWED BY THIS ARM'S OWN TARGET. Other arms' ticks write failure rows
+  -- too, so counting every 'candidate_enqueue_failed' row would count theirs.
+  -- The row read below is keyed on the poisoned fixture's id inside
+  -- failed_targets.
   --
   -- The fixtures are seeded HERE, by INSERT only, so no earlier arm can see
   -- them at all, and moderately stale like arms P and R so they could never
@@ -1866,17 +1937,21 @@ BEGIN
   --            tick in which a candidate failed, reporting nothing.
   -- ⚠️ `occurrences: 2, nth: 1`: both bodies in 20260924120000 carry the
   --    increment, single-key first. Not a migration needle: that file's
-  --    apply-time block needles the failed-target KEY and the failure block's
-  --    opening IF, and this mutation preserves both, so the apply survives and
+  --    apply-time block needles the failed-target KEY and the failure row's
+  --    count KEY, and this mutation preserves both, so the apply survives and
   --    the ARM is the first failure.
   -- RED-UNDER-M: {"arm":"N","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"v_failed := v_failed + 1;","replace":"v_failed := v_failed + 0;","occurrences":2,"nth":1}]}
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf N1', 'draft') RETURNING id INTO s_n1;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf N2', 'draft') RETURNING id INTO s_n2;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2, 'lrf N3', 'draft') RETURNING id INTO s_n3;
   INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
   VALUES (s_n1, 'complete_with_warnings', now(),
           jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 27, 'YYYY-MM-DD'), 'value', 0.002)));
   INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
   VALUES (s_n2, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 26, 'YYYY-MM-DD'), 'value', 0.002)));
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_n3, 'complete_with_warnings', now(),
           jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 26, 'YYYY-MM-DD'), 'value', 0.002)));
 
   CREATE FUNCTION pg_temp.lrf_poison_n() RETURNS TRIGGER LANGUAGE plpgsql AS $poison_n$
@@ -1889,24 +1964,24 @@ BEGIN
   CREATE TRIGGER lrf_poison_n_trg BEFORE INSERT ON compute_jobs
     FOR EACH ROW EXECUTE FUNCTION pg_temp.lrf_poison_n();
 
-  UPDATE strategies SET status = 'published' WHERE id IN (s_n1, s_n2);
+  UPDATE strategies SET status = 'published' WHERE id IN (s_n1, s_n2, s_n3);
 
   -- Wrapped for arm R's reason: any escape becomes THIS arm's identity.
   BEGIN
     v_ret := public.enqueue_ledger_refresh_for_strategies();
   EXCEPTION WHEN OTHERS THEN
-    RAISE EXCEPTION 'TEST FAILED (N): a tick with ONE poisoned candidate RAISED (SQLSTATE %) instead of skipping it and enqueueing its healthy sibling. Reporting a failure must never cost the tick.', SQLSTATE;
+    RAISE EXCEPTION 'TEST FAILED (N): a tick with ONE poisoned candidate RAISED (SQLSTATE %) instead of skipping it and enqueueing its healthy siblings. Reporting a failure must never cost the tick.', SQLSTATE;
   END;
 
   DROP TRIGGER lrf_poison_n_trg ON compute_jobs;
 
-  IF v_ret <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (N): one of two candidates was poisoned, so the fan-out must report 1 job INSERTED; it reported %. The return value means jobs inserted this tick (D-10), and a failure must be surfaced BESIDE it, never folded into it.', v_ret;
+  IF v_ret <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (N): one of three candidates was poisoned, so the fan-out must report 2 jobs INSERTED; it reported %. The return value means jobs inserted this tick (D-10), and a failure must be surfaced BESIDE it, never folded into it.', v_ret;
   END IF;
   SELECT count(*) INTO v_cnt FROM compute_jobs
-   WHERE strategy_id = s_n2 AND kind = 'derive_broker_dailies';
-  IF v_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (N): the HEALTHY sibling landed % derive_broker_dailies row(s), expected 1 — reporting one candidate''s failure took a good enqueue down with it.', v_cnt;
+   WHERE strategy_id IN (s_n2, s_n3) AND kind = 'derive_broker_dailies';
+  IF v_cnt <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (N): the two HEALTHY siblings landed % derive_broker_dailies row(s), expected 2 — reporting one candidate''s failure took a good enqueue down with it.', v_cnt;
   END IF;
   SELECT count(*) INTO v_cnt FROM compute_jobs
    WHERE strategy_id = s_n1 AND kind = 'derive_broker_dailies';
@@ -1923,31 +1998,83 @@ BEGIN
   IF v_cnt_n <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (N): the tick in which one candidate failed wrote % failure row(s) naming it, expected exactly 1. With 0, a production tick with a failed candidate again reports a clean run and the only trace is a WARNING nothing reads — the defect OPS-08-F2 exists to close.', v_cnt_n;
   END IF;
+
+  -- ======================================================================
+  -- ARM N2 — THE FAILURE ROW'S COUNTS ARE EXACT (164.6 review fix, IN-02).
+  -- The PRECISION edge of arm N's row, split out so its own twin can prove it:
+  -- exact integers that agree with each other and with the tick's own return
+  -- value, the healthy siblings NOT named, the cause and the failed
+  -- candidate's SQLSTATE present, and no lost race counted in a tick that had
+  -- none. Arm N's twin cannot reach here (it writes no row at all), and this
+  -- arm's twin leaves arm N's count intact.
+  -- ======================================================================
+  -- RED-UNDER: write the FAILED count into the row's enqueued count in the
+  --            single-key body — the copy-paste slip between two adjacent
+  --            integers. The tick enqueued 2 and failed 1, so the row then
+  --            says enqueued 1 against a tick that returned 2, and the
+  --            agreement read below fails.
+  -- ⚠️ `occurrences: 2, nth: 1`, single-key body first. Not a migration needle.
+  -- RED-UNDER-M: {"arm":"N2","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"'enqueued_count', v_enqueued,","replace":"'enqueued_count', v_failed,","occurrences":2,"nth":1}]}
   SELECT metadata INTO v_meta_n
     FROM public.cron_runs
    WHERE cron_name = 'ledger_refresh_fanout'
      AND error = 'candidate_enqueue_failed'
      AND metadata->>'function' = 'enqueue_ledger_refresh_for_strategies'
      AND metadata->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_n1));
-  -- The PRECISION edge: exact integers that agree with each other and with
-  -- the tick's own return value.
   IF (v_meta_n->>'failed_count')::int IS DISTINCT FROM 1
      OR (v_meta_n->>'failed_count')::int IS DISTINCT FROM jsonb_array_length(v_meta_n->'failed_targets')
-     OR (v_meta_n->>'enqueued_count')::int IS DISTINCT FROM v_ret THEN
-    RAISE EXCEPTION 'TEST FAILED (N): the failure row''s counts disagree — failed_count %, failed_targets holds %, enqueued_count % against a tick that returned %. Expected 1, 1 and the return value: a count that does not match its own list, or an enqueued count that does not match what the tick reported, is a number nobody can act on.', v_meta_n->>'failed_count', jsonb_array_length(v_meta_n->'failed_targets'), v_meta_n->>'enqueued_count', v_ret;
+     OR (v_meta_n->>'enqueued_count')::int IS DISTINCT FROM v_ret
+     OR (v_meta_n->>'lost_race_count')::int IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (N2): the failure row''s counts disagree — failed_count %, failed_targets holds %, enqueued_count % against a tick that returned %, lost_race_count %. Expected 1, 1, the return value and 0: a count that does not match its own list, or an enqueued count that does not match what the tick reported, is a number nobody can act on.', v_meta_n->>'failed_count', jsonb_array_length(v_meta_n->'failed_targets'), v_meta_n->>'enqueued_count', v_ret, v_meta_n->>'lost_race_count';
   END IF;
-  IF v_meta_n->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_n2)) THEN
-    RAISE EXCEPTION 'TEST FAILED (N): the failure row names the HEALTHY sibling, which enqueued. A failure list that includes a candidate that succeeded sends the reader after the wrong strategy.';
+  IF v_meta_n->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_n2))
+     OR v_meta_n->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_n3)) THEN
+    RAISE EXCEPTION 'TEST FAILED (N2): the failure row names a HEALTHY sibling, which enqueued. A failure list that includes a candidate that succeeded sends the reader after the wrong strategy, and puts a healthy strategy on the failed-attempt cooldown.';
   END IF;
   IF v_meta_n->>'cause' IS DISTINCT FROM 'candidate_enqueue_failed'
      OR v_meta_n->'failed_targets'->0->>'sqlstate' IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (N): the failure row''s metadata does not carry the cause (got %) and the failed candidate''s SQLSTATE (got %). The SQLSTATE is the one diagnostic the handler can capture, and only there.', v_meta_n->>'cause', v_meta_n->'failed_targets'->0->>'sqlstate';
+    RAISE EXCEPTION 'TEST FAILED (N2): the failure row''s metadata does not carry the cause (got %) and the failed candidate''s SQLSTATE (got %). The SQLSTATE is the one diagnostic the handler can capture, and only there.', v_meta_n->>'cause', v_meta_n->'failed_targets'->0->>'sqlstate';
   END IF;
 
-  -- The BOUNDARY edge: with the poison gone, a tick with no failure writes
-  -- NOTHING. The poisoned candidate is now enqueueable (its failed attempt
-  -- inserted no row, so neither the cooldown nor the in-flight guard sees it)
-  -- and the healthy one is in flight, so this tick inserts exactly 1: arm N1.
+  -- ======================================================================
+  -- ARM T — A FAILED CANDIDATE IS NOT RE-SELECTED, AND A HEALTHY ONE TAKES ITS
+  -- SLOT (164.6 review fix, HIGH-2).
+  --
+  -- A candidate whose enqueue RAISED inserted no compute_jobs row, so the
+  -- 20-hour attempt cooldown never saw it and stalest-first ordering handed it
+  -- the same slot on every tick. This arm makes that slot CONTESTED: on the
+  -- poisoned candidate's venue, two fresh healthy candidates compete for the
+  -- per-venue cap of two with the formerly poisoned one, which is the STALEST
+  -- of the three. Without the failed-attempt cooldown the poisoned candidate
+  -- takes one of the two slots and the less-stale healthy candidate gets
+  -- nothing. With it, both healthy candidates enqueue and the poisoned one is
+  -- left alone for 20 hours. The poison is DROPPED before this tick, so an
+  -- enqueue of the poisoned candidate would SUCCEED here — the only thing that
+  -- can keep it out is the cooldown.
+  -- ======================================================================
+  -- RED-UNDER: shrink the single-key body's FAILED-ATTEMPT cooldown window to
+  --            zero. Arm N's failure row then no longer excludes its poisoned
+  --            candidate, which is the stalest on its venue, so it takes a
+  --            slot back and the less-stale healthy candidate below is left
+  --            without a job.
+  -- ⚠️ `occurrences: 4, nth: 2`: each body carries the 20-hour window twice,
+  --    the attempt cooldown first and the failed-attempt cooldown second, and
+  --    the single-key body comes first. Not a migration needle: that file's
+  --    apply-time block needles the failed-attempt cooldown by its heartbeat
+  --    read, which this mutation leaves intact.
+  -- RED-UNDER-M: {"arm":"T","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '0 hours'","occurrences":4,"nth":2}]}
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf T1', 'draft') RETURNING id INTO s_t1;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf T2', 'draft') RETURNING id INTO s_t2;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_t1, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 25, 'YYYY-MM-DD'), 'value', 0.002)));
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_t2, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 24, 'YYYY-MM-DD'), 'value', 0.002)));
+  UPDATE strategies SET status = 'published' WHERE id IN (s_t1, s_t2);
+
+  -- Arm N3's before-reading of this function's failure rows, taken before
+  -- the tick it judges.
   SELECT count(*) INTO v_fail_pre
     FROM public.cron_runs
    WHERE cron_name = 'ledger_refresh_fanout'
@@ -1956,28 +2083,296 @@ BEGIN
   BEGIN
     v_ret := public.enqueue_ledger_refresh_for_strategies();
   EXCEPTION WHEN OTHERS THEN
-    RAISE EXCEPTION 'TEST FAILED (N): the clean tick AFTER the poisoned one raised (SQLSTATE %) instead of running. Same identity rule as the wrapper above.', SQLSTATE;
+    RAISE EXCEPTION 'TEST FAILED (T): the tick AFTER the poisoned one raised (SQLSTATE %) instead of running. Same identity rule as arm R''s wrapper.', SQLSTATE;
   END;
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_n1 AND kind = 'derive_broker_dailies';
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (T): the candidate whose enqueue failed on the previous tick was selected AGAIN (% derive_broker_dailies row(s)), inside the failed-attempt cooldown. A poisoned candidate then holds its slot on every tick and starves the healthy candidates behind it.', v_cnt;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_t2 AND kind = 'derive_broker_dailies';
+  IF v_cnt <> 1 OR v_ret <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (T): the healthy candidate that competes for the failed one''s slot holds % derive_broker_dailies row(s) (expected 1) and the tick enqueued % (expected 2). The slot a failed candidate leaves must go to a healthy one.', v_cnt, v_ret;
+  END IF;
+
+  -- ======================================================================
+  -- ARM N3 — A TICK WITH NO FAILURE WRITES NOTHING (164.6 review fix, IN-02).
+  -- The BOUNDARY edge, split out of arm N so its own twin can prove it: arm
+  -- T's tick above had no failed candidate, so it must not have added a
+  -- failure row. A row per healthy tick turns the failure signal into a
+  -- heartbeat nobody can read as a failure, and a heartbeat with an empty
+  -- target list would be read back by the cooldown on every tick.
+  -- ======================================================================
+  -- RED-UNDER: take the single-key body's failure block on a count of ZERO
+  --            (`>` becomes `>=`), so every tick writes a failure row. Arm
+  --            T's clean tick then adds one and the delta read below fails.
+  -- ⚠️ `occurrences: 2, nth: 1`, single-key body first. ⛔ This needle was
+  --    the apply-time block's ordering needle until this arm was added; that
+  --    block now needles the failure row's count KEY instead, so the apply
+  --    survives this mutation and the ARM is the first failure.
+  -- RED-UNDER-M: {"arm":"N3","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_failed > 0 THEN","replace":"IF v_failed >= 0 THEN","occurrences":2,"nth":1}]}
   SELECT count(*) INTO v_fail_post
     FROM public.cron_runs
    WHERE cron_name = 'ledger_refresh_fanout'
      AND error = 'candidate_enqueue_failed'
      AND metadata->>'function' = 'enqueue_ledger_refresh_for_strategies';
   IF v_fail_post <> v_fail_pre THEN
-    RAISE EXCEPTION 'TEST FAILED (N): a tick in which NO candidate failed wrote % failure row(s). A healthy tick must write nothing, or the failure signal becomes a heartbeat nobody can read as a failure.', v_fail_post - v_fail_pre;
+    RAISE EXCEPTION 'TEST FAILED (N3): a tick in which NO candidate failed wrote % failure row(s). A healthy tick must write nothing, or the failure signal becomes a heartbeat nobody can read as a failure.', v_fail_post - v_fail_pre;
   END IF;
-  IF v_ret <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (N): the clean tick after the poisoned one enqueued % job(s), expected 1 — the formerly poisoned candidate, which its failed attempt left eligible.', v_ret;
+
+  UPDATE strategies SET status = 'draft' WHERE id IN (s_n1, s_n2, s_n3, s_t1, s_t2);
+
+  -- ======================================================================
+  -- ARM U — A TICK IN WHICH EVERY CANDIDATE FAILED RAISES (164.6 review fix,
+  -- HIGH-1).
+  --
+  -- Before the fix such a tick returned 0, the scheduler recorded `succeeded`
+  -- and the only trace was a failure row nothing reads. It now raises AFTER
+  -- the unlock, so the scheduler records a FAILED run, which the prod prober
+  -- reads. This arm asserts the raise, that it is the tick's own message
+  -- (naming the function, carrying no strategy id), that the lock is released
+  -- and that nothing was enqueued.
+  --
+  -- ⛔ PLACED AFTER ARM N, deliberately. Under arm N's twin the failure count
+  -- never rises, so THIS tick would not raise either; placed first, this arm
+  -- would steal arm N's first failure.
+  -- ======================================================================
+  -- RED-UNDER: make the single-key body's all-candidates-failed condition
+  --            unsatisfiable (`v_enqueued = 0` becomes `v_enqueued < 0`). The
+  --            all-poisoned tick below then returns 0 in silence, which is
+  --            exactly what the scheduler used to record as `succeeded`.
+  -- ⚠️ `occurrences: 2, nth: 1`, single-key body first. Not a migration needle:
+  --    that file's apply-time block needles this raise by its MESSAGE, which
+  --    this mutation leaves intact.
+  -- RED-UNDER-M: {"arm":"U","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_enqueued = 0 AND v_failed > 0 THEN","replace":"IF v_enqueued < 0 AND v_failed > 0 THEN","occurrences":2,"nth":1}]}
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf U1', 'draft') RETURNING id INTO s_u1;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf U2', 'draft') RETURNING id INTO s_u2;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  SELECT sid, 'complete_with_warnings', now(),
+         jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 23, 'YYYY-MM-DD'), 'value', 0.002))
+    FROM unnest(ARRAY[s_u1, s_u2]) AS sid;
+
+  CREATE FUNCTION pg_temp.lrf_poison_u() RETURNS TRIGGER LANGUAGE plpgsql AS $poison_u$
+  BEGIN
+    IF EXISTS (SELECT 1 FROM strategies WHERE id = NEW.strategy_id AND name LIKE 'lrf U%') THEN
+      RAISE EXCEPTION 'arm U: the poisoned candidate refuses to enqueue';
+    END IF;
+    RETURN NEW;
+  END $poison_u$;
+  CREATE TRIGGER lrf_poison_u_trg BEFORE INSERT ON compute_jobs
+    FOR EACH ROW EXECUTE FUNCTION pg_temp.lrf_poison_u();
+
+  UPDATE strategies SET status = 'published' WHERE id IN (s_u1, s_u2);
+  SELECT count(*) INTO v_locks_pre FROM pg_locks
+   WHERE locktype = 'advisory' AND pid = pg_backend_pid();
+  v_ret := NULL;
+  v_err_state := NULL;
+  v_err_msg := NULL;
+  BEGIN
+    v_ret := public.enqueue_ledger_refresh_for_strategies();
+  EXCEPTION WHEN OTHERS THEN
+    v_err_state := SQLSTATE;
+    v_err_msg := SQLERRM;
+  END;
+  DROP TRIGGER lrf_poison_u_trg ON compute_jobs;
+  SELECT count(*) INTO v_locks_post FROM pg_locks
+   WHERE locktype = 'advisory' AND pid = pg_backend_pid();
+
+  IF v_err_msg IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (U): every candidate this tick failed and the fan-out RETURNED % instead of raising. The scheduler records such a tick as succeeded, so a fan-out whose every enqueue fails is invisible to the prober.', v_ret;
+  END IF;
+  IF v_err_state IS DISTINCT FROM 'P0001'
+     OR v_err_msg NOT LIKE 'enqueue_ledger_refresh_for_strategies: every candidate this tick failed to enqueue (2 failed, 0 lost a race, 0 enqueued)%' THEN
+    RAISE EXCEPTION 'TEST FAILED (U): the all-candidates-failed tick raised SQLSTATE % with a message that is not the fan-out''s own counted verdict. The scheduler records this message, and the prober attributes the failed run by the function name that leads it.', v_err_state;
+  END IF;
+  IF position(s_u1::text IN v_err_msg) > 0 OR position(s_u2::text IN v_err_msg) > 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (U): the all-candidates-failed message carries a strategy id. Raise text reaches the scheduler''s run log, which is not guarded by row security; ids belong only in the failure row''s metadata (T-161.1-10).';
+  END IF;
+  IF v_locks_post <> v_locks_pre THEN
+    RAISE EXCEPTION 'TEST FAILED (U): the fan-out held % advisory lock(s) before the raising tick and % after it. The raise must come after the unlock, or the tick that reports the failure also wedges every tick after it.', v_locks_pre, v_locks_post;
   END IF;
   SELECT count(*) INTO v_cnt FROM compute_jobs
-   WHERE strategy_id = s_n1 AND kind = 'derive_broker_dailies';
-  IF v_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (N): after the clean tick the formerly poisoned candidate holds % derive_broker_dailies row(s), expected 1 — the clean tick''s job went somewhere else.', v_cnt;
+   WHERE strategy_id IN (s_u1, s_u2) AND kind = 'derive_broker_dailies';
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (U): the raising tick left % derive_broker_dailies row(s) for its poisoned candidates, expected 0.', v_cnt;
   END IF;
 
-  UPDATE strategies SET status = 'draft' WHERE id IN (s_n1, s_n2);
+  UPDATE strategies SET status = 'draft' WHERE id IN (s_u1, s_u2);
 
-  RAISE NOTICE 'ALL 19 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, P, Q, R, S1) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one cron_runs row while its sibling still enqueues, and every one of those claims is falsifiable.';
+  -- ======================================================================
+  -- ARMS V1 / V2 — THE FAILURE ROW'S OWN WRITE FAILS (164.6 review fix,
+  -- MEDIUM-1).
+  --
+  -- A trigger on the heartbeat table refuses the failure row with its own
+  -- SQLSTATE, standing in for a revoked privilege or a constraint drift.
+  --   V1: one candidate fails beside a healthy one. The tick enqueued
+  --       something, so raising would roll a good enqueue back (D-10): the
+  --       tick must SURVIVE, return its count and keep the healthy job.
+  --   V2: every candidate fails. There is nothing to roll back, so the
+  --       instrument's own failure must surface as the tick's error, with the
+  --       instrument's SQLSTATE, rather than as a WARNING nothing reads.
+  -- V2's check reads the SQLSTATE because the all-candidates-failed raise
+  -- (arm U) would also make this tick raise; only the SQLSTATE tells the two
+  -- apart.
+  -- ======================================================================
+  CREATE FUNCTION pg_temp.lrf_refuse_fail_row() RETURNS TRIGGER LANGUAGE plpgsql AS $refuse$
+  BEGIN
+    RAISE EXCEPTION 'arms V1/V2: the heartbeat table refuses the failure row' USING ERRCODE = 'LRFV0';
+  END $refuse$;
+  CREATE TRIGGER lrf_refuse_fail_row_trg BEFORE INSERT ON public.cron_runs
+    FOR EACH ROW WHEN (NEW.error = 'candidate_enqueue_failed')
+    EXECUTE FUNCTION pg_temp.lrf_refuse_fail_row();
+  CREATE FUNCTION pg_temp.lrf_poison_v() RETURNS TRIGGER LANGUAGE plpgsql AS $poison_v$
+  BEGIN
+    IF EXISTS (SELECT 1 FROM strategies WHERE id = NEW.strategy_id AND name IN ('lrf V1', 'lrf V3', 'lrf V4')) THEN
+      RAISE EXCEPTION 'arms V1/V2: the poisoned candidate refuses to enqueue';
+    END IF;
+    RETURN NEW;
+  END $poison_v$;
+  CREATE TRIGGER lrf_poison_v_trg BEFORE INSERT ON compute_jobs
+    FOR EACH ROW EXECUTE FUNCTION pg_temp.lrf_poison_v();
+
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf V1', 'draft') RETURNING id INTO s_v1;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2, 'lrf V2', 'draft') RETURNING id INTO s_v2;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf V3', 'draft') RETURNING id INTO s_v3;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf V4', 'draft') RETURNING id INTO s_v4;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  SELECT sid, 'complete_with_warnings', now(),
+         jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 22, 'YYYY-MM-DD'), 'value', 0.002))
+    FROM unnest(ARRAY[s_v1, s_v2, s_v3, s_v4]) AS sid;
+
+  -- RED-UNDER: make the single-key body's instrument handler re-raise on
+  --            EVERY tick (`v_enqueued = 0` becomes `v_enqueued >= 0`). The
+  --            tick below enqueued its healthy candidate, so the re-raise rolls
+  --            that good enqueue back and the call raises instead of returning.
+  -- ⚠️ `occurrences: 2, nth: 1`, single-key body first. Not a migration needle.
+  -- RED-UNDER-M: {"arm":"V1","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_enqueued = 0 THEN","replace":"IF v_enqueued >= 0 THEN","occurrences":2,"nth":1}]}
+  UPDATE strategies SET status = 'published' WHERE id IN (s_v1, s_v2);
+  v_ret := NULL;
+  v_err_state := NULL;
+  BEGIN
+    v_ret := public.enqueue_ledger_refresh_for_strategies();
+  EXCEPTION WHEN OTHERS THEN
+    v_err_state := SQLSTATE;
+  END;
+  IF v_err_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (V1): a tick that ENQUEUED a healthy candidate raised (SQLSTATE %) because its failure row could not be written. That rolls the good enqueue back, turning a lost diagnostic into a lost tick (D-10).', v_err_state;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_v2 AND kind = 'derive_broker_dailies';
+  IF v_ret IS DISTINCT FROM 1 OR v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (V1): with the failure row refused, the tick returned % and its healthy candidate holds % derive_broker_dailies row(s), expected 1 and 1.', v_ret, v_cnt;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM public.cron_runs
+   WHERE cron_name = 'ledger_refresh_fanout'
+     AND error = 'candidate_enqueue_failed'
+     AND metadata->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_v1));
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (V1): % failure row(s) name the refused candidate although the heartbeat table refused the write, so the refusal did not happen and this arm measured nothing.', v_cnt;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id IN (s_v1, s_v2);
+
+  -- RED-UNDER: make the single-key body's instrument handler NEVER re-raise
+  --            (`v_enqueued = 0` becomes `v_enqueued < 0`). On the
+  --            all-failed tick below the refused write is then only a
+  --            WARNING, and the tick raises with the all-candidates-failed
+  --            verdict's SQLSTATE instead of the instrument's own.
+  -- ⚠️ `occurrences: 2, nth: 1`, single-key body first. Not a migration needle.
+  -- RED-UNDER-M: {"arm":"V2","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_enqueued = 0 THEN","replace":"IF v_enqueued < 0 THEN","occurrences":2,"nth":1}]}
+  UPDATE strategies SET status = 'published' WHERE id IN (s_v3, s_v4);
+  v_err_state := NULL;
+  v_err_msg := NULL;
+  BEGIN
+    v_ret := public.enqueue_ledger_refresh_for_strategies();
+  EXCEPTION WHEN OTHERS THEN
+    v_err_state := SQLSTATE;
+    v_err_msg := SQLERRM;
+  END;
+  IF v_err_state IS DISTINCT FROM 'LRFV0'
+     OR v_err_msg NOT LIKE 'enqueue_ledger_refresh_for_strategies: failure instrument write failed%' THEN
+    RAISE EXCEPTION 'TEST FAILED (V2): a tick that enqueued NOTHING and could not write its failure row ended with SQLSTATE %, expected the instrument''s own LRFV0 under a message naming the function. Otherwise the instrument''s failure is only a WARNING nothing reads.', v_err_state;
+  END IF;
+  DROP TRIGGER lrf_poison_v_trg ON compute_jobs;
+  DROP TRIGGER lrf_refuse_fail_row_trg ON public.cron_runs;
+  UPDATE strategies SET status = 'draft' WHERE id IN (s_v3, s_v4);
+
+  -- ======================================================================
+  -- ARM W — A LOST ENQUEUE RACE IS NOT A FAILURE (164.6 review fix, MEDIUM-2).
+  --
+  -- Four candidates, two per ledger venue: one loses a race with 40001, one
+  -- with 40P01, one fails for real, one is healthy. The real failure must be
+  -- the ONLY one counted and named, the two lost races must be counted
+  -- beside it, and the healthy candidate must enqueue. Counting a lost race
+  -- as a failure names a healthy strategy and puts it on the failed-attempt
+  -- cooldown for 20 hours.
+  -- ======================================================================
+  -- RED-UNDER: route the single-key body's lost races to the catch-all by
+  --            pointing their handler at a SQLSTATE nothing raises. The two
+  --            lost races are then counted as failures and named, and the
+  --            count and name reads below fail.
+  -- ⚠️ `occurrences: 2, nth: 1`, single-key body first. Not a migration needle.
+  -- RED-UNDER-M: {"arm":"W","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"WHEN serialization_failure OR deadlock_detected THEN","replace":"WHEN SQLSTATE 'LRW00' THEN","occurrences":2,"nth":1}]}
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf W1', 'draft') RETURNING id INTO s_w1;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf W2', 'draft') RETURNING id INTO s_w2;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2, 'lrf W3', 'draft') RETURNING id INTO s_w3;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2, 'lrf W4', 'draft') RETURNING id INTO s_w4;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  SELECT sid, 'complete_with_warnings', now(),
+         jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 21, 'YYYY-MM-DD'), 'value', 0.002))
+    FROM unnest(ARRAY[s_w1, s_w2, s_w3, s_w4]) AS sid;
+
+  CREATE FUNCTION pg_temp.lrf_race_w() RETURNS TRIGGER LANGUAGE plpgsql AS $race_w$
+  DECLARE
+    v_name TEXT;
+  BEGIN
+    SELECT name INTO v_name FROM strategies WHERE id = NEW.strategy_id;
+    IF v_name = 'lrf W1' THEN
+      RAISE EXCEPTION 'arm W: a lost enqueue race' USING ERRCODE = 'serialization_failure';
+    ELSIF v_name = 'lrf W2' THEN
+      RAISE EXCEPTION 'arm W: a lost lock race' USING ERRCODE = 'deadlock_detected';
+    ELSIF v_name = 'lrf W3' THEN
+      RAISE EXCEPTION 'arm W: a real failure';
+    END IF;
+    RETURN NEW;
+  END $race_w$;
+  CREATE TRIGGER lrf_race_w_trg BEFORE INSERT ON compute_jobs
+    FOR EACH ROW EXECUTE FUNCTION pg_temp.lrf_race_w();
+
+  UPDATE strategies SET status = 'published' WHERE id IN (s_w1, s_w2, s_w3, s_w4);
+  BEGIN
+    v_ret := public.enqueue_ledger_refresh_for_strategies();
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (W): a tick with two lost races, one real failure and one healthy candidate RAISED (SQLSTATE %). It enqueued a job, so it must return its count.', SQLSTATE;
+  END;
+  DROP TRIGGER lrf_race_w_trg ON compute_jobs;
+
+  SELECT count(*) INTO v_cnt_w
+    FROM public.cron_runs
+   WHERE cron_name = 'ledger_refresh_fanout'
+     AND error = 'candidate_enqueue_failed'
+     AND metadata->>'function' = 'enqueue_ledger_refresh_for_strategies'
+     AND (metadata->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_w1))
+          OR metadata->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_w2)));
+  IF v_cnt_w <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (W): % failure row(s) name a candidate that only LOST A RACE. A lost race is another writer serving the same strategy; naming it sends the reader after a healthy strategy and puts it on the failed-attempt cooldown for 20 hours.', v_cnt_w;
+  END IF;
+  SELECT metadata INTO v_meta_w
+    FROM public.cron_runs
+   WHERE cron_name = 'ledger_refresh_fanout'
+     AND error = 'candidate_enqueue_failed'
+     AND metadata->>'function' = 'enqueue_ledger_refresh_for_strategies'
+     AND metadata->'failed_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_w3));
+  IF v_meta_w IS NULL
+     OR (v_meta_w->>'failed_count')::int IS DISTINCT FROM 1
+     OR (v_meta_w->>'lost_race_count')::int IS DISTINCT FROM 2
+     OR v_ret IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (W): the real failure''s row reads failed_count % and lost_race_count %, and the tick returned %; expected 1, 2 and 1. The two lost races belong beside the failure count, never in it.', v_meta_w->>'failed_count', v_meta_w->>'lost_race_count', v_ret;
+  END IF;
+
+  UPDATE strategies SET status = 'draft' WHERE id IN (s_w1, s_w2, s_w3, s_w4);
+
+  RAISE NOTICE 'ALL 26 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, P, Q, R, S1, T, U, V1, V2, W) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one exact cron_runs row while its siblings still enqueue and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every candidate failed raises after releasing its lock, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race is counted apart from failures, and every one of those claims is falsifiable.';
 END $$;
 
 ROLLBACK;

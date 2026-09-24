@@ -46,6 +46,13 @@ DECLARE
   -- the lock is released, by the failure instrument below.
   v_failed         INTEGER := 0;
   v_failed_targets JSONB   := '[]'::jsonb;
+  -- ---- the lost-race count (164.6 review fix, MEDIUM-2) -----------------
+  -- A candidate whose enqueue raised serialization_failure or
+  -- deadlock_detected lost a race to another writer that is already serving
+  -- it. It is counted HERE, beside the failure count and never in it, so it
+  -- is never named in the failed-target list, never put on the failed-attempt
+  -- cooldown, and never by itself writes a failure row.
+  v_lost_race      INTEGER := 0;
 BEGIN
   -- ---- Lock B (D-08, 164.7 D-01): the fail-closed activation switch ------
   -- FIRST statement in the body, deliberately — unchanged from the form this
@@ -236,8 +243,10 @@ BEGIN
       --
       -- ⛔ FORCE ROW LEVEL SECURITY on public.cron_runs IS THE CLAUSE THAT
       -- BREAKS THIS WRITE. The definer is exempt from row security on this table
-      -- by OWNERSHIP ALONE (see check 3's derivation: the table carries no FORCE
-      -- clause at baseline.sql:9864, and neither policy admits this role), and
+      -- by OWNERSHIP ALONE (see check 3's derivation: the table's
+      -- `ALTER TABLE "public"."cron_runs" ENABLE ROW LEVEL SECURITY` statement in
+      -- supabase/schema/baseline.sql carries no FORCE clause, and neither policy
+      -- admits this role), and
       -- FORCE is the one clause under which owning a table stops being an
       -- exemption. Add it at STEP 2b — which is where a future hardener will be
       -- standing — and every dormant-with-cause tick loses its row. Before the
@@ -346,6 +355,32 @@ BEGIN
                    AND cj.kind IN ('derive_broker_dailies', 'compute_analytics_from_csv')
                    AND cj.created_at > now() - INTERVAL '20 hours'
               )
+          -- Failed-attempt cooldown (164.6 review fix, HIGH-2). A candidate
+          -- whose enqueue RAISED inserted no compute_jobs row, so the attempt
+          -- cooldown above never sees it, and stalest-first ordering then hands
+          -- it the same slot on every tick: two poisoned candidates would hold
+          -- their share of the per-tick bound for good and starve the healthy
+          -- candidates behind them. The failure instrument below names every
+          -- such candidate in `failed_targets`, so a candidate named there
+          -- inside the same 20-hour window is excluded exactly as a prior
+          -- ATTEMPT is, and a healthy candidate takes its slot.
+          -- ⚠️ ONLY A TICK THAT ALSO ENQUEUED SOMETHING KEEPS ITS FAILURE ROW.
+          -- A tick in which every candidate failed RAISES at its end (see the
+          -- all-candidates-failed block below), and the raise rolls the row
+          -- back, so those candidates are retried on the next tick, which
+          -- fails again. That is loud by design: the scheduler records every
+          -- such tick as a FAILED run.
+          -- The read is bounded by cron_name and completed_at, the two columns
+          -- the heartbeat table's own recent-run index is built on.
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM public.cron_runs cr
+                 WHERE cr.cron_name = 'ledger_refresh_fanout'
+                   AND cr.error = 'candidate_enqueue_failed'
+                   AND cr.completed_at > now() - INTERVAL '20 hours'
+                   AND cr.metadata->'failed_targets'
+                       @> jsonb_build_array(jsonb_build_object('strategy_id', lrs.strategy_id))
+              )
           -- In-flight guard. Belt-and-braces over enqueue_compute_job's own
           -- optimistic in-flight lookup and over the partial unique index: this
           -- one also covers a strategy busy with a DIFFERENT kind, which the
@@ -449,7 +484,18 @@ BEGIN
         IF v_existing = 0 AND v_job_id IS NOT NULL THEN
           v_enqueued := v_enqueued + 1;
         END IF;
-      EXCEPTION WHEN OTHERS THEN
+      EXCEPTION WHEN serialization_failure OR deadlock_detected THEN
+        -- ---- a LOST RACE, not a failure (164.6 review fix, MEDIUM-2) -------
+        -- 40001 is what the enqueue RPC raises when another writer's enqueue
+        -- for this strategy won the in-flight race, and 40P01 is the same
+        -- contention seen by the lock manager. Neither says anything is wrong
+        -- with the candidate: another enqueue is already serving it. Counting
+        -- either as a failure would name a healthy strategy in the failed-target
+        -- list and put it on the failed-attempt cooldown. ⛔ This branch sits
+        -- BEFORE the catch-all below, which would otherwise take both.
+        -- Assignment only, the rule every handler in this body follows.
+        v_lost_race := v_lost_race + 1;
+      WHEN OTHERS THEN
         -- ⛔ Deliberately NOT `WHEN unique_violation`: that condition cannot fire
         -- here (see the counter comment above), and an exception block that
         -- cannot fire is indistinguishable from one that is protecting
@@ -483,18 +529,18 @@ BEGIN
   -- ⛔ AFTER THE UNLOCK ABOVE, NEVER INSIDE THE LOCK-HOLDING BLOCK. There a
   -- failing INSERT would reach that block's handler, which unlocks and
   -- RE-RAISES, and the whole tick would roll back with every good enqueue in
-  -- it. Here the lock is already released on every path, by construction,
-  -- and the write is best-effort wrapped like the dormancy instrument's, so
-  -- a failed write costs the row and never the tick. The migration's
-  -- apply-time block refuses a body whose failure block precedes the last
-  -- unlock.
+  -- it. Here the lock is already released on every path, by construction.
+  -- The migration's apply-time block refuses a body whose failure block
+  -- precedes the last unlock.
   --
   -- ONE row per tick in which a candidate failed; a tick with no failure
-  -- writes nothing. Same cron_name as the dormancy rows, told apart by
-  -- `error` and metadata->>'cause'. The list is bounded by the per-tick
-  -- limit above. The strategy ids go ONLY into `metadata`, which row
-  -- security lets platform admins and service_role read, never into RAISE
-  -- text. The RETURN below is unchanged: it counts jobs INSERTED (D-10).
+  -- writes nothing, and a lost race alone is not a failure. Same cron_name as
+  -- the dormancy rows, told apart by `error` and metadata->>'cause'. The list
+  -- is bounded by the per-tick limit above. The strategy ids go ONLY into
+  -- `metadata`, which row security lets platform admins and service_role
+  -- read, never into RAISE text. The RETURN below is unchanged: it counts jobs
+  -- INSERTED (D-10). The candidate CTE reads this row back as the
+  -- failed-attempt cooldown.
   IF v_failed > 0 THEN
     BEGIN
       INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
@@ -503,13 +549,41 @@ BEGIN
                                  'cause', 'candidate_enqueue_failed',
                                  'failed_count', v_failed,
                                  'enqueued_count', v_enqueued,
+                                 'lost_race_count', v_lost_race,
                                  'failed_targets', v_failed_targets));
     EXCEPTION WHEN OTHERS THEN
+      -- (164.6 review fix, MEDIUM-1) A failed write costs the row, and on a
+      -- tick that ENQUEUED something that is the whole cost: raising here
+      -- would roll the good enqueues back, which D-10 refuses. On a tick that
+      -- enqueued NOTHING there is nothing to roll back, so the failure is
+      -- re-raised with its own SQLSTATE and the scheduler records the run as
+      -- failed, instead of a WARNING nothing reads being the only trace. The
+      -- message names this function and carries counts only (T-161.1-10).
+      IF v_enqueued = 0 THEN
+        RAISE EXCEPTION 'enqueue_ledger_refresh_for_strategies: failure instrument write failed (SQLSTATE %) on a tick that enqueued nothing; % candidate(s) failed', SQLSTATE, v_failed
+          USING ERRCODE = SQLSTATE;
+      END IF;
       RAISE WARNING 'enqueue_ledger_refresh_for_strategies: failure instrument write failed (SQLSTATE %); % candidate(s) failed this tick', SQLSTATE, v_failed;
     END;
   END IF;
 
-  RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: enqueued % refresh job(s) this tick; % candidate(s) failed to enqueue', v_enqueued, v_failed;
+  -- ---- the all-candidates-failed tick RAISES (164.6 review fix, HIGH-1) ----
+  -- A tick that selected candidates and enqueued NONE of them, because every
+  -- one of them failed, is not a quiet tick: returning 0 made the scheduler
+  -- record `succeeded` over it, and a failure row nothing reads was the only
+  -- trace. Raising here costs no good enqueue (there is none), leaves no lock
+  -- held (it was released above) and makes the scheduler record the run as
+  -- FAILED, with this function's name in the recorded message, which the prod
+  -- prober's cron-obs arm reads. ⚠️ The raise rolls back the failure row
+  -- written just above, so on this path the failed-attempt cooldown does not
+  -- engage and the next tick retries the same candidates: every such tick
+  -- fails loudly until a human looks. A lost race is not a failure and never
+  -- triggers this. Counts only, never an identifier.
+  IF v_enqueued = 0 AND v_failed > 0 THEN
+    RAISE EXCEPTION 'enqueue_ledger_refresh_for_strategies: every candidate this tick failed to enqueue (% failed, % lost a race, 0 enqueued); raising so the scheduler records this run as failed', v_failed, v_lost_race;
+  END IF;
+
+  RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: enqueued % refresh job(s) this tick; % candidate(s) failed to enqueue; % lost an enqueue race', v_enqueued, v_failed, v_lost_race;
   RETURN v_enqueued;
 END;
 $fanout$;
