@@ -2929,7 +2929,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 167.2-10-PLAN.md — a success is shown only when no factsheet-chain job is in flight; an unreadable job state never forwards one (KCS-18)
+- [x] 167.2-10-PLAN.md — a success is shown only when no factsheet-chain job is in flight; an unreadable job state never forwards one (KCS-18)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
