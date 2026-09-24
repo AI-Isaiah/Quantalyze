@@ -259,7 +259,12 @@ export async function GET(
       // composite as 0 must not let a member chain row answer for it. The
       // history here is the rows this route already read (no extra RPC on the
       // poll path): with no stitch in them, the preference changes nothing.
+      // Round-2 review: `nowMs` lets the selection skip a chain row older than
+      // `CHAIN_JOB_LIVE_WINDOW_MS`, as the resync guard does (see
+      // `computeJobDeadReason`).
+      const nowMs = Date.now();
       const latest = selectFactsheetJob(read.rows, {
+        nowMs,
         preferStitch: shouldPreferStitch({
           apiKeyId: (strategy as { api_key_id?: string | null }).api_key_id,
           memberCount,

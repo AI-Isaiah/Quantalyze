@@ -72,6 +72,9 @@ export interface ComputeJobRow {
   error_kind?: string | null;
   claimed_at?: string | null;
   created_at?: string;
+  /** Round-2 review: read by `computeJobDeadReason` (the RPC returns both). */
+  attempts?: number | null;
+  max_attempts?: number | null;
   metadata?: {
     member_progress?: unknown;
     member_progress_at?: string | null;
@@ -95,6 +98,61 @@ const STITCH_KIND = "stitch_composite";
  * this module still never reads the clock.
  */
 export const IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS = 8 * 60 * 60 * 1000;
+
+/**
+ * Round-2 review — how old an in-flight job row may be (at the caller's
+ * `nowMs`) and still count as live. The TS mirror of
+ * `_RESYNC_CHAIN_JOB_LIVE_WINDOW` in `analytics-service/routers/process_key.py`,
+ * where the 8 hours are derived; `tests/test_resync_draft_dedup.py` pins the
+ * two equal.
+ */
+export const CHAIN_JOB_LIVE_WINDOW_MS = 8 * 60 * 60 * 1000;
+
+/** Why an in-flight job row is NOT live evidence (see `computeJobDeadReason`). */
+export type ComputeJobDeadReason =
+  | "attempts_over_budget"
+  | "attempts_exhausted"
+  | "older_than_live_window";
+
+/**
+ * Round-2 review — the OBSERVABLE half of Python's `_chain_job_dead_reason`
+ * (`analytics-service/routers/process_key.py`), so a surface never reports as
+ * running a job the resync guard would treat as dead, and so a Retry shows
+ * exactly when the server would act on it.
+ *
+ * `reset_stalled_compute_jobs` puts a stuck `running` job back to `pending`
+ * without counting it, and the claim does not cap `attempts`, so a job whose
+ * worker keeps dying never goes terminal. A row in flight is dead when:
+ *   - it is running PAST its budget (`attempts > max_attempts`);
+ *   - it has spent its budget and is not running (`attempts >= max_attempts`);
+ *     a running row AT its budget is its legitimate final attempt;
+ *   - it was created `CHAIN_JOB_LIVE_WINDOW_MS` or more before `nowMs`. This
+ *     arm needs the caller's clock, so it applies only when `nowMs` is given
+ *     (this module never reads the clock itself).
+ * Python's fourth arm, `last_error = 'worker_stalled'`, is NOT observable here:
+ * `get_user_compute_jobs` redacts `last_error` to NULL for every caller.
+ * A row that is not in flight (finished, or an unknown status) is never dead.
+ */
+export function computeJobDeadReason(
+  row: ComputeJobRow,
+  nowMs?: number,
+): ComputeJobDeadReason | null {
+  if (!isFactsheetJobInFlight(row.status)) return null;
+  const { attempts, max_attempts: maxAttempts } = row;
+  if (typeof attempts === "number" && typeof maxAttempts === "number") {
+    if (attempts > maxAttempts) return "attempts_over_budget";
+    if (attempts >= maxAttempts && row.status !== "running") {
+      return "attempts_exhausted";
+    }
+  }
+  if (nowMs !== undefined) {
+    const createdMs = Date.parse(row.created_at ?? "");
+    if (Number.isFinite(createdMs) && nowMs - createdMs >= CHAIN_JOB_LIVE_WINDOW_MS) {
+      return "older_than_live_window";
+    }
+  }
+  return null;
+}
 
 function isFactsheetChainKind(kind: string | undefined): boolean {
   return (FACTSHEET_CHAIN_KINDS as readonly string[]).includes(kind as string);
@@ -122,6 +180,12 @@ function isFactsheetChainKind(kind: string | undefined): boolean {
  * `IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS` before it. An older in-flight row
  * is stale evidence, and the newest chain row answers.
  *
+ * DEAD ROWS ARE SKIPPED (round-2 review): a chain row `computeJobDeadReason`
+ * calls dead (at `opts.nowMs` when given) takes no part in the selection, the
+ * same rows the resync guard ignores. So a crash-looping job never reads as
+ * running, and with nothing live the strategy reads as settled, which is when
+ * the server would act on a Retry.
+ *
  * Stitch-PREFERRING (154-04): the stitch row is the only row that carries
  * member progress or a heartbeat, so whenever one exists it answers even if a
  * chain row ran afterwards (PIN-COMPOSITE-WINS in the route test).
@@ -139,7 +203,7 @@ function isFactsheetChainKind(kind: string | undefined): boolean {
  */
 export function selectFactsheetJob(
   rows: readonly (ComputeJobRow | null | undefined)[],
-  opts: { preferStitch?: boolean } = {},
+  opts: { preferStitch?: boolean; nowMs?: number } = {},
 ): ComputeJobRow | null {
   const isNewer = (row: ComputeJobRow, current: ComputeJobRow | null) =>
     current === null ||
@@ -152,6 +216,7 @@ export function selectFactsheetJob(
     if (row.kind === STITCH_KIND) {
       if (isNewer(row, latestStitch)) latestStitch = row;
     } else if (isFactsheetChainKind(row.kind)) {
+      if (computeJobDeadReason(row, opts.nowMs) !== null) continue;
       if (isNewer(row, latestChain)) latestChain = row;
       if (isFactsheetJobInFlight(row.status) && isNewer(row, latestInFlightChain)) {
         latestInFlightChain = row;
@@ -307,7 +372,12 @@ export function isWindowFullWithoutFactsheetJob(
   rows: readonly (ComputeJobRow | null | undefined)[],
   readExhaustive: boolean,
 ): boolean {
-  return !readExhaustive && selectFactsheetJob(rows) === null;
+  // Presence, not selection: a window holding only dead chain rows still holds
+  // a chain row, so it is not the "full with no chain row" case.
+  return (
+    !readExhaustive &&
+    !rows.some((r) => !!r && (r.kind === STITCH_KIND || isFactsheetChainKind(r.kind)))
+  );
 }
 
 /**
@@ -450,7 +520,10 @@ export function deriveComputeState(
     | { readError: true },
 ): ComputeState {
   if ("readError" in input) return { state: "unreadable" };
-  const row = selectFactsheetJob(input.rows, { preferStitch: input.preferStitch });
+  const row = selectFactsheetJob(input.rows, {
+    preferStitch: input.preferStitch,
+    nowMs: input.nowMs,
+  });
   if (row === null) {
     return input.readExhaustive
       ? { state: "never_started" }

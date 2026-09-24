@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  computeJobDeadReason,
   COMPUTE_STATE_READ_LIMIT,
   deriveComputeState,
   FACTSHEET_CHAIN_KINDS,
@@ -194,6 +195,35 @@ describe("selectFactsheetJob", () => {
     // Control: just inside the window the in-flight row still answers.
     const recentInFlight = row("sync_trades", { created_at: "2026-07-12T03:00:01.000Z", status: "pending" });
     expect(selectFactsheetJob([recentInFlight, newerDone])).toBe(recentInFlight);
+  });
+
+  it("round-2 review: a chain row the resync guard calls dead takes no part in the selection", () => {
+    const done = row("compute_analytics_from_csv", { created_at: "2026-07-12T10:00:00.000Z", status: "done" });
+    // Crash-looping: pending with its budget spent, and running past it.
+    const exhausted = { ...row("sync_trades", { created_at: "2026-07-12T11:00:00.000Z", status: "pending" }), attempts: 3, max_attempts: 3 };
+    const overBudget = { ...row("sync_trades", { created_at: "2026-07-12T11:10:00.000Z", status: "running" }), attempts: 5, max_attempts: 3 };
+    expect(selectFactsheetJob([done, exhausted])).toBe(done);
+    expect(selectFactsheetJob([done, overBudget])).toBe(done);
+    // Only dead rows: nothing is selected, so an exhaustive read is settled.
+    expect(selectFactsheetJob([exhausted])).toBeNull();
+    expect(
+      deriveComputeState({ rows: [exhausted], readExhaustive: true, nowMs: NOW_MS }).state,
+    ).toBe("never_started");
+    // Control: a running row AT its budget is its legitimate final attempt.
+    const finalAttempt = { ...row("sync_trades", { created_at: "2026-07-12T11:10:00.000Z", status: "running" }), attempts: 3, max_attempts: 3 };
+    expect(selectFactsheetJob([done, finalAttempt])).toBe(finalAttempt);
+  });
+
+  it("round-2 review: an in-flight chain row older than CHAIN_JOB_LIVE_WINDOW_MS at nowMs is dead; without nowMs the age arm is off", () => {
+    const nowMs = Date.parse("2026-07-12T20:00:00.000Z");
+    const ancient = row("sync_trades", { created_at: "2026-07-12T11:59:59.000Z", status: "running" });
+    const recent = row("sync_trades", { created_at: "2026-07-12T12:00:01.000Z", status: "running" });
+    expect(selectFactsheetJob([ancient], { nowMs })).toBeNull();
+    expect(selectFactsheetJob([recent], { nowMs })).toBe(recent);
+    expect(selectFactsheetJob([ancient])).toBe(ancient);
+    expect(computeJobDeadReason(ancient, nowMs)).toBe("older_than_live_window");
+    // A finished row is never "dead", whatever its age.
+    expect(computeJobDeadReason(row("sync_trades", { created_at: "2026-01-01T00:00:00.000Z", status: "done" }), nowMs)).toBeNull();
   });
 
   it("2026-09-24: with nothing in flight, the newest chain row still answers (finished vs failed)", () => {

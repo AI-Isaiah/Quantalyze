@@ -612,6 +612,28 @@ def test_resync_chain_kinds_match_the_typescript_factsheet_chain() -> None:
     assert ts_statuses == set(_NON_TERMINAL_JOB_STATUSES), (ts_statuses, _NON_TERMINAL_JOB_STATUSES)
 
 
+def test_the_ts_dead_row_mirror_uses_the_same_live_window() -> None:
+    """Round-2 review: `computeJobDeadReason` in src/lib/compute-state.ts mirrors
+    `_chain_job_dead_reason`'s observable arms, including the age bound. If the
+    two windows differ, a surface reports as dead (and offers a Retry for) a
+    job the server still treats as live, or the reverse."""
+    import re
+    from pathlib import Path
+
+    from routers.process_key import _RESYNC_CHAIN_JOB_LIVE_WINDOW
+
+    ts = (Path(__file__).resolve().parents[2] / "src/lib/compute-state.ts").read_text()
+    m = re.search(r"export const CHAIN_JOB_LIVE_WINDOW_MS = ([0-9_ *]+);", ts)
+    assert m is not None, "CHAIN_JOB_LIVE_WINDOW_MS not found in compute-state.ts"
+    factors = [int(f.replace("_", "")) for f in m.group(1).split("*")]
+    ts_ms = 1
+    for f in factors:
+        ts_ms *= f
+    assert ts_ms == int(_RESYNC_CHAIN_JOB_LIVE_WINDOW.total_seconds() * 1000), (
+        ts_ms, _RESYNC_CHAIN_JOB_LIVE_WINDOW,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Review-fix round 1 (MEDIUM-3) — the guard's two reads go through
 # `db_read_with_retry`, and a read that still fails never becomes a 500.
