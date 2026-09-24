@@ -33,6 +33,10 @@ from __future__ import annotations
 import ast
 import subprocess
 import sys
+import textwrap
+from pathlib import Path
+
+import pytest
 
 from tests.qstats_gate import (
     COVERED_MODULES,
@@ -43,6 +47,7 @@ from tests.qstats_gate import (
     SERVICE_ROOT,
     census_lines,
     mirror_rows,
+    scan_source,
     scan_tree,
 )
 
@@ -161,3 +166,244 @@ def test_qstats_gate_census_is_printed_on_a_real_run() -> None:
     out_lines = proc.stdout.splitlines()
     assert any(line.startswith("qstats-gate census:") for line in out_lines), proc.stdout
     assert any(line.startswith("qstats-gate reconciliation:") for line in out_lines), proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# Plan 166-08 (D-14 "proven able to fail"): permanent needles per call shape.
+#
+# Every needle goes through the SAME ``scan_source`` the real-corpus gate above
+# uses, so a needle that passes proves the production rule, never a second copy
+# of it. Each needle is its own collected case: a RED needle asserts the scanner
+# names the module, the enclosing function and the quantstats name; a GREEN
+# needle asserts the scanner stays silent on source that only LOOKS like a call.
+# The needle module is named ``services/metrics.py`` (a covered module) so that a
+# RED result is the call shape itself, not the importer rule.
+# ---------------------------------------------------------------------------
+
+NEEDLE_MODULE = "services/metrics.py"
+
+#: id -> (source, enclosing function, quantstats name the violation must carry,
+#: substring its reason must carry). Twelve shapes the gate claims to see.
+RED_NEEDLES: dict[str, tuple[str, str, str, str]] = {
+    "needle_direct_unclosed_call": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return qs.stats.sharpe(r)
+        """,
+        "compute_all_metrics",
+        "sharpe",
+        "not a kwarg-proven leaf",
+    ),
+    "needle_prepare_returns_true": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return qs.stats.volatility(r, prepare_returns=True)
+        """,
+        "compute_all_metrics",
+        "volatility",
+        "not the constant False",
+    ),
+    "needle_prepare_returns_variable": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r, flag):
+            return qs.stats.volatility(r, prepare_returns=flag)
+        """,
+        "compute_all_metrics",
+        "volatility",
+        "not the constant False",
+    ),
+    "needle_kwargs_splat": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r, **kwargs):
+            return qs.stats.volatility(r, **kwargs)
+        """,
+        "compute_all_metrics",
+        "volatility",
+        "**kwargs splat",
+    ),
+    "needle_cvar_keyword_that_lies": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return qs.stats.cvar(r, prepare_returns=False)
+        """,
+        "compute_all_metrics",
+        "cvar",
+        "not a kwarg-proven leaf",
+    ),
+    "needle_payoff_ratio_keyword_that_lies": (
+        """
+        import quantstats as qs
+        def _kelly_criterion(r):
+            return qs.stats.payoff_ratio(r, prepare_returns=False)
+        """,
+        "_kelly_criterion",
+        "payoff_ratio",
+        "not a kwarg-proven leaf",
+    ),
+    "needle_attribute_dispatch_over_table": (
+        """
+        import quantstats as qs
+        _QSTATS_SINGLE_ARG_SCALARS = (
+            ("recovery_factor", "recovery_factor"),
+            ("ulcer_index", "ulcer_index"),
+        )
+        def compute_qstats_scalars(r):
+            out = {}
+            for key, fn_name in _QSTATS_SINGLE_ARG_SCALARS:
+                out[key] = getattr(qs.stats, fn_name)(r)
+            return out
+        """,
+        "compute_qstats_scalars",
+        "getattr",
+        "dispatches: recovery_factor, ulcer_index",
+    ),
+    "needle_function_alias": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r, b):
+            fn = qs.stats.greeks
+            return fn(r, b)
+        """,
+        "compute_all_metrics",
+        "greeks",
+        "referenced without being called",
+    ),
+    "needle_from_stats_import": (
+        """
+        from quantstats.stats import greeks
+        def compute_all_metrics(r, b):
+            return greeks(r, b)
+        """,
+        "<module>",
+        "greeks",
+        "hides the call from the gate",
+    ),
+    "needle_preparer_reference": (
+        """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return qs.utils._prepare_returns(r)
+        """,
+        "compute_all_metrics",
+        "utils",
+        "reaches the quantstats preparers",
+    ),
+    "needle_rolling_alpha_beta_bare_rolling_greeks": (
+        """
+        import quantstats as qs
+        def _rolling_alpha_beta(r, b, window=90):
+            return qs.stats.rolling_greeks(r, b, window)
+        """,
+        "_rolling_alpha_beta",
+        "rolling_greeks",
+        "not a kwarg-proven leaf",
+    ),
+    "needle_stats_namespace_import_alias": (
+        """
+        from quantstats import stats as S
+        def compute_all_metrics(r):
+            return S.sharpe(r)
+        """,
+        "compute_all_metrics",
+        "sharpe",
+        "not a kwarg-proven leaf",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("source", "function", "qs_name", "reason"),
+    list(RED_NEEDLES.values()),
+    ids=list(RED_NEEDLES),
+)
+def test_qstats_gate_red_needle_is_named(
+    source: str, function: str, qs_name: str, reason: str
+) -> None:
+    """Each shape the gate claims to see is reported, naming the site.
+
+    A violation that did not carry the enclosing function and the quantstats
+    name would be RED but useless: the reader could not find the site to fix.
+    """
+    violations, _census, _nodes = scan_source(NEEDLE_MODULE, textwrap.dedent(source))
+    matching = [
+        v
+        for v in violations
+        if v.module == NEEDLE_MODULE
+        and v.function == function
+        and v.qs_name == qs_name
+        and reason in v.reason
+    ]
+    assert matching, (
+        f"the gate did not name {NEEDLE_MODULE}:{function}:{qs_name} ({reason!r}); "
+        f"it reported {violations}"
+    )
+
+
+def test_qstats_gate_importer_needle_names_the_uncovered_module(tmp_path: Path) -> None:
+    """Rule A through ``scan_tree``: a new importer outside COVERED_MODULES is RED.
+
+    The clean covered module beside it proves the violation is the importer rule
+    and not something the covered module did.
+    """
+    services = tmp_path / "services"
+    services.mkdir()
+    (services / "metrics.py").write_text(
+        "import quantstats as qs\n"
+        "def compute_all_metrics(r):\n"
+        "    return qs.stats.volatility(r, prepare_returns=False)\n",
+        encoding="utf-8",
+    )
+    (services / "other.py").write_text("import quantstats\n", encoding="utf-8")
+
+    violations, _census, _nodes, importers = scan_tree(tmp_path)
+    assert importers == frozenset({"services/metrics.py", "services/other.py"})
+    assert [(v.module, v.shape) for v in violations] == [
+        ("services/other.py", "uncovered importer")
+    ], violations
+
+
+GREEN_NEEDLES: dict[str, str] = {
+    "needle_green_clean_module": """
+        import quantstats as qs
+        def compute_all_metrics(r, dd):
+            vol = qs.stats.volatility(r, prepare_returns=False)
+            var = qs.stats.value_at_risk(r, prepare_returns=False)
+            tail = qs.stats.tail_ratio(r, prepare_returns=False)
+            pf = qs.stats.profit_factor(r, prepare_returns=False)
+            wr = qs.stats.win_rate(r, prepare_returns=False)
+            aw = qs.stats.avg_win(r, prepare_returns=False)
+            al = qs.stats.avg_loss(r, prepare_returns=False)
+            details = qs.stats.drawdown_details(dd)
+            return vol, var, tail, pf, wr, aw, al, details
+        """,
+    "needle_green_commented_out_call": """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            # sharpe = qs.stats.sharpe(r)
+            return qs.stats.volatility(r, prepare_returns=False)
+        """,
+    "needle_green_string_literal_call": """
+        import quantstats as qs
+        def compute_all_metrics(r):
+            note = "qs.stats.sharpe(r) guesses the price path; getattr(qs.stats, name)"
+            return note, qs.stats.volatility(r, prepare_returns=False)
+        """,
+}
+
+
+@pytest.mark.parametrize("source", list(GREEN_NEEDLES.values()), ids=list(GREEN_NEEDLES))
+def test_qstats_gate_green_needle_is_silent(source: str) -> None:
+    """Closed calls, comments and string literals are not violations.
+
+    The line gate this replaced matched TEXT, so a comment could satisfy or trip
+    it. The AST gate must stay silent here, and must still be LOOKING: the clean
+    call in each needle is counted as a node with a census row.
+    """
+    violations, census, nodes = scan_source(NEEDLE_MODULE, textwrap.dedent(source))
+    assert violations == [], violations
+    assert nodes > 0 and len(census) == nodes, (nodes, census)
