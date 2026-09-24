@@ -6,6 +6,14 @@ import { ApiKeyManager } from "@/components/strategy/ApiKeyManager";
 import { CsvStrategyEditNote } from "@/components/strategy/CsvStrategyEditNote";
 import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import type { Strategy } from "@/lib/types";
+import {
+  readCompositeMemberKeyIds,
+  resolveStrategyShape,
+  type CompositeHistory,
+} from "@/lib/strategy-shape";
+import { readOwnerCompositeHistory } from "@/lib/compute-jobs-read";
+import { captureToSentry } from "@/lib/sentry-capture";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { redirect } from "next/navigation";
 
 export default async function EditStrategyPage({
@@ -31,6 +39,88 @@ export default async function EditStrategyPage({
         Strategy not found.
       </div>
     );
+  }
+
+  // Phase 167.2 / KCS-23: is this strategy a composite? Its key card must then
+  // offer no control that rewrites `strategies.api_key_id` (Use & Sync, Resync,
+  // Add Key), because that write silently turns a composite into a single-key
+  // strategy. Read on the request client (RLS `strategy_keys_owner`) and only
+  // for an API-key-backed strategy: a CSV strategy renders no key card.
+  // An unreadable count is "unknown", NOT a page failure: the card then offers
+  // no link control (it might be a composite) but keeps `Update password`,
+  // `Delete` and each key's pill, because the "Sign-in failed" pill on
+  // /strategies links here for exactly that remedy. The message is logged
+  // server-side only; the card receives the shape and no error text.
+  let keyShape: "single" | "composite" | "unknown" = "single";
+  // 167.2-REVIEW CR-02: the member KEY IDS, not just their count, so the card
+  // lists only the keys the composite reads from (KCS23-COMPOSITE says it
+  // "reads from every key below"). One read gives both: the count is their
+  // number.
+  let compositeMemberKeyIds: string[] | undefined;
+  if (strategy.source !== "csv") {
+    // The generated types predate `strategy_keys`; the cast is type-only and
+    // RLS still applies to this request client (see strategy-shape.ts).
+    const members = await readCompositeMemberKeyIds(
+      supabase as unknown as SupabaseClient,
+      strategy.id,
+    );
+    if (members.ok) {
+      // 167.2-REVIEW-SFH M-7: a zero count with no linked key is cross-checked
+      // against the job history (a stitch on record, or an unreadable
+      // history, fails closed to "unknown"); see `resolveStrategyShape`. The
+      // extra read runs only in that case, so a linked single-key strategy and
+      // a composite pay nothing for it.
+      let compositeHistory: CompositeHistory = "none";
+      if (members.keyIds.length === 0 && !strategy.api_key_id) {
+        // 167.2-REVIEW-R2 CR-01 / SFH-R2 R2-H1: the history read has its own
+        // widening rule (`readOwnerCompositeHistory` re-asks at the RPC cap
+        // when the first window is not exhaustive and holds no stitch), so a
+        // mature unlinked strategy with 100+ job rows resolves to "single",
+        // not "unknown". It never throws.
+        // SFH-R2 R2-M2: every answer that is not "none" makes the shape
+        // "unknown" and removes every link control, so each one is logged
+        // (with the id) and captured (tags only), as the member-read arm is.
+        const read = await readOwnerCompositeHistory(
+          supabase as unknown as SupabaseClient,
+          strategy.id,
+        );
+        compositeHistory = read.history;
+        if (read.message !== null) {
+          console.error("[strategies/edit/page] composite history is not clean; the key card offers no link control", {
+            id: strategy.id,
+            history: read.history,
+            message: read.message,
+          });
+          captureToSentry(new Error(read.message), {
+            tags: { route: "strategies/edit/page", stage: "composite-history" },
+          });
+        }
+      }
+      const shape = resolveStrategyShape({
+        source: strategy.source,
+        apiKeyId: strategy.api_key_id,
+        memberCount: { ok: true, count: members.keyIds.length },
+        compositeHistory,
+      });
+      // The card's tri-state: "single" means NOT a composite (single-key or
+      // unlinked, both linkable from this card).
+      keyShape =
+        shape === "composite" ? "composite" : shape === "unknown" ? "unknown" : "single";
+      if (keyShape === "composite") compositeMemberKeyIds = members.keyIds;
+    } else {
+      console.error("[strategies/edit/page] composite member count failed", {
+        id: strategy.id,
+        message: members.message,
+      });
+      // 167.2-REVIEW-SFH H-2: captured like the owner factsheet's identical
+      // read (`readOwnerPendingStatus`, stage "strategy-shape"), so a card
+      // whose sync controls vanished is visible in production, not only in a
+      // server log. The strategy id stays in the log, as that site does.
+      captureToSentry(new Error(members.message), {
+        tags: { route: "strategies/edit/page", stage: "strategy-shape" },
+      });
+      keyShape = "unknown";
+    }
   }
 
   return (
@@ -72,6 +162,8 @@ export default async function EditStrategyPage({
                 strategyId={strategy.id}
                 currentKeyId={strategy.api_key_id}
                 defaultExchange={strategy.supported_exchanges?.[0]?.toLowerCase()}
+                keyShape={keyShape}
+                compositeMemberKeyIds={compositeMemberKeyIds}
               />
               {/*
                 Sprint 5 Task 5.8: live key-scope viewer. Only the strategy

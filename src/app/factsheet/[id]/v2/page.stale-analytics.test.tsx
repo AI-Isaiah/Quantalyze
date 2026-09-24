@@ -199,16 +199,26 @@ describe("STALE-01 · /factsheet/[id]/v2 — the page both PDF wrappers screensh
     ).toBeNull();
   });
 
-  it("V2: it falls to the EXISTING still-computing placeholder, not a new error state", async () => {
+  it("V2: it falls to the neutral public placeholder, not a new error state", async () => {
     const ui = await renderPage("failed");
     const text = collectText(ui).join(" ");
 
-    expect(text).toContain("still computing");
+    // KCS-10 (phase 167.2): the anchor MOVED from "still computing" to the one
+    // neutral public sentence. "Still computing" was false for a failed or
+    // never-started strategy, and the public lane cannot know which it is.
+    expect(text).toContain(
+      "The detailed factsheet for this strategy is not available yet.",
+    );
     // The strategy is not deleted and is not shouted at: it keeps its name and
     // the page carries no error/failure vocabulary.
     expect(text).toContain("Orpheus");
     expect(text.toLowerCase()).not.toContain("failed");
     expect(text.toLowerCase()).not.toContain("error");
+    // KCS-10: no promise of a compute that may not be coming, no timing, and
+    // not the sentence that told a reader this page was all there is.
+    expect(text).not.toContain("still computing");
+    expect(text).not.toContain("few minutes");
+    expect(text).not.toContain("Some strategies stay in this state");
   });
   // ── Criterion 9 (phase 164.2) ────────────────────────────────────────────
   // The placeholder above renders to an ANONYMOUS visitor: `renderPage` calls
@@ -236,10 +246,14 @@ describe("STALE-01 · /factsheet/[id]/v2 — the page both PDF wrappers screensh
     ).not.toContain("bundled benchmark window");
     expect(text, "the benchmark window's start date is internal").not.toContain("2023-04-26");
 
-    // Positives: V2's anchor is untouched, and the replacement sentence is the
-    // one this test pins — not merely "some other sentence".
-    expect(text).toContain("still computing");
-    expect(text).toContain("has not been computed yet");
+    // Positives: KCS-10 (phase 167.2) MOVED both anchors to the one neutral
+    // public sentence, which replaced the two paragraphs this test used to
+    // pin. The full sentence and its distinctive phrase are both pinned, so a
+    // silent re-wording cannot pass.
+    expect(text).toContain(
+      "The detailed factsheet for this strategy is not available yet.",
+    );
+    expect(text).toContain("is not available yet");
   });
 
   it("V3: a live `computing` run is withheld the same way", async () => {

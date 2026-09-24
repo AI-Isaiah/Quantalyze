@@ -7,6 +7,7 @@ import { FactsheetView } from "@/app/factsheet/[id]/v2/FactsheetView";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategyDetail } from "@/lib/queries";
 import { displayStrategyName } from "@/lib/strategy-display";
+import { KCS10_PUBLIC_SENTENCE } from "@/lib/status-surface-copy";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
@@ -228,11 +229,14 @@ export default async function StrategyDetailPage({
           <h1 className="mt-2 font-serif text-page-title leading-tight text-text-primary">
             {displayName}
           </h1>
+          {/* Phase 167.2 review-fix (167.2-REVIEW WR-01): the one KCS-10
+              sentence, imported from where it is authored, so this surface and
+              the v2 public lane cannot diverge. The sentence it replaces
+              promised a compute that may never come (a failed chain, or a
+              series that cannot build, does not resolve on its own) and named
+              an internal pipeline to allocators (phase 164.2 criterion 9). */}
           <p className="mt-6 text-small text-text-secondary">
-            The detailed factsheet for this strategy is still computing.
-            Daily-return data hasn&apos;t been ingested yet — once the
-            analytics service finishes the first compute pass, the full
-            panel set will render here.
+            {KCS10_PUBLIC_SENTENCE}
           </p>
         </article>
       )}

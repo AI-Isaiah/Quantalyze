@@ -27,10 +27,13 @@ export type ComputationStatus = StrategyAnalytics["computation_status"];
  *   attempt counter with an optional outer cap (`maxAttempts`, escalates on
  *   attempt N+1 BEFORE the query) and an optional missing-row grace window
  *   (`missingRowGracePolls`). Reads via `.single()`; a PGRST116 (0 rows) is the
- *   expected "row not yet created" case and a non-PGRST116 error is logged and
- *   consumes grace like a missing row (NO consecutive-error escalation — the
- *   pinned asymmetry vs the wizard). Terminal states are just forwarded via
- *   `onStatus`; the loop never self-stops (the parent flips `enabled` off).
+ *   expected "row not yet created" case and a non-PGRST116 error is logged
+ *   (NO consecutive-error escalation — the pinned asymmetry vs the wizard).
+ *   Phase 167.2 / KCS-22: only a clean absent read, before any row was seen in
+ *   this activation, can end the attempt at the grace boundary
+ *   (`onError("missing_row")`); a failed read runs to the cap (`onError("cap")`).
+ *   Terminal states are just forwarded via `onStatus`; the loop never
+ *   self-stops (the parent flips `enabled` off).
  *
  * - `schedule: readonly number[]` → self-scheduling `setTimeout` that walks the
  *   backoff ladder and holds the final step (wizard: POLL_BACKOFF_MS). Reads via
@@ -72,10 +75,27 @@ export interface UseStrategySyncPollerOptions {
    * attempts, the ladder arm counts CONSECUTIVE absent-row polls (an absent row
    * is not an error, so it gets its own counter). Left undefined → an absent row
    * never escalates; the loop keeps polling silently and reports nothing.
+   *
+   * Phase 167.2 / KCS-22: the INTERVAL arm escalates at this boundary only on
+   * evidence that nothing was recorded — no row seen in this activation, and a
+   * clean read (error null, or PGRST116) at the boundary — and passes
+   * `"missing_row"`. `SyncProgress` renders that as KCS22-NOROW ("… with nothing
+   * recorded yet …"), a claim a failed read cannot support, so an erroring read
+   * or an absent read after a row was seen runs to `maxAttempts` instead.
    */
   missingRowGracePolls?: number;
-  /** Fired on every clean read with the DB status + error (surface forwards/sets). */
-  onStatus: (status: ComputationStatus, error: string | null) => void;
+  /**
+   * Fired on every clean read with the DB status + error (surface forwards/sets).
+   * Phase 167.2 / KCS-02: the INTERVAL arm also passes the row's server-written
+   * `computed_at` as a third argument, which `SyncProgress` compares with the
+   * value read just before its attempt's enqueue. The LADDER arm (the wizard's)
+   * is unchanged and passes two arguments only.
+   */
+  onStatus: (
+    status: ComputationStatus,
+    error: string | null,
+    computedAt?: string | null,
+  ) => void;
   /**
    * Ladder mode only. Called on a terminal status; returns `"repoll"` to continue
    * the ladder or `"done"` to stop. The caller catches its own heavy-fetch faults
@@ -86,8 +106,15 @@ export interface UseStrategySyncPollerOptions {
     status: ComputationStatus,
     error: string | null,
   ) => Promise<"done" | "repoll"> | "done" | "repoll";
-  /** Escalation sink: wizard `failPolling`→SYNC_FAILED; SyncProgress `onStatusChange("error")`. */
-  onError: () => void;
+  /**
+   * Escalation sink: wizard `failPolling`→SYNC_FAILED; SyncProgress
+   * `onStatusChange("no_result", …)`. Phase 167.2 / KCS-22: the INTERVAL arm
+   * names which give-up fired (`"cap"` or `"missing_row"`); the LADDER arm calls
+   * it with no argument, exactly as before. 167.2-REVIEW-SFH M-3: the cap
+   * reached with NO clean read in the activation is `"unreadable"`: the panel
+   * stopped because it could not read, not because the sync was slow.
+   */
+  onError: (reason?: "cap" | "missing_row" | "unreadable") => void;
 }
 
 export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void {
@@ -132,16 +159,36 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
     if (!isLadder) {
       const intervalMs = schedule as number;
       let attempts = 0;
+      // KCS-22: has any read in THIS activation returned a row (whatever its
+      // status)? Effect-local like `attempts`, so a re-activation resets both.
+      let sawRow = false;
       let cancelled = false;
+      // 167.2-REVIEW-SFH M-2: reads are ORDERED. A read is issued every tick
+      // whether or not the previous one has answered, so a slow read issued
+      // before the worker wrote `computing` could land AFTER a faster, later
+      // read that saw it, and deliver the PREVIOUS run's terminal row to a
+      // caller whose evidence (a) is sticky (`SyncProgress`). Each read takes
+      // the next number, and a response older than the newest one applied is
+      // dropped, the `keysReadSeqRef` pattern `ApiKeyManager.loadKeys` uses.
+      // Effect-local like `attempts`, so a re-activation resets it. INTERVAL
+      // ARM ONLY: the ladder arm awaits each read before scheduling the next,
+      // so it cannot reorder, and it stays byte-unchanged (LADDER-TWO-ARGS).
+      let issuedSeq = 0;
+      let appliedSeq = 0;
+      // 167.2-REVIEW-SFH M-3: has any applied read in THIS activation been
+      // clean (error null, or PGRST116 = 0 rows)? A cap reached without one is
+      // reported as "unreadable", not "cap".
+      let sawCleanRead = false;
 
       const intervalId = setInterval(async () => {
         // Increment-BEFORE-cap: attempt N+1 escalates without querying.
         attempts += 1;
         if (maxAttempts !== undefined && attempts > maxAttempts) {
-          onErrorRef.current();
+          onErrorRef.current(sawCleanRead ? "cap" : "unreadable");
           return;
         }
 
+        const seq = ++issuedSeq;
         const supabase = createClient();
         const { data, error: pollErr } = await supabase
           .from("strategy_analytics")
@@ -149,6 +196,10 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
           .eq("strategy_id", strategyId)
           .single();
         if (cancelled) return;
+        // M-2: a response overtaken by a newer applied one is dropped whole.
+        if (seq < appliedSeq) return;
+        appliedSeq = seq;
+        if (!pollErr || pollErr.code === "PGRST116") sawCleanRead = true;
 
         // PGRST116 (0 rows via .single()) is the expected "row not yet created"
         // case; log everything else (RLS regression / network / 5xx).
@@ -160,21 +211,34 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
           );
         }
 
-        // A missing row (PGRST116 or any error with null data) consumes grace
-        // like a missing row — no escalation until the grace boundary.
+        // A read with no row reports no status. Phase 167.2 / KCS-22: past the
+        // grace boundary it ends the attempt as "missing_row" ONLY on evidence
+        // that nothing was recorded: this activation has seen no row, and this
+        // read was clean (error null, or PGRST116 = 0 rows). The caller says
+        // "nothing recorded yet" for that reason, and a failed read is not
+        // evidence of absence, nor is an absent read after a row was seen, so
+        // either one keeps polling and runs to the cap instead (UI-SPEC § State
+        // matrix, the offline row). Lineage: any null-data read, erroring or
+        // not, consumed grace and escalated here with no reason.
         if (!data) {
+          const cleanRead = !pollErr || pollErr.code === "PGRST116";
           if (
             missingRowGracePolls !== undefined &&
-            attempts > missingRowGracePolls
+            attempts > missingRowGracePolls &&
+            !sawRow &&
+            cleanRead
           ) {
-            onErrorRef.current();
+            onErrorRef.current("missing_row");
           }
           return;
         }
 
+        sawRow = true;
+
         onStatusRef.current(
           data.computation_status,
           data.computation_error ?? null,
+          data.computed_at ?? null,
         );
       }, intervalMs);
 
