@@ -2937,7 +2937,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 167.2-05-PLAN.md — the link update and the enqueue are bounded; expiry says the sync could not be confirmed (KCS-03)
+- [x] 167.2-05-PLAN.md — the link update and the enqueue are bounded; expiry says the sync could not be confirmed (KCS-03)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
