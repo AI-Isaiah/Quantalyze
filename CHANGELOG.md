@@ -84,6 +84,7 @@ after merge or is a founder read-through. See Notes.
   twins point at the single-key body and 16 at the composite body.
 
 ### Fixed — code review, two rounds (gsd-code-reviewer with silent-failure-hunter, migration-reviewer and rls-policy-auditor)
+- **Three retraction log lines no longer pass the caught error into their message template** (`keys/sync` in-budget and `_late` sites, and `finalize-wizard`). The SQLSTATE is read into a local first. CI's `seam-log-coverage` gate (SEAMCORE-06) caught it on the PR. The log output is unchanged.
 
 - **Round 1: 17 in scope, 17 fixed** (`0dd123d41`, `1db9fb526`, `21a8e2818`, `396efceeb`,
   `8d0859de0`).

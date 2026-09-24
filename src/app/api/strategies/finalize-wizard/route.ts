@@ -2173,8 +2173,9 @@ async function runLegacyFinalize(args: {
               }
             } catch (err) {
               // LOW-2 (164.6 review fix): the SQLSTATE rides in the cause.
+              const code = retractionFailureCode(err);
               console.error(
-                `[strategies/finalize-wizard] composite refresh-marker retraction failed for ${resolvedId} (code=${retractionFailureCode(err)}): ${scrubSeamError(err)}`,
+                `[strategies/finalize-wizard] composite refresh-marker retraction failed for ${resolvedId} (code=${code}): ${scrubSeamError(err)}`,
               );
               captureToSentry(err, {
                 tags: {

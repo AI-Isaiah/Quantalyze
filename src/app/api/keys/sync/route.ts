@@ -406,8 +406,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       const retraction = retractInheritedRefreshMarker(admin, rpcData, correlation_id);
       retraction.catch((err: unknown) => {
         if (!retractionTimedOut) return;
+        const code = retractionFailureCode(err);
         console.error(
-          `[keys/sync] composite refresh-marker retraction failed late, after the ${MARKER_RETRACTION_BUDGET_MS} ms budget, for ${strategy_id} (code=${retractionFailureCode(err)}):`,
+          `[keys/sync] composite refresh-marker retraction failed late, after the ${MARKER_RETRACTION_BUDGET_MS} ms budget, for ${strategy_id} (code=${code}):`,
           scrubSeamError(err),
         );
         captureToSentry(err, {
@@ -449,8 +450,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       } catch (err) {
         // LOW-2 (164.6 review fix): the thrown message is generic by design; the
         // PostgREST SQLSTATE rides in `cause`, so it is named here.
+        const code = retractionFailureCode(err);
         console.error(
-          `[keys/sync] composite refresh-marker retraction failed for ${strategy_id} (code=${retractionFailureCode(err)}):`,
+          `[keys/sync] composite refresh-marker retraction failed for ${strategy_id} (code=${code}):`,
           scrubSeamError(err),
         );
         captureToSentry(err, {
