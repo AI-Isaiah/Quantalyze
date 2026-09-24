@@ -255,16 +255,23 @@ export function selectFactsheetJob(
  * deliberately looks at the factsheet kinds only. This is the other half, so a
  * reader can tell "the chain is done and a recurring job holds the status"
  * from "nothing is running and the status is stuck".
+ *
+ * Round-2 review (SFH MED-4): a row `computeJobDeadReason` calls dead (at
+ * `nowMs` when given) does not count. A crash-looping or 8-hour-old recurring
+ * job is not work the server will finish, so it must not hold the Retry back
+ * for an hour behind the in-flight ceiling.
  */
 export function isNonFactsheetJobInFlight(
   rows: readonly (ComputeJobRow | null | undefined)[],
+  nowMs?: number,
 ): boolean {
   return rows.some(
     (row) =>
       !!row &&
       row.kind !== STITCH_KIND &&
       !isFactsheetChainKind(row.kind) &&
-      isFactsheetJobInFlight(row.status),
+      isFactsheetJobInFlight(row.status) &&
+      computeJobDeadReason(row, nowMs) === null,
   );
 }
 

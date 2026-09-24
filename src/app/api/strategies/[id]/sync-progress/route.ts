@@ -295,7 +295,7 @@ export async function GET(
       // LOW-8 — say when a non-factsheet job (a recurring kind) is still in
       // flight: the SQL status bridge holds `computing` for it too. Added only
       // when true, so every other body is byte-identical.
-      const body: SyncProgressResponse = isNonFactsheetJobInFlight(read.rows)
+      const body: SyncProgressResponse = isNonFactsheetJobInFlight(read.rows, nowMs)
         ? { jobStatus, stalled, memberProgress, otherJobInFlight: true }
         : { jobStatus, stalled, memberProgress };
       return NextResponse.json(body, { status: 200, headers: NO_STORE_HEADERS });
