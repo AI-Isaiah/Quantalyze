@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useStrategySyncPoller } from "@/hooks/useStrategySyncPoller";
+import { isFactsheetJobInFlight } from "@/lib/compute-state";
 import { Button } from "@/components/ui/Button";
 import type { StrategyAnalytics } from "@/lib/types";
 
@@ -84,6 +85,54 @@ export function toSyncStatus(db: ComputationStatus): SyncStatus {
  */
 export type EvidenceBaseline = { computedAt: string | null } | "unknown";
 
+/**
+ * Phase 167.2 / KCS-18 (RESEARCH P1): does the job queue agree that no
+ * factsheet-chain job is still in flight for this strategy? Reads the existing
+ * owner-scoped `/api/strategies/[id]/sync-progress` projection once.
+ *
+ * Fails closed on the claim: `true` only for a real read (HTTP ok, a JSON
+ * object, not `degraded`, `jobStatus` null or a string) whose `jobStatus` is not
+ * in flight per `isFactsheetJobInFlight`. Every other outcome (a limiter 429, a
+ * 5xx, a body that does not parse, a rejected fetch, the route's DEGRADED body)
+ * is `false`, and an unreadable answer is reported through `onUnreadable`. It
+ * never throws. `jobStatus` null means no factsheet-chain job is visible and
+ * `failed_final` is a finished chain; both let the success through.
+ */
+async function jobQueueSaysChainSettled(
+  strategyId: string,
+  onUnreadable: (reason: string) => void,
+): Promise<boolean> {
+  let body: unknown;
+  try {
+    const res = await fetch(
+      `/api/strategies/${encodeURIComponent(strategyId)}/sync-progress`,
+      { cache: "no-store" },
+    );
+    if (!res.ok) {
+      onUnreadable(`HTTP ${res.status}`);
+      return false;
+    }
+    body = await res.json();
+  } catch (err) {
+    onUnreadable(err instanceof Error ? err.message : String(err));
+    return false;
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    onUnreadable("the body is not the projection");
+    return false;
+  }
+  const read = body as { jobStatus?: unknown; degraded?: unknown };
+  if (read.degraded === true) {
+    onUnreadable("degraded read");
+    return false;
+  }
+  if (read.jobStatus !== null && typeof read.jobStatus !== "string") {
+    onUnreadable("the body carries no jobStatus");
+    return false;
+  }
+  return !isFactsheetJobInFlight(read.jobStatus);
+}
+
 interface SyncProgressProps {
   strategyId: string;
   syncStatus: SyncStatus;
@@ -159,6 +208,21 @@ export function SyncProgress({
   // KCS-02 evidence (a): this panel has itself read `computing` during this
   // attempt. Per attempt because the caller keys the panel per attempt.
   const sawComputingRef = useRef(false);
+  // KCS-18: one job-state read at a time; a token per stretch of `computing`
+  // (null once the panel leaves it or unmounts), so a read that lands late
+  // forwards nothing; and one console.warn per attempt for unreadable answers
+  // (the caller keys the panel per attempt, so these reset with it).
+  const jobCheckInFlightRef = useRef(false);
+  const computingTokenRef = useRef<object | null>(null);
+  const warnedUnreadableRef = useRef(false);
+
+  useEffect(() => {
+    const token = syncStatus === "computing" ? {} : null;
+    computingTokenRef.current = token;
+    return () => {
+      computingTokenRef.current = null;
+    };
+  }, [syncStatus]);
 
   const isActive = syncStatus === "syncing" || syncStatus === "computing";
 
@@ -284,9 +348,41 @@ export function SyncProgress({
         const changed =
           evidenceBaseline !== "unknown" &&
           (computedAt ?? null) !== evidenceBaseline.computedAt;
-        if (sawComputingRef.current || changed) {
+        if (!sawComputingRef.current && !changed) return;
+        // An evidenced failure is forwarded as it stands: it needs no job-state
+        // read (KCS-18 covers successes only).
+        if (next === "error") {
           onStatusChange?.(next);
+          return;
         }
+        // Phase 167.2 / KCS-18 — THE JOB-STATE CHECK (RESEARCH P1). The SQL
+        // status bridge keeps a `complete_with_warnings` row at that status while
+        // the chain's jobs run, and still moves `computed_at` on every hop, so
+        // evidence (b) above also accepts a warned row re-stamped MID-CHAIN. The
+        // analytics row cannot tell that from the finished run; the job queue is
+        // the authority on whether the chain is done. So a success is forwarded
+        // only after one read of the sync-progress projection finds no
+        // factsheet-chain job in flight. Any other answer drops this read and the
+        // poll continues; the next evidenced tick asks again. One read at a time
+        // (at the 3 s cadence that is at most 20 a minute against the route's
+        // limiter of 60), and a read that lands after the panel left `computing`
+        // or unmounted forwards nothing. It compares no client clock.
+        if (jobCheckInFlightRef.current) return;
+        jobCheckInFlightRef.current = true;
+        const token = computingTokenRef.current;
+        void jobQueueSaysChainSettled(strategyId, (reason) => {
+          if (warnedUnreadableRef.current) return;
+          warnedUnreadableRef.current = true;
+          console.warn(
+            `[SyncProgress] the job-state read was unreadable; the success is held and the poll continues [strategy_id=${strategyId}]:`,
+            reason,
+          );
+        }).then((settled) => {
+          jobCheckInFlightRef.current = false;
+          if (settled && token !== null && computingTokenRef.current === token) {
+            onStatusChange?.(next);
+          }
+        });
       }
     },
     onError: () => onStatusChange?.("error"),

@@ -37,7 +37,39 @@ const mockState = vi.hoisted(() => ({
     error: unknown;
   },
   analyticsSelectCount: 0,
+  /**
+   * Phase 167.2 / KCS-18: the answers `/api/strategies/[id]/sync-progress`
+   * gives, one per request, in order. An empty queue answers a real read with
+   * jobStatus `done`, so a success case that does not care about the job state
+   * (PIN 5, PIN 5c) sees "nothing in flight".
+   */
+  jobAnswers: [] as Array<() => Promise<unknown>>,
+  jobReadCount: 0,
 }));
+
+/** Phase 167.2 / KCS-18: a sync-progress answer with this body and HTTP status. */
+function jobRead(body: unknown, status = 200) {
+  return () =>
+    Promise.resolve({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+    });
+}
+
+/** A real (not degraded) projection read naming this factsheet-chain job status. */
+function jobState(jobStatus: string | null) {
+  return jobRead({ jobStatus, stalled: false, memberProgress: [] });
+}
+
+const fetchMock = vi.fn((url: string) => {
+  if (/^\/api\/strategies\/[^/]+\/sync-progress$/.test(url)) {
+    mockState.jobReadCount += 1;
+    const next = mockState.jobAnswers.shift() ?? jobState("done");
+    return next();
+  }
+  return Promise.reject(new Error(`unexpected fetch ${url}`));
+});
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -131,12 +163,16 @@ beforeEach(() => {
   vi.useFakeTimers();
   mockState.analyticsResult = { data: null, error: null };
   mockState.analyticsSelectCount = 0;
+  mockState.jobAnswers = [];
+  mockState.jobReadCount = 0;
+  vi.stubGlobal("fetch", fetchMock);
 });
 
 afterEach(() => {
   cleanup();
   vi.clearAllTimers();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -350,5 +386,41 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
     // The read DID happen on every tick — otherwise the absences above would be
     // satisfied by a loop that never ran.
     expect(mockState.analyticsSelectCount).toBe(11);
+  });
+});
+
+// ===========================================================================
+// Phase 167.2 / KCS-18 — the job-state check before a terminal SUCCESS.
+//
+// RESEARCH P1: the SQL status bridge keeps a `complete_with_warnings` row at
+// that status while the chain's jobs run, and still moves `computed_at` on
+// every hop. So a warned strategy's resync reads `complete_with_warnings` with
+// a NEW computed_at (KCS-02 evidence b) while the next hop is still `pending`.
+// The analytics row cannot tell that apart from the finished run; the job
+// queue can. A success is forwarded only on a readable "nothing in flight".
+// ===========================================================================
+describe("SyncProgress — a terminal success waits for the job queue (Phase 167.2 / KCS-18)", () => {
+  const T0 = "2026-04-19T11:58:00.000000+00:00";
+
+  it("WARNED-ROW-MID-CHAIN: a warned row re-stamped mid-chain is not forwarded while the chain job is pending, then forwarded once it is done", async () => {
+    // Baseline: the previous run ended complete_with_warnings at T0. The poll
+    // reads the same status at T1 (evidence b holds) with the job still pending.
+    mockState.analyticsResult = analyticsRow("complete_with_warnings", T1);
+    mockState.jobAnswers = [jobState("pending"), jobState("done")];
+    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    await tick(0);
+
+    await tick(POLL_MS);
+    expect(mockState.jobReadCount).toBe(1);
+    expect(
+      onStatusChange,
+      "a mid-chain warned row was shown as this attempt's finished result",
+    ).not.toHaveBeenCalled();
+
+    // The poll keeps reading, and the next evidenced tick asks the queue again.
+    await tick(POLL_MS);
+    expect(mockState.analyticsSelectCount).toBe(2);
+    expect(mockState.jobReadCount).toBe(2);
+    expect(onStatusChange.mock.calls).toEqual([["complete_with_warnings"]]);
   });
 });

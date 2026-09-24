@@ -24,7 +24,9 @@
  *     it is THIS attempt's (a `computing` read, or a `computed_at` that moved
  *     from the baseline read just before the enqueue), never on the previous
  *     run's row (STALE-TERMINAL, FAST-FAIL, COMPUTING-THEN-SUCCESS,
- *     UNKNOWN-BASELINE).
+ *     UNKNOWN-BASELINE);
+ *   - Phase 167.2 / KCS-18: a terminal SUCCESS ends the attempt only once the
+ *     job queue says no factsheet-chain job is in flight (WARNED-ROW-KEYCARD).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, act, fireEvent, cleanup, within } from "@testing-library/react";
@@ -61,6 +63,13 @@ const mockState = vi.hoisted(() => ({
   keysRows: [] as unknown[],
   /** When true, the NEXT key-list read never settles (one-shot). */
   hangNextKeysRead: false,
+  /**
+   * Phase 167.2 / KCS-18: the jobStatus each `/api/strategies/[id]/sync-progress`
+   * read answers, in order. Empty answers `done` (nothing in flight), which is
+   * what every case before KCS-18 assumed.
+   */
+  jobStatuses: [] as Array<string | null>,
+  jobReadCount: 0,
 }));
 
 vi.mock("@/lib/supabase/client", () => ({
@@ -176,14 +185,18 @@ async function startResyncWithHeldEnqueue() {
   const enqueue = deferred<Response>();
   const fetchMock = vi.fn().mockImplementation((url: string) => {
     if (url === "/api/keys/sync") return enqueue.promise;
-    // A real read of the job-state projection, so a later job-state check
-    // (plan 167.2-10) has a mock to find. Nothing in this plan reads it.
+    // A real read of the job-state projection. Phase 167.2 / KCS-18: the panel
+    // reads it before it forwards a terminal success (plan 167.2-10). Lineage:
+    // plan 167.2-03 added this arm answering `done` for every read; it now
+    // answers from `mockState.jobStatuses`, still `done` when the queue is empty.
     if (/^\/api\/strategies\/[^/]+\/sync-progress$/.test(url)) {
+      mockState.jobReadCount += 1;
+      const jobStatus = mockState.jobStatuses.length > 0 ? mockState.jobStatuses.shift() : "done";
       return Promise.resolve({
         ok: true,
         status: 200,
         headers: new Headers({ "content-type": "application/json" }),
-        json: async () => ({ jobStatus: "done", stalled: false, memberProgress: [] }),
+        json: async () => ({ jobStatus, stalled: false, memberProgress: [] }),
       });
     }
     return Promise.resolve({
@@ -223,6 +236,8 @@ beforeEach(() => {
   mockState.baselineReadCount = 0;
   mockState.keysRows = [healthyRow()];
   mockState.hangNextKeysRead = false;
+  mockState.jobStatuses = [];
+  mockState.jobReadCount = 0;
 });
 
 afterEach(() => {
@@ -509,5 +524,38 @@ describe("ApiKeyManager + the REAL poller: a terminal ends the attempt only with
     await enqueueAccepted(enqueue);
     await tick(POLL_MS * 2);
     expect(screen.queryByText("Up to date")).not.toBeInTheDocument();
+  });
+});
+
+describe("ApiKeyManager + the REAL poller: a success waits for the job queue (Phase 167.2 / KCS-18)", () => {
+  it("WARNED-ROW-KEYCARD: a warned strategy's resync does not say Synced with warnings while its chain job is pending", async () => {
+    // RESEARCH P1: the previous run ended complete_with_warnings at T0. The
+    // bridge keeps that status mid-chain and moves computed_at to T1, so the
+    // row alone carries this attempt's evidence (b) while the next hop is
+    // still pending. Only the job queue can say the run has not finished.
+    mockState.baselineResult = baselineRow(T0);
+    mockState.analyticsResult = analyticsRow("complete_with_warnings", T1);
+    mockState.jobStatuses = ["pending", "pending", "done"];
+    const enqueue = await startResyncWithHeldEnqueue();
+    await act(async () => {
+      enqueue.resolve(accepted());
+    });
+    await tick(0);
+
+    await tick(POLL_MS * 2);
+    expect(mockState.jobReadCount).toBe(2);
+    expect(
+      screen.queryByText("Synced with warnings"),
+      "a mid-chain warned row was shown as this attempt's result",
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Computing analytics...")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Syncing…" })).toBeDisabled();
+
+    // The job is done: the next evidenced read ends the attempt with the warning.
+    await tick(POLL_MS);
+    await tick(0);
+    expect(mockState.jobReadCount).toBe(3);
+    expect(screen.getByText("Synced with warnings")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
   });
 });
