@@ -73,6 +73,15 @@ const apiKeyDeleteMock = vi.fn();
 // the id; its default answer is "still present", the conservative reading, so
 // a case that means "already gone" has to say so.
 const apiKeyLookupMock = vi.fn();
+// Phase 167.2 / KCS-02: `handleSyncTrades` reads the strategy's pre-enqueue
+// `computed_at` with `from("strategy_analytics").select("computed_at")
+// .eq("strategy_id", …).maybeSingle()`. Extended deliberately (not a catch-all):
+// only that table answers `maybeSingle`, so a baseline read aimed at any other
+// table would throw here and the case asserting the read would go red. The spy
+// receives the table and the strategy id; default answer is a row with no
+// computed_at. The real evidence gate lives in `SyncProgress`, which this file
+// mocks; it is exercised in ApiKeyManager.poll.test.tsx.
+const analyticsBaselineMock = vi.fn();
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -87,9 +96,19 @@ vi.mock("@/lib/supabase/client", () => ({
           order: (_col: string, _opts?: unknown) =>
             Promise.resolve(selectResultMock()),
           eq: (_col: string, val: unknown) =>
-            Promise.resolve(
-              apiKeyLookupMock(table, val) ?? { data: [{ id: val }], error: null },
-            ),
+            table === "strategy_analytics"
+              ? {
+                  maybeSingle: () =>
+                    Promise.resolve(
+                      analyticsBaselineMock(table, val) ?? {
+                        data: { computed_at: null },
+                        error: null,
+                      },
+                    ),
+                }
+              : Promise.resolve(
+                  apiKeyLookupMock(table, val) ?? { data: [{ id: val }], error: null },
+                ),
         }),
         // Retained as the negative oracle — see apiKeyInsertMock above.
         insert: (row: unknown) => {
@@ -1240,6 +1259,43 @@ describe("ApiKeyManager — SEAMUX-05: both sync call sites observe the HTTP out
         "computing",
       );
     });
+  });
+
+  // Phase 167.2 / KCS-02 (RESEARCH P3): the panel can only tell this attempt's
+  // terminal from the previous run's if a baseline `computed_at` was read, and
+  // read BEFORE the enqueue (a read after it could already be this job's own).
+  it("KCS-02: a Resync reads the strategy_analytics baseline for THIS strategy, before the enqueue", async () => {
+    analyticsBaselineMock.mockReset();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          accepted: true,
+          strategy_id: "strat-1",
+          status: "syncing",
+          queued: true,
+          composite: false,
+        }),
+        { status: 202, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await clickResync();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "computing",
+      );
+    });
+    expect(analyticsBaselineMock).toHaveBeenCalledTimes(1);
+    expect(analyticsBaselineMock).toHaveBeenCalledWith("strategy_analytics", "strat-1");
+    const enqueueCall = fetchMock.mock.calls.findIndex(([url]) => url === "/api/keys/sync");
+    expect(enqueueCall).toBeGreaterThanOrEqual(0);
+    expect(analyticsBaselineMock.mock.invocationCallOrder[0]).toBeLessThan(
+      fetchMock.mock.invocationCallOrder[enqueueCall],
+    );
   });
 
   // ── C-9: the env-var lie, and the non-JSON failure path ────────────────────

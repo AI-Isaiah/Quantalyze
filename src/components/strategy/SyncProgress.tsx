@@ -76,6 +76,14 @@ export function toSyncStatus(db: ComputationStatus): SyncStatus {
   }
 }
 
+/**
+ * Phase 167.2 / KCS-02: the strategy's `strategy_analytics.computed_at` as the
+ * caller read it immediately before this attempt's enqueue. `null` is a real
+ * answer (no analytics row yet); `"unknown"` means the read failed or did not
+ * answer in time, so only a `computing` read can admit a terminal.
+ */
+export type EvidenceBaseline = { computedAt: string | null } | "unknown";
+
 interface SyncProgressProps {
   strategyId: string;
   syncStatus: SyncStatus;
@@ -84,6 +92,12 @@ interface SyncProgressProps {
   syncWarnings?: string | null;
   onRetry: () => void;
   onStatusChange?: (status: SyncStatus) => void;
+  /**
+   * KCS-02: the pre-enqueue baseline for this attempt (see `EvidenceBaseline`).
+   * Defaults to `"unknown"`. The caller mounts one panel per attempt (a React
+   * `key`), so the computing evidence below never carries into the next one.
+   */
+  evidenceBaseline?: EvidenceBaseline;
 }
 
 const STATUS_CONFIG: Record<
@@ -136,11 +150,15 @@ export function SyncProgress({
   syncWarnings,
   onRetry,
   onStatusChange,
+  evidenceBaseline = "unknown",
 }: SyncProgressProps) {
   const [showWarnings, setShowWarnings] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [exchangeName, setExchangeName] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // KCS-02 evidence (a): this panel has itself read `computing` during this
+  // attempt. Per attempt because the caller keys the panel per attempt.
+  const sawComputingRef = useRef(false);
 
   const isActive = syncStatus === "syncing" || syncStatus === "computing";
 
@@ -232,20 +250,43 @@ export function SyncProgress({
     schedule: 3000,
     maxAttempts: POLL_MAX_ATTEMPTS,
     missingRowGracePolls: MISSING_ROW_GRACE_POLLS,
-    onStatus: (db) => {
+    onStatus: (db, _error, computedAt) => {
       // audit-2026-05-07 C-0142: route DB status → UI status via the
       // discriminated converter. We only forward states that map cleanly to a
       // UI-visible transition (computing / complete / error); "idle" (from DB
       // "pending") is not propagated mid-sync because the caller already primed
       // us with "syncing" / "computing".
       const next = toSyncStatus(db);
+      if (next === "computing") {
+        sawComputingRef.current = true;
+        onStatusChange?.(next);
+        return;
+      }
       if (
-        next === "computing" ||
         next === "complete" ||
         next === "complete_with_warnings" ||
         next === "error"
       ) {
-        onStatusChange?.(next);
+        // Phase 167.2 / KCS-02 — THE PER-ATTEMPT EVIDENCE GATE. Nothing writes
+        // `strategy_analytics` when a job is enqueued or claimed, so for the
+        // whole first hop the poll reads the PREVIOUS run's row, and its terminal
+        // status used to end this attempt with the wrong run's result (a stale
+        // "Up to date", or a false "Sync failed"). A terminal is forwarded only
+        // with evidence that it is this attempt's:
+        //   (a) this panel has read `computing` during this attempt, or
+        //   (b) the row's `computed_at` differs from the value the caller read
+        //       immediately before the enqueue (`evidenceBaseline`).
+        // Both are server-written values; no client clock is read or compared.
+        // (b) also closes the measured fast-fail case (RESEARCH Q1): a job that
+        // fails before any handler writes `computing` still moves `computed_at`
+        // through the bridge. Without evidence the read is dropped and the poll
+        // continues; the attempt budget and the missing-row grace still apply.
+        const changed =
+          evidenceBaseline !== "unknown" &&
+          (computedAt ?? null) !== evidenceBaseline.computedAt;
+        if (sawComputingRef.current || changed) {
+          onStatusChange?.(next);
+        }
       }
     },
     onError: () => onStatusChange?.("error"),

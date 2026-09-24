@@ -8,7 +8,7 @@ import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "./ApiKeyForm";
 import { addKeyBlockedReason } from "./key-card-copy";
-import { SyncProgress, type SyncStatus } from "./SyncProgress";
+import { SyncProgress, type EvidenceBaseline, type SyncStatus } from "./SyncProgress";
 import { UpdateMt5SecretDialog } from "./UpdateMt5SecretDialog";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 import type { ApiKey } from "@/lib/types";
@@ -161,6 +161,17 @@ interface SyncAttempt {
  */
 const TERMINAL_REREAD_BOUND_MS = 15_000;
 
+/**
+ * Phase 167.2 / KCS-02 (RESEARCH P4, Q2): how long the pre-enqueue baseline
+ * read of `strategy_analytics.computed_at` may take. It is the same class of
+ * request as the terminal re-read above (one owner-scoped PostgREST read, and
+ * supabase-js sets no timeout of its own), so it takes the same bound. On
+ * expiry or error the attempt continues with an `"unknown"` baseline: the panel
+ * then admits a terminal only after it has read `computing` itself (evidence
+ * (a)), and never on a changed `computed_at` (evidence (b)).
+ */
+const BASELINE_READ_BOUND_MS = 15_000;
+
 
 // 167-06 security delta (UF-1): authored copy for a delete whose outcome we
 // could not confirm. A raw PostgREST message never reaches the page.
@@ -198,6 +209,12 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   // the one their render closed over, and it never drives a render itself
   // (`syncingKeyId` does).
   const attemptRef = useRef<SyncAttempt | null>(null);
+  // Phase 167.2 / KCS-02: the tracked attempt's pre-enqueue `computed_at`
+  // (see `readEvidenceBaseline`), and a per-attempt sequence that keys the
+  // panel. The panel stays mounted from `error` into a Retry, so without the
+  // key its "has read computing" evidence would carry into the next attempt.
+  const [evidenceBaseline, setEvidenceBaseline] = useState<EvidenceBaseline>("unknown");
+  const [attemptSeq, setAttemptSeq] = useState(0);
   // Phase 167.2 / KCS-01 (RESEARCH P7, the reverse overlap): true while an
   // Add Key is in flight, from before its validate request until it hands off
   // to its own tracked attempt. A ref, not `loading`: `loading` is async
@@ -658,6 +675,53 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     router.refresh();
   }
 
+  /**
+   * Phase 167.2 / KCS-02: read the strategy's `computed_at` immediately before
+   * the enqueue, so the panel can tell this attempt's terminal from the previous
+   * run's (see `EvidenceBaseline`). An absent row answers `{ computedAt: null }`,
+   * a real value. An error, a throw, or `BASELINE_READ_BOUND_MS` expiring answers
+   * `"unknown"` and logs; it never fails the attempt.
+   */
+  async function readEvidenceBaseline(): Promise<EvidenceBaseline> {
+    let boundTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const bound = new Promise<"timed_out">((resolve) => {
+        boundTimer = setTimeout(() => resolve("timed_out"), BASELINE_READ_BOUND_MS);
+      });
+      const supabase = createClient();
+      const outcome = await Promise.race([
+        supabase
+          .from("strategy_analytics")
+          .select("computed_at")
+          .eq("strategy_id", strategyId)
+          .maybeSingle(),
+        bound,
+      ]);
+      if (outcome === "timed_out") {
+        console.error(
+          `[ApiKeyManager] the evidence baseline read did not answer within ${BASELINE_READ_BOUND_MS} ms; continuing with an unknown baseline [strategy_id=${strategyId}]`,
+        );
+        return "unknown";
+      }
+      if (outcome.error) {
+        console.error(
+          `[ApiKeyManager] the evidence baseline read failed; continuing with an unknown baseline [strategy_id=${strategyId}]:`,
+          outcome.error.message,
+        );
+        return "unknown";
+      }
+      return { computedAt: outcome.data?.computed_at ?? null };
+    } catch (err) {
+      console.error(
+        `[ApiKeyManager] the evidence baseline read threw; continuing with an unknown baseline [strategy_id=${strategyId}]:`,
+        err,
+      );
+      return "unknown";
+    } finally {
+      clearTimeout(boundTimer);
+    }
+  }
+
   async function handleSyncTrades(keyId: string) {
     // Phase 167.2 / KCS-01: the card never starts a second sync while one is
     // live, nor while an Add Key is in flight (RESEARCH P7: the add would then
@@ -670,6 +734,9 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     // click.
     const attempt: SyncAttempt = { keyId, enqueued: false, settling: false };
     attemptRef.current = attempt;
+    // KCS-02: a fresh panel and no baseline until this attempt has read one.
+    setAttemptSeq((seq) => seq + 1);
+    setEvidenceBaseline("unknown");
     setSyncingKeyId(keyId);
     setLastAttemptedKeyId(keyId);
     setSyncStatus("syncing");
@@ -679,6 +746,13 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     try {
       // Link key to strategy first
       await handleLinkKey(keyId);
+
+      // KCS-02 (RESEARCH P3): the baseline is read AFTER the link update and
+      // immediately before the enqueue, which keeps the window in which a
+      // recurring job could move `computed_at` unnoticed as narrow as it can be.
+      const baseline = await readEvidenceBaseline();
+      if (attemptRef.current !== attempt) return;
+      setEvidenceBaseline(baseline);
 
       // Fetch trades
       const res = await fetch("/api/keys/sync", {
@@ -965,7 +1039,9 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           `withholdPanelSuccess`. Never withheld in flight, never on error. */}
       {syncStatus !== "idle" && !withholdPanelSuccess && (
         <SyncProgress
+          key={attemptSeq}
           strategyId={strategyId}
+          evidenceBaseline={evidenceBaseline}
           syncStatus={syncStatus}
           lastSyncAt={lastSyncAt}
           syncError={syncError}

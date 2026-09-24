@@ -74,8 +74,18 @@ export interface UseStrategySyncPollerOptions {
    * never escalates; the loop keeps polling silently and reports nothing.
    */
   missingRowGracePolls?: number;
-  /** Fired on every clean read with the DB status + error (surface forwards/sets). */
-  onStatus: (status: ComputationStatus, error: string | null) => void;
+  /**
+   * Fired on every clean read with the DB status + error (surface forwards/sets).
+   * Phase 167.2 / KCS-02: the INTERVAL arm also passes the row's server-written
+   * `computed_at` as a third argument, which `SyncProgress` compares with the
+   * value read just before its attempt's enqueue. The LADDER arm (the wizard's)
+   * is unchanged and passes two arguments only.
+   */
+  onStatus: (
+    status: ComputationStatus,
+    error: string | null,
+    computedAt?: string | null,
+  ) => void;
   /**
    * Ladder mode only. Called on a terminal status; returns `"repoll"` to continue
    * the ladder or `"done"` to stop. The caller catches its own heavy-fetch faults
@@ -175,6 +185,7 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
         onStatusRef.current(
           data.computation_status,
           data.computation_error ?? null,
+          data.computed_at ?? null,
         );
       }, intervalMs);
 

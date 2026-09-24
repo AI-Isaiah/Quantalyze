@@ -19,7 +19,12 @@
  *   - CONTROLS, so the absences above can fail: the fresh post-enqueue budget
  *     still escalates at its own grace boundary, and a post-enqueue terminal
  *     read still ends the attempt;
- *   - a terminal re-read that never settles is bounded (SFH2-MED-1 / IN-01).
+ *   - a terminal re-read that never settles is bounded (SFH2-MED-1 / IN-01);
+ *   - Phase 167.2 / KCS-02: a terminal ends the attempt only with evidence that
+ *     it is THIS attempt's (a `computing` read, or a `computed_at` that moved
+ *     from the baseline read just before the enqueue), never on the previous
+ *     run's row (STALE-TERMINAL, FAST-FAIL, COMPUTING-THEN-SUCCESS,
+ *     UNKNOWN-BASELINE).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, act, fireEvent, cleanup, within } from "@testing-library/react";
@@ -43,10 +48,16 @@ vi.mock("next/navigation", () => ({
 //   strategies.select(...).eq(...).single()→ the linked key id (SyncProgress)
 //   strategies.update(...).eq(...)         → the link write (`handleLinkKey`)
 //   strategy_analytics.select(...).eq(...).single() → THE POLL, counted
+//   strategy_analytics.select(...).eq(...).maybeSingle() → THE KCS-02 BASELINE,
+//     counted SEPARATELY from the poll (RESEARCH P4), so "no poll before the
+//     enqueue" stays measurable beside "exactly one baseline read before it".
 // ---------------------------------------------------------------------------
 const mockState = vi.hoisted(() => ({
   analyticsResult: { data: null, error: null } as { data: unknown; error: unknown },
   analyticsSelectCount: 0,
+  /** KCS-02: what the pre-enqueue baseline read answers. Default: no row. */
+  baselineResult: { data: null, error: null } as { data: unknown; error: unknown },
+  baselineReadCount: 0,
   keysRows: [] as unknown[],
   /** When true, the NEXT key-list read never settles (one-shot). */
   hangNextKeysRead: false,
@@ -73,6 +84,13 @@ vi.mock("@/lib/supabase/client", () => ({
             }
             mockState.analyticsSelectCount += 1;
             return Promise.resolve(mockState.analyticsResult);
+          },
+          maybeSingle: () => {
+            if (table !== "strategy_analytics") {
+              throw new Error(`unexpected maybeSingle on ${table}`);
+            }
+            mockState.baselineReadCount += 1;
+            return Promise.resolve(mockState.baselineResult);
           },
         }),
       }),
@@ -108,11 +126,20 @@ function healthyRow() {
   };
 }
 
-function analyticsRow(status: string) {
+function analyticsRow(status: string, computedAt: string | null = null) {
   return {
-    data: { computation_status: status, computation_error: null, computed_at: null },
+    data: { computation_status: status, computation_error: null, computed_at: computedAt },
     error: null,
   };
+}
+
+// KCS-02: synthetic server timestamps. T0 is the previous run's, T1 a later write.
+const T0 = "2026-04-19T11:58:00.000000+00:00";
+const T1 = "2026-04-19T12:03:00.000000+00:00";
+
+/** The pre-enqueue baseline read answering a row whose computed_at is `computedAt`. */
+function baselineRow(computedAt: string | null) {
+  return { data: { computed_at: computedAt }, error: null };
 }
 
 /**
@@ -149,6 +176,16 @@ async function startResyncWithHeldEnqueue() {
   const enqueue = deferred<Response>();
   const fetchMock = vi.fn().mockImplementation((url: string) => {
     if (url === "/api/keys/sync") return enqueue.promise;
+    // A real read of the job-state projection, so a later job-state check
+    // (plan 167.2-10) has a mock to find. Nothing in this plan reads it.
+    if (/^\/api\/strategies\/[^/]+\/sync-progress$/.test(url)) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => ({ jobStatus: "done", stalled: false, memberProgress: [] }),
+      });
+    }
     return Promise.resolve({
       ok: false,
       status: 404,
@@ -182,6 +219,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   mockState.analyticsResult = { data: null, error: null };
   mockState.analyticsSelectCount = 0;
+  mockState.baselineResult = { data: null, error: null };
+  mockState.baselineReadCount = 0;
   mockState.keysRows = [healthyRow()];
   mockState.hangNextKeysRead = false;
 });
@@ -217,8 +256,12 @@ describe("ApiKeyManager + the REAL poller: the budget starts at the enqueue (167
     expect(screen.getByText("Computing analytics...")).toBeInTheDocument();
     // The new job WAS read after its enqueue ...
     expect(mockState.analyticsSelectCount - readsBeforeEnqueue).toBeGreaterThanOrEqual(1);
-    // ... and nothing was read before it: such a read is the previous run's.
+    // ... and nothing was POLLED before it: such a poll is the previous run's.
+    // Moved by Phase 167.2 / KCS-02 (RESEARCH P4): the one analytics read that
+    // does happen before the enqueue is the baseline, counted apart from polls.
+    // Lineage: this pin was `expect(readsBeforeEnqueue).toBe(0)` alone.
     expect(readsBeforeEnqueue).toBe(0);
+    expect(mockState.baselineReadCount).toBe(1);
     // The attempt still holds its marker.
     expect(screen.getByRole("button", { name: "Syncing…" })).toBeDisabled();
   });
@@ -242,7 +285,10 @@ describe("ApiKeyManager + the REAL poller: the budget starts at the enqueue (167
     ).toBe(false);
     expect(screen.getByText("Computing analytics...")).toBeInTheDocument();
     expect(mockState.analyticsSelectCount - readsBeforeEnqueue).toBeGreaterThanOrEqual(1);
+    // Moved by KCS-02 (see the case above): zero polls and exactly one
+    // baseline read before the enqueue. Lineage: `readsBeforeEnqueue` alone.
     expect(readsBeforeEnqueue).toBe(0);
+    expect(mockState.baselineReadCount).toBe(1);
   });
 
   it("CONTROL: the fresh post-enqueue budget still escalates at its OWN grace boundary (so the absence above can fail)", async () => {
@@ -275,7 +321,12 @@ describe("ApiKeyManager + the REAL poller: the budget starts at the enqueue (167
     });
     await tick(0);
 
-    mockState.analyticsResult = analyticsRow("complete");
+    // Moved by Phase 167.2 / KCS-02: the terminal row carries a computed_at
+    // (T1) different from the baseline read before the enqueue (no row, null),
+    // which is this attempt's evidence. Lineage: it was `analyticsRow("complete")`
+    // with computed_at null and no computing read, which the gate now drops as
+    // indistinguishable from the previous run's row (see STALE-TERMINAL).
+    mockState.analyticsResult = analyticsRow("complete", T1);
     await tick(POLL_MS);
     await tick(0);
     expect(screen.getByText("Up to date")).toBeInTheDocument();
@@ -295,7 +346,9 @@ describe("ApiKeyManager + the REAL poller: a terminal re-read that never settles
 
     // The terminal arm's re-read is the next key-list read, and it hangs.
     mockState.hangNextKeysRead = true;
-    mockState.analyticsResult = analyticsRow("complete");
+    // Moved by Phase 167.2 / KCS-02: computed_at T1 differs from the baseline
+    // (no row), so the terminal is this attempt's. Lineage: `analyticsRow("complete")`.
+    mockState.analyticsResult = analyticsRow("complete", T1);
     await tick(POLL_MS);
 
     // Settling: no success yet, the marker still held.
@@ -318,5 +371,143 @@ describe("ApiKeyManager + the REAL poller: a terminal re-read that never settles
       expect.stringContaining("[ApiKeyManager]"),
       expect.anything(),
     );
+  });
+});
+
+describe("ApiKeyManager + the REAL poller: a terminal ends the attempt only with THIS attempt's evidence (Phase 167.2 / KCS-02)", () => {
+  /** Resolve the held enqueue with a 202 and settle the move to `computing`. */
+  async function enqueueAccepted(enqueue: ReturnType<typeof deferred<Response>>) {
+    await act(async () => {
+      enqueue.resolve(accepted());
+    });
+    await tick(0);
+    expect(screen.getByText("Computing analytics...")).toBeInTheDocument();
+  }
+
+  it("STALE-TERMINAL: the previous run's complete row (computed_at unchanged, no computing read) never ends the attempt", async () => {
+    mockState.baselineResult = baselineRow(T0);
+    mockState.analyticsResult = analyticsRow("complete", T0);
+    const enqueue = await startResyncWithHeldEnqueue();
+    await enqueueAccepted(enqueue);
+
+    await tick(POLL_MS * 5);
+    expect(mockState.analyticsSelectCount).toBe(5);
+    expect(
+      screen.queryByText("Up to date"),
+      "the previous run's complete row was shown as this attempt's result",
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Computing analytics...")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Syncing…" })).toBeDisabled();
+  });
+
+  it("FAST-FAIL: a job that fails before any computing write ends the attempt as Sync failed, through the moved computed_at", async () => {
+    // RESEARCH Q1: previous run failed at T0; this job fails fast, the bridge
+    // rewrites `failed` with computed_at = now() (T1), and `computing` is never
+    // observable. Evidence (b) alone must end the attempt truthfully.
+    mockState.baselineResult = baselineRow(T0);
+    mockState.analyticsResult = analyticsRow("failed", T1);
+    const enqueue = await startResyncWithHeldEnqueue();
+    await enqueueAccepted(enqueue);
+
+    await tick(POLL_MS);
+    expect(mockState.analyticsSelectCount).toBe(1);
+    expect(screen.getByText("Sync failed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
+  });
+
+  it("COMPUTING-THEN-SUCCESS: a computing read admits the terminal even when computed_at equals the baseline", async () => {
+    mockState.baselineResult = baselineRow(T0);
+    mockState.analyticsResult = analyticsRow("computing", T0);
+    const enqueue = await startResyncWithHeldEnqueue();
+    await enqueueAccepted(enqueue);
+
+    await tick(POLL_MS);
+    expect(screen.getByText("Computing analytics...")).toBeInTheDocument();
+
+    mockState.analyticsResult = analyticsRow("complete", T0);
+    await tick(POLL_MS);
+    await tick(0);
+    expect(screen.getByText("Up to date")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
+  });
+
+  it("UNKNOWN-BASELINE: a failed baseline read leaves only a computing read able to admit the terminal, and is logged", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockState.baselineResult = { data: null, error: { message: "network down" } };
+    // A moved computed_at is NOT evidence without a baseline to compare it with.
+    mockState.analyticsResult = analyticsRow("complete", T1);
+    const enqueue = await startResyncWithHeldEnqueue();
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining("evidence baseline read failed"),
+      "network down",
+    );
+    await enqueueAccepted(enqueue);
+
+    await tick(POLL_MS * 3);
+    expect(screen.queryByText("Up to date")).not.toBeInTheDocument();
+    expect(screen.getByText("Computing analytics...")).toBeInTheDocument();
+
+    mockState.analyticsResult = analyticsRow("computing", T1);
+    await tick(POLL_MS);
+    mockState.analyticsResult = analyticsRow("complete", T1);
+    await tick(POLL_MS);
+    await tick(0);
+    expect(screen.getByText("Up to date")).toBeInTheDocument();
+  });
+
+  it("KEYED-PER-ATTEMPT: a Retry does not inherit the previous attempt's computing read", async () => {
+    // Attempt 1 reads computing, then fails at T1. The panel stays mounted in
+    // `error`, so without `key={attemptSeq}` its computing evidence would carry
+    // into the Retry and admit attempt 2's stale read of that same failure.
+    mockState.baselineResult = baselineRow(T0);
+    mockState.analyticsResult = analyticsRow("computing", T0);
+    const enqueue = await startResyncWithHeldEnqueue();
+    await enqueueAccepted(enqueue);
+    await tick(POLL_MS);
+    mockState.analyticsResult = analyticsRow("failed", T1);
+    await tick(POLL_MS);
+    expect(screen.getByText("Sync failed")).toBeInTheDocument();
+
+    // Retry: the baseline is now T1, and the row still says the old failure.
+    mockState.baselineResult = baselineRow(T1);
+    const retryEnqueue = deferred<Response>();
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockImplementation((url: string) =>
+      url === "/api/keys/sync"
+        ? retryEnqueue.promise
+        : Promise.resolve({ ok: false, status: 404, headers: new Headers(), json: async () => ({}) }),
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    });
+    await tick(0);
+    await enqueueAccepted(retryEnqueue);
+
+    await tick(POLL_MS * 3);
+    expect(
+      screen.queryByText("Sync failed"),
+      "the Retry ended on the previous attempt's failure",
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Computing analytics...")).toBeInTheDocument();
+  });
+
+  it("the baseline read that never answers is bounded: the enqueue still goes out after 15 s, with an unknown baseline", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockState.baselineResult = new Promise(() => {}) as unknown as { data: unknown; error: unknown };
+    const enqueue = await startResyncWithHeldEnqueue();
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const enqueued = () => fetchMock.mock.calls.some(([url]) => url === "/api/keys/sync");
+
+    await tick(14_000);
+    expect(enqueued()).toBe(false);
+    await tick(1_000);
+    expect(enqueued()).toBe(true);
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("15000 ms"));
+
+    // Unknown baseline: a moved computed_at alone does not end the attempt.
+    mockState.analyticsResult = analyticsRow("complete", T1);
+    await enqueueAccepted(enqueue);
+    await tick(POLL_MS * 2);
+    expect(screen.queryByText("Up to date")).not.toBeInTheDocument();
   });
 });
