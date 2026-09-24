@@ -84,10 +84,10 @@ replay it, and boot green on a schema missing it. A full list cannot make that m
 
 | | |
 |---|---|
-| Taken | 2026-09-23 |
+| Taken | 2026-09-24 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
 | Supabase CLI | 2.84.2 (CI pins 2.98.2 — see the caveat below) |
-| sha256 | `efe49c155bed58d885e8779d6b54df80d51395cddaf1ef603fb5aae1a6e88aa6` |
+| sha256 | `b473ab7e48df967d981e99c1b366ca26bf9d1ccf81066df5c44c112413dcb21f` |
 | Shape | 63 tables, 155 policies, 123 function statements (121 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
@@ -95,6 +95,32 @@ Secret-scanned before commit with the exact pattern recorded in
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-09-24 — the Phase 164.6 apply, two function bodies, nothing else
+
+⛔ **A SEPARATE REVIEWED ACT, taken by the founder** with a read-only `supabase db dump --linked`
+(CLI 2.84.2); this checkout runs no database command against a remote. Taken AFTER Phase 164.6's
+migration had applied to PRODUCTION (Supabase Migrate run `36040151966`, `apply` job success, on
+merge commit `762c03c8`, the `MERGE` used to regenerate the marker).
+
+**Which migrations the new dump now carries** — measured from the marker diff, the complete set
+added since the 2026-09-23 capture:
+
+| migration | what it adds | expected shape delta |
+|---|---|---|
+| `20260924120000_ledger_fanout_failure_count.sql` | the two fan-out bodies record a `candidate_enqueue_failed` run row and honour its cooldown | none of the counted shapes (`CREATE OR REPLACE` of existing functions) |
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Shape | 63 tables, 155 policies, 123 function statements — **unchanged**, as a body replacement must leave them |
+| Data statements | **0** — unchanged |
+| sha256 | `efe49c15…` → `b473ab7e…` |
+| Secret scan (all five classes) | **0** matches; gitleaks over the file: no leaks |
+| Home path / local username | 0 matches |
+| File integrity | single `SET client_encoding`, no NUL bytes |
+| Currency gate | `baseline-currency: carried=274 replay=0 marker-sha=match defects=0` |
 
 ### Regenerated 2026-09-23 — the Phase 167 apply, one widened CHECK, nothing else
 
