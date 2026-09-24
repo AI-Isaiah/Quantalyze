@@ -718,3 +718,100 @@ describe("[167.2-04 / KCS-22] useStrategySyncPoller — the give-up names its re
     expect(onError.mock.calls).toEqual([["missing_row"]]);
   });
 });
+
+describe("[167.2-REVIEW-SFH M-2] useStrategySyncPoller — the interval arm applies reads in order", () => {
+  // WHY. The interval arm issues a read every 3 s whether or not the previous
+  // one has answered. A slow read issued BEFORE the worker wrote `computing`
+  // can land AFTER a faster, later read that saw `computing`. The panel's
+  // evidence (a) is sticky, so the late read's PREVIOUS-run terminal row was
+  // then admitted as this attempt's (the wrong-run attribution KCS-02 exists
+  // to prevent), re-entering through response ordering. A response older than
+  // the newest one applied is now dropped (the `keysReadSeqRef` pattern). The
+  // ladder arm awaits each read before scheduling the next, so it cannot
+  // reorder, and it stays byte-unchanged (LADDER-TWO-ARGS).
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    currentClientFactory = DEFAULT_FACTORY;
+  });
+
+  it("OUT-OF-ORDER: a slow read that lands after a newer applied read is dropped, never reported", async () => {
+    let releaseSlow!: (v: unknown) => void;
+    const slow = new Promise((r) => {
+      releaseSlow = r;
+    });
+    let reads = 0;
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () =>
+          chain(() => {
+            reads += 1;
+            if (reads === 1) return slow;
+            return okRow({ computation_status: "computing", computation_error: null, computed_at: null });
+          }),
+      }),
+    });
+    const onStatus = vi.fn();
+    renderHook(() =>
+      useStrategySyncPoller({
+        enabled: true,
+        strategyId: STRATEGY_ID,
+        schedule: INTERVAL_CADENCE_MS,
+        maxAttempts: 40,
+        missingRowGracePolls: 10,
+        onStatus,
+        onError: vi.fn(),
+      }),
+    );
+
+    // Read 1 goes out and hangs; read 2 goes out and answers `computing`.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INTERVAL_CADENCE_MS * 2);
+    });
+    expect(onStatus.mock.calls.map((c) => c[0])).toEqual(["computing"]);
+
+    // Read 1 finally answers with the PREVIOUS run's failed row.
+    await act(async () => {
+      releaseSlow(okRow({ computation_status: "failed", computation_error: "old", computed_at: "2026-01-01T00:00:00Z" }));
+    });
+    expect(onStatus.mock.calls.map((c) => c[0])).toEqual(["computing"]);
+  });
+
+  it("IN-ORDER (CONTROL): reads that answer in order are all reported", async () => {
+    let reads = 0;
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () =>
+          chain(() => {
+            reads += 1;
+            return okRow({
+              computation_status: reads === 1 ? "computing" : "complete",
+              computation_error: null,
+              computed_at: null,
+            });
+          }),
+      }),
+    });
+    const onStatus = vi.fn();
+    renderHook(() =>
+      useStrategySyncPoller({
+        enabled: true,
+        strategyId: STRATEGY_ID,
+        schedule: INTERVAL_CADENCE_MS,
+        maxAttempts: 40,
+        onStatus,
+        onError: vi.fn(),
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INTERVAL_CADENCE_MS * 2);
+    });
+    expect(onStatus.mock.calls.map((c) => c[0])).toEqual(["computing", "complete"]);
+  });
+});

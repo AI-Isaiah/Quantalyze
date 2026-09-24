@@ -161,6 +161,18 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
       // status)? Effect-local like `attempts`, so a re-activation resets both.
       let sawRow = false;
       let cancelled = false;
+      // 167.2-REVIEW-SFH M-2: reads are ORDERED. A read is issued every tick
+      // whether or not the previous one has answered, so a slow read issued
+      // before the worker wrote `computing` could land AFTER a faster, later
+      // read that saw it, and deliver the PREVIOUS run's terminal row to a
+      // caller whose evidence (a) is sticky (`SyncProgress`). Each read takes
+      // the next number, and a response older than the newest one applied is
+      // dropped, the `keysReadSeqRef` pattern `ApiKeyManager.loadKeys` uses.
+      // Effect-local like `attempts`, so a re-activation resets it. INTERVAL
+      // ARM ONLY: the ladder arm awaits each read before scheduling the next,
+      // so it cannot reorder, and it stays byte-unchanged (LADDER-TWO-ARGS).
+      let issuedSeq = 0;
+      let appliedSeq = 0;
 
       const intervalId = setInterval(async () => {
         // Increment-BEFORE-cap: attempt N+1 escalates without querying.
@@ -170,6 +182,7 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
           return;
         }
 
+        const seq = ++issuedSeq;
         const supabase = createClient();
         const { data, error: pollErr } = await supabase
           .from("strategy_analytics")
@@ -177,6 +190,9 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
           .eq("strategy_id", strategyId)
           .single();
         if (cancelled) return;
+        // M-2: a response overtaken by a newer applied one is dropped whole.
+        if (seq < appliedSeq) return;
+        appliedSeq = seq;
 
         // PGRST116 (0 rows via .single()) is the expected "row not yet created"
         // case; log everything else (RLS regression / network / 5xx).
