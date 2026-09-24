@@ -69,6 +69,57 @@ export async function countCompositeMembers(
   }
 }
 
+/** A composite's `strategy_keys` member key ids, or why they could not be read. */
+export type CompositeMemberKeyIds =
+  | { ok: true; keyIds: string[] }
+  | { ok: false; message: string };
+
+/**
+ * 167.2-REVIEW CR-02: read the strategy's `strategy_keys` member KEY IDS on the
+ * client the caller passes (one column, `api_key_id`, scoped to the strategy).
+ * The key card lists only these beneath KCS23-COMPOSITE, so its "reads from
+ * every key below" is true of the list as rendered. The count is their number,
+ * so a caller that needs both makes one read, not two.
+ *
+ * Fails closed exactly like `countCompositeMembers`: an error, a non-array
+ * answer, a row without a string id, or a throw is `ok: false` with a message
+ * for the caller to log. Never logs, never throws. Type-only cast as above:
+ * RLS (`strategy_keys_owner`) still applies to the caller's runtime client.
+ */
+export async function readCompositeMemberKeyIds(
+  client: SupabaseClient,
+  strategyId: string,
+): Promise<CompositeMemberKeyIds> {
+  try {
+    const { data, error } = await client
+      .from("strategy_keys")
+      .select("api_key_id")
+      .eq("strategy_id", strategyId);
+    if (error) {
+      return { ok: false, message: `strategy_keys member read failed: ${error.message}` };
+    }
+    if (!Array.isArray(data)) {
+      return {
+        ok: false,
+        message: "strategy_keys member read returned no rows array without an error",
+      };
+    }
+    const keyIds: string[] = [];
+    for (const row of data as Array<{ api_key_id?: unknown }>) {
+      if (typeof row?.api_key_id !== "string") {
+        return { ok: false, message: "strategy_keys member read returned a row without a key id" };
+      }
+      keyIds.push(row.api_key_id);
+    }
+    return { ok: true, keyIds };
+  } catch (err) {
+    return {
+      ok: false,
+      message: `strategy_keys member read threw: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
 /**
  * Resolve the shape: source "csv" → csv (whatever the count); an unknowable
  * member count → "unknown"; a member count above zero → composite; a linked

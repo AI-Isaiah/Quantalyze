@@ -40,6 +40,14 @@ interface ApiKeyManagerProps {
    * need. Defaults to "single", so every existing render is unchanged.
    */
   keyShape?: "single" | "composite" | "unknown";
+  /**
+   * 167.2-REVIEW CR-02: on a composite, the ids of its `strategy_keys`
+   * members, read by the edit page. The card then lists ONLY these keys, so
+   * KCS23-COMPOSITE ("reads from every key below") is true of the list as
+   * rendered. Ignored for any other shape. Absent on a composite lists no key
+   * (fail closed: a key the page did not name a member is never claimed as one).
+   */
+  compositeMemberKeyIds?: readonly string[];
 }
 
 /**
@@ -216,6 +224,7 @@ export function ApiKeyManager({
   currentKeyId,
   defaultExchange,
   keyShape = "single",
+  compositeMemberKeyIds,
 }: ApiKeyManagerProps) {
   /**
    * Phase 167.2 / KCS-23: may this card offer a control that writes
@@ -524,6 +533,18 @@ export function ApiKeyManager({
    * because a withhold lapsed the moment a later re-read (another tab's fix or
    * delete, the load-error Retry) stopped reading the key as untrusted.
    */
+  /**
+   * 167.2-REVIEW CR-02: the keys this card LISTS. On a composite, only its
+   * members (see `compositeMemberKeyIds`); every other shape lists every key
+   * the owner has, as before. `keys` stays the full list: the subject lookups
+   * and the Add Key blocked reason read it, and none of them is a claim about
+   * the composite.
+   */
+  const listedKeys =
+    keyShape === "composite"
+      ? keys.filter((k) => compositeMemberKeyIds?.includes(k.id) ?? false)
+      : keys;
+
   const panelSubjectUntrusted = isUntrustedKeySyncStatus(
     keys.find((k) => k.id === lastAttemptedKeyId)?.sync_status,
   );
@@ -1121,7 +1142,7 @@ export function ApiKeyManager({
         </Card>
       )}
 
-      {keys.length === 0 && !loadError && !showForm && (
+      {listedKeys.length === 0 && !loadError && !showForm && (
         <Card>
           <p className="text-sm text-text-muted text-center py-4">
             No API keys connected. Add a read-only exchange key to import your trading data.
@@ -1129,7 +1150,7 @@ export function ApiKeyManager({
         </Card>
       )}
 
-      {keys.map((key) => (
+      {listedKeys.map((key) => (
         <Card key={key.id} data-testid={`api-key-card-${key.id}`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">

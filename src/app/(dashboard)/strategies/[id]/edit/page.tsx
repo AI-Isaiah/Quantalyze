@@ -6,7 +6,7 @@ import { ApiKeyManager } from "@/components/strategy/ApiKeyManager";
 import { CsvStrategyEditNote } from "@/components/strategy/CsvStrategyEditNote";
 import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import type { Strategy } from "@/lib/types";
-import { countCompositeMembers } from "@/lib/strategy-shape";
+import { readCompositeMemberKeyIds } from "@/lib/strategy-shape";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { redirect } from "next/navigation";
 
@@ -46,19 +46,25 @@ export default async function EditStrategyPage({
   // /strategies links here for exactly that remedy. The message is logged
   // server-side only; the card receives the shape and no error text.
   let keyShape: "single" | "composite" | "unknown" = "single";
+  // 167.2-REVIEW CR-02: the member KEY IDS, not just their count, so the card
+  // lists only the keys the composite reads from (KCS23-COMPOSITE says it
+  // "reads from every key below"). One read gives both: the count is their
+  // number.
+  let compositeMemberKeyIds: string[] | undefined;
   if (strategy.source !== "csv") {
     // The generated types predate `strategy_keys`; the cast is type-only and
     // RLS still applies to this request client (see strategy-shape.ts).
-    const memberCount = await countCompositeMembers(
+    const members = await readCompositeMemberKeyIds(
       supabase as unknown as SupabaseClient,
       strategy.id,
     );
-    if (memberCount.ok) {
-      keyShape = memberCount.count > 0 ? "composite" : "single";
+    if (members.ok) {
+      keyShape = members.keyIds.length > 0 ? "composite" : "single";
+      if (keyShape === "composite") compositeMemberKeyIds = members.keyIds;
     } else {
       console.error("[strategies/edit/page] composite member count failed", {
         id: strategy.id,
-        message: memberCount.message,
+        message: members.message,
       });
       keyShape = "unknown";
     }
@@ -104,6 +110,7 @@ export default async function EditStrategyPage({
                 currentKeyId={strategy.api_key_id}
                 defaultExchange={strategy.supported_exchanges?.[0]?.toLowerCase()}
                 keyShape={keyShape}
+                compositeMemberKeyIds={compositeMemberKeyIds}
               />
               {/*
                 Sprint 5 Task 5.8: live key-scope viewer. Only the strategy

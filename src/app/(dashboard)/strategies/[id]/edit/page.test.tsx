@@ -55,15 +55,34 @@ vi.mock("@/lib/supabase/server", () => ({
         };
       }
       if (table === "strategy_keys") {
+        // 167.2-REVIEW CR-02 (lineage): this double used to REFUSE anything but
+        // a head count ("must be head-counted, never read"). The composite
+        // card now lists only its members, so the page reads the member KEY
+        // IDS (one column, RLS `strategy_keys_owner`) and derives the count
+        // from them. `memberCountMock` still names the count; the double turns
+        // it into that many synthetic member ids. Any other projection throws.
         return {
-          select: (_cols: string, opts?: { count?: string; head?: boolean }) => {
-            if (opts?.count !== "exact" || opts?.head !== true) {
-              throw new Error("strategy_keys must be head-counted, never read");
+          select: (cols: string) => {
+            if (cols !== "api_key_id") {
+              throw new Error(`strategy_keys must be read as api_key_id only, got: ${cols}`);
             }
             return {
               eq: (_col: string, strategyId: unknown) => {
                 memberCountReadMock(strategyId);
-                return Promise.resolve(memberCountMock());
+                const { count, error } = memberCountMock();
+                return Promise.resolve(
+                  error
+                    ? { data: null, error }
+                    : {
+                        data:
+                          count === null
+                            ? null
+                            : Array.from({ length: count }, (_, i) => ({
+                                api_key_id: `key-member-${i + 1}`,
+                              })),
+                        error: null,
+                      },
+                );
               },
             };
           },
@@ -255,6 +274,12 @@ describe("EditStrategyPage composite shape (KCS-23)", () => {
     expect(memberCountReadMock).toHaveBeenCalledWith(STRATEGY_ID);
     expect(screen.getByTestId("api-key-manager")).toBeInTheDocument();
     expect(lastKeyShape()).toBe("composite");
+    // 167.2-REVIEW CR-02: the card is told WHICH keys are members, so it can
+    // list only those beneath KCS23-COMPOSITE.
+    expect(apiKeyManagerPropsMock.mock.calls.at(-1)![0].compositeMemberKeyIds).toEqual([
+      "key-member-1",
+      "key-member-2",
+    ]);
   });
 
   it("SINGLE-PROP: zero strategy_keys members pass keyShape \"single\"", async () => {

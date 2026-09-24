@@ -3782,6 +3782,10 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
     rows: ReturnType<typeof keyRow>[],
     keyShape?: "single" | "composite" | "unknown",
     currentKeyId: string | null = null,
+    // 167.2-REVIEW CR-02: the composite's member key ids, as the edit page
+    // reads them. Defaults to every row, so the cases below that predate the
+    // member filter keep rendering the keys they assert on.
+    compositeMemberKeyIds: string[] = rows.map((r) => r.id as string),
   ) {
     selectResultMock.mockReturnValue({ data: rows, error: null });
     await act(async () => {
@@ -3790,6 +3794,7 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
           strategyId="strat-composite-1"
           currentKeyId={currentKeyId}
           {...(keyShape ? { keyShape } : {})}
+          {...(keyShape === "composite" ? { compositeMemberKeyIds } : {})}
         />,
       );
     });
@@ -3857,6 +3862,40 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
     const header = screen.getByRole("heading", { name: "Exchange API Keys" });
     expect(header.parentElement!.nextElementSibling).toBe(note);
     expect(screen.getAllByText(COMPOSITE_NOTE_ORACLE)).toHaveLength(1);
+  });
+
+  it("COMPOSITE-MEMBERS-ONLY (167.2-REVIEW CR-02): a composite card lists its member keys only, so KCS23-COMPOSITE is true of the list", async () => {
+    // The owner has two keys; the composite reads from one of them. The note
+    // says the composite "reads from every key below", so a non-member key
+    // below it (with its own pill) would be a false claim about the composite.
+    selectResultMock.mockReturnValue({
+      data: [
+        keyRow({ id: "key-synthetic-a", label: "Synthetic Member" }),
+        keyRow({
+          id: "key-synthetic-x",
+          label: "Synthetic Other",
+          sync_status: "sign_in_failed",
+        }),
+      ],
+      error: null,
+    });
+    await act(async () => {
+      render(
+        <ApiKeyManager
+          strategyId="strat-composite-1"
+          currentKeyId={null}
+          keyShape="composite"
+          compositeMemberKeyIds={["key-synthetic-a"]}
+        />,
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Synthetic Member")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText(COMPOSITE_NOTE_ORACLE)).toBeInTheDocument();
+    expect(screen.queryByText("Synthetic Other")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("api-key-card-key-synthetic-x")).not.toBeInTheDocument();
   });
 
   it("COMPOSITE-EMPTY: a composite with zero readable keys shows the existing empty copy plus the note, and no Add Key", async () => {
