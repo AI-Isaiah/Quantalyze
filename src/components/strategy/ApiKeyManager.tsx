@@ -332,6 +332,31 @@ export function ApiKeyManager({
   const [finishUnverified, setFinishUnverified] = useState(false);
   const router = useRouter();
 
+  // 167.2-REVIEW IN-02: an unmount mid-attempt drops the live attempt, so every
+  // liveness guard (`attemptRef.current !== attempt`) stops its continuations:
+  // no baseline read, no enqueue follow-up, no list read and no
+  // `router.refresh()` of whatever route the owner navigated to.
+  useEffect(
+    () => () => {
+      attemptRef.current = null;
+      unconfirmedAttemptRef.current = null;
+    },
+    [],
+  );
+
+  /**
+   * 167.2-REVIEW IN-01: the core of `retireWithheldSuccess`, as a STABLE
+   * callback that reads nothing from its render (only the stable
+   * `setSyncStatus`), so `loadKeys` can depend on it honestly. It used to call
+   * the render-scoped `retireWithheldSuccess` under an `eslint-disable` of
+   * exhaustive-deps: safe only while that function read nothing from its
+   * render, and the disable would have hidden the lint the moment it did.
+   */
+  const retireSuccessIf = useCallback((subjectUntrusted: boolean) => {
+    if (!subjectUntrusted) return;
+    setSyncStatus((prev) => (isComputedAnalytics(prev) ? "idle" : prev));
+  }, []);
+
   // Resolves `{ ok, subjectStatus }` (see `KeysReadOutcome`): `ok` is false
   // when the read failed (and `loadError` is set), and `subjectStatus` is the
   // panel subject's status in the rows this read APPLIED. The terminal-success
@@ -404,14 +429,10 @@ export function ApiKeyManager({
     // KCS-04: the new call site of the one retirement helper. It judges by
     // THESE rows, never by a render's copy, and its updater leaves every
     // in-flight value (syncing, computing) and every non-success alone.
-    retireWithheldSuccess(isUntrustedKeySyncStatus(subjectStatus));
+    // IN-01: through the stable core, an honest dependency (no lint disable).
+    retireSuccessIf(isUntrustedKeySyncStatus(subjectStatus));
     return { ok: true, subjectStatus, subjectPresent };
-    // `retireWithheldSuccess` is deliberately not a dependency: called with an
-    // explicit argument it reads nothing from its render (only the stable
-    // `setSyncStatus`), and making it one would re-key this callback, and so
-    // re-run the list-read effect, on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentKeyId]);
+  }, [currentKeyId, retireSuccessIf]);
 
   useEffect(() => {
     loadKeys();
@@ -651,8 +672,9 @@ export function ApiKeyManager({
    * no effect: `withholdPanelSuccess` is watched by nothing.
    */
   function retireWithheldSuccess(subjectUntrusted: boolean = panelSubjectUntrusted) {
-    if (!subjectUntrusted) return;
-    setSyncStatus((prev) => (isComputedAnalytics(prev) ? "idle" : prev));
+    // IN-01: a thin wrapper over the stable core; this is the one place the
+    // render-scoped default (`panelSubjectUntrusted`) is read.
+    retireSuccessIf(subjectUntrusted);
   }
 
   async function handleAddKey(data: {

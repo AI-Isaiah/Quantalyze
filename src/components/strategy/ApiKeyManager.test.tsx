@@ -2804,6 +2804,46 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       expect(cardButton("key-h", "Resync")).toBeEnabled();
     });
 
+    // ── 167.2-REVIEW IN-02: an unmount drops the live attempt's continuations ──
+    it("IN02-UNMOUNT: after an unmount mid-attempt, a late enqueue answer reads nothing and refreshes nothing", async () => {
+      let answer!: (r: Response) => void;
+      const held = new Promise<Response>((r) => {
+        answer = r;
+      });
+      const fetchMock = routeFetch({ sync: () => held });
+      const view = await (async () => {
+        selectResultMock.mockReturnValue({ data: [row({ id: "key-j" })], error: null });
+        let rendered!: ReturnType<typeof render>;
+        await act(async () => {
+          rendered = render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-j" />);
+        });
+        await waitFor(() => {
+          expect(screen.getByTestId("api-key-card-key-j")).toBeInTheDocument();
+        });
+        return rendered;
+      })();
+      await act(async () => {
+        fireEvent.click(cardButton("key-j", "Resync"));
+      });
+      await waitFor(() => {
+        expect(fetchMock.mock.calls.some((c) => c[0] === "/api/keys/sync")).toBe(true);
+      });
+
+      view.unmount();
+      const refreshes = routerRefreshMock.mock.calls.length;
+      const reads = selectResultMock.mock.calls.length;
+      await act(async () => {
+        answer(syncAccepted());
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      // The route the owner navigated to is not refreshed by a card that is gone.
+      expect(routerRefreshMock.mock.calls.length).toBe(refreshes);
+      expect(selectResultMock.mock.calls.length).toBe(reads);
+    });
+
     // ── 167.2-REVIEW-SFH L-1 / L-2: a withheld success leaves a trace ─────
     // Hand-typed from the UI-SPEC review-fix row KCS-FINISH-UNVERIFIED.
     const FINISH_UNVERIFIED =
