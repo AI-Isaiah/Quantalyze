@@ -371,6 +371,24 @@ export const SHARE_CARD_COPY = {
 export const KCS10_PUBLIC_SENTENCE =
   "The detailed factsheet for this strategy is not available yet.";
 
+// ── Review-fix round 1 (2026-09-24) — /strategies read failures ───────────
+
+/**
+ * KCS-LIST-UNREADABLE (UI-SPEC § Review-fix amendments, 167.2-REVIEW-SFH H-1).
+ * The /strategies list read failed. Never "No strategies yet": an owner with
+ * live strategies must not be told they have none.
+ */
+export const STRATEGIES_LIST_UNREADABLE =
+  "Your strategies could not be loaded. Reload this page to try again.";
+
+/**
+ * KCS-KEYSTATUS-UNREADABLE (UI-SPEC § Review-fix amendments,
+ * 167.2-REVIEW-SFH H-3). The key-status or member read failed, so an absent
+ * key pill no longer means "healthy"; this one page-level line says so.
+ */
+export const KEY_STATUS_UNREADABLE_NOTE =
+  "Key status could not be checked right now. Open a strategy to see its keys.";
+
 // ── S4 — KCS-06 key-mark caption ──────────────────────────────────────────
 
 function exchangeDisplayName(code: string): string {

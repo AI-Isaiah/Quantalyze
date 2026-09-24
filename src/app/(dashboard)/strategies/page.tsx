@@ -19,7 +19,12 @@ import {
 } from "@/lib/compute-state";
 import { readOwnerComputeJobs } from "@/lib/compute-jobs-read";
 import { captureToSentry } from "@/lib/sentry-capture";
-import { recipientShareNote, untrustedKeyCaption } from "@/lib/status-surface-copy";
+import {
+  KEY_STATUS_UNREADABLE_NOTE,
+  recipientShareNote,
+  STRATEGIES_LIST_UNREADABLE,
+  untrustedKeyCaption,
+} from "@/lib/status-surface-copy";
 import { PendingIntros } from "@/components/strategy/PendingIntros";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -167,12 +172,24 @@ export default async function StrategiesPage() {
   // See migration 031: `source` discriminates wizard drafts from
   // legacy / admin_import drafts. The PostgREST `.or()` filter below
   // keeps legacy drafts visible while hiding wizard-in-progress rows.
-  const { data: strategies } = await supabase
+  const { data: strategies, error: strategiesError } = await supabase
     .from("strategies")
     .select("id, name, status, source, strategy_types, review_note, created_at, api_key_id, strategy_analytics ( computation_status )")
     .eq("user_id", user.id)
     .or("source.neq.wizard,status.neq.draft")
     .order("created_at", { ascending: false });
+  // 167.2-REVIEW-SFH H-1: a failed list read is NOT "no strategies". The
+  // KCS-12 analytics embed added new ways for this one query to fail whole (a
+  // column grant revoked on `computation_status`, an ambiguous embed), and the
+  // discarded error used to render "No strategies yet" to an owner with live
+  // strategies: the H-0395 class the key card already fixed for itself. It is
+  // logged, captured, and rendered as its own line below.
+  if (strategiesError) {
+    console.error("[strategies/page] strategies read failed", strategiesError.message);
+    captureToSentry(new Error(strategiesError.message), {
+      tags: { route: "strategies/page", stage: "list" },
+    });
+  }
 
   // Companion query for the wizard-draft Resume CTA.
   //
@@ -223,7 +240,15 @@ export default async function StrategiesPage() {
   // ⛔ A failed member read is logged and the row is judged on api_key_id
   // alone (truthful, partial). A failed key read renders NO mark at all (an
   // error is not "healthy", but it is not a known-bad key either, so no pill
-  // is guessed) and is logged.
+  // is guessed) and is logged. Since 167.2-REVIEW-SFH H-3 either failure is
+  // also captured and renders the page-level KEY_STATUS_UNREADABLE_NOTE, so
+  // the absence of a pill stops reading as "healthy" during an outage.
+  // 167.2-REVIEW-SFH H-3: on this page the healthy state is the ABSENCE of a
+  // pill, so a failed key-status or member read would render every row as
+  // healthy, the exact state KCS-06 exists to surface. Either failure is
+  // captured and sets this flag, which renders one page-level line saying the
+  // status could not be checked.
+  let keyStatusUnreadable = false;
   const membersByStrategy = new Map<string, StrategyKeyMemberRow[]>();
   if (strategyIds.length > 0) {
     // The generated types predate `strategy_keys`; the cast is type-only (as in
@@ -236,6 +261,10 @@ export default async function StrategiesPage() {
       .in("strategy_id", strategyIds);
     if (membersError) {
       console.error("[strategies/page] strategy_keys read failed", membersError.message);
+      captureToSentry(new Error(membersError.message), {
+        tags: { route: "strategies/page", stage: "strategy-keys" },
+      });
+      keyStatusUnreadable = true;
     } else {
       for (const m of (memberRows ?? []) as StrategyKeyMemberRow[]) {
         const list = membersByStrategy.get(m.strategy_id);
@@ -265,6 +294,10 @@ export default async function StrategiesPage() {
       .in("id", keyIds);
     if (keysError) {
       console.error("[strategies/page] api_keys read failed", keysError.message);
+      captureToSentry(new Error(keysError.message), {
+        tags: { route: "strategies/page", stage: "key-status" },
+      });
+      keyStatusUnreadable = true;
     } else {
       for (const key of (keyRows ?? []) as KeyStatusRow[]) keysById.set(key.id, key);
     }
@@ -361,7 +394,13 @@ export default async function StrategiesPage() {
         </Card>
       )}
 
-      {(!strategies || strategies.length === 0) ? (
+      {strategiesError ? (
+        // H-1 (UI-SPEC KCS-LIST-UNREADABLE): muted, not red. Nothing is known
+        // to be wrong with the strategies, only with this read of them.
+        <Card className="text-center py-12" data-testid="strategies-list-unreadable">
+          <p className="text-text-muted">{STRATEGIES_LIST_UNREADABLE}</p>
+        </Card>
+      ) : (!strategies || strategies.length === 0) ? (
         <Card className="text-center py-12">
           {wizardDraft ? (
             <>
@@ -383,6 +422,16 @@ export default async function StrategiesPage() {
         </Card>
       ) : (
         <div className="space-y-3">
+          {/* H-3 (UI-SPEC KCS-KEYSTATUS-UNREADABLE): one muted line, once per
+              page, only when a key-status or member read failed. */}
+          {keyStatusUnreadable && (
+            <p
+              data-testid="strategies-key-status-unreadable"
+              className="text-xs text-text-muted"
+            >
+              {KEY_STATUS_UNREADABLE_NOTE}
+            </p>
+          )}
           {strategies.map((s) => {
             const keyLines = untrustedKeyLines(
               feedingKeyIdsByStrategy.get(s.id) ?? [],

@@ -119,6 +119,8 @@ type ReadResult = { data: unknown; error: { message: string } | null };
 const state = vi.hoisted(() => ({
   user: null as { id: string } | null,
   strategies: [] as MockStrategyRow[],
+  /** 167.2-REVIEW-SFH H-1: the list read's error, when it fails. */
+  strategiesError: null as { message: string } | null,
   keys: [] as MockKeyRow[],
   keysError: null as { message: string } | null,
   members: [] as MockMemberRow[],
@@ -151,7 +153,9 @@ vi.mock("@/lib/supabase/server", () => ({
     from: (table: string) => {
       let result: ReadResult;
       if (table === "strategies") {
-        result = { data: state.strategies, error: null };
+        result = state.strategiesError
+          ? { data: null, error: state.strategiesError }
+          : { data: state.strategies, error: null };
       } else if (table === "contact_requests") {
         result = { data: [], error: null };
       } else if (table === "strategy_keys") {
@@ -250,6 +254,7 @@ beforeEach(() => {
   pillProps.length = 0;
   state.user = { id: "u-test" };
   state.strategies = [];
+  state.strategiesError = null;
   state.keys = [];
   state.keysError = null;
   state.members = [];
@@ -651,5 +656,69 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
       tags: { route: "strategies/page", stage: "compute-state-window-full" },
     });
+  });
+});
+
+describe("StrategiesPage — an errored read is never rendered as healthy or empty (167.2-REVIEW-SFH H-1, H-3)", () => {
+  // Hand-typed from the UI-SPEC review-fix rows, never imported.
+  const LIST_UNREADABLE = "Your strategies could not be loaded. Reload this page to try again.";
+  const KEY_STATUS_UNREADABLE =
+    "Key status could not be checked right now. Open a strategy to see its keys.";
+
+  it("H1-LIST-ERROR: a failed list read renders the load-failure line, never \"No strategies yet\", and is logged and captured", async () => {
+    state.strategiesError = { message: "synthetic list failure" };
+
+    const container = await renderPage();
+
+    expect(container.textContent).toContain(LIST_UNREADABLE);
+    expect(container.textContent).not.toContain("No strategies yet");
+    expect(container.textContent).not.toContain("Create your first strategy");
+    expect(consoleError).toHaveBeenCalledWith(
+      "[strategies/page] strategies read failed",
+      "synthetic list failure",
+    );
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { route: "strategies/page", stage: "list" },
+    });
+  });
+
+  it("H1-CONTROL: a clean empty list still says \"No strategies yet\" and shows no load-failure line", async () => {
+    const container = await renderPage();
+    expect(container.textContent).toContain("No strategies yet");
+    expect(container.textContent).not.toContain(LIST_UNREADABLE);
+  });
+
+  it("H3-KEYS-ERROR: a failed key-status read says the status could not be checked, and is captured", async () => {
+    state.strategies = [row("s-1", { api_key_id: "k-1" })];
+    state.keysError = { message: "synthetic read failure" };
+
+    const container = await renderPage();
+
+    expect(container.textContent).toContain(KEY_STATUS_UNREADABLE);
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { route: "strategies/page", stage: "key-status" },
+    });
+  });
+
+  it("H3-MEMBERS-ERROR: a failed member read says the status could not be checked, and is captured", async () => {
+    state.strategies = [row("c-1", { api_key_id: null })];
+    state.membersError = { message: "synthetic member read failure" };
+
+    const container = await renderPage();
+
+    expect(container.textContent).toContain(KEY_STATUS_UNREADABLE);
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { route: "strategies/page", stage: "strategy-keys" },
+    });
+  });
+
+  it("H3-CONTROL: clean key reads show no such line (an absent pill still means healthy)", async () => {
+    state.strategies = [row("s-1", { api_key_id: "k-1" })];
+    state.keys = [key("k-1", "bybit", "complete")];
+
+    const container = await renderPage();
+
+    expect(container.textContent).not.toContain(KEY_STATUS_UNREADABLE);
+    expect(captureToSentryMock).not.toHaveBeenCalled();
   });
 });
