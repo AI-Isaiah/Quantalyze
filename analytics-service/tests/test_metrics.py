@@ -4016,3 +4016,204 @@ def test_q166r_r_squared_error_is_logged_only_when_both_legs_vary(caplog, monkey
     assert out["r_squared"] is None and out["r_squared_status"] == "error"
     lines = _q166r_suspect_lines(caplog)
     assert len(lines) == 1 and "r_squared" in lines[0], lines
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 code review, round 2 (166-REVIEW-R2.md, 166-REVIEW-SFH-R2.md).
+#
+# Same discipline as round 1: each guard was neutered, observed RED, restored
+# from a byte copy and checked with cmp.
+# ---------------------------------------------------------------------------
+
+
+def _q166r2_nav_constant_yield(
+    daily_yield: float, n: int = 366, start: float = 10_000.0, cents: bool = False
+) -> pd.Series:
+    """Returns taken the way the platform takes them: ``pct_change`` over an
+    exactly compounding NAV. Each return is ``E_t / E_{t-1} - 1``, so its
+    rounding residue is about 1e-16 ABSOLUTE, whatever the yield (CR-01). With
+    ``cents=True`` the NAV is rounded to cents first, which is real
+    quantisation dispersion, not residue."""
+    nav = start * (1.0 + daily_yield) ** np.arange(n + 1)
+    if cents:
+        nav = np.round(nav, 2)
+    idx = pd.date_range("2024-01-01", periods=n + 1, freq="D")
+    return pd.Series(nav, index=idx).pct_change().dropna().rename("returns")
+
+
+def _q166r2_apy(apy: float) -> float:
+    return (1.0 + apy) ** (1.0 / 365.0) - 1.0
+
+
+#: id -> daily yield. The daily ids are the review's table; the APY ids span
+#: SFH R2-HIGH-1's 0.01% .. 100% sweep.
+_Q166R2_CONSTANT_YIELDS: dict[str, float] = {
+    "daily_1e-5": 1e-5,
+    "daily_1e-4": 1e-4,
+    "daily_1e-3": 1e-3,
+    "apy_0.01pct": _q166r2_apy(0.0001),
+    "apy_0.1pct": _q166r2_apy(0.001),
+    "apy_1pct": _q166r2_apy(0.01),
+    "apy_3pct": _q166r2_apy(0.03),
+    "apy_5pct": _q166r2_apy(0.05),
+    "apy_10pct": _q166r2_apy(0.10),
+    "apy_50pct": _q166r2_apy(0.50),
+    "apy_100pct": _q166r2_apy(1.00),
+}
+
+
+def _q166r2_random_benchmark(index: pd.Index) -> pd.Series:
+    rng = np.random.default_rng(16602)
+    return pd.Series(rng.normal(0.001, 0.03, len(index)), index=index, name="benchmark")
+
+
+@pytest.mark.parametrize(
+    "daily_yield", list(_Q166R2_CONSTANT_YIELDS.values()), ids=list(_Q166R2_CONSTANT_YIELDS)
+)
+def test_q166r2_compounding_constant_yield_defines_no_dispersion_ratio(daily_yield):
+    """CR-01 / SFH R2-HIGH-1: a constant yield has no dispersion, so every ratio
+    over its std is UNDEFINED, at every site that divides by it.
+
+    Round 1's floor was ``1e-12 * |mean|``. A NAV-derived constant yield leaves
+    an ABSOLUTE ~1e-16 residue, so below about 5% APY the floor sank under it:
+    a 1e-4 daily yield persisted a headline Sharpe of 1.49e13 with status
+    ``ok`` and a PSR of 1.0, and every sibling site (smart_sharpe, rolling
+    Sharpe, correlation, rolling correlation, treynor over a residue beta,
+    R^2, outlier ratios) persisted a residue quotient. Each assertion below
+    names one of those sites; each was measured wrong before the fix.
+
+    Measured with the round-1 floor restored: 7 of the 11 cases go RED (daily
+    1e-5 and 1e-4, and APY 0.01% through 5%), because their residue exceeds
+    ``1e-12 * |mean|``. Daily 1e-3 and APY 10%, 50% and 100% were already caught
+    by the round-1 floor, since a larger mean lifts it above the residue; no
+    fixture of this shape can make them fail it. They stay as the pin that the
+    round-2 floor keeps covering that end of the scale.
+    """
+    import services.metrics as metrics_module
+
+    r = _q166r2_nav_constant_yield(daily_yield)
+    sd = float(r.std())
+    assert sd != 0.0, "fixture no longer carries the float residue it pins"
+    assert metrics_module._dispersion_is_residue(sd, float(r.mean()))
+
+    vol, sharpe = metrics_module._annualized_vol_sharpe(r, 365)
+    assert vol == 0.0 and math.isnan(sharpe), (vol, sharpe)
+    assert metrics_module.sharpe_vol_status_from_backbone(r, 365) == (
+        0.0, None, "zero_volatility",
+    )
+
+    res = compute_all_metrics(
+        r, benchmark_returns=_q166r2_random_benchmark(r.index), periods_per_year=365
+    )
+    mj = res.metrics_json
+    inner = mj["metrics_json"]
+    assert mj["sharpe"] is None, mj["sharpe"]
+    assert mj["volatility"] == 0.0, mj["volatility"]
+    assert inner["smart_sharpe"] is None, inner["smart_sharpe"]
+    assert inner["probabilistic_sharpe_ratio"] is None
+    assert inner["serenity_index"] is None
+    for window_key, points in mj["rolling_metrics"].items():
+        if window_key.startswith("sharpe"):
+            assert points == [], (window_key, points[:3])
+    assert "outlier_win_ratio" not in inner and "outlier_loss_ratio" not in inner
+    # Benchmark-relative sites over a strategy leg that never moves.
+    assert inner["correlation"] is None, inner["correlation"]
+    assert inner["btc_rolling_correlation_90d"] == []
+    assert inner["beta"] == 0.0, inner["beta"]
+    assert "treynor" not in inner, inner.get("treynor")
+    assert inner["r_squared"] is None and inner["r_squared_status"] == "error"
+
+
+def test_q166r2_compounding_constant_benchmark_defines_no_beta():
+    """CR-01 on the BENCHMARK leg: a benchmark whose returns are a compounding
+    constant yield has no variance, so beta, alpha, R^2, the rolling greeks and
+    the rolling correlation over it are undefined. Pre-fix the scalar beta was
+    9.6e11 and alpha -3.5e10 (reviewer), and the rendered rolling beta reached
+    4.3e13 (measured on this fixture)."""
+    import services.metrics as metrics_module
+
+    bench = _q166r2_nav_constant_yield(1e-4, start=100.0)
+    rng = np.random.default_rng(7)
+    strategy = pd.Series(rng.normal(0.001, 0.02, len(bench)), index=bench.index)
+
+    assert metrics_module._greeks_no_guess(strategy, bench, 365) == (None, None)
+    rolling = metrics_module._rolling_greeks(strategy, bench, 90)
+    assert rolling["beta"].notna().sum() == 0, rolling["beta"].dropna().head()
+    assert metrics_module._rolling_correlation(strategy, bench, 90) == []
+    assert not metrics_module._r_squared_pair_varies(strategy, bench)
+    out = compute_qstats_scalars(strategy, bench)
+    assert out["r_squared"] is None and out["r_squared_status"] == "error"
+
+
+def test_q166r2_residue_floor_keeps_real_quantisation_dispersion():
+    """SFH R2-MED-2, the OTHER side of the floor: widening it must go RED.
+
+    A NAV rounded to cents carries real quantisation noise. At 1% APY its sd is
+    about 4.1e-9 on a 1e6 NAV and 4.0e-11 on a 1e8 NAV (measured), the second 40x
+    above the 1e-12 floor. Those are measurements, so their Sharpe is the exact
+    unguarded arithmetic, not None. Round 1's drill M16a (floor widened to 1e-3)
+    survived the whole suite; with this test it cannot. The largest residue the
+    floor must still catch is about 1.3e-16 (test above), so the floor sits
+    between the two with orders of magnitude on each side.
+    """
+    import services.metrics as metrics_module
+
+    for start in (1e6, 1e8):
+        r = _q166r2_nav_constant_yield(_q166r2_apy(0.01), start=start, cents=True)
+        sd, mean = float(r.std()), float(r.mean())
+        assert sd > 1e-11, (start, sd)
+        assert not metrics_module._dispersion_is_residue(sd, mean), (start, sd)
+        expected_vol = float(r.std() * math.sqrt(365))
+        expected_sharpe = float((r.mean() * 365) / expected_vol)
+        assert metrics_module._annualized_vol_sharpe(r, 365) == (expected_vol, expected_sharpe)
+        mj = compute_all_metrics(r, periods_per_year=365)
+        assert mj["sharpe"] is not None and math.isfinite(mj["sharpe"]), (start, mj["sharpe"])
+        assert mj["metrics_json"]["smart_sharpe"] is not None, start
+
+
+def test_q166r2_constant_series_smart_sharpe_and_vol_are_not_residue():
+    """WR-01 and IN-02 on the round-1 fixture itself. With the headline Sharpe
+    already None, ``smart_sharpe`` still persisted 4.6e15 on 250 days of a
+    constant 0.001 (-4.6e15 on -0.002), and the headline ``volatility`` persisted
+    the residue 4.2e-18 while the backbone and the primitive said 0.0."""
+    for value in (0.001, -0.002):
+        c = _q166r_constant_series(value, 250)
+        mj = compute_all_metrics(c)
+        assert mj["metrics_json"]["smart_sharpe"] is None, (value, mj["metrics_json"]["smart_sharpe"])
+        assert mj["volatility"] == 0.0, (value, mj["volatility"])
+
+
+def test_q166r2_r_squared_over_a_pair_that_defines_none_is_none_not_residue(caplog):
+    """WR-02 and SFH R2-LOW-2.
+
+    * A constant NON-ZERO benchmark: scipy's ``linregress`` tests only an exact
+      zero variance, so R^2 persisted about 1e-34 with status ``ok`` (measured
+      3.2e-34 at 0.001, 0.0005 and -0.002). The pair is asked first now.
+    * Two rows: the line passes through both points, so R^2 is 1.0 whatever the
+      data; the ``len(p) >= 3`` conjunct makes it undefined. Remove it and this
+      goes RED with 0.9999999999999996.
+    * One row: its std is NaN, and ``_dispersion_is_real`` reads NaN as "does
+      not vary", so no false "mirror is suspect" line can come from it.
+    None of the three may log a suspect line: each is a legitimately undefined
+    R^2, not a broken mirror.
+    """
+    import services.metrics as metrics_module
+
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    for n in (120, 250, 1000):
+        idx = pd.bdate_range("2024-01-01", periods=n)
+        strategy = pd.Series(np.random.default_rng(n).normal(0.001, 0.01, n), index=idx)
+        for level in (0.001, 0.0005, -0.002):
+            out = compute_qstats_scalars(strategy, pd.Series(level, index=idx))
+            assert out["r_squared"] is None and out["r_squared_status"] == "error", (n, level, out)
+
+    two = pd.Series([0.01, -0.02], index=pd.bdate_range("2024-01-01", periods=2))
+    out = compute_qstats_scalars(two, pd.Series([0.03, 0.01], index=two.index))
+    assert out["r_squared"] is None and out["r_squared_status"] == "error", out
+
+    one = pd.Series([0.01], index=pd.bdate_range("2024-01-01", periods=1))
+    assert not metrics_module._r_squared_pair_varies(one, pd.Series([0.02], index=one.index))
+    assert metrics_module._dispersion_is_real(float("nan"), 0.0) is False
+    assert metrics_module._dispersion_is_residue(float("nan"), 0.0) is False
+    compute_qstats_scalars(one, pd.Series([0.02], index=one.index))
+    assert _q166r_suspect_lines(caplog) == []

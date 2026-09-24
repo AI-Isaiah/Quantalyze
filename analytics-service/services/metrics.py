@@ -517,12 +517,42 @@ def _drawdown_series_from_wealth(wealth: pd.Series) -> pd.Series:
     )
 
 
-#: A standard deviation at or below this fraction of ``|mean|`` is float residue,
-#: not dispersion. The residue pandas/numpy leave on a constant series is about
-#: ``1e-16 * |mean|`` (measured: 4.35e-19 for a constant 0.001), so 1e-12 clears
-#: it by four orders of magnitude. It only reclassifies a series whose
-#: per-period mean/std exceeds 1e12, which no real return series reaches.
+#: A standard deviation at or below ``_DISPERSION_RESIDUE_REL * max(1, |mean|)``
+#: is float residue, not dispersion (``_residue_floor``). Two residue scales exist
+#: and the floor covers both:
+#:
+#: - a series built by REPEATING one float leaves about ``1e-16 * |mean|``
+#:   (measured: 4.35e-19 for 120 days of a constant 0.001);
+#: - a series built as ``E_t / E_{t-1} - 1`` from a compounding equity or NAV
+#:   curve (``pct_change``, the way this platform gets most returns) leaves about
+#:   ``1e-16`` ABSOLUTE, whatever the yield, because the rounding error is
+#:   relative to the ratio ``1 + r``, not to ``r``.
+#:
+#: So the floor is 1e-12 in absolute terms for any ``|mean| <= 1`` and scales
+#: with ``|mean|`` above that, four orders above either residue. The smallest
+#: REAL dispersion pinned by a test is the quantisation noise of a cent-rounded
+#: compounding NAV; see
+#: ``test_q166r2_residue_floor_keeps_real_quantisation_dispersion``.
 _DISPERSION_RESIDUE_REL = 1e-12
+
+
+def _residue_floor(mean: Any) -> Any:
+    """``_DISPERSION_RESIDUE_REL * max(1, |mean|)``, for a scalar or elementwise.
+
+    WHY ``max(1, |mean|)`` (Phase 166 review round 2, CR-01 / SFH R2-HIGH-1). The
+    round-1 floor was ``1e-12 * |mean|``. That is right for repeated floats, but
+    a return is a ratio to 1, so ``pct_change`` over an exactly compounding NAV
+    leaves an ABSOLUTE ~1e-16 residue however small the yield. Scaled by a small
+    ``|mean|`` the floor sank under that residue: a 1e-4 daily yield (about 3.7%
+    APY, a stablecoin-lending shape) persisted a headline Sharpe of 1.49e13 with
+    status ``ok`` and a PSR of 1.0. The reviewer's ``max(1.0, |mean|)`` and the
+    SFH's ``1 + |mean|`` differ by at most a factor of 2 and agree on every
+    measured input. ``max`` is taken because it keeps the floor EXACTLY at the
+    round-1 value wherever ``|mean| >= 1``, so the only inputs it reclassifies
+    are the small-mean residues the round-1 floor missed. A NaN ``mean`` gives a
+    NaN floor, and every comparison against it is False.
+    """
+    return _DISPERSION_RESIDUE_REL * np.maximum(1.0, np.abs(mean))
 
 
 def _dispersion_is_residue(sd: float, mean: float) -> bool:
@@ -532,9 +562,20 @@ def _dispersion_is_residue(sd: float, mean: float) -> bool:
     series whose ``std()`` comes back as ``~1e-19`` instead of ``0.0``, and the
     ratio over it is then a fabricated ``~1e16``. Callers treat True as "no
     dispersion", so a ratio over it is undefined (None), never a number. A NaN
-    ``sd`` returns False: each caller handles NaN on its own path.
+    ``sd`` returns False: each caller handles NaN on its own path. The floor is
+    ``_residue_floor``.
     """
-    return bool(sd <= _DISPERSION_RESIDUE_REL * abs(mean))
+    return bool(sd <= _residue_floor(mean))
+
+
+def _dispersion_is_real(sd: float, mean: float) -> bool:
+    """True when ``sd`` is finite and above the residue floor: a leg that really moves.
+
+    The complement of ``_dispersion_is_residue`` EXCEPT on NaN, where both are
+    False. A predicate that asks "does this leg vary" must answer False for a
+    NaN ``sd`` (one row, or none), never "varies" (SFH R2-LOW-2).
+    """
+    return bool(sd > _residue_floor(mean))
 
 
 def _annualized_vol_sharpe(r: pd.Series, periods_per_year: int) -> tuple[float, float]:
@@ -572,6 +613,10 @@ def _annualized_vol_sharpe(r: pd.Series, periods_per_year: int) -> tuple[float, 
     the backbone's ``zero_volatility`` status and ``info_ratio``'s ``te > 0``
     guard see it. On a series with real dispersion the values are bit-identical
     to before.
+
+    ROUND 2 (CR-01 / SFH R2-HIGH-1, 2026-09-25): the same guard now also sees a
+    constant yield derived from a compounding NAV, whose residue is ABSOLUTE
+    (about 1e-16) rather than relative to the mean. See ``_residue_floor``.
 
     Returns RAW floats (NaN allowed); callers keep their own ``_safe_float``.
     """
@@ -794,7 +839,9 @@ def _serenity_index(r: pd.Series) -> float:
     review, SFH HIGH-1 class): a constant LOSING series has a residue ``std()``
     (4.3e-19 for 250 days of -0.002, measured), the pitfall over it is ~1e16,
     and 0.0.81's exact test let a fabricated ``-2.2e-18`` through. Reached by an
-    all-zero series (exact 0) and by any constant series (residue).
+    all-zero series (exact 0) and by any constant series (residue), including a
+    constant yield taken as ``pct_change`` of a compounding NAV (round 2,
+    ``_residue_floor``).
 
     The ``denominator == 0`` arm is kept for 0.0.81 parity and has NO natural
     input: ulcer is 0 only when every drawdown is 0, and then the VaR of the
@@ -1120,20 +1167,36 @@ def _r_squared(returns: pd.Series, benchmark: pd.Series) -> float:
 
 
 def _r_squared_pair_varies(returns: pd.Series, benchmark: pd.Series) -> bool:
-    """True when the pair ``_r_squared`` regresses has >= 3 rows and dispersion on both legs.
+    """True when the pair ``_r_squared`` regresses DEFINES an R^2: >= 3 rows and real dispersion on both legs.
 
     Built with the same preparation ``_r_squared`` uses, so it describes the
-    exact pair ``linregress`` sees. On such a pair R^2 is defined; SFH INFO-2
-    uses it to tell a broken mirror from a legitimately undefined R^2 (a leg
-    that never moves).
+    exact pair ``linregress`` sees. ``compute_qstats_scalars`` asks it FIRST
+    (review round 2, WR-02): a pair it rejects persists ``r_squared = None``,
+    status ``error``, with no log, and only a pair it accepts is regressed. A
+    non-finite R^2 on an accepted pair is a broken mirror and is logged (SFH
+    INFO-2).
+
+    Each conjunct is necessary:
+
+    - ``len(p) >= 3``: with two rows the fitted line passes through both
+      points, so ``linregress`` returns ``r = +-1`` whatever the data (zero
+      residual degrees of freedom). That R^2 of 1.0 measures nothing, so it is
+      undefined (D-09), not a perfect fit.
+    - real dispersion on each leg (``_dispersion_is_real``): a leg that never
+      moves has no variance to explain, or none to explain it with. scipy's
+      ``linregress`` tests only ``ssxm == 0.0``, so a constant NON-ZERO
+      benchmark, whose variance is float residue, came back as a residue
+      correlation (about 1e-34) with status ``ok`` (WR-02, measured at n = 120,
+      250 and 1000). ``_dispersion_is_real`` is False on a NaN ``sd``, so a
+      one-row pair reads "does not vary" and never "varies" (SFH R2-LOW-2).
     """
     p = _tz_naive_like_qs(_prepared_returns_no_guess(returns))
     b = _align_benchmark_like_qs(_align_benchmark_like_qs(benchmark, p.index), p.index)
     return bool(
         len(p) >= 3
         and len(b) == len(p)
-        and not _dispersion_is_residue(p.std(), p.mean())
-        and not _dispersion_is_residue(b.std(), b.mean())
+        and _dispersion_is_real(p.std(), p.mean())
+        and _dispersion_is_real(b.std(), b.mean())
     )
 
 
@@ -1178,6 +1241,14 @@ def _greeks_no_guess(
     Both legs are tz-normalised (the strategy here, the benchmark inside
     ``_align_benchmark_like_qs``), so the pairwise join lines them up by date.
     0.0.81 needs no such step because ``np.cov`` pairs its inputs by position.
+
+    RESIDUE ON EITHER LEG (review round 2, CR-01). A benchmark with no real
+    dispersion defines no beta: ``(None, None)``. A STRATEGY with no real
+    dispersion has a covariance of exactly 0 with any benchmark, so its beta is
+    the true ``0.0`` and alpha is its annualized mean. Without that snap the
+    residue covariance gave a beta of about 4e-16, which passed treynor's
+    ``beta != 0`` guard and persisted a treynor of about 1e15 (measured on a
+    compounding 1e-3 daily yield).
     """
     r = _tz_naive_like_qs(aligned_returns)
     b = _align_benchmark_like_qs(aligned_benchmark, r.index)
@@ -1192,6 +1263,8 @@ def _greeks_no_guess(
     # Same class as SFH HIGH-1, same guard: no dispersion -> beta undefined.
     if _dispersion_is_residue(math.sqrt(matrix[1, 1]), b.mean()):
         return None, None
+    if _dispersion_is_residue(math.sqrt(matrix[0, 0]), r.mean()):
+        return float(r.mean() * periods), 0.0
     beta = matrix[0, 1] / matrix[1, 1]
     alpha = r.mean() - beta * b.mean()
     alpha = alpha * periods
@@ -1562,7 +1635,14 @@ def compute_all_metrics(
     #       finite-looking number. Fail-soft beats fabricated (Rule 12).
     # Every kwarg site below shares this rationale and cites it rather than
     # repeating it. Each is pinned by a live-quantstats benign-parity test.
-    volatility = _safe_float(qs.stats.volatility(stat_returns, periods=periods_per_year, prepare_returns=False))
+    # Review round 2 (IN-02): a series with no real dispersion reports the true
+    # 0.0, the same answer `_annualized_vol_sharpe` and the backbone give, not
+    # the float residue `std()` leaves (3.4e-18 persisted for a constant 0.001).
+    volatility = (
+        0.0
+        if _dispersion_is_residue(float(stat_returns.std()), float(stat_returns.mean()))
+        else _safe_float(qs.stats.volatility(stat_returns, periods=periods_per_year, prepare_returns=False))
+    )
     # RANK-05 (Phase 159) — WHY INLINE, NOT quantstats. The pinned quantstats
     # 0.0.81 routes every stat through `_utils._prepare_returns`, which carries a
     # PRICE-detection heuristic the platform never asked for:
@@ -1956,10 +2036,16 @@ def compute_all_metrics(
                     * float((((_smart_n - _smart_x) / _smart_n) * (_smart_coef**_smart_x)).sum())
                 )
             )
-        _smart_sharpe_divisor = float(_smart_r.std()) * _smart_penalty
+        # Review round 2 (WR-01): the divisor is guarded by the residue floor,
+        # not only by `> 0.0`. A constant series' `std()` is float residue, and
+        # the quotient over it persisted smart_sharpe = 4.6e15 (250 days of a
+        # constant 0.001) while the headline sharpe was already None.
+        _smart_sd = float(_smart_r.std())
+        _smart_sharpe_divisor = _smart_sd * _smart_penalty
         metrics_json["smart_sharpe"] = (
             _safe_float((float(_smart_r.mean()) / _smart_sharpe_divisor) * math.sqrt(252))
             if _smart_sharpe_divisor > 0.0
+            and _dispersion_is_real(_smart_sd, float(_smart_r.mean()))
             else None
         )
     except Exception as exc:  # noqa: BLE001
@@ -2111,7 +2197,11 @@ def compute_all_metrics(
     try:
         mean_ret = float(returns.mean())
         std_ret = float(returns.std())
-        if std_ret > 0:
+        # Review round 2 (CR-01 class): a residue std is no dispersion, so no
+        # day is an outlier of it. The exact `> 0` test let a compounding
+        # constant yield report an outlier_loss_ratio of 0.0027 (one residue
+        # day below mean - 2 * 1e-16).
+        if _dispersion_is_real(std_ret, mean_ret):
             outlier_threshold = 2 * std_ret
             metrics_json["outlier_win_ratio"] = _safe_float((returns > mean_ret + outlier_threshold).mean())
             metrics_json["outlier_loss_ratio"] = _safe_float((returns < mean_ret - outlier_threshold).mean())
@@ -2157,7 +2247,22 @@ def compute_all_metrics(
                 alpha, beta_val = _greeks_no_guess(aligned_returns, aligned_benchmark, periods_per_year)
                 metrics_json["alpha"] = _safe_float(alpha)
                 metrics_json["beta"] = _safe_float(beta_val)
-                metrics_json["correlation"] = _safe_float(aligned_returns.corr(aligned_benchmark))
+                # Review round 2 (CR-01 class): correlation divides by BOTH legs'
+                # std, over the rows where both are present (pandas' pairwise
+                # rule). A leg with no real dispersion defines no correlation
+                # (None, D-09). Unguarded, a compounding constant yield persisted
+                # a residue correlation (0.10 measured against a random benchmark).
+                _corr_pair = pd.concat([aligned_returns, aligned_benchmark], axis=1).dropna()
+                metrics_json["correlation"] = (
+                    _safe_float(aligned_returns.corr(aligned_benchmark))
+                    if all(
+                        _dispersion_is_real(
+                            float(_corr_pair.iloc[:, i].std()), float(_corr_pair.iloc[:, i].mean())
+                        )
+                        for i in (0, 1)
+                    )
+                    else None
+                )
                 excess = aligned_returns - aligned_benchmark
                 # Tracking error and information ratio ARE annualized vol/Sharpe
                 # of the excess series — see `_annualized_vol_sharpe`.
@@ -2629,20 +2734,28 @@ def compute_qstats_scalars(
     # not promise 'ok' when r_squared is actually None.
     if benchmark is not None and len(benchmark) > 0:
         try:
-            r_squared_raw = _r_squared(returns, benchmark)
-            r_squared_val = _safe_float(r_squared_raw)
-            result["r_squared"] = r_squared_val
-            result["r_squared_status"] = "ok" if r_squared_val is not None else "error"
-            if r_squared_val is None and _r_squared_pair_varies(returns, benchmark):
-                # SFH INFO-2: `error` used to be set here with no log line. A
-                # leg that never moves defines no R^2 (legitimately undefined,
-                # no log); both legs moving and still no R^2 is a defect.
-                logger.warning(
-                    "qstats scalar r_squared returned non-finite %r on a pair "
-                    "where both legs vary (returns_len=%s, benchmark_len=%s): "
-                    "r_squared_status=error, the mirror is suspect",
-                    r_squared_raw, returns_len, len(benchmark),
-                )
+            if not _r_squared_pair_varies(returns, benchmark):
+                # Review round 2 (WR-02): a pair that defines no R^2 (a leg with
+                # no real dispersion, or fewer than 3 rows) persists None with
+                # status `error` and no log: a legitimately undefined ratio
+                # (D-09). It is asked FIRST because scipy's `linregress` tests
+                # only an EXACT zero variance, so a constant non-zero benchmark
+                # came back as a residue R^2 of about 1e-34 with status `ok`.
+                result["r_squared_status"] = "error"
+            else:
+                r_squared_raw = _r_squared(returns, benchmark)
+                r_squared_val = _safe_float(r_squared_raw)
+                result["r_squared"] = r_squared_val
+                result["r_squared_status"] = "ok" if r_squared_val is not None else "error"
+                if r_squared_val is None:
+                    # SFH INFO-2: `error` used to be set here with no log line.
+                    # The pair defines R^2 (checked above), so no R^2 is a defect.
+                    logger.warning(
+                        "qstats scalar r_squared returned non-finite %r on a pair "
+                        "where both legs vary (returns_len=%s, benchmark_len=%s): "
+                        "r_squared_status=error, the mirror is suspect",
+                        r_squared_raw, returns_len, len(benchmark),
+                    )
         except Exception as exc:  # noqa: BLE001
             result["r_squared_status"] = "error"
             logger.warning(
@@ -2729,12 +2842,18 @@ def _rolling_sharpe(
     emits a RuntimeWarning and produces ±Inf, which _finalize_rolling scrubs
     to NaN — silently dropping the point. Using np.where avoids the warning
     and makes the intent explicit.
+
+    Review round 2 (CR-01 class): the window's std must clear the residue floor
+    (``_residue_floor``), not just be ``> 0``. A window of a compounding constant
+    yield has a residue std of about 1e-16, and the quotient over it rendered
+    rolling Sharpe values around 1.9e13. Such a window has no Sharpe, so it is
+    NaN and ``_finalize_rolling`` drops it, exactly like an exact-zero window.
     """
     if len(returns) < window:
         return []
     roll_mean = returns.rolling(window).mean()
     roll_std = returns.rolling(window).std()
-    ratio = np.where(roll_std > 0, roll_mean / roll_std, np.nan)
+    ratio = np.where(roll_std > _residue_floor(roll_mean), roll_mean / roll_std, np.nan)
     ratio_series = pd.Series(ratio, index=returns.index)
     return _finalize_rolling(ratio_series * np.sqrt(periods_per_year))
 
@@ -2939,8 +3058,15 @@ def _rolling_greeks(
     rolling = df.rolling(int(window))
     corr = rolling.corr().unstack()["returns"]["benchmark"]
     std = rolling.std()
-    beta = corr * std["returns"] / std["benchmark"].replace(0, np.nan)
     means = rolling.mean()
+    # Review round 2 (CR-01 class): 0.0.81's `std["benchmark"].replace(0, nan)`
+    # catches only an EXACT zero. A window of a compounding constant benchmark
+    # has a residue std (~1e-16), and the beta over it rendered about 5e13. A
+    # benchmark window with no real dispersion defines no beta: NaN, dropped by
+    # `_finalize_rolling`. Wherever the std clears the floor this is the 0.0.81
+    # expression, so a benign pair stays bit-identical.
+    bench_std = std["benchmark"].where(std["benchmark"] > _residue_floor(means["benchmark"]))
+    beta = corr * std["returns"] / bench_std
     alpha = means["returns"] - beta * means["benchmark"]
     return pd.DataFrame(index=prepared.index, data={"beta": beta, "alpha": alpha})
 
@@ -3054,10 +3180,19 @@ def _log_returns_series(returns: pd.Series) -> list[SeriesPoint]:
 
 
 def _rolling_correlation(a: pd.Series, b: pd.Series, window: int) -> list[SeriesPoint]:
-    """Vectorized rolling Pearson correlation between two aligned series."""
+    """Vectorized rolling Pearson correlation between two aligned series.
+
+    Review round 2 (CR-01 class): a window in which either leg has no real
+    dispersion (std at or below ``_residue_floor``) defines no correlation, so
+    it is NaN and ``_finalize_rolling`` drops it. pandas divides by the residue
+    std instead and renders a noise correlation (up to 0.28 measured on a
+    compounding constant yield against a random benchmark).
+    """
     if len(a) < window:
         return []
-    return _finalize_rolling(a.rolling(window).corr(b))
+    ra, rb = a.rolling(window), b.rolling(window)
+    both_move = (ra.std() > _residue_floor(ra.mean())) & (rb.std() > _residue_floor(rb.mean()))
+    return _finalize_rolling(ra.corr(b).where(both_move))
 
 
 def _return_quantiles(
