@@ -188,3 +188,34 @@ describe("[161.1-D13] retractInheritedRefreshMarker", () => {
     expect((err as Error).cause).toBe(updateErr);
   });
 });
+
+/*
+ * ⭐ RED DEMO (run 2026-09-24, each restored from a byte backup after, `cmp`
+ * silent, re-run green):
+ *
+ *   (i) keys/sync — replaced the `retractInheritedRefreshMarker(admin, rpcData,
+ *   correlation_id)` call in the composite branch with `{ retracted: false }`.
+ *   Observed in src/app/api/keys/sync/route.test.ts: both "a deduped job
+ *   carrying ledger-refresh[-composite] is rewritten without source …" cases
+ *   and "a failed retraction never changes the 202, and is LOUD under its own
+ *   Sentry tag" FAILED (3 failed | 40 passed).
+ *
+ *   (ii) finalize-wizard — the same neuter on the composite enqueue's call.
+ *   Observed in src/app/api/strategies/finalize-wizard/route.test.ts: both
+ *   per-marker positive cases and "a failed retraction keeps the success
+ *   envelope, is captured under its OWN tag, and never as an enqueue failure"
+ *   FAILED (3 failed | 143 passed).
+ *
+ *   (iii) the helper — narrowed the membership check to
+ *   `source !== "ledger-refresh-composite"` (the single-marker shape Pitfall 16
+ *   warns about). Observed: "retracts an inherited ledger-refresh marker …"
+ *   here, and the `ledger-refresh` positive case at BOTH routes, FAILED; every
+ *   `ledger-refresh-composite` case stayed green — which is why each marker
+ *   has its own case (3 failed | 199 passed across the three files).
+ *
+ *   (iv) the parity pin — changed the TS literal "ledger-refresh-composite" to
+ *   "ledger-refresh-composit". Observed: "the TS marker set equals the set
+ *   Python honours" FAILED, alongside the composite positive case and the
+ *   update-error case, whose fixtures carry the real marker (3 failed |
+ *   10 passed).
+ */
