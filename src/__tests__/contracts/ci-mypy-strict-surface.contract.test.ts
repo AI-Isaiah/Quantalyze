@@ -1,0 +1,1462 @@
+import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+/**
+ * Phase 164.6.1 / MYPY-MAINPY-01 — the pin for the mypy --strict gate's SURFACE.
+ *
+ * ⛔ It is deliberately NOT a grep pin. `toContain("main.py")` over ci.yml
+ * passes when the COMMENT names the module and the COMMAND drops it — which is
+ * precisely the defect this phase removed: the comment above the step claimed
+ * ALL running-service code while `main.py`, the `uvicorn main:app` entry, was
+ * not on the command line. So this test EXTRACTS the step's `run:` line and the
+ * Makefile `typecheck` recipe line, TOKENISES them on whitespace (never a
+ * substring match — `main.py` is a substring of nothing else, but a substring
+ * pin has no way to know that), and compares SETS.
+ *
+ * WHAT IT PINS:
+ *   - the path set of the ci.yml `python` job's step
+ *     `Type gate - mypy strict over the running-service surface` EQUALS the
+ *     service surface derived from the TRACKED tree (`git ls-files`, so local
+ *     and CI agree): every top-level directory under `analytics-service/`
+ *     holding a tracked `.py` file anywhere beneath it (namespace packages
+ *     included — `__init__.py` does not decide it; `__pycache__` and
+ *     dot-directories skipped), minus the hand-typed `EXCLUDED` record, plus
+ *     every tracked top-level `analytics-service/*.py` file;
+ *   - the Makefile `typecheck` recipe names the same set;
+ *   - the `python` job carries exactly ONE mypy invocation (`mypy` or
+ *     `python -m mypy` at a command start, `--strict` or not, backslash
+ *     continuations joined, `name:` lines and quoted strings ignored; a
+ *     wrapper such as `uv run mypy` is NOT counted), and its flag set is EXACTLY
+ *     `--strict --follow-imports=silent --config-file=pyproject.toml` (an extra
+ *     flag such as `--exclude=` narrows the gate while the path set stays
+ *     equal; `--config-file` makes mypy read pyproject.toml and no other file);
+ *   - the Makefile `typecheck` recipe's flag set is EXACTLY
+ *     `--config-file=pyproject.toml` (pyproject.toml supplies the rest);
+ *   - neither command line carries a shell operator (`||`, `&&`, `;`, `|`), a
+ *     mypy argfile (`@...`) or a `#` — each reported as able to swallow the
+ *     exit status or inject arguments, never as a missing surface member;
+ *   - the Makefile `ci:` target depends on `typecheck`, so `make ci` runs the gate;
+ *   - the Makefile carries exactly one `MYPY = $(VENV)/bin/mypy` assignment and
+ *     exactly one rule line naming `typecheck` (a `MYPY = true`, or a second,
+ *     later `typecheck:` rule whose recipe GNU make would run instead, reddens);
+ *   - the gate step sets only `name` and ONE literal `run:` line — a POSITIVE
+ *     rule, so an `if:`, `continue-on-error:`, `shell:` or `env:` that could
+ *     switch it off with its run line intact is refused in any quoting or
+ *     spacing (`"if": false`, `if : false`); no deeper-indented continuation
+ *     line folds `|| true` or a flag into `run:`; the `python` job carries no
+ *     job-level `continue-on-error:` of any value; and neither the job's nor the
+ *     workflow's `defaults:` sets a `shell:` (job- and workflow-level keys are
+ *     matched with quotes and spacing normalised);
+ *   - every `EXCLUDED` member still holds a tracked `.py` (a stale exclusion reddens);
+ *   - the mypy CONFIG it runs under: `analytics-service/pyproject.toml` has one
+ *     `[tool.mypy]` whose keys are EXACTLY `python_version strict follow_imports`
+ *     with `strict = true` and `follow_imports = "silent"` (so no `exclude`,
+ *     `files` or `ignore_errors`), its `[[tool.mypy.overrides]]` name EXACTLY
+ *     the hand-typed third-party set and carry no `ignore_errors`, no tracked
+ *     `mypy.ini` / `.mypy.ini` shadows it, no tracked `.pyi` stub outside an
+ *     `EXCLUDED` directory replaces a surface module in mypy's crawl, and no
+ *     surface `.py` file carries a `# mypy:` comment or a top-of-file bare
+ *     `# type: ignore`.
+ *   The D-02 before/after record this pin keeps from going stale:
+ *     BEFORE: `services/ routers/ models/` — 96 source files as mypy counts them.
+ *     AFTER:  that set plus exactly `main.py main_worker.py main_worker_healthz.py
+ *             sentry_init.py` — 100.
+ *
+ * ⚠️ WHAT IT DOES NOT PIN, stated rather than implied:
+ *   - it does NOT prove mypy is green over that set — the `python` job does;
+ *   - it does NOT pin WHICH `mypy` binary runs. An earlier step that prepends a
+ *     fake `mypy` to `GITHUB_PATH`, a job- or workflow-level `env: PATH:`, or a
+ *     `VENV` pointed elsewhere for `make typecheck` substitutes the binary with
+ *     every pin here green. That is adversarial rather than accidental, and
+ *     pinning every earlier step is out of proportion, so it is a DECLARED
+ *     LIMIT, not a gap this file claims to close;
+ *   - it does NOT pin the `python` job's own `if:` or a job- or workflow-level
+ *     `env:` (DECIDED, round-2 review). A skipped `python` job is caught
+ *     downstream instead — `test-db-drift` needs `python` (since Phase 164.4.2;
+ *     `sql-tests` no longer does), and the `frontend` aggregator reds a
+ *     `test-db-drift` skip on a trusted event — though not on a
+ *     fork PR or a `workflow_dispatch`, and not by this file. An `env:` that
+ *     repoints `PATH` or sets a `MYPY*` variable is the binary-substitution
+ *     limit above;
+ *   - it does NOT count a mypy invocation hidden behind a wrapper word
+ *     (`uv run mypy`, `timeout 60 mypy`, `if mypy`, a quoted
+ *     `"$VENV/bin/mypy"`). The one-invocation count is of command-start
+ *     invocations; the gate's own paths and flags are pinned exactly, so a
+ *     missed second invocation cannot shrink the gate's coverage;
+ *   - it does NOT prove the job goes RED on GitHub when a named module breaks.
+ *     That is D-06b, OPEN until the phase PR: a neuter commit on the PR, the
+ *     step observed RED naming `main.py`, bound to the head SHA, then restored.
+ *
+ * ⭐ PLACEMENT ARGUMENT, stated so it is not re-derived. This file lives under
+ * `src/__tests__/contracts/`, so it runs in `contracts.yml` (no `paths:`
+ * filter) and in the `frontend-test` shards. A docs-only PR cannot BY
+ * CONSTRUCTION change `.github/workflows/ci.yml` or `analytics-service/Makefile`
+ * or add a module under `analytics-service/`, so every PR that can break this
+ * test's subject is a code PR on which it runs.
+ */
+
+const ROOT = process.cwd();
+const STEP_NAME = "Type gate - mypy strict over the running-service surface";
+const CI_YML = join(ROOT, ".github/workflows/ci.yml");
+const MAKEFILE = join(ROOT, "analytics-service/Makefile");
+const PYPROJECT = join(ROOT, "analytics-service/pyproject.toml");
+const SERVICE_DIR_REL = "analytics-service";
+
+/**
+ * The ci.yml mypy command's flag set, EXACTLY (sorted). `--config-file=pyproject.toml`
+ * makes mypy read that file and NO other, so a `mypy.ini` / `.mypy.ini` written
+ * by an earlier step (tracked or not) cannot take precedence over it.
+ */
+const REQUIRED_CI_FLAGS = ["--config-file=pyproject.toml", "--follow-imports=silent", "--strict"] as const;
+/** The Makefile `typecheck` recipe's flag set, EXACTLY: the same single config as CI, nothing else. */
+const REQUIRED_MAKEFILE_FLAGS = ["--config-file=pyproject.toml"] as const;
+
+/**
+ * Top-level directories holding tracked `.py` files that are OUTSIDE the gate
+ * BY STATED DESIGN. Hand-typed on purpose: an exclusion is a decision, and a
+ * decision must be written down where a reviewer sees it. Each member is
+ * asserted to still hold a tracked `.py`, so an exclusion cannot outlive its
+ * subject silently.
+ */
+const EXCLUDED: Record<string, string> = {
+  tests:
+    "untyped by design — the open `B-mypy part j` strict-scope policy question in TODOS.md, " +
+    "not carried by Phase 164.6.1",
+  scripts:
+    "one-off operational tooling (backfills, cassette recording), not the running service; " +
+    "gating it would add a types-PyYAML dev-dep for throwaway scripts",
+};
+
+/**
+ * The raw lines of the `python` job's block: from its key line up to (not
+ * including) the next content line at indentation 2 or less — the next job's
+ * key, whether or not it carries a trailing `# comment` or quotes.
+ */
+function pythonJobLines(ymlText: string): string[] {
+  const lines = ymlText.split("\n");
+  const jobsIdx = lines.indexOf("jobs:");
+  if (jobsIdx === -1) {
+    throw new Error(
+      "ci.yml has no top-level `jobs:` key. The job-key scan is scoped to the lines after it so a " +
+        "trigger key cannot leak into it; without the anchor the `python` job cannot be located.",
+    );
+  }
+  const start = lines.findIndex(
+    (l, i) => i > jobsIdx && /^ {2}(["']?)python\1\s*:\s*(?:#.*)?$/.test(l),
+  );
+  if (start === -1) {
+    throw new Error(
+      "ci.yml has no `python:` job key. That job carries the analytics-service mypy --strict gate; " +
+        "if it was renamed, update this test in the same commit — if it was deleted, the type gate " +
+        "is gone and this test is the only thing that says so.",
+    );
+  }
+  let end = start + 1;
+  while (end < lines.length && !(isContent(lines[end]) && indentOf(lines[end]) <= 2)) end++;
+  return lines.slice(start, end);
+}
+
+const indentOf = (l: string): number => l.length - l.trimStart().length;
+const isContent = (l: string): boolean => l.trim() !== "" && !l.trim().startsWith("#");
+
+/**
+ * `mypy` (optionally path-qualified) or `python -m mypy` as a COMMAND WORD: at
+ * the start of a command, or after `;`, `&`, `|`, `(` or `$(`. The step's own
+ * name ("Type gate - mypy strict …"), `pip install mypy` and `mypy.ini` are
+ * not command words and do not count.
+ */
+const MYPY_COMMAND = /(?:^|[;&|(]\s*|\$\(\s*)(?:[\w./-]*\/)?(?:python[\d.]*\s+-m\s+)?mypy(?=$|[\s;&|)])/g;
+
+/**
+ * Every mypy invocation in the job, `--strict` or not: non-comment lines with
+ * backslash continuations joined, the YAML `- ` / `run:` / `run: |` prefix
+ * stripped, YAML `name:` lines skipped and quoted strings blanked, then every
+ * command-word match counted. A second, partial invocation split across
+ * `mypy \` and a continuation line, or one without `--strict`, is counted like
+ * any other; a step NAMED `Lint check (mypy)` or an `echo "done; mypy next"` is
+ * not. ⚠️ LIMIT, stated: a wrapper word before `mypy` (`uv run mypy`,
+ * `timeout 60 mypy`, `if mypy`, a quoted `"$VENV/bin/mypy"`) is NOT counted.
+ * That does not open coverage — the gate step's own paths and flags are pinned
+ * exactly — but the count is "command-start invocations", not "every one".
+ */
+function mypyInvocationCount(jobLines: string[]): number {
+  const logical: string[] = [];
+  let buf = "";
+  for (const l of jobLines) {
+    if (!isContent(l) && buf === "") continue;
+    const t = l.trim();
+    if (t.endsWith("\\")) {
+      buf += `${t.slice(0, -1)} `;
+      continue;
+    }
+    logical.push(buf + t);
+    buf = "";
+  }
+  if (buf) logical.push(buf);
+  return logical
+    .map((t) => t.replace(/^-\s+/, ""))
+    .filter((t) => !/^name\s*:/.test(t))
+    .map((t) => t.replace(/^run:\s*(?:[|>][-+]?)?\s*/, ""))
+    .map((t) => t.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, " "))
+    .reduce((n, t) => n + (t.match(MYPY_COMMAND)?.length ?? 0), 0);
+}
+
+/**
+ * The gate step's own lines: from its `- name:` line up to (not including) the
+ * next content line at the step's dash indentation or shallower — the next
+ * step, whatever key it opens with.
+ */
+function gateStepLines(ymlText: string): string[] {
+  const job = pythonJobLines(ymlText);
+  const stepAt = job.findIndex((l) => l.trim() === `- name: ${STEP_NAME}`);
+  if (stepAt === -1) {
+    throw new Error(
+      `the ci.yml \`python\` job has no step named "${STEP_NAME}". That step IS the mypy --strict ` +
+        `gate. If it was renamed, update STEP_NAME here in the same commit; if it was deleted, the ` +
+        `gate is gone.`,
+    );
+  }
+  const dash = indentOf(job[stepAt]);
+  let end = stepAt + 1;
+  while (end < job.length && !(isContent(job[end]) && indentOf(job[end]) <= dash)) end++;
+  return job.slice(stepAt, end);
+}
+
+/**
+ * The mapping key a YAML line opens, NORMALISED: surrounding quotes and the
+ * space before the colon stripped, so `"if": false`, `'if': false` and
+ * `if : false` all read as `if` (GitHub reads all three as the same key).
+ * `null` when the line opens no simple key.
+ */
+function yamlKeyOf(line: string): string | null {
+  const m = /^(["']?)([A-Za-z0-9_-]+)\1\s*:(?:\s|$)/.exec(line.trimStart());
+  return m ? m[2] : null;
+}
+
+/**
+ * The lines of every block opened by a key at a given indentation: each key
+ * line plus every following line indented deeper (blank and comment lines
+ * included). The key is matched NORMALISED (see `yamlKeyOf`), and a duplicated
+ * key contributes every one of its blocks. Empty when the key is absent.
+ */
+function keyBlock(lines: string[], indent: number, key: string): string[] {
+  const out: string[] = [];
+  lines.forEach((l, at) => {
+    if (!(isContent(l) && indentOf(l) === indent && yamlKeyOf(l) === key)) return;
+    let end = at + 1;
+    while (end < lines.length && !(isContent(lines[end]) && indentOf(lines[end]) <= indent)) end++;
+    out.push(...lines.slice(at, end));
+  });
+  return out;
+}
+
+/**
+ * Every YAML key that can switch the gate off without touching its `run:`
+ * line: anything on the step but `name` and one literal `run:` (`if: false`,
+ * `continue-on-error: true`, a `shell:` that swallows the exit status, an
+ * `env:` that repoints mypy — in any quoting or spacing), a job-level
+ * `continue-on-error` of any value, or a `shell:` in the job's or the
+ * workflow's `defaults:`. Job- and workflow-level keys are matched normalised.
+ */
+function stepSwitchProblems(ymlText: string): string[] {
+  const problems: string[] = [];
+  // A content line indented DEEPER than the step's keys is a YAML plain-scalar
+  // continuation: it folds into the `run:` value (`|| true`, `--exclude=...`),
+  // and the single-line extractor below never sees it. Refused outright.
+  const step = gateStepLines(ymlText);
+  const keyIndent = indentOf(step[0]) + 2;
+  for (const l of step.slice(1)) {
+    if (isContent(l) && indentOf(l) > keyIndent) {
+      problems.push(
+        `ci.yml: step "${STEP_NAME}" carries the continuation line ${JSON.stringify(l.trim())}. It folds ` +
+          `into the \`run:\` value, where it can swallow the exit status or narrow the gate, and the ` +
+          `single-line extractor cannot see it. Keep the whole command on the \`run:\` line.`,
+      );
+    }
+  }
+  // A POSITIVE rule, not a list of bad keys: after the `- name:` line, every
+  // content line at the key indentation must be literally `run: ...`, and
+  // there is exactly one. A bad key cannot hide behind a spelling this reader
+  // does not know (`"if": false`, `if : false`), because no spelling but the
+  // literal `run:` is accepted at all.
+  const keyLines = step.slice(1).filter((l) => isContent(l) && indentOf(l) === keyIndent);
+  for (const l of keyLines) {
+    if (!/^run: \S/.test(l.trimStart())) {
+      problems.push(
+        `ci.yml: step "${STEP_NAME}" carries ${JSON.stringify(l.trim())}; after \`- name:\` only a ` +
+          `literal \`run: ...\` line is allowed. A key such as \`if: false\`, \`continue-on-error: true\`, ` +
+          `\`shell:\` or \`env:\` (in any quoting or spacing) can switch the gate off while its run ` +
+          `line stays pinned.`,
+      );
+    }
+  }
+  const runLines = keyLines.filter((l) => /^run: \S/.test(l.trimStart())).length;
+  if (runLines !== 1) {
+    problems.push(`ci.yml: step "${STEP_NAME}" carries ${runLines} \`run:\` line(s); exactly one is allowed.`);
+  }
+  const job = pythonJobLines(ymlText);
+  if (keyBlock(job, 4, "continue-on-error").length) {
+    problems.push(
+      "ci.yml: the `python` job carries a job-level `continue-on-error:` (any value is refused; " +
+        "`true` or an expression lets a red mypy step pass the job).",
+    );
+  }
+  const lines = ymlText.split("\n");
+  for (const [label, block] of [
+    ["the `python` job's", keyBlock(job, 4, "defaults")],
+    ["the workflow's top-level", keyBlock(lines, 0, "defaults")],
+  ] as const) {
+    // `\bshell["']?\s*:` rather than a line-start match, so a flow mapping
+    // (`defaults: {run: {shell: bash}}`) and a quoted or spaced key are seen too.
+    if (block.some((l) => isContent(l) && /\bshell["']?\s*:/.test(l))) {
+      problems.push(
+        `ci.yml: ${label} \`defaults:\` sets a \`shell:\`, which applies to the mypy step and can ` +
+          `swallow its exit status.`,
+      );
+    }
+  }
+  return problems;
+}
+
+/** The whitespace tokens after `mypy` on the named step's `run:` line. */
+function ciMypyArgs(ymlText: string): string[] {
+  let runLine: string | undefined;
+  for (const l of gateStepLines(ymlText).slice(1)) {
+    const t = l.trim();
+    if (t.startsWith("run: ")) {
+      runLine = t;
+      break;
+    }
+  }
+  if (runLine === undefined) {
+    throw new Error(`step "${STEP_NAME}" has no single-line \`run: \` value before the next step`);
+  }
+  const value = runLine.slice("run: ".length).trim();
+  if (!value.startsWith("mypy ")) {
+    throw new Error(
+      `step "${STEP_NAME}" runs \`${value}\`, which does not start with \`mypy \`. This test parses ` +
+        `the path set out of a single-line mypy command; a wrapped or multi-line body must be ` +
+        `taught to the extractor rather than silently read as empty.`,
+    );
+  }
+  return value.slice("mypy ".length).split(/\s+/).filter(Boolean);
+}
+
+/** The whitespace tokens after `$(MYPY)` on the `typecheck:` recipe line. */
+function makefileTypecheckArgs(makefileText: string): string[] {
+  const lines = makefileText.split("\n");
+  const at = lines.indexOf("typecheck:");
+  if (at === -1) {
+    throw new Error(
+      "analytics-service/Makefile has no `typecheck:` target. It is the local mirror of the CI mypy " +
+        "gate (`make ci` runs it); if it was renamed, update this test in the same commit.",
+    );
+  }
+  const recipe = lines[at + 1];
+  const prefix = "\t$(MYPY) ";
+  if (recipe === undefined || !recipe.startsWith(prefix)) {
+    throw new Error(
+      `the line after \`typecheck:\` is not a TAB-indented \`$(MYPY) ...\` recipe line: ` +
+        `${JSON.stringify(recipe)}`,
+    );
+  }
+  return recipe.slice(prefix.length).split(/\s+/).filter(Boolean);
+}
+
+/** The one `MYPY` assignment the `typecheck` recipe's `$(MYPY)` must expand from. */
+const MAKEFILE_MYPY_ASSIGNMENT = /^MYPY\s*=\s*\$\(VENV\)\/bin\/mypy\s*$/;
+
+/**
+ * Two ways to neutralise `make typecheck` with its recipe line intact: repoint
+ * `$(MYPY)` (`MYPY = true`, a second `MYPY :=`, an `override`/`define`), or add a
+ * second `typecheck:` rule — GNU make runs the LATER recipe, and a
+ * target-specific `typecheck: MYPY = true` line is a second rule line too. The
+ * `MYPY` assignment is pinned to exactly `$(VENV)/bin/mypy` and exactly one
+ * rule line may name `typecheck` as a target.
+ */
+function makefileBinaryProblems(makefileText: string): string[] {
+  const problems: string[] = [];
+  const lines = makefileText.split("\n").filter((l) => !l.startsWith("\t"));
+  const assignments = lines.filter((l) =>
+    /^\s*(?:(?:override|export|private)\s+)*(?:define\s+MYPY\b|MYPY\s*(?::::?=|::=|[:?+!]?=))/.test(l),
+  );
+  if (assignments.length !== 1 || !MAKEFILE_MYPY_ASSIGNMENT.test(assignments[0])) {
+    problems.push(
+      `Makefile: the \`MYPY\` variable is assigned by ${JSON.stringify(assignments)}; exactly one ` +
+        `\`MYPY = $(VENV)/bin/mypy\` is allowed. Any other value (\`MYPY = true\`) makes the ` +
+        `\`typecheck\` recipe run something that is not mypy with its line unchanged.`,
+    );
+  }
+  const rules = lines.filter((l) => {
+    const head = l.replace(/#.*/, "");
+    const colon = head.indexOf(":");
+    if (colon === -1 || head.startsWith(".")) return false;
+    return head.slice(0, colon).trim().split(/\s+/).includes("typecheck");
+  });
+  if (rules.length !== 1) {
+    problems.push(
+      `Makefile: ${rules.length} rule line(s) name \`typecheck\` as a target ` +
+        `(${JSON.stringify(rules)}); exactly one is allowed. GNU make runs the LATER recipe, and a ` +
+        `target-specific \`typecheck: MYPY = ...\` line repoints the binary.`,
+    );
+  }
+  return problems;
+}
+
+/** Path tokens only (flags dropped), one trailing `/` stripped. */
+function pathSet(tokens: string[]): Set<string> {
+  return new Set(tokens.filter((t) => !t.startsWith("--")).map((t) => t.replace(/\/$/, "")));
+}
+
+function flagSet(tokens: string[]): Set<string> {
+  return new Set(tokens.filter((t) => t.startsWith("--")));
+}
+
+/**
+ * A token that is neither a path nor a flag but shell or mypy syntax: a shell
+ * operator or metacharacter (`||`, `&&`, `;`, `|`, `>`, `$(`, a backtick), a
+ * mypy argfile (`@args.txt`, which injects arguments from a file), or a `#`
+ * that turns the rest of the line into a comment. Each can swallow the exit
+ * status or inject arguments, so it is reported as that — never as a missing
+ * surface member — and kept out of the path set.
+ */
+const isShellToken = (t: string): boolean => /[;&|<>`$()]/.test(t) || t.startsWith("@") || t.startsWith("#");
+
+/**
+ * Every TRACKED path under `analytics-service/`, relative to it. Read from
+ * `git ls-files`, not the working tree, so a developer's untracked scratch
+ * file (or a gitignored `__pycache__/`) cannot make this test disagree with
+ * CI's clean checkout. `execFileSync` with no shell; an empty result throws,
+ * because an empty listing would derive an empty surface and read as a
+ * mismatch against every named path rather than as a broken read.
+ */
+function readTrackedListing(): string[] {
+  const out = execFileSync("git", ["ls-files", "-z", "--", SERVICE_DIR_REL], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+  const prefix = `${SERVICE_DIR_REL}/`;
+  const paths = out
+    .split("\0")
+    .filter(Boolean)
+    .map((p) => (p.startsWith(prefix) ? p.slice(prefix.length) : p));
+  if (paths.length === 0) {
+    throw new Error(
+      `\`git ls-files -- ${SERVICE_DIR_REL}\` returned nothing from ${ROOT}. The surface is derived ` +
+        `from that listing; run this test from the repository root of a git checkout.`,
+    );
+  }
+  return paths;
+}
+
+/**
+ * The top-level directory a tracked `.py` path makes a surface candidate, or
+ * `null`. Any directory holding a `.py` file ANYWHERE beneath it counts —
+ * `__init__.py` does NOT decide it, because Python 3 imports a directory
+ * without one as a namespace package and mypy follows it under
+ * `--follow-imports=silent` with its errors suppressed. `__pycache__` and
+ * dot-directories are skipped at any depth.
+ */
+function pyTopDir(path: string): string | null {
+  const parts = path.split("/");
+  if (parts.length < 2 || !path.endsWith(".py")) return null;
+  const dirs = parts.slice(0, -1);
+  if (dirs.some((d) => d === "__pycache__" || d.startsWith("."))) return null;
+  return dirs[0];
+}
+
+/** Top-level `*.py` files plus every top-level directory holding a `.py`, minus `excluded`. */
+function diskSurface(listing: string[], excluded: Record<string, string>): Set<string> {
+  const surface = new Set<string>();
+  for (const p of listing) {
+    if (!p.includes("/") && p.endsWith(".py")) surface.add(p);
+    const top = pyTopDir(p);
+    if (top !== null && !Object.hasOwn(excluded, top)) surface.add(top);
+  }
+  return surface;
+}
+
+/** Every disagreement between the CI command, the Makefile recipe and disk. Empty ⇔ pinned. */
+function surfaceProblems(
+  ymlText: string,
+  makefileText: string,
+  listing: string[],
+  excluded: Record<string, string>,
+): string[] {
+  const problems: string[] = [];
+
+  const count = mypyInvocationCount(pythonJobLines(ymlText));
+  if (count !== 1) {
+    problems.push(
+      `ci.yml: the \`python\` job carries ${count} mypy invocation(s); exactly ONE is allowed. ` +
+        `A second, partial invocation lets the gate's surface be split across steps where no single ` +
+        `line states it. (Counted: \`mypy\` / \`python -m mypy\` at a command start or after ` +
+        `\`; & | ( $(\`, outside \`name:\` lines and quoted strings. Wrappers such as \`uv run\`, ` +
+        `\`timeout\` or \`if mypy\` are NOT counted; the gate's own paths and flags are pinned ` +
+        `exactly, which is what bounds coverage.)`,
+    );
+  }
+
+  problems.push(...stepSwitchProblems(ymlText));
+
+  // The flag set is pinned EXACTLY, not by presence. A presence check lets an
+  // added `--exclude=services/ingestion/` (or `--allow-untyped-defs`) narrow or
+  // weaken the gate while the PATH set, which is all the surface arm reads,
+  // stays equal. The Makefile recipe carries only `--config-file=pyproject.toml`:
+  // its other flags come from that file.
+  const ciTokens = ciMypyArgs(ymlText);
+  const flags = flagSet(ciTokens);
+  for (const f of REQUIRED_CI_FLAGS) {
+    if (!flags.has(f)) problems.push(`ci.yml: the mypy invocation lost the flag "${f}"`);
+  }
+  for (const f of [...flags].sort()) {
+    if (!(REQUIRED_CI_FLAGS as readonly string[]).includes(f)) {
+      problems.push(
+        `ci.yml: the mypy invocation carries the flag "${f}"; exactly ` +
+          `${JSON.stringify(REQUIRED_CI_FLAGS)} is allowed. Any other flag can narrow or weaken the ` +
+          `gate while its path set stays equal.`,
+      );
+    }
+  }
+  // `make ci` is the documented local mirror of CI; if it stops depending on
+  // `typecheck`, the local gauntlet goes green without running mypy at all.
+  const ciTarget = makefileText.split("\n").find((l) => /^ci:/.test(l));
+  if (ciTarget === undefined) {
+    problems.push("Makefile: no `ci:` target. It is the local CI gauntlet and must run `typecheck`.");
+  } else if (!ciTarget.slice("ci:".length).trim().split(/\s+/).includes("typecheck")) {
+    problems.push(
+      `Makefile: the \`ci:\` target's prerequisites ${JSON.stringify(ciTarget)} do not include ` +
+        `\`typecheck\`, so \`make ci\` no longer runs the mypy gate.`,
+    );
+  }
+
+  problems.push(...makefileBinaryProblems(makefileText));
+
+  const mkTokens = makefileTypecheckArgs(makefileText);
+  const mkFlags = flagSet(mkTokens);
+  for (const f of REQUIRED_MAKEFILE_FLAGS) {
+    if (!mkFlags.has(f)) {
+      problems.push(
+        `Makefile: the \`typecheck\` recipe lost the flag "${f}", so a stray mypy.ini / .mypy.ini ` +
+          `would be read instead of pyproject.toml and local no longer reads CI's config.`,
+      );
+    }
+  }
+  for (const f of [...mkFlags].sort()) {
+    if (!(REQUIRED_MAKEFILE_FLAGS as readonly string[]).includes(f)) {
+      problems.push(
+        `Makefile: the \`typecheck\` recipe carries the flag "${f}"; exactly ` +
+          `${JSON.stringify(REQUIRED_MAKEFILE_FLAGS)} is allowed, because its other flags come from ` +
+          `pyproject.toml [tool.mypy]. A flag here can narrow or weaken the local gate.`,
+      );
+    }
+  }
+
+  for (const [label, tokens] of [
+    ["ci.yml", ciTokens],
+    ["Makefile", mkTokens],
+  ] as const) {
+    for (const t of tokens.filter(isShellToken)) {
+      problems.push(
+        `${label}: the mypy invocation carries the token ${JSON.stringify(t)}, a shell operator, argfile ` +
+          `or comment that can swallow the exit status or inject arguments. The command must be ` +
+          `\`mypy\`, its pinned flags and its paths, nothing else.`,
+      );
+    }
+  }
+
+  const surface = diskSurface(listing, excluded);
+  const sets: Array<[string, Set<string>]> = [
+    ["ci.yml", pathSet(ciTokens.filter((t) => !isShellToken(t)))],
+    ["Makefile", pathSet(mkTokens.filter((t) => !isShellToken(t)))],
+  ];
+  for (const [label, named] of sets) {
+    for (const member of [...surface].sort()) {
+      if (!named.has(member)) {
+        problems.push(
+          `${label}: service-surface member "${member}" is tracked under analytics-service/ but ` +
+            `is NOT named by the mypy invocation. Name it on the command line (a module reached only ` +
+            `by import is followed with its errors suppressed), or add it to EXCLUDED with a reason.`,
+        );
+      }
+    }
+    for (const path of [...named].sort()) {
+      if (!surface.has(path)) {
+        problems.push(
+          `${label}: the mypy invocation names "${path}", which is not a service-surface member ` +
+            `(not a tracked top-level *.py file, not a top-level directory holding a tracked .py ` +
+            `file, or an EXCLUDED one).`,
+        );
+      }
+    }
+  }
+
+  for (const name of Object.keys(excluded).sort()) {
+    if (!listing.some((p) => pyTopDir(p) === name)) {
+      problems.push(
+        `EXCLUDED: the exclusion "${name}" names no directory holding a tracked .py file under ` +
+          `analytics-service/. A stale ` +
+          `exclusion is a decision that outlived its subject — remove it or restore the directory.`,
+      );
+    }
+  }
+
+  return problems;
+}
+
+// ── the mypy CONFIG the gate runs under ──────────────────────────────────────
+// CI runs mypy with cwd `analytics-service/`, so pyproject.toml's [tool.mypy]
+// always applies, and the Makefile recipe has no other source of flags. An
+// `ignore_errors` override, an `exclude`/`files` key, `strict = false`, or
+// `follow_imports = "skip"` on a surface module weakens the gate with the ci.yml
+// line unchanged; so does a per-file `# mypy:` comment or a top-of-file bare
+// `# type: ignore`. These are pinned here.
+
+/**
+ * The third-party modules carrying a `[[tool.mypy.overrides]]` entry, EXACTLY.
+ * Hand-typed, equal to today's set: an override is only legitimate for an
+ * untyped third-party boundary, and adding a module here is a decision a
+ * reviewer must see — above all a surface module, which an override can
+ * switch off.
+ */
+const THIRD_PARTY_OVERRIDES = ["ccxt.*", "pandas.*", "pandera.*", "quantstats.*", "scipy.*"] as const;
+/** The keys `[tool.mypy]` carries, EXACTLY. */
+const MYPY_TABLE_KEYS = ["follow_imports", "python_version", "strict"] as const;
+/** The keys an override may carry. `ignore_errors` is deliberately absent. */
+const OVERRIDE_KEYS = ["follow_imports", "ignore_missing_imports", "module"] as const;
+
+interface TomlTable {
+  header: string;
+  isArray: boolean;
+  kv: Map<string, string>;
+  /** Lines inside this table the reader could not parse; reported only for a table carrying mypy config. */
+  unparsed: string[];
+}
+
+function stripTomlComment(line: string): string {
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === "#") return line.slice(0, i);
+  }
+  return line;
+}
+
+/** Open `[` / `{` minus close `]` / `}` outside single-line strings. */
+function bracketDepth(text: string): number {
+  let depth = 0;
+  let quote: string | null = null;
+  for (const c of text) {
+    if (quote) {
+      if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === "[" || c === "{") depth++;
+    else if (c === "]" || c === "}") depth--;
+  }
+  return depth;
+}
+
+/**
+ * A deliberately NARROW TOML reader: table headers, array-of-table headers,
+ * `key = value`, and a value whose array spans several lines (bracket depth
+ * tracked outside strings — strings are single-line, because a multi-line
+ * string is refused below). Two kinds of error:
+ *   - `errors`, ALWAYS reported: a multi-line string or a line continuation
+ *     (which can make a header line string content), an array still open at
+ *     end of file, and any unparseable line that looks like a table header or
+ *     names `mypy`;
+ *   - `unparsed` on the table the line sits in: any other line it cannot parse,
+ *     reported by the caller only for the root table and for tables that carry
+ *     mypy configuration, so a routine `[tool.ruff]` construct cannot red the
+ *     mypy contract. A header cannot occur inside an array, so this keeps the
+ *     fail-closed property for mypy tables.
+ */
+function parseTomlTables(text: string): { tables: TomlTable[]; errors: string[] } {
+  const tables: TomlTable[] = [{ header: "", isArray: false, kv: new Map(), unparsed: [] }];
+  const errors: string[] = [];
+  let pending: { key: string; value: string; line: number } | null = null;
+  // A `for` loop, not `forEach`: TypeScript narrows `pending` across a loop
+  // body but not across a callback, so the end-of-file check below type-checks.
+  for (const [i, raw] of text.split("\n").entries()) {
+    // A multi-line string (`'''` / `"""`) or a backslash line continuation
+    // lets a line THIS reader sees as a table header be string content to a
+    // real TOML parser — the smuggle files `ignore_errors = true` under a fake
+    // table here while `tomllib` puts it in `[[tool.mypy.overrides]]`. Refused
+    // wherever it appears, comments included, before anything else is read.
+    if (/'''|"""/.test(raw) || /\\$/.test(stripTomlComment(raw).trimEnd())) {
+      errors.push(
+        `pyproject.toml: line ${i + 1} ${JSON.stringify(raw)} opens a multi-line string or a line ` +
+          `continuation. Its following lines may be string content that this reader would parse as ` +
+          `tables and keys, so it cannot vouch that the file sets no mypy option.`,
+      );
+      continue;
+    }
+    const line = stripTomlComment(raw).trim();
+    if (pending) {
+      pending.value += ` ${line}`;
+      if (bracketDepth(pending.value) <= 0) {
+        tables[tables.length - 1].kv.set(pending.key, pending.value.trim());
+        pending = null;
+      }
+      continue;
+    }
+    if (!line) continue;
+    let m: RegExpExecArray | null;
+    if ((m = /^\[\[\s*([^\]]+?)\s*\]\]$/.exec(line))) {
+      tables.push({ header: m[1], isArray: true, kv: new Map(), unparsed: [] });
+    } else if ((m = /^\[\s*([^\]]+?)\s*\]$/.exec(line))) {
+      tables.push({ header: m[1], isArray: false, kv: new Map(), unparsed: [] });
+    } else if ((m = /^([A-Za-z0-9_.-]+)\s*=\s*(.+)$/.exec(line))) {
+      if (bracketDepth(m[2]) > 0) pending = { key: m[1], value: m[2], line: i + 1 };
+      else tables[tables.length - 1].kv.set(m[1], m[2].trim());
+    } else {
+      const msg =
+        `pyproject.toml: line ${i + 1} ${JSON.stringify(raw)} is neither a table header nor a ` +
+        `\`key = value\`. This pin's reader cannot parse it, so it cannot vouch that it sets no mypy option.`;
+      if (line.startsWith("[") || /mypy/.test(line)) errors.push(msg);
+      else tables[tables.length - 1].unparsed.push(msg);
+    }
+  }
+  if (pending) {
+    errors.push(
+      `pyproject.toml: the array opened on line ${pending.line} for the key "${pending.key}" is never ` +
+        `closed, so every line after it was read as part of that value.`,
+    );
+  }
+  return { tables, errors };
+}
+
+const unquote = (v: string): string => v.trim().replace(/^(["'])(.*)\1$/, "$2");
+
+/** A TOML string or string array (a multi-line one arrives joined), as a list of strings. */
+function tomlStrings(v: string): string[] {
+  const t = v.trim();
+  const inner = /^\[(.*)\]$/.exec(t);
+  if (!inner) return [unquote(t)];
+  return inner[1].split(",").map(unquote).filter(Boolean);
+}
+
+/** Every tracked `.py` file the gate checks: top-level files plus those under a surface directory. */
+function surfaceFiles(listing: string[], excluded: Record<string, string>): string[] {
+  return listing.filter((p) => {
+    if (!p.endsWith(".py")) return false;
+    if (!p.includes("/")) return true;
+    const top = pyTopDir(p);
+    return top !== null && !Object.hasOwn(excluded, top);
+  });
+}
+
+/** Every per-file mypy switch in one surface file: a `# mypy:` line, or a bare `# type: ignore` before the first statement. */
+function inlineDirectiveProblems(path: string, text: string): string[] {
+  const problems: string[] = [];
+  const lines = text.split("\n");
+  lines.forEach((l, i) => {
+    if (/^\s*#\s*mypy\s*:/.test(l)) {
+      problems.push(
+        `${path}: line ${i + 1} is an inline \`# mypy:\` config comment, which reconfigures the ` +
+          `gate for this file with the ci.yml line and pyproject.toml unchanged.`,
+      );
+    }
+  });
+  for (const [i, l] of lines.entries()) {
+    if (isContent(l)) break;
+    if (/^\s*#\s*type\s*:\s*ignore\b/.test(l)) {
+      problems.push(
+        `${path}: line ${i + 1} is a \`# type: ignore\` before the first statement, which makes mypy ` +
+          `ignore the WHOLE file.`,
+      );
+    }
+  }
+  return problems;
+}
+
+/** Every way the config or a surface file can weaken the gate unseen by the command-line pin. Empty ⇔ pinned. */
+function mypyConfigProblems(
+  pyprojectText: string,
+  listing: string[],
+  excluded: Record<string, string>,
+  readPy: (rel: string) => string,
+): string[] {
+  const problems: string[] = [];
+
+  for (const f of ["mypy.ini", ".mypy.ini"]) {
+    if (listing.includes(f)) {
+      problems.push(
+        `analytics-service/${f} is tracked. mypy reads it BEFORE pyproject.toml, so it replaces the ` +
+          `pinned [tool.mypy] configuration wholesale.`,
+      );
+    }
+  }
+
+  // A `.pyi` stub beside a module REPLACES that module in mypy's crawl: mypy
+  // checks the stub and never reads the `.py`, so a red `pkg/bad.py` goes green
+  // the moment `pkg/bad.pyi` is added. None is tracked today; any one outside an
+  // EXCLUDED directory is refused.
+  for (const p of listing) {
+    if (!p.endsWith(".pyi")) continue;
+    const top = p.includes("/") ? p.split("/")[0] : null;
+    if (top !== null && Object.hasOwn(excluded, top)) continue;
+    problems.push(
+      `analytics-service/${p} is a tracked stub. mypy reads it INSTEAD of ` +
+        `analytics-service/${p.replace(/\.pyi$/, ".py")}, so that module is no longer checked.`,
+    );
+  }
+
+  const { tables, errors } = parseTomlTables(pyprojectText);
+  problems.push(...errors);
+  const mypyTables = tables.filter(
+    (t) => /mypy/.test(t.header) || [...t.kv.keys()].some((k) => /mypy/.test(k)),
+  );
+  for (const t of tables) if (t.header === "" || mypyTables.includes(t)) problems.push(...t.unparsed);
+  const main = mypyTables.filter((t) => t.header === "tool.mypy" && !t.isArray);
+  const overrides = mypyTables.filter((t) => t.header === "tool.mypy.overrides" && t.isArray);
+  for (const t of mypyTables) {
+    if (!main.includes(t) && !overrides.includes(t)) {
+      problems.push(
+        `pyproject.toml: the table [${t.header || "(root)"}] carries mypy configuration outside ` +
+          `[tool.mypy] and [[tool.mypy.overrides]], the only two shapes this pin reads.`,
+      );
+    }
+  }
+
+  if (main.length !== 1) {
+    problems.push(`pyproject.toml: ${main.length} [tool.mypy] table(s); exactly one is pinned.`);
+  } else {
+    const kv = main[0].kv;
+    for (const k of [...kv.keys()].sort()) {
+      if (!(MYPY_TABLE_KEYS as readonly string[]).includes(k)) {
+        problems.push(
+          `pyproject.toml: [tool.mypy] carries the key "${k}"; exactly ${JSON.stringify(MYPY_TABLE_KEYS)} ` +
+            `is allowed. A key such as \`exclude\`, \`files\` or \`ignore_errors\` narrows or weakens ` +
+            `the gate with the ci.yml line unchanged.`,
+        );
+      }
+    }
+    for (const k of MYPY_TABLE_KEYS) {
+      if (!kv.has(k)) problems.push(`pyproject.toml: [tool.mypy] lost the key "${k}".`);
+    }
+    if (kv.has("strict") && kv.get("strict") !== "true") {
+      problems.push(`pyproject.toml: [tool.mypy] sets strict = ${kv.get("strict")}; it must be true.`);
+    }
+    if (kv.has("follow_imports") && unquote(kv.get("follow_imports")!) !== "silent") {
+      problems.push(
+        `pyproject.toml: [tool.mypy] sets follow_imports = ${kv.get("follow_imports")}; it must be "silent".`,
+      );
+    }
+  }
+
+  const modules: string[] = [];
+  for (const t of overrides) {
+    for (const k of [...t.kv.keys()].sort()) {
+      if (!(OVERRIDE_KEYS as readonly string[]).includes(k)) {
+        problems.push(
+          `pyproject.toml: a [[tool.mypy.overrides]] entry carries the key "${k}"; only ` +
+            `${JSON.stringify(OVERRIDE_KEYS)} are allowed (\`ignore_errors\` switches checking off).`,
+        );
+      }
+    }
+    modules.push(...tomlStrings(t.kv.get("module") ?? ""));
+  }
+  for (const m of [...new Set(modules)].sort()) {
+    if (!(THIRD_PARTY_OVERRIDES as readonly string[]).includes(m)) {
+      problems.push(
+        `pyproject.toml: a [[tool.mypy.overrides]] entry names the module "${m}", which is not in the ` +
+          `hand-typed third-party set ${JSON.stringify(THIRD_PARTY_OVERRIDES)}. An override on a ` +
+          `surface module can switch the gate off for it.`,
+      );
+    }
+  }
+  for (const m of THIRD_PARTY_OVERRIDES) {
+    if (!modules.includes(m)) {
+      problems.push(
+        `pyproject.toml: no [[tool.mypy.overrides]] entry names "${m}" any more. Remove it from ` +
+          `THIRD_PARTY_OVERRIDES in the same commit, so the pinned set stays equal to the file.`,
+      );
+    }
+  }
+
+  for (const p of surfaceFiles(listing, excluded)) problems.push(...inlineDirectiveProblems(p, readPy(p)));
+
+  return problems;
+}
+
+// ── read ONCE at module load; every leg mutates in-memory copies of these ──
+const REAL_YML = readFileSync(CI_YML, "utf8");
+const REAL_MAKEFILE = readFileSync(MAKEFILE, "utf8");
+const REAL_PYPROJECT = readFileSync(PYPROJECT, "utf8");
+const REAL_LISTING = readTrackedListing();
+const readRealPy = (rel: string): string => readFileSync(join(ROOT, SERVICE_DIR_REL, rel), "utf8");
+
+describe("[164.6.1 / MYPY-MAINPY-01] the mypy --strict invocation names exactly the service surface", () => {
+  it("ci.yml path set == disk-derived surface == Makefile `typecheck` set, one invocation", () => {
+    const problems = surfaceProblems(REAL_YML, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(problems, problems.join("\n")).toEqual([]);
+  });
+
+  it("pyproject.toml [tool.mypy] and the surface files carry no switch that weakens the gate", () => {
+    const problems = mypyConfigProblems(REAL_PYPROJECT, REAL_LISTING, EXCLUDED, readRealPy);
+    expect(problems, problems.join("\n")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⛔ CALIBRATION — every leg feeds a MUTATED COPY of the real text (or the real
+// listing) through `surfaceProblems`, so extraction runs on every leg too. The
+// mutations are string operations in memory; nothing here writes a file, and
+// nothing restores with a checkout.
+// ---------------------------------------------------------------------------
+describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", () => {
+  const RUN_LINE =
+    "run: mypy --strict --follow-imports=silent --config-file=pyproject.toml services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py";
+  const RECIPE_LINE =
+    "\t$(MYPY) --config-file=pyproject.toml services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py";
+  const PRE_PHASE_RUN_LINE = "run: mypy --strict --follow-imports=silent services/ routers/ models/";
+
+  /**
+   * ⛔ ASSERT THE MUTATION APPLIED BEFORE BELIEVING ANYTHING. A neuter that does
+   * not apply leaves the real text in place, the pin stays green, and the leg
+   * certifies nothing while looking like evidence.
+   */
+  function mutate(original: string, target: string, replacement: string, label: string): string {
+    expect(
+      original.includes(target),
+      `CALIBRATION ${label}: the mutation target is not present in the real text — nothing would be ` +
+        `replaced and the leg would measure the unmutated file. Re-anchor the target.`,
+    ).toBe(true);
+    const mutated = original.replace(target, replacement);
+    expect(mutated, `CALIBRATION ${label}: the mutated text is identical to the original`).not.toBe(original);
+    expect(
+      mutated.includes(target),
+      `CALIBRATION ${label}: the target SURVIVED the mutation, so the copy still carries the real line`,
+    ).toBe(false);
+    return mutated;
+  }
+
+  /** An ADDITIVE mutation: the anchor stays, so the self-checks are on the added text instead. */
+  function insertAfter(original: string, anchor: string, added: string, label: string): string {
+    expect(
+      original.split(anchor).length - 1,
+      `CALIBRATION ${label}: the anchor must occur exactly once in the real text`,
+    ).toBe(1);
+    expect(original.includes(added), `CALIBRATION ${label}: the added text is already present`).toBe(false);
+    const mutated = original.replace(anchor, `${anchor}${added}`);
+    expect(mutated.includes(added), `CALIBRATION ${label}: the added text did not land`).toBe(true);
+    return mutated;
+  }
+
+  const has = (problems: string[], ...needles: string[]) =>
+    problems.some((p) => needles.every((n) => p.includes(n)));
+
+  it("(a) dropping `main.py` from the ci.yml run line → a problem naming main.py and ci.yml", () => {
+    const yml = mutate(REAL_YML, RUN_LINE, RUN_LINE.replace(" main.py ", " "), "(a)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, '"main.py"', "ci.yml:"), problems.join("\n")).toBe(true);
+    // The Makefile was not mutated, so it must not be blamed.
+    expect(has(problems, "Makefile:"), problems.join("\n")).toBe(false);
+  });
+
+  it("(a2) a ci.yml run line naming a path that is not a surface member → a problem naming it", () => {
+    const yml = mutate(REAL_YML, RUN_LINE, RUN_LINE.replace(" services/", " ghost/ services/"), "(a2)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'names "ghost"', "not a service-surface member"), problems.join("\n")).toBe(true);
+    expect(has(problems, "Makefile:"), problems.join("\n")).toBe(false);
+  });
+
+  it("(b) a phantom tracked top-level `newmod.py` → a problem naming newmod.py", () => {
+    const listing = [...REAL_LISTING, "newmod.py"];
+    const problems = surfaceProblems(REAL_YML, REAL_MAKEFILE, listing, EXCLUDED);
+    expect(has(problems, '"newmod.py"', "ci.yml:"), problems.join("\n")).toBe(true);
+    expect(has(problems, '"newmod.py"', "Makefile:"), problems.join("\n")).toBe(true);
+  });
+
+  it("(c) dropping `main_worker.py` from the Makefile recipe → a problem naming main_worker.py and Makefile", () => {
+    const mk = mutate(REAL_MAKEFILE, RECIPE_LINE, RECIPE_LINE.replace(" main_worker.py ", " "), "(c)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, '"main_worker.py"', "Makefile:"), problems.join("\n")).toBe(true);
+    expect(has(problems, "ci.yml:"), problems.join("\n")).toBe(false);
+  });
+
+  it("(d) a phantom package `newpkg/` with __init__.py → a problem naming newpkg (D-09)", () => {
+    const listing = [...REAL_LISTING, "newpkg/__init__.py"];
+    const problems = surfaceProblems(REAL_YML, REAL_MAKEFILE, listing, EXCLUDED);
+    expect(has(problems, '"newpkg"', "ci.yml:"), problems.join("\n")).toBe(true);
+    expect(has(problems, '"newpkg"', "Makefile:"), problems.join("\n")).toBe(true);
+  });
+
+  it("(d2) a phantom NAMESPACE package `newns/` (a nested .py, no __init__.py) → a problem naming newns", () => {
+    const listing = [...REAL_LISTING, "newns/dispatch/worker.py"];
+    expect(
+      listing.some((p) => p.startsWith("newns/") && p.endsWith("__init__.py")),
+      "CALIBRATION (d2): the phantom must carry NO __init__.py, or it proves nothing new over (d)",
+    ).toBe(false);
+    const problems = surfaceProblems(REAL_YML, REAL_MAKEFILE, listing, EXCLUDED);
+    expect(has(problems, '"newns"', "ci.yml:"), problems.join("\n")).toBe(true);
+    expect(has(problems, '"newns"', "Makefile:"), problems.join("\n")).toBe(true);
+  });
+
+  it("(e) a second, partial mypy --strict step in the python job → an invocation-count problem", () => {
+    const yml = insertAfter(
+      REAL_YML,
+      RUN_LINE,
+      "\n      - name: Partial type gate\n        run: mypy --strict --follow-imports=silent services/",
+      "(e)",
+    );
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "carries 2 mypy invocation(s)"), problems.join("\n")).toBe(true);
+  });
+
+  it("(e2) a second invocation split across `mypy \\` and a continuation line in a `run: |` block → counted", () => {
+    const yml = insertAfter(
+      REAL_YML,
+      RUN_LINE,
+      "\n      - name: Partial type gate (multi-line)\n        run: |\n          mypy \\\n            --strict services/",
+      "(e2)",
+    );
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "carries 2 mypy invocation(s)"), problems.join("\n")).toBe(true);
+  });
+
+  it("(e3) a second `python -m mypy` invocation WITHOUT --strict → counted", () => {
+    const yml = insertAfter(
+      REAL_YML,
+      RUN_LINE,
+      "\n      - name: Loose type gate\n        run: python -m mypy services/",
+      "(e3)",
+    );
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "carries 2 mypy invocation(s)"), problems.join("\n")).toBe(true);
+  });
+
+  it("(e4) a step NAMED `Lint check (mypy)` running no mypy → NOT counted, no invocation problem", () => {
+    const yml = insertAfter(REAL_YML, RUN_LINE, "\n      - name: Lint check (mypy)\n        run: echo ok", "(e4)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "mypy invocation(s)"), problems.join("\n")).toBe(false);
+  });
+
+  it('(e5) a quoted `echo "done; mypy next"` → NOT counted; the same text unquoted IS counted', () => {
+    const quoted = insertAfter(REAL_YML, RUN_LINE, '\n      - name: Say done\n        run: echo "done; mypy next"', "(e5)");
+    expect(has(surfaceProblems(quoted, REAL_MAKEFILE, REAL_LISTING, EXCLUDED), "mypy invocation(s)")).toBe(false);
+    const bare = insertAfter(REAL_YML, RUN_LINE, "\n      - name: Say done\n        run: echo done; mypy next", "(e5 bare)");
+    const problems = surfaceProblems(bare, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "carries 2 mypy invocation(s)"), problems.join("\n")).toBe(true);
+  });
+
+  it("(g2) the NEXT job's key carries a trailing comment → its job-level keys are not read as the python job's", () => {
+    const afterPython = REAL_YML.split("\n  python:\n")[1].split("\n").find((l) => /^ {0,2}\S/.test(l) && !l.trim().startsWith("#"));
+    expect(afterPython, "CALIBRATION (g2): `test-db-drift` is no longer the job after `python`; re-anchor the leg").toBe("  test-db-drift:");
+    const yml = mutate(REAL_YML, "\n  test-db-drift:\n", "\n  test-db-drift:  # calibration (g2)\n    continue-on-error: true\n", "(g2)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(problems, problems.join("\n")).toEqual([]);
+  });
+
+  it("(f) HISTORICAL — the pre-phase command names none of the four top-level modules", () => {
+    const yml = mutate(REAL_YML, RUN_LINE, PRE_PHASE_RUN_LINE, "(f)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    for (const m of ["main.py", "main_worker.py", "main_worker_healthz.py", "sentry_init.py"]) {
+      expect(has(problems, `"${m}"`, "ci.yml:"), `${m} was not named.\n${problems.join("\n")}`).toBe(true);
+    }
+  });
+
+  it("(g) removing `scripts` from the listing → a stale-exclusion problem naming scripts", () => {
+    const listing = REAL_LISTING.filter((p) => !p.startsWith("scripts/"));
+    expect(listing.length, "CALIBRATION (g): `scripts/` held no tracked path").toBeLessThan(REAL_LISTING.length);
+    const problems = surfaceProblems(REAL_YML, REAL_MAKEFILE, listing, EXCLUDED);
+    expect(has(problems, "EXCLUDED:", '"scripts"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(h) an added `--exclude=services/ingestion/` in ci.yml → a flag problem, with the path set still equal", () => {
+    const yml = mutate(
+      REAL_YML,
+      RUN_LINE,
+      RUN_LINE.replace("--follow-imports=silent ", "--follow-imports=silent --exclude=services/ingestion/ "),
+      "(h)",
+    );
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", '"--exclude=services/ingestion/"'), problems.join("\n")).toBe(true);
+    // The path set did not change, so the surface arm must stay quiet: the flag
+    // arm is the ONLY thing that sees this narrowing.
+    expect(has(problems, "service-surface member"), problems.join("\n")).toBe(false);
+  });
+
+  it("(h2) removing `--follow-imports=silent` alone from ci.yml → a lost-flag problem naming it", () => {
+    const yml = mutate(REAL_YML, RUN_LINE, RUN_LINE.replace(" --follow-imports=silent", ""), "(h2)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'lost the flag "--follow-imports=silent"'), problems.join("\n")).toBe(true);
+    expect(has(problems, '"--strict"'), problems.join("\n")).toBe(false);
+  });
+
+  const STEP_LINE = `      - name: ${STEP_NAME}\n`;
+
+  it("(j) `if: false` on the gate step → a step-key problem naming `if`", () => {
+    const yml = insertAfter(REAL_YML, STEP_LINE, "        if: false\n", "(j)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'carries "if: false"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(k) `continue-on-error: true` on the gate step → a step-key problem naming it", () => {
+    const yml = insertAfter(REAL_YML, STEP_LINE, "        continue-on-error: true  # calibration (k)\n", "(k)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'carries "continue-on-error: true'), problems.join("\n")).toBe(true);
+  });
+
+  it('(k2) a QUOTED `"if": false` on the gate step → a step-key problem naming it', () => {
+    const yml = insertAfter(REAL_YML, STEP_LINE, '        "if": false\n', "(k2)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'carries "\\"if\\": false"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(k3) a SPACED `if : false` on the gate step → a step-key problem naming it", () => {
+    const yml = insertAfter(REAL_YML, STEP_LINE, "        if : false\n", "(k3)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'carries "if : false"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(k4) a second `run:` line on the gate step → a run-count problem", () => {
+    const yml = insertAfter(REAL_YML, RUN_LINE, "\n        run: true", "(k4)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", "carries 2 `run:` line(s)"), problems.join("\n")).toBe(true);
+  });
+
+  it("(w) a folded continuation line `|| true` under the gate's run line → a continuation problem", () => {
+    const yml = insertAfter(REAL_YML, RUN_LINE, "\n          || true", "(w)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'continuation line "|| true"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(w2) a folded continuation line `--exclude=services/ingestion/` → a continuation problem", () => {
+    const yml = insertAfter(REAL_YML, RUN_LINE, "\n          --exclude=services/ingestion/", "(w2)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'continuation line "--exclude=services/ingestion/"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(l) a job-level `continue-on-error: true` on the python job → a job problem", () => {
+    const yml = insertAfter(REAL_YML, "\n  python:\n", "    continue-on-error: true  # calibration (l)\n", "(l)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", "job-level `continue-on-error:`"), problems.join("\n")).toBe(true);
+  });
+
+  it('(l2) a QUOTED job-level `"continue-on-error": true` → a job problem', () => {
+    const yml = insertAfter(REAL_YML, "\n  python:\n", '    "continue-on-error": true\n', "(l2)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", "job-level `continue-on-error:`"), problems.join("\n")).toBe(true);
+  });
+
+  it("(l3) a SPACED job-level `continue-on-error : false` → a job problem, whatever the value", () => {
+    const yml = insertAfter(REAL_YML, "\n  python:\n", "    continue-on-error : false\n", "(l3)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", "job-level `continue-on-error:` (any value is refused"), problems.join("\n")).toBe(true);
+  });
+
+  it("(m) a `shell:` in the python job's `defaults: run:` → a defaults problem", () => {
+    // The anchor must occur once (insertAfter asserts it): today only the
+    // python job carries this defaults block, so the shell lands in it.
+    const yml = insertAfter(
+      REAL_YML,
+      "    defaults:\n      run:\n        working-directory: analytics-service\n",
+      "        shell: bash {0} || true\n",
+      "(m)",
+    );
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", "`python` job's `defaults:` sets a `shell:`"), problems.join("\n")).toBe(true);
+  });
+
+  it("(i) a flag on the Makefile `typecheck` recipe → a Makefile flag problem", () => {
+    const mk = mutate(
+      REAL_MAKEFILE,
+      RECIPE_LINE,
+      RECIPE_LINE.replace("$(MYPY) ", "$(MYPY) --no-strict-optional "),
+      "(i)",
+    );
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", '"--no-strict-optional"'), problems.join("\n")).toBe(true);
+    expect(has(problems, "ci.yml:"), problems.join("\n")).toBe(false);
+  });
+
+  it("(h3) `--config-file=pyproject.toml` removed from ci.yml → a lost-flag problem naming it", () => {
+    const yml = mutate(REAL_YML, RUN_LINE, RUN_LINE.replace(" --config-file=pyproject.toml", ""), "(h3)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'lost the flag "--config-file=pyproject.toml"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(i2) `--config-file=pyproject.toml` removed from the Makefile recipe → a Makefile lost-flag problem", () => {
+    const mk = mutate(REAL_MAKEFILE, RECIPE_LINE, RECIPE_LINE.replace(" --config-file=pyproject.toml", ""), "(i2)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", 'lost the flag "--config-file=pyproject.toml"'), problems.join("\n")).toBe(true);
+    expect(has(problems, "ci.yml:"), problems.join("\n")).toBe(false);
+  });
+
+  it("(x) `MYPY = true` in the Makefile → a MYPY-assignment problem", () => {
+    const mk = mutate(REAL_MAKEFILE, "MYPY    = $(VENV)/bin/mypy", "MYPY    = true", "(x)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", "`MYPY` variable is assigned by", "MYPY    = true"), problems.join("\n")).toBe(true);
+    expect(has(problems, "ci.yml:"), problems.join("\n")).toBe(false);
+  });
+
+  it("(x2) a second `MYPY := true` below the real one → a MYPY-assignment problem", () => {
+    const mk = insertAfter(REAL_MAKEFILE, "MYPY    = $(VENV)/bin/mypy\n", "MYPY := true\n", "(x2)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", "`MYPY` variable is assigned by", "MYPY := true"), problems.join("\n")).toBe(true);
+  });
+
+  it("(x3) a second, later `typecheck:` rule → a rule-count problem", () => {
+    const mk = `${REAL_MAKEFILE}\ntypecheck:\n\ttrue\n`;
+    expect(REAL_MAKEFILE.endsWith("\ntypecheck:\n\ttrue\n"), "CALIBRATION (x3): already present").toBe(false);
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", "2 rule line(s) name `typecheck`"), problems.join("\n")).toBe(true);
+  });
+
+  it("(x4) a target-specific `typecheck: MYPY = true` → a rule-count problem", () => {
+    const mk = `${REAL_MAKEFILE}\ntypecheck: MYPY = true\n`;
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", "2 rule line(s) name `typecheck`"), problems.join("\n")).toBe(true);
+  });
+
+  it("(h4) `--strict` removed alone from ci.yml → a lost-flag problem naming it", () => {
+    const yml = mutate(REAL_YML, RUN_LINE, RUN_LINE.replace(" --strict", ""), "(h4)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'lost the flag "--strict"'), problems.join("\n")).toBe(true);
+    expect(has(problems, '"--follow-imports=silent"'), problems.join("\n")).toBe(false);
+  });
+
+  it("(sh) `|| true` appended to the ci.yml run line → a shell-token problem, not a surface problem", () => {
+    const yml = insertAfter(REAL_YML, RUN_LINE, " || exit 0", "(sh)");
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", 'the token "||"', "swallow the exit status or inject arguments"), problems.join("\n")).toBe(true);
+    expect(has(problems, '"||"', "service-surface member"), problems.join("\n")).toBe(false);
+  });
+
+  it("(sh2) an argfile `@extra-args.txt` on the Makefile recipe → a shell-token problem naming it", () => {
+    const mk = mutate(REAL_MAKEFILE, RECIPE_LINE, RECIPE_LINE.replace(" services/", " @extra-args.txt services/"), "(sh2)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", 'the token "@extra-args.txt"'), problems.join("\n")).toBe(true);
+    expect(has(problems, '"@extra-args.txt"', "service-surface member"), problems.join("\n")).toBe(false);
+  });
+
+  it("(sh3) a `#` in the Makefile recipe (the shell drops everything after it) → a shell-token problem", () => {
+    const mk = mutate(REAL_MAKEFILE, RECIPE_LINE, RECIPE_LINE.replace(" main.py", " # main.py"), "(sh3)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", 'the token "#"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(v2) the Makefile `ci:` target deleted → a missing-target problem", () => {
+    const mk = mutate(REAL_MAKEFILE, "\nci: typecheck test\n", "\n", "(v2)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile: no `ci:` target"), problems.join("\n")).toBe(true);
+  });
+
+  it("(m2) a job-level FLOW-MAPPING `defaults: {run: {shell: ...}}` → a defaults problem", () => {
+    const yml = mutate(
+      REAL_YML,
+      "    defaults:\n      run:\n        working-directory: analytics-service\n",
+      "    defaults: {run: {working-directory: analytics-service, shell: 'bash {0}'}}\n",
+      "(m2)",
+    );
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", "`python` job's `defaults:` sets a `shell:`"), problems.join("\n")).toBe(true);
+  });
+
+  it("(m3) a WORKFLOW-level block `defaults: run: shell:` → a workflow defaults problem", () => {
+    expect(REAL_YML.split("\njobs:\n").length - 1, "CALIBRATION (m3): `jobs:` must occur once").toBe(1);
+    expect(/^defaults\s*:/m.test(REAL_YML), "CALIBRATION (m3): a top-level defaults already exists").toBe(false);
+    const yml = REAL_YML.replace("\njobs:\n", "\ndefaults:\n  run:\n    shell: bash {0}\n\njobs:\n");
+    expect(yml.includes("\ndefaults:\n  run:\n    shell: bash {0}\n"), "CALIBRATION (m3): the block did not land").toBe(true);
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", "workflow's top-level `defaults:` sets a `shell:`"), problems.join("\n")).toBe(true);
+  });
+
+  it("(m4) a WORKFLOW-level one-line `defaults: {run: {shell: bash}}` → a workflow defaults problem", () => {
+    expect(REAL_YML.split("\njobs:\n").length - 1, "CALIBRATION (m4): `jobs:` must occur once").toBe(1);
+    const yml = REAL_YML.replace("\njobs:\n", "\ndefaults: {run: {shell: bash}}\njobs:\n");
+    expect(yml.includes("\ndefaults: {run: {shell: bash}}\n"), "CALIBRATION (m4): the line did not land").toBe(true);
+    const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "ci.yml:", "workflow's top-level `defaults:` sets a `shell:`"), problems.join("\n")).toBe(true);
+  });
+
+  it("(v) `ci: typecheck test` → `ci: test` in the Makefile → a problem naming the ci target", () => {
+    const mk = mutate(REAL_MAKEFILE, "\nci: typecheck test\n", "\nci: test\n", "(v)");
+    const problems = surfaceProblems(REAL_YML, mk, REAL_LISTING, EXCLUDED);
+    expect(has(problems, "Makefile:", "`ci:` target", "`typecheck`"), problems.join("\n")).toBe(true);
+    expect(has(problems, "ci.yml:"), problems.join("\n")).toBe(false);
+  });
+
+  // ── WR-05: pyproject.toml and inline directives ──
+  const cfg = (pyproject: string, listing = REAL_LISTING, readPy = readRealPy) =>
+    mypyConfigProblems(pyproject, listing, EXCLUDED, readPy);
+  const prepending = (rel: string, head: string) => (p: string) =>
+    p === rel ? `${head}${readRealPy(p)}` : readRealPy(p);
+
+  it("(n) an `ignore_errors = true` override for `main` → problems naming ignore_errors and main", () => {
+    const added = '\n[[tool.mypy.overrides]]\nmodule = ["main"]\nignore_errors = true\n';
+    expect(REAL_PYPROJECT.includes(added), "CALIBRATION (n): already present").toBe(false);
+    const problems = cfg(REAL_PYPROJECT + added);
+    expect(has(problems, "pyproject.toml:", '"ignore_errors"'), problems.join("\n")).toBe(true);
+    expect(has(problems, "pyproject.toml:", 'module "main"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(o) an `exclude` key in [tool.mypy] → a problem naming exclude", () => {
+    const toml = insertAfter(REAL_PYPROJECT, "strict = true\n", 'exclude = ["services/ingestion/"]\n', "(o)");
+    const problems = cfg(toml);
+    expect(has(problems, "[tool.mypy] carries the key", '"exclude"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(p) `strict = false` → a problem naming strict", () => {
+    const problems = cfg(mutate(REAL_PYPROJECT, "strict = true", "strict = false", "(p)"));
+    expect(has(problems, "strict = false"), problems.join("\n")).toBe(true);
+  });
+
+  it('(p2) [tool.mypy] `follow_imports = "skip"` → a problem naming follow_imports', () => {
+    const problems = cfg(mutate(REAL_PYPROJECT, 'follow_imports = "silent"', 'follow_imports = "skip"', "(p2)"));
+    expect(has(problems, "follow_imports", "must be \"silent\""), problems.join("\n")).toBe(true);
+  });
+
+  it("(s) a sixth module added to a third-party override → a problem naming it", () => {
+    const line = 'module = ["ccxt.*", "pandas.*", "scipy.*"]';
+    const problems = cfg(mutate(REAL_PYPROJECT, line, line.replace('"scipy.*"]', '"scipy.*", "numpy.*"]'), "(s)"));
+    expect(has(problems, 'module "numpy.*"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(t) a tracked analytics-service/mypy.ini → a problem naming it", () => {
+    const problems = cfg(REAL_PYPROJECT, [...REAL_LISTING, "mypy.ini"]);
+    expect(has(problems, "mypy.ini is tracked"), problems.join("\n")).toBe(true);
+  });
+
+  it("(y) a tracked `.pyi` stub beside a surface module → a problem naming the shadowed .py", () => {
+    const listing = [...REAL_LISTING, "services/metrics.pyi"];
+    expect(REAL_LISTING.includes("services/metrics.py"), "CALIBRATION (y): the shadowed module is not tracked").toBe(true);
+    const problems = cfg(REAL_PYPROJECT, listing);
+    expect(has(problems, "services/metrics.pyi is a tracked stub", "services/metrics.py,"), problems.join("\n")).toBe(true);
+  });
+
+  it("(y2) a tracked top-level `main.pyi` → a problem naming main.py; one under tests/ stays out", () => {
+    const problems = cfg(REAL_PYPROJECT, [...REAL_LISTING, "main.pyi", "tests/helper.pyi"]);
+    expect(has(problems, "analytics-service/main.pyi is a tracked stub", "main.py,"), problems.join("\n")).toBe(true);
+    expect(has(problems, "tests/helper.pyi"), problems.join("\n")).toBe(false);
+  });
+
+  it("(z) a multi-line string that smuggles `ignore_errors = true` past the reader → a problem", () => {
+    const tail = '[[tool.mypy.overrides]]\nmodule = ["pandera.*"]\nfollow_imports = "skip"\n';
+    // tomllib reads this as follow_imports = "skip\n[tool.fake]\nx = 1 " followed
+    // by ignore_errors = true INSIDE the pandera override; a line reader sees a
+    // [tool.fake] table holding x and ignore_errors.
+    const smuggled = '[[tool.mypy.overrides]]\nmodule = ["pandera.*"]\nfollow_imports = """skip\n[tool.fake]\nx = 1 """\nignore_errors = true\n';
+    const problems = cfg(mutate(REAL_PYPROJECT, tail, smuggled, "(z)"));
+    expect(has(problems, "pyproject.toml:", "opens a multi-line string"), problems.join("\n")).toBe(true);
+  });
+
+  it("(z2) a backslash line continuation → a problem", () => {
+    const problems = cfg(mutate(REAL_PYPROJECT, 'python_version = "3.12"', 'python_version = \\\n  "3.12"', "(z2)"));
+    expect(has(problems, "pyproject.toml:", "line continuation"), problems.join("\n")).toBe(true);
+  });
+
+  it("(n2) mypy config as a ROOT dotted key → an outside-table problem", () => {
+    const added = "tool.mypy.ignore_errors = true\n";
+    expect(REAL_PYPROJECT.includes(added), "CALIBRATION (n2): already present").toBe(false);
+    const problems = cfg(added + REAL_PYPROJECT);
+    expect(has(problems, "[(root)] carries mypy configuration"), problems.join("\n")).toBe(true);
+  });
+
+  it("(n3) mypy config as an inline table under `[tool]` → an outside-table problem", () => {
+    const added = "\n[tool]\nmypy = { ignore_errors = true }\n";
+    const problems = cfg(REAL_PYPROJECT + added);
+    expect(has(problems, "[tool] carries mypy configuration"), problems.join("\n")).toBe(true);
+  });
+
+  it("(o2) a second `[tool.mypy]` table → a table-count problem", () => {
+    const problems = cfg(`${REAL_PYPROJECT}\n[tool.mypy]\nstrict = true\n`);
+    expect(has(problems, "2 [tool.mypy] table(s)"), problems.join("\n")).toBe(true);
+  });
+
+  it("(o3) `strict = true` deleted from [tool.mypy] → a lost-key problem naming strict", () => {
+    const problems = cfg(mutate(REAL_PYPROJECT, "\nstrict = true\n", "\n", "(o3)"));
+    expect(has(problems, '[tool.mypy] lost the key "strict"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(s2) the `pandera.*` override deleted → a missing-override problem naming it", () => {
+    const block = '[[tool.mypy.overrides]]\nmodule = ["pandera.*"]\nfollow_imports = "skip"\n';
+    const problems = cfg(mutate(REAL_PYPROJECT, block, "", "(s2)"));
+    expect(has(problems, 'no [[tool.mypy.overrides]] entry names "pandera.*"'), problems.join("\n")).toBe(true);
+  });
+
+  it("(t2) a tracked analytics-service/.mypy.ini → a problem naming it", () => {
+    const problems = cfg(REAL_PYPROJECT, [...REAL_LISTING, ".mypy.ini"]);
+    expect(has(problems, "analytics-service/.mypy.ini is tracked"), problems.join("\n")).toBe(true);
+  });
+
+  it("(u) a multi-line `module = [...]` in an override is PARSED: the same set passes, an added module is named", () => {
+    const line = 'module = ["ccxt.*", "pandas.*", "scipy.*"]';
+    const same = cfg(mutate(REAL_PYPROJECT, line, 'module = [\n  "ccxt.*",  # a comment\n  "pandas.*",\n  "scipy.*",\n]', "(u)"));
+    expect(same, same.join("\n")).toEqual([]);
+    const added = cfg(mutate(REAL_PYPROJECT, line, 'module = [\n  "ccxt.*",\n  "pandas.*",\n  "scipy.*",\n  "main",\n]', "(u main)"));
+    expect(has(added, 'module "main"'), added.join("\n")).toBe(true);
+  });
+
+  it("(u2) a multi-line array in an UNRELATED `[tool.ruff]` table → NOT a problem", () => {
+    const added = '\n[tool.ruff.lint]\nselect = [\n  "E",\n  "F",\n]\n';
+    expect(REAL_PYPROJECT.includes(added), "CALIBRATION (u2): already present").toBe(false);
+    const problems = cfg(REAL_PYPROJECT + added);
+    expect(problems, problems.join("\n")).toEqual([]);
+  });
+
+  it("(u3) an array never closed → a problem naming its key", () => {
+    const line = 'module = ["pandera.*"]';
+    const problems = cfg(mutate(REAL_PYPROJECT, line, 'module = [\n  "pandera.*",', "(u3)"));
+    expect(has(problems, "pyproject.toml:", 'for the key "module" is never closed'), problems.join("\n")).toBe(true);
+  });
+
+  it("(u4) an unparseable line inside [tool.mypy] → a parse problem; the same line in [tool.ruff] → none", () => {
+    const inMypy = cfg(insertAfter(REAL_PYPROJECT, "strict = true\n", "warn_unused_ignores\n", "(u4)"));
+    expect(has(inMypy, "pyproject.toml:", '"warn_unused_ignores" is neither a table header'), inMypy.join("\n")).toBe(true);
+    const inRuff = cfg(`${REAL_PYPROJECT}\n[tool.ruff]\nwarn_unused_ignores\n`);
+    expect(inRuff, inRuff.join("\n")).toEqual([]);
+  });
+
+  it("(u5) an unparseable header-shaped line in an unrelated table → a problem, whatever table it sits in", () => {
+    const problems = cfg(`${REAL_PYPROJECT}\n[tool.ruff]\n[tool.mypy\nignore_errors = true\n`);
+    expect(has(problems, "pyproject.toml:", '"[tool.mypy" is neither a table header'), problems.join("\n")).toBe(true);
+  });
+
+  it("(q) an inline `# mypy: ignore-errors` in main.py → a problem naming main.py", () => {
+    const problems = cfg(REAL_PYPROJECT, REAL_LISTING, prepending("main.py", "# mypy: ignore-errors\n"));
+    expect(has(problems, "main.py:", "inline `# mypy:`"), problems.join("\n")).toBe(true);
+  });
+
+  it("(r) a top-of-file bare `# type: ignore` in sentry_init.py → a whole-file problem naming it", () => {
+    const problems = cfg(REAL_PYPROJECT, REAL_LISTING, prepending("sentry_init.py", "# type: ignore\n"));
+    expect(has(problems, "sentry_init.py:", "ignore the WHOLE file"), problems.join("\n")).toBe(true);
+  });
+
+  it("CONFIG NON-VACUITY CONTROL — the real config and files pass; the reader actually read them", () => {
+    expect(cfg(REAL_PYPROJECT)).toEqual([]);
+    const files = surfaceFiles(REAL_LISTING, EXCLUDED);
+    expect(files.includes("main.py") && files.some((f) => f.startsWith("services/")), files.join(" ")).toBe(true);
+    expect(files.some((f) => f.startsWith("tests/")), "an EXCLUDED directory's files were scanned").toBe(false);
+    expect(readRealPy("main.py").length, "main.py read as (nearly) empty — the reader is broken").toBeGreaterThan(1000);
+    const { tables, errors } = parseTomlTables(REAL_PYPROJECT);
+    expect(errors).toEqual([]);
+    expect(tables.filter((t) => t.header === "tool.mypy.overrides").length, "no override table parsed").toBeGreaterThan(0);
+  });
+
+  // ⛔ WITHOUT THIS THE LEGS ABOVE PROVE NOTHING: a `surfaceProblems` that
+  // always returned a non-empty list would pass every one of them.
+  it("NON-VACUITY CONTROL — the unmutated inputs pass through the same function with no problem", () => {
+    expect(surfaceProblems(REAL_YML, REAL_MAKEFILE, REAL_LISTING, EXCLUDED)).toEqual([]);
+    const surface = diskSurface(REAL_LISTING, EXCLUDED);
+    expect(surface.has("main.py"), "the disk surface lost main.py — the listing is not the service").toBe(true);
+    const dirs = [...surface].filter((m) => !m.endsWith(".py"));
+    expect(dirs.length, "fewer than 3 directories derived — the listing is suspect").toBeGreaterThanOrEqual(3);
+    // The recursive rule's two exclusions, and a non-.py directory, stay OUT of
+    // the surface: a `.py` under `__pycache__/` or a dot-directory is not
+    // service code, and `docs/` (tracked, no .py) is not a package.
+    const extra = diskSurface([...REAL_LISTING, "cachey/__pycache__/x.py", ".hidden/x.py", "docs/x.md"], EXCLUDED);
+    expect([...extra].sort(), "a __pycache__/dot-dir/non-.py path entered the surface").toEqual([...surface].sort());
+    expect(
+      pathSet(ciMypyArgs(REAL_YML)).size,
+      "fewer than 7 path tokens extracted from the run line — extraction is broken",
+    ).toBeGreaterThanOrEqual(7);
+  });
+});

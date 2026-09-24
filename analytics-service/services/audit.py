@@ -126,8 +126,9 @@ _SQLSTATE_INSUFFICIENT_PRIVILEGE_CLASS = "42"  # Class 42 — Syntax Error or Ac
 # src/lib/audit.ts and asserts the two vocabularies match, so a one-sided edit
 # (add to TS, forget Python, or vice versa) fails the suite.
 #
-# There is no mypy gate on this file in CI, so the annotations alone have no
-# runtime teeth — the sync test is what makes the contract enforceable: it
+# This file IS under the CI mypy step (the `python` job's type gate covers
+# services/), but annotations are static and have no runtime
+# teeth — the sync test is what makes the contract enforceable: it
 # fails loudly the moment the canonical TS list and this list diverge.
 AuditAction = Literal[
     # --- 7.1a pilot ---------------------------------------------------------

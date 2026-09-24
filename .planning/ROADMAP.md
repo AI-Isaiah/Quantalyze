@@ -840,11 +840,27 @@ Plans:
 
 **Requirements**: TBD — no v1.20 requirement IDs. The binding obligation is TODOS `[REDUNDER-SUBSET-SPLIT]`, booked 2026-09-05 by Phase 164.4.1 and unowned until this phase. ⛔ `WAIVED_CEILING` is 0 and has stayed 0 through two founder decisions that each took the root-cause fix over an exception — this phase must not be the one that adds a waiver.
 **Depends on:** Phase 164.4
-**Plans:** 0 plans
+**Plans:** 5/10 plans executed
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.4.2 to break down)
+- [x] 164.4.2-01-PLAN.md — Area E BEFORE: acquire-wait vs useful-work captured from >=5 concluded merge-push runs, with the refutation condition written down before the change exists
+- [x] 164.4.2-02-PLAN.md — Area A: ONE currency implementation (`scripts/check-baseline-currency.mjs`, `--self-test` observed RED), `refuse_stale_baseline()` re-pointed at it; the gate run for real at HEAD and its refusal recorded
+- [x] 164.4.2-03-PLAN.md — Area A wiring: founder regenerates the stale baseline (blocking-human), `load_baseline()` refuses a stale dump, `fetch-depth: 0` on both lane-booting jobs
+- [x] 164.4.2-04-PLAN.md — Area B precondition MEASURED on a real runner: corpus DEMAND vs lane SUPPLY (`pg_net`/vault/auth/roles/pg_cron), then a blocking decision — proceed, or take DECISION C on the written refutation
+- [x] 164.4.2-05-PLAN.md — Area B tracer: `sql-tests` onto the ephemeral lane with no mutex; VAC-08 rehomed to a new `test-db-drift` job that keeps the key, the wait and the gate; aggregator arms and comment currency (also completed the pre-replan plan 06's pin tasks)
+- [ ] 164.4.2-06-PLAN.md — Area F (DECISION F): committed carried-migrations marker bound to the dump's sha256; the currency gate's `--replay-set` mode ("bound and name"); `run.sh up` replays the migrations newer than the dump with ledger rows, fails loud on an undeterminable set or a failing replay; lane pins and BASELINE.md re-argued
+- [ ] 164.4.2-07-PLAN.md — Area D machinery (same wave as 06, file-disjoint): runner `--subset-from` mode that CAN exit 0 while `--file` still cannot, the `scope:` line, one merge-base diff exported and re-used by `scripts/sql-gate-subset.mjs`, and the floors ratchet's subset arms
+- [ ] 164.4.2-08-PLAN.md — Area F CI surface + Area B close-out: currency steps renamed for the replay, clone depth by measured consumer, mutex runbook and dated CLAUDE.md corrections, then an orchestrator-read COUNTED SHA-bound green covering plan 05's PENDING criteria and plan 06's lane lines
+- [ ] 164.4.2-09-PLAN.md — Area D wiring: `changed-paths` publishes the subset, `sql-mutation` narrows only on a pull request, the assert step's fence arms driven RED and GREEN on synthetic logs, and the real run's `scope:` line read by the orchestrator
+- [ ] 164.4.2-10-PLAN.md — ship: the AFTER protocol for four jobs against the CORRECTED refutation clauses (a)-(d), `[REDUNDER-SUBSET-SPLIT]` closed by its mechanism with follow-ons booked (incl. the restore path's epoch-based currency), VERSION + CHANGELOG cross-checked commit by commit
+- [ ] 164.4.2-11-PLAN.md — Area G (DECISION G): the lane replays the PROD objects outside `public` that the dump lacks (the `auth.users` trigger and the pg_cron registrations), extracted from the migrations, with a drift gate that fails the boot; the 8 SQL files that failed on the lane pass unedited
+
+⭐ **Replanned 2026-09-23 for DECISION F** (plans 06–10 replace the pre-replan 06–09): the pre-replan 06's Tasks 1–2 were already done inside plan 05 and are not repeated; the pre-replan 09's AFTER protocol restated the refutation condition CONTEXT Area E struck on 2026-09-21 and now uses the corrected clauses. ⚠️ Plan 06 has a precondition: the phase branch must carry every migration the committed dump carries — merge `origin/main` (which holds `20260922120000_api_keys_sync_status_sign_in_failed.sql`) into the phase branch before wave 5.
+
+⭐ **SCOPE ADDED 2026-09-23 BY FOUNDER DECISION (DECISION F in `164.4.2-CONTEXT.md`):** the ephemeral lane REPLAYS the migrations newer than `baseline.sql` on top of it, and prints which ones it replayed, so that a migration landing after the dump is the normal case and not a red. Without it, every migration merge would leave the lane red until the founder re-dumped from PROD, and a PR could never test its own migration on the lane. Realised by a replan of the remaining plans before plan 06 executes. Plan 05 was mid-execution and is left to finish.
+
+⭐ **SCOPE ADDED 2026-09-23 BY FOUNDER DECISION (DECISION G in `164.4.2-CONTEXT.md`):** the lane replays the PROD objects that live OUTSIDE `public`, which the schema-only dump does not carry: the trigger on `auth.users` and the `pg_cron` job registrations (24 migrations). They are extracted from the migration files, and a check fails the boot if the lane's set drifts from what the migrations declare. Measured by plan 08's SHA-bound CI read: once the lane ACL defect was fixed, 8 of 76 SQL files still failed on the lane for exactly this reason. Plan 04's probe measured that the lane HOSTS these schemas, not that it carries the objects registered in them. Realised as a new plan, executed before plan 08's CI checkpoint is re-read.
 
 ### Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral (INSERTED)
 
@@ -2404,11 +2420,16 @@ Plans:
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS `MYPY-MAINPY-01`
 
 **Depends on:** Phase 164.6 (ordering only — no code dependency)
-**Plans:** 0 plans
+**Plans:** 2/2 plans executed
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 164.6.1 to break down)
+- [x] 164.6.1-01-PLAN.md — wave 1: annotate `main.py`/`main_worker.py`/`sentry_init.py`, name and widen the ci.yml mypy step and the Makefile to the four top-level modules (96 → 100 files), correct every surface claim, local scratch-copy neuter proof (D-06b CI observation carried OPEN to ship)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 164.6.1-02-PLAN.md — wave 2: `ci-mypy-strict-surface.contract.test.ts` pins CI set == disk set == Makefile set with calibration legs; registry floor 60 → 61; TODOS `[MYPY-MAINPY-01]` closed in code with D-06b OPEN
 
 ### Phase 164.6.2: MT5RELOGIN — the MT5 gateway re-establishes its broker session without a human (INSERTED)
 

@@ -1,5 +1,237 @@
 # Changelog
 
+## [0.87.1.0] - 2026-09-24 — MYPYSTRICT: the strict type gate covers the module that IS the service
+
+⭐ **What changed for whoever reads this next.** CI's `mypy --strict` gate said it covered "all running-service code", but it never read `analytics-service/main.py`, the FastAPI app itself, nor the three top-level modules that run inside that process. It now does. The `python` job's step "Type gate - mypy strict over the running-service surface" checks `services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py`: **100 files, 0 errors, where it checked 96**. A contract test pins that path set to the service surface derived from the tracked tree, so the gate cannot be narrowed quietly again.
+
+### Added
+- **The four top-level service modules enter the strict gate** with real annotations, in `main.py`, `main_worker.py` and `sentry_init.py`. The phase adds no `# type: ignore` and no `cast(`. Five Supabase closures are typed `-> Any`, because a narrower type would have meant changing runtime code.
+- **`src/__tests__/contracts/ci-mypy-strict-surface.contract.test.ts`** (70 tests). It parses the CI `run:` line and the Makefile recipe into tokens and derives the surface from `git ls-files`, including namespace packages. It requires exactly one mypy invocation and pins the flag set exactly, the gate step's own YAML keys, `--config-file=pyproject.toml`, and the Makefile's `MYPY` assignment and single `typecheck` rule. It refuses a folded continuation line under `run:`, a tracked `.pyi` stub shadowing a surface module, and TOML multi-line strings or continuations in `pyproject.toml`. Each check has a calibration leg: two review rounds switched each of the 47 checks off in turn, and every one went red. The `CONTRACT_GUARDS` floor moves from 60 to 61 in the same commit.
+
+### Changed
+- **`/health` declares `response_model=None`.** Without it, FastAPI fails at import once the return type is annotated. The OpenAPI document hash is unchanged before and after.
+- **The gate runs under `--config-file=pyproject.toml`** in CI and the Makefile, so an untracked `mypy.ini` cannot override the settings.
+- **`make ci` runs `typecheck`**, not `lint`.
+- **Every statement of what the gate covers now names the real surface:** the `ci.yml` comment, the Makefile header, help text and targets, `services/audit.py`, the `services/ingestion/__init__.py` docstring, and the `pyproject.toml` header.
+
+### Fixed
+- `TODOS.md` `[MYPY-MAINPY-01]` is closed in code. The closure keeps ROADMAP criterion 3's CI half (D-06b) open until it is observed on the PR.
+- After merging Phase 164.4.2, contract calibration leg (g2) is re-anchored on `test-db-drift`, now the job after `python`. The downstream-catch prose names `test-db-drift`, not `sql-tests`.
+
+### Tests
+- The CI mypy line reports 100 source files and 0 issues. Neutering `_crash_handler`'s `Task[None]` leaves the old command green and turns the new one red with a `main.py` `type-arg` error. A second neuter, on `health`'s return type, also turns it red.
+- Full pytest from `analytics-service/`: 6109 passed, coverage 91.50%. Contract and registry tests: 135 passed.
+
+### Notes — known limits, declared rather than enforced
+- The contract test does not pin a PATH swap of the mypy binary, a job-level `if:` or `env:`, or command wrappers its counter does not recognise. A skipped `python` job is still caught downstream, because `test-db-drift` needs `python` and the `frontend` aggregator reds a trusted-event skip.
+- D-06b, the CI job observed red and then green on this PR, is recorded in `164.6.1-UAT.md`.
+
+## [0.87.0.0] - 2026-09-24 — SUBSETSPLIT: `sql-tests` stops queueing for shared TEST, and `sql-mutation` checks only what a pull request changed
+
+⭐ **What changed for whoever reads this next.** Phase 164.4.2 has two halves, and both are about
+CI being slow on purpose. **Half B (the tracer):** `sql-tests` no longer holds the shared-TEST
+advisory key `61616158`. It runs the `supabase/tests` corpus on a local Supabase stack private to
+its own runner, with no secret. VAC-08, which really does measure shared TEST, moved into a new
+`test-db-drift` job that keeps the secret, the wait, the mutex and the stagger. **Half A:** on a
+pull request, `sql-mutation` mutates only the gate files the PR changed. A push to `main` still
+runs the full corpus and owes every floor. Getting the lane good enough to carry `sql-tests` took
+most of the phase: a currency gate, a migration replay, an ACL reset, non-public objects from the
+migrations, a registry login and a Postgres pin. Each one was found because the lane went red on
+something PROD does and the lane did not.
+
+⚠️ **The claim that CI got faster is NOT yet measured.** It can only be measured on merge-push runs
+at the new head, which do not exist until this merges. The protocol for measuring it, and the
+clauses that would refute it, were written before any such run exists. Read the known limits at
+the bottom.
+
+### Added
+
+- **`scripts/check-baseline-currency.mjs` — the repo's ONE baseline CURRENCY gate.** The old
+  `check-baseline-staleness.mjs` checks INTEGRITY (the dump's sha256), not currency, despite its
+  name. The new gate has a pure `judge()` and a self-test that drives every named defect kind.
+  `refuse_stale_baseline()` in the TEST restore script now delegates to it through a documented
+  `CURRENCY_CHECK` seam, with identical decisions (a relocation, not a behaviour change).
+- **DECISION F: the local-stack lane REPLAYS migrations newer than its dump.** The dump no longer
+  has to be current. `supabase/schema/baseline-carried-migrations.txt` records the migrations the
+  dump already carries, bound to the dump's sha256. `check-baseline-currency.mjs --replay-set`
+  reads that marker and prints the replay set on a `baseline-replay:` line on every run, `(none)`
+  included. It fails loud, by one of 11 named defect kinds, when the set cannot be determined. The
+  lane then applies each file in filename order, as authored, with no whole-file transaction flag,
+  and writes its migration-ledger row only after the file applies. A replayed migration that errors
+  is FATAL. The lane's reference data is extracted from CARRIED migrations only, so a replayed
+  migration's own INSERTs run once. A pull request's own new migration now runs on the lane BEFORE
+  merge.
+- **DECISION G: the lane carries the non-public objects PROD registers.** The schema-only `public`
+  dump cannot carry the `auth.users` trigger or the `pg_cron` jobs. `scripts/local-stack/nonpublic-objects.mjs`
+  extracts them from the carried migrations, in their original bytes: the trigger, and 15 cron jobs
+  folded through every later reschedule and unschedule. A drift gate re-derives the fold (it never
+  reads the emitted SQL) and compares it byte-exact against the lane's catalogue. MISSING, EXTRA,
+  DIFFERS or DUPLICATE fails the boot. So does a shape the gate cannot prove. It runs before the
+  D-F replay.
+- **A default-ACL reset and an ACL-fidelity gate on the lane.** The Supabase image grants ALL to
+  every role on anything created in `public`, and the dump can only ADD grants. So every
+  lane object inherited privileges PROD does not give. `reset-public-default-acl.sql` removes those
+  defaults before the dump loads. It derives the grantor roles from `pg_default_acl` and never names
+  them. `acl-fidelity.mjs` then compares every `public` relation, sequence and function, plus the
+  default ACLs, against what the dump declares. MEASURED: 2403 privileges compared, drift 0.
+- **`scripts/local-stack/capability-probe.mjs`** — the corpus's DEMAND per capability class
+  (pg_net, vault, the auth functions, the platform roles, pg_cron), derived every run, against the
+  lane's SUPPLY read from its catalogue, on one `stack-probe:` line. On `sql-tests` an INSUFFICIENT
+  verdict is fatal. The founder's PROCEED on moving `sql-tests` rested on the SUFFICIENT verdict of
+  CI run `35816624285`.
+- **`run.mjs --subset-from <list>`** — a SUBSET gate mode for the mutation runner. It can exit 0,
+  unlike the diagnostic `--file`/`--arm` mode. Every corpus run prints exactly one `scope:` line
+  (`FULL`, `FULL … (subset fallback: …)`, `SUBSET k/N …` or `DIAGNOSTIC`).
+  **`scripts/sql-gate-subset.mjs`** derives the gate files from the ONE merge-base diff,
+  `changedFilesAgainstBase()` in `classify-changed-paths.mjs`, which throws on an unreadable base.
+- **`test-db-drift`** — a new CI job that runs VAC-08 on shared TEST behind the schema-apply wait,
+  the mutex, the configured-variable gate and the `needs: python` stagger. Its aggregator row
+  tolerates only a skip on a fork PR or a `workflow_dispatch`.
+- **A registry login before every Supabase CLI image pull**, in the five jobs measured to pull
+  (the three lane jobs, VAC-04's drift check and the TEST restore). It is a plain `docker login`
+  over stdin, not a third-party action, and each of those jobs gains `packages: read` and nothing
+  else. A GHCR rate limit had failed all three lane jobs and VAC-04 in one run.
+- **A lane Postgres image pin plus a function-denial boot probe.** See Root cause.
+- **`scripts/local-stack/sql-corpus-report.mjs`** — a diagnostic, not a gate. It runs the whole
+  SQL corpus on the lane and continues past failures, so a lane defect shows its full extent rather
+  than its first file.
+
+### Changed
+
+- **`sql-tests` runs on the local-stack lane.** It holds no key, reads no secret and has no fork
+  gate, and it is judged STRICTLY by the `frontend` aggregator. Its `timeout-minutes` fell from 90
+  to 20, because it no longer waits on anyone. The `ci.yml` key census, re-measured: `test-db-drift`
+  12, `python` 9, `e2e-seeded` 8, `sql-tests` 0.
+- **`sql-mutation` narrows on a pull request, and only there.** `changed-paths` publishes
+  `sql_gate_mode` and `sql_gate_files` after the derivation's own self-test. The mutate step takes the
+  SUBSET branch only when the mode is `subset` AND the event is `pull_request`. Every other event
+  runs the full-corpus command, byte-identical to before. The derivation forces FULL on a push, on a
+  deleted or moved gate file, and on any change to the mutation machinery (`scripts/mutation-runner/`,
+  `scripts/pg-lane/`, `supabase/migrations/`). A list that names no annotated file, or only some,
+  falls back to FULL and says so.
+- **`sql-mutation`'s assert step judges the `scope:` line first.** No line, more than one, a
+  DIAGNOSTIC or unknown form, a SUBSET on any event other than `pull_request`, a SUBSET whose k
+  disagrees with the names it prints, k = 0, an N that disagrees with the coverage numerator, and a
+  SUBSET without the runner's `ARMS_FLOOR: NOT compared` line are each a MEASURE_FAIL. A SUBSET is
+  judged on its own k and never claims both floors held. ⛔ `FILES_FLOOR`, `ARMS_FLOOR` and
+  `WAIVED_CEILING` did not move, and `sql-mutation`'s `timeout-minutes` is still 20.
+- **All three lane-booting jobs run `Baseline currency - name the migrations the lane replays on top
+  of the dump` before their boot.** They check out shallow again. The measurement found no git-history
+  reader in any of them, so the wiring pin now asserts the property that makes shallow safe: the
+  lane's gate reads no history.
+- **The committed baseline dump was regenerated twice from PRODUCTION**, once to clear the
+  currency refusal and once after Phase 167's PROD apply. The dump now carries `strategy_sync_cursors`,
+  the `sign_in_failed` sync status and the `venue_account_id` column grant.
+- **The live-DB execution ledger shrank from 18 entries to 10, and `ENTRY_CEILING` went down with it.**
+  Eight entries were the lane's own ACL drift, not PROD's, and now pass. They are deleted. Six wizard
+  arms were re-kinded from K2 to K3, because the lane now refuses them at the GRANT layer exactly as
+  PROD does. The classifier gained one evidence-keyed K3 rule, scoped to that module.
+- **Pins re-argued rather than deleted.** The mutex pin now measures the holder set from `ci.yml`
+  and compares it as an exact set in both directions. The anti-skip pin follows the corpus step onto
+  the lane and pins its loopback DSN refusals. The docs-path roster gains `test-db-drift`. The
+  aggregator tolerance partition and its MW02 green fixture model the new result loop.
+- **`docs/runbooks/shared-test-db-mutex.md` and `CLAUDE.md` name the holders that exist.** Each has
+  dated CORRECTED notes, and the original sentences are kept as lineage. `CLAUDE.md` also records
+  that the founder removed the `Production` environment's required reviewer on 2026-09-23, so PROD
+  migrations auto-apply once `apply-test` succeeds, and it records the lane's Postgres pin.
+
+### Fixed
+
+- **The ephemeral lane booted from a stale dump and nothing noticed.** The local-stack path called
+  neither staleness check, so `frontend-local-stack` and `frontend-live-db-lane` were green against a
+  schema missing two migrations. Fixed first with a refusal, then (D-F) with a replay that names what
+  it applied.
+- **The lane had no migration ledger at all**, so both ledger-oracle SQL gates would have gone red
+  the moment `sql-tests` moved. The lane now writes carried plus replayed ledger rows.
+- **35 of 76 SQL gate files failed on the lane before the ACL reset.** The reset fixed 27 of them.
+  The other 8 failed on the missing `auth.users` trigger and cron jobs, which only D-G could
+  supply. After both fixes, CI run `35922576855` at `ee965381`
+  read `75 of 76 SQL self-tests passed — no whole-file skips; 1 excluded (LANE-ONLY …)`, with
+  `acl-fidelity: … drift=0 verdict OK` and `nonpublic-fidelity: auth-users-triggers=1/1 cron-jobs=15/15
+  drift=0 verdict OK`. No SQL gate file and no migration was edited.
+
+### Fixed — code review, two rounds (gsd-code-reviewer with silent-failure-hunter, 28 findings)
+- **The pull-request subset now fails closed at every edge.** The changed-file list is read NUL-separated, so a path git would quote forces a FULL run instead of being dropped. Editing `ci.yml`, `scripts/sql-gate-subset.mjs` or `scripts/classify-changed-paths.mjs` also forces FULL. A SUBSET run now checks the corpus-wide annotated-minus-waived arm count against `ARMS_FLOOR`, so a pull request that deletes arms goes red before merge instead of after. The assert step requires the SUBSET names it prints to equal the list `changed-paths` handed the runner.
+- **The replay's psql meta-command guard reads SQL the way psql does.** A psql-aware lexer now flags a backslash anywhere outside a literal, not only at the start of a line. It handles identifiers containing non-ASCII characters or `$`. It refuses, by name, any replay file that mentions `standard_conforming_strings`, `backslash_quote`, `client_encoding` or `SET NAMES`, because those change how psql reads the bytes that follow. An unreadable replay file is a named defect (`replay-file-unreadable`), never empty text. The lexer flags 0 of the 273 migrations.
+- **The currency gate refuses a shallow clone.** A depth-1 checkout used to report the baseline as fresh, because both timestamps came from one commit. It now reports `history-shallow`.
+- **One loopback-DSN rule everywhere.** `run.sh`, the `sql-tests` corpus step and `sql-corpus-report.mjs` all use `refuseNonLocalDsn`. It refuses a `?host=`/`hostaddr=` override, a second `@`, a comma host list read the way libpq reads it, a missing port, and whitespace or control characters.
+- **The lane's non-public load refuses cron calls it cannot prove ran.** A `cron.schedule` inside a function body, including one nested in a DO block, is refused by `foldCron`. None of the 61 real call sites is affected, and the lane still registers 15 jobs.
+- **Smaller fixes.** The image-pin check accepts exactly one line and an anchored match. The default-ACL reset no longer double-quotes the grantor or grantee role. Self-tests no longer print a raw `fatal:` git line into CI logs. `sql-corpus-report.mjs` and `acl-fidelity.mjs` say what they do not check. `analytics-deploy-verify.yml` prose no longer names `sql-tests` as a lock holder. The lane's wall-clock dependence on its 15 active cron jobs is documented, not disabled, because disabling them would break PROD fidelity.
+- **Tests that could not fail now can.** The no-psql-call assertion has a loopback control. The no-echo assertions look for a non-credential marker. The quoted-path self-test pins `core.quotePath=true`. The DSN-refusal tests require the probe's own stderr line. The SUBSET fixture's floor figures are built from `ARMS_FLOOR`. Test connection strings carry no password.
+- **Known limit:** the replay guard refuses escaping-mode settings by name, so a setting name built at run time is not caught. The root-cause fix would replay each file without psql script parsing, which changes transaction semantics; that is booked as a decision, not done here.
+
+### Security
+
+- **`sql-tests` no longer reads `TEST_SUPABASE_DB_URL`.** The one job that still does for VAC-08 is
+  `test-db-drift`. The lane's DSN is refused unless it is a loopback URL with a port and no query
+  string, and it is never printed.
+- **The registry login hands the job token to no third party.** It goes over stdin under
+  `set -euo pipefail`, with no `continue-on-error`. A failed login fails the job loudly instead of
+  falling back to an anonymous, throttled pull. A contract test derives which jobs pull and requires
+  the login before the first pull.
+
+### Root cause — the lane crashed on the SQL corpus's own idiom
+
+- **Postgres images `17.6.1.104` through `.112` ship supautils 3.2.0.** It kills the backend
+  (signal 11) when a `postgres` session `SET ROLE`s to a role in `supautils.hint_roles` and is
+  refused EXECUTE on a function. The SQL self-test corpus does exactly that. PostgREST-shaped traffic
+  does not, which is why the live-DB lane stayed green on the same image. Emptying `hint_roles`
+  removed the crash, which confirmed the cause. supautils 3.2.2 fixed it upstream, and `.113` is the
+  first image that ships it.
+- **The lane never chose its image.** Each Supabase CLI release pins its own, so the developer box
+  and CI booted different Postgres builds. The lane now pins `17.6.1.113` through the workdir's
+  `.temp/postgres-version`, asserts the running image matches, and probes the crash shape before
+  anything loads.
+
+### Tests
+
+- New contract test `ghcr-login-before-image-pull.contract.test.ts`, RED at base on 10 of 11 arms.
+- Nine new extract-and-run arms in `mutation-runner-floors.test.ts` drive the assert step's
+  scope branches on every CI run, alongside subset arms proving every floor keeps its full-corpus
+  meaning.
+- New `local-stack-lane-wiring.test.ts` arms cover the currency seam, the replay, the ACL reset and
+  gate, D-G's trigger and cron classes, and the image pin. There are self-tests for the currency
+  gate (31/31), the capability probe (52/52), the subset derivation (19/19) and the runner's subset
+  block (6/6).
+- Every added assertion was falsified by neutering the property it guards, observing the RED, and
+  restoring from a `cp` byte backup verified with `cmp`.
+
+### Notes — the known limits, stated so they can be checked rather than assumed
+
+- ⚠️ **The AFTER measurement is outstanding.** `164.4.2-MEASUREMENT.md`'s `## AFTER` section fixes
+  the runs, the commands and the four refutation clauses in advance. It is filled from the first
+  concluded merge-push run at the new head, and the phase's verification waits on it. A pull-request
+  run, including plan 08's `sql-tests` wall clock of 2m31s, is not an AFTER number.
+- ⚠️ **The shared key still has three holders in `ci.yml`**: `python`, `e2e-seeded` and
+  `test-db-drift`. It also has holders outside it. Contention is reduced, not eliminated. Whether
+  the next holder moves is decided by the AFTER numbers (`[164.4.2-REMAINING-KEY-HOLDERS]`).
+- ⚠️ **The subset narrows only on a pull request that touches a gate file.** This branch changes the
+  runner, so its own CI correctly ran FULL (`scope: FULL 49/49 annotated files`, CI run
+  `35926142486` at `0ca0dc6c`). **The SUBSET arm has not yet been observed in CI.** The synthetic-log
+  arms cover it until a gate-only pull request runs.
+- ⚠️ **The restore path still judges currency by commit epochs**, not by the marker, and on a
+  depth-1 clone that judgement is vacuous. MEASURED: both epochs compared equal and passed. Its
+  workflow fetches full history today (`[164.4.2-RESTORE-CURRENCY-BY-EPOCH]`).
+- ⚠️ **The lane replays through psql.** It claims D-F's forward-apply shape: filename order, each
+  file as authored, a ledger row only after success. It does NOT claim byte-identical semantics with
+  the Supabase CLI's own client. A replay that fails part-way is FATAL rather than rolled back. And
+  a migration that refuses on an empty or unidentified database will redden every lane job until a
+  re-dump (`[164.4.2-LANE-REPLAY-REFUSES-ON-EMPTY-DB]`).
+- ⚠️ **Six `wizard-rpcs-live-db` arms still seed as `authenticated`**, which PROD refuses. They are
+  ledgered as K3 until they are re-pointed or retired (`[164.4.2-WIZARD-ARMS-SEED-AS-AUTHENTICATED]`).
+- ⚠️ **PROD may carry the supautils crash.** The drift-check log shows the linked project pulling
+  `17.6.1.104`. It is UNMEASURED on PROD, and it is a founder item
+  (`[164.4.2-PROD-SUPAUTILS-FUNCTION-DENIAL-CRASH]`).
+- ⚠️ **The lane registers `derive-allocator-key-dailies`**, because a corpus file asserts it, while
+  PROD deliberately lacks it. That contradiction between the test and the ROADMAP is booked, not
+  resolved (`[164.4.2-DERIVE-KEY-DAILIES-TEST-VS-ROADMAP]`).
+- `[REDUNDER-SUBSET-SPLIT]` is closed in `TODOS.md`, naming the mechanism that closed it. Seven
+  follow-ons are booked with owner, trigger and date.
+- **The planning record.** It holds CONTEXT decisions A-G, each with the measurement behind it,
+  including the Area E refutation condition corrected before any code existed. It also holds the
+  plans, the replans for D-F and D-G with their plan-check revisions, the BEFORE measurement over
+  six merge-push runs, and each plan's SUMMARY with its SHA-bound CI reading.
+
 ## [0.86.0.1] - 2026-09-23 — a real key identifier and strategy name leave the public tree
 
 ### Changed
