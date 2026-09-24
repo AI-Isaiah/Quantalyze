@@ -4803,7 +4803,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=11 and ARMS_FLOOR=215 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=11 and ARMS_FLOOR=229 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -4880,6 +4880,14 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // `ALL N ARMS EXECUTED` sentinel. The mutation runner's OWN ARMS_FLOOR moved
     // 426 -> 428 in the same phase, also +2, counting RED-UNDER-M twins rather
     // than sentinel arms: each new arm got both a sentinel and a biting twin.
+    //
+    // MOVED 2026-09-24 (Phase 164.6 GATE-HYGIENE, review fix round 1), 11/215 ->
+    // 11/229. SENTINEL_FLOOR does NOT move: the one new gate file,
+    // test_cron_runs_rls.sql, declares no sentinel. ARMS_FLOOR moves by FOURTEEN
+    // across the same two rows, composite 16 -> 23 and fan-out 19 -> 26 (N2, N3,
+    // T, U, V1, V2 and W in each), read off each file's own first `ALL N ARMS
+    // EXECUTED` sentinel. The runner's own ARMS_FLOOR moved 428 -> 445, +17: the
+    // same fourteen plus the new file's three twins, which carry no sentinel.
     const res = spawnSync(
       "grep",
       ["-ac", "SENTINEL_FLOOR=11", ".github/workflows/ci.yml"],
@@ -4893,7 +4901,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=215", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=229", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

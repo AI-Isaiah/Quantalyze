@@ -957,7 +957,25 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //                files are now annotated but FILES_FLOOR is still 48. Raise
 //                FILES_FLOOR in scripts/mutation-runner/run.mjs to 49.` FAILS
 //                at the old value; FILES_FLOOR=49 PASSES.
-export const FILES_FLOOR = 49;
+//
+// ⭐ RE-DERIVED 2026-09-24 (Phase 164.6 GATE-HYGIENE, review fix round 1) — the
+//                arrival of supabase/tests/test_cron_runs_rls.sql (the
+//                rls-policy-auditor's note (a): anon and a non-admin
+//                authenticated user read ZERO cron_runs rows, beside an admin
+//                anti-vacuity control; three arms), moving FILES_FLOOR 49 -> 50
+//                and the denominator 76 -> 77. The paired ARMS_FLOOR move
+//                (428 -> 445) is in the block below.
+//                MEASURED via ONE full lane run with no file edited during it,
+//                `node scripts/mutation-runner/run.mjs`: `scope: FULL 50/50
+//                annotated files`, `coverage: files 50/77`, `arms:
+//                445/445/0`, `biting: 445`, `lane-invocations: 445 … plus 50
+//                baseline / 50 restore leg(s)` (the two independent tallies
+//                AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`,
+//                `unreachable: 27`, `✅ No defects. Every annotated arm bit its
+//                own arm first.`, exit 0. Per-file line:
+//                `test_cron_runs_rls.sql: sections 3 / judged 3 / annotated 3 /
+//                waived 0 / biting 3`. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 50;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2232,7 +2250,31 @@ export const FILES_FLOOR = 49;
 //    That run was taken with this constant ALREADY at 428, so it also shows the
 //    floor holding at the measured value: `✅ No defects. Every annotated arm
 //    bit its own arm first.`, exit 0.
-export const ARMS_FLOOR = 428;
+//
+// ⭐ RE-DERIVED 2026-09-24 (Phase 164.6 GATE-HYGIENE, review fix round 1):
+//    428 -> 445, SEVENTEEN new arms. Seven in EACH ledger gate against the
+//    in-place-edited migration 20260924120000 — N2 (precision), T (the
+//    failed-attempt cooldown), N3 (boundary), U (the all-candidates-failed
+//    raise), V1 and V2 (a failure row whose own write fails) and W (a lost
+//    enqueue race is not a failure): test_ledger_refresh_fanout.sql 24 -> 31
+//    and test_ledger_refresh_composite_arm.sql 21 -> 28. Plus the three arms of
+//    the NEW file supabase/tests/test_cron_runs_rls.sql (ADMIN 1, ANON 1,
+//    USER 1), which also moves FILES_FLOOR above.
+//    MEASURED via ONE full lane run with no file edited during it,
+//    `node scripts/mutation-runner/run.mjs`: `scope: FULL 50/50 annotated
+//    files`, `coverage: files 50/77`, `arms: 445/445/0`, `biting: 445`,
+//    `lane-invocations: 445` (the two independent tallies AGREE, plus 50
+//    baseline / 50 restore legs), `lane-blocked: 0 file(s)`, `lane-probe:
+//    pg_cron AVAILABLE`, `unreachable: 27 file(s)`, `per-arm lane time: mean
+//    1.1s over 445 arm run(s)`, `✅ No defects. Every annotated arm bit its own
+//    arm first.`, exit 0. Per-file lines: `test_ledger_refresh_composite_arm.sql:
+//    sections 28 / judged 28 / annotated 28 / waived 0 / biting 28`,
+//    `test_ledger_refresh_fanout.sql: sections 31 / judged 31 / annotated 31 /
+//    waived 0 / biting 31`, `test_cron_runs_rls.sql: sections 3 / judged 3 /
+//    annotated 3 / waived 0 / biting 3`. That run was taken with this constant
+//    at 428, BELOW the corpus, which the runner cannot see by construction; the
+//    stale-low direction is src/__tests__/mutation-runner-floors.test.ts's.
+export const ARMS_FLOOR = 445;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

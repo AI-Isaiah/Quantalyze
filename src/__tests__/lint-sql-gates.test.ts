@@ -1116,7 +1116,10 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // fourth one, leaving CI red at HEAD. That is the SECOND time this exact
     // pin was the one left behind (see the 164.5.1.4 note above). The title no
     // longer restates it, so at least the two can no longer disagree.
-    expect(res.out).toMatch(/scanned 76 file/);
+    // MOVED 2026-09-24 (Phase 164.6 GATE-HYGIENE, review fix round 1), 76 -> 77:
+    // supabase/tests/test_cron_runs_rls.sql joined the corpus, and this fourth
+    // census moved in the same commit as the other three.
+    expect(res.out).toMatch(/scanned 77 file/);
     expect(res.status, res.out).toBe(0);
   });
 

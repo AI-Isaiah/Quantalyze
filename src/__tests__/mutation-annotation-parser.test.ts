@@ -979,8 +979,15 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // `+ 0;`), so this walk DOES see it and both pins move by two. MEASURED:
     // this file's own run read `expected 428 to be 426` at the pre-move pin,
     // and `stepsSeen` was re-run separately after `armsSeen` moved.
-    expect(armsSeen).toBe(428);
-    expect(stepsSeen).toBe(443);
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, review fix round 1):
+    // `armsSeen` 428 -> 445 and `stepsSeen` 443 -> 460. SEVENTEEN new arms:
+    // N2, T, N3, U, V1, V2 and W in EACH ledger gate, and ADMIN 1, ANON 1 and
+    // USER 1 in the new test_cron_runs_rls.sql. Each carries ONE `edit` step
+    // with a `find`, so both pins move by seventeen. MEASURED: this file's own
+    // run read `expected 445 to be 428` and `expected 460 to be 443` at the
+    // pre-move pins.
+    expect(armsSeen).toBe(445);
+    expect(stepsSeen).toBe(460);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1852,7 +1859,10 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // each carry one `edit` step whose `find` is `v_failed := v_failed + 1;`,
     // so each contributes one needle. RUN SEPARATELY: `expected 443 to be 441`
     // at the pre-move pin.
-    expect(needles.length).toBe(443);
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 443 -> 460,
+    // moving WITH `stepsSeen`: seventeen new `edit` steps, one needle each.
+    // RUN SEPARATELY: `expected 460 to be 443` at the pre-move pin.
+    expect(needles.length).toBe(460);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2410,7 +2420,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // (the D-11 arm B CHECK-widening gate) — so, as with the two entries
     // above, the denominator moves with it, 75 -> 76. MEASURED over
     // `scanCorpus` at this commit: `filesTotal 76`.
-    expect(corpus.filesTotal).toBe(76);
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 76 -> 77. The one
+    // added is supabase/tests/test_cron_runs_rls.sql, a NEW file (the cron_runs
+    // row-security gate, three arms), so the denominator moves with it.
+    expect(corpus.filesTotal).toBe(77);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2449,7 +2462,11 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // the gate-family-meta registry all reading the pre-plan-03 corpus.
     // MEASURED over `scanCorpus` at this commit: `filesTotal 76`,
     // `filesAnnotated 49`.
-    expect(corpus.filesAnnotated).toBe(49);
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 49 -> 50, with the
+    // denominator and the by-name list below. The one added is
+    // supabase/tests/test_cron_runs_rls.sql. MEASURED over `scanCorpus`:
+    // `filesTotal 77`, `filesAnnotated 50`.
+    expect(corpus.filesAnnotated).toBe(50);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2476,6 +2493,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_capital_ownership_column.sql",
       "test_compute_jobs_error_kind_copy_parity.sql",
       "test_create_wizard_strategy_for_key.sql",
+      // ⭐ ADDED 2026-09-24 (Phase 164.6 review fix round 1) — the FIFTIETH
+      // annotated file: anon and a non-admin authenticated user read ZERO
+      // cron_runs rows, beside a platform-admin anti-vacuity control.
+      "test_cron_runs_rls.sql",
       "test_csv_daily_returns_perkey_rls.sql",
       "test_csv_finalize_atomic_fold.sql",
       "test_csv_finalize_auth_guard.sql",
@@ -2902,7 +2923,11 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // a backfill — both halves move together again, and neither may be bumped
     // alone. MEASURED off the full lane run: annotated 49 + pending 0 +
     // unreachable 27 + inert 0 + lane-blocked 0 = 76.
-    expect(corpus.filesTotal).toBe(76);
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 76 -> 77 and
+    // 49 -> 50. One ADDED gate file (supabase/tests/test_cron_runs_rls.sql),
+    // both halves together. MEASURED off the full lane run: annotated 50 +
+    // pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 77.
+    expect(corpus.filesTotal).toBe(77);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -2911,7 +2936,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // above (the selftest fixture PAIR, which must still classify exactly
     // `lane-blocked-gate.sql` and NOT its comment-only sibling), and the
     // set-for-set PARTITION check below is the second independent guard.
-    expect(corpus.annotatedFiles).toHaveLength(49);
+    // ⭐ 49 -> 50 (Phase 164.6 review fix round 1, test_cron_runs_rls.sql).
+    expect(corpus.annotatedFiles).toHaveLength(50);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {
