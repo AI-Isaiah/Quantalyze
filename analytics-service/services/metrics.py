@@ -191,34 +191,84 @@ def _drop_nonfinite(series: pd.Series) -> pd.Series:
     return series.replace([np.inf, -np.inf], np.nan).dropna()
 
 
-def _every_mirror_ratio_is_defined(returns: pd.Series) -> bool:
-    """True when ``returns`` has the shape on which all eight dispatched mirrors are defined.
+def _mirror_keys_defined_by(returns: pd.Series) -> frozenset[str]:
+    """The dispatched mirror keys whose ratio ``returns`` DEFINES, each by its own precondition.
 
-    SFH LOW-4: each mirror's D-09 undefined arm needs a missing ingredient, and
-    this predicate requires every one of them on ``P(r)`` (the fillna(0) series
-    the mirrors read):
+    SFH LOW-4, made per mirror in review round 2 (SFH R2-MED-1). A mirror that
+    goes non-finite on an input that defines it is a BROKEN mirror, and
+    ``_safe_qstats_scalar`` logs it as one. A mirror that goes non-finite on an
+    input missing one of its ingredients is a D-09 undefined ratio and stays
+    silent. The round-1 predicate was ONE boolean for all eight mirrors and
+    required a NEGATIVE 5% quantile, so a strategy that loses on fewer than 5% of
+    days (a carry, market-making or option-selling shape, where all eight
+    mirrors are finite) got no broken-mirror signal at all.
 
-    - a losing day: a drawdown exists (``recovery_factor``, ``upi``,
-      ``serenity_index``), ``avg_loss`` exists (``kelly_criterion``,
-      ``cpc_index``) and ``profit_factor`` is finite (``common_sense_ratio``);
-    - a winning day: the payoff ratio is non-zero (``kelly_criterion``);
-    - a negative 5% quantile: ``tail_ratio``'s denominator is non-zero
-      (``common_sense_ratio``);
-    - at least 4 real observations: skew and kurtosis exist (PSR), and every
-      ``n - 1`` denominator is positive.
+    ``P(r)`` is the fillna(0) series the mirrors read; "raw" is ``returns`` as
+    given. The preconditions, each read off the mirror's own undefined arms and
+    each NECESSARY (``test_q166r2_each_mirror_precondition_is_necessary`` holds
+    one input per conjunct on which the mirror is non-finite):
 
-    Measured 2026-09-24: all eight mirrors were finite on every one of 11,843
-    random series (six shapes, n = 4..399, with NaN gaps) that satisfy it. So a
-    non-finite mirror on such a series is a defect, and
-    ``_safe_qstats_scalar`` logs it as one.
+    - ``recovery_factor``: a losing day in ``P(r)`` (so ``max_dd != 0``).
+    - ``ulcer_index``: at least 2 rows (its ``n - 1`` denominator). With no loss
+      it is a DEFINED 0.0.
+    - ``upi``: at least 2 rows, a losing day (ulcer != 0) and finite raw values
+      (its numerator compounds the RAW series, so an inf day makes it inf).
+    - ``kelly_criterion`` and ``cpc_index``: a losing day AND a winning day, so
+      the payoff ratio is finite and non-zero.
+    - ``common_sense_ratio``: a losing day (``profit_factor`` finite) and a
+      NON-ZERO 5% quantile (``tail_ratio``'s denominator). It need not be
+      negative: the round-1 ``< 0`` was stricter than the ratio.
+    - ``probabilistic_sharpe_ratio``: real dispersion on ``P(r)`` (the Sharpe
+      base), and a POSITIVE estimated variance of the Sharpe estimator, computed
+      here in the published form ``1 - g3*SR + ((g4 - 1)/4)*SR**2`` (Bailey and
+      Lopez de Prado). The term is NaN, so the test is False, below 4 real
+      observations (no sample kurtosis) or with a non-finite raw value, which
+      is how the round-1 ``count() >= 4`` is carried now. Sample moments of a
+      short, steady series can also make it negative (measured:
+      ``[0.01, 0.01, 0.02, 0.02]``); the ratio is then undefined, not broken.
+    - ``serenity_index``: real raw dispersion (``std_returns``) and real
+      dispersion in the drawdown series (its value-at-risk needs a positive
+      scale). The second implies a losing day (with none the drawdown is all
+      0), and it also excludes a single loss followed by flat days, which holds
+      the drawdown constant.
+
+    "Real dispersion" is ``_dispersion_is_real`` (above the residue floor), the
+    same test each mirror's own guard applies. SUFFICIENCY, measured 2026-09-25
+    by fuzzing (164,357 key-and-series checks over eleven random shapes, n = 1
+    to 399, with NaN gaps, an inf day, a +150% day, cent-rounded values and
+    compounding constant yields, plus every series of length 1 to 5 over a
+    7-value grid including NaN): no mirror returned non-finite on an input whose
+    precondition held.
+    ``test_q166r2_every_mirror_is_finite_wherever_its_precondition_holds`` keeps
+    a deterministic sample of that fuzz in the suite.
     """
     p = _prepared_returns_no_guess(returns)
-    return bool(
-        returns.count() >= 4
-        and (p < 0).any()
-        and (p > 0).any()
-        and p.quantile(0.05) < 0
-    )
+    raw = returns.dropna()
+    loss = bool((p < 0).any())
+    win = bool((p > 0).any())
+    defined: set[str] = set()
+    if loss:
+        defined.add("recovery_factor")
+    if len(returns) >= 2:
+        defined.add("ulcer_index")
+        if loss and bool(np.isfinite(raw.to_numpy(dtype="float64")).all()):
+            defined.add("upi")
+    if loss and win:
+        defined.update(("kelly_criterion", "cpc_index"))
+    if loss and float(p.quantile(0.05)) != 0.0:
+        defined.add("common_sense_ratio")
+    p_sd, p_mean = float(p.std()), float(p.mean())
+    if _dispersion_is_real(p_sd, p_mean):
+        sr = p_mean / p_sd
+        g3 = float(raw.skew())
+        g4 = float(raw.kurtosis()) + 3.0
+        if 1.0 - g3 * sr + ((g4 - 1.0) / 4.0) * sr**2 > 0.0:
+            defined.add("probabilistic_sharpe_ratio")
+    if _dispersion_is_real(float(raw.std()), float(raw.mean())):
+        dd = _drawdown_series_no_guess(returns)
+        if _dispersion_is_real(float(dd.std()), float(dd.mean())):
+            defined.add("serenity_index")
+    return frozenset(defined)
 
 
 def _format_series_points(
@@ -256,7 +306,8 @@ def _safe_qstats_scalar(
     Two named WARNINGs, never confused with each other or with a silent None:
     ``... failed`` when the mirror RAISES, and ``... the mirror is suspect``
     when it returns non-finite although ``must_be_defined`` says the input
-    defines every mirror (SFH LOW-4). A non-finite result on any other input
+    defines THIS mirror (SFH LOW-4, per mirror since round 2:
+    ``_mirror_keys_defined_by``). A non-finite result on any other input
     is a legitimately undefined ratio (D-09) and maps to None without a log.
 
     Since Phase 166 every ``fn`` is a module mirror from
@@ -288,9 +339,9 @@ def _safe_qstats_scalar(
     value = _safe_float(raw)
     if value is None and must_be_defined:
         # SFH LOW-4: D-09 maps a legitimately undefined ratio to None silently.
-        # A mirror that goes non-finite on a series where every mirror is
-        # defined (``_every_mirror_ratio_is_defined``) is a BROKEN mirror, not
-        # an undefined ratio, and it must not look the same in the logs.
+        # A mirror that goes non-finite on a series that defines it
+        # (``_mirror_keys_defined_by``) is a BROKEN mirror, not an undefined
+        # ratio, and it must not look the same in the logs.
         logger.warning(
             "qstats scalar %s returned non-finite %r on a series that defines it "
             "(returns_len=%s): not a D-09 undefined ratio, the mirror is suspect",
@@ -2719,13 +2770,14 @@ def compute_qstats_scalars(
     }
     returns_len = len(returns) if returns is not None else None
 
+    defined_keys: frozenset[str]
     try:
-        must_be_defined = _every_mirror_ratio_is_defined(returns)
+        defined_keys = _mirror_keys_defined_by(returns)
     except Exception:  # noqa: BLE001 - the mirrors below log their own failure
-        must_be_defined = False
+        defined_keys = frozenset()
     for result_key, fn in _QSTATS_SINGLE_ARG_SCALARS:
         result[result_key] = _safe_qstats_scalar(
-            result_key, fn, returns, returns_len, must_be_defined
+            result_key, fn, returns, returns_len, result_key in defined_keys
         )
 
     # H-0718: distinguish 'no benchmark' (default), 'ok', and 'error' for r_squared.

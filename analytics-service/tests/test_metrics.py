@@ -1,6 +1,7 @@
 import logging
 import math
 import warnings
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
@@ -3958,16 +3959,17 @@ def test_q166r_broken_mirror_logs_a_named_warning_an_undefined_ratio_does_not(
     Before this, a mirror that went NaN because of a BUG was indistinguishable
     from that: same None, no log line, no status companion.
 
-    A mirror returning NaN on a series that defines every mirror (a loss, a
-    gain, a negative 5% quantile, >= 4 observations) must log a WARNING that
-    names it. The same NaN on the all-winning trigger, where D-09 makes kelly
+    A mirror returning NaN on a series that defines it (since round 2, each
+    mirror by its own precondition: ``_mirror_keys_defined_by``) must log a
+    WARNING that names it. The same NaN on the all-winning trigger, where D-09 makes kelly
     undefined, must not."""
     import services.metrics as metrics_module
 
     mixed = _rank05_benign_mixed()
     trigger = _rank05_trigger_series()
-    assert metrics_module._every_mirror_ratio_is_defined(mixed)
-    assert not metrics_module._every_mirror_ratio_is_defined(trigger)
+    every_key = {k for k, _fn in metrics_module._QSTATS_SINGLE_ARG_SCALARS}
+    assert metrics_module._mirror_keys_defined_by(mixed) == every_key
+    assert "kelly_criterion" not in metrics_module._mirror_keys_defined_by(trigger)
 
     caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
     clean = compute_qstats_scalars(mixed, None)
@@ -4217,3 +4219,147 @@ def test_q166r2_r_squared_over_a_pair_that_defines_none_is_none_not_residue(capl
     assert metrics_module._dispersion_is_residue(float("nan"), 0.0) is False
     compute_qstats_scalars(one, pd.Series([0.02], index=one.index))
     assert _q166r_suspect_lines(caplog) == []
+
+
+def _q166r2_s(values: list[float]) -> pd.Series:
+    return pd.Series(values, index=pd.bdate_range("2024-01-01", periods=len(values)), dtype="float64")
+
+
+def _q166r2_q05_zero_with_a_loss() -> pd.Series:
+    # Two losses in 100 days and 50 flat days: the 5% quantile is exactly 0.
+    return _q166r2_s([-0.01] * 2 + [0.0] * 50 + [0.01] * 48)
+
+
+def _q166r2_high_win_rate() -> pd.Series:
+    """365 days, 8 of them losing (2.2%): a carry or option-selling shape. Its 5%
+    quantile is POSITIVE, and all eight mirrors are finite on it."""
+    rng = np.random.default_rng(16603)
+    v = np.abs(rng.normal(0.002, 0.004, 365))
+    v[rng.choice(365, 8, replace=False)] = -np.abs(rng.normal(0.01, 0.005, 8))
+    return _q166r2_s(list(v))
+
+
+#: id -> (series builder, the mirror key the input does NOT define). Each case
+#: removes exactly ONE ingredient of that mirror's precondition, so each
+#: conjunct of ``_mirror_keys_defined_by`` has an input that fails only it.
+_Q166R2_UNDEFINED_CASES: dict[str, tuple[Callable[[], pd.Series], str]] = {
+    "recovery_no_loss": (_rank05_trigger_series, "recovery_factor"),
+    "ulcer_one_row": (lambda: _q166r2_s([0.01]), "ulcer_index"),
+    "upi_no_loss": (_rank05_trigger_series, "upi"),
+    "upi_inf_day": (lambda: _q166r2_s([0.01, -0.02, float("inf"), 0.01, -0.01]), "upi"),
+    "kelly_no_win": (lambda: _q166r2_s([-0.01, -0.02, -0.005, -0.01, -0.03]), "kelly_criterion"),
+    "kelly_no_loss": (_rank05_trigger_series, "kelly_criterion"),
+    "cpc_no_win": (lambda: _q166r2_s([-0.01, -0.02, -0.005, -0.01, -0.03]), "cpc_index"),
+    "common_sense_no_loss": (_rank05_trigger_series, "common_sense_ratio"),
+    "common_sense_q05_zero": (_q166r2_q05_zero_with_a_loss, "common_sense_ratio"),
+    "psr_constant": (lambda: _q166r_constant_series(0.001, 120), "probabilistic_sharpe_ratio"),
+    "psr_nav_constant_yield": (
+        lambda: _q166r2_nav_constant_yield(1e-4),
+        "probabilistic_sharpe_ratio",
+    ),
+    "psr_three_rows": (lambda: _q166r2_s([0.01, -0.02, 0.03]), "probabilistic_sharpe_ratio"),
+    "psr_negative_variance_term": (
+        lambda: _q166r2_s([0.01, 0.01, 0.02, 0.02]),
+        "probabilistic_sharpe_ratio",
+    ),
+    "serenity_no_loss": (_rank05_trigger_series, "serenity_index"),
+    "serenity_constant_losing": (lambda: _q166r_constant_series(-0.002, 250), "serenity_index"),
+    "serenity_flat_drawdown": (lambda: _q166r2_s([-0.1, 0.0, 0.0, 0.0, 0.0]), "serenity_index"),
+}
+
+
+@pytest.mark.parametrize(
+    ("build", "key"), list(_Q166R2_UNDEFINED_CASES.values()), ids=list(_Q166R2_UNDEFINED_CASES)
+)
+def test_q166r2_each_mirror_precondition_is_necessary(build, key, caplog):
+    """SFH R2-MED-1: each conjunct of each mirror's precondition is NECESSARY.
+
+    On an input missing one ingredient the mirror really is non-finite (a D-09
+    undefined ratio), the predicate leaves its key out, and no "mirror is
+    suspect" line is logged. Widening any conjunct puts the key back in on an
+    input where the mirror is NaN, which logs a false broken-mirror line and
+    turns this RED. Round 1's drills M7 (the quantile conjunct), M8 (the
+    observation count, carried now by the PSR variance term) and M9 (the win
+    conjunct) all survived the suite; here they are ``common_sense_q05_zero``,
+    ``psr_three_rows`` and ``kelly_no_win`` / ``cpc_no_win``.
+    """
+    import services.metrics as metrics_module
+
+    s = build()
+    fn = dict(metrics_module._QSTATS_SINGLE_ARG_SCALARS)[key]
+    assert _safe_float(fn(s)) is None, f"{key} is finite here, so the case proves nothing"
+    assert key not in metrics_module._mirror_keys_defined_by(s)
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    compute_qstats_scalars(s, None)
+    assert [line for line in _q166r_suspect_lines(caplog) if key in line] == []
+
+
+def test_q166r2_high_win_rate_strategy_keeps_the_broken_mirror_signal(caplog, monkeypatch):
+    """SFH R2-MED-1: round 1's single predicate required a NEGATIVE 5% quantile,
+    so a strategy losing on fewer than 5% of days got no broken-mirror signal
+    for ANY mirror, although all eight are finite on it. Per-mirror
+    preconditions keep the signal: a kelly mirror broken to NaN is named."""
+    import services.metrics as metrics_module
+
+    s = _q166r2_high_win_rate()
+    p = metrics_module._prepared_returns_no_guess(s)
+    assert float(p.quantile(0.05)) > 0.0, "fixture must have a positive 5% quantile"
+    every_key = {k for k, _fn in metrics_module._QSTATS_SINGLE_ARG_SCALARS}
+    assert metrics_module._mirror_keys_defined_by(s) == every_key
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    clean = compute_qstats_scalars(s, None)
+    assert all(clean[k] is not None for k in every_key), clean
+    assert _q166r_suspect_lines(caplog) == []
+
+    broken = tuple(
+        (k, (lambda r: float("nan")) if k == "kelly_criterion" else fn)
+        for k, fn in metrics_module._QSTATS_SINGLE_ARG_SCALARS
+    )
+    monkeypatch.setattr(metrics_module, "_QSTATS_SINGLE_ARG_SCALARS", broken)
+    compute_qstats_scalars(s, None)
+    lines = _q166r_suspect_lines(caplog)
+    assert len(lines) == 1 and "kelly_criterion" in lines[0], lines
+
+
+def test_q166r2_every_mirror_is_finite_wherever_its_precondition_holds():
+    """The SUFFICIENCY direction: on any input whose precondition holds, the
+    mirror is finite, so the "mirror is suspect" line cannot fire on a healthy
+    mirror. A deterministic sample of the 164,357-check fuzz recorded in
+    ``_mirror_keys_defined_by``: every series of length 2 to 4 over a 6-value
+    grid (a +150% day included), and 150 seeded random series in five shapes."""
+    import itertools
+
+    import services.metrics as metrics_module
+
+    mirrors = dict(metrics_module._QSTATS_SINGLE_ARG_SCALARS)
+    grid = [-0.5, -0.01, 0.0, 0.01, 0.02, 1.5]
+    series = [
+        _q166r2_s(list(combo)) for n in (2, 3, 4) for combo in itertools.product(grid, repeat=n)
+    ]
+    rng = np.random.default_rng(16604)
+    for i in range(150):
+        n = int(rng.integers(4, 300))
+        kind = i % 5
+        if kind == 0:
+            v = rng.normal(0.001, 0.02, n)
+        elif kind == 1:
+            v = np.abs(rng.normal(0.002, 0.01, n))
+            v[rng.random(n) < 0.02] *= -1
+        elif kind == 2:
+            v = rng.normal(0.001, 0.02, n)
+            v[rng.random(n) < 0.3] = np.nan
+        elif kind == 3:
+            v = np.where(rng.random(n) < 0.5, 0.0, rng.normal(0, 0.01, n))
+        else:
+            v = rng.normal(0.01, 0.05, n)
+            v[0] = 1.5
+        series.append(_q166r2_s(list(v)))
+    failures = []
+    checked = 0
+    for s in series:
+        for key in metrics_module._mirror_keys_defined_by(s):
+            checked += 1
+            if _safe_float(mirrors[key](s)) is None:
+                failures.append((key, s.tolist()))
+    assert checked > 1000, checked
+    assert failures == [], failures[:5]
