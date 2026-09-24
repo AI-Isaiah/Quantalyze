@@ -546,25 +546,55 @@ SELECT count(*) AS enqueued_this_tick
 - **Expected:** `succeeded`, and `enqueued_this_tick = 2` for the four-strategy single-venue
   backlog (the per-venue cap of 2 binds — see "First tick"). The count the function returns is a
   NOTICE and does not reach `return_message`, which is why the second query exists at all.
-- A `failed` run whose `return_message` starts with `enqueue_ledger_refresh_for_strategies: every
-  candidate this tick failed to enqueue` is the fan-out's own verdict since Phase 164.6: every
-  candidate it selected that tick raised on enqueue. See the next subsection.
+- A `failed` run rolled its whole tick back: nothing it enqueued and no failure row survived. Since
+  the Phase 164.6 round-2 fix the fan-out raises on purpose in ONE case only, when the failure row's
+  own write failed on a tick that enqueued nothing. Its `return_message` then starts with
+  `enqueue_ledger_refresh_for_strategies: failure instrument write failed`. Any other failed run is
+  an error the fan-out did not handle. A tick whose candidates failed is NOT a failed run any more;
+  see the next subsection. The prod prober's cron-obs arm reports a failed run as
+  `cron-ledger-fanout-failed`.
 - ⚠️ Neither of these is success. They tell you the mechanism fired; the census above tells you it
   worked.
 
 #### Did a candidate fail to enqueue this tick? (Phase 164.6, OPS-08-F2)
 
-Since migration `20260924120000_ledger_fanout_failure_count.sql`, a candidate's enqueue that raised
-is handled in one of two ways, depending on what else the tick did:
+Since migration `20260924120000_ledger_fanout_failure_count.sql`, a tick in which any candidate's
+enqueue raised writes **exactly one** `public.cron_runs` row. Its `error` is
+`candidate_enqueue_failed` and its `metadata` carries the failed, enqueued and lost-race counts. Both
+fan-outs write it under the same `cron_name`. Since the Phase 164.6 round-2 fix, the tick then
+COMMITS whether or not it enqueued anything: the all-candidates-failed raise is gone, so the row
+survives and the 20-hour skip below always has something to read.
 
-- **The tick also enqueued something.** It writes **exactly one** `public.cron_runs` row. Its
-  `error` is `candidate_enqueue_failed` and its `metadata` carries the failed, enqueued and
-  lost-race counts. Both fan-outs write it under the same `cron_name`.
-- **Every selected candidate failed.** The tick RAISES at its end, after releasing its lock, so the
-  scheduler records the run as `failed`: the first query in "Did the tick itself run" above shows
-  it, with a `return_message` that starts with the function's name and `every candidate this tick
-  failed to enqueue`. The raise rolls that tick's own failure row back, so the query below does NOT
-  show it. The prod prober's cron-obs arm reports such a run as `cron-ledger-fanout-failed`.
+The one exception is the row's own write failing:
+
+- **On a tick that enqueued nothing**, the fan-out RAISES `failure instrument write failed`, and the
+  scheduler records the run as `failed`. The first query in "Did the tick itself run" above shows
+  it. There was nothing enqueued to lose.
+- **On a tick that enqueued something**, it only raises a Postgres `WARNING` and returns, so the
+  good enqueues are kept. See the "Zero rows is not proof of health" bullet below.
+
+**What the prod prober watches.** Its cron-obs arm reads the `ledger_refresh_fanout` job every run
+and counts, never selecting a message or `metadata`:
+
+| count | window | defect |
+|---|---|---|
+| runs started | 3 h | `cron-ledger-fanout-absent` when fewer than 2 (the job is hourly) |
+| runs finished outside the success form, `1 row` or `SELECT 1` | 3 h | `cron-ledger-fanout-failed` |
+| runs with no end time, started over 30 minutes ago | 24 h | `cron-ledger-fanout-stuck` |
+| `candidate_enqueue_failed` rows, by `completed_at` | 21 h | `cron-ledger-fanout-candidate-failed` |
+
+- The failed-run count is taken from the SUCCESS form, so it also catches a pg_cron start failure or
+  an error with no `CONTEXT` line. How many of those runs name the function is printed beside it as
+  a classification only, telling you whether to start from the function body or from pg_cron.
+- A stuck run holds the fan-out's advisory lock, so every later tick skips and finishes in the
+  success form. Nothing else would show it.
+- 21 hours covers the 20-hour skip plus one tick, so one failed candidate stays alerted for as long as
+  it is being skipped. The count clears by itself.
+- ⚠️ **Assumption the first PROD prober run measures.** A succeeded run records `1 row` (pg_cron in
+  connection mode) or `SELECT 1` (background-worker mode). PROD's succeeded fan-out runs were
+  recorded as `1 row` in the Phase 164.5.1.1 session, but no failed PROD run has been observed. If
+  PROD records any other success form, every run reads as failed and the arm goes red on its first
+  run. That is loud, never silent.
 
 A tick with no failure writes nothing. Run this in the admin SQL editor (row security admits
 platform admins and `service_role` only):
@@ -583,14 +613,17 @@ SELECT completed_at,
  ORDER BY completed_at DESC;
 ```
 
-- **Expected:** zero rows in the last tick's window. A row means that tick skipped `failed`
-  candidates and still enqueued `enqueued` others. `fn` names the fan-out that wrote it
+- **Expected:** zero rows in the last tick's window. A row means that tick recorded `failed`
+  candidates, enqueued `enqueued` others (possibly 0), and committed. `fn` names the fan-out that wrote it
   (`enqueue_ledger_refresh_for_strategies` or `enqueue_ledger_composite_refresh`).
 - ⚠️ **Zero rows is not proof of health.** Two failures leave no row here:
-  - a tick in which every candidate failed. Its row was rolled back by its own raise; read the
-    run's `status` in the first query above instead;
-  - a tick that enqueued something but whose failure-row write itself failed. That leaves only a
-    Postgres `WARNING` (`failure instrument write failed`), which nothing reads. Only the census
+  - a tick that enqueued nothing and whose failure-row write failed. It raised, so read the run's
+    `status` in the first query above instead. The prober reports it as
+    `cron-ledger-fanout-failed`;
+  - ⚠️ **recorded, not fixed (review L1):** a tick that enqueued something but whose failure-row
+    write itself failed. That leaves only a Postgres `WARNING` (`failure instrument write failed`),
+    which nothing reads, and the run finishes in the success form. It takes two independent faults,
+    a failing candidate and a failing `cron_runs` write. It is SILENT to the prober. Only the census
     above catches it, as a strategy that stays stale.
 - **History, not this tick.** Drop the `completed_at` line and add `LIMIT 20` to list older failure
   rows. `cron_runs` is never purged, so without the window the query returns rows forever once any
@@ -609,19 +642,27 @@ SELECT completed_at,
   failure row and are not a template.
 - **How the fan-out behaves around a failure** (the migration is the source of truth; this list
   describes it and promises nothing beyond it):
-  - **What is watched.** A tick in which every candidate failed is a failed run, which the prod
-    prober's cron-obs arm reports. A tick that failed some candidates and enqueued others is NOT
-    alerted on by anything. It is found only by the query above.
+  - **What is watched.** Every tick with a failed candidate, whether or not it enqueued anything,
+    through the prober's failure-row count (the table above). A failed, stuck or missing run of the
+    `ledger_refresh_fanout` job, through the prober's run counts.
+  - ⚠️ **What is NOT watched.** The COMPOSITE fan-out's own runs. Its failure rows share the
+    `cron_name` and are counted, but the prober reads only the `ledger_refresh_fanout` job's runs,
+    so a failed or stuck composite run is invisible. The composite is dormant today; closing this
+    is a scheduling precondition, see item 6 of `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` below. Also
+    not watched: the two-fault case in the "Zero rows" bullet above (L1).
   - **A failed candidate is skipped for 20 hours.** The candidate query excludes any strategy named
     in a failure row written in the last 20 hours, the same window as the attempt cooldown, so a
     poisoned candidate no longer takes the same slot every tick and a healthy candidate takes it.
-    ⚠️ This needs the failure row to survive. After a tick in which EVERY candidate failed, there is
-    no surviving row, so the next tick selects the same candidates and fails the same way until
-    the cause is repaired.
-  - **A lost enqueue race is not a failure.** SQLSTATE `40001` (serialization failure) and `40P01`
-    (deadlock) mean another writer is already serving the strategy. They are counted in
-    `lost_race`. They never name a strategy, never skip it for 20 hours, never write a row on their
-    own and never make a tick raise.
+    Since the round-2 fix the failure row survives every tick, all-failed ones included, so this
+    also holds when both per-venue slots, or the whole composite cohort, are poisoned. It does not
+    hold on the one tick whose failure-row write failed, because no row exists to read.
+  - **Only a lost enqueue race is not a failure.** SQLSTATE `40001` (serialization failure) means
+    another writer won the enqueue race and is already serving the strategy. It is counted in
+    `lost_race`, never names a strategy, never skips it for 20 hours and never writes a row on its
+    own. SQLSTATE `40P01` (deadlock) is NOT a lost race: the other party can be any lock holder,
+    such as a worker updating the row, so nothing guarantees a job exists for the strategy. Since
+    the round-2 fix a deadlock is counted as a failure, named in the failure row and skipped for
+    20 hours like any other.
 
 ### Proving the kill switch — with the schedule still firing
 
@@ -895,6 +936,14 @@ here, but this precondition sits here because this is where a reader would go to
    precondition stays BLOCKING
    until that phase ships. `TODOS.md` `161.1-D13` already requires the composite twin of the reuse
    collision to be closed before this go-live op, not after.
+6. ⛔ **BLOCKING: the composite's runs must be watched before it is scheduled** (review WR-03).
+   The prod prober's cron-obs arm reads only the `ledger_refresh_fanout` job's runs. The composite's
+   failure rows are already counted, because they share its `cron_name`, but a failed, stuck or
+   missing composite run is invisible. Before scheduling, either extend cron-obs so its job and
+   function constants cover the composite's own job, or schedule the composite as its own job
+   together with that extension. ⛔ Never add it as a second statement of `ledger_refresh_fanout`'s
+   command: pg_cron runs a multi-statement command as one transaction, so one fan-out's error
+   would roll back the other's enqueues.
 
 ---
 
