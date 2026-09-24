@@ -549,6 +549,52 @@ SELECT count(*) AS enqueued_this_tick
 - ⚠️ Neither of these is success. They tell you the mechanism fired; the census above tells you it
   worked.
 
+#### Did a candidate fail to enqueue this tick? (Phase 164.6, OPS-08-F2)
+
+Since migration `20260924120000_ledger_fanout_failure_count.sql`, a tick in which one or more
+candidates' enqueue raised writes **exactly one** `public.cron_runs` row. Its `error` is
+`candidate_enqueue_failed` and its `metadata` carries the failed and enqueued counts. A tick with no
+failure writes nothing. Both fan-outs write it under the same `cron_name`. Run this in the admin
+SQL editor (row security admits platform admins and `service_role` only):
+
+```sql
+SELECT completed_at,
+       error,
+       metadata->>'function'               AS fn,
+       (metadata->>'failed_count')::int    AS failed,
+       (metadata->>'enqueued_count')::int  AS enqueued
+  FROM public.cron_runs
+ WHERE cron_name = 'ledger_refresh_fanout'
+   AND error = 'candidate_enqueue_failed'
+ ORDER BY completed_at DESC
+ LIMIT 5;
+```
+
+- **Expected:** zero rows. A row means that tick skipped `failed` candidates and still enqueued
+  `enqueued` others. `fn` names the fan-out that wrote it (`enqueue_ledger_refresh_for_strategies`
+  or `enqueue_ledger_composite_refresh`).
+- ⛔ **The per-target list is deliberately NOT selected.** The row's `metadata` also holds the
+  failed strategy ids with their SQLSTATEs, but runbook output gets pasted into this public
+  repository. Read the ids in the editor if you need them to repair a cause, and never paste them.
+- **The function's return value still means jobs INSERTED** (D-10). A tick that returns `2` beside a
+  failure row enqueued 2 and failed `failed` more. The return value is not a failure signal; the
+  row is.
+- ⚠️ **Since Phase 164.6, a `cron_runs` row under `ledger_refresh_fanout` is no longer proof of
+  dormancy.** It may be a per-candidate failure row. The two dormancy causes (`flag_read_failed`,
+  `flag_row_invisible_or_absent`) and `candidate_enqueue_failed` share that `cron_name`, so any
+  "is it dormant?" reading must filter on `error` (or `metadata->>'cause'`), never on the
+  `cron_name` alone. Earlier readings that counted rows under `ledger_refresh_fanout` predate the
+  failure row and are not a template.
+- **Current behaviour. Each point below changes in the 164.6 review fix;** read the fixed migration
+  rather than this bullet once that fix lands.
+  - Nothing alerts on this row today. It is found only by running the query above. *(Changes in
+    the 164.6 review fix.)*
+  - A candidate whose enqueue raises leaves no `compute_jobs` row, so the 20-hour attempt cooldown
+    does not see it. The same candidate is selected again on the next tick, and a persistent cause
+    writes a failure row every tick until it is repaired. *(Changes in the 164.6 review fix.)*
+  - A lost enqueue race (SQLSTATE `40001`) is counted in `failed_count` like any other failure.
+    *(Changes in the 164.6 review fix.)*
+
 ### Proving the kill switch — with the schedule still firing
 
 This is the property the rejected `SET app.… ; SELECT …` workaround would have destroyed: a caller
@@ -790,10 +836,46 @@ the venue returns.
 
 ---
 
+## ⛔ Before the COMPOSITE fan-out is ever scheduled — BLOCKING precondition [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]
+
+This runbook activates the single-key fan-out only. Its composite twin gets no activation steps
+here, but this precondition sits here because this is where a reader would go to schedule it.
+
+1. **Where it stands.** `public.enqueue_ledger_composite_refresh()` is DORMANT. No `cron.schedule`
+   registration names it, and no migration may add one (the rule under Step 2 applies to it
+   unchanged).
+2. ⛔ **BLOCKING.** No schedule naming `public.enqueue_ledger_composite_refresh()` may be
+   registered until `run_stitch_composite_job` in `analytics-service/services/job_worker.py`
+   re-reads the LIVE `compute_jobs` row's `metadata->>'source'` before it honours the
+   `ledger-refresh-composite` marker. The single-key honour sites already do this through
+   `_refresh_marker_still_on_row`. The composite guard today compares against the claim-time
+   `job.get("metadata")` snapshot instead.
+3. **Why.** A user-initiated composite resync (the `stitch_composite` enqueues in
+   `src/app/api/keys/sync/route.ts` and `src/app/api/strategies/finalize-wizard/route.ts`) can
+   dedup onto a fan-out job that already carries the marker. Since Phase 164.6 those TypeScript
+   sites retract the marker. A retraction that lands BEFORE the worker claims the job is fully
+   effective. A retraction that lands AFTER the claim is not: that run's Python guard still sees
+   the stale marker in its snapshot, treats the run as a protected ledger refresh, and suppresses
+   the user's failure. That is a silent data-integrity failure on a funded account, and the
+   schedule is what makes it reachable.
+4. **How to check it is met.** Read `run_stitch_composite_job`: a live re-read of the row (through
+   `_refresh_marker_still_on_row` or an equivalent) must sit before its composite-marker
+   comparison. A test must go RED when that re-read is removed. Both must be true on the commit
+   the worker is deployed from. A code comment promising it does not count.
+5. **Owner.** Phase 164.6 did NOT implement this. The Python change belongs to **Phase 164.6.7
+   COMPOSITECLAIMSNAPSHOT** (inserted into the ROADMAP on `main` by PR #849, 2026-09-24). This
+   precondition stays BLOCKING
+   until that phase ships. `TODOS.md` `161.1-D13` already requires the composite twin of the reuse
+   collision to be closed before this go-live op, not after.
+
+---
+
 ## What this runbook deliberately does not cover
 
 - **The deribit composite.** The fan-out excludes composites by an explicit conjunct; deribit's
   sole live strategy is a composite, so it gets zero coverage from *this* mechanism. Its coverage
   is owed to the separate composite arm on `stitch_composite`. See `TODOS.md` item **0.3**.
+  ⛔ That arm's schedule is blocked by the precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in
+  the section directly above.
 - **The ccxt sibling defect.** ccxt strategies with no new fills also never recompute — a different
   venue class and a different mechanism, out of scope here. See `TODOS.md` item **0.2**.
