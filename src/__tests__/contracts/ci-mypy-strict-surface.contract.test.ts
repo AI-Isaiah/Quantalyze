@@ -1047,8 +1047,8 @@ describe("[164.6.1 / MYPY-MAINPY-01] CALIBRATION — the surface pin can FAIL", 
 
   it("(g2) the NEXT job's key carries a trailing comment → its job-level keys are not read as the python job's", () => {
     const afterPython = REAL_YML.split("\n  python:\n")[1].split("\n").find((l) => /^ {0,2}\S/.test(l) && !l.trim().startsWith("#"));
-    expect(afterPython, "CALIBRATION (g2): `e2e` is no longer the job after `python`; re-anchor the leg").toBe("  e2e:");
-    const yml = mutate(REAL_YML, "\n  e2e:\n", "\n  e2e:  # calibration (g2)\n    continue-on-error: true\n", "(g2)");
+    expect(afterPython, "CALIBRATION (g2): `test-db-drift` is no longer the job after `python`; re-anchor the leg").toBe("  test-db-drift:");
+    const yml = mutate(REAL_YML, "\n  test-db-drift:\n", "\n  test-db-drift:  # calibration (g2)\n    continue-on-error: true\n", "(g2)");
     const problems = surfaceProblems(yml, REAL_MAKEFILE, REAL_LISTING, EXCLUDED);
     expect(problems, problems.join("\n")).toEqual([]);
   });
