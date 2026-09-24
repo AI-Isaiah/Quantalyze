@@ -5,8 +5,8 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "167.2"
 current_phase_name: "KEYCARDSYNC — the key card never shows one key's sync result as another key's"
 status: "Phase 164.9 shipped — PR #837"
-stopped_at: Phase 167.2 UI-SPEC approved
-last_updated: "2026-09-23T23:11:22.196Z"
+stopped_at: Completed 167.2-01-PLAN.md
+last_updated: "2026-09-24T02:15:48.000Z"
 last_activity: 2026-09-22
 last_activity_desc: "Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction. Phase 167 CREDTRUST context locked 2026-09-22. Plan 167-01 (wizard SIGN_IN_FAILED mint) shipped. Plan 167-02 (D-09/D-10, six retry-disposition guards on allocator_positions.py's MT5/sFOX arms + AST roster case) shipped this session, commits 5c48916a + 26c83dc3 — see 167-02-SUMMARY.md."
 state_head: 1ab3b22afe8a3f289988bdaba7d19cee861f21f2
@@ -14,7 +14,7 @@ progress:
   total_phases: 50
   completed_phases: 32
   total_plans: 254
-  completed_plans: 237
+  completed_plans: 238
   percent: 60
 ---
 
@@ -179,8 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 167.2 (keycardsync-the-key-card-never-shows-one-key-s-sync-result-a) — READY TO EXECUTE
-Plan: Not started
+Phase: 167.2 (keycardsync-the-key-card-never-shows-one-key-s-sync-result-a) — EXECUTING
+Plan: 1 of 10 DONE (`167.2-01-SUMMARY.md`: compute-state derivation, sync-progress on the chain-filtered selection, locked S4-S9 copy, strategy-shape predicate; commits `016cfc73c`, `9275ff5ac`, `42353f928`)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
@@ -2299,6 +2299,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-09-24T02:15:48.000Z
+**Stopped At:** Completed 167.2-01-PLAN.md (wave 1; three task commits `016cfc73c`, `9275ff5ac`, `42353f928`, not pushed). Next: 167.2-02.
+**Resume File:** None
 
 **Last Date:** 2026-09-23T22:01:27.358Z
 **Stopped At:** Phase 167.2 UI-SPEC approved
