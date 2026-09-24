@@ -43,7 +43,11 @@ const LINKED_KEY_ID = "00000000-0000-4000-8000-0000000000b1";
  * The freshness probe resolves EMPTY (a first-time or in-progress draft), and
  * the status poll returns `pollStatus`.
  */
-function installClient(opts: { linkedKey: string | null; pollStatus: string }) {
+function installClient(opts: {
+  linkedKey: string | null;
+  pollStatus: string;
+  strategyReadError?: { message: string };
+}) {
   currentClientFactory = () => ({
     from: (table: string) => ({
       select: (cols: string) => {
@@ -51,10 +55,11 @@ function installClient(opts: { linkedKey: string | null; pollStatus: string }) {
           return {
             eq: () => ({
               maybeSingle: () =>
-                Promise.resolve({
-                  data: { api_key_id: opts.linkedKey },
-                  error: null,
-                }),
+                Promise.resolve(
+                  opts.strategyReadError
+                    ? { data: null, error: opts.strategyReadError }
+                    : { data: { api_key_id: opts.linkedKey }, error: null },
+                ),
             }),
           };
         }
@@ -98,6 +103,9 @@ let progressBody: SyncProgressResponse = {
   memberProgress: [],
 };
 let kickoffStatus = 202;
+// When true, the sync-progress read never answers on its own; it settles only
+// by rejecting when its request's AbortSignal fires.
+let progressHangs = false;
 let kickoffBody: Record<string, unknown> = {
   ok: true,
   accepted: true,
@@ -109,8 +117,15 @@ let kickoffBody: Record<string, unknown> = {
 function installFetchMock() {
   return vi
     .spyOn(globalThis, "fetch")
-    .mockImplementation(async (input: RequestInfo | URL) => {
+    .mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (progressHangs && url.includes("/sync-progress")) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("The operation timed out.", "TimeoutError")),
+          );
+        });
+      }
       if (url.includes("/api/keys/sync")) {
         return new Response(JSON.stringify(kickoffBody), { status: kickoffStatus });
       }
@@ -157,6 +172,7 @@ describe("SyncPreviewStep — no second sync, and Retry only when the server nee
     vi.useFakeTimers();
     progressBody = { jobStatus: "running", stalled: false, memberProgress: [] };
     kickoffStatus = 202;
+    progressHangs = false;
     kickoffBody = {
       ok: true,
       accepted: true,
@@ -208,6 +224,31 @@ describe("SyncPreviewStep — no second sync, and Retry only when the server nee
     installClient({ linkedKey: null, pollStatus: "computing" });
     await mountAndSettle();
     expect(kickoffPosts(fetchSpy)).toHaveLength(1);
+  });
+
+  it("review-fix round 1 (LOW-7): a sync-progress probe that never answers times out and the mount kicks off", async () => {
+    installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
+    progressHangs = true;
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await mountAndSettle();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(kickoffPosts(fetchSpy)).toHaveLength(1);
+  });
+
+  it("review-fix round 1 (LOW-7): a failed strategies read is logged, and the mount kicks off", async () => {
+    installClient({
+      linkedKey: LINKED_KEY_ID,
+      pollStatus: "computing",
+      strategyReadError: { message: "synthetic strategies read failure" },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await mountAndSettle();
+    expect(kickoffPosts(fetchSpy)).toHaveLength(1);
+    expect(
+      warn.mock.calls.some((c) => String(c[0]).includes("could not read the strategy")),
+    ).toBe(true);
   });
 
   // (b) + (c) ───────────────────────────────────────────────────────────────

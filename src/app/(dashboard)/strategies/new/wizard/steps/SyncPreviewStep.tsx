@@ -152,6 +152,20 @@ const SETTLED_WITHOUT_COMPLETE_GRACE_MS = 60_000;
 const IN_FLIGHT_TRUST_CEILING_MS = 3_600_000;
 
 /**
+ * Review-fix round 1 (LOW-7) — how long the mount's in-flight probe waits for
+ * its sync-progress read. The probe only decides whether to SKIP a kickoff, and
+ * any failure means "POST as before", so a read that hangs must not hold the
+ * kickoff back. A healthy read answers well inside a second; 5 s leaves room
+ * for a cold route without making a reload feel stuck.
+ *
+ * The timer is an `AbortController` plus `window.setTimeout`, not
+ * `AbortSignal.timeout`, and it covers the body read too. Same behaviour, but a
+ * test can drive it: jsdom's `AbortSignal.timeout` does not run on the fake
+ * clock, which was measured when the first version of this used it.
+ */
+const MOUNT_PROBE_TIMEOUT_MS = 5_000;
+
+/**
  * Status-poll backoff schedule. Each entry is the delay BEFORE the next
  * poll; the loop walks the ladder and then holds at the final step.
  * Capping at 10s keeps DB load and background-tab timer churn down on
@@ -717,16 +731,34 @@ export function SyncPreviewStep({
           .maybeSingle();
         const linkedKey = (strategyRow as { api_key_id?: unknown } | null)
           ?.api_key_id;
-        if (strategyErr || typeof linkedKey !== "string" || linkedKey === "") {
+        if (strategyErr) {
+          console.warn(
+            "[wizard:SyncPreviewStep] in-flight probe could not read the strategy; kicking off as before:",
+            scrubSeamError(strategyErr),
+          );
           return false;
         }
-        const progressRes = await wizardFetch(
-          `/api/strategies/${strategyId}/sync-progress`,
+        if (typeof linkedKey !== "string" || linkedKey === "") {
+          return false;
+        }
+        const probeAbort = new AbortController();
+        const probeTimer = window.setTimeout(
+          () => probeAbort.abort(),
+          MOUNT_PROBE_TIMEOUT_MS,
         );
-        if (!progressRes.ok) return false;
-        const progress = (await progressRes
-          .json()
-          .catch(() => null)) as SyncProgressResponse | null;
+        let progress: SyncProgressResponse | null;
+        try {
+          const progressRes = await wizardFetch(
+            `/api/strategies/${strategyId}/sync-progress`,
+            { signal: probeAbort.signal },
+          );
+          if (!progressRes.ok) return false;
+          progress = (await progressRes
+            .json()
+            .catch(() => null)) as SyncProgressResponse | null;
+        } finally {
+          window.clearTimeout(probeTimer);
+        }
         if (
           !progress ||
           progress.degraded === true ||
