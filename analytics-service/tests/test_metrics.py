@@ -3835,3 +3835,20 @@ def test_q166r_residue_guard_leaves_real_dispersion_bit_identical():
     expected_vol = float(s.std() * math.sqrt(252))
     expected_sharpe = float((s.mean() * 252) / expected_vol)
     assert _annualized_vol_sharpe(s, 252) == (expected_vol, expected_sharpe)
+
+
+def test_q166r_constant_benchmark_beta_is_undefined_not_a_residue_slope():
+    """SFH HIGH-1, same class on the benchmark leg: 0.0.81 `greeks` tests the
+    benchmark variance with `== 0`. A constant benchmark's `np.cov` variance is
+    float residue for most lengths (measured 1.9e-37 at 120 days), so the slope
+    over it was a fabricated beta: -1.92 and alpha 0.339 on a 250-day pair,
+    measured pre-fix. A benchmark that never moves defines no beta (D-09)."""
+    from services.metrics import _greeks_no_guess
+
+    for n in (120, 250, 1000):
+        flat = _q166r_constant_series(0.001, n)
+        assert float(np.cov(flat, flat)[1, 1]) != 0.0, "fixture lost its residue"
+        strategy = pd.Series(
+            np.random.default_rng(7).normal(0.001, 0.01, n), index=flat.index
+        )
+        assert _greeks_no_guess(strategy, flat, 252) == (None, None), n

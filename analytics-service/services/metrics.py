@@ -1072,7 +1072,11 @@ def _greeks_no_guess(
         return None, None
     r, b = pair.iloc[:, 0], pair.iloc[:, 1]
     matrix = np.cov(r, b)
-    if matrix[1, 1] == 0:
+    # 0.0.81 tests `matrix[1, 1] == 0`. A constant benchmark's variance is often
+    # float residue instead (1.9e-37 for 120 days of 0.001, measured), and the
+    # slope over it was a fabricated beta (-1.92 on a 250-day constant pair).
+    # Same class as SFH HIGH-1, same guard: no dispersion -> beta undefined.
+    if _dispersion_is_residue(math.sqrt(matrix[1, 1]), b.mean()):
         return None, None
     beta = matrix[0, 1] / matrix[1, 1]
     alpha = r.mean() - beta * b.mean()
