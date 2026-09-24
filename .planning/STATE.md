@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "167.1"
 current_phase_name: "AUMTRUST — the headline AUM says when it includes holdings from keys needing attention"
 status: executing
-stopped_at: Completed 167.1-05-PLAN.md
-last_updated: "2026-09-24T05:34:00.000Z"
+stopped_at: Completed 167.1-06-PLAN.md
+last_updated: "2026-09-24T06:17:00.000Z"
 last_activity: 2026-09-24
-last_activity_desc: Phase 167.1 plan 05 complete (D-06 answered (b) + D-18 reopened, implemented)
+last_activity_desc: Phase 167.1 plan 06 complete (WINDOWS 66 fixed, release v0.89.0.0 committed; phase human_needed)
 state_head: b64cb3002c4e017e389de4bafb29dcf8fa39edf6
 progress:
   total_phases: 50
   completed_phases: 32
   total_plans: 254
-  completed_plans: 248
+  completed_plans: 249
   percent: 64
 ---
 
@@ -180,7 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 167.1 (aumtrust-the-headline-aum-says-when-it-includes-holdings-fro) — EXECUTING
-Plan: 6 of 6 (plans 01-05 DONE — `167.1-01-SUMMARY.md` … `167.1-05-SUMMARY.md`; D-06 answered (b) and D-18 reopened by the founder 2026-09-24, both implemented in plan 05; plan 06 is the release)
+Plan: 6 of 6 (plans 01-06 DONE — `167.1-01-SUMMARY.md` … `167.1-06-SUMMARY.md`; D-06 answered (b) and D-18 reopened by the founder 2026-09-24, both implemented in plan 05; plan 06 released v0.89.0.0 (`7c0e57f7a`) and fixed WINDOWS 66. Phase stays human_needed until the three browser checks, run after deploy)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
@@ -498,7 +498,7 @@ Status: Executing Phase 167.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-24 — Phase 167.1 plan 05 complete (D-06 (b) excludes clause + D-18 reopen: State A at manual = live, State C in the hint at live ≤ 0)
+Last activity: 2026-09-24 — Phase 167.1 plan 06 complete (WINDOWS 66 fixed; release commit `7c0e57f7a`, v0.89.0.0, unified CHANGELOG entry, 58/58 commits mapped)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1291,6 +1291,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
      every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
      The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
      FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 06, the release, 2026-09-24)*
+
+- **D-167.1-06-A — the release is v0.89.0.0 (second segment), on the orchestrator's direction for a user-facing disclosure.** The plan named a third-segment bump (0.88.1.0 at today's main); recorded as a deviation in `167.1-06-SUMMARY.md`.
+- **D-167.1-06-B — plan 05's handoff line "a dropped holding whose key is missing from the key list is named by no part" is NOT a current limit.** Review round 3 WR-01 fixed it; the CHANGELOG lists the unknown-status excludes clause under Added instead.
 
 *(execution-time, Phase 167.1 AUMTRUST — plan 05, D-06 (b) and the D-18 reopen, 2026-09-24)*
 
@@ -2327,8 +2332,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-24T05:34:00.000Z
-**Stopped At:** Completed 167.1-05-PLAN.md
+**Last Date:** 2026-09-24T06:17:00.000Z
+**Stopped At:** Completed 167.1-06-PLAN.md
 **Resume File:** None
 
 **Last Date:** 2026-09-24T03:57:00.000Z

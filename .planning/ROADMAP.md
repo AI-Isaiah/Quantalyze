@@ -2939,7 +2939,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 167.1-06-PLAN.md — WINDOWS 66 closed, final byte-identity gate, and the ONE release commit carrying the D-06 outcome (D-14: the last plan releases) (wave 5)
+- [x] 167.1-06-PLAN.md — WINDOWS 66 closed, final byte-identity gate, and the ONE release commit carrying the D-06 outcome (D-14: the last plan releases) (wave 5) — DONE 2026-09-24 (`3bba699b1` docs, `7c0e57f7a` chore(release) v0.89.0.0; `167.1-06-SUMMARY.md`). Phase stays human_needed until the three browser checks
 
 ### Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding (INSERTED)
 
