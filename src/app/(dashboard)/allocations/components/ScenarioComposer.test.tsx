@@ -16556,4 +16556,91 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
     expect(screen.queryByText(/excludes/i)).toBeNull();
   });
+
+  // ── Review round 3 WR-01 — the production-reachable missing-key path ──────
+  // `getUserApiKeys` drops a key row on an unsupported exchange, but that
+  // key's holdings still arrive. It is in no eligible set, so the narrowing
+  // (always on in production) drops them. Until round 3 they landed in no
+  // part and the marker said nothing: "nothing silently disappears" failed on
+  // the one path an allocator can reach.
+  const AT_KEY_UNLISTED = "aumtrust-key-u";
+  function atUnlistedKeyBook(
+    unlisted: { spotUsd?: number; derivPnlUsd?: number },
+    withIncludes = false,
+  ): MyAllocationDashboardPayload {
+    const base = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: withIncludes ? "sign_in_failed" : null,
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: AT_B_UNTRUSTED_USD,
+      },
+      {
+        id: AT_KEY_UNLISTED,
+        status: null,
+        venue: "kraken",
+        symbol: unlisted.derivPnlUsd !== undefined ? "AUMTRUST-U-PERP" : "AUMTRUST-U",
+        ...unlisted,
+        eligible: false,
+      },
+    ]);
+    // The key list dropped the row, as `getUserApiKeys` does.
+    return {
+      ...base,
+      apiKeys: base.apiKeys.filter((k) => k.id !== AT_KEY_UNLISTED),
+    };
+  }
+
+  it("review round 3 WR-01 State A: a holding whose key the key list dropped stays out of the field, and the marker says so — 'Excludes $4,444 from keys with an unknown sync status.'", () => {
+    const payload = atUnlistedKeyBook({ spotUsd: 4_444 });
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the holding arrives, its key does not, and it is in
+    // neither eligible set nor the contributing set.
+    expect(payload.holdingsSummary.map((h) => h.api_key_id)).toContain(AT_KEY_UNLISTED);
+    expect(payload.apiKeys.map((k) => k.id)).not.toContain(AT_KEY_UNLISTED);
+    expect(payload.eligibleApiKeyIds).not.toContain(AT_KEY_UNLISTED);
+    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_UNLISTED);
+    renderAt(payload);
+
+    // D-03: the field is the contributing book only, 50,000 not 54,444.
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $4,444 from keys with an unknown sync status.",
+    );
+  });
+
+  it("review round 3 WR-01 State B, with an includes part: '…$50,000, which includes $12,345 from keys needing attention, and excludes $4,444 from keys with an unknown sync status.'", () => {
+    const payload = atUnlistedKeyBook({ spotUsd: 4_444 }, true);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    commitAum("75000");
+
+    expect(screen.getByTestId("scenario-aum-override-note").textContent).toBe(
+      "Overrides live-holdings total $50,000, which includes $12,345 from keys needing attention, and excludes $4,444 from keys with an unknown sync status.",
+    );
+    expect(screen.getAllByTestId("scenario-aum-untrusted-note")).toHaveLength(1);
+  });
+
+  it("review round 3 WR-01 count gate: a dropped unknown-status holding whose equity is exactly $0 still renders 'Excludes $0 from keys with an unknown sync status.' — the gate is the COUNT, never the amount", () => {
+    const payload = atUnlistedKeyBook({ derivPnlUsd: 0 });
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $0 from keys with an unknown sync status.",
+    );
+  });
 });

@@ -357,14 +357,50 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     expect(s.unknownStatus).toEqual({ amount: 4_444, count: 1, unavailable: 0 });
   });
 
-  it("review WR-05: a missing-key holding the narrowing drops is in neither the total nor unknownStatus", () => {
+  // ⛔ Review round 3 WR-01 (2026-09-24): this case used to pin the holding as
+  // in NO part, so the "excludes" clause was silent about it. It is flipped
+  // DELIBERATELY: the key list drops a key on an unsupported exchange, the
+  // holdings still arrive, and in production the narrowing is always on, so
+  // this is the one production-reachable missing-key path. D-06's intent is
+  // that the composer says what it excludes.
+  it("review round 3 WR-01: a missing-key holding the narrowing drops is in neither the total nor unknownStatus, and is recorded in excludedUnknownStatus, never in excludedUntrusted", () => {
     const s = summarize({
       holdings: [H_TRUSTED, H_MISSING_KEY],
       contributing: [KEY_TRUSTED],
     });
+    // D-03: the total is the contributing book only, unchanged.
     expect(s.total).toBe(480_000);
     expect(s.unknownStatus).toEqual({ amount: 0, count: 0, unavailable: 0 });
     expect(s.excludedUntrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
+    expect(s.excludedUnknownStatus).toEqual({ amount: 4_444, count: 1, unavailable: 0 });
+  });
+
+  it("review round 3 WR-01: with the key list ABSENT (an empty status map) every dropped holding is unknown-status excluded — the excludes side no longer fails closed — and the total is unchanged", () => {
+    const holdings = [H_TRUSTED, H_REVOKED, H_SIGN_IN_FAILED_OUTSIDE];
+    const s = summarizeLiveHoldings({
+      toggleByScopeRef: allOn(holdings),
+      holdingByRef: buildHoldingByRef(holdings),
+      contributingApiKeyIds: [KEY_TRUSTED],
+      managerSideApiKeyIds: [],
+      statusByKeyId: new Map(),
+    });
+    expect(s.total).toBe(480_000);
+    // The summed trusted holding's key is unknown too, so it is disclosed on
+    // the includes side, as before (WR-05).
+    expect(s.unknownStatus).toEqual({ amount: 480_000, count: 1, unavailable: 0 });
+    expect(s.excludedUntrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
+    // Hand-listed: 3,210 + 55,555 = 58,765, two holdings.
+    expect(s.excludedUnknownStatus).toEqual({ amount: 58_765, count: 2, unavailable: 0 });
+  });
+
+  it("review round 3 WR-01: a key the payload names as manager-side is not the allocator's book, so a dropped holding on it is left out of excludedUnknownStatus as well (D-20)", () => {
+    const s = summarize({
+      holdings: [H_TRUSTED, H_MISSING_KEY],
+      contributing: [KEY_TRUSTED],
+      managerSide: [KEY_MISSING_FROM_API_KEYS],
+    });
+    expect(s.total).toBe(480_000);
+    expect(s.excludedUnknownStatus).toEqual({ amount: 0, count: 0, unavailable: 0 });
   });
 
   it("D-20 (review WR-01): excludedUntrusted is D-20's $Y — a sign_in_failed MANAGER-SIDE key outside the contributing set is not the allocator's book and is left out, while an allocator-eligible sign_in_failed key with no series and an indistinguishable revoked key stay in", () => {
@@ -566,6 +602,44 @@ describe("buildKeyTrustClause — D-06 (b) excludes $Y from keys needing attenti
       buildKeyTrustClause(NONE, part(4_444, 1), RENDER, part(8_000, 1)),
     ).toBe(
       "includes $4444 from keys with an unknown sync status, and excludes $8000 from keys needing attention",
+    );
+  });
+
+  // Review round 3 WR-01: the fifth argument is `excludedUnknownStatus`,
+  // dollars the narrowing dropped whose key the key list does not carry.
+  it("review round 3 WR-01: an excluded unknown-status part is named with the unknown-status noun, never folded into 'keys needing attention'", () => {
+    expect(buildKeyTrustClause(NONE, NONE, RENDER, NONE, part(4_444, 1))).toBe(
+      "excludes $4444 from keys with an unknown sync status",
+    );
+    expect(buildKeyTrustClause(NONE, NONE, RENDER, undefined, part(4_444, 1))).toBe(
+      "excludes $4444 from keys with an unknown sync status",
+    );
+  });
+
+  it("review round 3 WR-01: beside an includes part, the unknown-status exclusion keeps its own noun, and the shared-noun form is not used", () => {
+    expect(
+      buildKeyTrustClause(part(12_345, 1), NONE, RENDER, NONE, part(4_444, 1)),
+    ).toBe(
+      "includes $12345 from keys needing attention, and excludes $4444 from keys with an unknown sync status",
+    );
+    expect(
+      buildKeyTrustClause(part(12_345, 1), NONE, RENDER, part(8_000, 1), part(4_444, 1)),
+    ).toBe(
+      "includes $12345 from keys needing attention, and excludes $8000 from keys needing attention and $4444 from keys with an unknown sync status",
+    );
+    expect(
+      buildKeyTrustClause(NONE, NONE, RENDER, part(8_000, 1), part(4_444, 1)),
+    ).toBe(
+      "excludes $8000 from keys needing attention and $4444 from keys with an unknown sync status",
+    );
+  });
+
+  it("review round 3 WR-01 / D-07 / WR-03: the unknown-status exclusion renders on its COUNT, and says when its value was not reported; a zero count adds nothing", () => {
+    expect(buildKeyTrustClause(NONE, NONE, RENDER, NONE, part(0, 1, 1))).toBe(
+      "excludes $0 from keys with an unknown sync status (value unavailable for 1 holding)",
+    );
+    expect(buildKeyTrustClause(part(12_345, 1), NONE, RENDER, NONE, NONE)).toBe(
+      "includes $12345 from keys needing attention",
     );
   });
 });

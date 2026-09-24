@@ -705,6 +705,11 @@ type AddedMetricsState = "pending" | "settled" | "unavailable";
  * (`excludedUntrusted`), so the same one clause says what the modelled-book
  * narrowing left OUT of the total ("excludes $Y from keys needing
  * attention"). Open Positions passes no such part and is unchanged.
+ *
+ * Review round 3 WR-01 (2026-09-24): it also passes `excludedUnknownStatus`,
+ * dropped dollars whose key the key list does not carry (an unsupported
+ * exchange), so they are named ("excludes $Z from keys with an unknown sync
+ * status") instead of vanishing.
  */
 function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
   return buildKeyTrustClause(
@@ -716,6 +721,7 @@ function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
       unit: ["holding", "holdings"],
     },
     summary.excludedUntrusted,
+    summary.excludedUnknownStatus,
   );
 }
 
@@ -4708,7 +4714,8 @@ export function ScenarioComposer({
   // a count — gated on the COUNT, never on the amount, because a derivative's
   // contribution can be <= 0 and still come from a key whose numbers are not
   // current (D-07). D-06 (b), 2026-09-24: the excluded part (D-20's `$Y`)
-  // counts toward the gate too, so an exclusion is never silent.
+  // counts toward the gate too, so an exclusion is never silent. Review round
+  // 3 WR-01, 2026-09-24: so does the excluded unknown-status part.
   const fieldShowsLive =
     liveHoldingsSum > 0 &&
     (sanitizedManualAum === undefined || sanitizedManualAum === liveHoldingsSum);
@@ -4721,7 +4728,8 @@ export function ScenarioComposer({
     entryMode === "book" &&
     (liveHoldingsSummary.untrusted.count > 0 ||
       liveHoldingsSummary.unknownStatus.count > 0 ||
-      liveHoldingsSummary.excludedUntrusted.count > 0) &&
+      liveHoldingsSummary.excludedUntrusted.count > 0 ||
+      liveHoldingsSummary.excludedUnknownStatus.count > 0) &&
     (fieldShowsLive || overrideNoteShowsLive || hintShowsLive);
   // Review WR-02 — the note that qualifies the field's value is its accessible
   // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the

@@ -116,14 +116,13 @@ export interface LiveHoldingsSummary {
    *  (revoked, soft-disconnected or inactive) cannot be told apart, so its
    *  untrusted holdings may be counted. That over-discloses and never hides.
    *
-   *  ⚠️ What `$Y` does NOT carry (review round 2 IN-04): a dropped holding
+   *  What `$Y` does NOT carry (review round 2 IN-04): a dropped holding
    *  whose key is missing from `statusByKeyId` has no known status, so it
-   *  fails the untrusted test and lands in no part. It is not in `total`
-   *  either, so no figure on screen contains it. Under D-06 (b) the
-   *  "excludes" clause therefore says nothing about it. A D-06 answer that
-   *  wants it named needs its own `excludedUnknownStatus` part beside
-   *  `unknownStatus`, not a wider reading of this one. The "missing-key
-   *  holding the narrowing drops" unit case pins today's behaviour.
+   *  fails the untrusted test. ⭐ SUPERSEDED 2026-09-24 (review round 3
+   *  WR-01): such a holding is no longer in "no part". It is counted in
+   *  `excludedUnknownStatus` below, and the composer names it. The text that
+   *  stood here ("lands in no part … the "excludes" clause therefore says
+   *  nothing about it") described the gap that part closes.
    *
    *  ⭐ D-06 RESOLVED 2026-09-24 by the founder: option (b). The composer
    *  discloses this part as "excludes $Y from keys needing attention",
@@ -132,6 +131,22 @@ export interface LiveHoldingsSummary {
    *  renders this yet … the founder's D-06 answer decides whether it is ever
    *  disclosed") is superseded. */
   excludedUntrusted: LiveHoldingsPart;
+  /** Review round 3 WR-01 (2026-09-24). Holdings the contributing-set
+   *  narrowing dropped from `total` whose `api_key_id` is not in
+   *  `statusByKeyId` at all, minus the keys the payload names as manager-side
+   *  (D-20, as for `excludedUntrusted`). The excludes-side twin of
+   *  `unknownStatus`, with the same `.has` rule.
+   *
+   *  WHY IT EXISTS. `getUserApiKeys` drops a key row on an unsupported
+   *  exchange, but that key's holdings still arrive. It is in no eligible set,
+   *  so in production (where the narrowing is always on) its holdings take
+   *  the narrowing arm. Before this part they landed nowhere and vanished from
+   *  the "excludes" clause. That is the one production-reachable missing-key
+   *  path, and D-06's intent is that the composer says what it excludes. An
+   *  absent `payload.apiKeys` (an empty status map) lands every dropped
+   *  holding here too, so the excludes side fails open like the includes
+   *  side. Never added to, or subtracted from, `total` (D-03). */
+  excludedUnknownStatus: LiveHoldingsPart;
 }
 
 /**
@@ -205,6 +220,7 @@ export function summarizeLiveHoldings(args: {
     untrusted: { amount: 0, count: 0, unavailable: 0 },
     unknownStatus: { amount: 0, count: 0, unavailable: 0 },
     excludedUntrusted: { amount: 0, count: 0, unavailable: 0 },
+    excludedUnknownStatus: { amount: 0, count: 0, unavailable: 0 },
   };
   const addTo = (part: LiveHoldingsPart, h: DashboardHolding, equity: number) => {
     part.amount += equity;
@@ -227,8 +243,14 @@ export function summarizeLiveHoldings(args: {
       // D-20: a manager-side key the payload identifies is not the allocator's
       // book, so its holdings are not part of what the narrowing excluded from
       // THEIR AUM. Only the indistinguishable remainder may over-disclose.
-      if (untrusted && !managerSide.has(h.api_key_id)) {
-        addTo(out.excludedUntrusted, h, equity);
+      if (!managerSide.has(h.api_key_id)) {
+        if (untrusted) {
+          addTo(out.excludedUntrusted, h, equity);
+        } else if (!args.statusByKeyId.has(h.api_key_id)) {
+          // Review round 3 WR-01: an ABSENT status is unknown, not trusted,
+          // on the excludes side too (the WR-05 `.has` rule).
+          addTo(out.excludedUnknownStatus, h, equity);
+        }
       }
       continue;
     }
@@ -284,12 +306,18 @@ export interface KeyTrustClauseRender {
  *   "(… unavailable …)" count, sharing the noun would misattribute it, so
  *   each side keeps its own. A caller that passes no excluded part (Open
  *   Positions) gets the includes-only wording, byte-identical to before.
+ * - Review round 3 WR-01 (2026-09-24): an optional `excludedUnknownStatus`
+ *   part (dropped dollars whose key the key list does not carry) is named
+ *   with the unknown-status noun after the excluded untrusted part, e.g.
+ *   `excludes $Z from keys with an unknown sync status`. Its presence rules
+ *   out the shared-noun form. Open Positions passes neither excluded part.
  */
 export function buildKeyTrustClause(
   untrusted: LiveHoldingsPart,
   unknownStatus: LiveHoldingsPart,
   render: KeyTrustClauseRender,
   excludedUntrusted?: LiveHoldingsPart,
+  excludedUnknownStatus?: LiveHoldingsPart,
 ): string {
   const phrase = (part: LiveHoldingsPart, noun: string): string => {
     const base = `${render.amount(part.amount)} from ${noun}`;
@@ -306,18 +334,31 @@ export function buildKeyTrustClause(
     excludedUntrusted !== undefined && excludedUntrusted.count > 0
       ? excludedUntrusted
       : null;
-  if (excluded === null) return `includes ${parts.join(" and ")}`;
-  if (parts.length === 0) {
-    return `excludes ${phrase(excluded, UNTRUSTED_KEY_SET_NOUN)}`;
+  const excludedUnknown =
+    excludedUnknownStatus !== undefined && excludedUnknownStatus.count > 0
+      ? excludedUnknownStatus
+      : null;
+  const excludedParts: string[] = [];
+  if (excluded !== null) {
+    excludedParts.push(phrase(excluded, UNTRUSTED_KEY_SET_NOUN));
   }
+  if (excludedUnknown !== null) {
+    excludedParts.push(phrase(excludedUnknown, UNKNOWN_KEY_STATUS_SET_NOUN));
+  }
+  if (excludedParts.length === 0) return `includes ${parts.join(" and ")}`;
+  if (parts.length === 0) return `excludes ${excludedParts.join(" and ")}`;
+  // `excluded !== null` is implied by the next term (some excluded part has a
+  // count) and is written out so the type narrows for `.unavailable`.
   const oneNoun =
+    excluded !== null &&
+    excludedUnknown === null &&
     unknownStatus.count === 0 &&
     untrusted.unavailable === 0 &&
     excluded.unavailable === 0;
   if (oneNoun) {
     return `includes ${render.amount(untrusted.amount)} and excludes ${render.amount(excluded.amount)} from ${UNTRUSTED_KEY_SET_NOUN}`;
   }
-  return `includes ${parts.join(" and ")}, and excludes ${phrase(excluded, UNTRUSTED_KEY_SET_NOUN)}`;
+  return `includes ${parts.join(" and ")}, and excludes ${excludedParts.join(" and ")}`;
 }
 
 /** Sentence-cases a clause built above, for the standalone sentence form. */
