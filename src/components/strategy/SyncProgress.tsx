@@ -366,14 +366,23 @@ export function SyncProgress({
           evidenceBaseline !== "unknown" &&
           (computedAt ?? null) !== evidenceBaseline.computedAt;
         if (!sawComputingRef.current && !changed) return;
-        // An evidenced failure is forwarded as it stands: it needs no job-state
-        // read (KCS-18 covers successes only). Phase 167.2 / KCS-22: it carries
-        // the row's server-scrubbed `computation_error`, the caller's only
-        // detail for it (React renders it as escaped text).
-        if (next === "error") {
-          onStatusChange?.(next, { computationError });
-          return;
-        }
+        // 167.2-REVIEW WR-03 (lineage): an evidenced failure used to be
+        // forwarded as it stood, with no job-state read ("KCS-18 covers
+        // successes only"). But the baseline is read BEFORE the enqueue, which
+        // may take up to ENQUEUE_BOUND_MS, and another chain job reaching
+        // `failed_final` in that window moves `computed_at` too (the bridge
+        // writes `failed` while this attempt's job does not exist yet). So
+        // evidence (b) admitted ANOTHER job's failure, the card said "Sync
+        // failed" with its `computation_error` and offered Retry while this
+        // attempt's job sat pending. A failure now takes the same job-state
+        // check as a success, with the same polarity: it is forwarded only
+        // when no chain job is in flight, because while this attempt's job is
+        // pending the failure cannot be its own. An unreadable answer holds it
+        // (fail closed); the poll continues to the cap (`no_result`).
+        // Phase 167.2 / KCS-22: a forwarded failure carries the row's
+        // server-scrubbed `computation_error`, the caller's only detail for it
+        // (React renders it as escaped text).
+        //
         // Phase 167.2 / KCS-18 — THE JOB-STATE CHECK (RESEARCH P1). The SQL
         // status bridge keeps a `complete_with_warnings` row at that status while
         // the chain's jobs run, and still moves `computed_at` on every hop, so
@@ -393,13 +402,14 @@ export function SyncProgress({
           if (warnedUnreadableRef.current) return;
           warnedUnreadableRef.current = true;
           console.warn(
-            `[SyncProgress] the job-state read was unreadable; the success is held and the poll continues [strategy_id=${strategyId}]:`,
+            `[SyncProgress] the job-state read was unreadable; the terminal is held and the poll continues [strategy_id=${strategyId}]:`,
             reason,
           );
         }).then((settled) => {
           jobCheckInFlightRef.current = false;
           if (settled && token !== null && computingTokenRef.current === token) {
-            onStatusChange?.(next);
+            if (next === "error") onStatusChange?.(next, { computationError });
+            else onStatusChange?.(next);
           }
         });
       }

@@ -594,16 +594,51 @@ describe("SyncProgress — the job-state check fails closed (Phase 167.2 / KCS-1
     },
   );
 
-  it("FAILED-NO-READ: an evidenced failed terminal is forwarded with no sync-progress request", async () => {
+  // Moved by the 167.2 review fix round (167.2-REVIEW WR-03, lineage): this
+  // pin was "FAILED-NO-READ: an evidenced failed terminal is forwarded with no
+  // sync-progress request", and it pinned the hole. A failure written by
+  // ANOTHER job between the baseline read and this attempt's enqueue moves
+  // `computed_at` too, so evidence (b) admitted it, and the card said "Sync
+  // failed" with another job's reason while this attempt's job sat pending.
+  // A failure is now forwarded only when no chain job is in flight: while
+  // this attempt's job is pending, the failure cannot be its own.
+  it("FAILED-SETTLED-FORWARDS: an evidenced failed terminal is forwarded once the job queue says no chain job is in flight", async () => {
     mockState.analyticsResult = analyticsRow("failed", T1);
+    mockState.jobAnswers = [jobState("failed_final")];
     const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
     await tick(0);
 
     await tick(POLL_MS);
+    await tick(0);
     // Moved by Phase 167.2 / KCS-22: the failure now carries the row's
     // computation_error (null here). Lineage: `[["error"]]`.
     expect(onStatusChange.mock.calls).toEqual([["error", { computationError: null }]]);
-    expect(mockState.jobReadCount).toBe(0);
+    expect(mockState.jobReadCount).toBe(1);
+  });
+
+  it("WR03-FAILED-WHILE-PENDING: a moved computed_at with failed is NOT forwarded while the job route says pending, and the poll continues", async () => {
+    mockState.analyticsResult = analyticsRow("failed", T1);
+    mockState.jobAnswers = [jobState("pending"), jobState("pending")];
+    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    await tick(0);
+
+    await tick(POLL_MS * 2);
+    await tick(0);
+    expect(mockState.jobReadCount).toBe(2);
+    expect(onStatusChange).not.toHaveBeenCalled();
+  });
+
+  it("WR03-FAILED-UNREADABLE: an unreadable job state holds the failure too (fail closed; the cap still ends the attempt)", async () => {
+    mockState.analyticsResult = analyticsRow("failed", T1);
+    mockState.jobAnswers = [jobRead({ error: "Too many requests" }, 429)];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    await tick(0);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(onStatusChange).not.toHaveBeenCalledWith("error", expect.anything());
+    warn.mockRestore();
   });
 
   it("FAILED-CARRIES-REASON: an evidenced failed row forwards its own computation_error (KCS-22)", async () => {
@@ -619,6 +654,8 @@ describe("SyncProgress — the job-state check fails closed (Phase 167.2 / KCS-1
     await tick(0);
 
     await tick(POLL_MS);
+    // WR-03: forwarded after the job-state read (empty queue answers "done").
+    await tick(0);
     expect(onStatusChange.mock.calls).toEqual([
       ["error", { computationError: "Example curated reason." }],
     ]);
