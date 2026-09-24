@@ -2911,7 +2911,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 167.1-03-PLAN.md — composer marker State B inside the override note, every absence state, tone and the component D-06 pin (wave 2)
+- [x] 167.1-03-PLAN.md — composer marker State B inside the override note, every absence state, tone and the component D-06 pin (wave 2) — DONE 2026-09-24 (`56fa60397` feat, `fa2a77460` test; `167.1-03-SUMMARY.md`)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
