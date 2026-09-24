@@ -1491,8 +1491,8 @@ def test_qstats_scalars_dispatch_table_per_entry(
     failure path across every entry so a regression fails the matching key's
     row, not a generic "scalar None" assertion.
 
-    Phase 166 re-target: the table holds callables now (some inline mirrors,
-    some quantstats functions until plan 166-04), so the fault is injected by
+    Phase 166 re-target: the table holds module callables now (every entry an
+    inline mirror since plan 166-04), so the fault is injected by
     swapping THIS entry's callable for a raiser in a patched copy of the table.
     """
     import services.metrics as metrics_module
@@ -3195,3 +3195,122 @@ def test_q166_parity_benign_mixed_reproduces_the_research_anchor(key, anchor):
     change that moved BOTH the oracle and the mirror would still be caught."""
     actual = compute_qstats_scalars(_rank05_benign_mixed(), None)[key]
     assert actual == pytest.approx(anchor, rel=1e-12, abs=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 plan 04: the LOSS/SHARPE family (kelly_criterion, PSR,
+# common_sense_ratio, cpc_index). Research Q2 measured that `prepare_returns=`
+# closes none of them: each reaches a preparer transitively (payoff_ratio,
+# win_rate, profit_factor, tail_ratio, sharpe). Every invariant below was
+# observed RED against the pre-mirror dispatch table first (D-09).
+# ---------------------------------------------------------------------------
+
+_Q166_LOSS_RATIO_KEYS = ("kelly_criterion", "common_sense_ratio", "cpc_index")
+
+
+def test_q166_all_winning_series_has_no_loss_derived_ratios():
+    """ECONOMIC INVARIANT (D-09) on the canonical all-winning trigger.
+
+    Profit factor is gross wins over gross losses. With no losing day the
+    denominator is a loss that does not exist, so profit factor, and the Common
+    Sense Ratio built on it (profit factor x tail ratio), are UNDEFINED (None),
+    never 0.0.
+
+    The Probabilistic Sharpe Ratio is Phi(SR / sigma_SR), the probability that
+    the true Sharpe exceeds 0. Every day of this series is a gain, so the sample
+    mean and SR are positive, and Phi of a positive number is above 0.5.
+
+    Pre-fix measurement (live quantstats through the dispatch table):
+    common_sense_ratio = 0.0, probabilistic_sharpe_ratio = 0.1531252134903383.
+    quantstats read the returns as a price path that falls after day 1, so it
+    saw a losing strategy.
+    """
+    s = compute_qstats_scalars(_rank05_trigger_series(), None)
+    assert s["common_sense_ratio"] is None, (
+        f"common_sense_ratio={s['common_sense_ratio']}: profit factor has no losses to divide by"
+    )
+    psr = s["probabilistic_sharpe_ratio"]
+    assert psr is not None and psr > 0.5, (
+        f"probabilistic_sharpe_ratio={psr}: an all-winning series has a positive Sharpe"
+    )
+
+
+def test_q166_all_winning_loss_values_reach_metrics_json():
+    """The same invariant on the persisted payload: `compute_all_metrics` merges
+    the qstats scalars into `metrics_json`, which lands in
+    `strategy_analytics.metrics_json`.
+
+    Pre-fix measurement: common_sense_ratio = 0.0,
+    probabilistic_sharpe_ratio = 0.1531252134903383, as in
+    test_q166_all_winning_series_has_no_loss_derived_ratios.
+    """
+    mj = compute_all_metrics(_rank05_trigger_series())["metrics_json"]
+    assert mj["common_sense_ratio"] is None, (
+        f"persisted common_sense_ratio={mj['common_sense_ratio']}: no losses to divide by"
+    )
+    psr = mj["probabilistic_sharpe_ratio"]
+    assert psr is not None and psr > 0.5, (
+        f"persisted probabilistic_sharpe_ratio={psr}: an all-winning series has a positive Sharpe"
+    )
+
+
+def test_q166_nonmonotone_series_has_no_loss_derived_ratios():
+    """ECONOMIC INVARIANT (D-09) on the non-monotone all-winning trigger.
+
+    No losing day, so the average loss is the mean of an empty set: the payoff
+    ratio (average win / |average loss|) and profit factor are undefined. Kelly
+    (built on payoff), CPC (profit factor x win rate x payoff) and the Common
+    Sense Ratio (profit factor x tail ratio) are therefore all None.
+
+    The canonical trigger cannot show this for kelly and cpc: there live
+    quantstats already returns None, for the wrong reason (research Q4). This
+    fixture gives them a wrong finite value. Pre-fix measurement:
+    kelly_criterion = 0.3890395480225989, cpc_index = 11.695887516415286,
+    common_sense_ratio = 23.98015435501653.
+    """
+    s = compute_qstats_scalars(_q166_trigger_nonmonotone(), None)
+    for key in _Q166_LOSS_RATIO_KEYS:
+        assert s[key] is None, (
+            f"{key}={s[key]}: its denominator is a loss that does not exist"
+        )
+
+
+def test_q166_shuffle_order_independent_scalars():
+    """ECONOMIC INVARIANT, formula-free: PSR, Kelly, the Common Sense Ratio and
+    the CPC index are functions of the DISTRIBUTION of daily returns (mean, std,
+    skew, kurtosis, win rate, average win and loss, gross sums, quantiles), not
+    of their order. Reordering the same days must leave them unchanged.
+    quantstats' price guess differences consecutive values, so it is
+    order-DEPENDENT, which makes a shuffle a sharp detector for it.
+
+    Deliberately EXCLUDED: ulcer_index, upi, serenity_index and recovery_factor.
+    They are built on the drawdown path, which legitimately depends on order.
+
+    Pre-fix, live values moved under this permutation (research Q4, re-measured
+    in the plan 166-04 SUMMARY), e.g. kelly 0.389 -> 0.485.
+    """
+    original = _q166_trigger_nonmonotone()
+    rng = np.random.default_rng(4242)
+    shuffled = pd.Series(
+        rng.permutation(original.to_numpy()), index=original.index, name="returns"
+    )
+    assert not np.array_equal(original.to_numpy(), shuffled.to_numpy())
+    # Anti-vacuity: the fixture must exercise the guess, i.e. live quantstats
+    # must give an order-dependent kelly on it. Otherwise equality proves nothing.
+    live_a = _safe_float(qs.stats.kelly_criterion(original))
+    live_b = _safe_float(qs.stats.kelly_criterion(shuffled))
+    assert live_a != live_b, "live kelly did not move under the shuffle: fixture is vacuous"
+
+    base = compute_qstats_scalars(original, None)
+    perm = compute_qstats_scalars(shuffled, None)
+    assert base["probabilistic_sharpe_ratio"] is not None
+    assert perm["probabilistic_sharpe_ratio"] == pytest.approx(
+        base["probabilistic_sharpe_ratio"], rel=1e-9, abs=0.0
+    ), "probabilistic_sharpe_ratio changed under a pure reordering"
+    for key in _Q166_LOSS_RATIO_KEYS:
+        if base[key] is None:
+            assert perm[key] is None, f"{key}: None on the original, {perm[key]} shuffled"
+        else:
+            assert perm[key] == pytest.approx(base[key], rel=1e-9, abs=0.0), (
+                f"{key} changed under a pure reordering: {base[key]} -> {perm[key]}"
+            )

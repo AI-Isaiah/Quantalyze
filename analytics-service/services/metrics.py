@@ -7,6 +7,8 @@ from collections.abc import Callable, ItemsView, KeysView, ValuesView
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
+from scipy.stats import norm
+
 from .transforms import downsample_series, cap_data_points
 from .nav_twr import cumulative_twr_segmented, _last_interior_break_suffix
 
@@ -468,7 +470,7 @@ def _annualized_vol_sharpe(r: pd.Series, periods_per_year: int) -> tuple[float, 
     mean over annualized vol), algebraically identical to quantstats'
     ``mean / std * sqrt(periods)`` and bit-identical to every spelling it replaces
     (RESEARCH Pattern 1). With ``periods_per_year=1`` it yields ``mean / std``
-    exactly — the per-period Sharpe base plan 166-04's PSR mirror consumes.
+    exactly — the per-period Sharpe base ``_probabilistic_sharpe_ratio`` consumes.
 
     Callers: ``compute_all_metrics`` headline ``sharpe`` (operand
     ``stat_returns``) and ``info_ratio`` (operand ``excess``, guarded by its own
@@ -705,17 +707,177 @@ def _serenity_index(r: pd.Series) -> float:
     return float(r.sum() / den)
 
 
+def _payoff_ratio_no_guess(p: pd.Series) -> float:
+    """quantstats 0.0.81 ``payoff_ratio`` (Series input) on an ALREADY-prepared ``p``.
+
+    WHY NOT CALL IT: 0.0.81 ``payoff_ratio(returns, prepare_returns=False)`` calls
+    ``avg_loss(returns)`` and ``avg_win(returns)`` WITHOUT forwarding the keyword,
+    so both leaves prepare again and the price guess fires (research Q2 spy,
+    finding F-5). ``win_loss_ratio`` is an alias of it and has the same hole.
+    This composes the two kwarg-proven leaves directly instead.
+
+    MATH PARITY (0.0.81 body, Series branch)::
+
+        avg_loss_val = avg_loss(returns)
+        avg_win_val = avg_win(returns)
+        if avg_loss_val == 0: return nan
+        return avg_win_val / abs(avg_loss_val)
+
+    ``avg_loss`` is the mean of the negative days. An empty set gives NaN,
+    which propagates.
+
+    Callers: ``_kelly_criterion`` and ``_cpc_index``.
+    """
+    avg_loss_val = qs.stats.avg_loss(p, prepare_returns=False)
+    avg_win_val = qs.stats.avg_win(p, prepare_returns=False)
+    if avg_loss_val == 0:
+        return float("nan")
+    return float(avg_win_val / abs(avg_loss_val))
+
+
+def _kelly_criterion(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``kelly_criterion`` (Series input) minus the price guess.
+
+    WHY INLINE: research Q2's spy saw ``kelly_criterion(r, prepare_returns=False)``
+    still reach ``_prepare_returns`` through ``payoff_ratio`` and ``win_rate``.
+    The "kwarg-closable" reading in WINDOWS.md entry 9 and the 159-05 Residual
+    table is REFUTED for this scalar. On the non-monotone trigger live
+    quantstats returned 0.3890395480225989 for a series with no losing day.
+
+    MATH PARITY (0.0.81 body, Series branch)::
+
+        returns = _prepare_returns(returns)
+        win_loss_ratio = payoff_ratio(returns)
+        win_prob = win_rate(returns)
+        lose_prob = 1 - win_prob
+        if win_loss_ratio == 0 or isna(win_loss_ratio): return nan
+        return ((win_loss_ratio * win_prob) - lose_prob) / win_loss_ratio
+
+    ``win_rate`` is the kwarg-proven leaf, called with ``prepare_returns=False``
+    on ``P(r)``. The payoff is ``_payoff_ratio_no_guess``.
+
+    NaN CONVENTION: ``P(r)`` (fillna(0)), as for every Phase 166 mirror.
+
+    D-09: no losing day -> average loss undefined -> payoff NaN -> NaN -> None.
+    """
+    p = _prepared_returns_no_guess(r)
+    wl = _payoff_ratio_no_guess(p)
+    wp = qs.stats.win_rate(p, prepare_returns=False)
+    lose_prob = 1 - wp
+    if wl == 0 or pd.isna(wl):
+        return float("nan")
+    return float(((wl * wp) - lose_prob) / wl)
+
+
+def _probabilistic_sharpe_ratio(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``probabilistic_ratio`` (base "sharpe", rf=0, not annualized) minus the price guess.
+
+    WHY INLINE: ``probabilistic_ratio`` has no ``prepare_returns=`` keyword, and
+    research Q2's spy saw it reach ``_prepare_returns`` through ``sharpe``. On the
+    canonical all-winning trigger live quantstats returned 0.1531252134903383, a
+    below-even probability for a series that never lost a day.
+
+    MATH PARITY (0.0.81 body)::
+
+        base = sharpe(series, periods=periods, annualize=False)  # P(r).mean() / P(r).std(ddof=1)
+        skew_no = skew(series, prepare_returns=False)            # raw r.skew()
+        kurtosis_no = kurtosis(series, prepare_returns=False)    # raw r.kurtosis(), EXCESS
+        n = len(series)                                          # raw row count
+        sigma_sr = np.sqrt((1 + (0.5 * base**2) - (skew_no * base)
+                            + (((kurtosis_no - 3) / 4) * base**2)) / (n - 1))
+        return norm.cdf((base - rf) / sigma_sr)
+
+    The base comes from the plan 166-01 primitive ``_annualized_vol_sharpe`` with
+    ``periods_per_year=1``, which is ``mean / std`` bit-identically (D-04: no
+    third hand-copy of the Sharpe arithmetic). ``periods`` (default 252) only
+    de-annualizes a non-zero rf, so it has no effect here (research Q5).
+    ``np.sqrt`` is kept, so a negative inner term gives NaN -> None rather than
+    an exception.
+
+    NaN CONVENTION: the base is on ``P(r)`` (fillna(0)). Skew, kurtosis and n
+    are on the RAW series, exactly as 0.0.81 computes them.
+    """
+    base = _annualized_vol_sharpe(_prepared_returns_no_guess(r), 1)[1]
+    skew_no = r.skew()
+    kurtosis_no = r.kurtosis()
+    n = len(r)
+    sigma_sr = np.sqrt(
+        (1 + (0.5 * base**2) - (skew_no * base) + (((kurtosis_no - 3) / 4) * base**2))
+        / (n - 1)
+    )
+    return float(norm.cdf(base / sigma_sr))
+
+
+def _common_sense_ratio(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``common_sense_ratio`` minus the price guess.
+
+    WHY INLINE: research Q2's spy saw ``common_sense_ratio(r, prepare_returns=False)``
+    still reach ``_prepare_returns`` through ``profit_factor`` and ``tail_ratio``.
+    The "kwarg-closable" reading in WINDOWS.md entry 9 and the 159-05 Residual
+    table is REFUTED for this scalar. On the canonical trigger live quantstats
+    returned 0.0 for a series with no losing day.
+
+    MATH PARITY (0.0.81 body)::
+
+        returns = _prepare_returns(returns)
+        return profit_factor(returns) * tail_ratio(returns)
+
+    Both leaves are kwarg-proven, and they are the same calls
+    ``compute_all_metrics`` already makes for its own ``profit_factor`` and
+    ``tail_ratio``, so neither gets a second implementation.
+
+    NaN CONVENTION: ``P(r)`` (fillna(0)).
+
+    D-09: no losing day -> ``profit_factor`` is +inf -> inf (or NaN) -> None.
+    """
+    p = _prepared_returns_no_guess(r)
+    return float(
+        qs.stats.profit_factor(p, prepare_returns=False)
+        * qs.stats.tail_ratio(p, prepare_returns=False)
+    )
+
+
+def _cpc_index(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``cpc_index`` minus the price guess.
+
+    WHY INLINE: research Q2's spy saw ``cpc_index(r, prepare_returns=False)``
+    still reach ``_prepare_returns`` through ``profit_factor``, ``win_rate`` and
+    ``win_loss_ratio``. The "kwarg-closable" reading in WINDOWS.md entry 9 and
+    the 159-05 Residual table is REFUTED for this scalar. On the non-monotone
+    trigger live quantstats returned 11.695887516415286 for a series with no
+    losing day.
+
+    MATH PARITY (0.0.81 body)::
+
+        returns = _prepare_returns(returns)
+        return profit_factor(returns) * win_rate(returns) * win_loss_ratio(returns)
+
+    ``win_loss_ratio`` is ``payoff_ratio``, composed here by
+    ``_payoff_ratio_no_guess``. The other two leaves are kwarg-proven.
+
+    NaN CONVENTION: ``P(r)`` (fillna(0)).
+
+    D-09: no losing day -> payoff NaN -> NaN -> None.
+    """
+    p = _prepared_returns_no_guess(r)
+    return float(
+        qs.stats.profit_factor(p, prepare_returns=False)
+        * qs.stats.win_rate(p, prepare_returns=False)
+        * _payoff_ratio_no_guess(p)
+    )
+
+
 # H-0710 / H-0713 / H-0723 dispatch table: (result_key, callable). Each callable
 # takes the raw returns series and returns a raw float; `compute_qstats_scalars`
 # runs each one through `_safe_qstats_scalar` (failure-soft, WARNING naming the
 # key). Phase 166 replaced the old (result_key, qs.stats attribute name) shape,
 # so there is no longer a `getattr` dispatch over the quantstats namespace.
 #
-# The four drawdown-family keys point at the Phase 166 mirrors above. The four
-# loss/Sharpe-family keys still point at the quantstats functions themselves,
-# which is the exact call the old attribute dispatch made, so their values do
-# not move in plan 166-03. Plan 166-04 owns replacing those four entries with
-# mirrors.
+# Every entry is a Phase 166 module mirror (0.0.81 minus the price guess). No
+# entry references a quantstats function object. The only quantstats calls left
+# inside the mirrors are leaves research Q2 proved honour `prepare_returns=False`
+# (avg_win, avg_loss, win_rate, profit_factor, tail_ratio, value_at_risk), each
+# called with that keyword on an already-prepared series.
 #
 # Typing the key as the literal union of QstatsScalarsResult's float|None fields
 # lets the `result[result_key] = ...` loop write into the TypedDict (which
@@ -727,10 +889,10 @@ _QSTATS_SINGLE_ARG_SCALARS: tuple[
     ("recovery_factor", _recovery_factor),
     ("ulcer_index", _ulcer_index),
     ("upi", _ulcer_performance_index),
-    ("kelly_criterion", qs.stats.kelly_criterion),
-    ("probabilistic_sharpe_ratio", qs.stats.probabilistic_ratio),
-    ("common_sense_ratio", qs.stats.common_sense_ratio),
-    ("cpc_index", qs.stats.cpc_index),
+    ("kelly_criterion", _kelly_criterion),
+    ("probabilistic_sharpe_ratio", _probabilistic_sharpe_ratio),
+    ("common_sense_ratio", _common_sense_ratio),
+    ("cpc_index", _cpc_index),
     ("serenity_index", _serenity_index),
 )
 
@@ -2102,8 +2264,10 @@ def compute_qstats_scalars(
     ``_QSTATS_SINGLE_ARG_SCALARS`` (key -> callable). ``recovery_factor``,
     ``ulcer_index``, ``upi`` and ``serenity_index`` are inline mirrors of
     quantstats 0.0.81 minus its price guess (``_recovery_factor``,
-    ``_ulcer_index``, ``_ulcer_performance_index``, ``_serenity_index``). The
-    other four still call quantstats directly until plan 166-04 mirrors them.
+    ``_ulcer_index``, ``_ulcer_performance_index``, ``_serenity_index``), and so
+    are ``kelly_criterion``, ``probabilistic_sharpe_ratio``,
+    ``common_sense_ratio`` and ``cpc_index`` (``_kelly_criterion``,
+    ``_probabilistic_sharpe_ratio``, ``_common_sense_ratio``, ``_cpc_index``).
     """
     result: QstatsScalarsResult = {
         "recovery_factor": None,
