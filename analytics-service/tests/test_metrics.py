@@ -3564,7 +3564,7 @@ def test_q166_greeks_nan_days_are_not_fabricated_zeros(
     assert mj["treynor"] == pytest.approx(out["cagr"] / exp_beta, rel=1e-12, abs=0.0)
 
 
-def test_q166_greeks_undefined_beta_is_none_not_zero():
+def test_q166_greeks_undefined_beta_is_none_not_zero(caplog):
     """D-15 / D-09: when beta is undefined it is None, never 0.0. A beta of
     0.0 claims the strategy is measured to be uncorrelated with the benchmark;
     an undefined beta claims nothing.
@@ -3572,16 +3572,33 @@ def test_q166_greeks_undefined_beta_is_none_not_zero():
     Two ways beta is undefined: the benchmark never moves (zero variance, the
     slope's denominator), or fewer than two days have both legs present.
     Pre-fix, 0.0.81's `.fillna(0)` persisted 0.0 for both keys in both cases.
+
+    Round-1 review (SFH MEDIUM-1): `mj.get(key) is None` is ALSO true when the
+    key is ABSENT, which is what the benchmark fan-out's `except` leaves behind
+    when anything in it raises: alpha, beta, correlation, info_ratio and treynor
+    vanish together behind one WARNING. Drills N11/N12 (greeks RAISING on each
+    undefined path) survived. So each key must be PRESENT and None, the
+    siblings the fan-out writes must be present, and no fan-out WARNING may be
+    logged.
     """
     idx = pd.bdate_range("2024-01-01", periods=60)
     strategy = pd.Series(
         np.random.default_rng(7).normal(0.001, 0.01, len(idx)), index=idx
     )
     flat = pd.Series(0.001, index=idx)
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
     mj = compute_all_metrics(strategy, flat)["metrics_json"]
-    assert mj.get("alpha") is None, f"alpha={mj.get('alpha')} over a zero-variance benchmark"
-    assert mj.get("beta") is None, f"beta={mj.get('beta')} over a zero-variance benchmark"
+    assert "alpha" in mj and mj["alpha"] is None, (
+        f"alpha over a zero-variance benchmark: {mj.get('alpha', '<absent>')}"
+    )
+    assert "beta" in mj and mj["beta"] is None, (
+        f"beta over a zero-variance benchmark: {mj.get('beta', '<absent>')}"
+    )
     assert "treynor" not in mj or mj["treynor"] is None
+    # The strategy moves, so tracking error is positive and info_ratio must
+    # survive: its absence would mean the fan-out aborted.
+    assert "info_ratio" in mj and mj["info_ratio"] is not None, mj.get("info_ratio", "<absent>")
+    assert "correlation" in mj
 
     sparse = strategy.copy()
     sparse.iloc[1:] = np.nan
@@ -3589,8 +3606,16 @@ def test_q166_greeks_undefined_beta_is_none_not_zero():
         np.random.default_rng(8).normal(0.0, 0.02, len(idx)), index=idx
     )
     mj = compute_all_metrics(sparse, moving)["metrics_json"]
-    assert mj.get("alpha") is None, f"alpha={mj.get('alpha')} from one complete pair"
-    assert mj.get("beta") is None, f"beta={mj.get('beta')} from one complete pair"
+    assert "alpha" in mj and mj["alpha"] is None, (
+        f"alpha from one complete pair: {mj.get('alpha', '<absent>')}"
+    )
+    assert "beta" in mj and mj["beta"] is None, (
+        f"beta from one complete pair: {mj.get('beta', '<absent>')}"
+    )
+    assert "correlation" in mj
+
+    fanout = [r for r in caplog.records if "benchmark_metrics fan-out failed" in r.getMessage()]
+    assert fanout == [], [r.getMessage() for r in fanout]
 
 
 _Q166_GREEKS_PARITY_PAIRS = ("golden_with_benchmark", "calendar_mismatch")
