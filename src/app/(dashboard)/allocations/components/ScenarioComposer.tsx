@@ -4697,6 +4697,15 @@ export function ScenarioComposer({
   //   • fieldShowsLive        — the field's number IS the live total: no
   //                             manual value (UI-SPEC state 3), or a manual
   //                             value exactly equal to it (state 6).
+  //                             ⚠️ Review round 3 IN-03: "equal" is EXACT
+  //                             float equality, kept deliberately (review
+  //                             [9]). The live total is a float sum of
+  //                             custody values, a typed value is usually a
+  //                             whole number, so typing the rounded live
+  //                             figure lands in State B (a true override
+  //                             note), not here. State 6 is reached when the
+  //                             summed values are whole or a resize matches
+  //                             the sum exactly.
   //   • overrideNoteShowsLive — a manual value differs from a positive live
   //                             total, so only the override note quotes it.
   //   • fieldBlankHintShows   — no manual value and a live total <= 0: the
