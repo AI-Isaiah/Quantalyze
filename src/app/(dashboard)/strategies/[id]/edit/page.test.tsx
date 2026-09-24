@@ -38,6 +38,13 @@ const { getUserMock, strategyDataMock, memberCountMock, memberCountReadMock, api
     // The props the page handed to <ApiKeyManager>, one call per render.
     apiKeyManagerPropsMock: vi.fn<(props: Record<string, unknown>) => void>(),
   }));
+// 167.2-REVIEW-SFH M-7: the owner-scoped job RPC the page asks, only for a
+// zero-member strategy with no linked key, whether a stitch is on record.
+const rpcMock = vi.hoisted(() =>
+  vi.fn<(name: string, args: Record<string, unknown>) => { data: unknown; error: unknown }>(
+    () => ({ data: [], error: null }),
+  ),
+);
 
 // Extended DELIBERATELY for KCS-23 (dispatch on the table name): `strategies`
 // keeps its original chain, `strategy_keys` answers the queued head count, and
@@ -45,6 +52,7 @@ const { getUserMock, strategyDataMock, memberCountMock, memberCountReadMock, api
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
     auth: { getUser: getUserMock },
+    rpc: (name: string, args: Record<string, unknown>) => Promise.resolve(rpcMock(name, args)),
     from: (table: string) => {
       if (table === "strategies") {
         return {
@@ -148,6 +156,7 @@ beforeEach(() => {
     data: { user: { id: "u-owner-1" } },
   });
   memberCountMock.mockReturnValue({ count: 0, error: null });
+  rpcMock.mockImplementation(() => ({ data: [], error: null }));
 });
 
 async function renderEditPage() {
@@ -326,6 +335,57 @@ describe("EditStrategyPage composite shape (KCS-23)", () => {
     } finally {
       consoleError.mockRestore();
     }
+  });
+
+  // 167.2-REVIEW-SFH M-7: a zero member count is a claim RLS can fabricate
+  // (a denied SELECT filters rows; it does not error). With no linked key the
+  // page asks the SECURITY DEFINER job RPC whether a composite ran here.
+  it("M7-STITCH-HISTORY: zero members, no linked key, a stitch on record -> \"unknown\", never \"single\"", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    rpcMock.mockImplementation(() => ({
+      data: [{ kind: "stitch_composite", status: "done", created_at: "2026-09-01T00:00:00.000Z" }],
+      error: null,
+    }));
+    await renderEditPage();
+
+    expect(rpcMock).toHaveBeenCalledWith("get_user_compute_jobs", {
+      p_strategy_id: STRATEGY_ID,
+      p_limit: 100,
+    });
+    expect(lastKeyShape()).toBe("unknown");
+  });
+
+  it("M7-HISTORY-UNREADABLE: zero members, no linked key, the job read fails -> \"unknown\" (fail closed)", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    rpcMock.mockImplementation(() => ({ data: null, error: { message: "synthetic rpc failure" } }));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await renderEditPage();
+      expect(lastKeyShape()).toBe("unknown");
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("M7-NO-HISTORY: zero members, no linked key, no stitch on record -> \"single\" (a genuinely unlinked strategy keeps Add Key)", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    rpcMock.mockImplementation(() => ({
+      data: [{ kind: "process_key_long", status: "failed_final", created_at: "2026-09-01T00:00:00.000Z" }],
+      error: null,
+    }));
+    await renderEditPage();
+    expect(lastKeyShape()).toBe("single");
+  });
+
+  it("M7-LINKED-NO-READ: a linked key with zero members is single and asks the job RPC nothing", async () => {
+    strategyDataMock.mockResolvedValue({ data: { ...apiStrategy, api_key_id: "key-synthetic-1" } });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    await renderEditPage();
+    expect(lastKeyShape()).toBe("single");
+    expect(rpcMock).not.toHaveBeenCalled();
   });
 
   it("CSV-NO-COUNT: a CSV strategy performs no strategy_keys read", async () => {

@@ -121,18 +121,59 @@ export async function readCompositeMemberKeyIds(
 }
 
 /**
+ * 167.2-REVIEW-SFH M-7: what the strategy's compute-job history says about
+ * whether it has ever been a composite. "seen": a `stitch_composite` row is on
+ * record. "none": an exhaustive read found none. "unreadable": the read failed,
+ * threw, or was not exhaustive, so a stitch could lie beyond it.
+ */
+export type CompositeHistory = "seen" | "none" | "unreadable";
+
+const STITCH_KIND = "stitch_composite";
+
+/**
+ * Fold a job read into a `CompositeHistory`. The read is the owner-scoped
+ * SECURITY DEFINER RPC (`readOwnerComputeJobs`), which resolves ownership from
+ * the session and which the `strategy_keys_owner` policy cannot filter. A
+ * throw is the caller's to catch and pass as `null`.
+ */
+export function compositeHistoryOf(
+  read:
+    | { ok: true; rows: readonly { kind?: string }[]; readExhaustive: boolean }
+    | { ok: false }
+    | null,
+): CompositeHistory {
+  if (read === null || !read.ok) return "unreadable";
+  if (read.rows.some((r) => r?.kind === STITCH_KIND)) return "seen";
+  return read.readExhaustive ? "none" : "unreadable";
+}
+
+/**
  * Resolve the shape: source "csv" → csv (whatever the count); an unknowable
  * member count → "unknown"; a member count above zero → composite; a linked
  * `api_key_id` → single; otherwise unlinked.
+ *
+ * 167.2-REVIEW-SFH M-7: a ZERO count is not proof either. RLS on SELECT filters
+ * rows rather than erroring, so a regressed `strategy_keys_owner` policy (or a
+ * session RLS does not resolve) counts a composite as 0 with `ok: true`, and
+ * "single"/"unlinked" re-enables the `strategies.api_key_id` write that
+ * silently turns it into a single-key strategy. So a zero count with NO linked
+ * key (a composite normally has none) is cross-checked against the job
+ * history: a stitch on record, or a history that could not be read, is
+ * "unknown". A linked key stays "single" whatever the history: a strategy
+ * converted from a composite before KCS-23 keeps its old stitch rows
+ * (167.2-REVIEW IN-03) and must keep its Resync. `compositeHistory` defaults
+ * to "none", the behaviour before M-7, for a caller that has no history read.
  */
 export function resolveStrategyShape(input: {
   source: string | null | undefined;
   apiKeyId: string | null | undefined;
   memberCount: CompositeMemberCount;
+  compositeHistory?: CompositeHistory;
 }): StrategyShape | "unknown" {
   if (input.source === "csv") return "csv";
   if (!input.memberCount.ok) return "unknown";
   if (input.memberCount.count > 0) return "composite";
   if (input.apiKeyId) return "single";
+  if ((input.compositeHistory ?? "none") !== "none") return "unknown";
   return "unlinked";
 }

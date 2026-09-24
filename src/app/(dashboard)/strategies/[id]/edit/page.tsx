@@ -6,7 +6,13 @@ import { ApiKeyManager } from "@/components/strategy/ApiKeyManager";
 import { CsvStrategyEditNote } from "@/components/strategy/CsvStrategyEditNote";
 import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import type { Strategy } from "@/lib/types";
-import { readCompositeMemberKeyIds } from "@/lib/strategy-shape";
+import {
+  compositeHistoryOf,
+  readCompositeMemberKeyIds,
+  resolveStrategyShape,
+  type CompositeHistory,
+} from "@/lib/strategy-shape";
+import { readOwnerComputeJobs } from "@/lib/compute-jobs-read";
 import { captureToSentry } from "@/lib/sentry-capture";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { redirect } from "next/navigation";
@@ -60,7 +66,43 @@ export default async function EditStrategyPage({
       strategy.id,
     );
     if (members.ok) {
-      keyShape = members.keyIds.length > 0 ? "composite" : "single";
+      // 167.2-REVIEW-SFH M-7: a zero count with no linked key is cross-checked
+      // against the job history (a stitch on record, or an unreadable
+      // history, fails closed to "unknown"); see `resolveStrategyShape`. The
+      // extra read runs only in that case, so a linked single-key strategy and
+      // a composite pay nothing for it.
+      let compositeHistory: CompositeHistory = "none";
+      if (members.keyIds.length === 0 && !strategy.api_key_id) {
+        let jobs: Awaited<ReturnType<typeof readOwnerComputeJobs>> | null = null;
+        try {
+          jobs = await readOwnerComputeJobs(
+            supabase as unknown as SupabaseClient,
+            strategy.id,
+          );
+        } catch (err) {
+          console.error("[strategies/edit/page] composite history read threw", {
+            id: strategy.id,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+        if (jobs && !jobs.ok) {
+          console.error("[strategies/edit/page] composite history read failed", {
+            id: strategy.id,
+            message: jobs.message,
+          });
+        }
+        compositeHistory = compositeHistoryOf(jobs);
+      }
+      const shape = resolveStrategyShape({
+        source: strategy.source,
+        apiKeyId: strategy.api_key_id,
+        memberCount: { ok: true, count: members.keyIds.length },
+        compositeHistory,
+      });
+      // The card's tri-state: "single" means NOT a composite (single-key or
+      // unlinked, both linkable from this card).
+      keyShape =
+        shape === "composite" ? "composite" : shape === "unknown" ? "unknown" : "single";
       if (keyShape === "composite") compositeMemberKeyIds = members.keyIds;
     } else {
       console.error("[strategies/edit/page] composite member count failed", {

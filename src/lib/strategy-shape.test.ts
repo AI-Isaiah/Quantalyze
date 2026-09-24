@@ -43,6 +43,28 @@ describe("resolveStrategyShape", () => {
     expect(resolveStrategyShape({ source: "api", apiKeyId: KEY_ID, memberCount: count(0) })).toBe("single");
   });
 
+  it("167.2-REVIEW-SFH M-7: count 0 without a linked key but a stitch in its job history (or an unreadable history) -> unknown, never unlinked", () => {
+    // RLS on SELECT filters rows, it does not error, so a regressed
+    // `strategy_keys_owner` policy reads a composite as zero members. A
+    // composite normally has no api_key_id, and its stitch_composite rows are
+    // read through the SECURITY DEFINER job RPC, which that policy cannot hide.
+    expect(
+      resolveStrategyShape({ source: "api", apiKeyId: null, memberCount: count(0), compositeHistory: "seen" }),
+    ).toBe("unknown");
+    expect(
+      resolveStrategyShape({ source: "api", apiKeyId: null, memberCount: count(0), compositeHistory: "unreadable" }),
+    ).toBe("unknown");
+    expect(
+      resolveStrategyShape({ source: "api", apiKeyId: null, memberCount: count(0), compositeHistory: "none" }),
+    ).toBe("unlinked");
+    // A linked key is single whatever the history: a strategy converted from a
+    // composite before KCS-23 keeps old stitch rows (IN-03) and must keep its
+    // Resync.
+    expect(
+      resolveStrategyShape({ source: "api", apiKeyId: KEY_ID, memberCount: count(0), compositeHistory: "seen" }),
+    ).toBe("single");
+  });
+
   it("count 0 without a linked key -> unlinked", () => {
     expect(resolveStrategyShape({ source: "api", apiKeyId: null, memberCount: count(0) })).toBe("unlinked");
     expect(resolveStrategyShape({ source: undefined, apiKeyId: undefined, memberCount: count(0) })).toBe("unlinked");

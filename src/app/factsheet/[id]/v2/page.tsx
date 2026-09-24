@@ -36,6 +36,7 @@ import {
 import {
   countCompositeMembers,
   resolveStrategyShape,
+  compositeHistoryOf,
   type StrategyShape,
 } from "@/lib/strategy-shape";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -653,6 +654,10 @@ async function readOwnerPendingStatus(
       source: shapeInputs.source,
       apiKeyId: shapeInputs.apiKeyId,
       memberCount,
+      // 167.2-REVIEW-SFH M-7: the same cross-check the edit page makes, from
+      // the job read this function already has, so the remedy never names a
+      // link control the edit page withholds.
+      compositeHistory: compositeHistoryOf(jobsRead),
     });
     if (!jobsRead.ok) {
       const readFailure = { code: jobsRead.code, message: jobsRead.message };
