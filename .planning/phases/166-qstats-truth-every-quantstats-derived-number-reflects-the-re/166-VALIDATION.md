@@ -48,7 +48,7 @@ misses there make live broker calls). Baseline at HEAD (research): 6109 passed /
 | SC-1 | Pin stays 0.0.81; decision recorded | unit | `pytest tests/test_metrics.py -k quantstats_pin` | ✅ | ⬜ pending |
 | SC-2 | Every allowlisted kwarg leaf behaviourally proven; `cvar`/`payoff_ratio` calibrate RED | unit | `pytest tests/test_qstats_gate.py -k kwarg_proven` | ❌ W0 | ⬜ pending |
 | SC-2 | Census printed (arm + reason per node, 30-vs-9 line) on a green run | unit + terminal summary | `pytest tests/test_qstats_gate.py -q` | ❌ W0 | ⬜ pending |
-| SC-3 | AST gate RED per shape (direct, not-allowlisted, getattr dispatch, alias, `_rolling_alpha_beta`, new importer), GREEN on clean | unit red/green fixtures | `pytest tests/test_qstats_gate.py -k fixture` | ❌ W0 | ⬜ pending |
+| SC-3 | AST gate RED per shape (direct, not-allowlisted, getattr dispatch, alias, `_rolling_alpha_beta`, new importer), GREEN on clean | unit red/green fixtures | `pytest tests/test_qstats_gate.py -k needle` | ❌ W0 | ⬜ pending |
 | SC-3 | Gate GREEN on real `services/metrics.py`, scanned > 0 | unit | `pytest tests/test_qstats_gate.py -k real_corpus` | ❌ W0 | ⬜ pending |
 | SC-4 | Canonical trigger invariants (ulcer 0; recovery/upi/serenity/csr None; PSR > 0.5) | unit, economic | `pytest tests/test_metrics.py -k q166_all_winning` | ❌ W0 | ⬜ pending |
 | SC-4 | Non-monotone trigger: kelly/cpc/csr None; shuffle invariance | unit, economic | `pytest tests/test_metrics.py -k "q166_nonmonotone or q166_shuffle"` | ❌ W0 | ⬜ pending |

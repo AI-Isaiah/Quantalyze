@@ -715,14 +715,16 @@ def test_q166_all_winning_series_has_no_drawdown_derived_ratios():
 | A3 | No other fork outside the ones listed fixes the guess | Q1 | None for this phase (D-01 does not adopt forks anyway) |
 | A4 | The Bailey–López de Prado PSR uses non-excess kurtosis with `(γ₄−1)/4` | F-2 | Low — only affects a recorded finding, not the mirror (which reproduces 0.0.81) |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **F-3 — fix the NaN-greeks fabricated zero here, or record and route?**
+> All three were resolved by the orchestrator in `166-CONTEXT.md`'s post-research amendment. The recommendations below are kept as the research record; where they differ from the resolution, the resolution binds.
+
+1. **RESOLVED → D-15 (fix here, disclosed).** **F-3 — fix the NaN-greeks fabricated zero here, or record and route?**
    - Known: live, measured, rendered, introduced by 159's kwarg; `greeks` is being inlined in this phase anyway.
    - Unclear: whether the founder wants D-08 strict parity at this site.
    - Recommendation: fix under D-10 (pairwise-complete + `None` when undefined); one disclosed row per affected class.
-2. **F-2 (PSR kurtosis) and F-4 (rolling alpha uses full-sample means)** — both are correctness defects in quantstats' own formulas, not the guess. Recommendation: mirror 0.0.81 now (parity), record both with measured before/after, and route each via `/gsd-phase --edit` to a named phase (F-4 is user-facing — rendered chart).
-3. **TS verification environment for D-12** — this worktree has no `node_modules`, and module resolution walks **up** from the worktree (a sibling of the main checkout), so it will not find the main checkout's `node_modules`. The plan needs an explicit, tested way to run `vitest`/`tsc` for the D-12 plan (no `npm install` — disk is tight).
+2. **RESOLVED → D-16 and D-17 (both fixed in this phase, disclosed; NOT routed — this supersedes the recommendation below).** **F-2 (PSR kurtosis) and F-4 (rolling alpha uses full-sample means)** — both are correctness defects in quantstats' own formulas, not the guess. Recommendation: mirror 0.0.81 now (parity), record both with measured before/after, and route each via `/gsd-phase --edit` to a named phase (F-4 is user-facing — rendered chart).
+3. **RESOLVED → D-19 (symlinked `node_modules`, measured to resolve).** **TS verification environment for D-12** — this worktree has no `node_modules`, and module resolution walks **up** from the worktree (a sibling of the main checkout), so it will not find the main checkout's `node_modules`. The plan needs an explicit, tested way to run `vitest`/`tsc` for the D-12 plan (no `npm install` — disk is tight).
 
 ## Environment Availability
 
