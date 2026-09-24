@@ -5,9 +5,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { withAuth } from "@/lib/api/withAuth";
 import { csvValidateLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
-import { isComputedAnalytics } from "@/lib/closed-sets";
+import { isComputedAnalytics, PERCENTILE_GATE_COLUMN } from "@/lib/closed-sets";
 import { canonicalizeExchangeList } from "@/lib/constants";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
+import { PERCENTILE_METRICS } from "@/lib/percentile-core";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import {
@@ -1051,23 +1052,19 @@ async function finalizeAtomicOrErrorResponse(
 
 /**
  * 146.2-01 / R1 — the columns the CLOCK-SAFETY GUARD measures on an
- * empty-series echo, MIRRORING `PERCENTILE_ANALYTICS_COLUMNS`
- * (the constant `getPercentiles` projects in `queries.ts`) member for member. That constant is the set both
- * percentile callers fold into rankings, so this is exactly the set a clock
- * relabel without a recompute would misrepresent. It is duplicated rather than
- * imported deliberately: `queries.ts` is a client-reachable module and the
- * original is not exported. If that set ever changes, this one must follow —
- * the guard is only as honest as the overlap.
+ * empty-series echo. They are the ranked KPIs: the set both percentile callers
+ * in `queries.ts` fold into rankings, so exactly the set a clock relabel
+ * without a recompute would misrepresent.
+ *
+ * Phase 166 (D-12) — DERIVED from `PERCENTILE_METRICS` (percentile-core.ts),
+ * the same array `queries.ts`'s `PERCENTILE_ANALYTICS_COLUMNS` is derived
+ * from, so the guard and the rankings measure one set by construction rather
+ * than by a hand-kept copy. percentile-core has no imports, so importing it
+ * here pulls no client-reachable module into the route. The bytes the guard
+ * sends are pinned by the BYTE PIN test in
+ * `csv-finalize-cross-submission-merge.test.ts`.
  */
-const CLOCK_SAFETY_KPI_COLUMNS = [
-  "cagr",
-  "sharpe",
-  "sortino",
-  "calmar",
-  "max_drawdown",
-  "volatility",
-  "cumulative_return",
-] as const;
+const CLOCK_SAFETY_KPI_COLUMNS = PERCENTILE_METRICS;
 
 /**
  * ⭐ 146.2-03 / G4 (2026-08-20) — THE WIZARD CONTROL THE CLASSIFICATION
@@ -1537,10 +1534,10 @@ async function resolveExistingStrategyOrRefuse(
     // THE GUARD ITSELF: one owner-scoped read (the same user-scoped client, so
     // strategies_select RLS fences it) of the strategy's stored KPIs.
     //
-    // ⛔ The column set MIRRORS `PERCENTILE_ANALYTICS_COLUMNS`
-    // (the constant `getPercentiles` projects in `queries.ts`) — the exact
-    // columns both percentile callers fold into rankings. The guard measures precisely what a
-    // clock relabel would misrepresent.
+    // ⛔ The KPI columns are `CLOCK_SAFETY_KPI_COLUMNS`, i.e. `PERCENTILE_METRICS`
+    // — the one array both percentile callers in `queries.ts` derive their
+    // projection from, so these are the exact columns rankings fold. The guard
+    // measures precisely what a clock relabel would misrepresent.
     //
     // ⚠️ A row CAN exist here with KPI values. `writeFailedStrategyAnalyticsPlaceholder`
     // below writes `strategy_analytics` rows with no compute job at all — it
@@ -1561,7 +1558,7 @@ async function resolveExistingStrategyOrRefuse(
     const { data: storedAnalytics, error: analyticsErr } = await supabase
       .from("strategy_analytics")
       .select(
-        "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return, computation_status",
+        `${PERCENTILE_METRICS.join(", ")}, ${PERCENTILE_GATE_COLUMN}`,
       )
       .eq("strategy_id", existingRow.id)
       .maybeSingle();
