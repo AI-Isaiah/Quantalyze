@@ -782,7 +782,10 @@ export function ApiKeyManager({
     if (linkError) {
       throw new Error(`Failed to link key to strategy: ${linkError.message}`);
     }
-    router.refresh();
+    // 167.2-REVIEW WR-04 (lineage): `router.refresh()` used to run here,
+    // unconditionally, so a link update answering after its bound (the
+    // request is deliberately not aborted) refreshed whatever page was current.
+    // The live-attempt path in `handleSyncTrades` refreshes instead.
   }
 
   async function handleDeleteKey(keyId: string) {
@@ -930,6 +933,49 @@ export function ApiKeyManager({
     }
   }
 
+  /**
+   * 167.2-REVIEW WR-04: read the strategy's `api_key_id` back from the server,
+   * after the link update and immediately before the enqueue. Bounded like the
+   * baseline read (one owner-scoped PostgREST read, no timeout of its own).
+   * Answers the linked id (null when none), or `"unreadable"` on an error, a
+   * throw or the bound, and logs those. Never throws.
+   */
+  async function readLinkedKeyId(): Promise<string | null | "unreadable"> {
+    let boundTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const bound = new Promise<"timed_out">((resolve) => {
+        boundTimer = setTimeout(() => resolve("timed_out"), BASELINE_READ_BOUND_MS);
+      });
+      const supabase = createClient();
+      const outcome = await Promise.race([
+        supabase.from("strategies").select("api_key_id").eq("id", strategyId).maybeSingle(),
+        bound,
+      ]);
+      if (outcome === "timed_out") {
+        console.error(
+          `[ApiKeyManager] the link read-back did not answer within ${BASELINE_READ_BOUND_MS} ms; no sync is sent [strategy_id=${strategyId}]`,
+        );
+        return "unreadable";
+      }
+      if (outcome.error) {
+        console.error(
+          `[ApiKeyManager] the link read-back failed; no sync is sent [strategy_id=${strategyId}]:`,
+          outcome.error.message,
+        );
+        return "unreadable";
+      }
+      return outcome.data?.api_key_id ?? null;
+    } catch (err) {
+      console.error(
+        `[ApiKeyManager] the link read-back threw; no sync is sent [strategy_id=${strategyId}]:`,
+        err,
+      );
+      return "unreadable";
+    } finally {
+      clearTimeout(boundTimer);
+    }
+  }
+
   async function handleSyncTrades(keyId: string) {
     // Phase 167.2 / KCS-01: the card never starts a second sync while one is
     // live, nor while an Add Key is in flight (RESEARCH P7: the add would then
@@ -1031,6 +1077,45 @@ export function ApiKeyManager({
         console.warn(
           `[ApiKeyManager] the link update answered after its ${LINK_UPDATE_BOUND_MS} ms bound; the attempt had already ended, so no sync is sent [key_id=${keyId}]`,
         );
+        return;
+      }
+
+      // The link landed for the live attempt: refresh the page's server data
+      // now (moved here from `handleLinkKey` by WR-04, so a late link from an
+      // attempt that already ended can never refresh the page).
+      if (attemptRef.current === attempt) router.refresh();
+
+      // 167.2-REVIEW WR-04 — READ THE LINK BACK BEFORE THE ENQUEUE. The link
+      // request is not aborted on its bound (by design: aborting cannot stop a
+      // server-side write), so an OLDER attempt's stalled link can land after
+      // this attempt's link and re-link the strategy to the older key; this
+      // attempt's job would then sync a key that is not the panel's subject.
+      // So the server's `strategies.api_key_id` is read back here: anything but
+      // this attempt's key, or a read that cannot answer, refuses the attempt
+      // as `unconfirmed` / `link_unverified`, and nothing is enqueued.
+      // Residual: a stalled link landing between this read and the handler's
+      // own read of the column is not closed; the pre-attempt gate narrows it
+      // (no new attempt starts while the previous attempt's job is in flight).
+      const linkedNow = await readLinkedKeyId();
+      if (attemptRef.current !== attempt) return;
+      if (linkedNow !== keyId) {
+        if (linkedNow !== "unreadable") {
+          console.error(
+            `[ApiKeyManager] the strategy is not linked to this attempt's key when read back; no sync is sent [strategy_id=${strategyId}]`,
+          );
+        }
+        captureToSentry(new Error("link read-back did not confirm this attempt's key"), {
+          level: "warning",
+          tags: {
+            component: "ApiKeyManager",
+            stage: linkedNow === "unreadable" ? "link-verify-unreadable" : "link-verify-mismatch",
+          },
+        });
+        if (endAttempt(attempt)) {
+          setSyncStatus("unconfirmed");
+          setPanelStopReason("link_unverified");
+          setSyncError(null);
+        }
         return;
       }
 

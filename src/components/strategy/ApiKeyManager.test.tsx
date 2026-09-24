@@ -88,6 +88,14 @@ const analyticsBaselineMock = vi.fn();
 // "a member of nothing", so every Delete case that predates the guard is
 // unchanged, and a case that means "member" has to say so.
 const strategyKeysMemberMock = vi.fn();
+// 167.2-REVIEW WR-04: after the link update and before the enqueue,
+// `handleSyncTrades` reads the strategy's `api_key_id` back with
+// `from("strategies").select("api_key_id").eq("id", …).maybeSingle()`. The spy
+// receives the strategy id; its default answer is the key the last link update
+// wrote (what the server would say), so every case that predates the read is
+// unchanged, and a case that means "someone else re-linked it" has to say so.
+const linkedReadMock = vi.fn();
+let lastLinkedKeyId: string | null = null;
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -102,7 +110,17 @@ vi.mock("@/lib/supabase/client", () => ({
           order: (_col: string, _opts?: unknown) =>
             Promise.resolve(selectResultMock()),
           eq: (_col: string, val: unknown) =>
-            table === "strategy_analytics"
+            table === "strategies"
+              ? {
+                  maybeSingle: () =>
+                    Promise.resolve(
+                      linkedReadMock(val) ?? {
+                        data: { api_key_id: lastLinkedKeyId },
+                        error: null,
+                      },
+                    ),
+                }
+              : table === "strategy_analytics"
               ? {
                   maybeSingle: () =>
                     Promise.resolve(
@@ -133,6 +151,9 @@ vi.mock("@/lib/supabase/client", () => ({
         // handleLinkKey does strategies.update({api_key_id}).eq('id', ...).
         update: (vals: unknown) => {
           const queued = strategiesUpdateMock({ table, vals });
+          if (!queued || !(queued as { error?: unknown }).error) {
+            lastLinkedKeyId = (vals as { api_key_id?: string }).api_key_id ?? null;
+          }
           return {
             eq: (_col: string, _val: unknown) =>
               Promise.resolve(queued ?? { error: null }),
@@ -3296,6 +3317,55 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       } finally {
         warn.mockRestore();
         chainJobStateMock.mockReset();
+      }
+    });
+
+    // ── 167.2-REVIEW WR-04: the link is read back before the enqueue ──────
+    //
+    // A link update that answers after LINK_UPDATE_BOUND_MS is not aborted (by
+    // design), so it can land AFTER a newer attempt's link and re-link the
+    // strategy to the older key, and the newer attempt's job then syncs a key
+    // that is not its subject. Before the enqueue the card now reads
+    // `strategies.api_key_id` back from the server; anything but this
+    // attempt's key refuses the attempt as `unconfirmed` / `link_unverified`.
+
+    it("WR04-LINK-MISMATCH: a strategy linked to another key when read back sends no enqueue and says why", async () => {
+      const fetchMock = routeFetch();
+      try {
+        await renderRows([row({ id: "key-j" })], "key-j");
+        linkedReadMock.mockReturnValue({ data: { api_key_id: "key-other" }, error: null });
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        await act(async () => {
+          fireEvent.click(cardButton("key-j", "Resync"));
+        });
+        await waitFor(() => {
+          expect(screen.getByTestId("sync-progress")).toHaveAttribute("data-stop-reason", "link_unverified");
+        });
+        errSpy.mockRestore();
+        expect(screen.getByTestId("sync-progress")).toHaveAttribute("data-sync-status", "unconfirmed");
+        expect(syncPosts(fetchMock)).toBe(0);
+        expect(linkedReadMock).toHaveBeenCalledWith("strat-1");
+      } finally {
+        linkedReadMock.mockReset();
+      }
+    });
+
+    it("WR04-LINK-UNREADABLE: a read-back that fails refuses the enqueue too (fail closed)", async () => {
+      const fetchMock = routeFetch();
+      try {
+        await renderRows([row({ id: "key-j" })], "key-j");
+        linkedReadMock.mockReturnValue({ data: null, error: { message: "synthetic read failure" } });
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        await act(async () => {
+          fireEvent.click(cardButton("key-j", "Resync"));
+        });
+        await waitFor(() => {
+          expect(screen.getByTestId("sync-progress")).toHaveAttribute("data-stop-reason", "link_unverified");
+        });
+        errSpy.mockRestore();
+        expect(syncPosts(fetchMock)).toBe(0);
+      } finally {
+        linkedReadMock.mockReset();
       }
     });
 

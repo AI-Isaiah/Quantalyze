@@ -134,6 +134,9 @@ export const ENQUEUE_BOUND_MS = 180_000;
  * was refused before its link and its enqueue, because a factsheet-chain job
  * is still in flight (`chain_in_flight`) or the job state could not be read
  * (`chain_unreadable`).
+ * Review fix round 1 (`unconfirmed`, 167.2-REVIEW WR-04): `link_unverified`,
+ * the strategy's `api_key_id`, read back after the link update and before the
+ * enqueue, was not this attempt's key, or could not be read.
  * Review fix round 1 (`no_result`, 167.2-REVIEW-SFH M-3): `unreadable`, the
  * poll cap was reached without one clean read in the attempt.
  */
@@ -144,6 +147,7 @@ export type PanelStopReason =
   | "enqueue_bound"
   | "chain_in_flight"
   | "chain_unreadable"
+  | "link_unverified"
   | "unreadable";
 
 /**
@@ -199,6 +203,13 @@ export const PANEL_STOP_COPY = {
     label: "Sync not started",
     detail:
       "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.",
+  },
+  // Review fix round 1 (167.2-REVIEW WR-04): the link read back before the
+  // enqueue was another key, or could not be read. Nothing was enqueued.
+  link_unverified: {
+    label: "Sync not started",
+    detail:
+      "This sync did not start: we could not confirm this strategy is linked to the key you chose. Reload this page to check which key is linked before you sync again.",
   },
 } as const satisfies Record<PanelStopReason, { label: string; detail: string }>;
 

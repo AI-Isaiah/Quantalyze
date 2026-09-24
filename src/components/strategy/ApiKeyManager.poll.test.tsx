@@ -77,6 +77,8 @@ const mockState = vi.hoisted(() => ({
   linkResult: null as Promise<{ error: unknown }> | null,
   /** 167.2-REVIEW CR-01: how many link updates were sent. */
   linkCount: 0,
+  /** 167.2-REVIEW WR-04: the key the last link update wrote (read back before the enqueue). */
+  linkedKeyId: "key-h" as string | null,
 }));
 
 vi.mock("@/lib/supabase/client", () => ({
@@ -102,6 +104,10 @@ vi.mock("@/lib/supabase/client", () => ({
             return Promise.resolve(mockState.analyticsResult);
           },
           maybeSingle: () => {
+            // 167.2-REVIEW WR-04: the link read-back before the enqueue.
+            if (table === "strategies") {
+              return Promise.resolve({ data: { api_key_id: mockState.linkedKeyId }, error: null });
+            }
             if (table !== "strategy_analytics") {
               throw new Error(`unexpected maybeSingle on ${table}`);
             }
@@ -110,9 +116,10 @@ vi.mock("@/lib/supabase/client", () => ({
           },
         }),
       }),
-      update: () => ({
+      update: (vals: { api_key_id?: string }) => ({
         eq: () => {
           mockState.linkCount += 1;
+          mockState.linkedKeyId = vals.api_key_id ?? null;
           return mockState.linkResult ?? Promise.resolve({ error: null });
         },
       }),

@@ -98,6 +98,7 @@ describe("PANEL_STOP_COPY covers exactly the pinned reasons", () => {
         "chain_unreadable",
         "enqueue_bound",
         "link_bound",
+        "link_unverified",
         "missing_row",
         "poll_cap",
         "unreadable",
@@ -176,5 +177,16 @@ describe("KCS-UNREADABLE (167.2-REVIEW-SFH M-3): the panel stopped because it co
     expect(PANEL_STOP_COPY.unreadable.detail).toBe(
       "This panel could not read the sync's status for 2 minutes. The sync may still be running: reload this page later to see its result.",
     );
+  });
+});
+
+describe("KCS-LINK-UNVERIFIED (167.2-REVIEW WR-04): the link read back before the enqueue was not this attempt's key", () => {
+  it("label and detail, and no failure claim", () => {
+    expect(PANEL_STOP_COPY.link_unverified.label).toBe("Sync not started");
+    expect(PANEL_STOP_COPY.link_unverified.detail).toBe(
+      "This sync did not start: we could not confirm this strategy is linked to the key you chose. Reload this page to check which key is linked before you sync again.",
+    );
+    const { label, detail } = PANEL_STOP_COPY.link_unverified;
+    expect(`${label} ${detail}`).not.toMatch(/fail|error/i);
   });
 });
