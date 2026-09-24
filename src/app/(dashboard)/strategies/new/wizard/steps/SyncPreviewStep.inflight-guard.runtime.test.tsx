@@ -433,6 +433,39 @@ describe("SyncPreviewStep — no second sync, and Retry only when the server nee
     ).not.toBeInTheDocument();
   });
 
+  it("LOW-8: a finished chain with a pending recurring job holding `computing` shows NO Retry", async () => {
+    // The SQL status bridge holds `computing` while ANY job of the strategy is
+    // non-terminal, recurring kinds included. The chain is done; a pending
+    // `reconcile_strategy` is what holds the status, and it will release it.
+    installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
+    await mountAndSettle();
+    progressBody = {
+      jobStatus: "done",
+      stalled: false,
+      memberProgress: [],
+      otherJobInFlight: true,
+    };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000);
+    });
+    expect(
+      screen.queryByTestId("wizard-sync-interrupted"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("LOW-8 control: a finished chain with nothing else in flight and the status stuck shows Retry", async () => {
+    installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
+    await mountAndSettle();
+    progressBody = { jobStatus: "done", stalled: false, memberProgress: [] };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000);
+    });
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /retry sync/i }),
+    ).toBeInTheDocument();
+  });
+
   it("(b) a kickoff that queued nothing shows no Retry while the server says a job is running", async () => {
     installClient({ linkedKey: null, pollStatus: "computing" });
     kickoffBody = { ...kickoffBody, queued: false };

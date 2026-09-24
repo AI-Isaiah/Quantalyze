@@ -126,6 +126,18 @@ export interface SyncProgressResponse {
    * transient degrade (a failed or thrown read) and on every real read.
    */
   degradedReason?: DegradedReason;
+  /**
+   * LOW-8 — present (and `true`) only on a real read where a job of a kind
+   * that is NEITHER a factsheet-chain kind NOR `stitch_composite` (a recurring
+   * `reconcile_strategy`, `poll_positions`, `sync_funding`, ...) is still in
+   * flight. The SQL status bridge `sync_strategy_analytics_status` holds
+   * `computing` while ANY job of the strategy is non-terminal, whatever its
+   * kind, while `jobStatus` names the factsheet job only. Without this field a
+   * finished chain plus a pending recurring job read as "chain done, status
+   * stuck at computing". Omitted when false, so every existing body stays
+   * byte-identical.
+   */
+  otherJobInFlight?: true;
 }
 
 /** 167.2-REVIEW-R2 IN-04: the deterministic degrade causes (see `degradedReason`). */

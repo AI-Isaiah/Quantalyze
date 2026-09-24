@@ -182,6 +182,28 @@ export function selectFactsheetJob(
 }
 
 /**
+ * LOW-8 — is a job that is NOT part of the factsheet (neither a chain kind nor
+ * `stitch_composite`) still in flight? The SQL status bridge
+ * `sync_strategy_analytics_status` counts every non-terminal job of the
+ * strategy, of any kind, when it holds `computing`
+ * (migration 20260906120000, `v_nonterminal_count`), and `selectFactsheetJob`
+ * deliberately looks at the factsheet kinds only. This is the other half, so a
+ * reader can tell "the chain is done and a recurring job holds the status"
+ * from "nothing is running and the status is stuck".
+ */
+export function isNonFactsheetJobInFlight(
+  rows: readonly (ComputeJobRow | null | undefined)[],
+): boolean {
+  return rows.some(
+    (row) =>
+      !!row &&
+      row.kind !== STITCH_KIND &&
+      !isFactsheetChainKind(row.kind) &&
+      isFactsheetJobInFlight(row.status),
+  );
+}
+
+/**
  * Field-by-field member projection of a stitch row — NEVER a spread of the
  * worker's entry, and touching ONLY `member_progress` (never last_error /
  * user_message / source / correlation_id / ciphertext). [] for a non-stitch

@@ -853,6 +853,36 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     expect(body.stalled).toBe(false);
   });
 
+  // LOW-8 — the SQL status bridge (`sync_strategy_analytics_status`) holds
+  // `computing` while ANY job of the strategy is non-terminal. When the chain
+  // is finished but a recurring job is still in flight, the body says so, so
+  // the wizard does not read "chain done, status computing" as stuck.
+  it("LOW-8-OTHER-IN-FLIGHT: a done chain beside a pending reconcile_strategy reports otherJobInFlight", async () => {
+    rpcResult.data = [
+      otherKindRow("reconcile_strategy", {
+        status: "pending",
+        created_at: "2026-07-12T11:59:00.000Z",
+      }),
+      otherKindRow("compute_analytics_from_csv", {
+        status: "done",
+        created_at: "2026-07-12T11:40:00.000Z",
+      }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body.jobStatus).toBe("done");
+    expect(body.otherJobInFlight).toBe(true);
+  });
+
+  it("LOW-8-CONTROL: a done chain beside only FINISHED recurring jobs omits otherJobInFlight", async () => {
+    rpcResult.data = [
+      otherKindRow("reconcile_strategy", { status: "done", created_at: "2026-07-12T11:59:00.000Z" }),
+      otherKindRow("poll_positions", { status: "failed_final", created_at: "2026-07-12T11:58:00.000Z" }),
+      otherKindRow("compute_analytics_from_csv", { status: "done", created_at: "2026-07-12T11:40:00.000Z" }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body).toEqual({ jobStatus: "done", stalled: false, memberProgress: [] });
+  });
+
   it("CHAIN-FILTER-ONLY-NON-CHAIN: rows of only non-chain kinds answer the IDLE body", async () => {
     rpcResult.data = [
       otherKindRow("reconcile_strategy", { status: "done" }),

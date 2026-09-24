@@ -1269,9 +1269,19 @@ export function SyncPreviewStep({
           // 2026-09-24 — record the server's in-flight evidence from the
           // incoming read itself (before the SF-3 keep-last-known choice). A
           // degraded read is no evidence, so it moves neither ref.
+          //
+          // LOW-8 — `otherJobInFlight` counts too: a recurring job the SQL
+          // status bridge is still holding `computing` for is work the server
+          // will finish on its own, so it is in-flight evidence (and, like any,
+          // still capped by `IN_FLIGHT_TRUST_CEILING_MS`). Without it a
+          // finished chain plus a pending `reconcile_strategy` read as "nothing
+          // in flight, status stuck" and showed Retry after the 60 s grace.
           if (json.degraded !== true) {
             const readAt = Date.now();
-            if (isJobInFlight(json.jobStatus ?? null)) {
+            if (
+              isJobInFlight(json.jobStatus ?? null) ||
+              json.otherJobInFlight === true
+            ) {
               lastInFlightReadAtRef.current = readAt;
               notInFlightSinceRef.current = null;
             } else if (notInFlightSinceRef.current === null) {
