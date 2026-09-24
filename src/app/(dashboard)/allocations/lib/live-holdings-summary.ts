@@ -125,11 +125,20 @@ export interface LiveHoldingsSummary {
  * composer (review round 2 WR-01): `excludedUntrusted` renders nowhere until
  * the founder answers D-06, so a wrong direction or a dropped argument here
  * would ship green unless the derivation is pinned where it is written.
+ *
+ * ⛔ A MISSING field yields NO manager-side key (review round 2 WR-06). Reading
+ * an absent `allocatorEligibleApiKeyIds` as `[]` would make every eligible key
+ * manager-side, and `summarizeLiveHoldings` would then HIDE their untrusted
+ * holdings from `$Y`. D-20's direction is over-disclose, never hide, so an
+ * unknown difference is treated as empty.
  */
 export function managerSideKeyIds(
-  eligibleApiKeyIds: readonly string[],
-  allocatorEligibleApiKeyIds: readonly string[],
+  eligibleApiKeyIds: readonly string[] | undefined,
+  allocatorEligibleApiKeyIds: readonly string[] | undefined,
 ): string[] {
+  if (eligibleApiKeyIds === undefined || allocatorEligibleApiKeyIds === undefined) {
+    return [];
+  }
   const allocatorEligible = new Set(allocatorEligibleApiKeyIds);
   return eligibleApiKeyIds.filter((id) => !allocatorEligible.has(id));
 }

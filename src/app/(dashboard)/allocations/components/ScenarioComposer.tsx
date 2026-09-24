@@ -4187,9 +4187,11 @@ export function ScenarioComposer({
   // one pinned helper (`managerSideKeyIds`), never re-derived here.
   const managerSideApiKeyIds = useMemo(
     () =>
+      // Raw fields, no `?? []`: the helper treats a missing one as "no
+      // manager-side key" (WR-06), which over-discloses rather than hides.
       managerSideKeyIds(
-        payload.eligibleApiKeyIds ?? [],
-        payload.allocatorEligibleApiKeyIds ?? [],
+        payload.eligibleApiKeyIds,
+        payload.allocatorEligibleApiKeyIds,
       ),
     [payload.eligibleApiKeyIds, payload.allocatorEligibleApiKeyIds],
   );

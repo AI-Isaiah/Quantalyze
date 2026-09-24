@@ -409,4 +409,14 @@ describe("managerSideKeyIds — the keys the payload names as manager-side (D-20
       ),
     ).toEqual([]);
   });
+
+  it("review round 2 WR-06: a MISSING payload field yields NO manager-side key — it must not mark every eligible key manager-side and so hide their holdings from $Y (over-disclose, never hide)", () => {
+    // allocatorEligibleApiKeyIds absent: reading it as [] would make EVERY
+    // eligible key manager-side, which HIDES holdings from $Y.
+    expect(
+      managerSideKeyIds(["aumtrust-key-a", "aumtrust-key-b"], undefined),
+    ).toEqual([]);
+    expect(managerSideKeyIds(undefined, ["aumtrust-key-a"])).toEqual([]);
+    expect(managerSideKeyIds(undefined, undefined)).toEqual([]);
+  });
 });
