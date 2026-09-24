@@ -25,12 +25,17 @@ import { STALL_THRESHOLD_MS } from "@/lib/sync-progress";
  */
 
 vi.mock("server-only", () => ({}));
+// 167.2-REVIEW-SFH M-4: the three could-not-tell answers are captured.
+const captureToSentryMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
 
 const {
   authState,
   ownershipResult,
   ownershipQuery,
   rpcResult,
+  rpcQueue,
+  memberCount,
   fromCalls,
   rpcCalls,
   checkLimitMock,
@@ -51,6 +56,14 @@ const {
     data: null as unknown,
     error: null as { message: string } | null,
   },
+  // 167.2-REVIEW IN-03: the strategy_keys head count the route reads to decide
+  // stitch preference. Default 1 (a member exists), so every case that
+  // predates it keeps the stitch-preferring selection; null means the count
+  // read failed.
+  memberCount: { value: 1 as number | null },
+  // 167.2-REVIEW-SFH M-4 / M-5: answers for successive RPC calls, in order.
+  // Empty answers every call with `rpcResult`, as before.
+  rpcQueue: [] as Array<{ data: unknown; error: { message: string } | null }>,
   // Every table the user-scoped client touches, in order. The RT-1 structural
   // pin asserts "strategy_analytics" is NEVER among them.
   fromCalls: [] as string[],
@@ -77,6 +90,21 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     from: (table: string) => {
       fromCalls.push(table);
+      if (table === "strategy_keys") {
+        // IN-03: a head count, awaited on the builder; kept apart from the
+        // ownership recorder so the ownership pins still read one query.
+        const countChain = {
+          select: () => countChain,
+          eq: () => countChain,
+          then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
+            Promise.resolve(
+              memberCount.value === null
+                ? { count: null, error: { message: "synthetic count failure" } }
+                : { count: memberCount.value, error: null },
+            ).then(resolve, reject),
+        };
+        return countChain;
+      }
       ownershipQuery.table = table;
       const builder = {
         select: (cols: string) => {
@@ -93,7 +121,7 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     rpc: (name: string, args: Record<string, unknown>) => {
       rpcCalls.push([name, args]);
-      return Promise.resolve(rpcResult);
+      return Promise.resolve(rpcQueue.shift() ?? rpcResult);
     },
   }),
 }));
@@ -188,6 +216,8 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     rpcResult.error = null;
     fromCalls.length = 0;
     rpcCalls.length = 0;
+    rpcQueue.length = 0;
+    memberCount.value = 1;
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
   });
@@ -776,6 +806,78 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     expect(fromCalls).toContain("strategies");
   });
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // 167.2 KCS-20 — THE NON-STITCH FALLBACK IS FACTSHEET-CHAIN ONLY.
+  //
+  // "Latest job of ANY kind" let a recurring cron row (`reconcile_strategy`,
+  // `sync_funding`) that has nothing to do with the factsheet become the answer,
+  // so a strategy whose chain job had FAILED read `done` the moment the daily
+  // reconcile finished. The fallback now considers only the chain kinds
+  // (process_key_long, sync_trades, derive_broker_dailies,
+  // compute_analytics_from_csv, compute_analytics); `jobStatus: null` means no
+  // factsheet-chain job is visible. The stitch arm and PIN-COMPOSITE-* are
+  // untouched.
+  // ═══════════════════════════════════════════════════════════════════════
+  it("CHAIN-FILTER-FAILED-WINS: a NEWER done reconcile_strategy does not hide a failed_final process_key_long", async () => {
+    rpcResult.data = [
+      otherKindRow("reconcile_strategy", {
+        status: "done",
+        created_at: "2026-07-12T11:59:00.000Z", // newest overall
+      }),
+      otherKindRow("process_key_long", {
+        status: "failed_final",
+        created_at: "2026-07-12T11:30:00.000Z",
+      }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body).toEqual({
+      jobStatus: "failed_final",
+      stalled: false,
+      memberProgress: [],
+    });
+  });
+
+  it("CHAIN-FILTER-FUNDING-IGNORED: a NEWER running sync_funding does not displace a done compute_analytics_from_csv", async () => {
+    rpcResult.data = [
+      otherKindRow("sync_funding", {
+        status: "running",
+        created_at: "2026-07-12T11:59:00.000Z", // newest overall
+      }),
+      otherKindRow("compute_analytics_from_csv", {
+        status: "done",
+        created_at: "2026-07-12T11:40:00.000Z",
+      }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body.jobStatus).toBe("done");
+    expect(body.stalled).toBe(false);
+  });
+
+  it("CHAIN-FILTER-ONLY-NON-CHAIN: rows of only non-chain kinds answer the IDLE body", async () => {
+    rpcResult.data = [
+      otherKindRow("reconcile_strategy", { status: "done" }),
+      otherKindRow("sync_funding", { status: "running" }),
+      otherKindRow("compute_intro_snapshot", { status: "failed_final" }),
+      otherKindRow("poll_positions", { status: "pending" }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(await res.json())).toBe(
+      '{"jobStatus":null,"stalled":false,"memberProgress":[]}',
+    );
+  });
+
+  it("CHAIN-FILTER-READ-WINDOW: the RPC is asked for COMPUTE_STATE_READ_LIMIT (100) rows, not 20", async () => {
+    // A chain-filtered fallback over a 20-row window can be hidden behind a
+    // run of daily cron rows (RESEARCH P11). Typed as a literal here, never
+    // imported from the module under test.
+    rpcResult.data = [];
+    await call(TEST_STRATEGY_ID);
+    expect(rpcCalls).toEqual([
+      ["get_user_compute_jobs", { p_strategy_id: TEST_STRATEGY_ID, p_limit: 100 }],
+    ]);
+  });
+
   // ── SF-3: a REAL read is NOT degraded (distinct from the couldn't-read blip) ──
   it("a real read (running job) is degraded:false/absent, unlike the RPC-degrade branch", async () => {
     rpcResult.data = [
@@ -794,5 +896,114 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     // The `degraded` key is ABSENT on a real read (the client treats
     // absent === not degraded); it is present ONLY on the rpcError branch.
     expect("degraded" in body).toBe(false);
+  });
+
+  // ── 167.2-REVIEW-SFH M-4 / M-5: "could not tell" is DEGRADED, never IDLE ──
+  // The key card's KCS-18 success gate and its pre-attempt gate read IDLE's
+  // `jobStatus: null` as "no chain job in flight". Each case below is an
+  // answer the route could not read, and each one used to be IDLE.
+  const DEGRADED_BODY = '{"jobStatus":null,"stalled":false,"memberProgress":[],"degraded":true}';
+  // 167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1: the two DETERMINISTIC degrade
+  // stages name themselves (a closed, non-sensitive string), so the key card
+  // does not promise that "a moment" will help. A transient failure does not.
+  const DEGRADED_WINDOW_FULL_BODY =
+    '{"jobStatus":null,"stalled":false,"memberProgress":[],"degraded":true,"degradedReason":"window_full"}';
+  const DEGRADED_BAD_STATUS_BODY =
+    '{"jobStatus":null,"stalled":false,"memberProgress":[],"degraded":true,"degradedReason":"bad_status"}';
+
+  it("M4-NOT-AN-ARRAY: an RPC answer with neither rows nor an error is DEGRADED, and captured", async () => {
+    rpcResult.data = null;
+    const res = await call(TEST_STRATEGY_ID);
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(await res.json())).toBe(DEGRADED_BODY);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("M4-WINDOW-FULL: a full window with no chain row, still full at the RPC cap, is DEGRADED, and captured", async () => {
+    const cron = (n: number) =>
+      Array.from({ length: n }, () => otherKindRow("reconcile_strategy", { status: "done" }));
+    rpcQueue.push({ data: cron(100), error: null }, { data: cron(1000), error: null });
+    const res = await call(TEST_STRATEGY_ID);
+    expect(JSON.stringify(await res.json())).toBe(DEGRADED_WINDOW_FULL_BODY);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("M5-REASK: a full 100-row window with no chain row re-asks once at the RPC cap (1000) and answers from that read", async () => {
+    const cron = Array.from({ length: 100 }, () =>
+      otherKindRow("reconcile_strategy", { status: "done" }),
+    );
+    rpcQueue.push(
+      { data: cron, error: null },
+      {
+        data: [...cron, otherKindRow("process_key_long", { status: "running" })],
+        error: null,
+      },
+    );
+    const res = await call(TEST_STRATEGY_ID);
+    expect((await res.json()).jobStatus).toBe("running");
+    expect(rpcCalls).toEqual([
+      ["get_user_compute_jobs", { p_strategy_id: TEST_STRATEGY_ID, p_limit: 100 }],
+      ["get_user_compute_jobs", { p_strategy_id: TEST_STRATEGY_ID, p_limit: 1000 }],
+    ]);
+    expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+
+  it("M4-BAD-STATUS: a selected job whose status is outside the six-value domain is DEGRADED, and captured", async () => {
+    rpcResult.data = [otherKindRow("process_key_long", { status: "exploded" })];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(JSON.stringify(await res.json())).toBe(DEGRADED_BAD_STATUS_BODY);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("M4-CONTROL: a short window with no chain row is still the real IDLE (not degraded, nothing captured)", async () => {
+    rpcResult.data = [otherKindRow("reconcile_strategy", { status: "done" })];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(JSON.stringify(await res.json())).toBe(
+      '{"jobStatus":null,"stalled":false,"memberProgress":[]}',
+    );
+    expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+
+  // ── 167.2-REVIEW IN-03: an old stitch does not answer for a strategy with no members ──
+  it("IN03-CONVERTED: zero members, an old done stitch and a NEWER running chain job answer the chain job", async () => {
+    memberCount.value = 0;
+    // 167.2-REVIEW-R2 IN-05: the IN-03 scenario is a strategy CONVERTED to a
+    // single key, so a key is linked; that is what proves it single.
+    ownershipResult.data = {
+      id: TEST_STRATEGY_ID,
+      user_id: TEST_USER_ID,
+      api_key_id: "22222222-2222-4222-8222-222222222222",
+    };
+    rpcResult.data = [
+      stitchRow({ status: "done", created_at: "2026-07-12T10:00:00.000Z" }),
+      otherKindRow("process_key_long", { status: "running", created_at: "2026-07-12T11:58:00.000Z" }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(JSON.stringify(await res.json())).toBe(
+      '{"jobStatus":"running","stalled":false,"memberProgress":[]}',
+    );
+  });
+
+  // ── 167.2-REVIEW-R2 IN-05: a zero count is a claim RLS can fabricate ──
+  it("IN05-ZERO-UNLINKED-STITCH: zero members, NO linked key and a stitch on record keep the stitch-preferring rule (a regressed policy cannot drop a composite's member progress)", async () => {
+    memberCount.value = 0;
+    ownershipResult.data = { id: TEST_STRATEGY_ID, user_id: TEST_USER_ID, api_key_id: null };
+    rpcResult.data = [
+      stitchRow({ status: "running", created_at: "2026-07-12T11:50:00.000Z", claimed_at: ago(60_000), metadata: { member_progress: [] } }),
+      otherKindRow("process_key_long", { status: "done", created_at: "2026-07-12T11:58:00.000Z" }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    expect((await res.json()).jobStatus).toBe("running");
+    expect(ownershipQuery.selectCols).toBe("id, user_id, api_key_id");
+  });
+
+  it("IN03-COUNT-UNREADABLE: a member count that cannot be read keeps the stitch-preferring rule", async () => {
+    memberCount.value = null;
+    rpcResult.data = [
+      stitchRow({ status: "done", created_at: "2026-07-12T10:00:00.000Z", metadata: { member_progress: [] } }),
+      otherKindRow("process_key_long", { status: "running", created_at: "2026-07-12T11:58:00.000Z" }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    expect((await res.json()).jobStatus).toBe("done");
   });
 });

@@ -3,8 +3,18 @@
 import { useState, useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useStrategySyncPoller } from "@/hooks/useStrategySyncPoller";
+import { readChainJobState } from "./chain-job-state";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { Button } from "@/components/ui/Button";
 import type { StrategyAnalytics } from "@/lib/types";
+import {
+  MISSING_ROW_GRACE_POLLS,
+  PANEL_STOP_COPY,
+  POLL_INTERVAL_MS,
+  POLL_MAX_ATTEMPTS,
+  SYNC_SLOW_NOTE,
+  type PanelStopReason,
+} from "./key-card-copy";
 
 /**
  * audit-2026-05-07 C-0142 — `ComputationStatus` is the source-of-truth DB
@@ -15,19 +25,10 @@ import type { StrategyAnalytics } from "@/lib/types";
  */
 export type ComputationStatus = StrategyAnalytics["computation_status"];
 
-// I2: module-level constants so they are not re-created on every render and
-// are not captured in useCallback closures as reactive values. These are
-// non-reactive (not derived from props/state) so placing them inside the
-// component body was misleading — a future engineer adding a prop shadow
-// would create a confusing closure-vs-constant ambiguity.
-// After ~120 s (40 polls × 3 s) call onStatusChange("error").
-const POLL_MAX_ATTEMPTS = 40;
-// After a few initial polls a missing row is treated as a failure so
-// the user sees a recoverable error instead of "Computing…" forever.
-// RED-TEAM-M2: raised from 3 (9 s) to 10 (30 s) to accommodate Railway
-// cold-start latency (15–30 s typical). The 120 s outer cap (POLL_MAX_ATTEMPTS)
-// is unchanged; this only widens the missing-row grace window.
-const MISSING_ROW_GRACE_POLLS = 10;
+// The poll budget (POLL_INTERVAL_MS, POLL_MAX_ATTEMPTS, MISSING_ROW_GRACE_POLLS)
+// and the copy that states it live in key-card-copy.ts (Phase 167.2 / KCS-22),
+// so the "stopped checking after N" sentences are computed from the bounds the
+// poll actually uses.
 
 export type SyncStatus =
   | "idle"
@@ -35,7 +36,30 @@ export type SyncStatus =
   | "computing"
   | "complete"
   | "complete_with_warnings"
-  | "error";
+  | "error"
+  // Phase 167.2 / KCS-22: UI-only. The panel stopped checking (its poll cap or
+  // its missing-row grace ran out) with no accepted result. Not a failure: it
+  // renders no "Sync failed" and no Retry (a re-POST while a job may be live
+  // can insert a second job). `toSyncStatus` never returns it.
+  | "no_result"
+  // Phase 167.2 / KCS-03: UI-only. A client-side bound expired before the
+  // enqueue was confirmed (the link update, or the enqueue request, did not
+  // answer in time), so the card cannot know whether a job exists. Not a
+  // failure: amber, no "Sync failed", no Retry. `toSyncStatus` never returns it.
+  // Since the 167.2 review fix round (CR-01 / WR-06) it is also the state of
+  // an attempt the card REFUSED before its link and its enqueue, because a
+  // chain job was in flight or the job state could not be read.
+  | "unconfirmed";
+
+/**
+ * Phase 167.2 / KCS-22: what the panel knows about a status it forwards.
+ * `stopReason` names which give-up ended a `no_result`; `computationError` is
+ * an evidenced failed row's server-written `computation_error`.
+ */
+export type SyncStatusInfo = {
+  stopReason?: PanelStopReason;
+  computationError?: string | null;
+};
 
 /**
  * Compile-time exhaustiveness guard. If a new `ComputationStatus` variant is
@@ -76,6 +100,31 @@ export function toSyncStatus(db: ComputationStatus): SyncStatus {
   }
 }
 
+/**
+ * Phase 167.2 / KCS-02: the strategy's `strategy_analytics.computed_at` as the
+ * caller read it immediately before this attempt's enqueue. `null` is a real
+ * answer (no analytics row yet); `"unknown"` means the read failed or did not
+ * answer in time, so only a `computing` read can admit a terminal.
+ */
+export type EvidenceBaseline = { computedAt: string | null } | "unknown";
+
+/**
+ * Phase 167.2 / KCS-18 (RESEARCH P1): does the job queue agree that no
+ * factsheet-chain job is still in flight for this strategy? One read of the
+ * shared `readChainJobState` (see ./chain-job-state, lifted from here in the
+ * 167.2 review fix round so the key card's pre-attempt gate reads it the same
+ * way). `true` only for a `settled` answer; an `unreadable` one is reported
+ * through `onUnreadable`. Never throws.
+ */
+async function jobQueueSaysChainSettled(
+  strategyId: string,
+  onUnreadable: (reason: string) => void,
+): Promise<boolean> {
+  const read = await readChainJobState(strategyId);
+  if (read.kind === "unreadable") onUnreadable(read.reason);
+  return read.kind === "settled";
+}
+
 interface SyncProgressProps {
   strategyId: string;
   syncStatus: SyncStatus;
@@ -83,7 +132,29 @@ interface SyncProgressProps {
   syncError: string | null;
   syncWarnings?: string | null;
   onRetry: () => void;
-  onStatusChange?: (status: SyncStatus) => void;
+  onStatusChange?: (status: SyncStatus, info?: SyncStatusInfo) => void;
+  /**
+   * KCS-22: which give-up a `no_result` status came from (the caller stores the
+   * reason the panel forwarded). Absent or null reads as `poll_cap`.
+   * KCS-03: which bound an `unconfirmed` status came from (`link_bound` or
+   * `enqueue_bound`, set by the caller). Absent or null reads as `enqueue_bound`.
+   */
+  stopReason?: PanelStopReason | null;
+  /**
+   * KCS-02: the pre-enqueue baseline for this attempt (see `EvidenceBaseline`).
+   * Defaults to `"unknown"`. The caller mounts one panel per attempt (a React
+   * `key`), so the computing evidence below never carries into the next one.
+   */
+  evidenceBaseline?: EvidenceBaseline;
+  /**
+   * 167.2-REVIEW-SFH-R2 R2-L2: did THIS attempt's enqueue queue a new job?
+   * False for a duplicate submission (`code: "WIZARD_DUPLICATE"`) and for
+   * `queued: false`. Only then may the give-up attribute a `failed_final`
+   * chain to this attempt; otherwise that chain is a previous run's, and the
+   * give-up keeps `no_result`. Defaults to false, the reading that claims
+   * least.
+   */
+  attemptEnqueuedNewJob?: boolean;
 }
 
 const STATUS_CONFIG: Record<
@@ -126,6 +197,24 @@ const STATUS_CONFIG: Record<
     bgColor: "bg-negative/10",
     label: "Sync failed",
   },
+  // KCS-22 (UI-SPEC § Color): muted like `idle`, because nothing is known to be
+  // wrong. It does NOT copy `complete_with_warnings`' amber-500 pair (not a
+  // DESIGN.md token, fails AA). The label shown is PANEL_STOP_COPY's.
+  no_result: {
+    icon: <IdleIcon />,
+    color: "text-text-secondary",
+    bgColor: "bg-page",
+    label: PANEL_STOP_COPY.poll_cap.label,
+  },
+  // KCS-03 (UI-SPEC § Color, "Amber panel"): the DESIGN.md-pinned opaque trio,
+  // NOT `bg-warning/10` (4.39:1) and NOT `complete_with_warnings`' amber-500
+  // pair. The label shown is PANEL_STOP_COPY's (link_bound / enqueue_bound).
+  unconfirmed: {
+    icon: <WarningIcon />,
+    color: "text-warning",
+    bgColor: "bg-warning-bg",
+    label: PANEL_STOP_COPY.enqueue_bound.label,
+  },
 };
 
 export function SyncProgress({
@@ -136,11 +225,37 @@ export function SyncProgress({
   syncWarnings,
   onRetry,
   onStatusChange,
+  evidenceBaseline = "unknown",
+  stopReason = null,
+  attemptEnqueuedNewJob = false,
 }: SyncProgressProps) {
   const [showWarnings, setShowWarnings] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [exchangeName, setExchangeName] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // KCS-02 evidence (a): this panel has itself read `computing` during this
+  // attempt. Per attempt because the caller keys the panel per attempt.
+  const sawComputingRef = useRef(false);
+  // KCS-18: one job-state read at a time; a token per stretch of `computing`
+  // (null once the panel leaves it or unmounts), so a read that lands late
+  // forwards nothing; and one console.warn per attempt for unreadable answers
+  // (the caller keys the panel per attempt, so these reset with it).
+  const jobCheckInFlightRef = useRef(false);
+  const computingTokenRef = useRef<object | null>(null);
+  const warnedUnreadableRef = useRef(false);
+  // 167.2-REVIEW-SFH M-3: one give-up per stretch of `computing`. The poller
+  // calls its give-up on every tick past the boundary, and the give-up now
+  // reads the job state first, so later ticks must not start a second read.
+  const giveUpStartedRef = useRef(false);
+
+  useEffect(() => {
+    const token = syncStatus === "computing" ? {} : null;
+    computingTokenRef.current = token;
+    giveUpStartedRef.current = false;
+    return () => {
+      computingTokenRef.current = null;
+    };
+  }, [syncStatus]);
 
   const isActive = syncStatus === "syncing" || syncStatus === "computing";
 
@@ -229,26 +344,151 @@ export function SyncProgress({
   useStrategySyncPoller({
     enabled: syncStatus === "computing",
     strategyId,
-    schedule: 3000,
+    schedule: POLL_INTERVAL_MS,
     maxAttempts: POLL_MAX_ATTEMPTS,
     missingRowGracePolls: MISSING_ROW_GRACE_POLLS,
-    onStatus: (db) => {
+    onStatus: (db, computationError, computedAt) => {
       // audit-2026-05-07 C-0142: route DB status → UI status via the
       // discriminated converter. We only forward states that map cleanly to a
       // UI-visible transition (computing / complete / error); "idle" (from DB
       // "pending") is not propagated mid-sync because the caller already primed
       // us with "syncing" / "computing".
       const next = toSyncStatus(db);
+      if (next === "computing") {
+        sawComputingRef.current = true;
+        onStatusChange?.(next);
+        return;
+      }
       if (
-        next === "computing" ||
         next === "complete" ||
         next === "complete_with_warnings" ||
         next === "error"
       ) {
-        onStatusChange?.(next);
+        // Phase 167.2 / KCS-02 — THE PER-ATTEMPT EVIDENCE GATE. Nothing writes
+        // `strategy_analytics` when a job is enqueued or claimed, so for the
+        // whole first hop the poll reads the PREVIOUS run's row, and its terminal
+        // status used to end this attempt with the wrong run's result (a stale
+        // "Up to date", or a false "Sync failed"). A terminal is forwarded only
+        // with evidence that it is this attempt's:
+        //   (a) this panel has read `computing` during this attempt, or
+        //   (b) the row's `computed_at` differs from the value the caller read
+        //       immediately before the enqueue (`evidenceBaseline`).
+        // Both are server-written values; no client clock is read or compared.
+        // (b) also closes the measured fast-fail case (RESEARCH Q1): a job that
+        // fails before any handler writes `computing` still moves `computed_at`
+        // through the bridge. Without evidence the read is dropped and the poll
+        // continues; the attempt budget and the missing-row grace still apply.
+        const changed =
+          evidenceBaseline !== "unknown" &&
+          (computedAt ?? null) !== evidenceBaseline.computedAt;
+        if (!sawComputingRef.current && !changed) return;
+        // 167.2-REVIEW WR-03 (lineage): an evidenced failure used to be
+        // forwarded as it stood, with no job-state read ("KCS-18 covers
+        // successes only"). But the baseline is read BEFORE the enqueue, which
+        // may take up to ENQUEUE_BOUND_MS, and another chain job reaching
+        // `failed_final` in that window moves `computed_at` too (the bridge
+        // writes `failed` while this attempt's job does not exist yet). So
+        // evidence (b) admitted ANOTHER job's failure, the card said "Sync
+        // failed" with its `computation_error` and offered Retry while this
+        // attempt's job sat pending. A failure now takes the same job-state
+        // check as a success, with the same polarity: it is forwarded only
+        // when no chain job is in flight, because while this attempt's job is
+        // pending the failure cannot be its own. An unreadable answer holds it
+        // (fail closed); the poll continues to the cap (`no_result`).
+        // Phase 167.2 / KCS-22: a forwarded failure carries the row's
+        // server-scrubbed `computation_error`, the caller's only detail for it
+        // (React renders it as escaped text).
+        //
+        // Phase 167.2 / KCS-18 — THE JOB-STATE CHECK (RESEARCH P1). The SQL
+        // status bridge keeps a `complete_with_warnings` row at that status while
+        // the chain's jobs run, and still moves `computed_at` on every hop, so
+        // evidence (b) above also accepts a warned row re-stamped MID-CHAIN. The
+        // analytics row cannot tell that from the finished run; the job queue is
+        // the authority on whether the chain is done. So a success is forwarded
+        // only after one read of the sync-progress projection finds no
+        // factsheet-chain job in flight. Any other answer drops this read and the
+        // poll continues; the next evidenced tick asks again. One read at a time
+        // (at the 3 s cadence that is at most 20 a minute against the route's
+        // limiter of 60), and a read that lands after the panel left `computing`
+        // or unmounted forwards nothing. It compares no client clock.
+        if (jobCheckInFlightRef.current) return;
+        jobCheckInFlightRef.current = true;
+        const token = computingTokenRef.current;
+        void jobQueueSaysChainSettled(strategyId, (reason) => {
+          if (warnedUnreadableRef.current) return;
+          warnedUnreadableRef.current = true;
+          console.warn(
+            `[SyncProgress] the job-state read was unreadable; the terminal is held and the poll continues [strategy_id=${strategyId}]:`,
+            reason,
+          );
+          // 167.2-REVIEW-SFH M-6: once per attempt, like the warn. A route
+          // answering 429/5xx for a whole attempt turns a verified success
+          // into a `no_result`, which production should see. Tags only.
+          captureToSentry(new Error(`the job-state read was unreadable: ${reason}`), {
+            level: "warning",
+            tags: { component: "SyncProgress", stage: "job-state-unreadable" },
+          });
+        }).then((settled) => {
+          jobCheckInFlightRef.current = false;
+          if (settled && token !== null && computingTokenRef.current === token) {
+            if (next === "error") onStatusChange?.(next, { computationError });
+            else onStatusChange?.(next);
+          }
+        });
       }
     },
-    onError: () => onStatusChange?.("error"),
+    // Phase 167.2 / KCS-22: a give-up is the panel running out of patience, not
+    // evidence of a failure, so it ends the attempt as `no_result` (muted, no
+    // Retry). The poller names which boundary fired: "missing_row" (no row seen
+    // and a clean read at the grace boundary) selects KCS22-NOROW; anything
+    // else, including no reason, is the poll cap. Lineage: this forwarded
+    // "error", which the caller rendered as "Sync failed" with a timeout
+    // sentence no timeout stood behind.
+    //
+    // 167.2-REVIEW-SFH M-3: before it says "may still be running", the give-up
+    // asks the job queue ONCE. A finished FAILED chain (`failed_final`) is
+    // forwarded as the failure it is: with an unknown baseline only a
+    // `computing` read can admit a terminal, so a job that failed before any
+    // handler wrote `computing` used to reach the cap and be called possibly
+    // running. Anything else (in flight, finished, unreadable) keeps the
+    // give-up and its reason. The poller names `"unreadable"` when the cap
+    // came with no clean read at all, which selects its own copy.
+    onError: (reason) => {
+      if (giveUpStartedRef.current) return;
+      giveUpStartedRef.current = true;
+      const stopReason: PanelStopReason =
+        reason === "missing_row"
+          ? "missing_row"
+          : reason === "unreadable"
+            ? "unreadable"
+            : "poll_cap";
+      // 167.2-REVIEW-SFH-R2 R2-L3: a whole attempt with no clean read (the
+      // session expired, every read errored) is an operational signal, not
+      // only a panel state. Tags only: no strategy id.
+      if (reason === "unreadable") {
+        captureToSentry(
+          new Error("the sync panel could not read the analytics row for a whole attempt"),
+          { level: "warning", tags: { component: "SyncProgress", stage: "poll-unreadable" } },
+        );
+      }
+      const token = computingTokenRef.current;
+      void readChainJobState(strategyId).then((read) => {
+        if (token === null || computingTokenRef.current !== token) return;
+        // 167.2-REVIEW-SFH-R2 R2-L2: a failed chain is this attempt's only
+        // when this attempt queued a new job (KCS-02: a terminal needs
+        // per-attempt evidence). A duplicate or `queued: false` answer queued
+        // nothing, so the newest failed chain is a previous run's.
+        if (
+          attemptEnqueuedNewJob &&
+          read.kind === "settled" &&
+          read.jobStatus === "failed_final"
+        ) {
+          onStatusChange?.("error", { computationError: null });
+        } else {
+          onStatusChange?.("no_result", { stopReason });
+        }
+      });
+    },
   });
 
   // Step-based label for active states
@@ -262,7 +502,20 @@ export function SyncProgress({
   }
 
   const config = STATUS_CONFIG[syncStatus];
-  const activeLabel = isActive ? getActiveLabel() : config.label;
+  // KCS-22 / KCS-03: the two UI-only stop states take their label and detail
+  // from PANEL_STOP_COPY. A missing reason reads as the one that claims least:
+  // the poll cap for `no_result`, the enqueue bound for `unconfirmed`.
+  const stopCopy =
+    syncStatus === "no_result"
+      ? PANEL_STOP_COPY[stopReason ?? "poll_cap"]
+      : syncStatus === "unconfirmed"
+        ? PANEL_STOP_COPY[stopReason ?? "enqueue_bound"]
+        : null;
+  const activeLabel = isActive
+    ? getActiveLabel()
+    : stopCopy
+      ? stopCopy.label
+      : config.label;
 
   // Step tracking: syncing = step 1-2, computing = step 3
   const currentStep = syncStatus === "syncing" ? 1 : syncStatus === "computing" ? 3 : 0;
@@ -272,7 +525,19 @@ export function SyncProgress({
       {/* Status row */}
       <div className="flex items-center gap-2">
         <span className={`shrink-0 ${config.color}`}>{config.icon}</span>
-        <span className={`text-sm font-medium ${config.color}`}>
+        {/* Phase 167.2 / UI-SPEC § Accessibility (S2 live region): the panel's
+            ONE live region. `unconfirmed` and `no_result` arrive minutes after
+            the click, unprompted, so they must be announced. This span stays
+            mounted for the whole attempt, so a change of its text is announced
+            (a region inserted with its text already inside generally is not).
+            The elapsed counter below is a sibling OUTSIDE it, so the seconds
+            are never read out. */}
+        <span
+          className={`text-sm font-medium ${config.color}`}
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
           {activeLabel}
         </span>
         {isActive && (
@@ -304,16 +569,14 @@ export function SyncProgress({
             </span>
           </div>
 
-          {/* Hint text */}
-          <p className="text-xs text-text-muted mt-1">
-            Usually takes 15–30 seconds
-          </p>
-
-          {/* Slow sync warning */}
+          {/* 167.2-REVIEW WR-07: no duration estimate. The hint that stood
+              here ("Usually takes 15–30 seconds") and the 60 s warning ("…up
+              to 2 minutes") both promised a duration RESEARCH P2 measured to
+              be false for a long first crawl. After 60 s the panel states its
+              OWN limit instead (KCS-SLOW), in muted text: nothing is known to
+              be wrong, and amber-500 fails AA at this size. */}
           {elapsedSeconds > 60 && (
-            <p className="text-xs text-amber-500 mt-0.5">
-              This is taking longer than usual. Large accounts can take up to 2 minutes.
-            </p>
+            <p className="text-xs text-text-muted mt-1">{SYNC_SLOW_NOTE}</p>
           )}
         </div>
       )}
@@ -326,6 +589,12 @@ export function SyncProgress({
             Last synced {formatRelativeTime(lastSyncAt)}
           </p>
         )}
+
+      {/* KCS-22 / KCS-03: the panel stopped checking, or a bound expired
+          before the sync was confirmed. Muted detail, no Retry. */}
+      {stopCopy && (
+        <p className="text-xs text-text-secondary mt-1 ml-6">{stopCopy.detail}</p>
+      )}
 
       {/* Warnings detail */}
       {syncStatus === "complete_with_warnings" && syncWarnings && (

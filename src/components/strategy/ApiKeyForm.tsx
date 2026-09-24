@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
@@ -19,9 +19,24 @@ interface ApiKeyFormProps {
   loading: boolean;
   error: string | null;
   defaultExchange?: string;
+  /**
+   * Phase 167.2 / KCS-01: when set, submission is blocked and this is why.
+   * The strategy key card passes it while a tracked sync attempt is live, so
+   * an add cannot start a second sync beside it. Optional and null by
+   * default: `AllocatorExchangeManager` passes nothing and renders as before.
+   */
+  submitBlockedReason?: string | null;
 }
 
-export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange }: ApiKeyFormProps) {
+export function ApiKeyForm({
+  onSubmit,
+  onCancel,
+  loading,
+  error,
+  defaultExchange,
+  submitBlockedReason = null,
+}: ApiKeyFormProps) {
+  const blockedReasonId = useId();
   const [exchange, setExchange] = useState(defaultExchange || "binance");
   const [label, setLabel] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -72,7 +87,8 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
     // in-flight guard; rejecting here before the async onSubmit call means
     // two rapid Enter presses cannot race past the parent's setLoading(true)
     // re-render and fire two validate-and-encrypt requests.
-    if (loading) return;
+    // KCS-01: the Enter-key path is blocked exactly like the disabled button.
+    if (loading || submitBlockedReason) return;
     try {
       // sFOX is token-only — submit an empty secret regardless of state (the
       // secret input is not rendered for sfox, so state stays "", but pin it
@@ -191,11 +207,24 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
 
         {error && <p className="text-sm text-negative mt-3">{error}</p>}
 
+        {/* KCS-01 (167.2-UI-SPEC S1): why Connect Key is blocked. Rendered as
+            escaped React text (the reason can carry a user-authored label),
+            in a wrapping <p>, and read as the button's description. */}
+        {submitBlockedReason && (
+          <p id={blockedReasonId} className="text-xs text-text-muted mt-3">
+            {submitBlockedReason}
+          </p>
+        )}
+
         <div className="flex gap-3 mt-4">
           <Button variant="secondary" type="button" onClick={handleCancel}>
             Cancel
           </Button>
-          <Button type="submit" disabled={loading}>
+          <Button
+            type="submit"
+            disabled={loading || !!submitBlockedReason}
+            aria-describedby={submitBlockedReason ? blockedReasonId : undefined}
+          >
             {loading ? "Validating..." : "Connect Key"}
           </Button>
         </div>

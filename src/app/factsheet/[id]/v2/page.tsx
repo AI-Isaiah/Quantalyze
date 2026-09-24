@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import Link from "next/link";
 import type { Metadata } from "next";
 import { unstable_cache } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
@@ -19,7 +20,42 @@ import {
 // that makes the cached wrapper safe lives in this file, and only here.
 import { fetchAndBuildPayload } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
+import {
+  deriveComputeState,
+  recipientArm,
+  type ComputeState,
+} from "@/lib/compute-state";
+import {
+  readOwnerComputeJobs,
+  readOwnerCompositeHistory,
+} from "@/lib/compute-jobs-read";
+import {
+  KCS10_PUBLIC_SENTENCE,
+  ownerRemedy,
+  ownerStateLine,
+  recipientShareNote,
+  type StateLineTone,
+} from "@/lib/status-surface-copy";
+import {
+  countCompositeMembers,
+  resolveStrategyShape,
+  shouldPreferStitch,
+  type CompositeHistory,
+  type StrategyShape,
+} from "@/lib/strategy-shape";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { FactsheetView, OwnerUnpublishedPanel } from "./FactsheetView";
+
+/**
+ * Phase 167.2 / KCS-09 — the owner state line's colour, by the tone its copy
+ * row carries (DESIGN.md § Semantic-color gates): muted for steady or in
+ * progress, amber for recoverable, red for a permanent failure only.
+ */
+const STATE_LINE_TONE_CLASS = {
+  muted: "text-text-secondary",
+  amber: "text-warning",
+  red: "text-negative",
+} as const satisfies Record<StateLineTone, string>;
 
 // Pin to dynamic rendering. This route's render output already depends on the
 // per-request authentication state (cookies → supabase.auth.getUser() inside
@@ -209,6 +245,12 @@ export default async function FactsheetV2Page({
   // fail-closed value, not a claim. A read error degrades to false with a
   // server-side log rather than crashing the owner's own factsheet.
   let hasActiveShare = false;
+  // Phase 167.2 / KCS-21 — the shape inputs of the owner pending page's remedy
+  // (CSV upload, linked key or not), read on the OWNER PROBE only and
+  // lane-local for the same reason as the two facts above. `signature` is
+  // typed by Lane A's column list, which does not carry them.
+  let ownerSource: string | null = null;
+  let ownerApiKeyId: string | null = null;
   if (signRes.error || !signature) {
     const {
       data: { user },
@@ -240,10 +282,13 @@ export default async function FactsheetV2Page({
     // (review WR-01 — `withPublishedOrOwner` also matches PUBLISHED rows for
     // ANY authed viewer via its `status.eq.published` arm, so "Lane B matched"
     // must not be read as "viewer owns an unpublished row").
+    // Phase 167.2 / KCS-21 adds `source, api_key_id`, the shape inputs of the
+    // owner's pending-page remedy. They are read on THIS probe only (Lane A's
+    // list is unchanged) and held lane-locally below, never on the payload.
     const { data: ownRow, error: probeError } = await withPublishedOrOwner(
       supabase
         .from("strategies")
-        .select("id, name, codename, disclosure_tier, status, capital_ownership, strategy_analytics ( computed_at )")
+        .select("id, name, codename, disclosure_tier, status, capital_ownership, source, api_key_id, strategy_analytics ( computed_at )")
         .eq("id", id),
       user.id,
     ).maybeSingle();
@@ -291,6 +336,8 @@ export default async function FactsheetV2Page({
       ownershipMark = isCapitalOwnership(ownRow.capital_ownership)
         ? ownRow.capital_ownership
         : null;
+      ownerSource = ownRow.source;
+      ownerApiKeyId = ownRow.api_key_id;
       // Share-link EXISTENCE, on the REQUEST-scoped client (RLS on — the owner
       // may read their own strategy's share row; nobody else's predicate can
       // reach it). Deliberately NOT the admin client: this fact is only ever
@@ -373,10 +420,10 @@ export default async function FactsheetV2Page({
     });
     // The strategy passed the signature gate (published, or the viewer's own
     // draft on the owner lane) but its analytics payload couldn't be built.
-    // Render a friendly placeholder rather than hard-404'ing: this is a
-    // transient state (analytics service still computing) or a CSV-ingested
-    // strategy whose daily_returns are not yet populated. Hard-404 only on
-    // the signature gate above.
+    // Render a placeholder rather than hard-404'ing: the computation may be
+    // in progress, may have failed, or may never have run (KCS-09 states which
+    // on the owner lane; the public lane says one neutral sentence). Hard-404
+    // only on the signature gate above.
     // Full-identity context — prefer the real name, fall back to the
     // pseudonym only when the strategy genuinely has no public name.
     const pendingName =
@@ -388,6 +435,33 @@ export default async function FactsheetV2Page({
         codename: null,
         disclosure_tier: (signature.disclosure_tier ?? null) as DisclosureTier | null,
       });
+
+    // Phase 167.2 / KCS-09 — on the OWNER lane, say what is actually happening
+    // to this strategy's computation instead of a fixed "still computing". The
+    // measured trigger was a composite whose stitch had failed permanently
+    // while this page promised a compute that was not coming.
+    //
+    // ⛔ D-04: the read runs on the REQUEST-scoped client (the RPC is SECURITY
+    // DEFINER and auth.uid()-scoped, and it nulls last_error), and its result is
+    // a lane-local value handed only to the JSX below, exactly like
+    // `ownershipMark` and `hasActiveShare`. It never enters the payload, the
+    // builder or the id-keyed cached wrapper. The public lane reads nothing.
+    //
+    // A read that cannot answer derives `unreadable` (see
+    // `readOwnerPendingStatus` at the end of this file), which never renders an
+    // in-progress claim. The remedy is keyed on the strategy's SHAPE (KCS-21),
+    // so it names only a control this strategy's edit page actually paints.
+    const ownerStatus =
+      lane === "owner"
+        ? await readOwnerPendingStatus(supabase, signature.id, {
+            source: ownerSource,
+            apiKeyId: ownerApiKeyId,
+          })
+        : null;
+    const ownerLine = ownerStatus && ownerStateLine(ownerStatus.state);
+    const ownerRemedyLine =
+      ownerStatus &&
+      ownerRemedy(ownerStatus.state, ownerStatus.shape, signature.id);
     return (
       <article className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12">
         {/* WR-02: the owner lane's placeholder must carry the visibility
@@ -400,6 +474,14 @@ export default async function FactsheetV2Page({
           <OwnerUnpublishedPanel
             strategyId={signature.id}
             hasActiveShare={hasActiveShare}
+            // KCS-12 (S7): what a recipient of the private link sees right
+            // now. This lane is reachable only for an UNPUBLISHED strategy,
+            // so the share mode is always mint-token.
+            shareNote={
+              ownerStatus
+                ? recipientShareNote("mint-token", recipientArm(ownerStatus.state))
+                : undefined
+            }
           />
         )}
         <p className="text-fixed-10 font-mono uppercase tracking-[0.22em] text-text-muted">
@@ -408,22 +490,41 @@ export default async function FactsheetV2Page({
         <h1 className="mt-2 font-serif text-fixed-28 sm:text-fixed-36 leading-tight text-text-primary">
           {pendingName}
         </h1>
-        <p className="mt-6 text-fixed-13 text-text-secondary">
-          The detailed factsheet for this strategy is still computing.
-          Daily-return data hasn&apos;t been ingested yet — once the
-          analytics service finishes the first compute pass, the full panel
-          set will render here.
-        </p>
-        {/* Criterion 9 (phase 164.2): a visitor has no developer console to
-            open, and this arm cannot know which of the three gates fired — so
-            it names none. The gate detail stays in the `console.warn` hint
-            above, which is the developer's channel. Not lane-gated: the owner
-            has no console on PROD either. */}
-        <p className="mt-3 text-fixed-12 text-text-muted italic">
-          This factsheet has not been computed yet. Some strategies stay in
-          this state, and this page is all there is until one has been
-          computed.
-        </p>
+        {ownerLine && ownerRemedyLine ? (
+          // KCS-09: one state line and one remedy line, read together. The
+          // remedy is an instruction, not an aside, so it is not italic.
+          <section aria-label="Computation status">
+            <p
+              className={
+                "mt-6 text-fixed-13 " + STATE_LINE_TONE_CLASS[ownerLine.tone]
+              }
+            >
+              {ownerLine.text}
+            </p>
+            <p className="mt-3 text-fixed-12 text-text-muted">
+              {ownerRemedyLine.before}
+              {ownerRemedyLine.link && (
+                <Link
+                  href={ownerRemedyLine.link.href}
+                  className="text-accent underline underline-offset-4"
+                >
+                  {ownerRemedyLine.link.text}
+                </Link>
+              )}
+              {ownerRemedyLine.after}
+            </p>
+          </section>
+        ) : (
+          // KCS-10 (S8) and criterion 9 (phase 164.2): the PUBLIC lane reads
+          // no job state, so it says one neutral sentence that is true in
+          // every state and promises no timing. It names no gate and no
+          // internal state: a visitor has no developer console, and the gate
+          // detail stays in the `console.warn` hint above, which is the
+          // developer's channel.
+          <p className="mt-6 text-fixed-13 text-text-secondary">
+            {KCS10_PUBLIC_SENTENCE}
+          </p>
+        )}
       </article>
     );
   }
@@ -507,4 +608,142 @@ export default async function FactsheetV2Page({
       />
     </>
   );
+}
+
+/**
+ * Phase 167.2 / KCS-09 + KCS-21 — the owner pending page's two facts: the
+ * strategy's compute state and its shape. Called only from the owner `!payload`
+ * branch above (a function declaration, hoisted), so neither read runs on the
+ * full render or on the public lane.
+ *
+ * Both reads use the REQUEST-scoped client: the compute jobs through the
+ * owner-scoped SECURITY DEFINER RPC (it resolves auth.uid() from the session
+ * and returns last_error as NULL), and the member head count under the
+ * `strategy_keys_owner` policy. A module-level function rather than inline in
+ * the page: the server clock is read here (`nowMs`), never in the component.
+ *
+ * ⛔ error-absent ≠ legit-absent (Rule 12). An RPC error, an answer that is not
+ * a rows array, or a throw (a client with no rpc member included) derives
+ * `unreadable`; a member count that cannot be read leaves the shape
+ * `unknown`, so no control is guessed. Each is logged server-side, and none
+ * derives an in-progress state.
+ */
+async function readOwnerPendingStatus(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  strategyId: string,
+  shapeInputs: { source: string | null; apiKeyId: string | null },
+): Promise<{ state: ComputeState; shape: StrategyShape | "unknown" }> {
+  let shape: StrategyShape | "unknown" = "unknown";
+  try {
+    const [jobsRead, memberCount] = await Promise.all([
+      // 167.2-REVIEW-SFH M-5: the shared bounded read (re-asks once at the RPC
+      // cap when the first window is full of non-chain rows). A throw lands in
+      // the catch below. Precondition (SFH L-3): the owner lane is reached only
+      // with a resolved session user, so an empty answer is not a missing one.
+      readOwnerComputeJobs(supabase as unknown as SupabaseClient, strategyId),
+      // The generated types predate `strategy_keys`; the cast is type-only and
+      // RLS still applies to this request client (see strategy-shape.ts).
+      countCompositeMembers(supabase as unknown as SupabaseClient, strategyId),
+    ]);
+    if (!memberCount.ok) {
+      console.error("[factsheet/v2/page] strategy-shape read failed", {
+        id: strategyId,
+        message: memberCount.message,
+      });
+      captureToSentry(new Error(memberCount.message), {
+        tags: { route: "factsheet/v2/page", stage: "strategy-shape" },
+      });
+    }
+    // 167.2-REVIEW-SFH M-7: the same cross-check the edit page makes, so the
+    // remedy never names a link control the edit page withholds.
+    // 167.2-REVIEW-R2 CR-01: through the SAME history read the edit page uses
+    // (`readOwnerCompositeHistory`, which re-asks at the RPC cap when the job
+    // read at hand is not exhaustive and holds no stitch), reusing that job
+    // read. It runs only where the history decides anything: a zero count,
+    // no linked key, not CSV. It never throws.
+    let compositeHistory: CompositeHistory = "none";
+    if (
+      shapeInputs.source !== "csv" &&
+      memberCount.ok &&
+      memberCount.count === 0 &&
+      !shapeInputs.apiKeyId
+    ) {
+      const history = await readOwnerCompositeHistory(
+        supabase as unknown as SupabaseClient,
+        strategyId,
+        jobsRead,
+      );
+      compositeHistory = history.history;
+      // SFH-R2 R2-M2: a history that is not "none" leaves the shape
+      // "unknown". A failed job read is captured below as `compute-state`
+      // (the same fault); every other case is captured here.
+      if (history.message !== null && jobsRead.ok) {
+        console.error("[factsheet/v2/page] composite history is not clean; no control is named", {
+          id: strategyId,
+          history: history.history,
+          message: history.message,
+        });
+        captureToSentry(new Error(history.message), {
+          tags: { route: "factsheet/v2/page", stage: "composite-history" },
+        });
+      }
+    }
+    shape = resolveStrategyShape({
+      source: shapeInputs.source,
+      apiKeyId: shapeInputs.apiKeyId,
+      memberCount,
+      compositeHistory,
+    });
+    if (!jobsRead.ok) {
+      const readFailure = { code: jobsRead.code, message: jobsRead.message };
+      console.error("[factsheet/v2/page] compute-state read failed", {
+        id: strategyId,
+        code: readFailure.code,
+        message: readFailure.message,
+      });
+      captureToSentry(readFailure, {
+        tags: { route: "factsheet/v2/page", stage: "compute-state" },
+      });
+      return { state: deriveComputeState({ readError: true }), shape };
+    }
+    if (jobsRead.windowFull) {
+      // Deterministic, and "reload" cannot fix it, so it is logged and
+      // captured as its own case rather than folded silently into unreadable.
+      console.error("[factsheet/v2/page] compute-state window full", {
+        id: strategyId,
+        rows: jobsRead.rows.length,
+      });
+      captureToSentry(
+        new Error("compute job window full at the RPC cap with no factsheet-chain job"),
+        { tags: { route: "factsheet/v2/page", stage: "compute-state-window-full" } },
+      );
+    }
+    return {
+      state: deriveComputeState({
+        rows: jobsRead.rows,
+        readExhaustive: jobsRead.readExhaustive,
+        nowMs: Date.now(),
+        // 167.2-REVIEW IN-03: an old stitch answers only while the strategy
+        // has members (or the count could not be read).
+        // 167.2-REVIEW-R2 IN-05: and a zero count drops it only for a proven
+        // single-key strategy (linked key, or no stitch on record).
+        preferStitch: shouldPreferStitch({
+          apiKeyId: shapeInputs.apiKeyId,
+          memberCount,
+          compositeHistory,
+        }),
+      }),
+      shape,
+    };
+  } catch (err) {
+    console.error("[factsheet/v2/page] compute-state read failed", {
+      id: strategyId,
+      code: undefined,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    captureToSentry(err, {
+      tags: { route: "factsheet/v2/page", stage: "compute-state" },
+    });
+    return { state: deriveComputeState({ readError: true }), shape };
+  }
 }
