@@ -113,6 +113,27 @@ export interface LiveHoldingsSummary {
   excludedUntrusted: LiveHoldingsPart;
 }
 
+/**
+ * CONTEXT D-20 — the keys the payload itself names as manager-side: in
+ * `eligibleApiKeyIds` (per-key-dailies eligible) but not in
+ * `allocatorEligibleApiKeyIds` (eligible minus the keys that feed a strategy
+ * the owner runs as a manager). It is the difference of two SSR sets, in
+ * `eligible` order, and never a re-derivation of either predicate on the
+ * client.
+ *
+ * A pure function next to `summarizeLiveHoldings` rather than inline in the
+ * composer (review round 2 WR-01): `excludedUntrusted` renders nowhere until
+ * the founder answers D-06, so a wrong direction or a dropped argument here
+ * would ship green unless the derivation is pinned where it is written.
+ */
+export function managerSideKeyIds(
+  eligibleApiKeyIds: readonly string[],
+  allocatorEligibleApiKeyIds: readonly string[],
+): string[] {
+  const allocatorEligible = new Set(allocatorEligibleApiKeyIds);
+  return eligibleApiKeyIds.filter((id) => !allocatorEligible.has(id));
+}
+
 export function summarizeLiveHoldings(args: {
   toggleByScopeRef: Readonly<Record<string, boolean>>;
   holdingByRef: ReadonlyMap<string, DashboardHolding>;

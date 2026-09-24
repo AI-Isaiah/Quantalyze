@@ -28,7 +28,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES } from "@/lib/closed-sets";
 import { buildHoldingRef } from "./holding-outcome-adapter";
-import { summarizeLiveHoldings } from "./live-holdings-summary";
+import {
+  managerSideKeyIds,
+  summarizeLiveHoldings,
+} from "./live-holdings-summary";
 
 // ---------------------------------------------------------------------------
 // The shared-predicate double (D-15 pin 5)
@@ -379,5 +382,31 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     // what counting the manager-side holding would give.
     expect(s.excludedUntrusted).toEqual({ amount: 15_555, count: 2, unavailable: 0 });
     expect(s.excludedUntrusted.amount).not.toBe(71_110);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-20's manager-side set (review round 2 WR-01)
+// ---------------------------------------------------------------------------
+
+describe("managerSideKeyIds — the keys the payload names as manager-side (D-20)", () => {
+  it("is eligibleApiKeyIds MINUS allocatorEligibleApiKeyIds, in eligible order — never the reverse difference, never either set whole", () => {
+    // The two sets differ in BOTH directions: m-1 and m-2 are eligible only,
+    // z is allocator-eligible only. Hand-listed answer: m-1, m-2.
+    expect(
+      managerSideKeyIds(
+        ["aumtrust-key-a", "aumtrust-key-m-1", "aumtrust-key-b", "aumtrust-key-m-2"],
+        ["aumtrust-key-a", "aumtrust-key-b", "aumtrust-key-z"],
+      ),
+    ).toEqual(["aumtrust-key-m-1", "aumtrust-key-m-2"]);
+  });
+
+  it("is empty when every eligible key is allocator-eligible", () => {
+    expect(
+      managerSideKeyIds(
+        ["aumtrust-key-a", "aumtrust-key-b"],
+        ["aumtrust-key-b", "aumtrust-key-a"],
+      ),
+    ).toEqual([]);
   });
 });

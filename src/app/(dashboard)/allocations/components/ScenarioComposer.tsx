@@ -156,6 +156,7 @@ import {
 import { buildHoldingRef } from "../lib/holding-outcome-adapter";
 import {
   holdingEquityContributionLocal,
+  managerSideKeyIds,
   summarizeLiveHoldings,
   type LiveHoldingsPart,
 } from "../lib/live-holdings-summary";
@@ -4182,16 +4183,16 @@ export function ScenarioComposer({
       ),
     [payload.apiKeys],
   );
-  // D-20: the keys the payload itself names as manager-side. It is the
-  // difference of two SSR sets (`allocatorEligibleApiKeyIds` is
-  // `eligibleApiKeyIds` minus the manager keys), never a re-derivation of
-  // either predicate on the client.
-  const managerSideApiKeyIds = useMemo(() => {
-    const allocatorEligible = new Set(payload.allocatorEligibleApiKeyIds ?? []);
-    return (payload.eligibleApiKeyIds ?? []).filter(
-      (id) => !allocatorEligible.has(id),
-    );
-  }, [payload.eligibleApiKeyIds, payload.allocatorEligibleApiKeyIds]);
+  // D-20: the keys the payload itself names as manager-side, derived by the
+  // one pinned helper (`managerSideKeyIds`), never re-derived here.
+  const managerSideApiKeyIds = useMemo(
+    () =>
+      managerSideKeyIds(
+        payload.eligibleApiKeyIds ?? [],
+        payload.allocatorEligibleApiKeyIds ?? [],
+      ),
+    [payload.eligibleApiKeyIds, payload.allocatorEligibleApiKeyIds],
+  );
   const liveHoldingsSummary = useMemo(
     () =>
       summarizeLiveHoldings({
