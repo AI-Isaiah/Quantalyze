@@ -2251,13 +2251,13 @@ on the merits if that matters more than the line.
 ➡️ **MOVED 2026-09-10 to Phase 164.8.4 GATERESIDUE — `[164.6-SOURCE-ANCHOR-ROT]`.** Source-comment `file:line` anchors are unguarded where PLAN.md anchors are not. Still gate-hygiene in kind; owned there because 164.8.2 is what measured it.
 
 **Depends on:** Phase 164.5 (ordering — the substrate work lands first), Phase 164.4.1 (pg-lane with pg_cron)
-**Plans:** 1/5 plans executed
+**Plans:** 2/5 plans executed
 
 Plans:
 
 **Wave 1** *(three file-disjoint plans, parallel worktrees)*
 - [x] 164.6-01-PLAN.md — OPS-08-TS: retry a 40001 exactly once at csv-finalize and allocator holdings sync (criterion 2)
-- [ ] 164.6-02-PLAN.md — 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker (criterion 4)
+- [x] 164.6-02-PLAN.md — 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker (criterion 4)
 - [ ] 164.6-03-PLAN.md — OPS-08-F2: both fan-outs record failed targets and a failure count in a cron_runs row; one migration plus gate arms and twin re-points in one commit (criterion 3)
 
 **Wave 2** *(blocked on Wave 1 completion)*
