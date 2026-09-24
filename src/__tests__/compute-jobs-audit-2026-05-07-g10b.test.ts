@@ -705,22 +705,24 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
         // (mig 109 P12) New row with parents starts as done_pending_children
         // so the fan-in machinery is reachable.
         //
-        // ⛔ THIS ARM IS RED ON PURPOSE AND IS LEFT RED (Phase 164.9 fix round).
-        // The retired-kind repair above stopped the enqueue bouncing off an
-        // RPC-level reject, and what it uncovered is a REAL CATALOGUE DEFECT,
-        // not fixture drift: `enqueue_compute_job` routes every mode to the
+        // ✅ FIXED BY MIGRATION 20260924230827_fanin_initial_status_10param
+        // (Phase 164.9.1, [164.9-FANIN-STATUS-NEVER-SET]). This arm was RED ON
+        // PURPOSE from the Phase 164.9 fix round until that migration: the
+        // retired-kind repair above had stopped the enqueue bouncing off an
+        // RPC-level reject, and what it uncovered was a REAL CATALOGUE DEFECT,
+        // not fixture drift. `enqueue_compute_job` routes every mode to the
         // TEN-ARG `_enqueue_compute_job_internal`, and that overload's INSERT
-        // omits `status` entirely, so the row takes the column DEFAULT
-        // ('pending'). Only the older SEVEN-ARG overload still carries mig 109's
+        // omitted `status`, so the row took the column DEFAULT ('pending').
+        // Only the SEVEN-ARG overload carried mig 109's
         // `v_initial_status := 'done_pending_children'` branch, and nothing
-        // reaches it. Consequence: a job enqueued through the public wrapper
-        // WITH parents never enters the fan-in state, so
-        // `mark_compute_job_done`'s fan-in advance can never see it.
+        // reaches it (a seven-argument call cannot resolve: 42725). A job
+        // enqueued through the public wrapper WITH parents therefore never
+        // entered the fan-in state, so `mark_compute_job_done`'s fan-in advance
+        // could never see it. The migration makes the TEN-ARG overload compute
+        // and INSERT the initial status exactly as the seven-arg does.
         //
-        // ⛔ Closing this needs a MIGRATION against a production catalogue,
-        // which this phase's gate work is ordered ahead of. Weakening the
-        // assertion to accept 'pending' would encode the defect as the contract.
-        // Booked under [164.9-LIVEDB-LANE-EXECUTION-CENSUS].
+        // ⛔ This assertion is the regression gate (D-08). Weakening it to
+        // accept 'pending' would encode the defect as the contract.
         expect(child.status).toBe("done_pending_children");
       } finally {
         await cleanupLiveDbRow(admin, {
