@@ -415,9 +415,15 @@ export function SyncProgress({
     },
     // Phase 167.2 / KCS-22: a give-up is the panel running out of patience, not
     // evidence of a failure, so it ends the attempt as `no_result` (muted, no
-    // Retry). Lineage: this forwarded "error", which the caller rendered as
-    // "Sync failed" with a timeout sentence no timeout stood behind.
-    onError: () => onStatusChange?.("no_result", { stopReason: "poll_cap" }),
+    // Retry). The poller names which boundary fired: "missing_row" (no row seen
+    // and a clean read at the grace boundary) selects KCS22-NOROW; anything
+    // else, including no reason, is the poll cap. Lineage: this forwarded
+    // "error", which the caller rendered as "Sync failed" with a timeout
+    // sentence no timeout stood behind.
+    onError: (reason) =>
+      onStatusChange?.("no_result", {
+        stopReason: reason === "missing_row" ? "missing_row" : "poll_cap",
+      }),
   });
 
   // Step-based label for active states
