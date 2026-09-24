@@ -80,6 +80,22 @@ export interface ComputeJobRow {
 
 const STITCH_KIND = "stitch_composite";
 
+/**
+ * Review-fix round 1 (HIGH-1 c) — how much OLDER than the newest finished
+ * chain row an in-flight chain row may be and still answer over it in
+ * `selectFactsheetJob`. Past this, the in-flight row is treated as stale (a
+ * job whose worker keeps dying cycles running -> pending and never reaches a
+ * terminal status) and the newest chain row answers, as it did before the
+ * in-flight-first rule.
+ *
+ * 8 hours mirrors `_RESYNC_CHAIN_JOB_LIVE_WINDOW` in
+ * `analytics-service/routers/process_key.py`, where it is derived: each job
+ * row is one hop, and `process_key_long`'s single-hop ceiling (~3.7 h) bounds
+ * every chain kind. The bound is measured between two rows' `created_at`, so
+ * this module still never reads the clock.
+ */
+export const IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS = 8 * 60 * 60 * 1000;
+
 function isFactsheetChainKind(kind: string | undefined): boolean {
   return (FACTSHEET_CHAIN_KINDS as readonly string[]).includes(kind as string);
 }
@@ -100,6 +116,11 @@ function isFactsheetChainKind(kind: string | undefined): boolean {
  * still held the strategy at `computing`. A stitch row is not affected: the
  * in-flight unique index allows one non-terminal row per kind, so the newest
  * stitch is already the in-flight one whenever one exists.
+ *
+ * BOUNDED (review-fix round 1): the in-flight row answers over a newer finished
+ * chain row only while it was created less than
+ * `IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS` before it. An older in-flight row
+ * is stale evidence, and the newest chain row answers.
  *
  * Stitch-PREFERRING (154-04): the stitch row is the only row that carries
  * member progress or a heartbeat, so whenever one exists it answers even if a
@@ -136,6 +157,16 @@ export function selectFactsheetJob(
         latestInFlightChain = row;
       }
     }
+  }
+  if (
+    latestInFlightChain !== null &&
+    latestChain !== null &&
+    latestChain !== latestInFlightChain &&
+    Date.parse(latestChain.created_at ?? "") -
+      Date.parse(latestInFlightChain.created_at ?? "") >=
+      IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS
+  ) {
+    latestInFlightChain = null;
   }
   const chain = latestInFlightChain ?? latestChain;
   if (opts.preferStitch === false && latestStitch !== null && chain !== null) {

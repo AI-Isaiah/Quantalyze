@@ -178,6 +178,24 @@ describe("selectFactsheetJob", () => {
     ).toBe("running");
   });
 
+  it("review-fix round 1: an in-flight chain row far OLDER than the newest finished one is stale and does not answer", () => {
+    // A crash-looping job cycles running -> pending and never goes terminal.
+    // A later chain finished 9 hours after it was created: the finished row
+    // answers, so the surface does not report a dead job as running for ever.
+    const staleInFlight = row("sync_trades", { created_at: "2026-07-12T02:00:00.000Z", status: "pending" });
+    const newerDone = row("compute_analytics_from_csv", { created_at: "2026-07-12T11:00:00.000Z", status: "done" });
+    expect(selectFactsheetJob([staleInFlight, newerDone])).toBe(newerDone);
+    expect(selectFactsheetJob([newerDone, staleInFlight])).toBe(newerDone);
+    expect(
+      selectFactsheetJob([staleInFlight, stitch({ created_at: "2026-07-12T11:30:00.000Z", status: "done" }), newerDone], {
+        preferStitch: false,
+      })?.kind,
+    ).not.toBe("sync_trades");
+    // Control: just inside the window the in-flight row still answers.
+    const recentInFlight = row("sync_trades", { created_at: "2026-07-12T03:00:01.000Z", status: "pending" });
+    expect(selectFactsheetJob([recentInFlight, newerDone])).toBe(recentInFlight);
+  });
+
   it("2026-09-24: with nothing in flight, the newest chain row still answers (finished vs failed)", () => {
     const olderFailed = row("sync_trades", { created_at: "2026-07-12T11:40:00.000Z", status: "failed_final" });
     const newerDone = row("compute_analytics_from_csv", { created_at: "2026-07-12T11:50:00.000Z", status: "done" });
