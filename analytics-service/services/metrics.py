@@ -770,14 +770,14 @@ def _kelly_criterion(r: pd.Series) -> float:
 
 
 def _probabilistic_sharpe_ratio(r: pd.Series) -> float:
-    """quantstats 0.0.81 ``probabilistic_ratio`` (base "sharpe", rf=0, not annualized) minus the price guess.
+    """Probabilistic Sharpe Ratio PSR(0): quantstats 0.0.81 ``probabilistic_ratio`` minus the price guess, with D-16's kurtosis fix.
 
     WHY INLINE: ``probabilistic_ratio`` has no ``prepare_returns=`` keyword, and
     research Q2's spy saw it reach ``_prepare_returns`` through ``sharpe``. On the
     canonical all-winning trigger live quantstats returned 0.1531252134903383, a
     below-even probability for a series that never lost a day.
 
-    MATH PARITY (0.0.81 body)::
+    0.0.81 BODY (base "sharpe", rf=0, not annualized)::
 
         base = sharpe(series, periods=periods, annualize=False)  # P(r).mean() / P(r).std(ddof=1)
         skew_no = skew(series, prepare_returns=False)            # raw r.skew()
@@ -786,6 +786,24 @@ def _probabilistic_sharpe_ratio(r: pd.Series) -> float:
         sigma_sr = np.sqrt((1 + (0.5 * base**2) - (skew_no * base)
                             + (((kurtosis_no - 3) / 4) * base**2)) / (n - 1))
         return norm.cdf((base - rf) / sigma_sr)
+
+    D-16 CORRECTION (research §Q5 F-2, founder-approved 2026-09-24). The
+    variance term above expects the NON-excess fourth moment gamma4 (3 for a
+    normal distribution): with it, ``1 + 0.5*SR**2 - g3*SR + ((gamma4 - 3)/4)*SR**2``
+    is exactly the published ``1 - g3*SR + ((gamma4 - 1)/4)*SR**2`` (Bailey &
+    Lopez de Prado, https://www.davidhbailey.com/dhbpapers/deflated-sharpe.pdf).
+    pandas' ``kurtosis()`` is EXCESS kurtosis, so 0.0.81 subtracts 3 twice and its
+    variance is short by ``0.75*SR**2/(n-1)``. That is small on typical series,
+    but on a steadily winning series the term goes negative and live PSR is
+    None. This mirror changes exactly ONE input: it feeds ``r.kurtosis() + 3``.
+    The expression is otherwise the 0.0.81 one, in its order.
+
+    D-10 DISCLOSURE: this moves the persisted value on every series. The golden
+    ``metrics_json.metrics_json.probabilistic_sharpe_ratio`` moved with it, and
+    the before/after rows are in the plan 166-04 SUMMARY. The correctness anchor
+    is ``test_q166_psr_matches_the_published_formula``, which computes the
+    published formula from sample moments with scipy. It is NOT live quantstats,
+    which carries the defect, so PSR has no live-quantstats parity row.
 
     The base comes from the plan 166-01 primitive ``_annualized_vol_sharpe`` with
     ``periods_per_year=1``, which is ``mean / std`` bit-identically (D-04: no
@@ -799,10 +817,10 @@ def _probabilistic_sharpe_ratio(r: pd.Series) -> float:
     """
     base = _annualized_vol_sharpe(_prepared_returns_no_guess(r), 1)[1]
     skew_no = r.skew()
-    kurtosis_no = r.kurtosis()
+    gamma4 = r.kurtosis() + 3  # D-16: non-excess fourth moment
     n = len(r)
     sigma_sr = np.sqrt(
-        (1 + (0.5 * base**2) - (skew_no * base) + (((kurtosis_no - 3) / 4) * base**2))
+        (1 + (0.5 * base**2) - (skew_no * base) + (((gamma4 - 3) / 4) * base**2))
         / (n - 1)
     )
     return float(norm.cdf(base / sigma_sr))

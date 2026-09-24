@@ -3124,15 +3124,16 @@ def _q166_golden_with_nan_days(s: pd.Series) -> pd.Series:
 # (metrics_json key, LIVE quantstats 0.0.81 oracle on the raw series). On the
 # benign fixtures below the price guess cannot fire, so live quantstats is the
 # non-self-referential correctness anchor (D-08). The first four rows are the
-# drawdown family (plan 166-03), the last four the loss/Sharpe family (plan
-# 166-04).
+# drawdown family (plan 166-03), the last three the loss family (plan 166-04).
+# probabilistic_sharpe_ratio has NO row: D-16 corrects 0.0.81's kurtosis term,
+# so live quantstats is no longer its anchor. Its anchor is the published
+# formula, in test_q166_psr_matches_the_published_formula.
 _Q166_PARITY_SITES = (
     ("recovery_factor", lambda s: qs.stats.recovery_factor(s)),
     ("ulcer_index", lambda s: qs.stats.ulcer_index(s)),
     ("upi", lambda s: qs.stats.ulcer_performance_index(s)),
     ("serenity_index", lambda s: qs.stats.serenity_index(s)),
     ("kelly_criterion", lambda s: qs.stats.kelly_criterion(s)),
-    ("probabilistic_sharpe_ratio", lambda s: qs.stats.probabilistic_ratio(s)),
     ("common_sense_ratio", lambda s: qs.stats.common_sense_ratio(s)),
     ("cpc_index", lambda s: qs.stats.cpc_index(s)),
 )
@@ -3353,4 +3354,76 @@ def test_q166_composed_leaf_fault_is_failure_soft(golden_returns, caplog, monkey
     assert all(result[k] is not None for k in others), (
         "a win_rate fault must not take down scalars that do not use it: "
         f"{ {k: result[k] for k in others} }"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 D-16: the Probabilistic Sharpe Ratio uses the NON-excess fourth
+# moment, as published. quantstats 0.0.81 feeds pandas' EXCESS kurtosis into a
+# term that expects the raw fourth moment, subtracting 3 twice (research §Q5
+# F-2). Its correctness anchor is therefore the published formula computed here
+# from sample moments, never live quantstats (which carries the defect) and
+# never pandas' own skew/kurtosis (which the mirror uses).
+# ---------------------------------------------------------------------------
+
+
+def _q166_psr_published(raw: pd.Series) -> float:
+    """Bailey & Lopez de Prado PSR(0), from sample moments, independently of the mirror.
+
+    PSR = Phi( SR / sqrt( (1 - g3*SR + ((g4 - 1)/4) * SR**2) / (n - 1) ) ),
+    SR the per-period (non-annualized) Sharpe, g3 the skewness, g4 the
+    NON-excess kurtosis (3 for a normal distribution), n the observation count.
+    """
+    from scipy import stats as scipy_stats
+
+    filled = raw.fillna(0).to_numpy(dtype="float64")
+    values = raw.to_numpy(dtype="float64")
+    sr = float(np.mean(filled) / np.std(filled, ddof=1))
+    g3 = float(scipy_stats.skew(values, bias=False, nan_policy="omit"))
+    g4 = float(scipy_stats.kurtosis(values, fisher=False, bias=False, nan_policy="omit"))
+    n = len(values)
+    return float(
+        scipy_stats.norm.cdf(sr / math.sqrt((1 - g3 * sr + ((g4 - 1) / 4) * sr**2) / (n - 1)))
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture_name", ("benign_mixed", "golden_returns", "benign_all_positive")
+)
+def test_q166_psr_matches_the_published_formula(fixture_name, request):
+    """D-16: the persisted probabilistic_sharpe_ratio equals the published PSR.
+
+    The anchor recomputes SR, skewness and the NON-excess kurtosis from the
+    sample with numpy and scipy, and applies Bailey & Lopez de Prado's variance
+    term. It is algebraically identical to the mirror's quantstats-shaped
+    expression once the mirror feeds the non-excess moment, but the operation
+    order differs, so the tolerance is rel 1e-10, not bit equality.
+
+    Pre-fix (0.0.81 form, excess kurtosis): benign_mixed 0.7693296699257343,
+    golden_returns 0.37176286348610654, benign_all_positive None (the 0.0.81
+    variance term went negative).
+    """
+    s = _q166_benign_fixture(fixture_name, request)
+    expected = _q166_psr_published(s)
+    actual = compute_qstats_scalars(s, None)["probabilistic_sharpe_ratio"]
+    assert actual is not None, f"PSR undefined on {fixture_name}; published value {expected}"
+    assert actual == pytest.approx(expected, rel=1e-10, abs=0.0), (
+        f"PSR on {fixture_name} is not the published formula: {actual} vs {expected}"
+    )
+
+
+def test_q166_psr_is_defined_for_a_steadily_winning_series():
+    """ECONOMIC INVARIANT: a series that gains every day has a positive Sharpe,
+    so the probability that its true Sharpe exceeds 0 is a real number above
+    0.5. It cannot be undefined.
+
+    Pre-fix: None. quantstats 0.0.81 subtracts 3 from an already-excess
+    kurtosis, which drove its variance term negative on this fixture, and the
+    square root of a negative number is NaN (research §Q5 F-2).
+    """
+    psr = compute_qstats_scalars(_rank05_benign_all_positive(), None)[
+        "probabilistic_sharpe_ratio"
+    ]
+    assert psr is not None and psr > 0.5, (
+        f"probabilistic_sharpe_ratio={psr} for a series that never lost a day"
     )
