@@ -23,7 +23,11 @@
  * C1 TOP-LEVEL, C2 LITERALS ONLY, C3 target in `public` (with the ONE named
  * `auth.users` exception), C4 a consumer reads the row — C4 is human judgement
  * and is carried as the entry's trailing `# <consumer>` comment, which this
- * script REQUIRES but cannot evaluate.
+ * script REQUIRES but cannot evaluate. C5 (Phase 164.9.2) is a separately pinned
+ * class: a top-level LITERAL UPDATE on a `public` table an INSERT line fills,
+ * spelled `update:<n>` (replayed) or `decline:<n>` (non-literal, accounted for
+ * and never replayed) in field 3. Emit order is (migration basename, byte
+ * offset) across both classes; UPDATE blocks never feed `-- refdata-expect:`.
  *
  * Lexing reuses `maskSql` + `statements` from `scripts/lint-sql-gates.mjs` (the
  * repo's only comment/string/dollar-quote-aware SQL lexer). Emitted SQL is the
@@ -157,7 +161,7 @@ export function parseAllowlist(text) {
       // there would mutate shared TEST's live row, not a row the replay just wrote.
       if (q[1] !== "public") {
         bad(
-          `field 2 "${qualified}" carries a ${kind}: count, and C5 targets public only — ${qualified} survives the restore's DROP, so an UPDATE replayed there would mutate a live row on shared TEST rather than a row the replay just wrote. The auth.users exception is C3's and is INSERT-only`,
+          `field 2 "${qualified}" is on a C5 ${kind}: line, and C5 targets public only — ${qualified} survives the restore's DROP, so an UPDATE replayed there would mutate a live row on shared TEST rather than a row the replay just wrote. The auth.users exception is C3's and is INSERT-only`,
         );
         continue;
       }
@@ -539,16 +543,20 @@ function splitQualified(qualified) {
 export function updateLiteralCheck(masked) {
   const word = /\b(FROM|USING|SELECT|RETURNING|WITH)\b/i.exec(masked);
   if (word) {
-    return `carries the token ${word[1].toUpperCase()} — a joined, sub-selected or RETURNING UPDATE is not a literal C5 update; decline it with a reason, this extractor does not replay joins (C5)`;
+    return `carries the token ${word[1].toUpperCase()} — a joined, sub-selected or RETURNING UPDATE is not a literal C5 update (C5)`;
   }
   if (masked.includes("$")) {
     return "carries a `$` (a dollar-quoted body or a positional parameter) — not a literal C5 update (C5)";
   }
   // Any `identifier(` is a call, except the IN-list and now(). That bans
   // current_setting(), net.http_*(), pg_notify() and every other side effect.
+  // AND / OR / NOT before a parenthesis group a boolean, they never call a
+  // function (all three are reserved words in PostgreSQL). Refusing them would
+  // push a LITERAL UPDATE into a `decline:` line, i.e. hide a replayable effect.
   const call = /([A-Za-z_][A-Za-z0-9_]*)[\t\n ]*\(/g;
+  const notCalls = new Set(["IN", "AND", "OR", "NOT"]);
   for (let m; (m = call.exec(masked)) !== null; ) {
-    if (m[1].toUpperCase() === "IN" || m[1].toLowerCase() === "now") continue;
+    if (notCalls.has(m[1].toUpperCase()) || m[1].toLowerCase() === "now") continue;
     return `makes the non-literal call \`${m[1]}(\` — only literals, column references, IN lists and now() are replayable (C5)`;
   }
   return null;
@@ -1109,6 +1117,71 @@ function modeAudit(io, allowlistPath, migrationsDir) {
       bad = 1;
     }
   }
+
+  // ── C5 (Phase 164.9.2). EVERY top-level UPDATE / DELETE / TRUNCATE / MERGE on a
+  // table an INSERT entry fills is ACCOUNTED FOR: a literal UPDATE by an
+  // `update:` line, a non-literal one by a `decline:` line with its reason, and
+  // anything else is a named refusal. The INSERT side's limitation 2 (an
+  // unlisted non-literal is skipped in silence) is deliberately NOT carried over.
+  // `tables` above is exactly the INSERT-filled set, `auth.users` included, so a
+  // top-level UPDATE of `auth.users` is refused: parse refuses any non-public C5
+  // line, so no line can account for it.
+  const pairs = c5Pairs(allEntries);
+  for (const pair of pairs.values()) {
+    if (!tables.has(pair.qualified)) {
+      for (const e of [pair.upd, pair.dec].filter(Boolean)) {
+        refuse(io, {
+          file: rel(allowlistPath),
+          line: e.lineNo,
+          table: e.qualified,
+          reason: `a C5 ${e.kind}: line names ${e.qualified}, which NO INSERT entry fills. C5 replays UPDATEs onto rows the replay itself wrote; on a table the replay never fills the UPDATE reaches nothing the restore rebuilt`,
+        });
+      }
+      bad = 1;
+    }
+  }
+  const updCache = new Map(); // `${file}|${qualified}` -> matchUpdate() result
+  const c5 = { upd: 0, updFiles: new Set(), updTables: new Set(), dec: 0, decFiles: new Set() };
+  const c5PerTable = new Map(); // qualified -> {upd, dec}
+  for (const file of corpus) {
+    const { src, prep } = readFile(file);
+    if (prep.error) continue; // already refused above
+    for (const qualified of tables) {
+      for (const hit of matchOtherDml(prep, qualified)) {
+        refuse(io, {
+          file,
+          line: hit.line,
+          table: qualified,
+          reason: `a top-level ${hit.verb} on a table the replay fills, and C5 replays UPDATE only — no allowlist line can account for it; classify it by hand at review`,
+        });
+        bad = 1;
+      }
+      const key = `${file}|${qualified}`;
+      if (!updCache.has(key)) updCache.set(key, matchUpdate(src, prep, qualified));
+      const m = updCache.get(key);
+      const pair = pairs.get(key);
+      if (!pair && m.ok.length === 0 && m.rejected.length === 0) continue;
+      const v = c5Verdict(m, qualified, pair?.upd, pair?.dec);
+      for (const r of v.refusals) {
+        refuse(io, { file, line: r.line, table: qualified, reason: r.reason });
+        bad = 1;
+      }
+      if (v.refusals.length > 0) continue;
+      const row = c5PerTable.get(qualified) ?? { upd: 0, dec: 0 };
+      if (v.replay.length > 0) {
+        c5.upd += v.replay.length;
+        c5.updFiles.add(file);
+        c5.updTables.add(qualified);
+        row.upd += v.replay.length;
+      }
+      if (v.declined > 0) {
+        c5.dec += v.declined;
+        c5.decFiles.add(file);
+        row.dec += v.declined;
+      }
+      c5PerTable.set(qualified, row);
+    }
+  }
   if (bad) return 1;
 
   const sorted = Array.from(perTableStatements.keys()).sort();
@@ -1130,8 +1203,21 @@ function modeAudit(io, allowlistPath, migrationsDir) {
       `  ${t.padEnd(width)}  ${String(perTableStatements.get(t)).padStart(3)} / ${perTableFiles.get(t)}`,
     );
   }
+  const c5Sorted = Array.from(c5PerTable.keys()).sort();
+  const c5Width = c5Sorted.reduce((w, t) => Math.max(w, t.length), 0);
+  io.out.push(
+    "  ── C5, measured per table: update statements replayed / declined ──",
+    `  C5 lines:             ${allEntries.length - entries.length}`,
+  );
+  for (const t of c5Sorted) {
+    const row = c5PerTable.get(t);
+    io.out.push(`  ${t.padEnd(c5Width)}  ${String(row.upd).padStart(3)} / ${row.dec}`);
+  }
+  // The INSERT `audit OK:` line is byte-stable (D-03) and the C5 census line
+  // follows it directly; both workflows parse each by its own prefix.
   io.out.push(
     `extract-reference-inserts audit OK: ${entries.length} entr(ies), ${files.size} file(s), ${tables.size} table(s), ${pinnedSum} statement(s); every pinned count re-measured, no unlisted top-level reference INSERT.`,
+    `extract-reference-inserts audit C5 OK: ${c5.upd} update statement(s) over ${c5.updFiles.size} file(s) and ${c5.updTables.size} table(s) replayed; ${c5.dec} declined over ${c5.decFiles.size} file(s); 0 unaccounted.`,
   );
   return 0;
 }

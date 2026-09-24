@@ -18,12 +18,33 @@
 #    and so explained 1 of the 3 surplus entries. It read as arithmetic and was
 #    not. If you cannot make these numbers reconcile, distrust the PROSE and
 #    re-run `--audit`, which prints statements and files per table.
+# ⛔ CORRECTED 2026-09-25 (Phase 164.9.2, C5). The recipe above counts EVERY
+#    non-comment line's file, so once C5 lines exist it counts their files too
+#    and answers 25, not 19 (measured). The paragraph above is kept as lineage;
+#    it was true of an INSERT-only file. The CLASS-AWARE recipes are:
+#      INSERT files (-> 19) and entries (-> 22): keep field 3 = a bare integer
+#        grep -vE '^[[:space:]]*(#|$)' scripts/restore-test-refdata-allowlist.txt \
+#          | awk -F'\t' '$3 ~ /^[0-9]+$/' | cut -f1 | sort -u | wc -l
+#        grep -vE '^[[:space:]]*(#|$)' scripts/restore-test-refdata-allowlist.txt \
+#          | awk -F'\t' '$3 ~ /^[0-9]+$/' | wc -l
+#      C5 lines (-> 6) and their files (-> 6): keep field 3 = update:/decline:
+#        grep -vE '^[[:space:]]*(#|$)' scripts/restore-test-refdata-allowlist.txt \
+#          | awk -F'\t' '$3 ~ /^(update|decline):[0-9]+$/' | cut -f1 | sort -u | wc -l
+#    The "22 ENTRIES over 19 FILES over 8 TABLES … 23 STATEMENTS" sentence above
+#    stays true of the INSERT class. Its C5 counterpart, dated 2026-09-25: 6 C5
+#    LINES over 6 FILES over 2 TABLES (public.profiles, public.strategies); 4
+#    are update: lines replaying 6 STATEMENTS, 2 are decline: lines accounting
+#    for 2 STATEMENTS. `--audit` prints it as the `audit C5 OK:` line.
 #
 # ── WHAT AN ENTRY IS ───────────────────────────────────────────────────────
 # One line = one (migration file, target table, pinned top-level statement
 # count) triple, plus the consumer that reads the row.
 #
 #     <basename>.sql <TAB> <schema.table> <TAB> <n> <TAB> # <anchor + consumer>
+#
+# Field 3 is `<n>` for an INSERT line (C1-C4). A C5 line (below) spells it
+# `update:<n>` (replayed) or `decline:<n>` (accounted for, not replayed), and
+# its field 4 is the REASON rather than a consumer; it is required all the same.
 #
 # ⛔ NEVER A BARE TABLE (decision L-02). Reference-ness is a property of a
 #    STATEMENT, not of a table. `public.strategies` is a DO-block fixture in
@@ -80,6 +101,35 @@
 #     criterion: `discovery_categories` has none and is unquestionably reference,
 #     while a backfill in 20260408113028_disclosure_and_tenancy.sql:152-156
 #     carries one and is not.
+# C5  TOP-LEVEL LITERAL UPDATE ON A REPLAYED PUBLIC TABLE (Phase 164.9.2, added
+#     2026-09-25). A separately pinned class, NOT a relaxation of C2. It admits
+#     a top-level (C1) `UPDATE [ONLY] <target> [[AS] alias] SET …` whose target
+#     is a `public` table some INSERT line above fills, and whose masked text
+#     carries no FROM, USING, SELECT, RETURNING or WITH, no `$`, and no call but
+#     `now()` (an IN list and AND/OR/NOT parentheses are not calls). Those
+#     tables are empty after `DROP SCHEMA public CASCADE`, so such an UPDATE can
+#     reach only rows the replay itself wrote. The extractor replays it inside
+#     the same transaction, in (migration filename, byte offset) order, and its
+#     block carries a `-- refdata-update:` trailer, never `-- refdata-expect:`,
+#     so the restore's count floor stays INSERT-only.
+#     ⛔ PUBLIC ONLY, NO auth.* EVER. The auth.users exception above is C3's and
+#     is INSERT-only: auth.users SURVIVES the DROP, so a replayed UPDATE there
+#     would mutate shared TEST's live row. A C5 line on any non-public target is
+#     refused at parse. And because `--audit` accounts for every UPDATE on every
+#     table an INSERT line fills, auth.users included, a future top-level UPDATE
+#     of auth.users is refused outright: no line can account for it. Zero C5
+#     statements on auth.* is therefore by design, not an accident of the corpus.
+#     ⛔ DECLINE, NEVER SKIP (decision D-02). A top-level UPDATE on such a table
+#     that is NOT literal (a join, a sub-select, a function call) gets a
+#     `decline:<n>` line with its reason. It is emitted as nothing, counted in
+#     the C5 census every run, and refused if the statement ever turns literal
+#     ("a literal UPDATE is replayed, not declined"), so a decline can never hide
+#     a replayable effect. The INSERT side's limitation 2 below (an unlisted
+#     non-literal is skipped) is deliberately NOT carried over to C5.
+#     `--audit` refuses a DELETE, TRUNCATE, MERGE or CTE-prefixed data-modifying
+#     statement on such a table by name: C5 replays UPDATE only. At most one
+#     `update:` and one `decline:` line per (file, table); a second line of one
+#     kind is refused as a duplicate.
 #
 # ── SCOPE BOUNDARY: THE REPLAY REPRODUCES INSERTS, NOT SUBSEQUENT EDITS ────
 # ⛔ MEASURED 2026-09-09. C1-C4 select INSERT statements, so the replay restores
@@ -103,6 +153,17 @@
 #    ⚠️ NOT resolved here, and NOT resolvable by editing this file: pinning
 #    post-seed column VALUES is a THIRD gate leg, booked as TODOS
 #    `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` against Phase 164.9 TESTISOLATION.
+# ⛔ CORRECTED 2026-09-25 (Phase 164.9.2). The block above is kept as lineage.
+#    Two of its sentences are no longer true. (a) "The five top-level UPDATEs"
+#    names 7 statement lines over 5 files, and the census is EIGHT statements
+#    over SIX files: it missed 20260429063138_seed_is_example_backfill.sql, one
+#    UPDATE of strategies, which sorts before the teaser INSERT. (b) "NOT
+#    resolvable by editing this file" is superseded by C5, a NEW criterion
+#    rather than an edit of C2: of the eight, 6 are literal and replayed by the
+#    four `update:` lines at the end of this file, and 2 are non-literal joins
+#    declined by name there (20260521190243 and 20260530120000). The worked case
+#    above now comes back right: 20260521150000's manager_status UPDATE replays
+#    after the sentinel INSERT, so the row carries the value the ledger implies.
 #
 # ── L-04: THE TWO FLAG TABLES ARE RESET TO THEIR SEED VALUES ───────────────
 # ⚠️ Decision, 2026-09-09, recorded because the behaviour is a real one and was
@@ -146,7 +207,8 @@
 # 2. `--audit` classifies with C1+C2. A future top-level `INSERT … SELECT` into
 #    an allowlisted table is therefore SKIPPED, not flagged. That is deliberate
 #    (it is a backfill by C2), and it is the second thing a reviewer must decide
-#    by hand rather than expect the gate to raise.
+#    by hand rather than expect the gate to raise. (INSERT class only: C5 does
+#    NOT carry this over — every UPDATE on a replayed table is accounted for.)
 # 3. This file says nothing about whether the rows are on TEST right now. It says
 #    which statements the restore replays. The restore's own in-transaction gate
 #    and its `refdata:` census rows are what report presence.
@@ -191,6 +253,10 @@
 # ⚠️ The masthead DOES carry the four numbers, deliberately — as a DATED
 #   MEASURED reading (see the header), not as a constant. Re-derive with the
 #   recipes above; where a recipe and the prose disagree, the RECIPE is right.
+# ⛔ CORRECTED 2026-09-25 (Phase 164.9.2, C5). With C5 lines present the two
+#   recipes just above count them too: 25 files and 28 lines (measured), not 19
+#   and 22. They are kept as lineage. Use the CLASS-AWARE recipes in the W3
+#   correction at the top of this file, which filter field 3 before counting.
 
 20260405061911_initial_schema.sql	public.discovery_categories	1	# :146-151, plain multi-row VALUES, no ON CONFLICT. Consumers: scripts/seed-demo-data.ts slug='crypto-sma' lookup; strategies.category_id FK (supabase/schema/baseline.sql:12610).
 20260407164606_perfect_match.sql	public.system_flags	1	# :55-56 match_engine_enabled=true. Consumer: policy system_flags_match_engine_public_read (supabase/schema/baseline.sql:13519).
@@ -219,3 +285,8 @@
 # Deliberately BELOW every INSERT line: the emit orders by (migration filename,
 # byte offset), never by the order of the lines in this file.
 20260521150000_universal_signup_approval_gate.sql	public.profiles	update:3	# C5 — its three top-level UPDATEs of profiles: SET allocator_status = 'verified' (role IN allocator/both), SET manager_status = 'verified' (role IN manager/both), and SET both statuses WHERE is_admin = true. The manager_status one moves the teaser sentinel profile (role manager, replayed from 20260515095804) to the value the restore's wrong-state leg reads.
+20260429063138_seed_is_example_backfill.sql	public.strategies	update:1	# C5 — its one top-level UPDATE, SET is_example = true WHERE id IN (the demo-seed ids). Reaches no replayed row today; it is replayed because C5 accounts for every literal UPDATE of a replayed table. ⛔ Its line sits BELOW the 20260515095804 INSERT lines while it runs BEFORE them: the emit's (filename, offset) order is what the real corpus exercises here.
+20260709130000_strategies_asset_class.sql	public.strategies	update:1	# C5 — its one top-level UPDATE, SET asset_class = 'crypto' WHERE api_key_id IS NOT NULL. The teaser sentinel strategy carries no api_key_id, so it reaches no replayed row today; replayed so the strategies row is in the state the ledger implies.
+20260716120000_backfill_staff_role_both.sql	public.profiles	update:1	# C5 — its one top-level UPDATE, SET role = 'both' WHERE is_admin = true. The teaser sentinel profile is not an admin, so it reaches no replayed row today; replayed so the profiles row is in the state the ledger implies.
+20260521190243_canonicalize_supported_exchanges.sql	public.strategies	decline:1	# C5 DECLINE (D-02) — its one top-level UPDATE is UPDATE … AS s SET … FROM (a sub-select over unnest() with lower() and CASE). A FROM/sub-select with function calls is a non-literal join C5 does not replay. On the replayed sentinel (supported_exchanges defaults to an empty array) it changes nothing.
+20260530120000_admin_role_mutate.sql	public.profiles	decline:1	# C5 DECLINE (D-02) — its one top-level UPDATE is UPDATE profiles p SET is_admin = TRUE FROM user_app_roles. user_app_roles is a table the replay never fills, so on the emptied schema the join reaches no row; a non-literal join C5 does not replay.
