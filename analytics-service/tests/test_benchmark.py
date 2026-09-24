@@ -1,6 +1,6 @@
 """Tests for analytics-service/services/benchmark.py.
 
-These four tests target the highest-leverage failure modes in the file:
+These tests target the highest-leverage failure modes in the file:
 
 1. The pure-math function `prices_to_returns` — small but it's the foundation
    of every Sharpe number on every factsheet. A regression here is invisible
@@ -16,6 +16,8 @@ These four tests target the highest-leverage failure modes in the file:
 4. The all-sources-fail escape hatch — proves the function returns
    (None, True) instead of raising when both data sources are down. This
    is the contract that lets factsheet code degrade gracefully.
+
+5. The fresh-cache hit — proves a fresh cache is served without a refetch.
 
 Skipped intentionally:
 - The CoinGecko fallback parse (mirror of Binance — would just be a duplicate test)
@@ -137,3 +139,43 @@ async def test_get_benchmark_returns_returns_none_when_all_sources_fail():
 
     assert result is None
     assert is_stale is True
+
+
+@pytest.mark.asyncio
+async def test_get_benchmark_returns_serves_a_fresh_cache_without_fetching():
+    """A fresh cache (more than 10 rows, newest under 48 h old) must be SERVED,
+    not refetched.
+
+    Why this matters: from v0.35.0.4 until this test existed, the cache-read
+    branch called the imported ``rows()`` helper while the same function later
+    bound a LOCAL ``rows`` list. Python then treats ``rows`` as local for the
+    whole function, so every cache read raised UnboundLocalError, the broad
+    ``except`` swallowed it as "cache read failed", and every compute
+    refetched Binance klines. Nothing failed loud; the cache was simply never
+    used. This test asserts the observable contract: no network fetch, and the
+    returns come from the cached closes.
+    """
+    today = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
+    cached = [
+        {
+            "date": (today - pd.Timedelta(days=i)).strftime("%Y-%m-%d"),
+            "symbol": "BTC",
+            "close_price": 100.0 + (20 - i),
+        }
+        for i in range(20)
+    ]
+    result = MagicMock()
+    result.data = cached
+    fetch = AsyncMock(side_effect=AssertionError("fresh cache must not refetch"))
+
+    with patch("services.benchmark.get_supabase", return_value=MagicMock()), patch(
+        "services.benchmark.db_execute", AsyncMock(return_value=result)
+    ), patch("services.benchmark.fetch_btc_daily_prices", fetch):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=30)
+
+    fetch.assert_not_awaited()
+    assert is_stale is False
+    assert returns is not None
+    assert len(returns) == 19
+    # Oldest close is 101, next is 102: the first return is 1/101.
+    assert returns.iloc[0] == pytest.approx(1 / 101)

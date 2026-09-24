@@ -134,11 +134,11 @@ async def get_benchmark_returns(
         # Cache for next time
         try:
             supabase = get_supabase()
-            rows = [
+            cache_rows = [
                 {"date": d.strftime("%Y-%m-%d"), "symbol": symbol, "close_price": float(v)}
                 for d, v in prices.items()
             ]
-            await db_execute(lambda: supabase.table("benchmark_prices").upsert(rows).execute())
+            await db_execute(lambda: supabase.table("benchmark_prices").upsert(cache_rows).execute())
         except Exception as e:
             logger.warning("Benchmark cache write failed: %s", str(e))
 
