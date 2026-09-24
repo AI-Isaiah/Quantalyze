@@ -24,6 +24,8 @@ import {
   type SyncStatusInfo,
 } from "./SyncProgress";
 import { UpdateMt5SecretDialog } from "./UpdateMt5SecretDialog";
+import { readChainJobState } from "./chain-job-state";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 import type { ApiKey } from "@/lib/types";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
@@ -956,6 +958,44 @@ export function ApiKeyManager({
     setError(null);
 
     try {
+      // 167.2-REVIEW CR-01 / WR-06 — THE PRE-ATTEMPT JOB-STATE GATE. Orchestrator
+      // decision (autonomous review-fix round): before any attempt links a key
+      // or enqueues (Resync, Use & Sync, the post-add sync, the panel's Retry),
+      // read whether a factsheet-chain job is in flight, and refuse while one
+      // is or while the read cannot answer (fail closed).
+      //   - CR-01: `no_result` and `unconfirmed` end an attempt whose job may
+      //     still be running. The enqueue dedupes on (strategy, kind) and hands
+      //     back the EXISTING job, and all of the panel's evidence is scoped to
+      //     the STRATEGY, never the key. So `Use & Sync` on another key was
+      //     served by the previous key's job, and the panel said "Up to date"
+      //     under the new key: one key's result shown as another's.
+      //   - WR-06: KCS-22 removed Retry on `no_result` because a re-POST during
+      //     `failed_retry` inserts a second job (F-3), and Resync on the same
+      //     key is that same re-POST.
+      // The gate runs BEFORE the link, so a refused attempt writes nothing. It
+      // ends the attempt as the amber `unconfirmed` panel with its own reason:
+      // the sync "did not start", which is exactly what the card knows.
+      const gate = await readChainJobState(strategyId);
+      if (attemptRef.current !== attempt) return;
+      if (gate.kind !== "settled") {
+        if (gate.kind === "unreadable") {
+          console.warn(
+            `[ApiKeyManager] the job-state read was unreadable; the sync is refused [strategy_id=${strategyId}]:`,
+            gate.reason,
+          );
+          captureToSentry(new Error(`pre-attempt job-state read unreadable: ${gate.reason}`), {
+            level: "warning",
+            tags: { component: "ApiKeyManager", stage: "pre-attempt-job-state" },
+          });
+        }
+        if (endAttempt(attempt)) {
+          setSyncStatus("unconfirmed");
+          setPanelStopReason(gate.kind === "in_flight" ? "chain_in_flight" : "chain_unreadable");
+          setSyncError(null);
+        }
+        return;
+      }
+
       // Link key to strategy first.
       // Phase 167.2 / KCS-03: raced against `LINK_UPDATE_BOUND_MS`, the same
       // shape as the enqueue race below. supabase-js sets no request timeout,

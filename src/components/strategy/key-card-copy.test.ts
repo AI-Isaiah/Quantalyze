@@ -93,7 +93,7 @@ describe("KCS-03 (S2): a client-side bound expired before the sync was confirmed
 describe("PANEL_STOP_COPY covers exactly the pinned reasons", () => {
   it("a new stop reason cannot ship without a pin in this file", () => {
     expect(Object.keys(PANEL_STOP_COPY).sort()).toEqual(
-      ["enqueue_bound", "link_bound", "missing_row", "poll_cap"],
+      ["chain_in_flight", "chain_unreadable", "enqueue_bound", "link_bound", "missing_row", "poll_cap"],
     );
   });
 });
@@ -136,5 +136,28 @@ describe("Review-fix round 1 (2026-09-24): the S3 strings authored for the revie
     expect(DELETE_COMPOSITE_MEMBER_COPY).toBe(
       "This key is part of a composite strategy, so it is not deleted here. Contact support@quantalyze.com to change which keys the composite uses.",
     );
+  });
+});
+
+describe("KCS-GATE (167.2-REVIEW CR-01 / WR-06): the pre-attempt job-state gate refused the attempt", () => {
+  it("KCS-GATE-INFLIGHT: label and detail", () => {
+    expect(PANEL_STOP_COPY.chain_in_flight.label).toBe("Sync not started");
+    expect(PANEL_STOP_COPY.chain_in_flight.detail).toBe(
+      "This sync did not start: a sync for this strategy is still running. Try again once it has finished.",
+    );
+  });
+
+  it("KCS-GATE-UNREADABLE: label and detail", () => {
+    expect(PANEL_STOP_COPY.chain_unreadable.label).toBe("Sync not started");
+    expect(PANEL_STOP_COPY.chain_unreadable.detail).toBe(
+      "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.",
+    );
+  });
+
+  it("neither gate line claims a failure the card cannot know", () => {
+    for (const reason of ["chain_in_flight", "chain_unreadable"] as const) {
+      const { label, detail } = PANEL_STOP_COPY[reason];
+      expect(`${label} ${detail}`).not.toMatch(/fail|error/i);
+    }
   });
 });

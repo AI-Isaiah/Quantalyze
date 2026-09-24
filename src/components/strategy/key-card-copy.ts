@@ -130,8 +130,18 @@ export const ENQUEUE_BOUND_MS = 180_000;
  * KCS-03 (`unconfirmed`): `link_bound`, the link update did not answer within
  * LINK_UPDATE_BOUND_MS; `enqueue_bound`, the enqueue did not answer within
  * ENQUEUE_BOUND_MS.
+ * Review fix round 1 (`unconfirmed`, 167.2-REVIEW CR-01 / WR-06): the attempt
+ * was refused before its link and its enqueue, because a factsheet-chain job
+ * is still in flight (`chain_in_flight`) or the job state could not be read
+ * (`chain_unreadable`).
  */
-export type PanelStopReason = "poll_cap" | "missing_row" | "link_bound" | "enqueue_bound";
+export type PanelStopReason =
+  | "poll_cap"
+  | "missing_row"
+  | "link_bound"
+  | "enqueue_bound"
+  | "chain_in_flight"
+  | "chain_unreadable";
 
 /**
  * KCS22-CAP, KCS22-NOROW (UI-SPEC § KCS-22), KCS03-LINK and KCS03-ENQUEUE
@@ -163,6 +173,20 @@ export const PANEL_STOP_COPY = {
     detail: `We could not confirm this sync started: the request did not answer within ${formatBoundDuration(
       ENQUEUE_BOUND_MS,
     )}, so it may still be running. Reload this page to see the latest status before you sync again.`,
+  },
+  // Review fix round 1 (UI-SPEC § Review-fix amendments, 167.2-REVIEW CR-01 /
+  // WR-06): the pre-attempt job-state gate refused the attempt. Neither says
+  // the sync failed; both say it did not start, which is exactly what the card
+  // knows (nothing was linked or enqueued).
+  chain_in_flight: {
+    label: "Sync not started",
+    detail:
+      "This sync did not start: a sync for this strategy is still running. Try again once it has finished.",
+  },
+  chain_unreadable: {
+    label: "Sync not started",
+    detail:
+      "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.",
   },
 } as const satisfies Record<PanelStopReason, { label: string; detail: string }>;
 

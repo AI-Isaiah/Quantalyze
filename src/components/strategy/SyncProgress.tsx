@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useStrategySyncPoller } from "@/hooks/useStrategySyncPoller";
-import { isFactsheetJobInFlight } from "@/lib/compute-state";
+import { readChainJobState } from "./chain-job-state";
 import { Button } from "@/components/ui/Button";
 import type { StrategyAnalytics } from "@/lib/types";
 import {
@@ -45,6 +45,9 @@ export type SyncStatus =
   // enqueue was confirmed (the link update, or the enqueue request, did not
   // answer in time), so the card cannot know whether a job exists. Not a
   // failure: amber, no "Sync failed", no Retry. `toSyncStatus` never returns it.
+  // Since the 167.2 review fix round (CR-01 / WR-06) it is also the state of
+  // an attempt the card REFUSED before its link and its enqueue, because a
+  // chain job was in flight or the job state could not be read.
   | "unconfirmed";
 
 /**
@@ -106,50 +109,19 @@ export type EvidenceBaseline = { computedAt: string | null } | "unknown";
 
 /**
  * Phase 167.2 / KCS-18 (RESEARCH P1): does the job queue agree that no
- * factsheet-chain job is still in flight for this strategy? Reads the existing
- * owner-scoped `/api/strategies/[id]/sync-progress` projection once.
- *
- * Fails closed on the claim: `true` only for a real read (HTTP ok, a JSON
- * object, not `degraded`, `jobStatus` null or a string) whose `jobStatus` is not
- * in flight per `isFactsheetJobInFlight`. Every other outcome (a limiter 429, a
- * 5xx, a body that does not parse, a rejected fetch, the route's DEGRADED body)
- * is `false`, and an unreadable answer is reported through `onUnreadable`. It
- * never throws. `jobStatus` null means no factsheet-chain job is visible and
- * `failed_final` is a finished chain; both let the success through.
+ * factsheet-chain job is still in flight for this strategy? One read of the
+ * shared `readChainJobState` (see ./chain-job-state, lifted from here in the
+ * 167.2 review fix round so the key card's pre-attempt gate reads it the same
+ * way). `true` only for a `settled` answer; an `unreadable` one is reported
+ * through `onUnreadable`. Never throws.
  */
 async function jobQueueSaysChainSettled(
   strategyId: string,
   onUnreadable: (reason: string) => void,
 ): Promise<boolean> {
-  let body: unknown;
-  try {
-    const res = await fetch(
-      `/api/strategies/${encodeURIComponent(strategyId)}/sync-progress`,
-      { cache: "no-store" },
-    );
-    if (!res.ok) {
-      onUnreadable(`HTTP ${res.status}`);
-      return false;
-    }
-    body = await res.json();
-  } catch (err) {
-    onUnreadable(err instanceof Error ? err.message : String(err));
-    return false;
-  }
-  if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    onUnreadable("the body is not the projection");
-    return false;
-  }
-  const read = body as { jobStatus?: unknown; degraded?: unknown };
-  if (read.degraded === true) {
-    onUnreadable("degraded read");
-    return false;
-  }
-  if (read.jobStatus !== null && typeof read.jobStatus !== "string") {
-    onUnreadable("the body carries no jobStatus");
-    return false;
-  }
-  return !isFactsheetJobInFlight(read.jobStatus);
+  const read = await readChainJobState(strategyId);
+  if (read.kind === "unreadable") onUnreadable(read.reason);
+  return read.kind === "settled";
 }
 
 interface SyncProgressProps {

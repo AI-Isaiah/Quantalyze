@@ -153,6 +153,19 @@ vi.mock("@/lib/supabase/client", () => ({
   }),
 }));
 
+// 167.2-REVIEW CR-01 / WR-06: before any attempt links or enqueues, the card
+// reads whether a factsheet-chain job is in flight (`readChainJobState`, the
+// read the real panel's KCS-18 gate shares). Replaced here so every case that
+// stubs `fetch` for its own requests is untouched; the default answer is
+// "settled, nothing in flight", the world every case before the gate assumed.
+// The module's own fetch-level behaviour is exercised against the real panel
+// in ApiKeyManager.poll.test.tsx and SyncProgress.poll.test.tsx.
+const chainJobStateMock = vi.fn();
+vi.mock("./chain-job-state", () => ({
+  readChainJobState: (strategyId: string) =>
+    Promise.resolve(chainJobStateMock(strategyId) ?? { kind: "settled", jobStatus: null }),
+}));
+
 // Capture SyncProgress's onStatusChange so a test can drive the terminal
 // callback directly (mig 20260707120000 regression: complete_with_warnings must
 // be treated as a terminal SUCCESS, clearing syncingKeyId + refreshing).
@@ -166,6 +179,7 @@ let capturedOnRetry: (() => void) | null = null;
 vi.mock("./SyncProgress", () => ({
   SyncProgress: (props: {
     syncStatus?: string;
+    stopReason?: string | null;
     syncError?: string | null;
     onStatusChange?: (
       s: string,
@@ -181,7 +195,11 @@ vi.mock("./SyncProgress", () => ({
     // "the failure reached THIS component's surface" from "the failure reached
     // console.warn and nothing else" — which is exactly the B-06 defect.
     return (
-      <div data-testid="sync-progress" data-sync-status={props.syncStatus}>
+      <div
+        data-testid="sync-progress"
+        data-sync-status={props.syncStatus}
+        data-stop-reason={props.stopReason ?? ""}
+      >
         {props.syncError}
       </div>
     );
@@ -3152,7 +3170,14 @@ describe("[167-06] the persisted credential state renders on the manager's key c
     // as the panel's detail. A give-up is now `no_result`, which is not a
     // failure, so it carries no error detail; the controls it frees are the
     // same ones.
-    it("a poll give-up ends the attempt as no_result: no failure detail, and Resync, Update password and Delete are usable again (167-REVIEW-06-R2 WR-02, KCS-22)", async () => {
+    // Moved again by the 167.2 review fix round (167.2-REVIEW WR-06, lineage):
+    // "usable again" pinned a hole as intended behaviour. KCS-22 hides Retry
+    // on `no_result` because a re-POST during `failed_retry` inserts a second
+    // job (F-3), and Resync on the same key IS that re-POST. The buttons are
+    // still ENABLED here (a give-up is not a failure, and the job may well be
+    // done), but a click now passes the pre-attempt job-state gate first, so a
+    // Resync while the job is live is refused (WR06-RESYNC-REFUSED below).
+    it("a poll give-up ends the attempt as no_result: no failure detail, and Resync, Update password and Delete are enabled again (167-REVIEW-06-R2 WR-02, KCS-22; gated since WR-06)", async () => {
       routeFetch();
       await renderRows([row({ id: "key-j" })], "key-j");
       await resync("key-j");
@@ -3174,6 +3199,117 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       expect(cardButton("key-j", "Resync")).toBeEnabled();
       expect(cardButton("key-j", "Update password")).toBeEnabled();
       expect(cardButton("key-j", "Delete")).toBeEnabled();
+    });
+
+    // ── 167.2-REVIEW CR-01 / WR-06: no attempt starts while a chain job is live ──
+    //
+    // `no_result` and `unconfirmed` end the attempt while its job may still be
+    // running (the copy says so). The analytics enqueue dedupes on
+    // (strategy, kind) and returns the EXISTING job, and every piece of
+    // evidence the panel reads is scoped to the STRATEGY, never the key. So a
+    // `Use & Sync` on another key was served by the previous key's job, and the
+    // panel then said "Up to date" under the new key (CR-01); a `Resync` on the
+    // same key during `failed_retry` inserted a second job (WR-06). Every
+    // attempt now reads the job state first and refuses, before the link and
+    // before the enqueue, while a chain job is in flight or the read cannot
+    // answer (fail closed). The refusal is the amber `unconfirmed` panel with
+    // its own authored reason (`chain_in_flight` / `chain_unreadable`).
+
+    /** Drive the live attempt to a KCS-22 give-up. */
+    async function giveUp() {
+      await act(async () => {
+        capturedOnStatusChange!("no_result", { stopReason: "poll_cap" });
+      });
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute("data-sync-status", "no_result");
+    }
+
+    function syncPosts(fetchMock: ReturnType<typeof vi.fn>) {
+      return fetchMock.mock.calls.filter((c) => c[0] === "/api/keys/sync").length;
+    }
+
+    it("CR01-OTHER-KEY-REFUSED: after a give-up on K1, Use & Sync on K2 while K1's chain job runs links nothing, enqueues nothing, and says why", async () => {
+      const fetchMock = routeFetch();
+      try {
+        await renderRows([row({ id: "key-j" }), row({ id: "key-k", label: "Key K" })], "key-j");
+        await resync("key-j");
+        await giveUp();
+        const linksBefore = strategiesUpdateMock.mock.calls.length;
+        const postsBefore = syncPosts(fetchMock);
+
+        chainJobStateMock.mockReturnValue({ kind: "in_flight", jobStatus: "running" });
+        await act(async () => {
+          fireEvent.click(cardButton("key-k", "Use & Sync"));
+        });
+
+        await waitFor(() => {
+          expect(screen.getByTestId("sync-progress")).toHaveAttribute("data-sync-status", "unconfirmed");
+        });
+        expect(screen.getByTestId("sync-progress")).toHaveAttribute("data-stop-reason", "chain_in_flight");
+        expect(strategiesUpdateMock.mock.calls.length).toBe(linksBefore);
+        expect(syncPosts(fetchMock)).toBe(postsBefore);
+        expect(chainJobStateMock).toHaveBeenCalledWith("strat-1");
+        // The refusal ends the attempt: nothing stays disabled behind it.
+        expect(cardButton("key-k", "Use & Sync")).toBeEnabled();
+      } finally {
+        chainJobStateMock.mockReset();
+      }
+    });
+
+    it("WR06-RESYNC-REFUSED: after a give-up, Resync on the same key while its job is in failed_retry is refused before any re-POST", async () => {
+      const fetchMock = routeFetch();
+      try {
+        await renderRows([row({ id: "key-j" })], "key-j");
+        await resync("key-j");
+        await giveUp();
+        const postsBefore = syncPosts(fetchMock);
+
+        chainJobStateMock.mockReturnValue({ kind: "in_flight", jobStatus: "failed_retry" });
+        await act(async () => {
+          fireEvent.click(cardButton("key-j", "Resync"));
+        });
+
+        await waitFor(() => {
+          expect(screen.getByTestId("sync-progress")).toHaveAttribute("data-stop-reason", "chain_in_flight");
+        });
+        expect(syncPosts(fetchMock)).toBe(postsBefore);
+      } finally {
+        chainJobStateMock.mockReset();
+      }
+    });
+
+    it("GATE-UNREADABLE: a job-state read that cannot answer refuses the attempt (fail closed), with its own reason", async () => {
+      const fetchMock = routeFetch();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await renderRows([row({ id: "key-j" })], "key-j");
+        chainJobStateMock.mockReturnValue({ kind: "unreadable", reason: "HTTP 429" });
+        await act(async () => {
+          fireEvent.click(cardButton("key-j", "Resync"));
+        });
+
+        await waitFor(() => {
+          expect(screen.getByTestId("sync-progress")).toHaveAttribute("data-stop-reason", "chain_unreadable");
+        });
+        expect(screen.getByTestId("sync-progress")).toHaveAttribute("data-sync-status", "unconfirmed");
+        expect(strategiesUpdateMock).not.toHaveBeenCalled();
+        expect(syncPosts(fetchMock)).toBe(0);
+      } finally {
+        warn.mockRestore();
+        chainJobStateMock.mockReset();
+      }
+    });
+
+    it("GATE-SETTLED (CONTROL): a settled read lets the attempt through to the link and the enqueue", async () => {
+      const fetchMock = routeFetch();
+      await renderRows([row({ id: "key-j" })], "key-j");
+      chainJobStateMock.mockReturnValue({ kind: "settled", jobStatus: "failed_final" });
+      try {
+        await resync("key-j");
+        expect(strategiesUpdateMock).toHaveBeenCalled();
+        expect(syncPosts(fetchMock)).toBe(1);
+      } finally {
+        chainJobStateMock.mockReset();
+      }
     });
 
     // ── An evidenced failure carries the server's own reason (KCS-22) ──────

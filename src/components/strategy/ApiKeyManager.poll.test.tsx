@@ -75,6 +75,8 @@ const mockState = vi.hoisted(() => ({
    * answers. Null answers `{ error: null }` at once, as before.
    */
   linkResult: null as Promise<{ error: unknown }> | null,
+  /** 167.2-REVIEW CR-01: how many link updates were sent. */
+  linkCount: 0,
 }));
 
 vi.mock("@/lib/supabase/client", () => ({
@@ -109,7 +111,10 @@ vi.mock("@/lib/supabase/client", () => ({
         }),
       }),
       update: () => ({
-        eq: () => mockState.linkResult ?? Promise.resolve({ error: null }),
+        eq: () => {
+          mockState.linkCount += 1;
+          return mockState.linkResult ?? Promise.resolve({ error: null });
+        },
       }),
     }),
   }),
@@ -525,10 +530,21 @@ describe("ApiKeyManager + the REAL poller: a terminal ends the attempt only with
     mockState.baselineResult = baselineRow(T1);
     const retryEnqueue = deferred<Response>();
     const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    // 167.2-REVIEW CR-01 (lineage): the Retry now reads the job state before
+    // it links or enqueues, and refuses on an unreadable answer. This double
+    // used to answer 404 to everything but the enqueue; the job-state read now
+    // answers "failed_final" (the first attempt's chain has finished).
     fetchMock.mockImplementation((url: string) =>
       url === "/api/keys/sync"
         ? retryEnqueue.promise
-        : Promise.resolve({ ok: false, status: 404, headers: new Headers(), json: async () => ({}) }),
+        : /^\/api\/strategies\/[^/]+\/sync-progress$/.test(url)
+          ? Promise.resolve({
+              ok: true,
+              status: 200,
+              headers: new Headers({ "content-type": "application/json" }),
+              json: async () => ({ jobStatus: "failed_final", stalled: false, memberProgress: [] }),
+            })
+          : Promise.resolve({ ok: false, status: 404, headers: new Headers(), json: async () => ({}) }),
     );
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Retry" }));
@@ -573,7 +589,10 @@ describe("ApiKeyManager + the REAL poller: a success waits for the job queue (Ph
     // still pending. Only the job queue can say the run has not finished.
     mockState.baselineResult = baselineRow(T0);
     mockState.analyticsResult = analyticsRow("complete_with_warnings", T1);
-    mockState.jobStatuses = ["pending", "pending", "done"];
+    // 167.2-REVIEW CR-01 (lineage): the first read is now the pre-attempt
+    // gate's ("done": nothing in flight when the owner clicks), so the panel's
+    // KCS-18 reads are the 2nd to 4th and each count below is one higher.
+    mockState.jobStatuses = ["done", "pending", "pending", "done"];
     const enqueue = await startResyncWithHeldEnqueue();
     await act(async () => {
       enqueue.resolve(accepted());
@@ -581,7 +600,7 @@ describe("ApiKeyManager + the REAL poller: a success waits for the job queue (Ph
     await tick(0);
 
     await tick(POLL_MS * 2);
-    expect(mockState.jobReadCount).toBe(2);
+    expect(mockState.jobReadCount).toBe(3);
     expect(
       screen.queryByText("Synced with warnings"),
       "a mid-chain warned row was shown as this attempt's result",
@@ -592,7 +611,7 @@ describe("ApiKeyManager + the REAL poller: a success waits for the job queue (Ph
     // The job is done: the next evidenced read ends the attempt with the warning.
     await tick(POLL_MS);
     await tick(0);
-    expect(mockState.jobReadCount).toBe(3);
+    expect(mockState.jobReadCount).toBe(4);
     expect(screen.getByText("Synced with warnings")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
   });
@@ -774,6 +793,49 @@ describe("ApiKeyManager + the REAL poller: a link update that never answers is b
     expect(screen.getByText(KCS03_LINK_LABEL)).toBeInTheDocument();
     expect(screen.getByText(KCS03_LINK)).toBeInTheDocument();
     expect(screen.queryByText("Fetching trades from Binance...")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
+  });
+});
+
+describe("ApiKeyManager + the REAL job-state read: no attempt starts while a chain job is in flight (167.2-REVIEW CR-01 / WR-06)", () => {
+  // Hand-typed from the UI-SPEC review-fix row KCS-GATE-INFLIGHT.
+  const GATE_INFLIGHT =
+    "This sync did not start: a sync for this strategy is still running. Try again once it has finished.";
+
+  it("GATE-E2E: a Resync while the projection says running writes no link, sends no enqueue, and says why on the panel", async () => {
+    mockState.jobStatuses = ["running"];
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (/^\/api\/strategies\/[^/]+\/sync-progress$/.test(url)) {
+        mockState.jobReadCount += 1;
+        const jobStatus = mockState.jobStatuses.shift() ?? "done";
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          json: async () => ({ jobStatus, stalled: false, memberProgress: [] }),
+        });
+      }
+      return Promise.resolve(accepted());
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mockState.linkCount = 0;
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-h" />);
+    });
+    await tick(0);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Resync" }));
+    });
+    await tick(0);
+
+    expect(mockState.jobReadCount).toBe(1);
+    expect(fetchMock.mock.calls.some(([url]) => url === "/api/keys/sync")).toBe(false);
+    expect(mockState.linkCount).toBe(0);
+    expect(screen.getByText("Sync not started")).toBeInTheDocument();
+    expect(screen.getByText(GATE_INFLIGHT)).toBeInTheDocument();
+    expect(screen.queryByText("Sync failed")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
   });
 });
