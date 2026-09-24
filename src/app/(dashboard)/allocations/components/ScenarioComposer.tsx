@@ -75,7 +75,11 @@ import {
 } from "@/lib/scenario";
 import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
-import { blendPeriodsPerYear, type SeriesState } from "@/lib/closed-sets";
+import {
+  blendPeriodsPerYear,
+  UNTRUSTED_KEY_SET_NOUN,
+  type SeriesState,
+} from "@/lib/closed-sets";
 import {
   coverageSpanOf,
   covers,
@@ -150,6 +154,10 @@ import {
   mergeAddedIntoPerKeySet,
 } from "../lib/scenario-adapter";
 import { buildHoldingRef } from "../lib/holding-outcome-adapter";
+import {
+  holdingEquityContributionLocal,
+  summarizeLiveHoldings,
+} from "../lib/live-holdings-summary";
 import {
   solveLeverageForMaxDD,
   type SolveLeverageResult,
@@ -678,30 +686,33 @@ type AddedMetricsEntry =
 /** The render-facing projection of the above (see `AddedMetricsEntry`). */
 type AddedMetricsState = "pending" | "settled" | "unavailable";
 
+// DSRC-02 (D2) — `holdingEquityContributionLocal`, the per-holding equity
+// contribution (the per-key WEIGHT source), now lives in
+// `../lib/live-holdings-summary` (Phase 167.1), body unchanged, so
+// `equityByApiKeyId` below and `summarizeLiveHoldings` read ONE definition. Its
+// docblock there records why it is a local copy of the SSR helper.
+
 /**
- * DSRC-02 (D2) — per-holding equity contribution, the per-key WEIGHT source.
+ * Phase 167.1 AUMTRUST — the ONE clause that names the part of the live
+ * holdings total sourced from keys needing attention, lower-case, e.g.
+ * `includes $12,345 from keys needing attention`.
  *
- * Mirrors the SSR `holdingEquityContribution` (queries.ts:2113) EXACTLY:
- *   - derivative → `unrealized_pnl_usd` (the actual equity at stake; `value_usd`
- *     is the leveraged NOTIONAL contract size, which would inflate the weight by
- *     the leverage factor), null/non-finite → 0.
- *   - spot       → `value_usd` (marked fair value = the equity contribution),
- *     non-finite → 0.
- *
- * Duplicated locally rather than imported: `@/lib/queries` is `server-only`, so
- * importing its export into this "use client" module crosses the client/server
- * boundary (and the per-key adapter sibling already duplicates the per-key loop
- * locally for the same reason — PATTERNS §"No Analog Found"). Keep this in
- * lockstep with the SSR helper so the client weight matches the server's.
+ * One builder, so the standalone sentence beside the AUM field and the clause
+ * nested in the override note cannot word the same fact two ways. The noun is
+ * the shared `UNTRUSTED_KEY_SET_NOUN` (the Holdings tab filter and footer use
+ * it, so a reader can find the rows the clause is about) and is never restated
+ * as a string here. The amount goes through the composer's own whole-dollar
+ * renderer `formatUsd`, signed as it comes (D-07). No venue, key label, key id
+ * or sync error is interpolated: the clause carries a dollar sum and a constant
+ * noun, nothing a venue supplied.
  */
-function holdingEquityContributionLocal(
-  h: MyAllocationDashboardPayload["holdingsSummary"][number],
-): number {
-  if (h.holding_type === "derivative") {
-    const pnl = h.unrealized_pnl_usd ?? 0;
-    return Number.isFinite(pnl) ? pnl : 0;
-  }
-  return Number.isFinite(h.value_usd) ? h.value_usd : 0;
+function buildUntrustedAumClause(includedAmount: number): string {
+  return `includes ${formatUsd(includedAmount)} from ${UNTRUSTED_KEY_SET_NOUN}`;
+}
+
+/** Sentence-cases a clause built above, for the standalone sentence form. */
+function capitalizeFirst(clause: string): string {
+  return clause.charAt(0).toUpperCase() + clause.slice(1);
 }
 
 /**
@@ -4138,42 +4149,40 @@ export function ScenarioComposer({
   // the remedy is one field away (type the size). The remedy is NAMED: the
   // refusal copy and the `liveHoldingsSum <= 0` hint next to the field both
   // point at the Portfolio AUM input.
-  const liveHoldingsSum = useMemo(() => {
-    const contributing = new Set(payload.contributingApiKeyIds ?? []);
-    // ⚠️ The narrowing applies only when there IS a modelled set to narrow TO.
-    // An EMPTY contributing set means no per-key row exists, so there is nothing
-    // for the AUM to agree with — and narrowing to ∅ would zero it, taking the
-    // dollar columns, the commit sizing and the commit itself down with it (the
-    // AUM-zero refusal), which is a far worse answer than custody's total.
-    //
-    // In production `bookEntryGateSatisfied === contributingApiKeyIds.length > 0`
-    // and book mode requires that gate, so this branch is unreachable there; it
-    // exists because the flag is read from the payload rather than re-derived,
-    // and a payload that asserts book-entry with an empty contributing set must
-    // degrade to the honest whole-book number rather than to zero. It also does
-    // NOT reintroduce F2's two-figure defect: with no contributing key,
-    // `totalBookEquity` is null and every NOTIONAL cell is an em-dash, so there
-    // is no second dollar figure to disagree with.
-    //
-    // The neighbouring degenerate case — a non-empty contributing set whose keys
-    // happen to carry no holdings — deliberately DOES land on 0: there the rows
-    // exist and their equity really is zero, so the USD and NOTIONAL columns are
-    // both honestly non-derivable and still agree.
-    const narrowToModelledBook = contributing.size > 0;
-    let sum = 0;
-    for (const [scopeRef, on] of Object.entries(scenario.draft.toggleByScopeRef)) {
-      if (!on) continue;
-      if (!scopeRef.startsWith("holding:")) continue;
-      const h = holdingByRef.get(scopeRef);
-      if (!h) continue;
-      if (narrowToModelledBook && !contributing.has(h.api_key_id)) continue;
-      // E1 — the SAME per-holding equity definition `equityByApiKeyId` (and
-      // therefore `totalBookEquity`, and therefore every NOTIONAL cell) uses.
-      // Never `h.value_usd`: on a derivative that is notional, not equity.
-      sum += holdingEquityContributionLocal(h);
-    }
-    return sum;
-  }, [scenario.draft.toggleByScopeRef, holdingByRef, payload.contributingApiKeyIds]);
+  //
+  // Phase 167.1 AUMTRUST — the loop that computed this sum MOVED, unchanged in
+  // walk order, filters and accumulation order, into `summarizeLiveHoldings`
+  // (`../lib/live-holdings-summary`), which returns the total AND the part of
+  // it sourced from keys needing attention from ONE pass, so the disclosure
+  // beside the field can never drift from the number it qualifies. The
+  // degrade-branch and E1 comments travelled with the loop. `liveHoldingsSum`
+  // keeps its name and its value, so every reader below is untouched.
+  //
+  // Two memos, not one (the `holdingByRef` precedent above): the key-status
+  // map changes only with the payload, the summary with every toggle.
+  const statusByKeyId = useMemo(
+    () =>
+      new Map<string, string | null>(
+        (payload.apiKeys ?? []).map((k) => [k.id, k.sync_status]),
+      ),
+    [payload.apiKeys],
+  );
+  const liveHoldingsSummary = useMemo(
+    () =>
+      summarizeLiveHoldings({
+        toggleByScopeRef: scenario.draft.toggleByScopeRef,
+        holdingByRef,
+        contributingApiKeyIds: payload.contributingApiKeyIds ?? [],
+        statusByKeyId,
+      }),
+    [
+      scenario.draft.toggleByScopeRef,
+      holdingByRef,
+      payload.contributingApiKeyIds,
+      statusByKeyId,
+    ],
+  );
+  const liveHoldingsSum = liveHoldingsSummary.total;
 
   // Phase 151 AUM-01 — SANITIZE-ON-READ (the sanitizeLeverageMap precedent at
   // the decode sites above). The persisted value is untrusted: the codec
@@ -4626,6 +4635,29 @@ export function ScenarioComposer({
     );
   }
 
+  // Phase 167.1 AUMTRUST — WHERE the live-holdings total is on screen, computed
+  // ONCE from the committed state (`sanitizedManualAum`, never the per-keystroke
+  // `aumInputText`) and read by the AUM row below, so the untrusted-key marker
+  // and the existing notes cannot disagree about it.
+  //   • fieldShowsLive        — no manual value, so the field IS the live total
+  //                             (the complement of the "Required to size and
+  //                             commit." hint's condition).
+  //   • overrideNoteShowsLive — a manual value differs from a positive live
+  //                             total, so only the override note quotes it.
+  // The marker renders iff the live total is on screen AND at least one summed
+  // holding is from a key needing attention — gated on the COUNT, never on the
+  // amount, because a derivative's contribution can be <= 0 and still come
+  // from a key whose numbers are not current (D-07 / D-18).
+  const fieldShowsLive = sanitizedManualAum === undefined && liveHoldingsSum > 0;
+  const overrideNoteShowsLive =
+    sanitizedManualAum !== undefined &&
+    liveHoldingsSum > 0 &&
+    sanitizedManualAum !== liveHoldingsSum;
+  const showUntrustedMarker =
+    entryMode === "book" &&
+    liveHoldingsSummary.untrusted.count > 0 &&
+    (fieldShowsLive || overrideNoteShowsLive);
+
   return (
     <div
       data-widget-id="scenario-composer"
@@ -4863,21 +4895,42 @@ export function ScenarioComposer({
           }}
           className="w-32 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs"
         />
+        {/* Phase 167.1 AUMTRUST — State A: the field shows the live total, and
+            part of that total comes from keys needing attention (a `revoked` or
+            `sign_in_failed` sync, whose numbers are not current). A headline
+            money figure may not change meaning silently, so the sentence sits
+            right beside the number it qualifies. It DISCLOSES and never
+            subtracts: the founder's decision (2026-09-22) is to keep the total
+            and flag it, because excluding those holdings would make a password
+            rotation read as an AUM loss (D-02 / D-03).
+
+            Same muted steady-state voice as the sibling notes in this row: no
+            role, no aria-live, no glyph, no sign colour. The remedy lives on
+            the Holdings tab and the key card, not here (D-09). */}
+        {showUntrustedMarker && fieldShowsLive && (
+          <span
+            data-testid="scenario-aum-untrusted-note"
+            className="text-xs text-text-muted"
+          >
+            {capitalizeFirst(
+              buildUntrustedAumClause(liveHoldingsSummary.untrusted.amount),
+            )}
+            .
+          </span>
+        )}
         {sanitizedManualAum === undefined && liveHoldingsSum <= 0 && (
           <span className="text-xs text-text-muted">
             Required to size and commit.
           </span>
         )}
-        {sanitizedManualAum !== undefined &&
-          liveHoldingsSum > 0 &&
-          sanitizedManualAum !== liveHoldingsSum && (
-            <span
-              data-testid="scenario-aum-override-note"
-              className="text-xs text-text-muted"
-            >
-              Overrides live-holdings total {formatUsd(liveHoldingsSum)}.
-            </span>
-          )}
+        {overrideNoteShowsLive && (
+          <span
+            data-testid="scenario-aum-override-note"
+            className="text-xs text-text-muted"
+          >
+            Overrides live-holdings total {formatUsd(liveHoldingsSum)}.
+          </span>
+        )}
         {/* Review round 2 F2 — the DISCLOSURE that pays for the narrowing above.
             The book-mode AUM now describes the MODELLED book (the keys carrying
             a return series), not custody's whole-book total, and a headline

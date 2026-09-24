@@ -333,7 +333,10 @@ import { blendPeriodsPerYear } from "@/lib/closed-sets";
 // attribute on the per-key leverage inputs the phase adds.
 import { MAX_LEVERAGE } from "@/lib/leverage";
 import { formatCurrency } from "@/lib/utils";
-import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
+import {
+  buildHoldingRef,
+  type FlaggedHolding,
+} from "../lib/holding-outcome-adapter";
 // IMPACT-02 — imported REAL (never mocked) so the R3 guard's positive control
 // renders a genuine PercentileRankBadge in isolation, proving the testid query
 // that asserts ABSENCE on the projection is non-vacuous.
@@ -15363,5 +15366,153 @@ describe("ScenarioComposer — review round 2: partial-book dollars (F2/F4/F5)",
     expect(
       notionalDollars([F2_KEY_A, F2_KEY_B]).reduce((a, b) => a + b, 0),
     ).toBe(F2_MODELLED_BOOK);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1 AUMTRUST — the headline AUM says when it includes holdings from
+// keys needing attention.
+//
+// Founder decision 2026-09-22, binding: KEEP THE TOTAL AND FLAG IT. A holding
+// from a key whose sync is untrusted (`sign_in_failed`, `revoked`) stays in the
+// PORTFOLIO AUM field's live total, and a muted sentence beside the field names
+// how many of those dollars come from such keys. Excluding them was rejected: a
+// password rotation would then read as an AUM loss.
+//
+// This block carries the tracer case (State A). Plan 03 extends it with State B
+// (the override note), every absence state, and the component half of D-06.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
+  const AT_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-06-${String(i + 1).padStart(2, "0")}`,
+  );
+  // Distinct series per key, for the same reason F2 gives: identical series
+  // would let a wrong key set pass by coincidence.
+  const AT_SERIES_A = AT_DATES.map((date, i) => ({
+    date,
+    value: [0.004, -0.001, 0.002, 0.0005][i % 4],
+  }));
+  const AT_SERIES_B = AT_DATES.map((date, i) => ({
+    date,
+    value: [-0.012, 0.021, -0.006, 0.017][i % 4],
+  }));
+
+  // Synthetic identifiers only — the repo and `.planning/` are public.
+  const AT_KEY_TRUSTED = "aumtrust-key-a";
+  const AT_KEY_SIGN_IN_FAILED = "aumtrust-key-b";
+  const AT_ALL_KEYS = [AT_KEY_TRUSTED, AT_KEY_SIGN_IN_FAILED];
+
+  // ── THE HAND-COMPUTED BOOK ────────────────────────────────────────────────
+  //   trusted        (key-a, spot)   480,000
+  //   sign_in_failed (key-b, spot)    12,345
+  //   live total                     492,345   ← the field, unchanged by 167.1
+  //   total − untrusted              480,000   ← the REJECTED alternative
+  // The ~39× gap between the two holdings keeps a basis or set mix-up far
+  // outside any rounding slack. SPOT holdings, so each equity contribution IS
+  // its `value_usd` and the fixture's arithmetic is the reader's arithmetic.
+  const AT_TRUSTED_USD = 480_000;
+  const AT_UNTRUSTED_USD = 12_345;
+  const AT_LIVE_TOTAL = 492_345;
+  const AT_TOTAL_MINUS_UNTRUSTED = 480_000;
+
+  /** Two contributing keys, the second `sign_in_failed`. Each holding carries
+   *  its OWN (venue, symbol, holding_type) triple: `holdingByRef` keys on that
+   *  triple, not on the key, so a shared triple would collapse two holdings
+   *  into one map entry and one of them would silently vanish from the sum. */
+  function atPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      apiKeys: [
+        winApiKey(AT_KEY_TRUSTED),
+        { ...winApiKey(AT_KEY_SIGN_IN_FAILED), sync_status: "sign_in_failed" },
+      ],
+      holdingsSummary: [
+        {
+          ...HOLDING_BTC,
+          venue: "binance",
+          symbol: "AUMTRUST-A",
+          holding_type: "spot" as const,
+          value_usd: AT_TRUSTED_USD,
+          api_key_id: AT_KEY_TRUSTED,
+        },
+        {
+          ...HOLDING_BTC,
+          venue: "okx",
+          symbol: "AUMTRUST-B",
+          holding_type: "spot" as const,
+          value_usd: AT_UNTRUSTED_USD,
+          api_key_id: AT_KEY_SIGN_IN_FAILED,
+        },
+      ],
+      perKeyReturnsByApiKeyId: {
+        [AT_KEY_TRUSTED]: AT_SERIES_A,
+        [AT_KEY_SIGN_IN_FAILED]: AT_SERIES_B,
+      },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: [...AT_ALL_KEYS],
+      allocatorEligibleApiKeyIds: [...AT_ALL_KEYS],
+      contributingApiKeyIds: [...AT_ALL_KEYS],
+      bookEntryGateSatisfied: true,
+    });
+  }
+
+  function renderAt(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function aumField(): HTMLInputElement {
+    return screen.getByTestId("scenario-aum-input") as HTMLInputElement;
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("AUMTRUST tracer (D-02/D-03, D-15 pin 1): a sign_in_failed holding stays in the PORTFOLIO AUM field and the field says so — 'Includes $12,345 from keys needing attention.'", () => {
+    const payload = atPayload();
+
+    // Fixture self-proof (non-vacuity). (1) Every holding has a distinct
+    // triple, so none collapses out of `holdingByRef`. (2) The hand-typed
+    // total is the arithmetic of the two holdings. (3) The rejected
+    // alternative really is a different number from the kept total, so the
+    // discriminating negative below cannot pass under both.
+    expect(new Set(payload.holdingsSummary.map(buildHoldingRef)).size).toBe(
+      payload.holdingsSummary.length,
+    );
+    expect(AT_TRUSTED_USD + AT_UNTRUSTED_USD).toBe(AT_LIVE_TOTAL);
+    expect(AT_LIVE_TOTAL - AT_UNTRUSTED_USD).toBe(AT_TOTAL_MINUS_UNTRUSTED);
+    expect(AT_TOTAL_MINUS_UNTRUSTED).not.toBe(AT_LIVE_TOTAL);
+
+    renderAt(payload);
+
+    // D-03 / D-15 pin 1 — the untrusted holding is STILL COUNTED. The field
+    // shows the same total it showed before this phase.
+    expect(aumField().value).toBe(String(AT_LIVE_TOTAL));
+    // The discriminating negative: dropping the untrusted holding is the
+    // alternative the founder rejected, and it must not be reachable by
+    // accident.
+    expect(aumField().value).not.toBe(String(AT_TOTAL_MINUS_UNTRUSTED));
+
+    // D-02 — exactly ONE disclosure for the one number (D-08), and its text is
+    // typed out here, never built from the noun constant or the formatter: an
+    // oracle that reads the source's own string would pass against any string.
+    const notes = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].textContent).toBe(
+      "Includes $12,345 from keys needing attention.",
+    );
   });
 });
