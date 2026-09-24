@@ -114,6 +114,25 @@ const WARN_THRESHOLD_MS = 60_000;
 const RETRY_THRESHOLD_MS = 900_000;
 
 /**
+ * 2026-09-24 — how long a real sync-progress read that said a job is in flight
+ * stays good evidence. The piggyback read runs on every poll tick (at most
+ * 10 s apart, `POLL_BACKOFF_MS`), so a healthy channel refreshes it several
+ * times inside this window, and a channel that goes dark loses it within a
+ * minute. While the evidence is current, the wall-clock backstop does not fire:
+ * a long, healthy chain (a Bybit run measured 4.7 min of sync_trades and
+ * 9.7 min of derive) must keep showing progress, not a Retry.
+ */
+const IN_FLIGHT_EVIDENCE_TTL_MS = 60_000;
+
+/**
+ * 2026-09-24 — how long real sync-progress reads must keep saying NOTHING is in
+ * flight, while the analytics status is still not computed, before the Retry
+ * banner shows. The grace covers the gap between the last job finishing and the
+ * status bridge writing `complete`, which the next poll tick then reads.
+ */
+const SETTLED_WITHOUT_COMPLETE_GRACE_MS = 60_000;
+
+/**
  * Status-poll backoff schedule. Each entry is the delay BEFORE the next
  * poll; the loop walks the ladder and then holds at the final step.
  * Capping at 10s keeps DB load and background-tab timer churn down on
@@ -635,10 +654,64 @@ export function SyncPreviewStep({
   // re-stitch (RT-1: a member-set change resets analytics to pending) CHANGES
   // the status and so RESETS this clock, correctly delaying the backstop.
   const statusChangedAtRef = useRef<number>(0);
+  // 2026-09-24 — the server's own in-flight evidence, from real (non-degraded)
+  // sync-progress reads. `lastInFlightReadAtRef` is when a read last said a job
+  // is in flight; `notInFlightSinceRef` is when reads started saying nothing is
+  // (null while one is). A degraded read or no answer moves neither: absence of
+  // the datum is not evidence either way.
+  const lastInFlightReadAtRef = useRef<number>(Number.NEGATIVE_INFINITY);
+  const notInFlightSinceRef = useRef<number | null>(null);
+  // Mirrors of the two refs for the render, refreshed on the 1 s tick.
+  const [serverSaysInFlight, setServerSaysInFlight] = useState(false);
+  const [settledPastGrace, setSettledPastGrace] = useState(false);
 
   useEffect(() => {
     mountedRef.current = true;
     startedAtRef.current = Date.now();
+    /**
+     * True only when the strategy is proven single-key AND a real
+     * sync-progress read says a factsheet job is in flight. Every failure,
+     * absence or doubt answers false, which means "POST as before".
+     */
+    const chainAlreadyInFlight = async (
+      supabase: ReturnType<typeof createClient>,
+    ): Promise<boolean> => {
+      try {
+        const { data: strategyRow, error: strategyErr } = await supabase
+          .from("strategies")
+          .select("api_key_id")
+          .eq("id", strategyId)
+          .maybeSingle();
+        const linkedKey = (strategyRow as { api_key_id?: unknown } | null)
+          ?.api_key_id;
+        if (strategyErr || typeof linkedKey !== "string" || linkedKey === "") {
+          return false;
+        }
+        const progressRes = await wizardFetch(
+          `/api/strategies/${strategyId}/sync-progress`,
+        );
+        if (!progressRes.ok) return false;
+        const progress = (await progressRes
+          .json()
+          .catch(() => null)) as SyncProgressResponse | null;
+        if (
+          !progress ||
+          progress.degraded === true ||
+          !isJobInFlight(progress.jobStatus ?? null)
+        ) {
+          return false;
+        }
+        lastInFlightReadAtRef.current = Date.now();
+        notInFlightSinceRef.current = null;
+        return true;
+      } catch (probeErr) {
+        console.warn(
+          "[wizard:SyncPreviewStep] in-flight probe failed; kicking off as before:",
+          scrubSeamError(probeErr),
+        );
+        return false;
+      }
+    };
     (async () => {
       try {
         // WIZ-05 (cached crawl snapshot) — FIRST, before any DB probe or
@@ -784,6 +857,29 @@ export function SyncPreviewStep({
           // unknowable membership, so the end-to-end fail-closed guarantee is
           // preserved without blocking a legitimate stale single-key re-sync on
           // a transient marker-read blip.
+        }
+        // 2026-09-24 — DO NOT START A SYNC THE SERVER IS ALREADY RUNNING. A
+        // page reload remounts this step, and this effect used to POST a new
+        // kickoff every time. During a long chain each reload started a SECOND
+        // chain, whose jobs then held the status at `computing` over the first
+        // chain's `complete`. The server now refuses that duplicate
+        // (`process_key`'s chain-in-flight guard), and that is the real guard;
+        // this one only skips a request whose answer is already known.
+        //
+        // It skips ONLY on positive evidence, and only on a first mount (a
+        // `kickoffNonce` retry may POST; the server dedups it):
+        //   - the strategy is PROVEN single-key: `strategies.api_key_id` is set,
+        //     the rule `/api/keys/sync` itself routes on. A composite's arm is
+        //     named only by the kickoff's `composite` field, so a composite (or
+        //     an unreadable row) POSTs as before and the stitch enqueue dedups.
+        //   - a real sync-progress read says a job is in flight. An analytics
+        //     status of `computing` alone is NOT enough: a dead chain can leave
+        //     it there, and then the POST is exactly what restarts the work.
+        // Any failed read falls through to the POST.
+        if (kickoffNonce === 0 && (await chainAlreadyInFlight(supabase))) {
+          if (!mountedRef.current) return;
+          setPhase("waiting_for_complete");
+          return;
         }
         const res = await wizardFetch("/api/keys/sync", {
           method: "POST",
@@ -954,9 +1050,24 @@ export function SyncPreviewStep({
       // full 15-min patience budget → surface the exit affordance even if the
       // cosmetic sync-progress stall channel is dead. Only fires in
       // `waiting_for_complete` (a terminal transition leaves this phase).
+      //
+      // 2026-09-24 — the backstop applies only when nothing is known to be in
+      // flight. A chain the server says is running is not stuck because the
+      // analytics status holds at `computing` for its whole length (the status
+      // bridge writes it for the entire chain, so it never advances mid-chain).
+      const inFlightEvidence =
+        now - lastInFlightReadAtRef.current < IN_FLIGHT_EVIDENCE_TTL_MS;
+      setServerSaysInFlight(inFlightEvidence);
       setStallBackstop(
         phase === "waiting_for_complete" &&
+          !inFlightEvidence &&
           now - statusChangedAtRef.current >= RETRY_THRESHOLD_MS,
+      );
+      const notInFlightSince = notInFlightSinceRef.current;
+      setSettledPastGrace(
+        phase === "waiting_for_complete" &&
+          notInFlightSince !== null &&
+          now - notInFlightSince >= SETTLED_WITHOUT_COMPLETE_GRACE_MS,
       );
     }, 1000);
     return () => window.clearInterval(id);
@@ -1082,6 +1193,18 @@ export function SyncPreviewStep({
           // timer callbacks"), reaching one datum further. `prev` now comes from
           // the ref, which is strictly FRESHER than the updater's argument, so
           // the SF-3 semantics above are unchanged.
+          // 2026-09-24 — record the server's in-flight evidence from the
+          // incoming read itself (before the SF-3 keep-last-known choice). A
+          // degraded read is no evidence, so it moves neither ref.
+          if (json.degraded !== true) {
+            const readAt = Date.now();
+            if (isJobInFlight(json.jobStatus ?? null)) {
+              lastInFlightReadAtRef.current = readAt;
+              notInFlightSinceRef.current = null;
+            } else if (notInFlightSinceRef.current === null) {
+              notInFlightSinceRef.current = readAt;
+            }
+          }
           const prev = syncProgressRef.current;
           const incomingEmpty =
             json.degraded === true || json.memberProgress.length === 0;
@@ -1851,6 +1974,10 @@ export function SyncPreviewStep({
       if (res.ok && mountedRef.current) {
         statusChangedAtRef.current = Date.now();
         setStallBackstop(false);
+        // 2026-09-24 — a fresh attempt starts a fresh settled-without-complete
+        // grace; the next real read re-establishes the evidence.
+        notInFlightSinceRef.current = null;
+        setSettledPastGrace(false);
         // 154-08 / M4 — the retry's OWN job fact replaces the kickoff's. Read
         // from the body rather than assumed from the 2xx, because that is the
         // whole finding: a 200 is not evidence that anything was enqueued. A
@@ -2640,8 +2767,24 @@ export function SyncPreviewStep({
   // users who had no other one — which is M1, the reason the 2026-08-04 stall
   // was UNBOUNDED rather than merely wrong, and why the founder's only available
   // action was to re-run a chain that had already succeeded, three times.
+  //
+  // 2026-09-24 — RETRY ONLY WHEN THE SERVER SAYS ONE IS NEEDED. Each arm is a
+  // server fact, or the absence of any in-flight evidence:
+  //   - the route reports a stalled stitch (`stalled`);
+  //   - real reads have said NOTHING is in flight for the whole grace while
+  //     the analytics status is still not computed (a failed or finished chain
+  //     that produced no factsheet, or a chain that never started);
+  //   - the kickoff said it queued nothing, and no read says a job is running;
+  //   - the wall-clock backstop, which itself fires only with no in-flight
+  //     evidence (see the 1 s tick).
+  // A long chain the server says is running shows none of them, however long.
+  const settledWithoutComplete =
+    settledPastGrace && !isComputedAnalytics(computationStatus);
   const showInterruptedBanner =
-    syncProgress?.stalled === true || stallBackstop || kickoffEnqueuedNothing;
+    syncProgress?.stalled === true ||
+    stallBackstop ||
+    settledWithoutComplete ||
+    (kickoffEnqueuedNothing && !serverSaysInFlight);
   // 154-08 / UI-SPEC State Contract 3 — the amber "we are recomputing" block.
   // It requires BOTH halves: the arm is repolling an empty series AND the
   // in-flight datum agrees that a job is still working. Without the second half
@@ -2681,10 +2824,25 @@ export function SyncPreviewStep({
         <div className="flex items-center gap-3">
           {/* The dot pulses to say "work is happening". It renders under the
               same condition as the sentence beside it, for the same reason. */}
+          {/* 2026-09-24 — a stage label ALWAYS shows while polling. When the
+              in-flight claim is not current (the banner or the recomputing
+              block is up), the row says only what is true, that the screen is
+              still checking, instead of rendering empty beside the counter. */}
+          {!inFlightClaimIsCurrent && (
+            <p
+              className="text-body font-medium text-text-primary"
+              data-testid="wizard-sync-stage-label"
+            >
+              Checking for progress…
+            </p>
+          )}
           {inFlightClaimIsCurrent && (
             <>
               <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-accent" />
-              <p className="text-body font-medium text-text-primary">
+              <p
+                className="text-body font-medium text-text-primary"
+                data-testid="wizard-sync-stage-label"
+              >
                 {computationStatus === "failed"
                   ? "Sync reported a failure"
                   : phase === "kicking_off"
