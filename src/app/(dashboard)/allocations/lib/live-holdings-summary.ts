@@ -63,10 +63,18 @@ export interface LiveHoldingsSummary {
    *  or negative and is still sourced from a key whose numbers are not current
    *  (D-07). Because of that, `amount <= total` is NOT an invariant. */
   untrusted: { amount: number; count: number };
-  /** Holdings from untrusted keys that the contributing-set narrowing dropped
-   *  from `total`. Nothing renders this yet; it exists so the D-06 pin can
-   *  measure the `revoked` exclusion, and the founder's D-06 answer decides
-   *  whether it is ever disclosed. */
+  /** CONTEXT D-20's `$Y`: holdings the contributing-set narrowing dropped from
+   *  `total` whose key is untrusted, MINUS the keys the payload names as
+   *  manager-side (`managerSideApiKeyIds`). A manager-side key's holdings are
+   *  not the allocator's book, so a `sign_in_failed` one is left out. A
+   *  `revoked` manager-side key cannot be told apart (it is in neither eligible
+   *  set), so its holdings may be counted: that over-discloses and never
+   *  hides. An allocator-eligible untrusted key that has no return series yet
+   *  IS counted, per D-20.
+   *
+   *  Nothing renders this yet. It exists so the D-06 pin can measure the
+   *  exclusion, and the founder's D-06 answer decides whether it is ever
+   *  disclosed. */
   excludedUntrusted: { amount: number; count: number };
 }
 
@@ -74,9 +82,14 @@ export function summarizeLiveHoldings(args: {
   toggleByScopeRef: Readonly<Record<string, boolean>>;
   holdingByRef: ReadonlyMap<string, DashboardHolding>;
   contributingApiKeyIds: readonly string[];
+  /** `eligibleApiKeyIds` minus `allocatorEligibleApiKeyIds`, both read from the
+   *  payload (never re-derived): the keys that feed a strategy the owner runs
+   *  as a manager. Read only to narrow `excludedUntrusted` to D-20's `$Y`. */
+  managerSideApiKeyIds: readonly string[];
   statusByKeyId: ReadonlyMap<string, string | null>;
 }): LiveHoldingsSummary {
   const contributing = new Set(args.contributingApiKeyIds);
+  const managerSide = new Set(args.managerSideApiKeyIds);
   // ⚠️ The narrowing applies only when there IS a modelled set to narrow TO.
   // An EMPTY contributing set means no per-key row exists, so there is nothing
   // for the AUM to agree with — and narrowing to ∅ would zero it, taking the
@@ -119,7 +132,10 @@ export function summarizeLiveHoldings(args: {
     // equality on the status column is the defect that rule exists to prevent.
     const untrusted = isUntrustedKeySyncStatus(args.statusByKeyId.get(h.api_key_id));
     if (narrowToModelledBook && !contributing.has(h.api_key_id)) {
-      if (untrusted) {
+      // D-20: a manager-side key the payload identifies is not the allocator's
+      // book, so its holdings are not part of what the narrowing excluded from
+      // THEIR AUM. Only the indistinguishable remainder may over-disclose.
+      if (untrusted && !managerSide.has(h.api_key_id)) {
         out.excludedUntrusted.amount += equity;
         out.excludedUntrusted.count += 1;
       }

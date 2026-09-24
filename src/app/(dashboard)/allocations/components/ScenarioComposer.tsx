@@ -4167,18 +4167,30 @@ export function ScenarioComposer({
       ),
     [payload.apiKeys],
   );
+  // D-20: the keys the payload itself names as manager-side. It is the
+  // difference of two SSR sets (`allocatorEligibleApiKeyIds` is
+  // `eligibleApiKeyIds` minus the manager keys), never a re-derivation of
+  // either predicate on the client.
+  const managerSideApiKeyIds = useMemo(() => {
+    const allocatorEligible = new Set(payload.allocatorEligibleApiKeyIds ?? []);
+    return (payload.eligibleApiKeyIds ?? []).filter(
+      (id) => !allocatorEligible.has(id),
+    );
+  }, [payload.eligibleApiKeyIds, payload.allocatorEligibleApiKeyIds]);
   const liveHoldingsSummary = useMemo(
     () =>
       summarizeLiveHoldings({
         toggleByScopeRef: scenario.draft.toggleByScopeRef,
         holdingByRef,
         contributingApiKeyIds: payload.contributingApiKeyIds ?? [],
+        managerSideApiKeyIds,
         statusByKeyId,
       }),
     [
       scenario.draft.toggleByScopeRef,
       holdingByRef,
       payload.contributingApiKeyIds,
+      managerSideApiKeyIds,
       statusByKeyId,
     ],
   );

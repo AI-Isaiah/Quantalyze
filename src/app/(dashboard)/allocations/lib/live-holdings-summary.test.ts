@@ -171,11 +171,15 @@ function summarize(opts: {
   holdings: readonly DashboardHolding[];
   contributing: readonly string[];
   toggles?: Record<string, boolean>;
+  /** Keys the payload identifies as manager-side: `eligibleApiKeyIds` minus
+   *  `allocatorEligibleApiKeyIds`. Defaults to none. */
+  managerSide?: readonly string[];
 }) {
   return summarizeLiveHoldings({
     toggleByScopeRef: opts.toggles ?? allOn(opts.holdings),
     holdingByRef: buildHoldingByRef(opts.holdings),
     contributingApiKeyIds: opts.contributing,
+    managerSideApiKeyIds: opts.managerSide ?? [],
     statusByKeyId: STATUS_BY_KEY_ID,
   });
 }
@@ -292,5 +296,25 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     expect(s.total).toBe(480_000);
     expect(s.untrusted).toEqual({ amount: 0, count: 0 });
     expect(s.excludedUntrusted).toEqual({ amount: 3_210, count: 1 });
+  });
+
+  it("D-20 (review WR-01): excludedUntrusted is D-20's $Y — a sign_in_failed MANAGER-SIDE key outside the contributing set is not the allocator's book and is left out, while an allocator-eligible sign_in_failed key with no series and an indistinguishable revoked key stay in", () => {
+    const s = summarize({
+      holdings: [H_TRUSTED, H_SIGN_IN_FAILED, H_REVOKED, H_SIGN_IN_FAILED_OUTSIDE],
+      contributing: [KEY_TRUSTED],
+      // KEY_SIGN_IN_FAILED_OUTSIDE is the manager-side key the payload names.
+      // KEY_SIGN_IN_FAILED is allocator-eligible but not contributing.
+      // KEY_REVOKED is in neither eligible set, so the payload cannot say
+      // whose book it is (D-20: over-discloses, never hides).
+      managerSide: [KEY_SIGN_IN_FAILED_OUTSIDE],
+    });
+    // The total is the contributing book only, unchanged by the narrowing.
+    expect(s.total).toBe(480_000);
+    expect(s.untrusted).toEqual({ amount: 0, count: 0 });
+    // Hand-listed: 12,345 (allocator-eligible sign_in_failed) + 3,210
+    // (revoked) = 15,555, two holdings. NOT 71,110 = 15,555 + 55,555, which is
+    // what counting the manager-side holding would give.
+    expect(s.excludedUntrusted).toEqual({ amount: 15_555, count: 2 });
+    expect(s.excludedUntrusted.amount).not.toBe(71_110);
   });
 });
