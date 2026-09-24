@@ -831,12 +831,16 @@ describe("[164.1-05] kinds and floors", () => {
   /**
    * Hand-typed on purpose. Spelling it `[...DEFECT_KINDS]` would make the
    * assertion agree with the implementation by construction — a list that can
-   * never disagree with the thing it checks. Twenty-one names, sorted.
+   * never disagree with the thing it checks. Twenty-two names, sorted.
+   * ⭐ 21 -> 22 in the Phase 164.6 review fix: `cron-ledger-fanout-failed`,
+   * raised by cron-obs when a ledger refresh fan-out run ended in an error of
+   * that function (every candidate of the tick failed, so it now raises).
    */
   const EXPECTED_DEFECT_KINDS = [
     "absurdity",
     "credential-absent",
     "cron-drift",
+    "cron-ledger-fanout-failed",
     "cron-no-observation",
     "cron-non-2xx",
     "cron-secret-in-command",
@@ -1895,7 +1899,9 @@ describe("[164.1-05] kinds and floors", () => {
     // is no literal `k/50` in the source to count. Executing the self-test is
     // the only honest way to derive the number — and it is fixtures-only, no
     // network, under a tenth of a second.
-    expect(SELF_TEST_SCENARIOS).toBe(83);
+    // ⭐ 83 -> 84 in the Phase 164.6 review fix: one red cron-obs fixture,
+    // ledger-fanout-failed.json, adds one isolation scenario.
+    expect(SELF_TEST_SCENARIOS).toBe(84);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);

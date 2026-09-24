@@ -1,0 +1,12 @@
+{
+  "_comment": "RED (Phase 164.6). ok.json's green match_engine_cron window, plus the ledger fan-out's failed-run read answering 3 runs in the window, 1 of which ended in an error of enqueue_ledger_refresh_for_strategies. Every value here is synthetic.",
+  "now": "2026-09-05T12:00:00Z",
+  "ttl": "6 hours",
+  "jobCount": 1,
+  "ledgerFanout": { "runs": 3, "errored": 1 },
+  "rows": [
+    ["901003", "2026-09-05T11:30:00Z", "70003", "200", "f", "", "2026-09-05T11:30:04Z", "{\"ok\":true}"],
+    ["901002", "2026-09-05T10:30:00Z", "70002", "200", "f", "", "2026-09-05T10:30:05Z", "{\"ok\":true}"],
+    ["901001", "2026-09-05T09:30:00Z", "70001", "200", "f", "", "2026-09-05T09:30:03Z", "{\"ok\":true}"]
+  ]
+}

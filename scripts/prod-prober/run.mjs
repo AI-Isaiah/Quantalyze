@@ -148,7 +148,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 4;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 83;
+export const SELF_TEST_SCENARIOS = 84;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -166,6 +166,12 @@ export const SELF_TEST_SCENARIOS = 83;
  * refuses a partial landing. That is the rule, not an exception to it.
  * ✅ Every one of the twenty-one is now raised by a registered arm and asserted
  * BY NAME in `selfTest`.
+ *
+ * ⚠️ THE TWENTY-SECOND, `cron-ledger-fanout-failed`, landed in the Phase 164.6
+ * review fix the same way: its fixture, its remedy, its `KIND_ASSERTIONS` entry
+ * and both scenario counters in ONE commit. cron-obs raises it when a run of
+ * the ledger refresh fan-out ended in an error of that function, which the
+ * fan-out now does on purpose when every candidate of a tick failed.
  */
 export const DEFECT_KINDS = [
   // harness-wide
@@ -181,6 +187,7 @@ export const DEFECT_KINDS = [
   "cron-no-observation",
   "cron-non-2xx",
   "cron-transport-error",
+  "cron-ledger-fanout-failed",
   "cron-drift",
   "cron-secret-in-command",
   "manifest-invalid",
@@ -916,6 +923,11 @@ const sqlOk = (stdout) => ({ status: 0, stdout, stderr: "", timedOut: false, mea
  * @param {object} data
  * @param {{jobCount:number, rows:Array<Array<string>>}} [data.cronObs]
  * @param {string} [data.ttl]                 answer for TTL_SQL ("" = NULL/unset)
+ * @param {{runs:number, errored:number}|string} [data.ledgerFanout]
+ *                                            answer for LEDGER_FANOUT_SQL; a
+ *                                            string is rendered RAW (the
+ *                                            unparsable case). Default: 3 runs,
+ *                                            0 errored — green.
  * @param {Array<object>} [data.cronJobRows]  answer for CRON_JOB_SQL
  * @param {string|null} [data.marker]         answer for DB_MARKER_SQL
  */
@@ -946,6 +958,16 @@ function fixtureSql(data) {
         for (const row of spec.rows) lines.push([String(spec.jobCount), ...row].join(fieldSep));
       }
       return sqlOk(`${lines.join("\n")}\n`);
+    }
+
+    // cron-obs's ledger fan-out read (Phase 164.6). Resolved by BOTH tables it
+    // names, before the generic `cron.job` branch below, which would otherwise
+    // answer it with cron-drift's rows. The default is GREEN so every existing
+    // bundle stays green without opting in.
+    if (q.includes("job_run_details") && q.includes("ledger_refresh_fanout")) {
+      const lf = data.ledgerFanout === undefined ? { runs: 3, errored: 0 } : data.ledgerFanout;
+      if (typeof lf === "string") return sqlOk(lf);
+      return sqlOk(`${lf.runs}${fieldSep}${lf.errored}\n`);
     }
 
     // The prober's own contact write (D-02) — see recordProberContact and
@@ -1051,14 +1073,15 @@ const ARM_FIXTURE_TABLE = [
     arm: CRON_OBS_MOD.ARM,
     fixtureDir: "cron-obs",
     green: "ok.json",
-    // TTL_SQL + CRON_OBS_SQL. The TTL read is not optional decoration: it is
-    // what clamps the scan window, so an arm that stopped issuing it would
-    // silently stop honouring pg_net's pruning.
-    greenSeamCalls: 2,
-    kinds: ["cron-no-observation", "cron-non-2xx", "cron-transport-error"],
+    // TTL_SQL + CRON_OBS_SQL + LEDGER_FANOUT_SQL. The TTL read is not optional
+    // decoration: it is what clamps the scan window, so an arm that stopped
+    // issuing it would silently stop honouring pg_net's pruning. The third is
+    // the ledger fan-out's failed-run read (Phase 164.6).
+    greenSeamCalls: 3,
+    kinds: ["cron-no-observation", "cron-non-2xx", "cron-transport-error", "cron-ledger-fanout-failed"],
     makeSeams: (data) =>
       createSeams({
-        sqlRunner: fixtureSql({ cronObs: data, ttl: data.ttl }),
+        sqlRunner: fixtureSql({ cronObs: data, ttl: data.ttl, ledgerFanout: data.ledgerFanout }),
         clock: () => new Date(data.now),
       }),
     red: {
@@ -1070,6 +1093,9 @@ const ARM_FIXTURE_TABLE = [
       "no-response.json": "cron-no-observation",
       "no-runs.json": "cron-no-observation",
       "timed-out.json": "cron-transport-error",
+      // Phase 164.6: an otherwise GREEN window (the match_engine_cron rows of
+      // ok.json) in which one ledger fan-out run ended in the fan-out's error.
+      "ledger-fanout-failed.json": "cron-ledger-fanout-failed",
     },
   },
   {
@@ -1218,6 +1244,7 @@ export async function selfTest() {
     "cron-no-observation": (d) => d.kind === "cron-no-observation",
     "cron-non-2xx": (d) => d.kind === "cron-non-2xx",
     "cron-transport-error": (d) => d.kind === "cron-transport-error",
+    "cron-ledger-fanout-failed": (d) => d.kind === "cron-ledger-fanout-failed",
     "cron-drift": (d) => d.kind === "cron-drift",
     "cron-secret-in-command": (d) => d.kind === "cron-secret-in-command",
     "manifest-invalid": (d) => d.kind === "manifest-invalid",

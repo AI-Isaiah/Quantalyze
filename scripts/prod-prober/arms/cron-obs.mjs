@@ -67,6 +67,30 @@
  *
  * ⛔ NOTHING IN THIS FILE READS `process`.env — the environment arrives as the
  * injected `env` object.
+ *
+ * ============================================================================
+ * THE SECOND JOB THIS ARM WATCHES: `ledger_refresh_fanout` (Phase 164.6 fix)
+ * ============================================================================
+ * The ledger refresh fan-out is a SYNCHRONOUS SQL job — its command is a plain
+ * function call, no `net.http_post` — and since migration 20260924120000 a tick
+ * in which every candidate failed to enqueue RAISES instead of returning 0.
+ * Before that, such a tick was recorded as a success and nothing read it.
+ *
+ * ⛔ IT STILL NEVER READS `cron.job_run_details.status`. It reads
+ * `return_message`, and only for ONE thing: whether the fan-out's own function
+ * NAME appears in it. MEASURED 2026-09-24 on a private local Supabase stack
+ * (pg_cron 1.6.4, background workers off): a job whose function raised records
+ * `ERROR:  <message>` followed by a `CONTEXT:  PL/pgSQL function <name>() …`
+ * line, and a job that succeeded records `1 row`. Every raise the fan-out makes
+ * on purpose LEADS with its own name, and any other error inside it carries
+ * the name in the CONTEXT line, so the name appearing in `return_message` is
+ * evidence the run ended in an error of the fan-out's. A succeeded run cannot
+ * carry it. Only COUNTS leave the database: the message itself can carry a
+ * constraint DETAIL, so it is never selected.
+ * ⚠️ UNMEASURED on PROD: whether PROD runs pg_cron in background-worker mode,
+ * where the recorded message may omit the CONTEXT line. The fan-out's own
+ * deliberate raises lead with its name either way; an unexpected error inside
+ * it would then be visible only when its message names the function.
  */
 
 /** All timestamps are compared as ISO-8601 INSTANTS in UTC, never as local strings. */
@@ -126,6 +150,23 @@ SELECT p.job_count,
  ORDER BY r.start_time DESC NULLS LAST, h.id ASC NULLS LAST`;
 
 /**
+ * The ledger refresh fan-out's failed runs in the same 3 h window. ONE row,
+ * always (aggregates over zero rows still return one): how many runs there
+ * were, and how many of them recorded an error that names the fan-out's own
+ * function. COUNTS ONLY — see the header for why the message is never selected.
+ */
+export const LEDGER_FANOUT_JOB = "ledger_refresh_fanout";
+export const LEDGER_FANOUT_FUNCTION = "enqueue_ledger_refresh_for_strategies";
+export const LEDGER_FANOUT_SQL = `SELECT count(*) AS runs,
+       count(*) FILTER (
+         WHERE position('${LEDGER_FANOUT_FUNCTION}' IN coalesce(r.return_message, '')) > 0
+       ) AS errored
+  FROM cron.job_run_details r
+  JOIN cron.job j ON j.jobid = r.jobid
+ WHERE j.jobname = '${LEDGER_FANOUT_JOB}'
+   AND r.start_time > now() - interval '3 hours'`;
+
+/**
  * One sentence of OPERATOR REMEDY per defect kind this arm can raise.
  *
  * ⛔ `SELECT net.worker_restart()` is named here as the documented operator
@@ -139,6 +180,8 @@ export const REMEDIES = {
     "The cron job's HTTP request was answered with a non-2xx status. A 401 means the key in the job's command no longer matches Railway's SERVICE_KEY: re-point the Vault secret analytics_service_key (the job reads it through vault.decrypted_secrets) and confirm the NEXT net._http_response row for this job is 2xx. Do not trust cron.job_run_details — it reads succeeded either way.",
   "cron-transport-error":
     "The cron job's HTTP request timed out or failed in transport: the analytics service did not answer within the job's own 60 s timeout_milliseconds budget. Read the Railway analytics-service logs for that tick and check GET /health; a transport failure is an upstream outage, not a credential fault, and has a different remedy from a 401.",
+  "cron-ledger-fanout-failed":
+    "The ledger refresh fan-out ended at least one run in the window with an error. Read that run's return_message in cron.job_run_details with an admin session: 'every candidate this tick failed to enqueue' means every selected strategy's enqueue raised, so read the newest failure rows in public.cron_runs (cron_name ledger_refresh_fanout, error candidate_enqueue_failed) for their SQLSTATEs; 'failure instrument write failed' means the heartbeat table refused the failure row as well. Follow docs/runbooks/ledger-refresh-go-live.md.",
 };
 
 // ---------------------------------------------------------------------------
@@ -207,6 +250,18 @@ export function parseIntervalSeconds(text) {
   }
 
   return matched ? seconds : null;
+}
+
+/**
+ * Parse the ONE row `LEDGER_FANOUT_SQL` returns. `null` when it is not exactly
+ * two integers — the caller reports that as a measure-fail, never as zero.
+ */
+export function parseLedgerFanoutRow(stdout) {
+  const line = String(stdout || "").split("\n").find((l) => l.length > 0);
+  if (line === undefined) return null;
+  const f = line.split("\t");
+  if (f.length !== 2 || !/^\d+$/.test(f[0]) || !/^\d+$/.test(f[1])) return null;
+  return { runs: Number.parseInt(f[0], 10), errored: Number.parseInt(f[1], 10) };
 }
 
 /** `10800` → `3h`, `7200` → `2h`, `900` → `15m`. For log lines only. */
@@ -402,6 +457,43 @@ async function run({ seams, log, addDefect }) {
   const rows = parseCronObsRows(res.stdout);
   for (const d of judgeCronObs(rows, seams.now(), ttlSeconds, log)) {
     addDefect(d.kind, "cron-obs", d.subject, d.detail, REMEDIES[d.kind]);
+  }
+
+  // (4) The ledger refresh fan-out's failed runs (Phase 164.6). A read that
+  // could not be performed, or an answer that is not two integers, is a
+  // measure-fail and never zero failures.
+  const lf = await seams.sql("cron-obs", LEDGER_FANOUT_SQL);
+  if (lf.measureFail) {
+    addDefect(
+      "measure-fail",
+      "cron-obs",
+      LEDGER_FANOUT_JOB,
+      `the ledger fan-out run read could not be performed at all: ${lf.measureFail}. An empty answer from ` +
+        `a failed psql is NOT zero failed runs.`,
+    );
+    return;
+  }
+  const counts = parseLedgerFanoutRow(lf.stdout);
+  if (counts === null) {
+    addDefect(
+      "measure-fail",
+      "cron-obs",
+      LEDGER_FANOUT_JOB,
+      "the ledger fan-out run read did not return exactly two integers, so how many of its runs failed is unknown.",
+    );
+    return;
+  }
+  log(`cron-obs: ${LEDGER_FANOUT_JOB}: ${counts.runs} run(s) in the last 3h, ${counts.errored} ended in an error of ${LEDGER_FANOUT_FUNCTION}`);
+  if (counts.errored > 0) {
+    addDefect(
+      "cron-ledger-fanout-failed",
+      "cron-obs",
+      LEDGER_FANOUT_JOB,
+      `${counts.errored} of ${counts.runs} ${LEDGER_FANOUT_JOB} run(s) in the last 3h ended in an error of ` +
+        `${LEDGER_FANOUT_FUNCTION}. Before Phase 164.6 a tick in which every candidate failed returned 0 and was ` +
+        `recorded as a success; it now raises so that it reaches this line.`,
+      REMEDIES["cron-ledger-fanout-failed"],
+    );
   }
 }
 
