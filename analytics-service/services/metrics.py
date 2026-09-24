@@ -191,6 +191,36 @@ def _drop_nonfinite(series: pd.Series) -> pd.Series:
     return series.replace([np.inf, -np.inf], np.nan).dropna()
 
 
+def _every_mirror_ratio_is_defined(returns: pd.Series) -> bool:
+    """True when ``returns`` has the shape on which all eight dispatched mirrors are defined.
+
+    SFH LOW-4: each mirror's D-09 undefined arm needs a missing ingredient, and
+    this predicate requires every one of them on ``P(r)`` (the fillna(0) series
+    the mirrors read):
+
+    - a losing day: a drawdown exists (``recovery_factor``, ``upi``,
+      ``serenity_index``), ``avg_loss`` exists (``kelly_criterion``,
+      ``cpc_index``) and ``profit_factor`` is finite (``common_sense_ratio``);
+    - a winning day: the payoff ratio is non-zero (``kelly_criterion``);
+    - a negative 5% quantile: ``tail_ratio``'s denominator is non-zero
+      (``common_sense_ratio``);
+    - at least 4 real observations: skew and kurtosis exist (PSR), and every
+      ``n - 1`` denominator is positive.
+
+    Measured 2026-09-24: all eight mirrors were finite on every one of 11,843
+    random series (six shapes, n = 4..399, with NaN gaps) that satisfy it. So a
+    non-finite mirror on such a series is a defect, and
+    ``_safe_qstats_scalar`` logs it as one.
+    """
+    p = _prepared_returns_no_guess(returns)
+    return bool(
+        returns.count() >= 4
+        and (p < 0).any()
+        and (p > 0).any()
+        and p.quantile(0.05) < 0
+    )
+
+
 def _format_series_points(
     series: pd.Series, decimals: int
 ) -> list[SeriesPoint]:
@@ -219,8 +249,15 @@ def _safe_qstats_scalar(
     fn: Callable[[pd.Series], float],
     returns: pd.Series,
     returns_len: int | None,
+    must_be_defined: bool = False,
 ) -> float | None:
     """Run one single-arg scalar mirror, returning None and logging on failure.
+
+    Two named WARNINGs, never confused with each other or with a silent None:
+    ``... failed`` when the mirror RAISES, and ``... the mirror is suspect``
+    when it returns non-finite although ``must_be_defined`` says the input
+    defines every mirror (SFH LOW-4). A non-finite result on any other input
+    is a legitimately undefined ratio (D-09) and maps to None without a log.
 
     Since Phase 166 every ``fn`` is a module mirror from
     ``_QSTATS_SINGLE_ARG_SCALARS`` (quantstats 0.0.81 minus the price guess),
@@ -240,7 +277,7 @@ def _safe_qstats_scalar(
     still get the full first-incident traceback.
     """
     try:
-        return _safe_float(fn(returns))
+        raw = fn(returns)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar %s failed (returns_len=%s): %s",
@@ -248,6 +285,18 @@ def _safe_qstats_scalar(
             exc_info=_should_emit_traceback(name, exc),
         )
         return None
+    value = _safe_float(raw)
+    if value is None and must_be_defined:
+        # SFH LOW-4: D-09 maps a legitimately undefined ratio to None silently.
+        # A mirror that goes non-finite on a series where every mirror is
+        # defined (``_every_mirror_ratio_is_defined``) is a BROKEN mirror, not
+        # an undefined ratio, and it must not look the same in the logs.
+        logger.warning(
+            "qstats scalar %s returned non-finite %r on a series that defines it "
+            "(returns_len=%s): not a D-09 undefined ratio, the mirror is suspect",
+            name, raw, returns_len,
+        )
+    return value
 
 
 @dataclass
@@ -1054,6 +1103,24 @@ def _r_squared(returns: pd.Series, benchmark: pd.Series) -> float:
     b = _align_benchmark_like_qs(benchmark, p.index)
     _, _, r_val, _, _ = linregress(p, _align_benchmark_like_qs(b, p.index))
     return float(r_val**2)
+
+
+def _r_squared_pair_varies(returns: pd.Series, benchmark: pd.Series) -> bool:
+    """True when the pair ``_r_squared`` regresses has >= 3 rows and dispersion on both legs.
+
+    Built with the same preparation ``_r_squared`` uses, so it describes the
+    exact pair ``linregress`` sees. On such a pair R^2 is defined; SFH INFO-2
+    uses it to tell a broken mirror from a legitimately undefined R^2 (a leg
+    that never moves).
+    """
+    p = _tz_naive_like_qs(_prepared_returns_no_guess(returns))
+    b = _align_benchmark_like_qs(_align_benchmark_like_qs(benchmark, p.index), p.index)
+    return bool(
+        len(p) >= 3
+        and len(b) == len(p)
+        and not _dispersion_is_residue(p.std(), p.mean())
+        and not _dispersion_is_residue(b.std(), b.mean())
+    )
 
 
 def _greeks_no_guess(
@@ -2533,9 +2600,13 @@ def compute_qstats_scalars(
     }
     returns_len = len(returns) if returns is not None else None
 
+    try:
+        must_be_defined = _every_mirror_ratio_is_defined(returns)
+    except Exception:  # noqa: BLE001 - the mirrors below log their own failure
+        must_be_defined = False
     for result_key, fn in _QSTATS_SINGLE_ARG_SCALARS:
         result[result_key] = _safe_qstats_scalar(
-            result_key, fn, returns, returns_len
+            result_key, fn, returns, returns_len, must_be_defined
         )
 
     # H-0718: distinguish 'no benchmark' (default), 'ok', and 'error' for r_squared.
@@ -2544,9 +2615,20 @@ def compute_qstats_scalars(
     # not promise 'ok' when r_squared is actually None.
     if benchmark is not None and len(benchmark) > 0:
         try:
-            r_squared_val = _safe_float(_r_squared(returns, benchmark))
+            r_squared_raw = _r_squared(returns, benchmark)
+            r_squared_val = _safe_float(r_squared_raw)
             result["r_squared"] = r_squared_val
             result["r_squared_status"] = "ok" if r_squared_val is not None else "error"
+            if r_squared_val is None and _r_squared_pair_varies(returns, benchmark):
+                # SFH INFO-2: `error` used to be set here with no log line. A
+                # leg that never moves defines no R^2 (legitimately undefined,
+                # no log); both legs moving and still no R^2 is a defect.
+                logger.warning(
+                    "qstats scalar r_squared returned non-finite %r on a pair "
+                    "where both legs vary (returns_len=%s, benchmark_len=%s): "
+                    "r_squared_status=error, the mirror is suspect",
+                    r_squared_raw, returns_len, len(benchmark),
+                )
         except Exception as exc:  # noqa: BLE001
             result["r_squared_status"] = "error"
             logger.warning(

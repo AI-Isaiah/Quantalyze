@@ -3945,3 +3945,74 @@ def test_q166r_psr_one_observation_is_undefined_without_a_failure_warning(caplog
     assert out["probabilistic_sharpe_ratio"] is None
     failed = [r.getMessage() for r in caplog.records if "failed" in r.getMessage()]
     assert failed == [], failed
+
+
+def _q166r_suspect_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "the mirror is suspect" in r.getMessage()]
+
+
+def test_q166r_broken_mirror_logs_a_named_warning_an_undefined_ratio_does_not(
+    caplog, monkeypatch
+):
+    """SFH LOW-4: D-09 maps a legitimately undefined ratio to None, silently.
+    Before this, a mirror that went NaN because of a BUG was indistinguishable
+    from that: same None, no log line, no status companion.
+
+    A mirror returning NaN on a series that defines every mirror (a loss, a
+    gain, a negative 5% quantile, >= 4 observations) must log a WARNING that
+    names it. The same NaN on the all-winning trigger, where D-09 makes kelly
+    undefined, must not."""
+    import services.metrics as metrics_module
+
+    mixed = _rank05_benign_mixed()
+    trigger = _rank05_trigger_series()
+    assert metrics_module._every_mirror_ratio_is_defined(mixed)
+    assert not metrics_module._every_mirror_ratio_is_defined(trigger)
+
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    clean = compute_qstats_scalars(mixed, None)
+    assert _q166r_suspect_lines(caplog) == []
+    assert all(clean[k] is not None for k, _fn in metrics_module._QSTATS_SINGLE_ARG_SCALARS)
+
+    broken = tuple(
+        (k, (lambda r: float("nan")) if k == "kelly_criterion" else fn)
+        for k, fn in metrics_module._QSTATS_SINGLE_ARG_SCALARS
+    )
+    monkeypatch.setattr(metrics_module, "_QSTATS_SINGLE_ARG_SCALARS", broken)
+    out = compute_qstats_scalars(mixed, None)
+    assert out["kelly_criterion"] is None
+    lines = _q166r_suspect_lines(caplog)
+    assert len(lines) == 1 and "kelly_criterion" in lines[0], lines
+
+    caplog.clear()
+    out = compute_qstats_scalars(trigger, None)
+    assert out["kelly_criterion"] is None
+    assert _q166r_suspect_lines(caplog) == [], "a D-09 undefined ratio was reported as a broken mirror"
+
+
+def test_q166r_r_squared_error_is_logged_only_when_both_legs_vary(caplog, monkeypatch):
+    """SFH INFO-2: `r_squared_status = "error"` was set on a non-finite R^2 with
+    no log line. A benchmark that never moves defines no R^2 (legitimately
+    undefined: status error, no log). Both legs moving and still no R^2 is a
+    broken mirror and must log a WARNING naming r_squared."""
+    import services.metrics as metrics_module
+
+    idx = pd.bdate_range("2024-01-01", periods=120)
+    rng = np.random.default_rng(1661)
+    strategy = pd.Series(rng.normal(0.001, 0.01, len(idx)), index=idx)
+    moving = pd.Series(rng.normal(0.0005, 0.02, len(idx)), index=idx)
+    flat = pd.Series(0.0, index=idx)
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+
+    out = compute_qstats_scalars(strategy, flat)
+    assert out["r_squared"] is None and out["r_squared_status"] == "error"
+    assert _q166r_suspect_lines(caplog) == []
+
+    assert compute_qstats_scalars(strategy, moving)["r_squared_status"] == "ok"
+    assert _q166r_suspect_lines(caplog) == []
+
+    monkeypatch.setattr(metrics_module, "_r_squared", lambda r, b: float("nan"))
+    out = compute_qstats_scalars(strategy, moving)
+    assert out["r_squared"] is None and out["r_squared_status"] == "error"
+    lines = _q166r_suspect_lines(caplog)
+    assert len(lines) == 1 and "r_squared" in lines[0], lines
