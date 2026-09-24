@@ -178,3 +178,25 @@ export const PANEL_STOP_COPY = {
  */
 export const COMPOSITE_CARD_NOTE =
   "This composite strategy reads from every key below. Keys are not linked or synced from this card: contact support@quantalyze.com to change which keys it uses or to re-run its computation.";
+
+// ---------------------------------------------------------------------------
+// Review-fix round 1 (2026-09-24, 167.2-REVIEW-SFH H-2): the card with no link
+// controls says why, and never invites an action it does not offer.
+// ---------------------------------------------------------------------------
+
+/**
+ * KCS-SHAPE-UNKNOWN. Rendered directly under the header when the edit page
+ * could not read the strategy's member count (`keyShape === "unknown"`). The
+ * card then offers no Resync, Use & Sync or Add Key (it might be a composite),
+ * and without this line the missing controls were a silent dead end.
+ */
+export const SHAPE_UNKNOWN_CARD_NOTE =
+  "We could not confirm how this strategy's keys are set up, so syncing and adding keys are paused on this page. Reload this page to try again.";
+
+/**
+ * KCS-EMPTY-NOLINK. The empty state on a card that offers no Add Key (a
+ * composite, or an unknown shape): the first sentence of the empty copy only.
+ * Its second sentence, "Add a read-only exchange key …", invites an action the
+ * card does not offer.
+ */
+export const EMPTY_NOLINK_COPY = "No API keys connected.";

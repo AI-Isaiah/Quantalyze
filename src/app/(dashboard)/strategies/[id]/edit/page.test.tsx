@@ -21,6 +21,9 @@ import { render, screen } from "@testing-library/react";
 import React from "react";
 
 vi.mock("server-only", () => ({}));
+// 167.2-REVIEW-SFH H-2: an unreadable shape is captured, not only logged.
+const captureToSentryMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
 
 const { getUserMock, strategyDataMock, memberCountMock, memberCountReadMock, apiKeyManagerPropsMock } =
   vi.hoisted(() => ({
@@ -312,6 +315,11 @@ describe("EditStrategyPage composite shape (KCS-23)", () => {
           message: expect.stringContaining("synthetic permission denied"),
         }),
       );
+      // 167.2-REVIEW-SFH H-2: captured like the owner factsheet's identical
+      // read (`stage: "strategy-shape"`), not only logged.
+      expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+        tags: { route: "strategies/edit/page", stage: "strategy-shape" },
+      });
       // The error text reaches the server log only, never the card's props.
       const props = apiKeyManagerPropsMock.mock.calls.at(-1)![0];
       expect(JSON.stringify(props)).not.toContain("synthetic permission denied");

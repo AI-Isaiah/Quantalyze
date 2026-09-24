@@ -7,6 +7,7 @@ import { CsvStrategyEditNote } from "@/components/strategy/CsvStrategyEditNote";
 import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import type { Strategy } from "@/lib/types";
 import { readCompositeMemberKeyIds } from "@/lib/strategy-shape";
+import { captureToSentry } from "@/lib/sentry-capture";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { redirect } from "next/navigation";
 
@@ -65,6 +66,13 @@ export default async function EditStrategyPage({
       console.error("[strategies/edit/page] composite member count failed", {
         id: strategy.id,
         message: members.message,
+      });
+      // 167.2-REVIEW-SFH H-2: captured like the owner factsheet's identical
+      // read (`readOwnerPendingStatus`, stage "strategy-shape"), so a card
+      // whose sync controls vanished is visible in production, not only in a
+      // server log. The strategy id stays in the log, as that site does.
+      captureToSentry(new Error(members.message), {
+        tags: { route: "strategies/edit/page", stage: "strategy-shape" },
       });
       keyShape = "unknown";
     }

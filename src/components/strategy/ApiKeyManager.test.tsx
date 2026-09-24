@@ -3747,6 +3747,10 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
     "This composite strategy reads from every key below. Keys are not linked or synced from this card: contact support@quantalyze.com to change which keys it uses or to re-run its computation.";
   const EMPTY_COPY_ORACLE =
     "No API keys connected. Add a read-only exchange key to import your trading data.";
+  // 167.2-REVIEW-SFH H-2: hand-typed from the UI-SPEC review-fix rows.
+  const EMPTY_NOLINK_ORACLE = "No API keys connected.";
+  const SHAPE_UNKNOWN_ORACLE =
+    "We could not confirm how this strategy's keys are set up, so syncing and adding keys are paused on this page. Reload this page to try again.";
 
   function keyRow(overrides: Partial<Record<string, unknown>> = {}) {
     return {
@@ -3804,7 +3808,9 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
       });
     } else {
       await waitFor(() => {
-        expect(screen.getByText(EMPTY_COPY_ORACLE)).toBeInTheDocument();
+        // Either empty copy (H-2: a card with no Add Key says the first
+        // sentence only); each case asserts which one it expects.
+        expect(screen.getByText(/^No API keys connected\./)).toBeInTheDocument();
       });
     }
   }
@@ -3898,10 +3904,15 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
     expect(screen.queryByTestId("api-key-card-key-synthetic-x")).not.toBeInTheDocument();
   });
 
-  it("COMPOSITE-EMPTY: a composite with zero readable keys shows the existing empty copy plus the note, and no Add Key", async () => {
+  // Moved by 167.2-REVIEW-SFH H-2 (lineage): this pin expected the full empty
+  // copy, whose second sentence ("Add a read-only exchange key …") invites an
+  // action the card does not offer on a composite. A card with no link
+  // controls now says only the first sentence.
+  it("COMPOSITE-EMPTY: a composite with zero readable keys shows the no-link empty copy plus the note, and no Add Key", async () => {
     await renderCard([], "composite");
 
-    expect(screen.getByText(EMPTY_COPY_ORACLE)).toBeInTheDocument();
+    expect(screen.getByText(EMPTY_NOLINK_ORACLE)).toBeInTheDocument();
+    expect(screen.queryByText(EMPTY_COPY_ORACLE)).not.toBeInTheDocument();
     expect(screen.getByText(COMPOSITE_NOTE_ORACLE)).toBeInTheDocument();
     expectNoLinkControls();
     expect(strategiesUpdateMock).not.toHaveBeenCalled();
@@ -3943,6 +3954,28 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
     expect(strategiesUpdateMock).not.toHaveBeenCalled();
   });
 
+  it("SHAPE-UNKNOWN-NOTE (167.2-REVIEW-SFH H-2): an unknown shape says why the sync controls are missing, directly under the header", async () => {
+    await renderCard([keyRow({ id: "key-synthetic-a", label: "Synthetic Key A" })], "unknown");
+
+    const note = screen.getByText(SHAPE_UNKNOWN_ORACLE);
+    expect(note.tagName).toBe("P");
+    expect(note).toHaveClass("text-xs", "text-text-muted");
+    const header = screen.getByRole("heading", { name: "Exchange API Keys" });
+    expect(header.parentElement!.nextElementSibling).toBe(note);
+  });
+
+  it("SHAPE-UNKNOWN-EMPTY (167.2-REVIEW-SFH H-2): with zero keys, an unknown shape never invites an Add Key it does not offer", async () => {
+    selectResultMock.mockReturnValue({ data: [], error: null });
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-composite-1" currentKeyId={null} keyShape="unknown" />);
+    });
+    await waitFor(() => {
+      expect(screen.getByText(EMPTY_NOLINK_ORACLE)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(EMPTY_COPY_ORACLE)).not.toBeInTheDocument();
+    expect(screen.getByText(SHAPE_UNKNOWN_ORACLE)).toBeInTheDocument();
+  });
+
   it.each([
     { label: "keyShape omitted", keyShape: undefined },
     { label: "keyShape \"single\"", keyShape: "single" as const },
@@ -3970,6 +4003,7 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
       ).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Add Key" })).toBeInTheDocument();
       expect(screen.queryByText(/composite strategy/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(SHAPE_UNKNOWN_ORACLE)).not.toBeInTheDocument();
     },
   );
 });

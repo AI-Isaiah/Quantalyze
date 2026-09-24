@@ -10,6 +10,8 @@ import { ApiKeyForm } from "./ApiKeyForm";
 import {
   addKeyBlockedReason,
   COMPOSITE_CARD_NOTE,
+  EMPTY_NOLINK_COPY,
+  SHAPE_UNKNOWN_CARD_NOTE,
   ENQUEUE_BOUND_MS,
   LINK_UPDATE_BOUND_MS,
   type PanelStopReason,
@@ -1097,10 +1099,16 @@ export function ApiKeyManager({
       </div>
 
       {/* KCS-23 (UI-SPEC S3): the one line that explains the missing link
-          controls, directly under the header. Only for a composite: an
-          "unknown" shape gets no copy (UI-SPEC defines none; the page logs). */}
+          controls, directly under the header. 167.2-REVIEW-SFH H-2: an
+          "unknown" shape gets its own line too (KCS-SHAPE-UNKNOWN). It used to
+          get none, so a transient member-count failure removed every sync
+          control with nothing to say why: failing closed on the write is
+          right, failing closed SILENTLY was the defect. */}
       {keyShape === "composite" && (
         <p className="text-xs text-text-muted">{COMPOSITE_CARD_NOTE}</p>
+      )}
+      {keyShape === "unknown" && (
+        <p className="text-xs text-text-muted">{SHAPE_UNKNOWN_CARD_NOTE}</p>
       )}
 
       {linkControlsAllowed && showForm && (
@@ -1145,7 +1153,10 @@ export function ApiKeyManager({
       {listedKeys.length === 0 && !loadError && !showForm && (
         <Card>
           <p className="text-sm text-text-muted text-center py-4">
-            No API keys connected. Add a read-only exchange key to import your trading data.
+            {/* H-2: a card with no Add Key never invites one (KCS-EMPTY-NOLINK). */}
+            {linkControlsAllowed
+              ? "No API keys connected. Add a read-only exchange key to import your trading data."
+              : EMPTY_NOLINK_COPY}
           </p>
         </Card>
       )}
