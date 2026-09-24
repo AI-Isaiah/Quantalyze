@@ -10,6 +10,7 @@ import { ApiKeyForm } from "./ApiKeyForm";
 import {
   addKeyBlockedReason,
   ENQUEUE_BOUND_MS,
+  LINK_UPDATE_BOUND_MS,
   type PanelStopReason,
 } from "./key-card-copy";
 import {
@@ -773,8 +774,43 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     setError(null);
 
     try {
-      // Link key to strategy first
-      await handleLinkKey(keyId);
+      // Link key to strategy first.
+      // Phase 167.2 / KCS-03: raced against `LINK_UPDATE_BOUND_MS`, the same
+      // shape as the enqueue race below. supabase-js sets no request timeout,
+      // so a link update that never answered held the marker and the spinner
+      // with no end. On expiry the attempt ends as `unconfirmed` / `link_bound`
+      // ("Sync not started") and RETURNS before the baseline read and the
+      // enqueue, so no enqueue is ever sent for this attempt. That is the only
+      // reason the card may say the sync did not start (UI-SPEC § KCS-03). The
+      // late answer is still awaited so it is logged (a late rejection reaches
+      // the catch, which logs it because the attempt already ended); it never
+      // resumes the attempt.
+      const linked = handleLinkKey(keyId).then(() => "linked" as const);
+      let linkTimer: ReturnType<typeof setTimeout> | undefined;
+      let linkOutcome: "linked" | "timed_out";
+      try {
+        const bound = new Promise<"timed_out">((resolve) => {
+          linkTimer = setTimeout(() => resolve("timed_out"), LINK_UPDATE_BOUND_MS);
+        });
+        linkOutcome = await Promise.race([linked, bound]);
+      } finally {
+        clearTimeout(linkTimer);
+      }
+      if (linkOutcome === "timed_out") {
+        console.error(
+          `[ApiKeyManager] the link update did not answer within ${LINK_UPDATE_BOUND_MS} ms; no sync is sent [key_id=${keyId}]`,
+        );
+        if (endAttempt(attempt)) {
+          setSyncStatus("unconfirmed");
+          setPanelStopReason("link_bound");
+          setSyncError(null);
+        }
+        await linked;
+        console.warn(
+          `[ApiKeyManager] the link update answered after its ${LINK_UPDATE_BOUND_MS} ms bound; the attempt had already ended, so no sync is sent [key_id=${keyId}]`,
+        );
+        return;
+      }
 
       // KCS-02 (RESEARCH P3): the baseline is read AFTER the link update and
       // immediately before the enqueue, which keeps the window in which a

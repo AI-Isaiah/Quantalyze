@@ -478,7 +478,19 @@ export function SyncProgress({
       {/* Status row */}
       <div className="flex items-center gap-2">
         <span className={`shrink-0 ${config.color}`}>{config.icon}</span>
-        <span className={`text-sm font-medium ${config.color}`}>
+        {/* Phase 167.2 / UI-SPEC § Accessibility (S2 live region): the panel's
+            ONE live region. `unconfirmed` and `no_result` arrive minutes after
+            the click, unprompted, so they must be announced. This span stays
+            mounted for the whole attempt, so a change of its text is announced
+            (a region inserted with its text already inside generally is not).
+            The elapsed counter below is a sibling OUTSIDE it, so the seconds
+            are never read out. */}
+        <span
+          className={`text-sm font-medium ${config.color}`}
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
           {activeLabel}
         </span>
         {isActive && (
