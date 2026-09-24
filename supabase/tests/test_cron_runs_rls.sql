@@ -16,13 +16,17 @@
 -- the table back as anon or as a non-admin user: the review found the claim
 -- "they read zero rows" true by inspection and pinned by nothing.
 --
--- THE THREE ARMS, and why each needs the others:
+-- THE FIVE ARMS, and why each needs the others:
 --   ADMIN 1  a platform admin, authenticated, READS the seeded rows. This is the
 --            anti-vacuity control: without it, the two zero-row verdicts below
 --            could be true because the rows were never there, or because a
 --            broken policy hides every row from everyone.
 --   ANON 1   anon, carrying an anon JWT, reads ZERO of the seeded rows.
 --   USER 1   an authenticated NON-admin user reads ZERO of the seeded rows.
+--   ANON 2   anon's INSERT of a failure row is refused by ROW SECURITY (42501).
+--   USER 2   an authenticated non-admin user's INSERT is refused the same way.
+--            (The two WRITE arms: 164.6 round-2 review fix, rls-policy-auditor
+--            LOW. Each has its own twin widening only the WITH CHECK clause.)
 -- Each read counts only rows THIS file seeded (by id), never the whole table:
 -- on a shared or long-lived database a global count measures other people's
 -- rows too.
@@ -67,6 +71,7 @@ DECLARE
   visible     INTEGER;
   raised      BOOLEAN;
   err_state   TEXT;
+  err_msg     TEXT;
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NEVER A SKIP -----------
   IF to_regclass('public.cron_runs') IS NULL THEN
@@ -192,7 +197,100 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (USER 1): an authenticated NON-admin user read % of the seeded cron_runs rows, expected 0. Any tenant could then read which strategies, private ones included, the ledger fan-outs failed to refresh.', visible;
   END IF;
 
-  RAISE NOTICE 'cron_runs row security OK: a platform admin reads the seeded rows (ADMIN 1), anon reads none (ANON 1) and an authenticated non-admin user reads none (USER 1).';
+  -- ======================================================================
+  -- THE WRITE ARMS (164.6 round-2 review fix, the rls-policy-auditor LOW).
+  -- The arms above prove who can READ a failure row. Since the round-2 fix
+  -- every tick with a failed candidate COMMITS that row, and the prod prober
+  -- counts those rows by `error`: a client that could INSERT one could forge
+  -- an alert, or name a strategy of its choosing and put it on the fan-outs'
+  -- failed-attempt cooldown for 20 hours. So anon and an authenticated
+  -- non-admin must both be REFUSED by row security when they try.
+  --
+  -- ⛔ A REFUSAL FROM THE GRANT LAYER IS NOT A POLICY VERDICT. Both carry
+  -- SQLSTATE 42501, so the SQLSTATE alone cannot tell them apart. The
+  -- transaction GRANTs INSERT to both client roles first, and each arm also
+  -- requires the refusal to be the ROW-SECURITY one, by its message. Both
+  -- GRANTs roll back with the file.
+  -- ======================================================================
+  GRANT INSERT ON public.cron_runs TO anon, authenticated;
+
+  -- ======================================================================
+  -- ANON 2 — anon's INSERT of a failure row is refused by row security (42501)
+  -- ======================================================================
+  -- RED-UNDER: widen the service-role policy's WITH CHECK to admit anon —
+  --            `WITH CHECK (auth.role() = 'service_role')` becomes
+  --            `WITH CHECK (auth.role() IN ('service_role', 'anon'))`. Its
+  --            USING clause is untouched, so every READ arm above still
+  --            passes and this arm is the first failure.
+  -- RED-UNDER-M: {"arm":"ANON 2","apply":[{"kind":"edit","file":"supabase/migrations/20260408113029_cron_heartbeat.sql","find":"WITH CHECK (auth.role() = 'service_role');","replace":"WITH CHECK (auth.role() IN ('service_role', 'anon'));","occurrences":1}]}
+  PERFORM set_config('request.jwt.claims', json_build_object('role', 'anon')::text, true);
+  SET LOCAL ROLE anon;
+  raised := FALSE;
+  err_state := NULL;
+  err_msg := NULL;
+  BEGIN
+    INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+    VALUES ('ledger_refresh_fanout', 'error', now(), 'candidate_enqueue_failed',
+            jsonb_build_object('function', 'enqueue_ledger_refresh_for_strategies',
+                               'cause', 'candidate_enqueue_failed',
+                               'failed_count', 1,
+                               'failed_targets', jsonb_build_array(
+                                 jsonb_build_object('strategy_id', gen_random_uuid(), 'sqlstate', 'P0001'))));
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    err_state := SQLSTATE;
+    err_msg := SQLERRM;
+  END;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (ANON 2): anon INSERTED a candidate_enqueue_failed row into cron_runs. An unauthenticated browser client could then forge a fan-out failure the prod prober alerts on, or put a strategy of its choosing on the failed-attempt cooldown.';
+  END IF;
+  IF err_state IS DISTINCT FROM '42501' OR err_msg NOT LIKE '%row-level security%' THEN
+    RAISE EXCEPTION 'TEST FAILED (ANON 2): anon''s INSERT was refused with SQLSTATE % but not by row security. The grant layer or something else refused first, so this verdict says nothing about the policy. Fix the gate, never the expectation.', err_state;
+  END IF;
+
+  -- ======================================================================
+  -- USER 2 — an authenticated NON-admin user's INSERT is refused (42501)
+  -- ======================================================================
+  -- RED-UNDER: widen the service-role policy's WITH CHECK to admit every
+  --            authenticated caller — `auth.role() IN ('service_role',
+  --            'authenticated')`. Its USING clause is untouched, so the READ
+  --            arms still pass, and anon is still refused (ANON 2), so this
+  --            arm is the first failure.
+  -- RED-UNDER-M: {"arm":"USER 2","apply":[{"kind":"edit","file":"supabase/migrations/20260408113029_cron_heartbeat.sql","find":"WITH CHECK (auth.role() = 'service_role');","replace":"WITH CHECK (auth.role() IN ('service_role', 'authenticated'));","occurrences":1}]}
+  PERFORM set_config(
+    'request.jwt.claims',
+    json_build_object('sub', uid_user::text, 'role', 'authenticated')::text,
+    true
+  );
+  SET LOCAL ROLE authenticated;
+  raised := FALSE;
+  err_state := NULL;
+  err_msg := NULL;
+  BEGIN
+    INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+    VALUES ('ledger_refresh_fanout', 'error', now(), 'candidate_enqueue_failed',
+            jsonb_build_object('function', 'enqueue_ledger_refresh_for_strategies',
+                               'cause', 'candidate_enqueue_failed',
+                               'failed_count', 1,
+                               'failed_targets', jsonb_build_array(
+                                 jsonb_build_object('strategy_id', gen_random_uuid(), 'sqlstate', 'P0001'))));
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    err_state := SQLSTATE;
+    err_msg := SQLERRM;
+  END;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (USER 2): an authenticated NON-admin user INSERTED a candidate_enqueue_failed row into cron_runs. Any tenant could then forge a fan-out failure the prod prober alerts on, or put another tenant''s strategy on the failed-attempt cooldown.';
+  END IF;
+  IF err_state IS DISTINCT FROM '42501' OR err_msg NOT LIKE '%row-level security%' THEN
+    RAISE EXCEPTION 'TEST FAILED (USER 2): the non-admin user''s INSERT was refused with SQLSTATE % but not by row security. The grant layer or something else refused first, so this verdict says nothing about the policy. Fix the gate, never the expectation.', err_state;
+  END IF;
+
+  RAISE NOTICE 'cron_runs row security OK: a platform admin reads the seeded rows (ADMIN 1), anon reads none (ANON 1), an authenticated non-admin user reads none (USER 1), and row security refuses a failure-row INSERT from anon (ANON 2) and from an authenticated non-admin user (USER 2).';
 END $$;
 
 ROLLBACK;
