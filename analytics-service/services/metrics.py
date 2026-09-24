@@ -703,6 +703,12 @@ def _recovery_factor(r: pd.Series) -> float:
     is a quantstats inconsistency. Changing it would move benign values, which
     this phase forbids, so it is reproduced as is.
 
+    RECORDED, NOT CHANGED (D-08; SFH LOW-3, 2026-09-24): ``abs(total)`` drops
+    the sign, so a NET-LOSING strategy shows a POSITIVE recovery factor (a
+    -30% total over a -40% drawdown reads 0.75, the same as a +30% one). That is
+    a second quantstats inconsistency and it reaches the UI. It is reproduced
+    for the same reason, and recorded in 166-CONTEXT.md.
+
     D-09: an all-winning series has ``max_dd == 0`` -> NaN -> None.
     """
     p = _prepared_returns_no_guess(r)
@@ -2899,6 +2905,15 @@ def _rolling_greeks(
     step (``_tz_naive_like_qs``), and ``_prepare_benchmark`` becomes
     ``_align_benchmark_like_qs``. Beta keeps 0.0.81's expression order, so a
     benign pair's rolling beta is bit-identical to live quantstats.
+
+    NaN CONVENTION, A DELIBERATE DIVERGENCE FROM D-15 (SFH LOW-2, recorded
+    2026-09-24): the joined frame keeps 0.0.81's ``df.fillna(0)``, so a gap day
+    enters every window that covers it as a 0.0 return on the missing leg. The
+    SCALAR greeks (``_greeks_no_guess``) drop that day instead
+    (pairwise-complete, D-15). The two series on one page therefore read gap
+    days differently. The rolling convention is kept for D-08 parity: changing
+    it would move every NaN-bearing rolling beta, which this phase does not
+    disclose. Recorded in 166-CONTEXT.md; the behaviour is unchanged.
 
     D-17 (founder-approved 2026-09-24, disclosed under D-10): ALPHA IS THE
     WINDOWED INTERCEPT ``mean_w(r) - beta_t * mean_w(b)`` over the same window

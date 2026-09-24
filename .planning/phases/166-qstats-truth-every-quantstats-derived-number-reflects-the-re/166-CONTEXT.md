@@ -338,3 +338,22 @@ a decision above.
 ## ⭐ Founder answers, 2026-09-24 (AskUserQuestion)
 - **D-15, D-16, D-17: APPROVED.** All three value changes ship as written and are disclosed under D-10.
 - **OPEN-2: ANSWERED.** After 166 merges, run plan 10's read-only census and queue a recompute of the affected PRODUCTION rows. The recompute is enqueued through the normal job path, never by hand-written data.
+
+## Recorded, not changed: code review round 1 (2026-09-24)
+
+Two quantstats 0.0.81 behaviours surfaced in `166-REVIEW-SFH.md`. Both are recorded here under D-08,
+and neither is changed. No founder decision is needed for either: each keeps the 0.0.81 behaviour this
+phase mirrors, and changing it would move values that this phase does not disclose.
+
+- **SFH LOW-2: rolling greeks and scalar greeks read gap days differently.** `_rolling_greeks` keeps
+  0.0.81's `df.fillna(0)` on the joined frame. A gap day on either leg therefore enters every 90-day
+  window that covers it as a 0.0 return. `_greeks_no_guess` drops that day instead: it computes
+  pairwise-complete, per D-15. The rendered `rolling_alpha`/`rolling_beta` and the scalar alpha/beta
+  on the same page therefore follow two NaN conventions. The rolling one is kept for D-08 parity:
+  switching it would move every NaN-bearing rolling beta. The `_rolling_greeks` docstring carries the
+  same note.
+- **SFH LOW-3: `_recovery_factor` reports a net-losing strategy as a POSITIVE ratio.**
+  `abs(total_returns) / abs(max_dd)` drops the sign, so a -30% total over a -40% drawdown reads 0.75,
+  the same as a +30% total. This is a second quantstats inconsistency, beside the arithmetic-versus-
+  compounded numerator recorded under D-08. It reaches the UI. It is reproduced as is, and the
+  `_recovery_factor` docstring carries the same note.
