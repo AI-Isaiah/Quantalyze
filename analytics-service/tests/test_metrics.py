@@ -1332,25 +1332,37 @@ def test_qstats_scalars_handle_missing_benchmark(golden_returns):
 
 
 def test_qstats_scalars_logs_warning_on_qs_failure(golden_returns, caplog, monkeypatch):
-    """Audit 2026-05-07 H-0710 / H-0713 / H-0723: a qs.stats.* failure must emit
-    `logger.warning` with the scalar name + returns length so operators can detect
-    silent regressions. Failure-soft contract (other 9 scalars unaffected) is
-    preserved.
+    """Audit 2026-05-07 H-0710 / H-0713 / H-0723: a failure inside a scalar must
+    emit `logger.warning` with the scalar name + returns length so operators can
+    detect silent regressions. Failure-soft contract (other scalars unaffected)
+    is preserved.
+
+    Phase 166 re-target (the 159 Deviation-2 rule: replace the contract, never
+    delete it): `recovery_factor` is an inline mirror now, so patching
+    `qs.stats.recovery_factor` would no longer reach it. The fault is injected
+    into `_max_drawdown_from_wealth`, a real step INSIDE the mirror's math.
     """
     import services.metrics as metrics_module
 
-    def boom_recovery_factor(_returns):
-        raise RuntimeError("simulated qs.stats.recovery_factor failure")
+    def boom_max_drawdown(_wealth):
+        raise RuntimeError("simulated _max_drawdown_from_wealth failure")
 
     monkeypatch.setattr(
-        metrics_module.qs.stats, "recovery_factor", boom_recovery_factor
+        metrics_module, "_max_drawdown_from_wealth", boom_max_drawdown
     )
 
     with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
         result = compute_qstats_scalars(golden_returns, None)
 
-    # The failing scalar is None as before, the other 9 are still computed.
+    # The failing scalar is None as before, the others are still computed.
     assert result["recovery_factor"] is None
+    others = [
+        k for k, _ in _QSTATS_SINGLE_ARG_SCALARS if k != "recovery_factor"
+    ]
+    assert all(result[k] is not None for k in others), (
+        "one failing scalar must not take the others down: "
+        f"{ {k: result[k] for k in others} }"
+    )
     # And the failure produced a WARNING log naming the scalar.
     failing_records = [
         r for r in caplog.records
@@ -1467,27 +1479,40 @@ def test_rolling_alpha_beta_zero_overlap_returns_empty():
     assert beta == []
 
 
-@pytest.mark.parametrize("result_key,qs_attr", _QSTATS_SINGLE_ARG_SCALARS)
+@pytest.mark.parametrize(
+    "result_key", [k for k, _ in _QSTATS_SINGLE_ARG_SCALARS]
+)
 def test_qstats_scalars_dispatch_table_per_entry(
-    golden_returns, caplog, monkeypatch, result_key, qs_attr
+    golden_returns, caplog, monkeypatch, result_key
 ):
     """Specialist test-gap: the dispatch table (`_QSTATS_SINGLE_ARG_SCALARS`)
-    is the single source of truth for 8 (key, qs.stats attr) pairs after the
-    simplify refactor. A typo would silently produce None in production for
-    one scalar. Parametrize the failure path across every entry so a regression
-    fails the matching attribute's row, not a generic "scalar None" assertion.
+    is the single source of truth for 8 (key, callable) pairs. A wiring slip
+    would silently produce None in production for one scalar. Parametrize the
+    failure path across every entry so a regression fails the matching key's
+    row, not a generic "scalar None" assertion.
+
+    Phase 166 re-target: the table holds callables now (some inline mirrors,
+    some quantstats functions until plan 166-04), so the fault is injected by
+    swapping THIS entry's callable for a raiser in a patched copy of the table.
     """
     import services.metrics as metrics_module
 
     def boom(_returns):
-        raise RuntimeError(f"simulated qs.stats.{qs_attr} failure")
+        raise RuntimeError(f"simulated {result_key} failure")
 
-    monkeypatch.setattr(metrics_module.qs.stats, qs_attr, boom)
+    patched = tuple(
+        (key, boom if key == result_key else fn)
+        for key, fn in metrics_module._QSTATS_SINGLE_ARG_SCALARS
+    )
+    monkeypatch.setattr(metrics_module, "_QSTATS_SINGLE_ARG_SCALARS", patched)
     with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
         result = compute_qstats_scalars(golden_returns, None)
     assert result[result_key] is None
-    matching = [r for r in caplog.records if result_key in r.getMessage()]
-    assert matching, f"failure for qs.stats.{qs_attr} must log WARNING naming {result_key!r}"
+    matching = [
+        r for r in caplog.records
+        if result_key in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert matching, f"failure for {result_key} must log WARNING naming {result_key!r}"
 
 
 # audit-2026-05-07 silent-failure sweep: regression tests for the
@@ -2975,3 +3000,111 @@ def test_rank05_no_unclosed_quantstats_call_survives_in_compute_all_metrics():
         "quantstats calls in compute_all_metrics without prepare_returns=False "
         f"(RANK-05 price heuristic reopened): {offenders}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 / QSTATS-TRUTH: every quantstats-derived number reflects the returns
+# ---------------------------------------------------------------------------
+# Phase 159 closed the quantstats price guess at the headline sites of
+# `compute_all_metrics`. The eight scalars dispatched by `compute_qstats_scalars`
+# (WINDOWS.md entry 9) were left open, and they persist to
+# `strategy_analytics.metrics_json`. Plan 166-03 closes the four DRAWDOWN-family
+# scalars (recovery_factor, ulcer_index, upi, serenity_index) with inline
+# mirrors of quantstats 0.0.81 minus the guess; plan 166-04 closes the
+# loss/Sharpe family on the same dispatch table.
+#
+# As in the RANK-05 section above, these tests pin ECONOMICS derived from the
+# definitions, never the implementation's own output, and every invariant was
+# observed RED against the pre-mirror code first (Phase 166 D-09).
+
+_Q166_DRAWDOWN_RATIO_KEYS = ("recovery_factor", "upi", "serenity_index")
+
+
+def _q166_trigger_nonmonotone() -> pd.Series:
+    """An all-winning trigger whose daily gains are NOT monotone in value.
+
+    Row 0 is +150%; after it, gains alternate 0.4% (even rows) and 2% (odd
+    rows). All-non-negative with max > 1, so it trips quantstats' price guess
+    exactly as `_rank05_trigger_series` does, but the zig-zag makes the bogus
+    "price" path go up and down. That matters: on the canonical trigger the
+    guessed path is a pure downtrend, so live `kelly_criterion` and `cpc_index`
+    are already None there (for the wrong reason) and their invariants could
+    never be observed RED. This fixture gives every drawdown-family AND
+    loss-family scalar a wrong, finite pre-fix value (166-RESEARCH §Q4).
+    """
+    n = 60
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    vals = np.where(np.arange(n) % 2 == 0, 0.004, 0.02)
+    vals[0] = 1.5
+    return pd.Series(vals, index=dates, name="returns").astype("float64")
+
+
+def test_q166_nonmonotone_trigger_actually_trips_the_heuristic():
+    """Anti-vacuity guard for the non-monotone invariant tests. If a future edit
+    made this fixture benign or monotone, the tests below would pass for the
+    wrong reason (or duplicate the canonical trigger's coverage)."""
+    s = _q166_trigger_nonmonotone()
+    assert bool(s.min() >= 0), "fixture must be all-non-negative"
+    assert bool(s.max() > 1), "fixture must contain a >100% day"
+    assert bool((s > 0).all()), "fixture must be ALL-WINNING (no losing day)"
+    tail = s.iloc[1:]
+    assert not (tail.is_monotonic_increasing or tail.is_monotonic_decreasing), (
+        "fixture must zig-zag after the +150% day, or it duplicates the canonical trigger"
+    )
+
+
+def test_q166_all_winning_series_has_no_drawdown_derived_ratios():
+    """ECONOMIC INVARIANT (D-09) on the canonical all-winning trigger.
+
+    A series with no losing day has a wealth curve that only rises, so it is
+    never underwater: every drawdown is 0 and the Ulcer Index (the RMS of the
+    drawdowns) is exactly 0. Recovery factor, UPI and Serenity divide by the max
+    drawdown, by the Ulcer Index, and by Ulcer x pitfall. Those denominators
+    measure a drawdown that does not exist, so each ratio is UNDEFINED (None),
+    never a number.
+
+    Pre-fix measurement (live quantstats through the dispatch table):
+    ulcer_index = 0.9947130555497081, recovery_factor = 2.0737188382869305,
+    upi = 2.9998728744771372, serenity_index = 0.3204442673452879. quantstats
+    read the returns as a price path and saw a 99% crash.
+    """
+    s = compute_qstats_scalars(_rank05_trigger_series(), None)
+    assert s["ulcer_index"] == 0.0, f"no losing day, but ulcer_index={s['ulcer_index']}"
+    for key in _Q166_DRAWDOWN_RATIO_KEYS:
+        assert s[key] is None, (
+            f"{key}={s[key]}: its denominator is a drawdown that does not exist"
+        )
+
+
+def test_q166_all_winning_drawdown_values_reach_metrics_json():
+    """The same invariant on the end-to-end path that persists to
+    `strategy_analytics.metrics_json`: `compute_all_metrics` merges the qstats
+    scalars into its `metrics_json` sub-dict. A fix that corrected
+    `compute_qstats_scalars` but not the persisted payload would be no fix.
+
+    Pre-fix measurement: the same four wrong values as
+    test_q166_all_winning_series_has_no_drawdown_derived_ratios.
+    """
+    mj = compute_all_metrics(_rank05_trigger_series())["metrics_json"]
+    assert mj["ulcer_index"] == 0.0, f"persisted ulcer_index={mj['ulcer_index']}"
+    for key in _Q166_DRAWDOWN_RATIO_KEYS:
+        assert mj[key] is None, (
+            f"persisted {key}={mj[key]}: its denominator is a drawdown that does not exist"
+        )
+
+
+def test_q166_nonmonotone_series_has_no_drawdown_derived_ratios():
+    """ECONOMIC INVARIANT (D-09) on the non-monotone all-winning trigger. Same
+    economics as the canonical trigger: no losing day, so no drawdown, so a zero
+    Ulcer Index and undefined drawdown-denominated ratios.
+
+    Pre-fix measurement: ulcer_index = 0.9919239385213344, recovery_factor =
+    92.05882352941175, upi = 4.117455241335786, serenity_index =
+    0.36207650738764285.
+    """
+    s = compute_qstats_scalars(_q166_trigger_nonmonotone(), None)
+    assert s["ulcer_index"] == 0.0, f"no losing day, but ulcer_index={s['ulcer_index']}"
+    for key in _Q166_DRAWDOWN_RATIO_KEYS:
+        assert s[key] is None, (
+            f"{key}={s[key]}: its denominator is a drawdown that does not exist"
+        )

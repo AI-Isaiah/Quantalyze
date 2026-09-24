@@ -3,7 +3,7 @@ import quantstats as qs
 import pandas as pd
 import numpy as np
 import math
-from collections.abc import ItemsView, KeysView, ValuesView
+from collections.abc import Callable, ItemsView, KeysView, ValuesView
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
@@ -165,9 +165,11 @@ MAR: float = 0.0
 # `_finalize_rolling.dropna()`. `log1p(-1 + 1e-9) ≈ -20.72`.
 _LOG_RETURN_FLOOR: float = -1.0 + 1e-9
 
-# H-0710 / H-0713 / H-0723 dispatch table: (result_key, qs.stats attribute name).
+# H-0710 / H-0713 / H-0723 dispatch keys for `_QSTATS_SINGLE_ARG_SCALARS`, which
+# is defined BELOW the Phase 166 mirror functions it points at (it holds module
+# callables now, so it must follow their definitions).
 # `r_squared` (needs benchmark) and `time_in_market` (not a qs call) are handled
-# inline since their shapes differ from the single-arg pattern below.
+# inline since their shapes differ from the single-arg pattern.
 _QstatsScalarKey = Literal[
     "recovery_factor",
     "ulcer_index",
@@ -178,20 +180,6 @@ _QstatsScalarKey = Literal[
     "cpc_index",
     "serenity_index",
 ]
-# Typing the key as the literal union of QstatsScalarsResult's float|None fields
-# lets the `result[result_key] = ...` loop below write into the TypedDict
-# (which requires literal keys) AND fails type-check if a dispatch-table key is
-# ever typo'd or drifts from the result shape — no cast, no ignore.
-_QSTATS_SINGLE_ARG_SCALARS: tuple[tuple[_QstatsScalarKey, str], ...] = (
-    ("recovery_factor", "recovery_factor"),
-    ("ulcer_index", "ulcer_index"),
-    ("upi", "ulcer_performance_index"),
-    ("kelly_criterion", "kelly_criterion"),
-    ("probabilistic_sharpe_ratio", "probabilistic_ratio"),
-    ("common_sense_ratio", "common_sense_ratio"),
-    ("cpc_index", "cpc_index"),
-    ("serenity_index", "serenity_index"),
-)
 
 
 def _drop_nonfinite(series: pd.Series) -> pd.Series:
@@ -540,6 +528,211 @@ def _cvar_of_tail(series: pd.Series, threshold: float) -> float:
     """
     tail = series[series < threshold]
     return float(tail.mean()) if len(tail) > 0 else float(threshold)
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 — quantstats 0.0.81 mirrors, MINUS the price guess
+# ---------------------------------------------------------------------------
+# The eight single-arg scalars `compute_qstats_scalars` dispatches persist to
+# `strategy_analytics.metrics_json` (WINDOWS.md entry 9). Phase 166 research Q2
+# wrapped quantstats' `_prepare_returns` / `_prepare_prices` in a spy and called
+# each scalar on the RANK-05 trigger: the `prepare_returns=` keyword closes NONE
+# of them, because each one reaches a preparer transitively (or has no keyword
+# at all). So each is an inline mirror (D-03 outcome), built on the plan-01
+# primitives above (D-04), reproducing the 0.0.81 expression order so benign
+# series stay bit-identical to live quantstats (D-08).
+#
+# NaN CONVENTION (recorded divergence, Rule 7): these mirrors use ``P(r)`` =
+# ``_prepared_returns_no_guess`` — quantstats' own cleanup, fillna(0) — and keep
+# quantstats' raw-vs-prepared choice per sub-term. That deliberately DIFFERS
+# from Phase 159's skipna choice at the headline sites (see the NaN CONVENTION
+# note at the headline sharpe/sortino site in ``compute_all_metrics``). The
+# reason: with fillna(0) ONLY trigger-shaped series (all-non-negative with a
+# >100% day) change value, so the D-11 census predicate describes the whole
+# affected population. A skipna switch would also move every NaN-bearing
+# series, which that predicate does not describe.
+#
+# Every mirror returns a RAW float (NaN/inf allowed). `_safe_qstats_scalar` ->
+# `_safe_float` maps NaN and ±inf to None; the D-09 Nones (a ratio over a
+# drawdown that does not exist) arise from that mapping and are never
+# special-cased here.
+
+
+def _prepared_returns_no_guess(r: pd.Series) -> pd.Series:
+    """``P(r)``: quantstats 0.0.81 ``_utils._prepare_returns`` (rf=0 path) MINUS the price guess.
+
+    0.0.81 body, in order: ``data.copy()``; ``elif data.min() >= 0 and
+    data.max() > 1: data = data.pct_change()`` (THE GUESS, dropped here);
+    ``replace([inf, -inf], NaN)``; ``fillna(0).replace([inf, -inf], NaN)``; then a
+    tz normalisation of the index that no scalar reads. Reused by plans 166-04
+    to 166-06.
+    """
+    return (
+        r.copy()
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0)
+        .replace([np.inf, -np.inf], np.nan)
+    )
+
+
+def _drawdown_series_no_guess(r: pd.Series) -> pd.Series:
+    """``DD(r)``: quantstats 0.0.81 ``to_drawdown_series`` MINUS the price guess.
+
+    ``to_prices`` fills NaN with 0 before compounding, so the wealth curve is
+    ``(1 + r.fillna(0)).cumprod()``. Phase 166 research measured max abs diff
+    0.0 against ``qs.stats.to_drawdown_series`` on five benign fixtures.
+    """
+    return _drawdown_series_from_wealth((1.0 + r.fillna(0)).cumprod())
+
+
+def _recovery_factor(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``recovery_factor`` (rf=0, Series input) minus the price guess.
+
+    WHY INLINE: research Q2's spy saw ``recovery_factor(r, prepare_returns=False)``
+    still reach ``_prepare_prices`` through ``max_drawdown``, which has no
+    keyword. On the RANK-05 trigger it returned 1.9733 with the keyword and
+    2.0737 without it. Both are wrong: the series never lost a day. The
+    "kwarg-closable" reading in WINDOWS.md entry 9 and the 159-05 Residual table
+    is REFUTED for this scalar.
+
+    MATH PARITY (0.0.81 body)::
+
+        returns = _prepare_returns(returns)
+        total_returns = returns.sum() - rf
+        max_dd = max_drawdown(returns)
+        if max_dd == 0: return nan
+        return abs(total_returns) / abs(max_dd)
+
+    ``max_drawdown`` of a returns series is the drawdown of
+    ``to_prices(r, base=1)`` = ``(1 + r).cumprod()``, i.e.
+    ``_max_drawdown_from_wealth``.
+
+    RECORDED, NOT CHANGED (D-08): the numerator is an ARITHMETIC sum of daily
+    returns, while ``upi``'s numerator is the COMPOUNDED return (``comp``). That
+    is a quantstats inconsistency. Changing it would move benign values, which
+    this phase forbids, so it is reproduced as is.
+
+    D-09: an all-winning series has ``max_dd == 0`` -> NaN -> None.
+    """
+    p = _prepared_returns_no_guess(r)
+    total = p.sum()
+    max_dd = _max_drawdown_from_wealth((1.0 + p).cumprod())
+    if max_dd == 0:
+        return float("nan")
+    return float(abs(total) / abs(max_dd))
+
+
+def _ulcer_index(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``ulcer_index`` minus the price guess.
+
+    WHY INLINE: ``ulcer_index`` has no ``prepare_returns=`` keyword, and research
+    Q2's spy saw it reach ``_prepare_prices`` through ``to_drawdown_series``.
+
+    MATH PARITY (0.0.81 body)::
+
+        dd = to_drawdown_series(returns)
+        return np.sqrt(np.divide((dd**2).sum(), returns.shape[0] - 1))
+
+    The denominator is the RAW row count minus 1, NaN rows included, exactly as
+    quantstats does it. ``np.divide`` / ``np.sqrt`` are kept so a length-1 series
+    gives NaN (as before) rather than raising.
+
+    D-09: no losing day -> ``dd`` is all 0 -> exactly 0.0.
+    """
+    dd = _drawdown_series_no_guess(r)
+    return float(np.sqrt(np.divide((dd**2).sum(), r.shape[0] - 1)))
+
+
+def _ulcer_performance_index(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``ulcer_performance_index`` (rf=0, Series input) minus the price guess.
+
+    WHY INLINE: no ``prepare_returns=`` keyword; it inherits ``ulcer_index``'s
+    transitive ``_prepare_prices`` call (research Q2).
+
+    MATH PARITY (0.0.81 body)::
+
+        ulcer = ulcer_index(returns)
+        if ulcer == 0: return nan
+        return (comp(returns) - rf) / ulcer
+
+    with ``comp(r) = r.add(1).prod() - 1`` on the RAW series (a skipna product,
+    equal to fillna(0) for this purpose).
+
+    D-09: ulcer 0 -> NaN -> None.
+    """
+    u = _ulcer_index(r)
+    if u == 0:
+        return float("nan")
+    return float((r.add(1).prod() - 1) / u)
+
+
+def _serenity_index(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``serenity_index`` (rf=0, Series input) minus the price guess.
+
+    WHY INLINE: no ``prepare_returns=`` keyword; research Q2's spy saw two
+    ``_prepare_prices`` calls through ``to_drawdown_series``. Its ``cvar`` of the
+    drawdown series also prepares, but it cannot guess there (a drawdown series
+    is <= 0).
+
+    MATH PARITY (0.0.81 body, Series branch)::
+
+        dd = to_drawdown_series(returns)
+        std_returns = returns.std()
+        if std_returns == 0: return nan
+        pitfall = -cvar(dd) / std_returns
+        denominator = ulcer_index(returns) * pitfall
+        if denominator == 0: return nan
+        return (returns.sum() - rf) / denominator
+
+    ``returns.std()`` and ``returns.sum()`` are on the RAW series (skipna).
+    ``cvar(dd)`` is ``_cvar_of_tail(dd, value_at_risk(dd))``: the mean of the
+    drawdowns below the 95% VaR, falling back to the VaR. ``value_at_risk`` is
+    the kwarg-proven leaf (research Q2), called with ``prepare_returns=False``.
+    The drawdown series carries no NaN, so skipping its fillna(0) changes
+    nothing.
+
+    D-09: no losing day -> ulcer 0 and VaR of an all-zero series NaN -> NaN -> None.
+    """
+    dd = _drawdown_series_no_guess(r)
+    sd = r.std()
+    if sd == 0:
+        return float("nan")
+    var = qs.stats.value_at_risk(dd, confidence=0.95, prepare_returns=False)
+    pitfall = -_cvar_of_tail(dd, var) / sd
+    den = _ulcer_index(r) * pitfall
+    if den == 0:
+        return float("nan")
+    return float(r.sum() / den)
+
+
+# H-0710 / H-0713 / H-0723 dispatch table: (result_key, callable). Each callable
+# takes the raw returns series and returns a raw float; `compute_qstats_scalars`
+# runs each one through `_safe_qstats_scalar` (failure-soft, WARNING naming the
+# key). Phase 166 replaced the old (result_key, qs.stats attribute name) shape,
+# so there is no longer a `getattr` dispatch over the quantstats namespace.
+#
+# The four drawdown-family keys point at the Phase 166 mirrors above. The four
+# loss/Sharpe-family keys still point at the quantstats functions themselves,
+# which is the exact call the old attribute dispatch made, so their values do
+# not move in plan 166-03. Plan 166-04 owns replacing those four entries with
+# mirrors.
+#
+# Typing the key as the literal union of QstatsScalarsResult's float|None fields
+# lets the `result[result_key] = ...` loop write into the TypedDict (which
+# requires literal keys) AND fails type-check if a dispatch-table key is ever
+# typo'd or drifts from the result shape — no cast, no ignore.
+_QSTATS_SINGLE_ARG_SCALARS: tuple[
+    tuple[_QstatsScalarKey, Callable[[pd.Series], float]], ...
+] = (
+    ("recovery_factor", _recovery_factor),
+    ("ulcer_index", _ulcer_index),
+    ("upi", _ulcer_performance_index),
+    ("kelly_criterion", qs.stats.kelly_criterion),
+    ("probabilistic_sharpe_ratio", qs.stats.probabilistic_ratio),
+    ("common_sense_ratio", qs.stats.common_sense_ratio),
+    ("cpc_index", qs.stats.cpc_index),
+    ("serenity_index", _serenity_index),
+)
 
 
 def compute_all_metrics(
@@ -1904,6 +2097,13 @@ def compute_qstats_scalars(
         common_sense_ratio, cpc_index, serenity_index, r_squared (vs benchmark),
         time_in_market (fraction in [0, 1], not ceil-rounded percent),
         r_squared_status (companion: 'no_benchmark' | 'ok' | 'error').
+
+    Phase 166: the eight single-arg scalars come from
+    ``_QSTATS_SINGLE_ARG_SCALARS`` (key -> callable). ``recovery_factor``,
+    ``ulcer_index``, ``upi`` and ``serenity_index`` are inline mirrors of
+    quantstats 0.0.81 minus its price guess (``_recovery_factor``,
+    ``_ulcer_index``, ``_ulcer_performance_index``, ``_serenity_index``). The
+    other four still call quantstats directly until plan 166-04 mirrors them.
     """
     result: QstatsScalarsResult = {
         "recovery_factor": None,
@@ -1920,9 +2120,9 @@ def compute_qstats_scalars(
     }
     returns_len = len(returns) if returns is not None else None
 
-    for result_key, qs_attr in _QSTATS_SINGLE_ARG_SCALARS:
+    for result_key, fn in _QSTATS_SINGLE_ARG_SCALARS:
         result[result_key] = _safe_qstats_scalar(
-            result_key, getattr(qs.stats, qs_attr), returns, returns_len
+            result_key, fn, returns, returns_len
         )
 
     # H-0718: distinguish 'no benchmark' (default), 'ok', and 'error' for r_squared.
