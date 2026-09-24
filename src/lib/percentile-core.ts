@@ -41,6 +41,31 @@ export const PERCENTILE_METRICS = [
 
 export type PercentileMetric = (typeof PERCENTILE_METRICS)[number];
 
+/**
+ * Phase 166 (D-12) — the literal TYPE of `tuple.join(", ")`.
+ *
+ * `PERCENTILE_METRICS` is the one KPI array, and the two PostgREST projections
+ * that read these columns (`queries.ts`'s percentile callers and the
+ * csv-finalize clock-safety guard) build their select strings from it with
+ * `.join(", ")`. `Array.prototype.join` is typed as returning plain `string`,
+ * and postgrest-js parses a select string AT THE TYPE LEVEL, so a plain
+ * `string` projection types every row as a `ParserError`. This type recomputes
+ * the joined literal from the tuple itself, so a consumer can narrow the join
+ * without restating the seven names as a hand-copied literal type.
+ *
+ * Only sound for a `", "` separator. The runtime bytes are pinned by
+ * `queries.percentile-columns.test.ts` and the csv-finalize guard test, not by
+ * this type.
+ */
+export type CommaSpaceJoined<T extends readonly string[]> = T extends readonly [
+  infer Head extends string,
+  ...infer Rest extends readonly string[],
+]
+  ? Rest extends readonly []
+    ? Head
+    : `${Head}, ${CommaSpaceJoined<Rest>}`
+  : string;
+
 /** Metrics where lower values are better — percentile is inverted */
 const LOWER_IS_BETTER: ReadonlySet<string> = new Set(["max_drawdown", "volatility"]);
 
