@@ -142,6 +142,9 @@ export const ENQUEUE_BOUND_MS = 180_000;
  * ENQUEUE_BOUND_MS, while this attempt's `enqueue_bound` panel was still shown.
  * Review fix round 1 (`no_result`, 167.2-REVIEW-SFH M-3): `unreadable`, the
  * poll cap was reached without one clean read in the attempt.
+ * Review fix round 2 (`unconfirmed`, 167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1):
+ * `chain_unreadable_persistent`, the gate's read came back DEGRADED for a
+ * deterministic cause (`degradedReason`), so a retry would read the same.
  */
 export type PanelStopReason =
   | "poll_cap"
@@ -150,6 +153,7 @@ export type PanelStopReason =
   | "enqueue_bound"
   | "chain_in_flight"
   | "chain_unreadable"
+  | "chain_unreadable_persistent"
   | "link_unverified"
   | "enqueue_late_started"
   | "unreadable";
@@ -198,15 +202,28 @@ export const PANEL_STOP_COPY = {
   // WR-06): the pre-attempt job-state gate refused the attempt. Neither says
   // the sync failed; both say it did not start, which is exactly what the card
   // knows (nothing was linked or enqueued).
+  // Review fix round 2 (167.2-REVIEW-R2 IN-02): the gate refuses on ANY
+  // in-flight chain job: `pending` (queued, not running), a `failed_retry`
+  // backoff, or a recurring `compute_analytics` / `derive_broker_dailies`
+  // row the owner never started. "A sync ... is still running" was false for
+  // most of those; this wording is true in every in-flight state.
   chain_in_flight: {
     label: "Sync not started",
     detail:
-      "This sync did not start: a sync for this strategy is still running. Try again once it has finished.",
+      "This sync did not start: this strategy still has a sync or computation in progress. Try again once it has finished.",
   },
   chain_unreadable: {
     label: "Sync not started",
     detail:
       "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.",
+  },
+  // Review fix round 2 (167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1): the route's
+  // DETERMINISTIC degrade causes. "Try again in a moment" is false there, so
+  // this names the path that works: support.
+  chain_unreadable_persistent: {
+    label: "Sync not started",
+    detail:
+      "This sync did not start: we cannot check whether this strategy has a sync in progress, and trying again will not change that. Contact support@quantalyze.com to start a sync.",
   },
   // Review fix round 1 (167.2-REVIEW-SFH M-1): the enqueue answered with
   // enqueue evidence after its bound. A job was queued, but the panel is not

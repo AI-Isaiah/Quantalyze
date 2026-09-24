@@ -28,7 +28,11 @@ import { isFactsheetJobInFlight } from "@/lib/compute-state";
 export type ChainJobRead =
   | { kind: "settled"; jobStatus: string | null }
   | { kind: "in_flight"; jobStatus: string }
-  | { kind: "unreadable"; reason: string };
+  // 167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1: `persistent` is true only for the
+  // route's DETERMINISTIC degrade causes (`degradedReason`), where a retry
+  // reads the same answer; the key card then names support rather than
+  // promising "in a moment".
+  | { kind: "unreadable"; reason: string; persistent?: boolean };
 
 /**
  * How long one read may take. The same class of request as the key card's
@@ -63,9 +67,20 @@ export async function readChainJobState(strategyId: string): Promise<ChainJobRea
       if (typeof body !== "object" || body === null || Array.isArray(body)) {
         return { kind: "unreadable", reason: "the body is not the projection" };
       }
-      const projection = body as { jobStatus?: unknown; degraded?: unknown };
+      const projection = body as {
+        jobStatus?: unknown;
+        degraded?: unknown;
+        degradedReason?: unknown;
+      };
       if (projection.degraded === true) {
-        return { kind: "unreadable", reason: "degraded read" };
+        return projection.degradedReason === "window_full" ||
+          projection.degradedReason === "bad_status"
+          ? {
+              kind: "unreadable",
+              reason: `degraded read (${projection.degradedReason})`,
+              persistent: true,
+            }
+          : { kind: "unreadable", reason: "degraded read" };
       }
       if (projection.jobStatus !== null && typeof projection.jobStatus !== "string") {
         return { kind: "unreadable", reason: "the body carries no jobStatus" };

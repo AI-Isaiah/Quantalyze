@@ -1227,7 +1227,15 @@ export function ApiKeyManager({
         }
         if (endAttempt(attempt)) {
           setSyncStatus("unconfirmed");
-          setPanelStopReason(gate.kind === "in_flight" ? "chain_in_flight" : "chain_unreadable");
+          // 167.2-REVIEW-R2 IN-04: a deterministic DEGRADED answer gets copy
+          // that names support instead of promising "in a moment".
+          setPanelStopReason(
+            gate.kind === "in_flight"
+              ? "chain_in_flight"
+              : gate.persistent
+                ? "chain_unreadable_persistent"
+                : "chain_unreadable",
+          );
           setSyncError(null);
         }
         return;

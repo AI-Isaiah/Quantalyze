@@ -914,7 +914,7 @@ describe("ApiKeyManager + the REAL poller: a link update that never answers is b
 describe("ApiKeyManager + the REAL job-state read: no attempt starts while a chain job is in flight (167.2-REVIEW CR-01 / WR-06)", () => {
   // Hand-typed from the UI-SPEC review-fix row KCS-GATE-INFLIGHT.
   const GATE_INFLIGHT =
-    "This sync did not start: a sync for this strategy is still running. Try again once it has finished.";
+    "This sync did not start: this strategy still has a sync or computation in progress. Try again once it has finished.";
 
   it("GATE-E2E: a Resync while the projection says running writes no link, sends no enqueue, and says why on the panel", async () => {
     mockState.jobStatuses = ["running"];
@@ -1028,5 +1028,63 @@ describe("ApiKeyManager: the Delete's membership read is bounded (167.2-REVIEW-R
     );
     expect(dialog).not.toHaveAttribute("open");
     expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled();
+  });
+});
+
+describe("ApiKeyManager + the REAL job-state read: a deterministic DEGRADED answer does not promise a retry (167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1)", () => {
+  // Hand-typed from the UI-SPEC round-2 rows.
+  const GATE_UNREADABLE =
+    "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.";
+  const GATE_PERSISTENT =
+    "This sync did not start: we cannot check whether this strategy has a sync in progress, and trying again will not change that. Contact support@quantalyze.com to start a sync.";
+
+  async function resyncAgainst(body: Record<string, unknown>) {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (/^\/api\/strategies\/[^/]+\/sync-progress$/.test(url)) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          json: async () => body,
+        });
+      }
+      return Promise.resolve(accepted());
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mockState.linkCount = 0;
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-h" />);
+    });
+    await tick(0);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Resync" }));
+    });
+    await tick(0);
+    return fetchMock;
+  }
+
+  it.each(["window_full", "bad_status"])(
+    "GATE-PERSISTENT: a DEGRADED body with degradedReason %s refuses with copy that names support and never says \"in a moment\"",
+    async (degradedReason) => {
+      const fetchMock = await resyncAgainst({
+        jobStatus: null,
+        stalled: false,
+        memberProgress: [],
+        degraded: true,
+        degradedReason,
+      });
+      expect(screen.getByText("Sync not started")).toBeInTheDocument();
+      expect(screen.getByText(GATE_PERSISTENT)).toBeInTheDocument();
+      expect(screen.queryByText(GATE_UNREADABLE)).not.toBeInTheDocument();
+      expect(mockState.linkCount).toBe(0);
+      expect(fetchMock.mock.calls.some(([url]) => url === "/api/keys/sync")).toBe(false);
+    },
+  );
+
+  it("GATE-TRANSIENT (CONTROL): a DEGRADED body with no reason (a failed read) keeps the \"in a moment\" copy", async () => {
+    await resyncAgainst({ jobStatus: null, stalled: false, memberProgress: [], degraded: true });
+    expect(screen.getByText(GATE_UNREADABLE)).toBeInTheDocument();
+    expect(screen.queryByText(GATE_PERSISTENT)).not.toBeInTheDocument();
   });
 });

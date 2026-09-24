@@ -903,6 +903,13 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
   // `jobStatus: null` as "no chain job in flight". Each case below is an
   // answer the route could not read, and each one used to be IDLE.
   const DEGRADED_BODY = '{"jobStatus":null,"stalled":false,"memberProgress":[],"degraded":true}';
+  // 167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1: the two DETERMINISTIC degrade
+  // stages name themselves (a closed, non-sensitive string), so the key card
+  // does not promise that "a moment" will help. A transient failure does not.
+  const DEGRADED_WINDOW_FULL_BODY =
+    '{"jobStatus":null,"stalled":false,"memberProgress":[],"degraded":true,"degradedReason":"window_full"}';
+  const DEGRADED_BAD_STATUS_BODY =
+    '{"jobStatus":null,"stalled":false,"memberProgress":[],"degraded":true,"degradedReason":"bad_status"}';
 
   it("M4-NOT-AN-ARRAY: an RPC answer with neither rows nor an error is DEGRADED, and captured", async () => {
     rpcResult.data = null;
@@ -917,7 +924,7 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
       Array.from({ length: n }, () => otherKindRow("reconcile_strategy", { status: "done" }));
     rpcQueue.push({ data: cron(100), error: null }, { data: cron(1000), error: null });
     const res = await call(TEST_STRATEGY_ID);
-    expect(JSON.stringify(await res.json())).toBe(DEGRADED_BODY);
+    expect(JSON.stringify(await res.json())).toBe(DEGRADED_WINDOW_FULL_BODY);
     expect(captureToSentryMock).toHaveBeenCalledTimes(1);
   });
 
@@ -944,7 +951,7 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
   it("M4-BAD-STATUS: a selected job whose status is outside the six-value domain is DEGRADED, and captured", async () => {
     rpcResult.data = [otherKindRow("process_key_long", { status: "exploded" })];
     const res = await call(TEST_STRATEGY_ID);
-    expect(JSON.stringify(await res.json())).toBe(DEGRADED_BODY);
+    expect(JSON.stringify(await res.json())).toBe(DEGRADED_BAD_STATUS_BODY);
     expect(captureToSentryMock).toHaveBeenCalledTimes(1);
   });
 

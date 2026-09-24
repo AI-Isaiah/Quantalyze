@@ -99,6 +99,7 @@ describe("PANEL_STOP_COPY covers exactly the pinned reasons", () => {
       [
         "chain_in_flight",
         "chain_unreadable",
+        "chain_unreadable_persistent",
         "enqueue_bound",
         "enqueue_late_started",
         "link_bound",
@@ -170,7 +171,7 @@ describe("KCS-GATE (167.2-REVIEW CR-01 / WR-06): the pre-attempt job-state gate 
   it("KCS-GATE-INFLIGHT: label and detail", () => {
     expect(PANEL_STOP_COPY.chain_in_flight.label).toBe("Sync not started");
     expect(PANEL_STOP_COPY.chain_in_flight.detail).toBe(
-      "This sync did not start: a sync for this strategy is still running. Try again once it has finished.",
+      "This sync did not start: this strategy still has a sync or computation in progress. Try again once it has finished.",
     );
   });
 
@@ -181,8 +182,16 @@ describe("KCS-GATE (167.2-REVIEW CR-01 / WR-06): the pre-attempt job-state gate 
     );
   });
 
+  it("KCS-GATE-UNREADABLE-PERSISTENT (167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1): label and detail", () => {
+    expect(PANEL_STOP_COPY.chain_unreadable_persistent.label).toBe("Sync not started");
+    expect(PANEL_STOP_COPY.chain_unreadable_persistent.detail).toBe(
+      "This sync did not start: we cannot check whether this strategy has a sync in progress, and trying again will not change that. Contact support@quantalyze.com to start a sync.",
+    );
+    expect(PANEL_STOP_COPY.chain_unreadable_persistent.detail).not.toMatch(/in a moment/i);
+  });
+
   it("neither gate line claims a failure the card cannot know", () => {
-    for (const reason of ["chain_in_flight", "chain_unreadable"] as const) {
+    for (const reason of ["chain_in_flight", "chain_unreadable", "chain_unreadable_persistent"] as const) {
       const { label, detail } = PANEL_STOP_COPY[reason];
       expect(`${label} ${detail}`).not.toMatch(/fail|error/i);
     }

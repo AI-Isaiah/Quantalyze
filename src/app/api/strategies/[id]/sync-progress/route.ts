@@ -69,6 +69,7 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { syncProgressLimiter, checkLimit } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import {
+  type DegradedReason,
   type MemberProgressEntry,
   type StitchJobStatus,
   type SyncProgressResponse,
@@ -190,7 +191,14 @@ export async function GET(
       //     (`deriveComputeState` calls that `unreadable`; this route used to
       //     call it IDLE, breaking its own module's rule);
       //   - the selected job's status is outside the six-value domain.
-      const degrade = (stage: string, message: string): NextResponse => {
+      // 167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1: a DETERMINISTIC cause names
+      // itself (`degradedReason`), so the key card's gate does not promise
+      // that trying again "in a moment" will help.
+      const degrade = (
+        stage: string,
+        message: string,
+        reason?: DegradedReason,
+      ): NextResponse => {
         console.error(
           `[api/strategies/sync-progress] ${stage} for ${id}: ${message}`,
         );
@@ -200,7 +208,7 @@ export async function GET(
         // SF-3: a 200 the poll never hard-fails on, flagged `degraded:true` so
         // the client keeps its last-known progress rather than treating a
         // couldn't-read as a real idle (empty panel / stalled:false).
-        return NextResponse.json(DEGRADED, {
+        return NextResponse.json(reason ? { ...DEGRADED, degradedReason: reason } : DEGRADED, {
           status: 200,
           headers: NO_STORE_HEADERS,
         });
@@ -231,6 +239,7 @@ export async function GET(
         return degrade(
           "compute-jobs-window-full",
           "the compute job window is full at the RPC cap with no factsheet-chain job in it",
+          "window_full",
         );
       }
 
@@ -270,6 +279,7 @@ export async function GET(
         return degrade(
           "compute-jobs-bad-status",
           "the selected compute job's status is outside the compute_jobs status domain",
+          "bad_status",
         );
       }
       const memberProgress: MemberProgressEntry[] = memberProgressOf(latest);

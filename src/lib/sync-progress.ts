@@ -117,7 +117,19 @@ export interface SyncProgressResponse {
    * degrade body until a real read arrives.
    */
   degraded?: boolean;
+  /**
+   * 167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1: present only on a DEGRADED body
+   * whose cause is DETERMINISTIC, so a reload or a retry gives the same
+   * answer: `window_full` (the job window is still full at the RPC cap with no
+   * factsheet-chain row) or `bad_status` (the selected job's status is outside
+   * the six-value domain). A closed, non-sensitive string. Absent on a
+   * transient degrade (a failed or thrown read) and on every real read.
+   */
+  degradedReason?: DegradedReason;
 }
+
+/** 167.2-REVIEW-R2 IN-04: the deterministic degrade causes (see `degradedReason`). */
+export type DegradedReason = "window_full" | "bad_status";
 
 /**
  * Stall threshold: a `running` job whose heartbeat
