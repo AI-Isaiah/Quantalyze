@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.90.0.1] - 2026-09-24 — the committed baseline catches up with the Phase 164.6 apply
+
+Same shape as v0.77.51.1 and v0.77.46.1: a read-only re-dump taken after a migration reached
+PRODUCTION, so the local-stack lane loads a dump that already carries it.
+
+### Changed
+- **`supabase/schema/baseline.sql` regenerated from PROD**, read-only `supabase db dump --linked`
+  taken by the founder AFTER Supabase Migrate run `36040151966` applied
+  `20260924120000_ledger_fanout_failure_count.sql` on merge commit `762c03c8`. sha256
+  `efe49c15…` → `b473ab7e…`, recorded in `BASELINE.md` with a dated section of what was measured.
+  Shape unchanged: 63 tables, 155 policies, 123 function statements, **0** data statements, as a
+  body-only `CREATE OR REPLACE` must leave it.
+- **`supabase/schema/baseline-carried-migrations.txt` regenerated in the same commit** (DECISION F)
+  from the tree of `762c03c8`: one migration added, sha line rebound.
+  `baseline-currency: carried=274 replay=0 marker-sha=match defects=0` — the lane's replay set is
+  back to zero.
+
+### Notes
+- **Secret-scanned before commit** with all five classes from `BASELINE.md`'s own command: **0**
+  matches; gitleaks over the file: no leaks; no home path or local username; one
+  `SET client_encoding`, no NUL bytes.
+- Gates re-run on the new dump: `dump-sql-functions.ts --check` current (121 functions, 0 ratcheted
+  disagreements); `baseline-content-drift` findings 0 (the three `[DRIFT-06]` allowlisted rows
+  unchanged, as expected).
+
 ## [0.90.0.0] - 2026-09-24 — GATEHYGIENE: a lost 40001 race is retried once, an inherited refresh marker is retracted, and a failed ledger fan-out candidate is counted, named and watched
 
 ⭐ **What changed for whoever reads this next.** Phase 164.6, pruned by the founder on 2026-09-17
