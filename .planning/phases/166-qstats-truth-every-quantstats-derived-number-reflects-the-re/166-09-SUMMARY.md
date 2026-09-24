@@ -214,6 +214,137 @@ unchanged. These rows come from the same two-tree method as the table above. Bef
 | beta | same pair | -1.9200000000000002 | None | same |
 | treynor | same pair | 0.07804666007757768 | absent | derived: skipped because beta is undefined |
 
+**Added 2026-09-25, code review round 2: corrected values on constant-yield inputs (CR-01 /
+SFH R2-HIGH-1 and its class, WR-01, WR-02, IN-02, IN-03).** None of the golden, parity or trigger
+fixtures moves: the full suite passes with them unchanged. Same two-tree method: before is the tree
+at `dcbd1749f` (round 1 complete), after is the round-2 fix tree. Values are read from
+`compute_all_metrics(r, b, periods_per_year=365)`, `sharpe_vol_status_from_backbone(r, 365)` and
+`compute_qstats_scalars(r, b)`; `backbone` is `(vol, sharpe, status)`.
+
+Fixture shapes. "NAV constant yield" is `pct_change` over `10000 * (1 + y) ** arange(367)` on
+daily dates, 366 returns, paired with a seeded normal(0.001, 0.03) benchmark; this is the way the
+platform takes returns from an equity or NAV curve, and its residue is about 1e-16 ABSOLUTE. The
+constant-series rows have no benchmark. Rolling series are the written 4-dp points.
+
+The cent-rounded NAV (1e6 start, 1% APY, real quantisation dispersion) was measured in the same
+run and moved on NO key: the over-reach side of the new floor holds.
+
+| metric key | fixture | before | after | reason |
+|---|---|---|---|---|
+| backbone | NAV constant yield, daily 1e-5 | `[2.431379697721842e-15, 1501205263597.9578, 'ok']` | `[0.0, None, 'zero_volatility']` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| alpha | NAV constant yield, daily 1e-5 | 0.0036500000000252524 | 0.0036500000000252407 | same snap: alpha is the annualized mean; the change is in the 16th digit |
+| beta | NAV constant yield, daily 1e-5 | 2.0084930846726158e-17 | 0.0 | CR-01 class: a constant strategy's covariance with any benchmark is exactly 0 |
+| btc_rolling_correlation_90d | NAV constant yield, daily 1e-5 | `series n=277 last=0.0214 max abs=0.0916` | `series n=0` | CR-01 class: a leg with no real dispersion defines no correlation |
+| correlation | NAV constant yield, daily 1e-5 | 0.004317663062306087 | None | CR-01 class: a leg with no real dispersion defines no correlation |
+| outlier_loss_ratio | NAV constant yield, daily 1e-5 | 0.0 | absent | CR-01 class: no day is an outlier of a residue std |
+| outlier_win_ratio | NAV constant yield, daily 1e-5 | 0.00273224043715847 | absent | CR-01 class: no day is an outlier of a residue std |
+| probabilistic_sharpe_ratio | NAV constant yield, daily 1e-5 | 1.0 | None | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| r_squared | NAV constant yield, daily 1e-5 | 1.8392601870855265e-05 | None | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| r_squared_status | NAV constant yield, daily 1e-5 | `ok` | `error` | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| smart_sharpe | NAV constant yield, daily 1e-5 | 890106162481.1398 | None | WR-01: the smart_sharpe divisor now clears the residue floor |
+| treynor | NAV constant yield, daily 1e-5 | 182559135494435.88 | absent | derived: cagr / beta is skipped because beta is 0 or undefined |
+| rolling_metrics.sharpe_30d | NAV constant yield, daily 1e-5 | `series n=337 last=1475094461158.6013 max abs=2356313733672.22` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| rolling_metrics.sharpe_365d | NAV constant yield, daily 1e-5 | `series n=2 last=1499150377535.2864 max abs=1499150377535.2864` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| rolling_metrics.sharpe_90d | NAV constant yield, daily 1e-5 | `series n=277 last=1565030313715.6946 max abs=1696236096247.681` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| sharpe | NAV constant yield, daily 1e-5 | 1501205263597.9578 | None | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| volatility | NAV constant yield, daily 1e-5 | 2.431379697721842e-15 | 0.0 | IN-02: the headline vol reports the true 0.0 the backbone reports |
+| backbone | NAV constant yield, daily 1e-4 | `[2.4418011490370317e-15, 14947982154235.418, 'ok']` | `[0.0, None, 'zero_volatility']` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| alpha | NAV constant yield, daily 1e-4 | 0.036499999999997215 | 0.03649999999999709 | same snap: alpha is the annualized mean; the change is in the 16th digit |
+| beta | NAV constant yield, daily 1e-4 | 2.1824716280061738e-16 | 0.0 | CR-01 class: a constant strategy's covariance with any benchmark is exactly 0 |
+| btc_rolling_correlation_90d | NAV constant yield, daily 1e-4 | `series n=277 last=-0.0263 max abs=0.1997` | `series n=0` | CR-01 class: a leg with no real dispersion defines no correlation |
+| correlation | NAV constant yield, daily 1e-4 | 0.046716414840324044 | None | CR-01 class: a leg with no real dispersion defines no correlation |
+| outlier_loss_ratio | NAV constant yield, daily 1e-4 | 0.0 | absent | CR-01 class: no day is an outlier of a residue std |
+| outlier_win_ratio | NAV constant yield, daily 1e-4 | 0.00273224043715847 | absent | CR-01 class: no day is an outlier of a residue std |
+| probabilistic_sharpe_ratio | NAV constant yield, daily 1e-4 | 1.0 | None | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| r_squared | NAV constant yield, daily 1e-4 | 0.002180720343982104 | None | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| r_squared_status | NAV constant yield, daily 1e-4 | `ok` | `error` | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| smart_sharpe | NAV constant yield, daily 1e-4 | 8648671718935.608 | None | WR-01: the smart_sharpe divisor now clears the residue floor |
+| treynor | NAV constant yield, daily 1e-4 | 170797769214223.44 | absent | derived: cagr / beta is skipped because beta is 0 or undefined |
+| rolling_metrics.sharpe_30d | NAV constant yield, daily 1e-4 | `series n=337 last=17900027723910.605 max abs=23563376624322.59` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| rolling_metrics.sharpe_365d | NAV constant yield, daily 1e-4 | `series n=2 last=14927898703134.416 max abs=14927898703134.416` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| rolling_metrics.sharpe_90d | NAV constant yield, daily 1e-4 | `series n=277 last=14863561383389.574 max abs=16630619506537.19` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| sharpe | NAV constant yield, daily 1e-4 | 14947982154235.418 | None | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| volatility | NAV constant yield, daily 1e-4 | 2.4418011490370317e-15 | 0.0 | IN-02: the headline vol reports the true 0.0 the backbone reports |
+| alpha | NAV constant yield, daily 1e-3 | 0.3649999999999583 | 0.3649999999999581 | same snap: alpha is the annualized mean; the change is in the 16th digit |
+| beta | NAV constant yield, daily 1e-3 | 4.4005895792056703e-16 | 0.0 | CR-01 class: a constant strategy's covariance with any benchmark is exactly 0 |
+| btc_rolling_correlation_90d | NAV constant yield, daily 1e-3 | `series n=277 last=0.128 max abs=0.276` | `series n=0` | CR-01 class: a leg with no real dispersion defines no correlation |
+| correlation | NAV constant yield, daily 1e-3 | 0.10069486182369787 | None | CR-01 class: a leg with no real dispersion defines no correlation |
+| outlier_loss_ratio | NAV constant yield, daily 1e-3 | 0.00273224043715847 | absent | CR-01 class: no day is an outlier of a residue std |
+| outlier_win_ratio | NAV constant yield, daily 1e-3 | 0.0 | absent | CR-01 class: no day is an outlier of a residue std |
+| r_squared | NAV constant yield, daily 1e-3 | 0.010150658281288322 | None | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| r_squared_status | NAV constant yield, daily 1e-3 | `ok` | `error` | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| smart_sharpe | NAV constant yield, daily 1e-3 | 87184917580157.45 | None | WR-01: the smart_sharpe divisor now clears the residue floor |
+| treynor | NAV constant yield, daily 1e-3 | 1003709972932027.2 | absent | derived: cagr / beta is skipped because beta is 0 or undefined |
+| rolling_metrics.sharpe_30d | NAV constant yield, daily 1e-3 | `series n=337 last=268693707815171.4 max abs=268693707815171.4` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| rolling_metrics.sharpe_365d | NAV constant yield, daily 1e-3 | `series n=2 last=159368661123371.0 max abs=159368661123371.0` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| rolling_metrics.sharpe_90d | NAV constant yield, daily 1e-3 | `series n=277 last=186282168322887.94 max abs=191234347967070.6` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| volatility | NAV constant yield, daily 1e-3 | 2.2842032712589038e-15 | 0.0 | IN-02: the headline vol reports the true 0.0 the backbone reports |
+| backbone | NAV constant yield, 1% APY | `[2.6268569742683366e-15, 3787974214330.88, 'ok']` | `[0.0, None, 'zero_volatility']` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| alpha | NAV constant yield, 1% APY | 0.009950466483263923 | 0.009950466483263695 | same snap: alpha is the annualized mean; the change is in the 16th digit |
+| beta | NAV constant yield, 1% APY | 3.8958494276646204e-16 | 0.0 | CR-01 class: a constant strategy's covariance with any benchmark is exactly 0 |
+| btc_rolling_correlation_90d | NAV constant yield, 1% APY | `series n=277 last=0.0653 max abs=0.2544` | `series n=0` | CR-01 class: a leg with no real dispersion defines no correlation |
+| correlation | NAV constant yield, 1% APY | 0.07751699516436995 | None | CR-01 class: a leg with no real dispersion defines no correlation |
+| outlier_loss_ratio | NAV constant yield, 1% APY | 0.00273224043715847 | absent | CR-01 class: no day is an outlier of a residue std |
+| outlier_win_ratio | NAV constant yield, 1% APY | 0.00273224043715847 | absent | CR-01 class: no day is an outlier of a residue std |
+| probabilistic_sharpe_ratio | NAV constant yield, 1% APY | 1.0 | None | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| r_squared | NAV constant yield, 1% APY | 0.006007679852099985 | None | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| r_squared_status | NAV constant yield, 1% APY | `ok` | `error` | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| smart_sharpe | NAV constant yield, 1% APY | 1992404678497.9734 | None | WR-01: the smart_sharpe divisor now clears the residue floor |
+| treynor | NAV constant yield, 1% APY | 25739018803711.668 | absent | derived: cagr / beta is skipped because beta is 0 or undefined |
+| rolling_metrics.sharpe_30d | NAV constant yield, 1% APY | `series n=337 last=3544391592348.0967 max abs=6423872869081.718` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| rolling_metrics.sharpe_365d | NAV constant yield, 1% APY | `series n=2 last=3782766746711.419 max abs=3782766746711.419` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| rolling_metrics.sharpe_90d | NAV constant yield, 1% APY | `series n=277 last=3500761846324.43 max abs=4615209768381.003` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| sharpe | NAV constant yield, 1% APY | 3787974214330.88 | None | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| volatility | NAV constant yield, 1% APY | 2.6268569742683366e-15 | 0.0 | IN-02: the headline vol reports the true 0.0 the backbone reports |
+| backbone | NAV constant yield, 3% APY | `[2.7011894692384058e-15, 10943326816220.43, 'ok']` | `[0.0, None, 'zero_volatility']` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| alpha | NAV constant yield, 3% APY | 0.029559999154409128 | 0.029559999154408878 | same snap: alpha is the annualized mean; the change is in the 16th digit |
+| beta | NAV constant yield, 3% APY | 4.326826376020715e-16 | 0.0 | CR-01 class: a constant strategy's covariance with any benchmark is exactly 0 |
+| btc_rolling_correlation_90d | NAV constant yield, 3% APY | `series n=277 last=0.0672 max abs=0.1864` | `series n=0` | CR-01 class: a leg with no real dispersion defines no correlation |
+| correlation | NAV constant yield, 3% APY | 0.08372316043514713 | None | CR-01 class: a leg with no real dispersion defines no correlation |
+| outlier_loss_ratio | NAV constant yield, 3% APY | 0.00819672131147541 | absent | CR-01 class: no day is an outlier of a residue std |
+| outlier_win_ratio | NAV constant yield, 3% APY | 0.0 | absent | CR-01 class: no day is an outlier of a residue std |
+| probabilistic_sharpe_ratio | NAV constant yield, 3% APY | 1.0 | None | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| r_squared | NAV constant yield, 3% APY | 0.0070129509531238025 | None | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| r_squared_status | NAV constant yield, 3% APY | `ok` | `error` | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| smart_sharpe | NAV constant yield, 3% APY | 5921550291879.501 | None | WR-01: the smart_sharpe divisor now clears the residue floor |
+| treynor | NAV constant yield, 3% APY | 69527670568824.15 | absent | derived: cagr / beta is skipped because beta is 0 or undefined |
+| rolling_metrics.sharpe_30d | NAV constant yield, 3% APY | `series n=337 last=10420623066301.13 max abs=15320137572498.83` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| rolling_metrics.sharpe_365d | NAV constant yield, 3% APY | `series n=2 last=10928348175379.492 max abs=10928348175379.492` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| rolling_metrics.sharpe_90d | NAV constant yield, 3% APY | `series n=277 last=11113406350369.324 max abs=12209405111346.285` | `series n=0` | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| sharpe | NAV constant yield, 3% APY | 10943326816220.43 | None | CR-01: the residue floor is absolute (`max(1, abs(mean))`) |
+| volatility | NAV constant yield, 3% APY | 2.7011894692384058e-15 | 0.0 | IN-02: the headline vol reports the true 0.0 the backbone reports |
+| outlier_loss_ratio | constant `0.001`, 250 business days | 0.0 | absent | CR-01 class: no day is an outlier of a residue std |
+| outlier_win_ratio | constant `0.001`, 250 business days | 0.0 | absent | CR-01 class: no day is an outlier of a residue std |
+| smart_sharpe | constant `0.001`, 250 business days | 4620826545062588.0 | None | WR-01: the smart_sharpe divisor now clears the residue floor |
+| volatility | constant `0.001`, 250 business days | 4.151041085121522e-18 | 0.0 | IN-02: the headline vol reports the true 0.0 the backbone reports |
+| outlier_loss_ratio | constant `-0.002`, 250 business days | 0.0 | absent | CR-01 class: no day is an outlier of a residue std |
+| outlier_win_ratio | constant `-0.002`, 250 business days | 0.0 | absent | CR-01 class: no day is an outlier of a residue std |
+| smart_sharpe | constant `-0.002`, 250 business days | -4620826545062588.0 | None | WR-01: the smart_sharpe divisor now clears the residue floor |
+| volatility | constant `-0.002`, 250 business days | 8.302082170243044e-18 | 0.0 | IN-02: the headline vol reports the true 0.0 the backbone reports |
+| alpha | normal(0.001, 0.02) strategy vs a NAV constant-yield benchmark (daily 1e-4) | 325699048869.4812 | None | CR-01 on the benchmark leg: no benchmark variance, beta undefined (D-09) |
+| beta | normal(0.001, 0.02) strategy vs a NAV constant-yield benchmark (daily 1e-4) | -8923261612872.568 | None | CR-01 on the benchmark leg: no benchmark variance, beta undefined (D-09) |
+| btc_rolling_correlation_90d | normal(0.001, 0.02) strategy vs a NAV constant-yield benchmark (daily 1e-4) | `series n=277 last=0.1428 max abs=0.2445` | `series n=0` | CR-01 class: a leg with no real dispersion defines no correlation |
+| correlation | normal(0.001, 0.02) strategy vs a NAV constant-yield benchmark (daily 1e-4) | -0.056475605054501075 | None | CR-01 class: a leg with no real dispersion defines no correlation |
+| r_squared | normal(0.001, 0.02) strategy vs a NAV constant-yield benchmark (daily 1e-4) | 0.003189493966271988 | None | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| r_squared_status | normal(0.001, 0.02) strategy vs a NAV constant-yield benchmark (daily 1e-4) | `ok` | `error` | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| treynor | normal(0.001, 0.02) strategy vs a NAV constant-yield benchmark (daily 1e-4) | 3.713650604523686e-14 | absent | derived: cagr / beta is skipped because beta is 0 or undefined |
+| rolling_alpha | normal(0.001, 0.02) strategy vs a NAV constant-yield benchmark (daily 1e-4) | `series n=277 last=-2014899532.2055 max abs=4312295378.8856` | `n=0` | CR-01 class: a benchmark window with no real dispersion defines no rolling beta |
+| rolling_beta | normal(0.001, 0.02) strategy vs a NAV constant-yield benchmark (daily 1e-4) | `series n=277 last=20148995322077.7 max abs=43122953788857.71` | `n=0` | CR-01 class: a benchmark window with no real dispersion defines no rolling beta |
+| r_squared | normal(0.001, 0.01) strategy vs a constant `0.001` benchmark, 250 days | 3.2331068047350337e-34 | None | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| r_squared_status | normal(0.001, 0.01) strategy vs a constant `0.001` benchmark, 250 days | `ok` | `error` | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| r_squared | same strategy vs a constant `0.0005` benchmark | 3.2331068047350337e-34 | None | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| r_squared_status | same strategy vs a constant `0.0005` benchmark | `ok` | `error` | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| r_squared | same strategy vs a constant `-0.002` benchmark | 3.2331068047350337e-34 | None | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| r_squared_status | same strategy vs a constant `-0.002` benchmark | `ok` | `error` | WR-02: the pair defines no R^2 and is asked first; `linregress` only tests an exact 0 variance |
+| r_squared | a 2-row pair | 0.9999999999999996 | None | WR-02: two rows fix the line through both points, so R^2 is 1 whatever the data (0 residual degrees of freedom) |
+| r_squared_status | a 2-row pair | `ok` | `error` | WR-02: two rows fix the line through both points, so R^2 is 1 whatever the data (0 residual degrees of freedom) |
+| r_squared | naive strategy vs an Asia/Tokyo benchmark, 200 days | 0.009044845791604503 | None | IN-03: the pair labels its days in two zones and is refused by name, where it was paired one day apart |
+| r_squared_status | naive strategy vs an Asia/Tokyo benchmark, 200 days | `ok` | `error` | IN-03: the pair labels its days in two zones and is refused by name, where it was paired one day apart |
+
+Two keys moved only in the 16th significant digit: `alpha` on the NAV constant-yield rows (the
+strategy leg's beta is now exactly 0.0, so alpha is `mean * periods` with no `- beta * mean(b)`
+residue term). They are listed for completeness, not because they are visible.
+
 The TypeScript tests that read the golden were run at HEAD through the D-19 `node_modules` link:
 `metrics-parity.test.ts`, `metrics-parity-helper.test.ts`, `MetricPanel.types.test.ts` and
 `contracts-registry.test.ts` gave `Test Files 4 passed (4)` / `Tests 101 passed (101)`. The link
