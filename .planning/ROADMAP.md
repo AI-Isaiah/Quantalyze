@@ -2955,6 +2955,22 @@ Plans:
 
 - the SUMMARY passed the planning-hygiene check while staged, before it was committed
 
+### Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go (INSERTED)
+
+**Goal:** Every persisted `strategy_analytics` row that Phase 166 changes is recomputed on PROD, so stored numbers match what the fixed code would produce. The same fabricated-ratio class is also closed outside quantstats: exact `== 0` / `> 0` standard-deviation guards.
+**Requirements**: Phase 166 OPEN-2 (founder answer 2026-09-24: "Recompute affected rows after merge", AskUserQuestion). The round-2 fixer measured the non-quantstats sites.
+**Depends on:** Phase 166
+**Plans:** 0 plans
+
+## Success Criteria
+1. **Census first.** The five read-only census SELECTs in `166-09-SUMMARY.md` run on PROD. The founder runs them, or they run read-only and are recorded as counts only. The recompute set is derived from them.
+2. **Normal job path.** Affected rows are recomputed through the normal compute-job path, never by a hand-written UPDATE. Each is verified against the D-10 before/after rows, and the rendered rolling alpha/beta chart and greeks table show the new values.
+3. **Exact-zero guards close.** They exist today in `portfolio_optimizer.py`, `csv_validator.py`, `allocated_capital.py`, `equity_reconstruction.py` and `optimizer.py`. They move to the relative dispersion floor (`_dispersion_is_residue` semantics), and each gets a red test built from a compounding-NAV constant yield.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 166.1 to break down)
+
 ### Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error
 
 **Goal:** A customer whose venue credentials stopped working is TOLD — in the product, on the surface where they notice the symptom — that the credential is the reason their factsheet stopped updating, and is nudged to reconnect. Key rotation is a NORMAL, recurring customer action, not an incident: the system must treat "your key no longer works" as an expected state it reports plainly, rather than a silent stall the customer discovers weeks later.
