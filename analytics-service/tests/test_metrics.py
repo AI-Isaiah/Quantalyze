@@ -1376,17 +1376,22 @@ def test_qstats_scalars_logs_warning_on_qs_failure(golden_returns, caplog, monke
 def test_qstats_scalars_r_squared_status_error_on_qs_failure(
     golden_returns, benchmark_returns, monkeypatch
 ):
-    """Audit 2026-05-07 H-0718: when a benchmark IS present but qs.stats.r_squared
-    raises, the companion `r_squared_status` field must be 'error' (not 'no_benchmark'
-    and not 'ok'). This is the disambiguation that lets operators see the failure
-    state without trawling logs.
+    """Audit 2026-05-07 H-0718: when a benchmark IS present but the r_squared
+    computation raises, the companion `r_squared_status` field must be 'error'
+    (not 'no_benchmark' and not 'ok'). This is the disambiguation that lets
+    operators see the failure state without trawling logs.
+
+    Phase 166 plan 05: r_squared is the inline mirror `_r_squared`, so the fault
+    is injected into the regression it calls, `linregress` (imported at module
+    scope in services/metrics.py), rather than into `qs.stats.r_squared`, which
+    production no longer calls.
     """
     import services.metrics as metrics_module
 
-    def boom_r_squared(_returns, _benchmark):
-        raise RuntimeError("simulated qs.stats.r_squared failure")
+    def boom_linregress(_x, _y):
+        raise RuntimeError("simulated linregress failure")
 
-    monkeypatch.setattr(metrics_module.qs.stats, "r_squared", boom_r_squared)
+    monkeypatch.setattr(metrics_module, "linregress", boom_linregress)
 
     result = compute_qstats_scalars(golden_returns, benchmark_returns)
     assert result["r_squared"] is None
@@ -1396,17 +1401,21 @@ def test_qstats_scalars_r_squared_status_error_on_qs_failure(
 def test_qstats_scalars_r_squared_status_error_when_qs_returns_nan(
     golden_returns, benchmark_returns, monkeypatch
 ):
-    """Red-team F7: qs.stats.r_squared may RETURN NaN/Inf (not raise) — e.g.
+    """Red-team F7: the regression may RETURN a NaN r-value (not raise) — e.g.
     zero-variance benchmark, degenerate covariance. `_safe_float` collapses
     that to None, but the previous code unconditionally set status='ok'.
     Status must be 'error' whenever the final r_squared value is None.
+
+    Phase 166 plan 05: re-targeted from `qs.stats.r_squared` to the
+    `linregress` call inside the `_r_squared` mirror. The fake returns the same
+    5-tuple shape, with a NaN r-value in position 2.
     """
     import services.metrics as metrics_module
 
-    def nan_r_squared(_returns, _benchmark):
-        return float("nan")
+    def nan_linregress(_x, _y):
+        return (float("nan"), float("nan"), float("nan"), float("nan"), float("nan"))
 
-    monkeypatch.setattr(metrics_module.qs.stats, "r_squared", nan_r_squared)
+    monkeypatch.setattr(metrics_module, "linregress", nan_linregress)
 
     result = compute_qstats_scalars(golden_returns, benchmark_returns)
     assert result["r_squared"] is None
@@ -3426,4 +3435,145 @@ def test_q166_psr_is_defined_for_a_steadily_winning_series():
     ]
     assert psr is not None and psr > 0.5, (
         f"probabilistic_sharpe_ratio={psr} for a series that never lost a day"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 plan 05: the SCALAR benchmark leg (r_squared, greeks alpha/beta).
+#
+# quantstats 0.0.81 runs every benchmark through `_prepare_benchmark` ->
+# `_prepare_returns` unconditionally, so no `prepare_returns=` keyword closes
+# the price guess on that leg (research Q2). The benchmark trigger below is an
+# all-non-negative benchmark with a +150% day, which live quantstats re-reads
+# as a price series and `pct_change`s.
+# ---------------------------------------------------------------------------
+
+
+def _q166_benchmark_trigger() -> tuple[pd.Series, pd.Series]:
+    """(strategy, benchmark) on the same 250 business days from 2024-01-01.
+
+    The strategy is benign (mixed sign). The benchmark is `[1.5]` followed by a
+    decaying positive tail: never negative and with max > 1, which is exactly
+    quantstats' price-detection condition. Research Q4 measured live 0.0.81 on
+    this pair: r_squared 0.006670639650444322, beta -0.015400848308443902,
+    alpha 0.12212418616146373 (periods 252).
+    """
+    idx = pd.bdate_range("2024-01-01", periods=250)
+    strategy = pd.Series(
+        np.random.default_rng(15905).normal(0.0006, 0.013, 250), index=idx
+    )
+    benchmark = pd.Series(np.r_[1.5, np.linspace(0.02, 0.001, 249)], index=idx)
+    return strategy, benchmark
+
+
+def _q166_calendar_mismatch() -> tuple[pd.Series, pd.Series]:
+    """(weekday strategy, 7-day benchmark) over DIFFERENT calendars.
+
+    The strategy trades business days only (160 rows). The benchmark trades
+    every calendar day and starts earlier and ends later. `set(period) !=
+    set(benchmark.index)`, so quantstats' `_prepare_benchmark` takes its
+    reindex/bfill branch. Production hits that branch on every benchmarked
+    strategy: `compute_qstats_scalars` receives the unaligned ~1000-day BTC
+    series (research Q3, Pitfall 3). Both legs are benign.
+    """
+    s_idx = pd.bdate_range("2024-02-01", periods=160)
+    strategy = pd.Series(
+        np.random.default_rng(16605).normal(0.0005, 0.012, len(s_idx)), index=s_idx
+    )
+    b_idx = pd.date_range("2024-01-01", "2024-12-31", freq="D")
+    benchmark = pd.Series(
+        np.random.default_rng(16606).normal(0.0004, 0.03, len(b_idx)), index=b_idx
+    )
+    return strategy, benchmark
+
+
+def test_q166_benchmark_trigger_actually_trips_the_heuristic():
+    """ANTI-VACUITY: the benchmark leg meets quantstats' price condition
+    (min >= 0 and max > 1) and the strategy leg does not, so any value the
+    tests below see move is the benchmark guess and nothing else."""
+    strategy, benchmark = _q166_benchmark_trigger()
+    assert benchmark.min() >= 0 and benchmark.max() > 1
+    assert strategy.min() < 0
+
+
+def test_q166_benchmark_r_squared_is_the_squared_correlation():
+    """ECONOMIC ANCHOR: the R-squared of a one-regressor OLS is the squared
+    Pearson correlation of the pair. On the trigger the two legs share one
+    index, so the pair is the raw series as given.
+
+    Pre-mirror: live quantstats returned 0.006670639650444322, because it
+    `pct_change`d the benchmark first (research Q4).
+    """
+    strategy, benchmark = _q166_benchmark_trigger()
+    expected = float(strategy.corr(benchmark)) ** 2
+    actual = compute_qstats_scalars(strategy, benchmark)["r_squared"]
+    assert actual is not None
+    assert actual == pytest.approx(expected, rel=1e-12, abs=0.0), (
+        f"r_squared={actual}; squared correlation of the raw pair is {expected}"
+    )
+
+
+def test_q166_benchmark_r_squared_reaches_metrics_json():
+    """The persisted value, not only the helper's, is the squared correlation."""
+    strategy, benchmark = _q166_benchmark_trigger()
+    expected = float(strategy.corr(benchmark)) ** 2
+    mj = compute_all_metrics(strategy, benchmark)["metrics_json"]
+    assert mj["r_squared"] == pytest.approx(expected, rel=1e-12, abs=0.0), (
+        f"persisted r_squared={mj['r_squared']}; squared correlation is {expected}"
+    )
+
+
+def test_q166_benchmark_r_squared_is_pair_permutation_invariant():
+    """FORMULA-FREE DETECTOR: R-squared depends on the set of (r, b) PAIRS, not
+    their order. The price guess is a `pct_change` of the benchmark, which does
+    depend on order, so a guessing implementation moves under a joint
+    permutation."""
+    strategy, benchmark = _q166_benchmark_trigger()
+    perm = np.random.default_rng(4242).permutation(len(strategy))
+    s2 = pd.Series(strategy.to_numpy()[perm], index=strategy.index)
+    b2 = pd.Series(benchmark.to_numpy()[perm], index=strategy.index)
+    original = compute_qstats_scalars(strategy, benchmark)["r_squared"]
+    shuffled = compute_qstats_scalars(s2, b2)["r_squared"]
+    assert original is not None and shuffled is not None
+    assert shuffled == pytest.approx(original, rel=1e-9, abs=0.0), (
+        f"r_squared changed under a joint pair permutation: {original} -> {shuffled}"
+    )
+
+
+_Q166_R_SQUARED_PARITY_PAIRS = (
+    "golden_with_benchmark",
+    "calendar_mismatch",
+    "golden_with_nan_days_and_benchmark",
+)
+
+
+def _q166_benchmark_pair(
+    name: str, request: pytest.FixtureRequest
+) -> tuple[pd.Series, pd.Series]:
+    if name == "calendar_mismatch":
+        return _q166_calendar_mismatch()
+    golden = request.getfixturevalue("golden_returns")
+    bench = request.getfixturevalue("benchmark_returns")
+    if name == "golden_with_benchmark":
+        return golden, bench
+    if name == "golden_with_nan_days_and_benchmark":
+        return _q166_golden_with_nan_days(golden), bench
+    raise AssertionError(f"unknown pair {name!r}")
+
+
+@pytest.mark.parametrize("pair_name", _Q166_R_SQUARED_PARITY_PAIRS)
+def test_q166_parity_r_squared_matches_live_quantstats(pair_name, request):
+    """BENIGN PARITY (D-08), one collected case per pair. Neither leg can trip
+    the guess, so the mirror must equal live 0.0.81 `r_squared` to rel 1e-12.
+    `calendar_mismatch` exercises the reindex/bfill branch of
+    `_prepare_benchmark`: a mirror that aligned on the inner join instead would
+    move r_squared for every benchmarked strategy (Pitfall 3)."""
+    strategy, benchmark = _q166_benchmark_pair(pair_name, request)
+    for leg in (strategy, benchmark):
+        assert not bool(leg.min() >= 0 and leg.max() > 1), "fixture would trip the guess"
+    expected = _safe_float(qs.stats.r_squared(strategy, benchmark))
+    actual = compute_qstats_scalars(strategy, benchmark)["r_squared"]
+    assert expected is not None
+    assert actual == pytest.approx(expected, rel=1e-12, abs=0.0), (
+        f"r_squared on {pair_name} drifted from live quantstats 0.0.81: {actual} vs {expected}"
     )

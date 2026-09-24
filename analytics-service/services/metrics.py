@@ -7,7 +7,7 @@ from collections.abc import Callable, ItemsView, KeysView, ValuesView
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
-from scipy.stats import norm
+from scipy.stats import linregress, norm
 
 from .transforms import downsample_series, cap_data_points
 from .nav_twr import cumulative_twr_segmented, _last_interior_break_suffix
@@ -883,6 +883,110 @@ def _cpc_index(r: pd.Series) -> float:
         * qs.stats.win_rate(p, prepare_returns=False)
         * _payoff_ratio_no_guess(p)
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 plan 05: the SCALAR benchmark leg.
+#
+# quantstats 0.0.81 ``r_squared`` and ``greeks`` both run the benchmark through
+# ``_utils._prepare_benchmark``, which ends in ``_prepare_returns`` and never
+# receives the caller's ``prepare_returns=`` keyword. So no keyword closes the
+# price guess on the benchmark leg (research Q2). Both are inline here, built on
+# ``_align_benchmark_like_qs``. Plan 166-06 reuses that primitive for the
+# rolling leg.
+# ---------------------------------------------------------------------------
+
+
+def _tz_naive_like_qs(s: pd.Series) -> pd.Series:
+    """The tz normalisation step of quantstats 0.0.81 ``_prepare_benchmark`` and ``_prepare_returns``, verbatim.
+
+    0.0.81::
+
+        if hasattr(benchmark.index, 'tz') and benchmark.index.tz is not None:
+            benchmark = benchmark.tz_convert('UTC').tz_localize(None)
+    """
+    if hasattr(s.index, "tz") and s.index.tz is not None:
+        s = s.tz_convert("UTC").tz_localize(None)
+    return s
+
+
+def _align_benchmark_like_qs(benchmark: pd.Series, period: pd.Index) -> pd.Series:
+    """quantstats 0.0.81 ``_utils._prepare_benchmark(benchmark, period, prepare_returns=True)`` MINUS the price guess.
+
+    0.0.81 BODY (Series benchmark, DatetimeIndex period, rf=0)::
+
+        if set(period) != set(benchmark.index):
+            benchmark_prices = to_prices(benchmark, base=1)
+            new_index = date_range(start=period[0], end=period[-1], freq="D")
+            benchmark = (benchmark_prices.reindex(new_index, method="bfill")
+                         .reindex(period).pct_change(fill_method=None).fillna(0))
+            benchmark = benchmark[benchmark.index.isin(period)]
+        <tz normalisation>
+        return _prepare_returns(benchmark.dropna(), rf=rf)
+
+    ``to_prices(x, base=1)`` is ``1 + 1 * compsum(x.fillna(0).replace(±inf, NaN))``
+    and ``compsum(x)`` is ``x.add(1).cumprod() - 1``. The final
+    ``_prepare_returns`` becomes ``_prepared_returns_no_guess``: that is the
+    only change, and it is the guess.
+
+    THE REINDEX BRANCH IS KEPT ON PURPOSE (Pitfall 3). ``compute_qstats_scalars``
+    receives the UNALIGNED strategy series and the ~1000-day BTC benchmark, so
+    the set equality is false for every benchmarked strategy and this branch
+    runs for all of them. Aligning on an inner join instead would move
+    ``r_squared`` for everyone. That would be a convention change, not a
+    closure.
+
+    WHY NOT CALL THE PRIVATE SYMBOL: ``_prepare_benchmark(..., prepare_returns=False)``
+    would also skip the guess, but it would put a private quantstats symbol into
+    production money math and into the D-14 gate's allowlist, and it would break
+    silently on any quantstats refactor (research "Alternatives Considered").
+    These lines of pandas are the whole of it.
+    """
+    if set(period) != set(benchmark.index):
+        cleaned = benchmark.copy().fillna(0).replace([np.inf, -np.inf], float("NaN"))
+        benchmark_prices = 1 + 1 * (cleaned.add(1).cumprod(axis=0) - 1)
+        new_index = pd.date_range(start=period[0], end=period[-1], freq="D")
+        benchmark = (
+            benchmark_prices.reindex(new_index, method="bfill")
+            .reindex(period)
+            .pct_change(fill_method=None)
+            .fillna(0)
+        )
+        benchmark = benchmark[benchmark.index.isin(period)]
+    benchmark = _tz_naive_like_qs(benchmark)
+    return _prepared_returns_no_guess(benchmark.dropna())
+
+
+def _r_squared(returns: pd.Series, benchmark: pd.Series) -> float:
+    """quantstats 0.0.81 ``r_squared`` minus the price guess, on BOTH legs.
+
+    WHY INLINE: ``r_squared(r, b, prepare_returns=False)`` closes the strategy
+    leg only. The benchmark goes through ``_prepare_benchmark`` twice, and each
+    pass ends in ``_prepare_returns`` with the guess (research Q2). On the
+    benchmark trigger (an all-non-negative benchmark with a +150% day) live
+    quantstats returned 0.006670639650444322. The squared correlation of the
+    raw pair is 0.0037210240094842067.
+
+    MATH PARITY (0.0.81 body)::
+
+        returns = _prepare_returns(returns)
+        benchmark = _prepare_benchmark(benchmark, returns.index)
+        _, _, r_val, _, _ = linregress(returns, _prepare_benchmark(benchmark, returns.index))
+        return r_val ** 2
+
+    The benchmark is prepared TWICE, against the unaligned series, exactly as
+    0.0.81 does, so benign benchmarked strategies stay bit-identical. ``linregress``
+    is the function quantstats imports. ``np.corrcoef`` is algebraically equal
+    but not bit-identical to the golden, so it is not used.
+
+    NaN CONVENTION: ``P(r)`` (fillna(0)), plus the tz step of 0.0.81
+    ``_prepare_returns``, because the prepared strategy index is the period the
+    benchmark is aligned to.
+    """
+    p = _tz_naive_like_qs(_prepared_returns_no_guess(returns))
+    b = _align_benchmark_like_qs(benchmark, p.index)
+    _, _, r_val, _, _ = linregress(p, _align_benchmark_like_qs(b, p.index))
+    return float(r_val**2)
 
 
 # H-0710 / H-0713 / H-0723 dispatch table: (result_key, callable). Each callable
@@ -2313,7 +2417,7 @@ def compute_qstats_scalars(
     # not promise 'ok' when r_squared is actually None.
     if benchmark is not None and len(benchmark) > 0:
         try:
-            r_squared_val = _safe_float(qs.stats.r_squared(returns, benchmark))
+            r_squared_val = _safe_float(_r_squared(returns, benchmark))
             result["r_squared"] = r_squared_val
             result["r_squared_status"] = "ok" if r_squared_val is not None else "error"
         except Exception as exc:  # noqa: BLE001
