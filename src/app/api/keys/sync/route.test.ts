@@ -120,6 +120,11 @@ const {
     // IN-04 (164.6 review fix): a read that never settles, so the bounded
     // retraction's budget is the only thing that can end the wait.
     hang: false,
+    // L2 (164.6 round 2): while `hang` is set, the hung read's resolver, so a
+    // test can settle it AFTER the budget has already answered the 202.
+    settleLate: undefined as
+      | ((v: { data: null; error: { message: string; code?: string } }) => void)
+      | undefined,
   },
   computeJobsUpdateResult: { error: null as { message: string; code?: string } | null },
   mockComputeJobsUpdate: vi.fn(),
@@ -273,7 +278,9 @@ vi.mock("@/lib/supabase/admin", () => ({
             eq: (_col: string, _val: unknown) => ({
               maybeSingle: () =>
                 computeJobsRead.hang
-                  ? new Promise(() => {})
+                  ? new Promise((resolve) => {
+                      computeJobsRead.settleLate = resolve;
+                    })
                   : Promise.resolve({
                       data: computeJobsRead.data,
                       error: computeJobsRead.error,
@@ -400,6 +407,7 @@ describe("POST /api/keys/sync", () => {
     computeJobsRead.data = { metadata: { source: "keys/sync" } };
     computeJobsRead.error = null;
     computeJobsRead.hang = false;
+    computeJobsRead.settleLate = undefined;
     computeJobsUpdateResult.error = null;
 
     // Default mock implementations
@@ -1021,6 +1029,86 @@ describe("POST /api/keys/sync", () => {
           vi.useRealTimers();
           errSpy.mockRestore();
         }
+      });
+
+      // L2 (164.6 round 2): past the budget the race has already settled, so a
+      // retraction that FAILS later used to be discarded without a word. The
+      // marker may then be in place for a known reason that nobody saw. The
+      // late failure is LOUD under its OWN `_late` tag, with its SQLSTATE.
+      it("a retraction that fails AFTER the budget answered 202 is still LOUD under a _late tag, with its code", async () => {
+        composite();
+        computeJobsRead.hang = true;
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const { captureToSentry } = await import("@/lib/sentry-capture");
+        const { POST } = await import("./route");
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          const pending = POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+          await vi.advanceTimersByTimeAsync(5_000);
+          const res = await pending;
+          expect(res.status).toBe(202);
+          // PRECONDITION: before the late failure nothing is reported as late,
+          // so the assertions below can only be satisfied by that failure.
+          expect(errSpy).not.toHaveBeenCalledWith(
+            expect.stringContaining("failed late"),
+            expect.anything(),
+          );
+          expect(computeJobsRead.settleLate, "the hung read must expose its resolver").toBeDefined();
+
+          computeJobsRead.settleLate!({
+            data: null,
+            error: { message: "canceling statement due to statement timeout", code: "57014" },
+          });
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(errSpy).toHaveBeenCalledWith(
+            expect.stringContaining("composite refresh-marker retraction failed late"),
+            expect.anything(),
+          );
+          expect(errSpy).toHaveBeenCalledWith(
+            expect.stringContaining("(code=57014)"),
+            expect.anything(),
+          );
+          expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+            expect.any(Error),
+            expect.objectContaining({
+              tags: { op: "keys-sync.composite_refresh_marker_retract_late" },
+              extra: {
+                strategy_id: TEST_STRATEGY_ID,
+                job_id: TEST_JOB_ID,
+                correlation_id: TEST_CORRELATION_ID,
+              },
+            }),
+          );
+          // An in-time failure is reported ONCE, by the route's own catch, and
+          // never a second time as late.
+          expect(
+            vi.mocked(captureToSentry).mock.calls.filter(
+              ([, ctx]) => (ctx as { tags?: { op?: string } })?.tags?.op === "keys-sync.composite_refresh_marker_retract",
+            ),
+          ).toHaveLength(0);
+        } finally {
+          vi.useRealTimers();
+          errSpy.mockRestore();
+        }
+      });
+
+      it("a retraction that fails IN TIME is reported once by the route's catch, never also as late", async () => {
+        composite();
+        computeJobsRead.data = { metadata: { source: "ledger-refresh-composite" } };
+        computeJobsUpdateResult.error = { message: "update denied", code: "42501" };
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const { captureToSentry } = await import("@/lib/sentry-capture");
+        const { POST } = await import("./route");
+        const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+        await new Promise((r) => setTimeout(r, 0));
+        expect(res.status).toBe(202);
+        const ops = vi
+          .mocked(captureToSentry)
+          .mock.calls.map(([, ctx]) => (ctx as { tags?: { op?: string } })?.tags?.op);
+        expect(ops.filter((op) => op === "keys-sync.composite_refresh_marker_retract")).toHaveLength(1);
+        expect(ops).not.toContain("keys-sync.composite_refresh_marker_retract_late");
+        errSpy.mockRestore();
       });
     });
   });

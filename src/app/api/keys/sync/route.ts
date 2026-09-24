@@ -393,21 +393,39 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // BOUNDED (164.6 review fix, IN-04) by `MARKER_RETRACTION_BUDGET_MS`. Past
       // the budget the 202 goes out and the overrun is LOUD under its OWN tag,
       // because a retraction that did not finish may have left the marker in
-      // place. The retraction itself is not cancelled; a later rejection is
-      // absorbed by the race and was already reported as the overrun.
+      // place. The retraction itself is not cancelled.
+      //
+      // L2 (164.6 round 2): a rejection that lands AFTER the budget used to be
+      // absorbed by the settled race without a word, so the reason the marker
+      // stayed in place was lost. The `.catch` on the retraction promise itself
+      // reports it under its OWN `_late` tag, with its SQLSTATE. An in-time
+      // rejection is reported once, by the catch below, never also as late.
       let retractionTimer: ReturnType<typeof setTimeout> | undefined;
+      let retractionTimedOut = false;
+      // @audit-skip: job-row provenance metadata; user intent is audited by the sync.start event below.
+      const retraction = retractInheritedRefreshMarker(admin, rpcData, correlation_id);
+      retraction.catch((err: unknown) => {
+        if (!retractionTimedOut) return;
+        console.error(
+          `[keys/sync] composite refresh-marker retraction failed late, after the ${MARKER_RETRACTION_BUDGET_MS} ms budget, for ${strategy_id} (code=${retractionFailureCode(err)}):`,
+          scrubSeamError(err),
+        );
+        captureToSentry(err, {
+          tags: { op: "keys-sync.composite_refresh_marker_retract_late" },
+          extra: { strategy_id, job_id: rpcData, correlation_id },
+        });
+      });
       try {
-        // @audit-skip: job-row provenance metadata; user intent is audited by the sync.start event below.
         const outcome = await Promise.race([
-          retractInheritedRefreshMarker(admin, rpcData, correlation_id).then((retraction) => ({
+          retraction.then((result) => ({
             kind: "done" as const,
-            retraction,
+            retraction: result,
           })),
           new Promise<{ kind: "timeout" }>((resolve) => {
-            retractionTimer = setTimeout(
-              () => resolve({ kind: "timeout" }),
-              MARKER_RETRACTION_BUDGET_MS,
-            );
+            retractionTimer = setTimeout(() => {
+              retractionTimedOut = true;
+              resolve({ kind: "timeout" });
+            }, MARKER_RETRACTION_BUDGET_MS);
           }),
         ]);
         if (outcome.kind === "timeout") {
