@@ -137,6 +137,9 @@ export const ENQUEUE_BOUND_MS = 180_000;
  * Review fix round 1 (`unconfirmed`, 167.2-REVIEW WR-04): `link_unverified`,
  * the strategy's `api_key_id`, read back after the link update and before the
  * enqueue, was not this attempt's key, or could not be read.
+ * Review fix round 1 (`unconfirmed`, 167.2-REVIEW-SFH M-1):
+ * `enqueue_late_started`, the enqueue answered with enqueue evidence AFTER
+ * ENQUEUE_BOUND_MS, while this attempt's `enqueue_bound` panel was still shown.
  * Review fix round 1 (`no_result`, 167.2-REVIEW-SFH M-3): `unreadable`, the
  * poll cap was reached without one clean read in the attempt.
  */
@@ -148,6 +151,7 @@ export type PanelStopReason =
   | "chain_in_flight"
   | "chain_unreadable"
   | "link_unverified"
+  | "enqueue_late_started"
   | "unreadable";
 
 /**
@@ -203,6 +207,14 @@ export const PANEL_STOP_COPY = {
     label: "Sync not started",
     detail:
       "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.",
+  },
+  // Review fix round 1 (167.2-REVIEW-SFH M-1): the enqueue answered with
+  // enqueue evidence after its bound. A job was queued, but the panel is not
+  // polling it (a late answer never resumes an ended attempt, KCS-03 / P5).
+  enqueue_late_started: {
+    label: "Sync started",
+    detail:
+      "The sync request was accepted after this panel stopped waiting for it. Reload this page later to see its result.",
   },
   // Review fix round 1 (167.2-REVIEW WR-04): the link read back before the
   // enqueue was another key, or could not be read. Nothing was enqueued.

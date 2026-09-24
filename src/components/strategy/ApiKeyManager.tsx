@@ -279,6 +279,11 @@ export function ApiKeyManager({
   // the one their render closed over, and it never drives a render itself
   // (`syncingKeyId` does).
   const attemptRef = useRef<SyncAttempt | null>(null);
+  // 167.2-REVIEW-SFH M-1: the attempt whose `enqueue_bound` panel is on screen,
+  // or null. Its late enqueue answer may update THAT panel (a late 2xx says
+  // the sync started; a late rejection shows the route's own failure), and
+  // only while nothing newer began: every registration clears it.
+  const unconfirmedAttemptRef = useRef<SyncAttempt | null>(null);
   // Phase 167.2 / KCS-02: the tracked attempt's pre-enqueue `computed_at`
   // (see `readEvidenceBaseline`), and a per-attempt sequence that keys the
   // panel. The panel stays mounted from `error` into a Retry, so without the
@@ -992,6 +997,7 @@ export function ApiKeyManager({
     // click.
     const attempt: SyncAttempt = { keyId, enqueued: false, settling: false };
     attemptRef.current = attempt;
+    unconfirmedAttemptRef.current = null;
     // KCS-02: a fresh panel and no baseline until this attempt has read one.
     setAttemptSeq((seq) => seq + 1);
     setEvidenceBaseline("unknown");
@@ -1073,10 +1079,23 @@ export function ApiKeyManager({
           setPanelStopReason("link_bound");
           setSyncError(null);
         }
-        await linked;
-        console.warn(
-          `[ApiKeyManager] the link update answered after its ${LINK_UPDATE_BOUND_MS} ms bound; the attempt had already ended, so no sync is sent [key_id=${keyId}]`,
-        );
+        // 167.2-REVIEW-SFH M-1: a late link answer, either way, is logged AND
+        // captured (a 15 s link update is a wedged request). It changes no
+        // panel: "This sync did not start … reload to check which key is
+        // linked" stays true whichever way the link landed, and no sync is
+        // sent for it.
+        try {
+          await linked;
+          console.warn(
+            `[ApiKeyManager] the link update answered after its ${LINK_UPDATE_BOUND_MS} ms bound; the attempt had already ended, so no sync is sent [key_id=${keyId}]`,
+          );
+        } catch (lateErr) {
+          console.warn("[ApiKeyManager] sync failed after its attempt ended:", lateErr);
+        }
+        captureToSentry(new Error("the link update answered after its bound"), {
+          level: "warning",
+          tags: { component: "ApiKeyManager", stage: "late-link-answer" },
+        });
         return;
       }
 
@@ -1188,11 +1207,40 @@ export function ApiKeyManager({
           setSyncStatus("unconfirmed");
           setPanelStopReason("enqueue_bound");
           setSyncError(null);
+          unconfirmedAttemptRef.current = attempt;
         }
-        await enqueued;
-        console.warn(
-          `[ApiKeyManager] the enqueue answered after its ${ENQUEUE_BOUND_MS} ms bound; the attempt had already ended, so nothing is written [key_id=${keyId}]`,
-        );
+        // 167.2-REVIEW-SFH M-1 — THE LATE ANSWER IS EVIDENCE. It used to be
+        // dropped to a console.warn, so the panel kept promising "it may still
+        // be running" about a sync the server had since refused, or kept
+        // saying "not confirmed" about one it had accepted. A late answer
+        // never resumes the ended attempt (no poll, no marker: KCS-03 / P5),
+        // but while THIS attempt's `enqueue_bound` panel is still the one on
+        // screen and no attempt is live, it updates that panel: a late 2xx
+        // with enqueue evidence says the sync started (KCS-LATE-STARTED); a
+        // late rejection shows the route's own failure. Either way it is
+        // captured at warning level: a 180 s enqueue is a wedged route.
+        const stillShown = () =>
+          attemptRef.current === null && unconfirmedAttemptRef.current === attempt;
+        try {
+          await enqueued;
+          console.warn(
+            `[ApiKeyManager] the enqueue answered after its ${ENQUEUE_BOUND_MS} ms bound; the attempt had already ended, so no poll starts [key_id=${keyId}]`,
+          );
+          if (stillShown()) setPanelStopReason("enqueue_late_started");
+        } catch (lateErr) {
+          console.warn("[ApiKeyManager] sync failed after its attempt ended:", lateErr);
+          if (stillShown()) {
+            unconfirmedAttemptRef.current = null;
+            const message = lateErr instanceof Error ? lateErr.message : "Sync failed";
+            setSyncStatus("error");
+            setSyncError(message);
+          }
+        }
+        captureToSentry(new Error("the enqueue answered after its bound"), {
+          level: "warning",
+          tags: { component: "ApiKeyManager", stage: "late-enqueue-answer" },
+        });
+        return;
       }
 
       // A job IS enqueued -- analytics may still be computing.
@@ -1206,7 +1254,19 @@ export function ApiKeyManager({
       setSyncStatus("computing");
       // NEW-C37-04: pass the key being synced so lastSyncAt reads from
       // the correct row.
-      await loadKeys({ lastSyncedKeyId: keyId });
+      // 167.2-REVIEW-SFH L-4: in its own try. It used to share the enqueue's
+      // try, so a throw here (a network-layer failure; supabase-js returns
+      // errors rather than throwing) ended a live, ENQUEUED attempt as "Sync
+      // failed" and stopped its poll. The job exists; only the list refresh
+      // failed, so it is logged and the attempt keeps running.
+      try {
+        await loadKeys({ lastSyncedKeyId: keyId });
+      } catch (refreshErr) {
+        console.error(
+          "[ApiKeyManager] the post-enqueue key-list re-read threw; the attempt keeps running:",
+          refreshErr,
+        );
+      }
       router.refresh();
     } catch (err) {
       // Only a live attempt reports its own failure. If this one was already

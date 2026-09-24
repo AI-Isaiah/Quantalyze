@@ -97,6 +97,7 @@ describe("PANEL_STOP_COPY covers exactly the pinned reasons", () => {
         "chain_in_flight",
         "chain_unreadable",
         "enqueue_bound",
+        "enqueue_late_started",
         "link_bound",
         "link_unverified",
         "missing_row",
@@ -187,6 +188,17 @@ describe("KCS-LINK-UNVERIFIED (167.2-REVIEW WR-04): the link read back before th
       "This sync did not start: we could not confirm this strategy is linked to the key you chose. Reload this page to check which key is linked before you sync again.",
     );
     const { label, detail } = PANEL_STOP_COPY.link_unverified;
+    expect(`${label} ${detail}`).not.toMatch(/fail|error/i);
+  });
+});
+
+describe("KCS-LATE-STARTED (167.2-REVIEW-SFH M-1): the enqueue answered after its bound, with enqueue evidence", () => {
+  it("label and detail, and no failure claim", () => {
+    expect(PANEL_STOP_COPY.enqueue_late_started.label).toBe("Sync started");
+    expect(PANEL_STOP_COPY.enqueue_late_started.detail).toBe(
+      "The sync request was accepted after this panel stopped waiting for it. Reload this page later to see its result.",
+    );
+    const { label, detail } = PANEL_STOP_COPY.enqueue_late_started;
     expect(`${label} ${detail}`).not.toMatch(/fail|error/i);
   });
 });

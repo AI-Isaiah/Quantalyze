@@ -147,6 +147,11 @@ const KCS03_ENQUEUE =
   "We could not confirm this sync started: the request did not answer within 3 minutes, so it may still be running. Reload this page to see the latest status before you sync again.";
 /** 180 s, hand-typed: the enqueue bound the KCS03-ENQUEUE sentence states. */
 const ENQUEUE_BOUND = 180_000;
+// 167.2-REVIEW-SFH M-1: hand-typed from the UI-SPEC review-fix row
+// KCS-LATE-STARTED, never imported.
+const KCS_LATE_STARTED_LABEL = "Sync started";
+const KCS_LATE_STARTED =
+  "The sync request was accepted after this panel stopped waiting for it. Reload this page later to see its result.";
 const KCS03_LINK_LABEL = "Sync not started";
 const KCS03_LINK =
   "This sync did not start: linking the key to this strategy did not answer within 15 seconds. Reload this page to check which key is linked before you sync again.";
@@ -718,7 +723,13 @@ describe("ApiKeyManager + the REAL poller: an enqueue that never answers is boun
     expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("180000 ms"));
   });
 
-  it("LATE-202: a 202 that lands at 200 s, after the bound, starts no poll and leaves Sync not confirmed on the panel", async () => {
+  // Moved by the 167.2 review fix round (167.2-REVIEW-SFH M-1, lineage): this
+  // pin said the late 202 "leaves Sync not confirmed on the panel". But a late
+  // answer is the one piece of evidence `unconfirmed` was waiting for, and it
+  // was discarded to a console.warn. It still starts NO poll and resurrects
+  // nothing (KCS-03 / RESEARCH P5 hold); when this attempt's panel is still the
+  // one on screen, it now says the sync started (KCS-LATE-STARTED).
+  it("LATE-202: a 202 that lands at 200 s, after the bound, starts no poll and says the sync started", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
     mockState.analyticsResult = analyticsRow("computing");
@@ -740,10 +751,36 @@ describe("ApiKeyManager + the REAL poller: an enqueue that never answers is boun
       "a late 202 resurrected an attempt the card had already ended",
     ).toBe(0);
     expect(screen.queryByText("Computing analytics...")).not.toBeInTheDocument();
-    expect(screen.getByText(KCS03_ENQUEUE_LABEL)).toBeInTheDocument();
-    expect(screen.getByText(KCS03_ENQUEUE)).toBeInTheDocument();
+    expect(screen.getByText(KCS_LATE_STARTED_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(KCS_LATE_STARTED)).toBeInTheDocument();
+    expect(screen.queryByText("Sync failed")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
     expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining("answered after its"));
+  });
+
+  it("LATE-REJECTION (167.2-REVIEW-SFH M-1): a 503 that lands after the bound replaces \"may still be running\" with the route's own failure", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const enqueue = await startResyncWithHeldEnqueue();
+
+    await tick(ENQUEUE_BOUND);
+    expect(screen.getByText(KCS03_ENQUEUE_LABEL)).toBeInTheDocument();
+
+    await tick(20_000);
+    await act(async () => {
+      enqueue.resolve({
+        ok: false,
+        status: 503,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => ({ error: "Synthetic breaker message." }),
+      } as unknown as Response);
+    });
+    await tick(0);
+
+    expect(screen.getByText("Sync failed")).toBeInTheDocument();
+    expect(screen.getByText("Synthetic breaker message.")).toBeInTheDocument();
+    expect(screen.queryByText(KCS03_ENQUEUE)).not.toBeInTheDocument();
+    expect(mockState.analyticsSelectCount).toBe(0);
   });
 });
 

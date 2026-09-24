@@ -3369,6 +3369,34 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       }
     });
 
+    it("L4-POST-ENQUEUE-THROW: a throw from the key-list re-read AFTER the enqueue never reports Sync failed for the enqueued sync", async () => {
+      // 167.2-REVIEW-SFH L-4: the re-read sat inside the enqueue's try, so a
+      // throw there (a network-layer failure) ended a live, ENQUEUED attempt
+      // as "Sync failed" and stopped its poll.
+      routeFetch();
+      await renderRows([row({ id: "key-j" })], "key-j");
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        selectResultMock.mockImplementationOnce(() => {
+          throw new Error("synthetic network failure");
+        });
+        await act(async () => {
+          fireEvent.click(cardButton("key-j", "Resync"));
+        });
+        await waitFor(() => {
+          expect(err).toHaveBeenCalledWith(
+            "[ApiKeyManager] the post-enqueue key-list re-read threw; the attempt keeps running:",
+            expect.any(Error),
+          );
+        });
+        expect(screen.getByTestId("sync-progress")).toHaveAttribute("data-sync-status", "computing");
+        expect(screen.queryByText(/Sync failed/)).not.toBeInTheDocument();
+        expect(cardButton("key-j", "Syncing…")).toBeDisabled();
+      } finally {
+        err.mockRestore();
+      }
+    });
+
     it("GATE-SETTLED (CONTROL): a settled read lets the attempt through to the link and the enqueue", async () => {
       const fetchMock = routeFetch();
       await renderRows([row({ id: "key-j" })], "key-j");
@@ -3815,20 +3843,24 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       await resync("key-h");
       expect(cardButton("key-h", "Syncing…")).toBeDisabled();
 
-      // A's late re-read now throws, into A's own catch.
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      // A's late re-read now throws. Moved by the 167.2 review fix round
+      // (167.2-REVIEW-SFH L-4, lineage): the post-enqueue re-read has its own
+      // catch now, so the throw is logged there instead of reaching the
+      // attempt's catch as "sync failed after its attempt ended". What this
+      // case pins is unchanged: B is untouched.
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
       try {
         await act(async () => {
           failLateRead(new Error("late read failed"));
         });
         await waitFor(() => {
-          expect(warn).toHaveBeenCalledWith(
-            "[ApiKeyManager] sync failed after its attempt ended:",
+          expect(err).toHaveBeenCalledWith(
+            "[ApiKeyManager] the post-enqueue key-list re-read threw; the attempt keeps running:",
             expect.any(Error),
           );
         });
       } finally {
-        warn.mockRestore();
+        err.mockRestore();
       }
 
       // B is untouched: still computing, still marked, no error written.
