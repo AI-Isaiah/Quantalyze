@@ -472,6 +472,76 @@ def _drawdown_series_from_wealth(wealth: pd.Series) -> pd.Series:
     )
 
 
+def _annualized_vol_sharpe(r: pd.Series, periods_per_year: int) -> tuple[float, float]:
+    """Annualized ``(vol, sharpe)`` — quantstats 0.0.81 ``volatility`` / ``sharpe`` minus the price guess.
+
+    ``vol = r.std() * sqrt(periods_per_year)`` (pandas ddof=1, skipna) and
+    ``sharpe = (r.mean() * periods_per_year) / vol`` — the P114 form (annualized
+    mean over annualized vol), algebraically identical to quantstats'
+    ``mean / std * sqrt(periods)`` and bit-identical to every spelling it replaces
+    (RESEARCH Pattern 1). With ``periods_per_year=1`` it yields ``mean / std``
+    exactly — the per-period Sharpe base plan 166-04's PSR mirror consumes.
+
+    Callers: ``compute_all_metrics`` headline ``sharpe`` (operand
+    ``stat_returns``) and ``info_ratio`` (operand ``excess``, guarded by its own
+    ``te > 0``), and ``sharpe_vol_status_from_backbone`` (operand ``returns``;
+    its ``insufficient_history`` / ``nan_vol`` / ``zero_volatility`` / ``ok``
+    status ladder stays OUTSIDE this primitive).
+
+    NO-DIVIDE BRANCH: when ``vol`` is 0 or NaN this returns ``(vol, nan)``
+    WITHOUT performing the division. The backbone checked vol BEFORE dividing,
+    so its zero/NaN-vol path never emitted a numpy divide RuntimeWarning; now
+    that it calls this primitive ahead of its status ladder, dividing here would
+    add one. No persisted value changes: the headline's old inf/NaN quotient and
+    this NaN both map to None through ``_safe_float``, and the backbone discards
+    ``sharpe`` on those paths. An inf ``vol`` still divides (``x / inf`` raises no
+    warning), exactly as every prior spelling did.
+
+    Returns RAW floats (NaN allowed); callers keep their own ``_safe_float``.
+    """
+    vol = float(r.std() * math.sqrt(periods_per_year))
+    if vol == 0.0 or math.isnan(vol):
+        return vol, float("nan")
+    return vol, float((r.mean() * periods_per_year) / vol)
+
+
+def _downside_rms(x: pd.Series) -> float:
+    """Downside RMS — the ``downside`` leg of quantstats 0.0.81 ``sortino``, on the skipna count.
+
+    quantstats: ``sqrt((r[r < 0] ** 2).sum() / len(r))`` after ``_prepare_returns``'
+    ``fillna(0)``. Here the denominator is ``int(x.count())``, the number of REAL
+    observations (identical to ``len`` on every NaN-free series) — the skipna NaN
+    CONVENTION recorded at the headline sharpe/sortino site. Returns NaN when the
+    count is 0. The "downside == 0 means Sortino is undefined" handling stays at
+    each call site.
+
+    Callers: ``compute_all_metrics`` headline ``sortino`` (operand
+    ``_sortino_excess``) and ``smart_sortino`` (operand ``_smart_r``, already
+    ``dropna()``-ed, so count == len). A pure dedup: no Phase 166 mirror consumes it.
+    """
+    n = int(x.count())
+    if n == 0:
+        return float("nan")
+    return math.sqrt(float((x[x < 0.0] ** 2).sum()) / n)
+
+
+def _cvar_of_tail(series: pd.Series, threshold: float) -> float:
+    """Mean of the tail below ``threshold`` — quantstats 0.0.81 ``conditional_value_at_risk``'s Series branch.
+
+    quantstats: ``c_var = returns[returns < var].values.mean()``, falling back to
+    ``var`` when no observation lies below it; reproduced verbatim, minus the
+    empty-slice RuntimeWarning ``.values.mean()`` emits. The caller supplies the
+    threshold (a kwarg-closed ``value_at_risk``) and keeps the ``None``-threshold
+    branch. Named ``_cvar_of_tail`` so it cannot collide with a ``_cvar_tail``
+    local.
+
+    Callers: ``compute_all_metrics`` ``cvar`` (operand ``returns``). Plan 166-03's
+    serenity mirror reuses it on a drawdown series.
+    """
+    tail = series[series < threshold]
+    return float(tail.mean()) if len(tail) > 0 else float(threshold)
+
+
 def compute_all_metrics(
     returns: pd.Series,
     benchmark_returns: pd.Series | None = None,
@@ -850,11 +920,8 @@ def compute_all_metrics(
     # "No observation" is not "a flat day"; skipna is the honest reading and keeps
     # this site coherent with the already-closed path. NaN-free series — every
     # golden/parity fixture — are unaffected.
-    _stat_std = stat_returns.std()  # pandas default ddof=1 == quantstats' std(ddof=1)
-    sharpe = _safe_float(
-        (stat_returns.mean() * periods_per_year)
-        / (_stat_std * math.sqrt(periods_per_year))
-    )
+    # See `_annualized_vol_sharpe` (pandas default ddof=1 == quantstats' std(ddof=1)).
+    sharpe = _safe_float(_annualized_vol_sharpe(stat_returns, periods_per_year)[1])
     # Audit 2026-05-07 H-0725: MAR is threaded EXPLICITLY so the scalar sortino
     # and `_rolling_sortino` share the SAME minimum acceptable return constant.
     # quantstats applied it as `_prepare_returns(returns, rf=MAR, nperiods=periods)`,
@@ -866,14 +933,10 @@ def compute_all_metrics(
     # `test_scalar_sortino_threads_mar_as_the_downside_floor`.
     _mar_per_period = (1.0 + MAR) ** (1.0 / periods_per_year) - 1.0
     _sortino_excess = stat_returns - _mar_per_period
-    _downside_sq_sum = float((_sortino_excess[_sortino_excess < 0.0] ** 2).sum())
     # quantstats divides by `len(returns)` on its fillna(0) series; under the
     # skipna convention above the honest denominator is the count of REAL
-    # observations (identical on every NaN-free series).
-    _sortino_n = int(_sortino_excess.count())
-    _downside = (
-        math.sqrt(_downside_sq_sum / _sortino_n) if _sortino_n > 0 else float("nan")
-    )
+    # observations (identical on every NaN-free series). See `_downside_rms`.
+    _downside = _downside_rms(_sortino_excess)
     # downside == 0 (no day below MAR) leaves Sortino mathematically UNDEFINED;
     # quantstats returns NaN there, which `_safe_float` maps to None. Same result,
     # reached explicitly instead of via a divide-by-zero warning.
@@ -1039,10 +1102,7 @@ def compute_all_metrics(
         if _cvar_threshold is None:
             metrics_json["cvar"] = None
         else:
-            _cvar_tail = returns[returns < _cvar_threshold]
-            metrics_json["cvar"] = _safe_float(
-                float(_cvar_tail.mean()) if len(_cvar_tail) > 0 else _cvar_threshold
-            )
+            metrics_json["cvar"] = _safe_float(_cvar_of_tail(returns, _cvar_threshold))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar cvar failed (returns_len=%s, nonnan_len=%s): %s",
@@ -1229,11 +1289,7 @@ def compute_all_metrics(
     # with the skipna count as the denominator per the note above.
     # fail-soft: optional scalar.
     try:
-        _smart_sortino_downside = (
-            math.sqrt(float((_smart_r[_smart_r < 0.0] ** 2).sum()) / _smart_n)
-            if _smart_n > 0
-            else float("nan")
-        ) * _smart_penalty
+        _smart_sortino_downside = _downside_rms(_smart_r) * _smart_penalty
         metrics_json["smart_sortino"] = (
             _safe_float((float(_smart_r.mean()) / _smart_sortino_downside) * math.sqrt(252))
             if _smart_sortino_downside > 0.0
@@ -1420,9 +1476,11 @@ def compute_all_metrics(
                 metrics_json["beta"] = _safe_float(greeks.get("beta", 0))
                 metrics_json["correlation"] = _safe_float(aligned_returns.corr(aligned_benchmark))
                 excess = aligned_returns - aligned_benchmark
-                te = float(excess.std() * np.sqrt(periods_per_year))
+                # Tracking error and information ratio ARE annualized vol/Sharpe
+                # of the excess series — see `_annualized_vol_sharpe`.
+                te, _info_ratio = _annualized_vol_sharpe(excess, periods_per_year)
                 if te > 0:
-                    metrics_json["info_ratio"] = _safe_float(excess.mean() * periods_per_year / te)
+                    metrics_json["info_ratio"] = _safe_float(_info_ratio)
                 beta = metrics_json.get("beta", 0)
                 if beta and beta != 0 and cagr is not None:
                     metrics_json["treynor"] = _safe_float(cagr / beta)
@@ -1672,13 +1730,15 @@ def sharpe_vol_status_from_backbone(
     # statistic exactly as the deleted helper did; an all-NaN or single-obs series
     # yields NaN std -> "nan_vol" gracefully (no raise, matching the legacy
     # anti-500 baseline).
-    vol = _safe_float(returns.std() * math.sqrt(periods_per_year))
-    mean_ret = returns.mean() * periods_per_year
+    # `_annualized_vol_sharpe` does not divide on a zero/NaN vol, so this path
+    # emits no divide RuntimeWarning (the status ladder below stays here).
+    _raw_vol, _raw_sharpe = _annualized_vol_sharpe(returns, periods_per_year)
+    vol = _safe_float(_raw_vol)
     if vol is None:
         return None, None, "nan_vol"
     if vol == 0.0:
         return 0.0, None, "zero_volatility"
-    sharpe = _safe_float(mean_ret / vol)
+    sharpe = _safe_float(_raw_sharpe)
     if sharpe is None:
         # UNREACHABLE under skipna once vol is finite/nonzero (>= 2 non-NaN obs
         # force a finite mean/vol); folded into nan_vol as a defensive backstop.
