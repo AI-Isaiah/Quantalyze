@@ -301,9 +301,11 @@ describe("SyncPreviewStep — no second sync, and Retry only when the server nee
     expect(screen.getByTestId("wizard-sync-maybe-stuck")).toHaveTextContent(
       "A sync is still queued or running on our side; it may be stuck.",
     );
+    // Round-2 review: reads still say a job is in flight, so the server's
+    // resync guard would refuse a Retry. None is rendered.
     expect(
-      screen.getByRole("button", { name: /retry sync/i }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /retry sync/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("(b) Retry shows once the server says nothing is in flight and the status is still not computed", async () => {
@@ -368,6 +370,11 @@ describe("SyncPreviewStep — no second sync, and Retry only when the server nee
     expect(screen.getByTestId("wizard-sync-already-running")).toHaveTextContent(
       "A sync is already running.",
     );
+    // Round-2 review: a second Retry would be refused the same way, so none
+    // is rendered.
+    expect(
+      screen.queryByRole("button", { name: /retry sync/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("review-fix round 1 (HIGH-2) control: a Retry that starts a new sync clears the banner", async () => {

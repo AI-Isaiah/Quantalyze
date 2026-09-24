@@ -752,12 +752,16 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
         "is concerned.",
     ).toBeGreaterThan(0);
 
-    // The exit affordance the composite arm always had, now reaching the user
-    // class that had no other one.
+    // The interrupted state the composite arm always had, now reaching the
+    // user class that had no other one.
     expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+    // Round-2 review (founder rule: Retry only when the server would act on
+    // it). The read says a job is RUNNING, so the resync guard would refuse a
+    // Retry; the banner says it may be stuck and renders no Retry control.
+    expect(screen.getByTestId("wizard-sync-maybe-stuck")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /retry sync/i }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /retry sync/i }),
+    ).not.toBeInTheDocument();
 
     // …and the per-key panel stays composite-only even though this body carries
     // three member rows.

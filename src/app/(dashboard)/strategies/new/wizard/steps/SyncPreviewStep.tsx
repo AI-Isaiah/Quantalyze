@@ -3096,34 +3096,34 @@ export function SyncPreviewStep({
             >
               The sync is retrying automatically — no action needed.
             </p>
+          ) : retryFoundRunningSync ? (
+            // Round-2 review — the last Retry was answered WIZARD_DUPLICATE: the
+            // server refused a new sync because one is running. Another Retry
+            // would be refused the same way, so none is rendered until a read
+            // says nothing is in flight.
+            <p
+              className="mt-1 text-caption text-text-secondary"
+              data-testid="wizard-sync-already-running"
+            >
+              A sync is already running. This screen updates when it finishes.
+            </p>
+          ) : serverSaysInFlight ? (
+            // Round-2 review — reads say a job is in flight (the in-flight
+            // ceiling, or a stalled stitch), so the server's resync guard would
+            // refuse a Retry. Say only what is known and render no control
+            // the server would not act on.
+            <p
+              className="mt-1 text-caption text-text-secondary"
+              data-testid="wizard-sync-maybe-stuck"
+            >
+              A sync is still queued or running on our side; it may be stuck.
+            </p>
           ) : (
             <>
-              {retryFoundRunningSync && (
-                <p
-                  className="mt-1 text-caption text-text-secondary"
-                  data-testid="wizard-sync-already-running"
-                >
-                  A sync is already running. This screen updates when it
-                  finishes.
-                </p>
-              )}
-              {inFlightTrustExpired ? (
-                // Review-fix round 1 (HIGH-1 a) — only what is known: the
-                // server still holds a job for this sync, and it has run far
-                // past any healthy chain.
-                <p
-                  className="mt-1 text-caption text-text-secondary"
-                  data-testid="wizard-sync-maybe-stuck"
-                >
-                  A sync is still queued or running on our side; it may be
-                  stuck.
-                </p>
-              ) : (
-                <p className="mt-1 text-caption text-text-secondary">
-                  You can retry safely — a healthy run already in progress is
-                  unaffected.
-                </p>
-              )}
+              <p className="mt-1 text-caption text-text-secondary">
+                You can retry safely — a healthy run already in progress is
+                unaffected.
+              </p>
               <Button
                 size="sm"
                 variant="secondary"
