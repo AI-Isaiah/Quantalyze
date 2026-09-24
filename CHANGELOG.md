@@ -1,5 +1,168 @@
 # Changelog
 
+## [0.91.0.0] - 2026-09-24 — QSTATS-TRUTH: every quantstats-derived number reflects the returns it was given
+
+⭐ **What changed for whoever reads this next.** Phase 166 (RANK-05) removes the quantstats 0.0.81
+"is this a price series?" guess from every number the analytics service derives through
+quantstats. When a returns series had no losing day and at least one day of +100% or more,
+quantstats silently re-read it as PRICES, so it computed the ratio of something else. The
+`prepare_returns=False` keyword did not help: it never reached the transitive preparers. Every
+affected site is now either a proven leaf call or an inline mirror of 0.0.81 with the guess removed.
+A stdlib-`ast` gate with a printed census replaces the old line-of-text gate. quantstats stays
+pinned at `0.0.81`.
+
+⚠️ **This is a minor bump because values users can see change, on purpose.** The founder approved
+D-15, D-16 and D-17 on 2026-09-24. The before and after values below were measured by running the
+phase-base `services/` tree and the release tree side by side on the same fixtures
+(`166-09-SUMMARY.md`, "Before / after (D-10)"). No measured movement fell outside the admitted set.
+
+⛔ **No PRODUCTION row was recomputed, and this release carries no migration.** A persisted value
+changes only on that strategy's next compute, and ledger venues never re-compute on their own. The
+founder answered OPEN-2 on 2026-09-24: after this merges, the founder runs the read-only census SQL
+in `166-09-SUMMARY.md` ("Census SQL for the founder"), and a NEW phase owns queueing the recomputes
+through the normal job path.
+
+### Fixed
+
+- **The price guess is closed on the four drawdown-family scalars** (`202c1c838`, pinned by
+  `c99b86b02`). `recovery_factor`, `ulcer_index`, `upi` and `serenity_index` are inline mirrors of
+  0.0.81 without the guess. On an all-winning series, `ulcer_index` is now `0.0` and the three
+  ratios are `None`, because there is no drawdown to divide by. On benign input all four are
+  bit-equal to live quantstats.
+- **The price guess is closed on the four loss-family scalars** (`09eb012f6`, pinned by
+  `ca9b2a3d3`). `kelly_criterion`, `probabilistic_sharpe_ratio`, `common_sense_ratio` and
+  `cpc_index` are inline mirrors. A leaf fault stays failure-soft: it logs and yields `None` for
+  that key, and the other keys still compute.
+- **D-16: PSR uses the non-excess fourth moment, as the published formula does** (`b5d96e9d5`).
+  0.0.81 fed pandas EXCESS kurtosis into a term that expects the raw fourth moment (finding F-2).
+- **The price guess is closed on `r_squared`'s benchmark leg** (`df4c09de5`). The benchmark goes
+  through `_align_benchmark_like_qs`, which is 0.0.81's `_prepare_benchmark` without the guess.
+- **D-15: scalar alpha and beta no longer persist a fabricated zero** (`097966d84`). 0.0.81's
+  `greeks` ended in `.fillna(0)`, so a benchmarked strategy with NaN days stored `alpha = 0.0,
+  beta = 0.0` (finding F-3). Alpha and beta are now computed pairwise-complete, and an undefined
+  beta is `None`.
+- **The price guess is closed on the rolling benchmark leg, and D-17 makes rolling alpha a windowed
+  intercept** (`8dbcd8bff`, pinned at full precision by `dbb7a64da`). `_rolling_alpha_beta` makes
+  one call to the inline `_rolling_greeks`. Rendered rolling alpha was a full-sample-mean transform
+  of rolling beta (finding F-4). It is now each window's own intercept. Its point count still equals
+  rolling beta's.
+
+### Changed
+
+These values move on each affected strategy's next compute. Figures are from `166-09-SUMMARY.md`.
+
+- **Rolling alpha, for every benchmarked strategy (D-17). This is rendered** in the rolling
+  alpha/beta chart. On the golden fixture, 154 of 163 points changed. The last point went from
+  `0.0002` to `0.0023`, and every date is unchanged. On the golden series with a benchmark,
+  403 of 411 points changed, and the last point went from `-0.0002` to `0.0002`. Rolling beta is
+  unchanged unless the benchmark leg tripped the guess.
+- **Alpha, beta and Treynor for a benchmarked strategy with NaN days (D-15). This is rendered** in
+  the Benchmark greeks table. On the golden series with three NaN days, alpha went from `0.0` to
+  `-0.05937915926821179` and beta from `0.0` to `-0.020437191682559225`. Treynor went from absent
+  to `3.891200099567501`, because it had been skipped while beta was 0. CAGR is unchanged. On a
+  NaN-free series, alpha, beta and Treynor are bit-identical.
+- **PSR, for every strategy with a non-zero Sharpe (D-16). It is persisted only**, with no reader
+  under `src/`. The golden value went from `0.5815691494050974` to `0.5815640555270074`. The
+  all-positive benign fixture went from `None` to `1.0`, because 0.0.81's variance term went
+  negative.
+- **The eight dispatched scalars on a guess-tripping strategy. They are persisted only.** On the
+  canonical trigger fixture: `ulcer_index` went from `0.9947130555497081` to `0.0`,
+  `recovery_factor` from `2.0737188382869305` to `None`, `upi` from `2.9998728744771372` to
+  `None`, `serenity_index` from `0.3204442673452879` to `None`, `common_sense_ratio` from `0.0` to
+  `None`, and PSR from `0.1531252134903383` to `0.9998517975825096`. A PSR below 0.5 for a series
+  that never lost a day was the guess at work.
+- **`r_squared`, alpha, beta and rolling greeks where the BENCHMARK leg tripped the guess.** On the
+  benchmark-trigger fixture, `r_squared` went from `0.006670639650444322` to
+  `0.0037210240094842093`, which is the squared Pearson correlation of the raw pair. Beta went
+  from `-0.015400848308443902` to `0.007651507459018336`, and Treynor changed sign. Census query
+  (2) checks whether the cached BTC series ever had a day of +100% or more. That is expected never
+  to happen.
+
+### Added
+
+- **A stdlib-`ast` quantstats gate over every production module, with a census printed on every
+  pytest run** (`38ec7cc44`, `2abc1775e`). `tests/qstats_gate.py` resolves aliases. It then checks
+  four things. A module that imports quantstats must be in `COVERED_MODULES`. A direct call must be
+  a `KWARG_PROVEN` leaf called with the constant `prepare_returns=False`, or the `EXEMPT`
+  `drawdown_details`. Aliased references are checked. So is indirect reach into quantstats:
+  `getattr` dispatch and any path to the preparers. The census prints through the existing
+  `pytest_terminal_summary`, a green run included: `13 quantstats node(s) in services/metrics.py,
+  11 mirror(s), 0 violation(s); arms kwarg-proven=12 exempt=1 inline=11`. A reconciliation line
+  sits next to it. It explains ROADMAP's "30 call sites" as a text count (30 text occurrences
+  against 9 AST nodes at phase start, and 33 against 13 now).
+- **Permanent proof that the gate can fail** (`4d338a183`, `9e89ec533`). There are 12 RED needles,
+  an importer needle and 3 GREEN needles, all through the same `scan_source` / `scan_tree` the
+  real-corpus gate uses. Behavioural preparer-spy pins cover every `KWARG_PROVEN` leaf, with
+  `cvar` / `payoff_ratio` calibration rows showing that the spy sees a function that accepts the
+  keyword and then drops it.
+- **The money-math primitives, each defined once** (`88dd7fafe`, `c94788406`). The drawdown
+  primitives, `_annualized_vol_sharpe`, `_downside_rms` and `_cvar_of_tail` are module-level in
+  `services/metrics.py`, and every bit-identical inline spelling calls them. This change is
+  byte-neutral: the golden file and the full suite passed with no test edited.
+
+### Changed (code shape, no value change)
+
+- **The two hand-kept KPI column lists are derived from `PERCENTILE_METRICS`** (`1e998899e`,
+  `da13b3cd6`). They are the `src/lib/queries.ts` percentile projection and the csv-finalize
+  clock-safety columns with their guard select. A hand-written literal byte pin was observed failing
+  for each, and each proves the string sent to PostgREST did not change by one byte. The mirror prose
+  in `src/lib/closed-sets.ts` was corrected.
+
+### Removed
+
+- **The RANK-05 line-of-text gate** (`38ec7cc44`). It was deleted in the same commit that added
+  the AST gate, so no commit is ever without a gate. It scanned the lines of `compute_all_metrics`
+  and trusted the text `prepare_returns=False`.
+- **The dead rolling missing-columns branch and its test** (`8dbcd8bff`). Once rolling greeks is
+  an inline mirror that always returns both columns, that branch cannot run. The test was deleted
+  together with its branch.
+
+### Tests
+
+- Live 0.0.81 is the non-self-referential parity anchor on benign fixtures for every mirror
+  (`c99b86b02`, `ca9b2a3d3`, `dbb7a64da`). The three disclosed corrections (D-15, D-16, D-17) are
+  anchored to an independent in-test formula instead. The golden file moved on exactly two key
+  paths, both disclosed: `probabilistic_sharpe_ratio` and `sibling.rolling_alpha`.
+- Four real-file neuter drills against `services/metrics.py` were each observed RED naming the
+  site, then restored byte-identical (plan 08).
+
+### Root cause
+
+- quantstats 0.0.81's `_prepare_returns` and `_prepare_prices` guess the input's kind from its
+  values. When `min(r) >= 0` and `max(r) >= 1`, the returns are treated as prices. Passing
+  `prepare_returns=False` to a top-level stats function does not stop the guess inside the
+  helpers it calls (`comp`, `ulcer_index`, `_prepare_benchmark`, `greeks`, `rolling_greeks`), so
+  the keyword closed only the leaves that call nothing else. Research §Q2 measured this with a
+  preparer spy.
+
+### Notes
+
+- **Recorded, not changed (D-08).** F-1: scalar alpha is annualized on the FREQUENCY clock
+  (`periods_per_year`), not the calendar clock. The mirrors keep this, and it is pinned. Separately,
+  `recovery_factor`'s numerator is arithmetic (`returns.sum()`) while `upi`'s is compounded. That
+  inconsistency is inside 0.0.81, and the mirrors reproduce it so benign values do not move.
+- **A ledger claim was refuted.** WINDOWS entry 9 and the 159-05 residual table called
+  `recovery_factor`, `kelly_criterion`, `common_sense_ratio`, `cpc_index` and `r_squared`
+  "kwarg-closable". The preparer spy showed that none of them honours the keyword all the way down,
+  so each became an inline mirror. WINDOWS entries 5 and 9 are fixed and TODOS 0f
+  `[159-SIMPLIFY-DEFER]` is closed (`9aadde8c0`).
+- **quantstats stays at 0.0.81.** PyPI was re-read on 2026-09-24 and 0.0.81 is still the latest.
+  Upstream `main` equals the tag, and both the maintained fork and the open upstream PRs keep the
+  guess. Removing the dependency belongs to Phase 165. Two findings are routed there: scipy is
+  pinned only `# via quantstats` although `services/metrics.py` now imports it directly, and
+  `requirements.in` says pandas 2.2.3 while the lock has 3.0.3.
+- **Out of scope:** the SQL RPC's own KPI list.
+- **No TypeScript change was needed for null values (D-13).** Every rendered surface shows `—` for
+  a null or non-finite value. The eight dispatched scalars and `r_squared` have no `metrics_json`
+  reader under `src/`.
+- **Planning and merge commits.** These commits changed no shipped code: context, research and
+  plan (`e91226a6c`, `a1d479c22`, `9007cceb0`, `c388fbd6f`, `73cbf2995`), one per-plan SUMMARY
+  each (`c0779f1ba`, `7d1f03098`, `c702b19fb`, `497d90914`, `270ef0912`, `54ab93333`,
+  `8be6b11a0`, `c7d5aafb8`, `de4607e51`), and three merges (`850ce0d9d` and `f22e63712` from
+  `origin/main`, `13ad4850e` for the plan 02 worktree).
+- The branch has 35 commits before this release commit, and each one maps to at least one bullet
+  above.
+
 ## [0.90.0.0] - 2026-09-24 — GATEHYGIENE: a lost 40001 race is retried once, an inherited refresh marker is retracted, and a failed ledger fan-out candidate is counted, named and watched
 
 ⭐ **What changed for whoever reads this next.** Phase 164.6, pruned by the founder on 2026-09-17
