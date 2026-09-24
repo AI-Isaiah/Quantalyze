@@ -2257,6 +2257,18 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.6 to break down)
 
+### Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot (INSERTED)
+
+**Goal:** A composite (`stitch_composite`) run decides whether it is a background ledger refresh from the job row as it stands when the decision is made, not from the metadata snapshot taken when the worker claimed the job. Found by Phase 164.6 plan 02 (`[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]`, founder queue 164.6 item a): the TS routes now retract an inherited refresh marker from a reused composite job, but Python's composite guard reads the claim-time snapshot, so a retraction that lands after the claim does not stand down that run's guard, while the SQL `is_protected` check does see it. The two layers disagree about the same job. **Data-integrity.** Latent today (the composite fan-out has no schedule, and a runbook precondition blocks scheduling it); this phase removes the precondition's reason to exist. Inserted 2026-09-24 under the founder's authorization to add phases.
+**Success criteria:** (1) the harm is shown on the local lane first (claim, then retract, then observe the run's decision), or the phase shrinks; (2) the composite guard and `is_protected` reach the same verdict for a marker retracted after the claim, proven by execution; (3) a regression test observed RED when the fix is neutered; (4) the runbook precondition is removed or restated to match.
+**Requirements**: TBD
+**Depends on:** Phase 164.6
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.6.7 to break down)
+
 ### Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals (INSERTED)
 
 **Goal:** A client can add an MT5 key, repeatedly, without taking MT5 validation down for
@@ -2906,6 +2918,18 @@ Plans:
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1 to break down)
+
+### Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding (INSERTED)
+
+**Goal:** Every holdings consumer keeps two keys' positions apart. `holdingScopeKey` (`holding:venue:symbol:type`) carries no `api_key_id`, so the latest-as-of holdings collapse in `src/lib/queries.ts` merges two accounts on the same venue holding the same asset into one row, and one key's position silently vanishes from the headline AUM, the Open Positions total and Phase 167.1's untrusted-key marker. Found by Phase 167.1's silent-failure-hunter (founder queue item 11); the defect predates 167.1. **Data-integrity.** Inserted 2026-09-24 under the founder's authorization to add phases.
+**Success criteria:** (1) a test with two keys holding the same asset on one venue shows both positions surviving the collapse, in AUM, in Open Positions and in the 167.1 marker, observed RED against today's key; (2) every consumer of `holdingScopeKey` is enumerated by symbol and each is either re-keyed or shown not to need it; (3) the discuss step records how a soft-disconnected key's holdings are counted (founder queue item 11's second question); (4) no change to the analytics service's own math unless the collapse lives there too.
+**Requirements**: TBD
+**Depends on:** Phase 167.1
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 167.1.1 to break down)
 
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 
