@@ -1,12 +1,11 @@
 {
-  "_comment": "RED (Phase 164.6). ok.json's green match_engine_cron window, plus the ledger fan-out read answering 3 runs in the window, 1 of which finished outside the success form with a message naming enqueue_ledger_refresh_for_strategies. Every value here is synthetic.",
+  "_comment": "RED (Phase 164.6 round 2). ok.json's green match_engine_cron window, plus one ledger fan-out run that started more than 30 minutes ago and has no end time. Every value here is synthetic.",
   "now": "2026-09-05T12:00:00Z",
   "ttl": "6 hours",
   "jobCount": 1,
   "ledgerFanout": {
     "runs": 3,
-    "errored": 1,
-    "named": 1
+    "stuck": 1
   },
   "rows": [
     [
