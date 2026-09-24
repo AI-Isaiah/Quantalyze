@@ -3780,3 +3780,58 @@ def test_q166_rolling_greeks_alpha_differs_from_the_full_sample_form(
     assert float(gap.max()) > 1e-12, (
         f"windowed alpha equals the full-sample form on every point (max gap {gap.max()})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 code review, round 1 (166-REVIEW.md, 166-REVIEW-SFH.md).
+#
+# Each test below pins one finding and was observed RED against the unfixed
+# code (neuter the guard -> RED -> restore -> cmp), per the project's
+# anti-vacuity rule.
+# ---------------------------------------------------------------------------
+
+
+def _q166r_constant_series(value: float = 0.001, n: int = 120) -> pd.Series:
+    """A constant daily return (a stablecoin-lending shape). For n=120 and 0.001,
+    pandas ``std()`` is ~4.35e-19, NOT 0.0 (measured), which is the float-residue
+    trap SFH HIGH-1 describes."""
+    idx = pd.bdate_range("2024-01-01", periods=n)
+    return pd.Series(value, index=idx, name="returns").astype("float64")
+
+
+def test_q166r_constant_series_sharpe_is_undefined_not_a_residue_quotient():
+    """SFH HIGH-1: a constant series has no dispersion, so its Sharpe is
+    UNDEFINED and must persist as None. Pre-fix, the float residue of ``std()``
+    (not an exact 0.0) slipped past the exact-zero guard and the headline Sharpe
+    persisted as 3.645e+16, while the backbone reported that number with status
+    ``ok``. A None here is the "no invented data" rule: an absent panel, never a
+    synthesized number, and never a synthesized 0.0 either."""
+    from services.metrics import _annualized_vol_sharpe, sharpe_vol_status_from_backbone
+
+    s = _q166r_constant_series()
+    assert float(s.std()) != 0.0, "fixture no longer carries the float residue it pins"
+
+    vol, sharpe = _annualized_vol_sharpe(s, 252)
+    assert vol == 0.0 and math.isnan(sharpe), (vol, sharpe)
+
+    mj = compute_all_metrics(s)
+    assert mj["sharpe"] is None, f"constant series persisted sharpe={mj['sharpe']}"
+
+    assert sharpe_vol_status_from_backbone(s, 252) == (0.0, None, "zero_volatility")
+
+    # Every sign and length measured to carry the residue behaves the same.
+    for value, n in ((0.0005, 250), (-0.002, 1000), (0.01, 60)):
+        c = _q166r_constant_series(value, n)
+        assert compute_all_metrics(c)["sharpe"] is None, (value, n)
+        assert sharpe_vol_status_from_backbone(c, 365)[2] == "zero_volatility", (value, n)
+
+
+def test_q166r_residue_guard_leaves_real_dispersion_bit_identical():
+    """The guard must reclassify ONLY float residue. On a series with real
+    dispersion the primitive is the exact pre-fix arithmetic."""
+    from services.metrics import _annualized_vol_sharpe
+
+    s = _rank05_benign_mixed()
+    expected_vol = float(s.std() * math.sqrt(252))
+    expected_sharpe = float((s.mean() * 252) / expected_vol)
+    assert _annualized_vol_sharpe(s, 252) == (expected_vol, expected_sharpe)

@@ -462,6 +462,26 @@ def _drawdown_series_from_wealth(wealth: pd.Series) -> pd.Series:
     )
 
 
+#: A standard deviation at or below this fraction of ``|mean|`` is float residue,
+#: not dispersion. The residue pandas/numpy leave on a constant series is about
+#: ``1e-16 * |mean|`` (measured: 4.35e-19 for a constant 0.001), so 1e-12 clears
+#: it by four orders of magnitude. It only reclassifies a series whose
+#: per-period mean/std exceeds 1e12, which no real return series reaches.
+_DISPERSION_RESIDUE_REL = 1e-12
+
+
+def _dispersion_is_residue(sd: float, mean: float) -> bool:
+    """True when ``sd`` is zero or only the float residue of a constant series.
+
+    Phase 166 review (SFH HIGH-1): an exact ``== 0`` test misses a constant
+    series whose ``std()`` comes back as ``~1e-19`` instead of ``0.0``, and the
+    ratio over it is then a fabricated ``~1e16``. Callers treat True as "no
+    dispersion", so a ratio over it is undefined (None), never a number. A NaN
+    ``sd`` returns False: each caller handles NaN on its own path.
+    """
+    return bool(sd <= _DISPERSION_RESIDUE_REL * abs(mean))
+
+
 def _annualized_vol_sharpe(r: pd.Series, periods_per_year: int) -> tuple[float, float]:
     """Annualized ``(vol, sharpe)`` — quantstats 0.0.81 ``volatility`` / ``sharpe`` minus the price guess.
 
@@ -478,20 +498,34 @@ def _annualized_vol_sharpe(r: pd.Series, periods_per_year: int) -> tuple[float, 
     its ``insufficient_history`` / ``nan_vol`` / ``zero_volatility`` / ``ok``
     status ladder stays OUTSIDE this primitive).
 
-    NO-DIVIDE BRANCH: when ``vol`` is 0 or NaN this returns ``(vol, nan)``
-    WITHOUT performing the division. The backbone checked vol BEFORE dividing,
-    so its zero/NaN-vol path never emitted a numpy divide RuntimeWarning; now
-    that it calls this primitive ahead of its status ladder, dividing here would
-    add one. No persisted value changes: the headline's old inf/NaN quotient and
-    this NaN both map to None through ``_safe_float``, and the backbone discards
-    ``sharpe`` on those paths. An inf ``vol`` still divides (``x / inf`` raises no
-    warning), exactly as every prior spelling did.
+    NO-DIVIDE BRANCH: when ``vol`` is NaN this returns ``(nan, nan)``, and when
+    the dispersion is zero or float residue (``_dispersion_is_residue``) it
+    returns ``(0.0, nan)``, in both cases WITHOUT performing the division. The
+    backbone checked vol BEFORE dividing, so its zero/NaN-vol path never emitted
+    a numpy divide RuntimeWarning; now that it calls this primitive ahead of its
+    status ladder, dividing here would add one. An inf ``vol`` still divides
+    (``x / inf`` raises no warning), exactly as every prior spelling did.
+
+    FLOAT-RESIDUE GUARD (Phase 166 review, SFH HIGH-1, 2026-09-24): pandas
+    ``std()`` of a CONSTANT series is not always 0.0. For 120 business days of
+    ``0.001`` it is ``4.35e-19``, and the quotient persisted a headline Sharpe of
+    ``3.645e+16`` (measured), ranked at the top of every Sharpe percentile, and
+    the backbone reported that number with status ``ok``. The old guard caught
+    only an EXACT zero. A constant series has no dispersion, so its Sharpe is
+    undefined: ``nan -> None`` (the "no invented data" rule: an absent panel,
+    never a synthesized number), and its vol is reported as the true ``0.0`` so
+    the backbone's ``zero_volatility`` status and ``info_ratio``'s ``te > 0``
+    guard see it. On a series with real dispersion the values are bit-identical
+    to before.
 
     Returns RAW floats (NaN allowed); callers keep their own ``_safe_float``.
     """
-    vol = float(r.std() * math.sqrt(periods_per_year))
-    if vol == 0.0 or math.isnan(vol):
+    sd = r.std()
+    vol = float(sd * math.sqrt(periods_per_year))
+    if math.isnan(vol):
         return vol, float("nan")
+    if _dispersion_is_residue(sd, r.mean()):
+        return 0.0, float("nan")
     return vol, float((r.mean() * periods_per_year) / vol)
 
 
@@ -2237,7 +2271,9 @@ def sharpe_vol_status_from_backbone(
       * NaN vol (``std`` is NaN: all-NaN or single non-NaN observation, since
         pandas skipna ``std`` needs >= 2 finite values) -> ``(None, None,
         "nan_vol")`` gracefully, WITHOUT raising (the legacy anti-500 baseline).
-      * ``vol == 0.0`` (flat returns) -> ``(0.0, None, "zero_volatility")``.
+      * ``vol == 0.0`` (flat returns, including a constant series whose
+        ``std()`` is float residue rather than exactly 0; see
+        ``_dispersion_is_residue``) -> ``(0.0, None, "zero_volatility")``.
       * else -> ``(vol, sharpe, "ok")``.
 
     Interior-NaN days (a guard-NaN flanked by valid returns, the shape
