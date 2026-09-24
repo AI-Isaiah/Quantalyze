@@ -29,6 +29,8 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES } from "@/lib/closed-sets";
 import { buildHoldingRef } from "./holding-outcome-adapter";
 import {
+  holdingEquityContributionLocal,
+  holdingEquityIsReported,
   managerSideKeyIds,
   summarizeLiveHoldings,
 } from "./live-holdings-summary";
@@ -418,5 +420,64 @@ describe("managerSideKeyIds — the keys the payload names as manager-side (D-20
     ).toEqual([]);
     expect(managerSideKeyIds(undefined, ["aumtrust-key-a"])).toEqual([]);
     expect(managerSideKeyIds(undefined, undefined)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The reported-equity lockstep (review round 2 WR-02)
+// ---------------------------------------------------------------------------
+
+describe("holdingEquityIsReported — in lockstep with holdingEquityContributionLocal (review round 2 WR-02)", () => {
+  // Hand-listed. `substituted` is true exactly where the contribution helper
+  // puts its 0 in place of a figure the venue did not report. The lockstep
+  // claim is that `holdingEquityIsReported` answers false on exactly those
+  // rows, so a disclosure never presents a defaulted 0 as a known figure.
+  const ROWS: Array<{
+    label: string;
+    holding: DashboardHolding;
+    contribution: number;
+    substituted: boolean;
+  }> = [
+    { label: "derivative, P&L 250", holding: buildHolding({ holding_type: "derivative", value_usd: 900_000, unrealized_pnl_usd: 250 }), contribution: 250, substituted: false },
+    { label: "derivative, P&L 0 (a known zero)", holding: buildHolding({ holding_type: "derivative", value_usd: 900_000, unrealized_pnl_usd: 0 }), contribution: 0, substituted: false },
+    { label: "derivative, P&L null", holding: buildHolding({ holding_type: "derivative", value_usd: 900_000, unrealized_pnl_usd: null }), contribution: 0, substituted: true },
+    { label: "derivative, P&L NaN", holding: buildHolding({ holding_type: "derivative", value_usd: 900_000, unrealized_pnl_usd: Number.NaN }), contribution: 0, substituted: true },
+    { label: "derivative, P&L +Infinity", holding: buildHolding({ holding_type: "derivative", value_usd: 900_000, unrealized_pnl_usd: Number.POSITIVE_INFINITY }), contribution: 0, substituted: true },
+    { label: "derivative, P&L -Infinity", holding: buildHolding({ holding_type: "derivative", value_usd: 900_000, unrealized_pnl_usd: Number.NEGATIVE_INFINITY }), contribution: 0, substituted: true },
+    { label: "spot, value 1,234", holding: buildHolding({ value_usd: 1_234 }), contribution: 1_234, substituted: false },
+    { label: "spot, value 0 (a known zero)", holding: buildHolding({ value_usd: 0 }), contribution: 0, substituted: false },
+    { label: "spot, value NaN", holding: buildHolding({ value_usd: Number.NaN }), contribution: 0, substituted: true },
+    { label: "spot, value +Infinity", holding: buildHolding({ value_usd: Number.POSITIVE_INFINITY }), contribution: 0, substituted: true },
+    { label: "spot, value -Infinity", holding: buildHolding({ value_usd: Number.NEGATIVE_INFINITY }), contribution: 0, substituted: true },
+  ];
+
+  it.each(ROWS)("$label", ({ holding, contribution, substituted }) => {
+    expect(holdingEquityContributionLocal(holding)).toBe(contribution);
+    expect(holdingEquityIsReported(holding)).toBe(!substituted);
+  });
+
+  it("summarizeLiveHoldings counts an untrusted derivative with a NaN P&L and an untrusted spot holding with a NaN value as unavailable, and the total is unchanged", () => {
+    const nanDeriv = buildHolding({
+      venue: "venue-n1",
+      symbol: "AUMTRUST-N1-PERP",
+      holding_type: "derivative",
+      value_usd: 700_000,
+      unrealized_pnl_usd: Number.NaN,
+      api_key_id: KEY_SIGN_IN_FAILED_DERIV,
+    });
+    const nanSpot = buildHolding({
+      venue: "venue-n2",
+      symbol: "AUMTRUST-N2",
+      value_usd: Number.NaN,
+      api_key_id: KEY_SIGN_IN_FAILED,
+    });
+    const s = summarize({
+      holdings: [H_TRUSTED, H_SIGN_IN_FAILED, nanDeriv, nanSpot],
+      contributing: [KEY_TRUSTED, KEY_SIGN_IN_FAILED, KEY_SIGN_IN_FAILED_DERIV],
+    });
+    // D-03: 480,000 + 12,345 + 0 + 0 = 492,345, and the 700,000 notional
+    // never leaks in.
+    expect(s.total).toBe(492_345);
+    expect(s.untrusted).toEqual({ amount: 12_345, count: 3, unavailable: 2 });
   });
 });
