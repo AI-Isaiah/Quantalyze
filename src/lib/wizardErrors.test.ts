@@ -2089,8 +2089,25 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    *     UNCHANGED at four members.
    * 95 was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 95 to be
    * 94"), never counted off the table.
+   *
+   * ⚠️ 95 → 96 (WIZRESYNC review round 2, SFH HIGH-1). ONE entry —
+   * `SUBMITTED_ANALYTICS_NOT_QUEUED`, finalize-wizard's answer when the
+   * promotion committed and the analytics dispatch after it failed.
+   *
+   * THIS GUARD IS THE DESTRUCTIVE-ACTION SCAN, so its question is "does the
+   * new entry fall INSIDE the population this scan walks?", and the
+   * reasoning was re-run over the entry BEFORE the number moved:
+   *   · the new entry's `actions` are `["clear_and_retry", "request_call"]`;
+   *   · `DESTRUCTIVE_ACTIONS` above holds exactly ONE member, `start_fresh`;
+   *   · neither action is that member, so the entry sits OUTSIDE the scanned
+   *     population by construction and the destructive class below is
+   *     UNCHANGED at four members. That is right on the merits too: the
+   *     submission is SAVED, so the one control that must never be offered is
+   *     one that deletes the draft.
+   * 96 was READ OFF THIS GUARD'S OWN FAILURE MESSAGE in CI run 36063849235
+   * ("expected 96 to be 95"), never counted off the table.
    */
-  const EXPECTED_TABLE_SIZE = 95;
+  const EXPECTED_TABLE_SIZE = 96;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2652,8 +2669,29 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    *     this arm, so the copy does not assert it).
    * 95 was READ OFF THE TWIN GUARD'S FAILURE MESSAGE ("expected 95 to be
    * 94") rather than counted off the table.
+   *
+   * ⚠️ 95 → 96 (WIZRESYNC review round 2, SFH HIGH-1), for
+   * `SUBMITTED_ANALYTICS_NOT_QUEUED`. THIS guard is the banned-claims honesty
+   * scan, and the entry was walked against all four FORBIDDEN fragments by
+   * hand — title, cause and both fix lines — BEFORE the number moved:
+   *   · "been notified" — ABSENT. The second fix line names who to email; it
+   *     says nobody has been told yet, the opposite claim.
+   *   · "we fetched your trades" — ABSENT. The entry names no fetch or trade
+   *     stage; it says only that the analytics step was not queued.
+   *   · "wizard_session_id idempotency" — ABSENT. The entry names no column,
+   *     no env variable and no internal subsystem.
+   *   · "data is unchanged" — ABSENT. ⭐ The entry DOES make a write claim, in
+   *     the other direction ("Your submission is saved"), and it was checked
+   *     against its ONE emitter rather than assumed: finalize-wizard's
+   *     `answerDispatchFailedAfterPromotion` is reached only after
+   *     `callFinalizeWizardRpc` returned success, i.e. the RPC committed the
+   *     promotion or a replay re-read the row as already promoted. On every
+   *     path that reaches this code the claim is true. A future emitter of the
+   *     same code must meet the same precondition.
+   * 96 was READ OFF THIS GUARD'S OWN FAILURE MESSAGE in CI run 36063849235
+   * ("expected 96 to be 95") rather than counted off the table.
    */
-  const EXPECTED_TABLE_SIZE = 95;
+  const EXPECTED_TABLE_SIZE = 96;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
