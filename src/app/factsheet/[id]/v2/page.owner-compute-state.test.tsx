@@ -40,6 +40,15 @@ vi.mock("@/lib/visibility", async () => {
   );
   return { ...actual };
 });
+// deriveComputeState runs FOR REAL (a passthrough spy). One case overrides a
+// single answer: KCS09-RUN-UNKNOWN is unreachable through the RPC selection,
+// because every kind the selection can pick has a known phase (see that case).
+vi.mock("@/lib/compute-state", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/compute-state")>(
+    "@/lib/compute-state",
+  );
+  return { ...actual, deriveComputeState: vi.fn(actual.deriveComputeState) };
+});
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
 vi.mock("@/lib/queries", () => ({
@@ -52,6 +61,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { deriveComputeState } from "@/lib/compute-state";
 
 // --- Fixtures ---------------------------------------------------------------
 
@@ -69,6 +79,25 @@ const minutesAgo = (m: number) => new Date(NOW_MS - m * 60_000).toISOString();
 const FAIL_PERMANENT =
   "The last computation stopped on a problem that retrying alone will not resolve.";
 const CONTACT_PERMANENT = "Contact support@quantalyze.com to resolve it.";
+const RELOAD = "Reload this page to see the latest status.";
+const CONTACT_CHECK = "Contact support@quantalyze.com to have it checked.";
+const RETRY_READ = "Reload this page to try again.";
+const UNREADABLE_LINE =
+  "The computation status for this strategy could not be read.";
+const FAIL_TRANSIENT =
+  "The last computation stopped after its automatic retries ran out.";
+const SHAPE_SINGLE =
+  "Start a new computation with Resync on this strategy's edit page. Contact support@quantalyze.com if it does not complete.";
+const SHAPE_UNLINKED =
+  "Link a key with Use & Sync on this strategy's edit page to start a new computation. Contact support@quantalyze.com if it does not complete.";
+const SHAPE_COMPOSITE =
+  "A composite strategy has no self-serve re-run. Contact support@quantalyze.com to start a new computation.";
+const SHAPE_CSV =
+  "A CSV strategy's data is fixed at upload. To publish a corrected series, upload a new CSV strategy, or contact support@quantalyze.com.";
+const EDIT_HREF = `/strategies/${STRATEGY_ID}/edit`;
+const CSV_WIZARD_HREF = "/strategies/new/wizard?source=csv";
+/** A linked single key (synthetic). */
+const LINKED_KEY_ID = "00000000-0000-4000-8000-0000000000c1";
 const IN_PROGRESS_PHRASES = [
   "still computing",
   "being prepared",
@@ -112,8 +141,12 @@ const STATE = {
   rpcResult: { data: [] as unknown, error: null as unknown },
   /** When true the request client carries NO `rpc` member (a throw). */
   rpcMissing: false,
+  /** The head-count answer of `strategy_keys` on the request client. */
+  memberCountResult: { count: 0 as number | null, error: null as unknown },
   observed: {
     rpcCalls: [] as Array<[string, unknown]>,
+    /** Tables named by `.from()` on the request client, in call order. */
+    requestTables: [] as string[],
   },
 };
 
@@ -122,7 +155,20 @@ const getUserSpy = vi.fn();
 function mockRequestClient() {
   const client: Record<string, unknown> = {
     auth: { getUser: getUserSpy },
-    from: () => {
+    from: (table: string) => {
+      STATE.observed.requestTables.push(table);
+      if (table === "strategy_keys") {
+        // A head count is awaited on the builder itself.
+        const countChain = {
+          select: () => countChain,
+          eq: () => countChain,
+          then: (
+            resolve: (v: unknown) => unknown,
+            reject?: (e: unknown) => unknown,
+          ) => Promise.resolve(STATE.memberCountResult).then(resolve, reject),
+        };
+        return countChain;
+      }
       let sawOr = false;
       const chain = {
         select: () => chain,
@@ -178,6 +224,9 @@ function givenOwnerPendingDraft(ownerRowExtra: Record<string, unknown> = {}) {
     codename: null,
     disclosure_tier: "exploratory",
     status: "draft",
+    capital_ownership: null,
+    source: "api",
+    api_key_id: LINKED_KEY_ID,
     strategy_analytics: { computed_at: "2026-09-01T00:00:00.000Z" },
     ...ownerRowExtra,
   };
@@ -215,7 +264,9 @@ beforeEach(() => {
   STATE.adminRow = null;
   STATE.rpcResult = { data: [], error: null };
   STATE.rpcMissing = false;
+  STATE.memberCountResult = { count: 0, error: null };
   STATE.observed.rpcCalls = [];
+  STATE.observed.requestTables = [];
 
   getUserSpy.mockImplementation(async () => ({
     data: { user: STATE.sessionUser },
@@ -261,5 +312,369 @@ describe("KCS-09 — the owner pending page states the trigger shape's real stat
     // D-04: the owner pending render never reaches the shared, id-keyed cache.
     expect(vi.mocked(unstable_cache)).toHaveBeenCalledTimes(0);
     expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 2 — every KCS09 row, the KCS21 shape remedies, and the unreadable degrade
+// ---------------------------------------------------------------------------
+
+type ToneClass = "text-text-secondary" | "text-warning" | "text-negative";
+
+/** A stitch row with member progress (the composite fetch phase). */
+function stitchRunning(
+  statuses: readonly string[],
+  heartbeatMinutesAgo: number,
+): JobRow {
+  return job({
+    kind: "stitch_composite",
+    status: "running",
+    claimed_at: minutesAgo(heartbeatMinutesAgo + 5),
+    created_at: minutesAgo(heartbeatMinutesAgo + 5),
+    metadata: {
+      member_progress: statuses.map((status, i) => ({
+        seq: i + 1,
+        exchange: "binance",
+        label: `Key ${i + 1}`,
+        status,
+      })),
+      member_progress_at: minutesAgo(heartbeatMinutesAgo),
+    },
+  });
+}
+
+const chainJob = (kind: string, status: string, errorKind: string | null = null) =>
+  job({ kind, status, error_kind: errorKind, created_at: minutesAgo(10) });
+
+/**
+ * One case per KCS09 row. `memberCount` sets the strategy_keys head count
+ * (0 = single-key API strategy with a linked key, the default owner row; 3 = a
+ * composite). Expected text is typed as a literal per row.
+ */
+const STATE_ROWS: ReadonlyArray<{
+  id: string;
+  rows: JobRow[];
+  memberCount?: number;
+  line: string;
+  tone: ToneClass;
+  remedy: string;
+}> = [
+  {
+    id: "KCS09-QUEUED (pending)",
+    rows: [chainJob("compute_analytics_from_csv", "pending")],
+    line: "A computation for this strategy is queued and has not started yet.",
+    tone: "text-text-secondary",
+    remedy: RELOAD,
+  },
+  {
+    id: "KCS09-QUEUED (done_pending_children, KCS-19)",
+    rows: [chainJob("derive_broker_dailies", "done_pending_children")],
+    line: "A computation for this strategy is queued and has not started yet.",
+    tone: "text-text-secondary",
+    remedy: RELOAD,
+  },
+  {
+    id: "KCS09-RETRYING",
+    rows: [chainJob("sync_trades", "failed_retry", "transient")],
+    line: "The last attempt hit a temporary problem, and the service is retrying it automatically.",
+    tone: "text-warning",
+    remedy: RELOAD,
+  },
+  {
+    id: "KCS09-RUN-FETCH",
+    rows: [chainJob("process_key_long", "running")],
+    line: "Fetching this strategy's trades from the exchange.",
+    tone: "text-text-secondary",
+    remedy: RELOAD,
+  },
+  {
+    id: "KCS09-RUN-MEMBER (two successful + one in_process -> key 3 of 3)",
+    rows: [stitchRunning(["successful", "successful", "in_process"], 1)],
+    memberCount: 3,
+    line: "Fetching trades for this composite strategy: key 3 of 3.",
+    tone: "text-text-secondary",
+    remedy: RELOAD,
+  },
+  {
+    id: "KCS09-RUN-COMPUTE",
+    rows: [chainJob("compute_analytics_from_csv", "running")],
+    line: "Computing this strategy's analytics from its trades.",
+    tone: "text-text-secondary",
+    remedy: RELOAD,
+  },
+  {
+    id: "KCS09-STALLED (stitch heartbeat older than 12 minutes)",
+    rows: [stitchRunning(["successful", "in_process", "waiting"], 13)],
+    memberCount: 3,
+    line: "The computation for this composite strategy stopped reporting progress more than 12 minutes ago.",
+    tone: "text-warning",
+    remedy: SHAPE_COMPOSITE,
+  },
+  {
+    id: "KCS09-FAIL-PERMANENT",
+    rows: [chainJob("derive_broker_dailies", "failed_final", "permanent")],
+    line: FAIL_PERMANENT,
+    tone: "text-negative",
+    remedy: CONTACT_PERMANENT,
+  },
+  {
+    id: "KCS09-FAIL-TRANSIENT",
+    rows: [chainJob("derive_broker_dailies", "failed_final", "transient")],
+    line: FAIL_TRANSIENT,
+    tone: "text-warning",
+    remedy: SHAPE_SINGLE,
+  },
+  {
+    id: "KCS09-FAIL-ORPHANED",
+    rows: [chainJob("process_key_long", "failed_final", "orphaned")],
+    line: "The last computation stopped before it finished because the process running it went away.",
+    tone: "text-warning",
+    remedy: SHAPE_SINGLE,
+  },
+  {
+    id: "KCS09-FAIL-UNKNOWN",
+    rows: [chainJob("compute_analytics_from_csv", "failed_final", "unknown")],
+    line: "The last computation stopped, and the service could not tell why.",
+    tone: "text-warning",
+    remedy: SHAPE_SINGLE,
+  },
+  {
+    id: "KCS09-FAIL-OTHER (error_kind null)",
+    rows: [chainJob("compute_analytics_from_csv", "failed_final", null)],
+    line: "The last computation did not finish.",
+    tone: "text-warning",
+    remedy: SHAPE_SINGLE,
+  },
+  {
+    id: "KCS09-FINISHED",
+    rows: [chainJob("compute_analytics_from_csv", "done")],
+    line: "The last computation finished, but the factsheet could not be built from its results.",
+    tone: "text-warning",
+    remedy: CONTACT_CHECK,
+  },
+  {
+    id: "KCS09-NEVER (empty, exhaustive read)",
+    rows: [],
+    line: "No computation is running for this strategy, and none is on record.",
+    tone: "text-text-secondary",
+    remedy: SHAPE_SINGLE,
+  },
+];
+
+describe("KCS-09 — every derived state renders exactly one state line and one remedy line", () => {
+  it.each(STATE_ROWS)("$id", async ({ rows, memberCount, line, tone, remedy }) => {
+    givenOwnerPendingDraft();
+    givenJobs(rows);
+    STATE.memberCountResult = { count: memberCount ?? 0, error: null };
+
+    const { section, stateLine, remedyLine } = await renderOwnerPending();
+
+    expect(section!.querySelectorAll("p")).toHaveLength(2);
+    expect(stateLine!.textContent).toBe(line);
+    expect(stateLine!.className).toBe(`mt-6 text-fixed-13 ${tone}`);
+    expect(remedyLine!.textContent).toBe(remedy);
+    expect(remedyLine!.className).toBe("mt-3 text-fixed-12 text-text-muted");
+    expect(vi.mocked(unstable_cache)).toHaveBeenCalledTimes(0);
+  });
+
+  it("KCS09-RUN-UNKNOWN: a running state with an unrecognised phase renders the neutral working line", async () => {
+    // Unreachable through the RPC selection today: every kind the selection
+    // can pick (stitch_composite and the five factsheet-chain kinds) maps to a
+    // known phase, and a row of any other kind is never selected (KCS-20).
+    // The derivation still owns the row (KCS-08), so the page's rendering of
+    // it is pinned by overriding one derivation answer.
+    givenOwnerPendingDraft();
+    givenJobs([chainJob("compute_analytics_from_csv", "running")]);
+    vi.mocked(deriveComputeState).mockReturnValueOnce({
+      state: "running",
+      phase: "unknown",
+    });
+
+    const { stateLine, remedyLine } = await renderOwnerPending();
+
+    expect(stateLine!.textContent).toBe(
+      "The analytics service is working on this strategy.",
+    );
+    expect(stateLine!.className).toBe("mt-6 text-fixed-13 text-text-secondary");
+    expect(remedyLine!.textContent).toBe(RELOAD);
+  });
+
+  it("KCS-20: a newer done reconcile_strategy row does not hide a failed chain job", async () => {
+    givenOwnerPendingDraft();
+    givenJobs([
+      job({ kind: "reconcile_strategy", status: "done", created_at: minutesAgo(2) }),
+      job({
+        kind: "derive_broker_dailies",
+        status: "failed_final",
+        error_kind: "transient",
+        created_at: minutesAgo(60),
+      }),
+    ]);
+
+    const { stateLine } = await renderOwnerPending();
+
+    expect(stateLine!.textContent).toBe(FAIL_TRANSIENT);
+    expect(stateLine!.textContent).not.toContain("finished");
+  });
+});
+
+describe("KCS-21 — the remedy is keyed on the strategy's shape", () => {
+  const failedTransient = [chainJob("derive_broker_dailies", "failed_final", "transient")];
+
+  it("KCS21-SINGLE: a linked single key -> Resync on the edit page, linked", async () => {
+    givenOwnerPendingDraft({ source: "api", api_key_id: LINKED_KEY_ID });
+    givenJobs(failedTransient);
+    STATE.memberCountResult = { count: 0, error: null };
+
+    const { remedyLine } = await renderOwnerPending();
+
+    expect(remedyLine!.textContent).toBe(SHAPE_SINGLE);
+    const anchors = remedyLine!.querySelectorAll("a");
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].getAttribute("href")).toBe(EDIT_HREF);
+    expect(anchors[0].textContent).toBe("edit page");
+    expect(anchors[0].className).toBe("text-accent underline underline-offset-4");
+    // The count ran on the request client, inside the owner pending render.
+    expect(STATE.observed.requestTables).toContain("strategy_keys");
+  });
+
+  it("KCS21-UNLINKED: no key linked -> Use & Sync on the edit page, linked", async () => {
+    givenOwnerPendingDraft({ source: "api", api_key_id: null });
+    givenJobs(failedTransient);
+    STATE.memberCountResult = { count: 0, error: null };
+
+    const { remedyLine } = await renderOwnerPending();
+
+    expect(remedyLine!.textContent).toBe(SHAPE_UNLINKED);
+    const anchors = remedyLine!.querySelectorAll("a");
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].getAttribute("href")).toBe(EDIT_HREF);
+  });
+
+  it("KCS21-COMPOSITE: three members -> support, and NO control is linked", async () => {
+    givenOwnerPendingDraft({ source: "api", api_key_id: LINKED_KEY_ID });
+    givenJobs(failedTransient);
+    STATE.memberCountResult = { count: 3, error: null };
+
+    const { remedyLine } = await renderOwnerPending();
+
+    expect(remedyLine!.textContent).toBe(SHAPE_COMPOSITE);
+    expect(
+      remedyLine!.querySelectorAll("a"),
+      "a composite has no self-serve re-run control, so its remedy links none",
+    ).toHaveLength(0);
+  });
+
+  it("KCS21-CSV: source csv -> the CSV wizard, linked", async () => {
+    givenOwnerPendingDraft({ source: "csv", api_key_id: null });
+    givenJobs(failedTransient);
+
+    const { remedyLine } = await renderOwnerPending();
+
+    expect(remedyLine!.textContent).toBe(SHAPE_CSV);
+    const anchors = remedyLine!.querySelectorAll("a");
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].getAttribute("href")).toBe(CSV_WIZARD_HREF);
+    expect(anchors[0].textContent).toBe("upload a new CSV strategy");
+  });
+
+  it("SHAPE-UNKNOWN: the member count read fails -> no shape is guessed, and the failure is logged", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft({ source: "api", api_key_id: LINKED_KEY_ID });
+      givenJobs(failedTransient);
+      STATE.memberCountResult = {
+        count: null,
+        error: { message: "permission denied for table strategy_keys" },
+      };
+
+      const { stateLine, remedyLine } = await renderOwnerPending();
+
+      // The state line is still true; only the remedy declines to name a control.
+      expect(stateLine!.textContent).toBe(FAIL_TRANSIENT);
+      expect(remedyLine!.textContent).toBe(RETRY_READ);
+      expect(remedyLine!.querySelectorAll("a")).toHaveLength(0);
+      expect(errSpy).toHaveBeenCalledWith(
+        "[factsheet/v2/page] strategy-shape read failed",
+        expect.objectContaining({ id: STRATEGY_ID }),
+      );
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+        expect.anything(),
+        { tags: { route: "factsheet/v2/page", stage: "strategy-shape" } },
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
+
+describe("KCS-09 — an unreadable read never claims progress", () => {
+  it("RPC-ERROR: the RPC answers { error } -> KCS09-UNREADABLE, logged to console and Sentry", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft();
+      STATE.rpcResult = {
+        data: null,
+        error: { code: "42501", message: "permission denied" },
+      };
+
+      const { container, stateLine, remedyLine } = await renderOwnerPending();
+
+      expect(stateLine!.textContent).toBe(UNREADABLE_LINE);
+      expect(stateLine!.className).toBe("mt-6 text-fixed-13 text-text-secondary");
+      expect(remedyLine!.textContent).toBe(RETRY_READ);
+      for (const phrase of IN_PROGRESS_PHRASES) {
+        expect(container.textContent).not.toContain(phrase);
+      }
+      expect(errSpy).toHaveBeenCalledWith(
+        "[factsheet/v2/page] compute-state read failed",
+        { id: STRATEGY_ID, code: "42501", message: "permission denied" },
+      );
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+        { code: "42501", message: "permission denied" },
+        { tags: { route: "factsheet/v2/page", stage: "compute-state" } },
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("RPC-THROWS: a request client with no rpc member -> KCS09-UNREADABLE, no uncaught throw", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft();
+      STATE.rpcMissing = true;
+
+      const { container, stateLine, remedyLine } = await renderOwnerPending();
+
+      expect(stateLine!.textContent).toBe(UNREADABLE_LINE);
+      expect(remedyLine!.textContent).toBe(RETRY_READ);
+      for (const phrase of IN_PROGRESS_PHRASES) {
+        expect(container.textContent).not.toContain(phrase);
+      }
+      expect(errSpy).toHaveBeenCalledWith(
+        "[factsheet/v2/page] compute-state read failed",
+        expect.objectContaining({ id: STRATEGY_ID }),
+      );
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+        expect.any(TypeError),
+        { tags: { route: "factsheet/v2/page", stage: "compute-state" } },
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("NON-EXHAUSTIVE: a full 100-row window with no chain job proves nothing -> unreadable", async () => {
+    givenOwnerPendingDraft();
+    givenJobs(
+      Array.from({ length: 100 }, (_, i) =>
+        job({ kind: "reconcile_strategy", status: "done", created_at: minutesAgo(i + 1) }),
+      ),
+    );
+
+    const { stateLine } = await renderOwnerPending();
+
+    expect(stateLine!.textContent).toBe(UNREADABLE_LINE);
   });
 });
