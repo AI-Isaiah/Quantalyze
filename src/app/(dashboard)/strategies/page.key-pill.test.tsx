@@ -563,6 +563,24 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC);
   });
 
+  it("PUBLIC-NO-READ (167.2-REVIEW IN-04): a published row's note is the public-URL line whatever the arm, so its jobs are never read", async () => {
+    state.strategies = [
+      row("s-pub", { status: "published", strategy_analytics: { computation_status: "failed" } }),
+    ];
+    state.jobsError = { message: "synthetic rpc failure" };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC);
+    // The read's answer was discarded, so a failure in it logged an error
+    // about a value nobody reads.
+    expect(state.rpcCalls).toEqual([]);
+    expect(consoleError).not.toHaveBeenCalledWith(
+      "[strategies/page] compute-state read failed",
+      expect.anything(),
+    );
+  });
+
   it("calls the RPC once per uncomputed row with its own p_strategy_id and the shared limit", async () => {
     state.strategies = [
       row("s-a", { strategy_analytics: { computation_status: "failed" } }),

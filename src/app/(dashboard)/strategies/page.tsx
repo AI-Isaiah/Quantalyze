@@ -282,16 +282,19 @@ export default async function StrategiesPage() {
     await Promise.all(
       (strategies ?? [])
         .filter((s) => !isComputedAnalytics(computationStatusOf(s.strategy_analytics)))
-        .map(
-          async (s) =>
-            [
-              s.id,
-              recipientShareNote(
-                shareAffordanceMode(isPublishedStatus(s.status)),
-                await readRecipientArm(supabase, s.id),
-              ),
-            ] as const,
-        ),
+        .map(async (s) => {
+          const mode = shareAffordanceMode(isPublishedStatus(s.status));
+          // 167.2-REVIEW IN-04: a published row's note is KCS12-PUBLIC whatever
+          // the arm (`recipientShareNote` ignores it for "public-url"), so its
+          // jobs are not read: that was one RPC per row whose answer, and whose
+          // failure log, described a value nobody reads. The arm passed for it
+          // is the one that claims least; it is never rendered.
+          const arm: RecipientArm =
+            mode === "public-url"
+              ? "not_available"
+              : await readRecipientArm(supabase, s.id);
+          return [s.id, recipientShareNote(mode, arm)] as const;
+        }),
     ),
   );
 
