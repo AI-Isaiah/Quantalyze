@@ -546,54 +546,82 @@ SELECT count(*) AS enqueued_this_tick
 - **Expected:** `succeeded`, and `enqueued_this_tick = 2` for the four-strategy single-venue
   backlog (the per-venue cap of 2 binds — see "First tick"). The count the function returns is a
   NOTICE and does not reach `return_message`, which is why the second query exists at all.
+- A `failed` run whose `return_message` starts with `enqueue_ledger_refresh_for_strategies: every
+  candidate this tick failed to enqueue` is the fan-out's own verdict since Phase 164.6: every
+  candidate it selected that tick raised on enqueue. See the next subsection.
 - ⚠️ Neither of these is success. They tell you the mechanism fired; the census above tells you it
   worked.
 
 #### Did a candidate fail to enqueue this tick? (Phase 164.6, OPS-08-F2)
 
-Since migration `20260924120000_ledger_fanout_failure_count.sql`, a tick in which one or more
-candidates' enqueue raised writes **exactly one** `public.cron_runs` row. Its `error` is
-`candidate_enqueue_failed` and its `metadata` carries the failed and enqueued counts. A tick with no
-failure writes nothing. Both fan-outs write it under the same `cron_name`. Run this in the admin
-SQL editor (row security admits platform admins and `service_role` only):
+Since migration `20260924120000_ledger_fanout_failure_count.sql`, a candidate's enqueue that raised
+is handled in one of two ways, depending on what else the tick did:
+
+- **The tick also enqueued something.** It writes **exactly one** `public.cron_runs` row. Its
+  `error` is `candidate_enqueue_failed` and its `metadata` carries the failed, enqueued and
+  lost-race counts. Both fan-outs write it under the same `cron_name`.
+- **Every selected candidate failed.** The tick RAISES at its end, after releasing its lock, so the
+  scheduler records the run as `failed`: the first query in "Did the tick itself run" above shows
+  it, with a `return_message` that starts with the function's name and `every candidate this tick
+  failed to enqueue`. The raise rolls that tick's own failure row back, so the query below does NOT
+  show it. The prod prober's cron-obs arm reports such a run as `cron-ledger-fanout-failed`.
+
+A tick with no failure writes nothing. Run this in the admin SQL editor (row security admits
+platform admins and `service_role` only):
 
 ```sql
 SELECT completed_at,
        error,
-       metadata->>'function'               AS fn,
-       (metadata->>'failed_count')::int    AS failed,
-       (metadata->>'enqueued_count')::int  AS enqueued
+       metadata->>'function'                  AS fn,
+       (metadata->>'failed_count')::int       AS failed,
+       (metadata->>'enqueued_count')::int     AS enqueued,
+       (metadata->>'lost_race_count')::int    AS lost_race
   FROM public.cron_runs
  WHERE cron_name = 'ledger_refresh_fanout'
    AND error = 'candidate_enqueue_failed'
- ORDER BY completed_at DESC
- LIMIT 5;
+   AND completed_at > now() - INTERVAL '65 minutes'
+ ORDER BY completed_at DESC;
 ```
 
-- **Expected:** zero rows. A row means that tick skipped `failed` candidates and still enqueued
-  `enqueued` others. `fn` names the fan-out that wrote it (`enqueue_ledger_refresh_for_strategies`
-  or `enqueue_ledger_composite_refresh`).
+- **Expected:** zero rows in the last tick's window. A row means that tick skipped `failed`
+  candidates and still enqueued `enqueued` others. `fn` names the fan-out that wrote it
+  (`enqueue_ledger_refresh_for_strategies` or `enqueue_ledger_composite_refresh`).
+- ⚠️ **Zero rows is not proof of health.** Two failures leave no row here:
+  - a tick in which every candidate failed. Its row was rolled back by its own raise; read the
+    run's `status` in the first query above instead;
+  - a tick that enqueued something but whose failure-row write itself failed. That leaves only a
+    Postgres `WARNING` (`failure instrument write failed`), which nothing reads. Only the census
+    above catches it, as a strategy that stays stale.
+- **History, not this tick.** Drop the `completed_at` line and add `LIMIT 20` to list older failure
+  rows. `cron_runs` is never purged, so without the window the query returns rows forever once any
+  tick has failed, and "zero rows" stops meaning anything.
 - ⛔ **The per-target list is deliberately NOT selected.** The row's `metadata` also holds the
   failed strategy ids with their SQLSTATEs, but runbook output gets pasted into this public
   repository. Read the ids in the editor if you need them to repair a cause, and never paste them.
 - **The function's return value still means jobs INSERTED** (D-10). A tick that returns `2` beside a
   failure row enqueued 2 and failed `failed` more. The return value is not a failure signal; the
-  row is.
+  row and the run's `status` are.
 - ⚠️ **Since Phase 164.6, a `cron_runs` row under `ledger_refresh_fanout` is no longer proof of
   dormancy.** It may be a per-candidate failure row. The two dormancy causes (`flag_read_failed`,
   `flag_row_invisible_or_absent`) and `candidate_enqueue_failed` share that `cron_name`, so any
   "is it dormant?" reading must filter on `error` (or `metadata->>'cause'`), never on the
   `cron_name` alone. Earlier readings that counted rows under `ledger_refresh_fanout` predate the
   failure row and are not a template.
-- **Current behaviour. Each point below changes in the 164.6 review fix;** read the fixed migration
-  rather than this bullet once that fix lands.
-  - Nothing alerts on this row today. It is found only by running the query above. *(Changes in
-    the 164.6 review fix.)*
-  - A candidate whose enqueue raises leaves no `compute_jobs` row, so the 20-hour attempt cooldown
-    does not see it. The same candidate is selected again on the next tick, and a persistent cause
-    writes a failure row every tick until it is repaired. *(Changes in the 164.6 review fix.)*
-  - A lost enqueue race (SQLSTATE `40001`) is counted in `failed_count` like any other failure.
-    *(Changes in the 164.6 review fix.)*
+- **How the fan-out behaves around a failure** (the migration is the source of truth; this list
+  describes it and promises nothing beyond it):
+  - **What is watched.** A tick in which every candidate failed is a failed run, which the prod
+    prober's cron-obs arm reports. A tick that failed some candidates and enqueued others is NOT
+    alerted on by anything. It is found only by the query above.
+  - **A failed candidate is skipped for 20 hours.** The candidate query excludes any strategy named
+    in a failure row written in the last 20 hours, the same window as the attempt cooldown, so a
+    poisoned candidate no longer takes the same slot every tick and a healthy candidate takes it.
+    ⚠️ This needs the failure row to survive. After a tick in which EVERY candidate failed, there is
+    no surviving row, so the next tick selects the same candidates and fails the same way until
+    the cause is repaired.
+  - **A lost enqueue race is not a failure.** SQLSTATE `40001` (serialization failure) and `40P01`
+    (deadlock) mean another writer is already serving the strategy. They are counted in
+    `lost_race`. They never name a strategy, never skip it for 20 hours, never write a row on their
+    own and never make a tick raise.
 
 ### Proving the kill switch — with the schedule still firing
 
