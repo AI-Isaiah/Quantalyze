@@ -3,6 +3,7 @@ import os
 import secrets
 import logging
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Final, Sequence, cast
@@ -11,6 +12,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
+from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 from dotenv import load_dotenv
 
@@ -252,7 +254,7 @@ def assert_platform_secrets_configured() -> list[str]:
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from services.encryption import validate_kek_on_startup
 
     validate_kek_on_startup()
@@ -346,7 +348,7 @@ async def lifespan(_app: FastAPI):
     # unhandled exception in a background task still gets logged with
     # full traceback and sets SHUTDOWN so the remaining loops (and the
     # API) terminate rather than silently drifting.
-    def _crash_handler(task: asyncio.Task) -> None:
+    def _crash_handler(task: asyncio.Task[None]) -> None:
         if task.cancelled():
             return
         exc = task.exception()
@@ -778,7 +780,9 @@ def _gate_process_key(request: Request) -> JSONResponse | None:
 
 
 @app.middleware("http")
-async def verify_service_key(request: Request, call_next):
+async def verify_service_key(
+    request: Request, call_next: RequestResponseEndpoint
+) -> Response:
     if request.url.path == "/health":
         return await call_next(request)
 
@@ -927,8 +931,8 @@ app.include_router(process_key_router.router)
 app.include_router(debug_key_flow_router)
 
 
-@app.get("/health")
-async def health():
+@app.get("/health", response_model=None)
+async def health() -> JSONResponse | dict[str, Any]:
     # Report 503 when the merged worker's dispatch_tick hasn't bumped the
     # heartbeat in >STALE_THRESHOLD_S. Railway's healthcheckPath=/health
     # then restarts the pod, which restores job processing automatically

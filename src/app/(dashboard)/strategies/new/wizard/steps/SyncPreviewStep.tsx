@@ -202,8 +202,11 @@ const MAX_CONSECUTIVE_POLL_ERRORS = 3;
  * perform the series delete→re-upsert, and `failed_retry` is the queue retrying
  * (progress, not a stall — the same reading `isAutoRetrying` already takes).
  *
- * `null` is NOT in flight: after 154-04 it means zero `compute_jobs` rows are
- * visible for this strategy, i.e. nothing was ever enqueued.
+ * `null` is NOT in flight: after 167.2 KCS-20 it means
+ * no factsheet-chain job is visible for this strategy (the route's selection
+ * ignores recurring cron kinds).
+ * A wizard strategy's only jobs are chain kinds, so for it this still reads as
+ * nothing enqueued yet.
  */
 const FINISHED_JOB_STATUSES: readonly StitchJobStatus[] = [
   "done",
@@ -220,7 +223,9 @@ function isJobInFlight(jobStatus: StitchJobStatus | null): boolean {
  * differ on exactly one member, `null`, and that member is the whole reason
  * this predicate exists rather than a negation at the call site.
  *
- * `null` means "zero `compute_jobs` rows are VISIBLE" (154-04) — which the
+ * `null` means no factsheet-chain job is visible (167.2 KCS-20; for a wizard
+ * strategy, whose only jobs are chain kinds, that still reads as nothing
+ * enqueued yet) — which the
  * client reads not only when nothing was ever enqueued but also on every tick
  * before the cosmetic sync-progress piggyback has answered (it is issued
  * fire-and-forget from `onStatus`, so the FIRST terminal poll almost always

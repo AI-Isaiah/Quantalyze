@@ -1,5 +1,601 @@
 # Changelog
 
+## [0.89.0.0] - 2026-09-24 — AUMTRUST: the AUM an allocator sizes with says how much of it comes from keys needing attention, and what the modelled book leaves out
+
+⭐ **What changed for whoever reads this next.** Phase 167.1 closes the Phase 167 review's SFH-M2
+follow-up (`.planning/WINDOWS.md` entry 66). The founder's call of 2026-09-22 was "keep the total and
+flag it", so **no money number changed (D-03)**. The two holdings-derived dollar totals an allocator
+actually reads now name the part that comes from keys needing attention (a `revoked` or
+`sign_in_failed` key, by the shared predicate `isUntrustedKeySyncStatus`). Those totals are the
+Scenario composer's PORTFOLIO AUM field with its override note, and the Open Positions footer "Total
+unrealized P&L (equity contribution)". Each part is computed in the same pass as its total. The
+composer also says what the modelled-book narrowing leaves out. That is the founder's D-06 answer,
+option (b), given on 2026-09-24. `src/lib/queries.ts`, the scenario commit route, `supabase/` and
+`analytics-service/` are byte-unchanged across the branch. **No migration.**
+
+⚠️ **The premise was corrected before any code was written (D-01/D-13).** The phase was filed
+against a "headline AUM" in the KPI strip. That cell does not exist: `liveBaselineMetrics.aum` is
+rendered nowhere. The ROADMAP keeps the original goal as lineage beside two dated corrections.
+
+⚠️ **The phase verification is `human_needed` (14/15 truths verified; the fifteenth is this
+release).** Three browser checks are still owed. They will be run in the browser after deploy. See
+the notes at the bottom.
+
+### Added
+
+- **The composer's PORTFOLIO AUM field discloses its untrusted part (State A).** Beside the field:
+  `Includes $12,345 from keys needing attention.` The field keeps the full total. One muted span,
+  `scenario-aum-untrusted-note`, with no role and no glyph. The input's `aria-describedby` names
+  whichever note is on screen, derived from the same flags that render it (review round 1 WR-02,
+  which superseded UI-SPEC U-07).
+- **A committed manual AUM carries the disclosure inside its override note (State B).**
+  `Overrides live-holdings total $50,000, which includes $12,345 from keys needing attention.` The
+  marker moves with the live total, so one number never carries two markers (D-08, D-18).
+- **The composer says what the modelled book leaves out: D-06 option (b), the founder's answer of
+  2026-09-24.** In book mode the composer sums only the keys that feed the modelled book, so an
+  untrusted key's holdings can drop out of the AUM. The one marker now names them:
+  `Excludes $8,000 from keys needing attention.`, or with an included part,
+  `Includes $12,345 and excludes $8,000 from keys needing attention.` In State B it reads
+  `Overrides live-holdings total $50,000, which excludes $8,000 from keys needing attention.` The
+  marker renders on the excluded COUNT, so a counted $0 still reads `Excludes $0 …` (D-07). A
+  manager-side key the payload can name is left out of the excluded figure (D-20). The total is
+  unchanged.
+- **`Excludes $Z from keys with an unknown sync status` (review round 3 WR-01).** A holding the
+  narrowing drops whose key is missing from the key list is now named in its own part. It used to
+  vanish from every part and every figure on screen. The D-20 manager-side rule applies to it as
+  well. A missing `apiKeys` list fails open here too, so the error goes toward over-disclosure.
+- **State C: the "Required to size and commit." hint names the live total when it is at or below
+  zero** (the D-18 reopen, founder, 2026-09-24).
+  `Required to size and commit. The live-holdings total is -$4,000, which includes $1,000 from keys needing attention.`
+  In that state the field's accessible description is the hint.
+- **The Open Positions footer discloses its untrusted part.** A muted row under the total reads
+  `Includes +$300 from keys needing attention.` It uses the footer's own `formatPnl` sign
+  convention (UI-SPEC U-05). The total still sums every row (D-16).
+- **Holdings whose value is unknown are counted, not shown as a known zero** (review round 1 WR-03).
+  The composer appends `(value unavailable for N holding(s))` and the footer
+  `(P&L unavailable for N position(s))`, each directly after the part it belongs to (review round 2
+  IN-01 / IN-05).
+- **A holding whose key is missing from the key list is named, never read as trusted.** Review
+  round 1 WR-05 added a separate part, `… and $Z from keys with an unknown sync status`, on both
+  surfaces. It is never folded into the "keys needing attention" noun, because the Holdings filter
+  would not find those rows under it. Review round 2 WR-05 carried this to the Holdings tab: both
+  tables mark such a row `Sync status unknown`, and the untrusted filter does not hide it.
+- **One clause builder, `buildKeyTrustClause`,** in the new
+  `src/app/(dashboard)/allocations/lib/live-holdings-summary.ts`, writes the wording for both
+  surfaces. The nouns come from `UNTRUSTED_KEY_SET_NOUN` and the new `UNKNOWN_KEY_STATUS_SET_NOUN`
+  in `src/lib/closed-sets.ts`. The composer file carries no copy of the noun.
+
+### Changed
+
+- **The composer's live-holdings loop moved into `summarizeLiveHoldings`** in that module, unchanged.
+  One loop fills the total and every disclosed part (D-04, D-19). `liveHoldingsSum` is now
+  `summary.total`, and it is byte-identical: the walk order, the `continue` chain and the
+  accumulation order were kept. `holdingEquityContributionLocal` moved with it, also unchanged.
+- **The marker no longer vanishes where the figure on screen still includes untrusted dollars**
+  (the D-18 reopen). A manual AUM exactly equal to the live total now shows State A (review round 1
+  IN-06). A live total at or below zero now shows State C (review round 1 WR-04). State 7, a manual
+  value with a live total at or below zero, stays without a marker, because nothing on screen
+  contains the live total there.
+- **The `closed-sets.ts` prose now names what the predicate reaches (D-12).** It used to say the
+  predicate missed a "headline AUM" and that a follow-up would flag it. It now names the two
+  disclosure surfaces and says both disclose rather than subtract. The ROADMAP `### Phase 167.1`
+  entry carries the same correction. Both keep the old wording as lineage.
+- `hintShowsLive` was renamed `fieldBlankHintShows` (review round 3 IN-02), with no behaviour
+  change.
+
+### Fixed — code review, three rounds (gsd-code-reviewer with silent-failure-hunter)
+
+- **Round 1 (11 in scope, 8 fixed; the 3 held against D-18 were closed later, 2 by the reopen and
+  1 kept by UI-SPEC U-05).**
+  - The excluded figure is D-20's `$Y`, not every dropped holding. Manager-side keys are taken from
+    the payload as `eligibleApiKeyIds` minus `allocatorEligibleApiKeyIds` (WR-01).
+  - The disclosure is tied to the input (WR-02). An unknown P&L no longer reads as `+$0` (WR-03).
+  - A missing key reads as unknown, not trusted (WR-05, which also closes IN-04).
+  - IN-01, IN-02 and IN-03 (a tombstone comment, an unclamped-part pin, a fixture renamed for the
+    `revoked` key it holds).
+- **Round 2 (12 of 12 fixed).**
+  - A missing payload field names no manager-side key, so the error direction is over-disclosure
+    (WR-06). The composer's manager-side derivation is pinned where it is written (WR-01).
+  - `holdingEquityIsReported`'s lockstep with the equity helper is executable (WR-02).
+  - The D-20 residual is stated by its predicate (WR-03).
+  - The missing-key anomaly reaches Sentry (WR-04; see Security).
+  - The Holdings tab names a missing-key row (WR-05).
+  - IN-01/IN-05 per-part suffix, IN-02 log carries no key id, IN-03 indentation, IN-04 docblock,
+    IN-06 test hygiene.
+- **Round 3, on the D-06 work (6 of 6 fixed).**
+  - WR-01 added the unknown-status excludes part (see Added).
+  - WR-02 pins the includes-side unavailable term of the shared-noun form.
+  - IN-01 and IN-02 corrected comments and a flag name the reopen had made stale.
+  - IN-03 records that State 6 is exact float equality.
+  - IN-04 supersedes two UI-SPEC rows.
+- **Method, every round:** each fix started from a test observed RED. Each new guard was then
+  neutered, observed RED, and restored from a `cp` byte backup checked with `cmp`.
+
+### Security
+
+- **The one new third-party write is count-only.** When the composer sums a holding whose key is
+  missing from the key list, it sends a `warning`-level capture to Sentry (review round 2 WR-04).
+  The tags are `component` and `reason: holding_key_missing_from_key_list`, and the extra field is
+  `unknown_status_count`. A test asserts that no key id appears in the message, the tags or the
+  extra. Round 3 WR-01 added no capture: the one reachable path is already captured at the trust
+  boundary by `getUserApiKeys`.
+- The phase security audit: 0 open threats at `block_on: high`. No new read, no new server path,
+  no migration. The composer's AUM is display and draft sizing only, because the commit route
+  computes its own AUM.
+
+### Tests
+
+- New files `live-holdings-summary.test.ts` and `untrusted-key-status.surfaces.test.tsx`. An
+  `AUMTRUST` block in `ScenarioComposer.test.tsx` covers every UI-SPEC § 1 state and § 3 row, the
+  count gates, tone, the accessible description and the D-06 pins. The panel split test and the
+  footer test cover the missing-key row marker.
+- Four pins were flipped deliberately by plan 05, each with a dated comment: the D-06 component pin,
+  the component pin 4, and the state 4 and state 6 absence pins.
+- Every new case was observed RED before its change. The plans, the fix rounds and the verifier
+  neutered each guard and saw it go RED. The guards include the excluded bucket leaking into the
+  total, an amount gate in place of the count gate, a second marker span, each D-18 branch and the
+  WR-01 bucket.
+- At the release head, `npx vitest run 'src/app/(dashboard)/allocations' src/lib/closed-sets`
+  reports **135 files, 2101 passed**, and `critical-regressions.test.ts` is green.
+
+### Notes — known limits, stated so they can be checked rather than assumed
+
+- **D-06 is answered: option (b), by the founder, 2026-09-24.** A `revoked` key is left out of the
+  book-mode composer AUM by `isPerKeyDailiesEligibleKey`. That is unchanged, and it is now disclosed
+  as excluded.
+- ⚠️ **D-20 residual.** A manager-side key outside `eligibleApiKeyIds` (revoked, soft-disconnected or
+  inactive) cannot be told apart in the payload, so its untrusted holdings may be counted in `$Y`.
+  This over-discloses and never hides.
+- ⚠️ **State 6 is exact float equality** (review round 3 IN-03). Typing the rounded live figure lands
+  in State B.
+- ⚠️ **Every guarantee holds only after the latest-asof holdings collapse.** `holdingScopeKey` omits
+  `api_key_id`, so two accounts holding the same asset on one venue can merge before any total is
+  computed. This predates the phase and is data-integrity. It is routed to Phase 167.1.1
+  HOLDINGKEYSCOPE.
+- Whether a soft-disconnected key counts as "needing attention" is the founder's call. The predicate
+  was not widened.
+- The two surfaces sign the amount differently on purpose. The composer prints `-$1,235`, and Open
+  Positions prints `+$300` / `−$1,235`. Each disclosure uses the renderer of the figure it qualifies
+  (U-05, review round 1 IN-05).
+- `ExposureByClass` is not qualified (D-17). `mandate-gates.ts` `minAumGate` has no production
+  caller and was not touched.
+- ⚠️ **Founder checks pending, to be run in the browser after deploy:** the UI-SPEC long-text
+  backstops, which are State A, B and C at 320px width and 200% zoom (including the longest
+  two-noun forms) and the Open Positions qualifier at 320px. Also a read-through of every new
+  string. The strings added in the review rounds and plan 05 were written without the founder, and
+  each one is a dated row in the phase UI-SPEC.
+- `.planning/WINDOWS.md` entry 66 is closed as fixed, with the disposition "disclosed, not changed".
+- **The planning record** holds the phase context with decisions D-01 to D-20 and its known
+  limits, research, patterns and validation, the UI design contract, six plans with their
+  SUMMARYs, three review rounds with their fix reports, the verification and the security audit.
+  The branch also carries three merges of `main`, which bring in other phases' work only.
+
+## [0.88.0.0] - 2026-09-24 — KEYCARDSYNC: a sync result is shown only for the key it came from, and no status surface promises a compute that is not coming
+
+⭐ **What changed for whoever reads this next.** Phase 167.2 covers one family of defects across
+three surfaces. A status the owner reads must be about the thing it names, and it must not promise
+an outcome that is not coming. **The manager key card** (`ApiKeyManager` on `/strategies/[id]/edit`)
+now ends a sync attempt only on a terminal that its own evidence proves. It does not start an
+attempt while a factsheet-chain job is in flight. It bounds every read and write it waits on, and
+when it stops checking it says so instead of saying the sync failed. This closes the four residuals
+Phase 167 routed here. **The `/strategies` list** marks each row fed by an untrusted key.
+**The pending factsheet, the share page and the discovery fallback** state the real compute
+state, or one neutral sentence. None of them says "still computing" or "a few minutes" for a
+compute that failed, stalled or never started. **No migration (KCS-15):** every new read uses an
+existing policy or RPC, and the diff touches nothing under `supabase/` or `analytics-service/`.
+
+⚠️ **The phase verification is `human_needed` (9/9 truths verified).** The founder's visual checks
+at 320px and 200% zoom, and a read-through of the new copy, are still pending. See the known limits
+at the bottom.
+
+### Added
+
+- **One compute-state derivation, `src/lib/compute-state.ts`.** It selects the factsheet job
+  once: it prefers the stitch job, filters to the factsheet chain and ignores recurring cron kinds
+  (KCS-20). `deriveComputeState` counts `done_pending_children` as in flight (KCS-19), and it
+  reads a non-exhaustive empty window as unreadable, not as "nothing ran". `recipientArm` maps
+  every state to what a share-link recipient sees. The sync-progress route, the owner factsheet,
+  the share page, `/strategies` and the key card's job-state read all use it.
+- **Locked copy modules** `src/components/strategy/key-card-copy.ts` and
+  `src/lib/status-surface-copy.ts`. Tests pin every string verbatim, and each change after the
+  review rounds is a dated row in the phase UI-SPEC.
+- **One strategy-shape predicate, `src/lib/strategy-shape.ts`**: single-key, composite or
+  `unknown`. It fails closed. A zero member count with no linked key is cross-checked against the
+  job history, so an RLS-filtered count cannot unlock the link write. The shared owner job read,
+  `src/lib/compute-jobs-read.ts`, re-asks once at the RPC's row cap and reports a window that is
+  still full. It never reads that window as empty.
+- **A shared, bounded job-state read, `src/components/strategy/chain-job-state.ts`**, used by
+  the key card's pre-attempt gate and by its panel. It is bounded at 15 s and fails closed on every
+  unreadable answer.
+- **The key card's new states, each with authored copy:**
+  - `No result yet` (muted, no Retry): the panel's 2-minute poll budget or its 30-second
+    missing-row grace ran out. A give-up is not a failure.
+  - `Sync not started` (amber): the 15 s link-update bound expired, and no enqueue was sent.
+  - `Sync not confirmed` (amber): the 180 s enqueue bound expired, and the sync may still be
+    running. A late 202 starts no poll.
+  - A refusal before the link and the enqueue, while a chain job is in flight or the job state is
+    unreadable. A deterministic unreadable answer names support and never says "try again in a
+    moment".
+  - A note when a finished success could not be verified. No later re-read clears it.
+  - After 60 s, a line stating the panel's own 2-minute limit. It promises no sync duration.
+- **`/strategies` key pills.** A row fed by a revoked or sign-in-failed key carries the key card's
+  own `AllocatorSyncStatus` pill and remedy line, one per distinct status, with no causal claim.
+  A feeding key is the row's linked key or any composite member. The list reads only through the
+  owner-scoped request client and never touches a factsheet path. A row with no computed
+  factsheet also says, beside its share control, what a link recipient sees right now.
+- **The owner pending factsheet states its real compute state**, read on the request client,
+  with a remedy that names a control this strategy's shape actually paints. The measured composite
+  trigger reads as a stop that retrying alone will not resolve. The owner's share panel says what a
+  recipient of the link sees.
+- **The share page has two neutral arms.** "Being prepared" appears only while a job will still do
+  work. A failed, stalled, finished-without-payload, never-started or unreadable compute reads
+  "This factsheet isn't available yet", with no internal cause. The read is bounded by the matched
+  strategy id and projects five fields: no `last_error`, no `error_kind`, no whole `metadata`.
+
+### Changed
+
+- **A key-card attempt ends only on a terminal it can prove belongs to it (KCS-02).** Either this
+  attempt saw `computing`, or `computed_at` differs from the value read just before the enqueue.
+  Both are server-written values, and no client clock is compared with a server clock. A resync can
+  no longer end at its first poll with the previous run's "Up to date" or "Sync failed". The
+  poller's interval arm drops a read that a newer applied read has overtaken.
+- **A success waits for the job queue.** Before the panel forwards a terminal success, it reads the
+  sync-progress projection once. It forwards the success only when no factsheet-chain job is still
+  running. A warned strategy's resync is no longer called "Synced with warnings" mid-chain. An
+  evidenced failure is forwarded only when the chain is settled, so another job's failure is not
+  shown as this attempt's result.
+- **The post-add sync is the tracked attempt (KCS-01).** `Add Key`'s Connect Key is disabled, with
+  the reason read as its description, while an attempt is live. Every Resync, Use & Sync and panel
+  Retry is refused while an add is in flight.
+- **A withheld success stays withheld.** It is retired at the applied re-read that found its key
+  untrusted. A later re-read cannot resurrect it, including one after another tab fixes or deletes
+  the key.
+- **The link is read back from the server before the enqueue (WR-04).** A mismatch, or an
+  unreadable read-back, ends the attempt unconfirmed and sends no enqueue.
+- **A failed sync shows the server's own reason**, or no detail. The old "Analytics computation
+  timed out" sentence is gone. A late answer from the route replaces the "may still be running"
+  panel with "Sync failed" only when it is the route's own verdict, never a transport failure.
+- **A composite's key card lists only its member keys and offers no control that rewrites
+  `strategies.api_key_id`.** There is no Resync, Use & Sync or Add Key, and the handlers refuse.
+  An unknown shape keeps Update password and Delete, and says why syncing is paused.
+- **Delete on a composite member key warns and then lets the owner delete** (founder decision
+  2026-09-24). The existing confirm runs a bounded membership read. Its amber warning names every
+  composite the key belongs to, says the key is removed from them, says a composite left with no
+  other key becomes unlinked, and says the database guard refuses the delete for a published
+  composite. A failed read shows an unchecked warning and still lets the owner choose. This
+  replaces two earlier round rules that REFUSED the delete. `KCS-23`'s amendment is recorded in the
+  phase CONTEXT and the ROADMAP.
+- **`/api/strategies/[id]/sync-progress` answers DEGRADED, never IDLE, when it could not tell.**
+  That covers a non-array RPC answer, a window still full at the cap, and a status outside the
+  domain. The two deterministic causes carry a closed `degradedReason` (`window_full`,
+  `bad_status`). The route also selects the factsheet job through the shared derivation.
+- **The public factsheet placeholder and the discovery fallback say one neutral sentence**
+  (KCS-10). "Some strategies stay in this state" and "still computing" are gone from non-test source.
+- The wizard's `SyncPreviewStep` comments now describe the narrowed `null` meaning. Its behaviour
+  is unchanged.
+
+### Fixed — code review, two rounds (gsd-code-reviewer with silent-failure-hunter, 43 findings)
+
+- **Round 1 (27 in scope, 26 fixed in 20 commits).** The fixes:
+  - The pre-attempt gate stops one key's running job from answering for another key's attempt
+    (CR-01, WR-06). The composite card lists only the keys it reads from (CR-02).
+  - `/strategies` never renders a failed list, key-status or member read as empty or healthy
+    (H-1, H-3). An unreadable key shape says why syncing is paused (H-2).
+  - A zero member count with no linked key no longer unlocks the link write (M-7). A full
+    compute-job window is re-asked, narrowed or reported (M-5).
+  - A give-up asks the job queue first (M-3). A late enqueue answer reaches the panel (M-1). A
+    post-enqueue re-read throw no longer fails the sync (L-4). A null or subject-less re-read
+    vouches for nothing (L-1, L-2).
+  - An old stitch no longer answers for a strategy with no members (IN-03). `/strategies` reads no
+    compute jobs for a published row (IN-04). `loadKeys` depends honestly on a stable retirement
+    core, and an unmount drops the live attempt (IN-01, IN-02).
+  - The key card's bound expiries and the compute-state read failures reach Sentry (M-6).
+  - WR-02 was recorded as unfixable in phase; see the known limits.
+- **Round 2 (16 in scope, all fixed in 8 code commits and 1 report correction).** The fixes:
+  - An unlinked strategy with 100+ job rows keeps Add Key: the composite-history read widens on
+    its own rule (CR-01, R2-H1). Its unknown-shape paths are captured (R2-M2).
+  - An RLS-scoped zero count no longer drops stitch preference for a composite (IN-05).
+  - The unknown-shape copy no longer promises that a reload fixes it (WR-01). The in-flight gate
+    line is true for every in-flight state (IN-02).
+  - A deterministic DEGRADED answer names support (IN-04, R2-L1). The gate's 15 s bound is pinned
+    by a test (WR-03).
+  - A late transport failure is no longer shown as a definitive "Sync failed" (R2-M1).
+  - A give-up blames a `failed_final` chain on this attempt only if the attempt queued a new job
+    (R2-L2). An all-unreadable attempt is captured (R2-L3).
+  - A null list read with no error is unreadable, not "No strategies yet" (IN-03). The Delete
+    membership read failure is captured (R2-L4 (a)). The Delete rule landed per the founder
+    decision above (WR-02).
+- **Method, both rounds:** each fix started with a test observed RED. Then each new guard was
+  neutered, observed RED, and restored from a `cp` byte backup checked with `cmp`.
+
+### Security
+
+- **Sentry captures carry no id in their message or tags.** Every new capture site uses stage tags
+  only. ⚠️ This is narrower than round 1 first claimed (corrected in round 2, IN-01). The
+  surrounding event can still carry non-secret, owner-internal ids in console breadcrumbs, fetch
+  breadcrumbs and page or request URLs. A UUID scrub of every breadcrumb is an instrumentation-wide
+  change, so it was not made here.
+- **The share page's new reads run on the admin client and are bounded by the matched strategy
+  id alone.** They are the five-field job projection and one member head count. The constant-time
+  token match stays the only authorisation. `/strategies` and the owner factsheet read only through
+  the owner-scoped client and `get_user_compute_jobs`. That RPC is SECURITY DEFINER,
+  `auth.uid()`-scoped, and nulls `last_error`.
+- The phase security audit covers 47 plan threats plus the review-round surface: 0 open at
+  `block_on: high`.
+
+### Tests
+
+- New suites: `compute-state`, `strategy-shape`, `status-surface-copy`, `key-card-copy`,
+  `useStrategySyncPoller`, the `/strategies` key-pill suite, the owner compute-state factsheet
+  suite, the share page suite and the discovery pending-fallback suite. `ApiKeyManager`,
+  `SyncProgress`, `ApiKeyForm`, the edit page and the sync-progress route suites were extended.
+- Every pin the phase moved (SEAMUX-05, the WR-02 Resync pin, FAILED-NO-READ, LATE-202, PIN 7 and
+  the others) keeps its reason and a lineage comment. None was deleted.
+- The phase test set, in the round-2 run: **355 files; 7004 passed, 9 skipped, 0 failed.**
+  `tsc --noEmit` and `eslint` on every touched file exit 0.
+- The verifier ran its own neuter drills, each restored and checked with `cmp`: the evidence guard
+  turned 5 tests RED, the pre-attempt gate 8, and `recipientArm` mapping `failed` to in-progress
+  13, across four surfaces.
+
+### Notes — known limits, stated so they can be checked rather than assumed
+
+- ⚠️ **Routed to Phase 167.2.1 FACTSHEETBUILDABLE**, both needing server-side work that KCS-15
+  forbids here:
+  - (WR-02) A computed row whose factsheet cannot actually build gets no recipient note on
+    `/strategies`, while its recipient sees the "not available" arm. Only the admin-client
+    builder knows whether a payload builds.
+  - (R2-L4 (b)) If the `strategy_keys_owner` policy regressed, the Delete membership read would
+    answer an empty list with no error, and the confirm would show no composite warning. The
+    database's publish guard still protects a published composite.
+- ⚠️ **WR-04 residual.** A stalled old link update can still land between the read-back and the
+  sync handler's own read of the column. The pre-attempt gate narrows that window but does not
+  close it.
+- ⚠️ **The baseline-read and enqueue window.** The evidence baseline is read just before the
+  enqueue. A server write that lands between that read and the enqueue is outside what the
+  evidence gate can attribute.
+- ⚠️ **M-7 residual.** A composite draft whose members are hidden, and which has no stitch on
+  record yet, still reads as unlinked.
+- ⚠️ **Founder checks pending:** the key-card panels and the Delete warning at 320px width and 200%
+  zoom, the composite card on real data, the share page and `/strategies` footer band, and a
+  read-through of every new locked string against DESIGN.md. Every string added in the review
+  rounds was authored without the founder, and each one is listed in the UI-SPEC amendment tables.
+- **No migration (KCS-15):** confirmed by the verifier and by the security audit.
+- **The planning record** holds the phase context with decisions KCS-01 to KCS-23, research and
+  validation, the UI design contract, ten plans with their SUMMARYs, both review rounds with their
+  fix reports, the verification and the security audit.
+
+## [0.87.1.0] - 2026-09-24 — MYPYSTRICT: the strict type gate covers the module that IS the service
+
+⭐ **What changed for whoever reads this next.** CI's `mypy --strict` gate said it covered "all running-service code", but it never read `analytics-service/main.py`, the FastAPI app itself, nor the three top-level modules that run inside that process. It now does. The `python` job's step "Type gate - mypy strict over the running-service surface" checks `services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py`: **100 files, 0 errors, where it checked 96**. A contract test pins that path set to the service surface derived from the tracked tree, so the gate cannot be narrowed quietly again.
+
+### Added
+- **The four top-level service modules enter the strict gate** with real annotations, in `main.py`, `main_worker.py` and `sentry_init.py`. The phase adds no `# type: ignore` and no `cast(`. Five Supabase closures are typed `-> Any`, because a narrower type would have meant changing runtime code.
+- **`src/__tests__/contracts/ci-mypy-strict-surface.contract.test.ts`** (70 tests). It parses the CI `run:` line and the Makefile recipe into tokens and derives the surface from `git ls-files`, including namespace packages. It requires exactly one mypy invocation and pins the flag set exactly, the gate step's own YAML keys, `--config-file=pyproject.toml`, and the Makefile's `MYPY` assignment and single `typecheck` rule. It refuses a folded continuation line under `run:`, a tracked `.pyi` stub shadowing a surface module, and TOML multi-line strings or continuations in `pyproject.toml`. Each check has a calibration leg: two review rounds switched each of the 47 checks off in turn, and every one went red. The `CONTRACT_GUARDS` floor moves from 60 to 61 in the same commit.
+
+### Changed
+- **`/health` declares `response_model=None`.** Without it, FastAPI fails at import once the return type is annotated. The OpenAPI document hash is unchanged before and after.
+- **The gate runs under `--config-file=pyproject.toml`** in CI and the Makefile, so an untracked `mypy.ini` cannot override the settings.
+- **`make ci` runs `typecheck`**, not `lint`.
+- **Every statement of what the gate covers now names the real surface:** the `ci.yml` comment, the Makefile header, help text and targets, `services/audit.py`, the `services/ingestion/__init__.py` docstring, and the `pyproject.toml` header.
+
+### Fixed
+- `TODOS.md` `[MYPY-MAINPY-01]` is closed in code. The closure keeps ROADMAP criterion 3's CI half (D-06b) open until it is observed on the PR.
+- After merging Phase 164.4.2, contract calibration leg (g2) is re-anchored on `test-db-drift`, now the job after `python`. The downstream-catch prose names `test-db-drift`, not `sql-tests`.
+
+### Tests
+- The CI mypy line reports 100 source files and 0 issues. Neutering `_crash_handler`'s `Task[None]` leaves the old command green and turns the new one red with a `main.py` `type-arg` error. A second neuter, on `health`'s return type, also turns it red.
+- Full pytest from `analytics-service/`: 6109 passed, coverage 91.50%. Contract and registry tests: 135 passed.
+
+### Notes — known limits, declared rather than enforced
+- The contract test does not pin a PATH swap of the mypy binary, a job-level `if:` or `env:`, or command wrappers its counter does not recognise. A skipped `python` job is still caught downstream, because `test-db-drift` needs `python` and the `frontend` aggregator reds a trusted-event skip.
+- D-06b, the CI job observed red and then green on this PR, is recorded in `164.6.1-UAT.md`.
+
+## [0.87.0.0] - 2026-09-24 — SUBSETSPLIT: `sql-tests` stops queueing for shared TEST, and `sql-mutation` checks only what a pull request changed
+
+⭐ **What changed for whoever reads this next.** Phase 164.4.2 has two halves, and both are about
+CI being slow on purpose. **Half B (the tracer):** `sql-tests` no longer holds the shared-TEST
+advisory key `61616158`. It runs the `supabase/tests` corpus on a local Supabase stack private to
+its own runner, with no secret. VAC-08, which really does measure shared TEST, moved into a new
+`test-db-drift` job that keeps the secret, the wait, the mutex and the stagger. **Half A:** on a
+pull request, `sql-mutation` mutates only the gate files the PR changed. A push to `main` still
+runs the full corpus and owes every floor. Getting the lane good enough to carry `sql-tests` took
+most of the phase: a currency gate, a migration replay, an ACL reset, non-public objects from the
+migrations, a registry login and a Postgres pin. Each one was found because the lane went red on
+something PROD does and the lane did not.
+
+⚠️ **The claim that CI got faster is NOT yet measured.** It can only be measured on merge-push runs
+at the new head, which do not exist until this merges. The protocol for measuring it, and the
+clauses that would refute it, were written before any such run exists. Read the known limits at
+the bottom.
+
+### Added
+
+- **`scripts/check-baseline-currency.mjs` — the repo's ONE baseline CURRENCY gate.** The old
+  `check-baseline-staleness.mjs` checks INTEGRITY (the dump's sha256), not currency, despite its
+  name. The new gate has a pure `judge()` and a self-test that drives every named defect kind.
+  `refuse_stale_baseline()` in the TEST restore script now delegates to it through a documented
+  `CURRENCY_CHECK` seam, with identical decisions (a relocation, not a behaviour change).
+- **DECISION F: the local-stack lane REPLAYS migrations newer than its dump.** The dump no longer
+  has to be current. `supabase/schema/baseline-carried-migrations.txt` records the migrations the
+  dump already carries, bound to the dump's sha256. `check-baseline-currency.mjs --replay-set`
+  reads that marker and prints the replay set on a `baseline-replay:` line on every run, `(none)`
+  included. It fails loud, by one of 11 named defect kinds, when the set cannot be determined. The
+  lane then applies each file in filename order, as authored, with no whole-file transaction flag,
+  and writes its migration-ledger row only after the file applies. A replayed migration that errors
+  is FATAL. The lane's reference data is extracted from CARRIED migrations only, so a replayed
+  migration's own INSERTs run once. A pull request's own new migration now runs on the lane BEFORE
+  merge.
+- **DECISION G: the lane carries the non-public objects PROD registers.** The schema-only `public`
+  dump cannot carry the `auth.users` trigger or the `pg_cron` jobs. `scripts/local-stack/nonpublic-objects.mjs`
+  extracts them from the carried migrations, in their original bytes: the trigger, and 15 cron jobs
+  folded through every later reschedule and unschedule. A drift gate re-derives the fold (it never
+  reads the emitted SQL) and compares it byte-exact against the lane's catalogue. MISSING, EXTRA,
+  DIFFERS or DUPLICATE fails the boot. So does a shape the gate cannot prove. It runs before the
+  D-F replay.
+- **A default-ACL reset and an ACL-fidelity gate on the lane.** The Supabase image grants ALL to
+  every role on anything created in `public`, and the dump can only ADD grants. So every
+  lane object inherited privileges PROD does not give. `reset-public-default-acl.sql` removes those
+  defaults before the dump loads. It derives the grantor roles from `pg_default_acl` and never names
+  them. `acl-fidelity.mjs` then compares every `public` relation, sequence and function, plus the
+  default ACLs, against what the dump declares. MEASURED: 2403 privileges compared, drift 0.
+- **`scripts/local-stack/capability-probe.mjs`** — the corpus's DEMAND per capability class
+  (pg_net, vault, the auth functions, the platform roles, pg_cron), derived every run, against the
+  lane's SUPPLY read from its catalogue, on one `stack-probe:` line. On `sql-tests` an INSUFFICIENT
+  verdict is fatal. The founder's PROCEED on moving `sql-tests` rested on the SUFFICIENT verdict of
+  CI run `35816624285`.
+- **`run.mjs --subset-from <list>`** — a SUBSET gate mode for the mutation runner. It can exit 0,
+  unlike the diagnostic `--file`/`--arm` mode. Every corpus run prints exactly one `scope:` line
+  (`FULL`, `FULL … (subset fallback: …)`, `SUBSET k/N …` or `DIAGNOSTIC`).
+  **`scripts/sql-gate-subset.mjs`** derives the gate files from the ONE merge-base diff,
+  `changedFilesAgainstBase()` in `classify-changed-paths.mjs`, which throws on an unreadable base.
+- **`test-db-drift`** — a new CI job that runs VAC-08 on shared TEST behind the schema-apply wait,
+  the mutex, the configured-variable gate and the `needs: python` stagger. Its aggregator row
+  tolerates only a skip on a fork PR or a `workflow_dispatch`.
+- **A registry login before every Supabase CLI image pull**, in the five jobs measured to pull
+  (the three lane jobs, VAC-04's drift check and the TEST restore). It is a plain `docker login`
+  over stdin, not a third-party action, and each of those jobs gains `packages: read` and nothing
+  else. A GHCR rate limit had failed all three lane jobs and VAC-04 in one run.
+- **A lane Postgres image pin plus a function-denial boot probe.** See Root cause.
+- **`scripts/local-stack/sql-corpus-report.mjs`** — a diagnostic, not a gate. It runs the whole
+  SQL corpus on the lane and continues past failures, so a lane defect shows its full extent rather
+  than its first file.
+
+### Changed
+
+- **`sql-tests` runs on the local-stack lane.** It holds no key, reads no secret and has no fork
+  gate, and it is judged STRICTLY by the `frontend` aggregator. Its `timeout-minutes` fell from 90
+  to 20, because it no longer waits on anyone. The `ci.yml` key census, re-measured: `test-db-drift`
+  12, `python` 9, `e2e-seeded` 8, `sql-tests` 0.
+- **`sql-mutation` narrows on a pull request, and only there.** `changed-paths` publishes
+  `sql_gate_mode` and `sql_gate_files` after the derivation's own self-test. The mutate step takes the
+  SUBSET branch only when the mode is `subset` AND the event is `pull_request`. Every other event
+  runs the full-corpus command, byte-identical to before. The derivation forces FULL on a push, on a
+  deleted or moved gate file, and on any change to the mutation machinery (`scripts/mutation-runner/`,
+  `scripts/pg-lane/`, `supabase/migrations/`). A list that names no annotated file, or only some,
+  falls back to FULL and says so.
+- **`sql-mutation`'s assert step judges the `scope:` line first.** No line, more than one, a
+  DIAGNOSTIC or unknown form, a SUBSET on any event other than `pull_request`, a SUBSET whose k
+  disagrees with the names it prints, k = 0, an N that disagrees with the coverage numerator, and a
+  SUBSET without the runner's `ARMS_FLOOR: NOT compared` line are each a MEASURE_FAIL. A SUBSET is
+  judged on its own k and never claims both floors held. ⛔ `FILES_FLOOR`, `ARMS_FLOOR` and
+  `WAIVED_CEILING` did not move, and `sql-mutation`'s `timeout-minutes` is still 20.
+- **All three lane-booting jobs run `Baseline currency - name the migrations the lane replays on top
+  of the dump` before their boot.** They check out shallow again. The measurement found no git-history
+  reader in any of them, so the wiring pin now asserts the property that makes shallow safe: the
+  lane's gate reads no history.
+- **The committed baseline dump was regenerated twice from PRODUCTION**, once to clear the
+  currency refusal and once after Phase 167's PROD apply. The dump now carries `strategy_sync_cursors`,
+  the `sign_in_failed` sync status and the `venue_account_id` column grant.
+- **The live-DB execution ledger shrank from 18 entries to 10, and `ENTRY_CEILING` went down with it.**
+  Eight entries were the lane's own ACL drift, not PROD's, and now pass. They are deleted. Six wizard
+  arms were re-kinded from K2 to K3, because the lane now refuses them at the GRANT layer exactly as
+  PROD does. The classifier gained one evidence-keyed K3 rule, scoped to that module.
+- **Pins re-argued rather than deleted.** The mutex pin now measures the holder set from `ci.yml`
+  and compares it as an exact set in both directions. The anti-skip pin follows the corpus step onto
+  the lane and pins its loopback DSN refusals. The docs-path roster gains `test-db-drift`. The
+  aggregator tolerance partition and its MW02 green fixture model the new result loop.
+- **`docs/runbooks/shared-test-db-mutex.md` and `CLAUDE.md` name the holders that exist.** Each has
+  dated CORRECTED notes, and the original sentences are kept as lineage. `CLAUDE.md` also records
+  that the founder removed the `Production` environment's required reviewer on 2026-09-23, so PROD
+  migrations auto-apply once `apply-test` succeeds, and it records the lane's Postgres pin.
+
+### Fixed
+
+- **The ephemeral lane booted from a stale dump and nothing noticed.** The local-stack path called
+  neither staleness check, so `frontend-local-stack` and `frontend-live-db-lane` were green against a
+  schema missing two migrations. Fixed first with a refusal, then (D-F) with a replay that names what
+  it applied.
+- **The lane had no migration ledger at all**, so both ledger-oracle SQL gates would have gone red
+  the moment `sql-tests` moved. The lane now writes carried plus replayed ledger rows.
+- **35 of 76 SQL gate files failed on the lane before the ACL reset.** The reset fixed 27 of them.
+  The other 8 failed on the missing `auth.users` trigger and cron jobs, which only D-G could
+  supply. After both fixes, CI run `35922576855` at `ee965381`
+  read `75 of 76 SQL self-tests passed — no whole-file skips; 1 excluded (LANE-ONLY …)`, with
+  `acl-fidelity: … drift=0 verdict OK` and `nonpublic-fidelity: auth-users-triggers=1/1 cron-jobs=15/15
+  drift=0 verdict OK`. No SQL gate file and no migration was edited.
+
+### Fixed — code review, two rounds (gsd-code-reviewer with silent-failure-hunter, 28 findings)
+- **The pull-request subset now fails closed at every edge.** The changed-file list is read NUL-separated, so a path git would quote forces a FULL run instead of being dropped. Editing `ci.yml`, `scripts/sql-gate-subset.mjs` or `scripts/classify-changed-paths.mjs` also forces FULL. A SUBSET run now checks the corpus-wide annotated-minus-waived arm count against `ARMS_FLOOR`, so a pull request that deletes arms goes red before merge instead of after. The assert step requires the SUBSET names it prints to equal the list `changed-paths` handed the runner.
+- **The replay's psql meta-command guard reads SQL the way psql does.** A psql-aware lexer now flags a backslash anywhere outside a literal, not only at the start of a line. It handles identifiers containing non-ASCII characters or `$`. It refuses, by name, any replay file that mentions `standard_conforming_strings`, `backslash_quote`, `client_encoding` or `SET NAMES`, because those change how psql reads the bytes that follow. An unreadable replay file is a named defect (`replay-file-unreadable`), never empty text. The lexer flags 0 of the 273 migrations.
+- **The currency gate refuses a shallow clone.** A depth-1 checkout used to report the baseline as fresh, because both timestamps came from one commit. It now reports `history-shallow`.
+- **One loopback-DSN rule everywhere.** `run.sh`, the `sql-tests` corpus step and `sql-corpus-report.mjs` all use `refuseNonLocalDsn`. It refuses a `?host=`/`hostaddr=` override, a second `@`, a comma host list read the way libpq reads it, a missing port, and whitespace or control characters.
+- **The lane's non-public load refuses cron calls it cannot prove ran.** A `cron.schedule` inside a function body, including one nested in a DO block, is refused by `foldCron`. None of the 61 real call sites is affected, and the lane still registers 15 jobs.
+- **Smaller fixes.** The image-pin check accepts exactly one line and an anchored match. The default-ACL reset no longer double-quotes the grantor or grantee role. Self-tests no longer print a raw `fatal:` git line into CI logs. `sql-corpus-report.mjs` and `acl-fidelity.mjs` say what they do not check. `analytics-deploy-verify.yml` prose no longer names `sql-tests` as a lock holder. The lane's wall-clock dependence on its 15 active cron jobs is documented, not disabled, because disabling them would break PROD fidelity.
+- **Tests that could not fail now can.** The no-psql-call assertion has a loopback control. The no-echo assertions look for a non-credential marker. The quoted-path self-test pins `core.quotePath=true`. The DSN-refusal tests require the probe's own stderr line. The SUBSET fixture's floor figures are built from `ARMS_FLOOR`. Test connection strings carry no password.
+- **Known limit:** the replay guard refuses escaping-mode settings by name, so a setting name built at run time is not caught. The root-cause fix would replay each file without psql script parsing, which changes transaction semantics; that is booked as a decision, not done here.
+
+### Security
+
+- **`sql-tests` no longer reads `TEST_SUPABASE_DB_URL`.** The one job that still does for VAC-08 is
+  `test-db-drift`. The lane's DSN is refused unless it is a loopback URL with a port and no query
+  string, and it is never printed.
+- **The registry login hands the job token to no third party.** It goes over stdin under
+  `set -euo pipefail`, with no `continue-on-error`. A failed login fails the job loudly instead of
+  falling back to an anonymous, throttled pull. A contract test derives which jobs pull and requires
+  the login before the first pull.
+
+### Root cause — the lane crashed on the SQL corpus's own idiom
+
+- **Postgres images `17.6.1.104` through `.112` ship supautils 3.2.0.** It kills the backend
+  (signal 11) when a `postgres` session `SET ROLE`s to a role in `supautils.hint_roles` and is
+  refused EXECUTE on a function. The SQL self-test corpus does exactly that. PostgREST-shaped traffic
+  does not, which is why the live-DB lane stayed green on the same image. Emptying `hint_roles`
+  removed the crash, which confirmed the cause. supautils 3.2.2 fixed it upstream, and `.113` is the
+  first image that ships it.
+- **The lane never chose its image.** Each Supabase CLI release pins its own, so the developer box
+  and CI booted different Postgres builds. The lane now pins `17.6.1.113` through the workdir's
+  `.temp/postgres-version`, asserts the running image matches, and probes the crash shape before
+  anything loads.
+
+### Tests
+
+- New contract test `ghcr-login-before-image-pull.contract.test.ts`, RED at base on 10 of 11 arms.
+- Nine new extract-and-run arms in `mutation-runner-floors.test.ts` drive the assert step's
+  scope branches on every CI run, alongside subset arms proving every floor keeps its full-corpus
+  meaning.
+- New `local-stack-lane-wiring.test.ts` arms cover the currency seam, the replay, the ACL reset and
+  gate, D-G's trigger and cron classes, and the image pin. There are self-tests for the currency
+  gate (31/31), the capability probe (52/52), the subset derivation (19/19) and the runner's subset
+  block (6/6).
+- Every added assertion was falsified by neutering the property it guards, observing the RED, and
+  restoring from a `cp` byte backup verified with `cmp`.
+
+### Notes — the known limits, stated so they can be checked rather than assumed
+
+- ⚠️ **The AFTER measurement is outstanding.** `164.4.2-MEASUREMENT.md`'s `## AFTER` section fixes
+  the runs, the commands and the four refutation clauses in advance. It is filled from the first
+  concluded merge-push run at the new head, and the phase's verification waits on it. A pull-request
+  run, including plan 08's `sql-tests` wall clock of 2m31s, is not an AFTER number.
+- ⚠️ **The shared key still has three holders in `ci.yml`**: `python`, `e2e-seeded` and
+  `test-db-drift`. It also has holders outside it. Contention is reduced, not eliminated. Whether
+  the next holder moves is decided by the AFTER numbers (`[164.4.2-REMAINING-KEY-HOLDERS]`).
+- ⚠️ **The subset narrows only on a pull request that touches a gate file.** This branch changes the
+  runner, so its own CI correctly ran FULL (`scope: FULL 49/49 annotated files`, CI run
+  `35926142486` at `0ca0dc6c`). **The SUBSET arm has not yet been observed in CI.** The synthetic-log
+  arms cover it until a gate-only pull request runs.
+- ⚠️ **The restore path still judges currency by commit epochs**, not by the marker, and on a
+  depth-1 clone that judgement is vacuous. MEASURED: both epochs compared equal and passed. Its
+  workflow fetches full history today (`[164.4.2-RESTORE-CURRENCY-BY-EPOCH]`).
+- ⚠️ **The lane replays through psql.** It claims D-F's forward-apply shape: filename order, each
+  file as authored, a ledger row only after success. It does NOT claim byte-identical semantics with
+  the Supabase CLI's own client. A replay that fails part-way is FATAL rather than rolled back. And
+  a migration that refuses on an empty or unidentified database will redden every lane job until a
+  re-dump (`[164.4.2-LANE-REPLAY-REFUSES-ON-EMPTY-DB]`).
+- ⚠️ **Six `wizard-rpcs-live-db` arms still seed as `authenticated`**, which PROD refuses. They are
+  ledgered as K3 until they are re-pointed or retired (`[164.4.2-WIZARD-ARMS-SEED-AS-AUTHENTICATED]`).
+- ⚠️ **PROD may carry the supautils crash.** The drift-check log shows the linked project pulling
+  `17.6.1.104`. It is UNMEASURED on PROD, and it is a founder item
+  (`[164.4.2-PROD-SUPAUTILS-FUNCTION-DENIAL-CRASH]`).
+- ⚠️ **The lane registers `derive-allocator-key-dailies`**, because a corpus file asserts it, while
+  PROD deliberately lacks it. That contradiction between the test and the ROADMAP is booked, not
+  resolved (`[164.4.2-DERIVE-KEY-DAILIES-TEST-VS-ROADMAP]`).
+- `[REDUNDER-SUBSET-SPLIT]` is closed in `TODOS.md`, naming the mechanism that closed it. Seven
+  follow-ons are booked with owner, trigger and date.
+- **The planning record.** It holds CONTEXT decisions A-G, each with the measurement behind it,
+  including the Area E refutation condition corrected before any code existed. It also holds the
+  plans, the replans for D-F and D-G with their plan-check revisions, the BEFORE measurement over
+  six merge-push runs, and each plan's SUMMARY with its SHA-bound CI reading.
+
 ## [0.86.0.1] - 2026-09-23 — a real key identifier and strategy name leave the public tree
 
 ### Changed

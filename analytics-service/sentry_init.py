@@ -30,6 +30,7 @@ from typing import Any, Mapping
 import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
+from sentry_sdk.types import Event, Hint
 
 # Phase 18 / FIX-04 — canonical PII scrub module. The walker below is now a
 # thin shim around services.redact.scrub_pii (which mirrors src/lib/admin/
@@ -216,7 +217,7 @@ def _scrub(value: Any) -> Any:
     return _url_userinfo_sweep(swept)
 
 
-def _redact_before_send(event: dict[str, Any], hint: dict[str, Any] | None) -> dict[str, Any]:
+def _redact_before_send(event: Event, hint: Hint | None) -> Event:
     """Sentry before_send hook. NEVER raises — Pitfall 6: a crash here drops the event silently.
 
     Phase 16 / OBSERV-04 scrub surfaces (must cover every place FastApiIntegration +
@@ -267,8 +268,9 @@ def _redact_before_send(event: dict[str, Any], hint: dict[str, Any] | None) -> d
         # to the rendered logger message — can carry unredacted ccxt URLs
         # when the stdlib factory failed-open) AND `crumb["data"]` when it
         # arrives as a STRING (some SDK versions stash exc_info text there).
-        if isinstance(event.get("breadcrumbs"), dict):
-            crumbs = event["breadcrumbs"].get("values")
+        breadcrumbs = event.get("breadcrumbs")
+        if isinstance(breadcrumbs, dict):
+            crumbs = breadcrumbs.get("values")
             if isinstance(crumbs, list):
                 for crumb in crumbs:
                     if not isinstance(crumb, dict):

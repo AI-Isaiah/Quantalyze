@@ -57,6 +57,7 @@ import {
   isUntrustedKeySyncStatus,
   untrustedKeyChipLabel,
   UNTRUSTED_KEY_SET_NOUN,
+  UNKNOWN_KEY_STATUS_ROW_LABEL,
 } from "@/lib/closed-sets";
 import { OWN_CAPITAL } from "@/lib/capital-ownership";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
@@ -123,6 +124,10 @@ export interface HoldingRow {
   api_key_id: string;
   /** Joined from `api_keys.sync_status` by the dashboard layer. */
   source_key_sync_status: string;
+  /** Phase 167.1 review round 2 WR-05. True when `api_key_id` is MISSING from
+   *  the key list, so the status is unknown rather than trusted. A key that is
+   *  present with a null status leaves this unset and stays trusted. */
+  source_key_missing?: boolean;
 }
 
 // ──────────────────────────────────────────────────────────────── new-mode types
@@ -636,6 +641,19 @@ function LegacyHoldingsTable({
                             style={AMBER_CHIP_STYLE}
                           >
                             {untrustedLabel}
+                          </span>
+                        ) : h.source_key_missing === true ? (
+                          // Phase 167.1 review round 2 WR-05: the key is
+                          // missing from the key list, so its status is
+                          // unknown. The composer names these holdings with
+                          // `UNKNOWN_KEY_STATUS_SET_NOUN`; this is where the
+                          // reader finds them. Muted, not struck through,
+                          // not hidden by the untrusted filter.
+                          <span
+                            data-testid="holding-key-status-unknown"
+                            className="text-xs text-text-muted"
+                          >
+                            {UNKNOWN_KEY_STATUS_ROW_LABEL}
                           </span>
                         ) : null}
                       </div>
