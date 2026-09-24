@@ -1,5 +1,194 @@
 # Changelog
 
+## [0.90.0.0] - 2026-09-24 — GATEHYGIENE: a lost 40001 race is retried once, an inherited refresh marker is retracted, and a failed ledger fan-out candidate is counted, named and watched
+
+⭐ **What changed for whoever reads this next.** Phase 164.6, pruned by the founder on 2026-09-17
+to ROADMAP criteria 2, 3 and 4 (CONTEXT D-01). Criterion 2 (OPS-08-TS): csv-finalize and allocator
+holdings sync retry a lost 40001 enqueue race exactly once. Criterion 4 (161.1-D13, TS half):
+keys/sync and finalize-wizard retract an inherited ledger-refresh marker at their composite
+enqueue. Criterion 3 (OPS-08-F2): both ledger-refresh fan-outs used to swallow a per-candidate
+enqueue failure as a WARNING that nothing reads. They now count it, name the failed candidates in
+one admin-only `cron_runs` row, cool the candidate down for 20 hours, and the prod prober watches
+the job. The criteria the prune dropped (criterion 1, 5, 7 and 10 to 17) were not built. The
+phase directory's name still carries criterion 1's pre-prune title.
+
+⛔ **This release carries a migration, and merging it applies it: first to TEST, then
+automatically to PROD.** `supabase/migrations/20260924120000_ledger_fanout_failure_count.sql`
+redefines the two `SECURITY DEFINER` fan-out bodies, `enqueue_ledger_refresh_for_strategies` and
+`enqueue_ledger_composite_refresh`. The single-key body is scheduled on PROD as
+`ledger_refresh_fanout`, so its new code runs on the first tick after the apply. There is no human
+stop between the merge and the PROD apply (founder decision 2026-09-23). All review had to happen
+before the merge. It did, in two rounds with three reviewers each. The migration is forward-only:
+both applied bodies are re-based here and never edited in place. Signature, return type
+(`INTEGER`, still "jobs actually inserted this tick") and ACL are unchanged, and the `$verify$`
+block is catalog-only.
+
+⚠️ **The phase verification is `human_needed`, 11/11 must-haves verified.** Every open item happens
+after merge or is a founder read-through. See Notes.
+
+### Added
+
+- **A lost 40001 enqueue race is retried once, at the two sites criterion 2 names** (`d7b1095e1`,
+  `ef99f4c1a`). The new `retryOnceOnSerializationFailure` in
+  `src/lib/supabase/retry-serialization-failure.ts` takes a factory. It retries only when the
+  PostgREST code is `40001`, exactly once, with no sleep. It wraps `enqueueCsvAnalyticsAfter` in
+  csv-finalize and the `request_allocator_holdings_sync` call in holdings sync. Any other code falls
+  through unchanged, and the user copy still reads "Retry the sync, or contact support if this
+  persists."
+- **keys/sync and finalize-wizard retract an inherited ledger-refresh marker at the composite
+  enqueue** (`5bc613962`, `f0d48e0df`). This closes the TS half of 161.1-D13. The new
+  `src/lib/ledger-refresh-marker.ts` exports `retractInheritedRefreshMarker`. finalize-wizard now
+  captures the composite job id so it can retract against it. The TS marker set is pinned to
+  Python's `LEDGER_REFRESH_JOB_SOURCES` by a parity test that parses `job_worker.py` (D-15, D-16).
+- **Both ledger fan-outs count and name a failed candidate enqueue** (`a03e008ed`). The
+  per-candidate `WHEN OTHERS` handler stays, and it now only assigns: it counts the failure and
+  records the candidate's id and SQLSTATE. After the loop, and after the advisory unlock, a tick
+  with at least one failure writes ONE `public.cron_runs` row: error `candidate_enqueue_failed`,
+  metadata `failed_count`, `enqueued_count`, `lost_race_count` and `failed_targets`. A healthy
+  tick writes nothing. A failed candidate's id goes into that admin-only row and never into RAISE
+  or NOTICE text (D-12).
+- **The prod prober watches the single-key ledger fan-out** (`21a8e2818`, reworked in round 2 by
+  `2ee0e28cb`). `scripts/prod-prober/arms/cron-obs.mjs` gains step (4), which always runs, even
+  when the pg_net read fails. It counts four things over the job's recent runs. A run that
+  finished outside the success form (`1 row` or `SELECT 1`) raises `cron-ledger-fanout-failed`. A
+  run started 30 minutes to 24 hours ago with no end time raises `cron-ledger-fanout-stuck`. Fewer
+  than `LEDGER_FANOUT_MIN_RUNS` runs in 3 hours raises `cron-ledger-fanout-absent`, because zero
+  runs is not health. Committed `candidate_enqueue_failed` rows in 21 hours raise
+  `cron-ledger-fanout-candidate-failed`. The step counts those rows and never reads their contents.
+  Its constants are bound to the cron manifest and the function snapshots, and the prober
+  self-test grows to 91 scenarios.
+
+### Changed
+
+- **A failed candidate sits out 20 hours** (`0dd123d41`). Both candidate CTEs skip a target named
+  in a `candidate_enqueue_failed` row from the last 20 hours. That is the same window as the
+  existing `compute_jobs` cooldown. Before this, a poisoned candidate was retried every hour and
+  could starve its venue or cohort.
+- **Only a 40001 is a lost race; a 40P01 deadlock is a failure** (`0dd123d41`, narrowed in round 2
+  by `a87cdeeee`). A `serialization_failure` handler sits ahead of `WHEN OTHERS` and adds to
+  `lost_race_count`. A tick with only lost races writes no error row.
+- **The runbooks read the failure row** (`1c8e3da84`, `8d0859de0`, `a1080564e`).
+  `docs/runbooks/ledger-refresh-go-live.md` gives a counts-only query over a 65-minute window. It
+  says that zero rows is not proof of health, and it adds a history variant. It describes the
+  behaviour as shipped: the failure row always commits, the 20-hour cooldown, 40001 counted apart,
+  40P01 a failure, and the four prober counts. `docs/runbooks/match-engine.md` cites the fan-out
+  handler by its committed snapshot rather than by migration. The 40P01 prose no longer claims more
+  than it means, and persistent lost races are named as silent (IN-05).
+- **The composite fan-out is BLOCKED from being scheduled** (`1c8e3da84`, `a1080564e`). The
+  runbook section `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` is marked BLOCKING and owned by Phase
+  164.6.7 COMPOSITECLAIMSNAPSHOT. The Python composite guard reads its claim-time snapshot of the
+  marker, not the live one. Precondition 6 adds that the composite runs must be watched before the
+  job is scheduled, since no prober step watches it today.
+- The fan-out and composite gate sentinels, the Python gate's migration pointers, and 36 edit-kind
+  twins moved to the new migration in the same commit that adds it (`a03e008ed`, `42a1f6e94`). 20
+  twins point at the single-key body and 16 at the composite body.
+
+### Fixed — code review, two rounds (gsd-code-reviewer with silent-failure-hunter, migration-reviewer and rls-policy-auditor)
+- **Three retraction log lines no longer pass the caught error into their message template** (`keys/sync` in-budget and `_late` sites, and `finalize-wizard`). The SQLSTATE is read into a local first. CI's `seam-log-coverage` gate (SEAMCORE-06) caught it on the PR. The log output is unchanged.
+
+- **Round 1: 17 in scope, 17 fixed** (`0dd123d41`, `1db9fb526`, `21a8e2818`, `396efceeb`,
+  `8d0859de0`).
+  - HIGH-1: nothing read the failure row, and a tick where every candidate failed was recorded as
+    `succeeded`. Fixed in part here: the prober step was added, and round 2 finished the job.
+  - HIGH-2 and the migration-reviewer's LOW: the 20-hour cooldown was added.
+  - MEDIUM-1: a failed instrument INSERT used to leave only a WARNING. It now re-raises with the
+    original SQLSTATE when the tick enqueued nothing. When the tick enqueued work it stays a
+    WARNING, so a telemetry failure never rolls back real enqueues.
+  - MEDIUM-2: a benign lost race was counted as a failure. It is now counted apart.
+  - LOW-3: verify check 7 now uses `<> 2`, to match its own message.
+  - WR-01 and IN-01: the parity oracle is built from the frozenset's real members and throws on
+    one it cannot resolve. The SQL `is_protected` list is pinned as a third copy.
+  - LOW-1: the retraction throws on a null job row and on an UPDATE that hits zero rows.
+  - LOW-2: log lines carry the PostgREST code. The final error says "after 1 retry" only when a
+    retry happened.
+  - IN-04: `MARKER_RETRACTION_BUDGET_MS = 5_000` bounds the keys/sync retraction. On timeout, the
+    route captures under `keys-sync.composite_refresh_marker_retract_timeout` and still answers
+    202.
+  - The runbooks got the 65-minute window, the present tense, and the by-symbol citation (WR-02,
+    WR-03, IN-03).
+- **Round 2: every finding fixed except IN-01 and L1, which are recorded** (`a87cdeeee`,
+  `51d82f4c4`, `2ee0e28cb`, `7a9694525`, `a1080564e`, `25412fc74`).
+  - WR-01, N2, N3 and the migration MEDIUM: the round-1 fix raised on an all-fail tick, and that
+    raise rolled back the tick's own failure row. So the cooldown never engaged in the exact case
+    HIGH-2 named. The raise is removed from both bodies. The failure row now always commits, and
+    the cooldown always engages. Arm U was inverted in both gates to prove the committed row and
+    the next tick's skip.
+  - L3: only 40001 is a lost race.
+  - WR-02, N1, N4 and N5: the cron-obs step judges a run by the success shape rather than by
+    `status`. It adds the stuck and too-few-runs checks. Its constants are bound, and each one was
+    neutered and seen RED.
+  - L2: a marker retraction that fails after its 5-second budget is reported under a `_late` tag
+    instead of vanishing into the race.
+  - IN-04: the composite W arm reads `lost_race_count = 1`.
+
+### Security
+
+- **`cron_runs` stays admin-only, and now two gates prove it.** New
+  `supabase/tests/test_cron_runs_rls.sql` (`1db9fb526`, extended by `51d82f4c4`). Anon and a
+  non-admin user read zero rows (ADMIN 1, ANON 1, USER 1). Anon and a non-admin user cannot INSERT
+  a failure row (ANON 2, USER 2). Each arm has a RED-UNDER twin that widens the policy.
+
+### Tests
+
+- The retry and the retraction are each proven to bite at every site (`c1ce981b8`, `7920749a9`).
+  The RPC doubles are isolated per test. The verifier neutered each wiring separately. The retry
+  went RED 2 and 2, the retraction RED 6 and 3, and each file was restored byte-identically.
+- New gate arms in both ledger gates, each with RED-UNDER twins (`a03e008ed`, `42a1f6e94`,
+  `0dd123d41`, `a87cdeeee`). N (count), N2 (guard and value), N3 (a healthy tick writes nothing),
+  T (cooldown), U (every candidate fails), V1 and V2 (a refused instrument write), and W (lost
+  races). Sentinels: fan-out `ALL 26 ARMS EXECUTED`, composite `ALL 23 ARMS EXECUTED`.
+- The census moved up with the arms, and no floor moved down (`72f76d68d`, `d2403b824`,
+  `1db9fb526`, `25412fc74`). `ARMS_FLOOR` went 426 → 428 → 445 → 449, and `FILES_FLOOR` 49 → 50.
+  The parser pins, the floors `GREEN_LOG` (its deliberate off-by-one mismatches kept),
+  gate-family-meta, the lint-sql-gates scanned count and the drift-check mirror moved with them.
+  The `ci.yml` sql-tests sentinel rows went to 23 and 26, and the SQL `ARMS_FLOOR` went 213 → 215
+  → 229. `WAIVED_CEILING` is still 0.
+- Full mutation run at `25412fc74`: `arms: 449/449/0`, `biting: 449`, `lane-blocked: 0`,
+  no defects, exit 0. Prober self-test 91/91. `dump-sql-functions --check` reports the snapshot
+  current at 121 functions.
+
+### Why
+
+- **D-02 and the founder's decision: no retry at the other six 40001 enqueue sites.** A census
+  found six more TS `enqueue_compute_job` callers: keys/sync, finalize-wizard ×2, intro and two
+  crons. They get no retry, because a 40001 there means a concurrent request won the race, and the
+  job it enqueued already serves the request.
+- **D-10: why the fan-out still returns the inserted count and does not raise on failure.**
+  Changing the return type needs a DROP FUNCTION and breaks the scheduled command. Raising at the
+  end of a tick rolls back the enqueues that did succeed, and turns one poisoned candidate back
+  into a lost tick. Round 2 removed the one raise round 1 had added, for the reason given under
+  Fixed.
+
+### Notes
+
+- **Post-merge items, in order.**
+  1. The migration applies to TEST (`apply-test`), then auto-applies to PROD.
+  2. VAC-08 in `test-db-drift` is red until the TEST apply, by construction (apply-on-merge). It
+     must read 0 NEW drift afterwards.
+  3. VAC-04 on the PR must report the same PROD body hashes that the migration's `prod-body-ack`
+     lines record. That is the migration-reviewer's merge condition.
+  4. The founder re-dumps `supabase/schema/baseline.sql` and regenerates
+     `baseline-carried-migrations.txt` in the same commit. Until then `baseline-content-drift`
+     shows 2 expected findings for the two re-based bodies. They are not a defect.
+- **IN-01 is an assumption that the first PROD prober run measures.** The success form (`1 row`
+  or `SELECT 1`) was measured only on the local lane (pg_cron 1.6.4). If PROD writes another form,
+  every healthy run reads as errored. That failure is loud, not silent.
+- **L1 is recorded, not fixed.** If the failure-row write itself fails on a tick that did enqueue
+  work, the failure is silent. It takes two independent faults.
+- **The composite fan-out is unwatched and unscheduled.** Its BLOCKING precondition is Phase
+  164.6.7 COMPOSITECLAIMSNAPSHOT.
+- The keys/sync retraction timeout does not cancel the in-flight retraction. A late rejection is
+  loud under its `_late` tag. Its real-latency behaviour is checked in Sentry after deploy.
+- **Two round-2 fixer attempts stalled and committed nothing.** The round-2 fix was then split into
+  an SQL half and a prober half, run in separate worktrees and merged. The first stalled attempt's
+  uncommitted SQL edits were checked and kept.
+- Planning and review records (`5b3e21bbc`, `7dea8ac4d`, `93d2ab394`, `7249ba3e4`, `717fb4f79`,
+  `47fe37cde`, `98feb7720`, `06aa57c5a`, `82c0f1e2e`, `49750a342`, `ab5ca7b39`, `b865cb11d`,
+  `6c2ab3674`, `9df87d147`, `f23e20c42`): the context, research, 5 plans in 3 waves and their
+  summaries. They also hold the three-reviewer record for the migration, both review rounds and
+  their fix reports, the verification and the security threat verification.
+- Commit map: 37 of 37 branch commits (merges excluded) map to at least one bullet above.
+
 ## [0.89.0.0] - 2026-09-24 — AUMTRUST: the AUM an allocator sizes with says how much of it comes from keys needing attention, and what the modelled book leaves out
 
 ⭐ **What changed for whoever reads this next.** Phase 167.1 closes the Phase 167 review's SFH-M2

@@ -5,6 +5,7 @@ import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
 import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import { retryOnceOnSerializationFailure } from "@/lib/supabase/retry-serialization-failure";
 
 /**
  * POST /api/allocator/holdings/sync — Phase 06 / D-14 / INGEST-06.
@@ -28,6 +29,15 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  *      are preserved. f8: Plan 04's sync-status pill discriminates on
  *      the already-inflight key and consumes `next_attempt_at` to render
  *      "Queued — retry in {N}s" during rate-limit contagion windows.
+ *   5. Phase 164.6 (OPS-08-TS): a `40001` (`serialization_failure`, the
+ *      lost-enqueue-race code `_enqueue_compute_job_internal` raises since
+ *      mig 20260826150000) is retried exactly ONCE, with no sleep, through
+ *      `retryOnceOnSerializationFailure`. The whole RPC is re-issued, which
+ *      is retry-safe: the RPC catches `unique_violation` only, so a 40001
+ *      aborts its own transaction (the `api_keys` UPDATE included) and the
+ *      re-issue starts clean. The retried attempt is a `console.warn`; a
+ *      40001 that survives the retry takes the existing 500 branch, and
+ *      every other error is never retried.
  *
  * Architectural delta from `src/app/api/keys/sync/route.ts`: that route
  * uses a service-role client for `enqueue_compute_job` (REVOKEd from
@@ -59,9 +69,20 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // `compute_jobs_one_inflight_per_kind_api_key` partial unique index
   // (23505 → { already_inflight, next_attempt_at } per f8).
   const supabase = await createClient();
-  const { data, error } = await supabase.rpc(
-    "request_allocator_holdings_sync",
-    { p_api_key_id: api_key_id },
+  // LOW-2 (164.6 review fix): whether the single retry happened, so the final
+  // error line says so instead of reading like a first-attempt failure.
+  let retried = false;
+  const { data, error } = await retryOnceOnSerializationFailure(
+    () =>
+      supabase.rpc("request_allocator_holdings_sync", {
+        p_api_key_id: api_key_id,
+      }),
+    (first) => {
+      retried = true;
+      console.warn(
+        `[allocator/holdings/sync] 40001 lost enqueue race for user ${user.id} key ${api_key_id}, retrying once: ${first.error?.message ?? "(no message)"}`,
+      );
+    },
   );
 
   if (error) {
@@ -77,7 +98,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       );
     }
     console.error(
-      `[allocator/holdings/sync] RPC failed for user ${user.id} key ${api_key_id}:`,
+      `[allocator/holdings/sync] RPC failed${retried ? " after 1 retry" : ""} for user ${user.id} key ${api_key_id} (code=${error.code ?? "none"}):`,
       error,
     );
     return NextResponse.json(

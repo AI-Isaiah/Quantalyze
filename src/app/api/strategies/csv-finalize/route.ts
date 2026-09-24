@@ -23,6 +23,7 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // to every successful finalize.
 import { logAuditEventAsUser } from "@/lib/audit";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { retryOnceOnSerializationFailure } from "@/lib/supabase/retry-serialization-failure";
 
 /**
  * POST /api/strategies/csv-finalize — Phase 15 / CSV-01, refolded by
@@ -1995,16 +1996,18 @@ async function writeFailedStrategyAnalyticsPlaceholder(
  * CI time, with nothing left to fail in production.
  *
  * ⛔ IT MUST NOT PROMISE AN AUTOMATIC RETRY. The review that raised WR-07
- * proposed "…and will retry automatically". MEASURED at HEAD: nothing in this
- * repo retries a 40001 — the classifiers that recognise the code
- * (`_is_serialization_failure` in `main_worker.py`, `_defer_lost_ownership` in
- * `services/job_worker.py`) each have a single call site, wrapping the MARK
- * RPCs and the defer path respectively; neither wraps an enqueue and neither
- * retries. That copy would trade operator jargon for a
- * false promise, which is the HONEST-01 defect over again one layer down. This
- * arm claims nothing about automatic retries, and that is precisely what makes
- * it true here: the enqueue did not happen, no job exists to retry itself, and
- * re-running the sync is the thing that gets the work done.
+ * proposed "…and will retry automatically". Since Phase 164.6 (OPS-08-TS) this
+ * route DOES retry a 40001 — exactly once, immediately, through
+ * `retryOnceOnSerializationFailure` in `enqueueCsvAnalyticsAfter` — and this
+ * copy is written ONLY after that single retry is exhausted. At that point no
+ * further automatic retry exists: the enqueue did not happen, no job exists to
+ * retry itself, and re-running the sync is the thing that gets the work done.
+ * So "Retry the sync" is still true, and a promise of an automatic retry would
+ * still be a false one — the HONEST-01 defect over again one layer down. This
+ * arm claims nothing about automatic retries, and that is what keeps it true.
+ * (The Python classifiers that recognise the code — `_is_serialization_failure`
+ * in `main_worker.py`, `_defer_lost_ownership` in `services/job_worker.py` —
+ * still wrap the MARK RPCs and the defer path only, never an enqueue.)
  */
 const ENQUEUE_LOST_RACE_USER_COPY =
   "Analytics could not complete for this strategy. Retry the sync, or contact support if this persists.";
@@ -2020,27 +2023,44 @@ function enqueueCsvAnalyticsAfter(
     // WR-07: the SQLSTATE is the WHOLE signal for a lost enqueue race — the
     // message riding with it is operator text, and mig 20260826150000 says so
     // at the RAISE itself ("A caller that wants to retry branches on the code,
-    // never on this string"). This is that branch. Before it existed,
-    // `grep -rn "40001" src/` had ZERO non-test hits and every enqueue failure
-    // read identically to the user.
+    // never on this string"). This is that branch. History (the pre-164.6
+    // state): before it existed, `grep -rn "40001" src/` had ZERO non-test hits
+    // and every enqueue failure read identically to the user. Since Phase 164.6
+    // the enqueue below is retried once on a 40001 first, so this flag is set
+    // only when that single retry ALSO lost the race.
     let enqueueLostRace = false;
     try {
       const { createAdminClient } = await import("@/lib/supabase/admin");
       const admin = createAdminClient();
+      // OPS-08-TS (Phase 164.6): a 40001 lost race is retried exactly once,
+      // immediately. The retried attempt is a console.warn, never Sentry — an
+      // expected MVCC outcome; only a failure that survives it is captured below.
       // @audit-skip: see helper-level audit-skip block above. Internal
       // compute-job enqueue — user intent was already audited by
       // finalize_csv_strategy_with_returns earlier.
-      const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
-        p_strategy_id: strategyId,
-        p_kind: "compute_analytics_from_csv",
-        p_metadata: { source: "csv-finalize", fmt },
-      });
+      // LOW-2 (164.6 review fix): whether the single retry happened, so the
+      // final failure line says so.
+      let retried = false;
+      const { error: enqueueErr } = await retryOnceOnSerializationFailure(
+        () =>
+          admin.rpc("enqueue_compute_job", {
+            p_strategy_id: strategyId,
+            p_kind: "compute_analytics_from_csv",
+            p_metadata: { source: "csv-finalize", fmt },
+          }),
+        (first) => {
+          retried = true;
+          console.warn(
+            `${opts.logPrefix} enqueue_compute_analytics_from_csv lost a 40001 enqueue race, retrying once [correlation_id=${opts.correlationId}]: ${first.error?.message ?? "(no message)"}`,
+          );
+        },
+      );
       if (enqueueErr) {
         enqueueFailed = true;
         enqueueErrMessage = enqueueErr.message ?? "(no message)";
         enqueueLostRace = enqueueErr.code === "40001";
         console.warn(
-          `${opts.logPrefix} enqueue_compute_analytics_from_csv failed (non-blocking) [correlation_id=${opts.correlationId}]: ${enqueueErrMessage}`,
+          `${opts.logPrefix} enqueue_compute_analytics_from_csv failed${retried ? " after 1 retry" : ""} (non-blocking) [correlation_id=${opts.correlationId}] (code=${enqueueErr.code ?? "none"}): ${enqueueErrMessage}`,
         );
         // D7 fail-loud (106-04): a silent enqueue failure means no compute job
         // ever runs and the strategy is stuck — the placeholder below breaks

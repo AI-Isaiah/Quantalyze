@@ -181,6 +181,8 @@ is decided by verification status, never by plan counts.**
 
 Phase: 166 (QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given) — READY TO EXECUTE
 Plan: Not started
+Phase: 164.6 (gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers) — EXECUTING
+Plan: 5 of 5 DONE (`164.6-01-SUMMARY.md`, OPS-08-TS: a 40001 is retried once at csv-finalize and holdings sync; `164.6-02-SUMMARY.md`, 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker; `164.6-03-SUMMARY.md`, OPS-08-F2 SQL layer: migration 20260924120000 makes both fan-outs write one counted cron_runs row naming failed candidates, arm N in both ledger gates, 36 twins re-pointed; `164.6-04-SUMMARY.md`, OPS-08-F2 pins: ARMS_FLOOR 428 from a full lane run with no defects, parser/floors/registry censuses at 428 arms and 443 steps/needles, ci.yml sentinel rows 16/19 and ARMS_FLOOR 215; `164.6-05-SUMMARY.md`, runbooks read the candidate_enqueue_failed row counts-only and carry the BLOCKING precondition [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT] owned by Phase 164.6.7, phase-level vitest/typecheck/lint/anchors green)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
@@ -498,7 +500,7 @@ Status: Executing Phase 167.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-24 — Phase 167.1 plan 06 complete (WINDOWS 66 fixed; release commit `7c0e57f7a`, v0.89.0.0, unified CHANGELOG entry, 58/58 commits mapped)
+Last activity: 2026-09-24 — Phase 164.6 plan 05 (runbooks and phase-level suite pass) executed
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1166,6 +1168,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.1.1.1 P01 | ~50 min | 3 tasks | 1 created, 3 modified |
 | Phase 164.5.1.4 P01 | ~41 min | 2 tasks | 1 created |
 | Phase 164.5.1.3 P01 | ~20 min | 3 tasks | 3 modified |
+| Phase 164.6 P01 | ~11 min | 3 tasks | 2 created, 4 modified |
+| Phase 164.6 P02 | ~11 min | 3 tasks | 2 created, 4 modified |
+| Phase 164.6 P03 | ~20 min | 3 tasks | 1 created, 5 modified |
+| Phase 164.6 P04 | ~26 min | 2 tasks | 6 modified |
+| Phase 164.6 P05 | ~9 min | 2 tasks | 2 modified |
 
 ## Accumulated Context
 
@@ -1281,6 +1288,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6.7 COMPOSITECLAIMSNAPSHOT inserted after Phase 164.6 on 2026-09-24 (via `/gsd-phase --insert`, founder-authorized): the composite run reads the live job marker, not its claim-time snapshot (`[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]`, data-integrity).
 - Phase 167.1.1 HOLDINGKEYSCOPE inserted after Phase 167.1 on 2026-09-24 (via `/gsd-phase --insert`, founder-authorized): `holdingScopeKey` carries no `api_key_id`, so two accounts on one venue holding the same asset merge into one holding (data-integrity).
 - Phase 167.2.1 FACTSHEETBUILDABLE inserted after Phase 167.2 on 2026-09-24 (via `/gsd-phase --insert`, founder-authorized): a computed row whose factsheet cannot build reads as "has a factsheet" while its recipient sees the pending page (167.2 review WR-02, user-facing).
+- Phase 164.9.2 REFDATAUPDATES inserted after Phase 164.9 on 2026-09-24 (via `/gsd-phase --insert`, founder-approved by AskUserQuestion): the shared-TEST restore replay also replays migration UPDATEs on public tables it just filled. Found by preflight run `36003106273`, which aborted on the 164.9 plan-07 wrong-state check. It owns `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` and unblocks 164.9 criterion 8.
 
 ### Decisions
 
@@ -2339,6 +2347,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md
 **Resume File:** None
+
+**Last Date:** 2026-09-24T04:36:00.000Z
+**Stopped At:** Completed 164.6-02-PLAN.md
+**Resume File:** .planning/phases/164.6-gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers/164.6-03-PLAN.md
 
 **Last Date:** 2026-09-24T03:57:00.000Z
 **Stopped At:** Completed 167.2-06-PLAN.md (wave 6; three commits `4de1ba074`, `df83f863a`, `2b6079c7a`, not pushed). No migration (the KCS-17 checkpoint did not fire). All ten 167.2 plans have a SUMMARY. Finding for review, logged to the phase's `deferred-items.md`: the locked KCS23-COMPOSITE line says the composite "reads from every key below" while the card lists all of the owner's keys. Pending founder visual checks: the S2 sync panel and the KCS23-COMPOSITE line at 320px. Next: 167.2 review and verification.

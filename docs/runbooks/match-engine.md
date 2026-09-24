@@ -362,9 +362,18 @@ SELECT cron.schedule(
   different bar here.
 
 **The deliberate exercise.** `enqueue_ledger_refresh_for_strategies()`'s per-candidate handler
-(`supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql`) wraps each
-candidate's `enqueue_compute_job` call in its own `EXCEPTION WHEN OTHERS` — one poisoned candidate
-logs a `WARNING` and the loop continues rather than aborting. **This whole branch is UNREACHABLE
+(the function's committed snapshot,
+`supabase/schema/functions/enqueue_ledger_refresh_for_strategies.sql`) wraps each candidate's
+`enqueue_compute_job` call in its own exception handler — one poisoned candidate logs a `WARNING`
+and the loop continues rather than aborting. Since Phase 164.6
+(`supabase/migrations/20260924120000_ledger_fanout_failure_count.sql`), a failed candidate ALSO
+leaves one counted `cron_runs` row for its tick (`cron_name = 'ledger_refresh_fanout'`,
+`error = 'candidate_enqueue_failed'`, failed, enqueued and lost-race counts in `metadata`) beside
+the unchanged `WARNING`, and is skipped for 20 hours. Since the Phase 164.6 round-2 fix that holds
+on a tick in which EVERY candidate failed too: the tick commits its row and does not raise, and the
+prod prober's cron-obs arm counts the row. Only a lost enqueue race, SQLSTATE `40001`, is counted
+apart and is not a failure; a deadlock (`40P01`) is a failure. Read both with "Did a candidate fail
+to enqueue this tick?" in `docs/runbooks/ledger-refresh-go-live.md`. **This whole branch is UNREACHABLE
 while the flag is FALSE** (the function returns before ever reaching the candidate loop) and
 **becomes reachable only from this moment** — it has never run, on any real candidate, until this
 activation. Deliberately fabricating a PROD failure to trigger it was considered and rejected: it

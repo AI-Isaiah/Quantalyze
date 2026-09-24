@@ -546,8 +546,123 @@ SELECT count(*) AS enqueued_this_tick
 - **Expected:** `succeeded`, and `enqueued_this_tick = 2` for the four-strategy single-venue
   backlog (the per-venue cap of 2 binds — see "First tick"). The count the function returns is a
   NOTICE and does not reach `return_message`, which is why the second query exists at all.
+- A `failed` run rolled its whole tick back: nothing it enqueued and no failure row survived. Since
+  the Phase 164.6 round-2 fix the fan-out raises on purpose in ONE case only, when the failure row's
+  own write failed on a tick that enqueued nothing. Its `return_message` then starts with
+  `enqueue_ledger_refresh_for_strategies: failure instrument write failed`. Any other failed run is
+  an error the fan-out did not handle. A tick whose candidates failed is NOT a failed run any more;
+  see the next subsection. The prod prober's cron-obs arm reports a failed run as
+  `cron-ledger-fanout-failed`.
 - ⚠️ Neither of these is success. They tell you the mechanism fired; the census above tells you it
   worked.
+
+#### Did a candidate fail to enqueue this tick? (Phase 164.6, OPS-08-F2)
+
+Since migration `20260924120000_ledger_fanout_failure_count.sql`, a tick in which any candidate's
+enqueue raised writes **exactly one** `public.cron_runs` row. Its `error` is
+`candidate_enqueue_failed` and its `metadata` carries the failed, enqueued and lost-race counts. Both
+fan-outs write it under the same `cron_name`. Since the Phase 164.6 round-2 fix, the tick then
+COMMITS whether or not it enqueued anything: the all-candidates-failed raise is gone, so the row
+survives and the 20-hour skip below always has something to read.
+
+The one exception is the row's own write failing:
+
+- **On a tick that enqueued nothing**, the fan-out RAISES `failure instrument write failed`, and the
+  scheduler records the run as `failed`. The first query in "Did the tick itself run" above shows
+  it. There was nothing enqueued to lose.
+- **On a tick that enqueued something**, it only raises a Postgres `WARNING` and returns, so the
+  good enqueues are kept. See the "Zero rows is not proof of health" bullet below.
+
+**What the prod prober watches.** Its cron-obs arm reads the `ledger_refresh_fanout` job every run
+and counts, never selecting a message or `metadata`:
+
+| count | window | defect |
+|---|---|---|
+| runs started | 3 h | `cron-ledger-fanout-absent` when fewer than 2 (the job is hourly) |
+| runs finished outside the success form, `1 row` or `SELECT 1` | 3 h | `cron-ledger-fanout-failed` |
+| runs with no end time, started over 30 minutes ago | 24 h | `cron-ledger-fanout-stuck` |
+| `candidate_enqueue_failed` rows, by `completed_at` | 21 h | `cron-ledger-fanout-candidate-failed` |
+
+- The failed-run count is taken from the SUCCESS form, so it also catches a pg_cron start failure or
+  an error with no `CONTEXT` line. How many of those runs name the function is printed beside it as
+  a classification only, telling you whether to start from the function body or from pg_cron.
+- A stuck run holds the fan-out's advisory lock, so every later tick skips and finishes in the
+  success form. Nothing else would show it.
+- 21 hours covers the 20-hour skip plus one tick, so one failed candidate stays alerted for as long as
+  it is being skipped. The count clears by itself.
+- ⚠️ **Assumption the first PROD prober run measures.** A succeeded run records `1 row` (pg_cron in
+  connection mode) or `SELECT 1` (background-worker mode). PROD's succeeded fan-out runs were
+  recorded as `1 row` in the Phase 164.5.1.1 session, but no failed PROD run has been observed. If
+  PROD records any other success form, every run reads as failed and the arm goes red on its first
+  run. That is loud, never silent.
+
+A tick with no failure writes nothing. Run this in the admin SQL editor (row security admits
+platform admins and `service_role` only):
+
+```sql
+SELECT completed_at,
+       error,
+       metadata->>'function'                  AS fn,
+       (metadata->>'failed_count')::int       AS failed,
+       (metadata->>'enqueued_count')::int     AS enqueued,
+       (metadata->>'lost_race_count')::int    AS lost_race
+  FROM public.cron_runs
+ WHERE cron_name = 'ledger_refresh_fanout'
+   AND error = 'candidate_enqueue_failed'
+   AND completed_at > now() - INTERVAL '65 minutes'
+ ORDER BY completed_at DESC;
+```
+
+- **Expected:** zero rows in the last tick's window. A row means that tick recorded `failed`
+  candidates, enqueued `enqueued` others (possibly 0), and committed. `fn` names the fan-out that wrote it
+  (`enqueue_ledger_refresh_for_strategies` or `enqueue_ledger_composite_refresh`).
+- ⚠️ **Zero rows is not proof of health.** Two failures leave no row here:
+  - a tick that enqueued nothing and whose failure-row write failed. It raised, so read the run's
+    `status` in the first query above instead. The prober reports it as
+    `cron-ledger-fanout-failed`;
+  - ⚠️ **recorded, not fixed (review L1):** a tick that enqueued something but whose failure-row
+    write itself failed. That leaves only a Postgres `WARNING` (`failure instrument write failed`),
+    which nothing reads, and the run finishes in the success form. It takes two independent faults,
+    a failing candidate and a failing `cron_runs` write. It is SILENT to the prober. Only the census
+    above catches it, as a strategy that stays stale.
+- **History, not this tick.** Drop the `completed_at` line and add `LIMIT 20` to list older failure
+  rows. `cron_runs` is never purged, so without the window the query returns rows forever once any
+  tick has failed, and "zero rows" stops meaning anything.
+- ⛔ **The per-target list is deliberately NOT selected.** The row's `metadata` also holds the
+  failed strategy ids with their SQLSTATEs, but runbook output gets pasted into this public
+  repository. Read the ids in the editor if you need them to repair a cause, and never paste them.
+- **The function's return value still means jobs INSERTED** (D-10). A tick that returns `2` beside a
+  failure row enqueued 2 and failed `failed` more. The return value is not a failure signal; the
+  row and the run's `status` are.
+- ⚠️ **Since Phase 164.6, a `cron_runs` row under `ledger_refresh_fanout` is no longer proof of
+  dormancy.** It may be a per-candidate failure row. The two dormancy causes (`flag_read_failed`,
+  `flag_row_invisible_or_absent`) and `candidate_enqueue_failed` share that `cron_name`, so any
+  "is it dormant?" reading must filter on `error` (or `metadata->>'cause'`), never on the
+  `cron_name` alone. Earlier readings that counted rows under `ledger_refresh_fanout` predate the
+  failure row and are not a template.
+- **How the fan-out behaves around a failure** (the migration is the source of truth; this list
+  describes it and promises nothing beyond it):
+  - **What is watched.** Every tick with a failed candidate, whether or not it enqueued anything,
+    through the prober's failure-row count (the table above). A failed, stuck or missing run of the
+    `ledger_refresh_fanout` job, through the prober's run counts.
+  - ⚠️ **What is NOT watched.** The COMPOSITE fan-out's own runs. Its failure rows share the
+    `cron_name` and are counted, but the prober reads only the `ledger_refresh_fanout` job's runs,
+    so a failed or stuck composite run is invisible. The composite is dormant today; closing this
+    is a scheduling precondition, see item 6 of `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` below. Also
+    not watched: the two-fault case in the "Zero rows" bullet above (L1).
+  - **A failed candidate is skipped for 20 hours.** The candidate query excludes any strategy named
+    in a failure row written in the last 20 hours, the same window as the attempt cooldown, so a
+    poisoned candidate no longer takes the same slot every tick and a healthy candidate takes it.
+    Since the round-2 fix the failure row survives every tick, all-failed ones included, so this
+    also holds when both per-venue slots, or the whole composite cohort, are poisoned. It does not
+    hold on the one tick whose failure-row write failed, because no row exists to read.
+  - **Only a lost enqueue race is not a failure.** SQLSTATE `40001` (serialization failure) means
+    another writer won the enqueue race and is already serving the strategy. It is counted in
+    `lost_race`, never names a strategy, never skips it for 20 hours and never writes a row on its
+    own. SQLSTATE `40P01` (deadlock) is NOT a lost race: the other party can be any lock holder,
+    such as a worker updating the row, so nothing guarantees a job exists for the strategy. Since
+    the round-2 fix a deadlock is counted as a failure, named in the failure row and skipped for
+    20 hours like any other.
 
 ### Proving the kill switch — with the schedule still firing
 
@@ -790,10 +905,54 @@ the venue returns.
 
 ---
 
+## ⛔ Before the COMPOSITE fan-out is ever scheduled — BLOCKING precondition [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]
+
+This runbook activates the single-key fan-out only. Its composite twin gets no activation steps
+here, but this precondition sits here because this is where a reader would go to schedule it.
+
+1. **Where it stands.** `public.enqueue_ledger_composite_refresh()` is DORMANT. No `cron.schedule`
+   registration names it, and no migration may add one (the rule under Step 2 applies to it
+   unchanged).
+2. ⛔ **BLOCKING.** No schedule naming `public.enqueue_ledger_composite_refresh()` may be
+   registered until `run_stitch_composite_job` in `analytics-service/services/job_worker.py`
+   re-reads the LIVE `compute_jobs` row's `metadata->>'source'` before it honours the
+   `ledger-refresh-composite` marker. The single-key honour sites already do this through
+   `_refresh_marker_still_on_row`. The composite guard today compares against the claim-time
+   `job.get("metadata")` snapshot instead.
+3. **Why.** A user-initiated composite resync (the `stitch_composite` enqueues in
+   `src/app/api/keys/sync/route.ts` and `src/app/api/strategies/finalize-wizard/route.ts`) can
+   dedup onto a fan-out job that already carries the marker. Since Phase 164.6 those TypeScript
+   sites retract the marker. A retraction that lands BEFORE the worker claims the job is fully
+   effective. A retraction that lands AFTER the claim is not: that run's Python guard still sees
+   the stale marker in its snapshot, treats the run as a protected ledger refresh, and suppresses
+   the user's failure. That is a silent data-integrity failure on a funded account, and the
+   schedule is what makes it reachable.
+4. **How to check it is met.** Read `run_stitch_composite_job`: a live re-read of the row (through
+   `_refresh_marker_still_on_row` or an equivalent) must sit before its composite-marker
+   comparison. A test must go RED when that re-read is removed. Both must be true on the commit
+   the worker is deployed from. A code comment promising it does not count.
+5. **Owner.** Phase 164.6 did NOT implement this. The Python change belongs to **Phase 164.6.7
+   COMPOSITECLAIMSNAPSHOT** (inserted into the ROADMAP on `main` by PR #849, 2026-09-24). This
+   precondition stays BLOCKING
+   until that phase ships. `TODOS.md` `161.1-D13` already requires the composite twin of the reuse
+   collision to be closed before this go-live op, not after.
+6. ⛔ **BLOCKING: the composite's runs must be watched before it is scheduled** (review WR-03).
+   The prod prober's cron-obs arm reads only the `ledger_refresh_fanout` job's runs. The composite's
+   failure rows are already counted, because they share its `cron_name`, but a failed, stuck or
+   missing composite run is invisible. Before scheduling, either extend cron-obs so its job and
+   function constants cover the composite's own job, or schedule the composite as its own job
+   together with that extension. ⛔ Never add it as a second statement of `ledger_refresh_fanout`'s
+   command: pg_cron runs a multi-statement command as one transaction, so one fan-out's error
+   would roll back the other's enqueues.
+
+---
+
 ## What this runbook deliberately does not cover
 
 - **The deribit composite.** The fan-out excludes composites by an explicit conjunct; deribit's
   sole live strategy is a composite, so it gets zero coverage from *this* mechanism. Its coverage
   is owed to the separate composite arm on `stitch_composite`. See `TODOS.md` item **0.3**.
+  ⛔ That arm's schedule is blocked by the precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in
+  the section directly above.
 - **The ccxt sibling defect.** ccxt strategies with no new fills also never recompute — a different
   venue class and a different mechanism, out of scope here. See `TODOS.md` item **0.2**.
