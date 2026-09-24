@@ -592,6 +592,12 @@ describe("buildKeyTrustClause — D-06 (b) excludes $Y from keys needing attenti
     );
   });
 
+  it("review round 3 WR-02: an unreported INCLUDES part rules out the shared-noun form, so its '(value unavailable …)' count is never dropped and a defaulted $0 never reads as a known figure", () => {
+    expect(buildKeyTrustClause(part(0, 1, 1), NONE, RENDER, part(8_000, 1))).toBe(
+      "includes $0 from keys needing attention (value unavailable for 1 holding), and excludes $8000 from keys needing attention",
+    );
+  });
+
   it("D-06 (b) / review WR-05: with an unknown-status part the includes side keeps each part's own noun, and the excludes part follows with its own", () => {
     expect(
       buildKeyTrustClause(part(12_345, 1), part(4_444, 1), RENDER, part(8_000, 1)),
