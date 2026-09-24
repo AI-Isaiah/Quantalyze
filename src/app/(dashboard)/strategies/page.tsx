@@ -204,9 +204,14 @@ export default async function StrategiesPage() {
   // discarded error used to render "No strategies yet" to an owner with live
   // strategies: the H-0395 class the key card already fixed for itself. It is
   // logged, captured, and rendered as its own line below.
-  if (strategiesError) {
-    console.error("[strategies/page] strategies read failed", strategiesError.message);
-    captureToSentry(new Error(strategiesError.message), {
+  // 167.2-REVIEW-R2 IN-03: `data: null` with no error is not a clean read
+  // either (the L-2 rule `loadKeys` already applies), so it takes the same
+  // unreadable arm rather than "No strategies yet".
+  const strategiesUnreadable = !!strategiesError || !Array.isArray(strategies);
+  if (strategiesUnreadable) {
+    const message = strategiesError?.message ?? "the strategies read returned no rows array and no error";
+    console.error("[strategies/page] strategies read failed", message);
+    captureToSentry(new Error(message), {
       tags: { route: "strategies/page", stage: "list" },
     });
   }
@@ -426,7 +431,7 @@ export default async function StrategiesPage() {
         </Card>
       )}
 
-      {strategiesError ? (
+      {strategiesUnreadable ? (
         // H-1 (UI-SPEC KCS-LIST-UNREADABLE): muted, not red. Nothing is known
         // to be wrong with the strategies, only with this read of them.
         <Card className="text-center py-12" data-testid="strategies-list-unreadable">

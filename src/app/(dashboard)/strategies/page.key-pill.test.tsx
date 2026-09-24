@@ -118,7 +118,8 @@ type ReadResult = { data: unknown; error: { message: string } | null };
 
 const state = vi.hoisted(() => ({
   user: null as { id: string } | null,
-  strategies: [] as MockStrategyRow[],
+  // 167.2-REVIEW-R2 IN-03: null answers `data: null, error: null`.
+  strategies: [] as MockStrategyRow[] | null,
   /** 167.2-REVIEW-SFH H-1: the list read's error, when it fails. */
   strategiesError: null as { message: string } | null,
   keys: [] as MockKeyRow[],
@@ -711,6 +712,18 @@ describe("StrategiesPage — an errored read is never rendered as healthy or emp
       "[strategies/page] strategies read failed",
       "synthetic list failure",
     );
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { route: "strategies/page", stage: "list" },
+    });
+  });
+
+  it("R2-IN03-NULL-DATA: a list read answering data null with no error is unreadable, never \"No strategies yet\", and is logged and captured", async () => {
+    state.strategies = null;
+
+    const container = await renderPage();
+
+    expect(container.textContent).toContain(LIST_UNREADABLE);
+    expect(container.textContent).not.toContain("No strategies yet");
     expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
       tags: { route: "strategies/page", stage: "list" },
     });
