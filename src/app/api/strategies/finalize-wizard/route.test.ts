@@ -101,6 +101,17 @@ const STATE = vi.hoisted(() => ({
   capitalOwnershipUpdateRows: [{ id: "" }] as Array<{ id: string }> | null,
   // Admin RPC capture (after() block).
   adminRpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
+  // 164.6 / 161.1-D13 — the enqueued stitch_composite job's row, read by the
+  // inherited-marker retraction, and every compute_jobs UPDATE it issues. The
+  // default row carries no marker, so every pre-existing composite case sees a
+  // read-only no-op.
+  computeJobsRow: null as { metadata: Record<string, unknown> | null } | null,
+  computeJobsReadError: null as { message: string } | null,
+  computeJobsUpdateError: null as { message: string; code?: string } | null,
+  computeJobsUpdates: [] as Array<{
+    patch: Record<string, unknown>;
+    eq: [string, unknown];
+  }>,
   // H-0330 — forced error returned by admin.rpc('enqueue_compute_job').
   adminEnqueueError: null as { message: string } | null,
   // Admin client api_keys lookup (api_key_id) for the after() block.
@@ -393,6 +404,32 @@ vi.mock("@/lib/supabase/admin", () => ({
           },
         };
       }
+      if (table === "compute_jobs") {
+        // 164.6 / 161.1-D13 (RESEARCH Pitfall 13) — BEFORE the throw below, or
+        // the retraction's read throws and lands in its own best-effort catch.
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({
+                data: STATE.computeJobsReadError ? null : STATE.computeJobsRow,
+                error: STATE.computeJobsReadError,
+              }),
+            }),
+          }),
+          update: (patch: Record<string, unknown>) => ({
+            eq: (col: string, val: unknown) => {
+              STATE.computeJobsUpdates.push({ patch, eq: [col, val] });
+              // LOW-1: the helper asks for the updated rows back.
+              return {
+                select: async () => ({
+                  data: STATE.computeJobsUpdateError ? null : [{ id: val }],
+                  error: STATE.computeJobsUpdateError,
+                }),
+              };
+            },
+          }),
+        };
+      }
       throw new Error(`unexpected admin from(${table})`);
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
@@ -491,6 +528,15 @@ vi.mock("@/lib/email", () => ({
 // default. Tests that need to assert side-effect fan-out (H-0330
 // enqueue_compute_job, etc.) set STATE.runAfterCallback=true to invoke
 // the callback synchronously.
+// 164.6 / 161.1-D13 (RESEARCH Pitfall 14) — the route resolves the correlation
+// id in request scope before scheduling after(); the real helper reads
+// next/headers, which throws outside a request. Copied from keys/sync's test.
+const TEST_CORRELATION_ID = "66666666-7777-8888-9999-000000000000";
+vi.mock("@/lib/correlation-id", () => ({
+  getCorrelationId: vi.fn().mockResolvedValue(TEST_CORRELATION_ID),
+  CORRELATION_HEADER: "x-correlation-id",
+}));
+
 vi.mock("next/server", async () => {
   const actual =
     await vi.importActual<typeof import("next/server")>("next/server");
@@ -570,6 +616,10 @@ beforeEach(async () => {
   STATE.adminEnqueueError = null;
   STATE.notifyFounderCalls = [];
   STATE.adminRpcCalls = [];
+  STATE.computeJobsRow = { metadata: { source: "finalize-wizard" } };
+  STATE.computeJobsReadError = null;
+  STATE.computeJobsUpdateError = null;
+  STATE.computeJobsUpdates = [];
   STATE.captureToSentryCalls = [];
   STATE.processKeyResult = null;
   STATE.processKeyCalls = [];
@@ -2579,6 +2629,111 @@ describe("POST /api/strategies/finalize-wizard — H-0330 enqueue failure escala
     expect(STATE.notifyFounderCalls.length).toBe(1);
 
     consoleWarn.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 164.6 / 161.1-D13 — finalize's composite enqueue retracts an inherited
+ * ledger-refresh marker.
+ *
+ * `enqueue_compute_job` dedups a stitch_composite onto an in-flight job and
+ * returns ITS id with our p_metadata discarded. If that job is a background
+ * ledger refresh, its `metadata.source` marker keeps a stale factsheet
+ * published over a failure of the finalize the user just submitted. The route
+ * must retract it — for BOTH markers — must never touch an unmarked row, and a
+ * failed retraction must be loud under its OWN tag, never the enqueue's.
+ */
+describe("POST /api/strategies/finalize-wizard — [161.1-D13] composite refresh-marker retraction", () => {
+  it.each(["ledger-refresh", "ledger-refresh-composite"])(
+    "a deduped job carrying %s is rewritten without source, with the marker and this request's correlation id",
+    async (marker) => {
+      const fetchSpy = mockProbeReadOnly();
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      routeThroughLegacyFinalize();
+      STATE.computeJobsRow = {
+        metadata: { source: marker, correlation_id: "fanout-run", run: 7 },
+      };
+      STATE.runAfterCallback = true;
+
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+      expect(res.status).toBe(200);
+      await flushAfter();
+
+      expect(STATE.computeJobsUpdates).toEqual([
+        {
+          patch: {
+            metadata: {
+              run: 7,
+              refresh_marker_retracted: marker,
+              correlation_id: TEST_CORRELATION_ID,
+            },
+          },
+          // The id the enqueue RPC RETURNED — the admin rpc double answers
+          // "fake-job-id" — never one derived from the request.
+          eq: ["id", "fake-job-id"],
+        },
+      ]);
+      fetchSpy.mockRestore();
+    },
+  );
+
+  it("a deduped job WITHOUT a ledger-refresh marker is never rewritten", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    routeThroughLegacyFinalize();
+    STATE.computeJobsRow = { metadata: { source: "keys/sync" } };
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    expect(
+      STATE.adminRpcCalls.find((c) => c.args.p_kind === "stitch_composite"),
+    ).toBeDefined();
+    expect(STATE.computeJobsUpdates).toEqual([]);
+    fetchSpy.mockRestore();
+  });
+
+  it("a failed retraction keeps the success envelope, is captured under its OWN tag, and never as an enqueue failure", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    routeThroughLegacyFinalize();
+    STATE.computeJobsRow = { metadata: { source: "ledger-refresh-composite" } };
+    STATE.computeJobsUpdateError = { message: "update denied", code: "42501" };
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, strategy_id: STRATEGY_ID });
+    await flushAfter();
+
+    expect(STATE.computeJobsUpdates).toHaveLength(1);
+    const retractCall = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.side_effect === "composite_refresh_marker_retract",
+    );
+    expect(retractCall).toBeDefined();
+    expect(retractCall!.options.tags.surface).toBe("finalize-wizard-after");
+    expect(retractCall!.options.extra).toEqual({
+      strategy_id: STRATEGY_ID,
+      job_id: "fake-job-id",
+      correlation_id: TEST_CORRELATION_ID,
+    });
+    // Pitfall 15: the enqueue SUCCEEDED, so nothing may report it as failed.
+    expect(
+      STATE.captureToSentryCalls.filter(
+        (c) => c.options.tags.side_effect === "enqueue_sync_trades_job",
+      ),
+    ).toEqual([]);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("composite refresh-marker retraction failed"),
+    );
+    // LOW-2 (164.6 review fix): the log line names the SQLSTATE from the cause.
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("(code=42501)"));
     fetchSpy.mockRestore();
   });
 });

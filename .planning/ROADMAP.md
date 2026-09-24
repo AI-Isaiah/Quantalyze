@@ -2251,11 +2251,20 @@ on the merits if that matters more than the line.
 ➡️ **MOVED 2026-09-10 to Phase 164.8.4 GATERESIDUE — `[164.6-SOURCE-ANCHOR-ROT]`.** Source-comment `file:line` anchors are unguarded where PLAN.md anchors are not. Still gate-hygiene in kind; owned there because 164.8.2 is what measured it.
 
 **Depends on:** Phase 164.5 (ordering — the substrate work lands first), Phase 164.4.1 (pg-lane with pg_cron)
-**Plans:** 0 plans
+**Plans:** 2/5 plans executed
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.6 to break down)
+**Wave 1** *(three file-disjoint plans, parallel worktrees)*
+- [x] 164.6-01-PLAN.md — OPS-08-TS: retry a 40001 exactly once at csv-finalize and allocator holdings sync (criterion 2)
+- [x] 164.6-02-PLAN.md — 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker (criterion 4)
+- [x] 164.6-03-PLAN.md — OPS-08-F2: both fan-outs record failed targets and a failure count in a cron_runs row; one migration plus gate arms and twin re-points in one commit (criterion 3)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 164.6-04-PLAN.md — OPS-08-F2: move every floor, census and sentinel pin to its MEASURED value
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 164.6-05-PLAN.md — runbooks read the failure row, the composite-schedule BLOCKING precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]`, and the phase-level full-suite pass
 
 ### Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot (INSERTED)
 
