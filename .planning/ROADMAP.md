@@ -2363,6 +2363,23 @@ already_authorized` in 33 ms. **Outage 11:02:38Z → 12:41:46Z = 1h39m.**
    attempts HOURS apart, so two different failures are indistinguishable in support. That undercuts
    the "email us with the correlation id" instruction in the same copy.
 
+**Inherited success criteria — routed here by founder decision 2026-09-24 (AskUserQuestion).** Both
+need a live MT5 validate against a terminal this phase makes trustworthy, so they close with it,
+not in their source phases. Each source VERIFICATION marks its item resolved-by-routing to here.
+
+7. **(from Phase 161, human item 1: the live MT5 `undetermined` verdict.)** One live MT5 validate
+   that lands an `undetermined` capability verdict is read, and its sentence names *"Allow
+   algorithmic trading"* (arm 1) when the Experts setting is off, or the external-Python-API option
+   (arm 2) only when `terminal_info` reports `tradeapi_disabled`. It must never name the
+   external-Python-API option while that flag is off. ⚠️ The verdict has no durable sink today (it
+   is a structured log event only), so the reading must be captured when it happens.
+8. **(from Phase 164.5.3, human item 2: the end-to-end live MT5 credential update.)** On an MT5 key
+   whose status the worker has already set to `revoked` or `error` by a wrong password, the
+   founder uses "Update password" with the correct password. The PATCH returns 200, the card drops
+   the revoked pill at once, and on the next ledger-refresh or allocator-poll tick the automated
+   fan-out picks the key up again. A row reading `sync_status = 'idle'` alone does not close it.
+   Founder-only: no agent enters or drives a real credential.
+
 ⚠️ **PIN, DO NOT FIX — a settings landmine:** the terminal's Experts tab has *"Disable algorithmic
 trading when the account has been changed"* UNCHECKED. Validation IS an account change, so ticking
 it would silently disable algo trading on the shared terminal. Correct today only by default;

@@ -1176,6 +1176,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ### Roadmap Evolution
 
+- Phase 164.6.5 MT5VALIDATEWEDGE **edited 2026-09-24 (hand-edited)**: inherited success criteria 7 and 8 were added, routed by founder decision 2026-09-24 (via AskUserQuestion). 7 comes from 161's live MT5 `undetermined` verdict and 8 from 164.5.3's end-to-end live MT5 credential update. Both source VERIFICATION files mark the item resolved-by-routing. The same day, 164.6-VERIFICATION.md was closed to `passed` (7/7 post-merge items, evidence by run id), and 164.4.2's Area E was measured FINAL at 5 runs: the change did not work and the slowdown holds. The founder's follow-up phase for that is NOT booked yet. The frontmatter census above was not recomputed.
 - Phase 164.5.3 inserted after Phase 164.5: MT5CREDS — MT5 account number on the key card + a credential-update path (URGENT)
 - Phase 164.5.4 inserted after Phase 164.5: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently (URGENT)
 

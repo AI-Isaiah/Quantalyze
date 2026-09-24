@@ -2,6 +2,7 @@
 phase: 161-wizerr-honest-error-surfaces
 verified: 2026-08-24T23:24:35Z
 head: 294ae79b
+verified_at_sha: 294ae79b4e5ec69c0c7002b87c1e9973db2708c2
 status: human_needed
 score: 4/4 success criteria verified · 13/13 requirements satisfied
 behavior_unverified: 0
@@ -21,14 +22,20 @@ human_verification:
     expected: "The sentence names 'Allow algorithmic trading' (arm 1) if the gateway's Experts setting is off, or the external-Python-API option (arm 2) only if terminal_info actually reports tradeapi_disabled. It must NOT name the external-Python-API option while that flag is off — that is the exact defect WIZERR-01 exists to remove."
     why_human: "Which arm fires is a property of the LIVE gateway's terminal_info, not of the code. The flag->cause builder is provably correct given its input (verified in source + parametrized fence), but `tradeapi_disabled` has been founder-measured exactly ONCE (2026-08-13) and has zero production readers. Only a live undetermined verdict shows which sentence a founder actually reads."
     blocked: "FOUNDER-GATED, with the reason now MEASURED rather than assumed (2026-08-28). There is no instance to read. Two things were checked: (a) the verdict has NO durable sink — `_Mt5ValidateTrace.outcome` is carried to `emit_mt5_stage_event` (`analytics-service/services/mt5_client.py:205`), which writes a STRUCTURED LOG EVENT, not a row, so there is no table to query for a historical `undetermined`; (b) the live operator surface is empty — the current Railway log window for `quantalyze-analytics` (production) contains ZERO `mt5` lines of any kind, let alone an `undetermined` one. So the fallback the item itself offered (\"read the operator surface / sanitized_message for the next one that occurs\") has nothing to read, and short log retention means a past occurrence would be gone anyway. ⭐ WHAT WOULD ACTUALLY CLOSE IT, and why it is founder-only: the arm is selected by the LIVE terminal's `tradeapi_disabled` flag, so it needs one real MT5 validate against a terminal with \"Allow algorithmic trading\" OFF — i.e. broker credentials and a gateway I do not have. The code half is already pinned (flag->cause builder verified in source plus a parametrized fence), so a live run adds exactly one fact: which input actually arrives. ⚠️ Worth pairing with a durable sink when it is done — an outcome that exists only in a rotating log cannot be verified after the fact by anyone, which is what made this item unclosable for a week."
+    result: "RESOLVED BY ROUTING 2026-09-24. Founder decision 2026-09-24 (via AskUserQuestion): this item is ROUTED to Phase 164.6.5 MT5VALIDATEWEDGE. It is carried there as inherited success criterion 7 in `.planning/ROADMAP.md` under `### Phase 164.6.5`. A live validate needs a terminal that stops wedging on an account switch, which is what 164.6.5 delivers, so the reading closes with that phase and not here."
+    resolved: routed
   - test: "On a strategy edit page whose stored key can no longer be decrypted, look at the KeyPermissionBadge error line."
     expected: "The founder can read and act on 'This stored key can no longer be decrypted. Reconnect the key — retrying will not help.'"
     why_human: "KeyPermissionBadge.tsx:118-122 renders `${err.code}: ${message}`, so the honest sentence reaches the user with the raw token `KEY_UNDECRYPTABLE: ` glued to its front. This is PRE-EXISTING (140.3-07) and untouched by Phase 161 — not a regression — but it is a founder-hit key surface and whether the copy still reads as truthful prose is a legibility judgment."
     result: "READY FOR A RULING 2026-08-26 — the FACT is now verified in source, so this no longer requires reproducing a broken key; only the judgment remains. Confirmed at HEAD: `permissions/route.ts:599,609` emit code `KEY_UNDECRYPTABLE` with the sentence 'This stored key can no longer be decrypted. Reconnect the key — retrying will not help.', and `KeyPermissionBadge.tsx:140` renders `err.code ? `${err.code}: ${message}` : message`. The exact string a founder reads is therefore: 'KEY_UNDECRYPTABLE: This stored key can no longer be decrypted. Reconnect the key — retrying will not help.' ⭐ The prefix is DELIBERATE, not an oversight: the comment at KeyPermissionBadge.tsx:137-138 states it exists 'so the displayed text is greppable in support tickets'. So the open question is not 'is this a bug' but a recorded trade-off — operator greppability vs user-facing prose. Founder call: keep the prefix, drop it for user-facing arms while keeping it in logs, or accept as-is. ⭐ RULED 2026-08-26: SPLIT — render the prose sentence alone to the user, keep the structured code in the console log and the Sentry breadcrumb. Support keeps a greppable handle; the founder reads a clean sentence. ⚠️ This is a CLASS change, not a one-string fix: the same render site serves other codes (e.g. PROBE_BACKEND_UNAVAILABLE), so the branch applies to every code it emits. Implementation routed to Phase 164.1, which already owns phase 161's deferred error-surface items."
+    resolution: "ACCEPTED 2026-09-24. Founder decision 2026-09-24 (via AskUserQuestion): the KEY_UNDECRYPTABLE line on KeyPermissionBadge is ACCEPTED as is. This supersedes the 2026-08-26 routing above. Measured at 96b5db4c: the 2026-08-26 SPLIT ruling already shipped with Phase 164.2 (commit 05994f1d, PR #749). KeyPermissionBadge.tsx now throws `RouteResponseError(message)` and renders `e.message` alone. The code goes only to its own `console.error` argument and to the Sentry breadcrumb. So the line the founder accepted is the sentence alone, with no `KEY_UNDECRYPTABLE: ` prefix."
+    resolved: true
   - test: "Walk the wizard to a gate refusal, click 'Try another key', then reload the page and open the wizard again."
     expected: "The draft and (on a composite) every stored member are still there; the user resumes rather than starting over."
     why_human: "The non-destructive transition is behaviourally pinned in jsdom (verified — see below), but end-to-end draft survival across a real reload against a real database is a user-flow property no unit test observes."
     blocked: "BLOCKED ON A RENDERED VIEWPORT, established 2026-08-28. The item needs an INTERACTIVE sequence — walk to a gate refusal, click `Try another key`, reload, reopen — and two of those four steps are clicks. This environment's Chrome reports `innerWidth/innerHeight = 0`, `document.scrollHeight = 0`, every element measures 0x0, and extension screenshots fail at the binding layer, so nothing is painted and no click can be aimed. Server-side probing cannot substitute here: the property under test is that a DRAFT SURVIVES A RELOAD, which is only meaningful when the reload is driven through the same client that made the draft. ⚠️ Reaching the gate refusal at all also needs an API key that FAILS the capability gate, and I do not supply exchange credentials — so even with a display this is at least partly founder-gated. ⭐ CLOSING RECIPE: this is a Playwright case, not a hand-click — seed a draft, stub the validate response to the refusal shape, assert the draft and every stored member survive `page.reload()`. That makes it repeatable instead of a one-off look, and it belongs with the e2e work 164.3 is standing up."
+    result: "STILL OPEN 2026-09-24, no existing evidence. Searched: e2e/ has no spec that reaches a gate refusal, clicks `Try another key` and reloads. `e2e/wizard-resume.spec.ts` resumes a draft from the overlay but never passes through a gate refusal. `161-UAT.md` test 3 is `blocked` (2026-09-05), and `.planning/FOUNDER-UAT-v1.20.md` section 2 lists it as founder-owned. That UAT reading supersedes the viewport blocker above: the display works now. What remains is a MANAGER account plus an API key that FAILS the capability gate. Owner: the founder in the browser, or a Playwright case (seed a draft, stub the validate response to the refusal shape, assert the draft and every stored member survive `page.reload()`)."
+    resolved: false
 ---
 
 # Phase 161: WIZERR — Honest Error Surfaces — Verification Report
@@ -37,7 +44,8 @@ human_verification:
 truthful copy — no `code: UNKNOWN`, no false sentence, no "try again" that can never succeed.
 
 **Verified:** 2026-08-24T23:24:35Z at `294ae79b` (branch `feat/v1.20-phase-161-wizerr`)
-**Status:** human_needed
+**Status:** human_needed. As of 2026-09-24, 2 of 3 human items are closed and 1 remains: draft
+survival across a real reload after a gate refusal. See `## Human verification status (2026-09-24)`.
 **Re-verification:** No — initial verification
 
 ---
@@ -250,6 +258,18 @@ confirmation of a property that is otherwise pinned only in jsdom.
 
 Two stale comment carriers (W1, W2) are the phase's own defect class surviving in code prose. They
 are non-blocking under this project's stopping rule and should be filed in `TODOS.md`.
+
+---
+
+## Human verification status (2026-09-24)
+
+| # | Item | Evidence | Status |
+|---|---|---|---|
+| 1 | Live MT5 `undetermined` verdict sentence | Founder decision 2026-09-24 (via AskUserQuestion): routed to Phase 164.6.5 MT5VALIDATEWEDGE, where it is inherited success criterion 7 in `ROADMAP.md` | ✓ resolved by routing |
+| 2 | `KEY_UNDECRYPTABLE` line on KeyPermissionBadge | Founder decision 2026-09-24 (via AskUserQuestion): ACCEPTED as is. At `96b5db4c` the badge renders the sentence alone. The code goes to `console.error` and the Sentry breadcrumb (the SPLIT shipped in 164.2, `05994f1d`) | ✓ resolved |
+| 3 | Draft survives `Try another key` plus a real reload after a gate refusal | No existing evidence: no e2e spec covers the gate-refusal path, and `161-UAT.md` test 3 is `blocked`. It needs a manager account and a key that fails the capability gate | ⏳ OPEN. Owner: the founder (browser), or a Playwright case |
+
+The status stays `human_needed` until item 3 is closed.
 
 ---
 
