@@ -377,6 +377,55 @@ describe("SyncPreviewStep — no second sync, and Retry only when the server nee
     ).not.toBeInTheDocument();
   });
 
+  async function bannerThenDuplicateRetry(duplicate: Record<string, unknown>) {
+    installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
+    await mountAndSettle();
+    progressBody = { jobStatus: "failed_final", stalled: false, memberProgress: [] };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(90_000);
+    });
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+    kickoffBody = {
+      ok: true,
+      accepted: true,
+      status: "syncing",
+      composite: false,
+      code: "WIZARD_DUPLICATE",
+      idempotent: true,
+      ...duplicate,
+    };
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /retry sync/i }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  }
+
+  it("round-2 review (reviewer #3): the 'already running' note clears, and Retry returns, once a read says nothing is in flight", async () => {
+    await bannerThenDuplicateRetry({ queued: true, job_state: "running" });
+    // The server now reports the job it refused over: in flight.
+    progressBody = { jobStatus: "running", stalled: false, memberProgress: [] };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(screen.queryByRole("button", { name: /retry sync/i })).not.toBeInTheDocument();
+    // That job ends without a factsheet: a Retry would now be acted on.
+    progressBody = { jobStatus: "failed_final", stalled: false, memberProgress: [] };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(90_000);
+    });
+    expect(screen.queryByTestId("wizard-sync-already-running")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry sync/i })).toBeInTheDocument();
+  });
+
+  it("round-2 review (SFH LOW-8): a duplicate that QUEUED work (resumed wedge, job_state enqueued) is a fresh attempt", async () => {
+    await bannerThenDuplicateRetry({ queued: true, job_state: "enqueued" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(screen.queryByTestId("wizard-sync-already-running")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-sync-interrupted")).not.toBeInTheDocument();
+  });
+
   it("review-fix round 1 (HIGH-2) control: a Retry that starts a new sync clears the banner", async () => {
     installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
     await mountAndSettle();

@@ -1256,6 +1256,9 @@ describe("[140.3-02 / TS-02] POST /api/keys/sync — the duplicate branch keys o
       "A resumed wedge HAS an enqueued job. Reporting `queued: false` beside " +
         "`idempotent: true` states the opposite of what the backbone just did.",
     ).toBe(true);
+    // Round-2 review (SFH LOW-8): the job's state is forwarded, so the wizard
+    // can tell a resumed wedge that QUEUED work from a refusal over a running job.
+    expect(body.job_state).toBe("enqueued");
     // Unified is a single-key resync path — never a composite.
     expect(body.composite).toBe(false);
     expect(body.ok).toBe(true);

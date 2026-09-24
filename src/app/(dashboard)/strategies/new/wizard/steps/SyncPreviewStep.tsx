@@ -1284,8 +1284,15 @@ export function SyncPreviewStep({
             ) {
               lastInFlightReadAtRef.current = readAt;
               notInFlightSinceRef.current = null;
-            } else if (notInFlightSinceRef.current === null) {
-              notInFlightSinceRef.current = readAt;
+            } else {
+              if (notInFlightSinceRef.current === null) {
+                notInFlightSinceRef.current = readAt;
+              }
+              // Round-2 review (reviewer #3) — the "already running" answer a
+              // duplicate-refused Retry left is stale once a real read says
+              // nothing is in flight: a Retry now WOULD be acted on, so the
+              // note goes and the Retry control can come back.
+              setRetryFoundRunningSync(false);
             }
           }
           const prev = syncProgressRef.current;
@@ -2058,16 +2065,23 @@ export function SyncPreviewStep({
         const retryBody = (await res.json().catch(() => null)) as {
           queued?: boolean;
           code?: unknown;
+          job_state?: unknown;
         } | null;
-        // Review-fix round 1 (HIGH-2) — a DUPLICATE reply started nothing: the
-        // server refused a new sync because one of this strategy's chains is
-        // still running (`process_key`'s chain-in-flight guard). Same reading
-        // as the key card's `enqueuedNewJob`. So nothing about the wait is
-        // fresh: the clocks are NOT reset and the banner stays, now saying
-        // that a sync is already running. Resetting here used to hide the
-        // banner for a full grace window on every press, for a Retry that did
-        // nothing.
-        if (retryBody?.code === "WIZARD_DUPLICATE") {
+        // Review-fix round 1 (HIGH-2), corrected in round 2 (SFH LOW-8) — a
+        // DUPLICATE reply is one of two things, told apart by the forwarded
+        // `job_state`:
+        //   - "enqueued" with `queued: true`: the resumed wedge
+        //     (`_resume_duplicate_job`) queued, or found, a PENDING job for
+        //     this session. Work was put in line, so it takes the fresh-attempt
+        //     path below and the clocks restart.
+        //   - anything else ("running", from the chain-in-flight guard or a
+        //     resumed job already in flight): the server refused a new sync
+        //     because one is running. Nothing about the wait is fresh, so the
+        //     clocks are NOT reset and the banner stays, saying a sync is
+        //     already running, with no Retry the server would refuse again.
+        const duplicateQueuedWork =
+          retryBody?.queued === true && retryBody.job_state === "enqueued";
+        if (retryBody?.code === "WIZARD_DUPLICATE" && !duplicateQueuedWork) {
           setRetryFoundRunningSync(true);
           return;
         }
