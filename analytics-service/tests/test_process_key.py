@@ -3457,6 +3457,7 @@ class _RecordingBuilder:
         self._op = "select"
         self._filters = {}
         self._gte = {}
+        self._in = {}
         self._payload = None
 
     def select(self, *_args, **_kwargs):
@@ -3488,6 +3489,14 @@ class _RecordingBuilder:
         assertion can pin the bound without loosening the equality pins.
         """
         self._gte[column] = value
+        return self
+
+    def in_(self, column, values):
+        """Recorded SEPARATELY from `.eq()`, for the same reason as `.gte()`:
+        the resync chain-in-flight guard (2026-09-24) filters compute_jobs by
+        kind and status with IN lists, and folding those into `self._filters`
+        would widen the equality-pinned shapes below."""
+        self._in[column] = list(values)
         return self
 
     def maybe_single(self):
@@ -4025,6 +4034,8 @@ def test_seam06_resync_dedups_on_strategy_scoped_draft_key(client):
             # flow falls through to a normal queued insert.
             ("strategy_verifications", "select"): [None],
             ("strategy_verifications", "insert"): [[{"id": "ver-resync"}]],
+            # No chain job in flight, so the chain-in-flight guard misses too.
+            ("compute_jobs", "select"): [[]],
         },
         rpc_responses={"enqueue_compute_job": ["job-resync-1"]},
     )

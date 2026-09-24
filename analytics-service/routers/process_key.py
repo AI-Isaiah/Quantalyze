@@ -60,6 +60,7 @@ from services.metrics import periods_per_year_for_asset_class
 from services.mt5_client import Mt5SessionAbandoned
 from services.rate_limit import limiter, platform_ceiling_key, tenant_rate_limit_key
 from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
+from services.job_worker import CLAIMABLE_STATUSES, JOB_CHAIN_FOLLOW_ON
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -769,6 +770,33 @@ _RESYNC_DRAFT_RESUME_WINDOW = timedelta(hours=8)
 # (migrations/20260716090000...sql:181+) minus 'pending'.
 _IN_FLIGHT_JOB_STATUSES = frozenset({"running", "done_pending_children"})
 
+# Every compute_jobs status that will still do work: the claimable set
+# (`pending`, `failed_retry`) plus the in-flight set above. `done` and
+# `failed_final` are the only terminal statuses. The TypeScript mirror is
+# `IN_FLIGHT_JOB_STATUSES` in `src/lib/compute-state.ts`.
+_NON_TERMINAL_JOB_STATUSES = frozenset(CLAIMABLE_STATUSES) | _IN_FLIGHT_JOB_STATUSES
+
+
+def _chain_kinds_from(head: str) -> frozenset[str]:
+    """The job kinds a chain starting at ``head`` can reach, walked over the
+    canonical ``JOB_CHAIN_FOLLOW_ON`` map rather than re-listed here."""
+    seen: set[str] = set()
+    frontier = [head]
+    while frontier:
+        kind = frontier.pop()
+        if kind in seen:
+            continue
+        seen.add(kind)
+        frontier.extend(JOB_CHAIN_FOLLOW_ON.get(kind, ()))
+    return frozenset(seen)
+
+
+# The chain a resync starts: process_key_long and every follow-on it can
+# enqueue (sync_trades, derive_broker_dailies, compute_analytics_from_csv).
+# This is `FACTSHEET_CHAIN_KINDS` in `src/lib/compute-state.ts` minus the
+# legacy `compute_analytics` kind, which nothing enqueues any more.
+_RESYNC_CHAIN_KINDS = _chain_kinds_from("process_key_long")
+
 
 def _resume_duplicate_job(
     *,
@@ -854,7 +882,9 @@ def _wizard_duplicate_reply(
     """The single WIZARD_DUPLICATE body, shared by BOTH emitters.
 
     There are two of them — the pre-check and the 23505 race-winner arm — and
-    they drifted apart in every prior fix to this contract. One builder means a
+    they drifted apart in every prior fix to this contract. (A third caller,
+    the resync chain-in-flight guard in ``process_key``, reuses this builder
+    for the same reason.) One builder means a
     future change to the shape cannot land on one arm only.
 
     Status 200 (NOT 409) per the API-7 spec: idempotency is a feature, not a
@@ -1503,6 +1533,59 @@ async def process_key(
                 correlation_id=correlation_id,
                 queued=_queued,
                 job_state=_job_state,
+            )
+
+    # CHAIN-IN-FLIGHT GUARD (2026-09-24). The draft pre-check above only sees a
+    # verification that is still `draft`, and process_key_long moves it out of
+    # draft within seconds. A full chain (process_key_long -> sync_trades ->
+    # derive_broker_dailies -> compute) can take many minutes after that. Before
+    # this guard, every wizard reload or Retry in that window started a SECOND
+    # chain. The SQL status bridge then wrote `computing` back while any job of
+    # the strategy was non-terminal, so the first chain's `complete` lasted
+    # under a second and the wizard poll never saw it.
+    #
+    # So a resync is refused as a duplicate while ANY job of the chain it would
+    # start is non-terminal for this strategy. No draft is minted and nothing is
+    # enqueued. `queued` is True because a non-terminal job does exist, and
+    # `job_state` is "running" because it was in flight before this call (the
+    # PYAPI-09 contract above). The reply names the newest verification of the
+    # strategy, which is the session that chain belongs to.
+    #
+    # Tenant scope is the same as the draft pre-check's: this runs after the
+    # `_caller_owns_strategy` gate, so the strategy_id filter carries it.
+    if body.flow_type == "resync":
+        inflight_chain_job = rows(
+            supabase.table("compute_jobs")
+            .select("id,kind,status")
+            .eq("strategy_id", strategy_id)
+            .in_("kind", sorted(_RESYNC_CHAIN_KINDS))
+            .in_("status", sorted(_NON_TERMINAL_JOB_STATUSES))
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if inflight_chain_job:
+            latest_verification = one(
+                supabase.table("strategy_verifications")
+                .select("id,status,trust_tier")
+                .eq("strategy_id", strategy_id)
+                .order("created_at", desc=True)
+                .limit(1)
+                .maybe_single()
+                .execute()
+            )
+            log.info(
+                "process_key.resync_chain_inflight_dedup_hit",
+                job_id=str(inflight_chain_job[0].get("id")),
+                job_kind=inflight_chain_job[0].get("kind"),
+                job_status=inflight_chain_job[0].get("status"),
+            )
+            return _wizard_duplicate_reply(
+                existing=latest_verification
+                or {"id": None, "status": None, "trust_tier": None},
+                correlation_id=correlation_id,
+                queued=True,
+                job_state="running",
             )
 
     trust_tier = "csv_uploaded" if body.source == "csv" else "api_verified"

@@ -75,6 +75,7 @@ class _StoreBuilder:
         self._op = "select"
         self._filters: dict[str, Any] = {}
         self._gte: dict[str, Any] = {}
+        self._in: dict[str, list[Any]] = {}
         self._order: list[tuple[str, bool]] = []
         self._payload: Any = None
         self._limit: int | None = None
@@ -96,6 +97,14 @@ class _StoreBuilder:
 
     def eq(self, col: str, val: Any) -> "_StoreBuilder":
         self._filters[col] = val
+        return self
+
+    def in_(self, col: str, values: Any) -> "_StoreBuilder":
+        """A REAL ``IN`` filter (2026-09-24, the resync chain-in-flight guard).
+
+        A no-op here would let the guard's kind and status filters be deleted
+        with every test still green, so it filters for real."""
+        self._in[col] = list(values)
         return self
 
     def maybe_single(self) -> "_StoreBuilder":
@@ -189,6 +198,8 @@ class _StatefulSupabase:
     @staticmethod
     def _match(row: dict[str, Any], b: _StoreBuilder) -> bool:
         if not all(row.get(k) == v for k, v in b._filters.items()):
+            return False
+        if not all(row.get(k) in v for k, v in b._in.items()):
             return False
         for col, bound in b._gte.items():
             actual = row.get(col)
@@ -416,3 +427,145 @@ def test_resync_dedup_is_strategy_scoped(full_stack_client: TestClient) -> None:
 
     assert len(_resync_drafts(sb, _STRATEGY_A)) == 1
     assert len(_resync_drafts(sb, _STRATEGY_B)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-24 — the resync chain-in-flight guard.
+#
+# Found live: a manager's wizard reload during a ~16-minute Bybit chain started
+# a SECOND chain, because the draft pre-check only matches `status='draft'` and
+# process_key_long moves the verification out of draft within seconds. The SQL
+# status bridge then wrote `computing` back over the first chain's `complete`,
+# so the wizard poll never saw it finish.
+#
+# The oracle below is independent of the module under test: the chain kinds
+# and statuses are typed here, not imported.
+# ---------------------------------------------------------------------------
+
+_CHAIN_KINDS_LITERAL = (
+    "process_key_long",
+    "sync_trades",
+    "derive_broker_dailies",
+    "compute_analytics_from_csv",
+)
+_NON_TERMINAL_LITERAL = ("pending", "running", "failed_retry", "done_pending_children")
+
+
+def _seed_advanced_session(
+    sb: _StatefulSupabase, strategy_id: str, *, job_kind: str, job_status: str
+) -> dict[str, Any]:
+    """A first resync whose verification has LEFT draft, with one chain job of
+    `job_kind` at `job_status`. The shape the live incident had."""
+    ver = {
+        "id": "ver-advanced",
+        "strategy_id": strategy_id,
+        "wizard_session_id": "dddddddd-0000-4000-8000-00000000000d",
+        "status": "validated",
+        "trust_tier": "api_verified",
+        "flow_type": "resync",
+        "source": "bybit",
+        "correlation_id": "33333333-3333-4333-8333-333333333333",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    sb.store["strategy_verifications"].append(ver)
+    sb.store["compute_jobs"].append(
+        {
+            "id": "job-seeded",
+            "strategy_id": strategy_id,
+            "kind": job_kind,
+            "status": job_status,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    return ver
+
+
+@pytest.mark.parametrize("job_status", _NON_TERMINAL_LITERAL)
+@pytest.mark.parametrize("job_kind", _CHAIN_KINDS_LITERAL)
+def test_resync_while_a_chain_job_is_non_terminal_starts_no_second_chain(
+    full_stack_client: TestClient, job_kind: str, job_status: str
+) -> None:
+    """A resync that arrives after the first session left draft, while any job
+    of the chain is still non-terminal, is a WIZARD_DUPLICATE: no new draft,
+    no enqueue call. This is the reload/Retry case from the live incident."""
+    sb = make_supabase(_STRATEGY_A)
+    ver = _seed_advanced_session(sb, _STRATEGY_A, job_kind=job_kind, job_status=job_status)
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload.get("code") == "WIZARD_DUPLICATE", (
+        f"a {job_kind} job at {job_status} is a chain still doing work; a resync "
+        f"now must not start a second chain. got {payload}"
+    )
+    assert payload["queued"] is True and payload["job_state"] == "running", payload
+    assert payload["verification_id"] == ver["id"], payload
+    assert _resync_drafts(sb, _STRATEGY_A) == [], "no new draft may be minted"
+    assert "enqueue_compute_job" not in sb.rpc_calls, (
+        f"no job may be enqueued while the chain is in flight; rpc_calls={sb.rpc_calls}"
+    )
+
+
+@pytest.mark.parametrize("job_status", ("done", "failed_final"))
+def test_resync_after_the_chain_finished_starts_a_new_chain(
+    full_stack_client: TestClient, job_status: str
+) -> None:
+    """Negative control: a TERMINAL chain job must not block. Without this the
+    guard could pass the test above by refusing every resync."""
+    sb = make_supabase(_STRATEGY_A)
+    _seed_advanced_session(
+        sb, _STRATEGY_A, job_kind="compute_analytics_from_csv", job_status=job_status
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.status_code == 200, r.text
+    assert r.json().get("code") != "WIZARD_DUPLICATE", r.json()
+    assert len(_resync_drafts(sb, _STRATEGY_A)) == 1
+    assert "enqueue_compute_job" in sb.rpc_calls
+
+
+def test_resync_is_not_blocked_by_a_non_chain_job(full_stack_client: TestClient) -> None:
+    """Negative control on KIND: a running recurring job (reconcile_strategy)
+    says nothing about the factsheet chain and must not block a resync."""
+    sb = make_supabase(_STRATEGY_A)
+    _seed_advanced_session(sb, _STRATEGY_A, job_kind="reconcile_strategy", job_status="running")
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.json().get("code") != "WIZARD_DUPLICATE", r.json()
+    assert len(_resync_drafts(sb, _STRATEGY_A)) == 1
+
+
+def test_resync_is_not_blocked_by_another_strategys_chain(
+    full_stack_client: TestClient,
+) -> None:
+    """The guard is strategy-scoped: strategy B's running chain does not block
+    a resync of strategy A."""
+    sb = make_supabase(_STRATEGY_A, _STRATEGY_B)
+    _seed_advanced_session(sb, _STRATEGY_B, job_kind="sync_trades", job_status="running")
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.json().get("code") != "WIZARD_DUPLICATE", r.json()
+    assert len(_resync_drafts(sb, _STRATEGY_A)) == 1
+
+
+def test_resync_chain_kinds_match_the_typescript_factsheet_chain() -> None:
+    """Drift pin: the Python guard derives its kinds from JOB_CHAIN_FOLLOW_ON,
+    while the wizard's progress read uses FACTSHEET_CHAIN_KINDS in
+    src/lib/compute-state.ts. They must name the same chain (the TS set also
+    keeps the legacy `compute_analytics` kind for historical rows)."""
+    import re
+    from pathlib import Path
+
+    from routers.process_key import _NON_TERMINAL_JOB_STATUSES, _RESYNC_CHAIN_KINDS
+
+    ts = (Path(__file__).resolve().parents[2] / "src/lib/compute-state.ts").read_text()
+    block = re.search(r"FACTSHEET_CHAIN_KINDS = \[(.*?)\] as const", ts, re.S)
+    assert block is not None, "FACTSHEET_CHAIN_KINDS not found in compute-state.ts"
+    ts_kinds = set(re.findall(r'"([a-z_]+)"', block.group(1)))
+    assert ts_kinds - {"compute_analytics"} == set(_RESYNC_CHAIN_KINDS)
+    assert set(_RESYNC_CHAIN_KINDS) == set(_CHAIN_KINDS_LITERAL)
+    assert set(_NON_TERMINAL_JOB_STATUSES) == set(_NON_TERMINAL_LITERAL)
