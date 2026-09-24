@@ -52,9 +52,49 @@ unchanged.**
   `Checking for progress…`. The "Usually takes 15–30 seconds" copy is unchanged.
 - **The benchmark cache is used again.** `get_benchmark_returns` called the imported `rows()`
   helper in its cache-read branch and bound a local `rows` list later in the same function, so
-  every cache read with more than 10 rows raised `UnboundLocalError`. The broad `except` logged it
-  as a cache read failure and every compute refetched Binance klines, from v0.35.0.4 (PR #536)
-  until now. The local list is `cache_rows`.
+  every cache read with more than 10 rows raised `UnboundLocalError`. The broad `except` SWALLOWED
+  it: it logged only a generic "cache read failed" warning, and every compute refetched Binance
+  klines, from v0.35.0.4 (PR #536) until now. The local list is `cache_rows`.
+- **Review round 1: a crash-looping or ancient chain job no longer refuses every resync.**
+  `reset_stalled_compute_jobs` puts a stuck `running` job back to `pending` without counting it,
+  and the claim does not cap `attempts`, so such a job never goes terminal. The guard now skips a
+  row whose `last_error` is `worker_stalled`, one that has spent its attempt budget and is not
+  running, one running past its budget, and one older than `_RESYNC_CHAIN_JOB_LIVE_WINDOW` (8 h,
+  derived beside the constant). Each skipped row is logged at warning and captured to Sentry. A
+  running job AT its budget is its legitimate final attempt and still refuses.
+- **Review round 1: a failed guard read never becomes a 500.** Both guard reads go through
+  `db_read_with_retry`. If the job read still fails, the guard is skipped and the resync takes its
+  pre-guard path, logged with context. If only the verification read fails, the reply is still a
+  duplicate with no verification status.
+- **Review round 1: the duplicate reply never borrows another verification's status.** Only a
+  `process_key_long` job carries its session's `verification_id`. The reply carries the newest
+  verification's status only when that id matches. Otherwise it carries the job's own id (None for
+  a follow-on hop) and `status: None`, and logs a warning. The comment that said the reply names
+  the chain's own session was false and is replaced.
+- **Review round 1: `selectFactsheetJob`'s in-flight preference is bounded.** An in-flight chain
+  row answers over a newer finished one only while it was created less than
+  `IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS` (8 h) before it, so a dead job cannot read as running
+  for ever once a later chain finishes.
+- **Review round 1: the wizard trusts "in flight" for 60 minutes at most.** Past
+  `IN_FLIGHT_TRUST_CEILING_MS` with the analytics status unchanged, the banner shows even while
+  reads say a job is in flight: "A sync is still queued or running on our side; it may be stuck."
+- **Review round 1: a Retry answered `WIZARD_DUPLICATE` keeps the banner.** It resets no clock
+  and clears nothing, and the banner says "A sync is already running." Before, each press hid the
+  banner for a full grace window for a Retry that started nothing.
+- **Review round 1: the envelope Retry starts a fresh settled grace.** `handleKickoffRetry` and
+  the kickoff effect now clear the in-flight evidence refs and `settledPastGrace`. Before, the
+  previous attempt's grace put the Retry banner straight back up over the sync just started.
+- **Review round 1: the mount's in-flight probe times out after 5 s** (`MOUNT_PROBE_TIMEOUT_MS`),
+  so a hanging sync-progress read cannot hold the kickoff back. A failed `strategies` read is now
+  logged instead of dropped.
+- **Review round 1: today's partial-day benchmark close is never cached, served or counted as
+  fresh.** Freshness is now "the newest completed day cached is yesterday (UTC) or later", in place
+  of the 48-hour age check.
+- **Review round 1: a benchmark cache that does not span the requested days is a miss, and a code
+  bug in the read is loud.** The newest `days` completed dates must be a contiguous run ending
+  yesterday or later. The read's `except` is narrowed to DB and network errors
+  (`_CACHE_READ_ERRORS`). Any other exception still falls back to a fetch, but logs at error level
+  and is captured to Sentry, so the `UnboundLocalError` class above can no longer pass as a miss.
 
 ### Removed
 
@@ -73,8 +113,23 @@ unchanged.**
   statuses) plus controls for a terminal job, a non-chain kind, another strategy's chain, and a
   drift pin of the derived kinds against `FACTSHEET_CHAIN_KINDS`. Both supabase fakes gained a real
   `in_` filter, so deleting the guard's kind or status filter turns a test RED.
-- `tests/test_benchmark.py`: a fresh-cache hit (20 rows) that asserts no fetch. It failed on the old
-  code with the exact `UnboundLocalError` message.
+- `tests/test_benchmark.py`: a fresh-cache hit that asserts no fetch. On the old code it failed on
+  `fetch.assert_not_awaited()`: the `except` swallowed the `UnboundLocalError`, so the only visible
+  symptom was the refetch. Round 1 moved it to 30 completed days, the full requested window.
+- Review round 1, `tests/test_resync_draft_dedup.py`: four not-live job shapes let a resync
+  through, and two controls still refuse (a running job on its final attempt, and a live job beside
+  a newer dead one). Read failures fall through, a single 504 is retried, and a failed verification
+  read still refuses. A newer unrelated verification's status is never borrowed. The drift pin now
+  also reads `IN_FLIGHT_JOB_STATUSES` against `_NON_TERMINAL_JOB_STATUSES`. The fake gained a
+  per-table, per-call read-failure queue.
+- Review round 1, `src/lib/compute-state.test.ts`: an in-flight row 9 h older than a finished one
+  does not answer, with a control just inside the window.
+- Review round 1, `SyncPreviewStep.inflight-guard.runtime.test.tsx`: the 60-minute ceiling, a
+  duplicate-answered Retry with its control, the envelope-retry flow, the probe timeout and the
+  logged strategies read.
+- Review round 1, `tests/test_benchmark.py` and `tests/test_benchmark_extras.py`: today's partial
+  close never served, cached or counted as fresh; a gappy, short or sparse cache is refetched; a
+  programming error is logged at error and captured, and a DB error is not.
 - `tests/test_long_fetch.py` and `tests/test_process_key.py`: the reconstruction is asserted NOT
   awaited on both paths.
 - `src/lib/compute-state.test.ts`: two overlapping chains (newest done, older running) in both
@@ -95,7 +150,25 @@ unchanged.**
   the per-kind in-flight index, and the cross-kind second-chain defect never applied to it.
 - **The 60 s evidence window and the 60 s settled grace are new constants in `SyncPreviewStep`**
   (`IN_FLIGHT_EVIDENCE_TTL_MS`, `SETTLED_WITHOUT_COMPLETE_GRACE_MS`). Each is documented beside its
-  definition.
+  definition. Review round 1 added `IN_FLIGHT_TRUST_CEILING_MS` (60 min) and
+  `MOUNT_PROBE_TIMEOUT_MS` (5 s) there, `_RESYNC_CHAIN_JOB_LIVE_WINDOW` (8 h) in `process_key.py`,
+  and `IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS` (8 h, mirroring it) in `compute-state.ts`.
+- **Review round 1 decisions, recorded so they read as decisions.** (1) For `selectFactsheetJob`
+  the staleness bound was taken over "prefer an in-flight row only when newer than the latest
+  terminal row", which reduces to newest-row-wins and would revert the in-flight-first rule.
+  (2) A running job AT its attempt budget stays live. The claim counts the attempt it starts, so
+  treating `attempts >= max_attempts` as dead for a running row would admit a second chain during
+  a legitimate final attempt. (3) The probe timeout uses an `AbortController` and
+  `window.setTimeout`, not `AbortSignal.timeout`, which does not run on the test's fake clock
+  (measured). (4) The job's kind and status were not added to the duplicate reply. The code
+  alone decides the Retry branch, and no TS reader would use them.
+- Review round 1, style only: the `services.job_worker` import in `process_key.py` now sits in
+  alphabetical order.
+- **Known limit: a partial-day benchmark close cached BEFORE this release can still be served.**
+  A row cached on day D for date D held D's price so far. From D+1 it is a completed-day row in
+  every respect this code can see, so it is served until a fresh fetch overwrites it by upsert. A
+  full cache is not refetched, so that may not happen. Recorded, not fixed: telling such a row
+  from a true close needs a write timestamp the table does not carry.
 
 ## [0.90.0.0] - 2026-09-24 — GATEHYGIENE: a lost 40001 race is retried once, an inherited refresh marker is retracted, and a failed ledger fan-out candidate is counted, named and watched
 
