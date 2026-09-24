@@ -80,7 +80,11 @@ import {
   selectFactsheetJob,
 } from "@/lib/compute-state";
 import { readOwnerComputeJobs } from "@/lib/compute-jobs-read";
-import { countCompositeMembers } from "@/lib/strategy-shape";
+import {
+  compositeHistoryOf,
+  countCompositeMembers,
+  shouldPreferStitch,
+} from "@/lib/strategy-shape";
 import { captureToSentry } from "@/lib/sentry-capture";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -158,7 +162,7 @@ export async function GET(
       // below is ALSO auth.uid()-scoped, so this is defense-in-depth.
       const { data: strategy } = await supabase
         .from("strategies")
-        .select("id, user_id")
+        .select("id, user_id, api_key_id")
         .eq("id", id)
         .eq("user_id", user.id)
         .single();
@@ -239,8 +243,18 @@ export async function GET(
       // is the latest FACTSHEET-CHAIN job, no longer the latest of any kind: a
       // newer recurring cron row (`reconcile_strategy`, `sync_funding`) must not
       // hide a failed chain job behind its own `done`.
+      // 167.2-REVIEW-R2 IN-05: a zero count drops stitch preference only for
+      // a PROVEN single-key strategy (a linked key, or no stitch in the rows
+      // at hand); a regressed `strategy_keys_owner` policy that counts a live
+      // composite as 0 must not let a member chain row answer for it. The
+      // history here is the rows this route already read (no extra RPC on the
+      // poll path): with no stitch in them, the preference changes nothing.
       const latest = selectFactsheetJob(read.rows, {
-        preferStitch: !(memberCount.ok && memberCount.count === 0),
+        preferStitch: shouldPreferStitch({
+          apiKeyId: (strategy as { api_key_id?: string | null }).api_key_id,
+          memberCount,
+          compositeHistory: compositeHistoryOf(read),
+        }),
       });
 
       if (latest === null) {

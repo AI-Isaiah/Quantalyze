@@ -616,6 +616,48 @@ describe("KCS-21 — the remedy is keyed on the strategy's shape", () => {
   });
 });
 
+describe("167.2-REVIEW-R2 CR-01 — the owner factsheet's history read widens on its own rule", () => {
+  it("R2-CR01-UNLINKED-150-ROWS: zero members, no key, a chain row in the newest 100 of 150 rows and no stitch -> the remedy is Use & Sync, after one re-ask at the cap", async () => {
+    givenOwnerPendingDraft({ source: "api", api_key_id: null });
+    STATE.memberCountResult = { count: 0, error: null };
+    givenJobs([
+      job({ kind: "derive_broker_dailies", status: "failed_final", error_kind: "transient", created_at: minutesAgo(1) }),
+      ...Array.from({ length: 149 }, (_, i) =>
+        job({ kind: "reconcile_strategy", status: "done", created_at: minutesAgo(i + 2) }),
+      ),
+    ]);
+
+    const { remedyLine } = await renderOwnerPending();
+
+    expect(remedyLine!.textContent).toBe(SHAPE_UNLINKED);
+    expect(STATE.observed.rpcCalls.map(([, a]) => (a as { p_limit: number }).p_limit)).toEqual([
+      100, 1000,
+    ]);
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+  });
+
+  it("R2-M2-FACTSHEET: zero members, no key, a stitch on record -> no control is guessed, and it is captured (stage composite-history)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft({ source: "api", api_key_id: null });
+      STATE.memberCountResult = { count: 0, error: null };
+      givenJobs([
+        job({ kind: "derive_broker_dailies", status: "failed_final", error_kind: "transient", created_at: minutesAgo(1) }),
+        job({ kind: "stitch_composite", status: "done", created_at: minutesAgo(600) }),
+      ]);
+
+      const { remedyLine } = await renderOwnerPending();
+
+      expect(remedyLine!.querySelectorAll("a")).toHaveLength(0);
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(expect.anything(), {
+        tags: { route: "factsheet/v2/page", stage: "composite-history" },
+      });
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
+
 describe("KCS-09 — an unreadable read never claims progress", () => {
   it("RPC-ERROR: the RPC answers { error } -> KCS09-UNREADABLE, logged to console and Sentry", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});

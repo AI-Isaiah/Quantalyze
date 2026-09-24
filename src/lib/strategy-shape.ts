@@ -125,6 +125,10 @@ export async function readCompositeMemberKeyIds(
  * whether it has ever been a composite. "seen": a `stitch_composite` row is on
  * record. "none": an exhaustive read found none. "unreadable": the read failed,
  * threw, or was not exhaustive, so a stitch could lie beyond it.
+ * ⚠️ 167.2-REVIEW-R2 CR-01: a caller deciding a SHAPE must not feed this a
+ * bare `readOwnerComputeJobs` answer, whose re-ask rule is the chain
+ * selection's, not this question's. Use `readOwnerCompositeHistory`
+ * (`@/lib/compute-jobs-read`), which re-asks at the RPC cap first.
  */
 export type CompositeHistory = "seen" | "none" | "unreadable";
 
@@ -176,4 +180,31 @@ export function resolveStrategyShape(input: {
   if (input.apiKeyId) return "single";
   if ((input.compositeHistory ?? "none") !== "none") return "unknown";
   return "unlinked";
+}
+
+/**
+ * 167.2-REVIEW-R2 IN-05 (round 2): may an old `stitch_composite` row answer
+ * for this strategy (`selectFactsheetJob`'s `preferStitch`)? The 167.2-REVIEW
+ * IN-03 rule dropped stitch preference on any ZERO member count, but a zero
+ * count is a claim RLS can fabricate (SFH M-7): a regressed
+ * `strategy_keys_owner` counts a live composite as 0 with `ok: true`, and a
+ * member chain row newer than its stitch then answered for the composite.
+ *
+ * So the M-7 cross-check applies here too. Stitch preference is dropped only
+ * for a PROVEN single-key strategy: a zero count AND either a linked key (the
+ * IN-03 case: a strategy converted from a composite keeps its old stitch rows
+ * and must not be answered by them) or a history with no stitch on record. An
+ * unreadable count keeps it, as before. For a caller whose history is only
+ * the rows it is about to select from, "unreadable" (no stitch in a
+ * non-exhaustive window) also keeps it, which is harmless: with no stitch row
+ * in the window the preference selects nothing different.
+ */
+export function shouldPreferStitch(input: {
+  apiKeyId: string | null | undefined;
+  memberCount: CompositeMemberCount;
+  compositeHistory: CompositeHistory;
+}): boolean {
+  if (!input.memberCount.ok || input.memberCount.count > 0) return true;
+  if (input.apiKeyId) return false;
+  return input.compositeHistory !== "none";
 }

@@ -33,6 +33,7 @@ import {
   isWindowFullWithoutFactsheetJob,
   type ComputeJobRow,
 } from "./compute-state";
+import { compositeHistoryOf, type CompositeHistory } from "./strategy-shape";
 
 export type ComputeJobsRead =
   | {
@@ -90,4 +91,71 @@ export async function readOwnerComputeJobs(
     readExhaustive,
     windowFull: isWindowFullWithoutFactsheetJob(rows, readExhaustive),
   };
+}
+
+/**
+ * 167.2-REVIEW-R2 CR-01 / SFH-R2 R2-H1 (round 2): the composite-HISTORY read
+ * has its own widening rule. Its question is "is any `stitch_composite` row on
+ * record?", not the chain-selection question `readOwnerComputeJobs` widens
+ * for. That read re-asks at the cap only when the first window holds NO chain
+ * row, so a mature strategy whose newest 100 rows include a chain row came
+ * back non-exhaustive, `compositeHistoryOf` called it "unreadable", and the
+ * edit page resolved an ordinary unlinked strategy to "unknown" on every
+ * render (Add Key gone after "delete the failed key").
+ *
+ * The rule here: when the read at hand is not exhaustive and holds no stitch,
+ * re-ask ONCE at `COMPUTE_STATE_READ_LIMIT_MAX`. Only a read that failed or
+ * threw, or a window still full at the cap with no stitch, is "unreadable".
+ *
+ * `first` is an already-made `readOwnerComputeJobs` answer (the owner
+ * factsheet has one); omit it and this makes the read itself. It never
+ * throws: a throw is folded into "unreadable". `message` says why the answer
+ * is not "none" (null when it is), for the caller to log and capture.
+ */
+export async function readOwnerCompositeHistory(
+  client: SupabaseClient,
+  strategyId: string,
+  first?: ComputeJobsRead,
+): Promise<{ history: CompositeHistory; message: string | null }> {
+  let rows: readonly ComputeJobRow[];
+  let readExhaustive: boolean;
+  try {
+    const read = first ?? (await readOwnerComputeJobs(client, strategyId));
+    if (!read.ok) {
+      return { history: "unreadable", message: `compute job history read failed: ${read.message}` };
+    }
+    rows = read.rows;
+    readExhaustive = read.readExhaustive;
+    if (
+      !readExhaustive &&
+      !rows.some((r) => r?.kind === "stitch_composite") &&
+      rows.length < COMPUTE_STATE_READ_LIMIT_MAX
+    ) {
+      const wide = await rpcOnce(client, strategyId, COMPUTE_STATE_READ_LIMIT_MAX);
+      if (!wide.ok) {
+        return { history: "unreadable", message: `compute job history read failed: ${wide.message}` };
+      }
+      rows = wide.rows;
+      readExhaustive = rows.length < COMPUTE_STATE_READ_LIMIT_MAX;
+    }
+  } catch (err) {
+    return {
+      history: "unreadable",
+      message: `compute job history read threw: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  const history = compositeHistoryOf({ ok: true, rows, readExhaustive });
+  if (history === "seen") {
+    return {
+      history,
+      message: "a stitch_composite job is on record for a strategy with no members and no linked key",
+    };
+  }
+  if (history === "unreadable") {
+    return {
+      history,
+      message: "the compute job history is full at the RPC cap with no stitch_composite job",
+    };
+  }
+  return { history, message: null };
 }

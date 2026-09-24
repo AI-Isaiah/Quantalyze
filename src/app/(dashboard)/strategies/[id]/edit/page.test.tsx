@@ -380,6 +380,88 @@ describe("EditStrategyPage composite shape (KCS-23)", () => {
     expect(lastKeyShape()).toBe("single");
   });
 
+  // 167.2-REVIEW-R2 CR-01 / SFH-R2 R2-H1 (round 2): a mature single-key
+  // strategy whose key was deleted (api_key_id -> null by the FK) has 100+ job
+  // rows, a chain row among the newest 100 and no stitch anywhere. The history
+  // read must re-ask at the RPC cap and answer "single" (Add Key stays), not
+  // read the non-exhaustive first window as "unreadable" -> "unknown".
+  function jobRows(n: number, kind: string) {
+    return Array.from({ length: n }, (_, i) => ({
+      kind,
+      status: "done",
+      created_at: `2026-09-01T00:00:${String(i % 60).padStart(2, "0")}.000Z`,
+    }));
+  }
+
+  it("R2-CR01-100-ROW-HISTORY: zero members, no linked key, a 100-row window with a chain row and no stitch -> re-asks at the cap and stays \"single\"", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    rpcMock.mockImplementation((_name, args) =>
+      args.p_limit === 1000
+        ? { data: [...jobRows(1, "sync_trades"), ...jobRows(149, "reconcile_strategy")], error: null }
+        : { data: [...jobRows(1, "sync_trades"), ...jobRows(99, "reconcile_strategy")], error: null },
+    );
+    await renderEditPage();
+
+    expect(rpcMock).toHaveBeenCalledWith("get_user_compute_jobs", {
+      p_strategy_id: STRATEGY_ID,
+      p_limit: 1000,
+    });
+    expect(lastKeyShape()).toBe("single");
+    expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+
+  it("R2-CR01-CAP-FULL: the history is still full at the RPC cap with no stitch -> \"unknown\", logged and captured (stage composite-history)", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    rpcMock.mockImplementation((_name, args) => ({
+      data: [...jobRows(1, "sync_trades"), ...jobRows(Number(args.p_limit) - 1, "reconcile_strategy")],
+      error: null,
+    }));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await renderEditPage();
+      expect(lastKeyShape()).toBe("unknown");
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining("composite history"),
+        expect.objectContaining({ id: STRATEGY_ID, history: "unreadable" }),
+      );
+      expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+        tags: { route: "strategies/edit/page", stage: "composite-history" },
+      });
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("R2-M2-CAPTURE: every path that resolves the shape to \"unknown\" from the history is captured (seen, read failed, read threw)", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const answers: Array<() => { data: unknown; error: unknown }> = [
+      () => ({ data: [{ kind: "stitch_composite", status: "done" }], error: null }),
+      () => ({ data: null, error: { message: "synthetic rpc failure" } }),
+      () => {
+        throw new Error("synthetic rpc throw");
+      },
+    ];
+    try {
+      for (const answer of answers) {
+        captureToSentryMock.mockClear();
+        rpcMock.mockImplementation(answer);
+        await renderEditPage();
+        expect(lastKeyShape()).toBe("unknown");
+        expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+          tags: { route: "strategies/edit/page", stage: "composite-history" },
+        });
+        // Tags only: the strategy id stays in the server log.
+        expect(JSON.stringify(captureToSentryMock.mock.calls)).not.toContain(STRATEGY_ID);
+      }
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("M7-LINKED-NO-READ: a linked key with zero members is single and asks the job RPC nothing", async () => {
     strategyDataMock.mockResolvedValue({ data: { ...apiStrategy, api_key_id: "key-synthetic-1" } });
     memberCountMock.mockReturnValue({ count: 0, error: null });

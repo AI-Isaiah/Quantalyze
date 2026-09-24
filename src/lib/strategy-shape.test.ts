@@ -1,10 +1,12 @@
 import { describe, it, expect } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
+  compositeHistoryOf,
   countCompositeMembers,
   resolveStrategyShape,
   type CompositeMemberCount,
 } from "./strategy-shape";
+import { readOwnerCompositeHistory } from "./compute-jobs-read";
 
 /**
  * Phase 167.2 / KCS-21, KCS-23 — the one strategy-shape predicate.
@@ -139,5 +141,102 @@ describe("countCompositeMembers", () => {
     const { client } = clientDouble({ count: null, error: null });
     const memberCount = await countCompositeMembers(client, SID);
     expect(resolveStrategyShape({ source: "api", apiKeyId: KEY_ID, memberCount })).toBe("unknown");
+  });
+});
+
+/**
+ * 167.2-REVIEW-R2 CR-01 (round 2): the history fold had no unit case at all,
+ * and its non-exhaustive arm locked an ordinary unlinked strategy out of Add
+ * Key. One case per answer, then the read that feeds it.
+ */
+describe("compositeHistoryOf", () => {
+  it("seen: a stitch_composite row is in the read", () => {
+    expect(
+      compositeHistoryOf({ ok: true, rows: [{ kind: "stitch_composite" }], readExhaustive: false }),
+    ).toBe("seen");
+  });
+  it("none: an exhaustive read with no stitch", () => {
+    expect(compositeHistoryOf({ ok: true, rows: [{ kind: "sync_trades" }], readExhaustive: true })).toBe("none");
+  });
+  it("unreadable: a failed read, a thrown read (null), or a non-exhaustive read with no stitch", () => {
+    expect(compositeHistoryOf({ ok: false })).toBe("unreadable");
+    expect(compositeHistoryOf(null)).toBe("unreadable");
+    expect(compositeHistoryOf({ ok: true, rows: [{ kind: "sync_trades" }], readExhaustive: false })).toBe(
+      "unreadable",
+    );
+  });
+});
+
+describe("readOwnerCompositeHistory (R2 CR-01: its own widening rule)", () => {
+  const rows = (n: number, kind: string) => Array.from({ length: n }, () => ({ kind, status: "done" }));
+  function rpcClient(answer: (limit: number) => { data: unknown; error: unknown }) {
+    const limits: number[] = [];
+    const client = {
+      rpc: (_name: string, args: { p_limit: number }) => {
+        limits.push(args.p_limit);
+        return Promise.resolve(answer(args.p_limit));
+      },
+    } as unknown as SupabaseClient;
+    return { client, limits };
+  }
+
+  it("100 rows with a chain row and no stitch: re-asks at 1000 and answers none when that read is exhaustive", async () => {
+    const { client, limits } = rpcClient((limit) => ({
+      data: [...rows(1, "sync_trades"), ...rows(limit === 1000 ? 149 : 99, "reconcile_strategy")],
+      error: null,
+    }));
+    await expect(readOwnerCompositeHistory(client, SID)).resolves.toEqual({ history: "none", message: null });
+    expect(limits).toEqual([100, 1000]);
+  });
+
+  it("a stitch in the first window answers seen without a re-ask", async () => {
+    const { client, limits } = rpcClient(() => ({
+      data: [...rows(1, "stitch_composite"), ...rows(99, "reconcile_strategy")],
+      error: null,
+    }));
+    const out = await readOwnerCompositeHistory(client, SID);
+    expect(out.history).toBe("seen");
+    expect(limits).toEqual([100]);
+  });
+
+  it("still full at the cap with no stitch: unreadable, with a message", async () => {
+    const { client } = rpcClient((limit) => ({
+      data: [...rows(1, "sync_trades"), ...rows(limit - 1, "reconcile_strategy")],
+      error: null,
+    }));
+    const out = await readOwnerCompositeHistory(client, SID);
+    expect(out.history).toBe("unreadable");
+    expect(out.message).toMatch(/full at the RPC cap/);
+  });
+
+  it("a failed re-ask, a failed first read and a throw are unreadable; it never throws", async () => {
+    const failedWide = rpcClient((limit) =>
+      limit === 1000
+        ? { data: null, error: { message: "synthetic" } }
+        : { data: [...rows(1, "sync_trades"), ...rows(99, "reconcile_strategy")], error: null },
+    );
+    expect((await readOwnerCompositeHistory(failedWide.client, SID)).history).toBe("unreadable");
+    const failedFirst = rpcClient(() => ({ data: null, error: { message: "synthetic" } }));
+    expect((await readOwnerCompositeHistory(failedFirst.client, SID)).history).toBe("unreadable");
+    const throwing = {
+      rpc: () => {
+        throw new Error("synthetic throw");
+      },
+    } as unknown as SupabaseClient;
+    const out = await readOwnerCompositeHistory(throwing, SID);
+    expect(out.history).toBe("unreadable");
+    expect(out.message).toMatch(/threw/);
+  });
+
+  it("a first read passed in is reused, not repeated", async () => {
+    const { client, limits } = rpcClient(() => ({ data: [], error: null }));
+    const out = await readOwnerCompositeHistory(client, SID, {
+      ok: true,
+      rows: [{ kind: "sync_trades" }],
+      readExhaustive: true,
+      windowFull: false,
+    });
+    expect(out).toEqual({ history: "none", message: null });
+    expect(limits).toEqual([]);
   });
 });

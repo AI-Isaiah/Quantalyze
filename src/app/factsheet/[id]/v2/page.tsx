@@ -25,7 +25,10 @@ import {
   recipientArm,
   type ComputeState,
 } from "@/lib/compute-state";
-import { readOwnerComputeJobs } from "@/lib/compute-jobs-read";
+import {
+  readOwnerComputeJobs,
+  readOwnerCompositeHistory,
+} from "@/lib/compute-jobs-read";
 import {
   KCS10_PUBLIC_SENTENCE,
   ownerRemedy,
@@ -36,7 +39,8 @@ import {
 import {
   countCompositeMembers,
   resolveStrategyShape,
-  compositeHistoryOf,
+  shouldPreferStitch,
+  type CompositeHistory,
   type StrategyShape,
 } from "@/lib/strategy-shape";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -650,14 +654,45 @@ async function readOwnerPendingStatus(
         tags: { route: "factsheet/v2/page", stage: "strategy-shape" },
       });
     }
+    // 167.2-REVIEW-SFH M-7: the same cross-check the edit page makes, so the
+    // remedy never names a link control the edit page withholds.
+    // 167.2-REVIEW-R2 CR-01: through the SAME history read the edit page uses
+    // (`readOwnerCompositeHistory`, which re-asks at the RPC cap when the job
+    // read at hand is not exhaustive and holds no stitch), reusing that job
+    // read. It runs only where the history decides anything: a zero count,
+    // no linked key, not CSV. It never throws.
+    let compositeHistory: CompositeHistory = "none";
+    if (
+      shapeInputs.source !== "csv" &&
+      memberCount.ok &&
+      memberCount.count === 0 &&
+      !shapeInputs.apiKeyId
+    ) {
+      const history = await readOwnerCompositeHistory(
+        supabase as unknown as SupabaseClient,
+        strategyId,
+        jobsRead,
+      );
+      compositeHistory = history.history;
+      // SFH-R2 R2-M2: a history that is not "none" leaves the shape
+      // "unknown". A failed job read is captured below as `compute-state`
+      // (the same fault); every other case is captured here.
+      if (history.message !== null && jobsRead.ok) {
+        console.error("[factsheet/v2/page] composite history is not clean; no control is named", {
+          id: strategyId,
+          history: history.history,
+          message: history.message,
+        });
+        captureToSentry(new Error(history.message), {
+          tags: { route: "factsheet/v2/page", stage: "composite-history" },
+        });
+      }
+    }
     shape = resolveStrategyShape({
       source: shapeInputs.source,
       apiKeyId: shapeInputs.apiKeyId,
       memberCount,
-      // 167.2-REVIEW-SFH M-7: the same cross-check the edit page makes, from
-      // the job read this function already has, so the remedy never names a
-      // link control the edit page withholds.
-      compositeHistory: compositeHistoryOf(jobsRead),
+      compositeHistory,
     });
     if (!jobsRead.ok) {
       const readFailure = { code: jobsRead.code, message: jobsRead.message };
@@ -690,7 +725,13 @@ async function readOwnerPendingStatus(
         nowMs: Date.now(),
         // 167.2-REVIEW IN-03: an old stitch answers only while the strategy
         // has members (or the count could not be read).
-        preferStitch: !(memberCount.ok && memberCount.count === 0),
+        // 167.2-REVIEW-R2 IN-05: and a zero count drops it only for a proven
+        // single-key strategy (linked key, or no stitch on record).
+        preferStitch: shouldPreferStitch({
+          apiKeyId: shapeInputs.apiKeyId,
+          memberCount,
+          compositeHistory,
+        }),
       }),
       shape,
     };

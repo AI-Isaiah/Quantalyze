@@ -960,6 +960,13 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
   // ── 167.2-REVIEW IN-03: an old stitch does not answer for a strategy with no members ──
   it("IN03-CONVERTED: zero members, an old done stitch and a NEWER running chain job answer the chain job", async () => {
     memberCount.value = 0;
+    // 167.2-REVIEW-R2 IN-05: the IN-03 scenario is a strategy CONVERTED to a
+    // single key, so a key is linked; that is what proves it single.
+    ownershipResult.data = {
+      id: TEST_STRATEGY_ID,
+      user_id: TEST_USER_ID,
+      api_key_id: "22222222-2222-4222-8222-222222222222",
+    };
     rpcResult.data = [
       stitchRow({ status: "done", created_at: "2026-07-12T10:00:00.000Z" }),
       otherKindRow("process_key_long", { status: "running", created_at: "2026-07-12T11:58:00.000Z" }),
@@ -968,6 +975,19 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     expect(JSON.stringify(await res.json())).toBe(
       '{"jobStatus":"running","stalled":false,"memberProgress":[]}',
     );
+  });
+
+  // ── 167.2-REVIEW-R2 IN-05: a zero count is a claim RLS can fabricate ──
+  it("IN05-ZERO-UNLINKED-STITCH: zero members, NO linked key and a stitch on record keep the stitch-preferring rule (a regressed policy cannot drop a composite's member progress)", async () => {
+    memberCount.value = 0;
+    ownershipResult.data = { id: TEST_STRATEGY_ID, user_id: TEST_USER_ID, api_key_id: null };
+    rpcResult.data = [
+      stitchRow({ status: "running", created_at: "2026-07-12T11:50:00.000Z", claimed_at: ago(60_000), metadata: { member_progress: [] } }),
+      otherKindRow("process_key_long", { status: "done", created_at: "2026-07-12T11:58:00.000Z" }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    expect((await res.json()).jobStatus).toBe("running");
+    expect(ownershipQuery.selectCols).toBe("id, user_id, api_key_id");
   });
 
   it("IN03-COUNT-UNREADABLE: a member count that cannot be read keeps the stitch-preferring rule", async () => {

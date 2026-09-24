@@ -7,12 +7,11 @@ import { CsvStrategyEditNote } from "@/components/strategy/CsvStrategyEditNote";
 import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import type { Strategy } from "@/lib/types";
 import {
-  compositeHistoryOf,
   readCompositeMemberKeyIds,
   resolveStrategyShape,
   type CompositeHistory,
 } from "@/lib/strategy-shape";
-import { readOwnerComputeJobs } from "@/lib/compute-jobs-read";
+import { readOwnerCompositeHistory } from "@/lib/compute-jobs-read";
 import { captureToSentry } from "@/lib/sentry-capture";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { redirect } from "next/navigation";
@@ -73,25 +72,29 @@ export default async function EditStrategyPage({
       // a composite pay nothing for it.
       let compositeHistory: CompositeHistory = "none";
       if (members.keyIds.length === 0 && !strategy.api_key_id) {
-        let jobs: Awaited<ReturnType<typeof readOwnerComputeJobs>> | null = null;
-        try {
-          jobs = await readOwnerComputeJobs(
-            supabase as unknown as SupabaseClient,
-            strategy.id,
-          );
-        } catch (err) {
-          console.error("[strategies/edit/page] composite history read threw", {
+        // 167.2-REVIEW-R2 CR-01 / SFH-R2 R2-H1: the history read has its own
+        // widening rule (`readOwnerCompositeHistory` re-asks at the RPC cap
+        // when the first window is not exhaustive and holds no stitch), so a
+        // mature unlinked strategy with 100+ job rows resolves to "single",
+        // not "unknown". It never throws.
+        // SFH-R2 R2-M2: every answer that is not "none" makes the shape
+        // "unknown" and removes every link control, so each one is logged
+        // (with the id) and captured (tags only), as the member-read arm is.
+        const read = await readOwnerCompositeHistory(
+          supabase as unknown as SupabaseClient,
+          strategy.id,
+        );
+        compositeHistory = read.history;
+        if (read.message !== null) {
+          console.error("[strategies/edit/page] composite history is not clean; the key card offers no link control", {
             id: strategy.id,
-            message: err instanceof Error ? err.message : String(err),
+            history: read.history,
+            message: read.message,
+          });
+          captureToSentry(new Error(read.message), {
+            tags: { route: "strategies/edit/page", stage: "composite-history" },
           });
         }
-        if (jobs && !jobs.ok) {
-          console.error("[strategies/edit/page] composite history read failed", {
-            id: strategy.id,
-            message: jobs.message,
-          });
-        }
-        compositeHistory = compositeHistoryOf(jobs);
       }
       const shape = resolveStrategyShape({
         source: strategy.source,

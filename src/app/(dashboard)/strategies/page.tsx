@@ -18,6 +18,11 @@ import {
   type RecipientArm,
 } from "@/lib/compute-state";
 import { readOwnerComputeJobs } from "@/lib/compute-jobs-read";
+import {
+  compositeHistoryOf,
+  shouldPreferStitch,
+  type CompositeMemberCount,
+} from "@/lib/strategy-shape";
 import { captureToSentry } from "@/lib/sentry-capture";
 import {
   KEY_STATUS_UNREADABLE_NOTE,
@@ -112,9 +117,11 @@ function computationStatusOf(embed: unknown): string | null {
 async function readRecipientArm(
   supabase: Awaited<ReturnType<typeof createClient>>,
   strategyId: string,
-  // 167.2-REVIEW IN-03: false only when the member read succeeded and found no
-  // member for this strategy (see `selectFactsheetJob`).
-  preferStitch: boolean,
+  // 167.2-REVIEW IN-03 / 167.2-REVIEW-R2 IN-05: the inputs of
+  // `shouldPreferStitch`. A zero member count drops stitch preference only
+  // for a proven single-key strategy (a linked key, or no stitch in the rows
+  // read below), because RLS can fabricate a zero count.
+  stitchInputs: { memberCount: CompositeMemberCount; apiKeyId: string | null },
 ): Promise<RecipientArm> {
   // 167.2-REVIEW-SFH M-5: the shared bounded read, which re-asks once at the
   // RPC's cap when the first window is full of non-chain rows. A throw is
@@ -165,7 +172,10 @@ async function readRecipientArm(
       rows: read.rows,
       readExhaustive: read.readExhaustive,
       nowMs: Date.now(),
-      preferStitch,
+      preferStitch: shouldPreferStitch({
+        ...stitchInputs,
+        compositeHistory: compositeHistoryOf(read),
+      }),
     }),
   );
 }
@@ -341,7 +351,12 @@ export default async function StrategiesPage() {
                   supabase,
                   s.id,
                   // IN-03: a failed member read keeps stitch preference.
-                  membersReadFailed || membersByStrategy.has(s.id),
+                  {
+                    memberCount: membersReadFailed
+                      ? { ok: false, message: "strategy_keys member read failed" }
+                      : { ok: true, count: membersByStrategy.get(s.id)?.length ?? 0 },
+                    apiKeyId: s.api_key_id,
+                  },
                 );
           return [s.id, recipientShareNote(mode, arm)] as const;
         }),
