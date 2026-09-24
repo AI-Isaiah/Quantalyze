@@ -2933,7 +2933,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 167.2-04-PLAN.md — a poll give-up says the panel stopped checking, never a timeout or failure; a failure carries the server's reason (KCS-22)
+- [x] 167.2-04-PLAN.md — a poll give-up says the panel stopped checking, never a timeout or failure; a failure carries the server's reason (KCS-22)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
