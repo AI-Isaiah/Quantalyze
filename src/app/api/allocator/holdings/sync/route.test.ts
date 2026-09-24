@@ -88,6 +88,12 @@ function makeReq(body: unknown) {
 describe("POST /api/allocator/holdings/sync", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // mockReset, not only clearAllMocks: clearing leaves unconsumed
+    // `mockResolvedValueOnce` results queued, so a 40001 a regression failed
+    // to consume would leak into the NEXT case. Measured 2026-09-24 while
+    // neutering the OPS-08-TS retry: the leak turned the unrelated audit case
+    // red as well, which blurs which case the neuter actually broke.
+    mockRpc.mockReset();
     mockRpc.mockResolvedValue({
       data: { ok: true, job_id: TEST_JOB_ID },
       error: null,

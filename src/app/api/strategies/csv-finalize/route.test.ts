@@ -795,6 +795,13 @@ describe("[WR-07] csv-finalize: a lost enqueue race tells the OWNER something tr
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
     rpcMock.mockResolvedValue({ data: NEW_STRATEGY_ID, error: null });
     updateMock.mockResolvedValue({ error: null });
+    // mockReset, not only clearAllMocks: clearing leaves unconsumed
+    // `mockResolvedValueOnce` results queued, so a case that queues two 40001s
+    // and (under a regression) consumes one would hand the leftover to the
+    // NEXT case. Measured 2026-09-24 while neutering the OPS-08-TS retry: the
+    // leak turned both CONTROL cases red as well, which blurs which case the
+    // neuter actually broke.
+    adminRpcMock.mockReset();
     adminRpcMock.mockResolvedValue({ error: null });
     installStrategyAnalyticsDouble();
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -916,7 +923,7 @@ describe("[WR-07] csv-finalize: a lost enqueue race tells the OWNER something tr
       "a retried race is an expected MVCC outcome — it must not alert",
     ).not.toHaveBeenCalled();
     expect(
-      warnSpy.mock.calls.some((c) => /retrying once/.test(String(c[0]))),
+      warnSpy.mock.calls.some((c: unknown[]) => /retrying once/.test(String(c[0]))),
       "the retried attempt must leave a console.warn trail",
     ).toBe(true);
   });
@@ -963,5 +970,23 @@ describe("[WR-07] csv-finalize: a lost enqueue race tells the OWNER something tr
    *   That is the exact-equality assertion's whole reason to exist: the
    *   sentence has to be the PROJECT's, parsed from the SQL, not one this file
    *   agrees with itself about. Restored: 19 passed.
+   *
+   * ⭐ RED DEMO (run 2026-09-24, Phase 164.6 OPS-08-TS, restored from a byte
+   * backup after and `cmp`-clean).
+   *
+   * NEUTER 3 — remove the single 40001 retry. In route.ts, replace the
+   *   `retryOnceOnSerializationFailure(() => admin.rpc(...), onRetry)` wrapper
+   *   in `enqueueCsvAnalyticsAfter` with the bare `admin.rpc(...)` call.
+   *   Observed — 2 failed | 18 passed:
+   *     × a 40001 lost race → the owner reads curated copy …
+   *       AssertionError: a 40001 must be retried exactly once — never zero,
+   *       never twice: expected 1 to be 2
+   *     × OPS-08-TS — a 40001 then a successful retry self-heals …
+   *       AssertionError: the lost race was not re-issued — the retry is
+   *       missing: expected 1 to be 2
+   *   Both CONTROL cases stayed GREEN, but only after `beforeEach` began
+   *   calling `adminRpcMock.mockReset()`: on the first attempt the unconsumed
+   *   second 40001 leaked into the next case and turned both CONTROLs red too,
+   *   which hid which case the neuter actually broke. Restored: 20 passed.
    */
 });
