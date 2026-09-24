@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "167.2"
-current_phase_name: "KEYCARDSYNC — the key card never shows one key's sync result as another key's"
-status: "Phase 164.9 shipped — PR #837"
-stopped_at: Completed 167.2-06-PLAN.md
-last_updated: "2026-09-24T03:57:00.000Z"
-last_activity: 2026-09-22
-last_activity_desc: "Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction. Phase 167 CREDTRUST context locked 2026-09-22. Plan 167-01 (wizard SIGN_IN_FAILED mint) shipped. Plan 167-02 (D-09/D-10, six retry-disposition guards on allocator_positions.py's MT5/sFOX arms + AST roster case) shipped this session, commits 5c48916a + 26c83dc3 — see 167-02-SUMMARY.md."
-state_head: 1ab3b22afe8a3f289988bdaba7d19cee861f21f2
+current_phase: "167.1"
+current_phase_name: "AUMTRUST — the headline AUM says when it includes holdings from keys needing attention"
+status: executing
+stopped_at: Completed 167.1-06-PLAN.md
+last_updated: "2026-09-24T06:17:00.000Z"
+last_activity: 2026-09-24
+last_activity_desc: Phase 167.1 plan 06 complete (WINDOWS 66 fixed, release v0.89.0.0 committed; phase human_needed)
+state_head: b64cb3002c4e017e389de4bafb29dcf8fa39edf6
 progress:
   total_phases: 50
   completed_phases: 32
   total_plans: 254
-  completed_plans: 247
-  percent: 60
+  completed_plans: 249
+  percent: 64
 ---
 
 ## ⭐ STATE lineage
@@ -179,8 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 167.2 (keycardsync-the-key-card-never-shows-one-key-s-sync-result-a) — EXECUTING
-Plan: 10 of 10 DONE (`167.2-01-SUMMARY.md`: compute-state derivation, sync-progress on the chain-filtered selection, locked S4-S9 copy, strategy-shape predicate; commits `016cfc73c`, `9275ff5ac`, `42353f928`. `167.2-02-SUMMARY.md`: the post-add sync is the tracked attempt, Add Key blocked while an attempt is live, every sync blocked while an add is in flight; commits `315e15691`, `cbba4e5b8`, `cfb907acf`, `c1743fa42`. `167.2-03-SUMMARY.md`: a terminal is accepted only with this attempt's server-written evidence (a computing read, or computed_at moved from the pre-enqueue baseline), panel keyed per attempt; commits `d68dc02b3`, `1518841dd`. `167.2-07-SUMMARY.md`: the owner pending factsheet states the real compute state with a shape-keyed remedy, the public placeholder is one neutral sentence, the owner share panel says what a recipient sees; commits `6808c4aa6`, `217a6fe47`, `c892dfcb5`, `06a613b6f`, `ac08bc590`. `167.2-08-SUMMARY.md`: the share page reads the matched strategy's compute jobs (five fields, bounded by the matched id only) and says "being prepared" only while a job will still do work, else "not available yet", fail closed; commits `baac7438c`, `186ec544e`. `167.2-09-SUMMARY.md`: a /strategies row fed by an untrusted key (api_key_id or any composite member) carries the key card's pill, one line per distinct status, and a row without a computed factsheet says what a recipient of its link sees; commits `e5156c652`, `7c1449f07`, `6e54b4871`, `da9c04ebc`, `2dc93bd48`. `167.2-10-SUMMARY.md`: a key-card success is forwarded only after one sync-progress read finds no factsheet-chain job in flight; every unreadable answer holds it, one read at a time, late answers dropped; commits `dc2cdc397`, `32d9ba109`. `167.2-04-SUMMARY.md`: a poll give-up ends the attempt as a muted `No result yet` naming how long the panel waited, with no Retry; "nothing recorded yet" only on clean reads with no row seen; the timeout sentence retired, a failure shows the server's computation_error; commits `6bbc07a38`, `3816edd57`, `ed6e00750`, `0e2ac686b`, `bb2146069`. `167.2-05-SUMMARY.md`: the link update (15 s) and the enqueue (180 s) are bounded; an expiry ends the attempt as an amber `unconfirmed` panel ("Sync not started" only when no enqueue was sent, else "Sync not confirmed"), never "Sync failed", no Retry; a late answer is logged and dropped; the panel label is its one live region; every S1-S2 string pinned; commits `f916c78e1`, `2ff5bd203`, `2fea0ad9a`. `167.2-06-SUMMARY.md`: a composite's key card offers no control that writes `strategies.api_key_id` (no Resync, Use & Sync or Add Key; handlers refuse), an unreadable member count fails closed on those controls but keeps Update password and Delete, and a success judged beside an untrusted key is retired at the applied re-read so no later read resurrects it; commits `4de1ba074`, `df83f863a`, `2b6079c7a`)
+Phase: 167.1 (aumtrust-the-headline-aum-says-when-it-includes-holdings-fro) — EXECUTING
+Plan: 6 of 6 (plans 01-06 DONE — `167.1-01-SUMMARY.md` … `167.1-06-SUMMARY.md`; D-06 answered (b) and D-18 reopened by the founder 2026-09-24, both implemented in plan 05; plan 06 released v0.89.0.0 (`7c0e57f7a`) and fixed WINDOWS 66. Phase stays human_needed until the three browser checks, run after deploy)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
@@ -482,7 +482,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 164.6.1
+Status: Executing Phase 167.1
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -498,7 +498,7 @@ Status: Executing Phase 164.6.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-24 — Phase 164.6.1 execution started
+Last activity: 2026-09-24 — Phase 167.1 plan 06 complete (WINDOWS 66 fixed; release commit `7c0e57f7a`, v0.89.0.0, unified CHANGELOG entry, 58/58 commits mapped)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1291,6 +1291,35 @@ Load-bearing sequencing (real dependencies, do not reorder):
      every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
      The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
      FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 06, the release, 2026-09-24)*
+
+- **D-167.1-06-A — the release is v0.89.0.0 (second segment), on the orchestrator's direction for a user-facing disclosure.** The plan named a third-segment bump (0.88.1.0 at today's main); recorded as a deviation in `167.1-06-SUMMARY.md`.
+- **D-167.1-06-B — plan 05's handoff line "a dropped holding whose key is missing from the key list is named by no part" is NOT a current limit.** Review round 3 WR-01 fixed it; the CHANGELOG lists the unknown-status excludes clause under Added instead.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 05, D-06 (b) and the D-18 reopen, 2026-09-24)*
+
+- **D-167.1-05-A — D-06 = (b) and D-18 REOPENED are the FOUNDER's answers (2026-09-24, recorded in `5d62a1a60`), not executor inferences.** The D-18 reopen was a founder-directed scope addition to plan 05.
+- **D-167.1-05-B — State C: at live ≤ 0 the "Required to size and commit." hint names the live total and nests the one marker.** "The live-holdings total is -$X, which <clause>." is the State B construction. State 7 (manual, live ≤ 0) stays absent because nothing on screen contains the live total.
+- **D-167.1-05-C — the shared noun is said once only when both sides are plain amounts of the untrusted set.** With an unknown-status part or an "(… unavailable …)" count, each side keeps its own noun, so the count is never misattributed.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 04, premise corrections and the interim byte-identity gate, 2026-09-24)*
+
+- **D-167.1-04-A — the ROADMAP D-03 correction is dated to plan 04's measurement, not stated as a standing fact.** It says `queries.ts`, the commit route, `supabase/` and `analytics-service/` WERE byte-unchanged when plan 04 measured them and names plan 06 as the re-measure, because plan 05 option (b) edits source.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 03, State B and the marker's absence states, 2026-09-24)*
+
+- **D-167.1-03-A — the plan's drill 2 (drop the on-screen conjunct from `showUntrustedMarker`) cannot bite, and the source was left unchanged.** Each render site carries its own placement gate (`fieldShowsLive` for State A, `overrideNoteShowsLive` for State B), so that conjunct is redundant at render. Substitute drill 2b neutered `fieldShowsLive`'s `liveHoldingsSum > 0` half and turned state 4 RED. ⚠️ For plan 05: a new site reading `showUntrustedMarker` needs its own placement gate.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 02, the Open Positions footer qualifier, 2026-09-24)*
+
+- **D-167.1-02-A — the Open Positions footer pass calls `isUntrustedKeySyncStatus` directly, not `untrustedKeyChipLabel(...) !== null`.** The footer needs membership, not a label; both go through the same predicate, and the plan allowed either.
+- **D-167.1-02-B — the plan's acceptance grep for a status equality reads 1, not 0, and the one hit was left alone.** It is the pre-existing Phase 167 comment recording the removed equality, and it already read 1 at the plan's base; no code equality exists.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 01, the State A marker and the single-pass summary, 2026-09-24)*
+
+- **D-167.1-01-A — `capitalizeFirst` is a module-level helper beside `buildUntrustedAumClause` in `ScenarioComposer.tsx`.** No capitalize utility exists in `src/lib` or `src/app`. The builder keeps its lower-case clause so plan 03 can nest the same clause in the override note without a second wording.
+- **D-167.1-01-B — the "Required to size and commit." hint keeps its own condition. Only the override note reads the hoisted `overrideNoteShowsLive`.** The plan names only the override note for the rewrite, and changing the hint as well would be a change the plan did not ask for.
 
 *(execution-time, Phase 164.1.1 PROBERCADENCE — plan 05, the go-live runbook and the disposed residual, 2026-09-18)*
 
@@ -2302,6 +2331,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-09-24T06:17:00.000Z
+**Stopped At:** Completed 167.1-06-PLAN.md
+**Resume File:** None
 
 **Last Date:** 2026-09-24T03:57:00.000Z
 **Stopped At:** Completed 167.2-06-PLAN.md (wave 6; three commits `4de1ba074`, `df83f863a`, `2b6079c7a`, not pushed). No migration (the KCS-17 checkpoint did not fire). All ten 167.2 plans have a SUMMARY. Finding for review, logged to the phase's `deferred-items.md`: the locked KCS23-COMPOSITE line says the composite "reads from every key below" while the card lists all of the owner's keys. Pending founder visual checks: the S2 sync panel and the KCS23-COMPOSITE line at 320px. Next: 167.2 review and verification.

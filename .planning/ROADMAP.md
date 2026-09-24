@@ -2911,13 +2911,35 @@ Plans:
 ### Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention (INSERTED)
 
 **Goal:** The allocator KPI strip's headline AUM stops presenting a number as current when part of it comes from keys whose sync is untrusted (`isUntrustedKeySyncStatus`: `revoked`, `sign_in_failed`), while the holdings table on the same page already strikes those rows through as not current.
+  ⛔ **CORRECTED 2026-09-23 (Phase 167.1 D-01/D-13).** The Goal sentence above is kept as lineage and its premise is false. The allocator KPI strip has had NO AUM cell since Phase 64 PRESENT-01, and `liveBaselineMetrics.aum` is rendered nowhere, so there is no "headline AUM" to mark. The holdings-derived dollar totals an allocator actually sees are the Scenario composer's PORTFOLIO AUM field and its override note, and the Open Positions footer "Total unrealized P&L (equity contribution)" (D-16, added by research). Both now carry the disclosure (`scenario-aum-untrusted-note`, `open-positions-untrusted-note`). `ExposureByClass` is out of scope: it reports exposure, not a holdings dollar total, and flagging it would need a new projection (D-17).
 **Requirements**: TBD. Source: Phase 167 silent-failure review M2 (2026-09-22); booked as `.planning/WINDOWS.md` entry 66. ⛔ A money-number change — the math in `src/lib/queries.ts` (`emptyLiveBaselineMetrics`, `liveBaselineMetricsFromPerKeyDailies`) is NOT to be changed silently; ⭐ **FOUNDER DECISION 2026-09-22: keep the total and FLAG it** — the headline shows the full number with a marker naming how much comes from keys needing attention (e.g. "includes $X from keys needing attention"). Excluding them was rejected: a password rotation would read as an AUM loss. Nothing silently disappears, and the headline stays reconcilable with the holdings table.
+  ⛔ **CORRECTED 2026-09-23 (Phase 167.1 D-03).** The "money-number change" framing above is lineage, not current. This phase changes NO money number: every total keeps its value and discloses the untrusted part. `src/lib/queries.ts`, the scenario commit route, `supabase/` and `analytics-service/` were byte-unchanged on the branch when plan 04 measured them (plan 06 re-measures after the D-06 answer).
 **Depends on:** Phase 167
-**Plans:** 0 plans
+**Founder decisions 2026-09-24:** D-06 answered (b) — the composer says what it excludes from keys needing attention; D-18 REOPENED — the marker shows whenever the on-screen figure includes untrusted dollars, including a live total ≤ 0 (review WR-04) and a manual value equal to the live total (review IN-06). Both land in plan 05. Recorded in `167.1-CONTEXT.md`.
+  ⭐ **2026-09-24: plan 05 implemented both** (`943e72d9f`). The composer's one marker now says "excludes $Y from keys needing attention" when the modelled-book narrowing leaves untrusted holdings out, and it shows in state 6 (State A) and state 4 (State C, in the "Required to size and commit." hint). The total is unchanged (D-03).
+**Plans:** 6 plans
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 167.1 to break down)
+- [x] 167.1-01-PLAN.md — composer AUM marker tracer: single-pass `summarizeLiveHoldings`, State A "Includes $X from keys needing attention" beside the field, unit pins (wave 1) — DONE 2026-09-24 (`7eff1d43a` feat, `197bd3bf0` test; `167.1-01-SUMMARY.md`)
+- [x] 167.1-02-PLAN.md — Open Positions footer qualifier on "Total unrealized P&L (equity contribution)" (wave 1, D-16) — DONE 2026-09-24 (`73d18979f` feat, `762187821` test; `167.1-02-SUMMARY.md`)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 167.1-03-PLAN.md — composer marker State B inside the override note, every absence state, tone and the component D-06 pin (wave 2) — DONE 2026-09-24 (`56fa60397` feat, `fa2a77460` test; `167.1-03-SUMMARY.md`)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 167.1-04-PLAN.md — premise corrections (closed-sets prose, this entry) and the interim byte-identity gate (wave 3) — DONE 2026-09-24 (`7e3360f11` docs; `167.1-04-SUMMARY.md`)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 167.1-05-PLAN.md — D-06 founder decision (`checkpoint:decision`, recommended option b) and its implementation; execution stops here for the answer (wave 4) — DONE 2026-09-24: founder answered (b) and reopened D-18 (`943e72d9f` feat; `167.1-05-SUMMARY.md`)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [x] 167.1-06-PLAN.md — WINDOWS 66 closed, final byte-identity gate, and the ONE release commit carrying the D-06 outcome (D-14: the last plan releases) (wave 5) — DONE 2026-09-24 (`3bba699b1` docs, `7c0e57f7a` chore(release) v0.89.0.0; `167.1-06-SUMMARY.md`). Phase stays human_needed until the three browser checks
 
 ### Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding (INSERTED)
 

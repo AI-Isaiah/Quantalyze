@@ -1,5 +1,175 @@
 # Changelog
 
+## [0.89.0.0] - 2026-09-24 — AUMTRUST: the AUM an allocator sizes with says how much of it comes from keys needing attention, and what the modelled book leaves out
+
+⭐ **What changed for whoever reads this next.** Phase 167.1 closes the Phase 167 review's SFH-M2
+follow-up (`.planning/WINDOWS.md` entry 66). The founder's call of 2026-09-22 was "keep the total and
+flag it", so **no money number changed (D-03)**. The two holdings-derived dollar totals an allocator
+actually reads now name the part that comes from keys needing attention (a `revoked` or
+`sign_in_failed` key, by the shared predicate `isUntrustedKeySyncStatus`). Those totals are the
+Scenario composer's PORTFOLIO AUM field with its override note, and the Open Positions footer "Total
+unrealized P&L (equity contribution)". Each part is computed in the same pass as its total. The
+composer also says what the modelled-book narrowing leaves out. That is the founder's D-06 answer,
+option (b), given on 2026-09-24. `src/lib/queries.ts`, the scenario commit route, `supabase/` and
+`analytics-service/` are byte-unchanged across the branch. **No migration.**
+
+⚠️ **The premise was corrected before any code was written (D-01/D-13).** The phase was filed
+against a "headline AUM" in the KPI strip. That cell does not exist: `liveBaselineMetrics.aum` is
+rendered nowhere. The ROADMAP keeps the original goal as lineage beside two dated corrections.
+
+⚠️ **The phase verification is `human_needed` (14/15 truths verified; the fifteenth is this
+release).** Three browser checks are still owed. They will be run in the browser after deploy. See
+the notes at the bottom.
+
+### Added
+
+- **The composer's PORTFOLIO AUM field discloses its untrusted part (State A).** Beside the field:
+  `Includes $12,345 from keys needing attention.` The field keeps the full total. One muted span,
+  `scenario-aum-untrusted-note`, with no role and no glyph. The input's `aria-describedby` names
+  whichever note is on screen, derived from the same flags that render it (review round 1 WR-02,
+  which superseded UI-SPEC U-07).
+- **A committed manual AUM carries the disclosure inside its override note (State B).**
+  `Overrides live-holdings total $50,000, which includes $12,345 from keys needing attention.` The
+  marker moves with the live total, so one number never carries two markers (D-08, D-18).
+- **The composer says what the modelled book leaves out: D-06 option (b), the founder's answer of
+  2026-09-24.** In book mode the composer sums only the keys that feed the modelled book, so an
+  untrusted key's holdings can drop out of the AUM. The one marker now names them:
+  `Excludes $8,000 from keys needing attention.`, or with an included part,
+  `Includes $12,345 and excludes $8,000 from keys needing attention.` In State B it reads
+  `Overrides live-holdings total $50,000, which excludes $8,000 from keys needing attention.` The
+  marker renders on the excluded COUNT, so a counted $0 still reads `Excludes $0 …` (D-07). A
+  manager-side key the payload can name is left out of the excluded figure (D-20). The total is
+  unchanged.
+- **`Excludes $Z from keys with an unknown sync status` (review round 3 WR-01).** A holding the
+  narrowing drops whose key is missing from the key list is now named in its own part. It used to
+  vanish from every part and every figure on screen. The D-20 manager-side rule applies to it as
+  well. A missing `apiKeys` list fails open here too, so the error goes toward over-disclosure.
+- **State C: the "Required to size and commit." hint names the live total when it is at or below
+  zero** (the D-18 reopen, founder, 2026-09-24).
+  `Required to size and commit. The live-holdings total is -$4,000, which includes $1,000 from keys needing attention.`
+  In that state the field's accessible description is the hint.
+- **The Open Positions footer discloses its untrusted part.** A muted row under the total reads
+  `Includes +$300 from keys needing attention.` It uses the footer's own `formatPnl` sign
+  convention (UI-SPEC U-05). The total still sums every row (D-16).
+- **Holdings whose value is unknown are counted, not shown as a known zero** (review round 1 WR-03).
+  The composer appends `(value unavailable for N holding(s))` and the footer
+  `(P&L unavailable for N position(s))`, each directly after the part it belongs to (review round 2
+  IN-01 / IN-05).
+- **A holding whose key is missing from the key list is named, never read as trusted.** Review
+  round 1 WR-05 added a separate part, `… and $Z from keys with an unknown sync status`, on both
+  surfaces. It is never folded into the "keys needing attention" noun, because the Holdings filter
+  would not find those rows under it. Review round 2 WR-05 carried this to the Holdings tab: both
+  tables mark such a row `Sync status unknown`, and the untrusted filter does not hide it.
+- **One clause builder, `buildKeyTrustClause`,** in the new
+  `src/app/(dashboard)/allocations/lib/live-holdings-summary.ts`, writes the wording for both
+  surfaces. The nouns come from `UNTRUSTED_KEY_SET_NOUN` and the new `UNKNOWN_KEY_STATUS_SET_NOUN`
+  in `src/lib/closed-sets.ts`. The composer file carries no copy of the noun.
+
+### Changed
+
+- **The composer's live-holdings loop moved into `summarizeLiveHoldings`** in that module, unchanged.
+  One loop fills the total and every disclosed part (D-04, D-19). `liveHoldingsSum` is now
+  `summary.total`, and it is byte-identical: the walk order, the `continue` chain and the
+  accumulation order were kept. `holdingEquityContributionLocal` moved with it, also unchanged.
+- **The marker no longer vanishes where the figure on screen still includes untrusted dollars**
+  (the D-18 reopen). A manual AUM exactly equal to the live total now shows State A (review round 1
+  IN-06). A live total at or below zero now shows State C (review round 1 WR-04). State 7, a manual
+  value with a live total at or below zero, stays without a marker, because nothing on screen
+  contains the live total there.
+- **The `closed-sets.ts` prose now names what the predicate reaches (D-12).** It used to say the
+  predicate missed a "headline AUM" and that a follow-up would flag it. It now names the two
+  disclosure surfaces and says both disclose rather than subtract. The ROADMAP `### Phase 167.1`
+  entry carries the same correction. Both keep the old wording as lineage.
+- `hintShowsLive` was renamed `fieldBlankHintShows` (review round 3 IN-02), with no behaviour
+  change.
+
+### Fixed — code review, three rounds (gsd-code-reviewer with silent-failure-hunter)
+
+- **Round 1 (11 in scope, 8 fixed; the 3 held against D-18 were closed later, 2 by the reopen and
+  1 kept by UI-SPEC U-05).**
+  - The excluded figure is D-20's `$Y`, not every dropped holding. Manager-side keys are taken from
+    the payload as `eligibleApiKeyIds` minus `allocatorEligibleApiKeyIds` (WR-01).
+  - The disclosure is tied to the input (WR-02). An unknown P&L no longer reads as `+$0` (WR-03).
+  - A missing key reads as unknown, not trusted (WR-05, which also closes IN-04).
+  - IN-01, IN-02 and IN-03 (a tombstone comment, an unclamped-part pin, a fixture renamed for the
+    `revoked` key it holds).
+- **Round 2 (12 of 12 fixed).**
+  - A missing payload field names no manager-side key, so the error direction is over-disclosure
+    (WR-06). The composer's manager-side derivation is pinned where it is written (WR-01).
+  - `holdingEquityIsReported`'s lockstep with the equity helper is executable (WR-02).
+  - The D-20 residual is stated by its predicate (WR-03).
+  - The missing-key anomaly reaches Sentry (WR-04; see Security).
+  - The Holdings tab names a missing-key row (WR-05).
+  - IN-01/IN-05 per-part suffix, IN-02 log carries no key id, IN-03 indentation, IN-04 docblock,
+    IN-06 test hygiene.
+- **Round 3, on the D-06 work (6 of 6 fixed).**
+  - WR-01 added the unknown-status excludes part (see Added).
+  - WR-02 pins the includes-side unavailable term of the shared-noun form.
+  - IN-01 and IN-02 corrected comments and a flag name the reopen had made stale.
+  - IN-03 records that State 6 is exact float equality.
+  - IN-04 supersedes two UI-SPEC rows.
+- **Method, every round:** each fix started from a test observed RED. Each new guard was then
+  neutered, observed RED, and restored from a `cp` byte backup checked with `cmp`.
+
+### Security
+
+- **The one new third-party write is count-only.** When the composer sums a holding whose key is
+  missing from the key list, it sends a `warning`-level capture to Sentry (review round 2 WR-04).
+  The tags are `component` and `reason: holding_key_missing_from_key_list`, and the extra field is
+  `unknown_status_count`. A test asserts that no key id appears in the message, the tags or the
+  extra. Round 3 WR-01 added no capture: the one reachable path is already captured at the trust
+  boundary by `getUserApiKeys`.
+- The phase security audit: 0 open threats at `block_on: high`. No new read, no new server path,
+  no migration. The composer's AUM is display and draft sizing only, because the commit route
+  computes its own AUM.
+
+### Tests
+
+- New files `live-holdings-summary.test.ts` and `untrusted-key-status.surfaces.test.tsx`. An
+  `AUMTRUST` block in `ScenarioComposer.test.tsx` covers every UI-SPEC § 1 state and § 3 row, the
+  count gates, tone, the accessible description and the D-06 pins. The panel split test and the
+  footer test cover the missing-key row marker.
+- Four pins were flipped deliberately by plan 05, each with a dated comment: the D-06 component pin,
+  the component pin 4, and the state 4 and state 6 absence pins.
+- Every new case was observed RED before its change. The plans, the fix rounds and the verifier
+  neutered each guard and saw it go RED. The guards include the excluded bucket leaking into the
+  total, an amount gate in place of the count gate, a second marker span, each D-18 branch and the
+  WR-01 bucket.
+- At the release head, `npx vitest run 'src/app/(dashboard)/allocations' src/lib/closed-sets`
+  reports **135 files, 2101 passed**, and `critical-regressions.test.ts` is green.
+
+### Notes — known limits, stated so they can be checked rather than assumed
+
+- **D-06 is answered: option (b), by the founder, 2026-09-24.** A `revoked` key is left out of the
+  book-mode composer AUM by `isPerKeyDailiesEligibleKey`. That is unchanged, and it is now disclosed
+  as excluded.
+- ⚠️ **D-20 residual.** A manager-side key outside `eligibleApiKeyIds` (revoked, soft-disconnected or
+  inactive) cannot be told apart in the payload, so its untrusted holdings may be counted in `$Y`.
+  This over-discloses and never hides.
+- ⚠️ **State 6 is exact float equality** (review round 3 IN-03). Typing the rounded live figure lands
+  in State B.
+- ⚠️ **Every guarantee holds only after the latest-asof holdings collapse.** `holdingScopeKey` omits
+  `api_key_id`, so two accounts holding the same asset on one venue can merge before any total is
+  computed. This predates the phase and is data-integrity. It is routed to Phase 167.1.1
+  HOLDINGKEYSCOPE.
+- Whether a soft-disconnected key counts as "needing attention" is the founder's call. The predicate
+  was not widened.
+- The two surfaces sign the amount differently on purpose. The composer prints `-$1,235`, and Open
+  Positions prints `+$300` / `−$1,235`. Each disclosure uses the renderer of the figure it qualifies
+  (U-05, review round 1 IN-05).
+- `ExposureByClass` is not qualified (D-17). `mandate-gates.ts` `minAumGate` has no production
+  caller and was not touched.
+- ⚠️ **Founder checks pending, to be run in the browser after deploy:** the UI-SPEC long-text
+  backstops, which are State A, B and C at 320px width and 200% zoom (including the longest
+  two-noun forms) and the Open Positions qualifier at 320px. Also a read-through of every new
+  string. The strings added in the review rounds and plan 05 were written without the founder, and
+  each one is a dated row in the phase UI-SPEC.
+- `.planning/WINDOWS.md` entry 66 is closed as fixed, with the disposition "disclosed, not changed".
+- **The planning record** holds the phase context with decisions D-01 to D-20 and its known
+  limits, research, patterns and validation, the UI design contract, six plans with their
+  SUMMARYs, three review rounds with their fix reports, the verification and the security audit.
+  The branch also carries three merges of `main`, which bring in other phases' work only.
+
 ## [0.88.0.0] - 2026-09-24 — KEYCARDSYNC: a sync result is shown only for the key it came from, and no status surface promises a compute that is not coming
 
 ⭐ **What changed for whoever reads this next.** Phase 167.2 covers one family of defects across
