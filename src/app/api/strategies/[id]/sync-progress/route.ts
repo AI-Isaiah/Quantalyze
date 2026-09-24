@@ -74,12 +74,14 @@ import {
   type SyncProgressResponse,
 } from "@/lib/sync-progress";
 import {
-  COMPUTE_STATE_READ_LIMIT,
+  isComputeJobStatus,
   isStitchStalled,
   memberProgressOf,
   selectFactsheetJob,
-  type ComputeJobRow,
 } from "@/lib/compute-state";
+import { readOwnerComputeJobs } from "@/lib/compute-jobs-read";
+import { captureToSentry } from "@/lib/sentry-capture";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 // AGENTS.md: pin the Node.js runtime — the route touches the supabase server
 // client (cookie store), which the Edge runtime would break.
@@ -167,28 +169,49 @@ export async function GET(
       }
 
       // Sanctioned owner-scoped read (Don't-Hand-Roll table): the SECURITY
-      // DEFINER RPC resolves auth.uid() server-side from the session JWT.
-      const { data: rows, error: rpcError } = await supabase.rpc(
-        "get_user_compute_jobs",
-        { p_strategy_id: id, p_limit: COMPUTE_STATE_READ_LIMIT },
+      // DEFINER RPC resolves auth.uid() server-side from the session JWT
+      // (`withAuth` has resolved the user, the precondition
+      // `readOwnerComputeJobs` documents). 167.2-REVIEW-SFH M-5: a full first
+      // window with no chain row is re-asked once at the RPC cap there.
+      const read = await readOwnerComputeJobs(
+        supabase as unknown as SupabaseClient,
+        id,
       );
 
-      if (rpcError) {
-        // A progress read must NEVER hard-fail the wizard poll — it is cosmetic
-        // (the analytics poll remains the authoritative one). Degrade to an
-        // idle 200 and log server-side (never forward the raw error).
+      // 167.2-REVIEW-SFH M-4 — every "could not tell" answer is DEGRADED,
+      // never IDLE. The key card reads IDLE's `jobStatus: null` as "no chain
+      // job in flight" (its KCS-18 success gate and its pre-attempt gate), so
+      // an IDLE here for a read that answered nothing would admit a mid-chain
+      // success or start a second job. Three cases, each logged and captured
+      // (no raw error is forwarded to the client):
+      //   - the RPC errored, answered no rows array, or threw (SF-3's branch,
+      //     widened: the non-array answer used to fall through to IDLE);
+      //   - the window is still full at the RPC cap with no chain row
+      //     (`deriveComputeState` calls that `unreadable`; this route used to
+      //     call it IDLE, breaking its own module's rule);
+      //   - the selected job's status is outside the six-value domain.
+      const degrade = (stage: string, message: string): NextResponse => {
         console.error(
-          `[api/strategies/sync-progress] get_user_compute_jobs failed for ${id}:`,
-          rpcError,
+          `[api/strategies/sync-progress] ${stage} for ${id}: ${message}`,
         );
-        // SF-3: degrade to a 200 the poll never hard-fails on, but flag it
-        // `degraded:true` so the client keeps its last-known progress rather
-        // than treating a couldn't-read blip as a real idle (empty panel /
-        // stalled:false). Distinct from the real-idle IDLE below.
+        captureToSentry(new Error(message), {
+          tags: { route: "api/strategies/sync-progress", stage },
+        });
+        // SF-3: a 200 the poll never hard-fails on, flagged `degraded:true` so
+        // the client keeps its last-known progress rather than treating a
+        // couldn't-read as a real idle (empty panel / stalled:false).
         return NextResponse.json(DEGRADED, {
           status: 200,
           headers: NO_STORE_HEADERS,
         });
+      };
+
+      if (!read.ok) return degrade("compute-jobs-read", read.message);
+      if (read.windowFull) {
+        return degrade(
+          "compute-jobs-window-full",
+          "the compute job window is full at the RPC cap with no factsheet-chain job in it",
+        );
       }
 
       // KCS-07 / KCS-20 (167.2) — the selection, the member projection and the
@@ -200,10 +223,7 @@ export async function GET(
       // is the latest FACTSHEET-CHAIN job, no longer the latest of any kind: a
       // newer recurring cron row (`reconcile_strategy`, `sync_funding`) must not
       // hide a failed chain job behind its own `done`.
-      const jobRows: ComputeJobRow[] = Array.isArray(rows)
-        ? (rows as unknown as ComputeJobRow[])
-        : [];
-      const latest = selectFactsheetJob(jobRows);
+      const latest = selectFactsheetJob(read.rows);
 
       if (latest === null) {
         return NextResponse.json(IDLE, { status: 200, headers: NO_STORE_HEADERS });
@@ -214,8 +234,14 @@ export async function GET(
       // a non-stitch fallback row projects [] and is never stalled. See the
       // "STALL IS STITCH-ONLY" note on `isStitchStalled` for why a non-stitch
       // job must never read as stalled.
+      if (!isComputeJobStatus(latest.status)) {
+        return degrade(
+          "compute-jobs-bad-status",
+          "the selected compute job's status is outside the compute_jobs status domain",
+        );
+      }
       const memberProgress: MemberProgressEntry[] = memberProgressOf(latest);
-      const jobStatus = (latest.status ?? null) as StitchJobStatus | null;
+      const jobStatus: StitchJobStatus = latest.status;
       const stalled = isStitchStalled(latest, Date.now());
 
       const body: SyncProgressResponse = { jobStatus, stalled, memberProgress };

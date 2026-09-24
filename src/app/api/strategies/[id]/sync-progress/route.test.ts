@@ -25,12 +25,16 @@ import { STALL_THRESHOLD_MS } from "@/lib/sync-progress";
  */
 
 vi.mock("server-only", () => ({}));
+// 167.2-REVIEW-SFH M-4: the three could-not-tell answers are captured.
+const captureToSentryMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
 
 const {
   authState,
   ownershipResult,
   ownershipQuery,
   rpcResult,
+  rpcQueue,
   fromCalls,
   rpcCalls,
   checkLimitMock,
@@ -51,6 +55,9 @@ const {
     data: null as unknown,
     error: null as { message: string } | null,
   },
+  // 167.2-REVIEW-SFH M-4 / M-5: answers for successive RPC calls, in order.
+  // Empty answers every call with `rpcResult`, as before.
+  rpcQueue: [] as Array<{ data: unknown; error: { message: string } | null }>,
   // Every table the user-scoped client touches, in order. The RT-1 structural
   // pin asserts "strategy_analytics" is NEVER among them.
   fromCalls: [] as string[],
@@ -93,7 +100,7 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     rpc: (name: string, args: Record<string, unknown>) => {
       rpcCalls.push([name, args]);
-      return Promise.resolve(rpcResult);
+      return Promise.resolve(rpcQueue.shift() ?? rpcResult);
     },
   }),
 }));
@@ -188,6 +195,7 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     rpcResult.error = null;
     fromCalls.length = 0;
     rpcCalls.length = 0;
+    rpcQueue.length = 0;
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
   });
@@ -866,5 +874,64 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     // The `degraded` key is ABSENT on a real read (the client treats
     // absent === not degraded); it is present ONLY on the rpcError branch.
     expect("degraded" in body).toBe(false);
+  });
+
+  // ── 167.2-REVIEW-SFH M-4 / M-5: "could not tell" is DEGRADED, never IDLE ──
+  // The key card's KCS-18 success gate and its pre-attempt gate read IDLE's
+  // `jobStatus: null` as "no chain job in flight". Each case below is an
+  // answer the route could not read, and each one used to be IDLE.
+  const DEGRADED_BODY = '{"jobStatus":null,"stalled":false,"memberProgress":[],"degraded":true}';
+
+  it("M4-NOT-AN-ARRAY: an RPC answer with neither rows nor an error is DEGRADED, and captured", async () => {
+    rpcResult.data = null;
+    const res = await call(TEST_STRATEGY_ID);
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(await res.json())).toBe(DEGRADED_BODY);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("M4-WINDOW-FULL: a full window with no chain row, still full at the RPC cap, is DEGRADED, and captured", async () => {
+    const cron = (n: number) =>
+      Array.from({ length: n }, () => otherKindRow("reconcile_strategy", { status: "done" }));
+    rpcQueue.push({ data: cron(100), error: null }, { data: cron(1000), error: null });
+    const res = await call(TEST_STRATEGY_ID);
+    expect(JSON.stringify(await res.json())).toBe(DEGRADED_BODY);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("M5-REASK: a full 100-row window with no chain row re-asks once at the RPC cap (1000) and answers from that read", async () => {
+    const cron = Array.from({ length: 100 }, () =>
+      otherKindRow("reconcile_strategy", { status: "done" }),
+    );
+    rpcQueue.push(
+      { data: cron, error: null },
+      {
+        data: [...cron, otherKindRow("process_key_long", { status: "running" })],
+        error: null,
+      },
+    );
+    const res = await call(TEST_STRATEGY_ID);
+    expect((await res.json()).jobStatus).toBe("running");
+    expect(rpcCalls).toEqual([
+      ["get_user_compute_jobs", { p_strategy_id: TEST_STRATEGY_ID, p_limit: 100 }],
+      ["get_user_compute_jobs", { p_strategy_id: TEST_STRATEGY_ID, p_limit: 1000 }],
+    ]);
+    expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+
+  it("M4-BAD-STATUS: a selected job whose status is outside the six-value domain is DEGRADED, and captured", async () => {
+    rpcResult.data = [otherKindRow("process_key_long", { status: "exploded" })];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(JSON.stringify(await res.json())).toBe(DEGRADED_BODY);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("M4-CONTROL: a short window with no chain row is still the real IDLE (not degraded, nothing captured)", async () => {
+    rpcResult.data = [otherKindRow("reconcile_strategy", { status: "done" })];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(JSON.stringify(await res.json())).toBe(
+      '{"jobStatus":null,"stalled":false,"memberProgress":[]}',
+    );
+    expect(captureToSentryMock).not.toHaveBeenCalled();
   });
 });

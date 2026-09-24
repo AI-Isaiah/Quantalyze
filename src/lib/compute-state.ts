@@ -54,6 +54,17 @@ export const FACTSHEET_CHAIN_KINDS = [
  */
 export const COMPUTE_STATE_READ_LIMIT = 100;
 
+/**
+ * 167.2-REVIEW-SFH M-5: the most rows `get_user_compute_jobs` will return
+ * (`LIMIT GREATEST(1, LEAST(p_limit, 1000))` in its latest definition,
+ * migration 20260826140000). A caller whose first window is full with no
+ * factsheet-chain row in it re-asks ONCE at this size (see
+ * `readOwnerComputeJobs`), because a strategy whose newest 100 rows are
+ * recurring kinds would otherwise derive `unreadable` on every render, and a
+ * reload could never help.
+ */
+export const COMPUTE_STATE_READ_LIMIT_MAX = 1000;
+
 /** Minimal shape read off a `get_user_compute_jobs` row. */
 export interface ComputeJobRow {
   kind?: string;
@@ -186,6 +197,28 @@ const COMPUTE_JOB_STATUSES = [
   "failed_final",
 ] as const;
 type ComputeJobStatus = (typeof COMPUTE_JOB_STATUSES)[number];
+
+/**
+ * 167.2-REVIEW-SFH M-4: is `raw` one of the six `compute_jobs.status` values?
+ * Exported so the sync-progress route answers DEGRADED for a status outside the
+ * domain, exactly as `deriveComputeState` answers `unreadable` for it.
+ */
+export function isComputeJobStatus(raw: unknown): raw is ComputeJobStatus {
+  return (COMPUTE_JOB_STATUSES as readonly unknown[]).includes(raw);
+}
+
+/**
+ * 167.2-REVIEW-SFH M-5: did this read fill its window with no factsheet-chain
+ * row in it? `deriveComputeState` calls that `unreadable`, the same word it
+ * uses for a failed read, so a caller asks this to log (and capture) the
+ * window case separately: it is deterministic, and a reload cannot fix it.
+ */
+export function isWindowFullWithoutFactsheetJob(
+  rows: readonly (ComputeJobRow | null | undefined)[],
+  readExhaustive: boolean,
+): boolean {
+  return !readExhaustive && selectFactsheetJob(rows) === null;
+}
 
 /**
  * The statuses of a job that will still do work (KCS-18's success gate).
