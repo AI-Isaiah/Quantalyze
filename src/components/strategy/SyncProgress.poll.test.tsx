@@ -424,3 +424,209 @@ describe("SyncProgress — a terminal success waits for the job queue (Phase 167
     expect(onStatusChange.mock.calls).toEqual([["complete_with_warnings"]]);
   });
 });
+
+// ===========================================================================
+// Phase 167.2 / KCS-18 — the job-state check fails closed on the claim. Every
+// answer that is not a readable "nothing in flight" keeps the panel computing
+// (plan 04's poll cap still applies); none of them throws or piles up reads.
+// ===========================================================================
+describe("SyncProgress — the job-state check fails closed (Phase 167.2 / KCS-18)", () => {
+  const T0 = "2026-04-19T11:58:00.000000+00:00";
+
+  /** An evidenced `complete` (computed_at moved from the T0 baseline) under the poll. */
+  function renderEvidencedComplete() {
+    mockState.analyticsResult = analyticsRow("complete", T1);
+    return renderPoller("computing", { computedAt: T0 });
+  }
+
+  function deferredAnswer() {
+    let resolve!: (value: unknown) => void;
+    const promise = new Promise<unknown>((r) => {
+      resolve = r;
+    });
+    return { answer: () => promise, resolve };
+  }
+
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  it("DEGRADED-HOLDS: the route's degraded body (jobStatus null, degraded true) is not a success", async () => {
+    // The DEGRADED body carries jobStatus null, which a real read would let
+    // through; only `degraded: true` says the queue could not be read.
+    const degraded = jobRead({ jobStatus: null, stalled: false, memberProgress: [], degraded: true });
+    mockState.jobAnswers = [degraded, degraded, degraded];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS * 3);
+    expect(mockState.analyticsSelectCount).toBe(3);
+    expect(mockState.jobReadCount).toBe(3);
+    expect(onStatusChange, "a degraded read was taken as nothing in flight").not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["HTTP-429-HOLDS", 429],
+    ["HTTP-500-HOLDS", 500],
+  ])("%s: a %i answer is not a success, and the poll continues", async (_name, status) => {
+    // A limiter or server answer can carry a JSON body shaped like a real read.
+    const refused = jobRead({ jobStatus: "done", stalled: false, memberProgress: [] }, status);
+    mockState.jobAnswers = [refused, refused];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS * 2);
+    expect(mockState.jobReadCount).toBe(2);
+    expect(onStatusChange).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[SyncProgress]"),
+      `HTTP ${status}`,
+    );
+  });
+
+  it("NON-JSON-HOLDS: a body that fails to parse is not a success, and no throw escapes", async () => {
+    const htmlPage = () =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new SyntaxError("Unexpected token < in JSON");
+        },
+      });
+    mockState.jobAnswers = [htmlPage, htmlPage];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS * 2);
+    expect(mockState.jobReadCount).toBe(2);
+    expect(onStatusChange).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["an array", []],
+    ["null", null],
+    ["an object without jobStatus", { stalled: false, memberProgress: [] }],
+  ])("NON-OBJECT-HOLDS: %s is not the projection, so it is not a success", async (_name, body) => {
+    mockState.jobAnswers = [jobRead(body)];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS);
+    expect(mockState.jobReadCount).toBe(1);
+    expect(onStatusChange).not.toHaveBeenCalled();
+  });
+
+  it("FETCH-REJECTS-HOLDS: a rejected fetch is not a success, no throw escapes, and it is logged once for the attempt", async () => {
+    const rejects = () => Promise.reject(new TypeError("Failed to fetch"));
+    mockState.jobAnswers = [rejects, rejects, rejects, rejects];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS * 4);
+    expect(mockState.jobReadCount).toBe(4);
+    expect(onStatusChange).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("strat-1"),
+      "Failed to fetch",
+    );
+
+    // CONTROL: the check was holding the success, not dead. A readable answer
+    // on the next tick forwards it.
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([["complete"]]);
+  });
+
+  it("NULL-JOB-FORWARDS: jobStatus null (no factsheet-chain job visible) forwards the success", async () => {
+    mockState.jobAnswers = [jobState(null)];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([["complete"]]);
+  });
+
+  it("FINAL-FAILED-FORWARDS: jobStatus failed_final (the chain has finished) forwards the success", async () => {
+    mockState.jobAnswers = [jobState("failed_final")];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([["complete"]]);
+  });
+
+  // `pending` is WARNED-ROW-MID-CHAIN's.
+  it.each(["running", "failed_retry", "done_pending_children"])(
+    "IN-FLIGHT-STATES: jobStatus %s holds the success",
+    async (jobStatus) => {
+      mockState.jobAnswers = [jobState(jobStatus), jobState(jobStatus)];
+      const { onStatusChange } = renderEvidencedComplete();
+      await tick(0);
+
+      await tick(POLL_MS * 2);
+      expect(mockState.jobReadCount).toBe(2);
+      expect(onStatusChange).not.toHaveBeenCalled();
+      // A job in flight is a readable answer, not a failure: nothing is logged.
+      expect(warnSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it("FAILED-NO-READ: an evidenced failed terminal is forwarded with no sync-progress request", async () => {
+    mockState.analyticsResult = analyticsRow("failed", T1);
+    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    await tick(0);
+
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([["error"]]);
+    expect(mockState.jobReadCount).toBe(0);
+  });
+
+  it("ONE-IN-FLIGHT: while a sync-progress request has not answered, the next evidenced ticks make no second request", async () => {
+    const held = deferredAnswer();
+    mockState.jobAnswers = [held.answer];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS * 3);
+    expect(mockState.analyticsSelectCount).toBe(3);
+    expect(mockState.jobReadCount).toBe(1);
+    expect(onStatusChange).not.toHaveBeenCalled();
+
+    // The one request answers "nothing in flight": the success goes out once.
+    await act(async () => {
+      held.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ jobStatus: "done", stalled: false, memberProgress: [] }),
+      });
+    });
+    expect(onStatusChange.mock.calls).toEqual([["complete"]]);
+  });
+
+  it.each(["unmounts", "leaves computing"])(
+    "LATE-RESULT: the panel %s before the request answers, and the answer forwards nothing",
+    async (how) => {
+      const held = deferredAnswer();
+      mockState.jobAnswers = [held.answer];
+      const { onStatusChange, rerenderStatus } = renderEvidencedComplete();
+      await tick(0);
+      await tick(POLL_MS);
+      expect(mockState.jobReadCount).toBe(1);
+
+      if (how === "unmounts") cleanup();
+      else rerenderStatus("error");
+
+      await act(async () => {
+        held.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ jobStatus: "done", stalled: false, memberProgress: [] }),
+        });
+      });
+      await tick(0);
+      expect(callsWith(onStatusChange, "complete")).toBe(0);
+    },
+  );
+});
