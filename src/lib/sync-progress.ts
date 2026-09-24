@@ -68,8 +68,11 @@ export interface MemberProgressEntry {
 
 /**
  * The compute_jobs status domain (CHECK constraint, migration 20260411144407).
- * `pending` and `running` are in-flight; `done` / `done_pending_children` are
- * terminal-success; `failed_retry` is the queue retrying (progress, NOT a
+ * `pending` and `running` are in-flight; `done` is terminal-success;
+ * `done_pending_children` is ALSO in flight (167.2 KCS-19): it is a child job
+ * waiting on its parents, flipped to `pending` when the last parent finishes,
+ * and the SQL status bridge and the in-flight unique index both count it
+ * non-terminal; `failed_retry` is the queue retrying (progress, NOT a
  * stall); `failed_final` is terminal-failure.
  *
  * The CHECK is table-wide, so this union is exact for EVERY job kind — which is
@@ -91,9 +94,10 @@ export type StitchJobStatus =
  */
 export interface SyncProgressResponse {
   /**
-   * The latest `stitch_composite` job's status, else (154-04) the latest job of
-   * any kind. null = NO compute_jobs row of any kind is visible for this
-   * strategy — i.e. nothing was ever enqueued, which is a fact worth having.
+   * The latest `stitch_composite` job's status, else the latest
+   * factsheet-chain job's (154-04 widened the fallback to any kind; 167.2 KCS-20
+   * narrowed it to the chain kinds). null = no factsheet-chain job is visible
+   * for this strategy; rows of other kinds (recurring cron jobs) may exist.
    */
   jobStatus: StitchJobStatus | null;
   /**

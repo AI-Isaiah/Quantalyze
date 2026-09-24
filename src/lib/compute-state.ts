@@ -160,3 +160,214 @@ export function isStitchStalled(row: ComputeJobRow, nowMs: number): boolean {
     nowMs - Date.parse(heartbeat) > STALL_THRESHOLD_MS
   );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// KCS-07 / KCS-08 / KCS-19 / KCS-20 — the ONE derivation of a strategy's
+// compute state. Every surface that states it (the owner factsheet, the share
+// page, the /strategies list, the owner share note) calls `deriveComputeState`
+// and, for a recipient, `recipientArm`, so the surfaces cannot disagree.
+//
+// ⛔ No new job state is invented (ROADMAP fence). Each output maps one-to-one
+// to a `compute_jobs.status` value or to the absence of a row, except
+// `stalled` (the rule sync-progress already ships) and `unreadable` (the read
+// could not answer, which is not a job state and never an in-progress claim).
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * The `compute_jobs.status` domain (table-wide CHECK). A selected row whose
+ * status is outside it derives `unreadable`, never a guess.
+ */
+const COMPUTE_JOB_STATUSES = [
+  "pending",
+  "running",
+  "done",
+  "done_pending_children",
+  "failed_retry",
+  "failed_final",
+] as const;
+type ComputeJobStatus = (typeof COMPUTE_JOB_STATUSES)[number];
+
+/**
+ * The statuses of a job that will still do work (KCS-18's success gate).
+ * `done_pending_children` is here (KCS-19): a child waiting on its parents,
+ * flipped to `pending` when the last one finishes, and counted non-terminal by
+ * the SQL status bridge and the in-flight unique index.
+ */
+const IN_FLIGHT_JOB_STATUSES = [
+  "pending",
+  "running",
+  "failed_retry",
+  "done_pending_children",
+] as const satisfies readonly ComputeJobStatus[];
+
+/** The `compute_jobs.error_kind` domain; anything else, null included, is null. */
+const JOB_ERROR_KINDS = ["permanent", "transient", "unknown", "orphaned"] as const;
+type JobErrorKind = (typeof JOB_ERROR_KINDS)[number];
+
+/** KCS-08: kinds whose running phase reads trades from the exchange. */
+const FETCH_JOB_KINDS = [
+  "process_key_long",
+  "sync_trades",
+  "derive_broker_dailies",
+] as const;
+
+/**
+ * KCS-08: kinds whose running phase computes analytics. `stitch_composite`
+ * is a compute kind; `deriveComputeState` refines a running stitch to the fetch
+ * phase ("key N of M") while one of its members has not yet succeeded.
+ */
+const COMPUTE_JOB_KINDS = [
+  "compute_analytics_from_csv",
+  "compute_analytics",
+  STITCH_KIND,
+] as const;
+
+export type ComputeJobPhase = "fetch" | "compute" | "unknown";
+
+/** The one derived compute state (UI-SPEC § C "One mapping, three consumers"). */
+export type ComputeState =
+  | { state: "queued" }
+  | { state: "retrying" }
+  | {
+      state: "running";
+      phase: ComputeJobPhase;
+      memberOf?: { n: number; m: number };
+    }
+  | { state: "stalled" }
+  | { state: "failed"; errorKind: JobErrorKind | null }
+  | { state: "finished" }
+  | { state: "never_started" }
+  | { state: "unreadable" };
+
+/**
+ * What a share-link recipient is told (UI-SPEC § C): the data is being
+ * prepared, it is not available, or (owner surfaces only) the state could not
+ * be read. The share page folds `unreadable` into `not_available`.
+ */
+export type RecipientArm = "in_progress" | "not_available" | "unreadable";
+
+function isOneOf<T extends string>(
+  domain: readonly T[],
+  raw: unknown,
+): raw is T {
+  return (domain as readonly unknown[]).includes(raw);
+}
+
+function coerceJobErrorKind(raw: unknown): JobErrorKind | null {
+  return isOneOf(JOB_ERROR_KINDS, raw) ? raw : null;
+}
+
+/**
+ * True while the job will still do work: `pending`, `running`, `failed_retry`
+ * or `done_pending_children` (KCS-18, KCS-19). `done`, `failed_final`, null and
+ * any unrecognised string are false.
+ */
+export function isFactsheetJobInFlight(
+  status: string | null | undefined,
+): boolean {
+  return isOneOf(IN_FLIGHT_JOB_STATUSES, status);
+}
+
+/**
+ * KCS-08: the running phase by job kind, from the closed
+ * `compute_jobs_kind_check` set. An unrecognised kind is `unknown` (a neutral
+ * "working on it" line downstream), never a guess.
+ */
+export function jobPhaseOf(kind: string | null | undefined): ComputeJobPhase {
+  if (isOneOf(FETCH_JOB_KINDS, kind)) return "fetch";
+  if (isOneOf(COMPUTE_JOB_KINDS, kind)) return "compute";
+  return "unknown";
+}
+
+function runningStateOf(row: ComputeJobRow): ComputeState {
+  if (row.kind !== STITCH_KIND) {
+    return { state: "running", phase: jobPhaseOf(row.kind) };
+  }
+  // A composite: the stitch fans out over its members (fetch), then stitches
+  // (compute). m = member count; n = successful + 1, never above m (UI-SPEC
+  // KCS-09). No member progress written yet reads as fetch with no N of M.
+  const members = memberProgressOf(row);
+  const m = members.length;
+  if (m === 0) return { state: "running", phase: "fetch" };
+  const successful = members.filter((e) => e.status === "successful").length;
+  if (successful >= m) return { state: "running", phase: "compute" };
+  return {
+    state: "running",
+    phase: "fetch",
+    memberOf: { n: Math.min(successful + 1, m), m },
+  };
+}
+
+/**
+ * Derive a strategy's compute state from its `get_user_compute_jobs` rows (or
+ * an equivalent bounded read).
+ *
+ * - `readError: true` → unreadable (a failed read is never "none" and never
+ *   "computing").
+ * - No factsheet-chain job selected → never_started ONLY when the read was
+ *   exhaustive (`rows.length < COMPUTE_STATE_READ_LIMIT`); a full window with
+ *   no chain job proves nothing and is unreadable (RESEARCH P10 / P11).
+ * - pending, done_pending_children → queued (KCS-19); failed_retry → retrying;
+ *   done → finished; failed_final → failed with its error_kind coerced through
+ *   the closed domain; running → stalled (stitch only, heartbeat older than
+ *   STALL_THRESHOLD_MS at `nowMs`) or running with its phase.
+ * - A selected status outside the six-value domain → unreadable.
+ *
+ * `nowMs` is the caller's SERVER clock; nothing here reads the clock.
+ */
+export function deriveComputeState(
+  input:
+    | {
+        rows: readonly (ComputeJobRow | null | undefined)[];
+        readExhaustive: boolean;
+        nowMs: number;
+      }
+    | { readError: true },
+): ComputeState {
+  if ("readError" in input) return { state: "unreadable" };
+  const row = selectFactsheetJob(input.rows);
+  if (row === null) {
+    return input.readExhaustive
+      ? { state: "never_started" }
+      : { state: "unreadable" };
+  }
+  const status = row.status;
+  if (!isOneOf(COMPUTE_JOB_STATUSES, status)) return { state: "unreadable" };
+  switch (status) {
+    case "pending":
+    case "done_pending_children":
+      return { state: "queued" };
+    case "failed_retry":
+      return { state: "retrying" };
+    case "done":
+      return { state: "finished" };
+    case "failed_final":
+      return { state: "failed", errorKind: coerceJobErrorKind(row.error_kind) };
+    case "running":
+      return isStitchStalled(row, input.nowMs)
+        ? { state: "stalled" }
+        : runningStateOf(row);
+  }
+}
+
+/**
+ * The recipient arm for a derived state (UI-SPEC § C). queued, retrying and
+ * running are in progress; stalled, failed, finished (no payload) and
+ * never_started are not available; unreadable stays unreadable so an owner
+ * surface can say something true in both arms.
+ */
+export function recipientArm(state: ComputeState): RecipientArm {
+  switch (state.state) {
+    case "queued":
+    case "retrying":
+    case "running":
+      return "in_progress";
+    case "stalled":
+    case "failed":
+    case "finished":
+    case "never_started":
+      return "not_available";
+    case "unreadable":
+      return "unreadable";
+  }
+}

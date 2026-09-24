@@ -1,11 +1,17 @@
 import { describe, it, expect } from "vitest";
 import {
   COMPUTE_STATE_READ_LIMIT,
+  deriveComputeState,
   FACTSHEET_CHAIN_KINDS,
+  isFactsheetJobInFlight,
   isStitchStalled,
+  jobPhaseOf,
   memberProgressOf,
+  recipientArm,
   selectFactsheetJob,
   type ComputeJobRow,
+  type ComputeState,
+  type RecipientArm,
 } from "./compute-state";
 
 /**
@@ -212,5 +218,271 @@ describe("memberProgressOf", () => {
   it("returns [] for a stitch with no member_progress array", () => {
     expect(memberProgressOf(stitch({ metadata: null }))).toEqual([]);
     expect(memberProgressOf(stitch({ metadata: { member_progress: "nope" } }))).toEqual([]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Task 2 — deriveComputeState, recipientArm, jobPhaseOf, isFactsheetJobInFlight.
+// Every expected state below is a literal (ORACLE INDEPENDENCE).
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Derive from rows with an exhaustive read on the pinned clock. */
+function derive(rows: (ComputeJobRow | null | undefined)[], readExhaustive = true): ComputeState {
+  return deriveComputeState({ rows, readExhaustive, nowMs: NOW_MS });
+}
+
+describe("deriveComputeState — status to state (KCS-07, KCS-19)", () => {
+  const cases: Array<[string, ComputeState]> = [
+    ["pending", { state: "queued" }],
+    ["done_pending_children", { state: "queued" }],
+    ["failed_retry", { state: "retrying" }],
+    ["done", { state: "finished" }],
+    ["failed_final", { state: "failed", errorKind: null }],
+  ];
+  for (const [status, expected] of cases) {
+    it(`${status} -> ${expected.state}`, () => {
+      expect(derive([row("compute_analytics_from_csv", { status })])).toEqual(expected);
+    });
+  }
+
+  it("KCS-19: done_pending_children is in flight (queued), never finished", () => {
+    const s = derive([row("derive_broker_dailies", { status: "done_pending_children" })]);
+    expect(s).toEqual({ state: "queued" });
+    expect(s.state).not.toBe("finished");
+  });
+
+  it("KCS-19 on a stitch too: done_pending_children -> queued", () => {
+    expect(derive([stitch({ status: "done_pending_children" })])).toEqual({ state: "queued" });
+  });
+
+  it("running -> running", () => {
+    expect(derive([row("process_key_long", { status: "running" })]).state).toBe("running");
+  });
+
+  it("a selected row whose status is outside the six-value domain -> unreadable", () => {
+    for (const status of ["exploded", "", "DONE", "cancelled"]) {
+      expect(derive([row("sync_trades", { status })])).toEqual({ state: "unreadable" });
+    }
+    expect(derive([row("sync_trades", { status: undefined })])).toEqual({ state: "unreadable" });
+  });
+});
+
+describe("deriveComputeState — failed carries a coerced error_kind", () => {
+  const cases: Array<[string | null | undefined, ComputeState]> = [
+    ["permanent", { state: "failed", errorKind: "permanent" }],
+    ["transient", { state: "failed", errorKind: "transient" }],
+    ["unknown", { state: "failed", errorKind: "unknown" }],
+    ["orphaned", { state: "failed", errorKind: "orphaned" }],
+    [null, { state: "failed", errorKind: null }],
+    [undefined, { state: "failed", errorKind: null }],
+    ["PERMANENT", { state: "failed", errorKind: null }],
+    ["timeout", { state: "failed", errorKind: null }],
+  ];
+  for (const [errorKind, expected] of cases) {
+    it(`error_kind ${String(errorKind)} -> ${JSON.stringify(expected)}`, () => {
+      expect(
+        derive([row("process_key_long", { status: "failed_final", error_kind: errorKind })]),
+      ).toEqual(expected);
+    });
+  }
+});
+
+describe("deriveComputeState — stall is stitch-only (KCS-07)", () => {
+  it("a running stitch whose heartbeat is older than 12 minutes -> stalled", () => {
+    const r = stitch({ metadata: { member_progress: [], member_progress_at: ago(13 * MIN) } });
+    expect(derive([r])).toEqual({ state: "stalled" });
+  });
+
+  it("a running process_key_long whose claimed_at is a year old -> running, never stalled", () => {
+    const r = row("process_key_long", {
+      status: "running",
+      claimed_at: ago(365 * 24 * 60 * MIN),
+      metadata: { member_progress_at: ago(365 * 24 * 60 * MIN) },
+    });
+    expect(derive([r])).toEqual({ state: "running", phase: "fetch" });
+  });
+});
+
+describe("deriveComputeState — running phase by kind (KCS-08)", () => {
+  const cases: Array<[string, "fetch" | "compute"]> = [
+    ["process_key_long", "fetch"],
+    ["sync_trades", "fetch"],
+    ["derive_broker_dailies", "fetch"],
+    ["compute_analytics_from_csv", "compute"],
+    ["compute_analytics", "compute"],
+  ];
+  for (const [kind, phase] of cases) {
+    it(`running ${kind} -> phase ${phase}, no memberOf`, () => {
+      expect(derive([row(kind, { status: "running" })])).toEqual({ state: "running", phase });
+    });
+  }
+});
+
+describe("jobPhaseOf (KCS-08)", () => {
+  it("classifies the chain kinds, and any other kind string is unknown", () => {
+    expect(jobPhaseOf("process_key_long")).toBe("fetch");
+    expect(jobPhaseOf("sync_trades")).toBe("fetch");
+    expect(jobPhaseOf("derive_broker_dailies")).toBe("fetch");
+    expect(jobPhaseOf("compute_analytics_from_csv")).toBe("compute");
+    expect(jobPhaseOf("compute_analytics")).toBe("compute");
+    for (const kind of ["reconcile_strategy", "sync_funding", "rescore_allocator", "future_kind", "", null, undefined]) {
+      expect(jobPhaseOf(kind)).toBe("unknown");
+    }
+  });
+
+  it("stitch_composite is a compute kind (its fetch phase comes from member progress)", () => {
+    expect(jobPhaseOf("stitch_composite")).toBe("compute");
+  });
+});
+
+describe("deriveComputeState — composite member progress, key N of M (UI-SPEC KCS-09)", () => {
+  const members = (...statuses: string[]) =>
+    statuses.map((status, i) => ({ seq: i + 1, exchange: "okx", label: null, status }));
+  const running = (memberStatuses: string[]) =>
+    stitch({
+      metadata: { member_progress_at: ago(30_000), member_progress: members(...memberStatuses) },
+    });
+
+  it("two successful and one in_process reads key 3 of 3 (CONTEXT Specifics)", () => {
+    expect(derive([running(["successful", "successful", "in_process"])])).toEqual({
+      state: "running",
+      phase: "fetch",
+      memberOf: { n: 3, m: 3 },
+    });
+  });
+
+  it("members all successful -> phase compute, no memberOf", () => {
+    expect(derive([running(["successful", "successful", "successful"])])).toEqual({
+      state: "running",
+      phase: "compute",
+    });
+  });
+
+  it("a single member not yet successful -> key 1 of 1", () => {
+    expect(derive([running(["in_process"])])).toEqual({
+      state: "running",
+      phase: "fetch",
+      memberOf: { n: 1, m: 1 },
+    });
+  });
+
+  it("n is successful + 1 and never above m", () => {
+    expect(derive([running(["waiting", "waiting", "waiting"])])).toEqual({
+      state: "running",
+      phase: "fetch",
+      memberOf: { n: 1, m: 3 },
+    });
+    expect(derive([running(["successful", "degraded"])])).toEqual({
+      state: "running",
+      phase: "fetch",
+      memberOf: { n: 2, m: 2 },
+    });
+  });
+
+  it("empty member_progress -> phase fetch with no memberOf", () => {
+    expect(derive([running([])])).toEqual({ state: "running", phase: "fetch" });
+  });
+});
+
+describe("deriveComputeState — absence, exhaustiveness and read errors (KCS-20)", () => {
+  it("no chain row and an exhaustive read -> never_started", () => {
+    expect(derive([], true)).toEqual({ state: "never_started" });
+    expect(derive([row("reconcile_strategy", { status: "done" })], true)).toEqual({
+      state: "never_started",
+    });
+  });
+
+  it("no chain row and a NON-exhaustive read -> unreadable, never never_started", () => {
+    expect(derive([], false)).toEqual({ state: "unreadable" });
+    const window = Array.from({ length: 100 }, () => row("sync_funding", { status: "done" }));
+    expect(derive(window, false)).toEqual({ state: "unreadable" });
+  });
+
+  it("a non-exhaustive read that DOES hold a chain row still derives from it", () => {
+    expect(derive([row("sync_trades", { status: "failed_retry" })], false)).toEqual({
+      state: "retrying",
+    });
+  });
+
+  it("{ readError: true } -> unreadable", () => {
+    expect(deriveComputeState({ readError: true })).toEqual({ state: "unreadable" });
+  });
+
+  it("KCS-20: a newer done reconcile_strategy does not turn a failed chain job into finished", () => {
+    expect(
+      derive([
+        row("reconcile_strategy", { status: "done", created_at: "2026-07-12T11:59:00.000Z" }),
+        row("process_key_long", {
+          status: "failed_final",
+          error_kind: "transient",
+          created_at: "2026-07-12T11:30:00.000Z",
+        }),
+      ]),
+    ).toEqual({ state: "failed", errorKind: "transient" });
+  });
+});
+
+describe("TRIGGER SHAPE (CONTEXT Specifics): a three-member composite whose stitch is failed_final / permanent", () => {
+  it("derives failed { errorKind: permanent } and recipient arm not_available", () => {
+    const rows: ComputeJobRow[] = [
+      stitch({
+        status: "failed_final",
+        error_kind: "permanent",
+        created_at: "2026-07-12T11:45:00.000Z",
+        metadata: {
+          member_progress_at: ago(20 * MIN),
+          member_progress: [
+            { seq: 1, exchange: "deribit", label: "Example A", status: "successful" },
+            { seq: 2, exchange: "bybit", label: "Example B", status: "successful" },
+            { seq: 3, exchange: "okx", label: "Example C", status: "in_process" },
+          ],
+        },
+      }),
+      // Older chain rows are present and must not answer.
+      row("process_key_long", { status: "done", created_at: "2026-07-12T11:20:00.000Z" }),
+      row("derive_broker_dailies", { status: "done", created_at: "2026-07-12T11:25:00.000Z" }),
+      // A newer non-chain cron row must not answer either.
+      row("reconcile_strategy", { status: "done", created_at: "2026-07-12T11:59:00.000Z" }),
+    ];
+    const state = derive(rows);
+    expect(state).toEqual({ state: "failed", errorKind: "permanent" });
+    expect(recipientArm(state)).toBe("not_available");
+  });
+});
+
+describe("recipientArm (UI-SPEC § C, one mapping for S5, S7 and S9)", () => {
+  const cases: Array<[ComputeState, RecipientArm]> = [
+    [{ state: "queued" }, "in_progress"],
+    [{ state: "retrying" }, "in_progress"],
+    [{ state: "running", phase: "fetch" }, "in_progress"],
+    [{ state: "running", phase: "compute" }, "in_progress"],
+    [{ state: "running", phase: "unknown" }, "in_progress"],
+    [{ state: "running", phase: "fetch", memberOf: { n: 2, m: 3 } }, "in_progress"],
+    [{ state: "stalled" }, "not_available"],
+    [{ state: "failed", errorKind: "permanent" }, "not_available"],
+    [{ state: "failed", errorKind: "orphaned" }, "not_available"],
+    [{ state: "failed", errorKind: null }, "not_available"],
+    [{ state: "finished" }, "not_available"],
+    [{ state: "never_started" }, "not_available"],
+    [{ state: "unreadable" }, "unreadable"],
+  ];
+  for (const [state, arm] of cases) {
+    it(`${JSON.stringify(state)} -> ${arm}`, () => {
+      expect(recipientArm(state)).toBe(arm);
+    });
+  }
+});
+
+describe("isFactsheetJobInFlight (the KCS-18 success gate)", () => {
+  it("is true for pending, running, failed_retry and done_pending_children", () => {
+    for (const status of ["pending", "running", "failed_retry", "done_pending_children"]) {
+      expect(isFactsheetJobInFlight(status)).toBe(true);
+    }
+  });
+
+  it("is false for done, failed_final, null, undefined and garbage", () => {
+    for (const status of ["done", "failed_final", null, undefined, "", "exploded"]) {
+      expect(isFactsheetJobInFlight(status)).toBe(false);
+    }
   });
 });
