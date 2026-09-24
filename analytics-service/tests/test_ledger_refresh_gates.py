@@ -110,11 +110,17 @@ _STALENESS_VIEW_MIGRATION_NAME: Final[str] = (
 # 20260911130000, which is still the live definition of that function. The new
 # file carries the $fanout$ and $verify$ tags and deliberately NOT $composite$,
 # which is what makes the divergence checkable rather than a matter of trust.
+# ⛔ MOVED 2026-09-24 (Phase 164.6 GATE-HYGIENE, OPS-08-F2), in the SAME COMMIT as
+# the migration that superseded BOTH bodies. 20260924120000 re-defines the fan-out
+# AND the composite arm (each per-candidate handler now counts and records a
+# failed enqueue, written as one cron_runs row after the unlock), so the two
+# pointers CONVERGE again on one file. It carries all three tags, $fanout$,
+# $composite$ and $verify$, which is what the extractors below find each body by.
 _FANOUT_MIGRATION_NAME: Final[str] = (
-    "20260917120000_ledger_fanout_admit_private.sql"
+    "20260924120000_ledger_fanout_failure_count.sql"
 )
 _COMPOSITE_MIGRATION_NAME: Final[str] = (
-    "20260911130000_ledger_fanout_grantees_and_dormancy.sql"
+    "20260924120000_ledger_fanout_failure_count.sql"
 )
 # ⛔ SUPERSEDED-BUT-APPLIED definitions, named rather than dropped. The lineage
 # is no longer a PAIR: {original, live} was only ever right while there were
@@ -126,9 +132,14 @@ _FANOUT_SUPERSEDED_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
     # Live until 2026-09-17, superseded by 20260917120000. Enumerated, never
     # dropped: the applied file is the record of what ran on PROD.
     "20260911130000_ledger_fanout_grantees_and_dormancy.sql",
+    # Live until 2026-09-24, superseded by 20260924120000. Same rule.
+    "20260917120000_ledger_fanout_admit_private.sql",
 })
 _COMPOSITE_SUPERSEDED_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
     "20260907130000_ledger_refresh_switch_to_system_flags.sql",
+    # Live until 2026-09-24, superseded by 20260924120000. Enumerated, never
+    # dropped: the applied file is the record of what ran on PROD.
+    "20260911130000_ledger_fanout_grantees_and_dormancy.sql",
 })
 # ⛔ The ORIGINAL definitions, kept as NAMED LINEAGE rather than deleted. Gates 3b
 # and 10c assert the EXACT SET {original, live} rather than a count, so a silent
@@ -279,6 +290,19 @@ _PHASE_MIGRATION_WINDOW_3_END: Final[str] = "20260911130001"
 # before it.
 _PHASE_MIGRATION_WINDOW_4_START: Final[str] = "20260917120000"
 _PHASE_MIGRATION_WINDOW_4_END: Final[str] = "20260917120001"
+
+# ⛔ A FIFTH DISJOINT RANGE, added in the SAME COMMIT as 20260924120000 (Phase
+# 164.6 GATE-HYGIENE, OPS-08-F2) — never by widening range 4, which would swallow
+# every migration stamped between 20260917120001 and 20260924120000 into a raw
+# comments-included scan they were never reviewed against. Half-open and one
+# second wide, like its four siblings.
+#
+# ⚠️ What this range ARMS, and it was measured before it was added: everything
+# inside it is scanned RAW by floor 4, comments included. MEASURED 2026-09-24 on
+# 20260924120000 — 0 occurrences of the schedule verb, 0 of the unschedule verb,
+# 0 of a `PERFORM` on either fan-out. The range was written after that reading.
+_PHASE_MIGRATION_WINDOW_5_START: Final[str] = "20260924120000"
+_PHASE_MIGRATION_WINDOW_5_END: Final[str] = "20260924120001"
 
 # ⛔ THE FLOOR IS A SET, NOT A COUNT. `len(paths) >= 4` is satisfiable by any
 # four files that happen to land in the window; this names the exact migrations
@@ -506,6 +530,7 @@ _PHASE_MIGRATION_WINDOWS: Final[tuple[tuple[str, str], ...]] = (
     (_PHASE_MIGRATION_WINDOW_2_START, _PHASE_MIGRATION_WINDOW_2_END),
     (_PHASE_MIGRATION_WINDOW_3_START, _PHASE_MIGRATION_WINDOW_3_END),
     (_PHASE_MIGRATION_WINDOW_4_START, _PHASE_MIGRATION_WINDOW_4_END),
+    (_PHASE_MIGRATION_WINDOW_5_START, _PHASE_MIGRATION_WINDOW_5_END),
 )
 
 

@@ -840,11 +840,27 @@ Plans:
 
 **Requirements**: TBD — no v1.20 requirement IDs. The binding obligation is TODOS `[REDUNDER-SUBSET-SPLIT]`, booked 2026-09-05 by Phase 164.4.1 and unowned until this phase. ⛔ `WAIVED_CEILING` is 0 and has stayed 0 through two founder decisions that each took the root-cause fix over an exception — this phase must not be the one that adds a waiver.
 **Depends on:** Phase 164.4
-**Plans:** 0 plans
+**Plans:** 5/10 plans executed
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.4.2 to break down)
+- [x] 164.4.2-01-PLAN.md — Area E BEFORE: acquire-wait vs useful-work captured from >=5 concluded merge-push runs, with the refutation condition written down before the change exists
+- [x] 164.4.2-02-PLAN.md — Area A: ONE currency implementation (`scripts/check-baseline-currency.mjs`, `--self-test` observed RED), `refuse_stale_baseline()` re-pointed at it; the gate run for real at HEAD and its refusal recorded
+- [x] 164.4.2-03-PLAN.md — Area A wiring: founder regenerates the stale baseline (blocking-human), `load_baseline()` refuses a stale dump, `fetch-depth: 0` on both lane-booting jobs
+- [x] 164.4.2-04-PLAN.md — Area B precondition MEASURED on a real runner: corpus DEMAND vs lane SUPPLY (`pg_net`/vault/auth/roles/pg_cron), then a blocking decision — proceed, or take DECISION C on the written refutation
+- [x] 164.4.2-05-PLAN.md — Area B tracer: `sql-tests` onto the ephemeral lane with no mutex; VAC-08 rehomed to a new `test-db-drift` job that keeps the key, the wait and the gate; aggregator arms and comment currency (also completed the pre-replan plan 06's pin tasks)
+- [ ] 164.4.2-06-PLAN.md — Area F (DECISION F): committed carried-migrations marker bound to the dump's sha256; the currency gate's `--replay-set` mode ("bound and name"); `run.sh up` replays the migrations newer than the dump with ledger rows, fails loud on an undeterminable set or a failing replay; lane pins and BASELINE.md re-argued
+- [ ] 164.4.2-07-PLAN.md — Area D machinery (same wave as 06, file-disjoint): runner `--subset-from` mode that CAN exit 0 while `--file` still cannot, the `scope:` line, one merge-base diff exported and re-used by `scripts/sql-gate-subset.mjs`, and the floors ratchet's subset arms
+- [ ] 164.4.2-08-PLAN.md — Area F CI surface + Area B close-out: currency steps renamed for the replay, clone depth by measured consumer, mutex runbook and dated CLAUDE.md corrections, then an orchestrator-read COUNTED SHA-bound green covering plan 05's PENDING criteria and plan 06's lane lines
+- [ ] 164.4.2-09-PLAN.md — Area D wiring: `changed-paths` publishes the subset, `sql-mutation` narrows only on a pull request, the assert step's fence arms driven RED and GREEN on synthetic logs, and the real run's `scope:` line read by the orchestrator
+- [ ] 164.4.2-10-PLAN.md — ship: the AFTER protocol for four jobs against the CORRECTED refutation clauses (a)-(d), `[REDUNDER-SUBSET-SPLIT]` closed by its mechanism with follow-ons booked (incl. the restore path's epoch-based currency), VERSION + CHANGELOG cross-checked commit by commit
+- [ ] 164.4.2-11-PLAN.md — Area G (DECISION G): the lane replays the PROD objects outside `public` that the dump lacks (the `auth.users` trigger and the pg_cron registrations), extracted from the migrations, with a drift gate that fails the boot; the 8 SQL files that failed on the lane pass unedited
+
+⭐ **Replanned 2026-09-23 for DECISION F** (plans 06–10 replace the pre-replan 06–09): the pre-replan 06's Tasks 1–2 were already done inside plan 05 and are not repeated; the pre-replan 09's AFTER protocol restated the refutation condition CONTEXT Area E struck on 2026-09-21 and now uses the corrected clauses. ⚠️ Plan 06 has a precondition: the phase branch must carry every migration the committed dump carries — merge `origin/main` (which holds `20260922120000_api_keys_sync_status_sign_in_failed.sql`) into the phase branch before wave 5.
+
+⭐ **SCOPE ADDED 2026-09-23 BY FOUNDER DECISION (DECISION F in `164.4.2-CONTEXT.md`):** the ephemeral lane REPLAYS the migrations newer than `baseline.sql` on top of it, and prints which ones it replayed, so that a migration landing after the dump is the normal case and not a red. Without it, every migration merge would leave the lane red until the founder re-dumped from PROD, and a PR could never test its own migration on the lane. Realised by a replan of the remaining plans before plan 06 executes. Plan 05 was mid-execution and is left to finish.
+
+⭐ **SCOPE ADDED 2026-09-23 BY FOUNDER DECISION (DECISION G in `164.4.2-CONTEXT.md`):** the lane replays the PROD objects that live OUTSIDE `public`, which the schema-only dump does not carry: the trigger on `auth.users` and the `pg_cron` job registrations (24 migrations). They are extracted from the migration files, and a check fails the boot if the lane's set drifts from what the migrations declare. Measured by plan 08's SHA-bound CI read: once the lane ACL defect was fixed, 8 of 76 SQL files still failed on the lane for exactly this reason. Plan 04's probe measured that the lane HOSTS these schemas, not that it carries the objects registered in them. Realised as a new plan, executed before plan 08's CI checkpoint is re-read.
 
 ### Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral (INSERTED)
 
@@ -2235,11 +2251,32 @@ on the merits if that matters more than the line.
 ➡️ **MOVED 2026-09-10 to Phase 164.8.4 GATERESIDUE — `[164.6-SOURCE-ANCHOR-ROT]`.** Source-comment `file:line` anchors are unguarded where PLAN.md anchors are not. Still gate-hygiene in kind; owned there because 164.8.2 is what measured it.
 
 **Depends on:** Phase 164.5 (ordering — the substrate work lands first), Phase 164.4.1 (pg-lane with pg_cron)
+**Plans:** 2/5 plans executed
+
+Plans:
+
+**Wave 1** *(three file-disjoint plans, parallel worktrees)*
+- [x] 164.6-01-PLAN.md — OPS-08-TS: retry a 40001 exactly once at csv-finalize and allocator holdings sync (criterion 2)
+- [x] 164.6-02-PLAN.md — 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker (criterion 4)
+- [x] 164.6-03-PLAN.md — OPS-08-F2: both fan-outs record failed targets and a failure count in a cron_runs row; one migration plus gate arms and twin re-points in one commit (criterion 3)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 164.6-04-PLAN.md — OPS-08-F2: move every floor, census and sentinel pin to its MEASURED value
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 164.6-05-PLAN.md — runbooks read the failure row, the composite-schedule BLOCKING precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]`, and the phase-level full-suite pass
+
+### Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot (INSERTED)
+
+**Goal:** A composite (`stitch_composite`) run decides whether it is a background ledger refresh from the job row as it stands when the decision is made, not from the metadata snapshot taken when the worker claimed the job. Found by Phase 164.6 plan 02 (`[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]`, founder queue 164.6 item a): the TS routes now retract an inherited refresh marker from a reused composite job, but Python's composite guard reads the claim-time snapshot, so a retraction that lands after the claim does not stand down that run's guard, while the SQL `is_protected` check does see it. The two layers disagree about the same job. **Data-integrity.** Latent today (the composite fan-out has no schedule, and a runbook precondition blocks scheduling it); this phase removes the precondition's reason to exist. Inserted 2026-09-24 under the founder's authorization to add phases.
+**Success criteria:** (1) the harm is shown on the local lane first (claim, then retract, then observe the run's decision), or the phase shrinks; (2) the composite guard and `is_protected` reach the same verdict for a marker retracted after the claim, proven by execution; (3) a regression test observed RED when the fix is neutered; (4) the runbook precondition is removed or restated to match.
+**Requirements**: TBD
+**Depends on:** Phase 164.6
 **Plans:** 0 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.6 to break down)
+- [ ] TBD (run /gsd-plan-phase 164.6.7 to break down)
 
 ### Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals (INSERTED)
 
@@ -2395,11 +2432,16 @@ Plans:
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS `MYPY-MAINPY-01`
 
 **Depends on:** Phase 164.6 (ordering only — no code dependency)
-**Plans:** 0 plans
+**Plans:** 2/2 plans executed
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 164.6.1 to break down)
+- [x] 164.6.1-01-PLAN.md — wave 1: annotate `main.py`/`main_worker.py`/`sentry_init.py`, name and widen the ci.yml mypy step and the Makefile to the four top-level modules (96 → 100 files), correct every surface claim, local scratch-copy neuter proof (D-06b CI observation carried OPEN to ship)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 164.6.1-02-PLAN.md — wave 2: `ci-mypy-strict-surface.contract.test.ts` pins CI set == disk set == Makefile set with calibration legs; registry floor 60 → 61; TODOS `[MYPY-MAINPY-01]` closed in code with D-06b OPEN
 
 ### Phase 164.6.2: MT5RELOGIN — the MT5 gateway re-establishes its broker session without a human (INSERTED)
 
@@ -2804,6 +2846,29 @@ Plans:
 - [ ] 164.9.1-13-PLAN.md — wave 9 — ⛔ FOUNDER CHECKPOINT FC-2 (merge order) + re-sync onto `main`
 - [ ] 164.9.1-14-PLAN.md — wave 10 — release record; ⛔ FOUNDER CHECKPOINTS FC-1 (merge = auto-apply TEST then PROD) and FC-3 (live restore dispatch, not a completion gate)
 
+### Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD (INSERTED)
+
+**Goal:** A shared-TEST restore rebuilds its reference rows in the state PROD holds them. The reference-data replay also replays a migration's top-level `UPDATE` when it targets a `public` table the replay has just filled. Those tables are empty after `DROP SCHEMA public CASCADE`, so such an UPDATE can reach only rows the replay itself wrote, never anyone's live data.
+**Requirements**: TODOS `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` (owned here); unblocks Phase 164.9 criterion 8 (`[164.9-CRIT8-RESTORE-DISPATCH-RECORD]`).
+**Depends on:** Phase 164.9
+**Plans:** 0 plans
+
+⭐ **Founder decision, 2026-09-24 (AskUserQuestion): "Yes, new phase".**
+
+**Evidence.** `test-restore-from-baseline.yml` preflight run `36003106273` (2026-09-24, `main` at `71697364`) is the first run to execute the replay on shared TEST. It replayed 23 statements into 8 tables, passed the empty and short-count checks, then aborted on Phase 164.9 plan 07's wrong-state check (`v_wrong_state` in `scripts/restore-test-from-baseline.sh`): the sentinel profile's `manager_status` came back at the column default instead of `verified`. The replay (`scripts/extract-reference-inserts.mjs`, criteria C1–C4 in `scripts/restore-test-refdata-allowlist.txt`) emits only literal INSERTs, so the later `manager_status` UPDATE in `20260521150000_universal_signup_approval_gate.sql` never runs. Plan 07 added the check without closing the gap, so criteria 7 and 8 of Phase 164.9 contradict each other until this phase lands. The preflight rolled back, and TEST is unchanged.
+
+## Success Criteria
+1. A new, separately pinned extractor class for top-level `UPDATE`s whose target is a `public` table already in the replay; never `auth.*`. It gets its own criterion id, pinned counts, an audit census, and red+green self-test arms.
+2. Replayed statements interleave in migration filename order, inside the same transaction as the INSERTs.
+3. ⛔ The wrong-state check and its `verified` default stay exactly as they are: no waiver, no relaxed default, no widened allowlist.
+4. A green `mode=preflight` run, then a green `mode=restore` run on shared TEST, both recorded by run id. That closes Phase 164.9 criterion 8.
+
+**Rejected:** hand-seeding the value after the replay (hand-seeding shared TEST is forbidden); editing the applied teaser migration (PROD's ledger stores the SQL that ran).
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.9.2 to break down)
+
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
 **Goal:** No metric persisted to `metrics_json` or rendered in a chart is the output of quantstats'
@@ -2893,24 +2958,96 @@ Plans:
 ### Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention (INSERTED)
 
 **Goal:** The allocator KPI strip's headline AUM stops presenting a number as current when part of it comes from keys whose sync is untrusted (`isUntrustedKeySyncStatus`: `revoked`, `sign_in_failed`), while the holdings table on the same page already strikes those rows through as not current.
+  ⛔ **CORRECTED 2026-09-23 (Phase 167.1 D-01/D-13).** The Goal sentence above is kept as lineage and its premise is false. The allocator KPI strip has had NO AUM cell since Phase 64 PRESENT-01, and `liveBaselineMetrics.aum` is rendered nowhere, so there is no "headline AUM" to mark. The holdings-derived dollar totals an allocator actually sees are the Scenario composer's PORTFOLIO AUM field and its override note, and the Open Positions footer "Total unrealized P&L (equity contribution)" (D-16, added by research). Both now carry the disclosure (`scenario-aum-untrusted-note`, `open-positions-untrusted-note`). `ExposureByClass` is out of scope: it reports exposure, not a holdings dollar total, and flagging it would need a new projection (D-17).
 **Requirements**: TBD. Source: Phase 167 silent-failure review M2 (2026-09-22); booked as `.planning/WINDOWS.md` entry 66. ⛔ A money-number change — the math in `src/lib/queries.ts` (`emptyLiveBaselineMetrics`, `liveBaselineMetricsFromPerKeyDailies`) is NOT to be changed silently; ⭐ **FOUNDER DECISION 2026-09-22: keep the total and FLAG it** — the headline shows the full number with a marker naming how much comes from keys needing attention (e.g. "includes $X from keys needing attention"). Excluding them was rejected: a password rotation would read as an AUM loss. Nothing silently disappears, and the headline stays reconcilable with the holdings table.
+  ⛔ **CORRECTED 2026-09-23 (Phase 167.1 D-03).** The "money-number change" framing above is lineage, not current. This phase changes NO money number: every total keeps its value and discloses the untrusted part. `src/lib/queries.ts`, the scenario commit route, `supabase/` and `analytics-service/` were byte-unchanged on the branch when plan 04 measured them (plan 06 re-measures after the D-06 answer).
 **Depends on:** Phase 167
+**Founder decisions 2026-09-24:** D-06 answered (b) — the composer says what it excludes from keys needing attention; D-18 REOPENED — the marker shows whenever the on-screen figure includes untrusted dollars, including a live total ≤ 0 (review WR-04) and a manual value equal to the live total (review IN-06). Both land in plan 05. Recorded in `167.1-CONTEXT.md`.
+  ⭐ **2026-09-24: plan 05 implemented both** (`943e72d9f`). The composer's one marker now says "excludes $Y from keys needing attention" when the modelled-book narrowing leaves untrusted holdings out, and it shows in state 6 (State A) and state 4 (State C, in the "Required to size and commit." hint). The total is unchanged (D-03).
+**Plans:** 6 plans
+
+Plans:
+**Wave 1**
+
+- [x] 167.1-01-PLAN.md — composer AUM marker tracer: single-pass `summarizeLiveHoldings`, State A "Includes $X from keys needing attention" beside the field, unit pins (wave 1) — DONE 2026-09-24 (`7eff1d43a` feat, `197bd3bf0` test; `167.1-01-SUMMARY.md`)
+- [x] 167.1-02-PLAN.md — Open Positions footer qualifier on "Total unrealized P&L (equity contribution)" (wave 1, D-16) — DONE 2026-09-24 (`73d18979f` feat, `762187821` test; `167.1-02-SUMMARY.md`)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 167.1-03-PLAN.md — composer marker State B inside the override note, every absence state, tone and the component D-06 pin (wave 2) — DONE 2026-09-24 (`56fa60397` feat, `fa2a77460` test; `167.1-03-SUMMARY.md`)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 167.1-04-PLAN.md — premise corrections (closed-sets prose, this entry) and the interim byte-identity gate (wave 3) — DONE 2026-09-24 (`7e3360f11` docs; `167.1-04-SUMMARY.md`)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 167.1-05-PLAN.md — D-06 founder decision (`checkpoint:decision`, recommended option b) and its implementation; execution stops here for the answer (wave 4) — DONE 2026-09-24: founder answered (b) and reopened D-18 (`943e72d9f` feat; `167.1-05-SUMMARY.md`)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [x] 167.1-06-PLAN.md — WINDOWS 66 closed, final byte-identity gate, and the ONE release commit carrying the D-06 outcome (D-14: the last plan releases) (wave 5) — DONE 2026-09-24 (`3bba699b1` docs, `7c0e57f7a` chore(release) v0.89.0.0; `167.1-06-SUMMARY.md`). Phase stays human_needed until the three browser checks
+
+### Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding (INSERTED)
+
+**Goal:** Every holdings consumer keeps two keys' positions apart. `holdingScopeKey` (`holding:venue:symbol:type`) carries no `api_key_id`, so the latest-as-of holdings collapse in `src/lib/queries.ts` merges two accounts on the same venue holding the same asset into one row, and one key's position silently vanishes from the headline AUM, the Open Positions total and Phase 167.1's untrusted-key marker. Found by Phase 167.1's silent-failure-hunter (founder queue item 11); the defect predates 167.1. **Data-integrity.** Inserted 2026-09-24 under the founder's authorization to add phases.
+**Success criteria:** (1) a test with two keys holding the same asset on one venue shows both positions surviving the collapse, in AUM, in Open Positions and in the 167.1 marker, observed RED against today's key; (2) every consumer of `holdingScopeKey` is enumerated by symbol and each is either re-keyed or shown not to need it; (3) the discuss step records how a soft-disconnected key's holdings are counted (founder queue item 11's second question); (4) no change to the analytics service's own math unless the collapse lives there too.
+**Requirements**: TBD
+**Depends on:** Phase 167.1
 **Plans:** 0 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 167.1 to break down)
+- [ ] TBD (run /gsd-plan-phase 167.1.1 to break down)
 
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 
 **Goal:** On a manager's key card (`ApiKeyManager`), a sync result is only ever shown about the key it came from, and a success the card withheld beside a "Sign-in failed" pill cannot reappear through a re-read. ⭐ **Widened 2026-09-22 (167 D-19):** the `/strategies` list, where a manager lands, marks each strategy row whose feeding key is untrusted (`isUntrustedKeySyncStatus`) with the same key-level pill — no causal claim, no D-04 path. ⭐ **Widened 2026-09-23 (founder decision, folded in as a second surface): the owner's "still computing" factsheet says what is actually happening.** Observed live on a freshly created three-key composite strategy: while its first sync job was actively fetching trades (key 2 of 3, progress rows being written), the owner's factsheet (`src/app/factsheet/[id]/v2/page.tsx`, the `!payload` placeholder branch) showed fixed copy — "still computing … once the analytics service finishes the first compute pass" and "This factsheet has not been computed yet. Some strategies stay in this state, and this page is all there is until one has been computed." Founder verdict: *"This is very confusing. It should clearly say what is happening."* The placeholder cannot tell running from queued, failed, stalled or never-enqueued, although the worker already writes `set_compute_job_progress` and the wizard already reads it via `/api/strategies/[id]/sync-progress` (`SyncPreviewStep`). **In scope:** on the OWNER lane only, the pending factsheet reads the strategy's latest compute job and states its real state in authored copy — queued, fetching trades (key N of M for a composite), computing, failed (the authored reason for its error kind, never raw exception text), or stalled / never started (with what the owner can do) — and the "Some strategies stay in this state" sentence goes. **Fenced:** the PUBLIC lane stays neutral and names no internal state (Phase 164.2 criterion 9's reasoning still holds there), and no new job states are invented. Read DESIGN.md before any copy decision. ⭐ **Widened again 2026-09-23 (founder-approved): the SHARE LINK for a strategy whose compute failed or stalled must say so too.** Observed the same day: the owner could create a share link while the first compute job was running; that job then failed permanently (Phase 168's Deribit `assignment` refusal), yet the share page (`src/app/factsheet-share/[token]/page.tsx`) keeps saying "This factsheet isn't ready yet — The link works — the strategy's performance data is still being computed. Try again in a few minutes." That is a promise that will not come true. Founder: *"weird that i can already post or copy a link but cant see it."* **In scope:** the share page and the owner's share affordance tell a compute that is genuinely running apart from one that failed or stalled, and never promise "a few minutes" for a terminal failure. The viewer-facing copy stays neutral about internal causes (Phase 164.2 criterion 9) but must not claim the data is being computed when it is not. **Open, for this phase's discuss step (record it, do not assume it):** whether creating a share link should be allowed before the first successful compute at all.
 **Requirements**: TBD. Source: Phase 167 plan 06 residuals, recorded in `167-CONTEXT.md` D-18 (2026-09-22). (1) The post-add sync bypasses the component's one tracked sync slot. ⭐ NARROWED 2026-09-22 (167 plan-06 fix round, D-18): `handleAddKey` no longer moves `lastAttemptedKeyId` while a tracked attempt is live, so the mislabel and the "success beside Sign-in failed" variant are closed; what remains is that a post-add sync FAILURE during another key's live attempt reaches only the console. Closing it routes the post-add sync through the tracked slot, which changes the add flow the `SEAMUX-05` tests pin. (3) A poll that lands AFTER the enqueue returns but BEFORE the worker marks the job `computing` can still end an attempt with the previous run's result — ⚠️ NOT narrow: the analytics row flips to `computing` only when a job handler runs, so this is likely on MOST resyncs of a strategy with a prior terminal row (a stale "Up to date", or a false "Sync failed" after a prior failure). Pre-existing, not worse after 167. Real fix: accept a terminal only once this attempt has seen `computing`, or when the row's `computed_at` differs from the value read before the enqueue (no client/server clock comparison); the poller already selects `computed_at` but does not pass it on. (4) An enqueue that never returns spins until the sync route's `maxDuration = 300` ends the request: since the plan-06 fix round the poller does not run before the enqueue answers (it polls only in `computing`), and the link update ahead of it has no bound of its own. (2) A change made in another tab can surface a withheld success through a re-read (the load-error Retry or the terminal-success re-read); closing it means retiring the success at the moment of withholding, a redesign of 167-06's R2.
 **Depends on:** Phase 167
+**Deviation 2026-09-24 (review round 1, WR-05; rule replaced in review round 2, WR-02):** KCS-23's "`Delete` behaves as before" was amended. Rule: delete allowed after a named warning (founder decision 2026-09-24). The `Delete` confirm names every composite the key belongs to and says what deleting does. The owner can still confirm. If the membership read fails, the confirm says it could not check, and it does not block. Recorded in `167.2-CONTEXT.md` KCS-23.
+**Plans:** 10 plans (6 waves: W1 01, 02 · W2 03, 07, 08, 09 · W3 10 · W4 04 · W5 05 · W6 06)
+
+Plans:
+**Wave 1**
+
+- [x] 167.2-01-PLAN.md — one compute-state derivation (chain-kind selection, done_pending_children in flight), the sync-progress route on it, the locked S4-S9 copy module and the one strategy-shape predicate (KCS-07/08/19/20/21)
+- [x] 167.2-02-PLAN.md — the post-add sync runs as the tracked attempt; Add Key blocked while an attempt is live and Resync blocked while an add is in flight (KCS-01/05)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 167.2-03-PLAN.md — a terminal is accepted only with this attempt's server-written evidence (KCS-02)
+- [x] 167.2-07-PLAN.md — the owner pending factsheet states the real compute state with a shape-true remedy; the public placeholder is one neutral sentence; the owner share panel says what a recipient sees (KCS-09/10/12/21)
+- [x] 167.2-08-PLAN.md — the share page's two neutral arms over a bounded compute_jobs read (KCS-11)
+- [x] 167.2-09-PLAN.md — the /strategies row key pill over every feeding key, and the recipient note beside each uncomputed row's share control (KCS-06/12)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 167.2-10-PLAN.md — a success is shown only when no factsheet-chain job is in flight; an unreadable job state never forwards one (KCS-18)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 167.2-04-PLAN.md — a poll give-up says the panel stopped checking, never a timeout or failure; a failure carries the server's reason (KCS-22)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [x] 167.2-05-PLAN.md — the link update and the enqueue are bounded; expiry says the sync could not be confirmed (KCS-03)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [x] 167.2-06-PLAN.md — a composite's key card offers no link control; a withheld success is retired at the applied re-read (KCS-23/04)
+
+### Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build (INSERTED)
+
+**Goal:** The owner's `/strategies` list and every "has a factsheet" signal agree with what a share-link recipient actually sees. Today a strategy whose `strategy_analytics.computation_status` reads computed, but whose series cannot build (`fetchAndBuildPayload` in `src/lib/factsheet/fetch-and-build-payload.ts` returns no payload), is shown on the list as having a factsheet with no share note, while its recipient lands on the pending page. Only the service-role builder can decide buildability (the series sit behind deny-all RLS) and no owner-readable field records the outcome, so Phase 167.2 could not fix it without a migration or an admin read (167.2 review WR-02, recorded UNFIXABLE-IN-PHASE 2026-09-24). **User-facing.** Inserted 2026-09-24 under the founder's authorization to add phases.
+**Success criteria:** (1) the mismatch is reproduced first (a computed row whose payload does not build) on the local lane, or the phase shrinks; (2) buildability is recorded where the owner lane can read it (e.g. a bridge-maintained column written by the compute path), or decided server-side for the list; (3) the list, the share note and the share page agree for that row, proven by a test observed RED against today's code; (4) any migration passes the three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before merge, because merge auto-applies to PROD. **Added 2026-09-24 (167.2 review R2-L4(b), data-integrity):** (5) the key-card Delete warning cannot be silenced by an RLS-filtered membership read — a `strategy_keys` read that comes back empty with no error because of a policy regression shows no composite warning, and the delete then cascades a composite's member away; the guard belongs server-side (a migration), so it lands here with WR-02.
+**Requirements**: TBD
+**Depends on:** Phase 167.2
 **Plans:** 0 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 167.2 to break down)
+- [ ] TBD (run /gsd-plan-phase 167.2.1 to break down)
 
 ### Phase 168: DRBOPTIONS — a Deribit options account ingests end to end
 

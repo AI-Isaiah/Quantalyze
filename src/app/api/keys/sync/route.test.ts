@@ -59,6 +59,13 @@ const {
   // (strategies update BEFORE the stitch enqueue) so a regression that drops it
   // — re-opening the √252-vs-√365 preview fail-loud — reddens.
   mockStrategiesUpdate,
+  // 164.6 / 161.1-D13: the composite kickoff reads the enqueued job's
+  // metadata and retracts an inherited ledger-refresh marker. The read result
+  // is configurable per test; the update is a spy so a dropped retraction is
+  // observable (and a retraction on an unmarked row is too).
+  computeJobsRead,
+  computeJobsUpdateResult,
+  mockComputeJobsUpdate,
 } = vi.hoisted(() => ({
   TEST_USER: { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" },
   mockRpc: vi.fn(),
@@ -107,6 +114,20 @@ const {
   mockStrategyKeysSelect: vi.fn(),
   mockPostProcessKey: vi.fn(),
   mockStrategiesUpdate: vi.fn(),
+  computeJobsRead: {
+    data: null as { metadata: Record<string, unknown> | null } | null,
+    error: null as { message: string } | null,
+    // IN-04 (164.6 review fix): a read that never settles, so the bounded
+    // retraction's budget is the only thing that can end the wait.
+    hang: false,
+    // L2 (164.6 round 2): while `hang` is set, the hung read's resolver, so a
+    // test can settle it AFTER the budget has already answered the 202.
+    settleLate: undefined as
+      | ((v: { data: null; error: { message: string; code?: string } }) => void)
+      | undefined,
+  },
+  computeJobsUpdateResult: { error: null as { message: string; code?: string } | null },
+  mockComputeJobsUpdate: vi.fn(),
   ownershipQuery: {
     table: null as string | null,
     selectCols: null as string | null,
@@ -247,6 +268,40 @@ vi.mock("@/lib/supabase/admin", () => ({
           }),
         };
       }
+      if (table === "compute_jobs") {
+        // 164.6 / 161.1-D13: EXPLICIT, so the retraction's read never falls
+        // through to the `{ upsert }` default below — there `.select` is
+        // undefined, the TypeError lands in the route's best-effort catch, and a
+        // retraction test would pass vacuously.
+        return {
+          select: (_cols: string) => ({
+            eq: (_col: string, _val: unknown) => ({
+              maybeSingle: () =>
+                computeJobsRead.hang
+                  ? new Promise((resolve) => {
+                      computeJobsRead.settleLate = resolve;
+                    })
+                  : Promise.resolve({
+                      data: computeJobsRead.data,
+                      error: computeJobsRead.error,
+                    }),
+            }),
+          }),
+          update: (patch: Record<string, unknown>) => ({
+            eq: (col: string, val: unknown) => {
+              mockComputeJobsUpdate(patch, col, val);
+              // LOW-1: the helper asks for the updated rows back.
+              return {
+                select: (_cols: string) =>
+                  Promise.resolve({
+                    data: computeJobsUpdateResult.error ? null : [{ id: val }],
+                    error: computeJobsUpdateResult.error,
+                  }),
+              };
+            },
+          }),
+        };
+      }
       return { upsert: mockUpsert };
     },
   }),
@@ -346,6 +401,14 @@ describe("POST /api/keys/sync", () => {
     analyticsExisting.error = null;
     // 106-07: the unified delegate resolves a normal 202 resync by default.
     mockPostProcessKey.mockResolvedValue({ ok: true, body: { queued: true } });
+
+    // 164.6 / 161.1-D13: the enqueued job carries no marker by default, so the
+    // retraction is a read-only no-op unless a test marks the row.
+    computeJobsRead.data = { metadata: { source: "keys/sync" } };
+    computeJobsRead.error = null;
+    computeJobsRead.hang = false;
+    computeJobsRead.settleLate = undefined;
+    computeJobsUpdateResult.error = null;
 
     // Default mock implementations
     mockRpc.mockResolvedValue({ data: TEST_JOB_ID, error: null });
@@ -825,6 +888,229 @@ describe("POST /api/keys/sync", () => {
       warnSpy.mockRestore();
       errSpy.mockRestore();
     });
+
+    // ── 164.6 / 161.1-D13: retract an inherited ledger-refresh marker ─────────
+    // `enqueue_compute_job` dedups onto an in-flight job and returns ITS id with
+    // our p_metadata discarded. If that job is a background ledger refresh, its
+    // `metadata.source` marker keeps a stale factsheet published over a failure
+    // of THIS request — one the user is watching. The route must retract it,
+    // for BOTH markers (the union), and never touch an unmarked row.
+    describe("[161.1-D13] retracts an inherited ledger-refresh marker", () => {
+      function composite(): void {
+        ownershipResult.data = {
+          id: TEST_STRATEGY_ID,
+          user_id: TEST_USER.id,
+          api_key_id: null,
+        };
+        strategyKeysProbe.count = 2;
+      }
+
+      it.each(["ledger-refresh", "ledger-refresh-composite"])(
+        "a deduped job carrying %s is rewritten without source, with the marker and this request's correlation id — and still answers 202",
+        async (marker) => {
+          composite();
+          computeJobsRead.data = {
+            metadata: { source: marker, correlation_id: "fanout-run", run: 7 },
+          };
+          const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+          const { POST } = await import("./route");
+          const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+          expect(res.status).toBe(202);
+          expect(mockComputeJobsUpdate).toHaveBeenCalledTimes(1);
+          expect(mockComputeJobsUpdate).toHaveBeenCalledWith(
+            {
+              metadata: {
+                run: 7,
+                refresh_marker_retracted: marker,
+                correlation_id: TEST_CORRELATION_ID,
+              },
+            },
+            "id",
+            TEST_JOB_ID,
+          );
+          warnSpy.mockRestore();
+        },
+      );
+
+      it("a deduped job WITHOUT a ledger-refresh marker is never rewritten", async () => {
+        composite();
+        computeJobsRead.data = { metadata: { source: "finalize-wizard" } };
+
+        const { POST } = await import("./route");
+        const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+        expect(res.status).toBe(202);
+        expect(mockComputeJobsUpdate).not.toHaveBeenCalled();
+      });
+
+      it("a failed retraction never changes the 202, and is LOUD under its own Sentry tag", async () => {
+        composite();
+        computeJobsRead.data = { metadata: { source: "ledger-refresh-composite" } };
+        computeJobsUpdateResult.error = { message: "update denied", code: "42501" };
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const { captureToSentry } = await import("@/lib/sentry-capture");
+
+        const { POST } = await import("./route");
+        const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+        expect(res.status).toBe(202);
+        expect(await res.json()).toMatchObject({ ok: true, composite: true });
+        expect(mockComputeJobsUpdate).toHaveBeenCalledTimes(1);
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining("composite refresh-marker retraction failed"),
+          expect.anything(),
+        );
+        // LOW-2 (164.6 review fix): the thrown message is generic; the log line
+        // must carry the PostgREST SQLSTATE that rides in its cause.
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining("(code=42501)"),
+          expect.anything(),
+        );
+        expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+          expect.any(Error),
+          expect.objectContaining({
+            tags: { op: "keys-sync.composite_refresh_marker_retract" },
+            extra: {
+              strategy_id: TEST_STRATEGY_ID,
+              job_id: TEST_JOB_ID,
+              correlation_id: TEST_CORRELATION_ID,
+            },
+          }),
+        );
+        // The user's intent is still audited: the retraction failure did not
+        // short-circuit the rest of the branch.
+        expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
+        errSpy.mockRestore();
+      });
+
+      // IN-04 (164.6 review fix): the retraction is bounded. A read that never
+      // settles must not hold the user's 202 past the budget, and the overrun
+      // is LOUD under its OWN tag, because the marker may still be in place.
+      it("a retraction that overruns its 5 s budget still answers 202, and the overrun is LOUD under its own tag", async () => {
+        composite();
+        computeJobsRead.hang = true;
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const { captureToSentry } = await import("@/lib/sentry-capture");
+        const { POST } = await import("./route");
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          let settled = false;
+          const pending = POST(makeReq({ strategy_id: TEST_STRATEGY_ID })).then((r) => {
+            settled = true;
+            return r;
+          });
+          // One millisecond short of the budget the response is still waiting.
+          // Without this, a route that never awaited the retraction at all
+          // would pass every assertion below.
+          await vi.advanceTimersByTimeAsync(4_999);
+          expect(settled, "the 202 went out before the retraction budget elapsed").toBe(false);
+          await vi.advanceTimersByTimeAsync(1);
+          const res = await pending;
+
+          expect(res.status).toBe(202);
+          expect(await res.json()).toMatchObject({ ok: true, composite: true });
+          expect(mockComputeJobsUpdate).not.toHaveBeenCalled();
+          expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+            expect.any(Error),
+            expect.objectContaining({
+              tags: { op: "keys-sync.composite_refresh_marker_retract_timeout" },
+              extra: {
+                strategy_id: TEST_STRATEGY_ID,
+                job_id: TEST_JOB_ID,
+                correlation_id: TEST_CORRELATION_ID,
+              },
+            }),
+          );
+          expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("exceeded 5000 ms"));
+          expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+          errSpy.mockRestore();
+        }
+      });
+
+      // L2 (164.6 round 2): past the budget the race has already settled, so a
+      // retraction that FAILS later used to be discarded without a word. The
+      // marker may then be in place for a known reason that nobody saw. The
+      // late failure is LOUD under its OWN `_late` tag, with its SQLSTATE.
+      it("a retraction that fails AFTER the budget answered 202 is still LOUD under a _late tag, with its code", async () => {
+        composite();
+        computeJobsRead.hang = true;
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const { captureToSentry } = await import("@/lib/sentry-capture");
+        const { POST } = await import("./route");
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          const pending = POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+          await vi.advanceTimersByTimeAsync(5_000);
+          const res = await pending;
+          expect(res.status).toBe(202);
+          // PRECONDITION: before the late failure nothing is reported as late,
+          // so the assertions below can only be satisfied by that failure.
+          expect(errSpy).not.toHaveBeenCalledWith(
+            expect.stringContaining("failed late"),
+            expect.anything(),
+          );
+          expect(computeJobsRead.settleLate, "the hung read must expose its resolver").toBeDefined();
+
+          computeJobsRead.settleLate!({
+            data: null,
+            error: { message: "canceling statement due to statement timeout", code: "57014" },
+          });
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(errSpy).toHaveBeenCalledWith(
+            expect.stringContaining("composite refresh-marker retraction failed late"),
+            expect.anything(),
+          );
+          expect(errSpy).toHaveBeenCalledWith(
+            expect.stringContaining("(code=57014)"),
+            expect.anything(),
+          );
+          expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+            expect.any(Error),
+            expect.objectContaining({
+              tags: { op: "keys-sync.composite_refresh_marker_retract_late" },
+              extra: {
+                strategy_id: TEST_STRATEGY_ID,
+                job_id: TEST_JOB_ID,
+                correlation_id: TEST_CORRELATION_ID,
+              },
+            }),
+          );
+          // An in-time failure is reported ONCE, by the route's own catch, and
+          // never a second time as late.
+          expect(
+            vi.mocked(captureToSentry).mock.calls.filter(
+              ([, ctx]) => (ctx as { tags?: { op?: string } })?.tags?.op === "keys-sync.composite_refresh_marker_retract",
+            ),
+          ).toHaveLength(0);
+        } finally {
+          vi.useRealTimers();
+          errSpy.mockRestore();
+        }
+      });
+
+      it("a retraction that fails IN TIME is reported once by the route's catch, never also as late", async () => {
+        composite();
+        computeJobsRead.data = { metadata: { source: "ledger-refresh-composite" } };
+        computeJobsUpdateResult.error = { message: "update denied", code: "42501" };
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const { captureToSentry } = await import("@/lib/sentry-capture");
+        const { POST } = await import("./route");
+        const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+        await new Promise((r) => setTimeout(r, 0));
+        expect(res.status).toBe(202);
+        const ops = vi
+          .mocked(captureToSentry)
+          .mock.calls.map(([, ctx]) => (ctx as { tags?: { op?: string } })?.tags?.op);
+        expect(ops.filter((op) => op === "keys-sync.composite_refresh_marker_retract")).toHaveLength(1);
+        expect(ops).not.toContain("keys-sync.composite_refresh_marker_retract_late");
+        errSpy.mockRestore();
+      });
+    });
   });
 });
 
@@ -970,6 +1256,9 @@ describe("[140.3-02 / TS-02] POST /api/keys/sync — the duplicate branch keys o
       "A resumed wedge HAS an enqueued job. Reporting `queued: false` beside " +
         "`idempotent: true` states the opposite of what the backbone just did.",
     ).toBe(true);
+    // Round-2 review (SFH LOW-8): the job's state is forwarded, so the wizard
+    // can tell a resumed wedge that QUEUED work from a refusal over a running job.
+    expect(body.job_state).toBe("enqueued");
     // Unified is a single-key resync path — never a composite.
     expect(body.composite).toBe(false);
     expect(body.ok).toBe(true);

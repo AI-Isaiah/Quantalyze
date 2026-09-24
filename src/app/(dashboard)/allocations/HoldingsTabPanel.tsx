@@ -179,8 +179,13 @@ export function HoldingsTabPanel(
     [holdingsSummary],
   );
 
-  // ── Map api_key.id → sync_status. Defensive default 'unknown' when the FK
-  //    doesn't resolve (RESTRICT FK should prevent this in practice).
+  // ── Map api_key.id → sync_status. A key PRESENT with a null status maps to
+  //    'unknown', which the tables read as trusted (the legitimate no-status
+  //    case). A key MISSING from the list (it dropped the key, e.g. an
+  //    unsupported exchange) is a different state: Phase 167.1 review round 2
+  //    WR-05 flags it as `source_key_missing` below, because the composer
+  //    names those holdings with `UNKNOWN_KEY_STATUS_SET_NOUN` and this tab is
+  //    where the reader looks for them.
   const keyStatusById = useMemo(() => {
     const m = new Map<string, string>();
     for (const k of apiKeys) {
@@ -213,6 +218,7 @@ export function HoldingsTabPanel(
           unrealized_pnl_usd: h.unrealized_pnl_usd ?? null,
           api_key_id: h.api_key_id,
           source_key_sync_status: status,
+          source_key_missing: !keyStatusById.has(h.api_key_id),
         };
       }),
     [spotHoldings, keyStatusById],
@@ -241,6 +247,7 @@ export function HoldingsTabPanel(
           unrealized_pnl_usd: h.unrealized_pnl_usd ?? null,
           api_key_id: h.api_key_id,
           source_key_sync_status: status,
+          source_key_missing: !keyStatusById.has(h.api_key_id),
         };
       }),
     [derivativeHoldings, keyStatusById],

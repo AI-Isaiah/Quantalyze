@@ -891,9 +891,10 @@ export function partitionedTolerancePosture(
  * if-chain indent, that admits `skipped` as an outcome.
  *
  * The indent test is what distinguishes a tolerance from a message selector:
- * the real `sql-tests` arm contains a nested `if [ "$result" = "skipped" ]`
- * inside its FAILING branch, two spaces deeper, which only chooses which error
- * text to print. Classifying that as a tolerance would report the aggregator as
+ * the real `test-db-drift` arm (`sql-tests`' until Phase 164.4.2 moved that
+ * arm with the job that can still skip) contains a nested
+ * `if [ "$result" = "skipped" ]` inside its FAILING branch, two spaces deeper,
+ * which only chooses which error text to print. Classifying that as a tolerance would report the aggregator as
  * laxer than it is — the mirror of the defect being closed here, and the
  * non-vacuity floor would not have caught it.
  */
@@ -1011,16 +1012,24 @@ const RESULT_LOOP_CONDITION_FLOOR = 8;
  * Rows whose skip the EVENT excuses (3). Each is a SKIP-BY-DESIGN justified by
  * something the job cannot control:
  *   * `e2e-seeded`  — a fork PR cannot see `E2E_TEST_DB_CONFIGURED`.
- *   * `sql-tests`   — same, plus `workflow_dispatch`, which its `if:` excludes.
+ *   * `test-db-drift` — same, plus `workflow_dispatch`, which its `if:` excludes.
+ *     Phase 164.4.2 (DECISION B) moved this excuse here from `sql-tests`, WITH
+ *     its reason: `sql-tests` now runs its corpus on a database private to its
+ *     own runner, consumes no secret and no repo variable, and so has no event
+ *     it may legitimately skip on — it falls to the strict default arm. The
+ *     VAC-08 drift check it used to carry is the part that still needs the
+ *     shared-TEST secret, so the job that holds it holds the excuse. The count
+ *     stayed three because one row left the set and one joined it, which is
+ *     exactly the swap a count cannot see — the exact-set pins below can.
  *   * `plan-anchor-verify` — its `if:` scopes it to `pull_request` so a drifting
  *     anchor on main cannot stall the Railway deploy (D-13).
  * A FOURTH entry here means some job grew a reason to be allowed to skip on an
  * event, and that is a decision, not a refactor.
  */
-const EVENT_TOLERANT_JOBS = ["e2e-seeded", "plan-anchor-verify", "sql-tests"] as const;
+const EVENT_TOLERANT_JOBS = ["e2e-seeded", "plan-anchor-verify", "test-db-drift"] as const;
 
 /**
- * Rows whose skip the DOCS-ONLY PATH FILTER excuses (12) — Phase 164.6.3 /
+ * Rows whose skip the DOCS-ONLY PATH FILTER excuses (13) — Phase 164.6.3 /
  * CI-DOCSPATH-01. These are exactly the rows the loop iterates that are NOT on
  * the aggregator's declared always-on shell list, and what excuses them is ONE
  * predicate, not twelve per-row arms: the detector must have said exactly
@@ -1035,9 +1044,12 @@ const EVENT_TOLERANT_JOBS = ["e2e-seeded", "plan-anchor-verify", "sql-tests"] as
  * docs-only ones — never an intermediate count, which is what a per-row
  * tolerance smuggled in later would produce.
  *
- * ⚠️ `e2e-seeded` and `sql-tests` appear in BOTH this set and the event set.
- * That is not duplication: they are excused by two independent things, and the
- * halves are asserted separately so losing either excuse still reddens.
+ * ⚠️ `e2e-seeded` and `test-db-drift` appear in BOTH this set and the event
+ * set. That is not duplication: they are excused by two independent things, and
+ * the halves are asserted separately so losing either excuse still reddens.
+ * (12 -> 13 in Phase 164.4.2: `test-db-drift` is a new aggregator row carrying
+ * the same docs-only conjunct as every filtered job. `sql-tests` stays here and
+ * is now excused by this filter ALONE — on a code PR its skip is a fault.)
  */
 const DOCS_ONLY_TOLERANT_JOBS = [
   "e2e-seeded",
@@ -1052,6 +1064,7 @@ const DOCS_ONLY_TOLERANT_JOBS = [
   "sql-gate-lint",
   "sql-mutation",
   "sql-tests",
+  "test-db-drift",
 ] as const;
 
 /**
@@ -1103,7 +1116,10 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // fourth one, leaving CI red at HEAD. That is the SECOND time this exact
     // pin was the one left behind (see the 164.5.1.4 note above). The title no
     // longer restates it, so at least the two can no longer disagree.
-    expect(res.out).toMatch(/scanned 76 file/);
+    // MOVED 2026-09-24 (Phase 164.6 GATE-HYGIENE, review fix round 1), 76 -> 77:
+    // supabase/tests/test_cron_runs_rls.sql joined the corpus, and this fourth
+    // census moved in the same commit as the other three.
+    expect(res.out).toMatch(/scanned 77 file/);
     expect(res.status, res.out).toBe(0);
   });
 

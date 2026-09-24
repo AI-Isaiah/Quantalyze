@@ -58,7 +58,31 @@
 # quietly handed back room to grow. ENTRY_CEILING moves DOWN with this file, in the
 # same commit, and UP only by the founder decision described below.
 #
-# ENTRY_COUNT = 18
+# ⭐ RECONCILED 2026-09-23 (Phase 164.4.2 plan 08 checkpoint RED, CI run
+# 35914559318 attempt 2, head 937cebf2): 18 -> 10, re-generated from a real run
+# (`--generate`) on the lane as that plan left it. The run measured
+#     executed: 396 (386 passed, 10 failed), NEW 6, STALE 14.
+#   * EIGHT entries DELETED, because they stopped being true: seven K1 privilege
+#     arms (audit_log_cold x2, audit_log x2, log_audit_event_service, sanitize_user
+#     H-0031, update_allocator_mandates anon) and SEC-005. They were the lane's
+#     ACL drift, not PROD's: plan 08 reset the image's default ACLs on `public`
+#     before the dump loads, so every object now carries exactly the dump's grants,
+#     and plan 11 loaded the non-public objects. The lane repaired them, not a
+#     re-dump - K1's "closed by a re-dump" was the wrong act for all eight.
+#   * SIX entries RE-KINDED K2 -> K3, a reclassification and NOT growth: same
+#     module, same arms, same signature class. They no longer reach the function
+#     body; the GRANT layer refuses them ("permission denied for function
+#     create_wizard_strategy"). That is PROD's state: Migration B (20260814120000)
+#     withdrew `authenticated` EXECUTE, and the committed dump grants it to
+#     service_role alone. So the lane became MORE PROD-faithful, and what is wrong
+#     is the arms, which still seed as `authenticated`. The measured kind was the
+#     K1 catch-all, whose closing act (a re-dump) is false here; `routeKind` now
+#     routes this evidence, in this module only, to K3. Closing act: re-point the
+#     arms at a service_role seed or retire them for the SQL gate, as the test
+#     module's own header prescribes.
+#   ENTRY_CEILING moved 18 -> 10 in the same commit. Nothing was added.
+#
+# ENTRY_COUNT = 10
 #
 # HOW AN ENTRY MAY BE ADDED - FOUNDER DECISION ONLY. The 18 below were seeded by
 # the founder decision of 2026-09-21 named above. From here, a NEW failing arm is
@@ -72,7 +96,7 @@
 # to do - it would send whoever picks this up looking for one fix where there are
 # three.
 #
-#   K1-baseline-privilege-state-absent          9 entries
+#   K1-baseline-privilege-state-absent          9 entries (1 since 2026-09-23)
 #       The committed supabase/schema/baseline.sql is SCHEMA-ONLY and does not
 #       reproduce column- and function-level privilege state, so an arm asserting
 #       that a REVOKE or a GRANT holds fails on the local stack. Two of them say so
@@ -81,7 +105,7 @@
 #       makes that a human-run command against production; no agent closes this
 #       one alone.
 #
-#   K2-function-body-role-gate                  6 entries
+#   K2-function-body-role-gate                  6 entries (0 since 2026-09-23)
 #       All six in wizard-rpcs-live-db. MEASURED, and it is NOT the same failure as
 #       K1: the caller REACHED the function body and the body's own role gate
 #       refused it, with the SQLSTATE the class records. The baseline DOES carry the
@@ -94,7 +118,7 @@
 #       round corrected that, and this file keeps the correction rather than the
 #       original.
 #
-#   K3-migration-or-invariant-decision          3 entries
+#   K3-migration-or-invariant-decision          3 entries (9 since 2026-09-23)
 #       Root causes derived one at a time by the fix round and written at each
 #       assertion.
 #         * g10b P12 - a REAL production defect the lane surfaced: the public
@@ -137,21 +161,13 @@
 # The arm is vitest's own fullName, suite and test joined by " > ".
 # Parsed BY TAB, never by stripping from `#` onward - an arm name may legitimately
 # contain a `#`, and the sibling ledgers' sed idiom would corrupt it.
-src/__tests__/audit-log-cold-archive.test.ts	K1-baseline-privilege-state-absent	C1-expected-empty-got-rows	Migration 056 — audit_log_cold table + append-only invariant > service-role DELETE on audit_log_cold is rejected (append-only invariant)	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
-src/__tests__/audit-log-cold-archive.test.ts	K1-baseline-privilege-state-absent	C1-expected-empty-got-rows	Migration 056 — audit_log_cold table + append-only invariant > service-role UPDATE on audit_log_cold is rejected (append-only invariant)	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
-src/__tests__/audit-log-rls.test.ts	K1-baseline-privilege-state-absent	C1-expected-empty-got-rows	Migration 049 — audit_log deny policies > service-role DELETE on audit_log is rejected	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
-src/__tests__/audit-log-rls.test.ts	K1-baseline-privilege-state-absent	C1-expected-empty-got-rows	Migration 049 — audit_log deny policies > service-role UPDATE on audit_log is rejected	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
 src/__tests__/compute-jobs-audit-2026-05-07-g10b.test.ts	K3-migration-or-invariant-decision	C5-expected-value-mismatch	audit-2026-05-07 G10.B / mig 109 — fan-in chain > P12: enqueue with parent_job_ids inserts row as done_pending_children	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
-src/__tests__/log-audit-event-service-rpc.test.ts	K1-baseline-privilege-state-absent	C6-expected-message-match-missed	Migration 058 — log_audit_event_service RPC runtime gates > authenticated JWT cannot EXECUTE log_audit_event_service (attribution-spoof gate)	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
 src/__tests__/match-decisions-xor-rls.test.ts	K3-migration-or-invariant-decision	C3-expected-non-null-got-null	match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB) > bridge_outcomes widened UNIQUE: strategy-sourced rows preserve (allocator+strategy) 1-per-pair guarantee via COALESCE('')	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
 src/__tests__/request-allocator-holdings-sync-queued.test.ts	K3-migration-or-invariant-decision	C4-expected-true-got-undefined	ISSUE-008 — request_allocator_holdings_sync f8 Queued path > returns {already_inflight, next_attempt_at} when a live job exists	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
 src/__tests__/sanitize-user-rpc.test.ts	K1-baseline-privilege-state-absent	C8-thrown-error-not-assertion	Migration 120 — sanitize_user hardening > P916: sanitize_user purges auth.refresh_tokens + auth.sessions and anonymizes auth.users	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
-src/__tests__/sanitize-user.test.ts	K1-baseline-privilege-state-absent	C3-expected-non-null-got-null	Migration 055 — sanitize_user RPC > H-0031: a non-service-role (anon) caller is denied EXECUTE on sanitize_user	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
-src/__tests__/update-allocator-mandates-rpc.test.ts	K1-baseline-privilege-state-absent	C7-expected-message-nomatch-hit	MANDATE-05 / MANDATE-06: update_allocator_mandates RPC > unauthenticated anon call: RPC is rejected at the GRANT layer (42501 insufficient_privilege) — anon REVOKEd in migration 061, function body never runs	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
-src/__tests__/wizard-rpcs-live-db.test.ts	K2-function-body-role-gate	C2-expected-null-got-pgerror-42501	create_wizard_strategy RPC (Migration 031 / P474) > happy path (as `authenticated` — grant withdrawn by 20260814120000): inserts api_keys + strategies (source=wizard, status=draft) atomically	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
-src/__tests__/wizard-rpcs-live-db.test.ts	K2-function-body-role-gate	C2-expected-null-got-pgerror-42501	finalize_wizard_strategy RPC (Migration 031 / P474) > happy path: flips draft (source=wizard, status=draft) to status=pending_review	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
-src/__tests__/wizard-rpcs-live-db.test.ts	K2-function-body-role-gate	C2-expected-null-got-pgerror-42501	finalize_wizard_strategy RPC (Migration 031 / P474) > rejects finalize on someone else's draft (SQLSTATE 42501)	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
-src/__tests__/wizard-rpcs-live-db.test.ts	K2-function-body-role-gate	C2-expected-null-got-pgerror-42501	guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 126 / Issue 1 + Migration 127 / Finding 1) > blocks a direct authenticated UPDATE that would flip wizard draft status	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
-src/__tests__/wizard-rpcs-live-db.test.ts	K2-function-body-role-gate	C2-expected-null-got-pgerror-42501	guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 126 / Issue 1 + Migration 127 / Finding 1) > Migration 126: SECURITY DEFINER finalize_wizard_strategy path passes the guard	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
-src/__tests__/wizard-rpcs-live-db.test.ts	K2-function-body-role-gate	C2-expected-null-got-pgerror-42501	guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 126 / Issue 1 + Migration 127 / Finding 1) > Migration 127 (Finding 1): authenticated session cannot smuggle the wizard_rpc_active GUC	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
-src/lib/sec-005-live-probe.test.ts	K1-baseline-privilege-state-absent	C2-expected-null-got-value	SEC-005 live probe — migration 027 ground truth > authenticated client returns NULL for encrypted columns	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/wizard-rpcs-live-db.test.ts	K3-migration-or-invariant-decision	C2-expected-null-got-pgerror-42501	create_wizard_strategy RPC (Migration 031 / P474) > happy path (as `authenticated` — grant withdrawn by 20260814120000): inserts api_keys + strategies (source=wizard, status=draft) atomically	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/wizard-rpcs-live-db.test.ts	K3-migration-or-invariant-decision	C2-expected-null-got-pgerror-42501	finalize_wizard_strategy RPC (Migration 031 / P474) > happy path: flips draft (source=wizard, status=draft) to status=pending_review	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/wizard-rpcs-live-db.test.ts	K3-migration-or-invariant-decision	C2-expected-null-got-pgerror-42501	finalize_wizard_strategy RPC (Migration 031 / P474) > rejects finalize on someone else's draft (SQLSTATE 42501)	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/wizard-rpcs-live-db.test.ts	K3-migration-or-invariant-decision	C2-expected-null-got-pgerror-42501	guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 126 / Issue 1 + Migration 127 / Finding 1) > blocks a direct authenticated UPDATE that would flip wizard draft status	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/wizard-rpcs-live-db.test.ts	K3-migration-or-invariant-decision	C2-expected-null-got-pgerror-42501	guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 126 / Issue 1 + Migration 127 / Finding 1) > Migration 126: SECURITY DEFINER finalize_wizard_strategy path passes the guard	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]
+src/__tests__/wizard-rpcs-live-db.test.ts	K3-migration-or-invariant-decision	C2-expected-null-got-pgerror-42501	guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 126 / Issue 1 + Migration 127 / Finding 1) > Migration 127 (Finding 1): authenticated session cannot smuggle the wizard_rpc_active GUC	# [164.9-LIVEDB-LANE-EXECUTION-CENSUS]

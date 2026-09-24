@@ -19,7 +19,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, cleanup, act } from "@testing-library/react";
-import { SyncProgress, type SyncStatus } from "./SyncProgress";
+import { SyncProgress, type EvidenceBaseline, type SyncStatus } from "./SyncProgress";
 
 // ---------------------------------------------------------------------------
 // Supabase client mock.
@@ -37,7 +37,43 @@ const mockState = vi.hoisted(() => ({
     error: unknown;
   },
   analyticsSelectCount: 0,
+  /**
+   * Phase 167.2 / KCS-18: the answers `/api/strategies/[id]/sync-progress`
+   * gives, one per request, in order. An empty queue answers a real read with
+   * jobStatus `done`, so a success case that does not care about the job state
+   * (PIN 5, PIN 5c) sees "nothing in flight".
+   */
+  jobAnswers: [] as Array<() => Promise<unknown>>,
+  jobReadCount: 0,
 }));
+
+/** Phase 167.2 / KCS-18: a sync-progress answer with this body and HTTP status. */
+function jobRead(body: unknown, status = 200) {
+  return () =>
+    Promise.resolve({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+    });
+}
+
+/** A real (not degraded) projection read naming this factsheet-chain job status. */
+function jobState(jobStatus: string | null) {
+  return jobRead({ jobStatus, stalled: false, memberProgress: [] });
+}
+
+const fetchMock = vi.fn((url: string) => {
+  if (/^\/api\/strategies\/[^/]+\/sync-progress$/.test(url)) {
+    mockState.jobReadCount += 1;
+    const next = mockState.jobAnswers.shift() ?? jobState("done");
+    return next();
+  }
+  return Promise.reject(new Error(`unexpected fetch ${url}`));
+});
+
+// 167.2-REVIEW-SFH M-6: an unreadable job state is captured once per attempt.
+const captureToSentryMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -70,16 +106,20 @@ vi.mock("@/lib/supabase/client", () => ({
 // --- Helpers ---------------------------------------------------------------
 
 /** A present, non-terminal-or-terminal analytics row keyed by DB status. */
-function analyticsRow(status: string) {
+function analyticsRow(status: string, computedAt: string | null = null) {
   return {
     data: {
       computation_status: status,
       computation_error: null,
-      computed_at: null,
+      computed_at: computedAt,
     },
     error: null,
   };
 }
+
+// Phase 167.2 / KCS-02: a synthetic server-written computed_at for a row this
+// attempt's job wrote (it differs from a `{ computedAt: null }` baseline).
+const T1 = "2026-04-19T12:03:00.000000+00:00";
 
 const baseProps = {
   strategyId: "strat-1",
@@ -92,10 +132,20 @@ const baseProps = {
  * Render the real `SyncProgress`. Returns the RTL `rerender` plus the
  * `onStatusChange` spy so pins can assert forwarded transitions.
  */
-function renderPoller(syncStatus: SyncStatus) {
+function renderPoller(
+  syncStatus: SyncStatus,
+  evidenceBaseline?: EvidenceBaseline,
+  attemptEnqueuedNewJob?: boolean,
+) {
   const onStatusChange = vi.fn();
   const { rerender } = render(
-    <SyncProgress {...baseProps} syncStatus={syncStatus} onStatusChange={onStatusChange} />,
+    <SyncProgress
+      {...baseProps}
+      syncStatus={syncStatus}
+      onStatusChange={onStatusChange}
+      evidenceBaseline={evidenceBaseline}
+      attemptEnqueuedNewJob={attemptEnqueuedNewJob}
+    />,
   );
   const rerenderStatus = (next: SyncStatus) =>
     rerender(
@@ -122,12 +172,17 @@ beforeEach(() => {
   vi.useFakeTimers();
   mockState.analyticsResult = { data: null, error: null };
   mockState.analyticsSelectCount = 0;
+  mockState.jobAnswers = [];
+  mockState.jobReadCount = 0;
+  captureToSentryMock.mockClear();
+  vi.stubGlobal("fetch", fetchMock);
 });
 
 afterEach(() => {
   cleanup();
   vi.clearAllTimers();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -149,6 +204,7 @@ describe("SyncProgress poll loop — timing (characterization)", () => {
   });
 
   it("PIN 2 — MISSING-ROW GRACE: 10 polls tolerated, 11th escalates once", async () => {
+    // Moved by Phase 167.2 / KCS-22: a give-up ends the attempt as "no_result", not "error" (the timing is unchanged).
     // PGRST116 = 0 rows via .single() (the expected 'row not yet created' case).
     mockState.analyticsResult = { data: null, error: { code: "PGRST116" } };
     const { onStatusChange } = renderPoller("computing");
@@ -156,41 +212,48 @@ describe("SyncProgress poll loop — timing (characterization)", () => {
 
     // Polls 1..10 (SyncProgress.tsx:244 — attempts > 10 is false): silent.
     await tick(POLL_MS * 10);
-    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
 
     // Poll 11 (attempts = 11 > MISSING_ROW_GRACE_POLLS): escalates exactly once.
     await tick(POLL_MS);
-    expect(callsWith(onStatusChange, "error")).toBe(1);
+    expect(callsWith(onStatusChange, "no_result")).toBe(1);
+    // KCS-22: the grace give-up names its reason, so the card says "nothing
+    // recorded yet" and not the poll-cap sentence.
+    expect(onStatusChange.mock.calls).toEqual([["no_result", { stopReason: "missing_row" }]]);
   });
 
   it("PIN 3 — 120s CAP: 40 polls with a present row never error, 41st does", async () => {
+    // Moved by Phase 167.2 / KCS-22: a give-up ends the attempt as "no_result", not "error" (the timing is unchanged).
     // A present, non-terminal row so the grace path (:243) never fires and the
     // ONLY escalation source is the outer cap (:216).
     mockState.analyticsResult = analyticsRow("computing");
     const { onStatusChange } = renderPoller("computing");
     await tick(0);
 
-    // Polls 1..40 forward "computing" but never "error" (attempts !> 40).
+    // Polls 1..40 forward "computing" but never escalate (attempts !> 40).
     await tick(POLL_MS * 40);
-    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
     expect(callsWith(onStatusChange, "computing")).toBe(40);
 
     // Poll 41 (attempts = 41 > POLL_MAX_ATTEMPTS): escalates before the query,
     // so the select counter does NOT advance on this tick.
     const beforeCount = mockState.analyticsSelectCount;
     await tick(POLL_MS);
-    expect(callsWith(onStatusChange, "error")).toBe(1);
+    expect(callsWith(onStatusChange, "no_result")).toBe(1);
+    expect(onStatusChange.mock.calls.at(-1)).toEqual(["no_result", { stopReason: "poll_cap" }]);
+    expect(callsWith(onStatusChange, "error")).toBe(0);
     expect(mockState.analyticsSelectCount).toBe(beforeCount);
   });
 
   it("PIN 4 — COUNTER RESET: re-activation restarts the attempt counter (:272)", async () => {
+    // Moved by Phase 167.2 / KCS-22: a give-up ends the attempt as "no_result", not "error" (the timing is unchanged).
     mockState.analyticsResult = { data: null, error: { code: "PGRST116" } };
     const { onStatusChange, rerenderStatus } = renderPoller("computing");
     await tick(0);
 
     // Drive 5 missing-row polls (attempts 1..5 — below the grace boundary).
     await tick(POLL_MS * 5);
-    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
 
     // Go inactive (interval cleared), then active again (pollAttemptsRef = 0).
     rerenderStatus("complete");
@@ -201,7 +264,7 @@ describe("SyncProgress poll loop — timing (characterization)", () => {
     // 10 more missing-row polls. If the counter had NOT reset, attempts would
     // run 6..15 and escalate at the 6th tick; a fresh 1..10 stays silent.
     await tick(POLL_MS * 10);
-    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
   });
 });
 
@@ -209,6 +272,13 @@ describe("SyncProgress poll loop — timing (characterization)", () => {
 // Task 2 — semantic pins (forwarding contract, asymmetry, inactivity)
 // ===========================================================================
 describe("SyncProgress poll loop — forwarding contract (characterization)", () => {
+  // Moved by Phase 167.2 / KCS-02: a terminal is forwarded only with this
+  // attempt's evidence. Lineage: this pin rendered with no baseline and a row
+  // carrying computed_at null, and asserted every DB terminal was forwarded on
+  // the first read. That is exactly the previous run's row the gate now drops
+  // (PIN 5b). Each row now carries this attempt's evidence (b): a computed_at
+  // that differs from a known `{ computedAt: null }` baseline. The mapping it
+  // characterizes (toSyncStatus through the forward filter) is unchanged.
   it.each([
     ["computing", "computing"],
     ["complete", "complete"],
@@ -217,13 +287,38 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
   ])(
     "PIN 5 — FORWARDED: DB %s maps to onStatusChange(%s)",
     async (dbStatus, uiStatus) => {
-      mockState.analyticsResult = analyticsRow(dbStatus);
-      const { onStatusChange } = renderPoller("computing");
+      mockState.analyticsResult = analyticsRow(dbStatus, T1);
+      const { onStatusChange } = renderPoller("computing", { computedAt: null });
       await tick(0);
       await tick(POLL_MS);
       expect(callsWith(onStatusChange, uiStatus)).toBe(1);
     },
   );
+
+  it("PIN 5b — NO-EVIDENCE: with an unknown baseline and no computing read, a terminal is never forwarded (KCS-02)", async () => {
+    // The previous run's `complete` row, as the poll reads it for the whole first
+    // hop of a resync. Neither piece of evidence exists, so nothing is forwarded
+    // and the loop keeps reading.
+    mockState.analyticsResult = analyticsRow("complete", T1);
+    const { onStatusChange } = renderPoller("computing");
+    await tick(0);
+
+    await tick(POLL_MS * 5);
+    expect(mockState.analyticsSelectCount).toBe(5);
+    expect(onStatusChange).not.toHaveBeenCalled();
+  });
+
+  it("PIN 5c — COMPUTING-ADMITS: one computing read, then complete: computing forwarded, then complete forwarded once (KCS-02)", async () => {
+    mockState.analyticsResult = analyticsRow("computing");
+    const { onStatusChange } = renderPoller("computing");
+    await tick(0);
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([["computing"]]);
+
+    mockState.analyticsResult = analyticsRow("complete");
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([["computing"], ["complete"]]);
+  });
 
   it("PIN 6 — NON-PROPAGATION: DB 'pending' (UI 'idle') is never forwarded", async () => {
     // toSyncStatus('pending') === 'idle', which is NOT in the forward filter
@@ -236,11 +331,17 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
     expect(onStatusChange).not.toHaveBeenCalled();
   });
 
-  it("PIN 7 — NO CONSECUTIVE-ERROR ESCALATION: a non-PGRST116 error consumes grace like a missing row", async () => {
+  it("PIN 7 — NO CONSECUTIVE-ERROR ESCALATION: a non-PGRST116 error never escalates early, and runs to the cap", async () => {
+    // Moved by Phase 167.2 / KCS-22: a give-up ends the attempt as "no_result", not "error".
+    // Moved again by KCS-22: a failed read is not evidence that nothing was
+    // recorded (UI-SPEC § State matrix, offline row), so it no longer consumes
+    // the missing-row grace; it escalates once at the poll cap (poll 41) as
+    // no_result / poll_cap. Lineage: this pin escalated at poll 11, the grace
+    // boundary, with the title "consumes grace like a missing row".
     // Load-bearing asymmetry vs the wizard's MAX_CONSECUTIVE_POLL_ERRORS=3
     // (95-RESEARCH Pitfall 6): SyncProgress has NO consecutive-error counter.
-    // A Supabase error with data:null falls through the same `if (!data)` grace
-    // gate — no immediate escalation, no throw.
+    // A Supabase error with data:null reports no status — no immediate
+    // escalation, no throw.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockState.analyticsResult = {
       data: null,
@@ -255,11 +356,20 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
 
     // Still silent right up to the grace boundary (polls 4..10).
     await tick(POLL_MS * 7);
-    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
 
-    // Escalation happens ONLY at the missing-row grace boundary (poll 11).
+    // Poll 11, the grace boundary: a failed read does not end the attempt.
     await tick(POLL_MS);
-    expect(callsWith(onStatusChange, "error")).toBe(1);
+    expect(onStatusChange).not.toHaveBeenCalled();
+
+    // Polls 12..40: still silent. Poll 41, the cap: escalates exactly once.
+    // Moved by the 167.2 review fix round (SFH M-3, lineage): the reason was
+    // `poll_cap`; with no clean read in the whole activation it is now
+    // `unreadable`, whose copy says the panel could not read the status.
+    await tick(POLL_MS * 29);
+    expect(onStatusChange).not.toHaveBeenCalled();
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([["no_result", { stopReason: "unreadable" }]]);
     errSpy.mockRestore();
   });
 
@@ -287,6 +397,7 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
   // asymmetry vs the wizard that PIN 7 pins for the error-valued shape).
   // ═══════════════════════════════════════════════════════════════════════
   it("PIN 9 — CLEAN ZERO-ROWS: {data:null,error:null} consumes grace unchanged (interval arm, 154-04)", async () => {
+    // Moved by Phase 167.2 / KCS-22: a give-up ends the attempt as "no_result", not "error" (the timing is unchanged).
     // PostgREST's zero-rows answer with NO error — not PGRST116, not a throw.
     mockState.analyticsResult = { data: null, error: null };
     const { onStatusChange } = renderPoller("computing");
@@ -299,15 +410,449 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
 
     // Polls 4..10 — still inside the grace window: no status, no escalation.
     await tick(POLL_MS * 7);
-    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
     expect(onStatusChange).not.toHaveBeenCalled();
 
     // Poll 11 — the grace boundary, and the ONLY escalation source here.
     await tick(POLL_MS);
-    expect(callsWith(onStatusChange, "error")).toBe(1);
+    expect(callsWith(onStatusChange, "no_result")).toBe(1);
 
     // The read DID happen on every tick — otherwise the absences above would be
     // satisfied by a loop that never ran.
     expect(mockState.analyticsSelectCount).toBe(11);
+  });
+});
+
+// ===========================================================================
+// Phase 167.2 / KCS-18 — the job-state check before a terminal SUCCESS.
+//
+// RESEARCH P1: the SQL status bridge keeps a `complete_with_warnings` row at
+// that status while the chain's jobs run, and still moves `computed_at` on
+// every hop. So a warned strategy's resync reads `complete_with_warnings` with
+// a NEW computed_at (KCS-02 evidence b) while the next hop is still `pending`.
+// The analytics row cannot tell that apart from the finished run; the job
+// queue can. A success is forwarded only on a readable "nothing in flight".
+// ===========================================================================
+describe("SyncProgress — a terminal success waits for the job queue (Phase 167.2 / KCS-18)", () => {
+  const T0 = "2026-04-19T11:58:00.000000+00:00";
+
+  it("WARNED-ROW-MID-CHAIN: a warned row re-stamped mid-chain is not forwarded while the chain job is pending, then forwarded once it is done", async () => {
+    // Baseline: the previous run ended complete_with_warnings at T0. The poll
+    // reads the same status at T1 (evidence b holds) with the job still pending.
+    mockState.analyticsResult = analyticsRow("complete_with_warnings", T1);
+    mockState.jobAnswers = [jobState("pending"), jobState("done")];
+    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    await tick(0);
+
+    await tick(POLL_MS);
+    expect(mockState.jobReadCount).toBe(1);
+    expect(
+      onStatusChange,
+      "a mid-chain warned row was shown as this attempt's finished result",
+    ).not.toHaveBeenCalled();
+
+    // The poll keeps reading, and the next evidenced tick asks the queue again.
+    await tick(POLL_MS);
+    expect(mockState.analyticsSelectCount).toBe(2);
+    expect(mockState.jobReadCount).toBe(2);
+    expect(onStatusChange.mock.calls).toEqual([["complete_with_warnings"]]);
+  });
+});
+
+// ===========================================================================
+// Phase 167.2 / KCS-18 — the job-state check fails closed on the claim. Every
+// answer that is not a readable "nothing in flight" keeps the panel computing
+// (plan 04's poll cap still applies); none of them throws or piles up reads.
+// ===========================================================================
+describe("SyncProgress — the job-state check fails closed (Phase 167.2 / KCS-18)", () => {
+  const T0 = "2026-04-19T11:58:00.000000+00:00";
+
+  /** An evidenced `complete` (computed_at moved from the T0 baseline) under the poll. */
+  function renderEvidencedComplete() {
+    mockState.analyticsResult = analyticsRow("complete", T1);
+    return renderPoller("computing", { computedAt: T0 });
+  }
+
+  function deferredAnswer() {
+    let resolve!: (value: unknown) => void;
+    const promise = new Promise<unknown>((r) => {
+      resolve = r;
+    });
+    return { answer: () => promise, resolve };
+  }
+
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  it("DEGRADED-HOLDS: the route's degraded body (jobStatus null, degraded true) is not a success", async () => {
+    // The DEGRADED body carries jobStatus null, which a real read would let
+    // through; only `degraded: true` says the queue could not be read.
+    const degraded = jobRead({ jobStatus: null, stalled: false, memberProgress: [], degraded: true });
+    mockState.jobAnswers = [degraded, degraded, degraded];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS * 3);
+    expect(mockState.analyticsSelectCount).toBe(3);
+    expect(mockState.jobReadCount).toBe(3);
+    expect(onStatusChange, "a degraded read was taken as nothing in flight").not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["HTTP-429-HOLDS", 429],
+    ["HTTP-500-HOLDS", 500],
+  ])("%s: a %i answer is not a success, and the poll continues", async (_name, status) => {
+    // A limiter or server answer can carry a JSON body shaped like a real read.
+    const refused = jobRead({ jobStatus: "done", stalled: false, memberProgress: [] }, status);
+    mockState.jobAnswers = [refused, refused];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS * 2);
+    expect(mockState.jobReadCount).toBe(2);
+    expect(onStatusChange).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[SyncProgress]"),
+      `HTTP ${status}`,
+    );
+  });
+
+  it("NON-JSON-HOLDS: a body that fails to parse is not a success, and no throw escapes", async () => {
+    const htmlPage = () =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new SyntaxError("Unexpected token < in JSON");
+        },
+      });
+    mockState.jobAnswers = [htmlPage, htmlPage];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS * 2);
+    expect(mockState.jobReadCount).toBe(2);
+    expect(onStatusChange).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["an array", []],
+    ["null", null],
+    ["an object without jobStatus", { stalled: false, memberProgress: [] }],
+  ])("NON-OBJECT-HOLDS: %s is not the projection, so it is not a success", async (_name, body) => {
+    mockState.jobAnswers = [jobRead(body)];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS);
+    expect(mockState.jobReadCount).toBe(1);
+    expect(onStatusChange).not.toHaveBeenCalled();
+  });
+
+  it("FETCH-REJECTS-HOLDS: a rejected fetch is not a success, no throw escapes, and it is logged once for the attempt", async () => {
+    const rejects = () => Promise.reject(new TypeError("Failed to fetch"));
+    mockState.jobAnswers = [rejects, rejects, rejects, rejects];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS * 4);
+    expect(mockState.jobReadCount).toBe(4);
+    expect(onStatusChange).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("strat-1"),
+      "Failed to fetch",
+    );
+    // 167.2-REVIEW-SFH M-6: captured once for the attempt, tags only.
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      level: "warning",
+      tags: { component: "SyncProgress", stage: "job-state-unreadable" },
+    });
+
+    // CONTROL: the check was holding the success, not dead. A readable answer
+    // on the next tick forwards it.
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([["complete"]]);
+  });
+
+  it("NULL-JOB-FORWARDS: jobStatus null (no factsheet-chain job visible) forwards the success", async () => {
+    mockState.jobAnswers = [jobState(null)];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([["complete"]]);
+  });
+
+  it("FINAL-FAILED-FORWARDS: jobStatus failed_final (the chain has finished) forwards the success", async () => {
+    mockState.jobAnswers = [jobState("failed_final")];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([["complete"]]);
+  });
+
+  // `pending` is WARNED-ROW-MID-CHAIN's.
+  it.each(["running", "failed_retry", "done_pending_children"])(
+    "IN-FLIGHT-STATES: jobStatus %s holds the success",
+    async (jobStatus) => {
+      mockState.jobAnswers = [jobState(jobStatus), jobState(jobStatus)];
+      const { onStatusChange } = renderEvidencedComplete();
+      await tick(0);
+
+      await tick(POLL_MS * 2);
+      expect(mockState.jobReadCount).toBe(2);
+      expect(onStatusChange).not.toHaveBeenCalled();
+      // A job in flight is a readable answer, not a failure: nothing is logged.
+      expect(warnSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  // Moved by the 167.2 review fix round (167.2-REVIEW WR-03, lineage): this
+  // pin was "FAILED-NO-READ: an evidenced failed terminal is forwarded with no
+  // sync-progress request", and it pinned the hole. A failure written by
+  // ANOTHER job between the baseline read and this attempt's enqueue moves
+  // `computed_at` too, so evidence (b) admitted it, and the card said "Sync
+  // failed" with another job's reason while this attempt's job sat pending.
+  // A failure is now forwarded only when no chain job is in flight: while
+  // this attempt's job is pending, the failure cannot be its own.
+  it("FAILED-SETTLED-FORWARDS: an evidenced failed terminal is forwarded once the job queue says no chain job is in flight", async () => {
+    mockState.analyticsResult = analyticsRow("failed", T1);
+    mockState.jobAnswers = [jobState("failed_final")];
+    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    await tick(0);
+
+    await tick(POLL_MS);
+    await tick(0);
+    // Moved by Phase 167.2 / KCS-22: the failure now carries the row's
+    // computation_error (null here). Lineage: `[["error"]]`.
+    expect(onStatusChange.mock.calls).toEqual([["error", { computationError: null }]]);
+    expect(mockState.jobReadCount).toBe(1);
+  });
+
+  it("WR03-FAILED-WHILE-PENDING: a moved computed_at with failed is NOT forwarded while the job route says pending, and the poll continues", async () => {
+    mockState.analyticsResult = analyticsRow("failed", T1);
+    mockState.jobAnswers = [jobState("pending"), jobState("pending")];
+    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    await tick(0);
+
+    await tick(POLL_MS * 2);
+    await tick(0);
+    expect(mockState.jobReadCount).toBe(2);
+    expect(onStatusChange).not.toHaveBeenCalled();
+  });
+
+  it("WR03-FAILED-UNREADABLE: an unreadable job state holds the failure too (fail closed; the cap still ends the attempt)", async () => {
+    mockState.analyticsResult = analyticsRow("failed", T1);
+    mockState.jobAnswers = [jobRead({ error: "Too many requests" }, 429)];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    await tick(0);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(onStatusChange).not.toHaveBeenCalledWith("error", expect.anything());
+    warn.mockRestore();
+  });
+
+  it("FAILED-CARRIES-REASON: an evidenced failed row forwards its own computation_error (KCS-22)", async () => {
+    mockState.analyticsResult = {
+      data: {
+        computation_status: "failed",
+        computation_error: "Example curated reason.",
+        computed_at: T1,
+      },
+      error: null,
+    };
+    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    await tick(0);
+
+    await tick(POLL_MS);
+    // WR-03: forwarded after the job-state read (empty queue answers "done").
+    await tick(0);
+    expect(onStatusChange.mock.calls).toEqual([
+      ["error", { computationError: "Example curated reason." }],
+    ]);
+  });
+
+  it("ONE-IN-FLIGHT: while a sync-progress request has not answered, the next evidenced ticks make no second request", async () => {
+    const held = deferredAnswer();
+    mockState.jobAnswers = [held.answer];
+    const { onStatusChange } = renderEvidencedComplete();
+    await tick(0);
+
+    await tick(POLL_MS * 3);
+    expect(mockState.analyticsSelectCount).toBe(3);
+    expect(mockState.jobReadCount).toBe(1);
+    expect(onStatusChange).not.toHaveBeenCalled();
+
+    // The one request answers "nothing in flight": the success goes out once.
+    await act(async () => {
+      held.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ jobStatus: "done", stalled: false, memberProgress: [] }),
+      });
+    });
+    expect(onStatusChange.mock.calls).toEqual([["complete"]]);
+  });
+
+  it.each(["unmounts", "leaves computing"])(
+    "LATE-RESULT: the panel %s before the request answers, and the answer forwards nothing",
+    async (how) => {
+      const held = deferredAnswer();
+      mockState.jobAnswers = [held.answer];
+      const { onStatusChange, rerenderStatus } = renderEvidencedComplete();
+      await tick(0);
+      await tick(POLL_MS);
+      expect(mockState.jobReadCount).toBe(1);
+
+      if (how === "unmounts") cleanup();
+      else rerenderStatus("error");
+
+      await act(async () => {
+        held.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ jobStatus: "done", stalled: false, memberProgress: [] }),
+        });
+      });
+      await tick(0);
+      expect(callsWith(onStatusChange, "complete")).toBe(0);
+    },
+  );
+});
+
+describe("SyncProgress — the S2 live region (Phase 167.2 / KCS-03, UI-SPEC § Accessibility)", () => {
+  it("LIVE-REGION: the status label is the panel's one polite, atomic live region; the elapsed counter is outside it; the same node persists from syncing to a terminal state", async () => {
+    // `unconfirmed` and `no_result` arrive minutes after the click, unprompted,
+    // so they must be announced. A region inserted with its text already
+    // inside is generally not announced (the 167 IN-01 lesson), so the label
+    // node must stay mounted and only its text may change.
+    const props = { ...baseProps, onStatusChange: vi.fn() };
+    const { container, rerender } = render(<SyncProgress {...props} syncStatus="syncing" />);
+    await tick(0);
+
+    const LIVE = '[role="status"], [aria-live]';
+    expect(container.querySelectorAll(LIVE)).toHaveLength(1);
+    const region = container.querySelector('[role="status"]');
+    expect(region).not.toBeNull();
+    expect(region?.getAttribute("aria-live")).toBe("polite");
+    expect(region?.getAttribute("aria-atomic")).toBe("true");
+    expect(region?.textContent).toMatch(/^Fetching trades/);
+
+    // The elapsed counter ticks every second; it must not be read out.
+    await tick(2_000);
+    const counter = Array.from(container.querySelectorAll("span")).find(
+      (el) => el.textContent === "2s",
+    );
+    expect(counter, "the elapsed counter did not render").toBeDefined();
+    expect(region?.contains(counter ?? null)).toBe(false);
+
+    rerender(<SyncProgress {...props} syncStatus="computing" />);
+    expect(container.querySelector('[role="status"]')).toBe(region);
+    expect(region?.textContent).toBe("Computing analytics...");
+
+    rerender(<SyncProgress {...props} syncStatus="unconfirmed" stopReason="enqueue_bound" />);
+    expect(container.querySelector('[role="status"]')).toBe(region);
+    expect(region?.textContent).toBe("Sync not confirmed");
+    expect(container.querySelectorAll(LIVE)).toHaveLength(1);
+  });
+});
+
+describe("SyncProgress — the in-flight hints promise no duration (167.2-REVIEW WR-07)", () => {
+  // WHY. RESEARCH P2 measured healthy first crawls far longer than this
+  // panel's 120 s poll budget (`process_key_long` may run for 30 minutes). The
+  // panel used to say "Usually takes 15–30 seconds" and, at 61 s, "Large
+  // accounts can take up to 2 minutes": a promise the phase's own evidence
+  // contradicts, in the component that then says "stopped checking after 2
+  // minutes. The sync may still be running". Hand-typed from the UI-SPEC
+  // review-fix row KCS-SLOW, never imported.
+  const KCS_SLOW =
+    "Large accounts can take longer. This panel checks for 2 minutes; the sync may still be running after that.";
+
+  it("NO-DURATION-PROMISE: no estimate before 60 s, the KCS-SLOW line after it, and never a duration the sync is said to take", async () => {
+    const { container } = render(
+      <SyncProgress {...baseProps} syncStatus="syncing" onStatusChange={vi.fn()} />,
+    );
+    await tick(0);
+    expect(container.textContent).not.toMatch(/Usually takes/);
+    expect(container.textContent).not.toContain(KCS_SLOW);
+
+    await tick(61_000);
+    expect(container.textContent).toContain(KCS_SLOW);
+    expect(container.textContent).not.toMatch(/up to 2 minutes/);
+    expect(container.textContent).not.toMatch(/taking longer than usual/);
+  });
+});
+
+describe("SyncProgress — the give-up asks the job queue once before it says \"may still be running\" (167.2-REVIEW-SFH M-3)", () => {
+  // WHY. A give-up used to say "The sync may still be running" without asking
+  // anything. With an unknown baseline only a `computing` read can admit a
+  // terminal, so a job that failed before any handler wrote `computing`
+  // reached the cap and was reported as possibly running while it was
+  // `failed_final`. The give-up now reads the job state once: a finished
+  // FAILED chain is forwarded as a failure; anything else keeps its reason.
+  it("GIVEUP-FAILED-FINAL: the cap with the job queue saying failed_final forwards a failure, not no_result", async () => {
+    mockState.analyticsResult = analyticsRow("computing");
+    // 167.2-REVIEW-SFH-R2 R2-L2: the attempt enqueued a NEW job, so the
+    // failed chain is its own.
+    const { onStatusChange } = renderPoller("computing", undefined, true);
+    await tick(0);
+    await tick(POLL_MS * 40);
+    mockState.jobAnswers = [jobState("failed_final")];
+    await tick(POLL_MS);
+    await tick(0);
+    expect(onStatusChange.mock.calls.at(-1)).toEqual(["error", { computationError: null }]);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
+  });
+
+  it("R2-L2-NO-NEW-JOB: at the cap, a failed_final chain is NOT this attempt's when the enqueue queued nothing new (duplicate / queued:false): no_result, never Sync failed", async () => {
+    mockState.analyticsResult = analyticsRow("computing");
+    const { onStatusChange } = renderPoller("computing", undefined, false);
+    await tick(0);
+    await tick(POLL_MS * 40);
+    mockState.jobAnswers = [jobState("failed_final")];
+    await tick(POLL_MS);
+    await tick(0);
+    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(onStatusChange.mock.calls.at(-1)).toEqual(["no_result", { stopReason: "poll_cap" }]);
+  });
+
+  it("R2-L3-CAPTURE: a give-up with no clean read in the whole attempt is captured (tags only)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      mockState.analyticsResult = { data: null, error: { message: "synthetic JWT expired" } };
+      renderPoller("computing", undefined, true);
+      await tick(0);
+      await tick(POLL_MS * 41);
+      await tick(0);
+      expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+        level: "warning",
+        tags: { component: "SyncProgress", stage: "poll-unreadable" },
+      });
+      expect(JSON.stringify(captureToSentryMock.mock.calls)).not.toContain("strat-1");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("GIVEUP-IN-FLIGHT: the cap with the job still running keeps no_result / poll_cap, once", async () => {
+    mockState.analyticsResult = analyticsRow("computing");
+    const { onStatusChange } = renderPoller("computing");
+    await tick(0);
+    await tick(POLL_MS * 40);
+    mockState.jobAnswers = [jobState("running")];
+    await tick(POLL_MS * 3);
+    await tick(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(1);
+    expect(onStatusChange.mock.calls.at(-1)).toEqual(["no_result", { stopReason: "poll_cap" }]);
+    // One give-up read, however many ticks fire while it is out.
+    expect(mockState.jobReadCount).toBe(1);
   });
 });

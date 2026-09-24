@@ -281,3 +281,295 @@ describe("[D-16] OpenPositionsTable — the derivative surface answers the predi
     }
   });
 });
+
+/**
+ * Phase 167.1 AUMTRUST / D-16 (amendment 2026-09-23) — the Open Positions
+ * footer total "Total unrealized P&L (equity contribution)" sums EVERY
+ * derivative row, including the ones struck through above with an untrusted
+ * chip. The founder's rule is "keep the total and flag it" (D-03): the total
+ * must not move, and a muted sentence under it names the untrusted part.
+ *
+ * ORACLE INDEPENDENCE: every expected string is typed literally. Neither the
+ * noun constant nor the file-local formatter is imported, so a drift in either
+ * turns this block RED instead of moving the oracle with it.
+ */
+describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
+  function footerTotal(container: HTMLElement): string {
+    const tfoot = container.querySelector("tfoot")!;
+    const totalRow = tfoot.querySelectorAll("tr")[0];
+    const cells = totalRow.querySelectorAll("td");
+    return cells[cells.length - 1].textContent ?? "";
+  }
+
+  it("tracer: a sign_in_failed position stays in the footer total and the footer says so", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({ id: "pos-trusted", unrealized_pnl_usd: 1_000 }),
+          makePosition({
+            id: "pos-untrusted",
+            unrealized_pnl_usd: 300,
+            source_key_sync_status: "sign_in_failed",
+          }),
+        ]}
+      />,
+    );
+    // D-03: the untrusted row is still counted — disclose, never subtract.
+    expect(footerTotal(container)).toBe("+$1,300");
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$300 from keys needing attention.",
+    );
+  });
+
+  it.each(UNTRUSTED)(
+    "%s: a single untrusted row renders the qualifier for its P&L",
+    (status) => {
+      render(
+        <OpenPositionsTable
+          rows={[makePosition({ source_key_sync_status: status })]}
+        />,
+      );
+      expect(
+        screen.getByTestId("open-positions-untrusted-note").textContent,
+      ).toBe("Includes +$1,500 from keys needing attention.");
+    },
+  );
+
+  it("healthy control: an all-complete table has no qualifier and a one-row footer", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({ id: "pos-a" }),
+          makePosition({ id: "pos-b", unrealized_pnl_usd: -200 }),
+        ]}
+      />,
+    );
+    expect(
+      screen.queryByTestId("open-positions-untrusted-note"),
+    ).not.toBeInTheDocument();
+    expect(container.querySelector("tfoot")!.querySelectorAll("tr")).toHaveLength(1);
+    expect(footerTotal(container)).toBe("+$1,300");
+  });
+
+  it("mixed table: the total is trusted + untrusted, the qualifier is the untrusted part only", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({ id: "pos-t1", unrealized_pnl_usd: 2_000 }),
+          makePosition({ id: "pos-t2", unrealized_pnl_usd: 500 }),
+          makePosition({
+            id: "pos-u1",
+            unrealized_pnl_usd: 700,
+            source_key_sync_status: "revoked",
+          }),
+          makePosition({
+            id: "pos-u2",
+            unrealized_pnl_usd: -100,
+            source_key_sync_status: "sign_in_failed",
+          }),
+        ]}
+      />,
+    );
+    // 2,000 + 500 + 700 - 100 = 3,100 (hand-summed; D-03 keeps the untrusted rows in).
+    expect(footerTotal(container)).toBe("+$3,100");
+    // 700 - 100 = 600: only the two untrusted rows, across both statuses.
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$600 from keys needing attention.",
+    );
+  });
+
+  it("negative untrusted P&L renders with the total's minus sign", () => {
+    render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({
+            unrealized_pnl_usd: -1_234.6,
+            source_key_sync_status: "sign_in_failed",
+          }),
+        ]}
+      />,
+    );
+    // The first character after "Includes " is U+2212 MINUS SIGN, not a
+    // hyphen-minus: it is formatPnl's sign, the same one the total uses.
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes −$1,235 from keys needing attention.",
+    );
+  });
+
+  it("null P&L on an untrusted row still renders (D-07), and says the P&L is unavailable rather than claiming a known zero (review WR-03)", () => {
+    render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({
+            unrealized_pnl_usd: null,
+            source_key_sync_status: "revoked",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$0 from keys needing attention (P&L unavailable for 1 position).",
+    );
+  });
+
+  it("review WR-03: a known untrusted P&L beside unknown ones keeps its amount and names how many rows had none — NaN counts as unavailable too, and a trusted null row does not", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({ id: "pos-t-null", unrealized_pnl_usd: null }),
+          makePosition({
+            id: "pos-u-known",
+            unrealized_pnl_usd: 300,
+            source_key_sync_status: "sign_in_failed",
+          }),
+          makePosition({
+            id: "pos-u-null",
+            unrealized_pnl_usd: null,
+            source_key_sync_status: "revoked",
+          }),
+          makePosition({
+            id: "pos-u-nan",
+            unrealized_pnl_usd: Number.NaN,
+            source_key_sync_status: "sign_in_failed",
+          }),
+        ]}
+      />,
+    );
+    // D-03: the total is unchanged — the unknown rows still sum as 0.
+    expect(footerTotal(container)).toBe("+$300");
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$300 from keys needing attention (P&L unavailable for 2 positions).",
+    );
+  });
+
+  it("review WR-03: a known zero untrusted P&L is a real zero and carries no unavailable note", () => {
+    render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({
+            unrealized_pnl_usd: 0,
+            source_key_sync_status: "sign_in_failed",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$0 from keys needing attention.",
+    );
+  });
+
+  it("tone: muted caption, no warning colour, no uppercase, no role (D-09)", () => {
+    render(
+      <OpenPositionsTable
+        rows={[makePosition({ source_key_sync_status: "sign_in_failed" })]}
+      />,
+    );
+    const cell = screen.getByTestId("open-positions-untrusted-note");
+    expect(cell.className).toContain("text-text-muted");
+    expect(cell.className).toContain("text-xs");
+    expect(cell.className).not.toMatch(
+      /warning|amber|danger|destructive|accent|uppercase/i,
+    );
+    expect(cell.getAttribute("role")).toBeNull();
+    expect(cell.getAttribute("style")).toBeNull();
+    expect(cell.getAttribute("colspan")).toBe("7");
+  });
+});
+
+/**
+ * Review round 2 WR-05 (silent-failure-hunter) — a holding whose key is
+ * MISSING from the key list. The composer names it "from keys with an unknown
+ * sync status", so the Holdings tab it points the reader to must name it too.
+ * A key that is PRESENT with a null status (`source_key_sync_status:
+ * "unknown"`, no `source_key_missing`) stays trusted and unmarked: that is the
+ * legitimate no-status case, and marking it would flag a healthy book.
+ *
+ * ORACLE INDEPENDENCE: every expected string is typed, never read from the
+ * constants under test.
+ */
+describe("[167.1 R2 WR-05] a holding whose key is missing from the key list", () => {
+  it("LegacyHoldingsTable: the row carries its own muted marker, is not struck through and is not hidden by the untrusted filter", () => {
+    const { container } = render(
+      <HoldingsTable
+        holdings={[
+          makeHolding({ id: "present-null", symbol: "BTC", source_key_sync_status: "unknown" }),
+          makeHolding({
+            id: "missing",
+            symbol: "ETH",
+            api_key_id: "key-missing",
+            source_key_sync_status: "unknown",
+            source_key_missing: true,
+          }),
+        ]}
+        showRevoked={false}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    const markers = screen.getAllByTestId("holding-key-status-unknown");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe("Sync status unknown");
+    expect(markers[0].closest("tr")?.textContent).toContain("ETH");
+    expect(markers[0].className).toContain("text-text-muted");
+    expect(markers[0].className).not.toMatch(/warning|amber|danger|destructive|accent/i);
+    expect(markers[0].getAttribute("role")).toBeNull();
+    expect(container.querySelector(".line-through")).toBeNull();
+    expect(screen.queryByText(/hidden/)).not.toBeInTheDocument();
+  });
+
+  it("OpenPositionsTable: the row carries the marker, and the footer names the unknown-status part in the composer's wording", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({ id: "pos-present-null", unrealized_pnl_usd: 1_000, source_key_sync_status: "unknown" }),
+          makePosition({
+            id: "pos-missing",
+            unrealized_pnl_usd: 50,
+            api_key_id: "key-missing",
+            source_key_sync_status: "unknown",
+            source_key_missing: true,
+          }),
+        ]}
+      />,
+    );
+    const markers = screen.getAllByTestId("holding-key-status-unknown");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe("Sync status unknown");
+    expect(container.querySelector(".line-through")).toBeNull();
+    // D-03: the total keeps the row.
+    const cells = container.querySelector("tfoot")!.querySelectorAll("tr")[0].querySelectorAll("td");
+    expect(cells[cells.length - 1].textContent).toBe("+$1,050");
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$50 from keys with an unknown sync status.",
+    );
+  });
+
+  it("OpenPositionsTable: both parts, each with its own unavailable count", () => {
+    render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({ id: "pos-u", unrealized_pnl_usd: 300, source_key_sync_status: "sign_in_failed" }),
+          makePosition({
+            id: "pos-missing-null",
+            unrealized_pnl_usd: null,
+            api_key_id: "key-missing",
+            source_key_sync_status: "unknown",
+            source_key_missing: true,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$300 from keys needing attention and +$0 from keys with an unknown sync status (P&L unavailable for 1 position).",
+    );
+  });
+
+  it("control: a present key with a null status is trusted — no marker and no footer note", () => {
+    render(
+      <OpenPositionsTable
+        rows={[makePosition({ source_key_sync_status: "unknown" })]}
+      />,
+    );
+    expect(screen.queryByTestId("holding-key-status-unknown")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("open-positions-untrusted-note")).not.toBeInTheDocument();
+  });
+});
