@@ -475,3 +475,101 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
     expect(cell.getAttribute("colspan")).toBe("7");
   });
 });
+
+/**
+ * Review round 2 WR-05 (silent-failure-hunter) — a holding whose key is
+ * MISSING from the key list. The composer names it "from keys with an unknown
+ * sync status", so the Holdings tab it points the reader to must name it too.
+ * A key that is PRESENT with a null status (`source_key_sync_status:
+ * "unknown"`, no `source_key_missing`) stays trusted and unmarked: that is the
+ * legitimate no-status case, and marking it would flag a healthy book.
+ *
+ * ORACLE INDEPENDENCE: every expected string is typed, never read from the
+ * constants under test.
+ */
+describe("[167.1 R2 WR-05] a holding whose key is missing from the key list", () => {
+  it("LegacyHoldingsTable: the row carries its own muted marker, is not struck through and is not hidden by the untrusted filter", () => {
+    const { container } = render(
+      <HoldingsTable
+        holdings={[
+          makeHolding({ id: "present-null", symbol: "BTC", source_key_sync_status: "unknown" }),
+          makeHolding({
+            id: "missing",
+            symbol: "ETH",
+            api_key_id: "key-missing",
+            source_key_sync_status: "unknown",
+            source_key_missing: true,
+          }),
+        ]}
+        showRevoked={false}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    const markers = screen.getAllByTestId("holding-key-status-unknown");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe("Sync status unknown");
+    expect(markers[0].closest("tr")?.textContent).toContain("ETH");
+    expect(markers[0].className).toContain("text-text-muted");
+    expect(markers[0].className).not.toMatch(/warning|amber|danger|destructive|accent/i);
+    expect(markers[0].getAttribute("role")).toBeNull();
+    expect(container.querySelector(".line-through")).toBeNull();
+    expect(screen.queryByText(/hidden/)).not.toBeInTheDocument();
+  });
+
+  it("OpenPositionsTable: the row carries the marker, and the footer names the unknown-status part in the composer's wording", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({ id: "pos-present-null", unrealized_pnl_usd: 1_000, source_key_sync_status: "unknown" }),
+          makePosition({
+            id: "pos-missing",
+            unrealized_pnl_usd: 50,
+            api_key_id: "key-missing",
+            source_key_sync_status: "unknown",
+            source_key_missing: true,
+          }),
+        ]}
+      />,
+    );
+    const markers = screen.getAllByTestId("holding-key-status-unknown");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe("Sync status unknown");
+    expect(container.querySelector(".line-through")).toBeNull();
+    // D-03: the total keeps the row.
+    const cells = container.querySelector("tfoot")!.querySelectorAll("tr")[0].querySelectorAll("td");
+    expect(cells[cells.length - 1].textContent).toBe("+$1,050");
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$50 from keys with an unknown sync status.",
+    );
+  });
+
+  it("OpenPositionsTable: both parts, each with its own unavailable count", () => {
+    render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({ id: "pos-u", unrealized_pnl_usd: 300, source_key_sync_status: "sign_in_failed" }),
+          makePosition({
+            id: "pos-missing-null",
+            unrealized_pnl_usd: null,
+            api_key_id: "key-missing",
+            source_key_sync_status: "unknown",
+            source_key_missing: true,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$300 from keys needing attention and +$0 from keys with an unknown sync status (P&L unavailable for 1 position).",
+    );
+  });
+
+  it("control: a present key with a null status is trusted — no marker and no footer note", () => {
+    render(
+      <OpenPositionsTable
+        rows={[makePosition({ source_key_sync_status: "unknown" })]}
+      />,
+    );
+    expect(screen.queryByTestId("holding-key-status-unknown")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("open-positions-untrusted-note")).not.toBeInTheDocument();
+  });
+});

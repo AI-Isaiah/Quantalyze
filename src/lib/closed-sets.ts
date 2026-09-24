@@ -972,6 +972,19 @@ export const UNTRUSTED_KEY_STATUS_CHIP_LABEL = {
 // a dated record of the same count drifting across seven restatements.
 export const UNTRUSTED_KEY_SET_NOUN = "keys needing attention";
 
+// Phase 167.1 review round 2 WR-05 — the noun for a holding whose key is
+// MISSING from the key list (the list dropped it, e.g. an unsupported
+// exchange). Its status is UNKNOWN, which is neither trusted nor a member of
+// `UNTRUSTED_KEY_SYNC_STATUSES`, so it is never folded into
+// `UNTRUSTED_KEY_SET_NOUN`: the untrusted filter does not find these rows. The
+// composer's AUM disclosure and the Open Positions footer both name them with
+// this one constant, and the row marker below names the same state on the row
+// itself, so a reader sent from the composer to the Holdings tab finds them.
+// ⚠️ A key PRESENT with a null status is NOT this state: it is the legitimate
+// no-status case and stays trusted.
+export const UNKNOWN_KEY_STATUS_SET_NOUN = "keys with an unknown sync status";
+export const UNKNOWN_KEY_STATUS_ROW_LABEL = "Sync status unknown";
+
 /**
  * Whether a row's source key is in a state that forbids showing its numbers as
  * current. A known untrusted status is never admitted to the healthy branch.

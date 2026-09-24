@@ -25,10 +25,18 @@ import { ResponsiveTable } from "@/components/ResponsiveTable";
 // surfaces cannot drift on what "trusted" means. ⛔ Do not re-introduce a
 // local equality on `sync_status` here.
 import {
-  UNTRUSTED_KEY_SET_NOUN,
+  UNKNOWN_KEY_STATUS_ROW_LABEL,
   isUntrustedKeySyncStatus,
   untrustedKeyChipLabel,
 } from "@/lib/closed-sets";
+// Phase 167.1 review round 2 WR-05 — the footer qualifier's wording comes from
+// the ONE clause builder the composer's AUM marker uses, so both surfaces name
+// the same parts with the same nouns.
+import {
+  buildKeyTrustClause,
+  capitalizeFirst,
+  type LiveHoldingsPart,
+} from "../lib/live-holdings-summary";
 
 const AMBER_CHIP_STYLE: CSSProperties = {
   color: "var(--color-warning)",
@@ -51,6 +59,10 @@ export interface OpenPositionRow {
   api_key_id: string;
   /** Joined from `api_keys.sync_status` by the dashboard layer. */
   source_key_sync_status: string;
+  /** Phase 167.1 review round 2 WR-05. True when `api_key_id` is MISSING from
+   *  the key list, so the status is unknown rather than trusted. A key that is
+   *  present with a null status leaves this unset and stays trusted. */
+  source_key_missing?: boolean;
 }
 
 interface OpenPositionsTableProps {
@@ -125,18 +137,26 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
   // unchanged), but an untrusted row whose P&L was defaulted is COUNTED, so the
   // qualifier says the P&L is unavailable instead of presenting that 0 as a
   // known figure.
+  //
+  // Review round 2 WR-05: a row whose key is missing from the key list is
+  // counted as a SEPARATE unknown-status part, never folded into the untrusted
+  // one, and named in the composer's wording.
   let totalUnrealized = 0;
-  let untrustedUnrealized = 0;
-  let untrustedCount = 0;
-  let untrustedUnavailableCount = 0;
+  const untrusted: LiveHoldingsPart = { amount: 0, count: 0, unavailable: 0 };
+  const unknownStatus: LiveHoldingsPart = { amount: 0, count: 0, unavailable: 0 };
   for (const r of rows) {
     const known = Number.isFinite(r.unrealized_pnl_usd ?? NaN);
     const pnl = known ? (r.unrealized_pnl_usd as number) : 0;
     totalUnrealized += pnl;
-    if (isUntrustedKeySyncStatus(r.source_key_sync_status)) {
-      untrustedUnrealized += pnl;
-      untrustedCount += 1;
-      if (!known) untrustedUnavailableCount += 1;
+    const part = isUntrustedKeySyncStatus(r.source_key_sync_status)
+      ? untrusted
+      : r.source_key_missing === true
+        ? unknownStatus
+        : null;
+    if (part !== null) {
+      part.amount += pnl;
+      part.count += 1;
+      if (!known) part.unavailable += 1;
     }
   }
 
@@ -203,6 +223,17 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                         >
                           {untrustedLabel}
                         </span>
+                      ) : r.source_key_missing === true ? (
+                        // Review round 2 WR-05: the key is missing from the
+                        // key list, so its status is unknown. Muted, like the
+                        // disclosures that name it; not struck through,
+                        // because nothing says these numbers are stale.
+                        <span
+                          data-testid="holding-key-status-unknown"
+                          className="text-xs text-text-muted"
+                        >
+                          {UNKNOWN_KEY_STATUS_ROW_LABEL}
+                        </span>
                       ) : null}
                     </div>
                   </td>
@@ -253,21 +284,22 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
             {/* Renders on the untrusted COUNT, not the amount (D-07): an
                 untrusted row with a null P&L is summed as 0 and still says so.
                 Muted, sentence case, no role (D-09). Its own row, so the
-                uppercase label cell above is not overridden. */}
-            {untrustedCount > 0 ? (
+                uppercase label cell above is not overridden. Review round 2
+                WR-05: an unknown-status row opens it too, as its own part. */}
+            {untrusted.count > 0 || unknownStatus.count > 0 ? (
               <tr className="bg-page/40">
                 <td
                   colSpan={7}
                   data-testid="open-positions-untrusted-note"
                   className="px-4 pb-2 text-xs text-text-muted"
                 >
-                  Includes {formatPnl(untrustedUnrealized)} from{" "}
-                  {UNTRUSTED_KEY_SET_NOUN}
-                  {untrustedUnavailableCount > 0
-                    ? ` (P&L unavailable for ${untrustedUnavailableCount} ${
-                        untrustedUnavailableCount === 1 ? "position" : "positions"
-                      })`
-                    : null}
+                  {capitalizeFirst(
+                    buildKeyTrustClause(untrusted, unknownStatus, {
+                      amount: formatPnl,
+                      missing: "P&L",
+                      unit: ["position", "positions"],
+                    }),
+                  )}
                   .
                 </td>
               </tr>

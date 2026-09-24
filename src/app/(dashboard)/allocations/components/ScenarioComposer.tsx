@@ -75,11 +75,7 @@ import {
 } from "@/lib/scenario";
 import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
-import {
-  blendPeriodsPerYear,
-  UNTRUSTED_KEY_SET_NOUN,
-  type SeriesState,
-} from "@/lib/closed-sets";
+import { blendPeriodsPerYear, type SeriesState } from "@/lib/closed-sets";
 import {
   coverageSpanOf,
   covers,
@@ -156,6 +152,8 @@ import {
 } from "../lib/scenario-adapter";
 import { buildHoldingRef } from "../lib/holding-outcome-adapter";
 import {
+  buildKeyTrustClause,
+  capitalizeFirst,
   holdingEquityContributionLocal,
   managerSideKeyIds,
   summarizeLiveHoldings,
@@ -690,51 +688,28 @@ type AddedMetricsEntry =
 type AddedMetricsState = "pending" | "settled" | "unavailable";
 
 /**
- * Phase 167.1 AUMTRUST — the ONE clause that names the part of the live
- * holdings total sourced from keys needing attention, lower-case, e.g.
+ * Phase 167.1 AUMTRUST — the composer's rendering of the ONE clause that names
+ * the parts of the live-holdings total sourced from keys needing attention and
+ * from keys whose sync status is unknown, lower-case, e.g.
  * `includes $12,345 from keys needing attention`.
  *
  * One builder, so the standalone sentence beside the AUM field and the clause
- * nested in the override note cannot word the same fact two ways. The noun is
- * the shared `UNTRUSTED_KEY_SET_NOUN` (the Holdings tab filter and footer use
- * it, so a reader can find the rows the clause is about) and is never restated
- * as a string here. The amount goes through the composer's own whole-dollar
- * renderer `formatUsd`, signed as it comes (D-07). No venue, key label, key id
- * or sync error is interpolated: the clause carries a dollar sum and a constant
- * noun, nothing a venue supplied.
+ * nested in the override note cannot word the same fact two ways, and (review
+ * round 2 WR-05) the Open Positions footer words it the same way too: the
+ * wording lives in `buildKeyTrustClause`. The composer supplies only its own
+ * renderer: `formatUsd`, the whole-dollar renderer the AUM figure uses, signed
+ * as it comes (D-07), and "value" per "holding", because a spot holding's
+ * missing figure is not a P&L.
  */
 function buildUntrustedAumClause(
   untrusted: LiveHoldingsPart,
   unknownStatus: LiveHoldingsPart,
 ): string {
-  // Review WR-05: a summed holding whose key is missing from `apiKeys` has an
-  // UNKNOWN status. It is named as such, never folded into the untrusted noun
-  // (that noun is the Holdings tab filter's, and those rows are not in it).
-  //
-  // Review WR-03: a holding whose equity was not reported is summed as 0, and
-  // the amount cannot show that. Say how many, so a defaulted 0 is never read
-  // as a known figure. Review round 2 IN-01 / IN-05: the count follows the
-  // PART it belongs to, so with two parts it never reads as qualifying the
-  // other part's amount.
-  const phrase = (part: LiveHoldingsPart, noun: string): string => {
-    const base = `${formatUsd(part.amount)} from ${noun}`;
-    if (part.unavailable === 0) return base;
-    const unit = part.unavailable === 1 ? "holding" : "holdings";
-    return `${base} (value unavailable for ${part.unavailable} ${unit})`;
-  };
-  const parts: string[] = [];
-  if (untrusted.count > 0) {
-    parts.push(phrase(untrusted, UNTRUSTED_KEY_SET_NOUN));
-  }
-  if (unknownStatus.count > 0) {
-    parts.push(phrase(unknownStatus, "keys with an unknown sync status"));
-  }
-  return `includes ${parts.join(" and ")}`;
-}
-
-/** Sentence-cases a clause built above, for the standalone sentence form. */
-function capitalizeFirst(clause: string): string {
-  return clause.charAt(0).toUpperCase() + clause.slice(1);
+  return buildKeyTrustClause(untrusted, unknownStatus, {
+    amount: formatUsd,
+    missing: "value",
+    unit: ["holding", "holdings"],
+  });
 }
 
 /**

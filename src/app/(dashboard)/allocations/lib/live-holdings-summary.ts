@@ -22,7 +22,11 @@
  */
 
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
-import { isUntrustedKeySyncStatus } from "@/lib/closed-sets";
+import {
+  isUntrustedKeySyncStatus,
+  UNKNOWN_KEY_STATUS_SET_NOUN,
+  UNTRUSTED_KEY_SET_NOUN,
+} from "@/lib/closed-sets";
 
 type DashboardHolding = MyAllocationDashboardPayload["holdingsSummary"][number];
 
@@ -235,4 +239,60 @@ export function summarizeLiveHoldings(args: {
     }
   }
   return out;
+}
+
+/** How one surface renders the clause below: its own amount renderer (the one
+ *  the figure it qualifies already uses, UI-SPEC U-05) and its own name for a
+ *  row whose figure was not reported. */
+export interface KeyTrustClauseRender {
+  /** Renders a part's signed amount. */
+  amount: (n: number) => string;
+  /** What a defaulted row is missing, e.g. `value` or `P&L`. */
+  missing: string;
+  /** The row unit, singular then plural, e.g. `holding` / `holdings`. */
+  unit: readonly [string, string];
+}
+
+/**
+ * Phase 167.1 AUMTRUST — the ONE lower-case clause that names the parts of a
+ * dollar total sourced from keys needing attention and from keys whose sync
+ * status is unknown, e.g. `includes $12,345 from keys needing attention`.
+ *
+ * One builder for every surface (review round 2 WR-05): the composer's AUM
+ * marker and the Open Positions footer word the same facts identically, so a
+ * reader sent from one to the other finds the same nouns. The nouns are the
+ * shared constants and are never restated as strings. No venue, key label,
+ * key id or sync error is interpolated: the clause carries dollar sums,
+ * counts and constant nouns.
+ *
+ * - An unknown-status part is named with its own noun, never folded into the
+ *   untrusted one (review WR-05).
+ * - A part whose rows were not reported says how many (review WR-03), right
+ *   after THAT part (review round 2 IN-01 / IN-05), so with two parts the
+ *   count never reads as qualifying the other part's amount.
+ * - A part renders on its COUNT, never its amount (D-07). The caller renders
+ *   the clause only when at least one part has a count.
+ */
+export function buildKeyTrustClause(
+  untrusted: LiveHoldingsPart,
+  unknownStatus: LiveHoldingsPart,
+  render: KeyTrustClauseRender,
+): string {
+  const phrase = (part: LiveHoldingsPart, noun: string): string => {
+    const base = `${render.amount(part.amount)} from ${noun}`;
+    if (part.unavailable === 0) return base;
+    const unit = part.unavailable === 1 ? render.unit[0] : render.unit[1];
+    return `${base} (${render.missing} unavailable for ${part.unavailable} ${unit})`;
+  };
+  const parts: string[] = [];
+  if (untrusted.count > 0) parts.push(phrase(untrusted, UNTRUSTED_KEY_SET_NOUN));
+  if (unknownStatus.count > 0) {
+    parts.push(phrase(unknownStatus, UNKNOWN_KEY_STATUS_SET_NOUN));
+  }
+  return `includes ${parts.join(" and ")}`;
+}
+
+/** Sentence-cases a clause built above, for the standalone sentence form. */
+export function capitalizeFirst(clause: string): string {
+  return clause.charAt(0).toUpperCase() + clause.slice(1);
 }
