@@ -2825,6 +2825,7 @@ Phase 164.9 plan 10 normalised shared TEST's `analytics_service_url` row to a lo
 
 **Requirements**: `[164.9-FANIN-STATUS-NEVER-SET]` (`TODOS.md`, `## FIX NOW`), `[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]`, `[164.9-TEST-ANALYTICS-URL-REARM]`
 **Depends on:** Phase 164.9
+⭐ **Founder decision 2026-09-24 (AskUserQuestion): D-23 "Restore it"** — migration 075's `api_key_disconnected` refusal (409) is restored. FC-3's blocker (the baseline re-dump) cleared with v0.90.0.1 (#855).
 **Plans:** 14 plans (10 waves; planned 2026-09-24, plan-checker passed after 3 revision rounds, 1 info advisory open)
 
 Plans:
