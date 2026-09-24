@@ -845,6 +845,15 @@ describe("[WR-07] csv-finalize: a lost enqueue race tells the OWNER something tr
       vi.mocked(captureToSentry),
       "only the failure that SURVIVED the retry is captured — once, not per attempt",
     ).toHaveBeenCalledTimes(1);
+    // LOW-2 (164.6 review fix): the final failure line says a retry already
+    // happened, and names the code.
+    expect(
+      warnSpy.mock.calls.some(
+        (c: unknown[]) =>
+          /failed after 1 retry/.test(String(c[0])) && /\(code=40001\)/.test(String(c[0])),
+      ),
+      "the surviving 40001 was logged without saying a retry had already been made",
+    ).toBe(true);
 
     const copy = copyWrittenToUser();
 
@@ -888,6 +897,14 @@ describe("[WR-07] csv-finalize: a lost enqueue race tells the OWNER something tr
       enqueueCalls(),
       "a NON-40001 enqueue failure was retried — only a lost race may be",
     ).toBe(1);
+    // LOW-2 (164.6 review fix): a first-attempt failure names its code and
+    // never claims a retry it did not make.
+    expect(
+      warnSpy.mock.calls.some((c: unknown[]) => /\(code=PGRST301\)/.test(String(c[0]))),
+    ).toBe(true);
+    expect(
+      warnSpy.mock.calls.some((c: unknown[]) => /after 1 retry/.test(String(c[0]))),
+    ).toBe(false);
     expect(
       copyWrittenToUser(),
       "the non-40001 arm lost its operator diagnostic — a blanket rewrite, not a branch",

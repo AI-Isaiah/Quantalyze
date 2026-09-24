@@ -2041,6 +2041,9 @@ function enqueueCsvAnalyticsAfter(
       // @audit-skip: see helper-level audit-skip block above. Internal
       // compute-job enqueue — user intent was already audited by
       // finalize_csv_strategy_with_returns earlier.
+      // LOW-2 (164.6 review fix): whether the single retry happened, so the
+      // final failure line says so.
+      let retried = false;
       const { error: enqueueErr } = await retryOnceOnSerializationFailure(
         () =>
           admin.rpc("enqueue_compute_job", {
@@ -2048,17 +2051,19 @@ function enqueueCsvAnalyticsAfter(
             p_kind: "compute_analytics_from_csv",
             p_metadata: { source: "csv-finalize", fmt },
           }),
-        (first) =>
+        (first) => {
+          retried = true;
           console.warn(
             `${opts.logPrefix} enqueue_compute_analytics_from_csv lost a 40001 enqueue race, retrying once [correlation_id=${opts.correlationId}]: ${first.error?.message ?? "(no message)"}`,
-          ),
+          );
+        },
       );
       if (enqueueErr) {
         enqueueFailed = true;
         enqueueErrMessage = enqueueErr.message ?? "(no message)";
         enqueueLostRace = enqueueErr.code === "40001";
         console.warn(
-          `${opts.logPrefix} enqueue_compute_analytics_from_csv failed (non-blocking) [correlation_id=${opts.correlationId}]: ${enqueueErrMessage}`,
+          `${opts.logPrefix} enqueue_compute_analytics_from_csv failed${retried ? " after 1 retry" : ""} (non-blocking) [correlation_id=${opts.correlationId}] (code=${enqueueErr.code ?? "none"}): ${enqueueErrMessage}`,
         );
         // D7 fail-loud (106-04): a silent enqueue failure means no compute job
         // ever runs and the strategy is stuck — the placeholder below breaks

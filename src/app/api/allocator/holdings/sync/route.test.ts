@@ -205,6 +205,10 @@ describe("POST /api/allocator/holdings/sync", () => {
 
     // Internals logged, not surfaced in body.
     expect(consoleSpy).toHaveBeenCalled();
+    // LOW-2 (164.6 review fix): the line names the code, and a first-attempt
+    // failure never claims a retry it did not make.
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("(code=PGRST301)"), expect.anything());
+    expect(consoleSpy).not.toHaveBeenCalledWith(expect.stringContaining("after 1 retry"), expect.anything());
     // OPS-08-TS control: a non-40001 error is never retried.
     expect(mockRpc, "a PGRST301 was retried — only a 40001 may be").toHaveBeenCalledTimes(1);
     consoleSpy.mockRestore();
@@ -268,6 +272,12 @@ describe("POST /api/allocator/holdings/sync", () => {
     ).toHaveBeenCalledTimes(2);
     expect(mockLogAuditEvent, "a failed sync was audited as requested").not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalledTimes(1);
+    // LOW-2 (164.6 review fix): the final error says a retry already happened.
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("RPC failed after 1 retry"),
+      expect.anything(),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("(code=40001)"), expect.anything());
     warnSpy.mockRestore();
     errorSpy.mockRestore();
   });

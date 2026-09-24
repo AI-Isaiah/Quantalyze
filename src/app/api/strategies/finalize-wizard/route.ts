@@ -28,7 +28,10 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError, scrubSeamString } from "@/lib/seam-redaction";
 import { logAuditEventAsUser } from "@/lib/audit";
 import { getCorrelationId } from "@/lib/correlation-id";
-import { retractInheritedRefreshMarker } from "@/lib/ledger-refresh-marker";
+import {
+  retractInheritedRefreshMarker,
+  retractionFailureCode,
+} from "@/lib/ledger-refresh-marker";
 // Phase 140.1.1 / PYAPIFIX-01 — the onboard-reply narrow lives in a
 // dependency-free leaf so the cross-process parity test can exercise THIS
 // predicate with zero mocks. Do not re-inline it here.
@@ -2169,8 +2172,9 @@ async function runLegacyFinalize(args: {
                 );
               }
             } catch (err) {
+              // LOW-2 (164.6 review fix): the SQLSTATE rides in the cause.
               console.error(
-                `[strategies/finalize-wizard] composite refresh-marker retraction failed for ${resolvedId}: ${scrubSeamError(err)}`,
+                `[strategies/finalize-wizard] composite refresh-marker retraction failed for ${resolvedId} (code=${retractionFailureCode(err)}): ${scrubSeamError(err)}`,
               );
               captureToSentry(err, {
                 tags: {

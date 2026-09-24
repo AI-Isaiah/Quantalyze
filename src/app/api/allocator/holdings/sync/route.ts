@@ -69,15 +69,20 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // `compute_jobs_one_inflight_per_kind_api_key` partial unique index
   // (23505 → { already_inflight, next_attempt_at } per f8).
   const supabase = await createClient();
+  // LOW-2 (164.6 review fix): whether the single retry happened, so the final
+  // error line says so instead of reading like a first-attempt failure.
+  let retried = false;
   const { data, error } = await retryOnceOnSerializationFailure(
     () =>
       supabase.rpc("request_allocator_holdings_sync", {
         p_api_key_id: api_key_id,
       }),
-    (first) =>
+    (first) => {
+      retried = true;
       console.warn(
         `[allocator/holdings/sync] 40001 lost enqueue race for user ${user.id} key ${api_key_id}, retrying once: ${first.error?.message ?? "(no message)"}`,
-      ),
+      );
+    },
   );
 
   if (error) {
@@ -93,7 +98,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       );
     }
     console.error(
-      `[allocator/holdings/sync] RPC failed for user ${user.id} key ${api_key_id}:`,
+      `[allocator/holdings/sync] RPC failed${retried ? " after 1 retry" : ""} for user ${user.id} key ${api_key_id} (code=${error.code ?? "none"}):`,
       error,
     );
     return NextResponse.json(

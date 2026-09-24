@@ -107,7 +107,7 @@ const STATE = vi.hoisted(() => ({
   // read-only no-op.
   computeJobsRow: null as { metadata: Record<string, unknown> | null } | null,
   computeJobsReadError: null as { message: string } | null,
-  computeJobsUpdateError: null as { message: string } | null,
+  computeJobsUpdateError: null as { message: string; code?: string } | null,
   computeJobsUpdates: [] as Array<{
     patch: Record<string, unknown>;
     eq: [string, unknown];
@@ -417,9 +417,15 @@ vi.mock("@/lib/supabase/admin", () => ({
             }),
           }),
           update: (patch: Record<string, unknown>) => ({
-            eq: async (col: string, val: unknown) => {
+            eq: (col: string, val: unknown) => {
               STATE.computeJobsUpdates.push({ patch, eq: [col, val] });
-              return { data: null, error: STATE.computeJobsUpdateError };
+              // LOW-1: the helper asks for the updated rows back.
+              return {
+                select: async () => ({
+                  data: STATE.computeJobsUpdateError ? null : [{ id: val }],
+                  error: STATE.computeJobsUpdateError,
+                }),
+              };
             },
           }),
         };
@@ -2697,7 +2703,7 @@ describe("POST /api/strategies/finalize-wizard — [161.1-D13] composite refresh
     vi.spyOn(console, "warn").mockImplementation(() => {});
     routeThroughLegacyFinalize();
     STATE.computeJobsRow = { metadata: { source: "ledger-refresh-composite" } };
-    STATE.computeJobsUpdateError = { message: "update denied" };
+    STATE.computeJobsUpdateError = { message: "update denied", code: "42501" };
     STATE.runAfterCallback = true;
 
     const POST = await importPost();
@@ -2726,6 +2732,8 @@ describe("POST /api/strategies/finalize-wizard — [161.1-D13] composite refresh
     expect(errSpy).toHaveBeenCalledWith(
       expect.stringContaining("composite refresh-marker retraction failed"),
     );
+    // LOW-2 (164.6 review fix): the log line names the SQLSTATE from the cause.
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("(code=42501)"));
     fetchSpy.mockRestore();
   });
 });

@@ -58,7 +58,17 @@ const MARKER_SET: ReadonlySet<string> = new Set(LEDGER_REFRESH_JOB_SOURCES);
  * Error contract: a read or update error THROWS an `Error` carrying the
  * PostgREST error as `cause`. The CALLER owns `console.error` +
  * `captureToSentry` under its own tag, and must not fail the user's request:
- * the enqueue already succeeded.
+ * the enqueue already succeeded. `retractionFailureCode` reads the SQLSTATE
+ * back out of that `cause` for the caller's log line.
+ *
+ * ⛔ Two outcomes that would otherwise read as "nothing to retract" THROW too
+ * (164.6 review fix, LOW-1):
+ *   * NO ROW for the id. `enqueue_compute_job` returned that id a moment ago,
+ *     so an unreadable row is an anomaly, not an unmarked job. A job carrying
+ *     `metadata: null` is still an ordinary "no marker".
+ *   * an UPDATE that matched NO row. Without `.select`, PostgREST reports
+ *     success for zero rows, and the marker would stay in place under a
+ *     `retracted: true` result.
  */
 export async function retractInheritedRefreshMarker(
   admin: SupabaseClient,
@@ -75,6 +85,11 @@ export async function retractInheritedRefreshMarker(
   if (readErr) {
     throw new Error("compute_jobs metadata read failed", { cause: readErr });
   }
+  if (row === null || row === undefined) {
+    throw new Error(
+      "compute_jobs row not readable for the job enqueue_compute_job just returned; an inherited marker may still be in place",
+    );
+  }
 
   const metadata: unknown = row?.metadata;
   if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
@@ -87,7 +102,7 @@ export async function retractInheritedRefreshMarker(
 
   // @audit-skip: job-row provenance metadata on a worker queue row, not a
   // user-visible mutation; the caller's route audits the user's intent.
-  const { error: updateErr } = await admin
+  const { data: updated, error: updateErr } = await admin
     .from("compute_jobs")
     .update({
       metadata: {
@@ -96,9 +111,29 @@ export async function retractInheritedRefreshMarker(
         correlation_id: correlationId,
       },
     })
-    .eq("id", jobId);
+    .eq("id", jobId)
+    .select("id");
   if (updateErr) {
     throw new Error("compute_jobs metadata update failed", { cause: updateErr });
   }
+  if (!Array.isArray(updated) || updated.length === 0) {
+    throw new Error(
+      `compute_jobs metadata update matched no row; the inherited ${source} marker was NOT retracted`,
+    );
+  }
   return { retracted: true, marker: source };
+}
+
+/**
+ * The SQLSTATE a `retractInheritedRefreshMarker` failure carries in its
+ * `cause` (the PostgREST error), for the caller's log line: the thrown
+ * message is generic by design, and the code is what tells a revoked
+ * privilege from a lost row (164.6 review fix, LOW-2). `"none"` when the
+ * failure carries no code, e.g. the two no-row outcomes above.
+ */
+export function retractionFailureCode(err: unknown): string {
+  const cause: unknown = err instanceof Error ? err.cause : undefined;
+  const code =
+    typeof cause === "object" && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code.length > 0 ? code : "none";
 }

@@ -117,8 +117,11 @@ const {
   computeJobsRead: {
     data: null as { metadata: Record<string, unknown> | null } | null,
     error: null as { message: string } | null,
+    // IN-04 (164.6 review fix): a read that never settles, so the bounded
+    // retraction's budget is the only thing that can end the wait.
+    hang: false,
   },
-  computeJobsUpdateResult: { error: null as { message: string } | null },
+  computeJobsUpdateResult: { error: null as { message: string; code?: string } | null },
   mockComputeJobsUpdate: vi.fn(),
   ownershipQuery: {
     table: null as string | null,
@@ -269,16 +272,25 @@ vi.mock("@/lib/supabase/admin", () => ({
           select: (_cols: string) => ({
             eq: (_col: string, _val: unknown) => ({
               maybeSingle: () =>
-                Promise.resolve({
-                  data: computeJobsRead.data,
-                  error: computeJobsRead.error,
-                }),
+                computeJobsRead.hang
+                  ? new Promise(() => {})
+                  : Promise.resolve({
+                      data: computeJobsRead.data,
+                      error: computeJobsRead.error,
+                    }),
             }),
           }),
           update: (patch: Record<string, unknown>) => ({
             eq: (col: string, val: unknown) => {
               mockComputeJobsUpdate(patch, col, val);
-              return Promise.resolve({ error: computeJobsUpdateResult.error });
+              // LOW-1: the helper asks for the updated rows back.
+              return {
+                select: (_cols: string) =>
+                  Promise.resolve({
+                    data: computeJobsUpdateResult.error ? null : [{ id: val }],
+                    error: computeJobsUpdateResult.error,
+                  }),
+              };
             },
           }),
         };
@@ -387,6 +399,7 @@ describe("POST /api/keys/sync", () => {
     // retraction is a read-only no-op unless a test marks the row.
     computeJobsRead.data = { metadata: { source: "keys/sync" } };
     computeJobsRead.error = null;
+    computeJobsRead.hang = false;
     computeJobsUpdateResult.error = null;
 
     // Default mock implementations
@@ -927,7 +940,7 @@ describe("POST /api/keys/sync", () => {
       it("a failed retraction never changes the 202, and is LOUD under its own Sentry tag", async () => {
         composite();
         computeJobsRead.data = { metadata: { source: "ledger-refresh-composite" } };
-        computeJobsUpdateResult.error = { message: "update denied" };
+        computeJobsUpdateResult.error = { message: "update denied", code: "42501" };
         const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
         const { captureToSentry } = await import("@/lib/sentry-capture");
 
@@ -939,6 +952,12 @@ describe("POST /api/keys/sync", () => {
         expect(mockComputeJobsUpdate).toHaveBeenCalledTimes(1);
         expect(errSpy).toHaveBeenCalledWith(
           expect.stringContaining("composite refresh-marker retraction failed"),
+          expect.anything(),
+        );
+        // LOW-2 (164.6 review fix): the thrown message is generic; the log line
+        // must carry the PostgREST SQLSTATE that rides in its cause.
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining("(code=42501)"),
           expect.anything(),
         );
         expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
@@ -956,6 +975,52 @@ describe("POST /api/keys/sync", () => {
         // short-circuit the rest of the branch.
         expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
         errSpy.mockRestore();
+      });
+
+      // IN-04 (164.6 review fix): the retraction is bounded. A read that never
+      // settles must not hold the user's 202 past the budget, and the overrun
+      // is LOUD under its OWN tag, because the marker may still be in place.
+      it("a retraction that overruns its 5 s budget still answers 202, and the overrun is LOUD under its own tag", async () => {
+        composite();
+        computeJobsRead.hang = true;
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const { captureToSentry } = await import("@/lib/sentry-capture");
+        const { POST } = await import("./route");
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          let settled = false;
+          const pending = POST(makeReq({ strategy_id: TEST_STRATEGY_ID })).then((r) => {
+            settled = true;
+            return r;
+          });
+          // One millisecond short of the budget the response is still waiting.
+          // Without this, a route that never awaited the retraction at all
+          // would pass every assertion below.
+          await vi.advanceTimersByTimeAsync(4_999);
+          expect(settled, "the 202 went out before the retraction budget elapsed").toBe(false);
+          await vi.advanceTimersByTimeAsync(1);
+          const res = await pending;
+
+          expect(res.status).toBe(202);
+          expect(await res.json()).toMatchObject({ ok: true, composite: true });
+          expect(mockComputeJobsUpdate).not.toHaveBeenCalled();
+          expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+            expect.any(Error),
+            expect.objectContaining({
+              tags: { op: "keys-sync.composite_refresh_marker_retract_timeout" },
+              extra: {
+                strategy_id: TEST_STRATEGY_ID,
+                job_id: TEST_JOB_ID,
+                correlation_id: TEST_CORRELATION_ID,
+              },
+            }),
+          );
+          expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("exceeded 5000 ms"));
+          expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+          errSpy.mockRestore();
+        }
       });
     });
   });

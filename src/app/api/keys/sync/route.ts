@@ -16,8 +16,23 @@ import { isUuid } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
-import { retractInheritedRefreshMarker } from "@/lib/ledger-refresh-marker";
+import {
+  retractInheritedRefreshMarker,
+  retractionFailureCode,
+} from "@/lib/ledger-refresh-marker";
 import type { User } from "@supabase/supabase-js";
+
+/**
+ * Phase 164.6 review fix (IN-04): the longest the composite kickoff waits for
+ * the inherited-marker retraction before answering its 202. The retraction is
+ * best-effort and never changes the response, but it is a read plus, when a
+ * marker is present, an UPDATE that can queue behind a claiming worker's row
+ * lock, all on the user's synchronous request. Same bounded-race shape as
+ * `SNAPSHOT_BUDGET_MS` in src/app/api/intro/route.ts. Deliberately NOT moved
+ * into `after()`: a retraction that lands after the response widens the
+ * post-claim window [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT] already records.
+ */
+const MARKER_RETRACTION_BUDGET_MS = 5_000;
 
 /**
  * POST /api/keys/sync — kicks off trade sync + analytics computation.
@@ -374,23 +389,58 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // already succeeded, so a failed retraction never changes the 202, but it
       // is LOUD under its own tag. The read-modify-write residual (161.1-D12) is
       // inherited; see `retractInheritedRefreshMarker`'s JSDoc.
+      //
+      // BOUNDED (164.6 review fix, IN-04) by `MARKER_RETRACTION_BUDGET_MS`. Past
+      // the budget the 202 goes out and the overrun is LOUD under its OWN tag,
+      // because a retraction that did not finish may have left the marker in
+      // place. The retraction itself is not cancelled; a later rejection is
+      // absorbed by the race and was already reported as the overrun.
+      let retractionTimer: ReturnType<typeof setTimeout> | undefined;
       try {
         // @audit-skip: job-row provenance metadata; user intent is audited by the sync.start event below.
-        const retraction = await retractInheritedRefreshMarker(admin, rpcData, correlation_id);
-        if (retraction.retracted) {
+        const outcome = await Promise.race([
+          retractInheritedRefreshMarker(admin, rpcData, correlation_id).then((retraction) => ({
+            kind: "done" as const,
+            retraction,
+          })),
+          new Promise<{ kind: "timeout" }>((resolve) => {
+            retractionTimer = setTimeout(
+              () => resolve({ kind: "timeout" }),
+              MARKER_RETRACTION_BUDGET_MS,
+            );
+          }),
+        ]);
+        if (outcome.kind === "timeout") {
+          console.error(
+            `[keys/sync] composite refresh-marker retraction exceeded ${MARKER_RETRACTION_BUDGET_MS} ms for ${strategy_id}; answering 202 without it, and the marker may still be in place`,
+          );
+          captureToSentry(
+            new Error(
+              `keys/sync composite refresh-marker retraction exceeded ${MARKER_RETRACTION_BUDGET_MS} ms`,
+            ),
+            {
+              tags: { op: "keys-sync.composite_refresh_marker_retract_timeout" },
+              extra: { strategy_id, job_id: rpcData, correlation_id },
+            },
+          );
+        } else if (outcome.retraction.retracted) {
           console.warn(
-            `[keys/sync] retracted inherited ${retraction.marker} marker on job=${rpcData} for strategy=${strategy_id}`,
+            `[keys/sync] retracted inherited ${outcome.retraction.marker} marker on job=${rpcData} for strategy=${strategy_id}`,
           );
         }
       } catch (err) {
+        // LOW-2 (164.6 review fix): the thrown message is generic by design; the
+        // PostgREST SQLSTATE rides in `cause`, so it is named here.
         console.error(
-          `[keys/sync] composite refresh-marker retraction failed for ${strategy_id}:`,
+          `[keys/sync] composite refresh-marker retraction failed for ${strategy_id} (code=${retractionFailureCode(err)}):`,
           scrubSeamError(err),
         );
         captureToSentry(err, {
           tags: { op: "keys-sync.composite_refresh_marker_retract" },
           extra: { strategy_id, job_id: rpcData, correlation_id },
         });
+      } finally {
+        clearTimeout(retractionTimer);
       }
 
       // Idempotent double-submit is handled by the compute_jobs partial unique
