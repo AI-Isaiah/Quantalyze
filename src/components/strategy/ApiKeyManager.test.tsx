@@ -4198,7 +4198,7 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
   // 167.2-REVIEW-SFH H-2: hand-typed from the UI-SPEC review-fix rows.
   const EMPTY_NOLINK_ORACLE = "No API keys connected.";
   const SHAPE_UNKNOWN_ORACLE =
-    "We could not confirm how this strategy's keys are set up, so syncing and adding keys are paused on this page. Reload this page to try again.";
+    "We could not confirm whether this strategy is a composite, so keys are not linked or synced from this card. Contact support@quantalyze.com to link a key or start a sync.";
 
   function keyRow(overrides: Partial<Record<string, unknown>> = {}) {
     return {

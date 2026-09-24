@@ -245,12 +245,18 @@ export const COMPOSITE_CARD_NOTE =
 
 /**
  * KCS-SHAPE-UNKNOWN. Rendered directly under the header when the edit page
- * could not read the strategy's member count (`keyShape === "unknown"`). The
- * card then offers no Resync, Use & Sync or Add Key (it might be a composite),
- * and without this line the missing controls were a silent dead end.
+ * could not establish whether the strategy is a composite
+ * (`keyShape === "unknown"`). The card then offers no Resync, Use & Sync or
+ * Add Key (it might be a composite), and without this line the missing
+ * controls were a silent dead end.
+ * Review-fix round 2 (167.2-REVIEW-R2 WR-01): it used to say "Reload this page
+ * to try again", which is false for the DETERMINISTIC ways to reach this
+ * shape (a stitch on record for an unlinked strategy; a job history still
+ * full at the RPC cap). It now says what the card cannot tell and names the
+ * one path that works in every case: support.
  */
 export const SHAPE_UNKNOWN_CARD_NOTE =
-  "We could not confirm how this strategy's keys are set up, so syncing and adding keys are paused on this page. Reload this page to try again.";
+  "We could not confirm whether this strategy is a composite, so keys are not linked or synced from this card. Contact support@quantalyze.com to link a key or start a sync.";
 
 /**
  * KCS-EMPTY-NOLINK. The empty state on a card that offers no Add Key (a

@@ -135,7 +135,7 @@ describe("KCS-SLOW (167.2-REVIEW WR-07): the in-flight panel names its own limit
 describe("Review-fix round 1 (2026-09-24): the S3 strings authored for the review findings", () => {
   it("KCS-SHAPE-UNKNOWN (SFH H-2)", () => {
     expect(SHAPE_UNKNOWN_CARD_NOTE).toBe(
-      "We could not confirm how this strategy's keys are set up, so syncing and adding keys are paused on this page. Reload this page to try again.",
+      "We could not confirm whether this strategy is a composite, so keys are not linked or synced from this card. Contact support@quantalyze.com to link a key or start a sync.",
     );
   });
 
