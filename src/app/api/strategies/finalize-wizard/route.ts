@@ -1694,11 +1694,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   }
 
   // CONTRIB-02 (Phase 110) — a single-key API contribution routes through the
-  // LEGACY finalize path, NOT the unified arm below. The unified arm delegates to
-  // process_key_long, which enqueues analytics but NEVER promotes strategies.status
-  // (only strategy_verifications advances — W1 note, 110-01). Routed there, a
-  // contribution would never reach status='private'. runLegacyFinalize calls
-  // finalize_wizard_strategy with p_terminal_status='private' AND enqueues
+  // LEGACY finalize path, NOT the unified arm below. process_key_long enqueues
+  // analytics but NEVER promotes strategies.status (only strategy_verifications
+  // advances — W1 note, 110-01). The unified arm now promotes through the shared
+  // `callFinalizeWizardRpc`, but it enqueues no sync_trades and fires no
+  // after() fan-out, so the contribution still takes the legacy arm.
+  // runLegacyFinalize calls finalize_wizard_strategy with
+  // p_terminal_status='private' AND enqueues
   // sync_trades — exactly what a private contribution needs (owner-visible KPIs,
   // no admin review-queue signal). The apiKeyId scope-broadening probe (above) has
   // already run, so the contribution key is re-checked identically to the manager
@@ -1807,26 +1809,58 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     },
     apiKeyId,
     source: resolvedSource,
+    supabase,
+    fields,
+    terminalStatus,
   });
 });
 
 /**
- * M-18 — legacy finalize path. Calls the SECURITY DEFINER RPC, schedules the
- * after() side-effect fan-out, and returns the legacy 200 envelope. Pulled
- * out of POST() so the legacy code path is grep-able as `runLegacyFinalize`
- * for the eventual M-9 cleanup.
+ * The ONE caller of the SECURITY DEFINER `finalize_wizard_strategy` RPC. It is
+ * what promotes a wizard draft out of `(source='wizard', status='draft')` to
+ * its terminal status (latest def: migration
+ * 20260716130500_finalize_terminal_status_param.sql). Both finalize arms call
+ * it, so the argument list, the SQLSTATE→envelope mapping and the replay rule
+ * cannot drift apart between them.
+ *
+ * WHY IT IS SHARED. The unified single-key arm used to skip this RPC entirely
+ * (latent since Phase 106 Stage B): `postProcessKey` enqueues analytics, but
+ * nothing on the Python side writes `strategies.status`, so a manager's
+ * single-key submit answered `status: 'pending_review'` while the row stayed a
+ * draft. Its wizard metadata was never written, it never reached the admin
+ * queue, and `cleanup-wizard-drafts` deleted it after 7 days. Routing every arm
+ * through this one function is what makes that shape unrepeatable.
+ *
+ * Returns the finalized id and the status the RPC WROTE, or the error envelope
+ * to answer with. The status is the `p_terminal_status` argument, which the RPC
+ * writes verbatim and RAISEs on before any write if it is outside
+ * ('pending_review','private').
+ *
+ * REPLAYS (`acceptAlreadyPromoted`). The RPC RAISEs 22023 on any non-draft row,
+ * so a double click, a reload or a Retry after a partial failure would read as
+ * "not in a finalizable state". When the caller opts in, a 22023 is followed
+ * by an owner-scoped re-read, and a row that is ALREADY
+ * `(source='wizard', status=<the requested terminal status>)` answers success
+ * with that status. Any other state keeps the 409. A failed re-read cannot
+ * confirm either way, so it takes the generic 500 tail, whose copy does not
+ * claim nothing was saved.
  */
-// DEPRECATED: remove after 2026-05-15 (PR-D + 7d)
-async function runLegacyFinalize(args: {
+async function callFinalizeWizardRpc(args: {
   supabase: Awaited<ReturnType<typeof createClient>>;
-  user: User;
+  userId: string;
   fields: ValidatedPayload;
-  // CONTRIB-02 (Phase 110) — the terminal status the RPC writes. Defaults to
-  // 'pending_review' (manager flow, byte-identical to pre-phase behavior); the
-  // contribution branch passes 'private'. The RPC RAISEs on anything else.
-  terminalStatus?: "pending_review" | "private";
-}): Promise<NextResponse> {
-  const { supabase, user, fields, terminalStatus = "pending_review" } = args;
+  terminalStatus: "pending_review" | "private";
+  acceptAlreadyPromoted: boolean;
+}): Promise<
+  | {
+      strategyId: string;
+      status: "pending_review" | "private";
+      replayed: boolean;
+    }
+  | NextResponse
+> {
+  const { supabase, userId, fields, terminalStatus, acceptAlreadyPromoted } =
+    args;
   // CONTRIB-02: the generated database.types.ts has not been regenerated for the
   // new trailing p_terminal_status parameter (110-01 migration
   // 20260716130500_finalize_terminal_status_param.sql), so the typed .rpc()
@@ -1845,7 +1879,7 @@ async function runLegacyFinalize(args: {
     }>
   )("finalize_wizard_strategy", {
     p_strategy_id: fields.strategy_id,
-    p_user_id: user.id,
+    p_user_id: userId,
     p_name: fields.name,
     p_description: fields.description,
     p_category_id: fields.category_id,
@@ -1891,7 +1925,37 @@ async function runLegacyFinalize(args: {
         { status: 403, headers: NO_STORE_HEADERS },
       );
     }
-    if (error.code === "22023") {
+    // Replay recognition (see the docblock). Runs ONLY on 22023, the SQLSTATE
+    // the RPC raises for a non-draft row, and only for callers that opted in.
+    let replayUnconfirmed = false;
+    if (error.code === "22023" && acceptAlreadyPromoted) {
+      const { data: currentRow, error: rereadErr } = await supabase
+        .from("strategies")
+        .select("status, source")
+        .eq("id", fields.strategy_id)
+        .eq("user_id", userId)
+        .maybeSingle();
+      if (rereadErr) {
+        replayUnconfirmed = true;
+        console.error(
+          "[strategies/finalize-wizard] replay re-read failed; cannot confirm the draft's state:",
+          scrubSeamError(rereadErr),
+        );
+      } else if (
+        currentRow?.source === "wizard" &&
+        currentRow.status === terminalStatus
+      ) {
+        console.info(
+          `[strategies/finalize-wizard] finalize replay: ${fields.strategy_id} is already ${terminalStatus}; answering success`,
+        );
+        return {
+          strategyId: fields.strategy_id,
+          status: terminalStatus,
+          replayed: true,
+        };
+      }
+    }
+    if (error.code === "22023" && !replayUnconfirmed) {
       return NextResponse.json(
         {
           // 153.1-05 / D-34 — UPPERCASED from `draft_state_invalid`, which is a
@@ -1928,8 +1992,44 @@ async function runLegacyFinalize(args: {
     );
   }
 
-  const resolvedId =
-    typeof finalizedId === "string" ? finalizedId : fields.strategy_id;
+  return {
+    strategyId:
+      typeof finalizedId === "string" ? finalizedId : fields.strategy_id,
+    status: terminalStatus,
+    replayed: false,
+  };
+}
+
+/**
+ * M-18 — legacy finalize path. Calls the SECURITY DEFINER RPC, schedules the
+ * after() side-effect fan-out, and returns the legacy 200 envelope. Pulled
+ * out of POST() so the legacy code path is grep-able as `runLegacyFinalize`
+ * for the eventual M-9 cleanup.
+ */
+// DEPRECATED: remove after 2026-05-15 (PR-D + 7d)
+async function runLegacyFinalize(args: {
+  supabase: Awaited<ReturnType<typeof createClient>>;
+  user: User;
+  fields: ValidatedPayload;
+  // CONTRIB-02 (Phase 110) — the terminal status the RPC writes. Defaults to
+  // 'pending_review' (manager flow, byte-identical to pre-phase behavior); the
+  // contribution branch passes 'private'. The RPC RAISEs on anything else.
+  terminalStatus?: "pending_review" | "private";
+}): Promise<NextResponse> {
+  const { supabase, user, fields, terminalStatus = "pending_review" } = args;
+  const finalized = await callFinalizeWizardRpc({
+    supabase,
+    userId: user.id,
+    fields,
+    terminalStatus,
+    // The legacy arm keeps its pre-existing replay answer (409
+    // DRAFT_STATE_INVALID): a replay here would re-run the after() fan-out,
+    // founder email included. Only the unified arm opts in.
+    acceptAlreadyPromoted: false,
+  });
+  if (finalized instanceof NextResponse) return finalized;
+
+  const resolvedId = finalized.strategyId;
 
   // ── OWN-03 (Phase 150) — persist the capital mark ────────────────────────
   //
@@ -2226,7 +2326,7 @@ async function runLegacyFinalize(args: {
       strategy_id: resolvedId,
       // CONTRIB-02 — return the ACTUAL terminal status the RPC wrote ('private'
       // on the contribution branch, 'pending_review' for the manager flow).
-      status: terminalStatus,
+      status: finalized.status,
       // 151 specialist F-3 — present ONLY when the caller asked for a capital
       // mark and it did not land. The finalize still succeeded; this says the
       // ONE metadata field was dropped, so the strategy is unmarked (therefore
@@ -2239,7 +2339,8 @@ async function runLegacyFinalize(args: {
 }
 
 /**
- * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
+ * Phase 19 / BACKBONE-01 unified path. Promotes the draft through
+ * `callFinalizeWizardRpc`, then delegates to /process-key with
  * `flow_type=onboard` (finalize step). The force-refresh permissions probe
  * has already run in the caller (Open Question 1 — RETAINED at this layer).
  *
@@ -2334,6 +2435,10 @@ async function unifiedFinalizeWizardHandler(args: {
   payload: Record<string, unknown>;
   apiKeyId: string | null;
   source: string;
+  /** The owner-scoped client and validated fields `callFinalizeWizardRpc` needs. */
+  supabase: Awaited<ReturnType<typeof createClient>>;
+  fields: ValidatedPayload;
+  terminalStatus: "pending_review" | "private";
 }): Promise<NextResponse> {
   // Finding 6: the unified backbone delegates to process_key_long — a SINGLE-KEY
   // derive that cannot honestly reconstruct a multi-key composite. Composite
@@ -2385,6 +2490,35 @@ async function unifiedFinalizeWizardHandler(args: {
       { status: 409, headers: NO_STORE_HEADERS },
     );
   }
+
+  // PROMOTE THE DRAFT. `process_key_long` enqueues analytics and advances
+  // `strategy_verifications`, but it never writes `strategies.status` or the
+  // wizard metadata; only `finalize_wizard_strategy` does. Before this call
+  // existed the arm answered 'pending_review' over a row still at 'draft'.
+  //
+  // ORDER: the RPC runs BEFORE `postProcessKey`, the same order as the legacy
+  // arm (RPC first, side effects after). Three reasons:
+  //   1. The RPC is the transactional gate (ownership, source='wizard',
+  //      status='draft'). If it refuses, nothing is enqueued for a row that
+  //      was never promoted, and the answer is the RPC's own envelope, never a
+  //      'pending_review' claim.
+  //   2. If `postProcessKey` fails AFTER a successful promotion, the user's
+  //      Retry reaches the RPC again, the replay rule (`acceptAlreadyPromoted`)
+  //      recognises the promoted row as success, and the retry goes on to
+  //      `postProcessKey`. The reverse order has no such recovery: a failed
+  //      RPC after a queued job leaves a draft the cleanup cron deletes.
+  //   3. For okx/binance/bybit keys the RPC inserts its own 'validated'
+  //      verification row. Running it first makes Python's onboard row the
+  //      NEWER one, and the trust-tier readers pick the most recent row per
+  //      strategy, so the row that tracks the real job is the one they show.
+  const finalized = await callFinalizeWizardRpc({
+    supabase: args.supabase,
+    userId: args.userId,
+    fields: args.fields,
+    terminalStatus: args.terminalStatus,
+    acceptAlreadyPromoted: true,
+  });
+  if (finalized instanceof NextResponse) return finalized;
 
   const result = await postProcessKey({
     flow_type: "onboard",
@@ -2441,13 +2575,10 @@ async function unifiedFinalizeWizardHandler(args: {
   // instead of probing an opaque `Record<string, unknown>`. A backbone-
   // side rename of `verification_id` / `queued` now surfaces here as a
   // missing branch, not as a silent null/false fallback.
-  // CONTRIB-02 (Phase 110) — the two `status: "pending_review"` literals below
-  // are correct and NOT a missed branch: contributions are diverted to
-  // runLegacyFinalize in the POST handler BEFORE this unified arm, so
-  // unifiedFinalizeWizardHandler is reached ONLY by the manager flow. The unified
-  // backbone (process_key_long) never writes a 'private' terminal status, so
-  // there is no terminalStatus to thread here — this arm always terminates
-  // 'pending_review' by construction.
+  // Both 200 bodies carry `finalized.status`, the status `finalize_wizard_strategy`
+  // wrote (or, on a replay, the status the re-read found). They used to carry
+  // a hard-coded 'pending_review' literal, which is how this arm reported a
+  // promotion that never happened.
   const upstream = result.body;
   // OWN-03 — the dropped-mark sidecar, spelled ONCE and spread into both 200
   // arms. Emitted ONLY when the caller asked for a mark, so every existing
@@ -2461,7 +2592,7 @@ async function unifiedFinalizeWizardHandler(args: {
         {
           ok: true,
           strategy_id: args.strategy_id,
-          status: "pending_review",
+          status: finalized.status,
           verification_id: upstream.verification_id,
           queued: true,
           ...markSidecar,
@@ -2474,7 +2605,7 @@ async function unifiedFinalizeWizardHandler(args: {
       {
         ok: true,
         strategy_id: args.strategy_id,
-        status: "pending_review",
+        status: finalized.status,
         verification_id: upstream.verification_id ?? null,
         queued: false,
         code: upstream.code,
