@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "164.6"
 current_phase_name: "GATE-HYGIENE — pruned to criteria 2, 3, 4"
 status: "Phase 164.9 shipped — PR #837"
-stopped_at: Phase 164.6 context gathered
-last_updated: "2026-09-23T22:41:32.757Z"
-last_activity: 2026-09-22
+stopped_at: Completed 164.6-01-PLAN.md
+last_updated: "2026-09-24T04:25:00.000Z"
+last_activity: 2026-09-24
 last_activity_desc: "Phase 164.9 TESTISOLATION shipped as PR #837; NOT marked complete — criterion 8 is post-merge by construction. Phase 167 CREDTRUST context locked 2026-09-22. Plan 167-01 (wizard SIGN_IN_FAILED mint) shipped. Plan 167-02 (D-09/D-10, six retry-disposition guards on allocator_positions.py's MT5/sFOX arms + AST roster case) shipped this session, commits 5c48916a + 26c83dc3 — see 167-02-SUMMARY.md."
 state_head: 93d2ab394092fca23d41972ae4e573f84d58fe99
 progress:
   total_phases: 50
   completed_phases: 32
   total_plans: 249
-  completed_plans: 239
+  completed_plans: 240
   percent: 64
 ---
 
@@ -179,8 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.6 (gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers) — READY TO EXECUTE
-Plan: Not started
+Phase: 164.6 (gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers) — EXECUTING
+Plan: 1 of 5 DONE (`164.6-01-SUMMARY.md`, OPS-08-TS: a 40001 is retried once at csv-finalize and holdings sync)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
@@ -498,7 +498,7 @@ Status: Executing Phase 164.6.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-24 — Phase 164.6.1 execution started
+Last activity: 2026-09-24 — Phase 164.6 plan 01 (OPS-08-TS) executed
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1166,6 +1166,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.1.1.1 P01 | ~50 min | 3 tasks | 1 created, 3 modified |
 | Phase 164.5.1.4 P01 | ~41 min | 2 tasks | 1 created |
 | Phase 164.5.1.3 P01 | ~20 min | 3 tasks | 3 modified |
+| Phase 164.6 P01 | ~11 min | 3 tasks | 2 created, 4 modified |
 
 ## Accumulated Context
 
@@ -2300,9 +2301,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-23T21:33:55.298Z
-**Stopped At:** Phase 164.6 context gathered
-**Resume File:** .planning/phases/164.6-gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers/164.6-CONTEXT.md
+**Last Date:** 2026-09-24T04:25:00.000Z
+**Stopped At:** Completed 164.6-01-PLAN.md
+**Resume File:** .planning/phases/164.6-gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers/164.6-02-PLAN.md
 
 **Last Date:** 2026-09-19T20:05:00.000Z
 **Stopped At:** Completed 164.5.1.4-04-PLAN.md (Phase 164.5.1.4 SYNCCURSOR, plan 04 of 4, wave 4 — the closure; isolation `worktree`, branch `feat/164.5.1.4-synccursor`). `files_modified` was `TODOS.md` alone; no code, test, migration, `VERSION`, `package.json` or `CHANGELOG.md` was touched. **`SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01` is disposed of in TWO statements rather than one, deliberately:** CLOSED IN CODE 2026-09-19, and explicitly NOT closed in production, because the thing the entry tracks is the stranding in production and that is not closed until the migration applies there. Its measured history, reachability list and the PRE-EXISTING-AND-DELIBERATE note are kept unchanged; the "not fixable by tweaking `should_advance_cursor`" note is now CONFIRMED rather than inherited (the expression is byte-identical to `origin/main` and 0 removed lines in the branch's whole `cron.py` diff touch it, `synced_count` or `update_data`); and the entry's stale research instruction is ANSWERED instead of left open — migration 045 is an `ALTER TABLE api_keys ADD COLUMN`, so it is per-KEY, the very granularity that causes this defect, and the fenced `advance_sync_cursor` RPC takes `p_api_key_id` first, so it is the right mechanism on the wrong axis. The TRIGGER is re-pointed at production: both new Supabase paths fail open, so while the marker table is absent every strategy falls back to the key cursor and that fall-back state IS the defect; confirm from the `Supabase Migrate` workflow run for the merge commit, never from the file being in the tree. **VERDICT 1 — the per-KEY cursor is SUPPLEMENTED** (not replaced, not merely kept): it is still the fallback for every strategy with no marker row, still carries `account_balance_usdt` on the same `api_keys` UPDATE, and still is the only cursor for a key with no eligible strategies, while the marker took over the resume FLOOR and the per-strategy HOLD; evidence is the byte-identical expression, the 0-removed-lines diff check, the 3 unchanged `TestC0198CursorOnlyAdvancesWhenStored` members and the two calibrated gates. **VERDICT 2 — SYNCADMIT is unblocked BY THE MIGRATION APPLYING TO PROD, not by this branch merging**; the repo has the fix, production does not until `apply-test` and then the `Production`-gated `apply` have run, and a widening deployed ahead of the table re-opens the closed path silently. **NON-REGRESSION, mechanical:** `gate_governor_files_changed = 0` against the branch base across `mutation-runner/run.mjs`, `mutation-runner-floors.test.ts`, `vac08-ledger-baseline.txt`, `lint-app-guc.mjs`, `lint-sql-gates.mjs`; `FILES_FLOOR` 47 / `ARMS_FLOOR` 402 / `WAIVED_CEILING` 0 all UNMOVED; hygiene OK over 6673 tracked files. The SUMMARY carries the written reviewer handoff with all three reviewers named individually, the additive claim re-derived (`functions_created=0 existing_tables_altered=0 destructive_statements=0 create_table=1 cron_schedule=0 raise_arms=7`), the deploy-order skew, and the note that a red VAC-08 or applied-ness probe on this PR is expected by construction and must never be cleared by widening a baseline. ⚠️ **Recorded rather than glossed:** `c93ce86a` closed the migration reviewers' findings but touches the MIGRATION FILE ONLY — the two `cron.py` findings from the same round are NOT in this branch's committed history at `4af31b8f` and must be confirmed committed before the merge. One task commit `4d71155c`, NOT pushed. ⛔ No database command of any kind; nothing applied, merged or pushed. `roadmap.update-plan-progress 164.5.1.4` ran and was CLEAN (3/4 → 4/4 plus the plan-04 checkbox, no collateral); `state.advance-plan` refused on an ambiguous Current Position and wrote nothing; `state.update-progress` NOT run; `completed_phases` 28 and `percent` 62 deliberately unmoved (the phase closes on a VERIFICATION, not on a plan count), `completed_plans` 206 → 207 by hand. Next: the three reviewers' `cron.py` half confirmed on the branch, then ship — and Phase 164.5.1.3 SYNCADMIT may be planned but must not be deployed before the PROD apply succeeds.
