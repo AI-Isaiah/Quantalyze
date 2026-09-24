@@ -2261,7 +2261,7 @@ Plans:
 - [x] 164.6-03-PLAN.md — OPS-08-F2: both fan-outs record failed targets and a failure count in a cron_runs row; one migration plus gate arms and twin re-points in one commit (criterion 3)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 164.6-04-PLAN.md — OPS-08-F2: move every floor, census and sentinel pin to its MEASURED value
+- [x] 164.6-04-PLAN.md — OPS-08-F2: move every floor, census and sentinel pin to its MEASURED value
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 164.6-05-PLAN.md — runbooks read the failure row, the composite-schedule BLOCKING precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]`, and the phase-level full-suite pass
