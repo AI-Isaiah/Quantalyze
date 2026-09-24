@@ -3930,3 +3930,18 @@ def test_q166r_benchmark_mirrors_accept_a_tz_aware_pair():
     pd.testing.assert_frame_equal(
         _rolling_greeks(r_utc, b_utc, 90), _rolling_greeks(r, b, 90), check_freq=False
     )
+
+
+def test_q166r_psr_one_observation_is_undefined_without_a_failure_warning(caplog):
+    """Review IN-01: on a one-row series the PSR mirror divided a Python float by
+    `n - 1 == 0`, raised ZeroDivisionError, and `_safe_qstats_scalar` logged
+    `qstats scalar probabilistic_sharpe_ratio failed ... float division by zero`
+    with a traceback. The persisted value was None either way, so the defect
+    was the false "scalar failed" signal an operator would chase. One
+    observation defines no Sharpe: None, silently, like 0.0.81's NaN."""
+    one = pd.Series([0.01], index=pd.bdate_range("2024-01-01", periods=1))
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    out = compute_qstats_scalars(one, None)
+    assert out["probabilistic_sharpe_ratio"] is None
+    failed = [r.getMessage() for r in caplog.records if "failed" in r.getMessage()]
+    assert failed == [], failed

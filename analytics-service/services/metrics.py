@@ -862,10 +862,16 @@ def _probabilistic_sharpe_ratio(r: pd.Series) -> float:
     NaN CONVENTION: the base is on ``P(r)`` (fillna(0)). Skew, kurtosis and n
     are on the RAW series, exactly as 0.0.81 computes them.
     """
+    n = len(r)
+    if n < 2:
+        # Review IN-01: `base` is a Python float, so `(...) / (n - 1)` with n = 1
+        # raised ZeroDivisionError and `_safe_qstats_scalar` logged a false
+        # "scalar failed" WARNING. 0.0.81's numpy division gave NaN silently.
+        # One observation defines no Sharpe, so this is undefined -> None.
+        return float("nan")
     base = _annualized_vol_sharpe(_prepared_returns_no_guess(r), 1)[1]
     skew_no = r.skew()
     gamma4 = r.kurtosis() + 3  # D-16: non-excess fourth moment
-    n = len(r)
     sigma_sr = np.sqrt(
         (1 + (0.5 * base**2) - (skew_no * base) + (((gamma4 - 3) / 4) * base**2))
         / (n - 1)
