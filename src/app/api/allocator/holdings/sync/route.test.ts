@@ -14,6 +14,9 @@ import { NextRequest } from "next/server";
  *     → 200 with both keys preserved VERBATIM (f8).
  *   - On RPC SQLSTATE '42501' (auth / ownership): 403.
  *   - On unexpected RPC error: 500 with generic copy.
+ *   - On SQLSTATE '40001' (lost enqueue race, Phase 164.6 OPS-08-TS): the RPC
+ *     is re-issued exactly once; a success answers 200, a second 40001 the
+ *     existing 500. No other code is ever retried.
  *   - On invalid body (missing / non-uuid api_key_id): 400.
  *   - Emits `allocator.holdings.sync_requested` audit event on success.
  *
@@ -166,6 +169,9 @@ describe("POST /api/allocator/holdings/sync", () => {
     expect(res.status).toBe(403);
     const body = await res.json();
     expect(body.error).toContain("not found or not owned");
+    // OPS-08-TS: only a 40001 is retried. A permission denial asked twice is
+    // still a permission denial, and a second call is wasted load.
+    expect(mockRpc, "a 42501 was retried — only a 40001 may be").toHaveBeenCalledTimes(1);
 
     consoleSpy.mockRestore();
   });
@@ -193,7 +199,71 @@ describe("POST /api/allocator/holdings/sync", () => {
 
     // Internals logged, not surfaced in body.
     expect(consoleSpy).toHaveBeenCalled();
+    // OPS-08-TS control: a non-40001 error is never retried.
+    expect(mockRpc, "a PGRST301 was retried — only a 40001 may be").toHaveBeenCalledTimes(1);
     consoleSpy.mockRestore();
+  });
+
+  // ── 6b. OPS-08-TS (Phase 164.6) — a lost enqueue race self-heals ─
+  // `_enqueue_compute_job_internal` raises 40001 when this enqueue loses the
+  // in-flight race and the winner has already advanced. The route re-issues
+  // the whole RPC once (retry-safe: the RPC catches unique_violation only, so
+  // a 40001 aborted its whole transaction), and the allocator sees a success
+  // instead of "Could not start sync".
+  it("retries a 40001 once and answers 200, auditing the sync exactly once", async () => {
+    mockRpc
+      .mockResolvedValueOnce({
+        data: null,
+        error: { code: "40001", message: "enqueue race lost" },
+      })
+      .mockResolvedValueOnce({
+        data: { ok: true, job_id: TEST_JOB_ID },
+        error: null,
+      });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ api_key_id: TEST_API_KEY_ID }));
+
+    expect(res.status, "a lost enqueue race reached the allocator as an error").toBe(200);
+    expect(await res.json()).toEqual({ ok: true, job_id: TEST_JOB_ID });
+    expect(mockRpc, "the lost race must be re-issued exactly once").toHaveBeenCalledTimes(2);
+    expect(mockRpc).toHaveBeenNthCalledWith(2, "request_allocator_holdings_sync", {
+      p_api_key_id: TEST_API_KEY_ID,
+    });
+    expect(
+      mockLogAuditEvent,
+      "the eventual success must be audited once — not per attempt",
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      warnSpy.mock.calls.some((c) => /retrying once/.test(String(c[0]))),
+      "the retried attempt must leave a console.warn trail",
+    ).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it("a 40001 that survives the single retry answers the existing 500, with no audit and no third call", async () => {
+    const lostRace = {
+      data: null,
+      error: { code: "40001", message: "enqueue race lost" },
+    };
+    mockRpc.mockResolvedValueOnce(lostRace).mockResolvedValueOnce(lostRace);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ api_key_id: TEST_API_KEY_ID }));
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toContain("Could not start sync");
+    expect(
+      mockRpc,
+      "the retry budget is ONE — one request must never execute the RPC more than twice",
+    ).toHaveBeenCalledTimes(2);
+    expect(mockLogAuditEvent, "a failed sync was audited as requested").not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 
   // ── 7. Audit event emitted on success path ──────────────────────
