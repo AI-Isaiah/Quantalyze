@@ -1559,7 +1559,10 @@ async function resolveExistingStrategyOrRefuse(
     const { data: storedAnalytics, error: analyticsErr } = await supabase
       .from("strategy_analytics")
       .select(
-        `${PERCENTILE_METRICS.join(", ")}, ${PERCENTILE_GATE_COLUMN}`,
+        // Review IN-05: the projection and the presence check below both read
+        // `CLOCK_SAFETY_KPI_COLUMNS`, so "projected == checked" rests on ONE
+        // name, not on two names that happen to alias one array.
+        `${CLOCK_SAFETY_KPI_COLUMNS.join(", ")}, ${PERCENTILE_GATE_COLUMN}`,
       )
       .eq("strategy_id", existingRow.id)
       .maybeSingle();
