@@ -4459,6 +4459,7 @@ jobs:
           # sql-tests made sql-tests look like a mutation-runner job. The arm is
           # right to be blunt — it exists so a new job cannot run these scripts
           # unpinned — so the comment yields, not the test.
+          # Re-measured 2026-09-24 (Phase 164.6): composite 15 -> 16, fan-out 18 -> 19 (arm N each).
           # ⚠️ Re-measured 2026-09-17 (164.5.1, arm R): the fan-out file goes
           # 15 -> 18. Its own closing sentinel had been stuck at 15 and did not
           # list arms P or Q although both run, so this table AGREED WITH A STALE
@@ -4470,8 +4471,8 @@ jobs:
           #   test_analytics_service_settings_and_vault_tick.sql 13
           #   test_create_wizard_strategy_for_key.sql         9
           #   test_get_verified_cohort_rank_gate.sql          6
-          #   test_ledger_refresh_composite_arm.sql          15
-          #   test_ledger_refresh_fanout.sql                 18
+          #   test_ledger_refresh_composite_arm.sql          16
+          #   test_ledger_refresh_fanout.sql                 19
           #   test_ledger_refresh_staleness.sql               8
           #   test_prod_prober_cadence.sql                    7
           #   test_retention_crons_safe.sql                   4
@@ -4548,7 +4549,7 @@ jobs:
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
           SENTINEL_FLOOR=11  # files declaring a sentinel
-          ARMS_FLOOR=213     # 13 + 9 + 6 + 15 + 18 + 8 + 7 + 4 + 103 + 7 + 23
+          ARMS_FLOOR=215     # 13 + 9 + 6 + 16 + 19 + 8 + 7 + 4 + 103 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
