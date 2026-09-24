@@ -90,6 +90,11 @@ interface MockStrategyRow {
   review_note: string | null;
   created_at: string;
   api_key_id: string | null;
+  /** PostgREST hands a 1:1 embed back as an object or a one-element array. */
+  strategy_analytics:
+    | { computation_status: string | null }
+    | Array<{ computation_status: string | null }>
+    | null;
 }
 
 interface MockKeyRow {
@@ -115,6 +120,11 @@ const state = vi.hoisted(() => ({
   keysError: null as { message: string } | null,
   members: [] as MockMemberRow[],
   membersError: null as { message: string } | null,
+  /** get_user_compute_jobs answers, per p_strategy_id. */
+  jobs: {} as Record<string, unknown[]>,
+  jobsError: null as { message: string } | null,
+  jobsThrow: false,
+  rpcCalls: [] as Array<{ fn: string; args: unknown }>,
   /** Every `.select(...)` / `.in(...)` the page issued, per table. */
   calls: [] as Array<{ table: string; op: string; args: unknown[] }>,
 }));
@@ -126,7 +136,13 @@ vi.mock("@/lib/supabase/server", () => ({
     auth: {
       getUser: async () => ({ data: { user: state.user }, error: null }),
     },
-    rpc: async () => ({ data: [], error: null }),
+    rpc: async (fn: string, args: { p_strategy_id?: string }) => {
+      state.rpcCalls.push({ fn, args });
+      if (fn !== "get_user_compute_jobs") throw new Error(`Unexpected rpc: ${fn}`);
+      if (state.jobsThrow) throw new Error("synthetic rpc throw");
+      if (state.jobsError) return { data: null, error: state.jobsError };
+      return { data: state.jobs[args.p_strategy_id ?? ""] ?? [], error: null };
+    },
     from: (table: string) => {
       let result: ReadResult;
       if (table === "strategies") {
@@ -181,6 +197,8 @@ function row(
     review_note: null,
     created_at: "2026-01-01T00:00:00.000Z",
     api_key_id: null,
+    // Default computed, so the key-mark cases see no share note.
+    strategy_analytics: { computation_status: "complete" },
     ...overrides,
   };
 }
@@ -231,6 +249,10 @@ beforeEach(() => {
   state.keysError = null;
   state.members = [];
   state.membersError = null;
+  state.jobs = {};
+  state.jobsError = null;
+  state.jobsThrow = false;
+  state.rpcCalls = [];
   state.calls = [];
   consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -431,5 +453,145 @@ describe("StrategiesPage — KCS-06 composite members are feeding keys", () => {
     const keyIn = state.calls.find((c) => c.table === "api_keys" && c.op === "in");
     expect(keyIn?.args[0]).toBe("id");
     expect([...(keyIn?.args[1] as string[])].sort()).toEqual(["k-direct", "k-m1", "k-m2"]);
+  });
+});
+
+describe("StrategiesPage — KCS-12 the share note on a row without a computed factsheet (S5)", () => {
+  // The LOCKED strings, typed out here character for character (UI-SPEC
+  // § KCS-12). The page renders them through recipientShareNote; a paraphrase
+  // anywhere in between goes red.
+  const MINT_A =
+    "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.";
+  const MINT_B =
+    "Right now, a private link to this strategy shows that its factsheet is not available yet. The numbers appear there once a computation succeeds.";
+  const UNREADABLE =
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
+  const PUBLIC =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.";
+
+  function noteOf(container: HTMLElement, strategyName: string): string | null {
+    const card = [...container.querySelectorAll("a")]
+      .find((a) => a.textContent === strategyName)
+      ?.closest('[data-testid="strategy-row"]');
+    return card?.querySelector('[data-testid="strategy-row-share-note"]')?.textContent ?? null;
+  }
+
+  const running = { kind: "process_key_long", status: "running", created_at: "2026-02-01T00:00:00.000Z" };
+
+  it("COMPUTED-NO-NOTE: a row with a computed factsheet shows no note and asks the RPC nothing", async () => {
+    state.strategies = [
+      row("s-done", { strategy_analytics: { computation_status: "complete" } }),
+      row("s-warn", { strategy_analytics: [{ computation_status: "complete_with_warnings" }] }),
+    ];
+
+    const container = await renderPage();
+
+    expect(container.querySelector('[data-testid="strategy-row-share-note"]')).toBeNull();
+    expect(container.querySelector('[data-testid="strategy-row-footer"]')).toBeNull();
+    // A computed row has a factsheet; reading its jobs would be a wasted round
+    // trip per row on the page every manager lands on.
+    expect(state.rpcCalls).toEqual([]);
+  });
+
+  it("MINT-A: an unpublished row whose computation is running says the private link shows it being prepared", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "computing" } })];
+    state.jobs = { "s-1": [running] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-1")).toBe(MINT_A);
+  });
+
+  it("MINT-B: an unpublished row whose stitch failed permanently says the private link shows it not available", async () => {
+    state.strategies = [row("c-1", { status: "draft", strategy_analytics: [{ computation_status: "failed" }] })];
+    state.jobs = {
+      "c-1": [
+        {
+          kind: "stitch_composite",
+          status: "failed_final",
+          error_kind: "permanent",
+          created_at: "2026-02-01T00:00:00.000Z",
+        },
+      ],
+    };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy c-1")).toBe(MINT_B);
+  });
+
+  it("UNREADABLE: an RPC error renders KCS12-UNREADABLE and is logged, never an in-progress claim", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: null })];
+    state.jobsError = { message: "synthetic rpc failure" };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-1")).toBe(UNREADABLE);
+    expect(consoleError).toHaveBeenCalledWith(
+      "[strategies/page] compute-state read failed",
+      expect.objectContaining({ id: "s-1", message: "synthetic rpc failure" }),
+    );
+  });
+
+  it("UNREADABLE: an RPC that throws renders KCS12-UNREADABLE and is logged", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "pending" } })];
+    state.jobsThrow = true;
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-1")).toBe(UNREADABLE);
+    expect(consoleError).toHaveBeenCalledWith(
+      "[strategies/page] compute-state read failed",
+      expect.objectContaining({ id: "s-1", message: "synthetic rpc throw" }),
+    );
+  });
+
+  it("PUBLIC: a published row without a computed factsheet says what its public link shows, whatever the RPC answers", async () => {
+    state.strategies = [row("s-pub", { status: "published", strategy_analytics: { computation_status: "failed" } })];
+    // Running would be MINT-A on a private link; the public URL renders the
+    // public placeholder, which never says "being prepared".
+    state.jobs = { "s-pub": [running] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC);
+  });
+
+  it("calls the RPC once per uncomputed row with its own p_strategy_id and the shared limit", async () => {
+    state.strategies = [
+      row("s-a", { strategy_analytics: { computation_status: "failed" } }),
+      row("s-done", { strategy_analytics: { computation_status: "complete" } }),
+      row("s-b", { strategy_analytics: null }),
+    ];
+
+    await renderPage();
+
+    // Never one unfiltered call: a null p_strategy_id returns every strategy's
+    // jobs, and the window would be shared across rows.
+    expect(state.rpcCalls).toEqual([
+      { fn: "get_user_compute_jobs", args: { p_strategy_id: "s-a", p_limit: 100 } },
+      { fn: "get_user_compute_jobs", args: { p_strategy_id: "s-b", p_limit: 100 } },
+    ]);
+  });
+
+  it("renders the note after any key lines, and renders the band for a note alone", async () => {
+    state.strategies = [
+      row("s-key", { api_key_id: "k-1", strategy_analytics: { computation_status: "failed" } }),
+      row("s-note", { strategy_analytics: { computation_status: "failed" } }),
+    ];
+    state.keys = [key("k-1", "bybit", "revoked")];
+
+    const container = await renderPage();
+
+    const bands = [...container.querySelectorAll('[data-testid="strategy-row-footer"]')];
+    expect(bands).toHaveLength(2);
+    expect([...bands[0].children].map((c) => c.getAttribute("data-testid"))).toEqual([
+      "strategy-row-key-mark",
+      "strategy-row-share-note",
+    ]);
+    expect([...bands[1].children].map((c) => c.getAttribute("data-testid"))).toEqual([
+      "strategy-row-share-note",
+    ]);
+    expect(bands[1].querySelector("p")?.className).toBe("text-xs text-text-muted");
   });
 });
