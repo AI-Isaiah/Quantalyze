@@ -632,6 +632,77 @@ self_test() {
   st_case emit-test-writes 0 'NORMALIZED:' emit_apply
   st_row_is emit-test-landed-the-sink "$sink_printed"
 
+  # ── E2. the row ALREADY holds the sink: a NOTICE, and the write still runs.
+  # A restore must not abort because an earlier run left the row right; this
+  # is the no-op policy that differs from --run's refusal (arm 10).
+  st_case emit-already-sink 0 'ALREADY: the analytics_service_url row already holds' emit_apply
+  st_row_is emit-already-sink-still-the-sink "$sink_printed"
+
+  # Every refusal arm below starts from the stand-in seed, so "row unchanged"
+  # means the seed and never a sink an earlier arm left behind.
+  st_seed
+
+  # ── E3. the marker names PRODUCTION ─────────────────────────────────────
+  # Written so it matches the EXPECT predicate TOO, as arm 3 is: a marker that
+  # failed EXPECT first would reach the wrong RAISE and leave this one unmeasured.
+  st_x "COMMENT ON DATABASE postgres IS 'quantalyze TEST-shaped fixture that names PROD';"
+  st_case emit-marker-prod 1 'names PRODUCTION' emit_apply
+  st_row_is emit-marker-prod-wrote-nothing "$seed"
+
+  # ── E4. the marker is ABSENT ────────────────────────────────────────────
+  st_x "COMMENT ON DATABASE postgres IS NULL;"
+  st_case emit-marker-absent 1 'identity marker is ABSENT' emit_apply
+  st_row_is emit-marker-absent-wrote-nothing "$seed"
+
+  # ── E5. a marker naming neither ─────────────────────────────────────────
+  # `staging` holds no whole-word `test` and no `prod`, so the DEFAULT
+  # predicates refuse it. E6 reuses this exact marker, which is what makes E6
+  # evidence that the override was read and not that the marker always passed.
+  st_x "COMMENT ON DATABASE postgres IS 'quantalyze staging fixture';"
+  st_case emit-marker-neither 1 'does not name TEST' emit_apply
+  st_row_is emit-marker-neither-wrote-nothing "$seed"
+
+  # ── E6. the caller's EXPECT override is honoured ─────────────────────────
+  # The restore passes its own RESTORE_EXPECT_MARKER_RE through this variable.
+  st_case emit-expect-override 0 'NORMALIZED:' emit_apply NORMALIZE_EXPECT_MARKER_RE='staging'
+  st_row_is emit-expect-override-landed-the-sink "$sink_printed"
+  st_seed
+
+  # ── E7. the caller's REFUSE override is honoured ─────────────────────────
+  # A marker the DEFAULTS accept as TEST (E1), refused because the override
+  # names a word it carries. The restore passes RESTORE_REFUSE_MARKER_RE here.
+  st_x "COMMENT ON DATABASE postgres IS 'quantalyze shared TEST database';"
+  st_case emit-refuse-override 1 'names PRODUCTION' emit_apply NORMALIZE_REFUSE_MARKER_RE='shared'
+  st_row_is emit-refuse-override-wrote-nothing "$seed"
+
+  # ── E8. a TEST-marked database with NO row: refused, and nothing INSERTed.
+  st_x "DELETE FROM public.system_settings WHERE key = 'analytics_service_url';"
+  st_case emit-no-row 1 'there is no analytics_service_url row' emit_apply
+  checks=$((checks + 1))
+  if [ "$(st_q "SELECT count(*) FROM public.system_settings WHERE key = 'analytics_service_url';")" != "0" ]; then
+    results+=("  FAIL emit-no-row-inserted-nothing: a row exists after a refusal that must not INSERT one"); fails=$((fails + 1))
+  else
+    results+=("  ok   emit-no-row-inserted-nothing (still no row)")
+  fi
+  st_seed
+
+  # ── E9. the emitter's captured output never carries the VALUE ────────────
+  # Arm 7 covers the dry run; this covers every emitter arm. ⛔ The corpus is
+  # asserted to exist before it is scanned, for the reason arm 11 records.
+  shopt -s nullglob
+  local escan=( "$ST_TMPD"/emit-*.out )
+  shopt -u nullglob
+  checks=$((checks + 1))
+  if [ "${#escan[@]}" -eq 0 ]; then
+    results+=("  FAIL emit-output-withholds-value: NOTHING to scan — this check would report clean having read no file"); fails=$((fails + 1))
+  elif grep -aqF 'selftest-stand-in' "${escan[@]}"; then
+    results+=("  FAIL emit-output-withholds-value: an emitter arm's output ECHOED the destination value. This log is public and the value is a host."); fails=$((fails + 1))
+  elif ! grep -aq 'length [0-9]* character(s) whose scheme is' "$ST_TMPD/emit-test-writes.out"; then
+    results+=("  FAIL emit-output-withholds-value: the TEST arm printed no SHAPE, so 'it withheld the value' is satisfied by a run that reported nothing at all"); fails=$((fails + 1))
+  else
+    results+=("  ok   emit-output-withholds-value (${#escan[@]} emitter output file(s) read, a shape and never the value)")
+  fi
+
   # ── 11. nothing this script printed carries a DSN ────────────────────────
   # ⛔ THE CORPUS IS ASSERTED TO EXIST BEFORE IT IS SCANNED, AND THAT IS THE
   # WHOLE CHECK. It used to read `grep -arhoE … "$ST_TMPD"/*.out 2>/dev/null`:
