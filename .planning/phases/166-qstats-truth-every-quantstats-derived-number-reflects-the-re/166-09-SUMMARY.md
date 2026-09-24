@@ -196,6 +196,24 @@ fixture movement as a defect, so it gets its own row:
 |---|---|---|---|
 | key ORDER of `mean_daily_turnover_usd`, `mean_monthly_turnover_usd` and `mean_trade_size_usd` inside `metrics_json.trade_metrics` and `metrics_json.volume_metrics` | not alphabetical (`mean_trade_size_usd` before `mean_monthly_turnover_usd` in both, and `mean_daily_turnover_usd` ahead of `expectancy` in `trade_metrics`) | alphabetical | Cosmetic, from the regeneration serialiser. No value, key or key count changed, and every parity reader is dict-based. Kept, not reverted. |
 
+**Added 2026-09-24, code review round 1: corrected values on CONSTANT-series inputs (SFH HIGH-1
+and its class).** None of the fixtures above moves: the golden, parity and trigger tests pass
+unchanged. These rows come from the same two-tree method as the table above. Before is the tree at
+`2c5733bb7` and after is the round-1 fix tree. Values are read from `compute_all_metrics(r, b)` and
+`sharpe_vol_status_from_backbone(r, 252)`.
+
+| metric key | fixture | before | after | reason |
+|---|---|---|---|---|
+| sharpe | constant `0.001`, 120 business days | 3.645128673430614e+16 | None | HIGH-1: `std()` of a constant series is float residue, not 0 |
+| backbone `(vol, sharpe, status)` | constant `0.001`, 120 business days | (6.9e-18, 3.645e+16, `ok`) | (0.0, None, `zero_volatility`) | HIGH-1 |
+| sharpe | constant `-0.002`, 250 business days | -7.306168277482229e+16 | None | HIGH-1 |
+| backbone `(vol, sharpe, status)` | constant `-0.002`, 250 business days | (6.9e-18, -7.306e+16, `ok`) | (0.0, None, `zero_volatility`) | HIGH-1 |
+| probabilistic_sharpe_ratio | constant `-0.002`, 250 business days | 1.294498818537706e-110 | None | HIGH-1: the PSR base is the same primitive |
+| serenity_index | constant `-0.002`, 250 business days | -2.2339635725366214e-18 | None | HIGH-1 class: serenity's `std == 0` test now uses the same residue guard |
+| alpha | normal(0.001, 0.01) strategy vs a constant `0.001` benchmark, 250 days | 0.3386020485210516 | None | HIGH-1 class: the greeks benchmark-variance test now uses the same residue guard (D-09) |
+| beta | same pair | -1.9200000000000002 | None | same |
+| treynor | same pair | 0.07804666007757768 | absent | derived: skipped because beta is undefined |
+
 The TypeScript tests that read the golden were run at HEAD through the D-19 `node_modules` link:
 `metrics-parity.test.ts`, `metrics-parity-helper.test.ts`, `MetricPanel.types.test.ts` and
 `contracts-registry.test.ts` gave `Test Files 4 passed (4)` / `Tests 101 passed (101)`. The link
