@@ -71,6 +71,10 @@ const fetchMock = vi.fn((url: string) => {
   return Promise.reject(new Error(`unexpected fetch ${url}`));
 });
 
+// 167.2-REVIEW-SFH M-6: an unreadable job state is captured once per attempt.
+const captureToSentryMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
+
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
     from: (table: string) => ({
@@ -165,6 +169,7 @@ beforeEach(() => {
   mockState.analyticsSelectCount = 0;
   mockState.jobAnswers = [];
   mockState.jobReadCount = 0;
+  captureToSentryMock.mockClear();
   vi.stubGlobal("fetch", fetchMock);
 });
 
@@ -556,6 +561,12 @@ describe("SyncProgress — the job-state check fails closed (Phase 167.2 / KCS-1
       expect.stringContaining("strat-1"),
       "Failed to fetch",
     );
+    // 167.2-REVIEW-SFH M-6: captured once for the attempt, tags only.
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      level: "warning",
+      tags: { component: "SyncProgress", stage: "job-state-unreadable" },
+    });
 
     // CONTROL: the check was holding the success, not dead. A readable answer
     // on the next tick forwards it.

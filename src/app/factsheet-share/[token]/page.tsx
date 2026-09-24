@@ -62,6 +62,7 @@ import {
 } from "@/lib/compute-state";
 import { SHARE_CARD_COPY } from "@/lib/status-surface-copy";
 import { countCompositeMembers } from "@/lib/strategy-shape";
+import { captureToSentry } from "@/lib/sentry-capture";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { FactsheetView } from "@/app/factsheet/[id]/v2/FactsheetView";
@@ -264,8 +265,16 @@ async function readShareComputeState(
       strategyId,
     );
     if (error || !Array.isArray(data)) {
+      const message = error?.message ?? "compute_jobs answer was not a row array";
+      // 167.2-REVIEW-SFH M-6: the matched strategy id joins the server log
+      // (never the page), so a failure can be tied to a strategy, and the
+      // failure is captured with tags only.
       console.error("[factsheet-share/page] compute-state read failed", {
-        message: error?.message ?? "compute_jobs answer was not a row array",
+        strategyId,
+        message,
+      });
+      captureToSentry(new Error(message), {
+        tags: { route: "factsheet-share/page", stage: "compute-state" },
       });
       return deriveComputeState({ readError: true });
     }
@@ -287,7 +296,11 @@ async function readShareComputeState(
     });
   } catch (err) {
     console.error("[factsheet-share/page] compute-state read failed", {
+      strategyId,
       message: err instanceof Error ? err.message : String(err),
+    });
+    captureToSentry(err, {
+      tags: { route: "factsheet-share/page", stage: "compute-state" },
     });
     return deriveComputeState({ readError: true });
   }

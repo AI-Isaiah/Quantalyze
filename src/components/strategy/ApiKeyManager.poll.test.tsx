@@ -32,6 +32,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, act, fireEvent, cleanup, within } from "@testing-library/react";
 import { ApiKeyManager } from "./ApiKeyManager";
 
+// 167.2-REVIEW-SFH M-6: bound expiries are captured at warning level.
+const captureToSentryMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
     refresh: vi.fn(),
@@ -721,6 +725,11 @@ describe("ApiKeyManager + the REAL poller: an enqueue that never answers is boun
     // Nothing was polled: no job is known to exist.
     expect(mockState.analyticsSelectCount).toBe(0);
     expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("180000 ms"));
+    // 167.2-REVIEW-SFH M-6: a wedged enqueue reaches Sentry, not only the console.
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      level: "warning",
+      tags: { component: "ApiKeyManager", stage: "enqueue-bound" },
+    });
   });
 
   // Moved by the 167.2 review fix round (167.2-REVIEW-SFH M-1, lineage): this

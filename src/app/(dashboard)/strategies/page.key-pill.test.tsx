@@ -542,6 +542,10 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       "[strategies/page] compute-state read failed",
       expect.objectContaining({ id: "s-1", message: "synthetic rpc failure" }),
     );
+    // 167.2-REVIEW-SFH M-6: captured, like the owner factsheet's identical read.
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { route: "strategies/page", stage: "compute-state" },
+    });
   });
 
   it("UNREADABLE: an RPC that throws renders KCS12-UNREADABLE and is logged", async () => {

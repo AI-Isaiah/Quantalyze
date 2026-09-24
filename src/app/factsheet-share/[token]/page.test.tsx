@@ -71,6 +71,9 @@ vi.mock("@/lib/ratelimit", () => ({
 // be asserted as "the client was never even constructed" — a stronger and much
 // less fakeable claim than counting queries.
 const createAdminMock = vi.hoisted(() => vi.fn());
+// 167.2-REVIEW-SFH M-6: the compute-state read failure is captured.
+const captureToSentryMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
 // 167.2-REVIEW IN-03: the head count's answer and its filters.
 const memberCountValue = vi.hoisted(() => ({ value: 1 as number }));
 const memberCountCalls = vi.hoisted(() => [] as Array<[string, unknown]>);
@@ -730,10 +733,20 @@ describe("KCS-11 — every way read (3) can fail renders the arm that promises n
       expect(out).not.toContain(KCS11_A_HEADING);
       // Nothing from the error reaches the recipient.
       expect(out).not.toContain("compute_jobs_secret");
+      // Moved by the 167.2 review fix round (SFH M-6, lineage): the log was
+      // `{ message }` only, so a share-page failure could not be tied to a
+      // strategy; it now carries the matched strategy id (server log only,
+      // never the page), and the failure is captured with tags only.
       expect(errSpy).toHaveBeenCalledWith(
         "[factsheet-share/page] compute-state read failed",
-        { message: 'relation "compute_jobs_secret" does not exist' },
+        {
+          strategyId: STRATEGY_ID,
+          message: 'relation "compute_jobs_secret" does not exist',
+        },
       );
+      expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+        tags: { route: "factsheet-share/page", stage: "compute-state" },
+      });
     } finally {
       errSpy.mockRestore();
     }
@@ -748,10 +761,15 @@ describe("KCS-11 — every way read (3) can fail renders the arm that promises n
       const out = await renderPage(VALID_TOKEN);
       expect(out).toContain(KCS11_B_HEADING);
       expect(out).not.toContain("socket hang up");
+      // Moved by the 167.2 review fix round (SFH M-6, lineage): the log now
+      // carries the matched strategy id; the throw is captured, tags only.
       expect(errSpy).toHaveBeenCalledWith(
         "[factsheet-share/page] compute-state read failed",
-        { message: "socket hang up" },
+        { strategyId: STRATEGY_ID, message: "socket hang up" },
       );
+      expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+        tags: { route: "factsheet-share/page", stage: "compute-state" },
+      });
     } finally {
       errSpy.mockRestore();
     }

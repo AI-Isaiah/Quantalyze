@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useStrategySyncPoller } from "@/hooks/useStrategySyncPoller";
 import { readChainJobState } from "./chain-job-state";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { Button } from "@/components/ui/Button";
 import type { StrategyAnalytics } from "@/lib/types";
 import {
@@ -410,6 +411,13 @@ export function SyncProgress({
             `[SyncProgress] the job-state read was unreadable; the terminal is held and the poll continues [strategy_id=${strategyId}]:`,
             reason,
           );
+          // 167.2-REVIEW-SFH M-6: once per attempt, like the warn. A route
+          // answering 429/5xx for a whole attempt turns a verified success
+          // into a `no_result`, which production should see. Tags only.
+          captureToSentry(new Error(`the job-state read was unreadable: ${reason}`), {
+            level: "warning",
+            tags: { component: "SyncProgress", stage: "job-state-unreadable" },
+          });
         }).then((settled) => {
           jobCheckInFlightRef.current = false;
           if (settled && token !== null && computingTokenRef.current === token) {

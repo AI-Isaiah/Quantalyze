@@ -497,6 +497,12 @@ export function ApiKeyManager({
             { keyId: attempt.keyId },
           );
           setLoadError("The key list re-read did not answer in time.");
+          // 167.2-REVIEW-SFH M-6: an owner-scoped read hanging for 15 s is an
+          // operational signal; tags only (no key id, no strategy id).
+          captureToSentry(new Error("the terminal key-list re-read did not answer within its bound"), {
+            level: "warning",
+            tags: { component: "ApiKeyManager", stage: "terminal-reread-bound" },
+          });
         } else {
           reread = outcome;
         }
@@ -510,6 +516,10 @@ export function ApiKeyManager({
           err,
         );
         setLoadError(err instanceof Error ? err.message : "The key list re-read failed.");
+        // 167.2-REVIEW-SFH M-6: captured, not only logged.
+        captureToSentry(err, {
+          tags: { component: "ApiKeyManager", stage: "terminal-reread" },
+        });
       } finally {
         clearTimeout(boundTimer);
         endAttempt(attempt);
@@ -951,6 +961,15 @@ export function ApiKeyManager({
    * `"unknown"` and logs; it never fails the attempt.
    */
   async function readEvidenceBaseline(): Promise<EvidenceBaseline> {
+    // 167.2-REVIEW-SFH M-3 / M-6: an unknown baseline silently disables
+    // evidence (b) for the whole attempt (a fast failure can then only end at
+    // the cap), so each of the three arms below is captured at warning level,
+    // tags only.
+    const captureUnknown = (why: string) =>
+      captureToSentry(new Error(`the evidence baseline read ${why}; the baseline is unknown`), {
+        level: "warning",
+        tags: { component: "ApiKeyManager", stage: "evidence-baseline" },
+      });
     let boundTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       const bound = new Promise<"timed_out">((resolve) => {
@@ -969,6 +988,7 @@ export function ApiKeyManager({
         console.error(
           `[ApiKeyManager] the evidence baseline read did not answer within ${BASELINE_READ_BOUND_MS} ms; continuing with an unknown baseline [strategy_id=${strategyId}]`,
         );
+        captureUnknown("did not answer within its bound");
         return "unknown";
       }
       if (outcome.error) {
@@ -976,6 +996,7 @@ export function ApiKeyManager({
           `[ApiKeyManager] the evidence baseline read failed; continuing with an unknown baseline [strategy_id=${strategyId}]:`,
           outcome.error.message,
         );
+        captureUnknown("failed");
         return "unknown";
       }
       return { computedAt: outcome.data?.computed_at ?? null };
@@ -984,6 +1005,7 @@ export function ApiKeyManager({
         `[ApiKeyManager] the evidence baseline read threw; continuing with an unknown baseline [strategy_id=${strategyId}]:`,
         err,
       );
+      captureUnknown("threw");
       return "unknown";
     } finally {
       clearTimeout(boundTimer);
@@ -1127,6 +1149,11 @@ export function ApiKeyManager({
         console.error(
           `[ApiKeyManager] the link update did not answer within ${LINK_UPDATE_BOUND_MS} ms; no sync is sent [key_id=${keyId}]`,
         );
+        // 167.2-REVIEW-SFH M-6: tags only (the key id stays in the console).
+        captureToSentry(new Error("the link update did not answer within its bound"), {
+          level: "warning",
+          tags: { component: "ApiKeyManager", stage: "link-bound" },
+        });
         if (endAttempt(attempt)) {
           setSyncStatus("unconfirmed");
           setPanelStopReason("link_bound");
@@ -1256,6 +1283,11 @@ export function ApiKeyManager({
         console.error(
           `[ApiKeyManager] the enqueue did not answer within ${ENQUEUE_BOUND_MS} ms; the sync is unconfirmed [key_id=${keyId}]`,
         );
+        // 167.2-REVIEW-SFH M-6: a wedged /api/keys/sync; tags only.
+        captureToSentry(new Error("the enqueue did not answer within its bound"), {
+          level: "warning",
+          tags: { component: "ApiKeyManager", stage: "enqueue-bound" },
+        });
         if (endAttempt(attempt)) {
           setSyncStatus("unconfirmed");
           setPanelStopReason("enqueue_bound");

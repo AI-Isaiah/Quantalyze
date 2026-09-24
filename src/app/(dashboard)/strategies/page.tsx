@@ -140,6 +140,12 @@ async function readRecipientArm(
       code: read.code,
       message: read.message,
     });
+    // 167.2-REVIEW-SFH M-6: captured like the owner factsheet's identical read
+    // (`readOwnerPendingStatus`), so the surfaces built to agree also agree on
+    // observability. Tags only; the id stays in the server log.
+    captureToSentry(new Error(read.message), {
+      tags: { route: "strategies/page", stage: "compute-state" },
+    });
     return recipientArm(deriveComputeState({ readError: true }));
   }
   if (read.windowFull) {

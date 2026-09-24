@@ -182,6 +182,10 @@ vi.mock("@/lib/supabase/client", () => ({
 // The module's own fetch-level behaviour is exercised against the real panel
 // in ApiKeyManager.poll.test.tsx and SyncProgress.poll.test.tsx.
 const chainJobStateMock = vi.fn();
+// 167.2-REVIEW-SFH M-6: the card's bound expiries and read failures are
+// captured, not only logged. Captures carry tags only: no key id, no strategy id.
+const captureToSentryMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
 vi.mock("./chain-job-state", () => ({
   readChainJobState: (strategyId: string) =>
     Promise.resolve(chainJobStateMock(strategyId) ?? { kind: "settled", jobStatus: null }),
@@ -3517,6 +3521,29 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       }
     });
 
+    it("M6-BASELINE-CAPTURED (167.2-REVIEW-SFH M-6 / M-3): a failed baseline read is captured at warning level, since it silently disables evidence (b)", async () => {
+      routeFetch();
+      await renderRows([row({ id: "key-j" })], "key-j");
+      captureToSentryMock.mockClear();
+      analyticsBaselineMock.mockReturnValue({ data: null, error: { message: "synthetic baseline failure" } });
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await resync("key-j");
+        expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+          level: "warning",
+          tags: { component: "ApiKeyManager", stage: "evidence-baseline" },
+        });
+        // No key id and no strategy id leave in a capture.
+        for (const call of captureToSentryMock.mock.calls) {
+          expect(JSON.stringify(call[1])).not.toMatch(/key-j|strat-1/);
+          expect(String((call[0] as Error).message)).not.toMatch(/key-j|strat-1/);
+        }
+      } finally {
+        errSpy.mockRestore();
+        analyticsBaselineMock.mockReset();
+      }
+    });
+
     it("GATE-SETTLED (CONTROL): a settled read lets the attempt through to the link and the enqueue", async () => {
       const fetchMock = routeFetch();
       await renderRows([row({ id: "key-j" })], "key-j");
@@ -3931,6 +3958,10 @@ describe("[167-06] the persisted credential state renders on the manager's key c
           expect.stringContaining("[ApiKeyManager] the terminal re-read threw"),
           expect.any(Error),
         );
+        // 167.2-REVIEW-SFH M-6: captured too, tags only.
+        expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+          tags: { component: "ApiKeyManager", stage: "terminal-reread" },
+        });
       } finally {
         consoleError.mockRestore();
       }
