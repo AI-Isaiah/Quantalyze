@@ -15697,4 +15697,240 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
       committed[0].closest('[data-testid="scenario-aum-override-note"]'),
     ).not.toBeNull();
   });
+
+  // ── The absence states (UI-SPEC § 1 states 1, 2, 4, 6, 7), the count gate,
+  //    pin 4, the tone and the component half of D-06 ─────────────────────────
+
+  /** The manual override as the commit boundary sees it: `undefined` means no
+   *  manual value is committed. Used as the non-vacuity check that a commit
+   *  really landed before asserting where the marker is (or is not). */
+  function atManualAumOnWire(): number | undefined {
+    return vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.manualAumUsd;
+  }
+
+  // ── THE LIVE ≤ 0 BOOK ─────────────────────────────────────────────────────
+  //   trusted        (key-a, derivative, unrealized)  -5,000
+  //   sign_in_failed (key-b, spot)                      1,000
+  //   live total                                       -4,000   ← not on screen
+  // An untrusted holding IS summed here, so only the "is the live total on
+  // screen?" half of the gate keeps the marker away.
+  function atNonPositiveBook(): MyAllocationDashboardPayload {
+    return atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "deribit",
+        symbol: "AUMTRUST-A-PERP",
+        derivPnlUsd: -5_000,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "sign_in_failed",
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: 1_000,
+      },
+    ]);
+  }
+
+  it("AUMTRUST absent, state 1 (blank slate): switching to Blank slate removes the marker — the AUM is the allocator's own and has no key basis", () => {
+    const payload = atPayload();
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    // Non-vacuity: the same book in book mode DOES carry the marker.
+    expect(screen.getAllByTestId("scenario-aum-untrusted-note")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(
+      screen.getByRole("radio", { name: /Blank slate/i }),
+    ).toHaveAttribute("aria-checked", "true");
+
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+  });
+
+  it("AUMTRUST absent, state 2 (D-15 pin 3): an all-trusted book renders NO marker element — never an 'Includes $0' claim when no untrusted holding exists", () => {
+    const payload = atStateBBook(null);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    // The live total IS on screen, so only the count gate keeps the marker away.
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+    expect(screen.queryByText(/keys needing attention/i)).toBeNull();
+  });
+
+  it("AUMTRUST absent, state 4 (D-18): the field is blank because the live total is <= 0, so there is no number to qualify, even with an untrusted holding summed", () => {
+    const payload = atNonPositiveBook();
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    // The live total is NOT on screen: the field is blank and asks for a value.
+    expect(aumField().value).toBe("");
+    expect(screen.getByText("Required to size and commit.")).toBeInTheDocument();
+
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+  });
+
+  it("AUMTRUST absent, state 6 (D-18): a committed manual value EQUAL to the live total renders no override note and no marker", () => {
+    const payload = atStateBBook();
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+
+    // Select-all → delete → retype, then blur: React's value tracker swallows a
+    // change to the value already in the DOM (see the 151 WR-04 note above), so
+    // a single change to "50000" would commit nothing and test a bare blur.
+    const el = aumField();
+    fireEvent.change(el, { target: { value: "" } });
+    fireEvent.change(el, { target: { value: "50000" } });
+    fireEvent.blur(el);
+    // Non-vacuity: a manual value really is committed, and equals the live one.
+    expect(atManualAumOnWire()).toBe(AT_B_LIVE_TOTAL);
+
+    expect(screen.queryByTestId("scenario-aum-override-note")).toBeNull();
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+  });
+
+  it("AUMTRUST absent, state 7 (D-18): a committed manual value with a live total <= 0 renders no override note and no marker", () => {
+    const payload = atNonPositiveBook();
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    commitAum("75000");
+    expect(atManualAumOnWire()).toBe(75_000);
+    expect(aumField().value).toBe("75000");
+
+    expect(screen.queryByTestId("scenario-aum-override-note")).toBeNull();
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+  });
+
+  it("AUMTRUST D-07: the gate is the untrusted COUNT, not the amount — a lone untrusted derivative with negative unrealized P&L renders its signed amount", () => {
+    // trusted spot 50,000 keeps the live total > 0 (48,765.4); the only
+    // untrusted holding is a derivative whose equity is -1,234.6. The
+    // derivative gets its OWN venue/symbol so its triple differs.
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: 50_000,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "sign_in_failed",
+        venue: "deribit",
+        symbol: "AUMTRUST-B-PERP",
+        derivPnlUsd: -1_234.6,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    // Hyphen-minus, as the composer's whole-dollar renderer emits it.
+    expect(markers[0].textContent).toBe(
+      "Includes -$1,235 from keys needing attention.",
+    );
+  });
+
+  it("AUMTRUST D-15 pin 4 (component): a sign_in_failed key that is allocator-eligible but NOT contributing adds nothing to the field and renders no marker", () => {
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "sign_in_failed",
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: AT_UNTRUSTED_USD,
+        contributing: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the key IS allocator-eligible and is NOT contributing.
+    expect(payload.allocatorEligibleApiKeyIds).toContain(AT_KEY_SIGN_IN_FAILED);
+    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_SIGN_IN_FAILED);
+    renderAt(payload);
+
+    // The field is the modelled book only: 480,000, not 492,345.
+    expect(aumField().value).toBe(String(AT_TRUSTED_USD));
+    expect(aumField().value).not.toBe(String(AT_LIVE_TOTAL));
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+  });
+
+  it("AUMTRUST tone (D-09, UI-SPEC U-01): State A is muted steady-state text with no role, no aria-live and no warning colour", () => {
+    renderAt(atPayload());
+    const marker = screen.getByTestId("scenario-aum-untrusted-note");
+    const cls = marker.getAttribute("class") ?? "";
+    expect(cls).toContain("text-xs");
+    expect(cls).toContain("text-text-muted");
+    expect(cls).not.toMatch(/warning|amber|danger|destructive|accent/i);
+    expect(marker.hasAttribute("role")).toBe(false);
+    expect(marker.hasAttribute("aria-live")).toBe(false);
+  });
+
+  it("AUMTRUST tone (D-09): State B's nested marker carries no class of its own and inherits the override note's muted voice", () => {
+    renderAt(atStateBBook());
+    commitAum("75000");
+
+    const marker = screen.getByTestId("scenario-aum-untrusted-note");
+    expect(marker.hasAttribute("class")).toBe(false);
+    expect(marker.hasAttribute("role")).toBe(false);
+    expect(marker.hasAttribute("aria-live")).toBe(false);
+    const note = marker.closest(
+      '[data-testid="scenario-aum-override-note"]',
+    ) as HTMLElement | null;
+    expect(note).not.toBeNull();
+    const cls = note?.getAttribute("class") ?? "";
+    expect(cls).toContain("text-text-muted");
+    expect(cls).not.toMatch(/warning|amber|danger|destructive|accent/i);
+    expect(note?.hasAttribute("role")).toBe(false);
+    expect(note?.hasAttribute("aria-live")).toBe(false);
+  });
+
+  it("D-06 (component pin, decision OPEN): a revoked key's holding outside the eligible and contributing sets is silently absent from the field, and nothing says 'excludes'", () => {
+    // ⚠️ CONTEXT D-06 is OPEN. Plan 05 records the founder's answer. This test
+    // pins TODAY's behaviour: a revoked key's holdings are silently absent
+    // (the SSR eligible set and the contributing-set narrowing both drop it),
+    // and no "excludes" copy renders. Under D-06 option (b) the marker gains an
+    // "excludes $Y from keys needing attention" clause, and plan 05 must edit
+    // this test DELIBERATELY — flip the `/excludes/i` assertion to the typed
+    // string — rather than let it drift.
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "revoked",
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: 55_555,
+        eligible: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the revoked key is in neither set.
+    expect(payload.allocatorEligibleApiKeyIds).not.toContain(
+      AT_KEY_SIGN_IN_FAILED,
+    );
+    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_SIGN_IN_FAILED);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_TRUSTED_USD));
+    expect(aumField().value).not.toBe(String(AT_TRUSTED_USD + 55_555));
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+    expect(screen.queryByText(/excludes/i)).toBeNull();
+  });
 });
