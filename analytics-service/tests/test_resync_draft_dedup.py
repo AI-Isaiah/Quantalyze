@@ -159,6 +159,11 @@ class _StatefulSupabase:
         }
         self.rpc_calls: list[str] = []
         self._seq = 0
+        # Review-fix round 1 (MEDIUM-3): per-table queue of exceptions a SELECT
+        # raises before it reads, one per call, so a test can make a read fail
+        # (or fail once and then succeed). A None entry lets that call through.
+        # Empty means every read succeeds.
+        self.select_failures: dict[str, list[BaseException | None]] = {}
 
     def table(self, name: str) -> _StoreBuilder:
         return _StoreBuilder(name, self)
@@ -242,6 +247,11 @@ class _StatefulSupabase:
                     r.update(b._payload)
             return MagicMock(data=[dict(r) for r in matched])
         # select
+        pending_failures = self.select_failures.get(b._table)
+        if pending_failures:
+            failure = pending_failures.pop(0)
+            if failure is not None:
+                raise failure
         matched = [r for r in table if self._match(r, b)]
         # ORDER BY before LIMIT — the SQL evaluation order, and the whole point of
         # the OPS-09 gate. Applied last-key-first so a multi-key `.order()` chain
@@ -569,3 +579,81 @@ def test_resync_chain_kinds_match_the_typescript_factsheet_chain() -> None:
     assert ts_kinds - {"compute_analytics"} == set(_RESYNC_CHAIN_KINDS)
     assert set(_RESYNC_CHAIN_KINDS) == set(_CHAIN_KINDS_LITERAL)
     assert set(_NON_TERMINAL_JOB_STATUSES) == set(_NON_TERMINAL_LITERAL)
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 1 (MEDIUM-3) — the guard's two reads go through
+# `db_read_with_retry`, and a read that still fails never becomes a 500.
+# ---------------------------------------------------------------------------
+
+
+class _GatewayTimeout(Exception):
+    """A PostgREST-shaped gateway 504: `db_read_with_retry` retries on `.code`."""
+
+    code = "504"
+
+
+@pytest.fixture
+def _no_retry_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.db as db_mod
+
+    monkeypatch.setattr(db_mod, "DB_READ_BACKOFF_BASE_S", 0.0)
+    monkeypatch.setattr(db_mod, "DB_READ_JITTER_MAX_S", 0.0)
+
+
+def test_resync_chain_read_failure_falls_through_to_a_new_chain(
+    full_stack_client: TestClient,
+) -> None:
+    """A compute_jobs read that fails for good must not answer 500 on a user's
+    Retry. The guard is skipped and the resync takes the pre-guard path: a new
+    draft and an enqueue."""
+    sb = make_supabase(_STRATEGY_A)
+    _seed_advanced_session(sb, _STRATEGY_A, job_kind="sync_trades", job_status="running")
+    sb.select_failures["compute_jobs"] = [RuntimeError("synthetic read failure")]
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.status_code == 200, r.text
+    assert r.json().get("code") != "WIZARD_DUPLICATE", r.json()
+    assert len(_resync_drafts(sb, _STRATEGY_A)) == 1
+    assert "enqueue_compute_job" in sb.rpc_calls
+
+
+def test_resync_chain_read_gateway_timeout_is_retried(
+    full_stack_client: TestClient, _no_retry_sleep: None
+) -> None:
+    """One gateway 504 on the compute_jobs read is retried, and the retried
+    read still finds the running chain: the resync is a duplicate."""
+    sb = make_supabase(_STRATEGY_A)
+    _seed_advanced_session(sb, _STRATEGY_A, job_kind="sync_trades", job_status="running")
+    sb.select_failures["compute_jobs"] = [_GatewayTimeout("gateway timeout")]
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.status_code == 200, r.text
+    assert r.json().get("code") == "WIZARD_DUPLICATE", r.json()
+    assert "enqueue_compute_job" not in sb.rpc_calls
+
+
+def test_resync_verification_read_failure_still_refuses_the_second_chain(
+    full_stack_client: TestClient,
+) -> None:
+    """When the job read found a running chain but the verification read fails,
+    the chain is still in flight: the reply is a duplicate with no
+    verification status, never a 500 and never a second chain."""
+    sb = make_supabase(_STRATEGY_A)
+    _seed_advanced_session(sb, _STRATEGY_A, job_kind="sync_trades", job_status="running")
+    # The first strategy_verifications read is the draft pre-check, which
+    # finds nothing; the failures land on the guard's verification read.
+    sb.select_failures["strategy_verifications"] = [
+        None,
+        RuntimeError("synthetic read failure"),
+    ]
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload.get("code") == "WIZARD_DUPLICATE", payload
+    assert payload["status"] is None, payload
+    assert "enqueue_compute_job" not in sb.rpc_calls

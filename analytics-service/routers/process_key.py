@@ -43,7 +43,7 @@ from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
 
 from services import exchange as exchange_svc
 from services.basis_series import derive_basis_series
-from services.db import get_supabase, one, rows
+from services.db import db_read_with_retry, get_supabase, one, rows
 from services.ingestion import get_adapter
 from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source, Trade
 from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
@@ -1553,27 +1553,58 @@ async def process_key(
     #
     # Tenant scope is the same as the draft pre-check's: this runs after the
     # `_caller_owns_strategy` gate, so the strategy_id filter carries it.
+    #
+    # Both reads go through `db_read_with_retry` (a gateway 504 is retried inside
+    # one gateway window). If the job read still fails, the guard is SKIPPED and
+    # the resync takes the path it took before this guard existed, logged with
+    # context: a read failure must never become a bare 500 on a user's Retry.
+    # The cost is the pre-guard behaviour (a possible second chain), not a
+    # stuck user.
     if body.flow_type == "resync":
-        inflight_chain_job = rows(
-            supabase.table("compute_jobs")
-            .select("id,kind,status")
-            .eq("strategy_id", strategy_id)
-            .in_("kind", sorted(_RESYNC_CHAIN_KINDS))
-            .in_("status", sorted(_NON_TERMINAL_JOB_STATUSES))
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if inflight_chain_job:
-            latest_verification = one(
-                supabase.table("strategy_verifications")
-                .select("id,status,trust_tier")
-                .eq("strategy_id", strategy_id)
-                .order("created_at", desc=True)
-                .limit(1)
-                .maybe_single()
-                .execute()
+        try:
+            inflight_chain_job = rows(
+                await db_read_with_retry(
+                    lambda: supabase.table("compute_jobs")
+                    .select("id,kind,status")
+                    .eq("strategy_id", strategy_id)
+                    .in_("kind", sorted(_RESYNC_CHAIN_KINDS))
+                    .in_("status", sorted(_NON_TERMINAL_JOB_STATUSES))
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
             )
+        except Exception as exc:  # noqa: BLE001 — fall through, logged below
+            log.warning(
+                "process_key.resync_chain_inflight_read_failed",
+                strategy_id=strategy_id,
+                correlation_id=correlation_id,
+                error_type=type(exc).__name__,
+                error=str(exc)[:200],
+            )
+            inflight_chain_job = []
+        if inflight_chain_job:
+            try:
+                latest_verification = one(
+                    await db_read_with_retry(
+                        lambda: supabase.table("strategy_verifications")
+                        .select("id,status,trust_tier")
+                        .eq("strategy_id", strategy_id)
+                        .order("created_at", desc=True)
+                        .limit(1)
+                        .maybe_single()
+                        .execute()
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — a job IS in flight; reply without it
+                log.warning(
+                    "process_key.resync_chain_inflight_verification_read_failed",
+                    strategy_id=strategy_id,
+                    correlation_id=correlation_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:200],
+                )
+                latest_verification = None
             log.info(
                 "process_key.resync_chain_inflight_dedup_hit",
                 job_id=str(inflight_chain_job[0].get("id")),
