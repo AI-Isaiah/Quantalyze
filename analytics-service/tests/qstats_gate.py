@@ -858,3 +858,23 @@ def census_lines(root: Path = SERVICE_ROOT) -> list[str]:
         f"(phase start: {PHASE_START_TEXT_OCCURRENCES} vs {PHASE_START_AST_NODES})"
     )
     return lines
+
+
+def safe_census_lines(root: Path = SERVICE_ROOT) -> list[str]:
+    """``census_lines`` for the ``pytest_terminal_summary`` hook, which must never raise.
+
+    Review IN-06: ``census_lines`` parses every production ``*.py`` on every pytest
+    run. One half-written or non-UTF-8 file made the terminal-summary hook raise,
+    which turns the whole session into an INTERNALERROR and hides the real test
+    outcome behind a census stack trace. Here that failure becomes one NAMED line
+    instead. The gate itself still fails loudly: ``tests/test_qstats_gate.py`` runs
+    the same ``scan_tree`` inside tests, where a parse failure is an ordinary
+    test failure.
+    """
+    try:
+        return census_lines(root)
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        return [
+            f"qstats-gate census: FAILED TO BUILD ({exc!r}); the gate tests in "
+            "tests/test_qstats_gate.py fail on the same cause"
+        ]

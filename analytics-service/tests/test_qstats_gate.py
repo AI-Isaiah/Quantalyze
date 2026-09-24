@@ -799,3 +799,41 @@ def test_qstats_gate_calibration_non_honouring_functions_do_reach_a_preparer(
         f"{name}(prepare_returns=False) reached no preparer: either quantstats now "
         "honours the keyword (re-measure; it may join KWARG_PROVEN) or the spy is blind"
     )
+
+
+def test_qstats_gate_census_that_cannot_be_built_is_a_named_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review IN-06: the census runs in ``pytest_terminal_summary`` on every run.
+
+    A production file that does not parse used to make that hook raise, which
+    turns the session into an INTERNALERROR and hides every real test result.
+    It must become one named line instead, and it must do so through the hook
+    itself, not just the helper.
+    """
+    from tests import conftest, qstats_gate
+
+    services = tmp_path / "services"
+    services.mkdir()
+    (services / "metrics.py").write_text("def half_written(:\n", encoding="utf-8")
+    with pytest.raises(SyntaxError):
+        census_lines(tmp_path)
+    [line] = qstats_gate.safe_census_lines(tmp_path)
+    assert line.startswith("qstats-gate census: FAILED TO BUILD (SyntaxError("), line
+
+    def broken(root: Path = SERVICE_ROOT) -> list[str]:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(qstats_gate, "census_lines", broken)
+
+    class Reporter:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def write_line(self, line: str) -> None:
+            self.lines.append(line)
+
+    reporter = Reporter()
+    conftest.pytest_terminal_summary(reporter)
+    failed = [x for x in reporter.lines if x.startswith("qstats-gate census: FAILED TO BUILD")]
+    assert len(failed) == 1 and "UnicodeDecodeError" in failed[0], reporter.lines

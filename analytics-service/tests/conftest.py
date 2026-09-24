@@ -315,8 +315,9 @@ def pytest_terminal_summary(terminalreporter):
     # (166-RESEARCH Pitfall 5), so the census is written here. It is a pure
     # function of source text, so the controller computes it directly; no xdist
     # aggregation is needed. Extend THIS hook: a second definition in this file
-    # would silently shadow it.
-    from tests.qstats_gate import census_lines
+    # would silently shadow it. `safe_census_lines` turns a census that cannot be
+    # built into one named line instead of an INTERNALERROR (review IN-06).
+    from tests.qstats_gate import safe_census_lines
 
-    for line in census_lines():
+    for line in safe_census_lines():
         terminalreporter.write_line(line)
