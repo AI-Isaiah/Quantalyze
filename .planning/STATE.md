@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "167.1"
 current_phase_name: "AUMTRUST — the headline AUM says when it includes holdings from keys needing attention"
 status: executing
-stopped_at: Completed 167.1-01-PLAN.md
-last_updated: "2026-09-24T01:45:00.000Z"
+stopped_at: Completed 167.1-02-PLAN.md
+last_updated: "2026-09-24T01:48:30.000Z"
 last_activity: 2026-09-24
-last_activity_desc: Phase 167.1 plan 01 complete (State A marker + summarizeLiveHoldings)
+last_activity_desc: Phase 167.1 plan 02 complete (Open Positions footer qualifier)
 state_head: b64cb3002c4e017e389de4bafb29dcf8fa39edf6
 progress:
   total_phases: 50
   completed_phases: 32
   total_plans: 250
-  completed_plans: 238
+  completed_plans: 239
   percent: 64
 ---
 
@@ -180,7 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 167.1 (aumtrust-the-headline-aum-says-when-it-includes-holdings-fro) — EXECUTING
-Plan: 2 of 6 (plan 01 DONE — `167.1-01-SUMMARY.md`)
+Plan: 3 of 6 (plans 01 and 02 DONE — `167.1-01-SUMMARY.md`, `167.1-02-SUMMARY.md`)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
       until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
       so a future handler cannot match them again; their continuation prose follows unbroken.
@@ -498,7 +498,7 @@ Status: Executing Phase 167.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-24 — Phase 167.1 plan 01 complete (State A marker + summarizeLiveHoldings)
+Last activity: 2026-09-24 — Phase 167.1 plan 02 complete (Open Positions footer qualifier)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1288,6 +1288,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
      every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
      The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
      FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 02, the Open Positions footer qualifier, 2026-09-24)*
+
+- **D-167.1-02-A — the Open Positions footer pass calls `isUntrustedKeySyncStatus` directly, not `untrustedKeyChipLabel(...) !== null`.** The footer needs membership, not a label; both go through the same predicate, and the plan allowed either.
+- **D-167.1-02-B — the plan's acceptance grep for a status equality reads 1, not 0, and the one hit was left alone.** It is the pre-existing Phase 167 comment recording the removed equality, and it already read 1 at the plan's base; no code equality exists.
 
 *(execution-time, Phase 167.1 AUMTRUST — plan 01, the State A marker and the single-pass summary, 2026-09-24)*
 
@@ -2305,8 +2310,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-24T01:45:00.000Z
-**Stopped At:** Completed 167.1-01-PLAN.md
+**Last Date:** 2026-09-24T01:48:30.000Z
+**Stopped At:** Completed 167.1-02-PLAN.md
 **Resume File:** None
 
 **Last Date:** 2026-09-19T20:05:00.000Z
