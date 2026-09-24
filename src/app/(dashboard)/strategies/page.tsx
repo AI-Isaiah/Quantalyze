@@ -8,11 +8,18 @@ import { ShareableLink } from "@/components/strategy/ShareableLink";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 // Server component: import the predicate from the NON-client module. Importing
 // it from ShareableLink.tsx compiles but throws at request time.
-import { isPublishedStatus } from "@/lib/share-affordance";
+import { isPublishedStatus, shareAffordanceMode } from "@/lib/share-affordance";
 // Same rule for the Phase 167.2 predicates and copy: every module CALLED here
 // carries no client directive. AllocatorSyncStatus is only RENDERED.
-import { isUntrustedKeySyncStatus } from "@/lib/closed-sets";
-import { untrustedKeyCaption } from "@/lib/status-surface-copy";
+import { isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
+import {
+  COMPUTE_STATE_READ_LIMIT,
+  deriveComputeState,
+  recipientArm,
+  type ComputeJobRow,
+  type RecipientArm,
+} from "@/lib/compute-state";
+import { recipientShareNote, untrustedKeyCaption } from "@/lib/status-surface-copy";
 import { PendingIntros } from "@/components/strategy/PendingIntros";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -76,6 +83,62 @@ function untrustedKeyLines(
   }));
 }
 
+/**
+ * KCS-12 — the embedded analytics status. PostgREST hands a 1:1 embed back as
+ * an object or a one-element array; a row with no analytics is null.
+ */
+function computationStatusOf(embed: unknown): string | null {
+  const row = Array.isArray(embed) ? embed[0] : embed;
+  const status = (row as { computation_status?: unknown } | null | undefined)
+    ?.computation_status;
+  return typeof status === "string" ? status : null;
+}
+
+/**
+ * KCS-12 — what a recipient of this strategy's link sees right now, by the
+ * SAME derivation the share page uses (`deriveComputeState` → `recipientArm`),
+ * so the note and the page cannot disagree. One RPC per strategy, filtered by
+ * `p_strategy_id` (never one unfiltered call: the window would be shared across
+ * rows). The RPC is owner-scoped (SECURITY DEFINER, resolves auth.uid()).
+ * ⛔ error-absent ≠ legit-absent: an error, an answer that is not a rows array,
+ * or a throw derives `unreadable`, is logged, and is never an in-progress
+ * claim. The server clock is read here, never in the component.
+ */
+async function readRecipientArm(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  strategyId: string,
+): Promise<RecipientArm> {
+  try {
+    const { data: jobRows, error } = await supabase.rpc("get_user_compute_jobs", {
+      p_strategy_id: strategyId,
+      p_limit: COMPUTE_STATE_READ_LIMIT,
+    });
+    if (error || !Array.isArray(jobRows)) {
+      console.error("[strategies/page] compute-state read failed", {
+        id: strategyId,
+        code: error?.code,
+        message:
+          error?.message ?? "compute job read returned no rows array and no error",
+      });
+      return recipientArm(deriveComputeState({ readError: true }));
+    }
+    return recipientArm(
+      deriveComputeState({
+        rows: jobRows as unknown as ComputeJobRow[],
+        readExhaustive: jobRows.length < COMPUTE_STATE_READ_LIMIT,
+        nowMs: Date.now(),
+      }),
+    );
+  } catch (err) {
+    console.error("[strategies/page] compute-state read failed", {
+      id: strategyId,
+      code: undefined,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return recipientArm(deriveComputeState({ readError: true }));
+  }
+}
+
 export default async function StrategiesPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -90,7 +153,7 @@ export default async function StrategiesPage() {
   // keeps legacy drafts visible while hiding wizard-in-progress rows.
   const { data: strategies } = await supabase
     .from("strategies")
-    .select("id, name, status, source, strategy_types, review_note, created_at, api_key_id")
+    .select("id, name, status, source, strategy_types, review_note, created_at, api_key_id, strategy_analytics ( computation_status )")
     .eq("user_id", user.id)
     .or("source.neq.wizard,status.neq.draft")
     .order("created_at", { ascending: false });
@@ -191,6 +254,31 @@ export default async function StrategiesPage() {
     }
   }
 
+  // Phase 167.2 / KCS-12 — beside each share control, what a recipient of that
+  // link sees right now, for every row WITHOUT a computed factsheet. "Has a
+  // computed factsheet" is `isComputedAnalytics(computation_status)`: the
+  // factsheet builder's own first gate (STALE-01 in fetchAndBuildPayload), so a
+  // row this predicate calls uncomputed is one the builder refuses. A computed
+  // row performs no RPC and shows no note. Known limit: a computed row whose
+  // series cannot build still reads as "has a factsheet" here; that is decided
+  // from data this request client cannot read (167.2-09 SUMMARY).
+  const shareNotes = new Map<string, string>(
+    await Promise.all(
+      (strategies ?? [])
+        .filter((s) => !isComputedAnalytics(computationStatusOf(s.strategy_analytics)))
+        .map(
+          async (s) =>
+            [
+              s.id,
+              recipientShareNote(
+                shareAffordanceMode(isPublishedStatus(s.status)),
+                await readRecipientArm(supabase, s.id),
+              ),
+            ] as const,
+        ),
+    ),
+  );
+
   return (
     <>
       <PageHeader
@@ -281,8 +369,9 @@ export default async function StrategiesPage() {
               feedingKeyIdsByStrategy.get(s.id) ?? [],
               keysById,
             );
+            const shareNote = shareNotes.get(s.id);
             return (
-              <Card key={s.id}>
+              <Card key={s.id} data-testid="strategy-row">
                 <div className="flex items-center justify-between">
                   <div className="flex-1 min-w-0">
                     <Link href={`/strategies/${s.id}/edit`} className="font-medium text-text-primary hover:text-accent transition-colors">
@@ -321,14 +410,14 @@ export default async function StrategiesPage() {
                     </span>
                   </div>
                 </div>
-                {/* Phase 167.2 / KCS-06 (S4) — the footer band, only when the row
-                    has something to show. One line per DISTINCT untrusted status,
+                {/* Phase 167.2 / KCS-06 (S4) + KCS-12 (S5) — the footer band, only
+                    when the row has something to show. One line per DISTINCT untrusted status,
                     carrying the key card's own pill and helper, mounted exactly
                     as the key card mounts it. The caption names a key and the
                     pill names its state: no claim about the strategy's numbers.
                     Each mount keeps its own helper live region; on this static
                     server render they never change, so they announce nothing. */}
-                {keyLines.length > 0 && (
+                {(keyLines.length > 0 || shareNote) && (
                   <div
                     data-testid="strategy-row-footer"
                     className="mt-3 border-t border-border pt-3 space-y-2"
@@ -348,6 +437,15 @@ export default async function StrategiesPage() {
                         />
                       </div>
                     ))}
+                    {/* KCS-12 (S5) — after any S4 lines; plain text, no role. */}
+                    {shareNote && (
+                      <p
+                        data-testid="strategy-row-share-note"
+                        className="text-xs text-text-muted"
+                      >
+                        {shareNote}
+                      </p>
+                    )}
                   </div>
                 )}
               </Card>
