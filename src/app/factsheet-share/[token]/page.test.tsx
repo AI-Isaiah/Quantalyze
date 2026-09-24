@@ -527,6 +527,187 @@ describe("KCS-11 — the pending card promises nothing when no job will finish t
   });
 });
 
+describe("KCS-11 — read (3) is pinned to one bound and one five-field projection", () => {
+  beforeEach(() => {
+    sharesReadMock.mockResolvedValue({ data: [ROW], error: null });
+    buildMock.mockResolvedValue(null);
+  });
+
+  it("PROJECTION-PIN: selects exactly the five fields the derivation needs, the heartbeat through a JSON-path alias", async () => {
+    await renderPage(VALID_TOKEN);
+    expect(jobsReadMock).toHaveBeenCalledTimes(1);
+    const [call] = jobsReadMock.mock.calls[0];
+    // No last_error, no error_kind, no bare metadata (it carries source and
+    // correlation ids): this is a public route and the recipient is anonymous.
+    expect(call.cols).toBe(
+      "status, kind, created_at, claimed_at, member_progress_at:metadata->>member_progress_at",
+    );
+  });
+
+  it("BOUND-PIN: the only bound is the HMAC-matched strategy id, newest first, 100 rows", async () => {
+    await renderPage(VALID_TOKEN);
+    const [call] = jobsReadMock.mock.calls[0];
+    // A second eq, or an eq on anything but the matched id, is a disclosure
+    // path: the match is the only authorisation this route has.
+    expect(call.eqs).toEqual([["strategy_id", STRATEGY_ID]]);
+    expect(call.order).toEqual(["created_at", { ascending: false }]);
+    expect(call.limit).toBe(100);
+  });
+
+  it("PAYLOAD-NO-READ: a built payload renders the recipient view and never reads compute_jobs", async () => {
+    buildMock.mockResolvedValue({ strategyId: "stub" } as never);
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain('data-testid="factsheet-view"');
+    expect(jobsReadMock).not.toHaveBeenCalled();
+    expect(adminFromMock).not.toHaveBeenCalledWith("compute_jobs");
+  });
+});
+
+describe("KCS-11 — every derived state lands on exactly one arm", () => {
+  beforeEach(() => {
+    sharesReadMock.mockResolvedValue({ data: [ROW], error: null });
+    buildMock.mockResolvedValue(null);
+  });
+
+  const minutesAgo = (m: number) =>
+    new Date(Date.now() - m * 60_000).toISOString();
+
+  // Arm (a): a job that will still do work. The card may say "being prepared".
+  const ARM_A_CASES: Array<[string, () => Record<string, unknown>[]]> = [
+    ["pending", () => [jobRow({ status: "pending", claimed_at: null })]],
+    [
+      "done_pending_children",
+      () => [jobRow({ kind: "compute_analytics_from_csv", status: "done_pending_children" })],
+    ],
+    ["failed_retry", () => [jobRow({ status: "failed_retry" })]],
+    ["running process_key_long", () => [jobRow({ status: "running" })]],
+    [
+      "running stitch with a fresh heartbeat",
+      () => [
+        jobRow({
+          kind: "stitch_composite",
+          status: "running",
+          claimed_at: minutesAgo(30),
+          member_progress_at: minutesAgo(1),
+        }),
+      ],
+    ],
+  ];
+
+  it.each(ARM_A_CASES)("ARM-A: %s renders KCS11-A", async (_name, rows) => {
+    jobsReadMock.mockResolvedValue({ data: rows(), error: null });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain(KCS11_A_HEADING);
+    expect(out).toContain(KCS11_A_BODY);
+    expect(out).not.toContain(KCS11_B_HEADING);
+  });
+
+  // Arm (b): nothing will finish the factsheet on its own, so nothing is
+  // promised. error_kind is NOT projected, so every failure kind lands here
+  // alike; the rows below carry one anyway to prove it changes nothing.
+  const ARM_B_CASES: Array<[string, () => Record<string, unknown>[]]> = [
+    ...(["permanent", "transient", "unknown", "orphaned"] as const).map(
+      (kind): [string, () => Record<string, unknown>[]] => [
+        `failed_final (${kind})`,
+        () => [{ ...jobRow({ status: "failed_final" }), error_kind: kind }],
+      ],
+    ),
+    [
+      "running stitch whose heartbeat is older than 12 minutes (stalled)",
+      () => [
+        jobRow({
+          kind: "stitch_composite",
+          status: "running",
+          claimed_at: minutesAgo(40),
+          member_progress_at: minutesAgo(13),
+        }),
+      ],
+    ],
+    [
+      "done with no payload (finished)",
+      () => [jobRow({ kind: "compute_analytics_from_csv", status: "done" })],
+    ],
+    ["no job on record, short window (never_started)", () => []],
+  ];
+
+  it.each(ARM_B_CASES)("ARM-B: %s renders KCS11-B", async (_name, rows) => {
+    jobsReadMock.mockResolvedValue({ data: rows(), error: null });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain(KCS11_B_HEADING);
+    expect(out).toContain(KCS11_B_BODY);
+    expect(out).not.toContain("ready yet");
+    expect(out).not.toContain("being prepared");
+    for (const word of NEVER_ON_THE_CARD) {
+      expect(out.toLowerCase()).not.toContain(word);
+    }
+  });
+});
+
+describe("KCS-11 — every way read (3) can fail renders the arm that promises nothing", () => {
+  beforeEach(() => {
+    sharesReadMock.mockResolvedValue({ data: [ROW], error: null });
+    buildMock.mockResolvedValue(null);
+  });
+
+  it("READ-ERROR-B: a PostgREST error renders KCS11-B and is logged by message only", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      jobsReadMock.mockResolvedValue({
+        data: null,
+        error: { message: 'relation "compute_jobs_secret" does not exist' },
+      });
+      const out = await renderPage(VALID_TOKEN);
+      expect(out).toContain(KCS11_B_HEADING);
+      expect(out).toContain(KCS11_B_BODY);
+      expect(out).not.toContain(KCS11_A_HEADING);
+      // Nothing from the error reaches the recipient.
+      expect(out).not.toContain("compute_jobs_secret");
+      expect(errSpy).toHaveBeenCalledWith(
+        "[factsheet-share/page] compute-state read failed",
+        { message: 'relation "compute_jobs_secret" does not exist' },
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("READ-THROWS-B: a throw from the read renders KCS11-B, never an uncaught error", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      jobsReadMock.mockImplementation(() => {
+        throw new Error("socket hang up");
+      });
+      const out = await renderPage(VALID_TOKEN);
+      expect(out).toContain(KCS11_B_HEADING);
+      expect(out).not.toContain("socket hang up");
+      expect(errSpy).toHaveBeenCalledWith(
+        "[factsheet-share/page] compute-state read failed",
+        { message: "socket hang up" },
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("FULL-WINDOW-B: 100 rows with no factsheet-chain job prove nothing and render KCS11-B", async () => {
+    // A full window of cron rows can hide the chain job behind it, so the
+    // absence of one is not "never started" and certainly not "in progress".
+    jobsReadMock.mockResolvedValue({
+      data: Array.from({ length: 100 }, (_, i) =>
+        jobRow({
+          kind: "reconcile_strategy",
+          status: "done",
+          created_at: new Date(Date.UTC(2026, 8, 20, 0, i)).toISOString(),
+        }),
+      ),
+      error: null,
+    });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain(KCS11_B_HEADING);
+    expect(out).not.toContain(KCS11_A_HEADING);
+  });
+});
+
 /**
  * Strip `//` line comments and `/* *\/` block comments before matching.
  *
