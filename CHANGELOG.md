@@ -1,5 +1,102 @@
 # Changelog
 
+## [0.90.1.0] - 2026-09-24 — WIZRESYNC: a wizard reload no longer starts a second sync, and Retry shows only when the server needs one
+
+⭐ **What changed for whoever reads this next.** Four defects found live on 2026-09-24 while a
+manager ran the strategy wizard on a Bybit key, plus one misleading log line. The stall had one root
+cause: a resync only deduped against a verification still in `draft`, and `process_key_long` moves
+it out of draft within about 3 s. So every wizard reload or Retry during a ~16-minute chain started a
+whole second chain. The SQL bridge `sync_strategy_analytics_status` then wrote `computing` back
+while any job of the strategy was non-terminal. The first chain's `complete` lived about half a
+second, and the wizard poll (every 10 s) never saw it. **No migration; the SQL bridge is
+unchanged.**
+
+### Root cause
+
+- **The resync dedup looked at the wrong object.** It matched a `draft` verification, which lives
+  for seconds. The chain it was meant to protect lives for minutes. The fix below keys the dedup on
+  the chain's own jobs.
+
+### Fixed
+
+- **A resync while the factsheet chain is running starts no second chain** (`process_key`, the
+  resync chain-in-flight guard). A resync `/process-key` now answers `WIZARD_DUPLICATE` with
+  `queued: true` and `job_state: "running"`, mints no draft and enqueues nothing while any job of
+  the chain it would start is non-terminal for that strategy. The kinds are walked from
+  `JOB_CHAIN_FOLLOW_ON` starting at `process_key_long`. The statuses are `CLAIMABLE_STATUSES` plus
+  `_IN_FLIGHT_JOB_STATUSES`. Neither set is re-listed. The existing draft pre-check still runs first,
+  so a wedged draft is still resumed.
+- **`sync-progress` no longer reports `done` while a second chain is still running.**
+  `selectFactsheetJob` picked the newest-created chain job, which could be the first chain's
+  finished compute. It now prefers the newest in-flight chain job and falls back to the newest one.
+  With `preferStitch: false`, an in-flight chain job also outranks a finished stitch. Every caller
+  shares this selection: the sync-progress route, `deriveComputeState` (owner factsheet, share page,
+  `/strategies` list) and `readChainJobState` (the key card gate and KCS-18's success gate).
+- **A wizard reload no longer re-kicks a running sync.** On a first mount the sync step skips the
+  `/api/keys/sync` POST when the strategy is proven single-key (`strategies.api_key_id` is set,
+  the rule `/api/keys/sync` routes on) and a real sync-progress read says a job is in flight. An
+  analytics status of `computing` alone is not treated as evidence, because a dead chain can leave
+  it there and the POST is then what restarts the work. A composite, an unreadable row, a degraded
+  read and an explicit retry all POST as before, and the server dedups them.
+- **"Retry sync" shows only when the server says a retry is needed** (founder, 2026-09-24:
+  "Shouldn't the system check and only show it, if it is absolutely necessary"). The analytics
+  status holds at `computing` for a whole chain, so the 15-minute wall-clock backstop fired on a
+  healthy run that was simply long (sync_trades 4.7 min, derive 9.7 min). The banner now comes up
+  for a stalled stitch; after real reads have said nothing is in flight for a 60 s grace while the
+  status is still not computed; for a kickoff that queued nothing when no read says a job runs; or
+  from the backstop, which now fires only with no in-flight evidence from the last minute. A dead
+  sync-progress channel still reaches the backstop.
+- **The progress row always shows a stage label while polling.** At 1061 s it rendered empty
+  beside the seconds counter, because the backstop's banner hid the in-flight label and nothing
+  replaced it. A healthy chain now keeps its label. When the banner is up the row reads
+  `Checking for progress…`. The "Usually takes 15–30 seconds" copy is unchanged.
+- **The benchmark cache is used again.** `get_benchmark_returns` called the imported `rows()`
+  helper in its cache-read branch and bound a local `rows` list later in the same function, so
+  every cache read with more than 10 rows raised `UnboundLocalError`. The broad `except` logged it
+  as a cache read failure and every compute refetched Binance klines, from v0.35.0.4 (PR #536)
+  until now. The local list is `cache_rows`.
+
+### Removed
+
+- **The discarded position reconstruction in `process_key_long` step 5, and the same call in the
+  synchronous `process_key` pipeline.** Both awaited `adapter.reconstruct_positions(trades)` and
+  threw the result away (the sync-path comment said "persisted in P8"; it never was). Each call
+  still logged "equity understated" for every open position without a mark price. Every adapter's
+  implementation is pure (an in-memory FIFO match plus logging, or `[]` for CSV), so nothing
+  depended on it. The call was removed rather than the warning downgraded, because
+  `EquityCurveBuilder` also feeds the equity curve, where a missing mark really does understate
+  equity. That warning stays as it is.
+
+### Tests
+
+- `tests/test_resync_draft_dedup.py`: 16 parametrised cases (4 chain kinds by 4 non-terminal
+  statuses) plus controls for a terminal job, a non-chain kind, another strategy's chain, and a
+  drift pin of the derived kinds against `FACTSHEET_CHAIN_KINDS`. Both supabase fakes gained a real
+  `in_` filter, so deleting the guard's kind or status filter turns a test RED.
+- `tests/test_benchmark.py`: a fresh-cache hit (20 rows) that asserts no fetch. It failed on the old
+  code with the exact `UnboundLocalError` message.
+- `tests/test_long_fetch.py` and `tests/test_process_key.py`: the reconstruction is asserted NOT
+  awaited on both paths.
+- `src/lib/compute-state.test.ts`: two overlapping chains (newest done, older running) in both
+  orders and all four in-flight statuses, a nothing-in-flight control, and the `preferStitch: false`
+  case.
+- `SyncPreviewStep.inflight-guard.runtime.test.tsx` (new): the reload guard with three
+  POST-as-before controls, a healthy chain at 1061 s and at 40 min with its label and no Retry,
+  Retry after the server reports the chain finished without a factsheet, and a queued-nothing
+  kickoff with a running job. Four of its seven cases fail against the original component.
+- Two `SyncPreviewStep.progress.render.test.tsx` cases pinned a Retry on a live, running chain. They
+  now drive the backstop through a channel that goes dark, which is the case the backstop is for.
+- Every new guard was neutered, observed RED, and restored from a byte backup confirmed with `cmp`.
+
+### Notes
+
+- **The server guard is the real one.** The client reload guard only skips a request whose answer
+  is already known. A composite still POSTs on reload. Its `stitch_composite` enqueue is deduped by
+  the per-kind in-flight index, and the cross-kind second-chain defect never applied to it.
+- **The 60 s evidence window and the 60 s settled grace are new constants in `SyncPreviewStep`**
+  (`IN_FLIGHT_EVIDENCE_TTL_MS`, `SETTLED_WITHOUT_COMPLETE_GRACE_MS`). Each is documented beside its
+  definition.
+
 ## [0.89.0.0] - 2026-09-24 — AUMTRUST: the AUM an allocator sizes with says how much of it comes from keys needing attention, and what the modelled book leaves out
 
 ⭐ **What changed for whoever reads this next.** Phase 167.1 closes the Phase 167 review's SFH-M2
