@@ -16,7 +16,9 @@ import { describe, it, expect } from "vitest";
 import {
   addKeyBlockedReason,
   formatBoundDuration,
+  DELETE_COMPOSITE_DRAFT_COPY,
   DELETE_COMPOSITE_MEMBER_COPY,
+  DELETE_MEMBERSHIP_UNCHECKED_COPY,
   EMPTY_NOLINK_COPY,
   FINISH_UNVERIFIED_NOTE,
   PANEL_STOP_COPY,
@@ -146,6 +148,20 @@ describe("Review-fix round 1 (2026-09-24): the S3 strings authored for the revie
   it("KCS-DELETE-COMPOSITE (REVIEW WR-05)", () => {
     expect(DELETE_COMPOSITE_MEMBER_COPY).toBe(
       "This key is part of a composite strategy, so it is not deleted here. Contact support@quantalyze.com to change which keys the composite uses.",
+    );
+  });
+});
+
+describe("Review-fix round 2 (2026-09-24): the Delete refusal strings (167.2-REVIEW-R2 WR-02)", () => {
+  it("KCS-DELETE-COMPOSITE-DRAFT", () => {
+    expect(DELETE_COMPOSITE_DRAFT_COPY).toBe(
+      "This key is part of a draft composite strategy, so it is not deleted here. Change the draft's keys in the strategy wizard (open your latest draft from your Strategies page), or contact support@quantalyze.com if this draft is not your latest.",
+    );
+  });
+
+  it("KCS-DELETE-UNCHECKED", () => {
+    expect(DELETE_MEMBERSHIP_UNCHECKED_COPY).toBe(
+      "We could not check whether this key is part of a composite strategy, so it was not deleted. Try again, and contact support@quantalyze.com if it keeps failing.",
     );
   });
 });

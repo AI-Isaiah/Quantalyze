@@ -1,5 +1,22 @@
 # Phase 167.2 — deferred items (out of scope for the plan that found them)
 
+## Found during the round-2 review fix (2026-09-24)
+
+- **An RLS-filtered membership read lets a Delete cascade a key out of a draft
+  composite (167.2-REVIEW-SFH-R2 R2-L4 (b)).** `ApiKeyManager`'s
+  `readDeleteLock` reads `strategy_keys` on the RLS-scoped client before the
+  Delete confirm. RLS on SELECT filters rows instead of raising an error. So if
+  the `strategy_keys_owner` policy regresses, the read answers `[]` with no
+  error, and the Delete goes ahead. `strategy_keys_api_key_id_fkey ... ON DELETE
+  CASCADE` then removes the key from a draft or pending composite. The database's
+  publish guard still protects a PUBLISHED composite. The real fix is
+  server-side: the delete should refuse a key that still has non-archived
+  memberships. That needs a migration, and KCS-15 forbids one in this phase.
+  **Owner: Phase 167.2.1.** ⚠️ Measured 2026-09-24:
+  `grep -n "167\.2\.1" .planning/ROADMAP.md` gives 0 hits, so that phase is
+  not in the ROADMAP yet. The orchestrator has to add it (`/gsd-phase`). This
+  entry is the only record until then.
+
 ## Found during 167.2-07 (2026-09-24)
 
 - **The discovery-detail fallback still says "still computing".**

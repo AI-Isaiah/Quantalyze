@@ -278,6 +278,29 @@ export const DELETE_COMPOSITE_MEMBER_COPY =
   "This key is part of a composite strategy, so it is not deleted here. Contact support@quantalyze.com to change which keys the composite uses.";
 
 /**
+ * KCS-DELETE-COMPOSITE-DRAFT (UI-SPEC § Review-fix amendments, round 2,
+ * 167.2-REVIEW-R2 WR-02). The key is a member of a wizard DRAFT composite,
+ * whose members the owner can still change in the strategy wizard: the wizard
+ * re-opens its connect-key step and re-posts the members through
+ * `/api/strategies/composite/set-members`. That wizard is reached from the
+ * draft banner on /strategies (`Resume draft`, or `Revise & resubmit` for a
+ * draft sent back by review), which opens the owner's MOST RECENT wizard
+ * draft only (`readLatestWizardDraft`), so the sentence says what to do for
+ * an older one.
+ */
+export const DELETE_COMPOSITE_DRAFT_COPY =
+  "This key is part of a draft composite strategy, so it is not deleted here. Change the draft's keys in the strategy wizard (open your latest draft from your Strategies page), or contact support@quantalyze.com if this draft is not your latest.";
+
+/**
+ * KCS-DELETE-UNCHECKED (UI-SPEC § Review-fix amendments, round 2,
+ * 167.2-REVIEW-R2 WR-02). The membership read before the confirm failed,
+ * threw or did not answer within its 15 s bound, so the Delete is refused
+ * (fail closed: an unknown membership cannot vouch for the cascade).
+ */
+export const DELETE_MEMBERSHIP_UNCHECKED_COPY =
+  "We could not check whether this key is part of a composite strategy, so it was not deleted. Try again, and contact support@quantalyze.com if it keeps failing.";
+
+/**
  * KCS-FINISH-UNVERIFIED (UI-SPEC § Review-fix amendments, 167.2-REVIEW-SFH
  * L-1). A terminal success was withheld because the key list could not be
  * re-read (it failed, threw or timed out), so the card cannot vouch for the

@@ -3165,44 +3165,175 @@ describe("[167-06] the persisted credential state renders on the manager's key c
     // the card does not change which keys a composite uses. Orchestrator
     // decision: refuse, on every card, with authored copy pointing at support.
     // Hand-typed from the UI-SPEC review-fix row KCS-DELETE-COMPOSITE.
+    //
+    // 167.2-REVIEW-R2 WR-02 (round 2, orchestrator decision): the refusal
+    // covers only a NON-archived composite (an archived composite's member key
+    // is deletable, or it could never be deleted at all); the membership read
+    // runs BEFORE the "permanently remove" confirm, bounded at 15 s, and fails
+    // closed with authored copy; the refusal is amber (recoverable) and renders
+    // in the card's own slot, never the Add Key form's error slot; a wizard
+    // draft composite points at the owner-reachable members editor (the
+    // strategy wizard). Hand-typed from the UI-SPEC round-2 rows.
     const DELETE_COMPOSITE_ORACLE =
       "This key is part of a composite strategy, so it is not deleted here. Contact support@quantalyze.com to change which keys the composite uses.";
+    const DELETE_COMPOSITE_DRAFT_ORACLE =
+      "This key is part of a draft composite strategy, so it is not deleted here. Change the draft's keys in the strategy wizard (open your latest draft from your Strategies page), or contact support@quantalyze.com if this draft is not your latest.";
+    const DELETE_UNCHECKED_ORACLE =
+      "We could not check whether this key is part of a composite strategy, so it was not deleted. Try again, and contact support@quantalyze.com if it keeps failing.";
 
-    it("WR05-MEMBER-REFUSED: a key that is a composite member is not deleted, the card stays, and the refusal says why", async () => {
+    /** Click a card's Delete when the click is expected to be REFUSED before the confirm. */
+    async function clickDelete(id: string) {
+      await act(async () => {
+        fireEvent.click(cardButton(id, "Delete"));
+      });
+    }
+
+    function membership(status: string, source = "wizard") {
+      return { strategy_id: `strat-composite-${status}`, strategies: { status, source } };
+    }
+
+    it("WR05-MEMBER-REFUSED: a key that is a member of a non-archived composite is refused BEFORE the confirm; the card stays and the amber refusal says why (R2 WR-02)", async () => {
       routeFetch();
       const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
       await renderRows([keyA]);
-      strategyKeysMemberMock.mockReturnValue({ data: [{ strategy_id: "strat-composite-x" }], error: null });
+      strategyKeysMemberMock.mockReturnValue({ data: [membership("published", "api")], error: null });
       try {
-        await deleteKey("key-a");
+        await clickDelete("key-a");
         await waitFor(() => {
           expect(screen.getByText(DELETE_COMPOSITE_ORACLE)).toBeInTheDocument();
         });
+        // Refused before the "permanently remove" confirm ever opened.
+        expect(dialogTitled("Delete API Key")).not.toHaveAttribute("open");
         expect(strategyKeysMemberMock).toHaveBeenCalledWith("key-a");
         expect(apiKeyDeleteMock).not.toHaveBeenCalled();
         expect(screen.getByTestId("api-key-card-key-a")).toBeInTheDocument();
+        // DESIGN.md: a policy refusal is recoverable (amber), never red.
+        const notice = screen.getByTestId("delete-notice");
+        expect(notice.className).toContain("text-warning");
+        expect(notice.className).not.toContain("text-negative");
       } finally {
         strategyKeysMemberMock.mockReset();
       }
     });
 
-    it("WR05-MEMBERSHIP-UNREADABLE: a membership read that fails refuses the Delete with the authored failure copy (fail closed)", async () => {
+    it("R2-WR02-DRAFT: a member of a wizard DRAFT composite is pointed at the strategy wizard (the owner-reachable members editor), not only support", async () => {
+      routeFetch();
+      const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
+      await renderRows([keyA]);
+      strategyKeysMemberMock.mockReturnValue({ data: [membership("draft", "wizard")], error: null });
+      try {
+        await clickDelete("key-a");
+        await waitFor(() => {
+          expect(screen.getByText(DELETE_COMPOSITE_DRAFT_ORACLE)).toBeInTheDocument();
+        });
+        expect(apiKeyDeleteMock).not.toHaveBeenCalled();
+      } finally {
+        strategyKeysMemberMock.mockReset();
+      }
+    });
+
+    it("R2-WR02-ARCHIVED-DELETABLE: a key whose composites are ALL archived opens the confirm and is deleted (no permanent trap)", async () => {
+      routeFetch();
+      const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
+      await renderRows([keyA]);
+      strategyKeysMemberMock.mockReturnValue({
+        data: [membership("archived", "wizard"), membership("archived", "api")],
+        error: null,
+      });
+      try {
+        await deleteKey("key-a");
+        await waitFor(() => {
+          expect(screen.queryByTestId("api-key-card-key-a")).not.toBeInTheDocument();
+        });
+        expect(apiKeyDeleteMock).toHaveBeenCalledWith("api_keys");
+        expect(screen.queryByTestId("delete-notice")).not.toBeInTheDocument();
+      } finally {
+        strategyKeysMemberMock.mockReset();
+      }
+    });
+
+    it("R2-WR02-MIXED: one archived and one pending_review composite still refuse (any non-archived membership locks the key)", async () => {
+      routeFetch();
+      const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
+      await renderRows([keyA]);
+      strategyKeysMemberMock.mockReturnValue({
+        data: [membership("archived", "api"), membership("pending_review", "api")],
+        error: null,
+      });
+      try {
+        await clickDelete("key-a");
+        await waitFor(() => {
+          expect(screen.getByText(DELETE_COMPOSITE_ORACLE)).toBeInTheDocument();
+        });
+        expect(apiKeyDeleteMock).not.toHaveBeenCalled();
+      } finally {
+        strategyKeysMemberMock.mockReset();
+      }
+    });
+
+    it("R2-WR02-EMBED-HIDDEN: a membership whose composite status cannot be read is treated as locking (fail closed)", async () => {
+      routeFetch();
+      const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
+      await renderRows([keyA]);
+      strategyKeysMemberMock.mockReturnValue({
+        data: [{ strategy_id: "strat-composite-x", strategies: null }],
+        error: null,
+      });
+      try {
+        await clickDelete("key-a");
+        await waitFor(() => {
+          expect(screen.getByText(DELETE_COMPOSITE_ORACLE)).toBeInTheDocument();
+        });
+        expect(apiKeyDeleteMock).not.toHaveBeenCalled();
+      } finally {
+        strategyKeysMemberMock.mockReset();
+      }
+    });
+
+    it("WR05-MEMBERSHIP-UNREADABLE: a membership read that fails refuses the Delete before the confirm, with authored amber copy, captured with tags only (R2 WR-02 / R2-L4)", async () => {
       routeFetch();
       const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
       await renderRows([keyA]);
       strategyKeysMemberMock.mockReturnValue({ data: null, error: { message: "RAW-PG-DETAIL-sentinel" } });
+      captureToSentryMock.mockClear();
       const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
       try {
-        await deleteKey("key-a");
+        await clickDelete("key-a");
         await waitFor(() => {
-          expect(
-            screen.getByText("Failed to delete key. Try again, and contact support if it keeps failing."),
-          ).toBeInTheDocument();
+          expect(screen.getByText(DELETE_UNCHECKED_ORACLE)).toBeInTheDocument();
         });
+        expect(dialogTitled("Delete API Key")).not.toHaveAttribute("open");
         expect(apiKeyDeleteMock).not.toHaveBeenCalled();
         expect(screen.queryByText(/RAW-PG-DETAIL-sentinel/)).not.toBeInTheDocument();
+        expect(screen.getByTestId("delete-notice").className).toContain("text-warning");
+        expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+          level: "warning",
+          tags: { component: "ApiKeyManager", stage: "delete-membership-read" },
+        });
+        expect(JSON.stringify(captureToSentryMock.mock.calls)).not.toContain("key-a");
       } finally {
         consoleError.mockRestore();
+        strategyKeysMemberMock.mockReset();
+      }
+    });
+
+    it("R2-WR02-FORM-OPEN: with the Add Key form open, the refusal renders in the card's own slot, never inside the form", async () => {
+      routeFetch();
+      const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
+      await renderRows([keyA]);
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /Add Key/i }));
+      });
+      expect(screen.getByLabelText(/Label/i)).toBeInTheDocument();
+      strategyKeysMemberMock.mockReturnValue({ data: [membership("published", "api")], error: null });
+      try {
+        await clickDelete("key-a");
+        await waitFor(() => {
+          expect(screen.getByTestId("delete-notice")).toHaveTextContent(DELETE_COMPOSITE_ORACLE);
+        });
+        // Exactly one rendering of the refusal: the card's notice, not the form's error slot.
+        expect(screen.getAllByText(DELETE_COMPOSITE_ORACLE)).toHaveLength(1);
+      } finally {
         strategyKeysMemberMock.mockReset();
       }
     });

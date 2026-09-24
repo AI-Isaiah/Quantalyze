@@ -83,6 +83,12 @@ const mockState = vi.hoisted(() => ({
   linkCount: 0,
   /** 167.2-REVIEW WR-04: the key the last link update wrote (read back before the enqueue). */
   linkedKeyId: "key-h" as string | null,
+  /**
+   * 167.2-REVIEW-R2 WR-02: what the Delete's composite-membership read
+   * (`strategy_keys.select(...).eq("api_key_id", …)`) answers. Null answers
+   * "a member of nothing" at once.
+   */
+  membershipResult: null as Promise<{ data: unknown; error: unknown }> | null,
 }));
 
 vi.mock("@/lib/supabase/client", () => ({
@@ -96,7 +102,10 @@ vi.mock("@/lib/supabase/client", () => ({
           }
           return Promise.resolve({ data: mockState.keysRows, error: null });
         },
-        eq: () => ({
+        eq: () =>
+          table === "strategy_keys"
+            ? (mockState.membershipResult ?? Promise.resolve({ data: [], error: null }))
+            : ({
           single: () => {
             if (table === "strategies") {
               return Promise.resolve({ data: { api_key_id: "key-h" }, error: null });
@@ -291,6 +300,7 @@ beforeEach(() => {
   mockState.jobStatuses = [];
   mockState.jobReadCount = 0;
   mockState.linkResult = null;
+  mockState.membershipResult = null;
 });
 
 afterEach(() => {
@@ -890,5 +900,82 @@ describe("ApiKeyManager + the REAL job-state read: no attempt starts while a cha
     expect(screen.queryByText("Sync failed")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
+  });
+});
+
+describe("ApiKeyManager + the REAL job-state read: the pre-attempt gate cannot hang the card (167.2-REVIEW-R2 WR-03)", () => {
+  // Hand-typed from the UI-SPEC review-fix row KCS-GATE-UNREADABLE.
+  const GATE_UNREADABLE =
+    "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.";
+  /** 15 s, hand-typed: `CHAIN_JOB_READ_BOUND_MS`. */
+  const CHAIN_JOB_BOUND = 15_000;
+
+  it("GATE-BOUND: a sync-progress read that never settles ends the attempt at 15 s as Sync not started; no link, no enqueue, and Resync comes back", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (/^\/api\/strategies\/[^/]+\/sync-progress$/.test(url)) {
+        mockState.jobReadCount += 1;
+        return new Promise(() => {});
+      }
+      return Promise.resolve(accepted());
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mockState.linkCount = 0;
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-h" />);
+    });
+    await tick(0);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Resync" }));
+    });
+    await tick(0);
+    expect(mockState.jobReadCount).toBe(1);
+
+    await tick(CHAIN_JOB_BOUND - 1_000);
+    // Still held: the attempt is registered and the card is locked.
+    expect(screen.queryByText(GATE_UNREADABLE)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Syncing…" })).toBeDisabled();
+
+    await tick(1_000);
+    expect(screen.getByText("Sync not started")).toBeInTheDocument();
+    expect(screen.getByText(GATE_UNREADABLE)).toBeInTheDocument();
+    expect(mockState.linkCount).toBe(0);
+    expect(fetchMock.mock.calls.some(([url]) => url === "/api/keys/sync")).toBe(false);
+    expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
+  });
+});
+
+describe("ApiKeyManager: the Delete's membership read is bounded (167.2-REVIEW-R2 WR-02)", () => {
+  // Hand-typed from the UI-SPEC round-2 row KCS-DELETE-UNCHECKED.
+  const DELETE_UNCHECKED =
+    "We could not check whether this key is part of a composite strategy, so it was not deleted. Try again, and contact support@quantalyze.com if it keeps failing.";
+
+  it("DELETE-MEMBERSHIP-BOUND: a membership read that never settles refuses the Delete at 15 s, before any confirm, and Delete comes back", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mockState.membershipResult = new Promise(() => {});
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(accepted())));
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-h" />);
+    });
+    await tick(0);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    });
+    await tick(0);
+    // Held while the read is open: the button cannot be clicked twice.
+    expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
+
+    await tick(14_000);
+    expect(screen.queryByText(DELETE_UNCHECKED)).not.toBeInTheDocument();
+
+    await tick(1_000);
+    expect(screen.getByText(DELETE_UNCHECKED)).toBeInTheDocument();
+    const dialog = Array.from(document.querySelectorAll("dialog")).find((d) =>
+      d.textContent?.includes("Delete API Key"),
+    );
+    expect(dialog).not.toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled();
   });
 });

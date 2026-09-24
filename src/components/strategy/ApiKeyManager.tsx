@@ -10,7 +10,9 @@ import { ApiKeyForm } from "./ApiKeyForm";
 import {
   addKeyBlockedReason,
   COMPOSITE_CARD_NOTE,
+  DELETE_COMPOSITE_DRAFT_COPY,
   DELETE_COMPOSITE_MEMBER_COPY,
+  DELETE_MEMBERSHIP_UNCHECKED_COPY,
   EMPTY_NOLINK_COPY,
   FINISH_UNVERIFIED_NOTE,
   SHAPE_UNKNOWN_CARD_NOTE,
@@ -278,6 +280,11 @@ export function ApiKeyManager({
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // 167.2-REVIEW-R2 WR-02: the key whose composite-membership read (run BEFORE
+  // the Delete confirm) is in flight, and the amber notice a refused Delete
+  // leaves in the card's own slot (never the Add Key form's error slot).
+  const [deleteCheckKeyId, setDeleteCheckKeyId] = useState<string | null>(null);
+  const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
   // Phase 164.5.3 / MT5CREDS Plan 05 — the id of the MT5 key whose password
   // is being corrected. Distinct from Reconnect: this key's credential is
   // WRONG and needs re-validation, not merely "try the stored one again".
@@ -855,40 +862,120 @@ export function ApiKeyManager({
     // The live-attempt path in `handleSyncTrades` refreshes instead.
   }
 
+  /**
+   * 167.2-REVIEW WR-05 / 167.2-REVIEW-R2 WR-02 — may this key be deleted
+   * without silently shrinking a composite? `strategy_keys.api_key_id`
+   * cascades on the key's DELETE, and the database's integrity guard refuses
+   * only for a PUBLISHED composite, so deleting a member of a draft or pending
+   * composite used to shrink it (the last member turned it "unlinked") from
+   * ANY card that lists the key.
+   *
+   * Round 2 (orchestrator decision, autonomous): the lock covers only a
+   * membership in a NON-archived composite. Round 1 refused every membership,
+   * so a key whose only composite was archived could never be deleted by its
+   * owner, not even after revoking it at the exchange. An archived composite
+   * no longer needs its members, so that key is deletable.
+   *
+   * One owner-scoped read (RLS `strategy_keys_owner`, the composite's status
+   * embedded through `strategy_keys_strategy_id_fkey`), bounded like the
+   * card's other reads (`BASELINE_READ_BOUND_MS`, 15 s). A membership whose
+   * composite status cannot be read locks the key (fail closed). Answers
+   * "free", a lock ("draft": every locking composite is a wizard draft, whose
+   * members the owner can still change; "other"), or "unreadable" (an error,
+   * a throw or the bound, logged and captured with tags only). Never throws.
+   *
+   * ⚠️ Residual, recorded rather than fixed (167.2-REVIEW-SFH-R2 R2-L4 (b)):
+   * RLS on SELECT filters rather than errors, so a regressed
+   * `strategy_keys_owner` policy answers `[]` and this reads "free". The real
+   * guard is server-side (the delete refusing a key with live memberships),
+   * which needs a migration and belongs to Phase 167.2.1 (KCS-15: no
+   * migration in this phase).
+   */
+  async function readDeleteLock(
+    keyId: string,
+  ): Promise<"free" | "draft" | "other" | "unreadable"> {
+    let boundTimer: ReturnType<typeof setTimeout> | undefined;
+    let failure: string | null = null;
+    try {
+      const bound = new Promise<"timed_out">((resolve) => {
+        boundTimer = setTimeout(() => resolve("timed_out"), BASELINE_READ_BOUND_MS);
+      });
+      const supabase = createClient() as unknown as SupabaseClient;
+      const outcome = await Promise.race([
+        supabase
+          .from("strategy_keys")
+          .select("strategy_id, strategies ( status, source )")
+          .eq("api_key_id", keyId),
+        bound,
+      ]);
+      if (outcome === "timed_out") {
+        failure = `no answer within ${BASELINE_READ_BOUND_MS} ms`;
+      } else if (outcome.error || !Array.isArray(outcome.data)) {
+        failure = outcome.error?.message ?? "no rows array and no error";
+      } else {
+        let lock: "free" | "draft" | "other" = "free";
+        for (const row of outcome.data as Array<{
+          strategies?: { status?: unknown; source?: unknown } | null;
+        }>) {
+          const composite = row?.strategies;
+          if (composite?.status === "archived") continue;
+          if (composite?.status === "draft" && composite.source === "wizard") {
+            if (lock === "free") lock = "draft";
+          } else {
+            lock = "other";
+          }
+        }
+        return lock;
+      }
+    } catch (err) {
+      failure = err instanceof Error ? err.message : String(err);
+    } finally {
+      clearTimeout(boundTimer);
+    }
+    console.error(
+      "[ApiKeyManager] composite membership read failed; the delete is refused:",
+      failure,
+    );
+    // SFH-R2 R2-L4 (a): captured like every other read on this card. Tags
+    // only: no key id and no strategy id.
+    captureToSentry(new Error("composite membership read before a delete failed"), {
+      level: "warning",
+      tags: { component: "ApiKeyManager", stage: "delete-membership-read" },
+    });
+    return "unreadable";
+  }
+
+  /**
+   * 167.2-REVIEW-R2 WR-02: the Delete button. The membership lock is read
+   * BEFORE the "This will permanently remove this API key" confirm, so a key
+   * the card will not delete is refused before the owner confirms anything.
+   * The refusal is amber (DESIGN.md: recoverable, never red) and renders in
+   * the card's own slot.
+   */
+  async function handleDeleteClick(keyId: string) {
+    setDeleteNotice(null);
+    setDeleteCheckKeyId(keyId);
+    const lock = await readDeleteLock(keyId);
+    setDeleteCheckKeyId(null);
+    if (lock === "free") {
+      setConfirmDelete(keyId);
+      return;
+    }
+    setDeleteNotice(
+      lock === "draft"
+        ? DELETE_COMPOSITE_DRAFT_COPY
+        : lock === "other"
+          ? DELETE_COMPOSITE_MEMBER_COPY
+          : DELETE_MEMBERSHIP_UNCHECKED_COPY,
+    );
+  }
+
   async function handleDeleteKey(keyId: string) {
     const supabase = createClient();
-    // 167.2-REVIEW WR-05: a composite member is never deleted from a card.
-    // `strategy_keys.api_key_id` cascades on this DELETE, and the database's
-    // integrity guard refuses only for a PUBLISHED composite, so deleting a
-    // member of a draft or pending composite silently shrank it (the last
-    // member turned it "unlinked"), from ANY card that lists the key, while
-    // KCS23-COMPOSITE says the card does not change which keys a composite
-    // uses. Orchestrator decision (autonomous round): REFUSE, on every card,
-    // rather than hide the control. Hiding it only on a composite card would
-    // leave the same cascade one click away on any single-key card listing the
-    // key. One owner-scoped read (RLS `strategy_keys_owner`), bounded by the
-    // key's own memberships. A read that fails refuses too (fail closed): an
-    // unknown membership cannot vouch for the delete.
-    const { data: memberships, error: membershipError } = await (
-      supabase as unknown as SupabaseClient
-    )
-      .from("strategy_keys")
-      .select("strategy_id")
-      .eq("api_key_id", keyId);
-    if (membershipError || !Array.isArray(memberships)) {
-      setConfirmDelete(null);
-      console.error(
-        "[ApiKeyManager] composite membership read failed; the delete is refused:",
-        membershipError?.message ?? "no rows array and no error",
-      );
-      setError(DELETE_FAILED_COPY);
-      return;
-    }
-    if (memberships.length > 0) {
-      setConfirmDelete(null);
-      setError(DELETE_COMPOSITE_MEMBER_COPY);
-      return;
-    }
+    // 167.2-REVIEW-R2 WR-02: the composite-membership lock is read BEFORE the
+    // confirm opens (`handleDeleteClick` / `readDeleteLock`), so reaching here
+    // means the key was free of every non-archived composite when the owner
+    // clicked Delete.
     // 167-06 fix round: `.select("id")` returns the rows the DELETE removed.
     // Without it, a delete that RLS filtered down to zero rows answers with no
     // error, the row was dropped locally, R5 retired a withheld success, and
@@ -1547,7 +1634,7 @@ export function ApiKeyManager({
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => setConfirmDelete(key.id)}
+                onClick={() => handleDeleteClick(key.id)}
                 // Phase 167 / 167-06, R5 (167-CONTEXT D-18): a key is never
                 // deleted during its own sync. Deleting it mid-attempt removes
                 // the panel's subject while the retirement must leave
@@ -1557,7 +1644,9 @@ export function ApiKeyManager({
                 // `showModal()`, and `handleDeleteKey` awaits the delete before
                 // it closes the confirm. Key-scoped for R4's reason: deleting
                 // key K changes only K's row.
-                disabled={syncingKeyId === key.id}
+                // 167.2-REVIEW-R2 WR-02: also disabled while this key's
+                // membership read (before the confirm) is in flight.
+                disabled={syncingKeyId === key.id || deleteCheckKeyId === key.id}
               >
                 Delete
               </Button>
@@ -1675,6 +1764,14 @@ export function ApiKeyManager({
           to be hidden whenever the panel showed ANY error, so a failed Delete
           on a key whose last sync had failed, the `revoked` helper's remedy
           path, was reported nowhere. */}
+      {/* 167.2-REVIEW-R2 WR-02: a refused Delete is a recoverable policy
+          refusal, not an error: amber (DESIGN.md § Color), in the card's own
+          slot whether or not the Add Key form is open. */}
+      {deleteNotice && (
+        <p data-testid="delete-notice" role="status" className="text-sm text-warning">
+          {deleteNotice}
+        </p>
+      )}
       {error && !showForm && !(syncStatus === "error" && error === syncError) && (
         <p className="text-sm text-negative">{error}</p>
       )}
