@@ -100,6 +100,7 @@ unchanged.**
 - **Review round 1: the wizard trusts "in flight" for 60 minutes at most.** Past
   `IN_FLIGHT_TRUST_CEILING_MS` with the analytics status unchanged, the banner shows even while
   reads say a job is in flight: "A sync is still queued or running on our side; it may be stuck."
+  (Round 2 removed the Retry this banner carried: see below.)
 - **Review round 1: a Retry answered `WIZARD_DUPLICATE` keeps the banner.** It resets no clock
   and clears nothing, and the banner says "A sync is already running." Before, each press hid the
   banner for a full grace window for a Retry that started nothing.
@@ -117,6 +118,43 @@ unchanged.**
   yesterday or later. The read's `except` is narrowed to DB and network errors
   (`_CACHE_READ_ERRORS`). Any other exception still falls back to a fetch, but logs at error level
   and is captured to Sentry, so the `UnboundLocalError` class above can no longer pass as a miss.
+- **Review round 2: a dispatch failure after the Submit promotion says the submission is saved**
+  (SFH HIGH-1). When `callFinalizeWizardRpc` committed and `postProcessKey` then failed, the route
+  forwarded the dispatch's own copy, which told a manager whose strategy WAS submitted that nothing
+  was. `answerDispatchFailedAfterPromotion` now answers `SUBMITTED_ANALYTICS_NOT_QUEUED`: 503,
+  recoverable, relays `Retry-After`, with new `wizardErrors` copy ("Your strategy is submitted, but
+  its analytics are not queued yet"; retrying is safe) admitted to `KNOWN_FINALIZE_CODES`. It logs
+  one line built from our own tokens and captures the hoisted Error with `strategy_id` and
+  `upstream_code`. The Retry replays the finalize (`acceptAlreadyPromoted`) and runs the dispatch
+  again, so a promoted strategy gets its job.
+- **Review round 2: no Retry renders that the server would refuse** (reviewer #1, SFH MED-3). While
+  reads say a job is in flight (the 60-minute ceiling, a stalled stitch) the banner says "A sync is
+  still queued or running on our side; it may be stuck." with no Retry control, and after a
+  duplicate-refused Retry it says "A sync is already running" with none either.
+- **Review round 2: the surfaces skip a job the resync guard would call dead.**
+  `computeJobDeadReason` mirrors the observable arms of Python's `_chain_job_dead_reason` (budget
+  spent and not running, running past it, 8 h old at the caller's `nowMs`).
+  - `selectFactsheetJob` skips a dead chain row.
+  - `isNonFactsheetJobInFlight` skips a dead recurring row (SFH MED-4).
+  - Python's `worker_stalled` arm is not observable: `get_user_compute_jobs` redacts `last_error`.
+- **Review round 2: a reload never starts a sync once a chain row exists** (reviewer #2, LOW-5).
+  `probeExistingChain` answers `in_flight` (including `otherJobInFlight`), `settled` or `none`, and
+  only `none` (no chain row yet) lets a first mount POST. A done or failed chain on reload now waits
+  and offers Retry. The 5 s probe deadline covers the strategies read too. A non-ok answer, an
+  unparseable body and a degraded answer are logged.
+- **Review round 2: the "already running" note clears once a read says nothing is in flight**
+  (reviewer #3), so the Retry returns exactly when the server would act. And a WIZARD_DUPLICATE with
+  `queued: true` and `job_state: "enqueued"` (the resumed wedge) is treated as queued work that
+  resets the clocks (SFH LOW-8). `/api/keys/sync` now forwards `job_state`.
+- **Review round 2: a failed chain-guard read is classified and the fall-through is reported**
+  (SFH MED-2, LOW-6). `APIError`, `httpx.HTTPError` and `OSError` log at warning, anything else logs
+  at error and is captured, and the skip itself always reaches Sentry. The bare `except: pass`
+  around a Sentry call is gone (`_sentry_report` logs a failed report).
+- **Review round 2: a failed benchmark fetch serves the recent cached days, flagged stale**
+  (reviewer #4). When the cache misses and the fetch fails, the completed days already read are
+  served with `is_stale=True` if the newest is at most 48 h old, never None. `RuntimeError` left
+  `_CACHE_READ_ERRORS` (SFH LOW-7): only `get_supabase`'s "not configured" raise stays quiet, caught
+  at that call.
 
 ### Removed
 
@@ -172,6 +210,26 @@ unchanged.**
 - Two `SyncPreviewStep.progress.render.test.tsx` cases pinned a Retry on a live, running chain. They
   now drive the backstop through a channel that goes dark, which is the case the backstop is for.
 - Every new guard was neutered, observed RED, and restored from a byte backup confirmed with `cmp`.
+- Review round 2:
+  - `finalize-wizard/route.test.ts` `[SUBMITFIX-R2]`: RATE_LIMITED, CIRCUIT_OPEN and
+    SEAM_MISCONFIGURED after a successful RPC, with the rendered title, Retry and Sentry tags. Also
+    replay-then-dispatch, and replay-then-failed-dispatch.
+  - `wizardErrors.invariant.test.ts`: the rejection-site pins move 32 -> 33 for the new CODED site.
+  - `compute-state.test.ts`: the dead-row selection, the final-attempt control, and the age arm
+    with and without `nowMs`.
+  - `test_resync_draft_dedup.py`: pins `CHAIN_JOB_LIVE_WINDOW_MS` to
+    `_RESYNC_CHAIN_JOB_LIVE_WINDOW`, and covers the classified guard-read failures and the logged
+    Sentry failure.
+  - `sync-progress/route.test.ts`: a dead recurring job leaves `otherJobInFlight` off.
+  - `keys/sync/route.test.ts`: forwards `job_state`.
+  - `SyncPreviewStep.inflight-guard.runtime.test.tsx`: no Retry at the ceiling or after a
+    duplicate, the note clearing, the resumed wedge, no POST on reload over a done or failed chain,
+    `otherJobInFlight` on mount, the strategies-read timeout, and the logged fallbacks.
+  - `SyncPreviewStep.progress.render.test.tsx`: a single-key RUNNING-and-stalled read now asserts
+    the may-be-stuck copy and no Retry, not the Retry it used to pin.
+  - `test_benchmark.py`: the stale fallback, its 48 h bound, a loud RuntimeError, and a quiet
+    unconfigured client.
+  - Every round-2 guard was neutered, observed RED, and restored via `cp`/`cmp`.
 
 ### Notes
 
@@ -199,6 +257,19 @@ unchanged.**
   arm has no such fan-out. Email is disabled anyway (RESEND off), so nothing is lost today.
 - **Known limit (submit fix): drafts already stranded at `status='draft'` are not repaired.** Only
   test data was affected. The fix applies to submits from this release on.
+- **Known limit, now documented (round 2, SFH LOW-9): a Submit replay writes nothing.**
+  `callFinalizeWizardRpc`'s docblock says so: form fields edited between the first submit and a
+  Retry are not applied, and the row keeps what the first submit wrote.
+- **Review round 2 decisions.**
+  - (1) `SUBMITTED_ANALYTICS_NOT_QUEUED` also answers a SEAM_MISCONFIGURED dispatch failure,
+    recoverable. A Retry cannot win until we redeploy, but it is safe, and the submission IS saved;
+    the upstream code rides along for support.
+  - (2) Hiding the Retry at the ceiling means that brief's "ceiling, then Retry, then duplicate"
+    sequence cannot occur. It is covered as its two halves.
+  - (3) A mount whose probe cannot tell (failed, timed out, unreadable) still POSTs, logged. The
+    server's chain-in-flight guard refuses a duplicate there, and not POSTing would strand a first
+    kickoff.
+  - (4) The `worker_stalled` arm has no TS mirror, because the RPC redacts `last_error`.
 - **Known limit: a partial-day benchmark close cached BEFORE this release can still be served.**
   A row cached on day D for date D held D's price so far. From D+1 it is a completed-day row in
   every respect this code can see, so it is served until a fresh fetch overwrites it by upsert. A
