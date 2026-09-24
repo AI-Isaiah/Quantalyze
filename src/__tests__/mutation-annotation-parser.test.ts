@@ -986,8 +986,12 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // with a `find`, so both pins move by seventeen. MEASURED: this file's own
     // run read `expected 445 to be 428` and `expected 460 to be 443` at the
     // pre-move pins.
-    expect(armsSeen).toBe(445);
-    expect(stepsSeen).toBe(460);
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 2): `armsSeen` 445 -> 449
+    // and `stepsSeen` 460 -> 464. FOUR new arms: W/deadlock in EACH ledger
+    // gate, and ANON 2 and USER 2 in test_cron_runs_rls.sql. Each carries ONE
+    // `edit` step with a `find`, so both pins move by four.
+    expect(armsSeen).toBe(449);
+    expect(stepsSeen).toBe(464);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1862,7 +1866,9 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 443 -> 460,
     // moving WITH `stepsSeen`: seventeen new `edit` steps, one needle each.
     // RUN SEPARATELY: `expected 460 to be 443` at the pre-move pin.
-    expect(needles.length).toBe(460);
+    // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 2): 460 -> 464,
+    // moving WITH `stepsSeen`: four new `edit` steps, one needle each.
+    expect(needles.length).toBe(464);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

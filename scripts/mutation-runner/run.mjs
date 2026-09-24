@@ -2274,7 +2274,34 @@ export const FILES_FLOOR = 50;
 //    annotated 3 / waived 0 / biting 3`. That run was taken with this constant
 //    at 428, BELOW the corpus, which the runner cannot see by construction; the
 //    stale-low direction is src/__tests__/mutation-runner-floors.test.ts's.
-export const ARMS_FLOOR = 445;
+//
+// ⭐ RE-DERIVED 2026-09-24 (Phase 164.6 GATE-HYGIENE, review fix round 2):
+//    445 -> 449, FOUR new arms, and no file joined the annotated set, so
+//    FILES_FLOOR does not move. One W/deadlock sub-arm in EACH ledger gate (a
+//    deadlock, 40P01, is now a FAILURE and must be named; its twin puts
+//    deadlock_detected back in the lost-race branch):
+//    test_ledger_refresh_fanout.sql 31 -> 32 and
+//    test_ledger_refresh_composite_arm.sql 28 -> 29. Plus the two WRITE arms
+//    of supabase/tests/test_cron_runs_rls.sql (ANON 2, USER 2: a failure-row
+//    INSERT is refused by row security), 3 -> 5. Arm U in both ledger gates
+//    was INVERTED in place (the all-candidates-failed raise is gone), which
+//    moves no count. MEASURED per file first, each a narrowed `--file` run
+//    with every arm `RED (identity ok)`: `biting: 32`, `biting: 29`,
+//    `biting: 5`. The full-run reading follows.
+//    MEASURED via ONE full lane run with no file edited during it and this
+//    constant ALREADY at 449, `node scripts/mutation-runner/run.mjs`: `scope:
+//    FULL 50/50 annotated files`, `coverage: files 50/77`, `arms: 449/449/0`,
+//    `biting: 449`, `lane-invocations: 449` (the two independent tallies
+//    AGREE, plus 50 baseline / 50 restore legs), `lane-blocked: 0 file(s)`,
+//    `lane-probe: pg_cron AVAILABLE`, `unreachable: 27 file(s)`, `per-arm lane
+//    time: mean 1.1s over 449 arm run(s)`, `✅ No defects. Every annotated arm
+//    bit its own arm first.`, exit 0. Per-file lines:
+//    `test_ledger_refresh_composite_arm.sql: sections 29 / judged 29 /
+//    annotated 29 / waived 0 / biting 29`, `test_ledger_refresh_fanout.sql:
+//    sections 32 / judged 32 / annotated 32 / waived 0 / biting 32`,
+//    `test_cron_runs_rls.sql: sections 5 / judged 5 / annotated 5 / waived 0 /
+//    biting 5`.
+export const ARMS_FLOOR = 449;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
