@@ -221,10 +221,12 @@ function accepted() {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((r, j) => {
     resolve = r;
+    reject = j;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 /** Advance fake timers inside act so poll promises and state updates settle. */
@@ -800,6 +802,55 @@ describe("ApiKeyManager + the REAL poller: an enqueue that never answers is boun
     expect(screen.getByText("Synthetic breaker message.")).toBeInTheDocument();
     expect(screen.queryByText(KCS03_ENQUEUE)).not.toBeInTheDocument();
     expect(mockState.analyticsSelectCount).toBe(0);
+  });
+});
+
+describe("ApiKeyManager + the REAL poller: a late TRANSPORT failure is not a verdict (167.2-REVIEW-SFH-R2 R2-M1)", () => {
+  // A late answer arrives between the 180 s bound and the route's 300 s
+  // maxDuration. A platform 504 (non-JSON) or a rejected fetch says nothing
+  // about whether the upstream enqueue committed, so the honest
+  // "may still be running" panel must stay. Only a JSON error body the route
+  // itself produced is a verdict (LATE-REJECTION above).
+  it.each([
+    {
+      arm: "a non-JSON 504 (the platform's function timeout)",
+      answer: () => ({
+        ok: false,
+        status: 504,
+        headers: new Headers({ "content-type": "text/html" }),
+        json: async () => {
+          throw new SyntaxError("Unexpected token <");
+        },
+      }),
+      reject: false,
+    },
+    { arm: "a rejected fetch (network dropped, laptop slept)", answer: null, reject: true },
+  ])("R2-M1-TRANSPORT: $arm after the bound keeps the enqueue_bound panel and is captured as transport", async ({ answer, reject }) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    captureToSentryMock.mockClear();
+    const enqueue = await startResyncWithHeldEnqueue();
+
+    await tick(ENQUEUE_BOUND);
+    expect(screen.getByText(KCS03_ENQUEUE_LABEL)).toBeInTheDocument();
+
+    await tick(20_000);
+    await act(async () => {
+      if (reject) {
+        enqueue.reject(new TypeError("Failed to fetch"));
+      } else {
+        enqueue.resolve(answer!() as unknown as Response);
+      }
+    });
+    await tick(0);
+
+    expect(screen.queryByText("Sync failed")).not.toBeInTheDocument();
+    expect(screen.getByText(KCS03_ENQUEUE_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(KCS03_ENQUEUE)).toBeInTheDocument();
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      level: "warning",
+      tags: { component: "ApiKeyManager", stage: "late-enqueue-answer", kind: "transport" },
+    });
   });
 });
 

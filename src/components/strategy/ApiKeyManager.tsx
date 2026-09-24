@@ -107,19 +107,42 @@ const SYNC_UNAVAILABLE_COPY =
  *     source precisely so it reaches users. Reading `error` alone rendered
  *     "Trade sync failed" over the top of it.
  */
-async function syncFailureMessage(res: Response): Promise<string> {
+async function syncFailureMessage(res: Response): Promise<EnqueueAnswerError> {
   const contentType = res.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {
     const body: unknown = await res.json().catch(() => null);
     if (body !== null && typeof body === "object") {
       const fields = body as Record<string, unknown>;
-      if (typeof fields.error === "string" && fields.error) return fields.error;
+      if (typeof fields.error === "string" && fields.error) {
+        return new EnqueueAnswerError(fields.error, "verdict");
+      }
       if (typeof fields.human_message === "string" && fields.human_message) {
-        return fields.human_message;
+        return new EnqueueAnswerError(fields.human_message, "verdict");
       }
     }
   }
-  return SYNC_UNAVAILABLE_COPY;
+  return new EnqueueAnswerError(SYNC_UNAVAILABLE_COPY, "transport");
+}
+
+/**
+ * 167.2-REVIEW-SFH-R2 R2-M1: what a failed enqueue answer IS. `verdict`: the
+ * route itself answered with a JSON `error` / `human_message` body, so it is
+ * the route's refusal of this sync. `transport`: a non-JSON failure (a
+ * platform 504 at the route's `maxDuration`, a proxy's HTML page), which says
+ * nothing about whether the upstream enqueue committed. `unrecognized`: a 2xx
+ * without enqueue evidence. A thrown `fetch` is not this class, and reads as
+ * transport. The message is what the panel shows on a LIVE attempt, exactly
+ * as before; the kind decides only whether a LATE answer may replace the
+ * `enqueue_bound` panel.
+ */
+class EnqueueAnswerError extends Error {
+  constructor(
+    message: string,
+    readonly kind: "verdict" | "transport" | "unrecognized",
+  ) {
+    super(message);
+    this.name = "EnqueueAnswerError";
+  }
 }
 
 /**
@@ -1322,7 +1345,7 @@ export function ApiKeyManager({
         });
 
         if (!res.ok) {
-          throw new Error(await syncFailureMessage(res));
+          throw await syncFailureMessage(res);
         }
 
         // 140.3-08 / SEAMUX-05 (B-15) — a 2xx is not evidence that a job was
@@ -1337,7 +1360,7 @@ export function ApiKeyManager({
         // still be told their analytics were computing when nothing was.
         const body: unknown = await res.json().catch(() => null);
         if (!isSyncEnqueued(body)) {
-          throw new Error(SYNC_UNAVAILABLE_COPY);
+          throw new EnqueueAnswerError(SYNC_UNAVAILABLE_COPY, "unrecognized");
         }
         return "enqueued";
       };
@@ -1391,26 +1414,36 @@ export function ApiKeyManager({
         // with enqueue evidence says the sync started (KCS-LATE-STARTED); a
         // late rejection shows the route's own failure. Either way it is
         // captured at warning level: a 180 s enqueue is a wedged route.
+        //
+        // 167.2-REVIEW-SFH-R2 R2-M1: only a ROUTE VERDICT (a JSON error body the
+        // route itself produced) replaces the panel with "Sync failed". A late
+        // answer lands between this bound and the route's `maxDuration`, where
+        // the likeliest failures are the platform's non-JSON 504 and a rejected
+        // fetch; the upstream enqueue may already have committed behind either,
+        // so the honest `enqueue_bound` panel ("it may still be running") stays.
+        // The capture's `kind` tag tells a verdict from a transport failure.
         const stillShown = () =>
           attemptRef.current === null && unconfirmedAttemptRef.current === attempt;
+        let lateKind: "started" | "verdict" | "transport" | "unrecognized";
         try {
           await enqueued;
+          lateKind = "started";
           console.warn(
             `[ApiKeyManager] the enqueue answered after its ${ENQUEUE_BOUND_MS} ms bound; the attempt had already ended, so no poll starts [key_id=${keyId}]`,
           );
           if (stillShown()) setPanelStopReason("enqueue_late_started");
         } catch (lateErr) {
+          lateKind = lateErr instanceof EnqueueAnswerError ? lateErr.kind : "transport";
           console.warn("[ApiKeyManager] sync failed after its attempt ended:", lateErr);
-          if (stillShown()) {
+          if (lateKind === "verdict" && stillShown()) {
             unconfirmedAttemptRef.current = null;
-            const message = lateErr instanceof Error ? lateErr.message : "Sync failed";
             setSyncStatus("error");
-            setSyncError(message);
+            setSyncError((lateErr as Error).message);
           }
         }
         captureToSentry(new Error("the enqueue answered after its bound"), {
           level: "warning",
-          tags: { component: "ApiKeyManager", stage: "late-enqueue-answer" },
+          tags: { component: "ApiKeyManager", stage: "late-enqueue-answer", kind: lateKind },
         });
         return;
       }
