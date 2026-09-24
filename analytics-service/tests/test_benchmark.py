@@ -168,9 +168,10 @@ async def test_get_benchmark_returns_serves_a_fresh_cache_without_fetching():
         {
             "date": (today - pd.Timedelta(days=i + 1)).strftime("%Y-%m-%d"),
             "symbol": "BTC",
-            "close_price": 100.0 + (20 - i),
+            "close_price": 100.0 + (30 - i),
         }
-        for i in range(20)
+        # All 30 requested days: a shorter cache is a miss (MEDIUM-6).
+        for i in range(30)
     ]
     result = MagicMock()
     result.data = cached
@@ -184,7 +185,7 @@ async def test_get_benchmark_returns_serves_a_fresh_cache_without_fetching():
     fetch.assert_not_awaited()
     assert is_stale is False
     assert returns is not None
-    assert len(returns) == 19
+    assert len(returns) == 29
     # Oldest close is 101, next is 102: the first return is 1/101.
     assert returns.iloc[0] == pytest.approx(1 / 101)
 
@@ -294,3 +295,94 @@ async def test_todays_partial_close_is_never_cached_or_served_after_a_fetch():
     assert all(r["date"] < _TODAY.strftime("%Y-%m-%d") for r in upserted), (
         "today's partial-day close was written to the cache"
     )
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 1 (MEDIUM-6) — a cache that does not span the requested
+# days is a miss, and only DB/network errors pass quietly.
+# ---------------------------------------------------------------------------
+
+
+def _fresh_series(n: int) -> pd.Series:
+    return pd.Series(
+        [100.0 + i for i in range(n)],
+        index=pd.DatetimeIndex([_TODAY - pd.Timedelta(days=n - i) for i in range(n)]),
+        name="BTC",
+    )
+
+
+def _supabase_returning(cached: list[dict]) -> MagicMock:
+    supabase = MagicMock()
+    supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=cached
+    )
+    return supabase
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "days_back",
+    [
+        pytest.param([d for d in range(1, 22) if d != 7], id="a-gap-inside-the-window"),
+        pytest.param(list(range(1, 16)), id="shorter-than-the-requested-days"),
+        pytest.param([1, 5, 10, 20], id="sparse-rows-spanning-the-full-window"),
+    ],
+)
+async def test_a_cache_that_does_not_span_the_requested_days_is_a_miss(days_back):
+    """Before this rule, any fresh cache of more than 10 rows was served, so
+    returns built across a missing day (one "daily" return spanning two days)
+    or over a shorter window than asked for reached the factsheet."""
+    fetch = AsyncMock(return_value=_fresh_series(21))
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=_supabase_returning(_cache_rows(days_back))
+    ), patch("services.benchmark.db_execute", side_effect=_run_sync), patch(
+        "services.benchmark.fetch_btc_daily_prices", fetch
+    ):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    fetch.assert_awaited_once()
+    assert is_stale is False and returns is not None
+
+
+@pytest.mark.asyncio
+async def test_a_programming_error_in_the_cache_read_is_loud():
+    """A non-DB error in the cache read (the UnboundLocalError class that hid
+    the cache for months) falls back to a fetch, but at error level with a
+    Sentry capture, never as a quiet "cache read failed"."""
+    fetch = AsyncMock(return_value=_fresh_series(21))
+    bug = TypeError("synthetic programming error")
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=MagicMock()
+    ), patch("services.benchmark.db_execute", AsyncMock(side_effect=[bug, None])), patch(
+        "services.benchmark.fetch_btc_daily_prices", fetch
+    ), patch("services.benchmark.sentry_sdk.capture_exception") as capture, patch(
+        "services.benchmark.logger"
+    ) as log:
+        returns, _ = await get_benchmark_returns(symbol="BTC", days=20)
+
+    capture.assert_called_once_with(bug)
+    assert log.error.called, "a programming error must log at error level"
+    fetch.assert_awaited_once()
+    assert returns is not None
+
+
+@pytest.mark.asyncio
+async def test_a_db_error_in_the_cache_read_stays_a_quiet_fallback():
+    """Control: a DB-side failure is an expected miss, a warning, no Sentry."""
+    fetch = AsyncMock(return_value=_fresh_series(21))
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=MagicMock()
+    ), patch(
+        "services.benchmark.db_execute",
+        AsyncMock(side_effect=[RuntimeError("db pool saturated"), None]),
+    ), patch("services.benchmark.fetch_btc_daily_prices", fetch), patch(
+        "services.benchmark.sentry_sdk.capture_exception"
+    ) as capture:
+        returns, _ = await get_benchmark_returns(symbol="BTC", days=20)
+
+    capture.assert_not_called()
+    fetch.assert_awaited_once()
+    assert returns is not None
