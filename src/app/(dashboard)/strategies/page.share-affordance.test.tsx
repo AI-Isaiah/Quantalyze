@@ -102,14 +102,22 @@ vi.mock("@/lib/supabase/server", () => ({
     auth: {
       getUser: async () => ({ data: { user: state.user }, error: null }),
     },
+    // Phase 167.2 (KCS-06 / KCS-12): the page also reads the owner's key
+    // statuses and, per uncomputed row, the compute-job RPC. Both are allowed
+    // DELIBERATELY, answering empty; any other table still throws.
+    rpc: async () => ({ data: [], error: null }),
     from: (table: string) => {
-      if (table !== "strategies" && table !== "contact_requests") {
+      if (
+        table !== "strategies" &&
+        table !== "contact_requests" &&
+        table !== "api_keys"
+      ) {
         throw new Error(`Unexpected table: ${table}`);
       }
       const listResult =
-        table === "contact_requests"
-          ? { data: [], error: null }
-          : { data: state.strategies, error: null };
+        table === "strategies"
+          ? { data: state.strategies, error: null }
+          : { data: [], error: null };
       const builder = {
         select: () => builder,
         eq: () => builder,
