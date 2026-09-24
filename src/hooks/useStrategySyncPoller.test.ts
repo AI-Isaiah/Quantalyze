@@ -569,7 +569,10 @@ describe("[167.2-04 / KCS-22] useStrategySyncPoller — the give-up names its re
     return () => reads;
   }
 
-  function renderInterval(onError: (reason?: "cap" | "missing_row") => void, enabled = true) {
+  function renderInterval(
+    onError: (reason?: "cap" | "missing_row" | "unreadable") => void,
+    enabled = true,
+  ) {
     return renderHook(
       ({ on }: { on: boolean }) =>
         useStrategySyncPoller({
@@ -686,7 +689,12 @@ describe("[167.2-04 / KCS-22] useStrategySyncPoller — the give-up names its re
     expect(onError.mock.calls).toEqual([["cap"]]);
   });
 
-  it("ERROR-FROM-START: a failed read on every poll: no give-up at poll 11, onError(\"cap\") at poll 41", async () => {
+  // Moved by the 167.2 review fix round (167.2-REVIEW-SFH M-3, lineage): this
+  // pin ended with onError("cap"), so the panel said "stopped checking after 2
+  // minutes. The sync may still be running" when it had not read ONE row: it
+  // stopped because it could not read, not because the sync was slow. A cap
+  // reached with no clean read in the activation now names "unreadable".
+  it("ERROR-FROM-START: a failed read on every poll: no give-up at poll 11, onError(\"unreadable\") at poll 41", async () => {
     installSequenceClient(() => READ_FAILED);
     const onError = vi.fn();
     renderInterval(onError);
@@ -696,7 +704,7 @@ describe("[167.2-04 / KCS-22] useStrategySyncPoller — the give-up names its re
     await polls(CAP - GRACE - 1);
     expect(onError).not.toHaveBeenCalled();
     await polls(1);
-    expect(onError.mock.calls).toEqual([["cap"]]);
+    expect(onError.mock.calls).toEqual([["unreadable"]]);
   });
 
   it("RE-ACTIVATION resets the row-seen flag with the attempt counter", async () => {

@@ -110,9 +110,11 @@ export interface UseStrategySyncPollerOptions {
    * Escalation sink: wizard `failPolling`→SYNC_FAILED; SyncProgress
    * `onStatusChange("no_result", …)`. Phase 167.2 / KCS-22: the INTERVAL arm
    * names which give-up fired (`"cap"` or `"missing_row"`); the LADDER arm calls
-   * it with no argument, exactly as before.
+   * it with no argument, exactly as before. 167.2-REVIEW-SFH M-3: the cap
+   * reached with NO clean read in the activation is `"unreadable"`: the panel
+   * stopped because it could not read, not because the sync was slow.
    */
-  onError: (reason?: "cap" | "missing_row") => void;
+  onError: (reason?: "cap" | "missing_row" | "unreadable") => void;
 }
 
 export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void {
@@ -173,12 +175,16 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
       // so it cannot reorder, and it stays byte-unchanged (LADDER-TWO-ARGS).
       let issuedSeq = 0;
       let appliedSeq = 0;
+      // 167.2-REVIEW-SFH M-3: has any applied read in THIS activation been
+      // clean (error null, or PGRST116 = 0 rows)? A cap reached without one is
+      // reported as "unreadable", not "cap".
+      let sawCleanRead = false;
 
       const intervalId = setInterval(async () => {
         // Increment-BEFORE-cap: attempt N+1 escalates without querying.
         attempts += 1;
         if (maxAttempts !== undefined && attempts > maxAttempts) {
-          onErrorRef.current("cap");
+          onErrorRef.current(sawCleanRead ? "cap" : "unreadable");
           return;
         }
 
@@ -193,6 +199,7 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
         // M-2: a response overtaken by a newer applied one is dropped whole.
         if (seq < appliedSeq) return;
         appliedSeq = seq;
+        if (!pollErr || pollErr.code === "PGRST116") sawCleanRead = true;
 
         // PGRST116 (0 rows via .single()) is the expected "row not yet created"
         // case; log everything else (RLS regression / network / 5xx).

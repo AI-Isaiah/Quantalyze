@@ -232,10 +232,15 @@ export function SyncProgress({
   const jobCheckInFlightRef = useRef(false);
   const computingTokenRef = useRef<object | null>(null);
   const warnedUnreadableRef = useRef(false);
+  // 167.2-REVIEW-SFH M-3: one give-up per stretch of `computing`. The poller
+  // calls its give-up on every tick past the boundary, and the give-up now
+  // reads the job state first, so later ticks must not start a second read.
+  const giveUpStartedRef = useRef(false);
 
   useEffect(() => {
     const token = syncStatus === "computing" ? {} : null;
     computingTokenRef.current = token;
+    giveUpStartedRef.current = false;
     return () => {
       computingTokenRef.current = null;
     };
@@ -421,10 +426,34 @@ export function SyncProgress({
     // else, including no reason, is the poll cap. Lineage: this forwarded
     // "error", which the caller rendered as "Sync failed" with a timeout
     // sentence no timeout stood behind.
-    onError: (reason) =>
-      onStatusChange?.("no_result", {
-        stopReason: reason === "missing_row" ? "missing_row" : "poll_cap",
-      }),
+    //
+    // 167.2-REVIEW-SFH M-3: before it says "may still be running", the give-up
+    // asks the job queue ONCE. A finished FAILED chain (`failed_final`) is
+    // forwarded as the failure it is: with an unknown baseline only a
+    // `computing` read can admit a terminal, so a job that failed before any
+    // handler wrote `computing` used to reach the cap and be called possibly
+    // running. Anything else (in flight, finished, unreadable) keeps the
+    // give-up and its reason. The poller names `"unreadable"` when the cap
+    // came with no clean read at all, which selects its own copy.
+    onError: (reason) => {
+      if (giveUpStartedRef.current) return;
+      giveUpStartedRef.current = true;
+      const stopReason: PanelStopReason =
+        reason === "missing_row"
+          ? "missing_row"
+          : reason === "unreadable"
+            ? "unreadable"
+            : "poll_cap";
+      const token = computingTokenRef.current;
+      void readChainJobState(strategyId).then((read) => {
+        if (token === null || computingTokenRef.current !== token) return;
+        if (read.kind === "settled" && read.jobStatus === "failed_final") {
+          onStatusChange?.("error", { computationError: null });
+        } else {
+          onStatusChange?.("no_result", { stopReason });
+        }
+      });
+    },
   });
 
   // Step-based label for active states

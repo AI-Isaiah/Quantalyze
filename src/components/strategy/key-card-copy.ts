@@ -134,6 +134,8 @@ export const ENQUEUE_BOUND_MS = 180_000;
  * was refused before its link and its enqueue, because a factsheet-chain job
  * is still in flight (`chain_in_flight`) or the job state could not be read
  * (`chain_unreadable`).
+ * Review fix round 1 (`no_result`, 167.2-REVIEW-SFH M-3): `unreadable`, the
+ * poll cap was reached without one clean read in the attempt.
  */
 export type PanelStopReason =
   | "poll_cap"
@@ -141,7 +143,8 @@ export type PanelStopReason =
   | "link_bound"
   | "enqueue_bound"
   | "chain_in_flight"
-  | "chain_unreadable";
+  | "chain_unreadable"
+  | "unreadable";
 
 /**
  * KCS22-CAP, KCS22-NOROW (UI-SPEC § KCS-22), KCS03-LINK and KCS03-ENQUEUE
@@ -173,6 +176,15 @@ export const PANEL_STOP_COPY = {
     detail: `We could not confirm this sync started: the request did not answer within ${formatBoundDuration(
       ENQUEUE_BOUND_MS,
     )}, so it may still be running. Reload this page to see the latest status before you sync again.`,
+  },
+  // Review fix round 1 (UI-SPEC § Review-fix amendments, 167.2-REVIEW-SFH
+  // M-3): the cap was reached without ONE clean read, so the panel says it
+  // could not read, rather than implying the sync is merely slow.
+  unreadable: {
+    label: "No result yet",
+    detail: `This panel could not read the sync's status for ${formatBoundDuration(
+      POLL_MAX_ATTEMPTS * POLL_INTERVAL_MS,
+    )}. The sync may still be running: reload this page later to see its result.`,
   },
   // Review fix round 1 (UI-SPEC § Review-fix amendments, 167.2-REVIEW CR-01 /
   // WR-06): the pre-attempt job-state gate refused the attempt. Neither says

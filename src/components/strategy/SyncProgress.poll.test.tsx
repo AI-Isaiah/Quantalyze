@@ -353,10 +353,13 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
     expect(onStatusChange).not.toHaveBeenCalled();
 
     // Polls 12..40: still silent. Poll 41, the cap: escalates exactly once.
+    // Moved by the 167.2 review fix round (SFH M-3, lineage): the reason was
+    // `poll_cap`; with no clean read in the whole activation it is now
+    // `unreadable`, whose copy says the panel could not read the status.
     await tick(POLL_MS * 29);
     expect(onStatusChange).not.toHaveBeenCalled();
     await tick(POLL_MS);
-    expect(onStatusChange.mock.calls).toEqual([["no_result", { stopReason: "poll_cap" }]]);
+    expect(onStatusChange.mock.calls).toEqual([["no_result", { stopReason: "unreadable" }]]);
     errSpy.mockRestore();
   });
 
@@ -769,5 +772,39 @@ describe("SyncProgress — the in-flight hints promise no duration (167.2-REVIEW
     expect(container.textContent).toContain(KCS_SLOW);
     expect(container.textContent).not.toMatch(/up to 2 minutes/);
     expect(container.textContent).not.toMatch(/taking longer than usual/);
+  });
+});
+
+describe("SyncProgress — the give-up asks the job queue once before it says \"may still be running\" (167.2-REVIEW-SFH M-3)", () => {
+  // WHY. A give-up used to say "The sync may still be running" without asking
+  // anything. With an unknown baseline only a `computing` read can admit a
+  // terminal, so a job that failed before any handler wrote `computing`
+  // reached the cap and was reported as possibly running while it was
+  // `failed_final`. The give-up now reads the job state once: a finished
+  // FAILED chain is forwarded as a failure; anything else keeps its reason.
+  it("GIVEUP-FAILED-FINAL: the cap with the job queue saying failed_final forwards a failure, not no_result", async () => {
+    mockState.analyticsResult = analyticsRow("computing");
+    const { onStatusChange } = renderPoller("computing");
+    await tick(0);
+    await tick(POLL_MS * 40);
+    mockState.jobAnswers = [jobState("failed_final")];
+    await tick(POLL_MS);
+    await tick(0);
+    expect(onStatusChange.mock.calls.at(-1)).toEqual(["error", { computationError: null }]);
+    expect(callsWith(onStatusChange, "no_result")).toBe(0);
+  });
+
+  it("GIVEUP-IN-FLIGHT: the cap with the job still running keeps no_result / poll_cap, once", async () => {
+    mockState.analyticsResult = analyticsRow("computing");
+    const { onStatusChange } = renderPoller("computing");
+    await tick(0);
+    await tick(POLL_MS * 40);
+    mockState.jobAnswers = [jobState("running")];
+    await tick(POLL_MS * 3);
+    await tick(0);
+    expect(callsWith(onStatusChange, "no_result")).toBe(1);
+    expect(onStatusChange.mock.calls.at(-1)).toEqual(["no_result", { stopReason: "poll_cap" }]);
+    // One give-up read, however many ticks fire while it is out.
+    expect(mockState.jobReadCount).toBe(1);
   });
 });

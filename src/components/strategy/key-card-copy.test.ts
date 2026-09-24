@@ -93,7 +93,15 @@ describe("KCS-03 (S2): a client-side bound expired before the sync was confirmed
 describe("PANEL_STOP_COPY covers exactly the pinned reasons", () => {
   it("a new stop reason cannot ship without a pin in this file", () => {
     expect(Object.keys(PANEL_STOP_COPY).sort()).toEqual(
-      ["chain_in_flight", "chain_unreadable", "enqueue_bound", "link_bound", "missing_row", "poll_cap"],
+      [
+        "chain_in_flight",
+        "chain_unreadable",
+        "enqueue_bound",
+        "link_bound",
+        "missing_row",
+        "poll_cap",
+        "unreadable",
+      ],
     );
   });
 });
@@ -159,5 +167,14 @@ describe("KCS-GATE (167.2-REVIEW CR-01 / WR-06): the pre-attempt job-state gate 
       const { label, detail } = PANEL_STOP_COPY[reason];
       expect(`${label} ${detail}`).not.toMatch(/fail|error/i);
     }
+  });
+});
+
+describe("KCS-UNREADABLE (167.2-REVIEW-SFH M-3): the panel stopped because it could not read", () => {
+  it("label and detail", () => {
+    expect(PANEL_STOP_COPY.unreadable.label).toBe("No result yet");
+    expect(PANEL_STOP_COPY.unreadable.detail).toBe(
+      "This panel could not read the sync's status for 2 minutes. The sync may still be running: reload this page later to see its result.",
+    );
   });
 });
