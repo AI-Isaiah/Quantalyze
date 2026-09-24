@@ -3577,3 +3577,109 @@ def test_q166_parity_r_squared_matches_live_quantstats(pair_name, request):
     assert actual == pytest.approx(expected, rel=1e-12, abs=0.0), (
         f"r_squared on {pair_name} drifted from live quantstats 0.0.81: {actual} vs {expected}"
     )
+
+
+def _q166_raw_pair_regression(
+    r: pd.Series, b: pd.Series, periods: int
+) -> tuple[float, float]:
+    """(alpha, beta) of the one-regressor OLS of r on b, over the rows where
+    BOTH are present. Written from the definition: beta = cov(r, b) / var(b),
+    alpha = (mean(r) - beta * mean(b)) * periods. No quantstats."""
+    pair = pd.concat([r, b], axis=1, join="inner").dropna()
+    rc, bc = pair.iloc[:, 0], pair.iloc[:, 1]
+    m = np.cov(rc, bc)
+    beta = float(m[0, 1] / m[1, 1])
+    alpha = float((rc.mean() - beta * bc.mean()) * periods)
+    return alpha, beta
+
+
+def test_q166_benchmark_greeks_are_the_raw_pair_regression():
+    """ECONOMIC ANCHOR: beta is the OLS slope of the strategy on the benchmark,
+    and alpha is the annualized intercept, both on the raw aligned pair.
+
+    Pre-mirror: live quantstats `greeks(..., prepare_returns=False)` returned
+    beta -0.015400848308443902 and alpha 0.12212418616146373, because it
+    `pct_change`d the benchmark first (research Q4).
+    """
+    strategy, benchmark = _q166_benchmark_trigger()
+    exp_alpha, exp_beta = _q166_raw_pair_regression(strategy, benchmark, 252)
+    mj = compute_all_metrics(strategy, benchmark)["metrics_json"]
+    assert mj["beta"] == pytest.approx(exp_beta, rel=1e-12, abs=0.0), (
+        f"beta={mj['beta']}; OLS slope of the raw pair is {exp_beta}"
+    )
+    assert mj["alpha"] == pytest.approx(exp_alpha, rel=1e-12, abs=0.0), (
+        f"alpha={mj['alpha']}; annualized OLS intercept of the raw pair is {exp_alpha}"
+    )
+
+
+def test_q166_greeks_nan_days_are_not_fabricated_zeros(
+    golden_returns, benchmark_returns
+):
+    """D-15 (F-3): a strategy with NaN days has a perfectly defined regression
+    over the days it does have. alpha and beta must be that regression, over
+    pairwise-complete observations, and treynor (cagr / beta) must be present.
+
+    Pre-fix: 0.0.81 `greeks` ends in `.fillna(0)`. Since Phase 159 passes the
+    strategy leg raw, one NaN day makes `np.cov` NaN, and the fillna turned
+    that into a confident alpha 0.0 / beta 0.0, rendered as 0.000 in the
+    Benchmark greeks table, with treynor silently dropped.
+    """
+    r = _q166_golden_with_nan_days(golden_returns)
+    exp_alpha, exp_beta = _q166_raw_pair_regression(r, benchmark_returns, 252)
+    out = compute_all_metrics(r, benchmark_returns)
+    mj = out["metrics_json"]
+    assert mj["alpha"] != 0.0 and mj["beta"] != 0.0, (
+        f"fabricated zeros: alpha={mj['alpha']}, beta={mj['beta']}"
+    )
+    assert mj["beta"] == pytest.approx(exp_beta, rel=1e-12, abs=0.0)
+    assert mj["alpha"] == pytest.approx(exp_alpha, rel=1e-12, abs=0.0)
+    assert mj.get("treynor") is not None, "treynor dropped though beta is defined"
+    assert mj["treynor"] == pytest.approx(out["cagr"] / exp_beta, rel=1e-12, abs=0.0)
+
+
+def test_q166_greeks_undefined_beta_is_none_not_zero():
+    """D-15 / D-09: when beta is undefined it is None, never 0.0. A beta of
+    0.0 claims the strategy is measured to be uncorrelated with the benchmark;
+    an undefined beta claims nothing.
+
+    Two ways beta is undefined: the benchmark never moves (zero variance, the
+    slope's denominator), or fewer than two days have both legs present.
+    Pre-fix, 0.0.81's `.fillna(0)` persisted 0.0 for both keys in both cases.
+    """
+    idx = pd.bdate_range("2024-01-01", periods=60)
+    strategy = pd.Series(
+        np.random.default_rng(7).normal(0.001, 0.01, len(idx)), index=idx
+    )
+    flat = pd.Series(0.001, index=idx)
+    mj = compute_all_metrics(strategy, flat)["metrics_json"]
+    assert mj.get("alpha") is None, f"alpha={mj.get('alpha')} over a zero-variance benchmark"
+    assert mj.get("beta") is None, f"beta={mj.get('beta')} over a zero-variance benchmark"
+    assert "treynor" not in mj or mj["treynor"] is None
+
+    sparse = strategy.copy()
+    sparse.iloc[1:] = np.nan
+    moving = pd.Series(
+        np.random.default_rng(8).normal(0.0, 0.02, len(idx)), index=idx
+    )
+    mj = compute_all_metrics(sparse, moving)["metrics_json"]
+    assert mj.get("alpha") is None, f"alpha={mj.get('alpha')} from one complete pair"
+    assert mj.get("beta") is None, f"beta={mj.get('beta')} from one complete pair"
+
+
+_Q166_GREEKS_PARITY_PAIRS = ("golden_with_benchmark", "calendar_mismatch")
+
+
+@pytest.mark.parametrize("pair_name", _Q166_GREEKS_PARITY_PAIRS)
+def test_q166_parity_greeks_match_live_quantstats_on_nan_free_series(
+    pair_name, request
+):
+    """BENIGN PARITY (D-08): on NaN-free input the D-15 pairwise restriction
+    removes nothing, so alpha and beta must equal live 0.0.81 `greeks` on the
+    SAME inner-join pair `compute_all_metrics` builds (M1), to rel 1e-12."""
+    strategy, benchmark = _q166_benchmark_pair(pair_name, request)
+    assert not strategy.isna().any() and not benchmark.isna().any()
+    aligned_r, aligned_b = strategy.align(benchmark, join="inner")
+    live = qs.stats.greeks(aligned_r, aligned_b, periods=252, prepare_returns=False)
+    mj = compute_all_metrics(strategy, benchmark)["metrics_json"]
+    assert mj["beta"] == pytest.approx(float(live["beta"]), rel=1e-12, abs=0.0)
+    assert mj["alpha"] == pytest.approx(float(live["alpha"]), rel=1e-12, abs=0.0)

@@ -989,6 +989,63 @@ def _r_squared(returns: pd.Series, benchmark: pd.Series) -> float:
     return float(r_val**2)
 
 
+def _greeks_no_guess(
+    aligned_returns: pd.Series, aligned_benchmark: pd.Series, periods: int
+) -> tuple[float | None, float | None]:
+    """(alpha, beta): quantstats 0.0.81 ``greeks`` minus the price guess, over pairwise-complete rows (D-05, D-15).
+
+    WHY INLINE: ``greeks(r, b, prepare_returns=False)`` closes the strategy leg
+    only. It runs the benchmark through ``_prepare_benchmark`` ->
+    ``_prepare_returns`` unconditionally, so an all-non-negative benchmark with
+    a >100% day is re-read as prices (research Q2). On the benchmark trigger
+    live quantstats returned beta -0.015400848308443902; the OLS slope of the
+    raw pair is 0.007651507459018336.
+
+    MATH PARITY (0.0.81 body; production passed ``prepare_returns=False``)::
+
+        benchmark = _prepare_benchmark(benchmark, returns.index)
+        matrix = np.cov(returns, benchmark)
+        beta = nan if matrix[1, 1] == 0 else matrix[0, 1] / matrix[1, 1]
+        alpha = returns.mean() - beta * benchmark.mean()
+        alpha = alpha * periods
+        return Series({"beta": beta, "alpha": alpha}).fillna(0)
+
+    The benchmark leg is ``_align_benchmark_like_qs``. The expression order is
+    kept, so NaN-free input is bit-identical to live 0.0.81.
+
+    D-15 DISCLOSURE (F-3): the trailing ``.fillna(0)`` is NOT reproduced. Since
+    Phase 159 the strategy leg arrives raw, so a single NaN day made ``np.cov``
+    NaN and the fillna persisted a confident ``alpha = 0.0, beta = 0.0``,
+    rendered as 0.000 in the Benchmark greeks table, with treynor silently
+    dropped. Here both legs are restricted to the rows where both are present
+    (the convention the sibling ``aligned_returns.corr(aligned_benchmark)``
+    already uses), and beta is undefined -> ``(None, None)`` when fewer than 2
+    complete rows remain or the benchmark variance is 0 (D-09: undefined is
+    None, never 0.0). On NaN-free input the restriction removes nothing.
+
+    F-1, RECORDED AND NOT CHANGED (D-08): alpha is an arithmetic return
+    annualized on the FREQUENCY clock (``periods``), not the calendar clock.
+    ``test_periods_param_rescales_365`` pins that it rescales exactly x365/252.
+
+    The strategy index is tz-normalised like the benchmark's, so the pairwise
+    join lines the two legs up by date. 0.0.81 needs no such step because
+    ``np.cov`` pairs its inputs by position.
+    """
+    r = _tz_naive_like_qs(aligned_returns)
+    b = _align_benchmark_like_qs(aligned_benchmark, r.index)
+    pair = pd.concat([r, b], axis=1, join="inner").dropna()
+    if len(pair) < 2:
+        return None, None
+    r, b = pair.iloc[:, 0], pair.iloc[:, 1]
+    matrix = np.cov(r, b)
+    if matrix[1, 1] == 0:
+        return None, None
+    beta = matrix[0, 1] / matrix[1, 1]
+    alpha = r.mean() - beta * b.mean()
+    alpha = alpha * periods
+    return float(alpha), float(beta)
+
+
 # H-0710 / H-0713 / H-0723 dispatch table: (result_key, callable). Each callable
 # takes the raw returns series and returns a raw float; `compute_qstats_scalars`
 # runs each one through `_safe_qstats_scalar` (failure-soft, WARNING naming the
@@ -1913,7 +1970,7 @@ def compute_all_metrics(
             exc_info=_should_emit_traceback("outlier_ratios", exc),
         )
 
-    # Benchmark metrics (single greeks() call for alpha + beta)
+    # Benchmark metrics (alpha + beta from ONE `_greeks_no_guess` call)
     if benchmark_returns is not None and len(benchmark_returns) > 0:
         try:
             # M1 (red-team 2026-05-27): align ONCE on the inner-join
@@ -1939,18 +1996,15 @@ def compute_all_metrics(
             aligned = returns.align(benchmark_returns, join="inner")
             aligned_returns, aligned_benchmark = aligned[0], aligned[1]
             if len(aligned_returns) > 1:
-                # RANK-05 kwarg arm — see the `volatility` site for the shared
-                # rationale; kept on ONE source line so the region gate sees it.
-                # RESIDUAL, recorded rather than silently left: the kwarg closes
-                # the guess on the STRATEGY leg only. quantstats then runs the
-                # benchmark through `_prepare_benchmark`, which calls
-                # `_prepare_returns` on it unconditionally — so an all-non-negative
-                # benchmark with a >100% day would still be re-read as prices.
-                # Closing that requires inlining greeks and is out of this plan's
-                # scope; it is enumerated in the 159-05 SUMMARY as follow-up work.
-                greeks = qs.stats.greeks(aligned_returns, aligned_benchmark, periods=periods_per_year, prepare_returns=False)
-                metrics_json["alpha"] = _safe_float(greeks.get("alpha", 0))
-                metrics_json["beta"] = _safe_float(greeks.get("beta", 0))
+                # Phase 166 (D-05, D-15): alpha/beta are the inline mirror
+                # `_greeks_no_guess`, on this same M1 pair. It closes the
+                # benchmark leg that `greeks(..., prepare_returns=False)` left
+                # open (the RANK-05 residual), and it drops 0.0.81's trailing
+                # `.fillna(0)`: an undefined beta is None, never a fabricated
+                # 0.0. The treynor guard below already skips a None beta.
+                alpha, beta_val = _greeks_no_guess(aligned_returns, aligned_benchmark, periods_per_year)
+                metrics_json["alpha"] = _safe_float(alpha)
+                metrics_json["beta"] = _safe_float(beta_val)
                 metrics_json["correlation"] = _safe_float(aligned_returns.corr(aligned_benchmark))
                 excess = aligned_returns - aligned_benchmark
                 # Tracking error and information ratio ARE annualized vol/Sharpe
