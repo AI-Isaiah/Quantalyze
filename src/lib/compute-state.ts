@@ -90,6 +90,17 @@ function isFactsheetChainKind(kind: string | undefined): boolean {
  * else null. The RPC already orders `created_at` DESC, but the reduce is
  * explicit so the rule does not silently depend on RPC ordering.
  *
+ * IN-FLIGHT FIRST among chain rows (2026-09-24): when any chain row is still
+ * in flight (`isFactsheetJobInFlight`), the latest IN-FLIGHT chain row
+ * answers, even if a finished chain row was created after it. Two chains can
+ * overlap (a duplicate resync used to start a second one), and the newest row
+ * can be the first chain's finished compute while the second chain's
+ * `process_key_long` is still running. Reporting that `done` told the wizard
+ * and KCS-18's success gate the chain had settled while the SQL status bridge
+ * still held the strategy at `computing`. A stitch row is not affected: the
+ * in-flight unique index allows one non-terminal row per kind, so the newest
+ * stitch is already the in-flight one whenever one exists.
+ *
  * Stitch-PREFERRING (154-04): the stitch row is the only row that carries
  * member progress or a heartbeat, so whenever one exists it answers even if a
  * chain row ran afterwards (PIN-COMPOSITE-WINS in the route test).
@@ -114,18 +125,29 @@ export function selectFactsheetJob(
     Date.parse(row.created_at ?? "") > Date.parse(current.created_at ?? "");
   let latestStitch: ComputeJobRow | null = null;
   let latestChain: ComputeJobRow | null = null;
+  let latestInFlightChain: ComputeJobRow | null = null;
   for (const row of rows) {
     if (!row) continue;
     if (row.kind === STITCH_KIND) {
       if (isNewer(row, latestStitch)) latestStitch = row;
-    } else if (isFactsheetChainKind(row.kind) && isNewer(row, latestChain)) {
-      latestChain = row;
+    } else if (isFactsheetChainKind(row.kind)) {
+      if (isNewer(row, latestChain)) latestChain = row;
+      if (isFactsheetJobInFlight(row.status) && isNewer(row, latestInFlightChain)) {
+        latestInFlightChain = row;
+      }
     }
   }
-  if (opts.preferStitch === false && latestStitch !== null && latestChain !== null) {
-    return isNewer(latestChain, latestStitch) ? latestChain : latestStitch;
+  const chain = latestInFlightChain ?? latestChain;
+  if (opts.preferStitch === false && latestStitch !== null && chain !== null) {
+    // An in-flight chain row outranks a finished stitch whatever their ages:
+    // the stale stitch this option exists for must not read as settled over
+    // a chain that is still running.
+    if (latestInFlightChain !== null && !isFactsheetJobInFlight(latestStitch.status)) {
+      return latestInFlightChain;
+    }
+    return isNewer(chain, latestStitch) ? chain : latestStitch;
   }
-  return latestStitch ?? latestChain;
+  return latestStitch ?? chain;
 }
 
 /**

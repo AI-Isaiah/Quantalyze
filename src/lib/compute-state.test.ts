@@ -153,6 +153,43 @@ describe("selectFactsheetJob", () => {
     expect(selectFactsheetJob([a, c, b])).toBe(c);
   });
 
+  it("2026-09-24: an OLDER in-flight chain row answers over a NEWER finished one (two overlapping chains)", () => {
+    // The live incident: a duplicate resync started a second chain. The first
+    // chain's compute finished AFTER the second chain's process_key_long was
+    // created, so newest-created said `done` while the second chain ran on and
+    // the SQL bridge held the strategy at `computing`.
+    const secondChainHead = row("process_key_long", {
+      created_at: "2026-07-12T11:45:00.000Z",
+      status: "running",
+    });
+    const firstChainTail = row("compute_analytics_from_csv", {
+      created_at: "2026-07-12T11:50:00.000Z",
+      status: "done",
+    });
+    expect(selectFactsheetJob([firstChainTail, secondChainHead])).toBe(secondChainHead);
+    expect(selectFactsheetJob([secondChainHead, firstChainTail])).toBe(secondChainHead);
+    for (const status of ["pending", "running", "failed_retry", "done_pending_children"]) {
+      const inFlight = row("sync_trades", { created_at: "2026-07-12T11:40:00.000Z", status });
+      expect(selectFactsheetJob([firstChainTail, inFlight])).toBe(inFlight);
+    }
+    // Every KCS-20 surface derives from the same selection.
+    expect(
+      deriveComputeState({ rows: [firstChainTail, secondChainHead], readExhaustive: true, nowMs: NOW_MS }).state,
+    ).toBe("running");
+  });
+
+  it("2026-09-24: with nothing in flight, the newest chain row still answers (finished vs failed)", () => {
+    const olderFailed = row("sync_trades", { created_at: "2026-07-12T11:40:00.000Z", status: "failed_final" });
+    const newerDone = row("compute_analytics_from_csv", { created_at: "2026-07-12T11:50:00.000Z", status: "done" });
+    expect(selectFactsheetJob([olderFailed, newerDone])).toBe(newerDone);
+  });
+
+  it("2026-09-24: with preferStitch false, an in-flight chain row outranks a NEWER finished stitch", () => {
+    const chain = row("process_key_long", { created_at: "2026-07-12T11:00:00.000Z", status: "running" });
+    const s = stitch({ created_at: "2026-07-12T11:59:00.000Z", status: "done" });
+    expect(selectFactsheetJob([chain, s], { preferStitch: false })).toBe(chain);
+  });
+
   it("skips null and undefined rows, and an empty list selects nothing", () => {
     const r = row("sync_trades");
     expect(selectFactsheetJob([null, undefined, r, null])).toBe(r);
