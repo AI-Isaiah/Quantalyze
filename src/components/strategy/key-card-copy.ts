@@ -284,38 +284,52 @@ export const SHAPE_UNKNOWN_CARD_NOTE =
 export const EMPTY_NOLINK_COPY = "No API keys connected.";
 
 /**
- * KCS-DELETE-COMPOSITE (UI-SPEC § Review-fix amendments, 167.2-REVIEW WR-05).
- * A Delete refused because the key is a member of a composite strategy. The
- * `strategy_keys` row cascades on the key's DELETE and the database refuses
- * only for a PUBLISHED composite, so an unrefused Delete silently shrank a
- * draft composite. `support@quantalyze.com` is plain text, as in
- * KCS23-COMPOSITE.
+ * KCS-DELETE-COMPOSITE (UI-SPEC § Review-fix amendments, round 2, FOUNDER
+ * DECISION 2026-09-24). Shown in amber inside the Delete confirm when the key
+ * is a member of one or more composite strategies (any status). Deleting the
+ * key cascades its `strategy_keys` rows away, so the confirm names each
+ * composite and says what deleting does; the owner may still confirm.
+ *
+ * Lineage: round 1 (167.2-REVIEW WR-05) REFUSED such a Delete on every card
+ * with "This key is part of a composite strategy, so it is not deleted here.
+ * Contact support@quantalyze.com to change which keys the composite uses."
+ * Round 2 first narrowed that refusal (archived composites deletable, a draft
+ * pointed at the wizard); the founder then decided: warn by name, never block.
+ *
+ * `name` is the owner's own strategy name (null when the embed could not be
+ * read: that composite is still listed, never dropped). The DB guard
+ * (`api_keys_published_composite_delete_guard`) still refuses a key used by
+ * a PUBLISHED composite, so that case is said up front. Names are inserted by
+ * a function replacer, so `$&` and similar patterns in a name stay literal.
  */
-export const DELETE_COMPOSITE_MEMBER_COPY =
-  "This key is part of a composite strategy, so it is not deleted here. Contact support@quantalyze.com to change which keys the composite uses.";
+export function deleteCompositeWarning(
+  composites: readonly { name: string | null; status: string | null }[],
+): string {
+  const n = composites.length;
+  const listed = composites
+    .map((c) =>
+      c.name && c.name.trim() !== ""
+        ? '"{name}"'.replace("{name}", () => c.name as string)
+        : "a composite whose name could not be read",
+    )
+    .join(", ");
+  const head = `This key is part of ${n} composite ${n === 1 ? "strategy" : "strategies"}: ${listed}.`;
+  const consequence =
+    " Deleting it removes the key from every composite listed, and a composite with no other key left becomes unlinked.";
+  const published = composites.some((c) => c.status === "published")
+    ? " A key used by a published composite cannot be deleted: contact support@quantalyze.com to change that composite's keys."
+    : "";
+  return head + consequence + published;
+}
 
 /**
- * KCS-DELETE-COMPOSITE-DRAFT (UI-SPEC § Review-fix amendments, round 2,
- * 167.2-REVIEW-R2 WR-02). The key is a member of a wizard DRAFT composite,
- * whose members the owner can still change in the strategy wizard: the wizard
- * re-opens its connect-key step and re-posts the members through
- * `/api/strategies/composite/set-members`. That wizard is reached from the
- * draft banner on /strategies (`Resume draft`, or `Revise & resubmit` for a
- * draft sent back by review), which opens the owner's MOST RECENT wizard
- * draft only (`readLatestWizardDraft`), so the sentence says what to do for
- * an older one.
- */
-export const DELETE_COMPOSITE_DRAFT_COPY =
-  "This key is part of a draft composite strategy, so it is not deleted here. Change the draft's keys in the strategy wizard (open your latest draft from your Strategies page), or contact support@quantalyze.com if this draft is not your latest.";
-
-/**
- * KCS-DELETE-UNCHECKED (UI-SPEC § Review-fix amendments, round 2,
- * 167.2-REVIEW-R2 WR-02). The membership read before the confirm failed,
- * threw or did not answer within its 15 s bound, so the Delete is refused
- * (fail closed: an unknown membership cannot vouch for the cascade).
+ * KCS-DELETE-UNCHECKED (UI-SPEC § Review-fix amendments, round 2, FOUNDER
+ * DECISION 2026-09-24). The membership read inside the Delete confirm failed,
+ * threw or did not answer within its 15 s bound. Warn, don't block: the
+ * confirm says it could not check, and the owner may still delete.
  */
 export const DELETE_MEMBERSHIP_UNCHECKED_COPY =
-  "We could not check whether this key is part of a composite strategy, so it was not deleted. Try again, and contact support@quantalyze.com if it keeps failing.";
+  "We could not check whether this key is part of a composite strategy. If it is, deleting it also removes it from that composite, and a composite with no other key left becomes unlinked.";
 
 /**
  * KCS-FINISH-UNVERIFIED (UI-SPEC § Review-fix amendments, 167.2-REVIEW-SFH

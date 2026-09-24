@@ -3,15 +3,18 @@
 ## Found during the round-2 review fix (2026-09-24)
 
 - **An RLS-filtered membership read lets a Delete cascade a key out of a draft
-  composite (167.2-REVIEW-SFH-R2 R2-L4 (b)).** `ApiKeyManager`'s
-  `readDeleteLock` reads `strategy_keys` on the RLS-scoped client before the
-  Delete confirm. RLS on SELECT filters rows instead of raising an error. So if
+  composite WITHOUT the founder-decided warning (167.2-REVIEW-SFH-R2 R2-L4 (b)).**
+  `ApiKeyManager`'s `readKeyCompositeMemberships` reads `strategy_keys` on the
+  RLS-scoped client when the Delete confirm opens. The founder decided on
+  2026-09-24 that the confirm names the composites and warns, and never blocks
+  the delete. RLS on SELECT filters rows instead of raising an error. So if
   the `strategy_keys_owner` policy regresses, the read answers `[]` with no
-  error, and the Delete goes ahead. `strategy_keys_api_key_id_fkey ... ON DELETE
+  error, so the confirm shows no warning and the owner deletes without being
+  warned. `strategy_keys_api_key_id_fkey ... ON DELETE
   CASCADE` then removes the key from a draft or pending composite. The database's
   publish guard still protects a PUBLISHED composite. The real fix is
-  server-side: the delete should refuse a key that still has non-archived
-  memberships. That needs a migration, and KCS-15 forbids one in this phase.
+  server-side: the server should report the memberships itself, so that a
+  policy regression cannot silence the warning. That needs a migration, and KCS-15 forbids one in this phase.
   **Owner: Phase 167.2.1.** ⚠️ Measured 2026-09-24:
   `grep -n "167\.2\.1" .planning/ROADMAP.md` gives 0 hits, so that phase is
   not in the ROADMAP yet. The orchestrator has to add it (`/gsd-phase`). This

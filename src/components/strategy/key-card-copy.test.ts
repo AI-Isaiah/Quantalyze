@@ -16,8 +16,7 @@ import { describe, it, expect } from "vitest";
 import {
   addKeyBlockedReason,
   formatBoundDuration,
-  DELETE_COMPOSITE_DRAFT_COPY,
-  DELETE_COMPOSITE_MEMBER_COPY,
+  deleteCompositeWarning,
   DELETE_MEMBERSHIP_UNCHECKED_COPY,
   EMPTY_NOLINK_COPY,
   FINISH_UNVERIFIED_NOTE,
@@ -146,23 +145,37 @@ describe("Review-fix round 1 (2026-09-24): the S3 strings authored for the revie
     expect(EMPTY_NOLINK_COPY).toBe("No API keys connected.");
   });
 
-  it("KCS-DELETE-COMPOSITE (REVIEW WR-05)", () => {
-    expect(DELETE_COMPOSITE_MEMBER_COPY).toBe(
-      "This key is part of a composite strategy, so it is not deleted here. Contact support@quantalyze.com to change which keys the composite uses.",
-    );
-  });
+  // KCS-DELETE-COMPOSITE's round-1 refusal string was retired by the founder
+  // decision of 2026-09-24 (round 2): the Delete now warns and proceeds. Its
+  // pin moved to the round-2 describe below (`deleteCompositeWarning`).
 });
 
-describe("Review-fix round 2 (2026-09-24): the Delete refusal strings (167.2-REVIEW-R2 WR-02)", () => {
-  it("KCS-DELETE-COMPOSITE-DRAFT", () => {
-    expect(DELETE_COMPOSITE_DRAFT_COPY).toBe(
-      "This key is part of a draft composite strategy, so it is not deleted here. Change the draft's keys in the strategy wizard (open your latest draft from your Strategies page), or contact support@quantalyze.com if this draft is not your latest.",
+describe("Review-fix round 2 (2026-09-24, founder decision): the Delete confirm's composite warning (167.2-REVIEW-R2 WR-02)", () => {
+  it("KCS-DELETE-COMPOSITE: one named composite", () => {
+    expect(deleteCompositeWarning([{ name: "Synthetic Composite A", status: "draft" }])).toBe(
+      'This key is part of 1 composite strategy: "Synthetic Composite A". Deleting it removes the key from every composite listed, and a composite with no other key left becomes unlinked.',
     );
+  });
+
+  it("KCS-DELETE-COMPOSITE: several, one unnamed, one published", () => {
+    expect(
+      deleteCompositeWarning([
+        { name: "Synthetic Composite A", status: "archived" },
+        { name: null, status: null },
+        { name: "Synthetic Composite P", status: "published" },
+      ]),
+    ).toBe(
+      'This key is part of 3 composite strategies: "Synthetic Composite A", a composite whose name could not be read, "Synthetic Composite P". Deleting it removes the key from every composite listed, and a composite with no other key left becomes unlinked. A key used by a published composite cannot be deleted: contact support@quantalyze.com to change that composite\'s keys.',
+    );
+  });
+
+  it("a name carrying a replacement pattern is rendered literally", () => {
+    expect(deleteCompositeWarning([{ name: "$& $'", status: "draft" }])).toContain('"$& $\'"');
   });
 
   it("KCS-DELETE-UNCHECKED", () => {
     expect(DELETE_MEMBERSHIP_UNCHECKED_COPY).toBe(
-      "We could not check whether this key is part of a composite strategy, so it was not deleted. Try again, and contact support@quantalyze.com if it keeps failing.",
+      "We could not check whether this key is part of a composite strategy. If it is, deleting it also removes it from that composite, and a composite with no other key left becomes unlinked.",
     );
   });
 });

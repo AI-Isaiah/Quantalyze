@@ -997,12 +997,35 @@ describe("ApiKeyManager + the REAL job-state read: the pre-attempt gate cannot h
   });
 });
 
-describe("ApiKeyManager: the Delete's membership read is bounded (167.2-REVIEW-R2 WR-02)", () => {
-  // Hand-typed from the UI-SPEC round-2 row KCS-DELETE-UNCHECKED.
-  const DELETE_UNCHECKED =
-    "We could not check whether this key is part of a composite strategy, so it was not deleted. Try again, and contact support@quantalyze.com if it keeps failing.";
+describe("ApiKeyManager: the Delete's membership read is bounded (167.2-REVIEW-R2 WR-02, founder decision)", () => {
+  // Hand-typed from the UI-SPEC round-2 founder-decision row.
+  const WARN_UNCHECKED =
+    "We could not check whether this key is part of a composite strategy. If it is, deleting it also removes it from that composite, and a composite with no other key left becomes unlinked.";
 
-  it("DELETE-MEMBERSHIP-BOUND: a membership read that never settles refuses the Delete at 15 s, before any confirm, and Delete comes back", async () => {
+  // jsdom has no HTMLDialogElement.showModal / close; the confirm renders
+  // through <Modal>, which calls them (ApiKeyManager.test.tsx polyfills the same).
+  beforeEach(() => {
+    if (!HTMLDialogElement.prototype.showModal) {
+      HTMLDialogElement.prototype.showModal = function showModal() {
+        this.setAttribute("open", "");
+      };
+    }
+    if (!HTMLDialogElement.prototype.close) {
+      HTMLDialogElement.prototype.close = function close() {
+        this.removeAttribute("open");
+      };
+    }
+  });
+
+  function confirmDialog() {
+    const dialog = Array.from(document.querySelectorAll("dialog")).find((d) =>
+      d.textContent?.includes("Delete API Key"),
+    );
+    expect(dialog).toBeTruthy();
+    return dialog!;
+  }
+
+  it("DELETE-MEMBERSHIP-BOUND: a membership read that never settles holds the confirm's Delete for 15 s, then warns it could not check and lets the owner choose", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     mockState.membershipResult = new Promise(() => {});
     vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(accepted())));
@@ -1015,19 +1038,16 @@ describe("ApiKeyManager: the Delete's membership read is bounded (167.2-REVIEW-R
       fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     });
     await tick(0);
-    // Held while the read is open: the button cannot be clicked twice.
-    expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
+    expect(confirmDialog()).toHaveAttribute("open");
+    // Held while the read is open: the owner decides with the answer, not before it.
+    expect(within(confirmDialog()).getByRole("button", { name: "Delete" })).toBeDisabled();
 
     await tick(14_000);
-    expect(screen.queryByText(DELETE_UNCHECKED)).not.toBeInTheDocument();
+    expect(screen.queryByText(WARN_UNCHECKED)).not.toBeInTheDocument();
 
     await tick(1_000);
-    expect(screen.getByText(DELETE_UNCHECKED)).toBeInTheDocument();
-    const dialog = Array.from(document.querySelectorAll("dialog")).find((d) =>
-      d.textContent?.includes("Delete API Key"),
-    );
-    expect(dialog).not.toHaveAttribute("open");
-    expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled();
+    expect(within(confirmDialog()).getByText(WARN_UNCHECKED)).toBeInTheDocument();
+    expect(within(confirmDialog()).getByRole("button", { name: "Delete" })).toBeEnabled();
   });
 });
 
