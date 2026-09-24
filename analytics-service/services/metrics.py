@@ -1130,6 +1130,46 @@ def _tz_naive_like_qs(s: pd.Series) -> pd.Series:
     return s
 
 
+def _wall_clock_is_utc(s: pd.Series) -> bool:
+    """True when every stamp of a tz-aware ``s`` reads the same wall clock in UTC."""
+    idx = s.index
+    return bool((idx.tz_localize(None) == idx.tz_convert("UTC").tz_localize(None)).all())
+
+
+def _refuse_mismatched_day_labels(returns: pd.Series, benchmark: pd.Series) -> None:
+    """Raise when the two legs label their days in different time zones.
+
+    Phase 166 review round 2 (IN-03). ``_tz_naive_like_qs`` converts a tz-aware
+    leg to UTC and drops the zone, so it treats a NAIVE stamp as UTC. That is
+    lossless when the aware leg's wall clock IS UTC. It is not when the zone is
+    east or west of UTC: a Tokyo midnight becomes 15:00 on the previous UTC day,
+    and ``_align_benchmark_like_qs``' reindex branch then back-fills each
+    strategy midnight from that stamp, pairing every strategy day with the NEXT
+    benchmark day. The result was a silently shifted ``r_squared`` with status
+    ``ok`` (measured on a naive strategy against an Asia/Tokyo benchmark).
+
+    The pair is accepted when both legs are naive, both carry the same zone, or
+    every aware leg's wall clock equals UTC at every stamp (a naive leg is read
+    as UTC, the convention ``_tz_naive_like_qs`` already applies). Anything else
+    is refused LOUDLY: guessing which day a foreign-zone bar belongs to would be
+    inventing the pairing. Each caller's ``except`` logs the refusal by name
+    (``compute_qstats_scalars``' r_squared block sets status ``error``).
+    """
+    tz_r = getattr(returns.index, "tz", None)
+    tz_b = getattr(benchmark.index, "tz", None)
+    if tz_r is None and tz_b is None:
+        return
+    if tz_r is not None and tz_b is not None and str(tz_r) == str(tz_b):
+        return
+    if all(_wall_clock_is_utc(s) for s in (returns, benchmark) if s.index.tz is not None):
+        return
+    raise ValueError(
+        f"strategy and benchmark label their days in different time zones "
+        f"(strategy tz={tz_r}, benchmark tz={tz_b}); normalising both to UTC would "
+        "pair each strategy day with a shifted benchmark day, so the pair is refused"
+    )
+
+
 def _align_benchmark_like_qs(benchmark: pd.Series, period: pd.Index) -> pd.Series:
     """quantstats 0.0.81 ``_utils._prepare_benchmark(benchmark, period, prepare_returns=True)`` MINUS the price guess.
 
@@ -1210,7 +1250,11 @@ def _r_squared(returns: pd.Series, benchmark: pd.Series) -> float:
     NaN CONVENTION: ``P(r)`` (fillna(0)), plus the tz step of 0.0.81
     ``_prepare_returns``, because the prepared strategy index is the period the
     benchmark is aligned to.
+
+    A pair whose legs label their days in different time zones is refused
+    (``_refuse_mismatched_day_labels``, review round 2 IN-03).
     """
+    _refuse_mismatched_day_labels(returns, benchmark)
     p = _tz_naive_like_qs(_prepared_returns_no_guess(returns))
     b = _align_benchmark_like_qs(benchmark, p.index)
     _, _, r_val, _, _ = linregress(p, _align_benchmark_like_qs(b, p.index))
@@ -1241,6 +1285,7 @@ def _r_squared_pair_varies(returns: pd.Series, benchmark: pd.Series) -> bool:
       250 and 1000). ``_dispersion_is_real`` is False on a NaN ``sd``, so a
       one-row pair reads "does not vary" and never "varies" (SFH R2-LOW-2).
     """
+    _refuse_mismatched_day_labels(returns, benchmark)
     p = _tz_naive_like_qs(_prepared_returns_no_guess(returns))
     b = _align_benchmark_like_qs(_align_benchmark_like_qs(benchmark, p.index), p.index)
     return bool(
@@ -1292,6 +1337,8 @@ def _greeks_no_guess(
     Both legs are tz-normalised (the strategy here, the benchmark inside
     ``_align_benchmark_like_qs``), so the pairwise join lines them up by date.
     0.0.81 needs no such step because ``np.cov`` pairs its inputs by position.
+    A pair whose legs label their days in different zones is refused
+    (``_refuse_mismatched_day_labels``, review round 2 IN-03).
 
     RESIDUE ON EITHER LEG (review round 2, CR-01). A benchmark with no real
     dispersion defines no beta: ``(None, None)``. A STRATEGY with no real
@@ -1301,6 +1348,7 @@ def _greeks_no_guess(
     ``beta != 0`` guard and persisted a treynor of about 1e15 (measured on a
     compounding 1e-3 daily yield).
     """
+    _refuse_mismatched_day_labels(aligned_returns, aligned_benchmark)
     r = _tz_naive_like_qs(aligned_returns)
     b = _align_benchmark_like_qs(aligned_benchmark, r.index)
     pair = pd.concat([r, b], axis=1, join="inner").dropna()
@@ -3108,7 +3156,11 @@ def _rolling_greeks(
     UNANNUALIZED (a per-period intercept) and rolling beta is a unitless ratio;
     ``periods_per_year`` deliberately does not apply here. Only the SCALAR
     greeks alpha is annualized.
+
+    A pair whose legs label their days in different zones is refused
+    (``_refuse_mismatched_day_labels``, review round 2 IN-03).
     """
+    _refuse_mismatched_day_labels(returns, benchmark)
     prepared = _tz_naive_like_qs(_prepared_returns_no_guess(returns))
     df = pd.DataFrame(
         data={

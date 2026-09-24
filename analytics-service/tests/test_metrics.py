@@ -4380,3 +4380,44 @@ def test_q166r2_a_failing_mirror_predicate_is_logged(caplog, monkeypatch):
     lines = [r.getMessage() for r in caplog.records if "mirror predicate failed" in r.getMessage()]
     assert len(lines) == 1 and "predicate exploded" in lines[0], lines
     assert out["recovery_factor"] is not None
+
+
+def test_q166r2_a_pair_labelled_in_different_zones_is_refused_not_shifted(caplog):
+    """IN-03: a naive strategy paired with an Asia/Tokyo benchmark. Normalising
+    the benchmark to UTC turned each Tokyo midnight into 15:00 of the previous
+    UTC day, and the reindex back-fill then paired every strategy day with the
+    NEXT benchmark day: r_squared 0.009 with status ``ok``, measured, on a
+    shifted pairing. The pair is refused by name instead. A pair that agrees on
+    its day labels (both naive, a naive leg with a UTC leg, both in one zone)
+    gives exactly the values of the naive pair."""
+    import services.metrics as metrics_module
+
+    idx = pd.date_range("2024-01-01", periods=200, freq="D")
+    r = pd.Series(np.random.default_rng(3).normal(0.001, 0.01, 200), index=idx)
+    b = pd.Series(np.random.default_rng(4).normal(0.001, 0.02, 200), index=idx)
+    b_tokyo = b.tz_localize("Asia/Tokyo")
+
+    for fn in (
+        lambda: metrics_module._greeks_no_guess(r, b_tokyo, 365),
+        lambda: metrics_module._r_squared(r, b_tokyo),
+        lambda: metrics_module._rolling_greeks(r, b_tokyo, 90),
+    ):
+        with pytest.raises(ValueError, match="different time zones"):
+            fn()
+
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    out = compute_qstats_scalars(r, b_tokyo)
+    assert out["r_squared"] is None and out["r_squared_status"] == "error", out
+    assert any(
+        "r_squared failed" in rec.getMessage() and "different time zones" in rec.getMessage()
+        for rec in caplog.records
+    ), [rec.getMessage() for rec in caplog.records]
+
+    naive = (metrics_module._greeks_no_guess(r, b, 365), metrics_module._r_squared(r, b))
+    b_utc = b.tz_localize("UTC")
+    r_tokyo = r.tz_localize("Asia/Tokyo")
+    assert (metrics_module._greeks_no_guess(r, b_utc, 365), metrics_module._r_squared(r, b_utc)) == naive
+    assert (
+        metrics_module._greeks_no_guess(r_tokyo, b_tokyo, 365),
+        metrics_module._r_squared(r_tokyo, b_tokyo),
+    ) == naive
