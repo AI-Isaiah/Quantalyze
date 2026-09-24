@@ -320,4 +320,112 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
       "Includes +$300 from keys needing attention.",
     );
   });
+
+  it.each(UNTRUSTED)(
+    "%s: a single untrusted row renders the qualifier for its P&L",
+    (status) => {
+      render(
+        <OpenPositionsTable
+          rows={[makePosition({ source_key_sync_status: status })]}
+        />,
+      );
+      expect(
+        screen.getByTestId("open-positions-untrusted-note").textContent,
+      ).toBe("Includes +$1,500 from keys needing attention.");
+    },
+  );
+
+  it("healthy control: an all-complete table has no qualifier and a one-row footer", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({ id: "pos-a" }),
+          makePosition({ id: "pos-b", unrealized_pnl_usd: -200 }),
+        ]}
+      />,
+    );
+    expect(
+      screen.queryByTestId("open-positions-untrusted-note"),
+    ).not.toBeInTheDocument();
+    expect(container.querySelector("tfoot")!.querySelectorAll("tr")).toHaveLength(1);
+    expect(footerTotal(container)).toBe("+$1,300");
+  });
+
+  it("mixed table: the total is trusted + untrusted, the qualifier is the untrusted part only", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({ id: "pos-t1", unrealized_pnl_usd: 2_000 }),
+          makePosition({ id: "pos-t2", unrealized_pnl_usd: 500 }),
+          makePosition({
+            id: "pos-u1",
+            unrealized_pnl_usd: 700,
+            source_key_sync_status: "revoked",
+          }),
+          makePosition({
+            id: "pos-u2",
+            unrealized_pnl_usd: -100,
+            source_key_sync_status: "sign_in_failed",
+          }),
+        ]}
+      />,
+    );
+    // 2,000 + 500 + 700 - 100 = 3,100 (hand-summed; D-03 keeps the untrusted rows in).
+    expect(footerTotal(container)).toBe("+$3,100");
+    // 700 - 100 = 600: only the two untrusted rows, across both statuses.
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$600 from keys needing attention.",
+    );
+  });
+
+  it("negative untrusted P&L renders with the total's minus sign", () => {
+    render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({
+            unrealized_pnl_usd: -1_234.6,
+            source_key_sync_status: "sign_in_failed",
+          }),
+        ]}
+      />,
+    );
+    // The first character after "Includes " is U+2212 MINUS SIGN, not a
+    // hyphen-minus: it is formatPnl's sign, the same one the total uses.
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes −$1,235 from keys needing attention.",
+    );
+  });
+
+  it("null P&L on an untrusted row still renders: the qualifier follows the count, not the amount (D-07)", () => {
+    render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({
+            unrealized_pnl_usd: null,
+            source_key_sync_status: "revoked",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$0 from keys needing attention.",
+    );
+  });
+
+  it("tone: muted caption, no warning colour, no uppercase, no role (D-09)", () => {
+    render(
+      <OpenPositionsTable
+        rows={[makePosition({ source_key_sync_status: "sign_in_failed" })]}
+      />,
+    );
+    const cell = screen.getByTestId("open-positions-untrusted-note");
+    expect(cell.className).toContain("text-text-muted");
+    expect(cell.className).toContain("text-xs");
+    expect(cell.className).not.toMatch(
+      /warning|amber|danger|destructive|accent|uppercase/i,
+    );
+    expect(cell.getAttribute("role")).toBeNull();
+    expect(cell.getAttribute("style")).toBeNull();
+    expect(cell.getAttribute("colspan")).toBe("7");
+  });
 });
