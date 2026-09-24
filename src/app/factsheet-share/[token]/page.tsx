@@ -54,6 +54,7 @@ import {
 } from "@/lib/factsheet/fetch-and-build-payload";
 import {
   COMPUTE_STATE_READ_LIMIT,
+  FACTSHEET_CHAIN_KINDS,
   deriveComputeState,
   recipientArm,
   type ComputeJobRow,
@@ -245,6 +246,11 @@ async function readShareComputeState(
         "status, kind, created_at, claimed_at, member_progress_at:metadata->>member_progress_at",
       )
       .eq("strategy_id", strategyId)
+      // 167.2-REVIEW-SFH M-5: only the kinds the selection can pick. Without
+      // it a strategy whose newest 100 rows are recurring cron kinds
+      // (`reconcile_strategy`, `sync_funding`) derived `unreadable` on every
+      // render. Adds no column; the matched id stays the one bound.
+      .in("kind", [...FACTSHEET_CHAIN_KINDS, "stitch_composite"])
       .order("created_at", { ascending: false })
       .limit(COMPUTE_STATE_READ_LIMIT);
 

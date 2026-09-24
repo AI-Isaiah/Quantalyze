@@ -97,6 +97,7 @@ type JobsReadCall = {
   eqs: Array<[string, unknown]>;
   order: [string, unknown] | null;
   limit: number | null;
+  ins: Array<[string, unknown]>;
 };
 type JobsReadAnswer = {
   data: Array<Record<string, unknown>> | null;
@@ -130,6 +131,7 @@ vi.mock("@/lib/supabase/admin", () => ({
             eqs: [],
             order: null,
             limit: null,
+            ins: [],
           };
           const builder = {
             select: (cols: string) => {
@@ -142,6 +144,11 @@ vi.mock("@/lib/supabase/admin", () => ({
             },
             order: (col: string, opts: unknown) => {
               call.order = [col, opts];
+              return builder;
+            },
+            // 167.2-REVIEW-SFH M-5: the read is narrowed to factsheet kinds.
+            in: (col: string, vals: unknown) => {
+              call.ins.push([col, vals]);
               return builder;
             },
             limit: (n: number) => {
@@ -552,6 +559,28 @@ describe("KCS-11 — read (3) is pinned to one bound and one five-field projecti
     expect(call.eqs).toEqual([["strategy_id", STRATEGY_ID]]);
     expect(call.order).toEqual(["created_at", { ascending: false }]);
     expect(call.limit).toBe(100);
+  });
+
+  it("KIND-FILTER-PIN (167.2-REVIEW-SFH M-5): the read is narrowed to the factsheet kinds, so recurring cron rows cannot fill its window", async () => {
+    await renderPage(VALID_TOKEN);
+    const [call] = jobsReadMock.mock.calls[0];
+    // Hand-typed: the five FACTSHEET_CHAIN_KINDS and the stitch. A strategy
+    // whose newest 100 rows were reconcile_strategy / sync_funding used to
+    // derive "unreadable" on every render. The filter adds no column and keeps
+    // the one bound (the matched id) the pin above guards.
+    expect(call.ins).toEqual([
+      [
+        "kind",
+        [
+          "process_key_long",
+          "sync_trades",
+          "derive_broker_dailies",
+          "compute_analytics_from_csv",
+          "compute_analytics",
+          "stitch_composite",
+        ],
+      ],
+    ]);
   });
 
   it("PAYLOAD-NO-READ: a built payload renders the recipient view and never reads compute_jobs", async () => {

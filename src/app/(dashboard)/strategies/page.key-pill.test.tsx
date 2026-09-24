@@ -21,6 +21,9 @@ import { render } from "@testing-library/react";
 import React from "react";
 
 vi.mock("server-only", () => ({}));
+// 167.2 review-fix: the page captures its read failures to Sentry.
+const captureToSentryMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
 
 vi.mock("next/link", () => ({
   default: ({ children, href }: { children: React.ReactNode; href: string }) =>
@@ -136,12 +139,14 @@ vi.mock("@/lib/supabase/server", () => ({
     auth: {
       getUser: async () => ({ data: { user: state.user }, error: null }),
     },
-    rpc: async (fn: string, args: { p_strategy_id?: string }) => {
+    rpc: async (fn: string, args: { p_strategy_id?: string; p_limit?: number }) => {
       state.rpcCalls.push({ fn, args });
       if (fn !== "get_user_compute_jobs") throw new Error(`Unexpected rpc: ${fn}`);
       if (state.jobsThrow) throw new Error("synthetic rpc throw");
       if (state.jobsError) return { data: null, error: state.jobsError };
-      return { data: state.jobs[args.p_strategy_id ?? ""] ?? [], error: null };
+      // 167.2-REVIEW-SFH M-5: the RPC honours `p_limit`.
+      const rows = state.jobs[args.p_strategy_id ?? ""] ?? [];
+      return { data: rows.slice(0, args.p_limit ?? rows.length), error: null };
     },
     from: (table: string) => {
       let result: ReadResult;
@@ -254,6 +259,7 @@ beforeEach(() => {
   state.jobsThrow = false;
   state.rpcCalls = [];
   state.calls = [];
+  captureToSentryMock.mockClear();
   consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -593,5 +599,39 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       "strategy-row-share-note",
     ]);
     expect(bands[1].querySelector("p")?.className).toBe("text-xs text-text-muted");
+  });
+
+  const cron = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      kind: "reconcile_strategy",
+      status: "done",
+      created_at: new Date(Date.UTC(2026, 1, 1) - i * 60_000).toISOString(),
+    }));
+
+  it("REASK (167.2-REVIEW-SFH M-5): a full 100-row window of cron rows re-asks once at the RPC cap and states the real arm", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: null })];
+    state.jobs = { "s-1": cron(100) };
+
+    const container = await renderPage();
+
+    expect(state.rpcCalls.map((c) => (c.args as { p_limit: number }).p_limit)).toEqual([100, 1000]);
+    // Exhaustive at 1000 with no chain job: never started, not "unreadable".
+    expect(noteOf(container, "Strategy s-1")).toBe(MINT_B);
+  });
+
+  it("WINDOW-FULL (167.2-REVIEW-SFH M-5): a window still full at the cap renders KCS12-UNREADABLE and is logged and captured as its own case", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: null })];
+    state.jobs = { "s-1": cron(1000) };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-1")).toBe(UNREADABLE);
+    expect(consoleError).toHaveBeenCalledWith(
+      "[strategies/page] compute-state window full",
+      expect.objectContaining({ id: "s-1" }),
+    );
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { route: "strategies/page", stage: "compute-state-window-full" },
+    });
   });
 });

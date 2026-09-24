@@ -191,7 +191,14 @@ function mockRequestClient() {
   if (!STATE.rpcMissing) {
     client.rpc = (name: string, args: unknown) => {
       STATE.observed.rpcCalls.push([name, args]);
-      return Promise.resolve(STATE.rpcResult);
+      // 167.2-REVIEW-SFH M-5: the RPC honours `p_limit`, so a full first
+      // window and the one wider re-ask can be told apart.
+      const limit = (args as { p_limit?: number } | null)?.p_limit;
+      const { data, error } = STATE.rpcResult;
+      return Promise.resolve({
+        data: Array.isArray(data) && typeof limit === "number" ? data.slice(0, limit) : data,
+        error,
+      });
     };
   }
   return client;
@@ -666,7 +673,37 @@ describe("KCS-09 — an unreadable read never claims progress", () => {
     }
   });
 
-  it("NON-EXHAUSTIVE: a full 100-row window with no chain job proves nothing -> unreadable", async () => {
+  // Moved by 167.2-REVIEW-SFH M-5 (lineage): this pin fed a 100-row window of
+  // cron rows and expected `unreadable`. A full first window now re-asks once
+  // at the RPC's 1000-row cap, so "proves nothing" needs a window still full
+  // at the cap; a window that stops short of it is exhaustive (REASK below).
+  it("NON-EXHAUSTIVE: a window still full at the RPC cap with no chain job proves nothing -> unreadable, logged and captured", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft();
+      givenJobs(
+        Array.from({ length: 1000 }, (_, i) =>
+          job({ kind: "reconcile_strategy", status: "done", created_at: minutesAgo(i + 1) }),
+        ),
+      );
+
+      const { stateLine } = await renderOwnerPending();
+
+      expect(stateLine!.textContent).toBe(UNREADABLE_LINE);
+      expect(errSpy).toHaveBeenCalledWith(
+        "[factsheet/v2/page] compute-state window full",
+        expect.objectContaining({ id: STRATEGY_ID }),
+      );
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+        expect.any(Error),
+        { tags: { route: "factsheet/v2/page", stage: "compute-state-window-full" } },
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("REASK (167.2-REVIEW-SFH M-5): a full 100-row window of cron rows re-asks once at the cap and states the real answer", async () => {
     givenOwnerPendingDraft();
     givenJobs(
       Array.from({ length: 100 }, (_, i) =>
@@ -676,7 +713,12 @@ describe("KCS-09 — an unreadable read never claims progress", () => {
 
     const { stateLine } = await renderOwnerPending();
 
-    expect(stateLine!.textContent).toBe(UNREADABLE_LINE);
+    expect(STATE.observed.rpcCalls.map(([, a]) => (a as { p_limit: number }).p_limit)).toEqual([
+      100, 1000,
+    ]);
+    expect(stateLine!.textContent).toBe(
+      "No computation is running for this strategy, and none is on record.",
+    );
   });
 });
 

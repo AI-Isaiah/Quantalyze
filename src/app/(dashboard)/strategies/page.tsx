@@ -13,12 +13,12 @@ import { isPublishedStatus, shareAffordanceMode } from "@/lib/share-affordance";
 // carries no client directive. AllocatorSyncStatus is only RENDERED.
 import { isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
 import {
-  COMPUTE_STATE_READ_LIMIT,
   deriveComputeState,
   recipientArm,
-  type ComputeJobRow,
   type RecipientArm,
 } from "@/lib/compute-state";
+import { readOwnerComputeJobs } from "@/lib/compute-jobs-read";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { recipientShareNote, untrustedKeyCaption } from "@/lib/status-surface-copy";
 import { PendingIntros } from "@/components/strategy/PendingIntros";
 import Link from "next/link";
@@ -108,35 +108,51 @@ async function readRecipientArm(
   supabase: Awaited<ReturnType<typeof createClient>>,
   strategyId: string,
 ): Promise<RecipientArm> {
+  // 167.2-REVIEW-SFH M-5: the shared bounded read, which re-asks once at the
+  // RPC's cap when the first window is full of non-chain rows. A throw is
+  // folded into the same failed-read arm.
+  // Precondition (SFH L-3): the page redirected above unless `getUser()`
+  // resolved a user, so an empty answer here is not a missing session.
+  let read: Awaited<ReturnType<typeof readOwnerComputeJobs>>;
   try {
-    const { data: jobRows, error } = await supabase.rpc("get_user_compute_jobs", {
-      p_strategy_id: strategyId,
-      p_limit: COMPUTE_STATE_READ_LIMIT,
-    });
-    if (error || !Array.isArray(jobRows)) {
-      console.error("[strategies/page] compute-state read failed", {
-        id: strategyId,
-        code: error?.code,
-        message:
-          error?.message ?? "compute job read returned no rows array and no error",
-      });
-      return recipientArm(deriveComputeState({ readError: true }));
-    }
-    return recipientArm(
-      deriveComputeState({
-        rows: jobRows as unknown as ComputeJobRow[],
-        readExhaustive: jobRows.length < COMPUTE_STATE_READ_LIMIT,
-        nowMs: Date.now(),
-      }),
+    read = await readOwnerComputeJobs(
+      supabase as unknown as SupabaseClient,
+      strategyId,
     );
   } catch (err) {
-    console.error("[strategies/page] compute-state read failed", {
-      id: strategyId,
+    read = {
+      ok: false,
       code: undefined,
       message: err instanceof Error ? err.message : String(err),
+    };
+  }
+  if (!read.ok) {
+    console.error("[strategies/page] compute-state read failed", {
+      id: strategyId,
+      code: read.code,
+      message: read.message,
     });
     return recipientArm(deriveComputeState({ readError: true }));
   }
+  if (read.windowFull) {
+    // Deterministic, and a reload cannot fix it, so it is logged and captured
+    // as its own case rather than folded silently into `unreadable`.
+    console.error("[strategies/page] compute-state window full", {
+      id: strategyId,
+      rows: read.rows.length,
+    });
+    captureToSentry(
+      new Error("compute job window full at the RPC cap with no factsheet-chain job"),
+      { tags: { route: "strategies/page", stage: "compute-state-window-full" } },
+    );
+  }
+  return recipientArm(
+    deriveComputeState({
+      rows: read.rows,
+      readExhaustive: read.readExhaustive,
+      nowMs: Date.now(),
+    }),
+  );
 }
 
 export default async function StrategiesPage() {

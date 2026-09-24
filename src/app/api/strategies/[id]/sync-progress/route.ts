@@ -173,11 +173,6 @@ export async function GET(
       // (`withAuth` has resolved the user, the precondition
       // `readOwnerComputeJobs` documents). 167.2-REVIEW-SFH M-5: a full first
       // window with no chain row is re-asked once at the RPC cap there.
-      const read = await readOwnerComputeJobs(
-        supabase as unknown as SupabaseClient,
-        id,
-      );
-
       // 167.2-REVIEW-SFH M-4 — every "could not tell" answer is DEGRADED,
       // never IDLE. The key card reads IDLE's `jobStatus: null` as "no chain
       // job in flight" (its KCS-18 success gate and its pre-attempt gate), so
@@ -205,6 +200,19 @@ export async function GET(
           headers: NO_STORE_HEADERS,
         });
       };
+
+      let read: Awaited<ReturnType<typeof readOwnerComputeJobs>>;
+      try {
+        read = await readOwnerComputeJobs(
+          supabase as unknown as SupabaseClient,
+          id,
+        );
+      } catch (err) {
+        return degrade(
+          "compute-jobs-read",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
 
       if (!read.ok) return degrade("compute-jobs-read", read.message);
       if (read.windowFull) {

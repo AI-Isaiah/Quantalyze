@@ -21,12 +21,11 @@ import {
 import { fetchAndBuildPayload } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
 import {
-  COMPUTE_STATE_READ_LIMIT,
   deriveComputeState,
   recipientArm,
-  type ComputeJobRow,
   type ComputeState,
 } from "@/lib/compute-state";
+import { readOwnerComputeJobs } from "@/lib/compute-jobs-read";
 import {
   KCS10_PUBLIC_SENTENCE,
   ownerRemedy,
@@ -631,11 +630,12 @@ async function readOwnerPendingStatus(
 ): Promise<{ state: ComputeState; shape: StrategyShape | "unknown" }> {
   let shape: StrategyShape | "unknown" = "unknown";
   try {
-    const [{ data: jobRows, error: jobsError }, memberCount] = await Promise.all([
-      supabase.rpc("get_user_compute_jobs", {
-        p_strategy_id: strategyId,
-        p_limit: COMPUTE_STATE_READ_LIMIT,
-      }),
+    const [jobsRead, memberCount] = await Promise.all([
+      // 167.2-REVIEW-SFH M-5: the shared bounded read (re-asks once at the RPC
+      // cap when the first window is full of non-chain rows). A throw lands in
+      // the catch below. Precondition (SFH L-3): the owner lane is reached only
+      // with a resolved session user, so an empty answer is not a missing one.
+      readOwnerComputeJobs(supabase as unknown as SupabaseClient, strategyId),
       // The generated types predate `strategy_keys`; the cast is type-only and
       // RLS still applies to this request client (see strategy-shape.ts).
       countCompositeMembers(supabase as unknown as SupabaseClient, strategyId),
@@ -654,11 +654,8 @@ async function readOwnerPendingStatus(
       apiKeyId: shapeInputs.apiKeyId,
       memberCount,
     });
-    if (jobsError || !Array.isArray(jobRows)) {
-      const readFailure = jobsError ?? {
-        code: undefined,
-        message: "compute job read returned no rows array and no error",
-      };
+    if (!jobsRead.ok) {
+      const readFailure = { code: jobsRead.code, message: jobsRead.message };
       console.error("[factsheet/v2/page] compute-state read failed", {
         id: strategyId,
         code: readFailure.code,
@@ -669,10 +666,22 @@ async function readOwnerPendingStatus(
       });
       return { state: deriveComputeState({ readError: true }), shape };
     }
+    if (jobsRead.windowFull) {
+      // Deterministic, and "reload" cannot fix it, so it is logged and
+      // captured as its own case rather than folded silently into unreadable.
+      console.error("[factsheet/v2/page] compute-state window full", {
+        id: strategyId,
+        rows: jobsRead.rows.length,
+      });
+      captureToSentry(
+        new Error("compute job window full at the RPC cap with no factsheet-chain job"),
+        { tags: { route: "factsheet/v2/page", stage: "compute-state-window-full" } },
+      );
+    }
     return {
       state: deriveComputeState({
-        rows: jobRows as unknown as ComputeJobRow[],
-        readExhaustive: jobRows.length < COMPUTE_STATE_READ_LIMIT,
+        rows: jobsRead.rows,
+        readExhaustive: jobsRead.readExhaustive,
         nowMs: Date.now(),
       }),
       shape,

@@ -18,9 +18,11 @@
  * session resolved a user (`auth.getUser()`), as every caller does today;
  * otherwise an empty answer here is not evidence of "never started".
  *
- * Never throws: an error, a non-array answer or a throw is `ok: false` with a
- * message for the caller to log. It never logs itself (the caller owns the
- * route tag). No client directive and no Next.js cache import (the owner-lane
+ * An error or a non-array answer is `ok: false` with a message for the caller
+ * to log. A THROW (a network-layer failure, a client with no `rpc` member)
+ * propagates: every caller already wraps this read in its own try/catch and
+ * logs and captures the thrown value as it stands. It never logs itself (the
+ * caller owns the route tag). No client directive and no Next.js cache import (the owner-lane
  * cache-isolation guard scans this closure).
  */
 
@@ -72,27 +74,20 @@ export async function readOwnerComputeJobs(
   client: SupabaseClient,
   strategyId: string,
 ): Promise<ComputeJobsRead> {
-  try {
-    const first = await rpcOnce(client, strategyId, COMPUTE_STATE_READ_LIMIT);
-    if (!first.ok) return first;
-    let rows = first.rows;
-    let readExhaustive = rows.length < COMPUTE_STATE_READ_LIMIT;
-    if (isWindowFullWithoutFactsheetJob(rows, readExhaustive)) {
-      const wide = await rpcOnce(client, strategyId, COMPUTE_STATE_READ_LIMIT_MAX);
-      if (!wide.ok) return wide;
-      rows = wide.rows;
-      readExhaustive = rows.length < COMPUTE_STATE_READ_LIMIT_MAX;
-    }
-    return {
-      ok: true,
-      rows,
-      readExhaustive,
-      windowFull: isWindowFullWithoutFactsheetJob(rows, readExhaustive),
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      message: `compute job read threw: ${err instanceof Error ? err.message : String(err)}`,
-    };
+  const first = await rpcOnce(client, strategyId, COMPUTE_STATE_READ_LIMIT);
+  if (!first.ok) return first;
+  let rows = first.rows;
+  let readExhaustive = rows.length < COMPUTE_STATE_READ_LIMIT;
+  if (isWindowFullWithoutFactsheetJob(rows, readExhaustive)) {
+    const wide = await rpcOnce(client, strategyId, COMPUTE_STATE_READ_LIMIT_MAX);
+    if (!wide.ok) return wide;
+    rows = wide.rows;
+    readExhaustive = rows.length < COMPUTE_STATE_READ_LIMIT_MAX;
   }
+  return {
+    ok: true,
+    rows,
+    readExhaustive,
+    windowFull: isWindowFullWithoutFactsheetJob(rows, readExhaustive),
+  };
 }
