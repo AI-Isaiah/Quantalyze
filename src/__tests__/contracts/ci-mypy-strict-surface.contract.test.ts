@@ -74,8 +74,9 @@ import { join } from "node:path";
  *     LIMIT, not a gap this file claims to close;
  *   - it does NOT pin the `python` job's own `if:` or a job- or workflow-level
  *     `env:` (DECIDED, round-2 review). A skipped `python` job is caught
- *     downstream instead — `sql-tests` needs `python`, and the `frontend`
- *     aggregator reds a `sql-tests` skip on a trusted event — though not on a
+ *     downstream instead — `test-db-drift` needs `python` (since Phase 164.4.2;
+ *     `sql-tests` no longer does), and the `frontend` aggregator reds a
+ *     `test-db-drift` skip on a trusted event — though not on a
  *     fork PR or a `workflow_dispatch`, and not by this file. An `env:` that
  *     repoints `PATH` or sets a `MYPY*` variable is the binary-substitution
  *     limit above;
