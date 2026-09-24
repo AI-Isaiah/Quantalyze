@@ -2942,6 +2942,18 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.2 to break down)
 
+### Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build (INSERTED)
+
+**Goal:** The owner's `/strategies` list and every "has a factsheet" signal agree with what a share-link recipient actually sees. Today a strategy whose `strategy_analytics.computation_status` reads computed, but whose series cannot build (`fetchAndBuildPayload` in `src/lib/factsheet/fetch-and-build-payload.ts` returns no payload), is shown on the list as having a factsheet with no share note, while its recipient lands on the pending page. Only the service-role builder can decide buildability (the series sit behind deny-all RLS) and no owner-readable field records the outcome, so Phase 167.2 could not fix it without a migration or an admin read (167.2 review WR-02, recorded UNFIXABLE-IN-PHASE 2026-09-24). **User-facing.** Inserted 2026-09-24 under the founder's authorization to add phases.
+**Success criteria:** (1) the mismatch is reproduced first (a computed row whose payload does not build) on the local lane, or the phase shrinks; (2) buildability is recorded where the owner lane can read it (e.g. a bridge-maintained column written by the compute path), or decided server-side for the list; (3) the list, the share note and the share page agree for that row, proven by a test observed RED against today's code; (4) any migration passes the three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before merge, because merge auto-applies to PROD.
+**Requirements**: TBD
+**Depends on:** Phase 167.2
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 167.2.1 to break down)
+
 ### Phase 168: DRBOPTIONS — a Deribit options account ingests end to end
 
 **Goal:** Classify Deribit's `assignment` transaction-log type **against a captured row census rather than a guess**, so an options account ingests end to end and the realized-cash series it feeds is neither silently dropped nor double-counted.
