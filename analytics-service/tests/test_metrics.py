@@ -3906,3 +3906,27 @@ def test_q166r_serenity_undefined_arms_are_none_not_zero(monkeypatch):
     assert math.isfinite(metrics_module._serenity_index(mixed)), "control must be defined"
     monkeypatch.setattr(metrics_module, "_ulcer_index", lambda r: 0.0)
     assert math.isnan(metrics_module._serenity_index(mixed))
+
+
+def test_q166r_benchmark_mirrors_accept_a_tz_aware_pair():
+    """SFH LOW-1 / review IN-02: each benchmark mirror tz-normalised the strategy
+    leg but compared it against a still-tz-aware benchmark index, so a UTC pair
+    raised `TypeError: Cannot compare dtypes` in `_align_benchmark_like_qs`
+    (measured in `_greeks_no_guess`, `_r_squared` and `_rolling_greeks`), where
+    live 0.0.81 `greeks` returned values. In production that TypeError would be
+    swallowed by the fan-out `except` and alpha, beta, correlation, info_ratio
+    and treynor would vanish together. A tz-aware pair must give exactly the
+    values of the same pair made naive."""
+    from services.metrics import _greeks_no_guess, _r_squared, _rolling_greeks
+
+    idx = pd.bdate_range("2024-01-01", periods=200)
+    rng = np.random.default_rng(166)
+    r = pd.Series(rng.normal(0.001, 0.01, len(idx)), index=idx)
+    b = pd.Series(rng.normal(0.0005, 0.02, len(idx)), index=idx)
+    r_utc, b_utc = r.tz_localize("UTC"), b.tz_localize("UTC")
+
+    assert _greeks_no_guess(r_utc, b_utc, 252) == _greeks_no_guess(r, b, 252)
+    assert _r_squared(r_utc, b_utc) == _r_squared(r, b)
+    pd.testing.assert_frame_equal(
+        _rolling_greeks(r_utc, b_utc, 90), _rolling_greeks(r, b, 90), check_freq=False
+    )

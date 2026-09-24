@@ -989,6 +989,15 @@ def _align_benchmark_like_qs(benchmark: pd.Series, period: pd.Index) -> pd.Serie
     silently on any quantstats refactor (research "Alternatives Considered").
     These lines of pandas are the whole of it.
     """
+    # Phase 166 review (SFH LOW-1 / IN-02): the benchmark is tz-normalised
+    # FIRST, exactly like the strategy leg every caller normalises before it
+    # builds ``period``. 0.0.81 normalises after the set test, which only works
+    # because it never normalises the strategy leg; with a naive ``period`` and a
+    # tz-aware benchmark the set test is always unequal and the reindex raised
+    # ``TypeError: Cannot compare dtypes datetime64[us, UTC] and datetime64[us]``
+    # (measured on a UTC pair). A naive benchmark is untouched, so every
+    # existing value is bit-identical.
+    benchmark = _tz_naive_like_qs(benchmark)
     if set(period) != set(benchmark.index):
         cleaned = benchmark.copy().fillna(0).replace([np.inf, -np.inf], float("NaN"))
         benchmark_prices = 1 + 1 * (cleaned.add(1).cumprod(axis=0) - 1)
@@ -1000,7 +1009,6 @@ def _align_benchmark_like_qs(benchmark: pd.Series, period: pd.Index) -> pd.Serie
             .fillna(0)
         )
         benchmark = benchmark[benchmark.index.isin(period)]
-    benchmark = _tz_naive_like_qs(benchmark)
     return _prepared_returns_no_guess(benchmark.dropna())
 
 
@@ -1074,9 +1082,9 @@ def _greeks_no_guess(
     annualized on the FREQUENCY clock (``periods``), not the calendar clock.
     ``test_periods_param_rescales_365`` pins that it rescales exactly x365/252.
 
-    The strategy index is tz-normalised like the benchmark's, so the pairwise
-    join lines the two legs up by date. 0.0.81 needs no such step because
-    ``np.cov`` pairs its inputs by position.
+    Both legs are tz-normalised (the strategy here, the benchmark inside
+    ``_align_benchmark_like_qs``), so the pairwise join lines them up by date.
+    0.0.81 needs no such step because ``np.cov`` pairs its inputs by position.
     """
     r = _tz_naive_like_qs(aligned_returns)
     b = _align_benchmark_like_qs(aligned_benchmark, r.index)
