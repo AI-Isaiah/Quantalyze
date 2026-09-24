@@ -11,19 +11,31 @@ from .db import get_supabase, db_execute, rows
 
 logger = logging.getLogger("quantalyze.analytics")
 
-# Review-fix round 1 (MEDIUM-6) — the failures a benchmark CACHE READ may meet
-# and still fall back to a fresh fetch quietly: a PostgREST error, a transport
-# or timeout error, and the RuntimeError `db_execute` raises when its thread
-# pool is saturated (and `get_supabase` raises when it is not configured).
-# Anything else (a KeyError, a TypeError, an UnboundLocalError) is a
-# programming error. It still falls back to the fetch, but at error level with
-# a Sentry capture, so a broken cache can never again pass as a miss.
+# Review-fix round 1 (MEDIUM-6), narrowed in round 2 (SFH LOW-7) — the
+# failures a benchmark CACHE READ may meet and still fall back to a fresh fetch
+# quietly: a PostgREST error, and a transport or timeout error. Anything else
+# (a KeyError, a TypeError, an UnboundLocalError, a RuntimeError) is a
+# programming or infrastructure error. It still falls back to the fetch, but at
+# error level with a Sentry capture, so a broken cache can never again pass as
+# a miss.
+#
+# `RuntimeError` was in this tuple, justified by two raises. `get_supabase`'s
+# "not configured" raise is now caught at that one call (`_benchmark_client`).
+# The other, "`db_execute` raises it when its thread pool is saturated", is not
+# how `ThreadPoolExecutor` behaves: it queues without bound and raises
+# RuntimeError only after shutdown, which is not an expected cache miss. A bare
+# `RuntimeError` here would also have swallowed any library bug that raises
+# one.
 _CACHE_READ_ERRORS: tuple[type[BaseException], ...] = (
     APIError,
     httpx.HTTPError,
     OSError,
-    RuntimeError,
 )
+
+# Round-2 review (reviewer #4) — how old the newest cached completed day may be
+# (measured from its UTC midnight) and still be served, flagged stale, when the
+# fresh fetch fails. 48 h is the freshness bound this cache used before round 1.
+_STALE_FALLBACK_MAX_AGE = timedelta(hours=48)
 
 
 async def fetch_btc_daily_prices(days: int = 1000) -> pd.Series:
@@ -96,9 +108,47 @@ async def _fetch_from_coingecko(days: int) -> pd.Series:
     return pd.Series(closes, index=pd.DatetimeIndex(dates), name="BTC")
 
 
+def _utc_now() -> datetime:
+    """The one wall-clock read in this module, so tests can pin it."""
+    return datetime.now(timezone.utc)
+
+
 def _utc_today() -> date:
     """Today's UTC date: the day whose daily close does not exist yet."""
-    return datetime.now(timezone.utc).date()
+    return _utc_now().date()
+
+
+def _benchmark_client() -> Any:
+    """The Supabase client, or None when the service is not configured.
+
+    Catches ONLY `get_supabase`'s own "not configured" RuntimeError, so an
+    unconfigured cache is a quiet miss and nothing else is swallowed."""
+    try:
+        return get_supabase()
+    except RuntimeError as e:
+        logger.warning("Benchmark cache unavailable: %s", str(e))
+        return None
+
+
+def _stale_cache_fallback(
+    by_date: dict[date, float], *, days: int, now: datetime
+) -> pd.Series | None:
+    """Round-2 review (reviewer #4) — the completed days the cache read already
+    returned, as prices, when the newest is at most `_STALE_FALLBACK_MAX_AGE`
+    old; else None. Served only when the fresh fetch failed, and always
+    flagged stale by the caller."""
+    if len(by_date) < 2:
+        return None
+    newest = max(by_date)
+    newest_midnight = datetime(newest.year, newest.month, newest.day, tzinfo=timezone.utc)
+    if now - newest_midnight > _STALE_FALLBACK_MAX_AGE:
+        return None
+    window = sorted(by_date)[-days:]
+    return pd.Series(
+        [by_date[d] for d in window],
+        index=pd.DatetimeIndex([pd.Timestamp(d) for d in window]),
+        name="BTC",
+    )
 
 
 def _completed_days_only(prices: pd.Series, today: date) -> pd.Series:
@@ -106,6 +156,10 @@ def _completed_days_only(prices: pd.Series, today: date) -> pd.Series:
     the current UTC day is the price so far, a partial-day close, not a close.
     It is never cached or served (review-fix round 1, MEDIUM-5)."""
     return prices[prices.index < pd.Timestamp(today)]
+
+
+class _CacheUnavailable(Exception):
+    """Internal: the cache client is not configured (already logged)."""
 
 
 def _cache_miss_reason(
@@ -152,8 +206,12 @@ async def get_benchmark_returns(
 
     # Try cache first. It answers only with `days` contiguous completed days
     # ending yesterday or later (`_cache_miss_reason`); anything less is a miss.
+    # What it read is kept (`by_date`) for the stale fallback below.
+    by_date: dict[date, float] = {}
     try:
-        supabase = get_supabase()
+        supabase = _benchmark_client()
+        if supabase is None:
+            raise _CacheUnavailable()
         # `days + 1`: one extra row, so a row for today cached before the
         # completed-days rule cannot push the window one day short.
         result = await db_execute(
@@ -178,6 +236,8 @@ async def get_benchmark_returns(
             )
             return prices_to_returns(prices), False
         logger.info("Benchmark cache miss (%s). Fetching fresh data.", miss_reason)
+    except _CacheUnavailable:
+        pass  # already logged by `_benchmark_client`
     except _CACHE_READ_ERRORS as e:
         logger.warning("Benchmark cache read failed: %s", str(e))
     except Exception as e:  # noqa: BLE001 — a programming error: loud, then fall back
@@ -210,5 +270,15 @@ async def get_benchmark_returns(
 
         return returns, False
     except Exception as e:
+        # Round-2 review (reviewer #4) — never None while a recent enough
+        # completed-day cache is in hand: serve it, flagged stale.
+        fallback = _stale_cache_fallback(by_date, days=days, now=_utc_now())
+        if fallback is not None:
+            logger.warning(
+                "All benchmark sources failed: %s. Serving the cached completed "
+                "days (newest %s), flagged stale.",
+                str(e), fallback.index.max().date().isoformat(),
+            )
+            return prices_to_returns(fallback), True
         logger.warning("All benchmark sources failed: %s. Returning None.", str(e))
         return None, True

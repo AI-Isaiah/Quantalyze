@@ -377,7 +377,7 @@ async def test_a_db_error_in_the_cache_read_stays_a_quiet_fallback():
         "services.benchmark.get_supabase", return_value=MagicMock()
     ), patch(
         "services.benchmark.db_execute",
-        AsyncMock(side_effect=[RuntimeError("db pool saturated"), None]),
+        AsyncMock(side_effect=[ConnectionError("synthetic connection reset"), None]),
     ), patch("services.benchmark.fetch_btc_daily_prices", fetch), patch(
         "services.benchmark.sentry_sdk.capture_exception"
     ) as capture:
@@ -386,3 +386,84 @@ async def test_a_db_error_in_the_cache_read_stays_a_quiet_fallback():
     capture.assert_not_called()
     fetch.assert_awaited_once()
     assert returns is not None
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_error_in_the_cache_read_is_loud_now():
+    """Round-2 review (SFH LOW-7): `RuntimeError` left the quiet tuple. Only
+    `get_supabase`'s own "not configured" raise stays quiet (next test)."""
+    fetch = AsyncMock(return_value=_fresh_series(21))
+    bug = RuntimeError("synthetic runtime error")
+
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase", return_value=MagicMock()
+    ), patch("services.benchmark.db_execute", AsyncMock(side_effect=[bug, None])), patch(
+        "services.benchmark.fetch_btc_daily_prices", fetch
+    ), patch("services.benchmark.sentry_sdk.capture_exception") as capture:
+        returns, _ = await get_benchmark_returns(symbol="BTC", days=20)
+
+    capture.assert_called_once_with(bug)
+    assert returns is not None
+
+
+@pytest.mark.asyncio
+async def test_an_unconfigured_cache_is_a_quiet_miss():
+    fetch = AsyncMock(return_value=_fresh_series(21))
+    with patch("services.benchmark._utc_today", return_value=_TODAY.date()), patch(
+        "services.benchmark.get_supabase",
+        side_effect=RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY required"),
+    ), patch("services.benchmark.fetch_btc_daily_prices", fetch), patch(
+        "services.benchmark.sentry_sdk.capture_exception"
+    ) as capture:
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    capture.assert_not_called()
+    fetch.assert_awaited_once()
+    assert returns is not None and is_stale is False
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review (reviewer #4) — the cache misses AND the fetch fails: serve the
+# completed days already read, flagged stale, within 48 h. Never None then.
+# ---------------------------------------------------------------------------
+
+_NOW = pd.Timestamp("2026-07-12T10:00:00Z").to_pydatetime()
+
+
+@pytest.mark.asyncio
+async def test_cache_miss_and_failed_fetch_serve_the_cached_days_flagged_stale():
+    # Short (15 of 20 days) so it is a miss, but the newest is yesterday.
+    supabase = _supabase_returning(_cache_rows(list(range(1, 16))))
+    with patch("services.benchmark._utc_now", return_value=_NOW), patch(
+        "services.benchmark.get_supabase", return_value=supabase
+    ), patch("services.benchmark.db_execute", side_effect=_run_sync), patch(
+        "services.benchmark.fetch_btc_daily_prices",
+        AsyncMock(side_effect=httpx_error()),
+    ):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    assert returns is not None, "a recent cache in hand must be served, not None"
+    assert is_stale is True
+    assert len(returns) == 14
+    assert returns.index.max() < _TODAY
+
+
+@pytest.mark.asyncio
+async def test_cache_older_than_48h_and_failed_fetch_still_answer_none():
+    # Newest cached completed day is 3 days before today: past the 48 h bound.
+    supabase = _supabase_returning(_cache_rows(list(range(3, 23))))
+    with patch("services.benchmark._utc_now", return_value=_NOW), patch(
+        "services.benchmark.get_supabase", return_value=supabase
+    ), patch("services.benchmark.db_execute", side_effect=_run_sync), patch(
+        "services.benchmark.fetch_btc_daily_prices",
+        AsyncMock(side_effect=httpx_error()),
+    ):
+        returns, is_stale = await get_benchmark_returns(symbol="BTC", days=20)
+
+    assert returns is None and is_stale is True
+
+
+def httpx_error() -> Exception:
+    import httpx
+
+    return httpx.ConnectError("synthetic: both sources down")
