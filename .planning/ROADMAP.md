@@ -2824,6 +2824,8 @@ Plans:
 
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
+⭐ **Founder answers, 2026-09-24:** D-15, D-16 and D-17 are APPROVED. OPEN-2: after merge, run plan 10's read-only census, then queue a recompute of the affected PROD rows.
+
 **Goal:** No metric persisted to `metrics_json` or rendered in a chart is the output of quantstats'
 price-detection heuristic misreading a return series as prices. RANK-05 (Phase 159) closed that
 heuristic in `compute_all_metrics` only; this phase closes the rest of the surface and settles

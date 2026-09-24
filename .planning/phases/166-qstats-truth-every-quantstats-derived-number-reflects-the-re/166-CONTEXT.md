@@ -334,3 +334,7 @@ a decision above.
 
 *Phase: 166-qstats-truth-every-quantstats-derived-number-reflects-the-returns-it-was-given*
 *Context gathered: 2026-09-24 (`--auto`)*
+
+## ⭐ Founder answers, 2026-09-24 (AskUserQuestion)
+- **D-15, D-16, D-17: APPROVED.** All three value changes ship as written and are disclosed under D-10.
+- **OPEN-2: ANSWERED.** After 166 merges, run plan 10's read-only census and queue a recompute of the affected PRODUCTION rows. The recompute is enqueued through the normal job path, never by hand-written data.
