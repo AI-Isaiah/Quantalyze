@@ -121,6 +121,8 @@ const TIMEOUT_COPY = "Analytics computation timed out. Please retry or contact s
 const NO_RESULT_LABEL = "No result yet";
 const KCS22_CAP =
   "This panel stopped checking after 2 minutes. The sync may still be running: reload this page later to see its result.";
+const KCS22_NOROW =
+  "This panel stopped checking after 30 seconds with nothing recorded yet. The sync may still be running: reload this page later to see its result.";
 
 function healthyRow() {
   return {
@@ -318,7 +320,7 @@ describe("ApiKeyManager + the REAL poller: the budget starts at the enqueue (167
     expect(mockState.baselineReadCount).toBe(1);
   });
 
-  it("CONTROL: the fresh post-enqueue budget still escalates at its OWN grace boundary (so the absence above can fail)", async () => {
+  it("NOROW-GIVEUP (CONTROL): the fresh post-enqueue budget still escalates at its OWN grace boundary (so the absence above can fail)", async () => {
     mockState.analyticsResult = { data: null, error: { code: "PGRST116" } };
     const enqueue = await startResyncWithHeldEnqueue();
     await tick(36_000);
@@ -333,11 +335,15 @@ describe("ApiKeyManager + the REAL poller: the budget starts at the enqueue (167
 
     // Poll 11 after the enqueue escalates, and the attempt ends (Resync is
     // usable again). Moved by Phase 167.2 / KCS-22: the give-up renders
-    // "No result yet", not "Sync failed" with the timeout copy. Lineage: this
-    // asserted both of those.
+    // "No result yet" with the KCS22-NOROW sentence (no row was ever read, and
+    // every read was clean), not "Sync failed" with the timeout copy. Lineage:
+    // this asserted both of those, under the name "CONTROL: …".
     await tick(POLL_MS);
     expect(screen.getByText(NO_RESULT_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(KCS22_NOROW)).toBeInTheDocument();
+    expect(screen.queryByText(KCS22_CAP)).not.toBeInTheDocument();
     expect(screen.queryByText("Sync failed")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
   });
 
@@ -601,5 +607,37 @@ describe("ApiKeyManager + the REAL poller: a give-up is not a failure (Phase 167
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
     // The attempt ended, so the key's Resync is usable again.
     expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
+  });
+
+  it("NOROW-NOT-ON-ERROR: computing rows, then a failed read on every tick from tick 4: no nothing-recorded claim at tick 15, KCS22-CAP after tick 41", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockState.analyticsResult = analyticsRow("computing");
+    const enqueue = await startResyncWithHeldEnqueue();
+    await act(async () => {
+      enqueue.resolve(accepted());
+    });
+    await tick(0);
+
+    await tick(POLL_MS * 3);
+    expect(mockState.analyticsSelectCount).toBe(3);
+    mockState.analyticsResult = { data: null, error: { code: "500", message: "boom" } };
+
+    // Tick 15 is an erroring read past the grace boundary: still computing.
+    await tick(POLL_MS * 12);
+    expect(mockState.analyticsSelectCount).toBe(15);
+    expect(screen.getByText("Computing analytics...")).toBeInTheDocument();
+    expect(
+      screen.queryByText(KCS22_NOROW),
+      "a failed read was rendered as nothing recorded yet",
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(NO_RESULT_LABEL)).not.toBeInTheDocument();
+
+    // The cap still ends it: after tick 41 the KCS22-CAP sentence renders.
+    await tick(POLL_MS * 26);
+    expect(screen.getByText(NO_RESULT_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(KCS22_CAP)).toBeInTheDocument();
+    expect(screen.queryByText(KCS22_NOROW)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
+    expect(consoleError).toHaveBeenCalled();
   });
 });

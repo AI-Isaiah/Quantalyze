@@ -207,6 +207,9 @@ describe("SyncProgress poll loop — timing (characterization)", () => {
     // Poll 11 (attempts = 11 > MISSING_ROW_GRACE_POLLS): escalates exactly once.
     await tick(POLL_MS);
     expect(callsWith(onStatusChange, "no_result")).toBe(1);
+    // KCS-22: the grace give-up names its reason, so the card says "nothing
+    // recorded yet" and not the poll-cap sentence.
+    expect(onStatusChange.mock.calls).toEqual([["no_result", { stopReason: "missing_row" }]]);
   });
 
   it("PIN 3 — 120s CAP: 40 polls with a present row never error, 41st does", async () => {
@@ -318,12 +321,17 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
     expect(onStatusChange).not.toHaveBeenCalled();
   });
 
-  it("PIN 7 — NO CONSECUTIVE-ERROR ESCALATION: a non-PGRST116 error consumes grace like a missing row", async () => {
-    // Moved by Phase 167.2 / KCS-22: a give-up ends the attempt as "no_result", not "error" (the timing is unchanged).
+  it("PIN 7 — NO CONSECUTIVE-ERROR ESCALATION: a non-PGRST116 error never escalates early, and runs to the cap", async () => {
+    // Moved by Phase 167.2 / KCS-22: a give-up ends the attempt as "no_result", not "error".
+    // Moved again by KCS-22: a failed read is not evidence that nothing was
+    // recorded (UI-SPEC § State matrix, offline row), so it no longer consumes
+    // the missing-row grace; it escalates once at the poll cap (poll 41) as
+    // no_result / poll_cap. Lineage: this pin escalated at poll 11, the grace
+    // boundary, with the title "consumes grace like a missing row".
     // Load-bearing asymmetry vs the wizard's MAX_CONSECUTIVE_POLL_ERRORS=3
     // (95-RESEARCH Pitfall 6): SyncProgress has NO consecutive-error counter.
-    // A Supabase error with data:null falls through the same `if (!data)` grace
-    // gate — no immediate escalation, no throw.
+    // A Supabase error with data:null reports no status — no immediate
+    // escalation, no throw.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockState.analyticsResult = {
       data: null,
@@ -340,9 +348,15 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
     await tick(POLL_MS * 7);
     expect(callsWith(onStatusChange, "no_result")).toBe(0);
 
-    // Escalation happens ONLY at the missing-row grace boundary (poll 11).
+    // Poll 11, the grace boundary: a failed read does not end the attempt.
     await tick(POLL_MS);
-    expect(callsWith(onStatusChange, "no_result")).toBe(1);
+    expect(onStatusChange).not.toHaveBeenCalled();
+
+    // Polls 12..40: still silent. Poll 41, the cap: escalates exactly once.
+    await tick(POLL_MS * 29);
+    expect(onStatusChange).not.toHaveBeenCalled();
+    await tick(POLL_MS);
+    expect(onStatusChange.mock.calls).toEqual([["no_result", { stopReason: "poll_cap" }]]);
     errSpy.mockRestore();
   });
 
