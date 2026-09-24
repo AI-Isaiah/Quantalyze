@@ -2918,7 +2918,7 @@ Plans:
 **Wave 1**
 
 - [x] 167.2-01-PLAN.md — one compute-state derivation (chain-kind selection, done_pending_children in flight), the sync-progress route on it, the locked S4-S9 copy module and the one strategy-shape predicate (KCS-07/08/19/20/21)
-- [ ] 167.2-02-PLAN.md — the post-add sync runs as the tracked attempt; Add Key blocked while an attempt is live and Resync blocked while an add is in flight (KCS-01/05)
+- [x] 167.2-02-PLAN.md — the post-add sync runs as the tracked attempt; Add Key blocked while an attempt is live and Resync blocked while an add is in flight (KCS-01/05)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
