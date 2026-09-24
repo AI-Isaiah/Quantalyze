@@ -134,6 +134,7 @@ import { formatCurrency, formatNumber, formatPercent } from "@/lib/utils";
 // a money surface is forbidden. Existing formatCurrency sites are left alone
 // (surgical change; migrating them is not this plan's job).
 import { isValidDollar, formatUsd } from "@/lib/dollar-validation";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { Button } from "@/components/ui/Button";
 import {
   computeHoldingsFingerprint,
@@ -4215,12 +4216,32 @@ export function ScenarioComposer({
   const liveHoldingsSum = liveHoldingsSummary.total;
   // Review WR-05 — a summed holding whose key the key list dropped is a payload
   // the dashboard did not expect (only the degrade branch can sum one). The
-  // marker discloses it; this makes it loud for whoever reads the console.
+  // marker discloses it; the console line is for local dev.
+  //
+  // Review round 2 WR-04 — a browser `console.error` reaches no operator
+  // (Sentry runs without a console-capture integration), so the anomaly is
+  // also captured, following the `ScenarioCommitDrawer` pattern: a
+  // warning-level event with component and reason tags. ⛔ It carries the
+  // COUNT only. No key id, holding or venue goes into the message, the tags or
+  // `extra`, in either sink.
   const unknownStatusCount = liveHoldingsSummary.unknownStatus.count;
   useEffect(() => {
     if (unknownStatusCount > 0) {
       console.error(
         `[ScenarioComposer] ${unknownStatusCount} summed holding(s) reference a key missing from the key list; disclosed as an unknown sync status`,
+      );
+      captureToSentry(
+        new Error(
+          "ScenarioComposer: summed holding(s) reference a key missing from the key list",
+        ),
+        {
+          tags: {
+            component: "ScenarioComposer",
+            reason: "holding_key_missing_from_key_list",
+          },
+          extra: { unknown_status_count: unknownStatusCount },
+          level: "warning",
+        },
       );
     }
   }, [unknownStatusCount]);

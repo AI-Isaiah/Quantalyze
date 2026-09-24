@@ -261,6 +261,39 @@ vi.mock("@/lib/scenario", async (importOriginal) => {
   };
 });
 
+// Phase 167.1 review round 2 WR-04 (silent-failure-hunter) — the composer's
+// Sentry captures are recorded here so the missing-key capture can be pinned
+// (level, tags, count only, never a key id). Same shape as the
+// ScenarioCommitDrawer suite's recorder; no other case in this file asserts on
+// Sentry, so replacing the lazy capture with a recorder is additive-safe.
+const composerSentryCalls = vi.hoisted(
+  () =>
+    [] as Array<{
+      err: unknown;
+      options: {
+        tags: Record<string, string>;
+        extra?: Record<string, unknown>;
+        level?: string;
+      };
+    }>,
+);
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: (
+    err: unknown,
+    options: {
+      tags: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    },
+  ) => {
+    composerSentryCalls.push({ err, options });
+    return Promise.resolve();
+  },
+  addSentryBreadcrumb: () => Promise.resolve(),
+  shouldCaptureNow: () => true,
+  __resetCaptureThrottleForTests: () => {},
+}));
+
 // Phase 167.1 review round 2 WR-01 — `excludedUntrusted` renders nowhere
 // until the founder answers D-06, so the composer's wiring of D-20's
 // manager-side set is observable only at the call. A PASS-THROUGH spy: the real
@@ -16070,6 +16103,46 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     } finally {
       errSpy.mockRestore();
     }
+  });
+
+  it("AUMTRUST review round 2 WR-04: the missing-key anomaly reaches an operator — one warning-level Sentry capture tagged holding_key_missing_from_key_list, carrying the count and never a key id", () => {
+    const payload = atMissingKeyBook("sign_in_failed");
+    composerSentryCalls.length = 0;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderAt(payload);
+      const captures = composerSentryCalls.filter(
+        (c) => c.options.tags.reason === "holding_key_missing_from_key_list",
+      );
+      expect(captures).toHaveLength(1);
+      expect(captures[0].options.level).toBe("warning");
+      expect(captures[0].options.tags).toEqual({
+        component: "ScenarioComposer",
+        reason: "holding_key_missing_from_key_list",
+      });
+      expect(captures[0].options.extra).toEqual({ unknown_status_count: 1 });
+      // No key id anywhere in what leaves for Sentry: not the missing key,
+      // and not either listed key.
+      const sent = JSON.stringify({
+        message: (captures[0].err as Error).message,
+        options: captures[0].options,
+      });
+      for (const keyId of [AT_KEY_MISSING, AT_KEY_TRUSTED, AT_KEY_SIGN_IN_FAILED]) {
+        expect(sent).not.toContain(keyId);
+      }
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("AUMTRUST review round 2 WR-04 (control): a book with no missing key sends no missing-key capture", () => {
+    composerSentryCalls.length = 0;
+    renderAt(atStateBBook());
+    expect(
+      composerSentryCalls.filter(
+        (c) => c.options.tags.reason === "holding_key_missing_from_key_list",
+      ),
+    ).toHaveLength(0);
   });
 
   it("AUMTRUST review WR-05: a missing-key holding alone (every listed key trusted) still renders the marker — the gate counts unknown-status holdings too", () => {
