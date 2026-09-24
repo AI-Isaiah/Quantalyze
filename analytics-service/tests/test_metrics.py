@@ -3852,3 +3852,32 @@ def test_q166r_constant_benchmark_beta_is_undefined_not_a_residue_slope():
             np.random.default_rng(7).normal(0.001, 0.01, n), index=flat.index
         )
         assert _greeks_no_guess(strategy, flat, 252) == (None, None), n
+
+
+def test_q166r_serenity_undefined_arms_are_none_not_zero(monkeypatch):
+    """SFH MEDIUM-2: `_serenity_index` has two undefined arms, and a fabricated
+    0.0 from either one ("measured, terrible") shipped green before this test:
+    drills N8 and N10 both survived the suite.
+
+    * ``std_returns == 0``: an all-zero series (exact 0) and a constant losing
+      series (float residue, the SFH HIGH-1 class; pre-fix it persisted
+      -2.2e-18) both reach it.
+    * ``denominator == 0``: no natural input reaches it (see the mirror's
+      docstring for why), so the test forces ulcer to 0 on a series that has
+      losses, which makes the pitfall finite and the denominator exactly 0. The
+      arm must answer NaN, not 0.0, and not the inf the bare division would give.
+    """
+    import services.metrics as metrics_module
+
+    zeros = _q166r_constant_series(0.0, 120)
+    assert float(zeros.std()) == 0.0
+    losing = _q166r_constant_series(-0.002, 250)
+    assert float(losing.std()) != 0.0, "fixture lost its residue"
+    for s in (zeros, losing):
+        assert math.isnan(metrics_module._serenity_index(s)), s.iloc[0]
+        assert compute_qstats_scalars(s, None)["serenity_index"] is None, s.iloc[0]
+
+    mixed = _rank05_benign_mixed()
+    assert math.isfinite(metrics_module._serenity_index(mixed)), "control must be defined"
+    monkeypatch.setattr(metrics_module, "_ulcer_index", lambda r: 0.0)
+    assert math.isnan(metrics_module._serenity_index(mixed))

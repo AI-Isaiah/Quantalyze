@@ -728,10 +728,23 @@ def _serenity_index(r: pd.Series) -> float:
     nothing.
 
     D-09: no losing day -> ulcer 0 and VaR of an all-zero series NaN -> NaN -> None.
+
+    ``std_returns == 0`` is tested through ``_dispersion_is_residue`` (Phase 166
+    review, SFH HIGH-1 class): a constant LOSING series has a residue ``std()``
+    (4.3e-19 for 250 days of -0.002, measured), the pitfall over it is ~1e16,
+    and 0.0.81's exact test let a fabricated ``-2.2e-18`` through. Reached by an
+    all-zero series (exact 0) and by any constant series (residue).
+
+    The ``denominator == 0`` arm is kept for 0.0.81 parity and has NO natural
+    input: ulcer is 0 only when every drawdown is 0, and then the VaR of the
+    all-zero drawdown series is NaN, so the denominator is NaN, not 0; and
+    whenever a drawdown exists the CVaR is strictly negative, so the pitfall is
+    not 0. ``test_q166r_serenity_undefined_arms_are_none_not_zero`` reaches it
+    by forcing ulcer to 0.
     """
     dd = _drawdown_series_no_guess(r)
     sd = r.std()
-    if sd == 0:
+    if _dispersion_is_residue(sd, r.mean()):
         return float("nan")
     var = qs.stats.value_at_risk(dd, confidence=0.95, prepare_returns=False)
     pitfall = -_cvar_of_tail(dd, var) / sd
