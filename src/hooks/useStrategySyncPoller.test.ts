@@ -427,6 +427,71 @@ describe("[154-01 / STALE-01a] useStrategySyncPoller — an absent row is not a 
   });
 
   // ═════════════════════════════════════════════════════════════════════════
+  // Phase 167.2 / KCS-02 — the interval arm forwards the row's server-written
+  // `computed_at` as a THIRD `onStatus` argument (SyncProgress compares it with
+  // its pre-enqueue baseline); the ladder arm, the wizard's, is byte-unchanged
+  // and still calls `onStatus` with exactly two. Hand-typed expected value: the
+  // row `installRowClient` serves.
+  // ═════════════════════════════════════════════════════════════════════════
+  it("INTERVAL-COMPUTED-AT: the interval arm's onStatus third argument is the row's computed_at", async () => {
+    const onStatus = vi.fn();
+    const onError = vi.fn();
+    installRowClient("complete");
+
+    renderHook(() =>
+      useStrategySyncPoller({
+        enabled: true,
+        strategyId: STRATEGY_ID,
+        schedule: INTERVAL_CADENCE_MS,
+        maxAttempts: 40,
+        missingRowGracePolls: 10,
+        onStatus,
+        onError,
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ADVANCE_MS);
+    });
+
+    expect(onStatus.mock.calls.length).toBeGreaterThan(0);
+    expect(onStatus.mock.calls[0]).toEqual([
+      "complete",
+      null,
+      "2026-08-04T11:39:35.342759+00:00",
+    ]);
+  });
+
+  it("LADDER-TWO-ARGS: the ladder arm's onStatus is called with exactly two arguments", async () => {
+    const onStatus = vi.fn();
+    const onTerminal = vi.fn(() => "done" as const);
+    const onError = vi.fn();
+    installRowClient("complete");
+
+    renderHook(() =>
+      useStrategySyncPoller({
+        enabled: true,
+        strategyId: STRATEGY_ID,
+        schedule: LADDER_SCHEDULE,
+        maxConsecutiveErrors: 3,
+        onStatus,
+        onTerminal,
+        onError,
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ADVANCE_MS);
+    });
+
+    expect(onStatus.mock.calls.length).toBeGreaterThan(0);
+    for (const call of onStatus.mock.calls) {
+      expect(call).toHaveLength(2);
+    }
+    expect(onStatus.mock.calls[0]).toEqual(["complete", null]);
+  });
+
+  // ═════════════════════════════════════════════════════════════════════════
   // SYM-interval — TWIN-3, THE DIVERGENCE. PASSES AT HEAD.
   //
   // Its own `it()`, never a loop over the two arms (154-PATTERNS.md §11.3): the
@@ -462,5 +527,299 @@ describe("[154-01 / STALE-01a] useStrategySyncPoller — an absent row is not a 
         "ladder arm against — if this reddens, the module no longer contains its " +
         "own correct answer and TWIN-3 has been closed in the wrong direction.",
     ).not.toHaveBeenCalled();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 167.2 / KCS-22 — the interval arm says WHICH give-up fired, and says
+// "missing_row" only on evidence that nothing was recorded.
+//
+// SyncProgress renders KCS22-NOROW ("… with nothing recorded yet …") for the
+// missing-row give-up and KCS22-CAP for the poll cap. The reason comes from the
+// poller, the one place that knows which boundary fired. "Nothing recorded
+// yet" is a claim, so it fires only when this activation has seen no row AND
+// the read that crossed the grace boundary was clean (error null or PGRST116).
+// A failed read is not evidence of absence; neither is an absent read after a
+// row was already seen. Both run to the cap instead (UI-SPEC § State matrix,
+// the offline row). The LADDER arm (the wizard's) is byte-unchanged and still
+// calls onError with no argument.
+//
+// Hand-typed bounds, never imported: cap 40, grace 10, cadence 3000.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("[167.2-04 / KCS-22] useStrategySyncPoller — the give-up names its reason", () => {
+  const CAP = 40;
+  const GRACE = 10;
+  const PGRST116 = { data: null, error: { code: "PGRST116", message: "0 rows" } };
+  const READ_FAILED = { data: null, error: { code: "500", message: "boom" } };
+  const computingRow = () =>
+    okRow({ computation_status: "computing", computation_error: null, computed_at: null });
+
+  /** The Nth `strategy_analytics` read (1-based) answers `answer(n)`. */
+  function installSequenceClient(answer: (n: number) => unknown) {
+    let reads = 0;
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () =>
+          chain(() => {
+            reads += 1;
+            return answer(reads);
+          }),
+      }),
+    });
+    return () => reads;
+  }
+
+  function renderInterval(
+    onError: (reason?: "cap" | "missing_row" | "unreadable") => void,
+    enabled = true,
+  ) {
+    return renderHook(
+      ({ on }: { on: boolean }) =>
+        useStrategySyncPoller({
+          enabled: on,
+          strategyId: STRATEGY_ID,
+          schedule: INTERVAL_CADENCE_MS,
+          maxAttempts: CAP,
+          missingRowGracePolls: GRACE,
+          onStatus: vi.fn(),
+          onError,
+        }),
+      { initialProps: { on: enabled } },
+    );
+  }
+
+  async function polls(n: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INTERVAL_CADENCE_MS * n);
+    });
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    currentClientFactory = DEFAULT_FACTORY;
+  });
+
+  it("INTERVAL-REASON-CAP: a present row for 40 polls ends at poll 41 with onError(\"cap\")", async () => {
+    installSequenceClient(() => computingRow());
+    const onError = vi.fn();
+    renderInterval(onError);
+
+    await polls(CAP);
+    expect(onError).not.toHaveBeenCalled();
+    await polls(1);
+    expect(onError.mock.calls[0]).toEqual(["cap"]);
+  });
+
+  it("INTERVAL-REASON-GRACE: clean absent reads from the first poll end at poll 11 with onError(\"missing_row\")", async () => {
+    installSequenceClient(() => PGRST116);
+    const onError = vi.fn();
+    renderInterval(onError);
+
+    await polls(GRACE);
+    expect(onError).not.toHaveBeenCalled();
+    await polls(1);
+    expect(onError.mock.calls).toEqual([["missing_row"]]);
+  });
+
+  it("INTERVAL-REASON-GRACE (clean zero rows): {data:null,error:null} is a clean read too", async () => {
+    installSequenceClient(() => ZERO_ROWS);
+    const onError = vi.fn();
+    renderInterval(onError);
+
+    await polls(GRACE + 1);
+    expect(onError.mock.calls).toEqual([["missing_row"]]);
+  });
+
+  it("LADDER-NO-REASON: the ladder arm's onError receives zero arguments", async () => {
+    installZeroRowsClient();
+    const onError = vi.fn();
+    renderHook(() =>
+      useStrategySyncPoller({
+        enabled: true,
+        strategyId: STRATEGY_ID,
+        schedule: LADDER_SCHEDULE,
+        maxConsecutiveErrors: 3,
+        missingRowGracePolls: 2,
+        onStatus: vi.fn(),
+        onTerminal: vi.fn(() => "done" as const),
+        onError,
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ADVANCE_MS);
+    });
+    expect(onError).toHaveBeenCalled();
+    for (const call of onError.mock.calls) {
+      expect(call).toHaveLength(0);
+    }
+  });
+
+  it("TRANSIENT-ERROR-AFTER-ROWS: computing rows, then failed reads from poll 4: no give-up at poll 11 or 15, onError(\"cap\") at poll 41 only", async () => {
+    installSequenceClient((n) => (n <= 3 ? computingRow() : READ_FAILED));
+    const onError = vi.fn();
+    renderInterval(onError);
+
+    await polls(GRACE + 1);
+    expect(onError, "a failed read after rows were seen ended the attempt at the grace boundary").not.toHaveBeenCalled();
+    await polls(4);
+    expect(onError).not.toHaveBeenCalled();
+    await polls(CAP - 15);
+    expect(onError).not.toHaveBeenCalled();
+    await polls(1);
+    expect(onError.mock.calls).toEqual([["cap"]]);
+  });
+
+  it("ABSENT-AFTER-ROWS: a computing row on poll 1, then clean zero-row reads: never onError(\"missing_row\"), onError(\"cap\") at poll 41", async () => {
+    installSequenceClient((n) => (n === 1 ? computingRow() : ZERO_ROWS));
+    const onError = vi.fn();
+    renderInterval(onError);
+
+    await polls(CAP);
+    expect(onError).not.toHaveBeenCalled();
+    await polls(1);
+    expect(onError.mock.calls).toEqual([["cap"]]);
+  });
+
+  // Moved by the 167.2 review fix round (167.2-REVIEW-SFH M-3, lineage): this
+  // pin ended with onError("cap"), so the panel said "stopped checking after 2
+  // minutes. The sync may still be running" when it had not read ONE row: it
+  // stopped because it could not read, not because the sync was slow. A cap
+  // reached with no clean read in the activation now names "unreadable".
+  it("ERROR-FROM-START: a failed read on every poll: no give-up at poll 11, onError(\"unreadable\") at poll 41", async () => {
+    installSequenceClient(() => READ_FAILED);
+    const onError = vi.fn();
+    renderInterval(onError);
+
+    await polls(GRACE + 1);
+    expect(onError, "a failed read was taken as evidence that nothing was recorded").not.toHaveBeenCalled();
+    await polls(CAP - GRACE - 1);
+    expect(onError).not.toHaveBeenCalled();
+    await polls(1);
+    expect(onError.mock.calls).toEqual([["unreadable"]]);
+  });
+
+  it("RE-ACTIVATION resets the row-seen flag with the attempt counter", async () => {
+    // Activation 1 sees a row; activation 2 sees only clean absent reads, so
+    // its grace give-up is "missing_row" again.
+    let rowPhase = true;
+    installSequenceClient(() => (rowPhase ? computingRow() : ZERO_ROWS));
+    const onError = vi.fn();
+    const { rerender } = renderInterval(onError);
+
+    await polls(2);
+    rerender({ on: false });
+    rowPhase = false;
+    rerender({ on: true });
+
+    await polls(GRACE);
+    expect(onError).not.toHaveBeenCalled();
+    await polls(1);
+    expect(onError.mock.calls).toEqual([["missing_row"]]);
+  });
+});
+
+describe("[167.2-REVIEW-SFH M-2] useStrategySyncPoller — the interval arm applies reads in order", () => {
+  // WHY. The interval arm issues a read every 3 s whether or not the previous
+  // one has answered. A slow read issued BEFORE the worker wrote `computing`
+  // can land AFTER a faster, later read that saw `computing`. The panel's
+  // evidence (a) is sticky, so the late read's PREVIOUS-run terminal row was
+  // then admitted as this attempt's (the wrong-run attribution KCS-02 exists
+  // to prevent), re-entering through response ordering. A response older than
+  // the newest one applied is now dropped (the `keysReadSeqRef` pattern). The
+  // ladder arm awaits each read before scheduling the next, so it cannot
+  // reorder, and it stays byte-unchanged (LADDER-TWO-ARGS).
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    currentClientFactory = DEFAULT_FACTORY;
+  });
+
+  it("OUT-OF-ORDER: a slow read that lands after a newer applied read is dropped, never reported", async () => {
+    let releaseSlow!: (v: unknown) => void;
+    const slow = new Promise((r) => {
+      releaseSlow = r;
+    });
+    let reads = 0;
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () =>
+          chain(() => {
+            reads += 1;
+            if (reads === 1) return slow;
+            return okRow({ computation_status: "computing", computation_error: null, computed_at: null });
+          }),
+      }),
+    });
+    const onStatus = vi.fn();
+    renderHook(() =>
+      useStrategySyncPoller({
+        enabled: true,
+        strategyId: STRATEGY_ID,
+        schedule: INTERVAL_CADENCE_MS,
+        maxAttempts: 40,
+        missingRowGracePolls: 10,
+        onStatus,
+        onError: vi.fn(),
+      }),
+    );
+
+    // Read 1 goes out and hangs; read 2 goes out and answers `computing`.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INTERVAL_CADENCE_MS * 2);
+    });
+    expect(onStatus.mock.calls.map((c) => c[0])).toEqual(["computing"]);
+
+    // Read 1 finally answers with the PREVIOUS run's failed row.
+    await act(async () => {
+      releaseSlow(okRow({ computation_status: "failed", computation_error: "old", computed_at: "2026-01-01T00:00:00Z" }));
+    });
+    expect(onStatus.mock.calls.map((c) => c[0])).toEqual(["computing"]);
+  });
+
+  it("IN-ORDER (CONTROL): reads that answer in order are all reported", async () => {
+    let reads = 0;
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () =>
+          chain(() => {
+            reads += 1;
+            return okRow({
+              computation_status: reads === 1 ? "computing" : "complete",
+              computation_error: null,
+              computed_at: null,
+            });
+          }),
+      }),
+    });
+    const onStatus = vi.fn();
+    renderHook(() =>
+      useStrategySyncPoller({
+        enabled: true,
+        strategyId: STRATEGY_ID,
+        schedule: INTERVAL_CADENCE_MS,
+        maxAttempts: 40,
+        onStatus,
+        onError: vi.fn(),
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INTERVAL_CADENCE_MS * 2);
+    });
+    expect(onStatus.mock.calls.map((c) => c[0])).toEqual(["computing", "complete"]);
   });
 });

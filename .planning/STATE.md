@@ -13,8 +13,8 @@ state_head: 93d2ab394092fca23d41972ae4e573f84d58fe99
 progress:
   total_phases: 50
   completed_phases: 32
-  total_plans: 249
-  completed_plans: 241
+  total_plans: 254
+  completed_plans: 249
   percent: 64
 ---
 
@@ -482,7 +482,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 164.6.1
+Status: Executing Phase 167.1
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -956,7 +956,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [██████░░░░] 64%
+Progress: [██████░░░░] 60%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1296,6 +1296,35 @@ Load-bearing sequencing (real dependencies, do not reorder):
      every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
      The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
      FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 06, the release, 2026-09-24)*
+
+- **D-167.1-06-A — the release is v0.89.0.0 (second segment), on the orchestrator's direction for a user-facing disclosure.** The plan named a third-segment bump (0.88.1.0 at today's main); recorded as a deviation in `167.1-06-SUMMARY.md`.
+- **D-167.1-06-B — plan 05's handoff line "a dropped holding whose key is missing from the key list is named by no part" is NOT a current limit.** Review round 3 WR-01 fixed it; the CHANGELOG lists the unknown-status excludes clause under Added instead.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 05, D-06 (b) and the D-18 reopen, 2026-09-24)*
+
+- **D-167.1-05-A — D-06 = (b) and D-18 REOPENED are the FOUNDER's answers (2026-09-24, recorded in `5d62a1a60`), not executor inferences.** The D-18 reopen was a founder-directed scope addition to plan 05.
+- **D-167.1-05-B — State C: at live ≤ 0 the "Required to size and commit." hint names the live total and nests the one marker.** "The live-holdings total is -$X, which <clause>." is the State B construction. State 7 (manual, live ≤ 0) stays absent because nothing on screen contains the live total.
+- **D-167.1-05-C — the shared noun is said once only when both sides are plain amounts of the untrusted set.** With an unknown-status part or an "(… unavailable …)" count, each side keeps its own noun, so the count is never misattributed.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 04, premise corrections and the interim byte-identity gate, 2026-09-24)*
+
+- **D-167.1-04-A — the ROADMAP D-03 correction is dated to plan 04's measurement, not stated as a standing fact.** It says `queries.ts`, the commit route, `supabase/` and `analytics-service/` WERE byte-unchanged when plan 04 measured them and names plan 06 as the re-measure, because plan 05 option (b) edits source.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 03, State B and the marker's absence states, 2026-09-24)*
+
+- **D-167.1-03-A — the plan's drill 2 (drop the on-screen conjunct from `showUntrustedMarker`) cannot bite, and the source was left unchanged.** Each render site carries its own placement gate (`fieldShowsLive` for State A, `overrideNoteShowsLive` for State B), so that conjunct is redundant at render. Substitute drill 2b neutered `fieldShowsLive`'s `liveHoldingsSum > 0` half and turned state 4 RED. ⚠️ For plan 05: a new site reading `showUntrustedMarker` needs its own placement gate.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 02, the Open Positions footer qualifier, 2026-09-24)*
+
+- **D-167.1-02-A — the Open Positions footer pass calls `isUntrustedKeySyncStatus` directly, not `untrustedKeyChipLabel(...) !== null`.** The footer needs membership, not a label; both go through the same predicate, and the plan allowed either.
+- **D-167.1-02-B — the plan's acceptance grep for a status equality reads 1, not 0, and the one hit was left alone.** It is the pre-existing Phase 167 comment recording the removed equality, and it already read 1 at the plan's base; no code equality exists.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 01, the State A marker and the single-pass summary, 2026-09-24)*
+
+- **D-167.1-01-A — `capitalizeFirst` is a module-level helper beside `buildUntrustedAumClause` in `ScenarioComposer.tsx`.** No capitalize utility exists in `src/lib` or `src/app`. The builder keeps its lower-case clause so plan 03 can nest the same clause in the override note without a second wording.
+- **D-167.1-01-B — the "Required to size and commit." hint keeps its own condition. Only the override note reads the hoisted `overrideNoteShowsLive`.** The plan names only the override note for the rewrite, and changing the hint as well would be a change the plan did not ask for.
 
 *(execution-time, Phase 164.1.1 PROBERCADENCE — plan 05, the go-live runbook and the disposed residual, 2026-09-18)*
 
@@ -2308,9 +2337,57 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
+**Last Date:** 2026-09-24T06:17:00.000Z
+**Stopped At:** Completed 167.1-06-PLAN.md
+**Resume File:** None
+
 **Last Date:** 2026-09-24T04:36:00.000Z
 **Stopped At:** Completed 164.6-02-PLAN.md
 **Resume File:** .planning/phases/164.6-gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers/164.6-03-PLAN.md
+
+**Last Date:** 2026-09-24T03:57:00.000Z
+**Stopped At:** Completed 167.2-06-PLAN.md (wave 6; three commits `4de1ba074`, `df83f863a`, `2b6079c7a`, not pushed). No migration (the KCS-17 checkpoint did not fire). All ten 167.2 plans have a SUMMARY. Finding for review, logged to the phase's `deferred-items.md`: the locked KCS23-COMPOSITE line says the composite "reads from every key below" while the card lists all of the owner's keys. Pending founder visual checks: the S2 sync panel and the KCS23-COMPOSITE line at 320px. Next: 167.2 review and verification.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T03:44:00.000Z
+**Stopped At:** Completed 167.2-05-PLAN.md (wave 5; three commits `f916c78e1`, `2ff5bd203`, `2fea0ad9a`, not pushed). No migration; `/api/keys/sync` unchanged (maxDuration 300). After a bound expires the handler still awaits the late answer so it is logged, and the liveness guard drops it. Pending founder visual check (carried from 03): the S2 sync panel at 320px. Next: 167.2-06.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T03:38:00.000Z
+**Stopped At:** Completed 167.2-04-PLAN.md (wave 4; five commits `6bbc07a38`, `3816edd57`, `ed6e00750`, `0e2ac686b`, `bb2146069`, not pushed). No migration; the wizard's ladder arm is unchanged. KCS22-NOROW kept; SyncProgress PIN 7 moved to the poll cap (a failed read is not evidence that nothing was recorded). Pending founder visual check (carried from 03): the S2 sync panel at 320px. Next: 167.2-05.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T03:25:00.000Z
+**Stopped At:** Completed 167.2-10-PLAN.md (wave 3; two commits `dc2cdc397`, `32d9ba109`, not pushed). No migration; the route, limiter and poller hook are unchanged. Pending founder visual check (carried from 03): the S2 sync panel at 320px.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T03:15:00.000Z
+**Stopped At:** Completed 167.2-09-PLAN.md (wave 2; five commits `e5156c652`, `7c1449f07`, `6e54b4871`, `da9c04ebc`, `2dc93bd48`, not pushed). Verification residual for the orchestrator to route: a computed row whose series cannot build shows no share note (not decidable from an owner-readable column). Pending founder visual check: the S4/S5 band at 320px.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T03:05:00.000Z
+**Stopped At:** Completed 167.2-08-PLAN.md (wave 2; two commits `baac7438c`, `186ec544e`, not pushed). The 167 D-04 share-route checkpoint was not taken: the read is bounded by the matched id, projects five fields, and both SL-1 tests stay unedited and green.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T02:55:00.000Z
+**Stopped At:** Completed 167.2-07-PLAN.md (wave 2; five commits `6808c4aa6`, `217a6fe47`, `c892dfcb5`, `06a613b6f`, `ac08bc590`, not pushed). Out-of-scope finding logged to the phase's `deferred-items.md` (discovery-detail fallback still says "still computing").
+**Resume File:** None
+
+**Last Date:** 2026-09-24T02:40:00.000Z
+**Stopped At:** Completed 167.2-03-PLAN.md (wave 2; two commits `d68dc02b3`, `1518841dd`, not pushed). Next: 167.2-10 (KCS-18 job-state check on this gate).
+**Resume File:** None
+
+**Last Date:** 2026-09-24T02:30:00.000Z
+**Stopped At:** Completed 167.2-02-PLAN.md (wave 1; four commits `315e15691`, `cbba4e5b8`, `cfb907acf`, `c1743fa42`, not pushed). Wave 1 complete. Next: 167.2 wave 2.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T02:15:48.000Z
+**Stopped At:** Completed 167.2-01-PLAN.md (wave 1; three task commits `016cfc73c`, `9275ff5ac`, `42353f928`, not pushed). Next: 167.2-02.
+**Resume File:** None
+
+**Last Date:** 2026-09-23T22:01:27.358Z
+**Stopped At:** Phase 167.2 UI-SPEC approved
+**Resume File:** .planning/phases/167.2-keycardsync-the-key-card-never-shows-one-key-s-sync-result-a/167.2-UI-SPEC.md
 
 **Last Date:** 2026-09-19T20:05:00.000Z
 **Stopped At:** Completed 164.5.1.4-04-PLAN.md (Phase 164.5.1.4 SYNCCURSOR, plan 04 of 4, wave 4 — the closure; isolation `worktree`, branch `feat/164.5.1.4-synccursor`). `files_modified` was `TODOS.md` alone; no code, test, migration, `VERSION`, `package.json` or `CHANGELOG.md` was touched. **`SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01` is disposed of in TWO statements rather than one, deliberately:** CLOSED IN CODE 2026-09-19, and explicitly NOT closed in production, because the thing the entry tracks is the stranding in production and that is not closed until the migration applies there. Its measured history, reachability list and the PRE-EXISTING-AND-DELIBERATE note are kept unchanged; the "not fixable by tweaking `should_advance_cursor`" note is now CONFIRMED rather than inherited (the expression is byte-identical to `origin/main` and 0 removed lines in the branch's whole `cron.py` diff touch it, `synced_count` or `update_data`); and the entry's stale research instruction is ANSWERED instead of left open — migration 045 is an `ALTER TABLE api_keys ADD COLUMN`, so it is per-KEY, the very granularity that causes this defect, and the fenced `advance_sync_cursor` RPC takes `p_api_key_id` first, so it is the right mechanism on the wrong axis. The TRIGGER is re-pointed at production: both new Supabase paths fail open, so while the marker table is absent every strategy falls back to the key cursor and that fall-back state IS the defect; confirm from the `Supabase Migrate` workflow run for the merge commit, never from the file being in the tree. **VERDICT 1 — the per-KEY cursor is SUPPLEMENTED** (not replaced, not merely kept): it is still the fallback for every strategy with no marker row, still carries `account_balance_usdt` on the same `api_keys` UPDATE, and still is the only cursor for a key with no eligible strategies, while the marker took over the resume FLOOR and the per-strategy HOLD; evidence is the byte-identical expression, the 0-removed-lines diff check, the 3 unchanged `TestC0198CursorOnlyAdvancesWhenStored` members and the two calibrated gates. **VERDICT 2 — SYNCADMIT is unblocked BY THE MIGRATION APPLYING TO PROD, not by this branch merging**; the repo has the fix, production does not until `apply-test` and then the `Production`-gated `apply` have run, and a widening deployed ahead of the table re-opens the closed path silently. **NON-REGRESSION, mechanical:** `gate_governor_files_changed = 0` against the branch base across `mutation-runner/run.mjs`, `mutation-runner-floors.test.ts`, `vac08-ledger-baseline.txt`, `lint-app-guc.mjs`, `lint-sql-gates.mjs`; `FILES_FLOOR` 47 / `ARMS_FLOOR` 402 / `WAIVED_CEILING` 0 all UNMOVED; hygiene OK over 6673 tracked files. The SUMMARY carries the written reviewer handoff with all three reviewers named individually, the additive claim re-derived (`functions_created=0 existing_tables_altered=0 destructive_statements=0 create_table=1 cron_schedule=0 raise_arms=7`), the deploy-order skew, and the note that a red VAC-08 or applied-ness probe on this PR is expected by construction and must never be cleared by widening a baseline. ⚠️ **Recorded rather than glossed:** `c93ce86a` closed the migration reviewers' findings but touches the MIGRATION FILE ONLY — the two `cron.py` findings from the same round are NOT in this branch's committed history at `4af31b8f` and must be confirmed committed before the merge. One task commit `4d71155c`, NOT pushed. ⛔ No database command of any kind; nothing applied, merged or pushed. `roadmap.update-plan-progress 164.5.1.4` ran and was CLEAN (3/4 → 4/4 plus the plan-04 checkbox, no collateral); `state.advance-plan` refused on an ambiguous Current Position and wrote nothing; `state.update-progress` NOT run; `completed_phases` 28 and `percent` 62 deliberately unmoved (the phase closes on a VERIFICATION, not on a plan count), `completed_plans` 206 → 207 by hand. Next: the three reviewers' `cron.py` half confirmed on the branch, then ship — and Phase 164.5.1.3 SYNCADMIT may be planned but must not be deployed before the PROD apply succeeds.

@@ -1,5 +1,369 @@
 # Changelog
 
+## [0.89.0.0] - 2026-09-24 — AUMTRUST: the AUM an allocator sizes with says how much of it comes from keys needing attention, and what the modelled book leaves out
+
+⭐ **What changed for whoever reads this next.** Phase 167.1 closes the Phase 167 review's SFH-M2
+follow-up (`.planning/WINDOWS.md` entry 66). The founder's call of 2026-09-22 was "keep the total and
+flag it", so **no money number changed (D-03)**. The two holdings-derived dollar totals an allocator
+actually reads now name the part that comes from keys needing attention (a `revoked` or
+`sign_in_failed` key, by the shared predicate `isUntrustedKeySyncStatus`). Those totals are the
+Scenario composer's PORTFOLIO AUM field with its override note, and the Open Positions footer "Total
+unrealized P&L (equity contribution)". Each part is computed in the same pass as its total. The
+composer also says what the modelled-book narrowing leaves out. That is the founder's D-06 answer,
+option (b), given on 2026-09-24. `src/lib/queries.ts`, the scenario commit route, `supabase/` and
+`analytics-service/` are byte-unchanged across the branch. **No migration.**
+
+⚠️ **The premise was corrected before any code was written (D-01/D-13).** The phase was filed
+against a "headline AUM" in the KPI strip. That cell does not exist: `liveBaselineMetrics.aum` is
+rendered nowhere. The ROADMAP keeps the original goal as lineage beside two dated corrections.
+
+⚠️ **The phase verification is `human_needed` (14/15 truths verified; the fifteenth is this
+release).** Three browser checks are still owed. They will be run in the browser after deploy. See
+the notes at the bottom.
+
+### Added
+
+- **The composer's PORTFOLIO AUM field discloses its untrusted part (State A).** Beside the field:
+  `Includes $12,345 from keys needing attention.` The field keeps the full total. One muted span,
+  `scenario-aum-untrusted-note`, with no role and no glyph. The input's `aria-describedby` names
+  whichever note is on screen, derived from the same flags that render it (review round 1 WR-02,
+  which superseded UI-SPEC U-07).
+- **A committed manual AUM carries the disclosure inside its override note (State B).**
+  `Overrides live-holdings total $50,000, which includes $12,345 from keys needing attention.` The
+  marker moves with the live total, so one number never carries two markers (D-08, D-18).
+- **The composer says what the modelled book leaves out: D-06 option (b), the founder's answer of
+  2026-09-24.** In book mode the composer sums only the keys that feed the modelled book, so an
+  untrusted key's holdings can drop out of the AUM. The one marker now names them:
+  `Excludes $8,000 from keys needing attention.`, or with an included part,
+  `Includes $12,345 and excludes $8,000 from keys needing attention.` In State B it reads
+  `Overrides live-holdings total $50,000, which excludes $8,000 from keys needing attention.` The
+  marker renders on the excluded COUNT, so a counted $0 still reads `Excludes $0 …` (D-07). A
+  manager-side key the payload can name is left out of the excluded figure (D-20). The total is
+  unchanged.
+- **`Excludes $Z from keys with an unknown sync status` (review round 3 WR-01).** A holding the
+  narrowing drops whose key is missing from the key list is now named in its own part. It used to
+  vanish from every part and every figure on screen. The D-20 manager-side rule applies to it as
+  well. A missing `apiKeys` list fails open here too, so the error goes toward over-disclosure.
+- **State C: the "Required to size and commit." hint names the live total when it is at or below
+  zero** (the D-18 reopen, founder, 2026-09-24).
+  `Required to size and commit. The live-holdings total is -$4,000, which includes $1,000 from keys needing attention.`
+  In that state the field's accessible description is the hint.
+- **The Open Positions footer discloses its untrusted part.** A muted row under the total reads
+  `Includes +$300 from keys needing attention.` It uses the footer's own `formatPnl` sign
+  convention (UI-SPEC U-05). The total still sums every row (D-16).
+- **Holdings whose value is unknown are counted, not shown as a known zero** (review round 1 WR-03).
+  The composer appends `(value unavailable for N holding(s))` and the footer
+  `(P&L unavailable for N position(s))`, each directly after the part it belongs to (review round 2
+  IN-01 / IN-05).
+- **A holding whose key is missing from the key list is named, never read as trusted.** Review
+  round 1 WR-05 added a separate part, `… and $Z from keys with an unknown sync status`, on both
+  surfaces. It is never folded into the "keys needing attention" noun, because the Holdings filter
+  would not find those rows under it. Review round 2 WR-05 carried this to the Holdings tab: both
+  tables mark such a row `Sync status unknown`, and the untrusted filter does not hide it.
+- **One clause builder, `buildKeyTrustClause`,** in the new
+  `src/app/(dashboard)/allocations/lib/live-holdings-summary.ts`, writes the wording for both
+  surfaces. The nouns come from `UNTRUSTED_KEY_SET_NOUN` and the new `UNKNOWN_KEY_STATUS_SET_NOUN`
+  in `src/lib/closed-sets.ts`. The composer file carries no copy of the noun.
+
+### Changed
+
+- **The composer's live-holdings loop moved into `summarizeLiveHoldings`** in that module, unchanged.
+  One loop fills the total and every disclosed part (D-04, D-19). `liveHoldingsSum` is now
+  `summary.total`, and it is byte-identical: the walk order, the `continue` chain and the
+  accumulation order were kept. `holdingEquityContributionLocal` moved with it, also unchanged.
+- **The marker no longer vanishes where the figure on screen still includes untrusted dollars**
+  (the D-18 reopen). A manual AUM exactly equal to the live total now shows State A (review round 1
+  IN-06). A live total at or below zero now shows State C (review round 1 WR-04). State 7, a manual
+  value with a live total at or below zero, stays without a marker, because nothing on screen
+  contains the live total there.
+- **The `closed-sets.ts` prose now names what the predicate reaches (D-12).** It used to say the
+  predicate missed a "headline AUM" and that a follow-up would flag it. It now names the two
+  disclosure surfaces and says both disclose rather than subtract. The ROADMAP `### Phase 167.1`
+  entry carries the same correction. Both keep the old wording as lineage.
+- `hintShowsLive` was renamed `fieldBlankHintShows` (review round 3 IN-02), with no behaviour
+  change.
+
+### Fixed — code review, three rounds (gsd-code-reviewer with silent-failure-hunter)
+
+- **Round 1 (11 in scope, 8 fixed; the 3 held against D-18 were closed later, 2 by the reopen and
+  1 kept by UI-SPEC U-05).**
+  - The excluded figure is D-20's `$Y`, not every dropped holding. Manager-side keys are taken from
+    the payload as `eligibleApiKeyIds` minus `allocatorEligibleApiKeyIds` (WR-01).
+  - The disclosure is tied to the input (WR-02). An unknown P&L no longer reads as `+$0` (WR-03).
+  - A missing key reads as unknown, not trusted (WR-05, which also closes IN-04).
+  - IN-01, IN-02 and IN-03 (a tombstone comment, an unclamped-part pin, a fixture renamed for the
+    `revoked` key it holds).
+- **Round 2 (12 of 12 fixed).**
+  - A missing payload field names no manager-side key, so the error direction is over-disclosure
+    (WR-06). The composer's manager-side derivation is pinned where it is written (WR-01).
+  - `holdingEquityIsReported`'s lockstep with the equity helper is executable (WR-02).
+  - The D-20 residual is stated by its predicate (WR-03).
+  - The missing-key anomaly reaches Sentry (WR-04; see Security).
+  - The Holdings tab names a missing-key row (WR-05).
+  - IN-01/IN-05 per-part suffix, IN-02 log carries no key id, IN-03 indentation, IN-04 docblock,
+    IN-06 test hygiene.
+- **Round 3, on the D-06 work (6 of 6 fixed).**
+  - WR-01 added the unknown-status excludes part (see Added).
+  - WR-02 pins the includes-side unavailable term of the shared-noun form.
+  - IN-01 and IN-02 corrected comments and a flag name the reopen had made stale.
+  - IN-03 records that State 6 is exact float equality.
+  - IN-04 supersedes two UI-SPEC rows.
+- **Method, every round:** each fix started from a test observed RED. Each new guard was then
+  neutered, observed RED, and restored from a `cp` byte backup checked with `cmp`.
+
+### Security
+
+- **The one new third-party write is count-only.** When the composer sums a holding whose key is
+  missing from the key list, it sends a `warning`-level capture to Sentry (review round 2 WR-04).
+  The tags are `component` and `reason: holding_key_missing_from_key_list`, and the extra field is
+  `unknown_status_count`. A test asserts that no key id appears in the message, the tags or the
+  extra. Round 3 WR-01 added no capture: the one reachable path is already captured at the trust
+  boundary by `getUserApiKeys`.
+- The phase security audit: 0 open threats at `block_on: high`. No new read, no new server path,
+  no migration. The composer's AUM is display and draft sizing only, because the commit route
+  computes its own AUM.
+
+### Tests
+
+- New files `live-holdings-summary.test.ts` and `untrusted-key-status.surfaces.test.tsx`. An
+  `AUMTRUST` block in `ScenarioComposer.test.tsx` covers every UI-SPEC § 1 state and § 3 row, the
+  count gates, tone, the accessible description and the D-06 pins. The panel split test and the
+  footer test cover the missing-key row marker.
+- Four pins were flipped deliberately by plan 05, each with a dated comment: the D-06 component pin,
+  the component pin 4, and the state 4 and state 6 absence pins.
+- Every new case was observed RED before its change. The plans, the fix rounds and the verifier
+  neutered each guard and saw it go RED. The guards include the excluded bucket leaking into the
+  total, an amount gate in place of the count gate, a second marker span, each D-18 branch and the
+  WR-01 bucket.
+- At the release head, `npx vitest run 'src/app/(dashboard)/allocations' src/lib/closed-sets`
+  reports **135 files, 2101 passed**, and `critical-regressions.test.ts` is green.
+
+### Notes — known limits, stated so they can be checked rather than assumed
+
+- **D-06 is answered: option (b), by the founder, 2026-09-24.** A `revoked` key is left out of the
+  book-mode composer AUM by `isPerKeyDailiesEligibleKey`. That is unchanged, and it is now disclosed
+  as excluded.
+- ⚠️ **D-20 residual.** A manager-side key outside `eligibleApiKeyIds` (revoked, soft-disconnected or
+  inactive) cannot be told apart in the payload, so its untrusted holdings may be counted in `$Y`.
+  This over-discloses and never hides.
+- ⚠️ **State 6 is exact float equality** (review round 3 IN-03). Typing the rounded live figure lands
+  in State B.
+- ⚠️ **Every guarantee holds only after the latest-asof holdings collapse.** `holdingScopeKey` omits
+  `api_key_id`, so two accounts holding the same asset on one venue can merge before any total is
+  computed. This predates the phase and is data-integrity. It is routed to Phase 167.1.1
+  HOLDINGKEYSCOPE.
+- Whether a soft-disconnected key counts as "needing attention" is the founder's call. The predicate
+  was not widened.
+- The two surfaces sign the amount differently on purpose. The composer prints `-$1,235`, and Open
+  Positions prints `+$300` / `−$1,235`. Each disclosure uses the renderer of the figure it qualifies
+  (U-05, review round 1 IN-05).
+- `ExposureByClass` is not qualified (D-17). `mandate-gates.ts` `minAumGate` has no production
+  caller and was not touched.
+- ⚠️ **Founder checks pending, to be run in the browser after deploy:** the UI-SPEC long-text
+  backstops, which are State A, B and C at 320px width and 200% zoom (including the longest
+  two-noun forms) and the Open Positions qualifier at 320px. Also a read-through of every new
+  string. The strings added in the review rounds and plan 05 were written without the founder, and
+  each one is a dated row in the phase UI-SPEC.
+- `.planning/WINDOWS.md` entry 66 is closed as fixed, with the disposition "disclosed, not changed".
+- **The planning record** holds the phase context with decisions D-01 to D-20 and its known
+  limits, research, patterns and validation, the UI design contract, six plans with their
+  SUMMARYs, three review rounds with their fix reports, the verification and the security audit.
+  The branch also carries three merges of `main`, which bring in other phases' work only.
+
+## [0.88.0.0] - 2026-09-24 — KEYCARDSYNC: a sync result is shown only for the key it came from, and no status surface promises a compute that is not coming
+
+⭐ **What changed for whoever reads this next.** Phase 167.2 covers one family of defects across
+three surfaces. A status the owner reads must be about the thing it names, and it must not promise
+an outcome that is not coming. **The manager key card** (`ApiKeyManager` on `/strategies/[id]/edit`)
+now ends a sync attempt only on a terminal that its own evidence proves. It does not start an
+attempt while a factsheet-chain job is in flight. It bounds every read and write it waits on, and
+when it stops checking it says so instead of saying the sync failed. This closes the four residuals
+Phase 167 routed here. **The `/strategies` list** marks each row fed by an untrusted key.
+**The pending factsheet, the share page and the discovery fallback** state the real compute
+state, or one neutral sentence. None of them says "still computing" or "a few minutes" for a
+compute that failed, stalled or never started. **No migration (KCS-15):** every new read uses an
+existing policy or RPC, and the diff touches nothing under `supabase/` or `analytics-service/`.
+
+⚠️ **The phase verification is `human_needed` (9/9 truths verified).** The founder's visual checks
+at 320px and 200% zoom, and a read-through of the new copy, are still pending. See the known limits
+at the bottom.
+
+### Added
+
+- **One compute-state derivation, `src/lib/compute-state.ts`.** It selects the factsheet job
+  once: it prefers the stitch job, filters to the factsheet chain and ignores recurring cron kinds
+  (KCS-20). `deriveComputeState` counts `done_pending_children` as in flight (KCS-19), and it
+  reads a non-exhaustive empty window as unreadable, not as "nothing ran". `recipientArm` maps
+  every state to what a share-link recipient sees. The sync-progress route, the owner factsheet,
+  the share page, `/strategies` and the key card's job-state read all use it.
+- **Locked copy modules** `src/components/strategy/key-card-copy.ts` and
+  `src/lib/status-surface-copy.ts`. Tests pin every string verbatim, and each change after the
+  review rounds is a dated row in the phase UI-SPEC.
+- **One strategy-shape predicate, `src/lib/strategy-shape.ts`**: single-key, composite or
+  `unknown`. It fails closed. A zero member count with no linked key is cross-checked against the
+  job history, so an RLS-filtered count cannot unlock the link write. The shared owner job read,
+  `src/lib/compute-jobs-read.ts`, re-asks once at the RPC's row cap and reports a window that is
+  still full. It never reads that window as empty.
+- **A shared, bounded job-state read, `src/components/strategy/chain-job-state.ts`**, used by
+  the key card's pre-attempt gate and by its panel. It is bounded at 15 s and fails closed on every
+  unreadable answer.
+- **The key card's new states, each with authored copy:**
+  - `No result yet` (muted, no Retry): the panel's 2-minute poll budget or its 30-second
+    missing-row grace ran out. A give-up is not a failure.
+  - `Sync not started` (amber): the 15 s link-update bound expired, and no enqueue was sent.
+  - `Sync not confirmed` (amber): the 180 s enqueue bound expired, and the sync may still be
+    running. A late 202 starts no poll.
+  - A refusal before the link and the enqueue, while a chain job is in flight or the job state is
+    unreadable. A deterministic unreadable answer names support and never says "try again in a
+    moment".
+  - A note when a finished success could not be verified. No later re-read clears it.
+  - After 60 s, a line stating the panel's own 2-minute limit. It promises no sync duration.
+- **`/strategies` key pills.** A row fed by a revoked or sign-in-failed key carries the key card's
+  own `AllocatorSyncStatus` pill and remedy line, one per distinct status, with no causal claim.
+  A feeding key is the row's linked key or any composite member. The list reads only through the
+  owner-scoped request client and never touches a factsheet path. A row with no computed
+  factsheet also says, beside its share control, what a link recipient sees right now.
+- **The owner pending factsheet states its real compute state**, read on the request client,
+  with a remedy that names a control this strategy's shape actually paints. The measured composite
+  trigger reads as a stop that retrying alone will not resolve. The owner's share panel says what a
+  recipient of the link sees.
+- **The share page has two neutral arms.** "Being prepared" appears only while a job will still do
+  work. A failed, stalled, finished-without-payload, never-started or unreadable compute reads
+  "This factsheet isn't available yet", with no internal cause. The read is bounded by the matched
+  strategy id and projects five fields: no `last_error`, no `error_kind`, no whole `metadata`.
+
+### Changed
+
+- **A key-card attempt ends only on a terminal it can prove belongs to it (KCS-02).** Either this
+  attempt saw `computing`, or `computed_at` differs from the value read just before the enqueue.
+  Both are server-written values, and no client clock is compared with a server clock. A resync can
+  no longer end at its first poll with the previous run's "Up to date" or "Sync failed". The
+  poller's interval arm drops a read that a newer applied read has overtaken.
+- **A success waits for the job queue.** Before the panel forwards a terminal success, it reads the
+  sync-progress projection once. It forwards the success only when no factsheet-chain job is still
+  running. A warned strategy's resync is no longer called "Synced with warnings" mid-chain. An
+  evidenced failure is forwarded only when the chain is settled, so another job's failure is not
+  shown as this attempt's result.
+- **The post-add sync is the tracked attempt (KCS-01).** `Add Key`'s Connect Key is disabled, with
+  the reason read as its description, while an attempt is live. Every Resync, Use & Sync and panel
+  Retry is refused while an add is in flight.
+- **A withheld success stays withheld.** It is retired at the applied re-read that found its key
+  untrusted. A later re-read cannot resurrect it, including one after another tab fixes or deletes
+  the key.
+- **The link is read back from the server before the enqueue (WR-04).** A mismatch, or an
+  unreadable read-back, ends the attempt unconfirmed and sends no enqueue.
+- **A failed sync shows the server's own reason**, or no detail. The old "Analytics computation
+  timed out" sentence is gone. A late answer from the route replaces the "may still be running"
+  panel with "Sync failed" only when it is the route's own verdict, never a transport failure.
+- **A composite's key card lists only its member keys and offers no control that rewrites
+  `strategies.api_key_id`.** There is no Resync, Use & Sync or Add Key, and the handlers refuse.
+  An unknown shape keeps Update password and Delete, and says why syncing is paused.
+- **Delete on a composite member key warns and then lets the owner delete** (founder decision
+  2026-09-24). The existing confirm runs a bounded membership read. Its amber warning names every
+  composite the key belongs to, says the key is removed from them, says a composite left with no
+  other key becomes unlinked, and says the database guard refuses the delete for a published
+  composite. A failed read shows an unchecked warning and still lets the owner choose. This
+  replaces two earlier round rules that REFUSED the delete. `KCS-23`'s amendment is recorded in the
+  phase CONTEXT and the ROADMAP.
+- **`/api/strategies/[id]/sync-progress` answers DEGRADED, never IDLE, when it could not tell.**
+  That covers a non-array RPC answer, a window still full at the cap, and a status outside the
+  domain. The two deterministic causes carry a closed `degradedReason` (`window_full`,
+  `bad_status`). The route also selects the factsheet job through the shared derivation.
+- **The public factsheet placeholder and the discovery fallback say one neutral sentence**
+  (KCS-10). "Some strategies stay in this state" and "still computing" are gone from non-test source.
+- The wizard's `SyncPreviewStep` comments now describe the narrowed `null` meaning. Its behaviour
+  is unchanged.
+
+### Fixed — code review, two rounds (gsd-code-reviewer with silent-failure-hunter, 43 findings)
+
+- **Round 1 (27 in scope, 26 fixed in 20 commits).** The fixes:
+  - The pre-attempt gate stops one key's running job from answering for another key's attempt
+    (CR-01, WR-06). The composite card lists only the keys it reads from (CR-02).
+  - `/strategies` never renders a failed list, key-status or member read as empty or healthy
+    (H-1, H-3). An unreadable key shape says why syncing is paused (H-2).
+  - A zero member count with no linked key no longer unlocks the link write (M-7). A full
+    compute-job window is re-asked, narrowed or reported (M-5).
+  - A give-up asks the job queue first (M-3). A late enqueue answer reaches the panel (M-1). A
+    post-enqueue re-read throw no longer fails the sync (L-4). A null or subject-less re-read
+    vouches for nothing (L-1, L-2).
+  - An old stitch no longer answers for a strategy with no members (IN-03). `/strategies` reads no
+    compute jobs for a published row (IN-04). `loadKeys` depends honestly on a stable retirement
+    core, and an unmount drops the live attempt (IN-01, IN-02).
+  - The key card's bound expiries and the compute-state read failures reach Sentry (M-6).
+  - WR-02 was recorded as unfixable in phase; see the known limits.
+- **Round 2 (16 in scope, all fixed in 8 code commits and 1 report correction).** The fixes:
+  - An unlinked strategy with 100+ job rows keeps Add Key: the composite-history read widens on
+    its own rule (CR-01, R2-H1). Its unknown-shape paths are captured (R2-M2).
+  - An RLS-scoped zero count no longer drops stitch preference for a composite (IN-05).
+  - The unknown-shape copy no longer promises that a reload fixes it (WR-01). The in-flight gate
+    line is true for every in-flight state (IN-02).
+  - A deterministic DEGRADED answer names support (IN-04, R2-L1). The gate's 15 s bound is pinned
+    by a test (WR-03).
+  - A late transport failure is no longer shown as a definitive "Sync failed" (R2-M1).
+  - A give-up blames a `failed_final` chain on this attempt only if the attempt queued a new job
+    (R2-L2). An all-unreadable attempt is captured (R2-L3).
+  - A null list read with no error is unreadable, not "No strategies yet" (IN-03). The Delete
+    membership read failure is captured (R2-L4 (a)). The Delete rule landed per the founder
+    decision above (WR-02).
+- **Method, both rounds:** each fix started with a test observed RED. Then each new guard was
+  neutered, observed RED, and restored from a `cp` byte backup checked with `cmp`.
+
+### Security
+
+- **Sentry captures carry no id in their message or tags.** Every new capture site uses stage tags
+  only. ⚠️ This is narrower than round 1 first claimed (corrected in round 2, IN-01). The
+  surrounding event can still carry non-secret, owner-internal ids in console breadcrumbs, fetch
+  breadcrumbs and page or request URLs. A UUID scrub of every breadcrumb is an instrumentation-wide
+  change, so it was not made here.
+- **The share page's new reads run on the admin client and are bounded by the matched strategy
+  id alone.** They are the five-field job projection and one member head count. The constant-time
+  token match stays the only authorisation. `/strategies` and the owner factsheet read only through
+  the owner-scoped client and `get_user_compute_jobs`. That RPC is SECURITY DEFINER,
+  `auth.uid()`-scoped, and nulls `last_error`.
+- The phase security audit covers 47 plan threats plus the review-round surface: 0 open at
+  `block_on: high`.
+
+### Tests
+
+- New suites: `compute-state`, `strategy-shape`, `status-surface-copy`, `key-card-copy`,
+  `useStrategySyncPoller`, the `/strategies` key-pill suite, the owner compute-state factsheet
+  suite, the share page suite and the discovery pending-fallback suite. `ApiKeyManager`,
+  `SyncProgress`, `ApiKeyForm`, the edit page and the sync-progress route suites were extended.
+- Every pin the phase moved (SEAMUX-05, the WR-02 Resync pin, FAILED-NO-READ, LATE-202, PIN 7 and
+  the others) keeps its reason and a lineage comment. None was deleted.
+- The phase test set, in the round-2 run: **355 files; 7004 passed, 9 skipped, 0 failed.**
+  `tsc --noEmit` and `eslint` on every touched file exit 0.
+- The verifier ran its own neuter drills, each restored and checked with `cmp`: the evidence guard
+  turned 5 tests RED, the pre-attempt gate 8, and `recipientArm` mapping `failed` to in-progress
+  13, across four surfaces.
+
+### Notes — known limits, stated so they can be checked rather than assumed
+
+- ⚠️ **Routed to Phase 167.2.1 FACTSHEETBUILDABLE**, both needing server-side work that KCS-15
+  forbids here:
+  - (WR-02) A computed row whose factsheet cannot actually build gets no recipient note on
+    `/strategies`, while its recipient sees the "not available" arm. Only the admin-client
+    builder knows whether a payload builds.
+  - (R2-L4 (b)) If the `strategy_keys_owner` policy regressed, the Delete membership read would
+    answer an empty list with no error, and the confirm would show no composite warning. The
+    database's publish guard still protects a published composite.
+- ⚠️ **WR-04 residual.** A stalled old link update can still land between the read-back and the
+  sync handler's own read of the column. The pre-attempt gate narrows that window but does not
+  close it.
+- ⚠️ **The baseline-read and enqueue window.** The evidence baseline is read just before the
+  enqueue. A server write that lands between that read and the enqueue is outside what the
+  evidence gate can attribute.
+- ⚠️ **M-7 residual.** A composite draft whose members are hidden, and which has no stitch on
+  record yet, still reads as unlinked.
+- ⚠️ **Founder checks pending:** the key-card panels and the Delete warning at 320px width and 200%
+  zoom, the composite card on real data, the share page and `/strategies` footer band, and a
+  read-through of every new locked string against DESIGN.md. Every string added in the review
+  rounds was authored without the founder, and each one is listed in the UI-SPEC amendment tables.
+- **No migration (KCS-15):** confirmed by the verifier and by the security audit.
+- **The planning record** holds the phase context with decisions KCS-01 to KCS-23, research and
+  validation, the UI design contract, ten plans with their SUMMARYs, both review rounds with their
+  fix reports, the verification and the security audit.
+
 ## [0.87.1.0] - 2026-09-24 — MYPYSTRICT: the strict type gate covers the module that IS the service
 
 ⭐ **What changed for whoever reads this next.** CI's `mypy --strict` gate said it covered "all running-service code", but it never read `analytics-service/main.py`, the FastAPI app itself, nor the three top-level modules that run inside that process. It now does. The `python` job's step "Type gate - mypy strict over the running-service surface" checks `services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py`: **100 files, 0 errors, where it checked 96**. A contract test pins that path set to the service surface derived from the tracked tree, so the gate cannot be narrowed quietly again.
