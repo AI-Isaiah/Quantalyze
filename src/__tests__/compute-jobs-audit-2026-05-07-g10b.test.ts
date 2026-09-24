@@ -802,6 +802,161 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
       }
     },
   );
+
+  // ⭐ Phase 164.9.1 plan 01 (D-01, D-02, D-03, D-26) — THE HARM PROBE.
+  //
+  // Arm P12 above proves the child LANDS in the wrong status. This arm proves
+  // what that costs, end to end through the real mechanism: the public wrapper,
+  // the claim RPC a worker calls, and the parent's mark-done that is meant to
+  // release the child. It records a verdict line FIRST and asserts AFTER, so the
+  // pre-fix run still prints what the lane actually did.
+  //
+  // WHY A RUNNING PARENT (D-01's "not done" condition): `mark_compute_job_done`
+  // is fenced on a `running` row and its claim token, so a `pending` parent
+  // could only reach step (iii) by being claimed through the very RPC under
+  // test. Seeding it running with a minted token (arm P15's shape) keeps step
+  // (ii) about the child alone and makes step (iii) executable.
+  //
+  // ⚠️ D-02: no production caller passes a non-empty `p_parent_job_ids`, so a
+  // RED here demonstrates a MECHANISM; the production harm stays latent.
+  //
+  // The assertions encode the POST-fix contract (mig 109 P12's intent): the
+  // child is held in `done_pending_children`, is NOT handed to a worker while
+  // its parent runs, and is released to `pending` — and claimable — by the
+  // parent's mark-done. Each one fails if the fan-in state is skipped again.
+  it.skipIf(!HAS_LIVE_DB)(
+    "P12-harm: a parented child is not claimable before its parent is done and is released by the parent's mark-done",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const userId = await createTestUser(
+        admin,
+        `g10b-harm-probe-${ts}@test.sec`,
+      );
+      const strategyId = await seedStrategy(admin, userId, "harm-probe");
+      const probeWorker = `g10b-harm-probe-${ts}`;
+      const childKind = "reconcile_strategy";
+      // The RPC's own cap (claim_kind_filter raises above 1000): the largest
+      // batch the probe may ask for, so the child cannot be crowded out.
+      const claimCap = 1000;
+
+      // D-26: all five args by name. PROD also carries a two-arg overload, so a
+      // two-named-arg call would be ambiguous (42725).
+      const claimOnce = async () => {
+        // Crowd-out fence: every row the claim could consider for this kind.
+        // A count at or above the cap would let the child be skipped for room
+        // rather than for its parent, and read as a false `false`.
+        const { count, error: countErr } = await admin
+          .from("compute_jobs")
+          .select("id", { count: "exact", head: true })
+          .eq("kind", childKind)
+          .in("status", ["pending", "failed_retry"]);
+        expect(countErr).toBeNull();
+        expect(count ?? Number.POSITIVE_INFINITY).toBeLessThan(claimCap);
+
+        const { data, error } = await admin.rpc(
+          "claim_compute_jobs_with_priority",
+          {
+            p_batch_size: claimCap,
+            p_worker_id: probeWorker,
+            p_unified_backbone_active: null,
+            p_kind_include: [childKind],
+            p_kind_exclude: null,
+          } as never,
+        );
+        expect(error).toBeNull();
+        return ((data as Array<{ id: string }>) ?? []).map((r) => r.id);
+      };
+
+      try {
+        const tokenParent = mintClaimToken();
+        const parentId = await insertComputeJob(admin, {
+          strategy_id: strategyId,
+          kind: "sync_trades",
+          status: "running",
+          attempts: 1,
+          max_attempts: 3,
+          claimed_at: new Date().toISOString(),
+          claimed_by: `${probeWorker}-parent`,
+          claim_token: tokenParent,
+        });
+
+        // The PUBLIC wrapper, exactly as arm P12 calls it. A different kind
+        // from the parent keeps the optimistic look-up from collapsing the
+        // child onto the parent.
+        const { data: childIdRaw, error: enqErr } = await admin.rpc(
+          "enqueue_compute_job",
+          {
+            p_strategy_id: strategyId,
+            p_kind: childKind,
+            p_idempotency_key: null,
+            p_parent_job_ids: [parentId],
+          } as never,
+        );
+        expect(enqErr).toBeNull();
+        expect(typeof childIdRaw).toBe("string");
+        const childId = childIdRaw as unknown as string;
+        const ownIds = new Set([parentId, childId]);
+
+        // (i) where the child landed.
+        const childStatusAtEnqueue = (await fetchJob(admin, childId)).status;
+
+        // (ii) does a worker get the child while its parent is still running?
+        const firstClaim = await claimOnce();
+        const claimedWhileParentRunning = firstClaim.includes(childId);
+        // Foreign rows are COUNTED, never printed and never reset: the probe
+        // writes no row it did not seed.
+        let foreignRowsClaimed = firstClaim.filter(
+          (id) => !ownIds.has(id),
+        ).length;
+
+        // (iii) ALWAYS, whatever (ii) showed: the parent finishes.
+        const { error: doneErr } = await admin.rpc("mark_compute_job_done", {
+          p_job_id: parentId,
+          p_claim_token: tokenParent,
+        } as never);
+        const parentMarkDoneOk = doneErr === null;
+        const childStatusAfterParentDone = (await fetchJob(admin, childId))
+          .status;
+
+        // Only the SECOND claim is conditional: re-claiming a row that is
+        // already running measures nothing.
+        let claimedAfterParentDone: boolean | "not-reached" = "not-reached";
+        if (!claimedWhileParentRunning) {
+          const secondClaim = await claimOnce();
+          claimedAfterParentDone = secondClaim.includes(childId);
+          foreignRowsClaimed += secondClaim.filter(
+            (id) => !ownIds.has(id),
+          ).length;
+        }
+
+        // Statuses, booleans and one count. No id, no DSN, no email.
+        console.log(
+          "HARM-PROBE verdict: " +
+            [
+              `child_status_at_enqueue=${childStatusAtEnqueue}`,
+              `claimed_while_parent_running=${claimedWhileParentRunning}`,
+              `parent_mark_done_ok=${parentMarkDoneOk}`,
+              `child_status_after_parent_done=${childStatusAfterParentDone}`,
+              `claimed_after_parent_done=${claimedAfterParentDone}`,
+              `foreign_rows_claimed=${foreignRowsClaimed}`,
+            ].join(" "),
+        );
+
+        // The POST-fix contract (RED on a lane without the fan-in status fix).
+        expect(childStatusAtEnqueue).toBe("done_pending_children");
+        expect(claimedWhileParentRunning).toBe(false);
+        expect(parentMarkDoneOk).toBe(true);
+        expect(childStatusAfterParentDone).toBe("pending");
+        expect(claimedAfterParentDone).toBe(true);
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyId],
+        });
+      }
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
