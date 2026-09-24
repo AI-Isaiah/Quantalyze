@@ -16,6 +16,7 @@ import { untrustedKeyCaption } from "@/lib/status-surface-copy";
 import { PendingIntros } from "@/components/strategy/PendingIntros";
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
  * Phase 167.2 / KCS-06 — the key-status projection this page reads. An
@@ -30,6 +31,12 @@ interface KeyStatusRow {
   sync_status: string | null;
   sync_error: string | null;
   last_sync_at: string | null;
+}
+
+interface StrategyKeyMemberRow {
+  strategy_id: string;
+  api_key_id: string;
+  seq: number;
 }
 
 /** One S4 line: one untrusted status, the keys in it, the first key seen. */
@@ -127,12 +134,48 @@ export default async function StrategiesPage() {
         .order("created_at", { ascending: false })
     : { data: [] };
 
-  // Phase 167.2 / KCS-06 — which rows are fed by an untrusted key. Owner-scoped
-  // on the request client (`api_keys_owner`); nothing here touches a factsheet
-  // path. ⛔ A failed read renders NO mark (an error is not "healthy", but it
-  // is not a known-bad key either, so no pill is guessed) and is logged.
+  // Phase 167.2 / KCS-06 — which rows are fed by an untrusted key. A row's
+  // feeding keys are the SET `[api_key_id, ...strategy_keys members by seq]`,
+  // de-duplicated: a composite usually has no api_key_id, and its stitch fans
+  // out over EVERY member (not only open windows), so any untrusted member
+  // stops it refreshing. Both reads are owner-scoped on the request client
+  // (`strategy_keys_owner`, `api_keys_owner`); nothing here touches a
+  // factsheet path.
+  // ⛔ A failed member read is logged and the row is judged on api_key_id
+  // alone (truthful, partial). A failed key read renders NO mark at all (an
+  // error is not "healthy", but it is not a known-bad key either, so no pill
+  // is guessed) and is logged.
+  const membersByStrategy = new Map<string, StrategyKeyMemberRow[]>();
+  if (strategyIds.length > 0) {
+    // The generated types predate `strategy_keys`; the cast is type-only (as in
+    // the composite members route) and the runtime client stays RLS-scoped.
+    const { data: memberRows, error: membersError } = await (
+      supabase as unknown as SupabaseClient
+    )
+      .from("strategy_keys")
+      .select("strategy_id, api_key_id, seq")
+      .in("strategy_id", strategyIds);
+    if (membersError) {
+      console.error("[strategies/page] strategy_keys read failed", membersError.message);
+    } else {
+      for (const m of (memberRows ?? []) as StrategyKeyMemberRow[]) {
+        const list = membersByStrategy.get(m.strategy_id);
+        if (list) list.push(m);
+        else membersByStrategy.set(m.strategy_id, [m]);
+      }
+    }
+  }
   const feedingKeyIdsByStrategy = new Map<string, string[]>(
-    (strategies ?? []).map((s) => [s.id, s.api_key_id ? [s.api_key_id] : []]),
+    (strategies ?? []).map((s) => {
+      const members = [...(membersByStrategy.get(s.id) ?? [])].sort(
+        (a, b) => a.seq - b.seq,
+      );
+      const ids = [
+        ...(s.api_key_id ? [s.api_key_id] : []),
+        ...members.map((m) => m.api_key_id),
+      ];
+      return [s.id, [...new Set(ids)]];
+    }),
   );
   const keyIds = [...new Set([...feedingKeyIdsByStrategy.values()].flat())];
   const keysById = new Map<string, KeyStatusRow>();
