@@ -3108,3 +3108,90 @@ def test_q166_nonmonotone_series_has_no_drawdown_derived_ratios():
         assert s[key] is None, (
             f"{key}={s[key]}: its denominator is a drawdown that does not exist"
         )
+
+
+def _q166_golden_with_nan_days(s: pd.Series) -> pd.Series:
+    """A copy of ``s`` with rows 10, 50 and 100 set to NaN (upstream CSV gaps).
+
+    Proves the mirrors reproduce quantstats' NaN handling (fillna(0) in the
+    prepared terms, raw row count and skipna in the raw terms), not only its
+    arithmetic on dense input."""
+    out = s.copy()
+    out.iloc[[10, 50, 100]] = np.nan
+    return out
+
+
+# (metrics_json key, LIVE quantstats 0.0.81 oracle on the raw series). On the
+# benign fixtures below the price guess cannot fire, so live quantstats is the
+# non-self-referential correctness anchor (D-08). Plan 166-04 extends this SAME
+# tuple with its four loss/Sharpe-family keys.
+_Q166_PARITY_SITES = (
+    ("recovery_factor", lambda s: qs.stats.recovery_factor(s)),
+    ("ulcer_index", lambda s: qs.stats.ulcer_index(s)),
+    ("upi", lambda s: qs.stats.ulcer_performance_index(s)),
+    ("serenity_index", lambda s: qs.stats.serenity_index(s)),
+)
+
+_Q166_BENIGN_FIXTURES = (
+    "benign_mixed",
+    "benign_all_positive",
+    "golden_returns",
+    "golden_returns_with_nan_days",
+)
+
+
+def _q166_benign_fixture(name: str, request: pytest.FixtureRequest) -> pd.Series:
+    if name == "benign_mixed":
+        return _rank05_benign_mixed()
+    if name == "benign_all_positive":
+        return _rank05_benign_all_positive()
+    golden = request.getfixturevalue("golden_returns")
+    if name == "golden_returns":
+        return golden
+    if name == "golden_returns_with_nan_days":
+        return _q166_golden_with_nan_days(golden)
+    raise AssertionError(f"unknown fixture {name!r}")
+
+
+@pytest.mark.parametrize("fixture_name", _Q166_BENIGN_FIXTURES)
+@pytest.mark.parametrize(
+    "key,oracle", _Q166_PARITY_SITES, ids=[e[0] for e in _Q166_PARITY_SITES]
+)
+def test_q166_parity_every_mirror_matches_live_quantstats(
+    key, oracle, fixture_name, request
+):
+    """BENIGN PARITY (D-08), one collected case per (site, fixture). On these
+    series quantstats' price guess cannot fire (mixed sign, max < 1, or both),
+    so a mirror that is "0.0.81 minus the guess" must equal live 0.0.81 to rel
+    1e-12. The value is read through `compute_qstats_scalars`, so the dispatch
+    table wiring is part of what is proven. A miss is a defect in the mirror,
+    never a tolerance to loosen.
+    """
+    s = _q166_benign_fixture(fixture_name, request)
+    assert not bool(s.min() >= 0 and s.max() > 1), "fixture would trip the guess"
+    actual = compute_qstats_scalars(s, None)[key]
+    expected = _safe_float(oracle(s))
+    if expected is None:
+        assert actual is None, f"{key}: live quantstats is undefined, mirror gave {actual}"
+    else:
+        assert actual is not None, f"{key}: mirror undefined, live quantstats gave {expected}"
+        assert actual == pytest.approx(expected, rel=1e-12, abs=0.0), (
+            f"{key} on {fixture_name} drifted from live quantstats 0.0.81"
+        )
+
+
+@pytest.mark.parametrize(
+    "key,anchor",
+    [
+        ("recovery_factor", 0.9517263110721105),
+        ("ulcer_index", 0.09511182002853455),
+        ("upi", 1.583422458226051),
+        ("serenity_index", 0.143686058754821),
+    ],
+)
+def test_q166_parity_benign_mixed_reproduces_the_research_anchor(key, anchor):
+    """The benign-mixed values live quantstats returned when the phase was
+    researched (166-RESEARCH §Q4). Pinned as numbers so a future quantstats
+    change that moved BOTH the oracle and the mirror would still be caught."""
+    actual = compute_qstats_scalars(_rank05_benign_mixed(), None)[key]
+    assert actual == pytest.approx(anchor, rel=1e-12, abs=0.0)
