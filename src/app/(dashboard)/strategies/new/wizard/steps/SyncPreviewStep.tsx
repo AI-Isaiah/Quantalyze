@@ -133,6 +133,25 @@ const IN_FLIGHT_EVIDENCE_TTL_MS = 60_000;
 const SETTLED_WITHOUT_COMPLETE_GRACE_MS = 60_000;
 
 /**
+ * Review-fix round 1 (HIGH-1 a) — the absolute ceiling on trusting "a job is in
+ * flight". Past this much time with the analytics status unchanged, the banner
+ * shows even while reads keep saying a job is in flight, with copy that says
+ * only what is known: a sync is queued or running on our side, and it may be
+ * stuck.
+ *
+ * WHY A CEILING AT ALL: in-flight evidence alone cannot tell a long chain from a
+ * dead one. `reset_stalled_compute_jobs` puts a stuck `running` job back to
+ * `pending` without counting it, so a job whose worker keeps dying reads as in
+ * flight for ever, and without this bound the step would wait on it silently.
+ *
+ * WHY 60 MINUTES: the longest healthy chain measured on this screen took about
+ * 16 minutes (the 2026-09-24 Bybit run). 60 minutes is almost four times that,
+ * and four times the 15-minute backstop (`RETRY_THRESHOLD_MS`) that applies
+ * when nothing is in flight. It changes copy only, never the polling.
+ */
+const IN_FLIGHT_TRUST_CEILING_MS = 3_600_000;
+
+/**
  * Status-poll backoff schedule. Each entry is the delay BEFORE the next
  * poll; the loop walks the ladder and then holds at the final step.
  * Capping at 10s keeps DB load and background-tab timer churn down on
@@ -584,6 +603,9 @@ export function SyncPreviewStep({
   // channel, so a genuinely stalled job never becomes an indefinite hang even
   // when the sync-progress route is dead (degrades to IDLE / sustained 429).
   const [stallBackstop, setStallBackstop] = useState(false);
+  // Review-fix round 1 (HIGH-1 a) — reads still say a job is in flight, but the
+  // analytics status has not moved for `IN_FLIGHT_TRUST_CEILING_MS`.
+  const [inFlightTrustExpired, setInFlightTrustExpired] = useState(false);
   // 154-08 / M4 — the kickoff answered 2xx and said, in its own body, that
   // NOTHING was enqueued (`queued: false`). Until this the arm read exactly one
   // field (`composite`) and entered `waiting_for_complete` regardless, so a
@@ -1058,10 +1080,18 @@ export function SyncPreviewStep({
       const inFlightEvidence =
         now - lastInFlightReadAtRef.current < IN_FLIGHT_EVIDENCE_TTL_MS;
       setServerSaysInFlight(inFlightEvidence);
+      const statusFrozenMs = now - statusChangedAtRef.current;
       setStallBackstop(
         phase === "waiting_for_complete" &&
           !inFlightEvidence &&
-          now - statusChangedAtRef.current >= RETRY_THRESHOLD_MS,
+          statusFrozenMs >= RETRY_THRESHOLD_MS,
+      );
+      // Review-fix round 1 (HIGH-1 a) — in-flight evidence is trusted only up
+      // to the absolute ceiling (see `IN_FLIGHT_TRUST_CEILING_MS`).
+      setInFlightTrustExpired(
+        phase === "waiting_for_complete" &&
+          inFlightEvidence &&
+          statusFrozenMs >= IN_FLIGHT_TRUST_CEILING_MS,
       );
       const notInFlightSince = notInFlightSinceRef.current;
       setSettledPastGrace(
@@ -1974,6 +2004,7 @@ export function SyncPreviewStep({
       if (res.ok && mountedRef.current) {
         statusChangedAtRef.current = Date.now();
         setStallBackstop(false);
+        setInFlightTrustExpired(false);
         // 2026-09-24 — a fresh attempt starts a fresh settled-without-complete
         // grace; the next real read re-establishes the evidence.
         notInFlightSinceRef.current = null;
@@ -2780,9 +2811,13 @@ export function SyncPreviewStep({
   // A long chain the server says is running shows none of them, however long.
   const settledWithoutComplete =
     settledPastGrace && !isComputedAnalytics(computationStatus);
+  //   - the in-flight trust ceiling: reads still say a job is in flight, but
+  //     the status has been frozen for `IN_FLIGHT_TRUST_CEILING_MS`, which is
+  //     longer than any healthy chain (review-fix round 1).
   const showInterruptedBanner =
     syncProgress?.stalled === true ||
     stallBackstop ||
+    inFlightTrustExpired ||
     settledWithoutComplete ||
     (kickoffEnqueuedNothing && !serverSaysInFlight);
   // 154-08 / UI-SPEC State Contract 3 — the amber "we are recomputing" block.
@@ -2990,10 +3025,23 @@ export function SyncPreviewStep({
             </p>
           ) : (
             <>
-              <p className="mt-1 text-caption text-text-secondary">
-                You can retry safely — a healthy run already in progress is
-                unaffected.
-              </p>
+              {inFlightTrustExpired ? (
+                // Review-fix round 1 (HIGH-1 a) — only what is known: the
+                // server still holds a job for this sync, and it has run far
+                // past any healthy chain.
+                <p
+                  className="mt-1 text-caption text-text-secondary"
+                  data-testid="wizard-sync-maybe-stuck"
+                >
+                  A sync is still queued or running on our side; it may be
+                  stuck.
+                </p>
+              ) : (
+                <p className="mt-1 text-caption text-text-secondary">
+                  You can retry safely — a healthy run already in progress is
+                  unaffected.
+                </p>
+              )}
               <Button
                 size="sm"
                 variant="secondary"

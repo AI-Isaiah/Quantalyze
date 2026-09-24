@@ -237,6 +237,32 @@ describe("SyncPreviewStep — no second sync, and Retry only when the server nee
     );
   });
 
+  it("review-fix round 1 (HIGH-1 a): in-flight evidence is trusted only up to the ceiling, then the banner says it may be stuck", async () => {
+    // A job whose worker keeps dying reads as in flight for ever (the watchdog
+    // resets it to pending without counting it). Reads keep saying `running`
+    // and the status never moves.
+    installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
+    await mountAndSettle();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(55 * 60_000);
+    });
+    expect(
+      screen.queryByTestId("wizard-sync-interrupted"),
+    ).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6 * 60_000);
+    });
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-sync-maybe-stuck")).toHaveTextContent(
+      "A sync is still queued or running on our side; it may be stuck.",
+    );
+    expect(
+      screen.getByRole("button", { name: /retry sync/i }),
+    ).toBeInTheDocument();
+  });
+
   it("(b) Retry shows once the server says nothing is in flight and the status is still not computed", async () => {
     installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
     // Reload guard reads `running` and skips the POST; the chain then ends
