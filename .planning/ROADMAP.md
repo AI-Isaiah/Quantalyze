@@ -2924,7 +2924,7 @@ Plans:
 
 - [x] 167.2-03-PLAN.md — a terminal is accepted only with this attempt's server-written evidence (KCS-02)
 - [x] 167.2-07-PLAN.md — the owner pending factsheet states the real compute state with a shape-true remedy; the public placeholder is one neutral sentence; the owner share panel says what a recipient sees (KCS-09/10/12/21)
-- [ ] 167.2-08-PLAN.md — the share page's two neutral arms over a bounded compute_jobs read (KCS-11)
+- [x] 167.2-08-PLAN.md — the share page's two neutral arms over a bounded compute_jobs read (KCS-11)
 - [ ] 167.2-09-PLAN.md — the /strategies row key pill over every feeding key, and the recipient note beside each uncomputed row's share control (KCS-06/12)
 
 **Wave 3** *(blocked on Wave 2 completion)*
