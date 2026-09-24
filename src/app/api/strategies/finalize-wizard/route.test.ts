@@ -29,7 +29,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 vi.mock("server-only", () => ({}));
 
@@ -5177,6 +5177,136 @@ describe("[SUBMITFIX] the unified single-key manager arm promotes the draft", ()
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe("DRAFT_STATE_INVALID");
     consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Round-2 review (SFH HIGH-1) — the RPC COMMITTED, then the dispatch failed.
+//
+// The strategy is promoted (saved, waiting for review) and only its analytics
+// job is missing. Before the fix the route forwarded the dispatch's own
+// envelope, so a rate-limit or outage card told a user whose strategy WAS
+// submitted that nothing was, and nothing named the job as the missing half.
+// The answer is now SUBMITTED_ANALYTICS_NOT_QUEUED, recoverable, and a Retry
+// (a replay) runs the dispatch again.
+// ══════════════════════════════════════════════════════════════════════════
+describe("[SUBMITFIX-R2] a dispatch failure after the promotion says the submission is saved", () => {
+  const failedDispatch = (code: string, status: number, retryAfter?: string) => {
+    const response = NextResponse.json(
+      { ok: false, code, human_message: "synthetic upstream copy", recoverable: true },
+      { status },
+    );
+    if (retryAfter) response.headers.set("Retry-After", retryAfter);
+    return { ok: false, response };
+  };
+
+  it.each([
+    ["RATE_LIMITED", 429, "30"],
+    ["CIRCUIT_OPEN", 503, "60"],
+    ["SEAM_MISCONFIGURED", 500, undefined],
+  ] as const)(
+    "%s from the dispatch after a successful RPC answers SUBMITTED_ANALYTICS_NOT_QUEUED",
+    async (upstreamCode, upstreamStatus, retryAfter) => {
+      const fetchSpy = mockProbeReadOnly();
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      STATE.strategyRow = { api_key_id: API_KEY_ID };
+      STATE.strategyKeysCount = 0;
+      STATE.processKeyResult = failedDispatch(upstreamCode, upstreamStatus, retryAfter);
+
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+
+      // The promotion really happened first.
+      expect(STATE.callOrder).toEqual(["rpc:finalize_wizard_strategy", "postProcessKey"]);
+      const body = await res.json();
+      expect(body.code).toBe("SUBMITTED_ANALYTICS_NOT_QUEUED");
+      expect(body.recoverable).toBe(true);
+      expect(body.status).toBe("pending_review");
+      expect(body.upstream_code).toBe(upstreamCode);
+      expect(res.status).toBe(503);
+      // The oracle is the RENDERED title and the Retry, not the code alone: a
+      // code without copy would render the generic UNKNOWN card.
+      const { buildEnvelope } = await import("@/lib/envelope");
+      const envelope = buildEnvelope(body.code, "corr-r2-dispatch");
+      expect(envelope.human_message).toBe(
+        "Your strategy is submitted, but its analytics are not queued yet.",
+      );
+      expect(envelope.recoverable).toBe(true);
+      if (retryAfter) expect(res.headers.get("Retry-After")).toBe(retryAfter);
+      // Logged and captured with the strategy id and the upstream code.
+      const sentry = STATE.captureToSentryCalls.find(
+        (c) => c.options.tags.step === "dispatch-after-promotion",
+      );
+      expect(sentry, "the dispatch failure after a promotion must reach Sentry").toBeDefined();
+      expect(sentry!.options.tags.upstream_code).toBe(upstreamCode);
+      expect(sentry!.options.extra?.strategy_id).toBe(STRATEGY_ID);
+      expect(
+        consoleError.mock.calls.some(
+          (c) =>
+            String(c[0]).includes("dispatch failed after the strategy was promoted") &&
+            (c[1] as { strategy_id?: string })?.strategy_id === STRATEGY_ID,
+        ),
+      ).toBe(true);
+      consoleError.mockRestore();
+      fetchSpy.mockRestore();
+    },
+  );
+
+  it("a Retry after that failure REPLAYS the finalize and runs the dispatch again, which queues the job", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => {});
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.rpcResult = {
+      data: null,
+      error: {
+        code: "22023",
+        message: "finalize_wizard_strategy: strategy x has status=pending_review (expected draft)",
+      },
+    };
+    STATE.strategyStatusRead = {
+      data: { status: "pending_review", source: "wizard" },
+      error: null,
+    };
+    STATE.processKeyResult = { ok: true, body: { queued: true, verification_id: "ver-retry" } };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(STATE.callOrder).toEqual(["rpc:finalize_wizard_strategy", "postProcessKey"]);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.queued).toBe(true);
+    expect(body.status).toBe("pending_review");
+    consoleInfo.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("a replay whose dispatch fails again still says the submission is saved", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => {});
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.rpcResult = {
+      data: null,
+      error: { code: "22023", message: "not draft" },
+    };
+    STATE.strategyStatusRead = {
+      data: { status: "pending_review", source: "wizard" },
+      error: null,
+    };
+    STATE.processKeyResult = failedDispatch("CIRCUIT_OPEN", 503);
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    const body = await res.json();
+    expect(body.code).toBe("SUBMITTED_ANALYTICS_NOT_QUEUED");
+    expect(STATE.processKeyCalls).toHaveLength(1);
+    consoleInfo.mockRestore();
+    consoleError.mockRestore();
     fetchSpy.mockRestore();
   });
 });

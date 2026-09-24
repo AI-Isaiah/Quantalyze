@@ -39,6 +39,7 @@ import {
 // applied here implicitly, by the predicate's `body is` narrowing — importing
 // the name explicitly would be an unused binding.)
 import { isProcessKeyOnboardResponse } from "@/lib/process-key-onboard-contract";
+import { seamCorrelationId, seamErrorCode } from "@/lib/seam-discriminator";
 // 140.3-03 / SEAMUX-07 — the publish gate's contract. ONE schema, shared with
 // the sibling route that reads the same upstream body.
 import {
@@ -2456,6 +2457,74 @@ async function compositeMemberCount(
   return count;
 }
 
+/**
+ * Round-2 review (SFH HIGH-1) — the answer when `postProcessKey` fails AFTER
+ * `callFinalizeWizardRpc` succeeded. The strategy is promoted (saved and waiting
+ * for review); only its analytics job is not queued. So the answer is
+ * `SUBMITTED_ANALYTICS_NOT_QUEUED`, recoverable, never the dispatch's own copy.
+ *
+ * WHY A RETRY IS THE ROOT RECOVERY. The Retry re-POSTs this route. The RPC then
+ * raises 22023 on the promoted row, `acceptAlreadyPromoted` recognises it as
+ * success, and the handler goes on to `postProcessKey` again. So a promoted
+ * strategy always gets its job on a Retry that the seam lets through.
+ *
+ * The upstream code and status go to the log line and to Sentry with the
+ * strategy id. The error is built ONCE and that one object is both logged (its
+ * message, which carries no upstream prose) and captured; no raw upstream error
+ * is put on the line. A `Retry-After` the dispatch carried is relayed.
+ */
+async function answerDispatchFailedAfterPromotion(args: {
+  strategyId: string;
+  status: "pending_review" | "private";
+  replayed: boolean;
+  upstream: NextResponse;
+}): Promise<NextResponse> {
+  const upstreamBody: unknown = await args.upstream
+    .clone()
+    .json()
+    .catch(() => null);
+  const upstreamCode = seamErrorCode(upstreamBody) ?? `HTTP_${args.upstream.status}`;
+  // Built from our own tokens only (a closed upstream code and a status), so the
+  // line carries no upstream prose and no caught value.
+  const dispatchMessage = `analytics dispatch failed after the strategy was promoted (upstream ${upstreamCode}, HTTP ${args.upstream.status})`;
+  const dispatchError = new Error(dispatchMessage);
+  console.error(`[strategies/finalize-wizard] ${dispatchMessage}`, {
+    strategy_id: args.strategyId,
+    upstream_code: upstreamCode,
+    upstream_status: args.upstream.status,
+    replayed: args.replayed,
+  });
+  captureToSentry(dispatchError, {
+    tags: {
+      surface: "finalize-wizard",
+      step: "dispatch-after-promotion",
+      upstream_code: upstreamCode,
+    },
+    extra: {
+      strategy_id: args.strategyId,
+      upstream_status: args.upstream.status,
+      replayed: args.replayed,
+    },
+  });
+  const details = {
+    ok: false as const,
+    strategy_id: args.strategyId,
+    status: args.status,
+    upstream_code: upstreamCode,
+    correlation_id: seamCorrelationId(upstreamBody),
+    recoverable: true as const,
+  };
+  // `{ code, error, ... }` in THAT order and short: the wizard's emitter scan
+  // (`wizardErrors.invariant.test.ts`, `emitterRe`) reads exactly that shape.
+  const answer = NextResponse.json(
+    { code: "SUBMITTED_ANALYTICS_NOT_QUEUED", error: "Submitted; analytics not queued yet.", ...details },
+    { status: 503, headers: NO_STORE_HEADERS },
+  );
+  const advertisedWait = args.upstream.headers.get("Retry-After");
+  if (advertisedWait !== null) answer.headers.set("Retry-After", advertisedWait);
+  return answer;
+}
+
 async function unifiedFinalizeWizardHandler(args: {
   strategy_id: string;
   userId: string;
@@ -2601,7 +2670,19 @@ async function unifiedFinalizeWizardHandler(args: {
     // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
     userId: args.userId,
   });
-  if (!result.ok) return result.response;
+  // Round-2 review (SFH HIGH-1) — the RPC above COMMITTED (or a replay
+  // confirmed the row is already promoted), so a dispatch failure here must not
+  // forward the dispatch's own copy: a rate-limit or outage card tells a user
+  // whose strategy IS submitted that nothing was. See
+  // `answerDispatchFailedAfterPromotion`.
+  if (!result.ok) {
+    return answerDispatchFailedAfterPromotion({
+      strategyId: args.strategy_id,
+      status: finalized.status,
+      replayed: finalized.replayed,
+      upstream: result.response,
+    });
+  }
 
   // API-9: translate the unified `{queued, verification_id}` shape back to the
   // legacy `{strategy_id, status:'pending_review'}` shape that wizard chrome
