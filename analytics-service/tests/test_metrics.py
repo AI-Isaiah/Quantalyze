@@ -632,6 +632,7 @@ from services.metrics import (
     _rolling_volatility,
     _rolling_alpha,
     _rolling_alpha_beta,
+    _rolling_greeks,
     _rolling_beta,
     _log_returns_series,
 )
@@ -3747,4 +3748,80 @@ def test_q166_rolling_alpha_is_the_windowed_intercept():
     assert not misses, (
         f"{len(misses)}/{len(alpha)} rolling alpha points are not the windowed "
         f"intercept; last (date, written, windowed intercept): {misses[-1]}"
+    )
+
+
+_Q166_ROLLING_PARITY_PAIRS = ("golden_with_benchmark", "calendar_mismatch")
+
+
+def _q166_rolling_pair(
+    name: str, request: pytest.FixtureRequest
+) -> tuple[pd.Series, pd.Series]:
+    """The pair inner-joined exactly as `_rolling_alpha_beta` joins it before
+    the rolling pass."""
+    strategy, benchmark = (
+        _q166_benchmark_trigger()
+        if name == "benchmark_trigger"
+        else _q166_benchmark_pair(name, request)
+    )
+    return strategy.align(benchmark, join="inner")
+
+
+@pytest.mark.parametrize("pair_name", _Q166_ROLLING_PARITY_PAIRS)
+def test_q166_parity_rolling_beta_matches_live_quantstats(pair_name, request):
+    """BENIGN PARITY (D-06, D-08): neither leg can trip the guess, so every
+    rolling beta point must equal live 0.0.81 `rolling_greeks` at rel 1e-12,
+    before any rounding, and the undefined (warm-up) points must sit on the
+    same dates. `calendar_mismatch` is a weekday strategy against a 7-day
+    benchmark; after the inner join the two calendars agree, which is the
+    shape production passes."""
+    r, b = _q166_rolling_pair(pair_name, request)
+    for leg in (r, b):
+        assert not bool(leg.min() >= 0 and leg.max() > 1), "fixture would trip the guess"
+    live = qs.stats.rolling_greeks(r, b, _Q166_ROLLING_WINDOW)["beta"]
+    mine = _rolling_greeks(r, b, _Q166_ROLLING_WINDOW)["beta"]
+    assert mine.index.equals(live.index)
+    assert (mine.isna() == live.isna()).all(), "undefined beta points moved"
+    defined = live.notna()
+    assert int(defined.sum()) > 0
+    assert mine[defined].to_numpy() == pytest.approx(
+        live[defined].to_numpy(), rel=1e-12, abs=0.0
+    ), f"rolling beta on {pair_name} drifted from live quantstats 0.0.81"
+
+
+@pytest.mark.parametrize("pair_name", ("benchmark_trigger", "golden_with_benchmark"))
+def test_q166_rolling_greeks_alpha_is_the_windowed_intercept_full_precision(
+    pair_name, request
+):
+    """D-17 at full precision: every defined alpha point t equals
+    mean_w(r) - beta_t * mean_w(b) over the same 90-row window of the prepared
+    frame (the aligned pair with `fillna(0)`, as 0.0.81 builds it), with
+    beta_t from the in-test cov/var. Task 1's tests check the written,
+    rounded values; this one pins the unrounded math."""
+    r, b = _q166_rolling_pair(pair_name, request)
+    frame = pd.concat({"r": r, "b": b}, axis=1).fillna(0)
+    anchor = _q166_windowed_regression(frame["r"], frame["b"], _Q166_ROLLING_WINDOW)
+    alpha = _rolling_greeks(r, b, _Q166_ROLLING_WINDOW)["alpha"].dropna()
+    assert alpha.index.equals(anchor.index), "defined alpha points are not one per full window"
+    assert alpha.to_numpy() == pytest.approx(
+        anchor["alpha"].to_numpy(), rel=1e-9
+    ), f"rolling alpha on {pair_name} is not the windowed intercept"
+
+
+def test_q166_rolling_greeks_alpha_differs_from_the_full_sample_form(
+    golden_returns, benchmark_returns
+):
+    """ANTI-VACUITY for D-17: on the benign golden pair (where beta is
+    bit-identical to live quantstats) at least one alpha point differs from
+    0.0.81's full-sample form `mean(r_all) - beta_t * mean(b_all)`. If this
+    passed vacuously, the D-17 change would be a no-op and the golden
+    `sibling.rolling_alpha` move would be unexplained."""
+    r, b = golden_returns.align(benchmark_returns, join="inner")
+    live = qs.stats.rolling_greeks(r, b, _Q166_ROLLING_WINDOW)["alpha"]
+    mine = _rolling_greeks(r, b, _Q166_ROLLING_WINDOW)["alpha"]
+    both = live.notna() & mine.notna()
+    assert int(both.sum()) > 0
+    gap = (mine[both] - live[both]).abs()
+    assert float(gap.max()) > 1e-12, (
+        f"windowed alpha equals the full-sample form on every point (max gap {gap.max()})"
     )
