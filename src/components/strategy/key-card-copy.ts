@@ -82,16 +82,50 @@ export function formatBoundDuration(ms: number): string {
   return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
 }
 
-/**
- * Why the sync panel stopped checking without an accepted result (KCS-22).
- * `poll_cap`: the POLL_MAX_ATTEMPTS budget ran out. `missing_row`: the
- * MISSING_ROW_GRACE_POLLS grace ran out and no analytics row was ever seen.
- */
-export type PanelStopReason = "poll_cap" | "missing_row";
+// ---------------------------------------------------------------------------
+// KCS-03 (UI-SPEC § KCS-03, S2): the client-side bounds on the two awaits ahead
+// of the poll, and what the panel says when one expires. An expiry is not a
+// failure: the card cannot know the outcome, so it says what it could not
+// confirm (the UI-only `unconfirmed` panel state).
+// ---------------------------------------------------------------------------
 
 /**
- * KCS22-CAP and KCS22-NOROW (UI-SPEC § KCS-22), with the durations computed
- * from the bounds above rather than typed into the sentence.
+ * How long the link update (`strategies.update({ api_key_id })`) may take.
+ * Evidence window (167.2-RESEARCH Q2): one owner-scoped single-row PostgREST
+ * write, the same class of request as `TERMINAL_REREAD_BOUND_MS`' list read
+ * in ApiKeyManager.tsx, and supabase-js sets no request timeout of its own.
+ * On expiry no enqueue is sent for the attempt (KCS03-LINK).
+ */
+export const LINK_UPDATE_BOUND_MS = 15_000;
+
+/**
+ * How long the enqueue (`POST /api/keys/sync` and its body read) may take.
+ * Evidence window (167.2-RESEARCH Q2): above the 126 s slow-but-successful
+ * enqueue that `ApiKeyManager.poll.test.tsx` pins as honoured; 12x the 15 s
+ * upstream `process-key-enqueue` budget, so an expiry means the network or
+ * the route is wedged, not slow; and 120 s below the route's
+ * `maxDuration = 300`, so a server-side expiry still arrives as a response
+ * first. On expiry the card cannot tell whether a job was enqueued
+ * (KCS03-ENQUEUE).
+ */
+export const ENQUEUE_BOUND_MS = 180_000;
+
+/**
+ * Why the sync panel stopped without an accepted result.
+ * KCS-22 (`no_result`): `poll_cap`, the POLL_MAX_ATTEMPTS budget ran out;
+ * `missing_row`, the MISSING_ROW_GRACE_POLLS grace ran out and no analytics
+ * row was ever seen.
+ * KCS-03 (`unconfirmed`): `link_bound`, the link update did not answer within
+ * LINK_UPDATE_BOUND_MS; `enqueue_bound`, the enqueue did not answer within
+ * ENQUEUE_BOUND_MS.
+ */
+export type PanelStopReason = "poll_cap" | "missing_row" | "link_bound" | "enqueue_bound";
+
+/**
+ * KCS22-CAP, KCS22-NOROW (UI-SPEC § KCS-22), KCS03-LINK and KCS03-ENQUEUE
+ * (UI-SPEC § KCS-03), with the durations computed from the bounds above rather
+ * than typed into the sentence. ⛔ Neither KCS03 string says the sync failed:
+ * the card does not know that.
  */
 export const PANEL_STOP_COPY = {
   poll_cap: {
@@ -105,5 +139,17 @@ export const PANEL_STOP_COPY = {
     detail: `This panel stopped checking after ${formatBoundDuration(
       MISSING_ROW_GRACE_POLLS * POLL_INTERVAL_MS,
     )} with nothing recorded yet. The sync may still be running: reload this page later to see its result.`,
+  },
+  link_bound: {
+    label: "Sync not started",
+    detail: `This sync did not start: linking the key to this strategy did not answer within ${formatBoundDuration(
+      LINK_UPDATE_BOUND_MS,
+    )}. Reload this page to check which key is linked before you sync again.`,
+  },
+  enqueue_bound: {
+    label: "Sync not confirmed",
+    detail: `We could not confirm this sync started: the request did not answer within ${formatBoundDuration(
+      ENQUEUE_BOUND_MS,
+    )}, so it may still be running. Reload this page to see the latest status before you sync again.`,
   },
 } as const satisfies Record<PanelStopReason, { label: string; detail: string }>;

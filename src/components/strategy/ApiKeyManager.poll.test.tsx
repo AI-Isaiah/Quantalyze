@@ -123,6 +123,13 @@ const KCS22_CAP =
   "This panel stopped checking after 2 minutes. The sync may still be running: reload this page later to see its result.";
 const KCS22_NOROW =
   "This panel stopped checking after 30 seconds with nothing recorded yet. The sync may still be running: reload this page later to see its result.";
+// Phase 167.2 / KCS-03: hand-typed from 167.2-UI-SPEC.md § KCS-03, never
+// imported from key-card-copy.ts.
+const KCS03_ENQUEUE_LABEL = "Sync not confirmed";
+const KCS03_ENQUEUE =
+  "We could not confirm this sync started: the request did not answer within 3 minutes, so it may still be running. Reload this page to see the latest status before you sync again.";
+/** 180 s, hand-typed: the enqueue bound the KCS03-ENQUEUE sentence states. */
+const ENQUEUE_BOUND = 180_000;
 
 function healthyRow() {
   return {
@@ -639,5 +646,66 @@ describe("ApiKeyManager + the REAL poller: a give-up is not a failure (Phase 167
     expect(screen.queryByText(KCS22_NOROW)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
     expect(consoleError).toHaveBeenCalled();
+  });
+});
+
+describe("ApiKeyManager + the REAL poller: an enqueue that never answers is bounded (Phase 167.2 / KCS-03)", () => {
+  it("ENQUEUE-HANG: at 180 s the attempt ends as Sync not confirmed with the KCS03-ENQUEUE sentence, never Sync failed, with no Retry", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockState.analyticsResult = analyticsRow("computing");
+    await startResyncWithHeldEnqueue();
+
+    // Just inside the bound: the attempt is still live.
+    await tick(ENQUEUE_BOUND - 1_000);
+    expect(screen.queryByText(KCS03_ENQUEUE_LABEL)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Syncing…" })).toBeDisabled();
+
+    // At the bound: the card says it could not confirm the sync, and why.
+    await tick(1_000);
+    expect(screen.getByText(KCS03_ENQUEUE_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(KCS03_ENQUEUE)).toBeInTheDocument();
+    expect(
+      screen.queryByText("Sync failed"),
+      "a bound expiry was rendered as a failure the card cannot know",
+    ).not.toBeInTheDocument();
+    // No Retry: a re-POST while the first enqueue may still land can insert a
+    // second job. The attempt ended, so the key's Resync is usable again.
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
+    // UI-SPEC § Color: the DESIGN.md opaque amber trio, not the amber-500 pair.
+    const label = screen.getByText(KCS03_ENQUEUE_LABEL);
+    expect(label.className).toContain("text-warning");
+    expect(label.closest(".rounded-lg")?.className).toContain("bg-warning-bg");
+    // Nothing was polled: no job is known to exist.
+    expect(mockState.analyticsSelectCount).toBe(0);
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("180000 ms"));
+  });
+
+  it("LATE-202: a 202 that lands at 200 s, after the bound, starts no poll and leaves Sync not confirmed on the panel", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockState.analyticsResult = analyticsRow("computing");
+    const enqueue = await startResyncWithHeldEnqueue();
+
+    await tick(ENQUEUE_BOUND);
+    expect(screen.getByText(KCS03_ENQUEUE_LABEL)).toBeInTheDocument();
+
+    // The request answers 20 s after its bound expired.
+    await tick(20_000);
+    await act(async () => {
+      enqueue.resolve(accepted());
+    });
+    await tick(0);
+    await tick(POLL_MS * 3);
+
+    expect(
+      mockState.analyticsSelectCount,
+      "a late 202 resurrected an attempt the card had already ended",
+    ).toBe(0);
+    expect(screen.queryByText("Computing analytics...")).not.toBeInTheDocument();
+    expect(screen.getByText(KCS03_ENQUEUE_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(KCS03_ENQUEUE)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
+    expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining("answered after its"));
   });
 });

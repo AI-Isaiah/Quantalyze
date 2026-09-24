@@ -7,7 +7,11 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "./ApiKeyForm";
-import { addKeyBlockedReason, type PanelStopReason } from "./key-card-copy";
+import {
+  addKeyBlockedReason,
+  ENQUEUE_BOUND_MS,
+  type PanelStopReason,
+} from "./key-card-copy";
 import {
   SyncProgress,
   type EvidenceBaseline,
@@ -779,35 +783,82 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       if (attemptRef.current !== attempt) return;
       setEvidenceBaseline(baseline);
 
-      // Fetch trades
-      const res = await fetch("/api/keys/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy_id: strategyId }),
-      });
+      // The enqueue exchange: the request, its failure message, its body and
+      // the enqueue evidence, as one unit so ONE bound covers all of it.
+      const enqueueExchange = async (): Promise<"enqueued"> => {
+        const res = await fetch("/api/keys/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ strategy_id: strategyId }),
+        });
 
-      if (!res.ok) {
-        throw new Error(await syncFailureMessage(res));
+        if (!res.ok) {
+          throw new Error(await syncFailureMessage(res));
+        }
+
+        // 140.3-08 / SEAMUX-05 (B-15) — a 2xx is not evidence that a job was
+        // enqueued, and this line used to assume it was. `/api/keys/sync`
+        // answers an unrecognised upstream shape with a deliberately UN-stamped
+        // passthrough, so the one response meaning "nothing was enqueued" was
+        // the one that started a 15-minute poll for it, ending in a timeout
+        // that blamed the computation.
+        //
+        // The fix is NOT entering the state. A wall-clock backstop would only
+        // time the symptom out — the poll would still run, and the user would
+        // still be told their analytics were computing when nothing was.
+        const body: unknown = await res.json().catch(() => null);
+        if (!isSyncEnqueued(body)) {
+          throw new Error(SYNC_UNAVAILABLE_COPY);
+        }
+        return "enqueued";
+      };
+
+      // Phase 167.2 / KCS-03 (RESEARCH Q2, P5): the exchange is raced against
+      // `ENQUEUE_BOUND_MS`, the same shape as the `TERMINAL_REREAD_BOUND_MS`
+      // race. Before it, an enqueue that never answered spun the panel and held
+      // the marker until the route's own `maxDuration`. On expiry the card
+      // cannot know whether a job was enqueued, so the attempt ends as the
+      // UI-only `unconfirmed` state (KCS03-ENQUEUE), never as `error`: that
+      // would render "Sync failed", a claim the card cannot make.
+      // The request is NOT aborted: aborting cannot stop a server-side enqueue,
+      // and it would turn a late 202 into a rejection. Instead the handler keeps
+      // waiting for the late answer, so its outcome is logged (a late rejection
+      // reaches the catch below, which logs it because the attempt already
+      // ended), and the liveness guard after this block drops it, so a late 202
+      // starts no poll and writes nothing.
+      const enqueued = enqueueExchange();
+      let enqueueTimer: ReturnType<typeof setTimeout> | undefined;
+      let enqueueOutcome: "enqueued" | "timed_out";
+      try {
+        const bound = new Promise<"timed_out">((resolve) => {
+          enqueueTimer = setTimeout(() => resolve("timed_out"), ENQUEUE_BOUND_MS);
+        });
+        enqueueOutcome = await Promise.race([enqueued, bound]);
+      } finally {
+        clearTimeout(enqueueTimer);
       }
-
-      // 140.3-08 / SEAMUX-05 (B-15) — a 2xx is not evidence that a job was
-      // enqueued, and this line used to assume it was. `/api/keys/sync` answers
-      // an unrecognised upstream shape with a deliberately UN-stamped
-      // passthrough, so the one response meaning "nothing was enqueued" was the
-      // one that started a 15-minute poll for it, ending in a timeout that
-      // blamed the computation.
-      //
-      // The fix is NOT entering the state. A wall-clock backstop would only time
-      // the symptom out — the poll would still run, and the user would still be
-      // told their analytics were computing when nothing was.
-      const body: unknown = await res.json().catch(() => null);
-      if (!isSyncEnqueued(body)) {
-        throw new Error(SYNC_UNAVAILABLE_COPY);
+      if (enqueueOutcome === "timed_out") {
+        console.error(
+          `[ApiKeyManager] the enqueue did not answer within ${ENQUEUE_BOUND_MS} ms; the sync is unconfirmed [key_id=${keyId}]`,
+        );
+        if (endAttempt(attempt)) {
+          setSyncStatus("unconfirmed");
+          setPanelStopReason("enqueue_bound");
+          setSyncError(null);
+        }
+        await enqueued;
+        console.warn(
+          `[ApiKeyManager] the enqueue answered after its ${ENQUEUE_BOUND_MS} ms bound; the attempt had already ended, so nothing is written [key_id=${keyId}]`,
+        );
       }
 
       // A job IS enqueued -- analytics may still be computing.
       // SyncProgress will poll strategy_analytics to track completion. From
       // here on its reads may end this attempt (see `SyncAttempt`).
+      // KCS-03 (RESEARCH P5): but only the live attempt may act on the answer.
+      // A late answer (after its bound expired, or after the attempt otherwise
+      // ended) starts no poll and moves no state.
+      if (attemptRef.current !== attempt) return;
       attempt.enqueued = true;
       setSyncStatus("computing");
       // NEW-C37-04: pass the key being synced so lastSyncAt reads from

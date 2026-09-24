@@ -39,7 +39,12 @@ export type SyncStatus =
   // its missing-row grace ran out) with no accepted result. Not a failure: it
   // renders no "Sync failed" and no Retry (a re-POST while a job may be live
   // can insert a second job). `toSyncStatus` never returns it.
-  | "no_result";
+  | "no_result"
+  // Phase 167.2 / KCS-03: UI-only. A client-side bound expired before the
+  // enqueue was confirmed (the link update, or the enqueue request, did not
+  // answer in time), so the card cannot know whether a job exists. Not a
+  // failure: amber, no "Sync failed", no Retry. `toSyncStatus` never returns it.
+  | "unconfirmed";
 
 /**
  * Phase 167.2 / KCS-22: what the panel knows about a status it forwards.
@@ -157,6 +162,8 @@ interface SyncProgressProps {
   /**
    * KCS-22: which give-up a `no_result` status came from (the caller stores the
    * reason the panel forwarded). Absent or null reads as `poll_cap`.
+   * KCS-03: which bound an `unconfirmed` status came from (`link_bound` or
+   * `enqueue_bound`, set by the caller). Absent or null reads as `enqueue_bound`.
    */
   stopReason?: PanelStopReason | null;
   /**
@@ -215,6 +222,15 @@ const STATUS_CONFIG: Record<
     color: "text-text-secondary",
     bgColor: "bg-page",
     label: PANEL_STOP_COPY.poll_cap.label,
+  },
+  // KCS-03 (UI-SPEC § Color, "Amber panel"): the DESIGN.md-pinned opaque trio,
+  // NOT `bg-warning/10` (4.39:1) and NOT `complete_with_warnings`' amber-500
+  // pair. The label shown is PANEL_STOP_COPY's (link_bound / enqueue_bound).
+  unconfirmed: {
+    icon: <WarningIcon />,
+    color: "text-warning",
+    bgColor: "bg-warning-bg",
+    label: PANEL_STOP_COPY.enqueue_bound.label,
   },
 };
 
@@ -439,8 +455,15 @@ export function SyncProgress({
   }
 
   const config = STATUS_CONFIG[syncStatus];
+  // KCS-22 / KCS-03: the two UI-only stop states take their label and detail
+  // from PANEL_STOP_COPY. A missing reason reads as the one that claims least:
+  // the poll cap for `no_result`, the enqueue bound for `unconfirmed`.
   const stopCopy =
-    syncStatus === "no_result" ? PANEL_STOP_COPY[stopReason ?? "poll_cap"] : null;
+    syncStatus === "no_result"
+      ? PANEL_STOP_COPY[stopReason ?? "poll_cap"]
+      : syncStatus === "unconfirmed"
+        ? PANEL_STOP_COPY[stopReason ?? "enqueue_bound"]
+        : null;
   const activeLabel = isActive
     ? getActiveLabel()
     : stopCopy
@@ -510,7 +533,8 @@ export function SyncProgress({
           </p>
         )}
 
-      {/* KCS-22: the panel stopped checking. Muted detail, no Retry. */}
+      {/* KCS-22 / KCS-03: the panel stopped checking, or a bound expired
+          before the sync was confirmed. Muted detail, no Retry. */}
       {stopCopy && (
         <p className="text-xs text-text-secondary mt-1 ml-6">{stopCopy.detail}</p>
       )}
