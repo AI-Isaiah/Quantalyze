@@ -861,9 +861,17 @@ export function OwnerUnpublishedNotice({
 export function OwnerUnpublishedPanel({
   strategyId,
   hasActiveShare = false,
+  shareNote,
 }: {
   strategyId: string;
   hasActiveShare?: boolean;
+  /**
+   * Phase 167.2 / KCS-12 (S7) — what a recipient of this strategy's private
+   * link sees right now, rendered as the panel's last child. Only the owner
+   * pending page passes it; absent, no element renders, so every other mount
+   * is byte-identical.
+   */
+  shareNote?: string;
 }) {
   const [shareLive, setShareLive] = React.useState(hasActiveShare);
 
@@ -883,6 +891,9 @@ export function OwnerUnpublishedPanel({
           />
         )}
       </div>
+      {shareNote && (
+        <p className="mt-2 text-fixed-12 text-text-muted">{shareNote}</p>
+      )}
     </div>
   );
 }

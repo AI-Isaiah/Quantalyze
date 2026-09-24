@@ -23,12 +23,15 @@ import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
 import {
   COMPUTE_STATE_READ_LIMIT,
   deriveComputeState,
+  recipientArm,
   type ComputeJobRow,
   type ComputeState,
 } from "@/lib/compute-state";
 import {
+  KCS10_PUBLIC_SENTENCE,
   ownerRemedy,
   ownerStateLine,
+  recipientShareNote,
   type StateLineTone,
 } from "@/lib/status-surface-copy";
 import {
@@ -413,10 +416,10 @@ export default async function FactsheetV2Page({
     });
     // The strategy passed the signature gate (published, or the viewer's own
     // draft on the owner lane) but its analytics payload couldn't be built.
-    // Render a friendly placeholder rather than hard-404'ing: this is a
-    // transient state (analytics service still computing) or a CSV-ingested
-    // strategy whose daily_returns are not yet populated. Hard-404 only on
-    // the signature gate above.
+    // Render a placeholder rather than hard-404'ing: the computation may be
+    // in progress, may have failed, or may never have run (KCS-09 states which
+    // on the owner lane; the public lane says one neutral sentence). Hard-404
+    // only on the signature gate above.
     // Full-identity context — prefer the real name, fall back to the
     // pseudonym only when the strategy genuinely has no public name.
     const pendingName =
@@ -467,6 +470,14 @@ export default async function FactsheetV2Page({
           <OwnerUnpublishedPanel
             strategyId={signature.id}
             hasActiveShare={hasActiveShare}
+            // KCS-12 (S7): what a recipient of the private link sees right
+            // now. This lane is reachable only for an UNPUBLISHED strategy,
+            // so the share mode is always mint-token.
+            shareNote={
+              ownerStatus
+                ? recipientShareNote("mint-token", recipientArm(ownerStatus.state))
+                : undefined
+            }
           />
         )}
         <p className="text-fixed-10 font-mono uppercase tracking-[0.22em] text-text-muted">
@@ -500,23 +511,15 @@ export default async function FactsheetV2Page({
             </p>
           </section>
         ) : (
-          <>
-            <p className="mt-6 text-fixed-13 text-text-secondary">
-              The detailed factsheet for this strategy is still computing.
-              Daily-return data hasn&apos;t been ingested yet — once the
-              analytics service finishes the first compute pass, the full panel
-              set will render here.
-            </p>
-            {/* Criterion 9 (phase 164.2): a visitor has no developer console to
-                open, and this arm cannot know which of the three gates fired — so
-                it names none. The gate detail stays in the `console.warn` hint
-                above, which is the developer's channel. */}
-            <p className="mt-3 text-fixed-12 text-text-muted italic">
-              This factsheet has not been computed yet. Some strategies stay in
-              this state, and this page is all there is until one has been
-              computed.
-            </p>
-          </>
+          // KCS-10 (S8) and criterion 9 (phase 164.2): the PUBLIC lane reads
+          // no job state, so it says one neutral sentence that is true in
+          // every state and promises no timing. It names no gate and no
+          // internal state: a visitor has no developer console, and the gate
+          // detail stays in the `console.warn` hint above, which is the
+          // developer's channel.
+          <p className="mt-6 text-fixed-13 text-text-secondary">
+            {KCS10_PUBLIC_SENTENCE}
+          </p>
         )}
       </article>
     );
