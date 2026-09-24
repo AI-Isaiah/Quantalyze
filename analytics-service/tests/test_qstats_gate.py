@@ -461,6 +461,18 @@ RED_NEEDLES: dict[str, tuple[str, str, str, str]] = {
         "quantstats",
         "reaches quantstats by name",
     ),
+    # Review round 2 (IN-01): the non-loading allowlist matches the callee's
+    # RESOLVED path, so a local function that shares a short name stays RED.
+    "needle_lookalike_of_a_non_loading_callee": (
+        """
+        from services.loader import version
+        def compute_all_metrics(r):
+            return version("quantstats").stats.sharpe(r)
+        """,
+        "compute_all_metrics",
+        "quantstats",
+        "reaches quantstats by name",
+    ),
     # Review round 2 (SFH R2-LOW-3): the B6 `.get` arm had no needle (G1 survived).
     "needle_globals_get_of_the_alias": (
         """
@@ -940,6 +952,28 @@ GREEN_NEEDLES: dict[str, str] = {
         def compute_all_metrics(r):
             note = "qs.stats.sharpe(r) guesses the price path; getattr(qs.stats, name)"
             return note, qs.stats.volatility(r, prepare_returns=False)
+        """,
+    # Review round 2 (IN-01): naming quantstats to a callee that never imports
+    # it (a version report, a logger level) is not string-named access.
+    "needle_green_metadata_version": """
+        import importlib.metadata
+        import quantstats as qs
+        def compute_all_metrics(r):
+            version = importlib.metadata.version("quantstats")
+            return version, qs.stats.volatility(r, prepare_returns=False)
+        """,
+    "needle_green_metadata_version_from_import": """
+        from importlib.metadata import version
+        import quantstats as qs
+        def compute_all_metrics(r):
+            return version("quantstats"), qs.stats.volatility(r, prepare_returns=False)
+        """,
+    "needle_green_logger_level": """
+        import logging
+        import quantstats as qs
+        logging.getLogger("quantstats.stats").setLevel(logging.WARNING)
+        def compute_all_metrics(r):
+            return qs.stats.volatility(r, prepare_returns=False)
         """,
 }
 

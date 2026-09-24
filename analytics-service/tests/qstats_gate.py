@@ -50,7 +50,10 @@ and ``from quantstats import stats [as X]`` bind a stats-namespace alias. Then:
   ``__import__("quantstats")``, ``sys.modules["quantstats"]``) is RED, and so is
   ``import_module`` / ``__import__`` with a non-constant first argument, because it
   cannot be proven not to load quantstats (no production module imports dynamically,
-  measured 2026-09-24). A ``globals()`` / ``vars()`` / ``locals()``
+  measured 2026-09-24). The one exception is a callee in ``NON_LOADING_CALLEES``,
+  matched on its RESOLVED dotted path (``logging.getLogger("quantstats.stats")``,
+  ``importlib.metadata.version("quantstats")``): those name the package and never
+  import it (review round 2, IN-01). A ``globals()`` / ``vars()`` / ``locals()``
   lookup of a quantstats alias by name (``globals()["qs"]``, ``globals().get("qs")``)
   is RED, and in a module that binds quantstats so is any such dict read with a
   COMPUTED key (``globals()["q" + "s"]``) or handed on as a value (``ns = globals()``).
@@ -211,6 +214,22 @@ DYNAMIC_IMPORTERS = frozenset({"import_module", "__import__"})
 
 #: Builtins that expose a namespace as a dict, so ``globals()["qs"]`` reaches an alias.
 NAMESPACE_DICTS = frozenset({"globals", "vars", "locals"})
+
+#: Callees that take a module NAME as a string and never import it (review round 2
+#: IN-01). B6 does not flag ``"quantstats"`` passed to one of these: a version
+#: report or a logger level is not a way to run the price guess. Matched on the
+#: callee's resolved dotted path, so a local function that merely shares the
+#: short name stays RED.
+NON_LOADING_CALLEES = frozenset(
+    {
+        "logging.getLogger",
+        "importlib.metadata.version",
+        "importlib.metadata.distribution",
+        "importlib.metadata.metadata",
+        "importlib.metadata.requires",
+        "importlib.metadata.files",
+    }
+)
 
 #: Phase-start measurement (166-RESEARCH P-2), kept beside the live counts so the
 #: success criterion's "30" is answered, not silently re-counted.
@@ -825,7 +844,12 @@ def scan_source(
                 if isinstance(first, ast.Constant) and isinstance(first.value, str)
                 else None
             )
-            if first_str is not None and _is_quantstats(first_str):
+            callee = resolve(func)
+            if (
+                first_str is not None
+                and _is_quantstats(first_str)
+                and not (callee and callee <= NON_LOADING_CALLEES)
+            ):
                 scanned += 1
                 violate(
                     node,
