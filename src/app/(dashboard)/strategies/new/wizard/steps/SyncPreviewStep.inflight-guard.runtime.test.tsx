@@ -16,7 +16,7 @@
  *
  * Synthetic ids only. jsdom under fake timers, not a browser.
  */
-import { render, screen, act } from "@testing-library/react";
+import { render, screen, act, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SyncPreviewStep } from "./SyncPreviewStep";
 import type { SyncProgressResponse } from "@/lib/sync-progress";
@@ -290,6 +290,65 @@ describe("SyncPreviewStep — no second sync, and Retry only when the server nee
     expect(screen.getByTestId("wizard-sync-stage-label")).toHaveTextContent(
       "Checking for progress…",
     );
+  });
+
+  it("review-fix round 1 (HIGH-2): a Retry answered WIZARD_DUPLICATE keeps the banner and says a sync is already running", async () => {
+    installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
+    await mountAndSettle();
+    progressBody = { jobStatus: "failed_final", stalled: false, memberProgress: [] };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(90_000);
+    });
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+
+    // The server refuses a new sync: one of this strategy's chains is running.
+    kickoffBody = {
+      ok: true,
+      accepted: true,
+      status: "syncing",
+      composite: false,
+      queued: true,
+      code: "WIZARD_DUPLICATE",
+      idempotent: true,
+    };
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /retry sync/i }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+
+    // Nothing new started, so nothing about the wait is fresh: the banner
+    // stays and says why the Retry did nothing.
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-sync-already-running")).toHaveTextContent(
+      "A sync is already running.",
+    );
+  });
+
+  it("review-fix round 1 (HIGH-2) control: a Retry that starts a new sync clears the banner", async () => {
+    installClient({ linkedKey: LINKED_KEY_ID, pollStatus: "computing" });
+    await mountAndSettle();
+    progressBody = { jobStatus: "failed_final", stalled: false, memberProgress: [] };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(90_000);
+    });
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /retry sync/i }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(
+      screen.queryByTestId("wizard-sync-interrupted"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("wizard-sync-already-running"),
+    ).not.toBeInTheDocument();
   });
 
   it("(b) a kickoff that queued nothing shows no Retry while the server says a job is running", async () => {

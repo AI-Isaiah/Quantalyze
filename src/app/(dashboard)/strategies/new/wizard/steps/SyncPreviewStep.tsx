@@ -606,6 +606,9 @@ export function SyncPreviewStep({
   // Review-fix round 1 (HIGH-1 a) — reads still say a job is in flight, but the
   // analytics status has not moved for `IN_FLIGHT_TRUST_CEILING_MS`.
   const [inFlightTrustExpired, setInFlightTrustExpired] = useState(false);
+  // Review-fix round 1 (HIGH-2) — the last banner Retry was answered
+  // WIZARD_DUPLICATE: the server refused a new sync because one is running.
+  const [retryFoundRunningSync, setRetryFoundRunningSync] = useState(false);
   // 154-08 / M4 — the kickoff answered 2xx and said, in its own body, that
   // NOTHING was enqueued (`queued: false`). Until this the arm read exactly one
   // field (`composite`) and entered `waiting_for_complete` regardless, so a
@@ -2002,6 +2005,23 @@ export function SyncPreviewStep({
         body: JSON.stringify({ strategy_id: strategyId }),
       });
       if (res.ok && mountedRef.current) {
+        const retryBody = (await res.json().catch(() => null)) as {
+          queued?: boolean;
+          code?: unknown;
+        } | null;
+        // Review-fix round 1 (HIGH-2) — a DUPLICATE reply started nothing: the
+        // server refused a new sync because one of this strategy's chains is
+        // still running (`process_key`'s chain-in-flight guard). Same reading
+        // as the key card's `enqueuedNewJob`. So nothing about the wait is
+        // fresh: the clocks are NOT reset and the banner stays, now saying
+        // that a sync is already running. Resetting here used to hide the
+        // banner for a full grace window on every press, for a Retry that did
+        // nothing.
+        if (retryBody?.code === "WIZARD_DUPLICATE") {
+          setRetryFoundRunningSync(true);
+          return;
+        }
+        setRetryFoundRunningSync(false);
         statusChangedAtRef.current = Date.now();
         setStallBackstop(false);
         setInFlightTrustExpired(false);
@@ -2016,9 +2036,6 @@ export function SyncPreviewStep({
         // nothing keeps it up, which is the honest outcome and leaves the Retry
         // control in place. The composite branch omits the field, so `undefined`
         // keeps the prior meaning exactly as on the kickoff path.
-        const retryBody = (await res.json().catch(() => null)) as {
-          queued?: boolean;
-        } | null;
         setKickoffEnqueuedNothing(retryBody?.queued === false);
         // F-2b — a successful retry is a legitimate "fresh wait starts now"
         // event, so reset the MOUNT patience clock too, not just the SF-1
@@ -3025,6 +3042,15 @@ export function SyncPreviewStep({
             </p>
           ) : (
             <>
+              {retryFoundRunningSync && (
+                <p
+                  className="mt-1 text-caption text-text-secondary"
+                  data-testid="wizard-sync-already-running"
+                >
+                  A sync is already running. This screen updates when it
+                  finishes.
+                </p>
+              )}
               {inFlightTrustExpired ? (
                 // Review-fix round 1 (HIGH-1 a) — only what is known: the
                 // server still holds a job for this sync, and it has run far
