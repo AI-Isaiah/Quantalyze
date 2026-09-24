@@ -187,6 +187,15 @@ Exit 0. Exactly the two disclosed paths.
 
 `sibling.rolling_beta` is equal before and after (measured).
 
+**Added 2026-09-24, code review round 1 (IN-04): one byte movement with no value change.** The
+regeneration also re-sorted three keys inside two sub-objects. The key-path compare above is
+dict-based, so it could not see this, and until now no row described it. D-10 treats an undescribed
+fixture movement as a defect, so it gets its own row:
+
+| golden key path | before | after | reason |
+|---|---|---|---|
+| key ORDER of `mean_daily_turnover_usd`, `mean_monthly_turnover_usd` and `mean_trade_size_usd` inside `metrics_json.trade_metrics` and `metrics_json.volume_metrics` | not alphabetical (`mean_trade_size_usd` before `mean_monthly_turnover_usd` in both, and `mean_daily_turnover_usd` ahead of `expectancy` in `trade_metrics`) | alphabetical | Cosmetic, from the regeneration serialiser. No value, key or key count changed, and every parity reader is dict-based. Kept, not reverted. |
+
 The TypeScript tests that read the golden were run at HEAD through the D-19 `node_modules` link:
 `metrics-parity.test.ts`, `metrics-parity-helper.test.ts`, `MetricPanel.types.test.ts` and
 `contracts-registry.test.ts` gave `Test Files 4 passed (4)` / `Tests 101 passed (101)`. The link
