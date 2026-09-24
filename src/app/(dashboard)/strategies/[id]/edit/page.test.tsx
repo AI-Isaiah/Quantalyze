@@ -22,23 +22,55 @@ import React from "react";
 
 vi.mock("server-only", () => ({}));
 
-const { getUserMock, strategyDataMock } = vi.hoisted(() => ({
-  getUserMock: vi.fn<() => Promise<{ data: { user: unknown } }>>(),
-  strategyDataMock: vi.fn<() => Promise<{ data: unknown }>>(),
-}));
+const { getUserMock, strategyDataMock, memberCountMock, memberCountReadMock, apiKeyManagerPropsMock } =
+  vi.hoisted(() => ({
+    getUserMock: vi.fn<() => Promise<{ data: { user: unknown } }>>(),
+    strategyDataMock: vi.fn<() => Promise<{ data: unknown }>>(),
+    // Phase 167.2 / KCS-23: the `strategy_keys` head-count answer the page's
+    // `countCompositeMembers` read receives. Default (set in beforeEach) is
+    // zero members, a single-key strategy.
+    memberCountMock: vi.fn<() => { count: number | null; error: { message: string } | null }>(),
+    // Records every `strategy_keys` read with the strategy id it was scoped to.
+    memberCountReadMock: vi.fn<(strategyId: unknown) => void>(),
+    // The props the page handed to <ApiKeyManager>, one call per render.
+    apiKeyManagerPropsMock: vi.fn<(props: Record<string, unknown>) => void>(),
+  }));
 
+// Extended DELIBERATELY for KCS-23 (dispatch on the table name): `strategies`
+// keeps its original chain, `strategy_keys` answers the queued head count, and
+// any other table throws so a read the page was never meant to make fails loud.
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
     auth: { getUser: getUserMock },
-    from: () => ({
-      select: () => ({
-        eq: () => ({
-          eq: () => ({
-            single: () => strategyDataMock(),
+    from: (table: string) => {
+      if (table === "strategies") {
+        return {
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                single: () => strategyDataMock(),
+              }),
+            }),
           }),
-        }),
-      }),
-    }),
+        };
+      }
+      if (table === "strategy_keys") {
+        return {
+          select: (_cols: string, opts?: { count?: string; head?: boolean }) => {
+            if (opts?.count !== "exact" || opts?.head !== true) {
+              throw new Error("strategy_keys must be head-counted, never read");
+            }
+            return {
+              eq: (_col: string, strategyId: unknown) => {
+                memberCountReadMock(strategyId);
+                return Promise.resolve(memberCountMock());
+              },
+            };
+          },
+        };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    },
   })),
 }));
 
@@ -62,8 +94,10 @@ vi.mock("@/components/strategy/StrategyForm", () => ({
     React.createElement("form", { "data-testid": "strategy-form" }),
 }));
 vi.mock("@/components/strategy/ApiKeyManager", () => ({
-  ApiKeyManager: () =>
-    React.createElement("div", { "data-testid": "api-key-manager" }),
+  ApiKeyManager: (props: Record<string, unknown>) => {
+    apiKeyManagerPropsMock(props);
+    return React.createElement("div", { "data-testid": "api-key-manager" });
+  },
 }));
 // Issue #12 (v0.24.5.22): the legacy `CsvUpload` component was deleted —
 // it mislabeled `daily_return` as "PnL" and wrote synthetic trade rows
@@ -91,6 +125,7 @@ beforeEach(() => {
   getUserMock.mockResolvedValue({
     data: { user: { id: "u-owner-1" } },
   });
+  memberCountMock.mockReturnValue({ count: 0, error: null });
 });
 
 async function renderEditPage() {
@@ -185,5 +220,95 @@ describe("EditStrategyPage source-conditional panels (UAT 2026-05-17)", () => {
     expect(
       screen.queryByTestId("key-permission-badge"),
     ).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Phase 167.2 / KCS-23: the page tells the key card whether the strategy is a
+ * composite. On a composite the card offers no control that rewrites
+ * `strategies.api_key_id` (that write would silently make it a single-key
+ * strategy); when the member count cannot be read the card gets "unknown" and
+ * fails closed on those controls, while the PAGE still renders, because the
+ * card's `Update password` and `Delete` are the remedy the /strategies
+ * "Sign-in failed" pill sends the owner here for.
+ */
+describe("EditStrategyPage composite shape (KCS-23)", () => {
+  const apiStrategy = {
+    id: STRATEGY_ID,
+    name: "Synthetic Composite",
+    source: "wizard",
+    api_key_id: null,
+    supported_exchanges: ["OKX"],
+  };
+
+  function lastKeyShape() {
+    const calls = apiKeyManagerPropsMock.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[calls.length - 1][0].keyShape;
+  }
+
+  it("COMPOSITE-PROP: two strategy_keys members pass keyShape \"composite\" to the key card", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({ count: 2, error: null });
+    await renderEditPage();
+
+    expect(memberCountReadMock).toHaveBeenCalledWith(STRATEGY_ID);
+    expect(screen.getByTestId("api-key-manager")).toBeInTheDocument();
+    expect(lastKeyShape()).toBe("composite");
+  });
+
+  it("SINGLE-PROP: zero strategy_keys members pass keyShape \"single\"", async () => {
+    strategyDataMock.mockResolvedValue({
+      data: { ...apiStrategy, api_key_id: "key-synthetic-1" },
+    });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    await renderEditPage();
+
+    expect(memberCountReadMock).toHaveBeenCalledWith(STRATEGY_ID);
+    expect(lastKeyShape()).toBe("single");
+  });
+
+  it("COUNT-FAILS: an unreadable member count renders the page with keyShape \"unknown\" and logs the strategy id server-side", async () => {
+    strategyDataMock.mockResolvedValue({ data: apiStrategy });
+    memberCountMock.mockReturnValue({
+      count: null,
+      error: { message: "synthetic permission denied" },
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await renderEditPage();
+
+      expect(screen.getByTestId("api-key-manager")).toBeInTheDocument();
+      expect(lastKeyShape()).toBe("unknown");
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining("composite member count failed"),
+        expect.objectContaining({
+          id: STRATEGY_ID,
+          message: expect.stringContaining("synthetic permission denied"),
+        }),
+      );
+      // The error text reaches the server log only, never the card's props.
+      const props = apiKeyManagerPropsMock.mock.calls.at(-1)![0];
+      expect(JSON.stringify(props)).not.toContain("synthetic permission denied");
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("CSV-NO-COUNT: a CSV strategy performs no strategy_keys read", async () => {
+    strategyDataMock.mockResolvedValue({
+      data: {
+        id: STRATEGY_ID,
+        name: "Synthetic CSV",
+        source: "csv",
+        api_key_id: null,
+        supported_exchanges: [],
+      },
+    });
+    await renderEditPage();
+
+    expect(screen.getByTestId("csv-edit-note")).toBeInTheDocument();
+    expect(memberCountReadMock).not.toHaveBeenCalled();
+    expect(apiKeyManagerPropsMock).not.toHaveBeenCalled();
   });
 });

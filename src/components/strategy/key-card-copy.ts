@@ -153,3 +153,16 @@ export const PANEL_STOP_COPY = {
     )}, so it may still be running. Reload this page to see the latest status before you sync again.`,
   },
 } as const satisfies Record<PanelStopReason, { label: string; detail: string }>;
+
+// ---------------------------------------------------------------------------
+// KCS-23 (UI-SPEC § KCS-23, S3): a composite strategy's key card offers no
+// control that rewrites `strategies.api_key_id`, and says why in one line.
+// ---------------------------------------------------------------------------
+
+/**
+ * KCS23-COMPOSITE. Rendered directly under the `Exchange API Keys` header when
+ * the strategy is a composite. `support@quantalyze.com` is plain text, not a
+ * `mailto:` link, following the shipped csv-finalize precedent.
+ */
+export const COMPOSITE_CARD_NOTE =
+  "This composite strategy reads from every key below. Keys are not linked or synced from this card: contact support@quantalyze.com to change which keys it uses or to re-run its computation.";

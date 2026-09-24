@@ -9,6 +9,7 @@ import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "./ApiKeyForm";
 import {
   addKeyBlockedReason,
+  COMPOSITE_CARD_NOTE,
   ENQUEUE_BOUND_MS,
   LINK_UPDATE_BOUND_MS,
   type PanelStopReason,
@@ -29,6 +30,16 @@ interface ApiKeyManagerProps {
   strategyId: string;
   currentKeyId: string | null;
   defaultExchange?: string;
+  /**
+   * Phase 167.2 / KCS-23: what the edit page could tell about the strategy.
+   * "single" means NOT a composite (a single-key or an unlinked strategy, both
+   * of which may be linked from this card); "composite" is a strategy with
+   * `strategy_keys` members; "unknown" is a member count the page could not
+   * read. A card-local tri-state, deliberately not `StrategyShape` from
+   * `@/lib/strategy-shape`, whose csv and unlinked arms this card does not
+   * need. Defaults to "single", so every existing render is unchanged.
+   */
+  keyShape?: "single" | "composite" | "unknown";
 }
 
 /**
@@ -188,7 +199,25 @@ const BASELINE_READ_BOUND_MS = 15_000;
 const DELETE_FAILED_COPY =
   "Failed to delete key. Try again, and contact support if it keeps failing.";
 
-export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: ApiKeyManagerProps) {
+export function ApiKeyManager({
+  strategyId,
+  currentKeyId,
+  defaultExchange,
+  keyShape = "single",
+}: ApiKeyManagerProps) {
+  /**
+   * Phase 167.2 / KCS-23: may this card offer a control that writes
+   * `strategies.api_key_id` (Resync, Use & Sync, Add Key)? Only when the page
+   * knows the strategy is NOT a composite. `handleLinkKey` writes that column
+   * unconditionally, so on a composite `Use & Sync` would silently turn it into
+   * a single-key strategy, and `Add Key` links the new key the same way. An
+   * "unknown" shape fails closed on these controls, since it might be a
+   * composite, but NOT on the remedy controls: `Update password`, `Delete` and
+   * each key's pill stay, because the /strategies "Sign-in failed" pill links
+   * here for exactly that remedy. The three link handlers also return early
+   * when this is false (defence in depth behind the missing buttons).
+   */
+  const linkControlsAllowed = keyShape === "single";
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -501,6 +530,9 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     // is defence in depth behind the disabled Connect Key. `addInFlightRef` is
     // checked too because, unlike `loading`, it is never read stale.
     if (loading || addInFlightRef.current || attemptRef.current !== null) return;
+    // KCS-23: an add links the new key to this strategy (via the tracked
+    // attempt's `handleLinkKey`), which a composite or unknown shape forbids.
+    if (!linkControlsAllowed) return;
     addInFlightRef.current = true;
     setLoading(true);
     setError(null);
@@ -622,6 +654,13 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   }
 
   async function handleLinkKey(keyId: string) {
+    // KCS-23: the one write of `strategies.api_key_id` on this card. Never on a
+    // composite, nor on a strategy the page could not classify. It throws
+    // rather than returning, so a caller cannot go on to sync as if the key
+    // were linked.
+    if (!linkControlsAllowed) {
+      throw new Error("This strategy's keys are not linked from this card.");
+    }
     const supabase = createClient();
     // C1/FINDING-4: destructure and throw on error so handleSyncTrades
     // cannot proceed to /api/keys/sync against the wrong api_key_id when
@@ -758,6 +797,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     // this is the handler guard behind those disables, and the one that covers
     // the panel's Retry and the post-add call, which no card button gates.
     if (addInFlightRef.current || attemptRef.current !== null) return;
+    // KCS-23: every sync from this card first re-links the strategy to `keyId`
+    // (`handleLinkKey`), so none starts on a composite or an unknown shape. This
+    // also covers the panel's Retry and the post-add call.
+    if (!linkControlsAllowed) return;
     // The attempt is registered BEFORE any await, so `handleSyncStatusChange`
     // and anything else that checks `attemptRef` see it as live from the first
     // click.
@@ -943,14 +986,21 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-text-primary">Exchange API Keys</h2>
-        {!showForm && (
+        {linkControlsAllowed && !showForm && (
           <Button size="sm" onClick={() => setShowForm(true)}>
             Add Key
           </Button>
         )}
       </div>
 
-      {showForm && (
+      {/* KCS-23 (UI-SPEC S3): the one line that explains the missing link
+          controls, directly under the header. Only for a composite: an
+          "unknown" shape gets no copy (UI-SPEC defines none; the page logs). */}
+      {keyShape === "composite" && (
+        <p className="text-xs text-text-muted">{COMPOSITE_CARD_NOTE}</p>
+      )}
+
+      {linkControlsAllowed && showForm && (
         <ApiKeyForm
           onSubmit={handleAddKey}
           onCancel={() => { setShowForm(false); setError(null); }}
@@ -1021,7 +1071,9 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
               </div>
             </div>
             <div className="flex items-center gap-2">
-              {key.id === currentKeyId ? (
+              {/* KCS-23: no Resync / Use & Sync on a composite or an unknown
+                  shape; both write `strategies.api_key_id`. */}
+              {!linkControlsAllowed ? null : key.id === currentKeyId ? (
                 <Button
                   size="sm"
                   variant="ghost"

@@ -6,6 +6,8 @@ import { ApiKeyManager } from "@/components/strategy/ApiKeyManager";
 import { CsvStrategyEditNote } from "@/components/strategy/CsvStrategyEditNote";
 import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import type { Strategy } from "@/lib/types";
+import { countCompositeMembers } from "@/lib/strategy-shape";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { redirect } from "next/navigation";
 
 export default async function EditStrategyPage({
@@ -31,6 +33,35 @@ export default async function EditStrategyPage({
         Strategy not found.
       </div>
     );
+  }
+
+  // Phase 167.2 / KCS-23: is this strategy a composite? Its key card must then
+  // offer no control that rewrites `strategies.api_key_id` (Use & Sync, Resync,
+  // Add Key), because that write silently turns a composite into a single-key
+  // strategy. Read on the request client (RLS `strategy_keys_owner`) and only
+  // for an API-key-backed strategy: a CSV strategy renders no key card.
+  // An unreadable count is "unknown", NOT a page failure: the card then offers
+  // no link control (it might be a composite) but keeps `Update password`,
+  // `Delete` and each key's pill, because the "Sign-in failed" pill on
+  // /strategies links here for exactly that remedy. The message is logged
+  // server-side only; the card receives the shape and no error text.
+  let keyShape: "single" | "composite" | "unknown" = "single";
+  if (strategy.source !== "csv") {
+    // The generated types predate `strategy_keys`; the cast is type-only and
+    // RLS still applies to this request client (see strategy-shape.ts).
+    const memberCount = await countCompositeMembers(
+      supabase as unknown as SupabaseClient,
+      strategy.id,
+    );
+    if (memberCount.ok) {
+      keyShape = memberCount.count > 0 ? "composite" : "single";
+    } else {
+      console.error("[strategies/edit/page] composite member count failed", {
+        id: strategy.id,
+        message: memberCount.message,
+      });
+      keyShape = "unknown";
+    }
   }
 
   return (
@@ -72,6 +103,7 @@ export default async function EditStrategyPage({
                 strategyId={strategy.id}
                 currentKeyId={strategy.api_key_id}
                 defaultExchange={strategy.supported_exchanges?.[0]?.toLowerCase()}
+                keyShape={keyShape}
               />
               {/*
                 Sprint 5 Task 5.8: live key-scope viewer. Only the strategy

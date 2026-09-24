@@ -3473,3 +3473,214 @@ describe("[167-06] the persisted credential state renders on the manager's key c
     });
   });
 });
+
+/**
+ * Phase 167.2 / KCS-23 — a COMPOSITE strategy's key card offers no control that
+ * rewrites `strategies.api_key_id`.
+ *
+ * WHY. `handleLinkKey` writes `strategies.api_key_id` unconditionally, and both
+ * `Use & Sync` / `Resync` (through `handleSyncTrades`) and `Add Key` (through
+ * the post-add tracked attempt) reach it. On a composite that write silently
+ * re-links the strategy to ONE key, turning it into a single-key strategy: a
+ * data-integrity defect with nothing on screen to say it happened. The oracle
+ * is `strategiesUpdateMock`, which records every `strategies.update` payload;
+ * a composite card must never make it fire.
+ *
+ * An "unknown" shape (the page could not read the member count) fails closed on
+ * the same link controls, but NOT on the remedy controls: the /strategies
+ * "Sign-in failed" pill links to this page for `Update password` and `Delete`.
+ *
+ * Oracles are hand-typed, never imported from key-card-copy.ts.
+ */
+describe("ApiKeyManager — KCS-23 composite key card", () => {
+  const COMPOSITE_NOTE_ORACLE =
+    "This composite strategy reads from every key below. Keys are not linked or synced from this card: contact support@quantalyze.com to change which keys it uses or to re-run its computation.";
+  const EMPTY_COPY_ORACLE =
+    "No API keys connected. Add a read-only exchange key to import your trading data.";
+
+  function keyRow(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      id: "key-synthetic-a",
+      user_id: "user-a",
+      exchange: "binance",
+      label: "Synthetic Key A",
+      is_active: true,
+      sync_status: "complete",
+      last_sync_at: "2026-04-19T11:58:00Z",
+      account_balance_usdt: 1000,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+      venue_account_id: null,
+      ...overrides,
+    };
+  }
+
+  const threeKeys = () => [
+    keyRow({ id: "key-synthetic-a", label: "Synthetic Key A" }),
+    keyRow({ id: "key-synthetic-b", label: "Synthetic Key B", exchange: "okx" }),
+    keyRow({
+      id: "key-synthetic-m",
+      label: "Synthetic MT5",
+      exchange: "mt5",
+      venue_account_id: "synth5678",
+    }),
+  ];
+
+  async function renderCard(
+    rows: ReturnType<typeof keyRow>[],
+    keyShape?: "single" | "composite" | "unknown",
+    currentKeyId: string | null = null,
+  ) {
+    selectResultMock.mockReturnValue({ data: rows, error: null });
+    await act(async () => {
+      render(
+        <ApiKeyManager
+          strategyId="strat-composite-1"
+          currentKeyId={currentKeyId}
+          {...(keyShape ? { keyShape } : {})}
+        />,
+      );
+    });
+    if (rows.length > 0) {
+      await waitFor(() => {
+        expect(screen.getByText(rows[0].label as string)).toBeInTheDocument();
+      });
+    } else {
+      await waitFor(() => {
+        expect(screen.getByText(EMPTY_COPY_ORACLE)).toBeInTheDocument();
+      });
+    }
+  }
+
+  const LINK_BUTTON_NAMES = [/^Resync$/, /^Use & Sync$/, /Add Key/];
+
+  function expectNoLinkControls() {
+    for (const name of LINK_BUTTON_NAMES) {
+      expect(screen.queryAllByRole("button", { name })).toHaveLength(0);
+    }
+    // No Add Key form either (its submit is Connect Key).
+    expect(screen.queryByRole("button", { name: "Connect Key" })).not.toBeInTheDocument();
+  }
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+    strategiesUpdateMock.mockReset();
+    capturedOnStatusChange = null;
+    capturedOnRetry = null;
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("COMPOSITE-NO-LINK: a composite card with three keys shows no Resync, Use & Sync or Add Key, keeps Update password and Delete, and never writes api_key_id", async () => {
+    // Even with one key matching currentKeyId (a composite whose legacy
+    // api_key_id still points at a member), no Resync is offered.
+    await renderCard(threeKeys(), "composite", "key-synthetic-a");
+
+    expectNoLinkControls();
+    for (const id of ["key-synthetic-a", "key-synthetic-b", "key-synthetic-m"]) {
+      const card = screen.getByTestId(`api-key-card-${id}`);
+      expect(within(card).getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    }
+    expect(
+      within(screen.getByTestId("api-key-card-key-synthetic-m")).getByRole("button", {
+        name: "Update password",
+      }),
+    ).toBeInTheDocument();
+    // The MT5 account line and the key's own identity are unchanged.
+    expect(screen.getByText("MT5 account synth5678")).toBeInTheDocument();
+    expect(strategiesUpdateMock).not.toHaveBeenCalled();
+  });
+
+  it("COMPOSITE-NOTE: the one line under the header is KCS23-COMPOSITE, character for character", async () => {
+    await renderCard(threeKeys(), "composite");
+
+    const note = screen.getByText(/^This composite strategy reads from every key below\./);
+    expect(note.tagName).toBe("P");
+    expect(note.textContent).toBe(COMPOSITE_NOTE_ORACLE);
+    expect(note).toHaveClass("text-xs", "text-text-muted");
+    // Directly under the header row, above every key card.
+    const header = screen.getByRole("heading", { name: "Exchange API Keys" });
+    expect(header.parentElement!.nextElementSibling).toBe(note);
+    expect(screen.getAllByText(COMPOSITE_NOTE_ORACLE)).toHaveLength(1);
+  });
+
+  it("COMPOSITE-EMPTY: a composite with zero readable keys shows the existing empty copy plus the note, and no Add Key", async () => {
+    await renderCard([], "composite");
+
+    expect(screen.getByText(EMPTY_COPY_ORACLE)).toBeInTheDocument();
+    expect(screen.getByText(COMPOSITE_NOTE_ORACLE)).toBeInTheDocument();
+    expectNoLinkControls();
+    expect(strategiesUpdateMock).not.toHaveBeenCalled();
+  });
+
+  it("SHAPE-UNKNOWN-REMEDY: an unknown shape offers no link control and no composite note, but keeps the Sign-in failed pill, Update password and Delete", async () => {
+    await renderCard(
+      [
+        keyRow({
+          id: "key-synthetic-m",
+          label: "Synthetic MT5",
+          exchange: "mt5",
+          sync_status: "sign_in_failed",
+          venue_account_id: "synth5678",
+        }),
+      ],
+      "unknown",
+      "key-synthetic-m",
+    );
+
+    expectNoLinkControls();
+    expect(screen.queryByText(/composite strategy/i)).not.toBeInTheDocument();
+
+    const card = screen.getByTestId("api-key-card-key-synthetic-m");
+    expect(within(card).getByTestId("allocator-sync-pill").textContent).toBe("Sign-in failed");
+    expect(within(card).getByRole("button", { name: "Delete" })).toBeEnabled();
+    const updatePassword = within(card).getByRole("button", { name: "Update password" });
+    expect(updatePassword).toBeEnabled();
+
+    // The remedy is reachable: Update password opens its form.
+    await act(async () => {
+      fireEvent.click(updatePassword);
+    });
+    const dialog = Array.from(document.querySelectorAll("dialog")).find((d) =>
+      d.textContent?.includes("New password"),
+    );
+    expect(dialog).toBeTruthy();
+    expect(dialog).toHaveAttribute("open");
+    expect(strategiesUpdateMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "keyShape omitted", keyShape: undefined },
+    { label: "keyShape \"single\"", keyShape: "single" as const },
+  ])(
+    "SINGLE-UNCHANGED ($label): Resync, Use & Sync and Add Key render as before, with no composite note",
+    async ({ keyShape }) => {
+      await renderCard(
+        [
+          keyRow({ id: "key-synthetic-a", label: "Synthetic Key A" }),
+          keyRow({ id: "key-synthetic-b", label: "Synthetic Key B", exchange: "okx" }),
+        ],
+        keyShape,
+        "key-synthetic-a",
+      );
+
+      expect(
+        within(screen.getByTestId("api-key-card-key-synthetic-a")).getByRole("button", {
+          name: "Resync",
+        }),
+      ).toBeInTheDocument();
+      expect(
+        within(screen.getByTestId("api-key-card-key-synthetic-b")).getByRole("button", {
+          name: "Use & Sync",
+        }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Add Key" })).toBeInTheDocument();
+      expect(screen.queryByText(/composite strategy/i)).not.toBeInTheDocument();
+    },
+  );
+});
