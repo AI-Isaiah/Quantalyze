@@ -89,6 +89,15 @@ export interface LiveHoldingsSummary {
    *  or negative and is still sourced from a key whose numbers are not current
    *  (D-07). Because of that, `amount <= total` is NOT an invariant. */
   untrusted: LiveHoldingsPart;
+  /** Review WR-05. The part of `total` from holdings whose `api_key_id` is not
+   *  in `statusByKeyId` at all. `allocator_holdings.api_key_id` is NOT NULL, so
+   *  an absent entry means the key list dropped the key (for example an
+   *  unsupported exchange), never "no key". Its status is UNKNOWN: treating it
+   *  as trusted would under-state the part of the figure nobody can vouch for,
+   *  and counting it as untrusted would claim a status it may not have. Only
+   *  the degrade branch can sum such a holding (the contributing set is a
+   *  subset of the `apiKeys` ids), but a disclosure must not fail open. */
+  unknownStatus: LiveHoldingsPart;
   /** CONTEXT D-20's `$Y`: holdings the contributing-set narrowing dropped from
    *  `total` whose key is untrusted, MINUS the keys the payload names as
    *  manager-side (`managerSideApiKeyIds`). A manager-side key's holdings are
@@ -143,6 +152,7 @@ export function summarizeLiveHoldings(args: {
   const out: LiveHoldingsSummary = {
     total: 0,
     untrusted: { amount: 0, count: 0, unavailable: 0 },
+    unknownStatus: { amount: 0, count: 0, unavailable: 0 },
     excludedUntrusted: { amount: 0, count: 0, unavailable: 0 },
   };
   const addTo = (part: LiveHoldingsPart, h: DashboardHolding, equity: number) => {
@@ -172,7 +182,13 @@ export function summarizeLiveHoldings(args: {
       continue;
     }
     out.total += equity;
-    if (untrusted) addTo(out.untrusted, h, equity);
+    if (untrusted) {
+      addTo(out.untrusted, h, equity);
+    } else if (!args.statusByKeyId.has(h.api_key_id)) {
+      // WR-05: an ABSENT status is unknown, not trusted. `.has`, not a check
+      // on the looked-up value: a key present with a null status is trusted.
+      addTo(out.unknownStatus, h, equity);
+    }
   }
   return out;
 }

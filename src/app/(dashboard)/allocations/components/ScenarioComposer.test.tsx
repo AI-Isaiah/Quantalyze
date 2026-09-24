@@ -15939,6 +15939,106 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     expect(screen.getAllByTestId("scenario-aum-untrusted-note")).toHaveLength(1);
   });
 
+  // ── THE MISSING-KEY BOOK (review WR-05) ──────────────────────────────────
+  // A payload asserting book entry with an EMPTY contributing set (the degrade
+  // branch, the one place such a holding is summed), and a third holding whose
+  // key is absent from apiKeys (the key list dropped it).
+  const AT_KEY_MISSING = "aumtrust-key-h";
+  function atMissingKeyBook(
+    secondKeyStatus: string | null,
+  ): MyAllocationDashboardPayload {
+    return makePayload({
+      apiKeys: [
+        winApiKey(AT_KEY_TRUSTED),
+        { ...winApiKey(AT_KEY_SIGN_IN_FAILED), sync_status: secondKeyStatus },
+      ],
+      holdingsSummary: [
+        {
+          ...HOLDING_BTC,
+          venue: "binance",
+          symbol: "AUMTRUST-A",
+          holding_type: "spot" as const,
+          value_usd: AT_TRUSTED_USD,
+          api_key_id: AT_KEY_TRUSTED,
+        },
+        {
+          ...HOLDING_BTC,
+          venue: "okx",
+          symbol: "AUMTRUST-B",
+          holding_type: "spot" as const,
+          value_usd: AT_UNTRUSTED_USD,
+          api_key_id: AT_KEY_SIGN_IN_FAILED,
+        },
+        {
+          ...HOLDING_BTC,
+          venue: "kraken",
+          symbol: "AUMTRUST-H",
+          holding_type: "spot" as const,
+          value_usd: 4_444,
+          api_key_id: AT_KEY_MISSING,
+        },
+      ],
+      perKeyReturnsByApiKeyId: {
+        [AT_KEY_TRUSTED]: AT_SERIES_A,
+        [AT_KEY_SIGN_IN_FAILED]: AT_SERIES_B,
+      },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: [...AT_ALL_KEYS],
+      allocatorEligibleApiKeyIds: [...AT_ALL_KEYS],
+      contributingApiKeyIds: [],
+      bookEntryGateSatisfied: true,
+    });
+  }
+
+  it("AUMTRUST review WR-05: a summed holding whose key is missing from apiKeys is disclosed as from a key with an unknown sync status — never read as trusted — and logged", () => {
+    // The degrade branch (a payload asserting book entry with an EMPTY
+    // contributing set) is the one place such a holding is summed.
+    //   trusted        (key-a, spot)            480,000
+    //   sign_in_failed (key-b, spot)             12,345
+    //   key missing from apiKeys (spot)           4,444
+    //   live total                              496,789
+    const payload = atMissingKeyBook("sign_in_failed");
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the third key really is absent from apiKeys.
+    expect(payload.apiKeys.map((k) => k.id)).not.toContain(AT_KEY_MISSING);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderAt(payload);
+
+      // D-03: the total is unchanged — the missing-key holding stays in.
+      expect(aumField().value).toBe("496789");
+      const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+      expect(markers).toHaveLength(1);
+      expect(markers[0].textContent).toBe(
+        "Includes $12,345 from keys needing attention and $4,444 from keys with an unknown sync status.",
+      );
+      expect(
+        errSpy.mock.calls.some((c) =>
+          String(c[0]).includes("missing from the key list"),
+        ),
+      ).toBe(true);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("AUMTRUST review WR-05: a missing-key holding alone (every listed key trusted) still renders the marker — the gate counts unknown-status holdings too", () => {
+    const payload = atMissingKeyBook(null);
+    expectDistinctTriples(payload);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderAt(payload);
+      expect(aumField().value).toBe("496789");
+      const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+      expect(markers).toHaveLength(1);
+      expect(markers[0].textContent).toBe(
+        "Includes $4,444 from keys with an unknown sync status.",
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
   it("AUMTRUST a11y (review WR-02): the PORTFOLIO AUM input's accessible description is whichever note qualifies its value — the State A disclosure, then the override note once a manual value is committed", () => {
     renderAt(atStateBBook());
     // State A: focus on the field announces the disclosure beside it. The

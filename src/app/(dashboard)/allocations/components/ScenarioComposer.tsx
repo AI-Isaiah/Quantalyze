@@ -707,14 +707,28 @@ type AddedMetricsState = "pending" | "settled" | "unavailable";
  * or sync error is interpolated: the clause carries a dollar sum and a constant
  * noun, nothing a venue supplied.
  */
-function buildUntrustedAumClause(included: LiveHoldingsPart): string {
-  const clause = `includes ${formatUsd(included.amount)} from ${UNTRUSTED_KEY_SET_NOUN}`;
+function buildUntrustedAumClause(
+  untrusted: LiveHoldingsPart,
+  unknownStatus: LiveHoldingsPart,
+): string {
+  // Review WR-05: a summed holding whose key is missing from `apiKeys` has an
+  // UNKNOWN status. It is named as such, never folded into the untrusted noun
+  // (that noun is the Holdings tab filter's, and those rows are not in it).
+  const parts: string[] = [];
+  if (untrusted.count > 0) {
+    parts.push(`${formatUsd(untrusted.amount)} from ${UNTRUSTED_KEY_SET_NOUN}`);
+  }
+  if (unknownStatus.count > 0) {
+    parts.push(`${formatUsd(unknownStatus.amount)} from keys with an unknown sync status`);
+  }
+  const clause = `includes ${parts.join(" and ")}`;
   // Review WR-03: a holding whose equity was not reported is summed as 0, and
   // the amount above cannot show that. Say how many, so a defaulted 0 is
   // never read as a known figure.
-  if (included.unavailable === 0) return clause;
-  const noun = included.unavailable === 1 ? "holding" : "holdings";
-  return `${clause} (value unavailable for ${included.unavailable} ${noun})`;
+  const unavailable = untrusted.unavailable + unknownStatus.unavailable;
+  if (unavailable === 0) return clause;
+  const noun = unavailable === 1 ? "holding" : "holdings";
+  return `${clause} (value unavailable for ${unavailable} ${noun})`;
 }
 
 /** Sentence-cases a clause built above, for the standalone sentence form. */
@@ -4202,6 +4216,17 @@ export function ScenarioComposer({
     ],
   );
   const liveHoldingsSum = liveHoldingsSummary.total;
+  // Review WR-05 — a summed holding whose key the key list dropped is a payload
+  // the dashboard did not expect (only the degrade branch can sum one). The
+  // marker discloses it; this makes it loud for whoever reads the console.
+  const unknownStatusCount = liveHoldingsSummary.unknownStatus.count;
+  useEffect(() => {
+    if (unknownStatusCount > 0) {
+      console.error(
+        `[ScenarioComposer] ${unknownStatusCount} summed holding(s) reference a key missing from the key list; disclosed as an unknown sync status`,
+      );
+    }
+  }, [unknownStatusCount]);
 
   // Phase 151 AUM-01 — SANITIZE-ON-READ (the sanitizeLeverageMap precedent at
   // the decode sites above). The persisted value is untrusted: the codec
@@ -4674,7 +4699,8 @@ export function ScenarioComposer({
     sanitizedManualAum !== liveHoldingsSum;
   const showUntrustedMarker =
     entryMode === "book" &&
-    liveHoldingsSummary.untrusted.count > 0 &&
+    (liveHoldingsSummary.untrusted.count > 0 ||
+      liveHoldingsSummary.unknownStatus.count > 0) &&
     (fieldShowsLive || overrideNoteShowsLive);
   // Review WR-02 — the note that qualifies the field's value is its accessible
   // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the
@@ -4949,7 +4975,10 @@ export function ScenarioComposer({
             className="text-xs text-text-muted"
           >
             {capitalizeFirst(
-              buildUntrustedAumClause(liveHoldingsSummary.untrusted),
+              buildUntrustedAumClause(
+                liveHoldingsSummary.untrusted,
+                liveHoldingsSummary.unknownStatus,
+              ),
             )}
             .
           </span>
@@ -4980,7 +5009,10 @@ export function ScenarioComposer({
               <>
                 , which{" "}
                 <span data-testid="scenario-aum-untrusted-note">
-                  {buildUntrustedAumClause(liveHoldingsSummary.untrusted)}
+                  {buildUntrustedAumClause(
+                liveHoldingsSummary.untrusted,
+                liveHoldingsSummary.unknownStatus,
+              )}
                 </span>
               </>
             )}

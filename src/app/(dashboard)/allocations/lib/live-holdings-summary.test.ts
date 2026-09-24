@@ -71,6 +71,8 @@ const KEY_REVOKED = "aumtrust-key-d";
 const KEY_ERROR = "aumtrust-key-e";
 const KEY_SIGN_IN_FAILED_OUTSIDE = "aumtrust-key-f";
 const KEY_SIGN_IN_FAILED_NO_PNL = "aumtrust-key-g";
+/** Deliberately ABSENT from STATUS_BY_KEY_ID: a key the key list dropped. */
+const KEY_MISSING_FROM_API_KEYS = "aumtrust-key-h";
 
 const STATUS_BY_KEY_ID: ReadonlyMap<string, string | null> = new Map<
   string,
@@ -160,8 +162,18 @@ const H_SIGN_IN_FAILED_NO_PNL = buildHolding({
   api_key_id: KEY_SIGN_IN_FAILED_NO_PNL,
 });
 
+/** A holding whose key is not in `apiKeys` (e.g. dropped by the key list for
+ *  an unsupported exchange). Its status is unknown, not trusted (WR-05). */
+const H_MISSING_KEY = buildHolding({
+  venue: "venue-h",
+  symbol: "AUMTRUST-H",
+  value_usd: 4_444,
+  api_key_id: KEY_MISSING_FROM_API_KEYS,
+});
+
 const ALL_HOLDINGS = [
   H_TRUSTED,
+  H_MISSING_KEY,
   H_SIGN_IN_FAILED,
   H_SIGN_IN_FAILED_DERIV,
   H_REVOKED,
@@ -234,6 +246,8 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     // number, and must not be what the helper returns.
     expect(s.total).not.toBe(480_000);
     expect(s.untrusted).toEqual({ amount: 12_345, count: 1, unavailable: 0 });
+    // A key that IS in apiKeys with a null status is trusted, not unknown.
+    expect(s.unknownStatus).toEqual({ amount: 0, count: 0, unavailable: 0 });
   });
 
   it("pin 2 (D-04 / D-07): the untrusted amount is exactly the untrusted subset on the EQUITY basis — a derivative adds its -2,500 P&L, never its 900,000 notional, and is COUNTED although its amount is <= 0", () => {
@@ -323,6 +337,28 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     // 800,000 notional never leaks in.
     expect(s.total).toBe(492_345);
     expect(s.untrusted).toEqual({ amount: 12_345, count: 2, unavailable: 1 });
+  });
+
+  it("review WR-05: a summed holding whose key is missing from apiKeys is status UNKNOWN, not trusted — it stays in the total and is counted in unknownStatus, never in untrusted", () => {
+    // Degrade branch (empty contributing set), where such a holding is summed.
+    const s = summarize({
+      holdings: [H_TRUSTED, H_SIGN_IN_FAILED, H_MISSING_KEY],
+      contributing: [],
+    });
+    // D-03: 480,000 + 12,345 + 4,444 = 496,789, unchanged.
+    expect(s.total).toBe(496_789);
+    expect(s.untrusted).toEqual({ amount: 12_345, count: 1, unavailable: 0 });
+    expect(s.unknownStatus).toEqual({ amount: 4_444, count: 1, unavailable: 0 });
+  });
+
+  it("review WR-05: a missing-key holding the narrowing drops is in neither the total nor unknownStatus", () => {
+    const s = summarize({
+      holdings: [H_TRUSTED, H_MISSING_KEY],
+      contributing: [KEY_TRUSTED],
+    });
+    expect(s.total).toBe(480_000);
+    expect(s.unknownStatus).toEqual({ amount: 0, count: 0, unavailable: 0 });
+    expect(s.excludedUntrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
   });
 
   it("D-20 (review WR-01): excludedUntrusted is D-20's $Y — a sign_in_failed MANAGER-SIDE key outside the contributing set is not the allocator's book and is left out, while an allocator-eligible sign_in_failed key with no series and an indistinguishable revoked key stay in", () => {
