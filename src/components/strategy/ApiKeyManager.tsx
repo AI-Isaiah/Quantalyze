@@ -132,8 +132,10 @@ function isSyncEnqueued(body: unknown): boolean {
  * below is kept as a second line: it is what makes this component's rule
  * independent of how the panel gates its poll.
  *
- * ENDED-ATTEMPT BRANCHES. The attempt is registered before any await, so a
- * failure elsewhere (the post-add catch) sees it as live from the click. A
+ * ENDED-ATTEMPT BRANCHES. The attempt is registered before any await, so
+ * anything that checks `attemptRef` sees it as live from the click (until
+ * 167.2 KCS-01 that included an untracked post-add sync's catch; the post-add
+ * sync is now itself the tracked attempt). A
  * continuation of an attempt that has already ended (its terminal arrived, then
  * its own post-enqueue re-read threw, possibly after a NEWER attempt started)
  * may not write the panel or the marker: `endAttempt` answers false for it.
@@ -439,7 +441,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     // to POST /api/keys/validate-and-encrypt and create duplicate api_keys
     // rows. The Connect button is already disabled via `loading`, but Enter
     // inside an <Input> submits the form regardless and setLoading is async.
-    if (loading) return;
+    // Phase 167.2 / KCS-01: nor while a tracked attempt is live. The post-add
+    // sync runs AS the tracked attempt, and the card holds one attempt at a
+    // time, so an add during a live attempt could only collide with it.
+    if (loading || attemptRef.current !== null) return;
     setLoading(true);
     setError(null);
 
@@ -499,120 +504,53 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         throw new Error("Your key was verified but not saved. Please try again.");
       }
 
-      const supabase = createClient();
-
-      // NEW-C37-03: surface auto-link errors instead of swallowing them.
-      // Pre-fix: the {error} from the strategies.update was discarded; if
-      // RLS denied the update (stale cookie / not owner) the sync would
-      // run against the OLD api_key_id and present wrong data as success.
-      const { error: linkError } = await supabase
-        .from("strategies")
-        .update({ api_key_id: newKeyId })
-        .eq("id", strategyId);
-      if (linkError) {
-        throw new Error(
-          `Failed to link key to strategy: ${linkError.message}`,
-        );
-      }
-
-      // Phase 167 / 167-06, R5 (167-CONTEXT D-18): the panel's subject is
-      // about to move to the new key (`setLastAttemptedKeyId` below), and R2
-      // would then judge the new, healthy key instead. A success R2 was
-      // withholding beside the old key's failed sign-in would re-appear, so it
-      // is retired here, after the link succeeded. A failed validation or link
-      // throws before this point and leaves the subject where it was.
+      // Phase 167 / 167-06, R5 (167-CONTEXT D-18), kept by 167.2 KCS-05: the
+      // panel's subject is about to move to the new key (the tracked attempt
+      // below sets `lastAttemptedKeyId`), and R2 would then judge the new,
+      // healthy key instead. A success R2 was withholding beside the old key's
+      // failed sign-in would re-appear, so it is retired here. A failed
+      // validation throws before this point and leaves the subject where it was.
       // ⚠️ This guard reads the subject's trust status AS OF THE SUBMIT CLICK:
-      // the closure is that render's. A re-read landing during the validate or
-      // link awaits above can make it stale. Only a success line is affected,
-      // because the updater is functional and returns every in-flight value
-      // unchanged. That is a residual, named beside the cross-tab one in D-18
-      // (a change made in another tab reaches this tab only through a re-read),
-      // and neither is fixed here. While a tracked attempt is live the subject
-      // does not move (below) and this is a no-op: the panel is in flight.
+      // the closure is that render's. A re-read landing during the validate
+      // await above can make it stale. Only a success line is affected, because
+      // the updater is functional and returns every in-flight value unchanged.
+      // That is a residual, named beside the cross-tab one in D-18 (a change
+      // made in another tab reaches this tab only through a re-read), and
+      // neither is fixed here.
       retireWithheldSuccess();
 
-      // Auto-sync trades in background (don't block the UI).
-      //
-      // 140.3-08 / SEAMUX-05 (B-06) — observe the HTTP OUTCOME, not just a
-      // transport rejection. This was `fetch(…).catch(…)`, and the comment
-      // beside it claimed it handled 401/403/500 errors. It could not:
-      // `.catch()` fires ONLY when the request never completes, so every one
-      // of those — and a breaker 503 — RESOLVED the promise and was invisible.
-      // The user was told the key was added and nothing ever said the sync had
-      // not started.
+      setShowForm(false);
+
+      // Phase 167.2 / KCS-01: the sync after an add RUNS AS the card's one
+      // tracked attempt. `handleSyncTrades` registers the attempt before its
+      // first await, links the new key (NEW-C37-03: a failed link throws before
+      // any sync request is sent), sends the enqueue, applies
+      // `isSyncEnqueued`, enters `computing` and ends itself through
+      // `endAttempt`. So the post-add sync takes the in-flight marker, is
+      // polled, has the new key as its subject and Retry target, and reports
+      // its own failure on the panel with the route's own message.
       //
       // Still NOT awaited: "don't block the UI" is a real requirement and the
-      // add-key flow continues below regardless. The outcome is observed
-      // INSIDE the promise chain and routed to the same SyncProgress surface
-      // an explicit sync failure uses, so a failed background sync cannot be
-      // read as a completed one.
+      // add flow continues below regardless.
       //
-      // `lastAttemptedKeyId` is set so SyncProgress's Retry button has a
-      // target; without it the retry closure would see null and no-op (the
-      // pre-existing bug the state's own comment above records).
-      //
-      // 167-06 fix round (D-18): NOT while a tracked attempt is live. The panel
-      // then belongs to that attempt, and `lastAttemptedKeyId` is its subject
-      // (R2) and its Retry target. Moving it here judged that attempt's later
-      // success against the NEW key, so an untrusted key's success could show
-      // beside its own "Sign-in failed" pill. This post-add sync does not own
-      // the panel in that case (see the catch below).
-      if (attemptRef.current === null) setLastAttemptedKeyId(newKeyId);
-      fetch("/api/keys/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy_id: strategyId }),
-      })
-        .then(async (res) => {
-          if (!res.ok) throw new Error(await syncFailureMessage(res));
-          // Same enqueue-evidence requirement as the explicit sync below —
-          // one shape at both members of the class, not two.
-          const body: unknown = await res.json().catch(() => null);
-          if (!isSyncEnqueued(body)) throw new Error(SYNC_UNAVAILABLE_COPY);
-        })
-        .catch((err: unknown) => {
-          // FINDING-10: keep the operator log — it is how a never-synced key
-          // gets diagnosed, and the caught value goes HERE rather than to the
-          // DOM (140.3-07's B-27 discipline).
-          console.warn("[ApiKeyManager] background sync after key add failed:", err);
-          // Phase 167 / 167-06, R6 (167-CONTEXT D-18), as corrected in the
-          // 167-06 fix round: this failure never touches a live tracked
-          // attempt. This post-add sync is not registered in the one sync slot
-          // and the Add Key form is not modal, so it can fail while ANOTHER
-          // key's attempt is live. Writing `error` then stopped that attempt's
-          // poll and left its marker set, dead-locking every Resync and Use &
-          // Sync, and R4's and R5's remedy controls, until a reload. R6 as
-          // first shipped also cleared the marker here, which ended an attempt
-          // this failure did not stop: when the attempt was still awaiting its
-          // own enqueue, its 202 then resumed polling with no marker, so its
-          // key's pill claimed a credential state under a spinner and its
-          // Update password and Delete were enabled mid-attempt
-          // (167-REVIEW-06 CR-01).
-          // So, while an attempt is live, the panel and the marker are its own:
-          // it keeps polling and ends itself, and this failure reaches the
-          // console only. ⚠️ That loss is a named residual of the post-add sync
-          // bypassing the slot (D-18, routed to 167.2), not a claim that the
-          // failure does not matter. When no attempt is live the panel is idle
-          // or showing a finished attempt, and the failure is shown there
-          // (SEAMUX-05 / B-06).
-          if (attemptRef.current !== null) return;
-          // 167-06 fix round 2 (167-REVIEW-06-R2 WR-01): the failure shown is
-          // the NEW key's, so the panel's Retry must target the new key. The
-          // gate above `fetch` decided the subject once, at link time, and a
-          // tracked attempt on another key can have started (or been live) and
-          // then ENDED before this failure lands, leaving `lastAttemptedKeyId`
-          // on that key. Retry then re-linked the strategy to it, undoing this
-          // Add Key's link. So the subject moves here, with the failure. An
-          // `error` is never withheld (R2), so this move cannot re-show a
-          // success.
-          setLastAttemptedKeyId(newKeyId);
-          setSyncStatus("error");
-          setSyncError(
-            err instanceof Error ? err.message : SYNC_UNAVAILABLE_COPY,
-          );
-        });
-
-      setShowForm(false);
+      // LINEAGE of the untracked chain this call replaces, kept so the reasons
+      // are not lost with the code:
+      //  - 140.3-08 / SEAMUX-05 (B-06): it was `fetch(…).catch(…)`, which saw
+      //    only transport rejections, so a 401/403/500 or a breaker 503 was
+      //    invisible. It then observed the HTTP outcome and the enqueue
+      //    evidence, one shape at both call sites.
+      //  - FINDING-10: its catch kept an operator log. The tracked attempt's
+      //    failure now reaches the panel itself.
+      //  - 167-06 R6, as corrected in the 167-06 fix round (167-REVIEW-06
+      //    CR-01): it was never registered in the one sync slot, so it could
+      //    fail while ANOTHER key's attempt was live, and its failure then
+      //    reached the console only. That was the named residual (1) of D-18.
+      //  - 167-06 fix round 2 (167-REVIEW-06-R2 WR-01): the subject moved with
+      //    the failure so the panel's Retry targeted the new key.
+      // KCS-01 closes that residual: this sync IS the tracked attempt, and the
+      // overlap that made it untracked cannot start (Add Key is blocked while
+      // an attempt is live; no second attempt starts during an add).
+      void handleSyncTrades(newKeyId);
       await loadKeys();
       router.refresh();
     } catch (err) {
@@ -706,8 +644,13 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   }
 
   async function handleSyncTrades(keyId: string) {
-    // The attempt is registered BEFORE any await, so the post-add catch and
-    // `handleSyncStatusChange` see it as live from the first click.
+    // Phase 167.2 / KCS-01: the card never starts a second sync while one is
+    // live. Every Resync / Use & Sync is disabled then too; this is the handler
+    // guard behind that disable, and the one that protects the post-add call.
+    if (attemptRef.current !== null) return;
+    // The attempt is registered BEFORE any await, so `handleSyncStatusChange`
+    // and anything else that checks `attemptRef` see it as live from the first
+    // click.
     const attempt: SyncAttempt = { keyId, enqueued: false, settling: false };
     attemptRef.current = attempt;
     setSyncingKeyId(keyId);
