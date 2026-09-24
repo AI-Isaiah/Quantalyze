@@ -16026,6 +16026,14 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
   // A payload asserting book entry with an EMPTY contributing set (the degrade
   // branch, the one place such a holding is summed), and a third holding whose
   // key is absent from apiKeys (the key list dropped it).
+  //
+  // ⚠️ Review round 2 IN-06: SSR CANNOT EMIT THIS PAYLOAD. In production
+  // `bookEntryGateSatisfied === contributingApiKeyIds.length > 0`, so
+  // `bookEntryGateSatisfied: true` beside an empty contributing set never
+  // arrives. The cases built on this book pin a GUARD for a payload that
+  // breaks that invariant (the flag is read, not re-derived), not a state an
+  // allocator can reach today. Read a failure here as "the degrade branch
+  // stopped failing loud", not as a production regression.
   const AT_KEY_MISSING = "aumtrust-key-h";
   function atMissingKeyBook(
     secondKeyStatus: string | null,

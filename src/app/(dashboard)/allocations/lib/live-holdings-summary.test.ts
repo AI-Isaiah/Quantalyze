@@ -381,9 +381,9 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     expect(s.untrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
     // Hand-listed: 12,345 (allocator-eligible sign_in_failed) + 3,210
     // (revoked) = 15,555, two holdings. NOT 71,110 = 15,555 + 55,555, which is
-    // what counting the manager-side holding would give.
+    // what counting the manager-side holding would give; the exact toEqual
+    // already rules that out.
     expect(s.excludedUntrusted).toEqual({ amount: 15_555, count: 2, unavailable: 0 });
-    expect(s.excludedUntrusted.amount).not.toBe(71_110);
   });
 
   it("D-20 residual (review round 2 WR-03): a manager-side key OUTSIDE eligibleApiKeyIds (here soft-disconnected, so in neither eligible set) cannot be told apart, so its untrusted holdings ARE counted in excludedUntrusted — over-disclosed, never hidden", () => {
