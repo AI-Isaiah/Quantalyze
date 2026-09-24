@@ -29,6 +29,7 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES } from "@/lib/closed-sets";
 import { buildHoldingRef } from "./holding-outcome-adapter";
 import {
+  buildKeyTrustClause,
   holdingEquityContributionLocal,
   holdingEquityIsReported,
   managerSideKeyIds,
@@ -494,5 +495,77 @@ describe("holdingEquityIsReported — in lockstep with holdingEquityContribution
     // never leaks in.
     expect(s.total).toBe(492_345);
     expect(s.untrusted).toEqual({ amount: 12_345, count: 3, unavailable: 2 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-06 (b) — the "excludes" clause (founder answer 2026-09-24)
+// ---------------------------------------------------------------------------
+
+describe("buildKeyTrustClause — D-06 (b) excludes $Y from keys needing attention", () => {
+  // A deliberately plain renderer, so each oracle below is the reader's own
+  // arithmetic. The composer passes `formatUsd`; that wiring is pinned in the
+  // composer suite with the real renderer's output typed out.
+  const RENDER = {
+    amount: (n: number) => `$${n}`,
+    missing: "value",
+    unit: ["holding", "holdings"] as const,
+  };
+  const part = (amount: number, count: number, unavailable = 0) => ({
+    amount,
+    count,
+    unavailable,
+  });
+  const NONE = part(0, 0);
+
+  it("D-06 (b): with no excluded part the clause is byte-identical to the includes-only wording — Open Positions and every pre-D-06 composer string are untouched", () => {
+    expect(buildKeyTrustClause(part(12_345, 1), NONE, RENDER)).toBe(
+      "includes $12345 from keys needing attention",
+    );
+    expect(buildKeyTrustClause(part(12_345, 1), NONE, RENDER, NONE)).toBe(
+      "includes $12345 from keys needing attention",
+    );
+  });
+
+  it("D-06 (b): excludes only — the UI-SPEC § 3 row 'excludes $Y from keys needing attention'", () => {
+    expect(buildKeyTrustClause(NONE, NONE, RENDER, part(8_000, 1))).toBe(
+      "excludes $8000 from keys needing attention",
+    );
+  });
+
+  it("D-06 (b): includes and excludes — the noun is said ONCE, at the end (UI-SPEC § 3)", () => {
+    expect(
+      buildKeyTrustClause(part(12_345, 1), NONE, RENDER, part(8_000, 2)),
+    ).toBe("includes $12345 and excludes $8000 from keys needing attention");
+  });
+
+  it("D-06 (b) / D-07: the excluded part renders on its COUNT — a counted $0 still reads 'excludes $0', never nothing", () => {
+    expect(buildKeyTrustClause(NONE, NONE, RENDER, part(0, 1))).toBe(
+      "excludes $0 from keys needing attention",
+    );
+  });
+
+  it("D-06 (b) / review WR-03: an excluded holding whose value was not reported says so after the excludes part, never after the includes part", () => {
+    expect(buildKeyTrustClause(NONE, NONE, RENDER, part(0, 1, 1))).toBe(
+      "excludes $0 from keys needing attention (value unavailable for 1 holding)",
+    );
+    expect(
+      buildKeyTrustClause(part(12_345, 1), NONE, RENDER, part(8_000, 3, 2)),
+    ).toBe(
+      "includes $12345 from keys needing attention, and excludes $8000 from keys needing attention (value unavailable for 2 holdings)",
+    );
+  });
+
+  it("D-06 (b) / review WR-05: with an unknown-status part the includes side keeps each part's own noun, and the excludes part follows with its own", () => {
+    expect(
+      buildKeyTrustClause(part(12_345, 1), part(4_444, 1), RENDER, part(8_000, 1)),
+    ).toBe(
+      "includes $12345 from keys needing attention and $4444 from keys with an unknown sync status, and excludes $8000 from keys needing attention",
+    );
+    expect(
+      buildKeyTrustClause(NONE, part(4_444, 1), RENDER, part(8_000, 1)),
+    ).toBe(
+      "includes $4444 from keys with an unknown sync status, and excludes $8000 from keys needing attention",
+    );
   });
 });

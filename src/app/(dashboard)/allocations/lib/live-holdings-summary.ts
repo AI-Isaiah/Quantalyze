@@ -125,9 +125,12 @@ export interface LiveHoldingsSummary {
    *  `unknownStatus`, not a wider reading of this one. The "missing-key
    *  holding the narrowing drops" unit case pins today's behaviour.
    *
-   *  Nothing renders this yet. It exists so the D-06 pin can measure the
-   *  exclusion, and the founder's D-06 answer decides whether it is ever
-   *  disclosed. */
+   *  ⭐ D-06 RESOLVED 2026-09-24 by the founder: option (b). The composer
+   *  discloses this part as "excludes $Y from keys needing attention",
+   *  through `buildKeyTrustClause`. It is still never added to, or subtracted
+   *  from, `total` (D-03). The sentence that stood here until then ("Nothing
+   *  renders this yet … the founder's D-06 answer decides whether it is ever
+   *  disclosed") is superseded. */
   excludedUntrusted: LiveHoldingsPart;
 }
 
@@ -272,11 +275,21 @@ export interface KeyTrustClauseRender {
  *   count never reads as qualifying the other part's amount.
  * - A part renders on its COUNT, never its amount (D-07). The caller renders
  *   the clause only when at least one part has a count.
+ * - D-06 (b), founder answer 2026-09-24: an optional `excludedUntrusted` part
+ *   (D-20's `$Y`, dollars the composer's modelled-book narrowing left OUT of
+ *   the total) adds "excludes $Y from keys needing attention". When both
+ *   sides are plain amounts of the one untrusted set, the noun is said once,
+ *   at the end (UI-SPEC § 3): `includes $X and excludes $Y from keys needing
+ *   attention`. When the includes side carries a second noun or an
+ *   "(… unavailable …)" count, sharing the noun would misattribute it, so
+ *   each side keeps its own. A caller that passes no excluded part (Open
+ *   Positions) gets the includes-only wording, byte-identical to before.
  */
 export function buildKeyTrustClause(
   untrusted: LiveHoldingsPart,
   unknownStatus: LiveHoldingsPart,
   render: KeyTrustClauseRender,
+  excludedUntrusted?: LiveHoldingsPart,
 ): string {
   const phrase = (part: LiveHoldingsPart, noun: string): string => {
     const base = `${render.amount(part.amount)} from ${noun}`;
@@ -289,7 +302,22 @@ export function buildKeyTrustClause(
   if (unknownStatus.count > 0) {
     parts.push(phrase(unknownStatus, UNKNOWN_KEY_STATUS_SET_NOUN));
   }
-  return `includes ${parts.join(" and ")}`;
+  const excluded =
+    excludedUntrusted !== undefined && excludedUntrusted.count > 0
+      ? excludedUntrusted
+      : null;
+  if (excluded === null) return `includes ${parts.join(" and ")}`;
+  if (parts.length === 0) {
+    return `excludes ${phrase(excluded, UNTRUSTED_KEY_SET_NOUN)}`;
+  }
+  const oneNoun =
+    unknownStatus.count === 0 &&
+    untrusted.unavailable === 0 &&
+    excluded.unavailable === 0;
+  if (oneNoun) {
+    return `includes ${render.amount(untrusted.amount)} and excludes ${render.amount(excluded.amount)} from ${UNTRUSTED_KEY_SET_NOUN}`;
+  }
+  return `includes ${parts.join(" and ")}, and excludes ${phrase(excluded, UNTRUSTED_KEY_SET_NOUN)}`;
 }
 
 /** Sentence-cases a clause built above, for the standalone sentence form. */

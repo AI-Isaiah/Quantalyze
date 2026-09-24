@@ -15810,19 +15810,60 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     expect(screen.queryByText(/keys needing attention/i)).toBeNull();
   });
 
-  it("AUMTRUST absent, state 4 (D-18): the field is blank because the live total is <= 0, so there is no number to qualify, even with an untrusted holding summed", () => {
+  // ⛔ D-18 REOPENED 2026-09-24 by the founder ("Reopen, show the marker"):
+  // whenever the figure on screen includes untrusted dollars, the marker
+  // shows. This case used to pin state 4 as ABSENT (review WR-04 recorded the
+  // vanishing marker as a known limit); it now pins State C, flipped
+  // deliberately, not drifted.
+  it("AUMTRUST state 4, State C (D-18 REOPENED, review WR-04): the field is blank because the live total is <= 0, and the hint now names that total and the untrusted part of it — the marker does not vanish", () => {
     const payload = atNonPositiveBook();
     expectDistinctTriples(payload);
     renderAt(payload);
 
-    // The live total is NOT on screen: the field is blank and asks for a value.
+    // The field is still blank and still asks for a value (D-03: the number
+    // and its refusal are unchanged; only the disclosure moved).
     expect(aumField().value).toBe("");
-    expect(screen.getByText("Required to size and commit.")).toBeInTheDocument();
-
-    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+    const hint = screen.getByTestId("scenario-aum-required-note");
+    expect(hint.textContent).toBe(
+      "Required to size and commit. The live-holdings total is -$4,000, which includes $1,000 from keys needing attention.",
+    );
+    // D-08: ONE marker, nested in the hint as a clause on the total it names.
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "includes $1,000 from keys needing attention",
+    );
+    expect(markers[0].closest('[data-testid="scenario-aum-required-note"]')).toBe(
+      hint,
+    );
+    expect(markers[0].hasAttribute("class")).toBe(false);
+    // The blank field's accessible description is the hint that explains it.
+    expect(aumField()).toHaveAccessibleDescription(
+      "Required to size and commit. The live-holdings total is -$4,000, which includes $1,000 from keys needing attention.",
+    );
   });
 
-  it("AUMTRUST absent, state 6 (D-18): a committed manual value EQUAL to the live total renders no override note and no marker", () => {
+  it("AUMTRUST state 4 regression (D-18 REOPENED): with no untrusted holding the blank-field hint is byte-identical to before and the input carries no description", () => {
+    const base = atNonPositiveBook();
+    const payload: MyAllocationDashboardPayload = {
+      ...base,
+      apiKeys: base.apiKeys.map((k) => ({ ...k, sync_status: null })),
+    };
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe("");
+    expect(screen.getByTestId("scenario-aum-required-note").textContent).toBe(
+      "Required to size and commit.",
+    );
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+    expect(aumField().hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  // ⛔ D-18 REOPENED 2026-09-24 (review IN-06): this case used to pin state 6
+  // as ABSENT. The number on screen then IS the live total, so it now pins
+  // State A beside the field, flipped deliberately.
+  it("AUMTRUST state 6 (D-18 REOPENED, review IN-06): a committed manual value EQUAL to the live total renders no override note, and the field — which then shows the live total — carries State A", () => {
     const payload = atStateBBook();
     expectDistinctTriples(payload);
     renderAt(payload);
@@ -15839,7 +15880,14 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     expect(atManualAumOnWire()).toBe(AT_B_LIVE_TOTAL);
 
     expect(screen.queryByTestId("scenario-aum-override-note")).toBeNull();
-    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Includes $12,345 from keys needing attention.",
+    );
+    expect(aumField()).toHaveAccessibleDescription(
+      "Includes $12,345 from keys needing attention.",
+    );
   });
 
   it("AUMTRUST absent, state 7 (D-18): a committed manual value with a live total <= 0 renders no override note and no marker", () => {
@@ -15919,7 +15967,11 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     );
   });
 
-  it("AUMTRUST D-15 pin 4 (component): a sign_in_failed key that is allocator-eligible but NOT contributing adds nothing to the field and renders no marker", () => {
+  // ⛔ D-06 answered (b) 2026-09-24: this case used to end "and renders no
+  // marker". Pin 4 is unchanged (the key adds nothing to the field or to the
+  // includes amount); what changed is that D-20's $Y now renders, so the
+  // excluded holding is named instead of silently absent.
+  it("AUMTRUST D-15 pin 4 (component): a sign_in_failed key that is allocator-eligible but NOT contributing adds nothing to the field or the includes amount, and D-06 (b) names it as excluded", () => {
     const payload = atBook([
       {
         id: AT_KEY_TRUSTED,
@@ -15946,7 +15998,12 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     // The field is the modelled book only: 480,000, not 492,345.
     expect(aumField().value).toBe(String(AT_TRUSTED_USD));
     expect(aumField().value).not.toBe(String(AT_LIVE_TOTAL));
-    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+    // No includes part (nothing untrusted is summed); the excludes part only.
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $12,345 from keys needing attention.",
+    );
   });
 
   it("AUMTRUST tone (D-09, UI-SPEC U-01): State A is muted steady-state text with no role, no aria-live and no warning colour", () => {
@@ -16293,14 +16350,12 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     expect(aumField().value).toBe(String(AT_TRUSTED_USD));
   });
 
-  it("D-06 (component pin, decision OPEN): a revoked key's holding outside the eligible and contributing sets is silently absent from the field, and nothing says 'excludes'", () => {
-    // ⚠️ CONTEXT D-06 is OPEN. Plan 05 records the founder's answer. This test
-    // pins TODAY's behaviour: a revoked key's holdings are silently absent
-    // (the SSR eligible set and the contributing-set narrowing both drop it),
-    // and no "excludes" copy renders. Under D-06 option (b) the marker gains an
-    // "excludes $Y from keys needing attention" clause, and plan 05 must edit
-    // this test DELIBERATELY — flip the `/excludes/i` assertion to the typed
-    // string — rather than let it drift.
+  it("D-06 (component pin, answered (b) 2026-09-24): a revoked key's holding outside the eligible and contributing sets stays out of the field, and the marker now says so — 'Excludes $55,555 from keys needing attention.'", () => {
+    // ⭐ CONTEXT D-06 RESOLVED 2026-09-24 by the founder: option (b). Until
+    // plan 05 this test pinned the OPEN behaviour — the revoked key's holdings
+    // silently absent and `queryByText(/excludes/i)` null. It is flipped here
+    // DELIBERATELY to the UI-SPEC § 3 string: the total is unchanged (D-03),
+    // and the exclusion is disclosed rather than silent.
     const payload = atBook([
       {
         id: AT_KEY_TRUSTED,
@@ -16326,6 +16381,178 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
 
     expect(aumField().value).toBe(String(AT_TRUSTED_USD));
     expect(aumField().value).not.toBe(String(AT_TRUSTED_USD + 55_555));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $55,555 from keys needing attention.",
+    );
+  });
+
+  // ── D-06 (b), UI-SPEC § 3 (M3) — every textContent row ─────────────────────
+  //   trusted        (key-a, spot, contributing)       37,655
+  //   sign_in_failed (key-b, spot, contributing)       12,345   ← X (includes)
+  //   revoked        (key-d, spot, in no eligible set)  8,000   ← Y (excludes)
+  //   live total                                       50,000   ← unchanged
+  // `withIncludes: false` makes key-b trusted, so the book carries Y only.
+  const AT_M3_EXCLUDED_USD = 8_000;
+  function atM3Book(withIncludes: boolean): MyAllocationDashboardPayload {
+    return atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: withIncludes ? "sign_in_failed" : null,
+        venue: "okx",
+        symbol: "AUMTRUST-B",
+        spotUsd: AT_B_UNTRUSTED_USD,
+      },
+      {
+        id: AT_KEY_REVOKED,
+        status: "revoked",
+        venue: "kraken",
+        symbol: "AUMTRUST-D",
+        spotUsd: AT_M3_EXCLUDED_USD,
+        eligible: false,
+      },
+    ]);
+  }
+
+  it("D-06 (b) M3 State A, excludes only: 'Excludes $8,000 from keys needing attention.' — one marker, the field unchanged", () => {
+    const payload = atM3Book(false);
+    expectDistinctTriples(payload);
+    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_REVOKED);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $8,000 from keys needing attention.",
+    );
+  });
+
+  it("D-06 (b) M3 State A, both: 'Includes $12,345 and excludes $8,000 from keys needing attention.' — one marker, the field unchanged", () => {
+    const payload = atM3Book(true);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Includes $12,345 and excludes $8,000 from keys needing attention.",
+    );
+  });
+
+  it("D-06 (b) M3 State B, excludes only: the override note reads '…$50,000, which excludes $8,000 from keys needing attention.' with the one nested marker", () => {
+    const payload = atM3Book(false);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    commitAum("75000");
+
+    expect(aumField().value).toBe("75000");
+    const note = screen.getByTestId("scenario-aum-override-note");
+    expect(note.textContent).toBe(
+      "Overrides live-holdings total $50,000, which excludes $8,000 from keys needing attention.",
+    );
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "excludes $8,000 from keys needing attention",
+    );
+    expect(markers[0].closest('[data-testid="scenario-aum-override-note"]')).toBe(
+      note,
+    );
+  });
+
+  it("D-06 (b) M3 State B, both: the override note reads '…$50,000, which includes $12,345 and excludes $8,000 from keys needing attention.'", () => {
+    const payload = atM3Book(true);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    commitAum("75000");
+
+    expect(screen.getByTestId("scenario-aum-override-note").textContent).toBe(
+      "Overrides live-holdings total $50,000, which includes $12,345 and excludes $8,000 from keys needing attention.",
+    );
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "includes $12,345 and excludes $8,000 from keys needing attention",
+    );
+  });
+
+  it("D-06 (b) count gate: an excluded untrusted holding whose equity is exactly $0 still renders 'Excludes $0 from keys needing attention.' — the gate is the excluded COUNT, never the amount", () => {
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_LIVE_TOTAL,
+      },
+      {
+        id: AT_KEY_REVOKED,
+        status: "revoked",
+        venue: "deribit",
+        symbol: "AUMTRUST-D-PERP",
+        derivPnlUsd: 0,
+        eligible: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $0 from keys needing attention.",
+    );
+  });
+
+  it("D-06 (b): the excludes clause is absent in blank mode, and absent in state 7 (a manual value with a live total <= 0), where no figure on screen contains the live total", () => {
+    // Blank mode: the same book carries the excludes marker in book mode.
+    renderAt(atM3Book(false));
+    expect(screen.getAllByTestId("scenario-aum-untrusted-note")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+    expect(screen.queryByText(/excludes/i)).toBeNull();
+    cleanup();
+
+    // State 7: trusted derivative -5,000 is the whole live total; the revoked
+    // spot 8,000 is excluded. A committed manual value hides the live total.
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "deribit",
+        symbol: "AUMTRUST-A-PERP",
+        derivPnlUsd: -5_000,
+      },
+      {
+        id: AT_KEY_REVOKED,
+        status: "revoked",
+        venue: "kraken",
+        symbol: "AUMTRUST-D",
+        spotUsd: AT_M3_EXCLUDED_USD,
+        eligible: false,
+      },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    // Non-vacuity: before the commit the live total is named in the hint
+    // (State C), and the excludes clause is there.
+    expect(screen.getByTestId("scenario-aum-required-note").textContent).toBe(
+      "Required to size and commit. The live-holdings total is -$5,000, which excludes $8,000 from keys needing attention.",
+    );
+    commitAum("75000");
+    expect(atManualAumOnWire()).toBe(75_000);
+    expect(screen.queryByTestId("scenario-aum-override-note")).toBeNull();
     expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
     expect(screen.queryByText(/excludes/i)).toBeNull();
   });

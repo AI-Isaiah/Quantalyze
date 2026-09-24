@@ -157,7 +157,7 @@ import {
   holdingEquityContributionLocal,
   managerSideKeyIds,
   summarizeLiveHoldings,
-  type LiveHoldingsPart,
+  type LiveHoldingsSummary,
 } from "../lib/live-holdings-summary";
 import {
   solveLeverageForMaxDD,
@@ -700,16 +700,23 @@ type AddedMetricsState = "pending" | "settled" | "unavailable";
  * renderer: `formatUsd`, the whole-dollar renderer the AUM figure uses, signed
  * as it comes (D-07), and "value" per "holding", because a spot holding's
  * missing figure is not a P&L.
+ *
+ * D-06 (b), founder answer 2026-09-24: the composer also passes D-20's `$Y`
+ * (`excludedUntrusted`), so the same one clause says what the modelled-book
+ * narrowing left OUT of the total ("excludes $Y from keys needing
+ * attention"). Open Positions passes no such part and is unchanged.
  */
-function buildUntrustedAumClause(
-  untrusted: LiveHoldingsPart,
-  unknownStatus: LiveHoldingsPart,
-): string {
-  return buildKeyTrustClause(untrusted, unknownStatus, {
-    amount: formatUsd,
-    missing: "value",
-    unit: ["holding", "holdings"],
-  });
+function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
+  return buildKeyTrustClause(
+    summary.untrusted,
+    summary.unknownStatus,
+    {
+      amount: formatUsd,
+      missing: "value",
+      unit: ["holding", "holdings"],
+    },
+    summary.excludedUntrusted,
+  );
 }
 
 /**
@@ -4681,37 +4688,57 @@ export function ScenarioComposer({
   // ONCE from the committed state (`sanitizedManualAum`, never the per-keystroke
   // `aumInputText`) and read by the AUM row below, so the untrusted-key marker
   // and the existing notes cannot disagree about it.
-  //   • fieldShowsLive        — no manual value, so the field IS the live total
-  //                             (the complement of the "Required to size and
-  //                             commit." hint's condition).
+  //   • fieldShowsLive        — the field's number IS the live total: no
+  //                             manual value (UI-SPEC state 3), or a manual
+  //                             value exactly equal to it (state 6).
   //   • overrideNoteShowsLive — a manual value differs from a positive live
   //                             total, so only the override note quotes it.
-  // The marker renders iff the live total is on screen AND at least one summed
-  // holding is from a key needing attention — gated on the COUNT, never on the
-  // amount, because a derivative's contribution can be <= 0 and still come
-  // from a key whose numbers are not current (D-07 / D-18).
-  const fieldShowsLive = sanitizedManualAum === undefined && liveHoldingsSum > 0;
+  //   • hintShowsLive         — no manual value and a live total <= 0: the
+  //                             field is blank and the "Required to size and
+  //                             commit." hint shows (state 4). With a marker
+  //                             the hint names the live total itself, so the
+  //                             clause has a number to qualify.
+  // ⛔ D-18 REOPENED 2026-09-24 by the founder ("Reopen, show the marker"):
+  // whenever the figure on screen includes untrusted dollars, the marker
+  // shows. Until then state 6 (review IN-06) and state 4 (review WR-04) were
+  // absent by D-18's "live > 0" and "the two differ" conditions. State 7 (a
+  // manual value with a live total <= 0) stays absent: the field shows the
+  // allocator's own number and nothing on screen contains the live total.
+  // The marker renders iff one of those three holds AND at least one part has
+  // a count — gated on the COUNT, never on the amount, because a derivative's
+  // contribution can be <= 0 and still come from a key whose numbers are not
+  // current (D-07). D-06 (b), 2026-09-24: the excluded part (D-20's `$Y`)
+  // counts toward the gate too, so an exclusion is never silent.
+  const fieldShowsLive =
+    liveHoldingsSum > 0 &&
+    (sanitizedManualAum === undefined || sanitizedManualAum === liveHoldingsSum);
   const overrideNoteShowsLive =
     sanitizedManualAum !== undefined &&
     liveHoldingsSum > 0 &&
     sanitizedManualAum !== liveHoldingsSum;
+  const hintShowsLive = sanitizedManualAum === undefined && liveHoldingsSum <= 0;
   const showUntrustedMarker =
     entryMode === "book" &&
     (liveHoldingsSummary.untrusted.count > 0 ||
-      liveHoldingsSummary.unknownStatus.count > 0) &&
-    (fieldShowsLive || overrideNoteShowsLive);
+      liveHoldingsSummary.unknownStatus.count > 0 ||
+      liveHoldingsSummary.excludedUntrusted.count > 0) &&
+    (fieldShowsLive || overrideNoteShowsLive || hintShowsLive);
   // Review WR-02 — the note that qualifies the field's value is its accessible
   // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the
   // qualification with the number and not only in linear reading order.
   // Derived from the SAME two flags that render the notes, so it can never
   // point at an element that is not on screen. No role or live region is
   // added (D-09); this supersedes UI-SPEC U-07's "no aria-describedby".
+  // D-18 REOPENED: in state 4 the blank field's description is the hint that
+  // now names the live total and its untrusted part (only when it does, so a
+  // plain hint stays undescribed, as before).
   const aumInputDescribedBy =
     [
       showUntrustedMarker && fieldShowsLive
         ? "scenario-aum-untrusted-note"
         : null,
       overrideNoteShowsLive ? "scenario-aum-override-note" : null,
+      showUntrustedMarker && hintShowsLive ? "scenario-aum-required-note" : null,
     ]
       .filter((id): id is string => id !== null)
       .join(" ") || undefined;
@@ -4972,18 +4999,33 @@ export function ScenarioComposer({
             data-testid="scenario-aum-untrusted-note"
             className="text-xs text-text-muted"
           >
-            {capitalizeFirst(
-              buildUntrustedAumClause(
-                liveHoldingsSummary.untrusted,
-                liveHoldingsSummary.unknownStatus,
-              ),
-            )}
-            .
+            {capitalizeFirst(buildUntrustedAumClause(liveHoldingsSummary))}.
           </span>
         )}
-        {sanitizedManualAum === undefined && liveHoldingsSum <= 0 && (
-          <span className="text-xs text-text-muted">
+        {/* Phase 167.1 AUMTRUST — State C (D-18 REOPENED 2026-09-24, review
+            WR-04): the field is blank because the live total is <= 0. Before
+            the reopen the marker vanished here, so a non-positive total driven
+            by keys needing attention read as an unexplained blank. With a
+            marker, the hint names the live total and carries the clause on it,
+            the State B construction; without one it is byte-identical to
+            before. The nested span has no class, as in State B (D-09). */}
+        {hintShowsLive && (
+          <span
+            id="scenario-aum-required-note"
+            data-testid="scenario-aum-required-note"
+            className="text-xs text-text-muted"
+          >
             Required to size and commit.
+            {showUntrustedMarker && (
+              <>
+                {" "}The live-holdings total is {formatUsd(liveHoldingsSum)},
+                which{" "}
+                <span data-testid="scenario-aum-untrusted-note">
+                  {buildUntrustedAumClause(liveHoldingsSummary)}
+                </span>
+                .
+              </>
+            )}
           </span>
         )}
         {/* Phase 167.1 AUMTRUST — State B: a committed manual value differs from
@@ -5007,10 +5049,7 @@ export function ScenarioComposer({
               <>
                 , which{" "}
                 <span data-testid="scenario-aum-untrusted-note">
-                  {buildUntrustedAumClause(
-                    liveHoldingsSummary.untrusted,
-                    liveHoldingsSummary.unknownStatus,
-                  )}
+                  {buildUntrustedAumClause(liveHoldingsSummary)}
                 </span>
               </>
             )}
