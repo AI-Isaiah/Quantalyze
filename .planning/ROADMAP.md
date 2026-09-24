@@ -2822,6 +2822,29 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.9.1 to break down)
 
+### Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD (INSERTED)
+
+**Goal:** A shared-TEST restore rebuilds its reference rows in the state PROD holds them. The reference-data replay also replays a migration's top-level `UPDATE` when it targets a `public` table the replay has just filled. Those tables are empty after `DROP SCHEMA public CASCADE`, so such an UPDATE can reach only rows the replay itself wrote, never anyone's live data.
+**Requirements**: TODOS `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` (owned here); unblocks Phase 164.9 criterion 8 (`[164.9-CRIT8-RESTORE-DISPATCH-RECORD]`).
+**Depends on:** Phase 164.9
+**Plans:** 0 plans
+
+⭐ **Founder decision, 2026-09-24 (AskUserQuestion): "Yes, new phase".**
+
+**Evidence.** `test-restore-from-baseline.yml` preflight run `36003106273` (2026-09-24, `main` at `71697364`) is the first run to execute the replay on shared TEST. It replayed 23 statements into 8 tables, passed the empty and short-count checks, then aborted on Phase 164.9 plan 07's wrong-state check (`v_wrong_state` in `scripts/restore-test-from-baseline.sh`): the sentinel profile's `manager_status` came back at the column default instead of `verified`. The replay (`scripts/extract-reference-inserts.mjs`, criteria C1–C4 in `scripts/restore-test-refdata-allowlist.txt`) emits only literal INSERTs, so the later `manager_status` UPDATE in `20260521150000_universal_signup_approval_gate.sql` never runs. Plan 07 added the check without closing the gap, so criteria 7 and 8 of Phase 164.9 contradict each other until this phase lands. The preflight rolled back, and TEST is unchanged.
+
+## Success Criteria
+1. A new, separately pinned extractor class for top-level `UPDATE`s whose target is a `public` table already in the replay; never `auth.*`. It gets its own criterion id, pinned counts, an audit census, and red+green self-test arms.
+2. Replayed statements interleave in migration filename order, inside the same transaction as the INSERTs.
+3. ⛔ The wrong-state check and its `verified` default stay exactly as they are: no waiver, no relaxed default, no widened allowlist.
+4. A green `mode=preflight` run, then a green `mode=restore` run on shared TEST, both recorded by run id. That closes Phase 164.9 criterion 8.
+
+**Rejected:** hand-seeding the value after the replay (hand-seeding shared TEST is forbidden); editing the applied teaser migration (PROD's ledger stores the SQL that ran).
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.9.2 to break down)
+
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
 **Goal:** No metric persisted to `metrics_json` or rendered in a chart is the output of quantstats'

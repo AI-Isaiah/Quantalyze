@@ -72,6 +72,7 @@ human_verification:
   - test: "After merge, confirm the CHECK widening applied on TEST, then on PROD behind the Production reviewer gate: api_keys_sync_status_check admits sign_in_failed. Run the marker query first."
     expected: "apply-test is green and the self-verify DO block stays silent. After the PROD apply, a later daily poll of a key whose sign-in was refused writes sync_status = sign_in_failed, not the SFH-H2 fallback 'error'."
     why_human: "The migration is not applied anywhere yet, and no DB command may run from this checkout."
+    resolved: "PARTLY CLOSED 2026-09-24, closed by founder authorization 2026-09-24. The APPLY half holds, re-read from the run itself: PR #841 merged as 2091fea6 (an ancestor of origin/main), and Supabase Migrate run 35819065230 on that sha concluded success with apply-test, apply-test-verdict, prod-credential-divergence-verdict and apply all success. Both apply jobs log `Applying migration 20260922120000_api_keys_sync_status_sign_in_failed.sql...` and then list 20260922120000 in the ledger, apply-test first (04:37Z) and apply second (04:39Z). A RAISE in the self-verify DO block would have failed the job, so it stayed silent. STILL OPEN: the second clause of `expected:`, that a later daily poll of a refused sign-in writes sync_status = sign_in_failed rather than 'error'. That needs a PROD read, which this closure did not make, and it is the same observation as human item 2 below."
   - test: "After merge and at least one daily poll, read the sync_status of the two keys behind the ROADMAP's measured cases: the long-stalled MT5 key and the expired bybit key."
     expected: "The MT5 key reads sign_in_failed, provided the live code satisfies the next item. The bybit key reads revoked. Either status renders for its owner, whatever the owner's role."
     why_human: "Needs a PROD read."
@@ -239,7 +240,7 @@ No requirement is orphaned.
 
 ### Human Verification Required
 
-1. **Migration applies on merge.** Confirm TEST first, then PROD behind the Production reviewer gate. Run the marker query first. Then confirm that a refused sign-in writes `sign_in_failed`, not `error`.
+1. **Migration applies on merge.** Confirm TEST first, then PROD behind the Production reviewer gate. Run the marker query first. Then confirm that a refused sign-in writes `sign_in_failed`, not `error`. ✅ **Apply half closed 2026-09-24** (founder authorization): Supabase Migrate run `35819065230` at `2091fea6`, `apply-test` then `apply` both success, each logging the apply of `20260922120000`. The `sign_in_failed`-not-`error` write after a daily poll is still open and folds into item 2.
 2. **The two measured keys after the first post-merge daily poll.** Expect `sign_in_failed` for the MT5 key, subject to item 3, and `revoked` for the bybit key.
 3. **The real wrong-password code** on the live gateway, entered by the founder (RESEARCH A1).
 4. **Visual checks at 320px and 200% zoom:** the pill and helper on the `/profile` table and on the narrower edit-page key card, plus the wizard envelope with no Retry.
