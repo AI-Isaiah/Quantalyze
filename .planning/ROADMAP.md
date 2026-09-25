@@ -2110,6 +2110,7 @@ Plans:
 
 **Requirements**: TODOS entries `161.1-D1`, DEC-4
 **Depends on:** Phase 164.4.1 (pg-lane with pg_cron). ⚠️ NOT Phase 164.5 — the plan is file-disjoint from it and was lifted whole.
+**Routed here 2026-09-25 (from 164.9.1 review round 1), both latent or loud, both on the terminal-mark / bridge surface this phase owns:** (1) a fan-in child whose parent is still open at enqueue and later ends `failed_final` stays in `done_pending_children` forever (no caller passes parents today); (2) a second `match_decisions` delete can raise 23505 through the ON DELETE SET NULL cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null` (pre-existing, fails loudly, the admin decisions route issues these deletes).
 **Plans:** 1 plan (lifted from Phase 164.5 plan 08, unmodified)
 
 Plans:
@@ -2826,6 +2827,7 @@ Phase 164.9 plan 10 normalised shared TEST's `analytics_service_url` row to a lo
 **Requirements**: `[164.9-FANIN-STATUS-NEVER-SET]` (`TODOS.md`, `## FIX NOW`), `[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]`, `[164.9-TEST-ANALYTICS-URL-REARM]`
 **Depends on:** Phase 164.9
 ⭐ **Founder decision 2026-09-24 (AskUserQuestion): D-23 "Restore it"** — migration 075's `api_key_disconnected` refusal (409) is restored. FC-3's blocker (the baseline re-dump) cleared with v0.90.0.1 (#855).
+**Amended 2026-09-25 (review round 1):** D-04 now departs from strict seven-arg parity: M1 refuses a NULL/missing/failed parent (22023) and starts a child `pending` when its parents are all done (164.9.1-CONTEXT D-04). The normalize self-test runs in the dispatch-only restore job, not on PRs — accepted: that job runs it before every live restore, which is where it guards. A ci.yml PR job for it needs PostgreSQL server binaries and is not in this phase.
 **Plans:** 14 plans (10 waves; planned 2026-09-24, plan-checker passed after 3 revision rounds, 1 info advisory open)
 
 Plans:
