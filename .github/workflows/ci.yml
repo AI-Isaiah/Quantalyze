@@ -5349,6 +5349,9 @@ jobs:
     # are gone. VAC-08 is read-only, and its ordering after `apply-test` is the
     # `Wait for the TEST schema apply to conclude (merge pushes only)` step (an
     # Actions-API fact plus the in-flight flag), which runs immediately before VAC-08.
+    # ⛔ CORRECTED 2026-09-25 (round-2 review, IN-04): not IMMEDIATELY before. The
+    # `actions/setup-node` step runs between the wait and VAC-08, and its duration
+    # adds to the merge-push window described below. The sentence is kept as lineage.
     # ⚠️ That wait is merge-push only. On a `pull_request` run it does not run, so
     # VAC-08 has NO ordering against `apply-test` or a dispatched restore; on a merge
     # push a seconds-wide window remains between the wait's exit and VAC-08's first
