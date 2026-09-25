@@ -253,8 +253,12 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 #                                ~86 s kill-to-authorized, and the next reading
 #                                decides.
 #   * recycle_failed          -> the recycle verb itself raised (the channel, the
-#                                seam, the snapshot). Whether the process was
-#                                ended is not known from here.
+#                                seam, the snapshot, or counts it could not read).
+#                                Whether the process was ended is not known from
+#                                the verb. ⭐ Since review round 2 (R2-SFH-04) one
+#                                budget-gated, credential-free reading follows,
+#                                which relaunches a terminal the failed call may
+#                                have ended; the line says whether it answered.
 #   * recycle_not_landed      -> the verb RAN and reported that it did not end
 #                                every terminal it matched (`terminated <
 #                                matched`), or matched none at all (164.6.5

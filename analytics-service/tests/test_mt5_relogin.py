@@ -227,6 +227,16 @@ class _FakeRpycConn:
                 "file_version_errors": owner._scenario.get(
                     "file_version_errors", [0] * matched
                 ),
+                # ⭐ 164.6.5 review round 2, Topic B (`mt5_client`, dd2ceb0e3) —
+                # the six fields the remote source now returns.
+                "attempted": owner._scenario.get("attempted", matched),
+                "unprocessed": owner._scenario.get("unprocessed", 0),
+                "enumerated": owner._scenario.get("enumerated", matched + 3),
+                "enumerate_error": owner._scenario.get("enumerate_error", 0),
+                "pid_errors": owner._scenario.get("pid_errors", []),
+                "file_version_exc": owner._scenario.get(
+                    "file_version_exc", [None] * matched
+                ),
             }
         )
 
@@ -2471,6 +2481,111 @@ async def test_ESCALATION_SFH09_the_refusal_codes_are_NAMED_in_the_escalation_li
         if "escalated to a terminal" in r.getMessage()
     )
     assert "open_errors=[] terminate_errors=[5]" in line
+    # ⭐ 164.6.5 review round 2 — Topic B's six new verdict fields reach the
+    # escalation line too, as counts, codes and class names only.
+    for fragment in (
+        "attempted=1",
+        "unprocessed=0",
+        "enumerated=4",
+        "enumerate_error=0",
+        "pid_errors=[]",
+        "file_version_exc=[None]",
+    ):
+        assert fragment in line, (fragment, line)
+
+
+@pytest.mark.parametrize(
+    "after_failure,post_code,crossing_costs,expected_fragment,run_ended",
+    [
+        pytest.param(
+            True, None, {}, "post_failure_probe=authorized", True,
+            id="the-terminal-ANSWERED",
+        ),
+        # `-6` is the terminal answering with no account yet: a falsy
+        # `initialize()`, so the answered-count does NOT move, and only this
+        # reading's own verdict can end the run.
+        pytest.param(
+            False, -6, {}, "post_failure_probe=code=-6", True,
+            id="the-terminal-ANSWERED-with-no-account",
+        ),
+        pytest.param(
+            False, None, {}, f"post_failure_probe=code={_IPC_TIMEOUT}", False,
+            id="still-WEDGED",
+        ),
+        # The failed call itself spent the budget the reading would need.
+        pytest.param(
+            True, None, {"recycle": 170.0}, "post_failure_probe=not_read", False,
+            id="the-budget-cannot-cover-it",
+        ),
+    ],
+)
+async def test_R2_SFH04_a_FAILED_recycle_takes_one_budget_gated_reading(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    after_failure: bool,
+    post_code: int | None,
+    crossing_costs: dict,
+    expected_fragment: str,
+    run_ended: bool,
+) -> None:
+    """⛔ R2-SFH-04 part 3 (164.6.5 review round 2). After a transport failure, a
+    snapshot failure or unreadable counts, the recycle call may already have
+    ended the terminal, and its own relaunch probe never ran, so the terminal
+    stayed down until some later caller's bare `initialize()` launched it (the
+    D-05 record measured about 4m45s). One budget-gated, credential-free
+    detector reading now follows: it relaunches a terminal the failed call may
+    have ended, and the line says whether it answered. An answer ends the run;
+    the kind stays `recycle_failed` at ERROR, since the verb itself needs a
+    human."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "recycle_raises": RuntimeError("the transport dropped"),
+            "crossing_costs": crossing_costs,
+        },
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+    answers = iter([False, after_failure, False, after_failure])
+    real = fake.initialize
+
+    def _scripted(**kwargs):
+        real(**kwargs)
+        return next(answers)
+
+    fake.initialize = _scripted
+    if post_code is not None:
+        codes = iter([_IPC_TIMEOUT, post_code] * 2)
+        real_last_error = fake.last_error
+
+        def _scripted_last_error():
+            real_last_error()
+            return (next(codes), "scripted")
+
+        fake.last_error = _scripted_last_error
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert (
+        outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_FAILED
+    )
+    line = next(
+        r for r in _records(caplog) if "escalated to a terminal" in r.getMessage()
+    )
+    assert line.levelno == logging.ERROR
+    assert expected_fragment in line.getMessage(), line.getMessage()
+    assert "the transport dropped" not in line.getMessage()
+    assert "initialize_credentialed" not in fake.call_order
+    probes = fake.call_order.count("initialize")
+    assert probes == (1 if "not_read" in expected_fragment else 2), fake.call_order
+
+    await _heal_n_times(1)  # the next wedged reading
+    assert _recycle_count(fake) == (2 if run_ended else 1), (
+        "a post-failure reading that measured the terminal answering must end the "
+        "run (and one that did not must not)"
+    )
 
 
 async def test_ESCALATION_WR02_a_recycle_that_WORKS_slowly_is_logged_recycled_never_human_needed(

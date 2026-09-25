@@ -1443,6 +1443,7 @@ def _escalate_ipc_fault(
         _clock(), _IPC_FAULT_RECYCLE_WINDOW_S
     )
     verdict: dict[str, object] = {}
+    answered_after_failure = False
     try:
         verdict = client.recycle_terminal_process()
         # ⭐ WR-02 — a recycle that landed is WATCHED until it answers or the
@@ -1477,10 +1478,20 @@ def _escalate_ipc_fault(
             f"exited={verdict.get('exited')} authorized={verdict.get('authorized')} "
             f"relaunch_code={verdict.get('relaunch_code')} "
             f"relaunch_polls={verdict.get('relaunch_polls', 0)} "
+            # ⭐ 164.6.5 review round 2, Topic B — the verb's diagnostic fields,
+            # each an int, a list of Win32 codes, four-int file versions or a
+            # bridge-local exception CLASS name (the client admits only a
+            # Python identifier there), or "unparsed". No remote free text.
+            f"attempted={verdict.get('attempted')} "
+            f"unprocessed={verdict.get('unprocessed')} "
+            f"enumerated={verdict.get('enumerated')} "
+            f"enumerate_error={verdict.get('enumerate_error')} "
             f"open_errors={verdict.get('open_errors')} "
             f"terminate_errors={verdict.get('terminate_errors')} "
+            f"pid_errors={verdict.get('pid_errors')} "
             f"file_versions={verdict.get('file_versions')} "
-            f"file_version_errors={verdict.get('file_version_errors')}"
+            f"file_version_errors={verdict.get('file_version_errors')} "
+            f"file_version_exc={verdict.get('file_version_exc')}"
             + (f" {post_relaunch}" if post_relaunch else "")
         )
     except Mt5SessionAbandoned as exc:
@@ -1504,6 +1515,39 @@ def _escalate_ipc_fault(
             f"exc_class={type(exc).__name__} "
             f"code={exc.code if isinstance(exc, Mt5ClientError) else None}"
         )
+        # ⛔ R2-SFH-04 part 3 (164.6.5 review round 2) — ONE CREDENTIAL-FREE
+        # READING AFTER A FAILED RECYCLE. This arm is reached on a transport
+        # failure, a snapshot failure or unreadable counts, i.e. the remote call
+        # may already have ended the terminal while the verb's own relaunch probe
+        # never ran. Nothing relaunched it until some later caller's bare
+        # `initialize()` did (about 4m45s in the D-05 record). The detector's
+        # bare `initialize()` launches a terminal that is not running, so this
+        # reading relaunches one the failed call may have ended, and says
+        # whether it answered. Budget-gated like every optional read (WR-04);
+        # `Mt5SessionAbandoned` propagates, and the attempt stands.
+        if _affordable(deadline, _DETECTOR_READING_CROSSINGS):
+            try:
+                client.assert_session_authorized()
+            except Mt5SessionAbandoned:
+                raise
+            except Mt5ClientError as probe_exc:
+                answered_after_failure = (
+                    probe_exc.code == _MT5_NO_AUTHORIZED_ACCOUNT_CODE
+                )
+                probe_part = f"post_failure_probe=code={probe_exc.code}"
+            except Exception as probe_exc:  # noqa: BLE001 — see this arm's docstring
+                probe_part = (
+                    f"post_failure_probe=failed "
+                    f"({_describe_capture_failure(probe_exc)})"
+                )
+            else:
+                answered_after_failure = True
+                probe_part = "post_failure_probe=authorized"
+        else:
+            probe_part = (
+                "post_failure_probe=not_read (the heal budget left cannot cover it)"
+            )
+        detail = f"{detail} {probe_part}"
     # ⛔ CR-01 (164.6.5 review round 1) — THE RELAUNCH PROBE IS A READING, AND
     # WHEN IT MEASURED THE TERMINAL ANSWERING THE RUN IS OVER. The gate used to
     # be re-armed only by a FIRST-probe reading of a later tick, so a recycle
@@ -1517,7 +1561,8 @@ def _escalate_ipc_fault(
     # run that is over must not be stamped with this line's alarm afterwards,
     # or the stale stamp pages the next, unrelated fault on its first reading.
     answered = (
-        verdict.get("authorized") is True
+        answered_after_failure
+        or verdict.get("authorized") is True
         or verdict.get("relaunch_code") == _MT5_NO_AUTHORIZED_ACCOUNT_CODE
     )
     if kind == KIND_IPC_FAULT_RECYCLED:
