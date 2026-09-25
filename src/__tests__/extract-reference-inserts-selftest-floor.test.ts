@@ -58,6 +58,11 @@ const REQUIRED_KINDS = [
   "c1-dollar-body",
   "c2-insert-select",
   "c2-nonliteral-tuple",
+  // C2's character allowlist (164.9.2 plan 05, the round-1 observation carried
+  // unfixed until then), MEASURED 2026-09-25 → `OK: 67 kinds`: psql acts on a
+  // backslash or a lone colon outside a string at replay.
+  "c2-psql-metachar",
+  "c2-psql-variable",
   "count-mismatch-high",
   "count-mismatch-low",
   "dollar-tag-in-span",

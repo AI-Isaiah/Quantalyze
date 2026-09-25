@@ -409,6 +409,21 @@ export function literalCheck(maskedStatement) {
   if (conflict && !/\bDO\s+NOTHING\b/i.test(conflict[1])) {
     return "the ON CONFLICT action is not DO NOTHING — a DO UPDATE arm MUTATES a pre-existing row, and `auth.users` (the one C3 exception) SURVIVES the restore, so on shared TEST that row is somebody else's (C2)";
   }
+  // ⛔ 164.9.2 plan 05 (the round-1 observation, carried unfixed until then): a
+  // CHARACTER allowlist over the WHOLE masked statement, ahead of the token scan.
+  // The restore replays through `psql -f`, which acts on a backslash outside a
+  // string (a meta-command: `\\` or `\!` needs no identifier after it) and on a
+  // lone colon (`:'v'` interpolates a variable and leaves no identifier once
+  // masked). The token scan only saw identifiers, so both passed. Measured on the
+  // real corpus the same day: the emission is byte-identical with this check in.
+  // Whole statement, not the tuple, because the tuple slice drops the ON CONFLICT
+  // tail, and psql reads that tail too. It runs AFTER the ON CONFLICT check so a
+  // DO UPDATE arm keeps its own, more specific refusal.
+  const outside = maskedStatement.replace(/::/g, "  ");
+  const odd = /[^A-Za-z0-9_\s(),.;+\-"]/.exec(outside);
+  if (odd) {
+    return `carries the character \`${odd[0]}\` outside a string literal — C2 admits only names, numbers, ::casts and ( ) , . ; + - " there, and psql acts on a backslash or a lone colon at replay (C2)`;
+  }
   let region = maskedStatement.slice(v.index + v[0].length);
   const stop = /\bON\s+CONFLICT\b|\bRETURNING\b/i.exec(region);
   if (stop) region = region.slice(0, stop.index);
@@ -2114,8 +2129,13 @@ function modeAudit(io, allowlistPath, migrationsDir) {
  * inserts self-test OK: 65 kinds, red+green each.`, exit 0. 62 → 65:
  * `c2-nonbuiltin-cast`, `c5-update-default` and `c5-update-nonbuiltin-cast`. The
  * layer-2 vitest was observed RED (`declares 65 … still 62`) before this raise.
+ *
+ * MEASURED 2026-09-25 (plan 05, C2's character allowlist): `extract-reference-
+ * inserts self-test OK: 67 kinds, red+green each.`, exit 0. 65 → 67:
+ * `c2-psql-metachar` and `c2-psql-variable`. The layer-2 vitest was observed RED
+ * (`declares 67 … still 65`) before this raise.
  */
-export const SELF_TEST_KINDS_FLOOR = 65;
+export const SELF_TEST_KINDS_FLOOR = 67;
 
 /**
  * @type {Array<{id:string, why:string, audit?:boolean, expect:string, redStderr?:RegExp, greenStdout?:RegExp, greenAbsent?:RegExp}>}
@@ -2158,6 +2178,18 @@ export const SELF_TEST_KINDS = [
     why: "C2 (164.9.2 review round 2, IN-05 / SFH R2-05): a ::cast to a type C2 does not know can run code the tuple does not show — a domain runs its CHECK, a CREATE CAST … WITH FUNCTION runs a function — and an UNQUALIFIED domain cast was admitted as 'a cast'. The green leg pins the ::uuid the replayed corpus really carries, and other built-ins bare or pg_catalog-qualified",
     expect: "casts to the type `fx_kind`, which is not a built-in type",
     greenStdout: /'00000000-0000-0000-0000-000000000000'::uuid, 'v'::text, '1'::pg_catalog\.int4\)/,
+  },
+  {
+    id: "c2-psql-metachar",
+    why: "C2 (164.9.2 plan 05, the round-1 observation): the restore replays through psql, which acts on a backslash outside a string as a meta-command. The token scan only refused one when an identifier followed it, so a bare `\\\\` passed. The green leg pins that a backslash INSIDE a string is masked and admitted, beside a cast, a sign and a quoted column",
+    expect: "carries the character `\\` outside a string literal",
+    greenStdout: /VALUES \(1, 'a\\b'::text, -1\.5\)/,
+  },
+  {
+    id: "c2-psql-variable",
+    why: "C2 (164.9.2 plan 05): psql interpolates a lone colon outside a string as a variable, and `:'v'` leaves no identifier once masked, so the token scan admitted it. The green leg pins that `::` and a colon INSIDE a string are still admitted",
+    expect: "carries the character `:` outside a string literal",
+    greenStdout: /VALUES \(1, 'a:b'::text\)/,
   },
   {
     id: "count-mismatch-high",
