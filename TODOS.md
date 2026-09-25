@@ -4812,6 +4812,56 @@ are recorded here so the next person does not repeat them.**
 The first came from reasoning about the error code instead of reading the call path. The second
 came from reading the call path but not looking at the screen. Both were needed.
 
+⭐ **REFINED 2026-09-25 (Phase 164.6.5 plan 01): `-10005` has AT LEAST TWO causes, with opposite
+remedies.** This entry is NOT reopened. Its modal-dialog mechanism was proven on 2026-09-01 and is
+still correct for its own cause, which the runbook now calls **Cause A**. A second cause, **Cause
+B, the account-switch wedge**, was measured on 2026-09-21. A validate switched the shared terminal
+to a client account, the Journal wrote `disconnected` and nothing after, and IPC answered `-10005`.
+There was no dialog: the VNC console was clean and the Alerts tab was empty. A process restart
+under the same Wine prefix reached `authorized` in 2.0 s with nobody at the console.
+⚠️ **This entry's claim that "a redeploy does NOT fix this, because the Wine prefix lives on the
+persistent volume" is TRUE for Cause A and FALSE for Cause B.** Cause B is process state, and a
+restart clears it. The shipped `mt5-ipc-timeout` remedy string asserted Cause A only, and Phase
+164.6.5 plan 03 rewrote it to name both. The differential procedure, and the remedy order that is
+safe under both causes (process restart first, then VNC), live in `docs/runbooks/mt5-go-live.md`
+§ "Step 2b — ⛔ `-10005` differential diagnosis". ➡️ **Phase 164.6.5 (MT5VALIDATEWEDGE) owns Cause
+B.** Its root cause is still EXPLICITLY OPEN, and the residual is `MT5-SWITCH-WEDGE-CAUSE-01`
+directly below.
+
+### MT5-SWITCH-WEDGE-CAUSE-01 — the mechanism behind the `-10005` account-switch wedge is not named (booked 2026-09-25)
+
+**Why it is open.** Phase 164.6.5 criterion 1 required a named mechanism that PREDICTS the
+asymmetry (D-01). On 2026-09-21 a switch at 04:08 completed cleanly in about one second, while
+the switches at 11:02 and ~12:52 wedged. The recorded verdicts are in the runbook's Step 2b:
+
+- **Same account vs a different account: REJECTED.** The 2026-09-21 Journal reading shows the
+  clean 04:08 event was ALSO a change to a different account. This rests on the 2026-09-21
+  reading only, because the 04:08 lines could not be re-read on 2026-09-25.
+- **Terminal self-update (D-03a): UNDECIDED.** The only build reading is 6182 (server 5830), taken
+  on 2026-09-25 after two restarts. No build reading from before the wedge exists.
+- **Same broker server vs a different broker server: UNDECIDED.** Surfaced on 2026-09-25, when
+  the window title named a different broker from the Journal's session. The server on each side
+  of each switch was never recorded.
+
+**What closes it.** At the next Cause B wedge, BEFORE the terminal restarts, record three things:
+the terminal build (and the build at the last clean switch), the broker server on each side of the
+wedged switch and of the last clean switch, and the Alerts and Journal state around the
+`disconnected`. Keep account numbers and broker server names somewhere private and bring only
+the verdicts into the repo. ⛔ Never write an account number or a broker server name here.
+⚠️ **The automatic recycle Phase 164.6.5 ships erases this evidence, because the wedge is process
+state.** Unless something records the build and the servers before the recycle, the next wedge
+heals with no evidence, and this item can never close by waiting.
+
+**Owner:** Phase 164.6.6 (MT5TERMINALISOLATION). It owns the shared-terminal ownership model that
+makes a switch happen at all, and the mechanism decides between its isolation options.
+**Trigger:** the next `-10005` that has Journal silence after a `disconnected` line, or the start of
+164.6.6 planning, whichever comes first.
+⛔ **Not a close:** a retry, a sleep, a serialisation or the automatic recycle making the symptom go
+away (D-02). Those are mitigations, not a mechanism.
+⚠️ **Also recorded, not reconciled:** on 2026-09-25 the Journal showed the terminal `disconnected`
+from 2026-09-21 12:52:04 with no reconnect line until the 2026-09-25 restarts. Read at face value,
+the second wedge was not recovered for about four days.
+
 
 ### ⛔ DRIFT-02 — a surgical in-place patch means the REPO no longer holds the true function body (booked 2026-08-27)
 

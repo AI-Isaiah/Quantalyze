@@ -294,8 +294,8 @@ the one step a process restart cannot do for you.
 
 ### Candidate mechanisms for Cause B — what would confirm or reject each
 
-These are candidates, not verdicts. Each carries the ONE observation that would confirm it
-and the ONE that would reject it.
+These were written as candidates. Each carries the ONE observation that would confirm it and
+the ONE that would reject it, and since 2026-09-25 each also carries its recorded verdict.
 
 - **(a) Terminal self-update.** `deploy/mt5-gateway/railway-gateway.md`'s digest-pin
   paragraph records, in its own words, that the MetaTrader terminal binary self-updates from
@@ -308,6 +308,11 @@ and the ONE that would reject it.
     update log records a self-update landing in that window.
   - **Rejects:** the build number is identical across that window and no self-update log
     entry exists for it.
+  - **Verdict (2026-09-25): UNDECIDED.** The only build reading that exists is the one taken
+    on 2026-09-25, AFTER two terminal restarts: terminal build 6182, server build 5830. No
+    build reading from 2026-09-21 before 11:02 exists, and the capture recorded no
+    self-update line for the 04:08 → 11:02 window. One reading cannot show a change. See the
+    verdict subsection below for what would decide it.
 - **(b) Same-account re-auth vs. cross-account switch.** The session monitor re-establishes
   the terminal's session against the house account on a fixed cadence and returns quickly
   when nothing needs to change; a validate re-establishes the same session against a client
@@ -321,9 +326,79 @@ and the ONE that would reject it.
   - **Rejects:** the captured evidence shows the clean event was ALSO a switch to a
     different account — i.e., a cross-account switch sometimes succeeds cleanly, which would
     mean "which account" alone does not predict the asymmetry.
-- **(c) Any further candidate this read establishes.** None beyond (a) and (b) is supported
-  by the repo's own measured record as of this writing. If a future investigation surfaces
-  one, record it here with the same confirms/rejects shape rather than as a bare guess.
+  - **Verdict (2026-09-25): REJECTED, on the 2026-09-21 reading.** The Journal lines read
+    during the incident, recorded in `.planning/ROADMAP.md` § `### Phase 164.6.6` success
+    criterion 1, show the clean 04:08 event as `'<account A>': disconnected` at 04:08:06
+    followed by `'<account B>': authorized` at 04:08:07. That is a change to a DIFFERENT
+    account, and it completed in about one second. So a cross-account switch can succeed
+    cleanly, and "same account vs different account" does not predict the asymmetry. ⚠️ The
+    2026-09-25 capture could NOT re-read those 04:08 lines through VNC. This rejection rests
+    on the 2026-09-21 reading alone, and it has not been re-verified.
+- **(c) Same broker server vs a different broker server.** Surfaced by the 2026-09-25 capture:
+  at one point the terminal's window title named an account at a DIFFERENT broker from the
+  session the Journal was running. The shared terminal therefore switches across broker
+  servers, not only across accounts, which is the Phase 164.6.6 surface. A switch to an
+  account on another broker server has to drop one trade-server connection and open a
+  different one. A switch within one broker keeps the same server. If the clean 04:08 event
+  stayed on one broker server and the wedged 11:02 and 12:52 events changed server, that
+  difference would predict the asymmetry.
+  - **Confirms:** the broker server on each side of the 04:08 switch is the SAME, and on each
+    side of the 11:02 and 12:52 switches it DIFFERS.
+  - **Rejects:** the 04:08 switch also changed broker server, or a wedged switch stayed on one
+    server.
+  - **Verdict (2026-09-25): UNDECIDED.** The 2026-09-21 record redacts the server on both
+    sides of every switch, and the 04:08 lines were not reachable on 2026-09-25. ⚠️ The
+    founder's 2026-09-25 relaunch spike (plan 02 SUMMARY, run 2) came back authorized on a
+    different account at the SAME broker. That run was a relaunch, not an in-session
+    switch, so it neither confirms nor rejects (c).
+- **Any further candidate.** None beyond (a), (b) and (c) is supported by the repo's measured
+  record as of 2026-09-25. If a future investigation surfaces one, record it here with the
+  same confirms/rejects shape rather than as a bare guess.
+
+### Verdict — criterion 1 is EXPLICITLY OPEN (recorded 2026-09-25, Phase 164.6.5 plan 01)
+
+⛔ **The mechanism behind Cause B is NOT named.** No candidate above predicts the asymmetry
+on the evidence that exists. (b) is rejected, and (a) and (c) are undecided because the
+deciding readings were never taken or can no longer be taken. Per D-01 and D-03, criterion 1
+ships OPEN. It is not closed on a story, and it is not closed on a mitigation.
+
+**The D-03a verdict, in one sentence:** the terminal-self-update hypothesis is UNDECIDED,
+because no terminal build reading from 2026-09-21 before the 11:02 wedge exists and no
+terminal update record for the 04:08 → 11:02 window was found. The build read on 2026-09-25
+(6182, server 5830) was taken after two restarts and cannot show a change on its own.
+
+**What the 2026-09-25 capture established.** The founder read these at the VNC console; no
+agent touched the gateway.
+
+- **Build:** terminal build 6182, server build 5830.
+- **Journal:** the terminal was `disconnected` from 2026-09-21 12:52:04, with NO reconnect line
+  until the founder's two restarts on 2026-09-25. Taken at face value, the second wedge of
+  2026-09-21 (the ~12:52 validate) was never recovered until 2026-09-25. ⚠️ This plan records
+  that reading and does NOT reconcile it with any other record of that period.
+- **Log retention:** the 04:08 Journal lines were not reachable through VNC, and no terminal
+  log files exist for 2026-08-06 to 08-11 or for 2026-08-26 to 08-31.
+- **Experts options:** "Allow algo trading" CHECKED, and all four "disable …" options
+  UNCHECKED. This does not bear on criterion 1. It is recorded because Phase 164.6.5
+  criterion 7 pins those settings.
+- **Alerts tab:** NOT read on 2026-09-25 before the terminal was restarted, and that state is
+  gone now. The "Alerts tab empty" fact under Cause B above is the 2026-09-21 reading and was
+  not re-taken.
+- **Restart remedy:** REPRODUCED. Killing `terminal64.exe` and letting the bridge's next
+  `initialize()` relaunch it brought authorization back with no human action, twice (plan 02
+  SUMMARY). This is a MITIGATION finding under D-02, NOT a diagnosis: it says what clears
+  Cause B, not what causes it.
+- **Cause A (the modal dialog):** not observed on 2026-09-25.
+
+**What would close criterion 1.** Readings taken at the NEXT Cause B wedge, BEFORE anything
+restarts the terminal:
+
+1. the terminal build at the wedge, and the build at the last clean switch before it;
+2. the broker server on each side of the wedged switch and of the last clean switch;
+3. the Alerts tab and the Journal lines around the `disconnected`.
+
+⚠️ The automatic recycle this phase ships DESTROYS all three, because the wedge is process
+state. Unless the heal records them first, the next wedge heals without evidence. The routed
+residual is `MT5-SWITCH-WEDGE-CAUSE-01` in `TODOS.md`, cross-linked from `MT5-WEDGE-OBS-01`.
 
 ⛔ **Public repo, no exceptions.** Refer to accounts only as "the house account" and "a
 client account" — never a number, never a broker server name, never a connection string or a
