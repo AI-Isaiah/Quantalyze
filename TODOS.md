@@ -10056,9 +10056,9 @@ evidence, so none earns a phase by that rule; each is fix-or-drop here, with an 
 and a date. The one exception to watch is `[164.4.2-PROD-SUPAUTILS-FUNCTION-DENIAL-CRASH]`: if
 its measurement confirms the crash on PROD, it moves to `## 🔴 FIX NOW` and gets a phase.
 
-- [ ] **`[164.4.2-REMAINING-KEY-HOLDERS]` `python`, `e2e-seeded` and now `test-db-drift` still hold
-      the shared-TEST advisory key `61616158`; whether they move off it is decided by the AFTER
-      numbers, not assumed (booked 2026-09-24, Phase 164.4.2 plan 10).**
+- [ ] **`[164.4.2-REMAINING-KEY-HOLDERS]` `python` and `e2e-seeded` still hold the shared-TEST
+      advisory key `61616158` (`test-db-drift` left 2026-09-25); whether they move off it is
+      decided by the AFTER numbers, not assumed (booked 2026-09-24, Phase 164.4.2 plan 10).**
       This phase moved ONE holder, `sql-tests`, as a tracer (CONTEXT DECISION B), and created one,
       `test-db-drift`, which keeps VAC-08 on shared TEST because VAC-08 measures shared TEST's
       drift. The key is ALSO taken outside `ci.yml` (`supabase-migrate.yml`,
@@ -10070,6 +10070,12 @@ its measurement confirms the crash on PROD, it moves to `## 🔴 FIX NOW` and ge
       numbers here and decide whether the next holder is worth moving.
       **Owner:** THE FOUNDER, reading the AFTER table (CONTEXT "Noted for later": the follow-on is
       "decided by the tracer's measured result, not assumed by it").
+      ⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1 DRIFTOFFMUTEX, round-1 review WR-03):** this
+      entry's title used to read "`python`, `e2e-seeded` and now `test-db-drift` still hold" the
+      key; that wording and the body above are kept as lineage. `test-db-drift` left the key
+      (the phase's decision D-02). The `ci.yml` holders are `python` and `e2e-seeded`. The AFTER
+      table for this move is `164.4.2.1-MEASUREMENT.md`. Whether the next holder moves is still
+      decided by those numbers.
 
 - [ ] **`[164.4.2-LANE-ONLY-REASON-STALE]` The one `-- LANE-ONLY:` marker in the gate corpus
       argues from shared TEST, but the job that reads it no longer runs there (booked 2026-09-24,
