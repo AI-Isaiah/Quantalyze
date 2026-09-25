@@ -5181,15 +5181,62 @@ exit 64
 
   describe(AUDIT_STEP, () => {
     const script = extractRunScript(WF, AUDIT_STEP);
-    const BOUNDS = [" || status=$?", " || census_rc=$?", " || scanned_rc=$?"];
-    const CENSUS =
+    const BOUNDS = [
+      " || status=$?",
+      " || census_rc=$?",
+      " || scanned_rc=$?",
+      " || c5_rc=$?",
+    ];
+    // The FIRST census line alone. Phase 164.9.2 (D-03) added a SECOND one, the C5
+    // census, which the real extractor prints directly after it; `CENSUS` carries
+    // both so every GREEN arm is green for the right reason, and `FIRST_CENSUS` is
+    // what the missing-C5 arm feeds.
+    const FIRST_CENSUS =
       "extract-reference-inserts audit OK: 3 entr(ies), 4 file(s), 2 table(s), 9 statement(s); all listed.\n";
+    const C5_CENSUS =
+      "extract-reference-inserts audit C5 OK: 6 update statement(s) over 4 file(s) and 2 table(s) replayed; 2 declined over 2 file(s); 0 unaccounted.\n";
+    const CENSUS = `${FIRST_CENSUS}${C5_CENSUS}`;
     const SCANNED = "  migrations scanned: 271\n";
+    const C5_REASON = "audit C5 OK: …' census line";
 
     it("GREEN — a census over a non-empty corpus exits 0", () => {
       const r = runStep(script, { STUB_AUDIT_OUT: `${CENSUS}${SCANNED}` });
       expect(r.code, r.out).toBe(0);
       expect(r.out).toContain("migrations scanned: 271");
+      expect(
+        r.out,
+        "the GREEN run did not echo the C5 census line it read",
+      ).toContain(C5_CENSUS.trim());
+    });
+
+    it("164.9.2 D-03 — a MISSING C5 census line is a named MEASURE_FAIL (pre-fix: green)", () => {
+      const stub = { STUB_AUDIT_OUT: `${FIRST_CENSUS}${SCANNED}` };
+      const r = runStep(script, stub);
+      expect(
+        r.code,
+        `the step passed with no C5 census line. A C5 class whose census nobody reads can vanish with every run green.\n${r.out}`,
+      ).toBe(1);
+      expect(r.out).toContain(C5_REASON);
+
+      // The unbounded twin: `grep` finds nothing, exits 1, and `bash -e` kills the
+      // step before the named MEASURE_FAIL can print.
+      const pre = runStep(unbind(script, BOUNDS), stub);
+      expect(
+        pre.out.includes(C5_REASON),
+        "CALIBRATION: the UNBOUNDED script printed the C5 MEASURE_FAIL too, so the bound is not what makes it reachable",
+      ).toBe(false);
+      expect(
+        pre.code,
+        "CALIBRATION: the unbounded script did not go red",
+      ).not.toBe(0);
+    });
+
+    it("164.9.2 D-03 — a C5 line reporting UNACCOUNTED statements is not the census line", () => {
+      const r = runStep(script, {
+        STUB_AUDIT_OUT: `${FIRST_CENSUS}${C5_CENSUS.replace("0 unaccounted", "1 unaccounted")}${SCANNED}`,
+      });
+      expect(r.code, r.out).toBe(1);
+      expect(r.out).toContain(C5_REASON);
     });
 
     it("a SILENT ZERO reaches its own MEASURE_FAIL (pre-fix: bash's silence)", () => {

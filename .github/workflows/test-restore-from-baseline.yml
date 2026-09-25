@@ -737,8 +737,23 @@ jobs:
             echo "::error::MEASURE_FAIL: the audit reports 0 allowlist entr(ies), so the restore would replay nothing while every migration still reads as applied."
             exit 1
           fi
+          # Phase 164.9.2 (D-03): the audit prints a SECOND census line for the C5
+          # class (top-level literal UPDATEs the replay re-runs). It is read here the
+          # same way as the first, bounded for the same `bash -e` reason, and its
+          # absence is a MEASURE_FAIL. The regex pins `0 unaccounted`.
+          c5_rc=0
+          c5_line=$(grep -a -m1 -E '^extract-reference-inserts audit C5 OK: [0-9]+ update statement\(s\) over [0-9]+ file\(s\) and [0-9]+ table\(s\) replayed; [0-9]+ declined over [0-9]+ file\(s\); 0 unaccounted\.$' "$REFDATA_AUDIT_LOG") || c5_rc=$?
+          if [ "$c5_rc" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: grep exited $c5_rc reading $REFDATA_AUDIT_LOG, so the C5 census line was NOT looked for. That is an unanswered question, not an absent line."
+            exit 1
+          fi
+          if [ -z "$c5_line" ]; then
+            echo "::error::MEASURE_FAIL: the audit exited 0 but printed NO 'extract-reference-inserts audit C5 OK: …' census line. A C5 class whose census nobody reads can vanish with every run green (Phase 164.9.2, D-03)."
+            exit 1
+          fi
           echo "$scanned_line"
           echo "$census"
+          echo "$c5_line"
 
       # Copied from ci.yml's `- name: Probe - the runner image's PostgreSQL server
       # binaries resolve` (the sql-mutation job). The restore script's --self-test
