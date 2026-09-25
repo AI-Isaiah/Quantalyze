@@ -28,6 +28,11 @@ import { FactsheetBody } from "@/app/factsheet/[id]/v2/FactsheetView";
  * header is suppressed (the AllocationsTabs page header already names
  * the surface) and the demo AllocatorSection is suppressed (this IS the
  * allocator's view; demo portfolios are out of place here).
+ *
+ * Phase 167.1.2 / D-02 ("Hide it until correct"): all of the above is the
+ * "ready" branch only. While `equityHistoryState !== "ready"` the Overview
+ * renders `EquityHistoryRebuilding` in place of the curve AND the factsheet,
+ * and builds no factsheet payload at all.
  */
 export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   const {

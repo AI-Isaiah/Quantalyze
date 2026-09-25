@@ -118,12 +118,20 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     );
 
     const panel = screen.getByTestId("overview-equity-rebuilding");
-    expect(panel).toHaveAttribute("role", "status");
+    // Review round 1 (WR-04 / IN-03): a labelled region with an h2. The page
+    // h1 is the only heading above the panel, so an h3 fails axe
+    // `heading-order`; and a static panel is not a live region.
     expect(
       screen.getByRole("heading", {
+        level: 2,
         name: "Your equity history is being rebuilt",
       }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Your equity history is being rebuilt" }),
+    ).toBe(panel);
+    expect(panel).not.toHaveAttribute("role");
+    expect(panel).not.toHaveAttribute("aria-live");
     expect(panel.textContent).toContain(
       "Holdings and AUM on this page do not use that history.",
     );
