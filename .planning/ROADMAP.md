@@ -3134,6 +3134,56 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 168 to break down)
 
+### Phase 169: PAGETRUTH — every number agrees across pages and with its own record length
+
+**Goal:** Every number a page shows agrees with the same number on every other page and with the length of the record it describes. Each contradiction below is traced to ONE source of truth and fixed there, not patched per page.
+**Founder decision, 2026-09-25 (AskUserQuestion):** the session QA sweep and the 2026-09-24 layout notes book as TWO phases; this numbers phase ships FIRST, Phase 170 PAGECOPY second. Phase 167.1.2 ACCOUNTTRUTH already owns the Allocations equity curve, Sharpe beside a negative return, the Scenario zero weights/UUID/$0 total, and the holdings total; they are EXCLUDED here.
+**Evidence:** the 2026-09-25 in-depth QA sweep of every page in the logged-in account (14 data-integrity findings) and the 2026-09-24 visual UAT. Counts only here; the reports hold no identifiers and are not tracked.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** none in code. Plan after 167.1.2 plan 01 (HIDE) so the two do not edit the same Allocations widgets at once.
+
+## Success Criteria
+
+1. `/admin` Compute Jobs: the list request no longer returns HTTP 500, and the tab never says "No compute jobs found" while the header counts a job in progress. A failed load says it failed.
+2. The Allocations Risk tab and the Overview / Scenario tabs read VaR, alpha/beta and correlation from the same series; one never says "insufficient data" while another shows a value.
+3. The BTC benchmark is current: MTD and 3-month returns, win rate, volatility and drawdown come from a benchmark series that is refreshed, and a stale benchmark is shown as stale rather than as +0.00%.
+4. A strategy's CAGR and Sharpe are identical on discovery, recommendations, my-strategies and its factsheet (one computation, one stored value), or a surface that must differ says why.
+5. A factsheet's header date, its "track record through" date and its stated record length agree, and record length is stated one way.
+6. 3-year and 5-year rows are not shown for a record shorter than that period.
+7. `/profile` Exchanges counts only live keys as connected and never repeats one balance across keys.
+8. `/recommendations` does not say "set your mandate" while listing "fits your mandate", and does not recommend a record that ended long ago without saying so.
+9. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 169 to break down)
+
+### Phase 170: PAGECOPY — layout and copy read clean on every page
+
+**Goal:** Pages read as a finished product: no stacked look-alike panels, no raw ids or internal labels, no test text, no typos, and the layout holds at 320 px and 200% zoom.
+**Founder decision, 2026-09-25 (AskUserQuestion):** the second of the two QA phases; ships after Phase 169 PAGETRUTH.
+**Evidence:** the founder's 2026-09-24 layout notes ("too many similar layers stacked", the "get private link" control too dominant and overlapping) and the 2026-09-25 QA sweep (4 user-facing broken, 14 cosmetic findings). Counts only here.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 169
+
+## Success Criteria
+
+1. Factsheet and Allocations panels no longer stack as near-identical layers; the private-link control is secondary and never overlaps content.
+2. No page shows a short id where a name exists, or a raw internal value as a label (strategy type, allocator type, event kinds, roles).
+3. No production page carries QA, test or internal-phase text, including strategy descriptions and the placeholder Referral page.
+4. The recorded typos are fixed and pages that share a title are distinguished.
+5. `/security` and the legal pages show the signed-in header when signed in; the floating tweaks control never covers the bottom navigation; `/compare` does not point to controls that do not exist; `/admin/match` on mobile is read-only in fact, not only in words; no page scrolls horizontally at 320 px.
+6. The wizard's post-Submit copy says "submitted" on success, not "already submitted".
+7. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 170 to break down)
+
 ---
 
 ### Phase 165: DEPS — The 9-PR dependabot campaign
