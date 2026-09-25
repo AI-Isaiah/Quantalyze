@@ -1178,6 +1178,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ### Roadmap Evolution
 
+- Phase 164.6.5 MT5VALIDATEWEDGE **edited 2026-09-24 (hand-edited)**: inherited success criteria 7 and 8 were added, routed by founder decision 2026-09-24 (via AskUserQuestion). 7 comes from 161's live MT5 `undetermined` verdict and 8 from 164.5.3's end-to-end live MT5 credential update. Both source VERIFICATION files mark the item resolved-by-routing. The same day, 164.6-VERIFICATION.md was closed to `passed` (7/7 post-merge items, evidence by run id), and 164.4.2's Area E was measured FINAL at 5 runs: the change did not work and the slowdown holds. The founder's follow-up phase for that is NOT booked yet. The frontmatter census above was not recomputed.
 - Phase 164.5.3 inserted after Phase 164.5: MT5CREDS — MT5 account number on the key card + a credential-update path (URGENT)
 - Phase 164.5.4 inserted after Phase 164.5: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently (URGENT)
 
@@ -1289,6 +1290,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.1.1 HOLDINGKEYSCOPE inserted after Phase 167.1 on 2026-09-24 (via `/gsd-phase --insert`, founder-authorized): `holdingScopeKey` carries no `api_key_id`, so two accounts on one venue holding the same asset merge into one holding (data-integrity).
 - Phase 167.2.1 FACTSHEETBUILDABLE inserted after Phase 167.2 on 2026-09-24 (via `/gsd-phase --insert`, founder-authorized): a computed row whose factsheet cannot build reads as "has a factsheet" while its recipient sees the pending page (167.2 review WR-02, user-facing).
 - Phase 164.9.2 REFDATAUPDATES inserted after Phase 164.9 on 2026-09-24 (via `/gsd-phase --insert`, founder-approved by AskUserQuestion): the shared-TEST restore replay also replays migration UPDATEs on public tables it just filled. Found by preflight run `36003106273`, which aborted on the 164.9 plan-07 wrong-state check. It owns `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` and unblocks 164.9 criterion 8.
+- Phase 164.4.2.1 DRIFTOFFMUTEX inserted after Phase 164.4.2 on 2026-09-24 (hand-inserted; founder rule "book the phase if it holds", AskUserQuestion; runs 2–5 confirmed the slowdown)
+- Phase 167.1.2 ACCOUNTTRUTH inserted after Phase 167.1.1 on 2026-09-24 (hand-inserted; founder UAT on the allocator book; founder decisions "Refuse a second key" and "Hide it until correct", AskUserQuestion)
 
 ### Decisions
 
