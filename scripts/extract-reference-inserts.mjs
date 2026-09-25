@@ -1113,7 +1113,9 @@ export function c5Verdict(m, qualified, upd, dec) {
         reason: !publicOnly
           ? `a top-level non-literal UPDATE of ${qualified}, and C5 targets public only — no allowlist line can account for it (C5)`
           : upd
-            ? r.reason
+            ? // 164.9.2 review IN-02: the bare classifier text did not tell the
+              // reviewer that a decline: line for the SAME pair is legal here.
+              `${r.reason} — add a decline: line for this (file, table) with the reason, beside its update: line; one of each per pair is legal`
             : // ⛔ 164.9.2 review WR-03 / SFH-03: this used to say "classify by hand:
               // decline it with a reason", and a classifier over-refusal then walked a
               // replayable UPDATE straight into a decline: line. A decline is for a
@@ -1787,6 +1789,8 @@ export const SELF_TEST_KINDS = [
     id: "c5-update-nonliteral",
     why: "C5: an UPDATE ... FROM reads EXISTING rows, which the restore has just dropped, so replaying it would write a value computed from nothing; an update: line over it must refuse, naming the token",
     expect: "carries the token FROM — a joined, sub-selected or RETURNING UPDATE is not a literal C5 update (C5)",
+    // 164.9.2 review IN-02: beside an update: line, the refusal names the remedy.
+    redStderr: /add a decline: line for this \(file, table\) with the reason, beside its update: line/,
     // 164.9.2 review WR-03 / SFH-03: the green also replays both IS [NOT] DISTINCT
     // FROM idioms; their FROM is an operator, and refusing it sent a replayable
     // UPDATE to a decline: line.
