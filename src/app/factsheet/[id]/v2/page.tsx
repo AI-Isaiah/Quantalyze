@@ -18,7 +18,10 @@ import {
 // canonical home is pinned by phase-148-owner-lane-cache-isolation.test.ts.
 // ⛔ `buildFactsheetPayloadCached` deliberately did NOT move: the lane decision
 // that makes the cached wrapper safe lives in this file, and only here.
-import { fetchAndBuildPayload } from "@/lib/factsheet/fetch-and-build-payload";
+import {
+  fetchAndBuildPayload,
+  probeFactsheetBuildable,
+} from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
 import {
   deriveComputeState,
@@ -33,8 +36,10 @@ import {
   KCS10_PUBLIC_SENTENCE,
   ownerRemedy,
   ownerStateLine,
-  recipientShareNote,
+  recipientShareNoteFor,
+  unbuildableNoteKindOf,
   type StateLineTone,
+  type UnbuildableNoteKind,
 } from "@/lib/status-surface-copy";
 import {
   countCompositeMembers,
@@ -458,6 +463,14 @@ export default async function FactsheetV2Page({
             apiKeyId: ownerApiKeyId,
           })
         : null;
+    // Phase 167.2.1 (D-05, D-06) — the S7 share note is derived the way the
+    // /strategies list derives it: the builder's own resolve stage is asked why
+    // this payload is null, and the same selection rule and error mapping pick
+    // the note. The probe runs ONLY here, on the owner lane after the builder
+    // has already answered null; its answer is lane-local like `ownerStatus`
+    // and never reaches the payload or the cached wrapper.
+    const ownerBuildability =
+      lane === "owner" ? await readOwnerBuildability(id, ownerUid!) : null;
     const ownerLine = ownerStatus && ownerStateLine(ownerStatus.state);
     const ownerRemedyLine =
       ownerStatus &&
@@ -479,7 +492,13 @@ export default async function FactsheetV2Page({
             // so the share mode is always mint-token.
             shareNote={
               ownerStatus
-                ? recipientShareNote("mint-token", recipientArm(ownerStatus.state))
+                ? recipientShareNoteFor(
+                    "mint-token",
+                    ownerBuildability?.unreadable
+                      ? "unreadable"
+                      : recipientArm(ownerStatus.state),
+                    ownerBuildability?.kind ?? null,
+                  )
                 : undefined
             }
           />
@@ -746,4 +765,49 @@ async function readOwnerPendingStatus(
     });
     return { state: deriveComputeState({ readError: true }), shape };
   }
+}
+
+/**
+ * Phase 167.2.1 (D-05, D-06) — why the owner lane's payload is null, in the
+ * two facts the S7 share note needs: an unbuildable note kind, and whether the
+ * answer is unreadable. Called only from the owner `!payload` branch above, so
+ * the public lane and the full owner render never probe.
+ *
+ * The probe runs under the SAME owner predicate as the builder call (D-06).
+ * `too_few_points` and `composite_unbuildable` give their D-02 kind.
+ * `not_computed` keeps today's arm-derived note, and so does `buildable: true`,
+ * which on this null path can only be a race (every null exit of the builder
+ * is a failed resolve). A throw, `read_error` or `not_visible` is unreadable,
+ * exactly as on /strategies (D-05): never read as a buildable factsheet, logged
+ * with the id, and captured with tags only.
+ */
+async function readOwnerBuildability(
+  id: string,
+  ownerUid: string,
+): Promise<{ unreadable: boolean; kind: UnbuildableNoteKind | null }> {
+  let probe: Awaited<ReturnType<typeof probeFactsheetBuildable>>;
+  try {
+    probe = await probeFactsheetBuildable(id, (q) => withPublishedOrOwner(q, ownerUid));
+  } catch (err) {
+    console.error("[factsheet/v2/page] factsheet probe failed", {
+      id,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    captureToSentry(err instanceof Error ? err : new Error(String(err)), {
+      tags: { route: "factsheet/v2/page", stage: "factsheet-probe" },
+    });
+    return { unreadable: true, kind: null };
+  }
+  if (probe.buildable) return { unreadable: false, kind: null };
+  if (probe.reason === "read_error" || probe.reason === "not_visible") {
+    console.error("[factsheet/v2/page] factsheet probe could not read the row", {
+      id,
+      reason: probe.reason,
+    });
+    captureToSentry(new Error(`factsheet probe answered ${probe.reason}`), {
+      tags: { route: "factsheet/v2/page", stage: "factsheet-probe" },
+    });
+    return { unreadable: true, kind: null };
+  }
+  return { unreadable: false, kind: unbuildableNoteKindOf(probe.reason) };
 }

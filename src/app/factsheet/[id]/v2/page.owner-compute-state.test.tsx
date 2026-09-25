@@ -49,6 +49,18 @@ vi.mock("@/lib/compute-state", async () => {
   );
   return { ...actual, deriveComputeState: vi.fn(actual.deriveComputeState) };
 });
+// Phase 167.2.1 (D-06): a PARTIAL mock. The builder and the cached wrapper's
+// callee stay real; only the buildability probe is a passthrough spy, so a
+// case can prove on which lane, and how often, the page asks it.
+vi.mock("@/lib/factsheet/fetch-and-build-payload", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/lib/factsheet/fetch-and-build-payload")
+  >("@/lib/factsheet/fetch-and-build-payload");
+  return {
+    ...actual,
+    probeFactsheetBuildable: vi.fn(actual.probeFactsheetBuildable),
+  };
+});
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
 vi.mock("@/lib/queries", () => ({
@@ -63,6 +75,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { deriveComputeState } from "@/lib/compute-state";
+import { probeFactsheetBuildable } from "@/lib/factsheet/fetch-and-build-payload";
 
 // --- Fixtures ---------------------------------------------------------------
 
@@ -210,6 +223,11 @@ function mockAdmin(): SupabaseClient {
       select: () => chain,
       eq: () => chain,
       or: () => chain,
+      // Phase 167.2.1: the composite read (`csv_daily_returns`, ordered and
+      // limited) answers no rows. `strategy_analytics_series` has none either
+      // (its `maybeSingle` below answers null for every table but strategies).
+      order: () => chain,
+      limit: () => Promise.resolve({ data: [], error: null }),
       maybeSingle: () =>
         Promise.resolve(
           table === "strategies"
@@ -238,7 +256,46 @@ function givenOwnerPendingDraft(ownerRowExtra: Record<string, unknown> = {}) {
     strategy_analytics: { computed_at: "2026-09-01T00:00:00.000Z" },
     ...ownerRowExtra,
   };
-  STATE.adminRow = null;
+  // Lineage (Phase 167.2.1, D-05 and D-06): this default was `null`. The owner
+  // lane now asks the buildability probe on its null-payload path, and a probe
+  // that finds no row answers `not_visible`, which renders KCS12-UNREADABLE
+  // (D-05), so a null default would silently move SHARE-NOTE-A and
+  // SHARE-NOTE-B. An UNCOMPUTED row keeps the builder at null and makes the
+  // probe answer `not_computed`, which keeps today's arm-derived note. It is
+  // also the realistic shape of a pending draft.
+  STATE.adminRow = adminRowWith({ computation_status: "computing" });
+}
+
+/** The admin read's strategy row, with an embedded analytics row. */
+function adminRowWith(analytics: Record<string, unknown>) {
+  return {
+    id: STRATEGY_ID,
+    name: STRATEGY_NAME,
+    codename: null,
+    disclosure_tier: "exploratory",
+    status: "draft",
+    markets: ["BTC"],
+    strategy_types: ["options"],
+    description: null,
+    subtypes: [],
+    supported_exchanges: ["deribit"],
+    leverage_range: null,
+    aum: null,
+    max_capacity: null,
+    avg_daily_turnover: null,
+    start_date: null,
+    benchmark: null,
+    asset_class: "crypto",
+    returns_denominator_config: null,
+    strategy_analytics: {
+      daily_returns: null,
+      returns_series: null,
+      computed_at: "2026-09-01T00:00:00.000Z",
+      data_quality_flags: {},
+      metrics_json_by_basis: null,
+      ...analytics,
+    },
+  };
 }
 
 function givenJobs(rows: unknown[]) {
@@ -791,6 +848,11 @@ const MINT_UNREADABLE =
   "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
 const PUBLIC_SENTENCE =
   "The detailed factsheet for this strategy is not available yet.";
+// Phase 167.2.1 CONTEXT D-02, typed as literals.
+const UNBUILDABLE_SHORT =
+  "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.";
+const UNBUILDABLE_COMPOSITE =
+  "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded, but its results cannot be built into a factsheet. Contact support@quantalyze.com to have this composite checked.";
 const SHARE_NOTE_CLASS = "mt-2 text-fixed-12 text-text-muted";
 
 /** The OwnerUnpublishedPanel root: the parent of its visibility notice. */
@@ -865,6 +927,122 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     expect(STATE.observed.rpcCalls).toEqual([]);
     expect(STATE.observed.requestTables).not.toContain("strategy_keys");
     expect(vi.mocked(unstable_cache)).toHaveBeenCalledTimes(0);
+    // Phase 167.2.1 (D-06): the probe runs only on the owner NULL-payload path.
+    expect(
+      vi.mocked(probeFactsheetBuildable),
+      "the full owner render built a payload, so nothing is probed",
+    ).not.toHaveBeenCalled();
+  });
+
+  // --- Phase 167.2.1 (D-02, D-05, D-06): the same note the /strategies list shows
+  it("S7-UNBUILDABLE-SHORT: a computed single-key draft with ONE dated return and a finished job -> KCS12-UNBUILDABLE-SHORT, as on the list", async () => {
+    givenOwnerPendingDraft();
+    STATE.adminRow = adminRowWith({
+      computation_status: "complete",
+      daily_returns: [{ date: "2025-08-01", value: 0.01 }],
+      returns_series: null,
+    });
+    givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+
+    const { container } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(UNBUILDABLE_SHORT);
+    expect(last.className).toBe(SHARE_NOTE_CLASS);
+    expect(vi.mocked(probeFactsheetBuildable)).toHaveBeenCalledTimes(1);
+    // The probe runs under the builder's owner predicate, never the cache.
+    expect(vi.mocked(probeFactsheetBuildable).mock.calls[0][0]).toBe(STRATEGY_ID);
+    expect(vi.mocked(unstable_cache)).toHaveBeenCalledTimes(0);
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+  });
+
+  it("S7-UNBUILDABLE-COMPOSITE: a computed composite with no persisted headline and a finished job -> KCS12-UNBUILDABLE-COMPOSITE", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft();
+      STATE.memberCountResult = { count: 3, error: null };
+      STATE.adminRow = adminRowWith({
+        computation_status: "complete",
+        data_quality_flags: { composite: true },
+        metrics_json_by_basis: null,
+      });
+      givenJobs([chainJob("stitch_composite", "done")]);
+
+      const { container } = await renderOwnerPending();
+      const last = panelOf(container).lastElementChild as HTMLElement;
+
+      expect(last.textContent).toBe(UNBUILDABLE_COMPOSITE);
+      expect(vi.mocked(probeFactsheetBuildable)).toHaveBeenCalledTimes(1);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("S7-PROBE-THROWS: the probe throws -> KCS12-UNREADABLE (D-05), never MINT-B, logged and captured once with tags only", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft();
+      givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+      // On the owner null path the builder creates the admin client first and
+      // the probe second; only the probe's creation throws.
+      let adminCalls = 0;
+      vi.mocked(createAdminClient).mockImplementation(() => {
+        adminCalls += 1;
+        if (adminCalls === 2) throw new Error("admin client unavailable");
+        return mockAdmin() as never;
+      });
+
+      const { container } = await renderOwnerPending();
+      const last = panelOf(container).lastElementChild as HTMLElement;
+
+      expect(adminCalls, "the builder's call, then the probe's").toBe(2);
+      expect(last.textContent).toBe(MINT_UNREADABLE);
+      expect(last.textContent).not.toBe(MINT_B);
+      expect(errSpy).toHaveBeenCalledWith(
+        "[factsheet/v2/page] factsheet probe failed",
+        expect.objectContaining({ id: STRATEGY_ID }),
+      );
+      const probeCaptures = vi
+        .mocked(captureToSentry)
+        .mock.calls.filter(
+          ([, ctx]) =>
+            (ctx as { tags?: { stage?: string } } | undefined)?.tags?.stage ===
+            "factsheet-probe",
+        );
+      expect(probeCaptures).toHaveLength(1);
+      expect(probeCaptures[0][1]).toEqual({
+        tags: { route: "factsheet/v2/page", stage: "factsheet-probe" },
+      });
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("S7-PROBE-NOT-VISIBLE: no admin row for the builder or the probe -> KCS12-UNREADABLE (D-05), captured once with tags only", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft();
+      STATE.adminRow = null;
+      givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+
+      const { container } = await renderOwnerPending();
+      const last = panelOf(container).lastElementChild as HTMLElement;
+
+      expect(last.textContent).toBe(MINT_UNREADABLE);
+      const probeCaptures = vi
+        .mocked(captureToSentry)
+        .mock.calls.filter(
+          ([, ctx]) =>
+            (ctx as { tags?: { stage?: string } } | undefined)?.tags?.stage ===
+            "factsheet-probe",
+        );
+      expect(probeCaptures).toHaveLength(1);
+      expect(probeCaptures[0][1]).toEqual({
+        tags: { route: "factsheet/v2/page", stage: "factsheet-probe" },
+      });
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
 
@@ -915,6 +1093,8 @@ describe("KCS-10 (S8) — the public pending placeholder says one neutral senten
     // The public lane reads no owner state at all.
     expect(STATE.observed.rpcCalls).toEqual([]);
     expect(STATE.observed.requestTables).not.toContain("strategy_keys");
+    // Phase 167.2.1 (D-06, D-11): nor does it probe buildability.
+    expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
   });
 });
 
