@@ -57,14 +57,36 @@ export type HoldingCompareAnalytics = {
   vol: number | null;
 };
 
+/**
+ * Phase 167.1.2 / D-13 ("Hide it until correct", extended to /compare,
+ * 2026-09-25). The per-holding return, Sharpe, max drawdown and vol are level
+ * ratios over `allocator_equity_snapshots.breakdown`, the same store D-02
+ * withholds on My Allocation. That store can count one exchange account twice
+ * when two keys read it (a +100% / -50% day inside one symbol's series), and a
+ * $-level ratio reads buying or selling more of a symbol as a gain or loss.
+ * Until plan 10 repairs the writer and plan 11 defines "ready", the item
+ * carries NO analytics: `historyState` is "rebuilding" and `analytics` is
+ * null, so the numbers never leave the server. Consumers are fail-closed:
+ * anything other than an explicit "ready" renders the rebuilding note.
+ *
+ * Reversible by design: flipping this constant to "ready" restores the
+ * pre-D-13 behaviour byte for byte. Plan 11 must DECIDE that flip for /compare
+ * explicitly; it does not follow from the My Allocation curve becoming ready,
+ * because the level-ratio defect is specific to this computation.
+ */
+export const HOLDING_COMPARE_HISTORY_STATE: "rebuilding" | "ready" =
+  "rebuilding";
+
 export type HoldingCompareItem = {
   kind: "holding";
   holding_ref: string;
   venue: string;
   symbol: string;
   holding_type: string;
-  analytics: HoldingCompareAnalytics;
-};
+} & (
+  | { historyState: "ready"; analytics: HoldingCompareAnalytics }
+  | { historyState: "rebuilding"; analytics: null }
+);
 
 /**
  * Reconstruct per-symbol daily returns from breakdown jsonb + compute institutional metrics.
@@ -76,8 +98,12 @@ export type HoldingCompareItem = {
  * - max_drawdown via cumulative-product running-peak
  * - vol = std(returns) * sqrt(365)
  * Returns null metrics when fewer than 2 symbol-present data points exist.
+ *
+ * @internal Exported for unit testing only (Phase 167.1.2 / D-13): while the
+ * item withholds its analytics, the math is pinned on this function directly
+ * so those tests can still fail.
  */
-function reconstructAndAnalyze(
+export function reconstructAndAnalyze(
   snapshots: Array<{ asof: string; breakdown: Record<string, number> | null }>,
   symbol: string,
 ): HoldingCompareAnalytics {
@@ -156,7 +182,17 @@ export async function fetchHoldingCompareItem(params: {
     .order("asof", { ascending: true })
     .limit(730);
 
-  if (error || !data || data.length === 0) return null;
+  if (error) {
+    // Phase 167.1.2 review round 1 (SFH INFO-02): a query failure used to fold
+    // silently into "not available". The caller still gets null (D-15: no
+    // existence leak), but the failure is now logged server-side.
+    console.error(
+      "[holding-compare-adapter.fetchHoldingCompareItem] supabase error:",
+      error.message ?? error,
+    );
+    return null;
+  }
+  if (!data || data.length === 0) return null;
 
   // CL9 / NEW-C01-11: this is a SECOND read boundary on allocator_equity_snapshots
   // (the allocator dashboard's getMyAllocationDashboard is the first). Rows whose
@@ -190,12 +226,19 @@ export async function fetchHoldingCompareItem(params: {
     return null;
   }
 
-  return {
-    kind: "holding",
+  const base = {
+    kind: "holding" as const,
     holding_ref: params.holding_ref,
     venue: parsed.venue,
     symbol: parsed.symbol,
     holding_type: parsed.holding_type,
-    analytics,
   };
+
+  // Phase 167.1.2 / D-13: the analytics above decide AVAILABILITY only (the
+  // pre-D-13 "not available" rule, unchanged). While the history is rebuilt
+  // the numbers themselves are dropped here, on the server.
+  if (HOLDING_COMPARE_HISTORY_STATE === "rebuilding") {
+    return { ...base, historyState: "rebuilding", analytics: null };
+  }
+  return { ...base, historyState: "ready", analytics };
 }

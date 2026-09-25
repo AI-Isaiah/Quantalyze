@@ -4,11 +4,13 @@
  * TDD RED phase: tests written before implementation.
  * Covers parseHoldingCompareId including finding-f6 charset validation.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   parseHoldingCompareId,
   fetchHoldingCompareItem,
+  reconstructAndAnalyze,
+  HOLDING_COMPARE_HISTORY_STATE,
 } from "./holding-compare-adapter";
 
 // Minimal thenable Supabase stub for the single query fetchHoldingCompareItem
@@ -127,34 +129,41 @@ describe("fetchHoldingCompareItem — CL9 terminus suppression", () => {
     expect(item).toBeNull();
   });
 
-  it("computes metrics from ONLY the trustworthy rows when flagged rows are interleaved", async () => {
-    // Two trustworthy points (BTC 100 → 110, +10%) plus flagged garbage that, if
-    // included, would inject spurious returns and a fake drawdown.
-    const withFlagged: SnapRow[] = [
+  // Phase 167.1.2 / D-13: the item no longer carries analytics while the
+  // history is rebuilt, so the filter is pinned through AVAILABILITY here: one
+  // trustworthy point among flagged rows is "not available" ONLY if the flagged
+  // rows are dropped (unfiltered, the three points would compute and return an
+  // item). The metric math itself is pinned on reconstructAndAnalyze below.
+  it("drops flagged rows before the availability decision: one trustworthy point among flagged rows is not available", async () => {
+    const rows: SnapRow[] = [
       { asof: "2026-01-01", breakdown: { BTC: 5 }, pre_terminus_balance_unknown: true },
       { asof: "2026-01-02", breakdown: { BTC: 100 }, pre_terminus_balance_unknown: false },
-      { asof: "2026-01-03", breakdown: { BTC: 110 }, pre_terminus_balance_unknown: false },
-      { asof: "2026-01-04", breakdown: { BTC: 9999 }, pre_terminus_balance_unknown: true },
+      { asof: "2026-01-03", breakdown: { BTC: 9999 }, pre_terminus_balance_unknown: true },
     ];
-    const cleanOnly: SnapRow[] = [
-      { asof: "2026-01-02", breakdown: { BTC: 100 }, pre_terminus_balance_unknown: false },
-      { asof: "2026-01-03", breakdown: { BTC: 110 }, pre_terminus_balance_unknown: false },
-    ];
-    const a = await fetchHoldingCompareItem({
-      allocator_id: "alloc-1", holding_ref: REF, supabase: fakeSupabase(withFlagged),
+    const item = await fetchHoldingCompareItem({
+      allocator_id: "alloc-1", holding_ref: REF, supabase: fakeSupabase(rows),
     });
-    const b = await fetchHoldingCompareItem({
-      allocator_id: "alloc-1", holding_ref: REF, supabase: fakeSupabase(cleanOnly),
-    });
-    expect(a).not.toBeNull();
-    // Filtering flagged rows → identical analytics to the clean-only series.
-    expect(a!.analytics).toEqual(b!.analytics);
-    // And the single clean +10% step is what's measured (no flagged distortion).
-    expect(a!.analytics.cumulative_return).toBeCloseTo(0.1, 6);
-    expect(a!.analytics.max_drawdown).toBe(0);
+    expect(item).toBeNull();
   });
 
-  it("is a no-op when no row is flagged (clean series still computes normally)", async () => {
+  it("the metric math: +10% over two clean points, no drawdown; flagged garbage would distort it", () => {
+    const clean = [
+      { asof: "2026-01-02", breakdown: { BTC: 100 } },
+      { asof: "2026-01-03", breakdown: { BTC: 110 } },
+    ];
+    const a = reconstructAndAnalyze(clean, "BTC");
+    expect(a.cumulative_return).toBeCloseTo(0.1, 6);
+    expect(a.max_drawdown).toBe(0);
+    // Positive control for the filter above: the same series WITH the flagged
+    // rows computes something else.
+    const withGarbage = reconstructAndAnalyze(
+      [{ asof: "2026-01-01", breakdown: { BTC: 5 } }, ...clean, { asof: "2026-01-04", breakdown: { BTC: 9999 } }],
+      "BTC",
+    );
+    expect(withGarbage.cumulative_return).not.toBeCloseTo(0.1, 6);
+  });
+
+  it("is a no-op when no row is flagged: a clean 2-point series is available", async () => {
     const rows: SnapRow[] = [
       { asof: "2026-01-01", breakdown: { BTC: 100 }, pre_terminus_balance_unknown: false },
       { asof: "2026-01-02", breakdown: { BTC: 120 }, pre_terminus_balance_unknown: false },
@@ -163,6 +172,78 @@ describe("fetchHoldingCompareItem — CL9 terminus suppression", () => {
       allocator_id: "alloc-1", holding_ref: REF, supabase: fakeSupabase(rows),
     });
     expect(item).not.toBeNull();
-    expect(item!.analytics.cumulative_return).toBeCloseTo(0.2, 6);
+    expect(reconstructAndAnalyze(rows, "BTC").cumulative_return).toBeCloseTo(0.2, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 / D-13 ("Hide it until correct", extended to /compare).
+//
+// Why this matters: return, Sharpe, max drawdown and vol here are level ratios
+// over allocator_equity_snapshots.breakdown. That store can count one exchange
+// account twice when two keys read it (a +100% / -50% day inside one symbol's
+// series), and a $-level ratio reads buying more of a symbol as a gain. My
+// Allocation withholds the same store (D-02). While it is rebuilt, the item
+// must carry NO number to the browser, and the availability rule must not
+// change (D-15: an unowned or missing holding is still indistinguishable).
+// ---------------------------------------------------------------------------
+describe("fetchHoldingCompareItem — 167.1.2 D-13 analytics withheld while rebuilding", () => {
+  const REF = "holding:binance:BTC:spot";
+  const CLEAN: SnapRow[] = [
+    { asof: "2026-01-01", breakdown: { BTC: 100 }, pre_terminus_balance_unknown: false },
+    { asof: "2026-01-02", breakdown: { BTC: 200 }, pre_terminus_balance_unknown: false },
+    { asof: "2026-01-03", breakdown: { BTC: 100 }, pre_terminus_balance_unknown: false },
+  ];
+
+  it("the switch is 'rebuilding' (plan 11 owns the flip)", () => {
+    expect(HOLDING_COMPARE_HISTORY_STATE).toBe("rebuilding");
+  });
+
+  it("an available holding comes back with historyState 'rebuilding' and analytics null, although the series WOULD compute", async () => {
+    // Positive control: this is exactly the +100% / -50% shape D-01 produces,
+    // and it computes non-null metrics.
+    expect(reconstructAndAnalyze(CLEAN, "BTC").sharpe).not.toBeNull();
+    const item = await fetchHoldingCompareItem({
+      allocator_id: "alloc-1", holding_ref: REF, supabase: fakeSupabase(CLEAN),
+    });
+    expect(item).not.toBeNull();
+    expect(item!.historyState).toBe("rebuilding");
+    expect(item!.analytics).toBeNull();
+    expect(item!.symbol).toBe("BTC");
+  });
+
+  // Review round 1 (SFH INFO-02): a query error used to fold silently into the
+  // same null as "no rows". The caller still gets null (D-15), but the failure
+  // is logged server-side so a transient outage is not invisible.
+  it("a query error still returns null to the caller but is logged, not swallowed", async () => {
+    const builder = {
+      select() { return this; },
+      eq() { return this; },
+      order() { return this; },
+      limit() {
+        return Promise.resolve({ data: null, error: { message: "boom" } });
+      },
+    };
+    const supabase = { from: () => builder } as unknown as SupabaseClient;
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const item = await fetchHoldingCompareItem({
+        allocator_id: "alloc-1", holding_ref: REF, supabase,
+      });
+      expect(item).toBeNull();
+      expect(spy).toHaveBeenCalledWith(
+        "[holding-compare-adapter.fetchHoldingCompareItem] supabase error:",
+        "boom",
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("availability is unchanged: no rows is still null (no existence leak)", async () => {
+    const item = await fetchHoldingCompareItem({
+      allocator_id: "alloc-1", holding_ref: REF, supabase: fakeSupabase([]),
+    });
+    expect(item).toBeNull();
   });
 });

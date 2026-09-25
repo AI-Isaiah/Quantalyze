@@ -239,10 +239,16 @@ describe("ComparePage — holding-side branch (LIVE-03 + finding g4 render parit
     render(Page as React.ReactElement);
     // HoldingFactsheet should be present
     expect(screen.getByTestId("holding-factsheet")).toBeInTheDocument();
-    // "Holding" badge
-    expect(screen.getByText(/Holding/i)).toBeInTheDocument();
+    // "Holding" badge (exact: the D-13 note below also says "holding").
+    expect(screen.getByText("Holding")).toBeInTheDocument();
     // BTC symbol
     expect(screen.getByText("BTC")).toBeInTheDocument();
+    // Phase 167.1.2 / D-13: 40 snapshot days WOULD compute every metric, but
+    // while the equity history is rebuilt the page shows the note and no
+    // per-holding return, Sharpe, drawdown or vol.
+    expect(screen.getByTestId("holding-factsheet-rebuilding")).toBeInTheDocument();
+    expect(screen.queryByText("Sharpe")).toBeNull();
+    expect(screen.queryByText("Max drawdown")).toBeNull();
   });
 
   it("shows 'not available' when holding fetch returns empty (RLS-gated or no data)", async () => {
