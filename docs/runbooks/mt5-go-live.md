@@ -400,10 +400,49 @@ restarts the terminal:
 state. Unless the heal records them first, the next wedge heals without evidence. The routed
 residual is `MT5-SWITCH-WEDGE-CAUSE-01` in `TODOS.md`, cross-linked from `MT5-WEDGE-OBS-01`.
 
+⛔ **CORRECTED 2026-09-25 (164.6.5 review round 2, WR-05 / IN-05): the heal does NOT record
+all three, and "unless the heal records them first" must not read as covered.** The paragraph
+above is kept as lineage. It now agrees with the corrected `MT5-SWITCH-WEDGE-CAUSE-01` entry
+in `TODOS.md`. What the heal records before it recycles:
+
+- **(a) An in-process build and connection state, best effort.** Expect `not_captured` on a
+  true `-10005`, because the read crosses the same dead terminal IPC.
+- **(b) The bridge-side `file_versions` of each `terminal64.exe` image it ends.** This path has
+  never run against the live terminal. It equals the running build only if no self-update
+  replaced the file after launch.
+
+**Items 2 and 3 (the broker servers, and the Alerts and Journal state) are recorded by nothing
+automatic.** They need an operator reading taken BEFORE the heal's next monitor tick recycles
+the terminal (`MT5_SESSION_POLL_INTERVAL_S`, 600 s by default).
+
 ⛔ **Public repo, no exceptions.** Refer to accounts only as "the house account" and "a
 client account" — never a number, never a broker server name, never a connection string or a
 local machine path. Timestamps, durations and MT5 error codes (like `-10005`) are safe and
 are kept above because they are the evidence.
+
+### ⚠️ The hourly ERROR re-raise reaches a human only through a Sentry ALERT RULE
+
+A `-10005` that persists past the recycle, and an IPC fault the recycle cannot reach, are
+re-raised at ERROR by the heal at most once an hour (`_escalate_ipc_fault` in
+`analytics-service/services/mt5_relogin.py`, lines beginning `mt5 session heal: ipc_fault`).
+Sentry's logging integration turns each ERROR into an event.
+
+⛔ **Each re-raise uses a fixed message template, so every hourly event lands on the SAME
+Sentry issue.** Two things follow:
+
+- A default "a new issue is created" alert fires on the FIRST event only. The re-raises after
+  it notify nobody.
+- If that issue was ever marked ignored or archived, the re-raises can notify nobody at all.
+
+So the hourly re-raise guarantees events, not a notification. Before relying on it:
+
+1. The analytics service's Sentry project must have an ISSUE ALERT rule that fires on event
+   frequency for these messages, not only on a new issue.
+2. The issue must not be ignored or archived.
+
+No alert rule lives in this repo. This paragraph does not say whether one exists. That is a
+read-only check of the live Sentry configuration (164.6.5 review round 2, R2-SFH-05), and its
+result belongs in the phase record, not here.
 
 ## Step 3 — CREDENTIAL ISOLATION + BROKER ALLOWLISTING (MT5GOLIVE-01)
 
