@@ -3910,6 +3910,14 @@ def _recycle_verdict(
             file_version_errors=(
                 [0] * matched if file_version_errors is None else file_version_errors
             ),
+            # Round 2 (R2-SFH-04 / -06 / -07, WR-06) — the fields the committed
+            # source now also returns, at their no-surprise values.
+            attempted=terminated,
+            unprocessed=0,
+            enumerated=matched + 1,
+            enumerate_error=0,
+            pid_errors=[],
+            file_version_exc=[None] * matched,
         )
     )
 
@@ -3939,8 +3947,25 @@ class _FakeWin32:
         not_exiting=(),
         version=(5, 0, 0, 6182),
         query_refused=None,
+        terminate_raises=None,
+        terminate_cost_ms=0,
+        first_fails_with=None,
+        version_dll_raises=None,
     ) -> None:
         self.procs = list(procs)
+        # R2-SFH-04 — a pid whose `TerminateProcess` RAISES (a ctypes marshalling
+        # error, say) rather than returning FALSE.
+        self.terminate_raises = dict(terminate_raises or {})
+        # WR-06 — modelled cost of each `TerminateProcess` (a slow Wine call).
+        self.terminate_cost_ms = terminate_cost_ms
+        # R2-SFH-06 — `Process32FirstW` fails and leaves this in GetLastError.
+        self.first_fails_with = first_fails_with
+        # R2-SFH-07 — `WinDLL("version")` itself raises (a missing version.dll).
+        self.version_dll_raises = version_dll_raises
+        # WR-06 — the modelled clock the committed source reads through
+        # `time.monotonic`: only a timed-out wait and a costed terminate move it.
+        self.elapsed_ms = 0
+        self.wait_ms: list[int] = []
         self.open_refused = dict(open_refused or {})
         self.terminate_refused = dict(terminate_refused or {})
         self.not_exiting = set(not_exiting)
@@ -3992,6 +4017,9 @@ class _FakeWin32:
 
     def _Process32FirstW(self, snapshot, ref):
         self._cursor = 0
+        if self.first_fails_with is not None:
+            self.last_error = self.first_fails_with
+            return 0
         return self._fill(ref)
 
     def _Process32NextW(self, snapshot, ref):
@@ -4011,6 +4039,9 @@ class _FakeWin32:
 
     def _TerminateProcess(self, handle, code):
         pid = handle - 10_000
+        self.elapsed_ms += self.terminate_cost_ms
+        if pid in self.terminate_raises:
+            raise self.terminate_raises[pid]
         if pid in self.terminate_refused:
             self.last_error = self.terminate_refused[pid]
             return 0
@@ -4018,7 +4049,11 @@ class _FakeWin32:
         return 1
 
     def _WaitForSingleObject(self, handle, ms):
-        return self.WAIT_TIMEOUT if handle - 10_000 in self.not_exiting else 0
+        self.wait_ms.append(ms)
+        if handle - 10_000 in self.not_exiting:
+            self.elapsed_ms += ms  # a timed-out wait costs its whole bound
+            return self.WAIT_TIMEOUT
+        return 0
 
     def _CloseHandle(self, handle):
         return 1
@@ -4047,19 +4082,30 @@ class _FakeWin32:
         block_ref._obj.value = ctypes.addressof(self._fixed)
         return 1
 
-    def run(self, monkeypatch) -> dict:
-        import ctypes
+    def _win_dll(self, name, **_kwargs):
+        if name == "version":
+            if self.version_dll_raises is not None:
+                raise self.version_dll_raises
+            return self.version_dll
+        return self.kernel32
 
-        monkeypatch.setattr(
-            ctypes,
-            "WinDLL",
-            lambda name, **_k: self.version_dll if name == "version" else self.kernel32,
-            raising=False,
-        )
+    def run(self, monkeypatch, exit_wait_ms=5000) -> dict:
+        import ctypes
+        import time
+
+        monkeypatch.setattr(ctypes, "WinDLL", self._win_dll, raising=False)
         monkeypatch.setattr(ctypes, "get_last_error", lambda: self.last_error, raising=False)
         namespace: dict = {}
         exec(mt5_client_mod._REMOTE_TERMINAL_RECYCLE_SRC, namespace)  # noqa: S102
-        return json.loads(namespace[_RECYCLE_FN_NAME](5000))
+        # The modelled clock is patched ONLY around the one call, and restored at
+        # once, so nothing else in the test process reads a frozen clock.
+        real_monotonic = time.monotonic
+        base = real_monotonic()
+        time.monotonic = lambda: base + self.elapsed_ms / 1000.0
+        try:
+            return json.loads(namespace[_RECYCLE_FN_NAME](exit_wait_ms))
+        finally:
+            time.monotonic = real_monotonic
 
 
 def test_TERMINAL_RECYCLE_a_live_session_sends_the_committed_source_then_relaunches():
@@ -4095,10 +4141,16 @@ def test_TERMINAL_RECYCLE_a_live_session_sends_the_committed_source_then_relaunc
         "matched": 1,
         "terminated": 1,
         "exited": 1,
+        "attempted": 1,
+        "unprocessed": 0,
+        "enumerated": 2,
+        "enumerate_error": 0,
         "open_errors": [],
         "terminate_errors": [],
+        "pid_errors": [],
         "file_versions": [[5, 0, 0, 6182]],
         "file_version_errors": [0],
+        "file_version_exc": [None],
         "authorized": True,
         "relaunch_code": None,
     }
@@ -4420,3 +4472,238 @@ def test_TERMINAL_RECYCLE_a_remote_traceback_is_scrubbed_typed_and_timed():
     events = _stage_events(captured, _RECYCLE_STAGE)
     assert len(events) == 1 and events[0]["ok"] is False
     assert events[0]["error_class"] == "RuntimeError"
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.5 review round 2 — Topic B, the remote recycle source.
+# --------------------------------------------------------------------------- #
+
+
+def test_TERMINAL_RECYCLE_R2SFH04_a_malformed_DIAGNOSTIC_field_keeps_the_counts_and_relaunch(
+    caplog,
+):
+    """⛔ R2-SFH-04. By the time the payload is parsed every `TerminateProcess` has
+    already run. The diagnostic fields come from Win32 code that has never run
+    live, so a shape surprise in ONE of them used to fail the whole parse: the
+    counts never reached the log, the relaunch was never issued, and the caller
+    logged "whether the process was ended is not known" about a process that WAS
+    ended. A malformed diagnostic field must become a named placeholder; the
+    counts and the relaunch must survive it."""
+    import logging
+
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    _install_recycle_double(
+        fake._MetaTrader5__conn,
+        returns=_recycle_verdict(
+            2, 2, 1, file_versions=[["x", "y"], None], file_version_errors="garbage"
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        verdict = client.recycle_terminal_process()
+
+    assert (verdict["matched"], verdict["terminated"], verdict["exited"]) == (2, 2, 1)
+    assert verdict["file_versions"] == "unparsed"
+    assert verdict["file_version_errors"] == "unparsed"
+    assert verdict["open_errors"] == [], "one bad field took a good one down with it"
+    assert fake.initialize_calls == 1, "the relaunch was skipped over a diagnostic field"
+    lines = [r.getMessage() for r in caplog.records if "terminate crossed" in r.getMessage()]
+    assert lines and "matched=2 terminated=2 exited=1" in lines[0], (
+        "the counts did not reach the log when a diagnostic field was malformed"
+    )
+
+
+def test_TERMINAL_RECYCLE_R2SFH04_a_malformed_ESSENTIAL_count_still_raises():
+    """The other half of the split: the three counts ARE the verdict. When they
+    cannot be read the verb does not know what happened, and it says so."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    _install_recycle_double(
+        fake._MetaTrader5__conn, returns=json.dumps(dict(matched=1, terminated="two"))
+    )
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.recycle_terminal_process()
+
+    assert "malformed" in str(exc_info.value)
+    assert fake.initialize_calls == 0
+
+
+def test_TERMINAL_RECYCLE_R2SFH04_a_raise_after_the_first_terminate_is_COUNTED_in_the_bridge(
+    monkeypatch,
+):
+    """⛔ R2-SFH-04. A remote raise on a LATER pid (a ctypes marshalling error, for
+    example) used to escape the function after the first terminate had landed.
+    `_guarded_read` then turned it into a code-0 error and the verdict read as
+    "not known", while a terminal was already down. The committed body now
+    catches per process, keeps going, and returns the counts with the failing
+    exception's CLASS NAME, so "terminate attempted" survives."""
+    import ctypes
+
+    win32 = _FakeWin32(
+        [(41, "terminal64.exe"), (42, "terminal64.exe"), (43, "terminal64.exe")],
+        terminate_raises={42: ctypes.ArgumentError("argument 1: bad handle")},
+    )
+
+    verdict = win32.run(monkeypatch)
+
+    assert verdict["matched"] == 3
+    assert verdict["attempted"] == 3, "the raising terminate was not counted as attempted"
+    assert verdict["terminated"] == 2
+    assert verdict["pid_errors"] == ["ArgumentError"]
+    assert win32.terminated == [41, 43], "one raising pid stopped the rest"
+    assert "bad handle" not in json.dumps(verdict), "remote free text left the bridge"
+
+
+def test_TERMINAL_RECYCLE_WR06_many_stray_terminals_cannot_overrun_the_rpyc_bound(
+    monkeypatch,
+):
+    """⛔ WR-06. The loop runs inside ONE rpyc request. Each timed-out exit wait
+    used to cost the full per-process bound, so eight stray `terminal64.exe`
+    processes modelled 8 x 5 s = 40 s against a 30 s `sync_request_timeout`: the
+    request timed out, the counts were lost, and a terminate that LANDED read as
+    "not known". Every process must still be ended, and the modelled runtime
+    must stay under half the bound (three exit waits' worth)."""
+    procs = [(50 + i, "terminal64.exe") for i in range(8)]
+    win32 = _FakeWin32(procs, not_exiting={pid for pid, _ in procs})
+
+    verdict = win32.run(monkeypatch, exit_wait_ms=5000)
+
+    assert win32.terminated == [pid for pid, _ in procs], "a stray terminal was left running"
+    assert verdict["terminated"] == 8 and verdict["exited"] == 0
+    assert verdict["unprocessed"] == 0
+    assert win32.elapsed_ms <= 3 * 5000, (
+        f"the remote body modelled {win32.elapsed_ms} ms of waiting inside one rpyc "
+        "request bounded at 30 s — several strays overrun it (WR-06)"
+    )
+
+
+def test_TERMINAL_RECYCLE_WR06_slow_win32_calls_stop_the_loop_and_report_partial_counts(
+    monkeypatch,
+):
+    """WR-06, the other way to overrun: the Win32 calls themselves are slow under
+    Wine (unmeasured). The body stops starting new processes once its budget is
+    spent and REPORTS how many it never reached, so `matched != terminated` reads
+    as a partial recycle and not as a timeout that lost everything."""
+    procs = [(60 + i, "terminal64.exe") for i in range(6)]
+    win32 = _FakeWin32(procs, terminate_cost_ms=6000)
+
+    verdict = win32.run(monkeypatch, exit_wait_ms=5000)
+
+    assert verdict["matched"] == 6
+    assert verdict["attempted"] == 3 and verdict["terminated"] == 3
+    assert verdict["unprocessed"] == 3
+    assert win32.wait_ms == [0, 0, 0], "an exhausted budget still waited"
+
+
+def test_TERMINAL_RECYCLE_WR06_the_exit_wait_shrinks_with_the_instance_request_timeout():
+    """WR-06. The in-bridge budget is three exit waits, so the exit wait that
+    crosses must be at most a sixth of THIS client's `sync_request_timeout` — a
+    client built with a shorter bound must not inherit the 30 s arithmetic."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(
+        _TERMINAL_HOST, _TERMINAL_PORT, _connect=connect, request_timeout_s=24
+    )
+    record = _install_recycle_double(fake._MetaTrader5__conn, returns=_recycle_verdict())
+
+    client.recycle_terminal_process()
+
+    assert record["calls"] == [(4000,)]
+    assert 6 * mt5_client_mod._TERMINAL_EXIT_WAIT_MS <= MT5_REQUEST_TIMEOUT_S * 1000, (
+        "the default exit wait no longer fits three waits in half the default bound"
+    )
+
+
+def test_TERMINAL_RECYCLE_R2SFH06_a_failed_enumeration_is_not_zero_matches(monkeypatch):
+    """⛔ R2-SFH-06. `Process32FirstW` failing (a `dwSize` Wine rejects, say) and
+    "no terminal running" both produced `matched=0`. The body now returns how many
+    processes it WALKED and the first call's `GetLastError()`, as ints."""
+    procs = [(71, "wineserver.exe"), (72, "services.exe")]
+
+    failed = _FakeWin32(procs, first_fails_with=24).run(monkeypatch)
+    empty = _FakeWin32(procs).run(monkeypatch)
+
+    assert (failed["matched"], failed["enumerated"], failed["enumerate_error"]) == (0, 0, 24)
+    assert (empty["matched"], empty["enumerated"], empty["enumerate_error"]) == (0, 2, 0)
+
+
+def test_TERMINAL_RECYCLE_R2SFH07_a_raising_version_read_names_its_exception_class(
+    monkeypatch,
+):
+    """⛔ R2-SFH-07. `except Exception` in the version read kept only `-1`, so a
+    missing `version.dll` under Wine and a ctypes signature mismatch read the
+    same. It now keeps the exception's CLASS NAME (bridge-local, never remote free
+    text) beside the `-1`, and the terminate that follows still runs."""
+    win32 = _FakeWin32(
+        [(81, "terminal64.exe")], version_dll_raises=OSError("version.dll not found")
+    )
+
+    verdict = win32.run(monkeypatch)
+
+    assert verdict["file_version_errors"] == [-1]
+    assert verdict["file_version_exc"] == ["OSError"]
+    assert "not found" not in json.dumps(verdict)
+    assert win32.terminated == [81]
+
+
+def test_TERMINAL_RECYCLE_R2SFH07_a_free_text_exception_field_never_reaches_the_verdict():
+    """The class-name fields are strings, so the client admits only an identifier
+    shape. Anything else — a message, a path — becomes the placeholder."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    payload = json.loads(_recycle_verdict())
+    payload["file_version_exc"] = ["C:/users/someone/terminal64.exe not found"]
+    payload["pid_errors"] = ["ArgumentError"]
+    _install_recycle_double(fake._MetaTrader5__conn, returns=json.dumps(payload))
+
+    verdict = client.recycle_terminal_process()
+
+    assert verdict["file_version_exc"] == "unparsed"
+    assert verdict["pid_errors"] == ["ArgumentError"]
+
+
+def test_TERMINAL_RECYCLE_IN01_every_Win32_function_called_has_its_signature_declared(
+    monkeypatch,
+):
+    """IN-01. Under the faked `WinDLL` an `argtypes` / `restype` assignment is a
+    plain attribute write, so a function called WITHOUT one passes every offline
+    gate and marshals with ctypes' int defaults on the live bridge: a HANDLE
+    truncated to 32 bits, a DWORD read as a signed int. This asserts, on the
+    EXECUTED body, that every function the source calls had `argtypes` set, and
+    that every function returning something other than BOOL had `restype` set.
+
+    ⚠️ It proves the declarations exist. It does NOT prove they are right under
+    Wine — live marshalling is still unmeasured (WINDOWS.md entry 68).
+    """
+    import re
+
+    src = mt5_client_mod._REMOTE_TERMINAL_RECYCLE_SRC
+    called = {
+        (dll, fn)
+        for dll, fn in re.findall(r"\b(kernel32|ver)\.([A-Za-z0-9]+)\(", src)
+    }
+    assert ("kernel32", "TerminateProcess") in called, "the call scan found nothing"
+    win32 = _FakeWin32(
+        [(91, "terminal64.exe")],
+    )
+
+    win32.run(monkeypatch)
+
+    dlls = {"kernel32": win32.kernel32, "ver": win32.version_dll}
+    missing_argtypes = sorted(
+        f"{dll}.{fn}" for dll, fn in called if not hasattr(getattr(dlls[dll], fn), "argtypes")
+    )
+    assert not missing_argtypes, f"called without argtypes: {missing_argtypes}"
+    non_bool = {
+        "CreateToolhelp32Snapshot",
+        "OpenProcess",
+        "WaitForSingleObject",
+        "GetFileVersionInfoSizeW",
+    }
+    missing_restype = sorted(
+        fn
+        for dll, fn in called
+        if fn in non_bool and not hasattr(getattr(dlls[dll], fn), "restype")
+    )
+    assert not missing_restype, f"non-BOOL return without restype: {missing_restype}"

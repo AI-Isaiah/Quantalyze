@@ -114,6 +114,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -927,11 +928,31 @@ def {_REMOTE_MATERIALIZE_FN}(deals):
 # file was replaced after launch, which a self-update may do. A failure is an int
 # in `file_version_errors` (`-1` for a Python-side raise) and NEVER blocks the
 # terminate that follows it. ⚠️ Like the terminate, never exercised live.
+#
+# ⭐ 164.6.5 review round 2, Topic B — WHAT THE BODY RETURNS BESIDE THE COUNTS.
+#   - R2-SFH-04: each process's open + terminate is caught PER PROCESS, so a raise
+#     on a later pid (a ctypes marshalling error, say) can no longer escape after
+#     an earlier terminate landed and turn a real kill into "not known".
+#     `attempted` counts every `TerminateProcess` issued (a raising one included);
+#     `pid_errors` names each caught exception by CLASS.
+#   - WR-06: `unprocessed` counts matched processes never started because the
+#     in-bridge budget ran out (see `_TERMINAL_EXIT_WAIT_MS`).
+#   - R2-SFH-06: `enumerated` is every process the snapshot walked, and
+#     `enumerate_error` is `GetLastError()` when `Process32FirstW` fails, so a
+#     failed enumeration no longer reads like "no terminal running".
+#   - R2-SFH-07: `file_version_exc` is the version read's exception CLASS name
+#     (a bridge-local identifier, never its message) beside the `-1`, so a
+#     missing `version.dll` and a signature mismatch stop reading the same.
+# ⚠️ IN-01: every Win32 function it calls declares `argtypes` (and `restype` when
+# it returns something other than BOOL). The contract suite pins that the
+# declarations EXIST; under a faked `WinDLL` it cannot show they are RIGHT under
+# Wine. Live marshalling is unmeasured (`.planning/WINDOWS.md` entry 68).
 _REMOTE_TERMINAL_RECYCLE_FN = "_qz_recycle_terminal_process"
 _REMOTE_TERMINAL_RECYCLE_SRC = """
 def _qz_recycle_terminal_process(exit_wait_ms):
     import ctypes
     import json
+    import time
     from ctypes import wintypes
 
     image = "terminal64.exe"
@@ -1026,56 +1047,104 @@ def _qz_recycle_terminal_process(exit_wait_ms):
         low = int(fixed.dwFileVersionLS)
         return [high >> 16, high & 0xFFFF, low >> 16, low & 0xFFFF], 0
 
+    def failure_name(exc):
+        return type(exc).__name__
+
+    budget_ms = 3 * exit_wait_ms
+    deadline = time.monotonic() + budget_ms / 1000.0
+
+    def remaining_ms():
+        return max(0, int((deadline - time.monotonic()) * 1000))
+
     snapshot = kernel32.CreateToolhelp32Snapshot(th32cs_snapprocess, 0)
     if snapshot is None or snapshot == ctypes.c_void_p(-1).value:
         raise OSError(ctypes.get_last_error(), "process snapshot failed")
     pids = []
+    enumerated = 0
+    enumerate_error = 0
     try:
         entry = ProcessEntry32W()
         entry.dwSize = ctypes.sizeof(ProcessEntry32W)
         more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        if not more:
+            enumerate_error = int(ctypes.get_last_error())
         while more:
+            enumerated += 1
             if entry.szExeFile.lower() == image:
                 pids.append(int(entry.th32ProcessID))
             more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
     finally:
         kernel32.CloseHandle(snapshot)
 
+    attempted = 0
     terminated = 0
     exited = 0
+    unprocessed = 0
     open_errors = []
     terminate_errors = []
+    pid_errors = []
     file_versions = []
     file_version_errors = []
-    for pid in pids:
-        try:
-            version, version_error = file_version(pid)
-        except Exception:
-            version, version_error = None, -1
-        file_versions.append(version)
-        file_version_errors.append(version_error)
-        handle = kernel32.OpenProcess(process_terminate | synchronize, False, pid)
-        if not handle:
-            open_errors.append(int(ctypes.get_last_error()))
-            continue
-        try:
-            if kernel32.TerminateProcess(handle, 1):
-                terminated += 1
-                if kernel32.WaitForSingleObject(handle, exit_wait_ms) == wait_object_0:
+    file_version_exc = []
+    handles = []
+    ended = []
+    try:
+        for index, pid in enumerate(pids):
+            if remaining_ms() <= 0:
+                unprocessed = len(pids) - index
+                break
+            try:
+                version, version_error = file_version(pid)
+                version_exc = None
+            except Exception as exc:
+                version, version_error, version_exc = None, -1, failure_name(exc)
+            file_versions.append(version)
+            file_version_errors.append(version_error)
+            file_version_exc.append(version_exc)
+            try:
+                handle = kernel32.OpenProcess(
+                    process_terminate | synchronize, False, pid
+                )
+                if not handle:
+                    open_errors.append(int(ctypes.get_last_error()))
+                    continue
+                handles.append(handle)
+                attempted += 1
+                if kernel32.TerminateProcess(handle, 1):
+                    terminated += 1
+                    ended.append(handle)
+                else:
+                    terminate_errors.append(int(ctypes.get_last_error()))
+            except Exception as exc:
+                pid_errors.append(failure_name(exc))
+        for handle in ended:
+            try:
+                wait_ms = min(exit_wait_ms, remaining_ms())
+                if kernel32.WaitForSingleObject(handle, wait_ms) == wait_object_0:
                     exited += 1
-            else:
-                terminate_errors.append(int(ctypes.get_last_error()))
-        finally:
-            kernel32.CloseHandle(handle)
+            except Exception as exc:
+                pid_errors.append(failure_name(exc))
+    finally:
+        for handle in handles:
+            try:
+                kernel32.CloseHandle(handle)
+            except Exception as exc:
+                pid_errors.append(failure_name(exc))
     return json.dumps(
         dict(
             matched=len(pids),
             terminated=terminated,
             exited=exited,
+            attempted=attempted,
+            unprocessed=unprocessed,
+            enumerated=enumerated,
+            enumerate_error=enumerate_error,
             open_errors=open_errors,
             terminate_errors=terminate_errors,
+            pid_errors=pid_errors,
             file_versions=file_versions,
             file_version_errors=file_version_errors,
+            file_version_exc=file_version_exc,
         )
     )
 """
@@ -1084,7 +1153,87 @@ def _qz_recycle_terminal_process(exit_wait_ms):
 # remote crossing is bounded by the rpyc `sync_request_timeout` (30s on the worker
 # chain), so this stays far below it; the relaunch that follows is a SEPARATE
 # round-trip carrying its own registered `initialize` ceiling.
+#
+# ⛔ WR-06 (164.6.5 review round 2) — THE WAIT IS NOT THE WHOLE COST. The source
+# spends at most THREE exit waits in total (`budget_ms = 3 * exit_wait_ms`),
+# however many processes matched: it ends every process first and only then
+# waits, each wait shrunk to what is left of the budget, and it stops STARTING
+# new processes once the budget is spent (reporting them as `unprocessed`). The
+# verb sends `min(_TERMINAL_EXIT_WAIT_MS, request_timeout / _TERMINAL_EXIT_WAIT_
+# DIVISOR)`, so three waits fit in HALF of THIS client's `sync_request_timeout`
+# and the other half covers the Win32 calls, whose cost under Wine is
+# unmeasured. Before this, eight stray `terminal64.exe` modelled 40 s inside a
+# 30 s request, and the timeout discarded the counts of terminates that landed.
 _TERMINAL_EXIT_WAIT_MS = 5000
+_TERMINAL_EXIT_WAIT_DIVISOR = 6
+
+# R2-SFH-04 — a diagnostic field the client could not read. It replaces THAT
+# field only, on the line and in the verdict; it never costs the counts.
+_RECYCLE_UNPARSED = "unparsed"
+# R2-SFH-07 — the only string shape a class-name field may carry: a Python
+# identifier. A message or a path is not one, so remote free text cannot pass.
+_RECYCLE_CLASS_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+
+
+def _recycle_int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        raise TypeError("not a list")
+    return [int(code) for code in value]
+
+
+def _recycle_int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("not an int")
+    return value
+
+
+def _recycle_versions(value: Any) -> list[list[int] | None]:
+    # SFH-04 — four ints per matched process, or None; never a path.
+    if not isinstance(value, list):
+        raise TypeError("not a list")
+    return [None if v is None else [int(part) for part in v][:4] for v in value]
+
+
+def _recycle_class_name(value: Any) -> str:
+    if not isinstance(value, str) or not _RECYCLE_CLASS_NAME_RE.fullmatch(value):
+        raise ValueError("not a class name")
+    return value
+
+
+def _recycle_class_names(value: Any) -> list[str | None]:
+    if not isinstance(value, list):
+        raise TypeError("not a list")
+    return [None if v is None else _recycle_class_name(v) for v in value]
+
+
+def _parse_recycle_diagnostics(counts: dict[str, Any]) -> dict[str, Any]:
+    """Every field of the recycle verdict BESIDES the three counts, each parsed on
+    its own. ⛔ R2-SFH-04: this cannot raise. A field that is missing or has an
+    unexpected shape becomes ``"unparsed"`` and the others are kept, because by
+    the time it runs every ``TerminateProcess`` has already happened and the
+    counts must reach the log whatever the diagnostics look like."""
+    parsers: tuple[tuple[str, Callable[[Any], Any]], ...] = (
+        ("attempted", _recycle_int),
+        ("unprocessed", _recycle_int),
+        ("enumerated", _recycle_int),
+        ("enumerate_error", _recycle_int),
+        ("open_errors", _recycle_int_list),
+        ("terminate_errors", _recycle_int_list),
+        ("pid_errors", _recycle_class_names),
+        ("file_versions", _recycle_versions),
+        ("file_version_errors", _recycle_int_list),
+        ("file_version_exc", _recycle_class_names),
+    )
+    parsed: dict[str, Any] = {}
+    for key, parse in parsers:
+        try:
+            parsed[key] = parse(counts[key])
+        except Exception:
+            # Deliberately broad: a diagnostic's shape is unmeasured live, and
+            # any surprise here must degrade to the placeholder, never unwind
+            # past a terminate that already landed.
+            parsed[key] = _RECYCLE_UNPARSED
+    return parsed
 
 
 class Mt5Client:
@@ -2281,36 +2430,38 @@ class Mt5Client:
                 0, "MT5 rpyc transport is not reachable for the terminal recycle"
             )
 
+        # WR-06 — three of these must fit in half of THIS client's rpyc bound.
+        exit_wait_ms = min(
+            _TERMINAL_EXIT_WAIT_MS,
+            int(self._request_timeout_s * 1000) // _TERMINAL_EXIT_WAIT_DIVISOR,
+        )
+
         def _remote_call() -> str:
             conn.execute(_REMOTE_TERMINAL_RECYCLE_SRC)
             return cast(
                 str,
-                conn.namespace[_REMOTE_TERMINAL_RECYCLE_FN](_TERMINAL_EXIT_WAIT_MS),
+                conn.namespace[_REMOTE_TERMINAL_RECYCLE_FN](exit_wait_ms),
             )
 
         # Through `_guarded_read` for the reason every remote crossing is: a remote
         # traceback carries the executed source line and must be scrubbed, and the
         # stage bracket is what makes the recycle's cost visible.
         payload = self._guarded_read(_remote_call, stage="terminal_recycle")
+        # ⛔ R2-SFH-04 (164.6.5 review round 2) — THE COUNTS FIRST, ON THEIR OWN.
+        # They are the verdict: unreadable, the verb does not know what happened
+        # and says so. Every OTHER field is parsed tolerantly after them, because
+        # they come from Win32 code that has never run live and one surprise in
+        # them used to fail this whole parse — after every terminate had landed.
         try:
             counts = json.loads(payload)
-            matched = int(counts["matched"])
-            terminated = int(counts["terminated"])
-            exited = int(counts["exited"])
-            # SFH-09 — the Win32 codes of each refused open / terminate. Ints
-            # only: a remote string never reaches a log line from here.
-            open_errors = [int(code) for code in counts["open_errors"]]
-            terminate_errors = [int(code) for code in counts["terminate_errors"]]
-            # SFH-04 — four ints per matched process, or None; never a path.
-            file_versions = [
-                None if v is None else [int(part) for part in v][:4]
-                for v in counts["file_versions"]
-            ]
-            file_version_errors = [int(c) for c in counts["file_version_errors"]]
+            matched = _recycle_int(counts["matched"])
+            terminated = _recycle_int(counts["terminated"])
+            exited = _recycle_int(counts["exited"])
         except (TypeError, ValueError, KeyError):
             raise Mt5ClientError(
                 0, "MT5 terminal recycle returned a malformed verdict"
             ) from None
+        diagnostics = _parse_recycle_diagnostics(counts)
 
         # ⛔ SFH-06 (164.6.5 review round 1) — THE COUNTS REACH THE LOG BEFORE THE
         # RELAUNCH, whatever happens to it. The relaunch below can raise
@@ -2319,20 +2470,27 @@ class Mt5Client:
         # this verb and the verdict dict is discarded — and the ONLY evidence that
         # a shared terminal was ended and not relaunched by us went with it. The
         # generic "ABANDONED at the budget" line says nothing about a process
-        # having been killed. Counts and Win32 codes only: no host, no port, no
-        # account.
+        # having been killed. Counts, Win32 codes and bridge-local exception CLASS
+        # names only: no host, no port, no account, no remote message.
         logger.warning(
             "Mt5Client.recycle_terminal_process: terminate crossed — matched=%d "
-            "terminated=%d exited=%d open_errors=%s terminate_errors=%s "
-            "file_versions=%s file_version_errors=%s; issuing the relaunch probe "
-            "now (a later abandonment does not undo this).",
+            "terminated=%d exited=%d attempted=%s unprocessed=%s enumerated=%s "
+            "enumerate_error=%s open_errors=%s terminate_errors=%s pid_errors=%s "
+            "file_versions=%s file_version_errors=%s file_version_exc=%s; issuing "
+            "the relaunch probe now (a later abandonment does not undo this).",
             matched,
             terminated,
             exited,
-            open_errors,
-            terminate_errors,
-            file_versions,
-            file_version_errors,
+            diagnostics["attempted"],
+            diagnostics["unprocessed"],
+            diagnostics["enumerated"],
+            diagnostics["enumerate_error"],
+            diagnostics["open_errors"],
+            diagnostics["terminate_errors"],
+            diagnostics["pid_errors"],
+            diagnostics["file_versions"],
+            diagnostics["file_version_errors"],
+            diagnostics["file_version_exc"],
         )
         authorized = True
         relaunch_code: int | None = None
@@ -2345,10 +2503,7 @@ class Mt5Client:
             "matched": matched,
             "terminated": terminated,
             "exited": exited,
-            "open_errors": open_errors,
-            "terminate_errors": terminate_errors,
-            "file_versions": file_versions,
-            "file_version_errors": file_version_errors,
+            **diagnostics,
             "authorized": authorized,
             "relaunch_code": relaunch_code,
         }
