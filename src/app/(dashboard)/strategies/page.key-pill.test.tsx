@@ -133,6 +133,101 @@ const state = vi.hoisted(() => ({
   rpcCalls: [] as Array<{ fn: string; args: unknown }>,
   /** Every `.select(...)` / `.in(...)` the page issued, per table. */
   calls: [] as Array<{ table: string; op: string; args: unknown[] }>,
+  /**
+   * Phase 167.2.1 (D-08) — the service-role read behind `probeFactsheetBuildable`,
+   * per strategy id. An id with no entry answers a computed row with a 30-point
+   * series, so every other describe's computed rows stay buildable and render
+   * as they did before the list probed them.
+   */
+  adminRows: {} as Record<string, { data: unknown; error: { message: string } | null }>,
+  /** 167.2.1 D-05: the admin factory itself throws. */
+  adminThrow: false,
+  /** Every `from(table)` the admin client was asked for. */
+  adminTables: [] as string[],
+  /** The id of every strategies read the admin client answered. */
+  adminStrategyReads: [] as string[],
+  /** Every `.or(filter)` applied to an admin read (the visibility predicate). */
+  adminOrFilters: [] as string[],
+}));
+
+/** N consecutive synthetic calendar days from 2024-01-02, as {date, value}. */
+const points = vi.hoisted(() => (n: number) =>
+  Array.from({ length: n }, (_, i) => ({
+    date: new Date(Date.UTC(2024, 0, 2) + i * 86_400_000).toISOString().slice(0, 10),
+    value: ((i % 7) - 3) / 1000,
+  })),
+);
+
+/** A strategies row as the builder's admin select returns it (synthetic). */
+const adminStrategy = vi.hoisted(() => (id: string, analytics: Record<string, unknown>) => ({
+  id,
+  name: `Strategy ${id}`,
+  codename: null,
+  disclosure_tier: null,
+  status: "draft",
+  markets: [],
+  strategy_types: [],
+  description: null,
+  subtypes: [],
+  supported_exchanges: [],
+  leverage_range: null,
+  aum: null,
+  max_capacity: null,
+  avg_daily_turnover: null,
+  start_date: null,
+  benchmark: null,
+  asset_class: "crypto",
+  returns_denominator_config: null,
+  strategy_analytics: {
+    daily_returns: null,
+    returns_series: null,
+    computed_at: "2024-03-01T00:00:00Z",
+    data_quality_flags: null,
+    metrics_json_by_basis: null,
+    computation_status: "complete",
+    ...analytics,
+  },
+}));
+
+// Phase 167.2.1 (D-08) — the service-role client `probeFactsheetBuildable`
+// builds. A chainable double that records the tables, the id read and the
+// visibility filter; the probe itself (the builder's resolve stage) is REAL.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => {
+    if (state.adminThrow) throw new Error("synthetic admin client failure");
+    return {
+      from: (table: string) => {
+        state.adminTables.push(table);
+        let id = "";
+        const b: Record<string, unknown> = {};
+        const self = () => b;
+        b.select = self;
+        b.order = self;
+        b.limit = self;
+        b.eq = (column: string, value: string) => {
+          if (column === "id") id = value;
+          return b;
+        };
+        b.or = (filter: string) => {
+          state.adminOrFilters.push(filter);
+          return b;
+        };
+        b.maybeSingle = async () => {
+          if (table !== "strategies") return { data: null, error: null };
+          state.adminStrategyReads.push(id);
+          return (
+            state.adminRows[id] ?? {
+              data: adminStrategy(id, { daily_returns: points(30) }),
+              error: null,
+            }
+          );
+        };
+        // The composite read awaits its csv builder directly.
+        b.then = (resolve: (v: unknown) => unknown) => resolve({ data: [], error: null });
+        return b;
+      },
+    };
+  },
 }));
 
 // Table-dispatch double. Each table the page reads is named; anything else
@@ -253,7 +348,10 @@ let consoleError: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   redirectMock.mockReset();
   pillProps.length = 0;
-  state.user = { id: "u-test" };
+  // Phase 167.2.1 (D-08): UUID-shaped, because the list now probes computed
+  // rows with `withPublishedOrOwner(q, user.id)`, which fails closed (and logs)
+  // on a non-UUID id. Synthetic.
+  state.user = { id: "00000000-0000-4000-8000-0000000000a1" };
   state.strategies = [];
   state.strategiesError = null;
   state.keys = [];
@@ -265,6 +363,11 @@ beforeEach(() => {
   state.jobsThrow = false;
   state.rpcCalls = [];
   state.calls = [];
+  state.adminRows = {};
+  state.adminThrow = false;
+  state.adminTables = [];
+  state.adminStrategyReads = [];
+  state.adminOrFilters = [];
   captureToSentryMock.mockClear();
   consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -480,6 +583,9 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
   const PUBLIC =
     "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.";
+  // Phase 167.2.1 (D-02) — typed out from 167.2.1-CONTEXT.md, never imported.
+  const UNBUILDABLE_SHORT =
+    "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.";
 
   function noteOf(container: HTMLElement, strategyName: string): string | null {
     const card = [...container.querySelectorAll("a")]
@@ -509,6 +615,25 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     // A computed row has a factsheet; reading its jobs would be a wasted round
     // trip per row on the page every manager lands on.
     expect(state.rpcCalls).toEqual([]);
+  });
+
+  // A finished factsheet-chain job: the share page's arm for it is
+  // `not_available`, so a null payload shows the "not available" card.
+  const finished = { kind: "process_key_long", status: "done", created_at: "2026-02-01T00:00:00.000Z" };
+
+  it("COMPUTED-UNBUILDABLE (167.2.1 SC3, WR-02): a computed single-key row with ONE dated return says the private link shows 'not available', and why", async () => {
+    // The owner's embed calls it computed; the builder refuses it (G4). Its
+    // share-link recipient lands on the "not available" card, so a silent row
+    // here would imply a working factsheet.
+    state.strategies = [row("s-short", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = {
+      "s-short": { data: adminStrategy("s-short", { daily_returns: points(1) }), error: null },
+    };
+    state.jobs = { "s-short": [finished] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-short")).toBe(UNBUILDABLE_SHORT);
   });
 
   it("MINT-A: an unpublished row whose computation is running says the private link shows it being prepared", async () => {

@@ -27,9 +27,15 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import {
   KEY_STATUS_UNREADABLE_NOTE,
   recipientShareNote,
+  recipientShareNoteFor,
   STRATEGIES_LIST_UNREADABLE,
+  unbuildableNoteKindOf,
   untrustedKeyCaption,
 } from "@/lib/status-surface-copy";
+// Phase 167.2.1 (D-04, D-08): the builder's own resolve stage, so the list and
+// the share page decide "can this factsheet build?" from the same code.
+import { probeFactsheetBuildable } from "@/lib/factsheet/fetch-and-build-payload";
+import { withPublishedOrOwner } from "@/lib/visibility";
 import { PendingIntros } from "@/components/strategy/PendingIntros";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -331,41 +337,94 @@ export default async function StrategiesPage() {
   }
 
   // Phase 167.2 / KCS-12 — beside each share control, what a recipient of that
-  // link sees right now, for every row WITHOUT a computed factsheet. "Has a
-  // computed factsheet" is `isComputedAnalytics(computation_status)`: the
-  // factsheet builder's own first gate (STALE-01 in fetchAndBuildPayload), so a
-  // row this predicate calls uncomputed is one the builder refuses. A computed
-  // row performs no RPC and shows no note. Known limit: a computed row whose
-  // series cannot build still reads as "has a factsheet" here; that is decided
-  // from data this request client cannot read (167.2-09 SUMMARY).
+  // link sees right now, for every row WITHOUT a buildable factsheet. "Has a
+  // computed factsheet" starts at `isComputedAnalytics(computation_status)`:
+  // the factsheet builder's own first gate (STALE-01 in fetchAndBuildPayload),
+  // so a row this predicate calls uncomputed is one the builder refuses.
+  // Lineage: 167.2-REVIEW WR-02 (a computed row whose series cannot build read
+  // as "has a factsheet" here) is closed by 167.2.1 D-04 and D-08. A computed
+  // row is now asked `probeFactsheetBuildable`, the builder's own resolve
+  // stage, so the list and the share page decide from the builder's own code.
+  //
+  // The recipient arm, and the note an uncomputed row has always shown. One
+  // function, so the uncomputed path and the probe's fallbacks read the arm
+  // the same way.
+  const armOf = async (
+    s: NonNullable<typeof strategies>[number],
+    mode: ReturnType<typeof shareAffordanceMode>,
+  ): Promise<RecipientArm> =>
+    // 167.2-REVIEW IN-04: a published row's note is the public line whatever
+    // the arm (`recipientShareNote` / `recipientShareNoteFor` ignore it for
+    // "public-url"), so its jobs are not read: that was one RPC per row whose
+    // answer, and whose failure log, described a value nobody reads. The arm
+    // passed for it is the one that claims least; it is never rendered.
+    mode === "public-url"
+      ? "not_available"
+      : readRecipientArm(
+          supabase,
+          s.id,
+          // IN-03: a failed member read keeps stitch preference.
+          {
+            memberCount: membersReadFailed
+              ? { ok: false, message: "strategy_keys member read failed" }
+              : { ok: true, count: membersByStrategy.get(s.id)?.length ?? 0 },
+            apiKeyId: s.api_key_id,
+          },
+        );
+  const uncomputedNote = async (
+    s: NonNullable<typeof strategies>[number],
+    mode: ReturnType<typeof shareAffordanceMode>,
+  ): Promise<string> => recipientShareNote(mode, await armOf(s, mode));
+
   const shareNotes = new Map<string, string>(
-    await Promise.all(
-      (strategies ?? [])
-        .filter((s) => !isComputedAnalytics(computationStatusOf(s.strategy_analytics)))
-        .map(async (s) => {
+    (
+      await Promise.all(
+        (strategies ?? []).map(async (s): Promise<readonly [string, string | null]> => {
           const mode = shareAffordanceMode(isPublishedStatus(s.status));
-          // 167.2-REVIEW IN-04: a published row's note is KCS12-PUBLIC whatever
-          // the arm (`recipientShareNote` ignores it for "public-url"), so its
-          // jobs are not read: that was one RPC per row whose answer, and whose
-          // failure log, described a value nobody reads. The arm passed for it
-          // is the one that claims least; it is never rendered.
-          const arm: RecipientArm =
-            mode === "public-url"
-              ? "not_available"
-              : await readRecipientArm(
-                  supabase,
-                  s.id,
-                  // IN-03: a failed member read keeps stitch preference.
-                  {
-                    memberCount: membersReadFailed
-                      ? { ok: false, message: "strategy_keys member read failed" }
-                      : { ok: true, count: membersByStrategy.get(s.id)?.length ?? 0 },
-                    apiKeyId: s.api_key_id,
-                  },
-                );
-          return [s.id, recipientShareNote(mode, arm)] as const;
+          // D-08: an uncomputed row is never probed; it keeps today's path.
+          if (!isComputedAnalytics(computationStatusOf(s.strategy_analytics))) {
+            return [s.id, await uncomputedNote(s, mode)] as const;
+          }
+          // D-08: a computed row is probed, uncached, under the owner
+          // predicate. Only ids from the owner-filtered list reach here.
+          let probe: Awaited<ReturnType<typeof probeFactsheetBuildable>>;
+          try {
+            probe = await probeFactsheetBuildable(s.id, (q) => withPublishedOrOwner(q, user.id));
+          } catch (err) {
+            // D-05: a probe that throws is never read as "buildable".
+            console.error("[strategies/page] factsheet probe failed", {
+              id: s.id,
+              message: err instanceof Error ? err.message : String(err),
+            });
+            captureToSentry(err instanceof Error ? err : new Error(String(err)), {
+              tags: { route: "strategies/page", stage: "factsheet-probe" },
+            });
+            return [s.id, recipientShareNote(mode, "unreadable")] as const;
+          }
+          if (probe.buildable) return [s.id, null] as const;
+          if (probe.reason === "read_error" || probe.reason === "not_visible") {
+            // D-05: the probe could not see the row, so what the recipient
+            // sees is not known. Logged and captured, tags only.
+            console.error("[strategies/page] factsheet probe could not read the row", {
+              id: s.id,
+              reason: probe.reason,
+            });
+            captureToSentry(new Error(`factsheet probe answered ${probe.reason}`), {
+              tags: { route: "strategies/page", stage: "factsheet-probe" },
+            });
+            return [s.id, recipientShareNote(mode, "unreadable")] as const;
+          }
+          // D-05: the embed and the admin read disagree (a race): the admin
+          // read is the builder's, so the row takes the uncomputed path.
+          if (probe.reason === "not_computed") {
+            return [s.id, await uncomputedNote(s, mode)] as const;
+          }
+          // D-02: computed, but the builder refuses it.
+          const kind = unbuildableNoteKindOf(probe.reason);
+          return [s.id, recipientShareNoteFor(mode, await armOf(s, mode), kind)] as const;
         }),
-    ),
+      )
+    ).filter((entry): entry is readonly [string, string] => entry[1] !== null),
   );
 
   return (

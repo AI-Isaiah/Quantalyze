@@ -22,6 +22,9 @@
 
 import { EXCHANGE_DISPLAY } from "./closed-sets";
 import type { ComputeState, RecipientArm } from "./compute-state";
+// Type-only (Phase 167.2.1): erased at build, so this copy module pulls in
+// none of the builder's server-side imports.
+import type { NotBuildableReason } from "./factsheet/fetch-and-build-payload";
 import type { ShareAffordanceMode } from "./share-affordance";
 import type { StrategyShape } from "./strategy-shape";
 import { STALL_THRESHOLD_MS } from "./sync-progress";
@@ -336,12 +339,80 @@ const PUBLIC_URL_NOTE =
  * What a recipient of this strategy's link sees right now (KCS12-MINT-A,
  * KCS12-MINT-B, KCS12-UNREADABLE for a private link; KCS12-PUBLIC for a
  * published strategy's public URL, whatever the arm).
+ *
+ * Phase 167.2.1 (D-02) adds four rows to this family for a row that is
+ * computed but whose factsheet cannot build: KCS12-UNBUILDABLE-SHORT,
+ * KCS12-UNBUILDABLE-COMPOSITE, KCS12-PUBLIC-UNBUILDABLE-SHORT and
+ * KCS12-PUBLIC-UNBUILDABLE-COMPOSITE. They are chosen by
+ * `recipientShareNoteFor`; this function never returns them.
  */
 export function recipientShareNote(
   mode: ShareAffordanceMode,
   arm: RecipientArm,
 ): string {
   return mode === "public-url" ? PUBLIC_URL_NOTE : MINT_TOKEN_NOTES[arm];
+}
+
+/**
+ * Phase 167.2.1 (D-02) — why a computed row's factsheet cannot build, in the
+ * two kinds the copy distinguishes: a single-key series too short to build
+ * (`too_short`), or a composite whose results cannot be built (`cannot_build`).
+ */
+export type UnbuildableNoteKind = "too_short" | "cannot_build";
+
+/**
+ * The note kind for a probe reason, or null when the reason is not a
+ * build-time refusal of a computed row (`read_error`, `not_visible` and
+ * `not_computed` are decided by the caller, D-05).
+ */
+export function unbuildableNoteKindOf(
+  reason: NotBuildableReason,
+): UnbuildableNoteKind | null {
+  switch (reason) {
+    case "too_few_points":
+      return "too_short";
+    case "composite_unbuildable":
+      return "cannot_build";
+    default:
+      return null;
+  }
+}
+
+// The "2" is MIN_FACTSHEET_SERIES_POINTS; status-surface-copy.test.ts pins the
+// sentences to that constant, so the copy cannot drift from the gate. "yet" is
+// dropped on purpose: waiting does not change this row (D-02).
+const MINT_UNBUILDABLE_NOTES = {
+  too_short:
+    "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.",
+  cannot_build:
+    "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded, but its results cannot be built into a factsheet. Contact support@quantalyze.com to have this composite checked.",
+} as const satisfies Record<UnbuildableNoteKind, string>;
+
+const PUBLIC_UNBUILDABLE_NOTES = {
+  too_short:
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.",
+  cannot_build:
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its last computation succeeded, but its results cannot be built into a factsheet. Contact support@quantalyze.com to have this composite checked.",
+} as const satisfies Record<UnbuildableNoteKind, string>;
+
+/**
+ * Phase 167.2.1 (D-02) — the selection rule. With no unbuildable kind this is
+ * `recipientShareNote(mode, arm)`. For an unbuildable row, a public URL takes
+ * its PUBLIC-UNBUILDABLE line whatever the arm (167.2 IN-04: no RPC); a
+ * private link takes its UNBUILDABLE line only on arm `not_available`, which is
+ * exactly when the share page shows its "not available" card. Arm
+ * `in_progress` keeps KCS12-MINT-A (a recompute is running and the recipient
+ * sees "being prepared"), and `unreadable` keeps KCS12-UNREADABLE.
+ */
+export function recipientShareNoteFor(
+  mode: ShareAffordanceMode,
+  arm: RecipientArm,
+  kind: UnbuildableNoteKind | null,
+): string {
+  if (kind === null) return recipientShareNote(mode, arm);
+  if (mode === "public-url") return PUBLIC_UNBUILDABLE_NOTES[kind];
+  if (arm === "not_available") return MINT_UNBUILDABLE_NOTES[kind];
+  return recipientShareNote(mode, arm);
 }
 
 // ── S9 — KCS-11 share page arms ───────────────────────────────────────────
