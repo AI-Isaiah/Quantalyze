@@ -56,6 +56,19 @@ _BRIDGE_MARKER_IN_LIST = "('ledger-refresh', 'ledger-refresh-composite')"
 _BRIDGE_PROTECTED_ALIAS = "AS is_protected"
 _SEEDED_STATUS = "complete_with_warnings"
 
+# (name, retracted, warned_seed, inflight). The modelled arm puts ONE other
+# job for the same strategy in flight before the failure mark; a production
+# path to that shape is unmeasured, so it is labelled modelled, never observed.
+_ARMS: tuple[tuple[str, bool, bool, str], ...] = (
+    ("control", False, True, "none"),
+    ("retracted-warned", True, True, "none"),
+    ("retracted-unwarned", True, False, "none"),
+    ("retracted-warned-inflight", True, True, "modelled"),
+)
+# enqueue_compute_job gates a strategy-scoped kind only on the kind CHECK list
+# and the retired compute_analytics; sync_trades needs no key or seed.
+_INFLIGHT_KIND = "sync_trades"
+
 _WORKER_ID = "probe-164.6.7-claimtime"
 _CORRELATION_ID = "probe-164.6.7-retraction"
 
@@ -149,13 +162,10 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     supabase = get_supabase()
 
+    readings: list[tuple[str, dict[str, Any]]] = []
     with psycopg.connect(env["DB_URL"], autocommit=True) as conn:
         _assert_bridge_definition(conn)
-        arms: list[tuple[str, bool, bool, str]] = [
-            ("control", False, True, "none"),
-            ("retracted-warned", True, True, "none"),
-        ]
-        for name, retracted, warned_seed, inflight in arms:
+        for name, retracted, warned_seed, inflight in _ARMS:
             reading = await _run_arm(
                 conn,
                 supabase,
@@ -165,7 +175,71 @@ async def _main_async(args: argparse.Namespace) -> int:
                 inflight=inflight,
             )
             print(_verdict_line(name, reading), flush=True)
-    return 0
+            readings.append((name, reading))
+
+    methods = sorted({str(r["next_bridge_method"]) for _, r in readings})
+    print(
+        f"HARM-PROBE next-bridge: method={','.join(methods)} "
+        f"inflight_kind={_INFLIGHT_KIND}",
+        flush=True,
+    )
+    result, code = _judge(args.expect, readings)
+    print(
+        f"HARM-PROBE summary: expect={args.expect or 'none'} arms={len(readings)} "
+        f"result={result}",
+        flush=True,
+    )
+    return code
+
+
+def _judge(expect: str | None, readings: list[tuple[str, dict[str, Any]]]) -> tuple[str, int]:
+    """Assert the DECISION readings for the chosen mode.
+
+    The end-state values (warned_after_fail, both *_after_next_bridge readings
+    and everything on the modelled arm) are printed and asserted in NEITHER
+    mode: they size the harm, they gate nothing (D-02).
+
+    Precedence in pre-fix mode: a broken control or a bridge-fidelity miss is
+    FAIL first, because either one means the driver cannot be trusted, and a
+    retracted reading from an untrusted driver cannot disprove anything. Only
+    with a trusted driver does a retracted arm that AGREES read as
+    PREMISE-DISPROVED (exit 3: stop and replan).
+    """
+    if expect is None:
+        return "ok", 0
+
+    fidelity_ok = all(
+        r["bridge_agrees"] == "true" for _, r in readings if r["inflight"] == "none"
+    )
+    control = [r for name, r in readings if name == "control"]
+    control_ok = len(control) == 1 and (
+        control[0]["python_branch"] == "error_only"
+        and control[0]["sql_is_protected"] is True
+        and control[0]["layers_agree"] is True
+    )
+    retracted = [r for _, r in readings if r["retracted"]]
+    if not (fidelity_ok and control_ok and retracted):
+        return "FAIL", 1
+
+    if expect == "pre-fix":
+        if any(r["layers_agree"] for r in retracted):
+            return "PREMISE-DISPROVED", 3
+        if all(
+            r["python_branch"] == "error_only" and r["sql_is_protected"] is False
+            for r in retracted
+        ):
+            return "ok", 0
+        return "FAIL", 1
+
+    # post-fix
+    if all(
+        r["layers_agree"] is True
+        and r["python_branch"] == "loud"
+        and r["sql_is_protected"] is False
+        for r in retracted
+    ):
+        return "ok", 0
+    return "FAIL", 1
 
 
 def _assert_bridge_definition(conn: Any) -> None:
@@ -342,6 +416,9 @@ async def _run_arm(
         sql_is_protected = _sql_is_protected(conn, job_id)
         layers_agree = (python_branch == "error_only") == sql_is_protected
 
+        if inflight == "modelled":
+            _enqueue(conn, strategy_id, _INFLIGHT_KIND, None)
+
         claim_token = snapshot.get("claim_token")
         if not claim_token:
             raise ProbeError("the claimed row carries no claim token")
@@ -369,6 +446,18 @@ async def _run_arm(
         else:
             bridge_agrees = "n/a"
 
+        # The next bridge call (H2): a fresh UNMARKED composite job stays
+        # pending, then the bridge runs once more.
+        next_job_id = _enqueue(conn, strategy_id, "stitch_composite", None)
+        if next_job_id == job_id:
+            raise ProbeError("the next-bridge enqueue returned the failed job")
+        next_bridge_method = await _drive_next_bridge(
+            conn, supabase, strategy_id, next_job_id
+        )
+        status_after_next_bridge, warned_after_next_bridge = _read_analytics(
+            conn, strategy_id
+        )
+
         return {
             "retracted": retracted,
             "warned_seed": warned_seed,
@@ -379,12 +468,62 @@ async def _run_arm(
             "status_after_fail": status_after_fail,
             "warned_after_fail": warned_after_fail,
             "bridge_agrees": bridge_agrees,
-            "status_after_next_bridge": "not-run",
-            "warned_after_next_bridge": "not-run",
+            "status_after_next_bridge": status_after_next_bridge,
+            "warned_after_next_bridge": warned_after_next_bridge,
+            "next_bridge_method": next_bridge_method,
             "foreign_rows_claimed": foreign_rows_claimed,
         }
     finally:
         _cleanup(conn, user_id=user_id, strategy_id=strategy_id)
+
+
+async def _drive_next_bridge(
+    conn: Any, supabase: Any, strategy_id: str, next_job_id: str
+) -> str:
+    """Call the bridge directly on the lane (research A3). If the lane refuses
+    the direct call, drive it by claiming and failing the fresh job through its
+    claim token instead, and say which."""
+    import psycopg
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT public.sync_strategy_analytics_status(%s::uuid)", (strategy_id,)
+            )
+        return "direct"
+    except psycopg.errors.InsufficientPrivilege:
+        pass
+
+    claimed = await asyncio.to_thread(
+        lambda: supabase.rpc(
+            "claim_compute_jobs_with_priority",
+            {
+                "p_batch_size": 1000,
+                "p_worker_id": _WORKER_ID,
+                "p_unified_backbone_active": None,
+                "p_kind_include": ["stitch_composite"],
+                "p_kind_exclude": None,
+            },
+        ).execute()
+    )
+    rows = [
+        r for r in (getattr(claimed, "data", None) or []) if str(r.get("id")) == next_job_id
+    ]
+    if len(rows) != 1 or not rows[0].get("claim_token"):
+        raise ProbeError("the next-bridge fallback could not claim the fresh job")
+    token = rows[0]["claim_token"]
+    await asyncio.to_thread(
+        lambda: supabase.rpc(
+            "mark_compute_job_failed",
+            {
+                "p_job_id": next_job_id,
+                "p_error": "probe next-bridge fallback",
+                "p_error_kind": "permanent",
+                "p_claim_token": token,
+            },
+        ).execute()
+    )
+    return "claim-and-fail"
 
 
 def _fmt(value: Any) -> str:
@@ -413,6 +552,12 @@ def _verdict_line(name: str, r: dict[str, Any]) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--expect",
+        choices=("pre-fix", "post-fix"),
+        default=None,
+        help="assert the decision readings for this tree (default: print only)",
+    )
     parser.add_argument(
         "--handler-log",
         required=True,
