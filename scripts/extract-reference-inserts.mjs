@@ -1715,6 +1715,8 @@ function modeAudit(io, allowlistPath, migrationsDir) {
   // run could print anything else and the workflows' `0 unaccounted` term could
   // not fail. It is now tallied at every C5 refusal site and printed on BOTH
   // paths: on the OK line (0 there by construction) and on the FAILED line.
+  // Round 2 (IN-01 / SFH R2-04): the membership refusal was one site it missed,
+  // and a failure with no C5 refusal now prints a neutral `audit FAILED:` line.
   let c5Unaccounted = 0;
 
   // ⛔ [164.8.1 review, finding 3] ONE CLASSIFICATION PATH, not two. The
@@ -1837,6 +1839,9 @@ function modeAudit(io, allowlistPath, migrationsDir) {
           table: e.qualified,
           reason: `a C5 ${e.kind}: line names ${e.qualified}, which NO INSERT entry fills. C5 replays UPDATEs onto rows the replay itself wrote; on a table the replay never fills the UPDATE reaches nothing the restore rebuilt`,
         });
+        // 164.9.2 review round 2, IN-01 / SFH R2-04: a C5 refusal like every
+        // other, so it is tallied; it used to leave the FAILED line reading 0.
+        c5Unaccounted++;
       }
       bad = 1;
     }
@@ -1886,8 +1891,15 @@ function modeAudit(io, allowlistPath, migrationsDir) {
     }
   }
   if (bad) {
+    // ⛔ 164.9.2 review round 2, IN-01 / SFH R2-04: the `audit C5 FAILED:` line was
+    // printed for EVERY failure, so an INSERT pin drift read "audit C5 FAILED: 0
+    // unaccounted", pointing whoever triages a red sql-gate-lint at the wrong
+    // class with a count of zero. It is printed only when C5 raised a refusal;
+    // any other failure gets the neutral line, which states that C5 raised none.
     io.err.push(
-      `extract-reference-inserts audit C5 FAILED: ${c5Unaccounted} unaccounted C5 refusal(s) among the REFUSED lines above (the audit exits 1; it printed no census).`,
+      c5Unaccounted > 0
+        ? `extract-reference-inserts audit C5 FAILED: ${c5Unaccounted} unaccounted C5 refusal(s) among the REFUSED lines above (the audit exits 1; it printed no census).`
+        : "extract-reference-inserts audit FAILED: 0 C5 refusal(s); every REFUSED line above is outside C5 (an INSERT line, the allowlist itself, or a file that could not be lexed). The audit exits 1; it printed no census.",
     );
     return 1;
   }
@@ -2101,9 +2113,10 @@ export const SELF_TEST_KINDS = [
   },
   {
     id: "audit-count-drift",
-    why: "--audit: a pinned count stops matching the file it pins",
+    why: "--audit: a pinned count stops matching the file it pins. Since 164.9.2 review round 2 (IN-01 / SFH R2-04) the red leg also pins that an INSERT-only failure prints the NEUTRAL `audit FAILED:` line and never `audit C5 FAILED: 0 …`, which blamed C5 for a failure C5 did not raise",
     audit: true,
     expect: "were measured — an applied migration was edited",
+    redStderr: /^(?![\s\S]*audit C5 FAILED)[\s\S]*extract-reference-inserts audit FAILED: 0 C5 refusal\(s\)/,
   },
   // ── C5 (Phase 164.9.2): every C5 refusal reason has a red leg. Emit mode first.
   {
@@ -2301,9 +2314,10 @@ export const SELF_TEST_KINDS = [
   },
   {
     id: "c5-audit-unfilled-table",
-    why: "C5 --audit membership: an update: line on a table no INSERT entry fills reaches nothing the restore rebuilt",
+    why: "C5 --audit membership: an update: line on a table no INSERT entry fills reaches nothing the restore rebuilt. Since 164.9.2 review round 2 (IN-01 / SFH R2-04) the red leg also pins that this C5 refusal is TALLIED: it used to print `audit C5 FAILED: 0 unaccounted`",
     audit: true,
     expect: "which NO INSERT entry fills",
+    redStderr: /audit C5 FAILED: 1 unaccounted C5 refusal\(s\)/,
     greenStdout: /audit C5 OK: 1 update statement\(s\) over 1 file\(s\) and 1 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
   },
   {
