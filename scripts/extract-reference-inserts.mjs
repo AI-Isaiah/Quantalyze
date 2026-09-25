@@ -1054,7 +1054,7 @@ export function matchDoBodyWrites(prep, qualified) {
  * THE ONE C5 VERDICT, shared by emit and `--audit` so the two can never
  * disagree. `upd` / `dec` are the pair's `update:` / `decline:` entries (either
  * may be absent; in `--audit` both may be).
- * @returns {{ refusals: Array<{line:number|null, reason:string}>, replay: Array, declined: number }}
+ * @returns {{ refusals: Array<{line:number|null, reason:string}>, replay: Array, declined: number, declinedLines: number[] }}
  */
 export function c5Verdict(m, qualified, upd, dec) {
   const refusals = [];
@@ -1130,6 +1130,9 @@ export function c5Verdict(m, qualified, upd, dec) {
     refusals,
     replay: upd && refusals.length === 0 ? m.ok : [],
     declined: dec && refusals.length === 0 ? nonLit.length : 0,
+    // 164.9.2 review SFH-06: the lines a decline: accounts for, so the emit can
+    // NAME each one and the restore log can say what it deliberately did not replay.
+    declinedLines: dec && refusals.length === 0 ? nonLit.map((r) => r.line) : [],
   };
 }
 
@@ -1295,6 +1298,7 @@ function modeEmit(io, allowlistPath, migrationsDir) {
   let insertN = 0;
   let updateN = 0;
   const updateTables = new Set();
+  const declines = []; // {file, line, qualified}
   let bad = 0;
   for (const e of insertEntries) {
     const ok = classifyEntry(io, migrationsDir, cache, e);
@@ -1333,6 +1337,7 @@ function modeEmit(io, allowlistPath, migrationsDir) {
     }
     updateN += v.replay.length;
     if (v.replay.length > 0) updateTables.add(pair.qualified);
+    for (const line of v.declinedLines) declines.push({ file: pair.file, line, qualified: pair.qualified });
   }
   if (bad) return 1;
 
@@ -1353,14 +1358,23 @@ function modeEmit(io, allowlistPath, migrationsDir) {
     "-- file, or made idempotent here — the idempotence is the migration's own.",
     "-- Blocks run in (migration filename, byte offset) order: INSERTs end with",
     "-- a `-- refdata:` trailer, C5 UPDATEs with a `-- refdata-update:` trailer.",
+    "-- `-- refdata-decline:` lines at the foot name C5 writes declined, NOT replayed.",
     "-- ─────────────────────────────────────────────────────────────────────────",
   );
   for (const b of blocks) io.out.push(b.text);
   const tables = Array.from(perTable.keys()).sort();
   for (const t of tables) io.out.push(`-- refdata-expect: ${t}=${perTable.get(t)}`);
+  // ⛔ 164.9.2 review SFH-06: a decline means the restore COMMITS a row without a
+  // write history applied to it (by design, D-02), and a successful restore log
+  // used to say nothing about it. Each declined write is NAMED here — file, line,
+  // table, never statement text — and the restore notes every one. A comment, so
+  // it executes as nothing; one per declined write, so the restore can compare
+  // the count with the allowlist's decline: pins.
+  declines.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line));
+  for (const d of declines) io.out.push(`-- refdata-decline: ${d.file}:${d.line} ${d.qualified}`);
   io.err.push(
     `extract-reference-inserts: emitted ${insertN} statement(s) over ${tables.length} table(s) from ${insertEntries.length} allowlist entr(ies).`,
-    `extract-reference-inserts: emitted ${updateN} C5 update statement(s) over ${updateTables.size} table(s) from ${pairs.filter((p) => p.upd).length} update: line(s); ${pairs.filter((p) => p.dec).length} decline: line(s) emit nothing.`,
+    `extract-reference-inserts: emitted ${updateN} C5 update statement(s) over ${updateTables.size} table(s) from ${pairs.filter((p) => p.upd).length} update: line(s); ${pairs.filter((p) => p.dec).length} decline: line(s) replay nothing and name ${declines.length} declined write(s) on "-- refdata-decline:" lines.`,
   );
   return 0;
 }
@@ -1863,7 +1877,8 @@ export const SELF_TEST_KINDS = [
     id: "c5-duplicate-line",
     why: "C5: two update: lines for one (file, table) would double-pin one measured count. The green leg pins the legal pair: one update: and one decline: line over a file holding a literal and a joined UPDATE, where only the literal one is emitted",
     expect: "duplicate C5 line: a second update: line for",
-    greenStdout: /UPDATE fx_ref SET label = 'v' WHERE id = 1;/,
+    // 164.9.2 review SFH-06: the declined joined UPDATE is NAMED, never emitted.
+    greenStdout: /UPDATE fx_ref SET label = 'v' WHERE id = 1;[\s\S]*^-- refdata-decline: 20260101000000_fx_a\.sql:\d+ public\.fx_ref$/m,
     greenAbsent: /FROM fx_src/,
   },
   {

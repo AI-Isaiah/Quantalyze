@@ -56,3 +56,10 @@ INSERT INTO fx_keep (id, label) VALUES (3, 'ref_c') ON CONFLICT (id) DO NOTHING;
 -- replays INSERT, INSERT, UPDATE. Arm 33 goes RED if blocks are emitted in
 -- allowlist-line order; sort removal alone is caught by the extractor self-test's `c5-update-count-drift.green` ORDER leg, not here. The sentence above is kept as lineage.
 UPDATE fx_keep SET status = 'verified' WHERE id = 3;
+
+-- 164.9.2 review SFH-06: a JOINED UPDATE of fx_keep, accounted for by the fixture
+-- allowlist's decline:1 line and therefore NEVER replayed (it reaches no row: no
+-- fx_keep id is 0). Arm 33 reads the restore log's note NAMING it by file, line
+-- and table: the evidence that a successful restore records what it deliberately
+-- did not replay. It adds no row and no INSERT, so every count above is unmoved.
+UPDATE fx_keep SET label = s.label FROM fx_keep s WHERE s.id = fx_keep.id AND s.id = 0;

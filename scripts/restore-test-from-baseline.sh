@@ -1430,7 +1430,7 @@ TXN_MID
   # `refuse_bad_refdata_allowlist` made: that one is deleted with its mktemp, and
   # a `refdata.sql` that lives beside `restore.sql` is what arm 23 mutates and
   # what a human reads after a failed run.
-  local refdata_rc=0 refdata_n refdata_update_n
+  local refdata_rc=0 refdata_n refdata_update_n refdata_decline_n decl
   node "$REFDATA_EXTRACTOR" --allowlist "$REFDATA_ALLOWLIST" --migrations "$MIGRATIONS_DIR" \
     > "$RESTORE_OUT_DIR/refdata.sql" 2> "$RESTORE_OUT_DIR/refdata.err" || refdata_rc=$?
   if [ "$refdata_rc" -ne 0 ]; then
@@ -1442,6 +1442,12 @@ TXN_MID
   # never move `refdata_n` (the INSERT count the note below reports) or the
   # count floor. Counted separately so a restore log is evidence that C5 ran.
   refdata_update_n=$(awk '/^-- refdata-update: /{ c++ } END { print c+0 }' "$RESTORE_OUT_DIR/refdata.sql")
+  # 164.9.2 review SFH-06: a DECLINED C5 write is one this restore deliberately
+  # does NOT replay, so the row commits without it (D-02). The extractor names
+  # each on a `-- refdata-decline: <file>:<line> <table>` comment line, and the
+  # note below prints every one, so a SUCCESSFUL restore log records what it left
+  # out. Before this, only refdata.err said so, and it is printed on failure only.
+  refdata_decline_n=$(awk '/^-- refdata-decline: /{ c++ } END { print c+0 }' "$RESTORE_OUT_DIR/refdata.sql")
 
   # ⛔ PITFALL 1 — THE SEARCH_PATH BRACKET IS LOAD-BEARING, NOT HYGIENE. At this
   # point in the stream the session's path is `pg_catalog` (the TXN_MID line
@@ -1665,6 +1671,15 @@ TXN_REFDATA_GATE
 
   note "refdata: ${refdata_n} statement(s) replayed into ${#REFDATA_TABLES[@]} table(s), gated inside the transaction against each table's pinned statement count (count(*) >= expected, not merely non-empty) and against ${REFDATA_KIND_CHECK} over ${REFDATA_KIND_REGISTRY}"
   note "refdata: ${refdata_update_n} C5 update statement(s) replayed in migration filename order inside the same transaction"
+  note "refdata: ${refdata_decline_n} C5 write(s) DECLINED — accounted for by a decline: line and deliberately NOT replayed, so their rows commit without them (D-02):"
+  while IFS= read -r decl; do
+    # File names, line numbers and table names only — never statement text. The
+    # same charset refusal the table names get, before anything is printed.
+    case "$decl" in
+      ''|*[!A-Za-z0-9_.:\ -]*) fail "the reference-data extractor named a declined write as '${decl}' — this script refuses to print that." ;;
+    esac
+    note "refdata:   declined, not replayed: ${decl}"
+  done < <(awk '/^-- refdata-decline: /{ sub(/^-- refdata-decline: /, ""); print }' "$RESTORE_OUT_DIR/refdata.sql")
 
   # ── the ledger ───────────────────────────────────────────────────────────
   # The DDL is the CLI's OWN (supabase/cli v2.98.2, its migration-history package).
@@ -3891,6 +3906,13 @@ FRESHSTUB
       || { echo "MEASURE_FAIL: the restore log does not carry the C5 note with count 1, so a green run is no evidence that the UPDATE replayed"; return 1; }
     grep -aqF 'refdata: 1 table(s) from 1 allowlist line(s)' "$out" \
       || { echo "MEASURE_FAIL: the entry note does not read 1 allowlist line(s) — the C5 update: line was counted as a pinned-statement entry"; return 1; }
+    # 164.9.2 review SFH-06: the fixture's decline:1 line (a joined UPDATE of
+    # fx_keep) is NAMED in a successful restore's log — the evidence of what the
+    # restore deliberately did not replay.
+    grep -aqF 'refdata: 1 C5 write(s) DECLINED' "$out" \
+      || { echo "MEASURE_FAIL: the restore log does not count the fixture's one declined C5 write, so a green run says nothing about what it left out"; return 1; }
+    grep -aqE 'refdata:   declined, not replayed: 20260103000000_fixture_c\.sql:[0-9]+ public\.fx_keep$' "$out" \
+      || { echo "MEASURE_FAIL: the restore log does not NAME the declined write by file, line and table"; return 1; }
     return 0
   }
 
@@ -3906,7 +3928,11 @@ FRESHSTUB
     local scratch="$SELFTEST_TMPD/refdata-arm34"
     rm -rf "$scratch"
     mkdir -p "$scratch"
-    awk -F '\t' '$3 != "update:1"' "$FIXTURES/refdata-allowlist.txt" > "$scratch/no-update.txt"
+    # 164.9.2 review SFH-06: the fixture now also carries a decline:1 line (arm
+    # 33 reads its note). It goes too: a decline: line over a pair whose literal
+    # UPDATE lost its update: line is refused by the extractor ("a literal UPDATE
+    # is replayed, not declined"), which would abort this leg for the wrong reason.
+    awk -F '\t' '$3 != "update:1" && $3 != "decline:1"' "$FIXTURES/refdata-allowlist.txt" > "$scratch/no-update.txt"
     if cmp -s "$scratch/no-update.txt" "$FIXTURES/refdata-allowlist.txt"; then
       echo "MEASURE_FAIL: the scratch copy is identical to the fixture allowlist — there was no update:1 line to remove, so this RED would prove nothing"
       return 1
