@@ -91,11 +91,13 @@ from services.mt5_session_episodes import (
     KIND_STILL_UNAUTHORIZED,
     HealOutcome,
     claim_ipc_fault_escalation,
+    end_ipc_fault_run,
+    end_ipc_fault_run_if_answered,
     ipc_fault_alarm_due,
     ipc_fault_escalation_armed,
     mark_ipc_fault_alarm,
     note_ipc_fault_reading,
-    rearm_ipc_fault_escalation,
+    restore_ipc_fault_attempt,
     record_mt5_heal_outcome,
     record_mt5_session_reading,
 )
@@ -1122,9 +1124,17 @@ def _escalate_ipc_fault(
     if deadline is None:
         deadline = _clock() + _relogin_budget_s()
     now = _clock()
+    # ⭐ WR-02 / R2-SFH-03 (164.6.5 review round 2) — FOR EVERY CODE: if the
+    # terminal answered anyone since this run started (the job path's `login()`
+    # included), the run is over, gate AND alarm, before this reading is counted.
+    answers = mt5_terminal_answer_count(client.terminal_key)
     # ⭐ SFH-03 — every IPC-transport reading extends the persistence run. The `0`
     # sentinel measured nothing and neither starts nor extends one.
-    since = note_ipc_fault_reading(now) if code in _IPC_FAULT_ALARM_CODES else None
+    if code in _IPC_FAULT_ALARM_CODES:
+        since: float | None = note_ipc_fault_reading(now, answers)
+    else:
+        end_ipc_fault_run_if_answered(answers)
+        since = None
     if code not in _RECYCLE_REACHABLE_IPC_CODES:
         # ⛔ WR-08 — NO re-arm here. `0` measured nothing, and `-10003` / `-10004`
         # are the terminal NOT answering either; re-arming on them let a flaky
@@ -1146,8 +1156,7 @@ def _escalate_ipc_fault(
                 int(_IPC_FAULT_ALARM_INTERVAL_S // 60),
             )
         return None
-    answers = mt5_terminal_answer_count(client.terminal_key)
-    if not ipc_fault_escalation_armed(answers):
+    if not ipc_fault_escalation_armed():
         if since is not None and ipc_fault_alarm_due(
             now, _IPC_FAULT_ALARM_INTERVAL_S, attempted=True
         ):
@@ -1212,7 +1221,7 @@ def _escalate_ipc_fault(
             _MT5_RELOGIN_BUDGET_ENV,
         )
         return None
-    claim_ipc_fault_escalation(answers)
+    claim_ipc_fault_escalation()
     verdict: dict[str, object] = {}
     degraded = False
     try:
@@ -1248,8 +1257,13 @@ def _escalate_ipc_fault(
         # it refused BEFORE anything crossed, so no process was ended and the
         # attempt was not spent. Any other stage is the relaunch, i.e. AFTER the
         # terminate crossed, and the attempt stands.
+        #
+        # ⛔ WR-02 (164.6.5 review round 2) — UNDO THE CLAIM, NOTHING MORE. This
+        # refusal runs in the zombie thread after the `wait_for` fired and
+        # measured nothing about the terminal, so the persistence alarm's run
+        # stays exactly as it was.
         if exc.stage == _RECYCLE_FENCE_STAGE:
-            rearm_ipc_fault_escalation()
+            restore_ipc_fault_attempt()
         raise
     except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
         kind = KIND_IPC_FAULT_RECYCLE_FAILED
@@ -1259,21 +1273,22 @@ def _escalate_ipc_fault(
             f"exc_class={type(exc).__name__} "
             f"code={exc.code if isinstance(exc, Mt5ClientError) else None}"
         )
-    else:
-        # ⛔ CR-01 (164.6.5 review round 1) — THE RELAUNCH PROBE IS A READING, AND
-        # WHEN IT MEASURED THE TERMINAL ANSWERING THE RUN IS OVER. The gate used to
-        # be re-armed only by a FIRST-probe reading of a later tick, so a recycle
-        # that WORKED left it disarmed: a client validation that re-wedged the
-        # terminal before the next tick saw it healthy was debounced forever, and
-        # the 1h39m manual outage came back with an INFO line per tick saying the
-        # recovery was withheld. `authorized` and `-6` are both the terminal
-        # answering (the ordinary heal owns `-6` on the next reading), so either
-        # one ends this run and the NEXT wedge earns its own attempt.
-        if (
-            verdict.get("authorized") is True
-            or verdict.get("relaunch_code") == _MT5_NO_AUTHORIZED_ACCOUNT_CODE
-        ):
-            rearm_ipc_fault_escalation()
+    # ⛔ CR-01 (164.6.5 review round 1) — THE RELAUNCH PROBE IS A READING, AND
+    # WHEN IT MEASURED THE TERMINAL ANSWERING THE RUN IS OVER. The gate used to
+    # be re-armed only by a FIRST-probe reading of a later tick, so a recycle
+    # that WORKED left it disarmed: a client validation that re-wedged the
+    # terminal before the next tick saw it healthy was debounced forever, and
+    # the 1h39m manual outage came back with an INFO line per tick saying the
+    # recovery was withheld. `authorized` and `-6` are both the terminal
+    # answering (the ordinary heal owns `-6` on the next reading), so either
+    # one ends this run and the NEXT wedge earns its own attempt.
+    # ⚠️ Decided here and APPLIED after the level ladder (WR-02, round 2): a
+    # run that is over must not be stamped with this line's alarm afterwards,
+    # or the stale stamp pages the next, unrelated fault on its first reading.
+    answered = (
+        verdict.get("authorized") is True
+        or verdict.get("relaunch_code") == _MT5_NO_AUTHORIZED_ACCOUNT_CODE
+    )
     if kind == KIND_IPC_FAULT_RECYCLED:
         level = logging.INFO
     elif kind in (
@@ -1300,7 +1315,9 @@ def _escalate_ipc_fault(
         # pipe the relaunch attached to.
         level = max(level, logging.WARNING)
         detail = f"{detail} exit_unconfirmed={terminated - exited}"
-    if level >= logging.ERROR:
+    if answered:
+        end_ipc_fault_run()
+    elif level >= logging.ERROR:
         # SFH-03 — this line IS the run's alarm; the next is due an interval on.
         mark_ipc_fault_alarm(_clock())
     logger.log(
@@ -1424,9 +1441,9 @@ def _heal_blocking(
             first_kind = KIND_NO_AUTHORIZED_ACCOUNT
             first_code = err.code
             # A reading that is not the escalating class ends any run of them.
-            rearm_ipc_fault_escalation()
+            end_ipc_fault_run()
         else:
-            rearm_ipc_fault_escalation()
+            end_ipc_fault_run()
             return HealOutcome(
                 verdict=_VERDICT_ALREADY_AUTHORIZED,
                 first_kind=KIND_ALREADY_AUTHORIZED,

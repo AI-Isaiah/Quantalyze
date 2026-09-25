@@ -518,17 +518,9 @@ def _clear_blind_run() -> None:
 # recycle; key the gate by `terminal_key` before a second terminal ships.
 _IPC_FAULT_ESCALATION_ARMED: bool = True
 
-#: The terminal's answered-count (``mt5_client.mt5_terminal_answer_count``) at
-#: the moment the escalation was claimed. ``None`` while armed.
-_IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER: int | None = None
 
-
-def ipc_fault_escalation_armed(answer_count: int) -> bool:
+def ipc_fault_escalation_armed() -> bool:
     """Whether the heal may recycle now. It does NOT claim the attempt.
-
-    ``answer_count`` is the terminal's answered-count NOW. If it has moved since
-    the claim, the terminal answered in between — the run that claim belonged to
-    is over — so the gate re-arms first (SFH-05).
 
     ⭐ A PEEK, SEPARATE FROM THE CLAIM (WR-01). The claim used to be the FIRST
     act of the escalation, ahead of the evidence capture and ahead of the
@@ -536,45 +528,79 @@ def ipc_fault_escalation_armed(answer_count: int) -> bool:
     one attempt with no process ended. The heal now peeks, captures, and claims
     only immediately before the recycle crosses.
 
-    ⛔ A SEPARATE FUNCTION for the same reason ``_count_blind_reading`` is one: a
-    ``global`` declaration is a statement, and the heal's own bodies are held to
-    shapes a stray statement would break. It cannot raise.
+    ⭐ 164.6.5 review round 2 (WR-02 / R2-SFH-03) — IT TAKES NO ANSWERED-COUNT
+    ANY MORE. The count is compared ONCE per reading, by
+    ``note_ipc_fault_reading`` / ``end_ipc_fault_run_if_answered``, against the
+    count the RUN started at, and a moved count ends the whole run (gate AND
+    alarm), not only the gate. Checking it here as well re-armed the gate while
+    leaving the alarm's run open, which is the defect round 2 named.
+
+    It cannot raise.
     """
-    global _IPC_FAULT_ESCALATION_ARMED, _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER
-    if (
-        _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER is not None
-        and answer_count != _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER
-    ):
-        _IPC_FAULT_ESCALATION_ARMED = True
-        _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER = None
     return _IPC_FAULT_ESCALATION_ARMED
 
 
-def claim_ipc_fault_escalation(answer_count: int) -> None:
+def claim_ipc_fault_escalation() -> None:
     """DISARM the gate for the rest of this run: the recycle is about to cross.
 
-    Records ``answer_count`` so a later answer from the terminal re-arms it.
-    Called only after ``ipc_fault_escalation_armed`` said yes. It cannot raise.
+    Called only after ``ipc_fault_escalation_armed`` said yes, and only after
+    ``note_ipc_fault_reading`` opened the run, so the run's answered-count is the
+    baseline a later answer is measured against. It cannot raise.
     """
-    global _IPC_FAULT_ESCALATION_ARMED, _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER
+    global _IPC_FAULT_ESCALATION_ARMED
     _IPC_FAULT_ESCALATION_ARMED = False
-    _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER = answer_count
 
 
-def rearm_ipc_fault_escalation() -> None:
+def restore_ipc_fault_attempt() -> None:
+    """UNDO THE CLAIM, and nothing else: the recycle did not cross.
+
+    ⛔ 164.6.5 review round 2 (WR-02). Two different events used to share one
+    function. This one is the recycle verb's own fence refusing BEFORE anything
+    crossed, which happens in a ZOMBIE thread after the ``wait_for`` fired. It
+    measured NOTHING about the terminal, so it gives the attempt back and leaves
+    the persistence alarm's run exactly as it was. Ending the run here erased
+    the alarm's memory of a fault that was still there.
+    """
+    global _IPC_FAULT_ESCALATION_ARMED
+    _IPC_FAULT_ESCALATION_ARMED = True
+
+
+def end_ipc_fault_run() -> None:
     """The terminal was MEASURED answering, so the run of faults is over.
 
-    ⭐ Called for an authorized reading or ``-6``, from any heal probe. ⛔ NEVER
-    for the ``0`` sentinel, ``-10003`` or ``-10004``: those measured no answer,
-    and re-arming on them is what let a flaky bridge recycle the terminal every
-    other tick (WR-08). It also ends the persistence alarm's run (SFH-03).
+    ⭐ Called for an authorized reading or ``-6`` from any heal probe, and by
+    ``end_ipc_fault_run_if_answered`` when a bare ``initialize()`` anywhere in
+    this process answered since the run started. It re-arms the gate AND ends
+    the persistence alarm's run (SFH-03): both stamps go, so the next fault's
+    elapsed time is measured from ITS first reading and its first alarm is an
+    interval away. ⛔ NEVER for the ``0`` sentinel, ``-10003`` or ``-10004``:
+    those measured no answer, and re-arming on them is what let a flaky bridge
+    recycle the terminal every other tick (WR-08).
     """
-    global _IPC_FAULT_ESCALATION_ARMED, _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER
+    global _IPC_FAULT_ESCALATION_ARMED, _IPC_FAULT_RUN_ANSWERS
     global _IPC_FAULT_RUN_SINCE, _IPC_FAULT_LAST_ALARM_AT
     _IPC_FAULT_ESCALATION_ARMED = True
-    _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER = None
+    _IPC_FAULT_RUN_ANSWERS = None
     _IPC_FAULT_RUN_SINCE = None
     _IPC_FAULT_LAST_ALARM_AT = None
+
+
+def end_ipc_fault_run_if_answered(answer_count: int) -> bool:
+    """End the open run if the terminal answered since it started. Returns
+    whether it did.
+
+    ``answer_count`` is ``mt5_client.mt5_terminal_answer_count`` NOW. ⭐ This is
+    the check SFH-05 put on the gate alone; round 2 (WR-02 / R2-SFH-03) moved it
+    to the RUN, and the heal makes it for EVERY first-probe code, the ``0``
+    sentinel included. A recovery only the job path saw (every monitor tick a
+    busy skip) otherwise left the run and its last-alarm stamp open, so a
+    transient ``-10004`` hours later paged on its first reading with an elapsed
+    time spanning the recovery. It cannot raise.
+    """
+    if _IPC_FAULT_RUN_ANSWERS is not None and answer_count != _IPC_FAULT_RUN_ANSWERS:
+        end_ipc_fault_run()
+        return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -588,18 +614,29 @@ def rearm_ipc_fault_escalation() -> None:
 # `-10004` / `-10003`, which are never escalated, produced no ERROR at all. These
 # two monotonic stamps let the heal re-raise a persisting IPC fault at ERROR at
 # most once per alarm interval, with its elapsed time. They are ended only by the
-# terminal being MEASURED answering (`rearm_ipc_fault_escalation`); the `0`
-# sentinel neither starts nor ends a run.
+# terminal being MEASURED answering (`end_ipc_fault_run`); the `0` sentinel
+# neither starts nor ends a run by itself.
 # --------------------------------------------------------------------------- #
 _IPC_FAULT_RUN_SINCE: float | None = None
 _IPC_FAULT_LAST_ALARM_AT: float | None = None
 
+#: The terminal's answered-count (``mt5_client.mt5_terminal_answer_count``) when
+#: the current run STARTED, ``None`` while no run is open. A count that has moved
+#: since means the terminal answered in between, so the run is over (WR-02).
+_IPC_FAULT_RUN_ANSWERS: int | None = None
 
-def note_ipc_fault_reading(now: float) -> float:
-    """Record an IPC-fault reading; return when this run of them STARTED."""
-    global _IPC_FAULT_RUN_SINCE
+
+def note_ipc_fault_reading(now: float, answer_count: int) -> float:
+    """Record an IPC-fault reading; return when this run of them STARTED.
+
+    A run the terminal answered in the middle of is ended first
+    (``end_ipc_fault_run_if_answered``), so this reading starts a new one.
+    """
+    global _IPC_FAULT_RUN_SINCE, _IPC_FAULT_RUN_ANSWERS
+    end_ipc_fault_run_if_answered(answer_count)
     if _IPC_FAULT_RUN_SINCE is None:
         _IPC_FAULT_RUN_SINCE = now
+        _IPC_FAULT_RUN_ANSWERS = answer_count
     return _IPC_FAULT_RUN_SINCE
 
 
@@ -642,7 +679,7 @@ def _reset_session_episode_state_for_tests() -> None:
     global _LAST_MEASURED_READING_MONOTONIC
     _LAST_MEASURED_READING_MONOTONIC = None
     _clear_blind_run()
-    rearm_ipc_fault_escalation()
+    end_ipc_fault_run()
 
 
 def _stamp_reading_and_measure_gap() -> tuple[float | None, bool]:

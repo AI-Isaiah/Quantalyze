@@ -541,11 +541,13 @@ _DECLARED_MUTABLE_MODULE_GLOBALS = {
         "keyed on it. A redeploy re-arms it, which costs at most one extra "
         "recycle attempt per deploy during a wedge that spans one."
     ),
-    "_IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER": (
-        "164.6.5 review round 1 (SFH-05) — an INT: the terminal's answered-count "
-        "when the recycle was claimed, so a recovery only the job path saw ends "
-        "the debounced run. It gates the same ACTION as the bool above and never "
-        "a dataset value; a redeploy resets it together with that bool."
+    "_IPC_FAULT_RUN_ANSWERS": (
+        "164.6.5 review round 2 (WR-02 / R2-SFH-03; it replaces round 1's "
+        "`_IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER`) — an INT: the terminal's "
+        "answered-count when the current run of IPC faults STARTED, so a recovery "
+        "only the job path saw ends the run, gate and alarm together. It gates an "
+        "ACTION and a LOG LEVEL, never a dataset value; a redeploy resets it "
+        "together with the run it belongs to."
     ),
     "_IPC_FAULT_RUN_SINCE": (
         "164.6.5 review round 1 (SFH-03) — a monotonic stamp of the FIRST reading "

@@ -2484,6 +2484,89 @@ async def test_SFH03_the_terminal_answering_ends_the_persistence_run(
     assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR]
 
 
+def _job_path_login() -> None:
+    """A job, on its own client for the SAME terminal, logs in successfully: its
+    bare `initialize()` answered, so the terminal's answered-count moves."""
+    healthy = _FakeMt5({"initialize": True, "login": True})
+    Mt5Client(_FAKE_HOST, int(_FAKE_PORT), _connect=lambda **_k: healthy).login(
+        int(_FAKE_LOGIN), _FAKE_PASSWORD, _FAKE_SERVER
+    )
+
+
+@pytest.mark.parametrize(
+    "first_code",
+    [
+        pytest.param(_IPC_TIMEOUT, id="after-a-recycle-that-did-not-cure"),
+        pytest.param(-10004, id="after-a-never-escalated-blip"),
+    ],
+)
+async def test_R2_WR02_a_recovery_ONLY_the_job_path_saw_ENDS_the_persistence_run(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+    first_code: int,
+) -> None:
+    """⛔ WR-02 / R2-SFH-03 (164.6.5 review round 2). The job path's answer used to
+    re-arm the recycle GATE but leave the persistence ALARM's run and last-alarm
+    stamp alone. So a transient `-10004` hours later (a gateway redeploy, which
+    round 1 promised "stays quiet") found an hour-old stamp and paged on its FIRST
+    reading, telling the operator nothing automatic would clear a fault a redeploy
+    was already clearing — over a terminal that had answered throughout."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {"initialize": False, "last_error": (first_code, "No IPC connection")},
+    )
+    _capture_outcomes(monkeypatch)
+
+    await _heal_n_times(1)  # the first fault (for -10005: recycled, still faulted)
+    _job_path_login()  # ...and then the terminal answered a job
+    _fake_clock.now += 2 * 3600.0
+
+    fake.recycled = False
+    fake._scenario["last_error"] = (-10004, "No IPC connection")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR], (
+        "the first reading of a NEW fault paged, because the run the job path's "
+        "answer should have ended was still open (WR-02 / R2-SFH-03): "
+        f"{[r.getMessage() for r in _records(caplog)]}"
+    )
+
+
+def test_R2_WR02_a_fence_refusal_does_NOT_end_the_persistence_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ WR-02 (164.6.5 review round 2). "Undo the claim" and "the terminal
+    answered" are two events. A refusal by the recycle verb's own fence runs in a
+    ZOMBIE thread after the `wait_for` fired and measured NOTHING, so it may give
+    the attempt back but must not erase the alarm's memory of the fault."""
+    from services.mt5_client import Mt5SessionAbandoned, bump_mt5_terminal_epoch
+
+    fake = _FakeMt5(dict(_WEDGED))
+    client = _escalation_client(fake)
+    real_capture = mt5_relogin._capture_wedge_evidence
+
+    def _capture_then_release(c, env_server, deadline):
+        line = real_capture(c, env_server, deadline)
+        bump_mt5_terminal_epoch(c.terminal_key)
+        return line
+
+    monkeypatch.setattr(mt5_relogin, "_capture_wedge_evidence", _capture_then_release)
+    with pytest.raises(Mt5SessionAbandoned) as refused:
+        mt5_relogin._escalate_ipc_fault(client, _IPC_TIMEOUT, _FAKE_SERVER)
+    assert refused.value.stage == mt5_relogin._RECYCLE_FENCE_STAGE
+
+    assert mt5_session_episodes._IPC_FAULT_RUN_SINCE is not None, (
+        "a fence refusal that measured nothing ENDED the persistence run"
+    )
+    assert mt5_session_episodes.ipc_fault_escalation_armed(), (
+        "the refused attempt was not given back"
+    )
+
+
 @pytest.mark.parametrize(
     "connected,login,expected_level,expected_fragment",
     [
