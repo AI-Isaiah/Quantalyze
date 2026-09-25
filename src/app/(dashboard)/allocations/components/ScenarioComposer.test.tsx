@@ -6925,8 +6925,11 @@ describe("ScenarioComposer — Phase 43 GUARD-01 static guard + assembled degene
     // (D) The chart-bound Peer / Mandate / OwnBookDelta props degrade HONESTLY:
     // a 0-constituent degenerate blend yields no peer rank (below floor → null),
     // no mandate panel (no constituents → undefined), and the own-book delta is
-    // undefined because the default book equity (2 points) gives <2 derivable
-    // returns. None is a fabricated zero/NaN — they are the honest absence.
+    // undefined because gate=false forces BLANK mode, which empties the own-book
+    // series before the delta is built (measured 2026-09-25: the chart receives
+    // `equityDailyPoints: []` here). The `bookReturns.length < 2` guard is pinned
+    // by its own case in the 167.1.2 D-02 describe block, not by this render.
+    // None is a fabricated zero/NaN — they are the honest absence.
     const props = lastChartProps();
     expect(props.scenarioPeer ?? null).toBeNull();
     expect(props.scenarioMandate ?? null).toBeNull();
@@ -16767,6 +16770,30 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(live.twr).toBe(payload.liveBaselineMetrics.ytdTwr);
     expect(live.sharpe).toBe(payload.liveBaselineMetrics.sharpe);
     expect(live.max_drawdown).toBe(payload.liveBaselineMetrics.maxDd);
+  });
+
+  // Review round 1 (WR-02): the `bookReturns.length < 2` guard in
+  // `scenarioOwnBookDelta`. A 2-point book yields ONE return, and a Sharpe or
+  // Sortino delta from one observation is not a number worth showing. The
+  // series DOES reach the chart (so "ready" is honoured); only the delta is
+  // absent, which isolates the guard from the rebuilding gate above.
+  it("ready + a 2-point book (one derivable return): the series reaches the chart but no own-book delta is built", () => {
+    const TWO_POINT_CURVE = THREE_POINT_CURVE.slice(0, 2);
+    const payload = makePayload({
+      equityDailyPoints: TWO_POINT_CURVE,
+      equityHistoryState: "ready",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const props = lastChart();
+    expect(props.equityDailyPoints).toEqual(TWO_POINT_CURVE);
+    expect(props.scenarioOwnBookDelta).toBeUndefined();
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
   });
 
   it("ready (regression guard): the own-book series and delta flow as before and no disclosure renders", () => {
