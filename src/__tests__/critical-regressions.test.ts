@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
 import { describe, it, expect } from "vitest";
 
@@ -1483,10 +1483,13 @@ describe("Critical regression guards", () => {
       const DB_JOBS = ["python", "e2e-seeded"] as const;
       // Same job-slicing idiom as the supabase-migrate describes above:
       // anchor on the start-of-line job key, stop at the next top-level one.
+      // A key line may carry a trailing comment, and the next key may start with
+      // a capital, a digit or an underscore (SFH-R2-06, same tolerance as
+      // measureHolders' enumeration below).
       const jobSlice = (src: string, job: string): string =>
         findOrFail(
           src,
-          new RegExp(`^ {2}${job}:\\s*\\n([\\s\\S]*?)(?=\\n {2}[a-z])`, "m"),
+          new RegExp(`^ {2}${job}:[ \\t]*(?:#[^\\n]*)?\\n([\\s\\S]*?)(?=\\n {2}[A-Za-z0-9_])`, "m"),
           `ci.yml: ${job} job not found`,
         );
 
@@ -1505,76 +1508,258 @@ describe("Critical regression guards", () => {
       // Widened 2026-09-25 (164.4.2.1 round-1 review, SFH-02 / IN-05). It used to
       // see only the literal step name or the literal key in the job's YAML, so a
       // job that took the key through a renamed step with a variable key, or by
-      // running a script that takes it (`restore-test-from-baseline.sh` and
-      // `test-only-normalize-analytics-url.sh` both do, via `MUTEX_KEY=`), read as
-      // a non-holder — and `test-db-drift` could have re-acquired that way with
+      // running a script that takes or asserts it (`restore-test-from-baseline.sh`
+      // and `test-only-normalize-analytics-url.sh` both do, via `MUTEX_KEY=`), read
+      // as a non-holder — and `test-db-drift` could have re-acquired that way with
       // both pins green. Every spelling of TAKING the key the repo uses now counts.
+      // ⛔ CORRECTED 2026-09-25 (164.4.2.1 round-2 review, WR-03 / SFH-R2-03..06 /
+      // SFH-R2-08 / IN-01 / IN-02 / IN-03): "every spelling" was not true — `_shared`,
+      // upper case, a space before `(`, a `::bigint` cast, a key held in any other
+      // variable name, `. x.sh || exit 1`, an executed child script, a node or
+      // python entry point, `cd scripts && bash x.sh`, a `..` path into the lane
+      // directories and a job key line carrying a comment all read as "no holder".
+      // And `restore-test-from-baseline.sh` ASSERTS the workflow's held mutex rather
+      // than taking it; its `MUTEX_KEY=` still marks the job as a key-bound TEST
+      // session, which over-counts in the safe direction. The sentence above is
+      // kept as lineage. What the detector does now, and what it does not:
       //
       // In the job's own YAML the rule is the stricter "holds OR NAMES": the
-      // literal key anywhere (comments included), an Acquire…mutex step, a
-      // `MUTEX_KEY` assignment, the mutex's PGAPPNAME, or any advisory-lock CALL
-      // except one on a DIFFERENT numeric literal (a variable argument counts).
+      // literal key anywhere (comments included), an Acquire…mutex step, any
+      // `…MUTEX_KEY` assignment, the mutex's PGAPPNAME, or any advisory-lock CALL
+      // (any case, `try_`/`xact_`/`_shared`, space before `(`) except one on a
+      // DIFFERENT numeric literal (a variable argument counts).
       const JOB_TAKES_KEY =
-        /- name: Acquire\b[^\n]*mutex|61616158|\bMUTEX_KEY[=:]|PGAPPNAME=ci-shared-test-db-mutex|pg_(?:try_)?advisory(?:_xact)?_lock\(\s*(?:\d+\s*,\s*)?(?!\d)/;
-      // In a script the job RUNS, a MENTION is not a take, and the difference is
+        /- name: Acquire\b[^\n]*mutex|61616158|MUTEX_KEY\s*[=:]|PGAPPNAME=ci-shared-test-db-mutex|pg_(?:try_)?advisory(?:_xact)?_lock(?:_shared)?\s*\(\s*(?:\d+\s*,\s*)?(?!\d)/i;
+      // In a file the job RUNS, a MENTION is not a take, and the difference is
       // load-bearing: the ordering wait sources scripts/shared-test-db-keys.sh,
-      // which names the key as a read-only comparison operand and try-locks a
+      // which holds the key as a read-only comparison operand and try-locks a
       // DIFFERENT key (the in-flight flag), and VAC-08's script names the key in a
-      // comment. Neither holds anything. A script takes the key only by a
-      // `MUTEX_KEY=` assignment, the mutex's PGAPPNAME, or an advisory-lock call
-      // whose argument is the key literal or `MUTEX_KEY`.
-      const SCRIPT_TAKES_KEY =
-        /\bMUTEX_KEY=|PGAPPNAME=ci-shared-test-db-mutex|pg_(?:try_)?advisory(?:_xact)?_lock\(\s*(?:\d+\s*,\s*)?(?:61616158|\$\{?MUTEX_KEY\}?)\s*\)/;
-      // The two private-database lanes. Each boots a cluster of its own on the
-      // runner (scripts/local-stack/run.sh REFUSES a non-local DSN), so a lock taken
-      // there is not the shared-TEST key however it is spelled —
-      // scripts/pg-lane/mutex-dead-holder-lane.sh takes the literal key on purpose,
-      // as a drill on a throwaway cluster. The calibration `it` below proves this
-      // exemption is load-bearing rather than decorative.
-      const PRIVATE_LANE_SCRIPT = /^scripts\/(?:pg-lane|local-stack)\//;
-      // Every `scripts/*.sh` a job's NON-comment lines run, plus (transitively)
-      // every file those scripts `.`/`source`. A commented-out invocation runs
-      // nothing and is not followed.
-      const scriptsRunBy = (jobBody: string, read: (p: string) => string): string[] => {
-        const code = jobBody
+      // comment. Neither holds anything. So on a file's NON-comment lines the rule
+      // FAILS CLOSED rather than listing spellings:
+      //   - ANY advisory-lock call (same verb family as above) is a take, unless its
+      //     argument is PROVABLY another key: a different numeric literal (a cast
+      //     is ignored), the two-int4 form, or exactly the in-flight key constant;
+      //   - the key literal assigned to ANY variable is a take, unless the
+      //     assignment is `local`, never exported, and every later use of that
+      //     name is an operand of a `[ … ]` comparison (keys.sh's self-test);
+      //   - any `…MUTEX_KEY` assignment, or the mutex's PGAPPNAME.
+      const MUTEX_KEY_LITERAL = "61616158";
+      const LOCK_CALL = /pg_(?:try_)?advisory(?:_xact)?_lock(?:_shared)?\s*\(((?:[^()]|\([^()]*\))*)\)/gi;
+      const provablyAnotherKey = (arg: string): boolean => {
+        const a = arg.replace(/::\s*\w+/g, "").replace(/["'\s]/g, "");
+        return (
+          (/^\d+$/.test(a) && a !== MUTEX_KEY_LITERAL) ||
+          /^\d+,\d+$/.test(a) ||
+          /^\$\{?SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY\}?$/.test(a)
+        );
+      };
+      // Full-line comments in shell, python, SQL and JS/TS. A trailing comment is
+      // kept, which can only over-count.
+      const codeOf = (text: string): string =>
+        text
           .split("\n")
-          .filter((line) => !/^\s*#/.test(line))
+          .filter((line) => !/^\s*(?:#|\/\/|--|\/?\*)/.test(line))
           .join("\n");
-        const queue = [...code.matchAll(/scripts\/[\w./-]+\.sh/g)].map((m) => m[0]);
-        const seen = new Set<string>();
+      const fileTakesKey = (text: string): boolean => {
+        const code = codeOf(text);
+        if (/(?:PGAPPNAME|application_name)\s*[=:]\s*["']?ci-shared-test-db-mutex/i.test(code)) return true;
+        if (/\w*MUTEX_KEY\w*\s*:?=(?!=)/.test(code)) return true;
+        if ([...code.matchAll(LOCK_CALL)].some((m) => !provablyAnotherKey(m[1]))) return true;
+        const lines = code.split("\n");
+        return [
+          ...code.matchAll(
+            /(?:\b(?:local|export|readonly|typeset|declare(?:\s+-\w+)*)\s+)?\b([A-Za-z_]\w*)(?:\s+[A-Za-z_]\w*)?\s*:?=\s*["']?61616158\b/g,
+          ),
+        ].some((m) => {
+          const name = m[1];
+          const at = lines.find((line) => line.includes(m[0])) ?? "";
+          const exported = new RegExp(`\\bexport\\b[^\\n]*\\b${name}\\b|\\bdeclare\\s+-\\w*x\\w*\\b[^\\n]*\\b${name}\\b`).test(code);
+          const uses = lines.filter((line) => line !== at && new RegExp(`\\b${name}\\b`).test(line));
+          const comparisonOnly =
+            /\blocal\s/.test(at) &&
+            !exported &&
+            uses.length > 0 &&
+            uses.every((line) => /^\s*(?:if\s+|elif\s+|!\s*)?\[\[?\s[^\n]*\s(?:!?=|==|-eq|-ne)\s[^\n]*\]\]?/.test(line));
+          return !comparisonOnly;
+        });
+      };
+      // The private-database lane exemption is a NAMED FILE LIST, and each entry
+      // must PROVE on every run that it never reaches shared TEST, rather than
+      // being trusted for the directory it sits in (IN-02 / SFH-R2-05: a new
+      // `scripts/pg-lane/*.sh` that honoured TEST_SUPABASE_DB_URL used to be exempt
+      // by path alone). A named file whose proof no longer holds is simply NOT
+      // exempt, so its take counts and the holder-set pin names its job.
+      // scripts/pg-lane/mutex-dead-holder-lane.sh takes the literal key on purpose,
+      // as a drill on a throwaway cluster: it refuses every argument (no caller can
+      // hand it a target), binds its cluster to 127.0.0.1, and never expands the
+      // shared DSN. It is the only lane file whose text takes the key today.
+      const READS_SHARED_DSN = /\$\{?TEST_SUPABASE_DB_URL\b/;
+      const PRIVATE_LANE_PROOF: Record<string, RegExp[]> = {
+        "scripts/pg-lane/mutex-dead-holder-lane.sh": [
+          /^if \[ "\$#" -gt 0 \]; then\n\s+fail /m,
+          /listen_addresses=127\.0\.0\.1/,
+        ],
+      };
+      const laneProvenPrivate = (path: string, text: string): boolean =>
+        path in PRIVATE_LANE_PROOF &&
+        !READS_SHARED_DSN.test(text) &&
+        PRIVATE_LANE_PROOF[path].every((proof) => proof.test(text));
+      // A reader returns undefined for a path that is not a repo file, so the walk
+      // can name a miss instead of dying on a bare ENOENT (IN-03).
+      type RepoReader = (path: string) => string | undefined;
+      const readRepoFile: RepoReader = (path) => {
+        const abs = join(REPO_ROOT, path);
+        return existsSync(abs) && statSync(abs).isFile() ? readFileSync(abs, "utf8") : undefined;
+      };
+      // Every repo file a job's NON-comment lines run or name, transitively through
+      // SHELL files. From the job body and from every `.sh` it reaches, each token
+      // ending in .sh/.bash/.mjs/.cjs/.js/.ts/.py is followed, whether it is
+      // sourced, executed, or passed to node/python/tsx. `npm run <name>` is
+      // expanded from package.json. A path is resolved after substituting
+      // `${GITHUB_WORKSPACE}`, `$(dirname "$0")`/`${BASH_SOURCE[0]}` forms and any
+      // variable the file assigns from them (`SCRIPT_DIR`, `REPO_ROOT`, …), then
+      // normalised (`..` included) against the file's own directory, the repo
+      // root, every `cd` target and every `working-directory:`. A commented-out
+      // line runs nothing and is not followed.
+      // It FAILS LOUD, never silent: an invoked token (after bash/sh/./source/exec/
+      // node/python/tsx) that resolves to no repo file, or a job-body path that
+      // does, or an invocation under a variable directory it cannot resolve, or an
+      // `npm run` of an undefined script, throws with the form named.
+      // NOT covered, stated so no one reads completeness into it: a node/python/TS
+      // entry point is a LEAF — it is grepped with the rule above, but what it
+      // imports or spawns is not walked (its imports reach every test fixture in
+      // the repo). A file name built from a variable (`"${x}.sh"`) is not a token.
+      // A MENTIONED path under an unresolvable variable directory (`$tmp/x.sh`,
+      // a self-test's scratch file) is skipped, because it is not a repo file.
+      const DIRNAME_FORM = /\$\(\s*dirname\s+"?\$(?:\{BASH_SOURCE(?:\[0\])?\}|BASH_SOURCE|\{0\}|0)"?\s*\)/g;
+      const PATH_TOKEN = /(?<![\w./@$-])((?:@[RV]@\/)?(?:[\w.-]+\/)*[\w.-]+\.(?:sh|bash|mjs|cjs|js|ts|py))(?![\w/-])/g;
+      const INVOKED_BY = /(?:^|[\s;&|(!])(?:bash|sh|zsh|source|\.|exec|node|python3?|tsx|npx\s+tsx|bun)(?:\s+-{1,2}[\w-]+(?:=\S+)?)*\s+$/;
+      const toRepoPath = (path: string): string => {
+        const n = posix.normalize(path).replace(/\/$/, "");
+        return n === "." ? "" : n;
+      };
+      const escapesRepo = (path: string): boolean => path === ".." || path.startsWith("../") || path.startsWith("/");
+      // `@R@` marks the repo root, `@V@` a directory the walk cannot resolve.
+      const substitutePaths = (s: string, dir: string, vars: Record<string, string>): string =>
+        s
+          .replace(DIRNAME_FORM, `@R@/${dir}`)
+          .replace(/\$\{\{\s*github\.workspace\s*\}\}/g, "@R@")
+          .replace(/\$\(\s*cd\s+"?([^"()]*)"?\s*&&\s*pwd\s*\)/g, "$1")
+          .replace(/\$\{([A-Za-z_]\w*)(?::?-([^}]*))?\}|\$([A-Za-z_]\w*)/g, (_m: string, a: string | undefined, dflt: string | undefined, b: string | undefined) => {
+            const name = (a ?? b) as string;
+            if (name === "GITHUB_WORKSPACE") return "@R@";
+            if (name in vars) return `@R@/${vars[name]}`;
+            if (dflt !== undefined && !dflt.includes("$")) return dflt;
+            return "@V@";
+          })
+          .replace(/["']/g, "")
+          .replace(/@R@\/(?=\/|\s|$)/g, "@R@")
+          .replace(/@R@\/\.?(?=\/)/g, "@R@");
+      const filesRunBy = (jobBody: string, read: RepoReader): Map<string, string> => {
+        const seen = new Map<string, string>();
+        const queue: { text: string; dir: string; from: string; isJob: boolean }[] = [
+          { text: jobBody, dir: "", from: "the job body", isJob: true },
+        ];
         while (queue.length > 0) {
-          const path = queue.shift() as string;
-          if (seen.has(path)) continue;
-          seen.add(path);
-          const dir = posix.dirname(path);
-          for (const m of read(path).matchAll(/^\s*(?:\.|source)\s+"?[^"\s]*?([\w.-]+\.sh)"?\s*$/gm)) {
-            queue.push(`${dir}/${m[1]}`);
+          const { text, dir, from, isJob } = queue.shift() as (typeof queue)[number];
+          if (!isJob && !/\.(?:sh|bash)$/.test(from)) continue; // a node/python/TS entry point is a leaf
+          const vars: Record<string, string> = {};
+          const lines: string[] = [];
+          for (const raw of codeOf(text).split("\n")) {
+            const assign = isJob ? null : raw.match(/^\s*(?:export\s+|local\s+|readonly\s+)?([A-Za-z_]\w*)=(\S.*)$/);
+            if (assign) {
+              const v = substitutePaths(assign[2], dir, vars).trim();
+              if (/^@R@(?:\/[\w./-]*)?$/.test(v)) {
+                const resolved = toRepoPath(v.replace(/^@R@\/?/, "") || ".");
+                if (!escapesRepo(resolved)) vars[assign[1]] = resolved;
+              }
+            }
+            lines.push(substitutePaths(raw, dir, vars));
+          }
+          const bases = new Set([dir, ""]);
+          for (const line of lines) {
+            for (const m of line.matchAll(/(?:^|[\s;&|(])(?:cd|pushd)\s+(\S+)/g)) {
+              if (m[1].includes("@V@")) continue;
+              const target = m[1].startsWith("@R@")
+                ? toRepoPath(m[1].replace(/^@R@\/?/, "") || ".")
+                : toRepoPath(posix.join(dir, m[1]));
+              if (!escapesRepo(target)) bases.add(target);
+            }
+            const wd = line.match(/^\s*(?:-\s+)?working-directory:\s*(\S+)\s*$/);
+            if (wd && !wd[1].includes("@V@")) bases.add(toRepoPath(wd[1].replace(/^@R@\/?/, "") || "."));
+          }
+          const npmScripts = lines.flatMap((line) => [...line.matchAll(/\bnpm\s+run(?:-script)?\s+([\w:.-]+)/g)].map((m) => m[1]));
+          if (npmScripts.length > 0) {
+            const pkg = JSON.parse(read("package.json") ?? "{}") as { scripts?: Record<string, string> };
+            for (const name of npmScripts) {
+              const cmd = pkg.scripts?.[name];
+              if (cmd === undefined) {
+                throw new Error(`measureHolders: ${from} runs \`npm run ${name}\`, which package.json does not define — the detector cannot read what it runs`);
+              }
+              lines.push(cmd);
+            }
+          }
+          for (const line of lines) {
+            for (const m of line.matchAll(PATH_TOKEN)) {
+              const token = m[1];
+              const invoked = INVOKED_BY.test(line.slice(0, m.index));
+              if (token.startsWith("@V@")) {
+                if (invoked) {
+                  throw new Error(`measureHolders: ${from} runs "${token.replace("@V@", "$…")}" under a directory the detector cannot resolve — a holder it cannot read would count as none`);
+                }
+                continue;
+              }
+              const candidates = [
+                ...new Set(
+                  token.startsWith("@R@/")
+                    ? [toRepoPath(token.slice(4))]
+                    : [...bases].map((base) => toRepoPath(posix.join(base, token))),
+                ),
+              ];
+              const found = candidates.filter((c) => !escapesRepo(c) && read(c) !== undefined);
+              if (found.length === 0) {
+                if (invoked || (isJob && token.includes("/"))) {
+                  throw new Error(`measureHolders: ${from} ${invoked ? "runs" : "names"} "${token.replace("@R@/", "")}", which resolves to no repo file (tried ${candidates.join(", ")}) — a holder the detector cannot read would count as none`);
+                }
+                continue;
+              }
+              for (const file of found) {
+                if (seen.has(file)) continue;
+                const body = read(file) as string;
+                seen.set(file, body);
+                queue.push({ text: body, dir: posix.dirname(file) === "." ? "" : posix.dirname(file), from: file, isJob: false });
+              }
+            }
           }
         }
-        return [...seen];
+        return seen;
       };
-      const measureHolders = (src: string, read: (p: string) => string = readText): string[] =>
-        [...src.matchAll(/^ {2}([a-z0-9-]+):\s*$/gm)]
+      // Job keys may carry a trailing comment, capitals and underscores (SFH-R2-06).
+      const JOB_KEY = /^ {2}([A-Za-z0-9_-]+):[ \t]*(?:#[^\n]*)?$/gm;
+      const measureHolders = (src: string, read: RepoReader = readRepoFile): string[] =>
+        [...src.matchAll(JOB_KEY)]
           .map((m) => m[1])
           .filter((job) => {
             const body = src.match(
-              new RegExp(`^ {2}${job}:\\s*\\n([\\s\\S]*?)(?=\\n {2}[a-z]|$(?![\\s\\S]))`, "m"),
+              new RegExp(`^ {2}${job}:[ \\t]*(?:#[^\\n]*)?\\n([\\s\\S]*?)(?=\\n {2}[A-Za-z0-9_]|$(?![\\s\\S]))`, "m"),
             )?.[1] ?? "";
             if (JOB_TAKES_KEY.test(body)) return true;
-            return scriptsRunBy(body, read).some(
-              (path) => !PRIVATE_LANE_SCRIPT.test(path) && SCRIPT_TAKES_KEY.test(read(path)),
+            return [...filesRunBy(body, read)].some(
+              ([path, text]) => !laneProvenPrivate(path, text) && fileTakesKey(text),
             );
           })
           .sort();
 
       // The detector's own calibration: each spelling it claims to see must be
       // SEEN, and each mention it claims to ignore must be IGNORED, measured on
-      // synthetic jobs that run the repo's REAL scripts. Without this, a detector
-      // that silently stopped walking scripts would keep the two pins below green.
+      // synthetic jobs that run the repo's REAL scripts (and, where a form needs a
+      // file the repo does not have, a named fake). Without this, a detector that
+      // silently stopped walking scripts would keep the two pins below green.
       it("measureHolders sees every spelling of taking the shared-test-db key, and no mere mention (SFH-02 / IN-05)", () => {
         const job = (name: string, lines: string): string =>
           `  ${name}:\n    runs-on: ubuntu-latest\n    steps:\n${lines}\n`;
-        const verdict = (lines: string, read?: (p: string) => string): boolean =>
+        const withFakes = (fakes: Record<string, string>): RepoReader => (p) => fakes[p] ?? readRepoFile(p);
+        const verdict = (lines: string, read?: RepoReader): boolean =>
           measureHolders(`jobs:\n${job("probe", lines)}`, read).includes("probe");
         expect(
           verdict(`      - run: bash scripts/test-only-normalize-analytics-url.sh`),
@@ -1592,16 +1777,94 @@ describe("Critical regression guards", () => {
           verdict(`      - run: PGAPPNAME=ci-shared-test-db-mutex psql "$DSN" -c "SELECT 1;"`),
           "measureHolders missed a job that opens a session under the mutex's PGAPPNAME",
         ).toBe(true);
-        const fakeRead = (p: string): string =>
-          p === "scripts/fake-outer.sh"
-            ? `#!/usr/bin/env bash\n. "\${SCRIPT_DIR}/fake-inner.sh"\n`
-            : p === "scripts/fake-inner.sh"
-              ? "MUTEX_KEY=61616158\n"
-              : readText(p);
+        const sourced = withFakes({
+          "scripts/fake-outer.sh": '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n. "${SCRIPT_DIR}/fake-inner.sh"\n',
+          "scripts/fake-inner.sh": "MUTEX_KEY=61616158\n",
+        });
         expect(
-          verdict(`      - run: bash scripts/fake-outer.sh`, fakeRead),
+          verdict(`      - run: bash scripts/fake-outer.sh`, sourced),
           "measureHolders does not follow a `.`-sourced helper — a script that takes the key only through a file it sources read as a non-holder",
         ).toBe(true);
+
+        // Round 2 (WR-03 / SFH-R2-03): the take is recognised by the ACT, not a spelling.
+        const takes: [string, string][] = [
+          ["a key held in an arbitrary variable (probe C)", 'LOCK=61616158\npsql "$DSN" -c "SELECT pg_advisory_lock(${LOCK});"\n'],
+          ["a shared-mode lock on a variable key (probe D)", 'psql "$DSN" -c "SELECT pg_advisory_lock_shared(${SHARED_KEY});"\n'],
+          ["upper case, a space before `(`, a ::bigint cast", 'psql "$DSN" -c "SELECT PG_ADVISORY_LOCK (61616158::bigint);"\n'],
+          ["the key assigned to a longer name (`SHARED_TEST_DB_MUTEX_KEY=`)", "SHARED_TEST_DB_MUTEX_KEY=61616158\n"],
+          ["a `local` key used as a psql variable, not a comparison", 'f() {\n  local key=61616158\n  psql "$DSN" -v k="${key}" -f lock.sql\n}\n'],
+          ["a PL/pgSQL key variable locked by name", "DO $$ DECLARE c_key bigint := 61616158; BEGIN PERFORM pg_try_advisory_xact_lock(c_key); END $$;\n"],
+        ];
+        for (const [what, text] of takes) {
+          expect(
+            verdict(`      - run: bash scripts/fake-take.sh`, withFakes({ "scripts/fake-take.sh": text })),
+            `measureHolders missed a script that takes the key through ${what} — the holder-set pin and the D-02 negative would both stay green`,
+          ).toBe(true);
+        }
+        expect(
+          verdict(`      - run: psql "$DSN" -c "SELECT pg_advisory_lock_shared(:k);"`),
+          "measureHolders missed a shared-mode advisory lock on a psql variable in the job's own YAML (probe J)",
+        ).toBe(true);
+        const notTakes: [string, string][] = [
+          ["a lock on a DIFFERENT numeric literal", 'psql "$DSN" -c "SELECT pg_advisory_lock(12345);"\n'],
+          ["a try-lock on the in-flight key constant", 'psql "$DSN" -c "SELECT pg_try_advisory_lock(${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY});"\n'],
+          ["a `local` key used only as a comparison operand", 'f() {\n  local mutex_key=61616158\n  if [ "${X}" = "${mutex_key}" ]; then exit 1; fi\n}\n'],
+        ];
+        for (const [what, text] of notTakes) {
+          expect(
+            verdict(`      - run: bash scripts/fake-take.sh`, withFakes({ "scripts/fake-take.sh": text })),
+            `measureHolders counted ${what} as a take — the rule's only exemptions are the ones it can prove`,
+          ).toBe(false);
+        }
+
+        // Round 2 (WR-03 / SFH-R2-04 / SFH-R2-08): every ordinary way to RUN the file.
+        const inner = { "scripts/fake-inner.sh": "MUTEX_KEY=61616158\n" };
+        const runs: [string, string, RepoReader][] = [
+          ["`. x.sh || exit 1` (probe E)", "      - run: bash scripts/fake-outer.sh", withFakes({ ...inner, "scripts/fake-outer.sh": 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n. "${SCRIPT_DIR}/fake-inner.sh" || exit 1\n' })],
+          ["`. ./x.sh # comment`", "      - run: bash scripts/fake-outer.sh", withFakes({ ...inner, "scripts/fake-outer.sh": ". ./fake-inner.sh # the helper\n" })],
+          ['`source "$(dirname "$0")/x.sh"`', "      - run: bash scripts/fake-outer.sh", withFakes({ ...inner, "scripts/fake-outer.sh": 'source "$(dirname "$0")/fake-inner.sh"\n' })],
+          ["a child script the followed script EXECUTES (probe F)", "      - run: bash scripts/fake-outer.sh", withFakes({ "scripts/fake-outer.sh": 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nbash "${SCRIPT_DIR}/restore-test-from-baseline.sh" --mode preflight\n' })],
+          ["a node entry point (probe G)", "      - run: node scripts/fake-entry.mjs", withFakes({ "scripts/fake-entry.mjs": 'await client.query("SELECT pg_advisory_lock($1)", [key]);\n' })],
+          ["a python entry point", "      - run: python3 scripts/fake_entry.py", withFakes({ "scripts/fake_entry.py": 'cur.execute("SELECT pg_advisory_lock(%s)", (key,))\n' })],
+          ["`cd scripts && bash x.sh` (probe H)", "      - run: cd scripts && bash restore-test-from-baseline.sh --mode preflight", readRepoFile],
+          ["a bare path under `working-directory: scripts`", "      - working-directory: scripts\n        run: bash restore-test-from-baseline.sh --mode preflight", readRepoFile],
+          ["a `..` path through a lane directory (probe L)", "      - run: bash scripts/pg-lane/../restore-test-from-baseline.sh --mode preflight", readRepoFile],
+          ["a sourced `../lib/x.sh` resolved by its whole path, not its basename (SFH-R2-08)", "      - run: bash scripts/fake-outer.sh", withFakes({ "scripts/fake-outer.sh": 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n. "${SCRIPT_DIR}/../lib/fake-k.sh"\n', "lib/fake-k.sh": "MUTEX_KEY=61616158\n", "scripts/fake-k.sh": "echo decoy\n" })],
+          ["`npm run <name>` expanded from package.json", "      - run: npm run fake-restore", withFakes({ "package.json": JSON.stringify({ scripts: { "fake-restore": "bash scripts/restore-test-from-baseline.sh --mode preflight" } }) })],
+          ["a NEW lane-directory script that is not a proven-private named file (probe I, any DSN)", "      - run: bash scripts/pg-lane/fake-other-lane.sh", withFakes({ "scripts/pg-lane/fake-other-lane.sh": 'psql "$DATABASE_URL" -c "SELECT pg_advisory_lock(61616158);"\n' })],
+          ["a NEW lane-directory script that reads the shared DSN (probe I)", "      - run: bash scripts/pg-lane/fake-new-lane.sh", withFakes({ "scripts/pg-lane/fake-new-lane.sh": 'psql "$TEST_SUPABASE_DB_URL" -c "SELECT pg_advisory_lock(61616158);"\n' })],
+        ];
+        for (const [what, lines, read] of runs) {
+          expect(
+            verdict(lines, read),
+            `measureHolders did not follow ${what} to a file that takes the key — the job read as a non-holder`,
+          ).toBe(true);
+        }
+        expect(
+          measureHolders(
+            `jobs:\n  Probe_Job:  # a holder whose key line carries a comment\n    runs-on: ubuntu-latest\n    steps:\n      - run: psql "$DSN" -c "SELECT pg_advisory_lock(61616158);"\n`,
+          ),
+          "measureHolders never enumerated a job whose key line has a capital, an underscore and a trailing comment (probe A, SFH-R2-06)",
+        ).toEqual(["Probe_Job"]);
+
+        // Fail LOUD, never a bare ENOENT and never a silent non-holder (IN-03).
+        expect(
+          () => verdict(`      - run: bash scripts/r2-fake-does-not-exist.sh`),
+          "measureHolders did not name an invoked script that resolves to no repo file",
+        ).toThrow(/runs "scripts\/r2-fake-does-not-exist\.sh", which resolves to no repo file/);
+        expect(
+          () => verdict(`      - run: echo "see scripts/r2-fake-gone.sh"`),
+          "measureHolders did not name a job-body path that resolves to no repo file",
+        ).toThrow(/names "scripts\/r2-fake-gone\.sh", which resolves to no repo file/);
+        expect(
+          () => verdict(`      - run: bash "$RUNNER_TEMP/x.sh"`),
+          "measureHolders silently skipped an invocation under a directory it cannot resolve",
+        ).toThrow(/under a directory the detector cannot resolve/);
+        expect(
+          () => verdict(`      - run: npm run r2-fake-undefined-script`),
+          "measureHolders silently skipped an `npm run` of a script package.json does not define",
+        ).toThrow(/which package\.json does not define/);
+
         expect(
           verdict(`      - run: |\n          bash "\${GITHUB_WORKSPACE}/scripts/wait-for-test-schema-apply.sh"\n          bash scripts/test-ledger-drift-check.sh`),
           "measureHolders counted test-db-drift's two REAL scripts as a holder — the ordering wait (and the shared-test-db-keys.sh it sources) and VAC-08 only NAME the key; a detector that reads a mention as a take would red the D-02 negative on a job that holds nothing",
@@ -1610,13 +1873,22 @@ describe("Critical regression guards", () => {
           verdict(`      - run: echo ok\n        # bash scripts/restore-test-from-baseline.sh`),
           "measureHolders followed a COMMENTED-OUT script invocation, which runs nothing",
         ).toBe(false);
+        const drill = readRepoFile("scripts/pg-lane/mutex-dead-holder-lane.sh") ?? "";
         expect(
-          SCRIPT_TAKES_KEY.test(readText("scripts/pg-lane/mutex-dead-holder-lane.sh")),
-          "scripts/pg-lane/mutex-dead-holder-lane.sh no longer takes the key literal — the PRIVATE_LANE_SCRIPT exemption below is then unproven; re-point this calibration at a lane script that does",
+          fileTakesKey(drill),
+          "scripts/pg-lane/mutex-dead-holder-lane.sh no longer takes the key literal — the PRIVATE_LANE_PROOF exemption below is then unproven; re-point this calibration at a lane script that does",
         ).toBe(true);
         expect(
+          laneProvenPrivate("scripts/pg-lane/mutex-dead-holder-lane.sh", drill),
+          "scripts/pg-lane/mutex-dead-holder-lane.sh no longer PROVES it is private (it must refuse every argument, bind 127.0.0.1 and never expand TEST_SUPABASE_DB_URL) — its literal-key take now counts as a shared-TEST holder, as it should until the proof is restored",
+        ).toBe(true);
+        expect(
+          laneProvenPrivate("scripts/pg-lane/mutex-dead-holder-lane.sh", `${drill}\npsql "$TEST_SUPABASE_DB_URL" -c "SELECT 1;"\n`),
+          "the private-lane proof still exempted the named drill after it started expanding TEST_SUPABASE_DB_URL — a named file that reaches the shared DSN is not private, whatever its name",
+        ).toBe(false);
+        expect(
           verdict(`      - run: bash scripts/pg-lane/mutex-dead-holder-lane.sh`),
-          "measureHolders counted a private-lane drill (scripts/pg-lane/, a throwaway cluster on the runner) as a shared-TEST holder",
+          "measureHolders counted a private-lane drill (a throwaway 127.0.0.1 cluster on the runner) as a shared-TEST holder",
         ).toBe(false);
       });
       it("the set of jobs holding the shared-test-db key is EXACTLY DB_JOBS, and sql-tests is not among them", () => {
