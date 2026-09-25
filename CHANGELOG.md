@@ -164,6 +164,120 @@ catalogues only, so none of them can refuse on TEST's empty tables.
   `0fec29911`, `c12842fad`, `80e07112b`, `411b56e9d`, `5e43d4d97`, `616b95aaf`, `c07e8a409`,
   `a892e8560`).
 
+## [0.92.0.0] - 2026-09-25 — ACCOUNTTRUTH PR A: the allocation history is hidden while it is rebuilt
+
+⭐ **What changed for whoever reads this next.** Phase 167.1.2 (ACCOUNTTRUTH) rebuilds the
+allocator's account history. Until that lands, the history behind the allocator equity curve can
+count one exchange account twice when more than one key reads it, and it can read a day with no
+sync as zero. D-02 ("Hide it until correct") is the founder's call: a wrong number an allocator can
+act on is worse than an honest absence. This PR hides the equity curve, every factsheet ratio built
+from it (Sharpe among them), the Scenario composer's own-book comparison and, under D-13, the
+per-holding return, Sharpe, drawdown and vol on `/compare`. Each surface shows a short note that
+says what is hidden and why. Holdings and AUM are unchanged; they never read that history.
+
+⚠️ **This is a minor bump because what allocators see changes, on purpose.** No number is
+recomputed, no migration ships and no database row moves. The withholding happens at the producer
+and on the server, so the hidden values never reach the client payload.
+
+### Changed
+
+- **The allocator equity curve is withheld at its one producer** (`01d96ab5b`). `derivePhase07Fields`
+  in `src/lib/queries.ts` now returns `equityHistoryState: "rebuilding"` and an empty
+  `equityDailyPoints` for every allocator. The new `equityHistoryState` field on
+  `MyAllocationDashboardPayload` is the single switch that plan 11 flips.
+- **The Overview shows a "being rebuilt" panel in place of the curve and the factsheet**
+  (`01d96ab5b`). `EquityHistoryRebuilding` replaces both, and no factsheet payload is built while
+  the history is rebuilt, so no KPI is computed from it either. The baseline-unknown banner drops
+  its promise that "a full performance history builds up from here" while the history is hidden.
+- **The Scenario composer drops the own-book comparison and says so** (`d87b19aca` pinned it
+  first, `ca2f8d431`). The own-book series is empty while the history is rebuilt, so the own-book
+  delta is undefined. A one-line note explains the gap instead of leaving it silent. The live-book
+  KPIs are a separate field and stay (D-03).
+- **The raw snapshot levels are withheld with the curve** (`29e52dcf9`, review round 1 SFH-03).
+  `equitySnapshots` is `[]` in the client payload while the history is rebuilt. `snapshotCount` and
+  `minHistoryDepthMonths` are computed before the rows are withheld and stay populated. Nothing on
+  the client read the rows, so this stops a future reader from getting around D-02, and stops the
+  30-second refresh from re-sending the full history.
+- **D-13: `/compare` withholds per-holding return, Sharpe, max drawdown and vol** (`efba46454`,
+  review round 1 WR-05). These are level ratios over the same snapshot store, and a $-level ratio
+  also reads buying or selling more of a symbol as a gain or loss. `HOLDING_COMPARE_HISTORY_STATE`
+  in `holding-compare-adapter.ts` is `"rebuilding"`, so `fetchHoldingCompareItem` returns the item
+  with `analytics: null` and the numbers never leave the server. The analytics still decide
+  availability, so the "not available" rule is unchanged. `HoldingFactsheet` shows a note in place
+  of the four metrics.
+- **The `/allocations` loading skeleton draws the rebuilding panel, not a KPI strip and a chart**
+  (`b1fcba6c9`, review round 1 IN-04). A skeleton that promised numbers and then swapped to a
+  paragraph was a layout shift that implied figures that would not come.
+- **A brand-new book sees the warm-up note, not the rebuilding panel** (`5d1cc6304`, founder copy
+  call IN-01, 2026-09-25). A book with no snapshots and no derived curve has nothing for D-02 to
+  withhold, so the Overview shows the existing "Portfolio factsheet" warm-up note, now extracted as
+  `FactsheetWarmupNote`. The test is the exact negation of the composer's note gate, so the two
+  surfaces read the same book the same way. The curve slot stays unmounted either way.
+
+### Fixed
+
+- **Every equity-history gate fails closed** (`5aea287b3`, review round 1 WR-01). The Overview and
+  the composer show the curve only on an explicit `"ready"`. A missing field, `null`, `""` or any
+  state added later all read as rebuilding. `HoldingFactsheet` applies the same rule to
+  `historyState`.
+- **The rebuilding copy is true for every allocator who reads it** (`e49867349`, review round 1
+  WR-03 and SFH-05). The panel names the cause as a property of the history ("could", "when more
+  than one key reads it"). It does not refer to an "earlier chart" that a first connect never saw,
+  and it says holdings and AUM do not use that history rather than calling them current. The
+  composer's note shows only when there is an own-book history to withhold.
+- **The rebuilding panel is a labelled region with an `h2`** (`c50cb3fa9`, review round 1 WR-04).
+  An `h3` under the page `h1` failed axe's `heading-order` rule. A static panel mounted at first
+  render announces nothing as a live region, so it is a `section` labelled by its heading.
+- **The composer's note covers both sources of the own-book series** (`a41f1725d`, review round 2
+  WR-02). Gating on the legacy snapshot count alone hid the note from a book whose history comes
+  only from the derived curve. It now also checks `equityCurveSource === "derived"`.
+- **`/compare` surfaces a failed load instead of calling it "not available"** (`a588b3189`, review
+  round 2 SFH-R2-02). A failed holding read now throws `HoldingCompareLoadError`, and a failed
+  strategies read throws, both to the route's error boundary with a retry. Each logs the database
+  message server-side only. D-15 is unchanged: RLS hides an unowned row as zero rows, never as an
+  error, so a failure reveals nothing about ownership.
+
+### Tests
+
+- **New suites pin the hidden state and the copy.** `AllocationDashboardV2.rebuilding.test.tsx`,
+  `HoldingFactsheet.test.tsx` and the new composer cases pin the panel, the notes, the fail-closed
+  reading of every non-`"ready"` value, and the brand-new-book branch (`01d96ab5b`, `d87b19aca`,
+  `5aea287b3`, `e49867349`, `c50cb3fa9`, `a41f1725d`, `5d1cc6304`). The five `AllocationsTabs`
+  fixtures carry the new payload field.
+- **The derived-curve pins read the withheld series** (`5d112ae63`). The Phase 115.1 flip pins in
+  `queries.test.ts` would otherwise pass vacuously against an empty curve.
+- **The 115.1 derived-curve pins assert the extractor directly, so they can still fail**
+  (`6d7b77ca9`, review round 1 SFH-04). A later cleanup drops a constant assertion and stops the
+  producer comments promising a restore that plan 11 has not decided (`7f58e1ff8`, review round 1
+  IN-02 and IN-03).
+- **The own-book delta's two-return floor has its own `"ready"` case** (`1d629924d`, review round 1
+  WR-02), so hiding the series cannot silently take the floor's coverage with it.
+- **`/compare`'s `"ready"` branch stays under test** (`a588b3189`, review round 2 WR-01).
+  `fetchHoldingCompareItem` takes an internal `historyState` test seam, and
+  `reconstructAndAnalyze` is exported for unit tests, so the math and the pre-D-13 behaviour are
+  pinned while production uses the `"rebuilding"` default. `compare-holding-rls.test.ts` asserts
+  availability plus `historyState: "rebuilding"` and `analytics: null` (`efba46454`).
+- **The seeded 320px Overview e2e gate pins the rebuilding panel** (`fb24fb49d`, then `20ffb2803`
+  for review round 1 IN-01). It had been skipping unconditionally. It now checks that the panel is
+  visible and fits the 320px viewport on both edges, and that the equity-curve slot is NOT mounted,
+  so the 44px tap-rect measurement cannot be forgotten when the chart returns.
+- **`loading.test.tsx` pins the new skeleton shape** (`b1fcba6c9`).
+
+### Notes
+
+- **Known limit: the curve, Sharpe and the scenario comparison come back only in PR C.** Plan 11
+  of Phase 167.1.2 defines `"ready"` and flips `equityHistoryState` and
+  `HOLDING_COMPARE_HISTORY_STATE` with evidence. The `/compare` flip is a separate decision, because
+  the level-ratio defect is specific to that computation. Until then the producer never emits
+  `"ready"`.
+- **Known limit: the reused warm-up sentence promises panels "once at least two days of blended
+  equity history are available".** For a brand-new book under D-02 that is true only once PR C
+  flips the state. It was kept on the founder's copy call (IN-01).
+- **Known limit (accepted): a failed holding read fails the whole `/compare` page** to its error
+  boundary, not only the holding card.
+- **Merged `origin/main` into the branch** (`80d6627e2`) with no conflicts, to pick up the
+  verification-paperwork close for 164.6, 161, 164.5.3 and 164.4.2 (#856).
+
 ## [0.91.0.0] - 2026-09-24 — QSTATS-TRUTH: every quantstats-derived number reflects the returns it was given
 
 ⭐ **What changed for whoever reads this next.** Phase 166 (RANK-05) removes the quantstats 0.0.81

@@ -197,8 +197,8 @@ import {
   derivePhase07Fields,
   deriveStrategyLinkedKeyIds,
   deriveStrategylessKeys,
+  extractTrustworthyDerivedCurve,
 } from "./queries";
-import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 import type { SupportedExchange } from "./utils";
 
 const baseStrategy = {
@@ -1429,11 +1429,15 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     const result = callWith(derivedRow(true));
 
     expect(result.equityCurveSource).toBe("derived");
-    // The dense curve is mapped DIRECTLY ({date, equity_usd} → {date, value}) —
-    // no snapshot forward-fill adapter.
-    expect(result.equityDailyPoints).toEqual(
+    // Phase 167.1.2 / D-02: the producer withholds the display series while the
+    // history is rebuilt, so it is [] here. What it WOULD show (the payload
+    // mapped DIRECTLY, no snapshot forward-fill) is pinned on the extractor the
+    // producer calls (review round 1 SFH-04), so this case still bites.
+    expect(extractTrustworthyDerivedCurve(derivedRow(true).payload)).toEqual(
       DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
     );
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityDailyPoints).toEqual([]);
     expect(result.derivedCurveComputedAt).toBe(COMPUTED_AT);
   });
 
@@ -1441,13 +1445,15 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     const result = callWith(derivedRow(false));
 
     expect(result.equityCurveSource).toBe("legacy");
-    // Falls back to the legacy forward-fill render over the snapshots — NOT the
-    // derived curve.
-    expect(result.equityDailyPoints).toEqual(
-      equitySnapshotsToDailyPoints(
-        SNAPSHOTS.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
-      ),
-    );
+    // Phase 167.1.2 / D-02: the producer withholds the display series while the
+    // history is rebuilt, so it is [] here. The trust gate's verdict on this
+    // byte-identical curve is pinned on the extractor (review round 1 SFH-04).
+    // The legacy render's CONTENT is not observable while hidden; it is pinned
+    // in allocation-helpers.equity-adapter.test.ts and retires with the legacy
+    // branch in plan 11.
+    expect(extractTrustworthyDerivedCurve(derivedRow(false).payload)).toBeNull();
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityDailyPoints).toEqual([]);
     // computed_at is suppressed when the curve is not shown.
     expect(result.derivedCurveComputedAt).toBeNull();
   });

@@ -8,6 +8,11 @@
  * Four institutional metrics: cumulative_return, sharpe, max_drawdown, vol.
  * Missing metrics render "—" (em-dash) per institutional convention —
  * explicit-missing, never zero.
+ *
+ * Phase 167.1.2 / D-13: while the equity history is rebuilt the item carries
+ * no analytics, and the card shows a short note in place of the four metrics.
+ * Fail-closed: only an explicit `historyState === "ready"` with analytics
+ * present renders numbers.
  */
 import type { HoldingCompareItem } from "@/app/(dashboard)/compare/lib/holding-compare-adapter";
 
@@ -22,7 +27,11 @@ function fmtNum(v: number | null): string {
 }
 
 export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
-  const { venue, symbol, holding_type, analytics } = item;
+  const { venue, symbol, holding_type } = item;
+  const analytics =
+    item.historyState === "ready" && item.analytics != null
+      ? item.analytics
+      : null;
   return (
     <div
       data-testid="holding-factsheet"
@@ -40,40 +49,53 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
         </div>
       </div>
 
-      <dl className="grid grid-cols-2 gap-4">
-        <div>
-          <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
-            Cumulative return
-          </dt>
-          <dd className="font-mono text-lg text-text-primary">
-            {fmtPct(analytics.cumulative_return)}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
-            Sharpe
-          </dt>
-          <dd className="font-mono text-lg text-text-primary">
-            {fmtNum(analytics.sharpe)}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
-            Max drawdown
-          </dt>
-          <dd className="font-mono text-lg text-text-primary">
-            {fmtPct(analytics.max_drawdown)}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
-            Vol (annualized)
-          </dt>
-          <dd className="font-mono text-lg text-text-primary">
-            {fmtPct(analytics.vol)}
-          </dd>
-        </div>
-      </dl>
+      {analytics === null ? (
+        <p
+          data-testid="holding-factsheet-rebuilding"
+          className="max-w-prose text-sm text-text-secondary"
+        >
+          Return, Sharpe, max drawdown and volatility for this holding are
+          hidden while your equity history is rebuilt. The history they are
+          computed from could count one exchange account twice when more than
+          one key reads it, and it reads buying or selling more of the holding
+          as a gain or loss.
+        </p>
+      ) : (
+        <dl className="grid grid-cols-2 gap-4">
+          <div>
+            <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
+              Cumulative return
+            </dt>
+            <dd className="font-mono text-lg text-text-primary">
+              {fmtPct(analytics.cumulative_return)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
+              Sharpe
+            </dt>
+            <dd className="font-mono text-lg text-text-primary">
+              {fmtNum(analytics.sharpe)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
+              Max drawdown
+            </dt>
+            <dd className="font-mono text-lg text-text-primary">
+              {fmtPct(analytics.max_drawdown)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
+              Vol (annualized)
+            </dt>
+            <dd className="font-mono text-lg text-text-primary">
+              {fmtPct(analytics.vol)}
+            </dd>
+          </div>
+        </dl>
+      )}
     </div>
   );
 }
