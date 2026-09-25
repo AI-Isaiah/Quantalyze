@@ -53,7 +53,12 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { deriveSyncFreshness } from "@/lib/sync-freshness/types";
 import { safeFraction } from "./units";
 import { withPublishedOnly } from "./visibility";
-import { scoreAgainstPopulation, type PercentileMap } from "./percentile-core";
+import {
+  PERCENTILE_METRICS,
+  scoreAgainstPopulation,
+  type CommaSpaceJoined,
+  type PercentileMap,
+} from "./percentile-core";
 import {
   OWN_CAPITAL,
   isAllocatable,
@@ -125,15 +130,24 @@ export type { PercentileMap } from "./percentile-core";
  * The analytics columns BOTH percentile callers project. Hoisted to a module
  * const so the two projections cannot drift.
  *
- * ⚠️ BYTE-FROZEN (Phase 159 / RANK-01). This list is the KPI set and nothing
- * else. The csv-finalize route mirrors it member-for-member in its
- * CLOCK_SAFETY_KPI_COLUMNS prose, so appending a non-KPI column here would
- * silently make those comments false. The RANK-01 gate column is therefore a
- * SEPARATE constant (`PERCENTILE_GATE_COLUMN`, closed-sets.ts) that each
- * projection site composes alongside this one.
+ * ⚠️ BYTE-FROZEN (Phase 159 D-03 / RANK-01). This list is the KPI set and
+ * nothing else. Since Phase 166 (D-12) it is DERIVED from `PERCENTILE_METRICS`
+ * (percentile-core.ts), the one KPI array — the csv-finalize route's
+ * clock-safety guard derives its column list from the same array, so the two
+ * cannot diverge. The bytes are enforced by the hand-written pin in
+ * `queries.percentile-columns.test.ts`, not by this comment: a reorder, rename
+ * or separator change in `PERCENTILE_METRICS` turns that pin RED.
+ *
+ * The RANK-01 gate column is a SEPARATE constant (`PERCENTILE_GATE_COLUMN`,
+ * closed-sets.ts) that each projection site composes ALONGSIDE this one, never
+ * appended to it — the KPI array must stay KPIs only, because the percentile
+ * scorer ranks every member of it.
  */
-const PERCENTILE_ANALYTICS_COLUMNS =
-  "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return";
+// The cast narrows `join`'s plain `string` to the literal postgrest-js needs to
+// type the rows; `CommaSpaceJoined` derives that literal from the same tuple.
+const PERCENTILE_ANALYTICS_COLUMNS = PERCENTILE_METRICS.join(", ") as CommaSpaceJoined<
+  typeof PERCENTILE_METRICS
+>;
 
 /**
  * Compute percentile ranks for each published strategy across key metrics.
@@ -153,7 +167,7 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
   // RANK-01: the gate column rides ALONGSIDE the byte-frozen KPI list, never
   // appended to it. Both select branches below interpolate this one composition,
   // so the categorized and uncategorized projections cannot disagree.
-  const analyticsColumns = `${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN}`;
+  const analyticsColumns = `${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN}` as const;
 
   const query = categorySlug
     ? withPublishedOnly(

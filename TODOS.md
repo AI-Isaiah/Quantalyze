@@ -668,6 +668,35 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    byte-freeze + mirror-prose machinery can be deleted. Skipped same-pass because each
    reshapes just-red-teamed money-math or test machinery right before ship.
    **Recorded:** 2026-08-23 (/simplify, phase 159)
+   ✅ **CLOSED 2026-09-24 by Phase 166 QSTATS-TRUTH. All three items landed, in the order this
+   entry asked for.** The text above is kept as lineage.
+   - **Primitives, extracted first (plan 01), before any new mirror:** `_drawdown_series_from_wealth`,
+     `_max_drawdown_from_wealth`, `_annualized_vol_sharpe`, `_downside_rms` and `_cvar_of_tail`
+     in `analytics-service/services/metrics.py`. Every bit-identical inline spelling now calls them,
+     including the headline Sharpe, the backbone Sharpe/vol and `info_ratio`. The golden parity file
+     passed unedited. The phase's new mirrors (plans 03-06) are built on these primitives, so no
+     third hand-copy was written.
+   - **AST gate (plans 07-08):** `analytics-service/tests/qstats_gate.py`, tested by
+     `analytics-service/tests/test_qstats_gate.py`, replaces the line-oriented RANK-05 region gate.
+     It walks every production module that imports quantstats. It sees direct calls, the
+     `getattr(qs.stats, ...)` dispatch, aliases and preparer reach-ins. It allowlists named leaf
+     FUNCTIONS, each pinned by a behavioural preparer-spy test, never the keyword text. Its census
+     prints on every pytest run. Needles for each call shape, plus four neuter drills on the real
+     file, show that it can fail.
+   - **KPI array (plan 02):** `PERCENTILE_ANALYTICS_COLUMNS` (`src/lib/queries.ts`) and csv-finalize's
+     `CLOCK_SAFETY_KPI_COLUMNS` plus its guard select are derived from the existing exported
+     `PERCENTILE_METRICS` (`src/lib/percentile-core.ts`). Two hand-written byte pins, both observed
+     RED on a separator mutation, prove that no string sent to PostgREST changed.
+   - ⛔ **The "kwarg-closable" claim was REFUTED by measurement.** WINDOWS.md entry 9 and the 159-05
+     SUMMARY "Residual" table said `recovery_factor`, `kelly_criterion`, `common_sense_ratio`,
+     `cpc_index` and `r_squared` could be closed with `prepare_returns=False`. The phase's
+     preparer-spy measurement (166-RESEARCH §Q2) showed that none of them honours the keyword.
+     Each still reaches quantstats' preparers through a helper that is not passed the keyword:
+     `max_drawdown`, `payoff_ratio`, `win_rate`, `profit_factor`, `tail_ratio` and
+     `win_loss_ratio`, plus `_prepare_benchmark` on the benchmark leg of `r_squared`, `greeks` and
+     `rolling_greeks`. So `recovery_factor`, `kelly_criterion`, `common_sense_ratio`, `cpc_index`
+     and the benchmark leg of `r_squared` / `greeks` / `rolling_greeks` all went to inline
+     mirrors. WINDOWS.md entries 5 and 9 are marked fixed in the same commit as this note.
 
 0.12. **🎨 FreshnessChip's longest label overflows its masthead column — measured in a real browser.**
    Found 2026-08-26 during the phase-162 browser pass on localhost/TEST (the first time this phase

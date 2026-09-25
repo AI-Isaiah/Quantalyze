@@ -752,10 +752,14 @@ export function isComputedAnalytics(
 
 // --- RANK-01: the published-percentile rank gate (Phase 159) ---------------
 // The strategy_analytics column that decides whether a row may participate in a
-// PUBLIC ranking. Kept as its own constant, deliberately NOT appended to
-// queries.ts's PERCENTILE_ANALYTICS_COLUMNS: that list is mirrored member-for-
-// member by the csv-finalize CLOCK_SAFETY_KPI_COLUMNS prose, so growing it
-// would silently falsify three comments. The projection sites compose the two.
+// PUBLIC ranking. Kept as its own constant, deliberately NOT a member of the KPI
+// array: queries.ts's PERCENTILE_ANALYTICS_COLUMNS and the csv-finalize
+// CLOCK_SAFETY_KPI_COLUMNS are both DERIVED from PERCENTILE_METRICS
+// (percentile-core.ts, Phase 166 D-12), and every member of that array is
+// ranked and measured as a KPI — a status column in it would be scored as one.
+// The projection sites compose the two instead (KPIs, then this column), and
+// the bytes they send are pinned by queries.percentile-columns.test.ts and the
+// csv-finalize guard's BYTE PIN test.
 export const PERCENTILE_GATE_COLUMN = "computation_status";
 
 // Whether an embedded strategy_analytics row may take part in a published

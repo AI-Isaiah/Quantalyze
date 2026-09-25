@@ -113,6 +113,11 @@ const analyticsProbe = vi.hoisted(() => ({
   error: null as { code?: string; message?: string } | null,
   /** Every strategy_id the guard read with, so "the read happened" is assertable. */
   reads: [] as string[],
+  /**
+   * Phase 166 (D-18) — every column list the guard passed to `.select()`, so
+   * the projection's BYTES are assertable, not only that a read happened.
+   */
+  selects: [] as string[],
 }));
 
 /** Metadata UPDATE recorder — the economic oracle's write vector.
@@ -226,7 +231,7 @@ vi.mock("@/lib/supabase/server", () => ({
       // The metadata UPDATE — must run ONLY after a successful create or a
       // successful resolve (Pitfall 6).
       update: (payload: Record<string, unknown>) => makeUpdateChain(payload),
-      select: (_cols: string) => {
+      select: (cols: string) => {
         if (table === "strategies") {
           // The resolve arm's C-08 scoped re-fetch:
           // .eq(user_id).eq(wizard_session_id).eq(source).maybeSingle()
@@ -248,6 +253,7 @@ vi.mock("@/lib/supabase/server", () => ({
           // .select(<the 7 ranked KPI columns>).eq(strategy_id).maybeSingle().
           // Without this branch the guard would fall into the series-probe
           // shape below, whose table assertion would fail it.
+          analyticsProbe.selects.push(cols);
           return {
             eq: (_col: string, val: string) => ({
               maybeSingle: async () => {
@@ -425,6 +431,7 @@ beforeEach(() => {
   analyticsProbe.row = null;
   analyticsProbe.error = null;
   analyticsProbe.reads.length = 0;
+  analyticsProbe.selects.length = 0;
   updateCalls.length = 0;
   updateOutcome.error = null;
   // 159-06 / RANK-07 — every case starts from the FILL premise: the committed
@@ -1445,7 +1452,8 @@ describe("[146.1-05 / A4] the metadata UPDATE belongs to the create, never to it
  * (the enqueue is gated on `dailyReturnsSeries.length > 0`), so the route must
  * MEASURE — on this request, against this strategy — whether stored KPIs
  * already exist, and refuse if they do. The measured columns are exactly the
- * seven `PERCENTILE_ANALYTICS_COLUMNS` that rankings fold (queries.ts:126-127).
+ * seven `PERCENTILE_METRICS` (percentile-core.ts) that rankings fold — the
+ * array queries.ts's `PERCENTILE_ANALYTICS_COLUMNS` derives from too.
  * A refusal writes NOTHING: a `category_id`-only partial fill would promote the
  * row into discovery and make KPIs computed under a DIFFERENT clock reachable
  * in listings and percentile ranks.
@@ -1658,6 +1666,33 @@ describe("[146.2-01 / R1] an echo FILLS an absent classification and REFUSES a c
       "the FILL happened without the guard ever reading strategy_analytics — " +
         "clock safety was assumed rather than measured",
     ).toEqual([EXISTING_ID]);
+  });
+
+  it("BYTE PIN (Phase 159 D-03, Phase 166 D-18): the guard projects exactly the seven ranked KPIs plus computation_status", async () => {
+    // The guard's column list is DERIVED from `PERCENTILE_METRICS` (the one KPI
+    // array the percentile callers in queries.ts also derive from) plus the
+    // RANK-01 gate column. A reorder, rename or separator change there would
+    // silently change what the guard measures before it lets a clock move.
+    // ⛔ The expected string is written out BY HAND: recomputing it from
+    // PERCENTILE_METRICS would make this pin agree with whatever the source
+    // says, so it could never fail.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+
+    await postTradesWithMetadata({
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(analyticsProbe.selects).toEqual([
+      "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return, computation_status",
+    ]);
   });
 
   it("RED TRADES REFUSE (KPIs measured PRESENT): stored KPIs on an empty-series echo refuse 409 and write nothing", async () => {
