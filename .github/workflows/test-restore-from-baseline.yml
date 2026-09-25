@@ -1121,6 +1121,12 @@ jobs:
       # on keeping it out; an overlap can only red VAC-08 (a read of a state that
       # really committed, or a loud failure), never harm the restore. Every WRITER
       # still holds the mutex, and for writers there is still no window.
+      # ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1 round-2 review, IN-07): "an overlap
+      # can only red VAC-08" is kept as lineage and understates the outcome set. A
+      # read that lands before the restore's late TRUNCATE sees the pre-restore
+      # COMMITTED state and can PASS. The outcomes match the wait script's SFH-05
+      # note: an overlap cannot harm the restore, and VAC-08 either reads a state
+      # that really committed (and passes or fails on its merits) or fails loudly.
       #
       # ⚠️ THE PREDICATE IS INVERTED ON PURPOSE: everything EXCEPT plain `idle` counts
       # as busy. Enumerating the busy states is FAIL-OPEN, and that is MEASURED, not
