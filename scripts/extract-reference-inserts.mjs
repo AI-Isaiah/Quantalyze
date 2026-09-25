@@ -1400,6 +1400,13 @@ function modeAudit(io, allowlistPath, migrationsDir) {
   const perTableFiles = new Map();
   let bad = 0;
   let scanned = 0;
+  // ⛔ 164.9.2 review IN-01 / SFH-04: "N unaccounted" on the C5 census line is a
+  // COUNT of the C5 refusals this run raised, not a literal. It used to be the
+  // constant `0` in the template, printed only after `if (bad) return 1`, so no
+  // run could print anything else and the workflows' `0 unaccounted` term could
+  // not fail. It is now tallied at every C5 refusal site and printed on BOTH
+  // paths: on the OK line (0 there by construction) and on the FAILED line.
+  let c5Unaccounted = 0;
 
   // ⛔ [164.8.1 review, finding 3] ONE CLASSIFICATION PATH, not two. The
   // "every listed pair was reached" loop below used to re-read and re-lex files
@@ -1457,6 +1464,7 @@ function modeAudit(io, allowlistPath, migrationsDir) {
             reason: `a top-level INSERT … ON CONFLICT DO UPDATE on a table the replay fills, with no allowlist line — its DO UPDATE arm rewrites an existing replayed row, which no C5 line can replay; classify it by hand at review`,
           });
           bad = 1;
+          c5Unaccounted++;
         }
         if (m.ok.length === 0) continue; // limitation 2: an unlisted non-literal is a backfill
         refuse(io, {
@@ -1545,6 +1553,7 @@ function modeAudit(io, allowlistPath, migrationsDir) {
           reason: `a top-level ${hit.verb} on a table the replay fills, and C5 replays UPDATE only — no allowlist line can account for it; classify it by hand at review`,
         });
         bad = 1;
+        c5Unaccounted++;
       }
       const key = `${file}|${qualified}`;
       if (!updCache.has(key)) updCache.set(key, matchUpdate(src, prep, qualified));
@@ -1555,6 +1564,7 @@ function modeAudit(io, allowlistPath, migrationsDir) {
       for (const r of v.refusals) {
         refuse(io, { file, line: r.line, table: qualified, reason: r.reason });
         bad = 1;
+        c5Unaccounted++;
       }
       if (v.refusals.length > 0) continue;
       const row = c5PerTable.get(qualified) ?? { upd: 0, dec: 0 };
@@ -1572,7 +1582,12 @@ function modeAudit(io, allowlistPath, migrationsDir) {
       c5PerTable.set(qualified, row);
     }
   }
-  if (bad) return 1;
+  if (bad) {
+    io.err.push(
+      `extract-reference-inserts audit C5 FAILED: ${c5Unaccounted} unaccounted C5 refusal(s) among the REFUSED lines above (the audit exits 1; it printed no census).`,
+    );
+    return 1;
+  }
 
   const sorted = Array.from(perTableStatements.keys()).sort();
   const width = sorted.reduce((w, t) => Math.max(w, t.length), 0);
@@ -1610,7 +1625,7 @@ function modeAudit(io, allowlistPath, migrationsDir) {
   // follows it directly; both workflows parse each by its own prefix.
   io.out.push(
     `extract-reference-inserts audit OK: ${entries.length} entr(ies), ${files.size} file(s), ${tables.size} table(s), ${pinnedSum} statement(s); every pinned count re-measured, no unlisted top-level reference INSERT.`,
-    `extract-reference-inserts audit C5 OK: ${c5.upd} update statement(s) over ${c5.updFiles.size} file(s) and ${c5.updTables.size} table(s) replayed; ${c5.dec} declined over ${c5.decFiles.size} file(s); 0 unaccounted.`,
+    `extract-reference-inserts audit C5 OK: ${c5.upd} update statement(s) over ${c5.updFiles.size} file(s) and ${c5.updTables.size} table(s) replayed; ${c5.dec} declined over ${c5.decFiles.size} file(s); ${c5Unaccounted} unaccounted.`,
   );
   return 0;
 }
@@ -1663,7 +1678,7 @@ function modeAudit(io, allowlistPath, migrationsDir) {
 export const SELF_TEST_KINDS_FLOOR = 53;
 
 /**
- * @type {Array<{id:string, why:string, audit?:boolean, expect:string, greenStdout?:RegExp, greenAbsent?:RegExp}>}
+ * @type {Array<{id:string, why:string, audit?:boolean, expect:string, redStderr?:RegExp, greenStdout?:RegExp, greenAbsent?:RegExp}>}
  */
 export const SELF_TEST_KINDS = [
   {
@@ -1931,6 +1946,9 @@ export const SELF_TEST_KINDS = [
     why: "C5 --audit: a migration gains a top-level literal UPDATE on a replayed table with no C5 line — the drift a static list cannot see about itself",
     audit: true,
     expect: "NO C5 allowlist line; add an update: line",
+    // 164.9.2 review IN-01 / SFH-04: the unaccounted count is COMPUTED, so a red
+    // run prints it non-zero, where a template constant would print 0.
+    redStderr: /audit C5 FAILED: 1 unaccounted C5 refusal\(s\)/,
     greenStdout: /audit C5 OK: 1 update statement\(s\) over 1 file\(s\) and 1 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
   },
   {
@@ -2032,6 +2050,8 @@ function selfTest(io) {
       fail(
         `${kind.id}.red exited 1 but its message does not carry "${kind.expect}" — a leg that fires for the WRONG reason is not evidence. Got: ${red.stderr.trim().split("\n")[0]}`,
       );
+    } else if (kind.redStderr && !kind.redStderr.test(red.stderr)) {
+      fail(`${kind.id}.red stderr does not match ${kind.redStderr} — the red leg's second reading is missing.`);
     }
     const green = runLeg(kind, "green");
     if (green.code !== 0) {

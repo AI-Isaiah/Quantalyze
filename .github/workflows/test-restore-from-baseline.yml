@@ -741,6 +741,12 @@ jobs:
           # class (top-level literal UPDATEs the replay re-runs). It is read here the
           # same way as the first, bounded for the same `bash -e` reason, and its
           # absence is a MEASURE_FAIL. The regex pins `0 unaccounted`.
+          # 164.9.2 review IN-01 / SFH-04: that count is COMPUTED by the extractor (a
+          # tally of its C5 refusals, printed non-zero on its `audit C5 FAILED:` line and
+          # measured so by its self-test), not a template constant. On an exit-0 run it
+          # is 0 by construction, so this term is a consistency check against an
+          # extractor that prints a non-zero count and still exits 0; the exit status
+          # above stays the gate. What the count covers is the audit's `C5 scope:` line.
           c5_rc=0
           c5_line=$(grep -a -m1 -E '^extract-reference-inserts audit C5 OK: [0-9]+ update statement\(s\) over [0-9]+ file\(s\) and [0-9]+ table\(s\) replayed; [0-9]+ declined over [0-9]+ file\(s\); 0 unaccounted\.$' "$REFDATA_AUDIT_LOG") || c5_rc=$?
           if [ "$c5_rc" -gt 1 ]; then
