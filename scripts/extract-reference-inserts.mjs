@@ -689,10 +689,18 @@ const C5_ALLOWED_CALLS = new Set([
  * operator, not a join; `WITH[OUT] TIME ZONE` is part of a type name, not a
  * CTE. Refusing either sent a LITERAL UPDATE to a `decline:` line (review
  * WR-03 / SFH-03) — the outcome decision D-02 forbids.
+ *
+ * ⛔ THE COMPARISON IS REPLACED BY AN OPERATOR TOKEN, NOT BY SPACES (164.9.2
+ * review round 2, WR-04). Blanked to spaces, `label IS DISTINCT FROM ('v')` left
+ * the column and the `(` adjacent, so the walk read the call `label(` and refused
+ * a literal UPDATE, naming a call the statement does not make. `=` padded to the
+ * phrase's length keeps offsets and gives the walk the shape `col = (…)` that
+ * the comparison really has. The time-zone phrase is part of a type name, and
+ * blanking it to spaces leaves the cast's type readable, so it stays spaces.
  */
 const C5_BLANKED_PHRASES = [
-  /\bIS[\t\n\r\f\v ]+(?:NOT[\t\n\r\f\v ]+)?DISTINCT[\t\n\r\f\v ]+FROM\b/gi,
-  /\bWITH(?:OUT)?[\t\n\r\f\v ]+TIME[\t\n\r\f\v ]+ZONE\b/gi,
+  [/\bIS[\t\n\r\f\v ]+(?:NOT[\t\n\r\f\v ]+)?DISTINCT[\t\n\r\f\v ]+FROM\b/gi, "="],
+  [/\bWITH(?:OUT)?[\t\n\r\f\v ]+TIME[\t\n\r\f\v ]+ZONE\b/gi, " "],
 ];
 /** Built-in comparison, arithmetic, concatenation, pattern and jsonb operators. */
 const C5_ALLOWED_OPS = new Set(
@@ -820,7 +828,7 @@ export function updateLiteralCheck(masked) {
     return "carries a `$` (a dollar-quoted body or a positional parameter) — not a literal C5 update (C5)";
   }
   let text = masked;
-  for (const re of C5_BLANKED_PHRASES) text = text.replace(re, (p) => " ".repeat(p.length));
+  for (const [re, head] of C5_BLANKED_PHRASES) text = text.replace(re, (p) => head.padEnd(p.length, " "));
   const toks = c5Tokens(text);
   // Paren depth, and whether the statement's head SET has been passed: the ONE
   // position where `SET (` is grammar rather than a call (review round 2, CR-01).
@@ -1842,8 +1850,9 @@ export const SELF_TEST_KINDS = [
     redStderr: /add a decline: line for this \(file, table\) with the reason, beside its update: line/,
     // 164.9.2 review WR-03 / SFH-03: the green also replays both IS [NOT] DISTINCT
     // FROM idioms; their FROM is an operator, and refusing it sent a replayable
-    // UPDATE to a decline: line.
-    greenStdout: /UPDATE fx_ref SET label = 'v' WHERE id IN \(1\);[\s\S]*UPDATE fx_ref SET label = 'v' WHERE label IS DISTINCT FROM 'v' AND id = 1;[\s\S]*UPDATE fx_ref SET label = 'w' WHERE label IS NOT DISTINCT FROM 'v';/,
+    // UPDATE to a decline: line. Review round 2, WR-04: and with a PARENTHESISED
+    // right operand, which blanking the phrase to spaces read as the call `label(`.
+    greenStdout: /UPDATE fx_ref SET label = 'v' WHERE id IN \(1\);[\s\S]*UPDATE fx_ref SET label = 'v' WHERE label IS DISTINCT FROM 'v' AND id = 1;[\s\S]*UPDATE fx_ref SET label = 'w' WHERE label IS NOT DISTINCT FROM 'v';[\s\S]*UPDATE fx_ref SET label = 'v' WHERE label IS DISTINCT FROM \('v'\);[\s\S]*UPDATE fx_ref SET label = 'w' WHERE \(id, label\) IS NOT DISTINCT FROM \(1, 'v'\);/,
   },
   {
     id: "c5-update-function-call",
