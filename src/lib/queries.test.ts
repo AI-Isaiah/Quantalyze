@@ -198,7 +198,6 @@ import {
   deriveStrategyLinkedKeyIds,
   deriveStrategylessKeys,
 } from "./queries";
-import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 import type { SupportedExchange } from "./utils";
 
 const baseStrategy = {
@@ -1429,11 +1428,11 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     const result = callWith(derivedRow(true));
 
     expect(result.equityCurveSource).toBe("derived");
-    // The dense curve is mapped DIRECTLY ({date, equity_usd} → {date, value}) —
-    // no snapshot forward-fill adapter.
-    expect(result.equityDailyPoints).toEqual(
-      DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
-    );
+    // Phase 167.1.2 / D-02: the producer withholds the display series while the
+    // history is rebuilt, so it is [] here; the source flip above is still the
+    // pin. Plan 11 restores the content pin when it defines "ready".
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityDailyPoints).toEqual([]);
     expect(result.derivedCurveComputedAt).toBe(COMPUTED_AT);
   });
 
@@ -1441,13 +1440,11 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     const result = callWith(derivedRow(false));
 
     expect(result.equityCurveSource).toBe("legacy");
-    // Falls back to the legacy forward-fill render over the snapshots — NOT the
-    // derived curve.
-    expect(result.equityDailyPoints).toEqual(
-      equitySnapshotsToDailyPoints(
-        SNAPSHOTS.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
-      ),
-    );
+    // Phase 167.1.2 / D-02: the producer withholds the display series while the
+    // history is rebuilt, so it is [] here; the source flip above is still the
+    // pin. Plan 11 restores the content pin when it defines "ready".
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityDailyPoints).toEqual([]);
     // computed_at is suppressed when the curve is not shown.
     expect(result.derivedCurveComputedAt).toBeNull();
   });
