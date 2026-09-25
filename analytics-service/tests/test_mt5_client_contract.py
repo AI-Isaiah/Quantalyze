@@ -1602,6 +1602,11 @@ def test_public_surface_is_exactly_the_contract():
         # `initialize()` the detector above uses. Named apart from `restart`,
         # which reconnects the rpyc SOCKET and never touches the terminal.
         "recycle_terminal_process",
+        # 164.6.5 review round 2, WR-03 root cause — the heal's session read. It
+        # reads what `terminal_info` / `account_info` read (no new MT5 call) in
+        # ONE crossing through a committed remote expression, and returns
+        # equality verdicts only.
+        "session_snapshot",
     }
 
 
@@ -4707,3 +4712,243 @@ def test_TERMINAL_RECYCLE_IN01_every_Win32_function_called_has_its_signature_dec
         if fn in non_bool and not hasattr(getattr(dlls[dll], fn), "restype")
     )
     assert not missing_restype, f"non-BOOL return without restype: {missing_restype}"
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.5 review round 2, WR-03 ROOT CAUSE — the session snapshot
+#
+# The terminal heal's pre-recycle evidence capture and its post-relaunch house-
+# session check read `terminal_info` / `account_info`, which cost one rpyc
+# crossing per field when materialized client-side, so the heal skipped them on
+# every run. `session_snapshot` reads them on the FAR side in one `conn.eval` of a
+# committed expression. What must hold: the expression is fixed text that can only
+# READ; it returns plain scalars; the client hands back VERDICTS, never an account
+# number or a server name; and every failure is typed and scrubbed.
+# --------------------------------------------------------------------------- #
+
+_SNAPSHOT_ALLOWED_MT5_CALLS = frozenset({"terminal_info", "account_info", "last_error"})
+
+
+def test_SESSION_SNAPSHOT_the_remote_source_is_a_committed_literal_that_can_only_read():
+    """T-134-03 / T-164.6.5-06 class. The expression crosses the arbitrary-remote-
+    code channel, so it must be an AST string CONSTANT with no interpolation
+    marker (the recycle source's rule), must parse as ONE expression, and its
+    only calls on `mt5` may be the three reads. Anything else it calls must be a
+    local lambda or `getattr` / `isinstance` / `str`: no import, no dunder, no
+    login, no `initialize`, no trade verb."""
+    source = pathlib.Path(mt5_client_mod.__file__).read_text()
+    assigned = [
+        node.value
+        for node in ast.parse(source).body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "_REMOTE_SESSION_SNAPSHOT_SRC"
+            for t in node.targets
+        )
+    ]
+    assert len(assigned) == 1
+    value = assigned[0]
+    assert isinstance(value, ast.Constant) and isinstance(value.value, str)
+    src = value.value
+    assert src == mt5_client_mod._REMOTE_SESSION_SNAPSHOT_SRC
+    for marker in ("{", "}", "%(", "%s", "%d", "__", "import"):
+        assert marker not in src, f"{marker!r} in the snapshot source"
+
+    tree = ast.parse(src, mode="eval")
+    lambda_params = {
+        arg.arg
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Lambda)
+        for arg in node.args.args
+    }
+    mt5_calls: set[str] = set()
+    other_calls: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "mt5"
+        ):
+            mt5_calls.add(func.attr)
+        elif isinstance(func, ast.Name):
+            other_calls.add(func.id)
+        elif isinstance(func, ast.Lambda):
+            other_calls.add("<lambda>")
+        else:
+            other_calls.add(ast.dump(func))
+    assert mt5_calls == _SNAPSHOT_ALLOWED_MT5_CALLS, mt5_calls
+    assert other_calls <= lambda_params | {"<lambda>", "getattr", "isinstance", "str"}, (
+        other_calls
+    )
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert names <= lambda_params | {
+        "mt5", "getattr", "isinstance", "str", "bool", "int", "float"
+    }, names
+
+
+class _SnapshotBridge:
+    """The `mt5` the committed expression reads through, far-side."""
+
+    def __init__(self, terminal, account, last_error=(-10005, "IPC timeout")):
+        self.terminal, self.account, self.error = terminal, account, last_error
+        self.calls: list[str] = []
+
+    def terminal_info(self):
+        self.calls.append("terminal_info")
+        return self.terminal
+
+    def account_info(self):
+        self.calls.append("account_info")
+        return self.account
+
+    def last_error(self):
+        self.calls.append("last_error")
+        return self.error
+
+
+class _SnapshotTerminal(NamedTuple):
+    build: object
+    connected: object
+
+
+class _SnapshotAccount(NamedTuple):
+    login: object
+    server: object
+
+
+def _snapshot_client(bridge, *, evaluate=None):
+    connect, fake, _rec = _make({})
+    conn = fake._MetaTrader5__conn
+    evaluated: list[str] = []
+
+    def _eval(src):
+        evaluated.append(src)
+        if evaluate is not None:
+            return evaluate(src)
+        return eval(src, {"mt5": bridge})  # noqa: S307 — the committed source, offline
+
+    conn.eval = _eval
+    return Mt5Client("host", 18812, _connect=connect), evaluated
+
+
+@pytest.mark.parametrize(
+    "terminal,account,expected",
+    [
+        pytest.param(
+            None,
+            None,
+            dict(terminal_code=-10005, account_read=False, build=None),
+            id="terminal-unanswered-account-NOT-read",
+        ),
+        pytest.param(
+            _SnapshotTerminal(6182, True),
+            None,
+            dict(terminal_code=None, account_code=-10005, build=6182, connected=True),
+            id="account-unanswered",
+        ),
+        pytest.param(
+            _SnapshotTerminal(6182, False),
+            _SnapshotAccount(4242, "House-Server"),
+            dict(connected=False, login_matches=True, server_matches=True),
+            id="house-session",
+        ),
+        pytest.param(
+            _SnapshotTerminal(6182, True),
+            _SnapshotAccount(4243, "Another-Server"),
+            dict(login_matches=False, server_matches=False),
+            id="another-account-and-server",
+        ),
+        pytest.param(
+            _SnapshotTerminal(object(), "yes"),
+            _SnapshotAccount(None, ""),
+            dict(build=None, connected=None, login_matches=None, server_matches=None),
+            id="fields-not-captured",
+        ),
+    ],
+)
+def test_SESSION_SNAPSHOT_returns_verdicts_never_values(terminal, account, expected):
+    """The committed expression is evaluated against a far-side double, and the
+    client must reduce it to verdicts: an account number or a server name never
+    comes back. A terminal that does not answer is not asked `account_info`, and
+    `last_error()` is read right after the `None`."""
+    bridge = _SnapshotBridge(terminal, account)
+    client, evaluated = _snapshot_client(bridge)
+
+    snapshot = client.session_snapshot(expected_login=4242, expected_server="House-Server")
+
+    assert evaluated == [mt5_client_mod._REMOTE_SESSION_SNAPSHOT_SRC]
+    for key, value in expected.items():
+        assert getattr(snapshot, key) == value, (key, snapshot)
+    assert 4242 not in snapshot and "House-Server" not in snapshot
+    assert 4243 not in snapshot and "Another-Server" not in snapshot
+    if terminal is None:
+        assert bridge.calls == ["terminal_info", "last_error"]
+    elif account is None:
+        assert bridge.calls == ["terminal_info", "account_info", "last_error"]
+    else:
+        assert bridge.calls == ["terminal_info", "account_info"]
+
+
+def test_SESSION_SNAPSHOT_the_far_side_result_is_plain_scalars():
+    """rpyc's brine copies a tuple BY VALUE only when every item is a scalar; one
+    non-scalar turns the whole result into a netref whose every index is another
+    crossing. The expression coerces, so a non-scalar field arrives as a string."""
+    bridge = _SnapshotBridge(_SnapshotTerminal(object(), True), _SnapshotAccount(1, "s"))
+    raw = eval(mt5_client_mod._REMOTE_SESSION_SNAPSHOT_SRC, {"mt5": bridge})  # noqa: S307
+
+    def _by_value(v):
+        return v is None or isinstance(v, (bool, int, float, str)) or (
+            type(v) is tuple and all(_by_value(i) for i in v)
+        )
+
+    assert type(raw) is tuple and _by_value(raw), raw
+    assert isinstance(raw[1], str)
+
+
+@pytest.mark.parametrize(
+    "returned",
+    [
+        pytest.param(["answered", 1, True, 1, "s"], id="a-list-a-netref-would-look-like"),
+        pytest.param(("answered", 1, True), id="short"),
+        pytest.param(("surprise", 1), id="unknown-tag"),
+        pytest.param((), id="empty"),
+    ],
+)
+def test_SESSION_SNAPSHOT_a_malformed_result_raises_typed(returned):
+    client, _ = _snapshot_client(None, evaluate=lambda _src: returned)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.session_snapshot(expected_login=1, expected_server="s")
+    assert exc_info.value.code == 0
+
+
+def test_SESSION_SNAPSHOT_a_transport_raise_is_scrubbed_and_typed():
+    """Like every read: a raw remote traceback never escapes unscrubbed."""
+
+    def _boom(_src):
+        raise RuntimeError("remote traceback: password='hunter2' server='Broker'")
+
+    client, _ = _snapshot_client(None, evaluate=_boom)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.session_snapshot(expected_login=1, expected_server="s")
+    assert "hunter2" not in str(exc_info.value)
+
+
+def test_SESSION_SNAPSHOT_without_a_transport_fails_loud_and_is_fenced():
+    """No `_MetaTrader5__conn` means nothing can be read bridge-side, and falling
+    back to the per-field reads would re-open WR-03 invisibly: it RAISES. And an
+    abandoned session is refused at the fence before anything crosses."""
+    connect, _fake, _rec = _make({"no_transport": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError):
+        client.session_snapshot(expected_login=1, expected_server="s")
+
+    bridge = _SnapshotBridge(None, None)
+    fenced, evaluated = _snapshot_client(bridge)
+    fenced.session_snapshot(expected_login=1, expected_server="s")  # binds
+    bump_mt5_terminal_epoch(fenced.terminal_key)
+    with pytest.raises(Mt5SessionAbandoned):
+        fenced.session_snapshot(expected_login=1, expected_server="s")
+    assert len(evaluated) == 1, "the abandoned read crossed the wire"

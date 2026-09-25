@@ -323,7 +323,7 @@ _MT5_RELOGIN_LEASE_WAIT_ENV: Final[str] = "MT5_RELOGIN_LEASE_WAIT_S"
 # UNDER-COUNT, AND THE PATH IS NOW 7. `terminal_info()` was charged 2 crossings,
 # which is its FAILING shape (the read, then `_raise_last`'s `last_error()`). Its
 # ANSWERING shape is a netref namedtuple that `mt5_client._materialize` walks
-# once per field (`_TERMINAL_INFO_READ_CROSSINGS` below, 29), so "unconditional"
+# once per field (29 crossings at the documented field count), so "unconditional"
 # was never true of it at the ceiling. Charged honestly, no budget under the 300 s
 # ceiling can cover an answering read beside the recycle and its relaunch, so the
 # capture is now budget-gated like every other optional read, and the
@@ -339,40 +339,53 @@ _MT5_RELOGIN_LEASE_WAIT_ENV: Final[str] = "MT5_RELOGIN_LEASE_WAIT_S"
 # affordable only if these reads stop costing one crossing per field, i.e. are
 # materialized bridge-side the way `Mt5Client._materialize_rows` already does
 # deals (the review's other option, and `mt5_client`'s to take).
+#
+# ⭐ SUPERSEDED THE SAME DAY (164.6.5 review round 2, WR-03 ROOT CAUSE,
+# 2026-09-25; the paragraph above is kept as lineage). The option above was
+# taken: `Mt5Client.session_snapshot` reads the heal's fields of BOTH
+# `terminal_info()` and `account_info()` on the far side of the wire in ONE
+# `conn.eval` of a committed literal (`mt5_client._REMOTE_SESSION_SNAPSHOT_SRC`),
+# returning a tuple of scalars rpyc copies by value. A read that does not answer
+# reads its `last_error()` code in the SAME crossing. So the capture and the
+# SFH-07 post-relaunch check cost ONE crossing each, whatever the terminal
+# answers, and both are back on the unconditional path:
+#
+#   | the first probe: `initialize()` + `last_error()`                 | 2 |
+#   | the capture: `session_snapshot()`                                | 1 |
+#   | the recycle: execute + namespace lookup + call                   | 3 |
+#   | the relaunch reading, ONE of:                                    | 2 |
+#   |   the verb's probe does not answer: `initialize()` + `last_error()` |   |
+#   |   it answers: `initialize()` + the post-relaunch `session_snapshot()` | |
+#
+# 8 x 30 + 10 = 250 s (it was 220 s with both reads skipped, 280 s before
+# that), under the unchanged 300 s ceiling. The last row is why the check costs
+# the path nothing extra: it runs only after the probe ANSWERED, and an
+# answering probe is one crossing, so the probe and the check together are never
+# more than the failing probe's two. The same arithmetic means the recycle's own
+# reserve (`_ESCALATION_RESERVE_CROSSINGS`) already covers the check.
+# ⚠️ The two reads are ONE crossing, not one each, on purpose: one crossing per
+# read would make the path 2 + 2 + 3 + 3 = 10 crossings = 310 s, over the
+# ceiling. The relaunch POLLS stay budget-gated, and each poll reserves a whole
+# detector reading, so a poll that sees the relaunch answer also leaves the
+# check its crossing.
 _DETECTOR_READING_CROSSINGS: Final[int] = 2
 _RECYCLE_CROSSINGS: Final[int] = 3
+#: `Mt5Client.session_snapshot`: one `conn.eval`, whatever it answers.
+#: `test_R2_WR03_RC_a_session_snapshot_is_ONE_crossing_on_every_shape` drives the
+#: REAL client against a netref-shaped double and requires this charge to equal
+#: what it crossed.
+_SESSION_SNAPSHOT_CROSSINGS: Final[int] = 1
 _MT5_RELOGIN_ROUND_TRIPS: Final[int] = (
     _DETECTOR_READING_CROSSINGS  # the first probe
+    + _SESSION_SNAPSHOT_CROSSINGS  # the pre-recycle evidence capture
     + _RECYCLE_CROSSINGS
-    + _DETECTOR_READING_CROSSINGS  # the verb's own relaunch probe
-)
-
-# ⭐ WR-03 (164.6.5 review round 2) — WHAT AN ANSWERING `terminal_info()` /
-# `account_info()` COSTS, counted the way `mt5_client._materialize` walks a
-# netref namedtuple: the read itself (1), then `getattr(_asdict)` and its call
-# (2), `.items` and its call (2), the `__iter__` (1), one `next()` per field, and
-# the closing `next()` that raises `StopIteration` (1).
-# `test_R2_WR03_an_answering_read_is_charged_what_materialize_makes_it_cross`
-# drives the REAL client read against a netref-shaped double and requires these
-# charges to equal what it crossed.
-# ⚠️ THE FIELD COUNTS are the MetaTrader5 Python package's documented
-# `TerminalInfo` (22) and `AccountInfo` (28) namedtuples. They were NOT measured
-# on this gateway. They set only how far below reach the reads are: at the rpyc
-# ceiling, ANY answering read (at least 8 crossings) beside the recycle already
-# exceeds the 300 s budget ceiling.
-_MATERIALIZE_FIXED_CROSSINGS: Final[int] = 6
-_TERMINAL_INFO_FIELDS: Final[int] = 22
-_ACCOUNT_INFO_FIELDS: Final[int] = 28
-_TERMINAL_INFO_READ_CROSSINGS: Final[int] = (
-    1 + _MATERIALIZE_FIXED_CROSSINGS + _TERMINAL_INFO_FIELDS
-)
-_ACCOUNT_INFO_READ_CROSSINGS: Final[int] = (
-    1 + _MATERIALIZE_FIXED_CROSSINGS + _ACCOUNT_INFO_FIELDS
+    + _DETECTOR_READING_CROSSINGS  # the relaunch reading (see the table)
 )
 
 #: The crossings the escalation must still make once the capture is done: the
-#: recycle and its relaunch probe. An optional read is taken only if the time
-#: left covers it PLUS this reserve.
+#: recycle and its relaunch reading, which covers the post-relaunch check (see
+#: the table). The recycle, and the capture before it, are taken only if the
+#: time left covers this (WR-04).
 _ESCALATION_RESERVE_CROSSINGS: Final[int] = (
     _RECYCLE_CROSSINGS + _DETECTOR_READING_CROSSINGS
 )
@@ -693,6 +706,13 @@ def _relogin_budget_s() -> float:
     (WR-01). MEASURED 2026-09-25 by the orchestrator (read-only): the variable is
     NOT set on the production analytics service, so the derived default applies
     there today.
+
+    ⚠️ WR-03 ROOT CAUSE (2026-09-25) — "NEVER afford" above is now true only of
+    the lower part of that range. The default covers the pre-recycle evidence
+    capture as well, so a value somewhat below it drops the capture first, and
+    only a value further below it loses the recycle itself. (The post-relaunch
+    check is never the one dropped: whenever the recycle starts, its reserve
+    leaves the check its crossing.) The warning says both.
     """
     default = (
         _MT5_RELOGIN_ROUND_TRIPS * _MT5_REQUEST_TIMEOUT_S
@@ -708,11 +728,12 @@ def _relogin_budget_s() -> float:
         _log_configuration_fault_once(
             f"{_MT5_RELOGIN_BUDGET_ENV}_below_derived_default",
             "mt5 session path: %s is set below its derived default of %s seconds. "
-            "The value is accepted, but the ipc_fault escalation can never afford "
-            "its terminal-process recycle at it, so a -10005 wedge is never "
-            "recycled automatically; the persistence alarm raises it at ERROR "
-            "instead. This is a SERVER misconfiguration, never a credential "
-            "failure (D-02).",
+            "The value is accepted, but the ipc_fault escalation cannot afford "
+            "every step at it: the pre-recycle evidence capture is dropped "
+            "first, and further below the default the terminal-process recycle "
+            "itself, so a -10005 wedge is never recycled automatically and the "
+            "persistence alarm raises it at ERROR instead. This is a SERVER "
+            "misconfiguration, never a credential failure (D-02).",
             _MT5_RELOGIN_BUDGET_ENV,
             default,
         )
@@ -927,84 +948,72 @@ def _capture_wedge_evidence(
     No account number is read into the line at all.
 
     ⛔ IT CANNOT RAISE, except ``Mt5SessionAbandoned``, which is re-raised for the
-    same reason ``_escalate_ipc_fault`` re-raises it. ⚠️ A failing
-    ``terminal_info()`` SKIPS ``account_info()``: a terminal that cannot answer
-    one cannot answer the other. ⛔ And ``account_info()`` is BUDGET-GATED (WR-04):
-    it is read only when the time left covers it AND the recycle and its relaunch
-    probe (``_ESCALATION_RESERVE_CROSSINGS``). Evidence is never bought with the
-    recovery it exists to precede.
+    same reason ``_escalate_ipc_fault`` re-raises it. ⚠️ A terminal that does not
+    answer ``terminal_info()`` is not asked ``account_info()``: a terminal that
+    cannot answer one cannot answer the other. ⛔ And the capture is BUDGET-GATED
+    (WR-04): it is read only when the time left covers it AND the recycle and its
+    relaunch reading, which leaves the post-relaunch check its crossing
+    (``_ESCALATION_RESERVE_CROSSINGS``).
+    Evidence is never bought with the recovery it exists to precede.
 
-    ⛔ WR-03 (164.6.5 review round 2) — ``terminal_info()`` IS BUDGET-GATED TOO,
-    on its ANSWERING cost (``_TERMINAL_INFO_READ_CROSSINGS``): it was read
-    unconditionally, charged as its failing shape, while an answering read
-    materializes one rpyc crossing per field. At every budget the window admits
-    that cost does not fit beside the recycle, so the line records the skip and
-    why; the bridge-side file version on the recycle's own line is the build
-    evidence that does not need the IPC.
+    ⛔ WR-03 (164.6.5 review round 2) — the two reads were charged their ANSWERING
+    cost, one rpyc crossing per field, and at that cost this capture was skipped
+    at every budget the window admits. ⭐ WR-03 ROOT CAUSE (same day): they are
+    now ONE bridge-side crossing (``Mt5Client.session_snapshot``), so at the
+    derived default the capture RUNS on every escalation.
     """
     if not _affordable(
-        deadline, _TERMINAL_INFO_READ_CROSSINGS + _ESCALATION_RESERVE_CROSSINGS
+        deadline, _SESSION_SNAPSHOT_CROSSINGS + _ESCALATION_RESERVE_CROSSINGS
     ):
         return (
             "build=not_captured connected=not_captured "
             "session_server_matches_env=not_captured (terminal_info and "
-            "account_info skipped: an answering read costs one rpyc crossing per "
-            "field, and the heal budget left cannot cover it beside the recycle "
-            "and its relaunch; the bridge-side file version is on the recycle's "
-            "own line)"
+            "account_info skipped: the heal budget left is reserved for the "
+            "recycle and its relaunch; the bridge-side file version is on the "
+            "recycle's own line)"
         )
     try:
-        terminal = client.terminal_info()
+        snapshot = client.session_snapshot(
+            expected_login=None, expected_server=env_server
+        )
     except Mt5SessionAbandoned:
         raise
     except Exception as exc:  # noqa: BLE001 — a capture must never block the recycle
-        why = _describe_capture_failure(exc)
         return (
-            f"build=not_captured connected=not_captured "
-            f"session_server_matches_env=not_captured "
-            f"(terminal_info failed: {why}; account_info skipped; the "
+            "build=not_captured connected=not_captured "
+            "session_server_matches_env=not_captured "
+            f"(the session read failed: {_describe_capture_failure(exc)}; the "
             "bridge-side file version is on the recycle's own line)"
         )
-    build = terminal.get("build")
-    connected = terminal.get("connected")
+    if snapshot.terminal_code is not None:
+        return (
+            "build=not_captured connected=not_captured "
+            "session_server_matches_env=not_captured "
+            f"(terminal_info failed: code={snapshot.terminal_code}; account_info "
+            "skipped; the bridge-side file version is on the recycle's own line)"
+        )
     build_part = (
-        f"build={build}"
-        if isinstance(build, int) and not isinstance(build, bool)
+        f"build={snapshot.build}"
+        if snapshot.build is not None
         else "build=not_captured (terminal_info carried no integer build)"
     )
     connected_part = (
-        f"connected={connected}"
-        if isinstance(connected, bool)
+        f"connected={snapshot.connected}"
+        if snapshot.connected is not None
         else "connected=not_captured (terminal_info carried no boolean)"
     )
-    if not _affordable(
-        deadline, _ACCOUNT_INFO_READ_CROSSINGS + _ESCALATION_RESERVE_CROSSINGS
-    ):
-        return (
-            f"{build_part} {connected_part} session_server_matches_env=not_captured "
-            "(account_info skipped: the heal budget left is reserved for the "
-            "recycle and its relaunch)"
-        )
-    try:
-        account = client.account_info()
-    except Mt5SessionAbandoned:
-        raise
-    except Exception as exc:  # noqa: BLE001 — a capture must never block the recycle
+    if snapshot.account_code is not None:
         server_part = (
             "session_server_matches_env=not_captured "
-            f"(account_info failed: {_describe_capture_failure(exc)})"
+            f"(account_info failed: code={snapshot.account_code})"
         )
+    elif snapshot.server_matches is not None:
+        server_part = f"session_server_matches_env={snapshot.server_matches}"
     else:
-        session_server = account.get("server")
-        if isinstance(session_server, str) and session_server:
-            server_part = (
-                f"session_server_matches_env={session_server == env_server}"
-            )
-        else:
-            server_part = (
-                "session_server_matches_env=not_captured "
-                "(account_info carried no server)"
-            )
+        server_part = (
+            "session_server_matches_env=not_captured "
+            "(account_info carried no server)"
+        )
     return f"{build_part} {connected_part} {server_part}"
 
 
@@ -1108,73 +1117,71 @@ def _read_post_relaunch_state(
       * ``unverified`` — the check could not complete, whatever the reason.
       * ``verified`` — connected, on the environment's login and server.
 
-    ⛔ CREDENTIAL-FREE and VALUE-FREE: two reads of the CURRENT session, no login.
+    ⛔ CREDENTIAL-FREE and VALUE-FREE: one read of the CURRENT session, no login.
     The account and server are recorded as EQUALITY VERDICTS against the
     environment's, never as values — the same rule the pre-recycle capture
-    follows (T-164.6.2-12); no account number reaches the line.
+    follows (T-164.6.2-12); no account number reaches the line, and none reaches
+    this module (``Mt5Client.session_snapshot`` compares inside the client).
 
-    ⛔ BUDGET-GATED, like every optional read (WR-04): each is taken only if it
+    ⛔ BUDGET-GATED, like every optional read (WR-04): it is taken only if it
     still fits before ``deadline``, else recorded ``not_read`` with the reason.
-    It cannot raise except ``Mt5SessionAbandoned``.
+    ⭐ WR-03 ROOT CAUSE (164.6.5 review round 2, 2026-09-25): it is ONE crossing
+    and it is on the derived default's path, so at that default a relaunch the
+    verb's own probe saw answer is always checked. It cannot raise except
+    ``Mt5SessionAbandoned``.
     """
-    degraded = False
-    complete = True
-    # ⛔ WR-03 (review round 2) — each read is charged its ANSWERING cost, one
-    # rpyc crossing per field (`_TERMINAL_INFO_READ_CROSSINGS` /
-    # `_ACCOUNT_INFO_READ_CROSSINGS`), not the two crossings of a failing read.
-    if not _affordable(deadline, _TERMINAL_INFO_READ_CROSSINGS):
+    if not _affordable(deadline, _SESSION_SNAPSHOT_CROSSINGS):
         return (
             "post_relaunch=not_read (the heal budget left cannot cover it)",
             _POST_RELAUNCH_UNVERIFIED,
         )
     try:
-        terminal = client.terminal_info()
+        snapshot = client.session_snapshot(
+            expected_login=env_login, expected_server=env_server
+        )
     except Mt5SessionAbandoned:
         raise
     except Exception as exc:  # noqa: BLE001 — a read must never undo the verdict
-        complete = False
-        connected_part = (
-            f"connected=not_captured (terminal_info failed: "
-            f"{_describe_capture_failure(exc)})"
-        )
-    else:
-        connected = terminal.get("connected")
-        if isinstance(connected, bool):
-            connected_part = f"connected={connected}"
-            degraded = degraded or not connected
-        else:
-            complete = False
-            connected_part = "connected=not_captured (no boolean)"
-    if not _affordable(deadline, _ACCOUNT_INFO_READ_CROSSINGS):
+        why = _describe_capture_failure(exc)
         return (
-            f"post_relaunch: {connected_part} session_account_matches_env=not_read "
-            "(the heal budget left cannot cover it)",
-            _POST_RELAUNCH_DEGRADED if degraded else _POST_RELAUNCH_UNVERIFIED,
+            f"post_relaunch: connected=not_captured (the session read failed: {why}) "
+            "session_account_matches_env=not_captured "
+            "session_server_matches_env=not_captured",
+            _POST_RELAUNCH_UNVERIFIED,
         )
-    try:
-        account = client.account_info()
-    except Mt5SessionAbandoned:
-        raise
-    except Exception as exc:  # noqa: BLE001 — a read must never undo the verdict
+    if snapshot.terminal_code is not None:
+        return (
+            "post_relaunch: connected=not_captured (terminal_info failed: "
+            f"code={snapshot.terminal_code}) session_account_matches_env="
+            "not_captured (account_info not read: the terminal did not answer)",
+            _POST_RELAUNCH_UNVERIFIED,
+        )
+    degraded = False
+    complete = True
+    if snapshot.connected is not None:
+        connected_part = f"connected={snapshot.connected}"
+        degraded = not snapshot.connected
+    else:
+        complete = False
+        connected_part = "connected=not_captured (no boolean)"
+    if snapshot.account_code is not None:
         complete = False
         account_part = (
-            f"session_account_matches_env=not_captured (account_info failed: "
-            f"{_describe_capture_failure(exc)})"
+            "session_account_matches_env=not_captured (account_info failed: "
+            f"code={snapshot.account_code})"
         )
     else:
-        login = account.get("login")
-        server = account.get("server")
-        if isinstance(login, int) and not isinstance(login, bool):
-            matches = login == env_login
-            account_part = f"session_account_matches_env={matches}"
-            degraded = degraded or not matches
+        if snapshot.login_matches is not None:
+            account_part = f"session_account_matches_env={snapshot.login_matches}"
+            degraded = degraded or not snapshot.login_matches
         else:
             complete = False
             account_part = "session_account_matches_env=not_captured (no login)"
-        if isinstance(server, str) and server:
-            server_matches = server == env_server
-            account_part += f" session_server_matches_env={server_matches}"
-            degraded = degraded or not server_matches
+        if snapshot.server_matches is not None:
+            account_part += (
+                f" session_server_matches_env={snapshot.server_matches}"
+            )
+            degraded = degraded or not snapshot.server_matches
         else:
             complete = False
             account_part += " session_server_matches_env=not_captured (no server)"
@@ -1249,8 +1256,9 @@ def _escalate_ipc_fault(
     that with a second acquisition is the "second lease acquisition, second
     budget" this module's docstring refuses. Here it inherits the ONE lease and
     the ONE whole-heal budget. ⚠️ That budget was re-derived for this path —
-    first probe, the evidence capture, the recycle and its relaunch — at the
-    ``_MT5_RELOGIN_ROUND_TRIPS`` definition, and a test counts it.
+    first probe, the evidence capture, the recycle, its relaunch and the
+    post-relaunch check — at the ``_MT5_RELOGIN_ROUND_TRIPS`` definition, and a
+    test counts it.
 
     ⛔ THE CODE GATE: ``_RECYCLE_REACHABLE_IPC_CODES`` only. A DETACHED bridge
     (``-10004``) gives the recycle nothing to talk to, and ``-10003`` and the

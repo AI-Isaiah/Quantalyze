@@ -21,6 +21,8 @@ Contract:
     `api_verified` trust story. The forbidden trade method (referred to here
     without call parentheses so the grep gate stays clean) is absent.
     `terminal_info` (153.3 / D-31) reads OUR terminal: a READ-surface widening.
+    `session_snapshot` (164.6.5 review round 2) reads those two reads' heal
+    fields through one committed remote expression; it wraps no new MT5 call.
 
   * Return discipline (fail-loud, no invented data) — every read distinguishes
     `None` (RPyC/terminal error -> capture `last_error()` IMMEDIATELY and raise a
@@ -119,7 +121,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Final, NoReturn, TypeVar, cast
+from typing import Any, Callable, Final, NamedTuple, NoReturn, TypeVar, cast
 
 import structlog
 
@@ -1236,6 +1238,162 @@ def _parse_recycle_diagnostics(counts: dict[str, Any]) -> dict[str, Any]:
     return parsed
 
 
+# 164.6.5 review round 2, WR-03 ROOT CAUSE (2026-09-25) — THE HEAL'S SESSION
+# SNAPSHOT, READ BRIDGE-SIDE IN ONE RPYC CROSSING.
+#
+# ⛔ WHY IT EXISTS. `terminal_info()` / `account_info()` hand back a netref
+# namedtuple that `_materialize` walks on THIS side of the wire, one crossing per
+# field (the MT5DEAL-01 cost model, see `_REMOTE_MATERIALIZE_SRC`): 29 and 35
+# crossings at the package's documented field counts. The terminal heal
+# (`mt5_relogin`) budgets in rpyc crossings at their 30 s ceiling, so at that cost
+# its pre-recycle evidence capture and its post-relaunch house-session check fit no
+# budget under the 300 s ceiling and were SKIPPED ON EVERY RUN (round 2 WR-03,
+# commit 7662d7d8b). This expression reads both, keeps only the fields the heal
+# uses, and returns them as a plain TUPLE OF SCALARS, which rpyc's brine copies
+# BY VALUE. One `conn.eval` is one crossing, bounded by `sync_request_timeout`
+# however many MetaTrader5 calls it makes on the far side.
+#
+# ⛔ A PLAIN LITERAL EXPRESSION, NOT AN F-STRING, AND NEVER ASSEMBLED AT RUN TIME
+# (the rpyc channel is the unauthenticated arbitrary-remote-code channel T-134-03
+# names, as for `_REMOTE_TERMINAL_RECYCLE_SRC`). It takes NO argument at all: the
+# environment's login and server never cross the wire. It carries no brace, and
+# `tests/test_mt5_client_contract.py` pins that, that it is an AST string
+# constant, and that the only MetaTrader5 calls in it are `terminal_info`,
+# `account_info` and `last_error`.
+#
+# ⛔ IT IS EVALUATED IN THE BRIDGE'S CLASSIC NAMESPACE, where `mt5linux` 0.1.9
+# itself binds the package as `mt5` (every mt5linux call is a
+# `conn.eval('mt5.<name>(...)')` there; `_credential_renderings` records the same
+# shape for `initialize`). That binding is what it reads through.
+#
+# What it returns, one of three shapes, tagged:
+#   ("terminal_unanswered", <last_error code>)            — `account_info` NOT read:
+#                                                           a terminal that cannot
+#                                                           answer one cannot answer
+#                                                           the other
+#   ("account_unanswered", build, connected, <code>)
+#   ("answered", build, connected, login, server)
+# `last_error()` is read on the far side IMMEDIATELY after the `None`, as
+# `_raise_last` does, and only its CODE crosses, never its text. Every field is
+# coerced the way `_coerce` does, so a non-scalar never turns the tuple into a
+# netref. A field the answer does not carry reads as `None` (`getattr` with a
+# default), exactly what the heal's former `.get()` on the materialized dict
+# gave it, so the heal records THAT field `not_captured` and keeps the others.
+# A far-side raise (a dead IPC mid-read) is turned into a scrubbed
+# `Mt5ClientError` by `_guarded_read`.
+#
+# ⚠️ Never exercised against the live bridge (`.planning/WINDOWS.md` entry 68).
+_REMOTE_SESSION_SNAPSHOT_SRC = """
+(lambda scalar: (lambda terminal:
+    ("terminal_unanswered", scalar(mt5.last_error()[0]))
+    if terminal is None
+    else (lambda build, connected, account:
+        ("account_unanswered", build, connected, scalar(mt5.last_error()[0]))
+        if account is None
+        else ("answered", build, connected,
+              scalar(getattr(account, "login", None)),
+              scalar(getattr(account, "server", None)))
+    )(scalar(getattr(terminal, "build", None)),
+      scalar(getattr(terminal, "connected", None)),
+      mt5.account_info())
+)(mt5.terminal_info()))(
+    lambda value: value
+    if value is None or isinstance(value, (bool, int, float, str))
+    else str(value)
+)
+"""
+
+
+class Mt5SessionSnapshot(NamedTuple):
+    """What ``Mt5Client.session_snapshot`` read, reduced to what the heal uses.
+
+    ⛔ NO ACCOUNT NUMBER AND NO SERVER NAME. The session's login and server are
+    compared with the caller's expected values inside the client and only the
+    EQUALITY VERDICTS are kept (T-164.6.2-12).
+
+    ``terminal_code`` is ``None`` when ``terminal_info()`` answered, else the
+    ``last_error()`` code read after it (``0`` when that code was unreadable).
+    ``account_code`` is the same for ``account_info()``, and ``account_read`` is
+    ``False`` when it was not read because the terminal did not answer. ``build``
+    is ``None`` unless the terminal reported an int, ``connected`` unless it
+    reported a bool. ``login_matches`` is ``None`` when the session carried no
+    int login or no expected login was given; ``server_matches`` is ``None`` when
+    the session carried no server.
+    """
+
+    terminal_code: int | None
+    build: int | None
+    connected: bool | None
+    account_read: bool
+    account_code: int | None
+    login_matches: bool | None
+    server_matches: bool | None
+
+
+def _snapshot_code(value: Any) -> int:
+    """A ``last_error()`` code from the snapshot. Anything but an int is the
+    ``0`` sentinel, the one ``_raise_last`` uses for an unreadable answer."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _parse_session_snapshot(
+    raw: Any, expected_login: int | None, expected_server: str
+) -> Mt5SessionSnapshot:
+    """Validate the snapshot tuple and reduce it to verdicts. ⛔ ``type(raw) is
+    tuple`` first: a result that came back as a netref (something on the far side
+    was not brine-dumpable) is refused WITHOUT being indexed, since each index of
+    a netref is another crossing."""
+    if type(raw) is not tuple or not raw:
+        raise Mt5ClientError(0, "MT5 session snapshot returned a malformed shape")
+    tag = raw[0]
+    if tag == "terminal_unanswered" and len(raw) == 2:
+        return Mt5SessionSnapshot(
+            terminal_code=_snapshot_code(raw[1]),
+            build=None,
+            connected=None,
+            account_read=False,
+            account_code=None,
+            login_matches=None,
+            server_matches=None,
+        )
+    if tag not in ("account_unanswered", "answered") or len(raw) != (
+        4 if tag == "account_unanswered" else 5
+    ):
+        raise Mt5ClientError(0, "MT5 session snapshot returned a malformed shape")
+    build = raw[1] if isinstance(raw[1], int) and not isinstance(raw[1], bool) else None
+    connected = raw[2] if isinstance(raw[2], bool) else None
+    if tag == "account_unanswered":
+        return Mt5SessionSnapshot(
+            terminal_code=None,
+            build=build,
+            connected=connected,
+            account_read=True,
+            account_code=_snapshot_code(raw[3]),
+            login_matches=None,
+            server_matches=None,
+        )
+    login, server = raw[3], raw[4]
+    login_matches = (
+        login == expected_login
+        if expected_login is not None
+        and isinstance(login, int)
+        and not isinstance(login, bool)
+        else None
+    )
+    server_matches = (
+        server == expected_server if isinstance(server, str) and server else None
+    )
+    return Mt5SessionSnapshot(
+        terminal_code=None,
+        build=build,
+        connected=connected,
+        account_read=True,
+        account_code=None,
+        login_matches=login_matches,
+        server_matches=server_matches,
+    )
+
+
 class Mt5Client:
     """Read-only narrowing facade over `mt5linux.MetaTrader5` (RPyC). Synchronous
     by construction — rpyc classic is blocking. See module docstring."""
@@ -1971,6 +2129,50 @@ class Mt5Client:
         if info is None:
             self._raise_last()
         return _materialize(info)
+
+    def session_snapshot(
+        self, *, expected_login: int | None, expected_server: str
+    ) -> Mt5SessionSnapshot:
+        """The terminal heal's session read, in ONE rpyc crossing (164.6.5 review
+        round 2, WR-03 root cause).
+
+        It reads what ``terminal_info()`` and ``account_info()`` would, on the far
+        side of the wire through the committed ``_REMOTE_SESSION_SNAPSHOT_SRC``,
+        and keeps only the fields the heal uses: the terminal ``build``, whether
+        it is ``connected``, and whether the session's login and broker server
+        EQUAL the expected ones. See the constant for why: materialized here, the
+        two reads cost one crossing per field, and the heal could never afford
+        them.
+
+        ⛔ VERDICTS, NEVER VALUES. The session's account number and server name
+        are compared here and dropped; neither is returned or logged. The
+        expected values are used locally only: the remote source takes no
+        argument, so nothing of the caller's crosses the wire. Keyword-only so a
+        positional mistake is a ``TypeError``.
+
+        ⛔ A terminal that does not answer is RETURNED (``terminal_code`` /
+        ``account_code``), not raised, because the heal records it and carries on.
+        A dead transport, a far-side raise or a malformed result RAISES a typed,
+        scrubbed ``Mt5ClientError``, like every read.
+
+        The existing ``terminal_info()`` / ``account_info()`` are unchanged; the
+        validate path needs their full dicts.
+        """
+        # WIZFORM-ABANDON / D-36 — ahead of `_guarded_read` and `_timed`.
+        self._assert_live("session_snapshot")
+        conn = getattr(self._mt5, "_MetaTrader5__conn", None)
+        if conn is None:
+            # The same seam `_materialize_rows` depends on. Falling back to the
+            # per-field reads would re-open WR-03 invisibly, so fail loud.
+            raise Mt5ClientError(
+                0, "MT5 rpyc transport is not reachable for the session snapshot"
+            )
+
+        def _remote_call() -> Any:
+            return conn.eval(_REMOTE_SESSION_SNAPSHOT_SRC)
+
+        raw = self._guarded_read(_remote_call, stage="session_snapshot")
+        return _parse_session_snapshot(raw, expected_login, expected_server)
 
     def history_deals_get(self, from_ts: Any, to_ts: Any) -> list[dict[str, Any]]:
         """Deals in [from_ts, to_ts) as native dicts. `None` is an ERROR -> typed
