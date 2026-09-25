@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { describe, it, expect } from "vitest";
 
 // ⛔ THE DELIBERATE DEGENERACY DEMONSTRATION, ROUTED THROUGH ITS ONE NAMED HOME
@@ -1501,16 +1501,124 @@ describe("Critical regression guards", () => {
       // without any other test noticing.
       // ONE detector, shared by the holder-set pin and the test-db-drift
       // negative below, so the two can never disagree about what "holds" means.
-      const measureHolders = (src: string): string[] =>
+      //
+      // Widened 2026-09-25 (164.4.2.1 round-1 review, SFH-02 / IN-05). It used to
+      // see only the literal step name or the literal key in the job's YAML, so a
+      // job that took the key through a renamed step with a variable key, or by
+      // running a script that takes it (`restore-test-from-baseline.sh` and
+      // `test-only-normalize-analytics-url.sh` both do, via `MUTEX_KEY=`), read as
+      // a non-holder — and `test-db-drift` could have re-acquired that way with
+      // both pins green. Every spelling of TAKING the key the repo uses now counts.
+      //
+      // In the job's own YAML the rule is the stricter "holds OR NAMES": the
+      // literal key anywhere (comments included), an Acquire…mutex step, a
+      // `MUTEX_KEY` assignment, the mutex's PGAPPNAME, or any advisory-lock CALL
+      // except one on a DIFFERENT numeric literal (a variable argument counts).
+      const JOB_TAKES_KEY =
+        /- name: Acquire\b[^\n]*mutex|61616158|\bMUTEX_KEY[=:]|PGAPPNAME=ci-shared-test-db-mutex|pg_(?:try_)?advisory(?:_xact)?_lock\(\s*(?:\d+\s*,\s*)?(?!\d)/;
+      // In a script the job RUNS, a MENTION is not a take, and the difference is
+      // load-bearing: the ordering wait sources scripts/shared-test-db-keys.sh,
+      // which names the key as a read-only comparison operand and try-locks a
+      // DIFFERENT key (the in-flight flag), and VAC-08's script names the key in a
+      // comment. Neither holds anything. A script takes the key only by a
+      // `MUTEX_KEY=` assignment, the mutex's PGAPPNAME, or an advisory-lock call
+      // whose argument is the key literal or `MUTEX_KEY`.
+      const SCRIPT_TAKES_KEY =
+        /\bMUTEX_KEY=|PGAPPNAME=ci-shared-test-db-mutex|pg_(?:try_)?advisory(?:_xact)?_lock\(\s*(?:\d+\s*,\s*)?(?:61616158|\$\{?MUTEX_KEY\}?)\s*\)/;
+      // The two private-database lanes. Each boots a cluster of its own on the
+      // runner (scripts/local-stack/run.sh REFUSES a non-local DSN), so a lock taken
+      // there is not the shared-TEST key however it is spelled —
+      // scripts/pg-lane/mutex-dead-holder-lane.sh takes the literal key on purpose,
+      // as a drill on a throwaway cluster. The calibration `it` below proves this
+      // exemption is load-bearing rather than decorative.
+      const PRIVATE_LANE_SCRIPT = /^scripts\/(?:pg-lane|local-stack)\//;
+      // Every `scripts/*.sh` a job's NON-comment lines run, plus (transitively)
+      // every file those scripts `.`/`source`. A commented-out invocation runs
+      // nothing and is not followed.
+      const scriptsRunBy = (jobBody: string, read: (p: string) => string): string[] => {
+        const code = jobBody
+          .split("\n")
+          .filter((line) => !/^\s*#/.test(line))
+          .join("\n");
+        const queue = [...code.matchAll(/scripts\/[\w./-]+\.sh/g)].map((m) => m[0]);
+        const seen = new Set<string>();
+        while (queue.length > 0) {
+          const path = queue.shift() as string;
+          if (seen.has(path)) continue;
+          seen.add(path);
+          const dir = posix.dirname(path);
+          for (const m of read(path).matchAll(/^\s*(?:\.|source)\s+"?[^"\s]*?([\w.-]+\.sh)"?\s*$/gm)) {
+            queue.push(`${dir}/${m[1]}`);
+          }
+        }
+        return [...seen];
+      };
+      const measureHolders = (src: string, read: (p: string) => string = readText): string[] =>
         [...src.matchAll(/^ {2}([a-z0-9-]+):\s*$/gm)]
           .map((m) => m[1])
           .filter((job) => {
             const body = src.match(
               new RegExp(`^ {2}${job}:\\s*\\n([\\s\\S]*?)(?=\\n {2}[a-z]|$(?![\\s\\S]))`, "m"),
             )?.[1] ?? "";
-            return /- name: Acquire shared-test-db mutex|61616158/.test(body);
+            if (JOB_TAKES_KEY.test(body)) return true;
+            return scriptsRunBy(body, read).some(
+              (path) => !PRIVATE_LANE_SCRIPT.test(path) && SCRIPT_TAKES_KEY.test(read(path)),
+            );
           })
           .sort();
+
+      // The detector's own calibration: each spelling it claims to see must be
+      // SEEN, and each mention it claims to ignore must be IGNORED, measured on
+      // synthetic jobs that run the repo's REAL scripts. Without this, a detector
+      // that silently stopped walking scripts would keep the two pins below green.
+      it("measureHolders sees every spelling of taking the shared-test-db key, and no mere mention (SFH-02 / IN-05)", () => {
+        const job = (name: string, lines: string): string =>
+          `  ${name}:\n    runs-on: ubuntu-latest\n    steps:\n${lines}\n`;
+        const verdict = (lines: string, read?: (p: string) => string): boolean =>
+          measureHolders(`jobs:\n${job("probe", lines)}`, read).includes("probe");
+        expect(
+          verdict(`      - run: bash scripts/test-only-normalize-analytics-url.sh`),
+          "measureHolders missed a job that runs scripts/test-only-normalize-analytics-url.sh, which takes the key through `MUTEX_KEY=` — a job could re-acquire by running a script and pass the holder-set pin",
+        ).toBe(true);
+        expect(
+          verdict(`      - run: bash "\${GITHUB_WORKSPACE}/scripts/restore-test-from-baseline.sh" --mode preflight`),
+          "measureHolders missed a job that runs scripts/restore-test-from-baseline.sh through a workspace-rooted path",
+        ).toBe(true);
+        expect(
+          verdict(`      - name: Take the shared TEST lock\n        run: psql "$DSN" -c "SELECT pg_try_advisory_lock($KEY);"`),
+          "measureHolders missed a renamed step that takes an advisory lock on a VARIABLE key in the job's own YAML",
+        ).toBe(true);
+        expect(
+          verdict(`      - run: PGAPPNAME=ci-shared-test-db-mutex psql "$DSN" -c "SELECT 1;"`),
+          "measureHolders missed a job that opens a session under the mutex's PGAPPNAME",
+        ).toBe(true);
+        const fakeRead = (p: string): string =>
+          p === "scripts/fake-outer.sh"
+            ? `#!/usr/bin/env bash\n. "\${SCRIPT_DIR}/fake-inner.sh"\n`
+            : p === "scripts/fake-inner.sh"
+              ? "MUTEX_KEY=61616158\n"
+              : readText(p);
+        expect(
+          verdict(`      - run: bash scripts/fake-outer.sh`, fakeRead),
+          "measureHolders does not follow a `.`-sourced helper — a script that takes the key only through a file it sources read as a non-holder",
+        ).toBe(true);
+        expect(
+          verdict(`      - run: |\n          bash "\${GITHUB_WORKSPACE}/scripts/wait-for-test-schema-apply.sh"\n          bash scripts/test-ledger-drift-check.sh`),
+          "measureHolders counted test-db-drift's two REAL scripts as a holder — the ordering wait (and the shared-test-db-keys.sh it sources) and VAC-08 only NAME the key; a detector that reads a mention as a take would red the D-02 negative on a job that holds nothing",
+        ).toBe(false);
+        expect(
+          verdict(`      - run: echo ok\n        # bash scripts/restore-test-from-baseline.sh`),
+          "measureHolders followed a COMMENTED-OUT script invocation, which runs nothing",
+        ).toBe(false);
+        expect(
+          SCRIPT_TAKES_KEY.test(readText("scripts/pg-lane/mutex-dead-holder-lane.sh")),
+          "scripts/pg-lane/mutex-dead-holder-lane.sh no longer takes the key literal — the PRIVATE_LANE_SCRIPT exemption below is then unproven; re-point this calibration at a lane script that does",
+        ).toBe(true);
+        expect(
+          verdict(`      - run: bash scripts/pg-lane/mutex-dead-holder-lane.sh`),
+          "measureHolders counted a private-lane drill (scripts/pg-lane/, a throwaway cluster on the runner) as a shared-TEST holder",
+        ).toBe(false);
+      });
       it("the set of jobs holding the shared-test-db key is EXACTLY DB_JOBS, and sql-tests is not among them", () => {
         const holders = measureHolders(readText(".github/workflows/ci.yml"));
         expect(
