@@ -2142,6 +2142,8 @@ main() {
 #                                                30  GREEN extension guard: public unchanged
 #                                                31  RED  value-pinning leg: WRONG STATE
 #                                                32  GREEN value-pinning leg: pinned value holds
+#                                                33  GREEN C5 UPDATE replayed after its INSERT
+#                                                34  RED  C5 update: line absent -> WRONG STATE
 #
 # Several arms carry more than one LEG, because one guard can be false in more than
 # one way and an arm that measures the easy way is not measuring the guard:
@@ -2223,8 +2225,15 @@ main() {
 # wrong-state/correct-state discrimination (31-32). All five falsifiers were
 # observed RED before being fixed and are recorded verbatim in this plan's
 # SUMMARY, the same posture arms 19-27 are held to.
-# MEASURED 2026-09-21 — `--self-test` prints 32/32 and exits 0 on a throwaway cluster.
-EXPECTED_ARMS=32
+#
+# Arms 33-34 are Phase 164.9.2's (C5, plan 03): a literal top-level UPDATE on a
+# replayed table replays after its INSERT inside the same transaction (33), and
+# without its `update:` line the unchanged value-pinning leg aborts (34). Their
+# falsifiers (arm 33 RED before the fixture UPDATE existed, and RED again through
+# a neutered-sort COPY of the extractor) were observed and are recorded verbatim
+# in 164.9.2-03-SUMMARY.md.
+# MEASURED 2026-09-25 — `--self-test` prints 34/34 and exits 0 on a throwaway cluster.
+EXPECTED_ARMS=34
 
 SELFTEST_MUTEX_HOLDER_PID=""
 SELFTEST_TMPD=""
@@ -3803,6 +3812,65 @@ FRESHSTUB
     return 0
   }
 
+  # ═══ ARM 33 (164.9.2 C5) — a replayed UPDATE lands AFTER its INSERT, inside ═══
+  # the restore transaction. Row id=3 is INSERTed without `status`, so it starts
+  # at the fixture's schema DEFAULT; the SAME migration then UPDATEs it to the
+  # pinned value (20260103000000_fixture_c.sql), and the fixture allowlist names
+  # the `update:1` line ABOVE the INSERT line, so only a (basename, offset) sort
+  # puts the UPDATE after the row it needs. The UNCHANGED wrong-state leg,
+  # pointed at id=3, is the oracle: quiet here, loud in arm 34.
+  arm_c5_update_green() {
+    setup_lane || return 1
+    local ARM_WRONGSTATE_ID="3"
+    local out="$SELFTEST_TMPD/a33.out" rc=0
+    arm_env restore a33 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: a restore whose allowlisted UPDATE sets row id=3 to its pinned value exited ${rc}, expected 0"; return 1; }
+    if grep -aq 'WRONG STATE after the replay' "$out"; then
+      echo "MEASURE_FAIL: the wrong-state fault fired on a row the replayed C5 UPDATE should have set"
+      return 1
+    fi
+    local n
+    n=$(lane_q "SELECT status FROM public.fx_keep WHERE id = 3;")
+    [ "$n" = "verified" ] || { echo "MEASURE_FAIL: the premise is broken — public.fx_keep id=3 holds status='${n}', not 'verified', so the C5 UPDATE did not land after its INSERT"; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 34 (164.9.2 C5) — the same restore WITHOUT the fixture's update: ═══
+  # line, on a scratch copy of the fixture allowlist (arm 24's idiom): the UPDATE
+  # is not replayed, row id=3 stays at its DEFAULT, and the unchanged wrong-state
+  # leg must abort and roll back. Without this RED, arm 33 alone would not rule
+  # out a leg that is quiet on id=3 whatever the replay did.
+  arm_c5_update_red() {
+    setup_lane || return 1
+    local scratch="$SELFTEST_TMPD/refdata-arm34"
+    rm -rf "$scratch"
+    mkdir -p "$scratch"
+    awk -F '\t' '$3 != "update:1"' "$FIXTURES/refdata-allowlist.txt" > "$scratch/no-update.txt"
+    if cmp -s "$scratch/no-update.txt" "$FIXTURES/refdata-allowlist.txt"; then
+      echo "MEASURE_FAIL: the scratch copy is identical to the fixture allowlist — there was no update:1 line to remove, so this RED would prove nothing"
+      return 1
+    fi
+    local ARM_REFDATA_ALLOWLIST="$scratch/no-update.txt"
+    local ARM_WRONGSTATE_ID="3"
+    local out="$SELFTEST_TMPD/a34.out" rc=0
+    arm_env restore a34 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: a restore whose C5 UPDATE was not replayed exited ${rc}, expected 1"; return 1; }
+    grep -aq 'WRONG STATE after the replay' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not name the wrong-state fault"; return 1; }
+    grep -aq 'public.fx_keep.status for id=3' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not name the row and column that disagreed"; return 1; }
+    if grep -aqE "'newbie'|'verified'" "$out"; then
+      echo "MEASURE_FAIL: the abort printed a raw row VALUE — the message must describe SHAPES, never values"
+      return 1
+    fi
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — a WRONG-STATE row COMMITTED instead of rolling back."; return 1; }
+    return 0
+  }
+
   run_arm "1  RED   credential absent — a missing DSN is a hard failure, never a skip" 0 arm_credential_absent
   run_arm "2  RED   identity marker NULL — refused before any write" 0 arm_marker_null
   run_arm "3  RED   identity marker names PROD — refused, loudly" 0 arm_marker_prod
@@ -3836,6 +3904,8 @@ FRESHSTUB
   run_arm "30 GREEN the extension guard is QUIET when public is unchanged — it discriminates (164.9-07)" 0 arm_ext_unchanged
   run_arm "31 RED   the reference-data value-pinning leg fires on a row restored in the WRONG STATE (164.9-07, [164.8.1-REPLAY-INSERT-ONLY-SCOPE])" 0 arm_wrongstate_red
   run_arm "32 GREEN the reference-data value-pinning leg is QUIET when the row holds its pinned value (164.9-07)" 0 arm_wrongstate_green
+  run_arm "33 GREEN a replayed C5 UPDATE lands after its INSERT inside the transaction, and the value-pinning leg is QUIET (164.9.2 C5)" 0 arm_c5_update_green
+  run_arm "34 RED   without the C5 update: line the row stays at its DEFAULT and the value-pinning leg aborts (164.9.2 C5)" 0 arm_c5_update_red
 
   release_mutex
 

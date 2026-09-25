@@ -448,23 +448,23 @@ describe("restore-test-from-baseline.sh — the header's cross-file pointers res
 });
 
 describe("restore-test-from-baseline.sh — the arm ratchet", () => {
-  it("EXPECTED_ARMS=32 is a live line, exactly once, with its MEASURED date beside it", () => {
+  it("EXPECTED_ARMS=34 is a live line, exactly once, with its MEASURED date beside it", () => {
     const region = selfTestRegion(SRC);
     expect(
-      liveCount(region, "EXPECTED_ARMS=32"),
-      "the arm ratchet is no longer a single live `EXPECTED_ARMS=32` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
+      liveCount(region, "EXPECTED_ARMS=34"),
+      "the arm ratchet is no longer a single live `EXPECTED_ARMS=34` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
     ).toBe(1);
 
     // SC-9 (`gate-family-meta.test.ts:18-30`): a threshold constant needs a
     // measurement token AND a date beside it, or nobody can tell a measured floor
     // from a guessed one.
     const lines = region.split("\n");
-    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=32"));
+    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=34"));
     const beside = `${lines[at - 1] ?? ""}\n${lines[at]}`;
     expect(
       beside,
-      "EXPECTED_ARMS=32 carries no MEASURED date on its own or the preceding line — SC-9",
-    ).toContain("MEASURED 2026-09-21");
+      "EXPECTED_ARMS=34 carries no MEASURED date on its own or the preceding line — SC-9",
+    ).toContain("MEASURED 2026-09-25");
 
     // The harness must ASSERT the count, not merely print it.
     expect(liveCount(region, 'if [ "$total" -ne "$EXPECTED_ARMS" ]; then')).toBe(1);
@@ -494,9 +494,9 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION for the pair above — move the constant and the prose must
     // disagree, or this assertion is measuring nothing.
-    const moved = SRC.replace("\nEXPECTED_ARMS=32\n", "\nEXPECTED_ARMS=33\n");
+    const moved = SRC.replace("\nEXPECTED_ARMS=34\n", "\nEXPECTED_ARMS=35\n");
     expect(moved).not.toBe(SRC);
-    const movedArms = 33;
+    const movedArms = 35;
     expect(
       SRC.split("\n").filter((l) => /prints \d+\/\d+/.test(l)).every((l) => l.includes(`prints ${movedArms}/${movedArms}`)),
       "the `prints N/N` prose still agrees with a MOVED constant, so the agreement check is vacuous.",
@@ -504,15 +504,15 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — comment the constant out; a whole-file `toContain` would
     // still pass, this pin must not.
-    const commented = SRC.replace("\nEXPECTED_ARMS=32\n", "\n# EXPECTED_ARMS=32\n");
+    const commented = SRC.replace("\nEXPECTED_ARMS=34\n", "\n# EXPECTED_ARMS=34\n");
     expect(commented).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=32")).toBe(0);
+    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=34")).toBe(0);
 
     // CALIBRATION — a second copy of the constant is a disagreement waiting to
     // happen, and must fail the "exactly once" leg.
-    const doubled = SRC.replace("\nEXPECTED_ARMS=32\n", "\nEXPECTED_ARMS=32\nEXPECTED_ARMS=32\n");
+    const doubled = SRC.replace("\nEXPECTED_ARMS=34\n", "\nEXPECTED_ARMS=34\nEXPECTED_ARMS=34\n");
     expect(doubled).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=32")).toBe(2);
+    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=34")).toBe(2);
   });
 
   it("plan 01's interim closing line is GONE — the word it used appears nowhere", () => {
@@ -531,8 +531,8 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — re-insert the interim line; the pin must flip.
     const restored = SRC.replace(
-      "\nEXPECTED_ARMS=32\n",
-      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=32\n`,
+      "\nEXPECTED_ARMS=34\n",
+      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=34\n`,
     );
     expect(restored).not.toBe(SRC);
     expect(restored.includes(interimWord)).toBe(true);

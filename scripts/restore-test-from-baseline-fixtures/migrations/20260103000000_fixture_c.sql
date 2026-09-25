@@ -41,3 +41,13 @@ SELECT 1;
 INSERT INTO fx_keep (id, label, status) VALUES (1, 'ref_a', 'verified'), (2, 'ref_b', DEFAULT) ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO fx_keep (id, label) VALUES (3, 'ref_c') ON CONFLICT (id) DO NOTHING;
+
+-- 164.9.2 C5: row 3 is inserted above WITHOUT `status`, so it starts at the
+-- fixture's schema DEFAULT ('newbie'). This UPDATE is the fixture analog of
+-- 20260521150000_universal_signup_approval_gate.sql's sentinel UPDATE: a
+-- literal top-level UPDATE of a row the replay itself just wrote. The fixture
+-- allowlist names it on an `update:1` line placed ABOVE the INSERT line, so only
+-- the extractor's (basename, offset) sort replays it after the row exists (arm
+-- 33). It adds no row and no INSERT statement, so arm 22's counts, arm 23 legs
+-- (c)/(d) and arm 24's 2-over-3 shape are unaffected.
+UPDATE fx_keep SET status = 'verified' WHERE id = 3;
