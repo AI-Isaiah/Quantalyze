@@ -534,6 +534,13 @@ _DECLARED_MUTABLE_MODULE_GLOBALS = {
         "the blind-run counter. It gates a LOG LEVEL and never a dataset value, "
         "so a redeploy resetting it costs a late escalation and nothing else."
     ),
+    "_IPC_FAULT_ESCALATION_ARMED": (
+        "164.6.5 plan 05 — the ipc_fault recycle's once-per-run debounce, a "
+        "BOOL. It gates an ACTION (whether the heal may recycle the terminal "
+        "now) and never a dataset value: no row reads it and no episode is "
+        "keyed on it. A redeploy re-arms it, which costs at most one extra "
+        "recycle attempt per deploy during a wedge that spans one."
+    ),
 }
 
 
@@ -550,8 +557,8 @@ def test_the_module_holds_NO_EPISODE_STATE_AT_ALL_by_construction() -> None:
     """
     source = inspect.getsource(mt5_session_episodes)
     assert _module_globals_mutated(source) == set(_DECLARED_MUTABLE_MODULE_GLOBALS), (
-        "the recorder rebinds a module-level name that is not one of the two "
-        "declared counters. ⛔ If it is episode state, an analytics redeploy now "
+        "the recorder rebinds a module-level name that is not one of the "
+        "declared module globals. ⛔ If it is episode state, an analytics redeploy now "
         "truncates a session lifetime; if it is not, add it to "
         "`_DECLARED_MUTABLE_MODULE_GLOBALS` WITH the reason it cannot be."
     )

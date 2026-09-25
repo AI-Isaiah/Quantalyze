@@ -205,6 +205,48 @@ KIND_GATEWAY_NOT_CONFIGURED: Final[str] = "gateway_not_configured"
 #: `close_is_measured: false`, and a successor computing lifetimes filters it out.
 KIND_SUPERSEDED: Final[str] = "superseded"
 
+# --------------------------------------------------------------------------- #
+# ⭐ THE IPC-FAULT ESCALATION's OUTCOMES (164.6.5 plan 05, D-08).
+#
+# `KIND_IPC_FAULT` REPORTS a terminal whose bridge answered and whose terminal
+# did not; since plan 05 the heal also ACTS on the `-10005` half of it, by
+# recycling the terminal PROCESS (never by re-sending a credential). These kinds
+# name what that action came to. ⛔ They are SIBLINGS of `KIND_IPC_FAULT` and
+# cannot reuse it: `KIND_IPC_FAULT` names the FAULT the first probe read, and it
+# stays byte-identical in the verdict string downstream keys off. The kinds below
+# name a RESPONSE to that fault, which is a different fact about a different
+# moment.
+#
+# ⭐ FOUR KINDS, NOT ONE KIND WITH A CODE, because the REMEDIES differ — the
+# lesson IN-07 (round 2) above recorded when two operator faults shared one class
+# and broke the class-to-log pin:
+#
+#   * recycled                -> nothing for anyone to do; the terminal is back
+#                                and the detector found an authorized session.
+#   * recycled_no_account     -> the terminal is back and ANSWERING, with no
+#                                account signed in yet (`-6`). The ordinary heal
+#                                owns that on the next reading; the escalation
+#                                itself never sends a credential (D-08).
+#   * recycled_still_faulted  -> the recycle ran and the terminal still does not
+#                                answer. A HUMAN is needed; a second automatic
+#                                recycle is exactly what the debounce refuses.
+#   * recycle_failed          -> the recycle verb itself raised (the channel, the
+#                                seam, the snapshot). Whether the process was
+#                                ended is not known from here.
+#
+# ⚠️ NONE OF THEM IS PASSED TO `classify_reading` BY THE HEAL, and if one ever is
+# it DEGRADES TO `not_measured` — none is a positive class and none carries
+# `-6` — which is the honest default: the recycle ACTS on the terminal, it is
+# not the instrument measuring the session. The escalation's evidence is its own
+# log line and `HealOutcome.escalation_kind`, never an episode row.
+# --------------------------------------------------------------------------- #
+KIND_IPC_FAULT_RECYCLED: Final[str] = "ipc_fault_recycled"
+KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT: Final[str] = "ipc_fault_recycled_no_account"
+KIND_IPC_FAULT_RECYCLED_STILL_FAULTED: Final[str] = (
+    "ipc_fault_recycled_still_faulted"
+)
+KIND_IPC_FAULT_RECYCLE_FAILED: Final[str] = "ipc_fault_recycle_failed"
+
 #: The MT5 code meaning "the bridge ANSWERED and NO ACCOUNT IS AUTHORIZED" — the
 #: ONE code that establishes darkness. Re-spelled here rather than imported from
 #: `mt5_relogin` so this module has no import edge back to its own caller.
@@ -266,6 +308,13 @@ class HealOutcome(NamedTuple):
     post-heal re-probe's, and is ``None`` when no credentialed call ran — which
     is what makes "a tick that finds the session healthy produces ZERO rows"
     structural rather than incidental.
+
+    ``escalation_kind`` (164.6.5 plan 05) is one of the ``KIND_IPC_FAULT_RECYCLE*``
+    kinds when the ``ipc_fault`` escalation RAN, and ``None`` when it did not —
+    the ``final_kind`` precedent: ``None`` means this step never ran. ⛔ APPENDED
+    and DEFAULTED, so every construction site that predates it stays valid and no
+    positional construction is silently reordered. ⛔ The recorder does not read
+    it: an escalation acts on the terminal, it does not measure the session.
     """
 
     verdict: str
@@ -273,6 +322,7 @@ class HealOutcome(NamedTuple):
     first_code: int | None
     final_kind: str | None
     final_code: int | None
+    escalation_kind: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -397,6 +447,56 @@ def _clear_blind_run() -> None:
     _CONSECUTIVE_NOT_MEASURED_READINGS = 0
 
 
+# --------------------------------------------------------------------------- #
+# ⭐ THE IPC-FAULT ESCALATION's ONCE-PER-RUN GATE (164.6.5 plan 05, D-08).
+#
+# The heal recycles the terminal process on the escalating fault class. The
+# session monitor calls the heal on a cadence, and a wedge outlives many ticks —
+# production read `not_healed:ipc_fault` FIVE consecutive times on 2026-09-21. So
+# the recycle is debounced to ONE attempt per run of consecutive escalating
+# readings: the gate is ARMED at the start of a run, DISARMED the moment the
+# escalation fires, and RE-ARMED by any first-probe reading that is not the
+# escalating class. Five readings of one wedge, one recovery attempt.
+#
+# ⛔ The alternative is not a noisier log, it is an outage: at a ten-minute
+# cadence an un-debounced escalation recycles the ONE shared terminal every ten
+# minutes for as long as the recycle does not help, and each recycle drops the
+# IPC for every other caller.
+#
+# ⚠️ IN-PROCESS, AND THIS GATE's OWN TRADEOFF — not the blind-run counter's,
+# whose acceptance above explicitly does not generalise. A deploy re-arms the
+# gate, so a wedge that spans a deploy gets at most ONE more recycle attempt per
+# deploy. That is the whole cost, it is bounded by the deploy rate rather than by
+# the cadence, and it is cheap against a second durable write path whose own
+# failure would have to be handled inside a heal that must never raise.
+# --------------------------------------------------------------------------- #
+_IPC_FAULT_ESCALATION_ARMED: bool = True
+
+
+def claim_ipc_fault_escalation() -> bool:
+    """``True`` exactly once per run of escalating readings, and DISARMS on it.
+
+    ⛔ A SEPARATE FUNCTION for the same reason ``_count_blind_reading`` is one: a
+    ``global`` declaration is a statement, and the heal's own bodies are held to
+    shapes a stray statement would break. It cannot raise.
+    """
+    global _IPC_FAULT_ESCALATION_ARMED
+    armed = _IPC_FAULT_ESCALATION_ARMED
+    _IPC_FAULT_ESCALATION_ARMED = False
+    return armed
+
+
+def rearm_ipc_fault_escalation() -> None:
+    """A first-probe reading that is NOT the escalating class ends the run.
+
+    ⭐ Whatever it found — authorized, ``-6``, the detached bridge, the ``0``
+    sentinel: the terminal is no longer answering the way the wedge did, so the
+    NEXT wedge is a new run and earns its own one attempt.
+    """
+    global _IPC_FAULT_ESCALATION_ARMED
+    _IPC_FAULT_ESCALATION_ARMED = True
+
+
 def _reset_session_episode_state_for_tests() -> None:
     """Clear the previous-reading stamp and the consecutive-blind counter.
 
@@ -406,10 +506,15 @@ def _reset_session_episode_state_for_tests() -> None:
     Production never calls it — the stamp is what makes
     ``first_reading_after_boot`` honest, and a blind run that survived into the
     next test would make "it escalated" and "it stayed quiet" indistinguishable.
+
+    ⭐ It also RE-ARMS the ipc_fault escalation gate (164.6.5 plan 05): a gate
+    disarmed by one test would make the next test's "it fired once" pass or fail
+    on test ORDER, which is the vacuous fires-once gate in its purest form.
     """
     global _LAST_MEASURED_READING_MONOTONIC
     _LAST_MEASURED_READING_MONOTONIC = None
     _clear_blind_run()
+    rearm_ipc_fault_escalation()
 
 
 def _stamp_reading_and_measure_gap() -> tuple[float | None, bool]:
