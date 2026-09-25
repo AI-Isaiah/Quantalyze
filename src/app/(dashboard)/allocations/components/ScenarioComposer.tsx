@@ -918,6 +918,9 @@ export function ScenarioComposer({
     strategies,
     equityDailyPoints,
     snapshotCount,
+    // Phase 167.1.2 review round 2 (WR-02): names the derived source of the
+    // own-book series for the rebuilding disclosure below.
+    equityCurveSource,
     allKeysStale,
     minHistoryDepthMonths,
     activeVenues,
@@ -5511,11 +5514,17 @@ export function ScenarioComposer({
             equity history is rebuilt; say so rather than leave a silent gap.
             Not in blank mode, where there is no own book to compare with.
             Review round 1 (SFH-05): the producer sends [] for every allocator,
-            so the series cannot tell "withheld" from "none". `snapshotCount`
-            is computed before the history is withheld, so it can: with no
-            snapshot there is no own-book history to withhold, and the
-            sentence would explain an absence D-02 did not cause. */}
-        {isOwnBookRebuilding && !isBlankMode && snapshotCount > 0 && (
+            so the series cannot tell "withheld" from "none". Two fields are
+            computed before the history is withheld, and together they can.
+            The candidate series has TWO sources: the trustworthy derived curve,
+            which `equityCurveSource === "derived"` names, and the legacy
+            snapshots, which `snapshotCount > 0` names. With neither there is
+            no own-book history to withhold, and the sentence would explain an
+            absence D-02 did not cause. Review round 2 (WR-02): gating on the
+            legacy count alone hid the disclosure from a derived-only book. */}
+        {isOwnBookRebuilding &&
+          !isBlankMode &&
+          (snapshotCount > 0 || equityCurveSource === "derived") && (
           <p
             data-testid="scenario-ownbook-rebuilding"
             className="mt-2 text-fixed-11 text-text-muted"

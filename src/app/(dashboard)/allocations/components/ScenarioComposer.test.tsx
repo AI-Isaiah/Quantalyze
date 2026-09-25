@@ -16803,6 +16803,47 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
   });
 
+  // Review round 2 (WR-02): the own-book series has TWO sources, the
+  // trustworthy derived curve and the legacy snapshots. `snapshotCount` counts
+  // only the legacy rows, so a book whose history is ALL derived (every legacy
+  // row terminus-flagged, or no legacy row at all) reports 0 snapshots while
+  // D-02 still withholds a real curve. Gating on the legacy count alone
+  // silenced the disclosure for exactly that book.
+  it("rebuilding + NO legacy snapshot but a trustworthy DERIVED curve: the disclosure renders (something was withheld)", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          equityHistoryState: "rebuilding",
+          snapshotCount: 0,
+          equityCurveSource: "derived",
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
+
+    // Control: the same zero-snapshot book on the legacy source has nothing to
+    // withhold, so the case above is decided by the derived source alone.
+    cleanup();
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          equityHistoryState: "rebuilding",
+          snapshotCount: 0,
+          equityCurveSource: "legacy",
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  });
+
   // Review round 1 (WR-02): the `bookReturns.length < 2` guard in
   // `scenarioOwnBookDelta`. A 2-point book yields ONE return, and a Sharpe or
   // Sortino delta from one observation is not a number worth showing. The
