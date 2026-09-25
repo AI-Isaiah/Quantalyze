@@ -145,7 +145,11 @@ export function wizardFetch(
   options?: WizardFetchOptions,
 ): Promise<Response> {
   const headers = new Headers(init?.headers);
-  const correlationId = headers.get(CORRELATION_HEADER) ?? mintWizardId();
+  // `||`, not `??` (164.6.5 review round 1 / IN-08): `Headers.get` answers ""
+  // for an empty or whitespace-only value, and "" must mint like an absence —
+  // otherwise the server falls back to a UUID the client never sees and the
+  // envelope displays an empty id.
+  const correlationId = headers.get(CORRELATION_HEADER) || mintWizardId();
   headers.set(CORRELATION_HEADER, correlationId);
   headers.set(PAGE_LOAD_HEADER, getWizardCorrelationId());
   options?.onCorrelationId?.(correlationId);

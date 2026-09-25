@@ -156,6 +156,30 @@ describe("wizard-correlation — wizardFetch", () => {
     expect(captured).toBe("caller:override");
   });
 
+  // 164.6.5 review round 1 / IN-08. `Headers.get` answers "" (not null) for an
+  // empty value, and it trims surrounding whitespace to "" too. A `??` let that
+  // "" through: it went on the wire, the server fell back to a fresh UUID the
+  // client never saw, and the envelope displayed an EMPTY id — nothing support
+  // could match. An empty caller value is treated as absent.
+  it.each([
+    ["empty", ""],
+    ["whitespace-only", "   "],
+  ])("a %s caller-supplied X-Correlation-Id is treated as absent — a fresh id is minted and reported", async (_label, value) => {
+    let captured: string | null = null;
+    await wizardFetch(
+      "/api/thing",
+      { headers: { "X-Correlation-Id": value } },
+      {
+        onCorrelationId: (id) => {
+          captured = id;
+        },
+      },
+    );
+    const sent = sentHeaders().get("X-Correlation-Id");
+    expect(sent).toMatch(WIZARD_ID_RE);
+    expect(captured).toBe(sent);
+  });
+
   it("wizardFetch remains callable with only (input) — backward-compatible signature", async () => {
     await expect(wizardFetch("/api/thing")).resolves.toBeInstanceOf(Response);
   });
