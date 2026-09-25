@@ -710,6 +710,20 @@ const C5_NILADIC = new Set([
  * they are real functions resolved on the search_path, and the replay runs
  * under `SET LOCAL search_path = public, pg_catalog`, so a `public.lower` would
  * win. The grammar constructs above have no such lookup.
+ * ⛔ CORRECTED 2026-09-25 (164.9.2 review round 2, WR-03 / SFH R2-02). The
+ * paragraph above is kept as lineage; two of its claims no longer hold.
+ * (a) Its reasoning covered `now()` as much as `lower()`: `now` is not a
+ * keyword, it resolves on the search_path the same way, and the round-2
+ * reviewer MEASURED a `public.now()` winning under the old bracket. Round 1
+ * refused lower() for a reason it did not apply to the one call it admitted.
+ * (b) The bracket it cites is gone. Since Topic B's 6498c10c5 the replay runs
+ * under `SET LOCAL search_path = pg_catalog, public`, PROD's effective order,
+ * so `now()`, `lower()` and every built-in operator resolve to pg_catalog
+ * first and a `public.lower` would NOT win. lower() / upper() stay refused, for
+ * the reason that is still true: every admitted call is one more name the
+ * classifier trusts to a search_path set in ANOTHER file, which this extractor
+ * cannot see, and no replayed UPDATE needs either (0 in the corpus). `now` is
+ * admitted on exactly that trust, and on no other.
  *
  * ⛔ SET IS NOT HERE, and it was until 2026-09-25 (164.9.2 review round 2,
  * CR-01). It was added in round 1 so the multi-column head `SET (a, b) = (…)`
@@ -717,7 +731,9 @@ const C5_NILADIC = new Set([
  * keyword in PostgreSQL, so `set` is a legal function name. MEASURED by the
  * reviewer on a pg-lane cluster: after `CREATE FUNCTION public.set(text) …`,
  * both `SET x = set(1)` and `WHERE … AND set(2) IS NOT NULL` ran the function
- * under the replay's search_path, and both classified LITERAL here. The head is
+ * under the replay's search_path, and both classified LITERAL here. (Putting
+ * pg_catalog first, 6498c10c5, does not close it: pg_catalog has no function
+ * named `set`, so the lookup still reaches `public.set`.) The head is
  * now admitted by POSITION in `updateLiteralCheck` (the first SET at paren
  * depth 0); any other `set(` is a call and is refused. ROW, COALESCE, NULLIF,
  * GREATEST and LEAST stay: they are column-name keywords, which can never name
