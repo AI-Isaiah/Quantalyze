@@ -184,6 +184,16 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — chart tap-rects @ 320px (
  * Phase 48-04 / CHART-01b — EquityChart coarse tap-rect target-size at 320px
  * on the SEEDED `/allocations` Overview tab.
  *
+ * ⛔ SUSPENDED by Phase 167.1.2 / D-02 ("Hide it until correct"). While the
+ * equity history is rebuilt the Overview does not mount the EquityChart, so
+ * there is no 44px tap surface to measure. The test below pins the hidden state
+ * instead: the rebuilding panel is visible and fits inside the 320px viewport
+ * on both edges, and the curve slot is NOT mounted. That last assertion fails
+ * the moment the chart returns, so the 44px measurement cannot be forgotten.
+ * Plan 11 of Phase 167.1.2 owns restoring it (this file is in its files list).
+ * The rest of this block describes the measurement as it stood before D-02 and
+ * as plan 11 restores it.
+ *
  * The Phase-48-03 EquityChart edit wires the Phase-47 useTapPin gesture core
  * onto the hand-rolled `<svg role="img" aria-label="Equity chart">` and wraps
  * it in a `pointer-coarse:min-h-[44px]` layer (EquityChart.tsx:1500-1511) — the
@@ -198,8 +208,9 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — chart tap-rects @ 320px (
  * allocator has zero holdings, so this case seeds a minimal connected BOOK
  * (seedAllocatorBook: one active api_key + one holding + a daily equity curve)
  * for a freshly-seeded allocator, then logs in and lands on Overview. Without
- * the book the page renders EmptyState and the EquityChart never mounts — the
- * visible-anchor gate below then fails LOUD (not a hollow-zero false-green).
+ * the book the page renders EmptyState and neither the EquityChart nor (while
+ * D-02 holds) the rebuilding panel mounts — the visible-anchor gate below then
+ * fails LOUD (not a hollow-zero false-green).
  *
  * COARSE-POINTER EMULATION: like the Phase-47 block, `test.use({ hasTouch,
  * isMobile })` makes Chromium report pointer:coarse so the
@@ -224,14 +235,14 @@ async function loginViaForm(
   });
 }
 
-test.describe("target-size gate (WCAG 2.5.5/2.5.8) — EquityChart tap-rect @ 320px (seeded)", () => {
+test.describe("Overview rebuilding panel @ 320px (seeded) — EquityChart target-size gate suspended until plan 11 (167.1.2 D-02)", () => {
   // Coarse pointer so the `pointer-coarse:min-h-[44px]` layer is present +
   // measurable (display/min-height only apply under pointer:coarse).
   test.use({ hasTouch: true, isMobile: true });
 
   test.skip(
     !HAS_SEED_ENV,
-    "EquityChart tap-rect target-size: seed-helper env vars not wired " +
+    "Overview rebuilding panel @ 320px: seed-helper env vars not wired " +
       "(set TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY) — " +
       "skipping prevents a false-green against an empty/404/EmptyState " +
       "/allocations page (W-02). Runs in the seeded MA-8 CI job once the " +
@@ -244,7 +255,8 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — EquityChart tap-rect @ 32
     await page.setViewportSize({ width: 320, height: 800 });
 
     // Seed a verified allocator with a connected BOOK so the Overview tab
-    // renders the EquityChart (not EmptyState), then sign in.
+    // renders its book branch (not EmptyState), then sign in. While D-02 holds
+    // that branch shows the rebuilding panel in place of the EquityChart.
     const allocator = await seedTestAllocator();
     await seedAllocatorBook({ allocatorUserId: allocator.userId, days: 120 });
     await loginViaForm(page, allocator.email, allocator.password);
@@ -253,15 +265,15 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — EquityChart tap-rect @ 32
     if (res && res.status() >= 400) {
       throw new Error(
         `/allocations returned HTTP ${res.status()} — ` +
-          "cannot run EquityChart tap-rect target-size gate",
+          "cannot run the Overview rebuilding-panel gate",
       );
     }
 
     // Phase 167.1.2 / D-02 ("Hide it until correct"): while the equity history
     // is rebuilt the Overview withholds the EquityChart and mounts the
     // rebuilding panel instead. This gate therefore pins the hidden state at
-    // 320px: the panel is visible and fits the viewport, and the chart is NOT
-    // mounted. Plan 11 of Phase 167.1.2 restores the 44px tap-rect measurement
+    // 320px: the panel is visible and fits the viewport on both edges, and the
+    // chart is NOT mounted. Plan 11 of Phase 167.1.2 restores the 44px tap-rect measurement
     // when it defines "ready" (the assertion below fails the moment the chart
     // returns, so the restore cannot be forgotten).
     const rebuilding = page.locator('[data-testid="overview-equity-rebuilding"]');
@@ -276,6 +288,7 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — EquityChart tap-rect @ 32
     ).toHaveCount(0);
     const box = await rebuilding.boundingBox();
     expect(box, "rebuilding panel has no layout box").not.toBeNull();
+    expect(box!.x, "rebuilding panel starts left of the 320px viewport").toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width, "rebuilding panel overflows the 320px viewport").toBeLessThanOrEqual(320);
   });
 });
