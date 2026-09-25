@@ -985,7 +985,7 @@ refuse_without_mutex() {
     # restore` COMMITS, so there the bypass is not a seam, it is the removal of
     # the guard — and it is a refusal, not a note.
     if [ "$mode" = "restore" ]; then
-      fail "RESTORE_REQUIRE_MUTEX=${RESTORE_REQUIRE_MUTEX} would bypass the shared-TEST mutex check, and this is --mode restore, which COMMITS. The mutex is the only thing keeping other people's CI out during DROP SCHEMA public CASCADE. The bypass is accepted for --mode preflight and --self-test, which write nothing; it is refused here."
+      fail "RESTORE_REQUIRE_MUTEX=${RESTORE_REQUIRE_MUTEX} would bypass the shared-TEST mutex check, and this is --mode restore, which COMMITS. The mutex is the only thing keeping other people's CI WRITERS out during DROP SCHEMA public CASCADE (one read-only job, ci.yml's test-db-drift, has held no key since Phase 164.4.2.1; it only reads, so it cannot harm the restore). The bypass is accepted for --mode preflight and --self-test, which write nothing; it is refused here."
     fi
     # Loud, on stderr, and it names the mode it is being tolerated for. (It is NOT
     # spelled `::warning::`: `src/__tests__/restore-test-from-baseline.test.ts`
