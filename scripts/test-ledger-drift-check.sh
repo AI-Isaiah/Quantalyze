@@ -235,6 +235,13 @@ fail() {
 }
 
 # ── The default database access commands (used when nothing is injected) ─────
+# ⚠️ WHAT BOUNDS THESE psql CALLS, stated per phase of the call (Phase 164.4.2.1
+# round-2 review, IN-05). The CONNECT is bounded by `PGCONNECT_TIMEOUT`, which
+# the VAC-08 step in ci.yml sets in its `env:`. A running query is bounded by
+# the `SET statement_timeout` each call issues, and that is enforced by the
+# SERVER. Neither bounds a network loss AFTER connect: the client then blocks
+# on a read until TCP keepalive gives up, which by default is far longer than
+# the job. That case is bounded only by the job's own `timeout-minutes`.
 default_ledger_query() {
   local direction="$1"
   local names_csv="$2"
@@ -459,7 +466,7 @@ check() {
   # fallback never fires.
   missing_err_lines="$( { wc -l < "$missing_err" 2>/dev/null || echo '?'; } | tr -d '[:space:]' )"
   if [ "$missing_rc" -ne 0 ]; then
-    fail "the ledger presence query failed (exited ${missing_rc}; ${missing_err_lines} line(s) of stderr captured and WITHHELD — it can carry connection detail). A possible cause other than a connection fault: a TEST writer (apply-test or a restore) was running concurrently. A restore's TRUNCATE of the ledger holds this query past its statement timeout on every attempt. This job has held no shared-TEST key since Phase 164.4.2.1, and on a pull_request run it has no ordering wait either, so re-run once supabase-migrate.yml and test-restore-from-baseline.yml are idle before hunting for a credential or network fault."
+    fail "the ledger presence query failed (exited ${missing_rc}; ${missing_err_lines} line(s) of stderr captured and WITHHELD — it can carry connection detail). A possible cause other than a connection fault: a TEST writer (apply-test or a restore) was running concurrently. A restore's TRUNCATE of the ledger can hold this query past its statement timeout on every attempt, if the restore's post-TRUNCATE tail outlasts the retry budget. This job has held no shared-TEST key since Phase 164.4.2.1, and on a pull_request run it has no ordering wait either, so re-run once supabase-migrate.yml and test-restore-from-baseline.yml are idle before hunting for a credential or network fault."
   fi
 
   # ⛔ SP-M01. This read
