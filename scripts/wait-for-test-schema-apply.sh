@@ -244,6 +244,17 @@ probe_apply_state() {
 # ── THE WAIT ───────────────────────────────────────────────────────────────
 wait_for_apply() {
   local waited=0 flag apply outcome="" polls=0
+  # ⛔ A MISSING psql MUST NAME ITSELF (Phase 164.4.2.1 round-2 review,
+  # SFH-R2-10). Without this check the flag probe answers `unknown` on every
+  # poll, which is correctly "not clear", so the step burns its whole
+  # WAIT_BUDGET_SECONDS and then blames an in-flight flag for what is a missing
+  # binary. Nothing pins `Install psql client` ahead of this step in ci.yml, so
+  # the check lives here. It is skipped only when the flag probe is injected,
+  # because then psql is never called.
+  if [ -z "${TEST_INFLIGHT_PROBE_CMD:-}" ] && ! command -v psql >/dev/null 2>&1; then
+    echo "::error::wait-outcome: psql-missing — psql is not on PATH, so the in-flight flag cannot be read. Install the psql client before this step. This is a missing binary, not an apply still running."
+    return 1
+  fi
   echo "ordering wait: budget ${WAIT_BUDGET_SECONDS}s, appearance grace ${APPEAR_GRACE_SECONDS}s, poll ${WAIT_POLL_SECONDS}s."
   while [ -z "${outcome}" ]; do
     flag="$(probe_inflight_flag)"
@@ -416,6 +427,48 @@ self_test() {
   seam_arm "flag seam PRINTS NOTHING answers unknown"  1 "in-flight flag 'unknown'"  "true"  "printf %s absent"
   seam_arm "apply seam EXITS NON-ZERO answers unreadable" 1 "apply state 'unreadable'" "printf %s clear" "false"
   seam_arm "apply seam PRINTS NOTHING answers unreadable" 1 "apply state 'unreadable'" "printf %s clear" "true"
+
+  # ── A MISSING psql (SFH-R2-10) ──────────────────────────────────────────
+  # ⭐ THE REAL flag probe with no psql on PATH must name the binary and fail
+  # AT ONCE, never exhaust the budget and blame the flag. PATH is cut down to a
+  # directory holding only `dirname` (the one external the script needs before
+  # the check), so the check cannot find psql wherever this runs. The budget is
+  # 0, so a guard that stopped firing reaches `wait-exhausted` at once and the
+  # arm fails on the missing `psql-missing` name, not on a hang. The second leg
+  # proves the check is skipped when the flag probe is injected, which is what
+  # keeps every arm above independent of the host's psql.
+  local nopsql_dir="" nopsql_dirname=""
+  nopsql_dirname="$(command -v dirname)"
+  nopsql_dir="$(mktemp -d)"
+  ln -s "${nopsql_dirname}" "${nopsql_dir}/dirname"
+  rc=0
+  out="$(PATH="${nopsql_dir}" TEST_INFLIGHT_PROBE_CMD="" \
+         TEST_APPLY_STATE_CMD="printf %s absent" \
+         WAIT_BUDGET_SECONDS=0 APPEAR_GRACE_SECONDS=0 WAIT_POLL_SECONDS=1 \
+         "${BASH}" "${BASH_SOURCE[0]}" 2>&1)" || rc=$?
+  checks=$((checks + 1))
+  case "${rc}:${out}" in
+    1:*"wait-outcome: psql-missing"*"psql is not on PATH"*) : ;;
+    *)
+      rm -f "${nopsql_dir}/dirname"; rmdir "${nopsql_dir}"
+      echo "SELF-TEST FAIL: with no psql on PATH the wait must exit 1 naming 'psql-missing' and 'psql is not on PATH'. It exited ${rc}. A missing binary would read as a flag problem after the full budget. Output: ${out}" >&2
+      exit 1
+      ;;
+  esac
+  rc=0
+  out="$(PATH="${nopsql_dir}" TEST_INFLIGHT_PROBE_CMD="printf %s clear" \
+         TEST_APPLY_STATE_CMD="printf %s absent" \
+         WAIT_BUDGET_SECONDS=0 APPEAR_GRACE_SECONDS=0 WAIT_POLL_SECONDS=1 \
+         "${BASH}" "${BASH_SOURCE[0]}" 2>&1)" || rc=$?
+  rm -f "${nopsql_dir}/dirname"; rmdir "${nopsql_dir}"
+  checks=$((checks + 1))
+  case "${rc}:${out}" in
+    0:*"wait-outcome: no-apply-run"*) : ;;
+    *)
+      echo "SELF-TEST FAIL: with the flag probe INJECTED the psql check must be skipped (psql is never called then). It exited ${rc}. Output: ${out}" >&2
+      exit 1
+      ;;
+  esac
 
   # ══ THE READS THEMSELVES ═══════════════════════════════════════════════
   # ⛔ EVERY ARM ABOVE INJECTS BOTH SEAMS, SO NOT ONE OF THEM EXECUTES A LINE
