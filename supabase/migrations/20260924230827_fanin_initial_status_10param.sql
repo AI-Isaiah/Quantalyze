@@ -103,6 +103,17 @@
 -- a caller that passes `p_parent_job_ids` must also make a parent's terminal
 -- failure reach its children. The optimistic look-up still ignores
 -- p_parent_job_ids when an in-flight job already exists, as the seven-arg does.
+-- ⚠️ SECOND KNOWN LIMIT (review round 2, 2026-09-25) — a DIAMOND can DEADLOCK.
+-- Edit (4)'s parent lock is `FOR SHARE ... ORDER BY id`, which orders only this
+-- enqueue's own locks. `mark_compute_job_done` locks a parent first and then its
+-- children, so for a child D with parents [A, B] where B is itself a waiting
+-- child of A and sorts before A, the enqueue (holding B, waiting on A) and the
+-- worker's fan-in (holding A, releasing B) wait on each other and one side gets
+-- 40P01. Keep the lock (without it the round-1 race returns). Latent (D-02: no
+-- caller passes parents). Whoever first passes `p_parent_job_ids` must treat
+-- 40P01 as retryable on BOTH sides — the caller's enqueue and the worker's mark
+-- path (`_safe_mark` today swallows only serialization failures). Routed with
+-- the stranded-child limit above to Phase 164.5.2 BRIDGELOCK.
 --
 -- ══════════════════════════════════════════════════════════════════════════
 -- VAC-04 ACKNOWLEDGEMENT — the PROD body this CREATE OR REPLACE overwrites

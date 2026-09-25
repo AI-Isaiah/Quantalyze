@@ -2110,7 +2110,7 @@ Plans:
 
 **Requirements**: TODOS entries `161.1-D1`, DEC-4
 **Depends on:** Phase 164.4.1 (pg-lane with pg_cron). ⚠️ NOT Phase 164.5 — the plan is file-disjoint from it and was lifted whole.
-**Routed here 2026-09-25 (from 164.9.1 review round 1), both latent or loud, both on the terminal-mark / bridge surface this phase owns:** (1) a fan-in child whose parent is still open at enqueue and later ends `failed_final` stays in `done_pending_children` forever (no caller passes parents today); (2) a second `match_decisions` delete can raise 23505 through the ON DELETE SET NULL cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null` (pre-existing, fails loudly, the admin decisions route issues these deletes).
+**Routed here 2026-09-25 (from 164.9.1 review round 1), both latent or loud, both on the terminal-mark / bridge surface this phase owns:** (1) a fan-in child whose parent is still open at enqueue and later ends `failed_final` stays in `done_pending_children` forever (no caller passes parents today); (2) a second `match_decisions` delete can raise 23505 through the ON DELETE SET NULL cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null` (pre-existing, fails loudly, the admin decisions route issues these deletes). (3) the fan-in parent lock `FOR SHARE ... ORDER BY id` can deadlock (40P01) against `mark_compute_job_done` in a diamond (a child whose parents include another waiting child); latent, recorded in M1's header — whoever passes parents must treat 40P01 as retryable on both the enqueue and the worker's mark path.
 **Plans:** 1 plan (lifted from Phase 164.5 plan 08, unmodified)
 
 Plans:
