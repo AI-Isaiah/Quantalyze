@@ -640,8 +640,7 @@ const C5_NILADIC = new Set([
 ]);
 /**
  * A WORD directly followed by `(` that is NOT a function call: IN (…) is a list,
- * AND / OR / NOT / WHEN / THEN / ELSE / WHERE (…) group an expression, SET (…)
- * is the multi-column assignment head, ANY / ALL / SOME (…) compare against an
+ * AND / OR / NOT / WHEN / THEN / ELSE / WHERE (…) group an expression, ANY / ALL / SOME (…) compare against an
  * array, and ROW / COALESCE / NULLIF / GREATEST / LEAST are GRAMMAR constructs,
  * not functions looked up on the search_path. `now` is the one call, and only
  * unqualified and unquoted. Every token inside the parentheses is still walked
@@ -651,6 +650,18 @@ const C5_NILADIC = new Set([
  * they are real functions resolved on the search_path, and the replay runs
  * under `SET LOCAL search_path = public, pg_catalog`, so a `public.lower` would
  * win. The grammar constructs above have no such lookup.
+ *
+ * ⛔ SET IS NOT HERE, and it was until 2026-09-25 (164.9.2 review round 2,
+ * CR-01). It was added in round 1 so the multi-column head `SET (a, b) = (…)`
+ * would pass, but membership here is POSITION-BLIND, and SET is an UNRESERVED
+ * keyword in PostgreSQL, so `set` is a legal function name. MEASURED by the
+ * reviewer on a pg-lane cluster: after `CREATE FUNCTION public.set(text) …`,
+ * both `SET x = set(1)` and `WHERE … AND set(2) IS NOT NULL` ran the function
+ * under the replay's search_path, and both classified LITERAL here. The head is
+ * now admitted by POSITION in `updateLiteralCheck` (the first SET at paren
+ * depth 0); any other `set(` is a call and is refused. ROW, COALESCE, NULLIF,
+ * GREATEST and LEAST stay: they are column-name keywords, which can never name
+ * a function; every other member is reserved, or `now`.
  */
 const C5_ALLOWED_CALLS = new Set([
   "IN",
@@ -661,7 +672,6 @@ const C5_ALLOWED_CALLS = new Set([
   "THEN",
   "ELSE",
   "WHERE",
-  "SET",
   "ANY",
   "ALL",
   "SOME",
@@ -812,11 +822,20 @@ export function updateLiteralCheck(masked) {
   let text = masked;
   for (const re of C5_BLANKED_PHRASES) text = text.replace(re, (p) => " ".repeat(p.length));
   const toks = c5Tokens(text);
+  // Paren depth, and whether the statement's head SET has been passed: the ONE
+  // position where `SET (` is grammar rather than a call (review round 2, CR-01).
+  let depth = 0;
+  let headSetSeen = false;
   for (let x = 0; x < toks.length; x++) {
     const t = toks[x];
     const prev = toks[x - 1];
     const next = toks[x + 1];
     const callNext = isP(next, "(");
+    if (t.k === "p") {
+      if (t.v === "(") depth++;
+      else if (t.v === ")") depth--;
+      continue;
+    }
     if (t.k === "bad") {
       return `carries the character \`${t.v}\` outside a string literal — C5 admits only names, numbers, operators and ( ) [ ] , . ; there, and psql acts on a backslash or a lone colon at replay (C5)`;
     }
@@ -845,6 +864,13 @@ export function updateLiteralCheck(masked) {
       if (callNext) {
         return `makes the schema-qualified call \`…${t.v}(\` — only an unqualified now() is replayable, and a qualified name is whatever that schema defines (C5)`;
       }
+      continue;
+    }
+    // The head of `UPDATE [ONLY] t [[AS] a] SET …`: the first SET at paren depth
+    // 0. `SET (a, b) = (…)` there is the multi-column assignment; every other
+    // `set(` falls through to the call check below and is refused.
+    if (up === "SET" && !headSetSeen && depth === 0) {
+      headSetSeen = true;
       continue;
     }
     if (C5_JOIN_WORDS.has(up)) {
@@ -1695,8 +1721,12 @@ function modeAudit(io, allowlistPath, migrationsDir) {
  * self-test OK: 56 kinds, red+green each.`, exit 0. 53 → 56: the TRUNCATE,
  * MERGE and CTE-prefixed DELETE heads of `matchOtherDml`, which had no leg. The
  * layer-2 vitest was observed RED (`declares 56 … still 53`) before this raise.
+ *
+ * MEASURED 2026-09-25 (review round 2, CR-01): `extract-reference-inserts
+ * self-test OK: 57 kinds, red+green each.`, exit 0. 56 → 57: `c5-update-set-call`.
+ * The layer-2 vitest was observed RED (`declares 57 … still 56`) before this raise.
  */
-export const SELF_TEST_KINDS_FLOOR = 56;
+export const SELF_TEST_KINDS_FLOOR = 57;
 
 /**
  * @type {Array<{id:string, why:string, audit?:boolean, expect:string, redStderr?:RegExp, greenStdout?:RegExp, greenAbsent?:RegExp}>}
@@ -1949,6 +1979,13 @@ export const SELF_TEST_KINDS = [
     why: "C5: a PostgreSQL reserved word is never a bare column reference, so one outside the admitted set is syntax C5 has not been taught to read, and it is refused rather than replayed on a guess. The green leg pins the admitted CASE/WHEN/THEN/ELSE/END, TRUE, NULL and DEFAULT",
     expect: "carries the reserved word COLLATE, which C5's token allowlist does not admit",
     greenStdout: /UPDATE fx_ref SET label = CASE WHEN id = 1 THEN 'a' ELSE 'b' END, flag = TRUE, note = NULL, kind = DEFAULT WHERE id = 1;/,
+  },
+  {
+    id: "c5-update-set-call",
+    why: "C5 (review round 2, CR-01): SET is an UNRESERVED keyword, so `set(` is a legal function name, and round 1 admitted `set(` at ANY position so the multi-column head would pass. A migration defining public.set would then run inside the COMMITting replay. Both legs of the red, in SET and in WHERE, must refuse. The green leg pins that the head `SET (`, with ONLY and an alias too, is still admitted",
+    expect: "makes the non-literal call `set(`",
+    redStderr: /call `set\(`[\s\S]*call `set\(`/,
+    greenStdout: /UPDATE fx_ref SET \(label, n\) = \('v', 1\) WHERE id = 1;[\s\S]*UPDATE ONLY fx_ref AS r SET \(label\) = ROW\('w'\) WHERE r\.id = 1;/,
   },
   // ── C5 in --audit: every top-level UPDATE / DELETE on a replayed table is accounted for.
   {

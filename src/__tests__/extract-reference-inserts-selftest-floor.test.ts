@@ -93,6 +93,9 @@ const REQUIRED_KINDS = [
   "c5-update-niladic",
   "c5-update-array-subquery",
   "c5-update-reserved-word",
+  // Review round 2, CR-01, MEASURED 2026-09-25 → `OK: 57 kinds`: `set(` is a call
+  // everywhere but the UPDATE's head.
+  "c5-update-set-call",
   // C5, --audit
   "c5-decline-literal",
   "c5-decline-count-drift",
