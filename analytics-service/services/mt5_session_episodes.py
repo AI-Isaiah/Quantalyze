@@ -228,8 +228,15 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 #                                owns that on the next reading; the escalation
 #                                itself never sends a credential (D-08).
 #   * recycled_still_faulted  -> the recycle ran and the terminal still does not
-#                                answer. A HUMAN is needed; a second automatic
+#                                answer after the WHOLE relaunch settle window was
+#                                watched. A HUMAN is needed; a second automatic
 #                                recycle is exactly what the debounce refuses.
+#   * recycled_relaunch_pending -> the recycle ran and the heal budget ran out
+#                                BEFORE the settle window did (164.6.5 review
+#                                round 1, WR-02 / SFH-02). "Not yet known", never
+#                                "still faulted": a cold relaunch was MEASURED at
+#                                ~86 s kill-to-authorized, and the next reading
+#                                decides.
 #   * recycle_failed          -> the recycle verb itself raised (the channel, the
 #                                seam, the snapshot). Whether the process was
 #                                ended is not known from here.
@@ -252,6 +259,9 @@ KIND_IPC_FAULT_RECYCLED: Final[str] = "ipc_fault_recycled"
 KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT: Final[str] = "ipc_fault_recycled_no_account"
 KIND_IPC_FAULT_RECYCLED_STILL_FAULTED: Final[str] = (
     "ipc_fault_recycled_still_faulted"
+)
+KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING: Final[str] = (
+    "ipc_fault_recycled_relaunch_pending"
 )
 KIND_IPC_FAULT_RECYCLE_FAILED: Final[str] = "ipc_fault_recycle_failed"
 KIND_IPC_FAULT_RECYCLE_NOT_LANDED: Final[str] = "ipc_fault_recycle_not_landed"

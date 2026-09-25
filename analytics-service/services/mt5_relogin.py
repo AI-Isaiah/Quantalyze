@@ -85,6 +85,7 @@ from services.mt5_session_episodes import (
     KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
     KIND_IPC_FAULT_RECYCLED,
     KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
+    KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
     KIND_IPC_FAULT_RECYCLED_STILL_FAULTED,
     KIND_NO_AUTHORIZED_ACCOUNT,
     KIND_STILL_UNAUTHORIZED,
@@ -325,6 +326,30 @@ _ESCALATION_RESERVE_CROSSINGS: Final[int] = (
 #: so the budget-gated paths can be driven against a clock whose every crossing
 #: costs its full ceiling — the one condition the budget exists for.
 _clock: Callable[[], float] = time.monotonic
+
+#: The heal's sleep, a module attribute for the same reason as `_clock`.
+_sleep: Callable[[float], None] = time.sleep
+
+# ⭐ WR-02 / SFH-02 (164.6.5 review round 1) — THE RELAUNCH IS WATCHED, NOT READ
+# ONCE. The verb's own relaunch probe is ONE bare `initialize()` bounded by
+# `MT5_INITIALIZE_TIMEOUT_MS` (20 s), while plan 02's live spike MEASURED a cold
+# relaunch reaching authorized 86 s after the kill (run 1; the terminal reappeared
+# about 25 s in). So on the only evidence held, a WORKING recycle usually read an
+# IPC code on that one probe and was logged `recycled_still_faulted` at ERROR,
+# "a human is needed" — minutes before the next tick found it healthy. That trains
+# the operator to ignore the one loud line this phase adds.
+#
+# SETTLE: the escalation keeps probing until the terminal answers, or until this
+# long has passed since the verb RETURNED. The verb returns only after the remote
+# terminate AND its own relaunch probe, so this clock starts no earlier than the
+# kill: 90 s from here is always more than the measured 86 s kill-to-authorized.
+# Only a relaunch still not answering after the whole window is `still_faulted`.
+_RELAUNCH_SETTLE_S: Final[float] = 90.0
+
+# The pause between relaunch polls. A not-yet-answering `initialize()` usually
+# spends its own 20 s IPC timeout, so this mostly matters when it fails FAST
+# (a terminal not yet listening), where it stops a tight loop against the bridge.
+_RELAUNCH_POLL_INTERVAL_S: Final[float] = 10.0
 
 
 def _affordable(deadline: float, crossings: int) -> bool:
@@ -854,7 +879,55 @@ def _recycle_landed(verdict: dict[str, object]) -> bool:
     )
 
 
-def _classify_recycle_verdict(verdict: dict[str, object]) -> str:
+def _watch_relaunch(
+    client: Mt5Client, verdict: dict[str, object], deadline: float
+) -> bool:
+    """Poll the credential-free detector until the relaunched terminal answers,
+    the settle window has passed, or the heal budget can no longer cover another
+    poll. Updates ``verdict``'s ``authorized`` / ``relaunch_code`` IN PLACE with
+    the LAST reading, records ``relaunch_polls``, and returns whether the WHOLE
+    settle window was watched (WR-02).
+
+    ⛔ BUDGET-GATED, like every optional read (WR-04): a poll is started only if
+    the pause and one full detector reading still fit before ``deadline``. So
+    this loop can never push the heal past its ``wait_for``; when the budget
+    runs out first the answer is "not yet known", and the caller says so.
+
+    ⛔ Credential-free: it is the same bare ``initialize()`` the detector uses.
+    ``Mt5SessionAbandoned`` propagates — the terminate has already crossed, so
+    the attempt stands (WR-01).
+    """
+    started = _clock()
+    polls = 0
+    try:
+        while not (
+            verdict.get("authorized") is True
+            or verdict.get("relaunch_code") == _MT5_NO_AUTHORIZED_ACCOUNT_CODE
+        ):
+            if _clock() - started >= _RELAUNCH_SETTLE_S:
+                return True
+            if not _affordable(
+                deadline - _RELAUNCH_POLL_INTERVAL_S, _DETECTOR_READING_CROSSINGS
+            ):
+                return False
+            _sleep(_RELAUNCH_POLL_INTERVAL_S)
+            polls += 1
+            try:
+                client.assert_session_authorized()
+            except Mt5ClientError as exc:
+                verdict["authorized"] = False
+                verdict["relaunch_code"] = exc.code
+            else:
+                verdict["authorized"] = True
+                verdict["relaunch_code"] = None
+        return True
+    finally:
+        verdict["relaunch_polls"] = polls
+
+
+def _classify_recycle_verdict(
+    verdict: dict[str, object], *, settled: bool = True
+) -> str:
     """Map the plan-02 recycle verb's verdict to one escalation kind.
 
     Read from the verb's STRUCTURED keys, never from any text.
@@ -873,6 +946,10 @@ def _classify_recycle_verdict(verdict: dict[str, object]) -> str:
     ``relaunch_code == -6`` is the terminal back up and answering with no account
     signed in yet: the ordinary heal owns that on the next reading, because the
     escalation never sends a credential (D-08).
+
+    ``settled`` is whether the whole relaunch settle window was watched
+    (``_watch_relaunch``). A relaunch still not answering is ``still_faulted``
+    only then, and ``relaunch_pending`` otherwise (WR-02).
     """
     if not _recycle_landed(verdict):
         return KIND_IPC_FAULT_RECYCLE_NOT_LANDED
@@ -880,6 +957,10 @@ def _classify_recycle_verdict(verdict: dict[str, object]) -> str:
         return KIND_IPC_FAULT_RECYCLED
     if verdict.get("relaunch_code") == _MT5_NO_AUTHORIZED_ACCOUNT_CODE:
         return KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT
+    if not settled:
+        # ⛔ WR-02 — the budget ran out before the settle window did. The relaunch
+        # has NOT been shown to fail, so this is never `still_faulted`.
+        return KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING
     return KIND_IPC_FAULT_RECYCLED_STILL_FAULTED
 
 
@@ -990,11 +1071,20 @@ def _escalate_ipc_fault(
     verdict: dict[str, object] = {}
     try:
         verdict = client.recycle_terminal_process()
-        kind = _classify_recycle_verdict(verdict)
+        # ⭐ WR-02 — a recycle that landed is WATCHED until it answers or the
+        # settle window passes; one 20 s probe of a relaunch measured at 86 s is
+        # not a verdict. A recycle that did not land relaunched nothing.
+        settled = (
+            _watch_relaunch(client, verdict, deadline)
+            if _recycle_landed(verdict)
+            else True
+        )
+        kind = _classify_recycle_verdict(verdict, settled=settled)
         detail = (
             f"matched={verdict.get('matched')} terminated={verdict.get('terminated')} "
             f"exited={verdict.get('exited')} authorized={verdict.get('authorized')} "
             f"relaunch_code={verdict.get('relaunch_code')} "
+            f"relaunch_polls={verdict.get('relaunch_polls', 0)} "
             f"open_errors={verdict.get('open_errors')} "
             f"terminate_errors={verdict.get('terminate_errors')}"
         )
@@ -1031,7 +1121,13 @@ def _escalate_ipc_fault(
             rearm_ipc_fault_escalation()
     if kind == KIND_IPC_FAULT_RECYCLED:
         level = logging.INFO
-    elif kind == KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT:
+    elif kind in (
+        KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
+        KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
+    ):
+        # ⛔ WR-02 — PENDING is "not yet known", never "a human is needed": the
+        # next reading decides, and a persisting wedge is then re-raised at ERROR
+        # by the persistence alarm.
         level = logging.WARNING
     else:
         # Still faulted after a recycle, a recycle that did not land, or one
