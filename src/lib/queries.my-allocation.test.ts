@@ -3023,6 +3023,21 @@ describe("115.1 equity display-repoint", () => {
     vi.unstubAllGlobals();
   });
 
+  // Review round 1 (SFH-04): D-02 makes `equityDailyPoints` [] for EVERY input,
+  // so asserting on it alone can no longer fail. The content these cases exist
+  // for (direct mapping, never NaN, malformed and empty curves degrade to the
+  // legacy fallback) is decided by `extractTrustworthyDerivedCurve`, the one
+  // function the producer calls on the derived row. Assert on it directly with
+  // the exact payload the producer read. `null` means "the legacy fallback".
+  // The legacy adapter's own content is pinned in
+  // allocation-helpers.equity-adapter.test.ts.
+  async function candidateDerivedCurve() {
+    const { extractTrustworthyDerivedCurve } = await import("./queries");
+    return extractTrustworthyDerivedCurve(
+      state.allocatorEquityDerived[0]?.payload ?? null,
+    );
+  }
+
   it("SAFETY (never redden): no derived row → equityDailyPoints is byte-identical to the legacy snapshot render", async () => {
     // No allocator_equity_derived row seeded — the fallback branch (and the
     // CURRENT pre-repoint code, which does not read the table at all) must render
@@ -3037,9 +3052,11 @@ describe("115.1 equity display-repoint", () => {
     // Positive control: this fixture WOULD render a non-empty legacy curve, so
     // the empty series below is the D-02 gate, not an empty input.
     expect(legacyExpectedDailyPoints().length).toBeGreaterThan(0);
-    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
-    // so the display series is [] for every allocator; plan 11 restores the
-    // content pin when it defines "ready".
+    // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
+    // every allocator). What it WOULD show is pinned directly on the extractor
+    // it calls (review round 1 SFH-04), so this case can still fail on a
+    // regression in the trust gate while the curve is hidden.
+    expect(await candidateDerivedCurve()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
     // Neuter gap: the no-row case must ALSO stamp the source 'legacy' (only the
     // derived/untrusted pins asserted the source before) — a repoint that
@@ -3067,9 +3084,13 @@ describe("115.1 equity display-repoint", () => {
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
     ).toBe("derived");
-    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
-    // so the display series is [] for every allocator; plan 11 restores the
-    // content pin when it defines "ready".
+    // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
+    // every allocator). What it WOULD show is pinned directly on the extractor
+    // it calls (review round 1 SFH-04), so this case can still fail on a
+    // regression in the trust gate while the curve is hidden.
+    expect(await candidateDerivedCurve()).toEqual(
+      P1151_DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
+    );
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3085,9 +3106,11 @@ describe("115.1 equity display-repoint", () => {
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
     ).toBe("legacy");
-    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
-    // so the display series is [] for every allocator; plan 11 restores the
-    // content pin when it defines "ready".
+    // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
+    // every allocator). What it WOULD show is pinned directly on the extractor
+    // it calls (review round 1 SFH-04), so this case can still fail on a
+    // regression in the trust gate while the curve is hidden.
+    expect(await candidateDerivedCurve()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3114,9 +3137,11 @@ describe("115.1 equity display-repoint", () => {
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
     ).toBe("legacy");
-    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
-    // so the display series is [] for every allocator; plan 11 restores the
-    // content pin when it defines "ready".
+    // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
+    // every allocator). What it WOULD show is pinned directly on the extractor
+    // it calls (review round 1 SFH-04), so this case can still fail on a
+    // regression in the trust gate while the curve is hidden.
+    expect(await candidateDerivedCurve()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3146,9 +3171,11 @@ describe("115.1 equity display-repoint", () => {
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
     ).toBe("legacy");
-    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
-    // so the display series is [] for every allocator; plan 11 restores the
-    // content pin when it defines "ready".
+    // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
+    // every allocator). What it WOULD show is pinned directly on the extractor
+    // it calls (review round 1 SFH-04), so this case can still fail on a
+    // regression in the trust gate while the curve is hidden.
+    expect(await candidateDerivedCurve()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3181,9 +3208,11 @@ describe("115.1 equity display-repoint", () => {
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
     ).toBe("legacy");
-    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
-    // so the display series is [] for every allocator; plan 11 restores the
-    // content pin when it defines "ready".
+    // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
+    // every allocator). What it WOULD show is pinned directly on the extractor
+    // it calls (review round 1 SFH-04), so this case can still fail on a
+    // regression in the trust gate while the curve is hidden.
+    expect(await candidateDerivedCurve()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3209,9 +3238,11 @@ describe("115.1 equity display-repoint", () => {
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
     ).toBe("legacy");
-    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
-    // so the display series is [] for every allocator; plan 11 restores the
-    // content pin when it defines "ready".
+    // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
+    // every allocator). What it WOULD show is pinned directly on the extractor
+    // it calls (review round 1 SFH-04), so this case can still fail on a
+    // regression in the trust gate while the curve is hidden.
+    expect(await candidateDerivedCurve()).toBeNull();
     expect(result.equityDailyPoints).toEqual([]);
   });
 
