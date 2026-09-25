@@ -3193,6 +3193,7 @@ Plans:
 **Evidence:** the 2026-09-25 in-depth QA sweep of every page in the logged-in account (14 data-integrity findings) and the 2026-09-24 visual UAT. Counts only here; the reports hold no identifiers and are not tracked.
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** none in code. Plan after 167.1.2 plan 01 (HIDE) so the two do not edit the same Allocations widgets at once.
+**Routed in, 2026-09-25 (Phase 167.2.1 D-03):** the discovery detail page (`src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx`) assembles the factsheet builder a second time. It calls `resolveDailyReturnSeries`, `readCompositeFactsheet`, `readSingleKeyBasisOpts` and `buildFactsheetPayload` itself instead of `fetchAndBuildPayload`. That is a drift risk on a factsheet number surface, not a false claim today: it serves published rows only and falls back to the honest KCS-10 sentence. Phase 167.2.1 splits the builder into one shared resolve stage (its D-04); folding this page onto it belongs here, beside SC4. Backlog entry: `[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` in `TODOS.md`, written by Phase 167.2.1 plan 04.
 
 ## Success Criteria
 
