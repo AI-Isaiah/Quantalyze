@@ -2302,7 +2302,9 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.6.7 to break down)
+- [ ] 164.6.7-01-PLAN.md — harm probe on the local lane, pre-fix (criterion 1, D-01/D-02)
+- [ ] 164.6.7-02-PLAN.md — composite live re-read fix, regression observed RED under neuter, post-fix probe (criteria 2-3, D-05)
+- [ ] 164.6.7-03-PLAN.md — runbook precondition restated and TODOS.md residue entry (criterion 4, D-03/D-07)
 
 ### Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals (INSERTED)
 
