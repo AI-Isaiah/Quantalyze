@@ -5,6 +5,11 @@
 # criterion 3). Invoked bare from the three DB-touching READER jobs in
 # .github/workflows/ci.yml (`sql-tests`, `python`, `e2e-seeded`), immediately
 # BEFORE each job's `Acquire shared-test-db mutex` step.
+# ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1): the sentence above is lineage. The
+# invokers are now `python` and `e2e-seeded` (immediately before their acquire
+# step) and `test-db-drift` (before VAC-08). `test-db-drift` has had no acquire
+# step since Phase 164.4.2.1, so for it this wait is the ONLY ordering control
+# against `apply-test`. `sql-tests` stopped invoking it in Phase 164.4.2.
 #
 # ⭐ WHY A WAIT AND NOT A LOCK. A mutex guarantees that no two holders overlap;
 # it never guarantees WHICH GOES FIRST. On a merge push, ci.yml's reader jobs
@@ -250,6 +255,12 @@ wait_for_apply() {
       # still prevents the two from actually overlapping. What this closes is the
       # ORDERING hole — proceeding to queue for a lock behind a restore that is
       # replacing the schema this job is about to assert against.
+      # ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1): the mutex still keeps
+      # `python` and `e2e-seeded` from overlapping a writer, but it no longer
+      # covers `test-db-drift`, which holds no key. Its VAC-08 reads are
+      # read-only, and an overlap makes them fail loudly, never pass falsely.
+      # A restore's lock blocks them until COMMIT or their statement timeout.
+      # A later commit's apply can only produce a loud false red.
       # `unknown` is deliberately NOT treated as clear: an unreadable probe
       # cannot rule an apply IN, which is the same reading the exhaustion
       # message already states.

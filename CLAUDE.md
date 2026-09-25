@@ -120,6 +120,15 @@ about the CLI link and the marker.
   step. Re-measured 2026-09-23 with `grep -c 61616158`: **29×** in `ci.yml` (`test-db-drift`
   12, `python` 9, `e2e-seeded` 8, `sql-tests` 0), **7×** in `supabase-migrate.yml`. This
   supersedes the 27× reading above.
+  ⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1) — half (a) again; the 2026-09-23 note above is
+  kept as lineage.** `test-db-drift` holds NO key now. The `ci.yml` jobs that hold it are
+  **`python` and `e2e-seeded`**, so on a merge push those two are what contends with
+  `apply-test` for it. `test-db-drift` is ordered after `apply-test` by the schema-apply wait
+  alone (Option A, the phase's decision D-02). Reason: the wait, not the key, is what orders
+  VAC-08 after the apply, and VAC-08 only reads. Before this change it waited up to 20m31s
+  for the key to do 2-5 s of work (`164.4.2.1-MEASUREMENT.md`). Re-measured 2026-09-25 with
+  `grep -c 61616158`: **17×** in `ci.yml` (`python` 9, `e2e-seeded` 8, `test-db-drift` 0,
+  `sql-tests` 0), **7×** in `supabase-migrate.yml`. This supersedes the 29× reading above.
   (b) **Narrowed for `sql-tests`** by DECISION F. Its lane replays a PR's own new migration
   on top of the committed dump BEFORE merge (see the D-F note below), so its corpus gates
   run against the PR's schema instead of being red until merge. Nothing else about (b)
@@ -221,6 +230,10 @@ private database has no drift to measure. `test-db-drift` keeps the secret, the
 schema-apply wait, the mutex and the `needs: python` stagger. Its `frontend` aggregator
 row tolerates only a skip on a fork PR or a `workflow_dispatch`. The original sentence is
 kept as lineage.
+⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1):** `test-db-drift` keeps the secret, the
+schema-apply wait and the `needs: python` edge, and **no longer takes the mutex**. The
+wait is now its only ordering control, and `src/__tests__/critical-regressions.test.ts`
+pins it. The 2026-09-23 note above is kept as lineage.
 
 ### Current reading — ⛔ SUPERSEDED. The block below is the 2026-09-07 reading and it is STALE.
 
