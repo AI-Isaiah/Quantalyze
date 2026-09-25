@@ -5348,7 +5348,14 @@ jobs:
     # holds the shared-test-db key. Its Acquire, Release and dead-holder Verdict steps
     # are gone. VAC-08 is read-only, and its ordering after `apply-test` is the
     # `Wait for the TEST schema apply to conclude (merge pushes only)` step (an
-    # Actions-API fact plus the in-flight flag), which already ran BEFORE the acquire.
+    # Actions-API fact plus the in-flight flag), which runs immediately before VAC-08.
+    # ⚠️ That wait is merge-push only. On a `pull_request` run it does not run, so
+    # VAC-08 has NO ordering against `apply-test` or a dispatched restore; on a merge
+    # push a seconds-wide window remains between the wait's exit and VAC-08's first
+    # read. Accepted because an overlap can only red loudly, never pass on a state
+    # that never committed (runbook `docs/runbooks/shared-test-db-mutex.md`, section 0).
+    # ⛔ Do not widen the wait's `if:` to PRs: it keys on this commit's own
+    # `supabase-migrate.yml` run, which never exists on a PR.
     # The key only made this job queue behind `python` and `e2e-seeded` (up to 20m31s
     # for 2-5 s of work, per 164.4.2-MEASUREMENT). `needs: [python, changed-paths]` is
     # KEPT: it makes the same-commit `supabase-migrate.yml` run register long before
@@ -5399,6 +5406,10 @@ jobs:
     # workflow_dispatch. See the `frontend:` loop's `test-db-drift` arm.
     #
     # ⚠️ The ⛔ block below, moved VERBATIM from `sql-tests` (Phase 164.4.2):
+    # (2026-09-25, Phase 164.4.2.1: `python` and `e2e-seeded` point here for the
+    # mutex mechanism and its ⛔ constraints, and those constraints still bind THEM.
+    # The "Acquire" step and "this job" the block describes are now theirs; this job
+    # holds no key and has no such step.)
     # Phase 142.1 (D-05): this job must SERIALIZE against the `python` and
     # `e2e-seeded` jobs. These SQL files run against the ONE
     # shared Supabase test project (`secrets.TEST_SUPABASE_DB_URL`), and
@@ -5539,7 +5550,9 @@ jobs:
       # (2026-09-25, Phase 164.4.2.1: in THIS job there is no acquire any more, so
       # "the mutex below" and "BEFORE THE ACQUIRE" describe `python` and `e2e-seeded`.
       # Here the wait is the ONLY ordering control on VAC-08, and a pin in
-      # critical-regressions.test.ts holds it before VAC-08 and enabled.)
+      # critical-regressions.test.ts holds it before VAC-08, enabled and fail-closed.
+      # On a `pull_request` run this step does not run, so there VAC-08 has no
+      # ordering control at all — see the ⚠️ in this job's CORRECTED header.)
       #
       # ⛔ NO `needs:` EDGE WAS ADDED, AND NONE MAY BE. These three jobs' `if:`
       # conditions diverge and a skipped `needs:` job skips its dependents — the
@@ -5584,12 +5597,10 @@ jobs:
           TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
         run: |
           set -euo pipefail
-          # The acquire step below installs psql conditionally too, so this moves
-          # that cost earlier on a merge push rather than adding one.
-          if ! command -v psql >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y --no-install-recommends postgresql-client
-          fi
+          # psql is installed by this job's `Install psql client` step above. (Until
+          # 2026-09-25 this step carried a conditional psql install "moved earlier"
+          # from an acquire step below; Phase 164.4.2.1 removed that acquire, and the
+          # unconditional install above already ran, so the block was dead code.)
           # Workspace-rooted: the `python` job's defaults.run.working-directory is
           # analytics-service, where a bare relative script path does not resolve.
           bash "${GITHUB_WORKSPACE}/scripts/wait-for-test-schema-apply.sh"
