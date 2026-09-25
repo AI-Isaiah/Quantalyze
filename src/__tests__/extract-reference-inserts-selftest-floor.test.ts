@@ -121,6 +121,9 @@ const REQUIRED_KINDS = [
   "c5-audit-do-body-literal-update",
   "c5-audit-do-body-delete",
   "c5-audit-do-body-truncate",
+  // One upsert rule, top level and DO body (review round 2, WR-02), MEASURED
+  // 2026-09-25 → `OK: 61 kinds`.
+  "c5-audit-upsert-decline",
 ];
 
 describe("SELF_TEST_KINDS_FLOOR — the extractor's self-test corpus is ratcheted", () => {

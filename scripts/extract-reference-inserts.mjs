@@ -949,7 +949,36 @@ export function matchUpdate(src, prep, qualified) {
   const ok = [];
   const body = [];
   const rejected = [];
+  const insRe = headRe(schema, table);
+  const cteInsRe = cteHeadRe(schema, table);
+  const upsertRe = new RegExp(`\\bON${WS}+CONFLICT\\b[\\s\\S]*\\bDO${WS}+UPDATE\\b`, "i");
+  const id = `${targetPfx(schema)}${quotedId(table)}(?![A-Za-z0-9_])`;
   for (const s of prep.spans) {
+    // ⛔ 164.9.2 review round 2, WR-02: a TOP-LEVEL upsert follows the SAME rule as
+    // its DO-body twin (`doBodyWriteVerdict`). Round 1 refused it from the INSERT
+    // loop of `modeAudit` with no line able to account for it — "classify it by
+    // hand at review", with nowhere to record the classification — while a
+    // decline: line cleared the identical DO-body upsert. Now: declinable when
+    // `freshKeyProof` proves its conflict column takes a gen_random_uuid() (the
+    // DO UPDATE arm can then reach only a row this statement minted), a HARD
+    // refusal otherwise. auth.users is never declinable: C5 is public only.
+    if (!s.inBody && (insRe.test(s.masked) || cteInsRe.test(s.masked)) && upsertRe.test(s.masked)) {
+      const key = schema === "public" ? freshKeyProof("INSERT … ON CONFLICT DO UPDATE", s.masked, null, id) : null;
+      rejected.push(
+        key
+          ? {
+              line: s.line,
+              nonLiteral: true,
+              reason: `a top-level INSERT … ON CONFLICT DO UPDATE on ${qualified} whose conflict column takes ${key}, so its DO UPDATE arm can reach only a row this statement wrote, never one the replay wrote (proven by freshKeyProof); C5 replays no upsert`,
+            }
+          : {
+              line: s.line,
+              nonLiteral: false,
+              reason: `a top-level INSERT … ON CONFLICT DO UPDATE on a table the replay fills, with no allowlist line that can account for it: its DO UPDATE arm rewrites an EXISTING row, and nothing PROVES that row is not one the replay wrote. The rule is the one a DO-body upsert follows: the only proof C5 accepts is a conflict column that takes gen_random_uuid() (at top level) or a variable the block declares as gen_random_uuid() and never reassigns (in a DO body)${schema === "public" ? "" : `, and ${qualified} is outside C5 altogether (public only)`}. ${HARD_REMEDY} (C5)`,
+            },
+      );
+      continue;
+    }
     if (!re.test(s.masked)) {
       if (!s.inBody && cteRe.test(s.masked)) {
         rejected.push({
@@ -1363,7 +1392,7 @@ export function c5Verdict(m, qualified, upd, dec) {
     if (nonLit.length !== dec.count) {
       refusals.push({
         line: nonLit[0]?.line ?? null,
-        reason: `the C5 line pins decline:${dec.count} top-level statement(s) but ${nonLit.length} were measured (top-level non-literal UPDATEs plus DO-body writes). A pinned count moves ONLY when an applied migration is edited — understand the edit, do not re-pin the number`,
+        reason: `the C5 line pins decline:${dec.count} top-level statement(s) but ${nonLit.length} were measured (top-level non-literal UPDATEs and proven upserts, plus declinable DO-body writes). A pinned count moves ONLY when an applied migration is edited — understand the edit, do not re-pin the number`,
       });
     }
   } else {
@@ -1735,17 +1764,11 @@ function modeAudit(io, allowlistPath, migrationsDir) {
         // 164.9.2 review WR-02 item 1: limitation 2 skips an unlisted non-literal
         // INSERT as a backfill of NEW rows, but an `ON CONFLICT … DO UPDATE` arm
         // rewrites an EXISTING replayed row — an UPDATE effect neither the INSERT
-        // class nor C5 would otherwise name. It is refused whatever its VALUES.
-        for (const r of m.rejected.filter((x) => x.upsert)) {
-          refuse(io, {
-            file,
-            line: r.line,
-            table: qualified,
-            reason: `a top-level INSERT … ON CONFLICT DO UPDATE on a table the replay fills, with no allowlist line — its DO UPDATE arm rewrites an existing replayed row, which no C5 line can replay; classify it by hand at review`,
-          });
-          bad = 1;
-          c5Unaccounted++;
-        }
+        // class nor C5 would otherwise name.
+        // ⛔ Since review round 2 (WR-02) that refusal is NOT raised here: C5's
+        // `matchUpdate` owns every top-level upsert on a replayed table, under the
+        // same rule as a DO-body upsert, so a decline: line can account for a
+        // proven one and an unproven one is a hard refusal in the C5 loop below.
         if (m.ok.length === 0) continue; // limitation 2: an unlisted non-literal is a backfill
         refuse(io, {
           file,
@@ -1969,8 +1992,13 @@ function modeAudit(io, allowlistPath, migrationsDir) {
  * each.`, exit 0. 57 → 60: `c5-audit-do-body-literal-update`, `-delete` and
  * `-truncate`. The layer-2 vitest was observed RED (`declares 60 … still 57`)
  * before this raise.
+ *
+ * MEASURED 2026-09-25 (review round 2, WR-02, one upsert rule): `extract-reference-
+ * inserts self-test OK: 61 kinds, red+green each.`, exit 0. 60 → 61:
+ * `c5-audit-upsert-decline`. The layer-2 vitest was observed RED (`declares 61 …
+ * still 60`) before this raise.
  */
-export const SELF_TEST_KINDS_FLOOR = 60;
+export const SELF_TEST_KINDS_FLOOR = 61;
 
 /**
  * @type {Array<{id:string, why:string, audit?:boolean, expect:string, redStderr?:RegExp, greenStdout?:RegExp, greenAbsent?:RegExp}>}
@@ -2338,6 +2366,14 @@ export const SELF_TEST_KINDS = [
     audit: true,
     expect: "a top-level INSERT … ON CONFLICT DO UPDATE on a table the replay fills, with no allowlist line",
     greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-upsert-decline",
+    why: "C5 --audit (review round 2, WR-02): ONE rule for an upsert on a replayed table, at top level and in a DO body. Round 1 refused a top-level upsert with no line able to account for it (the refusal said 'classify it by hand' and there was nowhere to record the classification) while a decline: cleared the identical DO-body upsert. Now both are hard refusals under a decline: line unless freshKeyProof proves the conflict column takes a gen_random_uuid() the statement or its block minted; the green leg pins both proven spellings accounted for by decline:2",
+    audit: true,
+    expect: "a top-level INSERT … ON CONFLICT DO UPDATE on a table the replay fills, with no allowlist line that can account for it",
+    redStderr: /a DO block runs INSERT … ON CONFLICT DO UPDATE on public\.fx_ref when this migration applies, and nothing PROVES/,
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 2 declined over 1 file\(s\); 0 unaccounted\./,
   },
   {
     id: "c5-audit-unlisted-copy",

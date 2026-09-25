@@ -279,6 +279,15 @@
 #    level (`SELECT some_backfill();`), and dynamic SQL built from a string.
 #    DO-body writes on auth.* are not counted: auth.users survives the DROP,
 #    so a write a DO body made there is still on TEST after a restore.
+#    ⛔ CORRECTED 2026-09-25 (164.9.2 review round 2, WR-02). An upsert follows
+#    ONE rule now, at top level and in a DO body alike. Round 1 refused a
+#    top-level `INSERT … ON CONFLICT DO UPDATE` with no line able to account
+#    for it ("classify it by hand at review", and nowhere to record that),
+#    while a decline: line cleared the identical DO-body upsert. Both are now a
+#    HARD refusal unless the extractor proves the conflict column takes a
+#    gen_random_uuid() minted by the statement (top level) or by its block (a
+#    variable declared once and never reassigned). A proven one is accounted
+#    for by a decline: line. An upsert on auth.users is never declinable.
 # 3. This file says nothing about whether the rows are on TEST right now. It says
 #    which statements the restore replays. The restore's own in-transaction gate
 #    and its `refdata:` census rows are what report presence.
