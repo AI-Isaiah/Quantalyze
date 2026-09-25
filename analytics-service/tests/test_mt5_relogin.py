@@ -2478,6 +2478,115 @@ async def test_SFH03_the_terminal_answering_ends_the_persistence_run(
     assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR]
 
 
+@pytest.mark.parametrize(
+    "connected,login,expected_level,expected_fragment",
+    [
+        pytest.param(
+            True,
+            int(_FAKE_LOGIN),
+            logging.INFO,
+            "post_relaunch: connected=True session_account_matches_env=True "
+            "session_server_matches_env=True",
+            id="house-account-connected",
+        ),
+        pytest.param(
+            True,
+            int(_FAKE_LOGIN) + 1,
+            logging.WARNING,
+            "session_account_matches_env=False",
+            id="relaunched-on-ANOTHER-account",
+        ),
+        pytest.param(
+            False,
+            int(_FAKE_LOGIN),
+            logging.WARNING,
+            "connected=False",
+            id="relaunched-DISCONNECTED",
+        ),
+    ],
+)
+async def test_ESCALATION_SFH07_authorized_after_a_relaunch_says_WHICH_account_and_whether_connected(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    connected: bool,
+    login: int,
+    expected_level: int,
+    expected_fragment: str,
+) -> None:
+    """⛔ SFH-07 (164.6.5 review round 1). The D-05 record MEASURED a relaunched
+    terminal coming back on whichever account the last service call had logged
+    in to — a DIFFERENT one in run 2 — and a bare `initialize()` returning True
+    does not show a trade-server connection either. `recycled` at INFO over a
+    terminal on a client's account, or disconnected, says the house session was
+    restored when it was not. The account is an EQUALITY VERDICT, never a value:
+    no account number may reach the line."""
+    from collections import namedtuple
+
+    _set_full_env(monkeypatch)
+    _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "initialize_after_recycle": True,
+            "terminal_info": namedtuple("TerminalInfo", "build connected")(
+                6182, connected
+            ),
+            "account_info": namedtuple("AccountInfo", "login server")(
+                login, _FAKE_SERVER
+            ),
+        },
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
+    line = next(
+        r for r in _records(caplog) if "escalated to a terminal" in r.getMessage()
+    )
+    assert expected_fragment in line.getMessage()
+    assert line.levelno == expected_level
+    assert str(login) not in line.getMessage(), "an account number reached the line"
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+async def test_ESCALATION_SFH07_the_post_relaunch_reads_never_outlive_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+) -> None:
+    """The post-relaunch reads are OPTIONAL, so they are budget-gated like the
+    rest (WR-04): with every crossing at its ceiling the relaunch answers with
+    only slack left, and the reads are recorded `not_read` rather than taken
+    past the `wait_for`."""
+    _set_full_env(monkeypatch)
+    monkeypatch.delenv("MT5_RELOGIN_BUDGET_S", raising=False)
+    budget = mt5_relogin._relogin_budget_s()
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "initialize_after_recycle": True,
+            "crossing_cost_s": mt5_relogin._MT5_REQUEST_TIMEOUT_S,
+        },
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+    started = _fake_clock.now
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
+    assert _fake_clock.now - started <= budget
+    line = next(
+        r.getMessage()
+        for r in _records(caplog)
+        if "escalated to a terminal" in r.getMessage()
+    )
+    assert "post_relaunch=not_read" in line
+
+
 @pytest.mark.parametrize("kind", _ESCALATION_KINDS)
 def test_ESCALATION_every_escalation_kind_degrades_to_NOT_MEASURED(kind: str) -> None:
     """An escalation ACTS on the terminal; it does not measure the session. If

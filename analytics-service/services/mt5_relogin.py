@@ -944,6 +944,78 @@ def _watch_relaunch(
         verdict["relaunch_polls"] = polls
 
 
+def _read_post_relaunch_state(
+    client: Mt5Client, env_login: int, env_server: str, deadline: float
+) -> tuple[str, bool]:
+    """After a relaunch the detector called AUTHORIZED, read what "authorized"
+    did not say. Returns ``(log fragment, degraded)``.
+
+    ⛔ SFH-07 (164.6.5 review round 1). A bare ``initialize()`` returning True
+    says a session exists — not WHICH account it is on, nor whether the terminal
+    is connected to the trade server. The D-05 record MEASURED a relaunched
+    terminal coming back on "whichever account the last service call had logged
+    in to" (a different account in run 2), and the four-day incident's Journal
+    showed a terminal `disconnected` with no reconnect. Either way the heal's
+    purpose — the house account's session — is not restored, the monitor's next
+    probe reads `already_authorized`, and nothing said so.
+
+    ⛔ CREDENTIAL-FREE and VALUE-FREE: two reads of the CURRENT session, no login.
+    The account and server are recorded as EQUALITY VERDICTS against the
+    environment's, never as values — the same rule the pre-recycle capture
+    follows (T-164.6.2-12); no account number reaches the line.
+
+    ⛔ BUDGET-GATED, like every optional read (WR-04): each is taken only if it
+    still fits before ``deadline``, else recorded ``not_read`` with the reason.
+    It cannot raise except ``Mt5SessionAbandoned``.
+    """
+    degraded = False
+    if not _affordable(deadline, _CAPTURE_READ_CROSSINGS):
+        return "post_relaunch=not_read (the heal budget left cannot cover it)", False
+    try:
+        terminal = client.terminal_info()
+    except Mt5SessionAbandoned:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a read must never undo the verdict
+        connected_part = (
+            f"connected=not_captured (terminal_info failed: "
+            f"{_describe_capture_failure(exc)})"
+        )
+    else:
+        connected = terminal.get("connected")
+        if isinstance(connected, bool):
+            connected_part = f"connected={connected}"
+            degraded = degraded or not connected
+        else:
+            connected_part = "connected=not_captured (no boolean)"
+    if not _affordable(deadline, _CAPTURE_READ_CROSSINGS):
+        return (
+            f"post_relaunch: {connected_part} session_account_matches_env=not_read "
+            "(the heal budget left cannot cover it)",
+            degraded,
+        )
+    try:
+        account = client.account_info()
+    except Mt5SessionAbandoned:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a read must never undo the verdict
+        account_part = (
+            f"session_account_matches_env=not_captured (account_info failed: "
+            f"{_describe_capture_failure(exc)})"
+        )
+    else:
+        login = account.get("login")
+        server = account.get("server")
+        if isinstance(login, int) and not isinstance(login, bool):
+            matches = login == env_login
+            account_part = f"session_account_matches_env={matches}"
+            degraded = degraded or not matches
+        else:
+            account_part = "session_account_matches_env=not_captured (no login)"
+        if isinstance(server, str) and server:
+            account_part += f" session_server_matches_env={server == env_server}"
+    return f"post_relaunch: {connected_part} {account_part}", degraded
+
+
 def _classify_recycle_verdict(
     verdict: dict[str, object], *, settled: bool = True
 ) -> str:
@@ -984,7 +1056,11 @@ def _classify_recycle_verdict(
 
 
 def _escalate_ipc_fault(
-    client: Mt5Client, code: int, env_server: str, deadline: float | None = None
+    client: Mt5Client,
+    code: int,
+    env_server: str,
+    deadline: float | None = None,
+    env_login: int | None = None,
 ) -> str | None:
     """ACT on an ``ipc_fault`` reading by recycling the terminal PROCESS (D-08),
     once per run, and return the escalation kind — or ``None`` when it did not run.
@@ -1126,6 +1202,7 @@ def _escalate_ipc_fault(
         return None
     claim_ipc_fault_escalation(answers)
     verdict: dict[str, object] = {}
+    degraded = False
     try:
         verdict = client.recycle_terminal_process()
         # ⭐ WR-02 — a recycle that landed is WATCHED until it answers or the
@@ -1137,6 +1214,12 @@ def _escalate_ipc_fault(
             else True
         )
         kind = _classify_recycle_verdict(verdict, settled=settled)
+        # ⭐ SFH-07 — "authorized" is not "the house account, connected".
+        post_relaunch, degraded = (
+            _read_post_relaunch_state(client, env_login, env_server, deadline)
+            if kind == KIND_IPC_FAULT_RECYCLED and env_login is not None
+            else ("", False)
+        )
         detail = (
             f"matched={verdict.get('matched')} terminated={verdict.get('terminated')} "
             f"exited={verdict.get('exited')} authorized={verdict.get('authorized')} "
@@ -1144,6 +1227,7 @@ def _escalate_ipc_fault(
             f"relaunch_polls={verdict.get('relaunch_polls', 0)} "
             f"open_errors={verdict.get('open_errors')} "
             f"terminate_errors={verdict.get('terminate_errors')}"
+            + (f" {post_relaunch}" if post_relaunch else "")
         )
     except Mt5SessionAbandoned as exc:
         # ⛔ WR-01 — `terminal_recycle` is the verb's OWN first-statement fence:
@@ -1190,6 +1274,10 @@ def _escalate_ipc_fault(
         # Still faulted after a recycle, a recycle that did not land, or one
         # whose effect is unknown: a human is needed.
         level = logging.ERROR
+    if degraded:
+        # ⛔ SFH-07 — back up, but disconnected or on another account: the
+        # house session was NOT restored, and INFO would say it was.
+        level = max(level, logging.WARNING)
     exited = _count(verdict, "exited")
     terminated = _count(verdict, "terminated")
     if exited is not None and terminated is not None and exited < terminated:
@@ -1313,7 +1401,7 @@ def _heal_blocking(
                     # ⭐ D-08 — ACT, don't only report. Decided from the typed
                     # `err.code`, never from `verdict`. See `_escalate_ipc_fault`.
                     escalation_kind=_escalate_ipc_fault(
-                        client, err.code, server, deadline
+                        client, err.code, server, deadline, env_login=login
                     ),
                 )
             # ⭐ THE ONE READING THAT ESTABLISHES DARKNESS. `-6` means the bridge
