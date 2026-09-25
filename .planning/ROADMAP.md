@@ -3003,17 +3003,32 @@ Plans:
 **Goal:** Every persisted `strategy_analytics` row that Phase 166 changes is recomputed on PROD, so stored numbers match what the fixed code would produce. The same fabricated-ratio class is also closed outside quantstats: exact `== 0` / `> 0` standard-deviation guards.
 **Requirements**: Phase 166 OPEN-2 (founder answer 2026-09-24: "Recompute affected rows after merge", AskUserQuestion). The round-2 fixer measured the non-quantstats sites.
 **Depends on:** Phase 166
-**Plans:** 3 plans
+**Plans:** 7 plans
 
 ## Success Criteria
 1. **Census first.** The five read-only census SELECTs in `166-09-SUMMARY.md` run on PROD. The founder runs them, or they run read-only and are recorded as counts only. The recompute set is derived from them.
 2. **Normal job path.** Affected rows are recomputed through the normal compute-job path, never by a hand-written UPDATE. Each is verified against the D-10 before/after rows, and the rendered rolling alpha/beta chart and greeks table show the new values.
 3. **Exact-zero guards close.** They exist today in `portfolio_optimizer.py`, `csv_validator.py`, `allocated_capital.py`, `equity_reconstruction.py` and `optimizer.py`. They move to the relative dispersion floor (`_dispersion_is_residue` semantics), and each gets a red test built from a compounding-NAV constant yield.
    ⭐ **2026-09-25 (166.1-CONTEXT D-02):** criterion 3 now also covers the unguarded correlation sites outside `metrics.py` (same root cause: a ratio over a residue standard deviation), and `portfolio_risk.compute_risk_decomposition` (D-05).
+   ⭐ **2026-09-25 (plan-check revision, 166.1-CONTEXT D-15, orchestrator decision under the founder rule "close the whole class, not point-fixes"):** criterion 3 also covers the TS sites that compute a Sharpe, correlation, beta or related ratio from daily returns behind a `> 0` / `!== 0` guard or a relative-only floor (RESEARCH A5, T1-T20). The earlier premise that TS only reads stored values was false. **D-16:** the `analytics_runner` SQN block is site S8 (measured SQN -4.03e16 on 21 identical losses).
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 166.1 to break down)
+**Wave 1**
+
+- [ ] 166.1-01-PLAN.md — the floor moves to `services/dispersion.py`; Python variance sites S1-S8 (incl. SQN, D-16) on it, red tests and drills
+- [ ] 166.1-02-PLAN.md — founder-gated PROD recompute: Q1-Q5 read-only pack, tracer then one-at-a-time enqueues, blocking rendered check per published row (independent of the code plans)
+- [ ] 166.1-04-PLAN.md — the TS floor `src/lib/dispersion-floor.ts` pinned to Python; T1-T5 (/compare, sampleBasisRatios, computeScenario, diversificationRatio) (D-15)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 166.1-03-PLAN.md — Python correlation sites C1-C8 on two shared helpers (D-02)
+- [ ] 166.1-05-PLAN.md — TS T6-T12: correlation helpers, portfolio-stats, the scenario benchmark and stress floors (D-15)
+- [ ] 166.1-06-PLAN.md — TS T13-T20: every ratio in `src/lib/factsheet/` (D-15)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 166.1-07-PLAN.md — whole-phase gate sweep and the single release commit (VERSION, package.json, CHANGELOG)
 
 ### Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error
 
