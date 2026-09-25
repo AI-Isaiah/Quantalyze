@@ -257,6 +257,29 @@ export async function register() {
   }
 }
 
+/**
+ * 164.6.5 review round 1 / WR-07 — the wizard's per-page-load id, read off
+ * `X-Wizard-Page-Load-Id` (`src/lib/wizard/wizard-correlation.ts`).
+ *
+ * Plan 07 made the wizard's `X-Correlation-Id` per-REQUEST and moved the
+ * stable page-load id onto this header, so this is the one server reader
+ * that still lets two failures from one open tab be grouped in Sentry.
+ *
+ * The value is CLIENT-SUPPLIED, so it is shape-checked before it becomes a
+ * tag: the same allowlist `CORRELATION_ID_SHAPE` applies in
+ * `src/lib/correlation-id.ts` (no CR, LF, NUL or whitespace). That module is
+ * `server-only` and reads `next/headers`, which this hook does not need, so
+ * the pattern is restated here rather than imported. Anything else is null,
+ * never echoed.
+ */
+const WIZARD_PAGE_LOAD_ID_SHAPE = /^[A-Za-z0-9._:-]{1,128}$/;
+
+function wizardPageLoadIdTag(raw: string | undefined): string | null {
+  if (raw === undefined) return null;
+  const trimmed = raw.trim();
+  return WIZARD_PAGE_LOAD_ID_SHAPE.test(trimmed) ? trimmed : null;
+}
+
 export async function onRequestError(
   error: { digest?: string },
   request: { path: string; method: string; headers: Record<string, string> },
@@ -277,6 +300,10 @@ export async function onRequestError(
         // which is the placeholder shape the scrubber produces anyway. It is
         // `request.path` below that is raw.
         correlation_id: request.headers["x-correlation-id"] ?? null,
+        // 164.6.5 / WR-07 — the page-load grain, beside the per-request one.
+        wizard_page_load_id: wizardPageLoadIdTag(
+          request.headers["x-wizard-page-load-id"],
+        ),
       },
       extra: {
         // Phase 164 / SHARE-01 — `request.path` is the RAW request path, so on

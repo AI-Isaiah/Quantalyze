@@ -37,6 +37,25 @@
 //   (`X-Wizard-Page-Load-Id`) so nothing that still wants one stable
 //   per-page-load value loses it.
 //
+//   ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1 / WR-07) — the sentence
+//   above was false server-side when it shipped: NO server code read
+//   `X-Wizard-Page-Load-Id`. What the reversal actually did to each join the
+//   old header fed, measured by grep at the time of this correction:
+//     · server logs and `compute_jobs.metadata.correlation_id` — the routes
+//       read `X-Correlation-Id` (through `getCorrelationId()`, or directly as
+//       `finalize-wizard` does), so from this
+//       release they carry a PER-REQUEST id. Rows written before it carry the
+//       per-PAGE-LOAD id. A query that groups by `correlation_id` across that
+//       boundary is grouping two different grains. Nothing server-side
+//       records the page-load id beside them.
+//     · the Sentry `correlation_id` tag set in `src/instrumentation.ts`'s
+//       `onRequestError` — per-request too, and that hook NOW also reads this
+//       header into its own `wizard_page_load_id` tag, shape-checked. That is
+//       the one server reader, and the one place the page-load join survives.
+//   Handled captures (`captureToSentry` in the key routes) and the Python
+//   seam do not carry it. Restoring it there means reading this header in
+//   each route and forwarding it to the analytics service.
+//
 //   The header-merge rule is likewise REVERSED. Before, the session id was
 //   `set` LAST so it deterministically won over any caller-supplied
 //   `X-Correlation-Id` — the docblock reasoned that a per-call override would
