@@ -404,6 +404,12 @@ GRANT SELECT (account_shared_with_api_key_id, account_share_kind, history_inclus
   ON public.api_keys TO authenticated;
 
 -- ───────────── 6. the COMMENTs that said every ccxt venue is NULL (D-10)
+-- The column COMMENT re-stamps 20260920120000's text (byte-identical to PROD's,
+-- MEASURED against supabase/schema/baseline.sql 2026-09-25). The index COMMENT
+-- is re-stated from 20260812083206's longer wording, which is NOT what PROD
+-- carries: PROD holds a shorter text no migration here produces. Every
+-- sentence of PROD's shorter text is kept in substance below. The rollback
+-- restores PROD's text, not the file's.
 COMMENT ON COLUMN public.api_keys.venue_account_id IS
   'Phase 154/WIZCONT-02, RE-STAMPED by 164.5.3/MT5CREDS (founder decision '
   'D-01-PRIME, 2026-09-20; full reasoning in 164.5.3-CONTEXT.md AMENDMENT '
@@ -461,8 +467,8 @@ COMMENT ON COLUMN public.api_keys.venue_account_id IS
   'REVOKE-then-allowlist governs it and anon is not on the allowlist.';
 
 COMMENT ON INDEX public.api_keys_user_exchange_venue_account_uniq IS
-  'Phase 154 / WIZCONT-02: at most one api_keys row per (user, venue, '
-  'venue-confirmed account id). The DB half of "one fence, two keys" — the app '
+  'Phase 154 / WIZCONT-02: at most one LIVE api_keys row per (user, venue, '
+  'account id). The DB half of "one fence, two keys" — the app '
   'fence in /api/strategies/create-with-key keys on wizard_session_id, this one '
   'keys on the credential identity, so a re-connect from a context that LOST the '
   'session token still dedups. CONTRACT: it FAILS TOWARD THE EXISTING ROW — the '
