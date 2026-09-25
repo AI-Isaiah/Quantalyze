@@ -271,18 +271,44 @@ export async function register() {
  * `server-only` and reads `next/headers`, which this hook does not need, so
  * the pattern is restated here rather than imported. Anything else is null,
  * never echoed.
+ *
+ * ⛔ CORRECTED 2026-09-25 (164.6.5 review round 2 / R2-SFH-11): "anything
+ * else is null" is kept above as lineage. An ABSENT header is still `null`
+ * (an old bundle that never sends it). A PRESENT header that fails the shape
+ * check — empty, whitespace, CR/LF, too long, or an array — is now the fixed
+ * sentinel `WIZARD_PAGE_LOAD_ID_MALFORMED`, so Sentry can tell "no header"
+ * from "a bad header" (a client bug). The sentinel's angle brackets are
+ * outside the shape allowlist, so no client value can ever read as it, and
+ * the client's own value is still never echoed.
  */
 const WIZARD_PAGE_LOAD_ID_SHAPE = /^[A-Za-z0-9._:-]{1,128}$/;
+const WIZARD_PAGE_LOAD_ID_MALFORMED = "<malformed>";
 
-function wizardPageLoadIdTag(raw: string | undefined): string | null {
+/**
+ * Next's DOCUMENTED type for an `onRequestError` header value is
+ * `string | string[]` (`node_modules/next/dist/docs/01-app/03-api-reference/
+ * 03-file-conventions/instrumentation.md`; `NodeJS.Dict<string | string[]>` in
+ * `next/dist/server/instrumentation/types.d.ts`). 164.6.5 review round 2 /
+ * IN-03: this used to take `string | undefined` and call `.trim()`, so an array
+ * would have thrown INSIDE the error hook and lost the capture. Node joins
+ * duplicate custom headers into one string, so it did not fire; the narrowed
+ * signature is what hid it. An array is not one page-load id, so it is
+ * malformed.
+ */
+function wizardPageLoadIdTag(raw: string | string[] | undefined): string | null {
   if (raw === undefined) return null;
+  if (typeof raw !== "string") return WIZARD_PAGE_LOAD_ID_MALFORMED;
   const trimmed = raw.trim();
-  return WIZARD_PAGE_LOAD_ID_SHAPE.test(trimmed) ? trimmed : null;
+  return WIZARD_PAGE_LOAD_ID_SHAPE.test(trimmed)
+    ? trimmed
+    : WIZARD_PAGE_LOAD_ID_MALFORMED;
 }
 
 export async function onRequestError(
   error: { digest?: string },
-  request: { path: string; method: string; headers: Record<string, string> },
+  // IN-03 — Next's documented header type, not the narrower
+  // `Record<string, string>` this hook used to declare.
+  request: { path: string; method: string; headers: NodeJS.Dict<string | string[]> },
   context: { routerKind: string; routePath: string; routeType: string; renderSource: string },
 ) {
   if (process.env.SENTRY_DSN) {
@@ -299,7 +325,12 @@ export async function onRequestError(
         // hands it to us already PARAMETERIZED (`/factsheet-share/[token]`),
         // which is the placeholder shape the scrubber produces anyway. It is
         // `request.path` below that is raw.
-        correlation_id: request.headers["x-correlation-id"] ?? null,
+        // IN-03 — a tag value must be a primitive, and an array is not one
+        // correlation id; only a string header becomes the tag.
+        correlation_id:
+          typeof request.headers["x-correlation-id"] === "string"
+            ? request.headers["x-correlation-id"]
+            : null,
         // 164.6.5 / WR-07 — the page-load grain, beside the per-request one.
         wizard_page_load_id: wizardPageLoadIdTag(
           request.headers["x-wizard-page-load-id"],
