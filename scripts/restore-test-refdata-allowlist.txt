@@ -141,6 +141,28 @@
 #     statement on such a table by name: C5 replays UPDATE only. At most one
 #     `update:` and one `decline:` line per (file, table); a second line of one
 #     kind is refused as a duplicate.
+#     ⛔ CORRECTED 2026-09-25 (164.9.2 review round 2, WR-01 / SFH R2-01). "so a
+#     decline can never hide a replayable effect" was FALSE for DO-body writes:
+#     round 1 made every one declinable with any reason text, so a LITERAL
+#     DO-body UPDATE of a seeded row, and a DO-body DELETE / TRUNCATE / MERGE /
+#     COPY that is a hard refusal at top level, both passed under a decline:
+#     line. The sentence above is kept as lineage. What a decline: line may
+#     account for is now exactly three things, and each is scoped truthfully:
+#       (1) a top-level NON-literal UPDATE, and (2) a NON-literal DO-body UPDATE.
+#           For both, "it reaches no row the replay wrote" is a REVIEW judgement
+#           in the line's reason. NO mechanism checks it. What the mechanism
+#           guarantees is only that the statement is not one C5 could replay.
+#       (3) a DO-body DELETE or INSERT … ON CONFLICT DO UPDATE that the
+#           extractor PROVES is keyed by a gen_random_uuid() the block declares
+#           once and never reassigns (`freshKeyProof`), so it can reach only rows
+#           the block itself wrote. A machine checked that one.
+#     Everything else is a HARD refusal that no line clears, at top level and in
+#     a DO body alike: a LITERAL UPDATE under a decline: (top level: add the
+#     update: line; DO body: C5 replays top level only, so move it there), an
+#     unproven DELETE or upsert, and any TRUNCATE, MERGE or COPY … FROM. An
+#     applied migration cannot be edited, so each refusal says which remedy
+#     applies: change a migration not yet applied, or, for one already applied,
+#     take the finding to review.
 #     ⛔ CORRECTED 2026-09-25 (164.9.2 review round 1, CR-01 / SFH-01 / WR-01).
 #     "no FROM, USING, SELECT, RETURNING or WITH, no `$`, and no call but
 #     `now()`" above was a DENYLIST, and it admitted `"pg_notify"(…)` (a quoted
@@ -343,6 +365,13 @@
 # DO-body write on a replayed public table is accounted for by a decline: line
 # (D-02: decline, never skip). The four below were MEASURED on 2026-09-25 by the
 # first --audit that could see them; the round-1 reviewers had counted 0.
+# ⚠️ ADDED 2026-09-25 (164.9.2 review round 2, WR-01 / SFH R2-01). Since round 2
+# only a DECLINABLE DO-body write may sit under one of these lines (see the C5
+# correction in the header). Of the four: the perfect_match UPDATE is declinable
+# because it is NON-literal, so its "reaches no replayed row" is a review
+# judgement. The two b5b DELETEs and the cleanup upsert are declinable because
+# `freshKeyProof` PROVES each is keyed by `v_user`, a gen_random_uuid() its block
+# declares once and never reassigns; that is checked, not asserted.
 20260407164606_perfect_match.sql	public.profiles	decline:1	# C5 DECLINE (D-02) — a DO-body UPDATE (:37) that sets is_admin from an app-namespace setting joined to auth.users. It reads session state and another schema, so it is not literal and never could be replayed; the only replayed profiles row is the teaser sentinel, which is not an admin, so it reaches no row the replay wrote.
 20260602183000_b5b_api_key_delete_atomicity.sql	public.profiles	decline:1	# C5 DECLINE (D-02) — a DO-body DELETE (:408) in the file's self-verification block, removing the probe profile the same block inserted under its own gen_random_uuid() id. It reaches no row the replay wrote.
 20260602183000_b5b_api_key_delete_atomicity.sql	public.strategies	decline:1	# C5 DECLINE (D-02) — a DO-body DELETE (:406) in the same self-verification block, removing the probe strategy the block inserted for its own probe user. It reaches no row the replay wrote.

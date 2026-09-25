@@ -123,7 +123,7 @@ interface MatchResult {
   ok: { line: number; sql: string }[];
   body: { line: number }[];
   rejected: { line: number; reason: string; nonLiteral?: boolean }[];
-  doWrites?: { line: number; verb: string }[];
+  doWrites?: { line: number; verb: string; declinable: boolean; reason: string }[];
 }
 
 /** Classify one file against one table, failing loud rather than returning empty. */
@@ -149,6 +149,9 @@ function measureUpdate(src: string, qualified: string, label: string): MatchResu
  * against top-level literal INSERTs, `update:` lines against top-level literal
  * UPDATEs, `decline:` lines against top-level NON-literal UPDATEs plus the writes
  * a DO body runs on the table at apply time (164.9.2 review WR-02 / SFH-02).
+ * ⛔ Since review round 2 (WR-01 / SFH R2-01) only a DECLINABLE DO-body write
+ * counts toward a decline:; one that is not (a literal UPDATE, an unproven DELETE
+ * or upsert, a TRUNCATE / MERGE / COPY) is a hard refusal, as at top level.
  */
 function measuredFor(e: Entry): { n: number; refused: string | null } {
   const src = readFileSync(join(MIGRATIONS_DIR, e.file), "utf8");
@@ -157,10 +160,16 @@ function measuredFor(e: Entry): { n: number; refused: string | null } {
     return { n: m.ok.length, refused: m.rejected[0]?.reason ?? null };
   }
   const m = measureUpdate(src, e.qualified, e.file);
-  const hard = m.rejected.filter((r) => !r.nonLiteral);
+  const hard = [
+    ...m.rejected.filter((r) => !r.nonLiteral),
+    ...(m.doWrites ?? []).filter((w) => !w.declinable),
+  ];
   if (hard.length > 0) return { n: -1, refused: hard[0].reason };
   return {
-    n: e.kind === "update" ? m.ok.length : m.rejected.length + (m.doWrites?.length ?? 0),
+    n:
+      e.kind === "update"
+        ? m.ok.length
+        : m.rejected.length + (m.doWrites ?? []).filter((w) => w.declinable).length,
     refused: null,
   };
 }

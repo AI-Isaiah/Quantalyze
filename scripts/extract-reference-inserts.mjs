@@ -1056,7 +1056,24 @@ export function matchOtherDml(prep, qualified) {
  * "0 unaccounted". The scan is unanchored over the masked body (strings are
  * blanked, so dynamic SQL built from a string literal is NOT seen: that limit is
  * printed on the audit's `C5 scope:` line).
- * @returns {Array<{line:number, verb:string}>}
+ *
+ * ⛔ A DO BODY DOES NOT LAUNDER A WRITE (164.9.2 review round 2, WR-01 / SFH
+ * R2-01). Round 1 made every hit here declinable, with any reason text. So a
+ * DELETE / TRUNCATE / MERGE / COPY of a replayed table, which is a HARD refusal at
+ * top level, became declinable by wrapping it in `DO $$ BEGIN … END $$`, and a
+ * LITERAL DO-body UPDATE of the row the replay seeded was declinable too, which
+ * made the allowlist's "a decline can never hide a replayable effect" false. Each
+ * hit now carries its own verdict from `doBodyWriteVerdict`:
+ *   * UPDATE — run through `updateLiteralCheck`. LITERAL is a HARD refusal (C5
+ *     replays top-level statements only, so no update: line can replay it, and a
+ *     decline may not hide it). NON-literal is declinable: a review judgement that
+ *     it reaches no replayed row, exactly as for a top-level non-literal UPDATE.
+ *   * DELETE, and INSERT … ON CONFLICT DO UPDATE — HARD, unless `freshKeyProof`
+ *     proves the write is keyed by a value the block itself minted with
+ *     gen_random_uuid(), so it can reach only rows the block wrote. Proven is
+ *     declinable, and the decline then hides nothing: a machine checked it.
+ *   * TRUNCATE, MERGE, COPY … FROM — HARD. No key narrows them.
+ * @returns {Array<{line:number, verb:string, declinable:boolean, reason:string}>}
  */
 export function matchDoBodyWrites(prep, qualified) {
   const [schema, table] = splitQualified(qualified);
@@ -1078,10 +1095,214 @@ export function matchDoBodyWrites(prep, qualified) {
     const text = prep.code.slice(b.start, b.end);
     for (const [verb, src] of heads) {
       const re = new RegExp(src, "gi");
-      for (let m; (m = re.exec(text)) !== null; ) hits.push({ line: prep.lineOf(b.start + m.index), verb });
+      for (let m; (m = re.exec(text)) !== null; ) {
+        // The statement is the masked text from the head to the next `;` (strings
+        // and comments are blanked, so neither can end it early or hide one).
+        const semi = text.indexOf(";", m.index);
+        const stmt = text.slice(m.index, semi === -1 ? text.length : semi);
+        hits.push({
+          line: prep.lineOf(b.start + m.index),
+          verb,
+          ...doBodyWriteVerdict(verb, stmt, text, id, qualified),
+        });
+      }
     }
   }
   return hits.sort((a, b) => a.line - b.line);
+}
+
+const IDENT = "[A-Za-z_][A-Za-z0-9_]*";
+
+/**
+ * The remedy a hard refusal names. An applied migration is immutable (the
+ * allowlist's own rule: "a pinned count moves ONLY when an applied migration is
+ * edited"), so the fix-the-SQL remedy exists only for a migration not yet applied.
+ */
+const HARD_REMEDY =
+  "If the migration is NOT yet applied, change it: key the write by a gen_random_uuid() value the same block minted, or take it out. An APPLIED migration cannot be edited, so on one of those this refusal is a finding for review, and no allowlist line can clear it";
+
+/**
+ * The verdict for one write a DO body runs on a replayed public table (164.9.2
+ * review round 2, WR-01 / SFH R2-01). See `matchDoBodyWrites`.
+ * @returns {{declinable:boolean, reason:string}}
+ */
+function doBodyWriteVerdict(verb, stmt, body, id, qualified) {
+  const runs = `a DO block runs ${verb} on ${qualified} when this migration applies`;
+  if (verb === "UPDATE") {
+    const why = updateLiteralCheck(stmt);
+    if (why === null) {
+      return {
+        declinable: false,
+        reason: `${runs}, and C5's literal check reads that UPDATE as LITERAL. C5 replays top-level statements only (C1), so no update: line can replay it, and a decline: line must never hide a literal write: the restore would commit the row without it while the ledger swears it ran. (A PL/pgSQL variable reads as a column reference here, so a variable-driven UPDATE also lands on this side.) Move the UPDATE to the migration's top level, where an update: line replays it — ${HARD_REMEDY} (C5, D-02)`,
+      };
+    }
+    return {
+      declinable: true,
+      reason: `${runs} (${why.replace(/ \(C5\)$/, "")}), and C5 never replays a DO body, so a restore commits the row without that write`,
+    };
+  }
+  if (verb === "DELETE" || verb === "INSERT … ON CONFLICT DO UPDATE") {
+    const key = freshKeyProof(verb, stmt, body, id);
+    if (key) {
+      return {
+        declinable: true,
+        reason: `${runs}, keyed by ${key}, so it can reach only rows the block itself wrote and never a row the replay wrote (proven by freshKeyProof, not asserted); C5 never replays a DO body`,
+      };
+    }
+    return {
+      declinable: false,
+      reason: `${runs}, and nothing PROVES it reaches only rows the block itself wrote. A top-level ${verb} of a replayed table is a hard refusal, and a DO body does not launder one into a decline. The one proof C5 accepts is a write keyed by a variable the block declares as gen_random_uuid() and never reassigns (\`DELETE … WHERE col = v\`, or an upsert whose conflict column takes v). ${HARD_REMEDY} (C5)`,
+    };
+  }
+  return {
+    declinable: false,
+    reason: `${runs}. A top-level ${verb} of a replayed table is a hard refusal, and a DO body does not launder one into a decline: no key narrows a ${verb} to the block's own rows. ${HARD_REMEDY} (C5)`,
+  };
+}
+
+/**
+ * The PL/pgSQL variables a masked DO body declares ONCE as `<v> uuid :=
+ * gen_random_uuid()` and never assigns again. Conservative by construction:
+ * anything that MIGHT assign the name disqualifies it, and a false
+ * disqualification only turns a proof into a refusal.
+ * @returns {{fresh:Set<string>, declared:Set<string>, labels:boolean}}
+ */
+export function freshKeyVars(body) {
+  const declared = new Set();
+  // Lookarounds, not consumed context: `DECLARE` is itself matched as a name here
+  // (`DECLARE v_id` reads like a declaration of `declare`), and consuming its type
+  // would swallow the real declaration that follows it.
+  const declRe = new RegExp(
+    `(?<=(?:^|;|\\bDECLARE\\b)${WS}*)(${IDENT})(?=${WS}+(?!:=|=)${IDENT})`,
+    "gi",
+  );
+  // Over-inclusive on purpose: `; END IF` reads as a declaration of `end`. A name
+  // in this set is refused as the COLUMN side of a key, so a surplus name can
+  // only turn a proof into a refusal, never the reverse.
+  for (let m; (m = declRe.exec(body)) !== null; ) declared.add(m[1].toLowerCase());
+  const fresh = new Set();
+  for (const name of declared) {
+    const count = (re) => (body.match(new RegExp(re, "gi")) ?? []).length;
+    const n = name;
+    const ok =
+      // declared exactly once in the whole body (a nested DECLARE can shadow it) …
+      count(`(?:^|;|\\bDECLARE\\b)${WS}*${n}${WS}+(?!:=|=)${IDENT}`) === 1 &&
+      // … and that one declaration is the fresh one;
+      count(
+        `(?:^|;|\\bDECLARE\\b)${WS}*${n}${WS}+(?:CONSTANT${WS}+)?uuid${WS}*(?::=|=|DEFAULT\\b)${WS}*gen_random_uuid${WS}*\\(${WS}*\\)${WS}*;`,
+      ) === 1 &&
+      // never `v := …`, never a statement-level `v = …` (PL/pgSQL accepts both);
+      count(`\\b${n}${WS}*:=`) === 0 &&
+      count(`(?:^|;|\\b(?:BEGIN|THEN|ELSE|LOOP|DECLARE)\\b)${WS}*${n}${WS}*=`) === 0 &&
+      // never a FOR-loop target, an INTO target, or a GET DIAGNOSTICS target;
+      count(`\\bFOR${WS}+(?:${IDENT}${WS}*,${WS}*)*${n}\\b`) === 0 &&
+      count(
+        `(?<!\\b(?:INSERT|MERGE)${WS}+)\\bINTO${WS}+(?:STRICT${WS}+)?(?:${IDENT}${WS}*,${WS}*)*${n}\\b`,
+      ) === 0 &&
+      count(`\\bDIAGNOSTICS\\b[^;]*\\b${n}\\b`) === 0 &&
+      // and never spelled quoted (a quoted spelling is a different identifier
+      // this scan does not follow).
+      count(`"${n}"`) === 0;
+    if (ok) fresh.add(name);
+  }
+  // A block label (`<<lbl>>`) lets `lbl.v` name a variable where a column is
+  // expected; with one present the column side of a key cannot be trusted.
+  return { fresh, declared, labels: body.includes("<<") };
+}
+
+/** Split a masked parenthesised list at its depth-0 commas. */
+function splitTopLevel(s) {
+  const parts = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "(" || s[i] === "[") depth++;
+    else if (s[i] === ")" || s[i] === "]") depth--;
+    else if (s[i] === "," && depth === 0) {
+      parts.push(s.slice(from, i));
+      from = i + 1;
+    }
+  }
+  parts.push(s.slice(from));
+  return parts.map((p) => p.trim());
+}
+
+/** The balanced `( … )` group opening at `s[at]`: its inner text and end, or null. */
+function parenGroup(s, at) {
+  if (s[at] !== "(") return null;
+  let depth = 0;
+  for (let i = at; i < s.length; i++) {
+    if (s[i] === "(") depth++;
+    else if (s[i] === ")" && --depth === 0) return { inner: s.slice(at + 1, i), end: i + 1 };
+  }
+  return null;
+}
+
+/**
+ * PROVE a DELETE or an `INSERT … ON CONFLICT DO UPDATE` reaches only rows its own
+ * block wrote (164.9.2 review round 2, WR-01 / WR-02). The proof is a key: the
+ * write is narrowed to rows carrying a value minted by gen_random_uuid() in this
+ * block — a DO-body variable per `freshKeyVars`, or, for an upsert, the call
+ * itself — and a row the replay wrote was keyed before that value existed.
+ *   DELETE FROM [ONLY] t WHERE <col> = <v>   (or `<v> = <col>`), nothing else;
+ *   INSERT INTO t (c…) VALUES (e…) ON CONFLICT (<ck>) DO UPDATE …, ONE tuple,
+ *     whose e at <ck>'s position is <v> or gen_random_uuid().
+ * `body` is the masked DO body, or null at top level (no variables there).
+ * A trigger on the target is outside this proof, as it is outside C5's (the
+ * allowlist's trigger paragraph).
+ * @returns {string|null} a description of the key, or null when unproven.
+ */
+export function freshKeyProof(verb, stmt, body, id) {
+  const vars = body === null ? { fresh: new Set(), declared: new Set(), labels: false } : freshKeyVars(body);
+  const isFreshVar = (v) => v !== undefined && vars.fresh.has(v.toLowerCase());
+  const s = stmt.trim().replace(/;$/, "").trim();
+  if (verb === "DELETE") {
+    const m = new RegExp(
+      `^DELETE${WS}+FROM${WS}+(?:ONLY${WS}+)?${id}${WS}+WHERE${WS}+((?:${IDENT}${WS}*\\.${WS}*)?${IDENT})${WS}*=${WS}*((?:${IDENT}${WS}*\\.${WS}*)?${IDENT})$`,
+      "i",
+    ).exec(s);
+    if (!m || vars.labels) return null;
+    // Either side may be the key; the OTHER side must be a COLUMN, never a
+    // variable (`WHERE v = v` is true of every row). A qualified name is a
+    // column (labels were refused above); an unqualified one must not be any
+    // name the block declares.
+    const isColumn = (x) => x.includes(".") || !vars.declared.has(x.toLowerCase());
+    for (const [key, other] of [
+      [m[2], m[1]],
+      [m[1], m[2]],
+    ]) {
+      if (isFreshVar(key) && isColumn(other)) {
+        return `\`${key}\`, a gen_random_uuid() the block declares once and never reassigns`;
+      }
+    }
+    return null;
+  }
+  const head = new RegExp(`^INSERT${WS}+INTO${WS}+${id}${WS}*`, "i").exec(s);
+  if (!head) return null;
+  const cols = parenGroup(s, head[0].length);
+  if (!cols) return null;
+  const vals0 = new RegExp(`^${WS}*VALUES${WS}*`, "i").exec(s.slice(cols.end));
+  if (!vals0) return null;
+  const vals = parenGroup(s, cols.end + vals0[0].length);
+  if (!vals) return null;
+  const tail = new RegExp(
+    `^${WS}*ON${WS}+CONFLICT${WS}*\\(${WS}*(${IDENT})${WS}*\\)${WS}*DO${WS}+UPDATE(?![A-Za-z0-9_])`,
+    "i",
+  ).exec(s.slice(vals.end));
+  if (!tail) return null;
+  const colList = splitTopLevel(cols.inner).map((c) => c.toLowerCase());
+  const valList = splitTopLevel(vals.inner);
+  if (colList.length !== valList.length) return null;
+  const at = colList.indexOf(tail[1].toLowerCase());
+  if (at < 0) return null;
+  const e = valList[at];
+  if (new RegExp(`^gen_random_uuid${WS}*\\(${WS}*\\)$`, "i").test(e)) {
+    return "a gen_random_uuid() call in the conflict column";
+  }
+  if (new RegExp(`^${IDENT}$`).test(e) && isFreshVar(e) && !vars.labels) {
+    return `\`${e}\` in the conflict column, a gen_random_uuid() the block declares once and never reassigns`;
+  }
+  return null;
 }
 
 /**
@@ -1092,18 +1313,23 @@ export function matchDoBodyWrites(prep, qualified) {
  */
 export function c5Verdict(m, qualified, upd, dec) {
   const refusals = [];
-  const hard = m.rejected.filter((r) => !r.nonLiteral);
-  // A decline: line counts EVERY write of this (file, table) C5 will not replay:
-  // top-level non-literal UPDATEs AND, since 164.9.2 review WR-02 / SFH-02, the
-  // writes a DO body runs at apply time. Neither may pass unaccounted.
+  // ⛔ Since 164.9.2 review round 2 (WR-01 / SFH R2-01) a DO-body write that is
+  // not declinable (a literal UPDATE, an unproven DELETE or upsert, any TRUNCATE /
+  // MERGE / COPY) is a HARD refusal, like its top-level twin: no line clears it.
+  const doWrites = m.doWrites ?? [];
+  const hard = [
+    ...m.rejected.filter((r) => !r.nonLiteral),
+    ...doWrites.filter((h) => !h.declinable),
+  ].sort((a, b) => a.line - b.line);
+  // A decline: line counts EVERY write of this (file, table) C5 will not replay
+  // and may account for: top-level non-literal UPDATEs AND, since 164.9.2 review
+  // WR-02 / SFH-02, the DECLINABLE writes a DO body runs at apply time. Neither
+  // may pass unaccounted.
   const nonLit = [
     ...m.rejected.filter((r) => r.nonLiteral),
-    ...(m.doWrites ?? []).map((h) => ({
-      line: h.line,
-      nonLiteral: true,
-      doBody: true,
-      reason: `a DO block runs ${h.verb} on ${qualified} when this migration applies, and C5 never replays a DO body, so a restore commits the row without that write`,
-    })),
+    ...doWrites
+      .filter((h) => h.declinable)
+      .map((h) => ({ line: h.line, nonLiteral: true, doBody: true, reason: h.reason })),
   ].sort((a, b) => a.line - b.line);
   for (const r of hard) refusals.push({ line: r.line, reason: r.reason });
   const publicOnly = qualified.startsWith("public.");
@@ -1154,8 +1380,12 @@ export function c5Verdict(m, qualified, upd, dec) {
               // decline it with a reason", and a classifier over-refusal then walked a
               // replayable UPDATE straight into a decline: line. A decline is for a
               // statement that really reads other rows or calls something.
+              // ⛔ Round 2 (WR-01 / SFH R2-01): this used to offer "or move the
+              // write to a top-level literal UPDATE", a remedy an APPLIED
+              // migration does not have, and a declinable DO-body write is by
+              // now non-literal or fresh-keyed, so moving it would not help.
               r.doBody
-              ? `NO C5 allowlist line for a DO-body write C5 will not replay — ${r.reason}. Account for it with a decline: line whose reason says why it reaches no row the replay wrote (a self-test fixture keyed by its own uid, say), or move the write to a top-level literal UPDATE (C5, D-02)`
+              ? `NO C5 allowlist line for a DO-body write C5 will not replay — ${r.reason}. Account for it with a decline: line whose reason says why it reaches no row the replay wrote; for a non-literal UPDATE that reason is a REVIEW judgement no mechanism checks (C5, D-02)`
               : `NO C5 allowlist line for a top-level UPDATE C5 will not replay — ${r.reason}. A decline: line is for a statement that genuinely reads other rows or calls a function (a join, a sub-select, a call); if this statement is literal, the classifier is wrong: fix the classifier, never decline a replayable effect (C5, D-02)`,
       });
     }
@@ -1733,8 +1963,14 @@ function modeAudit(io, allowlistPath, migrationsDir) {
  * MEASURED 2026-09-25 (review round 2, CR-01): `extract-reference-inserts
  * self-test OK: 57 kinds, red+green each.`, exit 0. 56 → 57: `c5-update-set-call`.
  * The layer-2 vitest was observed RED (`declares 57 … still 56`) before this raise.
+ *
+ * MEASURED 2026-09-25 (review round 2, WR-01 / SFH R2-01, a DO body does not
+ * launder a write): `extract-reference-inserts self-test OK: 60 kinds, red+green
+ * each.`, exit 0. 57 → 60: `c5-audit-do-body-literal-update`, `-delete` and
+ * `-truncate`. The layer-2 vitest was observed RED (`declares 60 … still 57`)
+ * before this raise.
  */
-export const SELF_TEST_KINDS_FLOOR = 57;
+export const SELF_TEST_KINDS_FLOOR = 60;
 
 /**
  * @type {Array<{id:string, why:string, audit?:boolean, expect:string, redStderr?:RegExp, greenStdout?:RegExp, greenAbsent?:RegExp}>}
@@ -2066,10 +2302,35 @@ export const SELF_TEST_KINDS = [
   },
   {
     id: "c5-audit-do-body-write",
-    why: "C5 --audit (review WR-02 item 2 / SFH-02): a DO body EXECUTES when its migration applies, and C5 never replays one; its UPDATE of a replayed table used to fall into the body bucket in silence. The green leg accounts for it with decline:1 and pins that an UPDATE inside a CREATE FUNCTION body — defined, never executed — is NOT counted",
+    why: "C5 --audit (review WR-02 item 2 / SFH-02): a DO body EXECUTES when its migration applies, and C5 never replays one; its UPDATE of a replayed table used to fall into the body bucket in silence. The green leg accounts for it with decline:1 and pins that an UPDATE inside a CREATE FUNCTION body — defined, never executed — is NOT counted. ⛔ Round 2 (WR-01): both legs' write is NON-literal and targets id 2, a row the replay did not write; until round 2 the green declined a LITERAL write of the seeded id 1, the hidden replayable effect a decline must never cover",
     audit: true,
     expect: "NO C5 allowlist line for a DO-body write C5 will not replay — a DO block runs UPDATE on public.fx_ref",
     greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 1 declined over 1 file\(s\); 0 unaccounted\./,
+  },
+  // ── A DO body does not launder a write (164.9.2 review round 2, WR-01 / SFH R2-01).
+  {
+    id: "c5-audit-do-body-literal-update",
+    why: "C5 --audit (review round 2, WR-01 / SFH R2-01): a LITERAL UPDATE inside a DO body rewrote the row the replay seeded, and a decline: line cleared it with any reason text, so 'a decline can never hide a replayable effect' was false. It is now a hard refusal whatever the allowlist says, and so is one driven by a PL/pgSQL variable (it reads as a column). The green leg is the remedy for an unapplied migration: the literal UPDATE at top level under update:1, and only a NON-literal write on an unreplayed row left in the DO body under decline:1",
+    audit: true,
+    expect: "a DO block runs UPDATE on public.fx_ref when this migration applies, and C5's literal check reads that UPDATE as LITERAL",
+    redStderr: /fx_b\.sql:4 \[public\.fx_ref\]: a DO block runs UPDATE[^\n]*as LITERAL[\s\S]*fx_b\.sql:11 \[public\.fx_ref\]: a DO block runs UPDATE[^\n]*as LITERAL/,
+    greenStdout: /audit C5 OK: 1 update statement\(s\) over 1 file\(s\) and 1 table\(s\) replayed; 1 declined over 1 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-do-body-delete",
+    why: "C5 --audit (review round 2, WR-01 / SFH R2-01): a top-level DELETE of a replayed table is a hard refusal, and wrapping it in a DO body made it declinable. It is hard again, unless freshKeyProof PROVES it is keyed by a gen_random_uuid() the block declares once and never reassigns. The red legs: a direct DELETE of the seeded row, a key the block REASSIGNS, and a key a nested block SHADOWS. The green leg is the corpus's own b5b idiom, with the key on either side of `=`",
+    audit: true,
+    expect: "a DO block runs DELETE on public.fx_ref when this migration applies, and nothing PROVES it reaches only rows the block itself wrote",
+    redStderr: /fx_b\.sql:4 \[[^\n]*nothing PROVES[\s\S]*fx_b\.sql:12 \[[^\n]*nothing PROVES[\s\S]*fx_b\.sql:22 \[[^\n]*nothing PROVES/,
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 2 declined over 1 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-do-body-truncate",
+    why: "C5 --audit (review round 2, WR-01 / SFH R2-01): TRUNCATE, MERGE and COPY … FROM of a replayed table are hard refusals at top level and, since round 2, inside a DO body too, whatever the allowlist says; no key narrows them. The green leg pins that the same three writes on a table no INSERT entry fills are outside C5",
+    audit: true,
+    expect: "a DO block runs TRUNCATE on public.fx_ref when this migration applies. A top-level TRUNCATE of a replayed table is a hard refusal",
+    redStderr: /a DO block runs MERGE on public\.fx_ref[\s\S]*a DO block runs COPY … FROM on public\.fx_ref/,
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
   },
   {
     id: "c5-audit-unlisted-upsert",

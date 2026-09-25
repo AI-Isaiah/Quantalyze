@@ -116,6 +116,11 @@ const REQUIRED_KINDS = [
   "c5-audit-unlisted-truncate",
   "c5-audit-unlisted-merge",
   "c5-audit-unlisted-cte-delete",
+  // A DO body does not launder a write (review round 2, WR-01 / SFH R2-01),
+  // MEASURED 2026-09-25 → `OK: 60 kinds`.
+  "c5-audit-do-body-literal-update",
+  "c5-audit-do-body-delete",
+  "c5-audit-do-body-truncate",
 ];
 
 describe("SELF_TEST_KINDS_FLOOR — the extractor's self-test corpus is ratcheted", () => {
