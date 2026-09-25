@@ -544,6 +544,43 @@ def bump_mt5_terminal_epoch(terminal_key: str) -> int:
     return nxt
 
 
+# --------------------------------------------------------------------------- #
+# ⭐ "THE TERMINAL ANSWERED" — a per-terminal COUNT of bare `initialize()` calls
+# that returned truthy, from ANY caller in this process (164.6.5 review round 1,
+# SFH-05 / WR-08).
+#
+# WHY IT EXISTS. The heal's ipc_fault escalation is debounced to one terminal
+# recycle per run of consecutive wedged readings, and a run must end when the
+# terminal is SEEN answering again. The heal's own probe is not the only thing
+# that sees it: the job path's `login()` opens with the same bare `initialize()`,
+# and while jobs hold the lease every monitor tick is a busy SKIP that measures
+# nothing. Before this count, a recovery only jobs observed left the gate
+# disarmed, and the NEXT wedge was debounced as if it were the old one.
+#
+# ⛔ WHAT COUNTS: a bare `initialize()` returning truthy — the terminal answered
+# its IPC. Never a `last_error()` (bridge-local), never a raise, never a falsy
+# return (a wedged terminal answers falsy). The count carries no credential and
+# no account: it is a number per `host:port`.
+#
+# ⛔ LOCK-FREE, like `_MT5_TERMINAL_EPOCHS` above and for the same reason. Two
+# racing increments can lose one, and that is harmless: the only question ever
+# asked of the count is "has it CHANGED since the escalation was claimed", and a
+# lost increment still changes it.
+# --------------------------------------------------------------------------- #
+_MT5_TERMINAL_ANSWERS: dict[str, int] = {}
+
+
+def _note_terminal_answered(terminal_key: str) -> None:
+    """Record that a bare ``initialize()`` on this terminal returned truthy."""
+    _MT5_TERMINAL_ANSWERS[terminal_key] = _MT5_TERMINAL_ANSWERS.get(terminal_key, 0) + 1
+
+
+def mt5_terminal_answer_count(terminal_key: str) -> int:
+    """How many times, in this process, the terminal has answered a bare
+    ``initialize()`` truthily. Unknown key -> 0. A READ never mints an entry."""
+    return _MT5_TERMINAL_ANSWERS.get(terminal_key, 0)
+
+
 def _reset_mt5_epochs_for_tests() -> None:
     """Clear the epoch registry between tests (RESEARCH Pitfall 8).
 
@@ -553,8 +590,12 @@ def _reset_mt5_epochs_for_tests() -> None:
     code, and not to be: it is reached through the ONE shared
     `mt5_concurrency.reset_terminal_state_for_tests()` so a future third registry
     has exactly one home to be added to.
+
+    ⭐ It also clears the answered-count registry above (164.6.5 review round 1):
+    that IS the third registry, and this is the one home it was promised.
     """
     _MT5_TERMINAL_EPOCHS.clear()
+    _MT5_TERMINAL_ANSWERS.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -1396,6 +1437,9 @@ class Mt5Client:
             # submitted account or server back at us. The triple is in scope here, so
             # the shared raise site redacts it BY VALUE.
             self._raise_last(credentials=(login, password, server))
+        # ⭐ 164.6.5 SFH-05 — the job path's bare `initialize()` answering is the
+        # terminal answering, whoever asked. See `_MT5_TERMINAL_ANSWERS`.
+        _note_terminal_answered(self.terminal_key)
         try:
             ok = self._timed(
                 "login",
@@ -1489,6 +1533,8 @@ class Mt5Client:
             raise Mt5ClientError(0, scrub_freeform_string(str(exc))) from None
         if not inited:
             self._raise_last()
+        # ⭐ 164.6.5 SFH-05 — see `_MT5_TERMINAL_ANSWERS`.
+        _note_terminal_answered(self.terminal_key)
 
     def initialize_with_credentials(
         self, login: int, password: str, server: str

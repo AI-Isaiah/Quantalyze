@@ -455,8 +455,29 @@ def _clear_blind_run() -> None:
 # production read `not_healed:ipc_fault` FIVE consecutive times on 2026-09-21. So
 # the recycle is debounced to ONE attempt per run of consecutive escalating
 # readings: the gate is ARMED at the start of a run, DISARMED the moment the
-# escalation fires, and RE-ARMED by any first-probe reading that is not the
-# escalating class. Five readings of one wedge, one recovery attempt.
+# escalation fires, and RE-ARMED when the terminal is MEASURED ANSWERING. Five
+# readings of one wedge, one recovery attempt.
+#
+# ⛔ WHAT RE-ARMS IT, AND WHAT DELIBERATELY DOES NOT (164.6.5 review round 1,
+# WR-08 / SFH-05 / CR-01). It used to be "any first-probe reading that is not the
+# escalating class", which was wrong in both directions:
+#
+#   * too EAGER — the `0` sentinel is `_raise_last`'s "last_error() itself failed
+#     or answered malformed", which measured NOTHING about the session, and
+#     `-10003` / `-10004` are IPC faults too. A bridge that intermittently timed
+#     out `last_error()` during a wedge (-10005, 0, -10005, 0 ...) re-armed the
+#     gate every other tick and recycled the shared terminal every 20 minutes,
+#     which is the periodic outage the debounce exists to prevent. These readings
+#     are now NEUTRAL: they neither arm nor disarm.
+#   * too NARROW — only the heal's own first probe could re-arm it. A recycle
+#     whose relaunch MEASURED the terminal answering (CR-01), and a recovery only
+#     the job path saw while every monitor tick was a busy skip (SFH-05), both
+#     left it disarmed, so the NEXT wedge was debounced as if it were the old one.
+#
+# So the run ends when the terminal answers: an authorized reading or `-6` from
+# any heal probe (first probe, re-probe, relaunch), OR any bare `initialize()`
+# in this process returning truthy since the claim — the job path's `login()`
+# included (`mt5_client.mt5_terminal_answer_count`).
 #
 # ⛔ The alternative is not a noisier log, it is an outage: at a ten-minute
 # cadence an un-debounced escalation recycles the ONE shared terminal every ten
@@ -472,29 +493,45 @@ def _clear_blind_run() -> None:
 # --------------------------------------------------------------------------- #
 _IPC_FAULT_ESCALATION_ARMED: bool = True
 
+#: The terminal's answered-count (``mt5_client.mt5_terminal_answer_count``) at
+#: the moment the escalation was claimed. ``None`` while armed.
+_IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER: int | None = None
 
-def claim_ipc_fault_escalation() -> bool:
+
+def claim_ipc_fault_escalation(answer_count: int) -> bool:
     """``True`` exactly once per run of escalating readings, and DISARMS on it.
+
+    ``answer_count`` is the terminal's answered-count NOW. If it has moved since
+    the previous claim, the terminal answered in between — the run that claim
+    belonged to is over — so the gate re-arms before it is claimed (SFH-05).
 
     ⛔ A SEPARATE FUNCTION for the same reason ``_count_blind_reading`` is one: a
     ``global`` declaration is a statement, and the heal's own bodies are held to
     shapes a stray statement would break. It cannot raise.
     """
-    global _IPC_FAULT_ESCALATION_ARMED
+    global _IPC_FAULT_ESCALATION_ARMED, _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER
+    if (
+        _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER is not None
+        and answer_count != _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER
+    ):
+        _IPC_FAULT_ESCALATION_ARMED = True
     armed = _IPC_FAULT_ESCALATION_ARMED
     _IPC_FAULT_ESCALATION_ARMED = False
+    _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER = answer_count
     return armed
 
 
 def rearm_ipc_fault_escalation() -> None:
-    """A first-probe reading that is NOT the escalating class ends the run.
+    """The terminal was MEASURED answering, so the run of faults is over.
 
-    ⭐ Whatever it found — authorized, ``-6``, the detached bridge, the ``0``
-    sentinel: the terminal is no longer answering the way the wedge did, so the
-    NEXT wedge is a new run and earns its own one attempt.
+    ⭐ Called for an authorized reading or ``-6``, from any heal probe. ⛔ NEVER
+    for the ``0`` sentinel, ``-10003`` or ``-10004``: those measured no answer,
+    and re-arming on them is what let a flaky bridge recycle the terminal every
+    other tick (WR-08).
     """
-    global _IPC_FAULT_ESCALATION_ARMED
+    global _IPC_FAULT_ESCALATION_ARMED, _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER
     _IPC_FAULT_ESCALATION_ARMED = True
+    _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER = None
 
 
 def _reset_session_episode_state_for_tests() -> None:

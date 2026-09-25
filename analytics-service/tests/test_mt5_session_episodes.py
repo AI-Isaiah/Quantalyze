@@ -541,6 +541,12 @@ _DECLARED_MUTABLE_MODULE_GLOBALS = {
         "keyed on it. A redeploy re-arms it, which costs at most one extra "
         "recycle attempt per deploy during a wedge that spans one."
     ),
+    "_IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER": (
+        "164.6.5 review round 1 (SFH-05) — an INT: the terminal's answered-count "
+        "when the recycle was claimed, so a recovery only the job path saw ends "
+        "the debounced run. It gates the same ACTION as the bool above and never "
+        "a dataset value; a redeploy resets it together with that bool."
+    ),
 }
 
 

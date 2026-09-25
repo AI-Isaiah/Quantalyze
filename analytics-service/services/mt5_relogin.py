@@ -66,6 +66,7 @@ from services.mt5_client import (
     Mt5ClientError,
     Mt5SessionAbandoned,
     _redact_credential_values,
+    mt5_terminal_answer_count,
     mt5_terminal_key,
 )
 from services.mt5_concurrency import Mt5TerminalBusyError, mt5_terminal_lease
@@ -810,8 +811,10 @@ def _escalate_ipc_fault(
 
     ⛔ THE CODE GATE: ``_RECYCLE_REACHABLE_IPC_CODES`` only. A DETACHED bridge
     (``-10004``) gives the recycle nothing to talk to, and ``-10003`` and the
-    ``0`` sentinel are not the wedge. Every non-escalating reading RE-ARMS the
-    once-per-run gate.
+    ``0`` sentinel are not the wedge. ⛔ Those readings are NEUTRAL to the
+    once-per-run gate (WR-08): they measured no answer from the terminal, so they
+    neither end the run nor start one. Only the terminal MEASURED answering
+    re-arms it — see the gate's comment in ``mt5_session_episodes``.
 
     ⛔ THE DEBOUNCE: without it, a ten-minute cadence recycles a shared terminal
     every ten minutes forever when the recycle does not help — a self-inflicted
@@ -833,13 +836,16 @@ def _escalate_ipc_fault(
     kinds, codes and counts only; never a credential, host, port or account.
     """
     if code not in _RECYCLE_REACHABLE_IPC_CODES:
-        rearm_ipc_fault_escalation()
+        # ⛔ WR-08 — NO re-arm here. `0` measured nothing, and `-10003` / `-10004`
+        # are the terminal NOT answering either; re-arming on them let a flaky
+        # bridge (-10005, 0, -10005, 0 ...) recycle the shared terminal every
+        # other tick.
         return None
-    if not claim_ipc_fault_escalation():
+    if not claim_ipc_fault_escalation(mt5_terminal_answer_count(client.terminal_key)):
         logger.info(
             "mt5 session heal: ipc_fault code=%s persists — the terminal-process "
             "recycle was already attempted in this run of consecutive faults, so "
-            "it is NOT repeated (once per run; a different reading re-arms it).",
+            "it is NOT repeated (once per run; the terminal answering re-arms it).",
             code,
         )
         return None

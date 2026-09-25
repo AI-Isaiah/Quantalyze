@@ -280,6 +280,13 @@ class _FakeMt5:
         self.round_trips.append("account_info")
         return self._scenario.get("account_info")
 
+    def login(self, *args, **kwargs):
+        # ⭐ 164.6.5 SFH-05 — the JOB path's per-call login, reached only by the
+        # gate proving a recovery the job path saw re-arms the escalation.
+        self.call_order.append("login")
+        self.round_trips.append("login")
+        return self._scenario.get("login", True)
+
     def last_error(self):
         self.round_trips.append("last_error")
         if self.recycled and "last_error_after_recycle" in self._scenario:
@@ -1626,6 +1633,72 @@ async def test_ESCALATION_CR01_a_recycle_that_WORKED_re_arms_so_the_NEXT_wedge_i
 
 
 @pytest.mark.parametrize(
+    "neutral_code",
+    [
+        pytest.param(0, id="the-unattributed-sentinel"),
+        pytest.param(-10003, id="ipc-init-failed"),
+        pytest.param(-10004, id="bridge-DETACHED"),
+    ],
+)
+async def test_ESCALATION_WR08_a_reading_that_measured_no_answer_does_NOT_re_arm(
+    monkeypatch: pytest.MonkeyPatch, neutral_code: int
+) -> None:
+    """⛔ WR-08 (164.6.5 review round 1). `0` is `_raise_last`'s sentinel for
+    "last_error() itself failed" — it measured NOTHING — and `-10003` / `-10004`
+    are the terminal not answering either. A bridge that intermittently times
+    out `last_error()` during a wedge reads `-10005, 0, -10005, 0 ...`; if the
+    middle reading re-arms the gate, the shared terminal is recycled every other
+    tick (every 20 minutes), the periodic outage the debounce exists to prevent.
+    `-10005, <neutral>, -10005` must be ONE recycle."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, dict(_WEDGED))
+    _capture_outcomes(monkeypatch)
+
+    await _heal_n_times(1)
+    assert _recycle_count(fake) == 1
+
+    fake._scenario["last_error_after_recycle"] = (neutral_code, "no answer")
+    await _heal_n_times(1)
+    fake._scenario["last_error_after_recycle"] = (_IPC_TIMEOUT, _IPC_TIMEOUT_TEXT)
+    await _heal_n_times(1)
+
+    assert _recycle_count(fake) == 1, (
+        f"a `{neutral_code}` reading between two wedged readings re-armed the "
+        "gate and the terminal was recycled again (WR-08)"
+    )
+
+
+async def test_ESCALATION_SFH05_a_recovery_ONLY_the_job_path_saw_re_arms_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ SFH-05 (164.6.5 review round 1). While jobs hold the lease every monitor
+    tick is a busy SKIP that measures nothing, so the heal's own probe never sees
+    the terminal recover. A job's `login()` does: its bare `initialize()`
+    answered. The next wedge after that is a NEW run and must be recycled — not
+    debounced as "already attempted in this run"."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, dict(_WEDGED))
+    _capture_outcomes(monkeypatch)
+
+    await _heal_n_times(1)
+    assert _recycle_count(fake) == 1
+
+    # A job, on its own client for the SAME terminal, logs in successfully.
+    healthy = _FakeMt5({"initialize": True, "login": True})
+    job_client = Mt5Client(
+        _FAKE_HOST, int(_FAKE_PORT), _connect=lambda **_k: healthy
+    )
+    job_client.login(int(_FAKE_LOGIN), _FAKE_PASSWORD, _FAKE_SERVER)
+
+    await _heal_n_times(1)  # the terminal has wedged again
+
+    assert _recycle_count(fake) == 2, (
+        "the terminal answered the job path's login between the two wedges, "
+        "yet the second wedge was debounced as the same run (SFH-05)"
+    )
+
+
+@pytest.mark.parametrize(
     "code",
     [
         pytest.param(-10004, id="bridge-DETACHED"),
@@ -1739,6 +1812,8 @@ def test_ESCALATION_the_session_abandonment_exception_still_escapes_untouched(
     from services.mt5_client import Mt5SessionAbandoned
 
     class _Client:
+        terminal_key = "stub.test:1"
+
         def __init__(self, raise_in: str) -> None:
             self._raise_in = raise_in
 
