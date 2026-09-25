@@ -1030,8 +1030,9 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     // withheld from the client payload with the curve; the count stays.
     expect(result.equitySnapshots).toEqual([]);
     // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
-    // so the display series is [] for every allocator; plan 11 restores the
-    // content pin when it defines "ready".
+    // so the display series is [] for every allocator. The legacy series'
+    // content is pinned on the adapter (allocation-helpers.equity-adapter.test.ts)
+    // and retires with the legacy branch, which plan 11 removes.
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityDailyPoints).toEqual([]);
   });
@@ -1096,8 +1097,9 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     // absence is pinned by the count above while the history is rebuilt.
     expect(result.equitySnapshots).toEqual([]);
     // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
-    // so the display series is [] for every allocator; plan 11 restores the
-    // content pin when it defines "ready".
+    // so the display series is [] for every allocator. The legacy series'
+    // content is pinned on the adapter (allocation-helpers.equity-adapter.test.ts)
+    // and retires with the legacy branch, which plan 11 removes.
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -1257,8 +1259,9 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     expect(result.snapshotCount).toBe(5);
     expect(result.equitySnapshots).toEqual([]);
     // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
-    // so the display series is [] for every allocator; plan 11 restores the
-    // content pin when it defines "ready".
+    // so the display series is [] for every allocator. The legacy series'
+    // content is pinned on the adapter (allocation-helpers.equity-adapter.test.ts)
+    // and retires with the legacy branch, which plan 11 removes.
     expect(result.equityDailyPoints).toEqual([]);
   });
 
@@ -3075,10 +3078,10 @@ describe("115.1 equity display-repoint", () => {
     // the empty series below is the D-02 gate, not an empty input.
     expect(legacyExpectedDailyPoints().length).toBeGreaterThan(0);
     // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
-    // every allocator). What it WOULD show is pinned directly on the extractor
-    // it calls (review round 1 SFH-04), so this case can still fail on a
-    // regression in the trust gate while the curve is hidden.
-    expect(await candidateDerivedCurve()).toBeNull();
+    // every allocator). With no derived row seeded, the extractor's input is
+    // `null`, so asserting on it here would be a constant (review round 2
+    // IN-03). What this case can still fail on is the source stamp below: a
+    // producer that picked the derived branch without a row would mislabel it.
     expect(result.equityDailyPoints).toEqual([]);
     // Neuter gap: the no-row case must ALSO stamp the source 'legacy' (only the
     // derived/untrusted pins asserted the source before) — a repoint that
