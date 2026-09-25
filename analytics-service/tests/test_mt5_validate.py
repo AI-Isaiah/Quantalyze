@@ -46,13 +46,17 @@ Regression gates — WHY each case matters (Rule 9):
 """
 from __future__ import annotations
 
+import ast
 import asyncio
+import io
 import json
 import logging
 import pathlib
+import re
 import sys
 import threading
 import time
+import tokenize
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -2862,3 +2866,264 @@ async def test_a_connect_stage_abandon_is_transient_and_never_the_counting_503(
     assert validate[0]["outcome"] == "transient"
     assert validate[0]["outcome"] != "gateway_unreachable"
     assert validate[0]["ok"] is False
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.5 / criterion 7 / D-15 — THE SETTINGS LANDMINE IS PINNED, NOT TICKED.
+#
+# The gateway terminal's Expert-Advisors tab carries "Disable algorithmic trading
+# when the account has been changed". Validation LOGS THE SHARED TERMINAL IN, so
+# every validation is an account change: ticking that box would silently disable
+# algo trading for every client. The box itself cannot be read (it reaches disk
+# only on a clean terminal exit), so the CONSEQUENCE is the check — a connected
+# terminal reporting its own trade permission off — and it must be LOUD. These
+# gates keep it loud, keep it from false-alarming, and keep this repo from ever
+# gaining a path that writes a terminal option.
+#
+# ⛔ The label below is HAND-TYPED from the on-screen label the founder read over
+# VNC on 2026-09-24, never imported from the module under test.
+# --------------------------------------------------------------------------- #
+
+_ACCOUNT_CHANGE_OPTION_LABEL = (
+    "Disable algorithmic trading when the account has been changed"
+)
+_ANALYTICS_LOGGER = "quantalyze.analytics"
+
+
+def _landmine_client():
+    """A connected terminal whose OWN trade permission is off — the observable
+    consequence of the landmine, and the only one."""
+    return _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal={"connected": True, "trade_allowed": False},
+    )
+
+
+def _operator_arm_records(caplog):
+    return [
+        r
+        for r in caplog.records
+        if r.name == _ANALYTICS_LOGGER and "capability undetermined" in r.getMessage()
+    ]
+
+
+async def test_d15_lost_terminal_permission_logs_above_an_ordinary_verdict(
+    exchange_router, caplog, monkeypatch
+):
+    """The shared terminal serving EVERY client has lost algo permission. Logged at
+    WARNING it sat below a merely-unset `MT5_GATEWAY_HOST`, which this same router
+    logs at ERROR — a severity inversion that hides the one outage that takes every
+    MT5 client down at once. It must be ABOVE an ordinary verdict and NEVER below
+    the unset-env arm."""
+    router = exchange_router
+    _install_mt5_client(router, _landmine_client())
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req())
+    records = _operator_arm_records(caplog)
+    assert len(records) == 1, f"expected ONE operator-arm line, got {records!r}"
+    level = records[0].levelno
+    assert level > logging.WARNING, (
+        f"the lost-terminal-permission line logged at {records[0].levelname}: a "
+        "shared terminal refusing algo trading for EVERY client reads like one "
+        "user's routine refusal, and nobody is paged until clients report it"
+    )
+
+    # ...and never below the unset-env arm, measured from the SAME router.
+    caplog.clear()
+    monkeypatch.delenv("MT5_GATEWAY_HOST", raising=False)
+    monkeypatch.delenv("MT5_GATEWAY_PORT", raising=False)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req())
+    env_levels = [
+        r.levelno
+        for r in caplog.records
+        if r.name == _ANALYTICS_LOGGER and "not configured" in r.getMessage()
+    ]
+    assert env_levels, "the unset-env comparison is vacuous — its line was not seen"
+    assert level >= max(env_levels), (
+        "the lost-terminal-permission line logs BELOW an unset env var — the "
+        "severity inversion mt5_relogin's WR-01 already corrected for its own verdicts"
+    )
+
+
+async def test_d15_the_line_names_the_setting_and_why_validation_trips_it(
+    exchange_router, caplog
+):
+    """One line must tell an operator BOTH the what and the why: which setting,
+    and that validation is itself an account change. Asserted on what the line
+    SAYS — a gate that only checked a word was absent would pass a reword that
+    dropped the cause."""
+    router = exchange_router
+    _install_mt5_client(router, _landmine_client())
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req())
+    records = _operator_arm_records(caplog)
+    assert len(records) == 1, f"expected ONE operator-arm line, got {records!r}"
+    line = records[0].getMessage()
+    assert _ACCOUNT_CHANGE_OPTION_LABEL in line, (
+        f"the line does not name the landmine setting: {line!r}"
+    )
+    assert "Validation is an account change" in line, (
+        f"the line does not say why a validation trips the setting: {line!r}"
+    )
+    assert "Allow algorithmic trading" in line, (
+        f"the line does not name the permission that is off: {line!r}"
+    )
+    assert "every" in line and "client" in line, (
+        f"the line does not say the terminal is SHARED by every client: {line!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "terminal, why",
+    [
+        (None, "unreadable — terminal_info() raised"),
+        ({"connected": False, "trade_allowed": False}, "disconnected AND permission off"),
+        ({"connected": False, "trade_allowed": True}, "disconnected"),
+        ({"trade_allowed": False}, "malformed — no connected field"),
+        ({"connected": True}, "malformed — no trade_allowed field"),
+    ],
+)
+async def test_d15_the_loud_check_never_false_alarms_on_a_bridge_blip(
+    exchange_router, caplog, terminal, why
+):
+    """⭐ The assertion that stops the loud check becoming a false-alarm generator.
+    An unreadable, malformed or disconnected terminal proves NOTHING about the
+    landmine — it is our bridge blipping and it clears on retry. It must route
+    TRANSIENT and emit NOTHING above WARNING; paging an operator about a setting
+    for a network blip is how a real alarm gets ignored."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK, terminal=terminal
+    )
+    _install_mt5_client(router, client)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.status_code == 424, f"{why}: not the transient arm"
+    assert ei.value.detail == NETWORK_ERROR_DETAIL, f"{why}: not the transient arm"
+    loud = [
+        r for r in caplog.records
+        if r.name == _ANALYTICS_LOGGER and r.levelno > logging.WARNING
+    ]
+    assert not loud, f"{why}: a bridge blip raised a loud line {loud!r}"
+    assert all(
+        _ACCOUNT_CHANGE_OPTION_LABEL not in r.getMessage() for r in caplog.records
+    ), f"{why}: a bridge blip blamed the account-change setting"
+
+
+async def test_d15_the_raised_fault_is_unchanged_only_the_log_got_louder(
+    exchange_router,
+):
+    """The change is how LOUDLY the condition is reported, never what the caller
+    is told. Status, machine code, dependency and retryable flag are typed here as
+    the literals they were before 164.6.5-06 — a drift in any one changes the
+    wizard's rendering and the breaker's accounting."""
+    router = exchange_router
+    _install_mt5_client(router, _landmine_client())
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+    assert ei.value.status_code == 500
+    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["dependency"] == "mt5-gateway"
+    assert ei.value.detail["retryable"] is False
+    assert set(ei.value.detail) == {"code", "dependency", "retryable", "detail"}
+    assert not (ei.value.headers or {}).get("Retry-After")
+
+
+# The markers a terminal-option WRITE would have to carry in code: the terminal's
+# config files, the `[Experts]` section (as a header or as a configparser key),
+# or one of its option keys assigned a value.
+_TERMINAL_OPTION_WRITE_MARKERS = re.compile(
+    r"(?i)\b(?:terminal|common|origin)\.ini\b"
+    r"|\[Experts\]"
+    r"|^['\"]Experts['\"]$"
+    r"|\b(?:Account|Profile|Enabled|Api|AllowLiveTrading|AllowDllImport)\s*=\s*[01]\b"
+)
+
+
+def _code_tokens_without_comments_or_docstrings(src: str):
+    """Yield (line, token text) for every token that is CODE — comments and
+    docstrings are dropped, so prose describing the landmine can neither satisfy
+    nor defeat the scan."""
+    tree = ast.parse(src)
+    docstring_lines = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        ):
+            docstring_lines.add(node.body[0].lineno)
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type == tokenize.COMMENT:
+            continue
+        if tok.type == tokenize.STRING and tok.start[0] in docstring_lines:
+            continue
+        yield tok.start[0], tok.string
+
+
+def _analytics_service_source_files():
+    root = pathlib.Path(__file__).resolve().parent.parent
+    return sorted(
+        p
+        for p in root.rglob("*.py")
+        if not ({".venv", "tests", "__pycache__"} & set(p.relative_to(root).parts))
+    )
+
+
+def test_d15_no_analytics_service_path_writes_a_terminal_option():
+    """⛔ D-15 is one-way in the dangerous direction: nothing in this service may
+    ever write a terminal option — not to "fix" algo trading, not to tick the box.
+    Scanned over CODE only, and the failure names the offending file and line."""
+    files = _analytics_service_source_files()
+    # Not vacuous: the service's own source tree, not an empty glob.
+    assert len(files) > 50, f"scan found only {len(files)} files — wrong root?"
+    offenders = []
+    for path in files:
+        for line, text in _code_tokens_without_comments_or_docstrings(
+            path.read_text(encoding="utf-8")
+        ):
+            if _TERMINAL_OPTION_WRITE_MARKERS.search(text):
+                offenders.append(f"{path.name}:{line}: {text[:80]}")
+    assert not offenders, (
+        "a code path names a terminal option store — D-15 forbids any write to the "
+        "gateway terminal's options (ticking the account-change box silently "
+        f"disables algo trading for every client): {offenders}"
+    )
+
+
+def test_d15_the_write_scan_ignores_prose_and_catches_code():
+    """The scan's two halves, proven on synthetic source: a COMMENT or DOCSTRING
+    naming the landmine is ignored (prose must not make the gate self-invalidating),
+    and a CODE line naming a terminal option store is caught."""
+    prose = (
+        '"""Mentions [Experts] Account=1 in terminal.ini."""\n'
+        "# [Experts] Account=1 lives in terminal.ini\n"
+        "x = 1\n"
+    )
+    assert not [
+        t for _, t in _code_tokens_without_comments_or_docstrings(prose)
+        if _TERMINAL_OPTION_WRITE_MARKERS.search(t)
+    ]
+    for code in (
+        'path = "Config/terminal.ini"\n',
+        'cfg["Experts"]["Account"] = "0"\n',
+        'line = "Account=0"\n',
+    ):
+        assert [
+            t for _, t in _code_tokens_without_comments_or_docstrings(code)
+            if _TERMINAL_OPTION_WRITE_MARKERS.search(t)
+        ], f"the scan missed a code-shaped option write: {code!r}"
+    # And the real corpus DOES carry the landmine in prose, so the stripping above
+    # is load-bearing rather than decorative.
+    raw = "".join(
+        p.read_text(encoding="utf-8") for p in _analytics_service_source_files()
+    )
+    assert "[Experts]" in raw

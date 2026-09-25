@@ -855,3 +855,34 @@ def test_mt5_gateway_misconfigured_operator_fault_on_both_paths(
             assert word not in low, f"refusal copy names the credential word {word!r}"
         assert MT5_WRONG_SERVER_DETAIL not in rendered
         assert AUTH_FAILED_DETAIL not in rendered
+
+
+def test_d15_the_trade_permission_sentence_names_the_landmine_and_no_recurrence():
+    """164.6.5-06 / D-15 — the user-facing trade-permission sentence was FALSE at
+    HEAD: it told an operator the gateway "switches it off again whenever it changes
+    users". That re-clear only happens while "Disable algorithmic trading when the
+    account has been changed" is ticked, and the founder read it UNCHECKED over VNC
+    on 2026-09-24. The corrected sentence names THAT option as the one that must
+    stay unticked — true whichever way the box sits — and stays inside the curated
+    family, which the whole-family fence above keeps credential-free and blame-free.
+
+    The label is hand-typed here AND read from `mt5_validation`, so a drift in the
+    sentence's label, in the named constant, or in both apart reds this test.
+    """
+    from services.mt5_probe import MT5_GATEWAY_TRADE_PERMISSION_OFF_DETAIL
+    from services.mt5_validation import ACCOUNT_CHANGE_ALGO_DISABLE_OPTION
+
+    label = "Disable algorithmic trading when the account has been changed"
+    assert ACCOUNT_CHANGE_ALGO_DISABLE_OPTION == label
+    sentence = MT5_GATEWAY_TRADE_PERMISSION_OFF_DETAIL
+    assert sentence in MT5_GATEWAY_MISCONFIGURED_DETAILS, (
+        "the reworded sentence left the curated family — the worker's allow-list "
+        "would silently degrade it to the generic constant"
+    )
+    assert f"'{label}' option must stay unticked" in sentence, (
+        f"the sentence no longer names the landmine as what must stay unticked: {sentence!r}"
+    )
+    assert "every key check changes the account" in sentence, (
+        f"the sentence no longer says WHY the landmine matters: {sentence!r}"
+    )
+    assert "needs an operator, not a retry" in sentence
