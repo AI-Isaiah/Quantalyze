@@ -352,6 +352,40 @@ const ALLOWED_BARE = new Set(["NULL", "TRUE", "FALSE", "DEFAULT"]);
 const ALLOWED_CALLS = new Set(["now", "gen_random_uuid"]);
 
 /**
+ * The type names a `::` cast may name, in C2 and in C5 (164.9.2 review round 2,
+ * IN-05 / SFH R2-05). Until then any readable type name was admitted, and a
+ * cast can run code the statement text does not show: a cast to a DOMAIN runs
+ * the domain's CHECK expression, and `CREATE CAST … WITH FUNCTION` runs a
+ * function. PostgreSQL built-ins only, bare or `pg_catalog.`-qualified; a
+ * quoted name, any other schema, and any other type are refused. A bare name
+ * resolves through the replay's search_path, which since 164.9.2 review round 2
+ * (WR-03, `restore-test-from-baseline.sh`) lists pg_catalog FIRST, so a
+ * `public.text` cannot shadow the built-in. MEASURED 2026-09-25: the emitted
+ * replay carries four casts, all `::uuid`, in the teaser INSERTs, and none in
+ * its C5 UPDATEs.
+ */
+const BUILTIN_CAST_TYPES = new Set(
+  (
+    "text varchar char character bpchar int int2 int4 int8 integer smallint bigint " +
+    "numeric decimal real float float4 float8 double boolean bool uuid date time " +
+    "timetz timestamp timestamptz interval json jsonb bytea inet cidr"
+  ).split(" "),
+);
+
+/** The refusal for a cast to `[qualifier.]name`, or null when it is a built-in. */
+function castTypeRefusal(qualifier, name, cls) {
+  const spelled = qualifier === null ? name : `${qualifier}.${name}`;
+  const quoted = name.startsWith('"') || (qualifier !== null && qualifier.startsWith('"'));
+  const ok =
+    !quoted &&
+    (qualifier === null || qualifier.toLowerCase() === "pg_catalog") &&
+    BUILTIN_CAST_TYPES.has(name.toLowerCase());
+  return ok
+    ? null
+    : `casts to the type \`${spelled}\`, which is not a built-in type ${cls} knows — a cast to a domain runs its CHECK expression and a CREATE CAST … WITH FUNCTION runs a function, neither visible in the statement text; only PostgreSQL built-ins, bare or pg_catalog-qualified, are replayable (${cls})`;
+}
+
+/**
  * C2 over the MASKED text of one statement (string interiors are already
  * blanked, so what remains in the tuple is code).
  * @returns {string|null} the refusal reason, or null when the span is literal.
@@ -379,15 +413,19 @@ export function literalCheck(maskedStatement) {
   const stop = /\bON\s+CONFLICT\b|\bRETURNING\b/i.exec(region);
   if (stop) region = region.slice(0, stop.index);
   const re = /::|[A-Za-z_][A-Za-z0-9_]*/g;
+  const castType = new RegExp(
+    `^${WS}*("(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_]*)(?:${WS}*\\.${WS}*("(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_]*))?`,
+  );
   let m;
-  let afterCast = false;
   while ((m = re.exec(region)) !== null) {
     if (m[0] === "::") {
-      afterCast = true;
-      continue;
-    }
-    if (afterCast) {
-      afterCast = false;
+      // 164.9.2 review round 2, IN-05 / SFH R2-05: the type is READ and checked,
+      // not skipped. A skipped word admitted `'k'::some_domain` as "a cast".
+      const ty = castType.exec(region.slice(m.index + 2));
+      if (!ty) return "carries a `::` cast whose type C2 cannot read — not a literal VALUES (C2)";
+      const why = ty[2] === undefined ? castTypeRefusal(null, ty[1], "C2") : castTypeRefusal(ty[1], ty[2], "C2");
+      if (why) return `the VALUES tuple ${why}`;
+      re.lastIndex = m.index + 2 + ty[0].length;
       continue;
     }
     const t = m[0];
@@ -629,10 +667,16 @@ const PG_RESERVED = new Set(
  * The reserved words a literal `UPDATE [ONLY] t [[AS] a] SET … WHERE …` carries.
  * The CURRENT_DATE family is admitted for the reason now() is: it is the
  * statement's clock, not another row and not a side effect.
+ * ⛔ DEFAULT is NOT here since 164.9.2 review round 2 (IN-05 / SFH R2-05): `SET
+ * col = DEFAULT` evaluates the column default in the RESTORE session, and
+ * `updateLiteralCheck` refuses it by name. (C2 still admits DEFAULT in a VALUES
+ * tuple: an INSERT that omits a column evaluates the same default in the same
+ * session, so refusing the keyword alone would close nothing. The allowlist's
+ * C5 criterion block records that premise and its census.)
  */
 const C5_ADMITTED_RESERVED = new Set(
   (
-    "AND OR NOT IN NULL TRUE FALSE DEFAULT ONLY AS WHERE CASE WHEN THEN ELSE END ARRAY " +
+    "AND OR NOT IN NULL TRUE FALSE ONLY AS WHERE CASE WHEN THEN ELSE END ARRAY " +
     "CURRENT_DATE CURRENT_TIME CURRENT_TIMESTAMP LOCALTIME LOCALTIMESTAMP"
   ).split(" "),
 );
@@ -870,6 +914,12 @@ export function updateLiteralCheck(masked) {
     if (t.k === "cast") {
       const y = skipC5CastType(toks, x);
       if (y < 0) return "carries a `::` cast whose type C5 cannot read — not a literal C5 update (C5)";
+      // 164.9.2 review round 2, IN-05 / SFH R2-05: readable is not enough; the
+      // type must be a built-in (`castTypeRefusal`). `skipC5CastType` accepts
+      // at most `a.b`, so a longer qualified name is refused by it above.
+      const q = isP(toks[x + 2], ".");
+      const why = castTypeRefusal(q ? toks[x + 1].v : null, q ? toks[x + 3].v : toks[x + 1].v, "C5");
+      if (why) return why;
       x = y;
       continue;
     }
@@ -905,6 +955,9 @@ export function updateLiteralCheck(masked) {
     }
     if (C5_NILADIC.has(up)) {
       return `reads the niladic session function ${up} — it takes no parentheses, so it reads like a column reference, but it replays the RESTORE session's value rather than the one PROD had (C5)`;
+    }
+    if (up === "DEFAULT") {
+      return "sets a column to DEFAULT — that evaluates the column's default expression in the RESTORE session, and a default can read session state (auth.uid(), current_setting(…)), so the replay could write a value PROD never held (C5)";
     }
     if (up === "ARRAY") {
       if (isP(next, "[")) continue;
@@ -2040,8 +2093,13 @@ function modeAudit(io, allowlistPath, migrationsDir) {
  * inserts self-test OK: 62 kinds, red+green each.`, exit 0. 61 → 62:
  * `begin-atomic-body`. The layer-2 vitest was observed RED (`declares 62 …
  * still 61`) before this raise.
+ *
+ * MEASURED 2026-09-25 (review round 2, IN-05 / SFH R2-05): `extract-reference-
+ * inserts self-test OK: 65 kinds, red+green each.`, exit 0. 62 → 65:
+ * `c2-nonbuiltin-cast`, `c5-update-default` and `c5-update-nonbuiltin-cast`. The
+ * layer-2 vitest was observed RED (`declares 65 … still 62`) before this raise.
  */
-export const SELF_TEST_KINDS_FLOOR = 62;
+export const SELF_TEST_KINDS_FLOOR = 65;
 
 /**
  * @type {Array<{id:string, why:string, audit?:boolean, expect:string, redStderr?:RegExp, greenStdout?:RegExp, greenAbsent?:RegExp}>}
@@ -2078,6 +2136,12 @@ export const SELF_TEST_KINDS = [
     why: "a bare identifier in the VALUES tuple is not a literal (C2)",
     expect: "non-literal token",
     greenStdout: /gen_random_uuid\(\)/,
+  },
+  {
+    id: "c2-nonbuiltin-cast",
+    why: "C2 (164.9.2 review round 2, IN-05 / SFH R2-05): a ::cast to a type C2 does not know can run code the tuple does not show — a domain runs its CHECK, a CREATE CAST … WITH FUNCTION runs a function — and an UNQUALIFIED domain cast was admitted as 'a cast'. The green leg pins the ::uuid the replayed corpus really carries, and other built-ins bare or pg_catalog-qualified",
+    expect: "casts to the type `fx_kind`, which is not a built-in type",
+    greenStdout: /'00000000-0000-0000-0000-000000000000'::uuid, 'v'::text, '1'::pg_catalog\.int4\)/,
   },
   {
     id: "count-mismatch-high",
@@ -2270,9 +2334,9 @@ export const SELF_TEST_KINDS = [
   },
   {
     id: "c5-update-unreadable-cast",
-    why: "C5: after `::` the allowlist reads a type name and a NUMERIC typmod; anything else in the parentheses is code. The green leg pins qualified, multi-word, typmod'd and array casts",
+    why: "C5: after `::` the allowlist reads a type name and a NUMERIC typmod; anything else in the parentheses is code. The green leg pins qualified, multi-word, typmod'd and array casts. Its qualified cast is `pg_catalog.text` since review round 2 (IN-05): until then it pinned `public.fx_kind` as ADMITTED, a user type that c5-update-nonbuiltin-cast now refuses",
     expect: "carries a `::` cast whose type C5 cannot read",
-    greenStdout: /UPDATE fx_ref SET label = 'v'::character varying\(20\), n = '1'::numeric\(10, 2\), tags = '\{\}'::text\[\], kind = 'k'::public\.fx_kind WHERE id = 1;/,
+    greenStdout: /UPDATE fx_ref SET label = 'v'::character varying\(20\), n = '1'::numeric\(10, 2\), tags = '\{\}'::text\[\], kind = 'k'::pg_catalog\.text WHERE id = 1;/,
   },
   {
     id: "c5-update-table-subquery",
@@ -2300,9 +2364,9 @@ export const SELF_TEST_KINDS = [
   },
   {
     id: "c5-update-reserved-word",
-    why: "C5: a PostgreSQL reserved word is never a bare column reference, so one outside the admitted set is syntax C5 has not been taught to read, and it is refused rather than replayed on a guess. The green leg pins the admitted CASE/WHEN/THEN/ELSE/END, TRUE, NULL and DEFAULT",
+    why: "C5: a PostgreSQL reserved word is never a bare column reference, so one outside the admitted set is syntax C5 has not been taught to read, and it is refused rather than replayed on a guess. The green leg pins the admitted CASE/WHEN/THEN/ELSE/END, TRUE and NULL. It pinned DEFAULT as admitted too until review round 2 (IN-05), which refuses it by name (c5-update-default)",
     expect: "carries the reserved word COLLATE, which C5's token allowlist does not admit",
-    greenStdout: /UPDATE fx_ref SET label = CASE WHEN id = 1 THEN 'a' ELSE 'b' END, flag = TRUE, note = NULL, kind = DEFAULT WHERE id = 1;/,
+    greenStdout: /UPDATE fx_ref SET label = CASE WHEN id = 1 THEN 'a' ELSE 'b' END, flag = TRUE, note = NULL WHERE id = 1;/,
   },
   {
     id: "c5-update-set-call",
@@ -2310,6 +2374,19 @@ export const SELF_TEST_KINDS = [
     expect: "makes the non-literal call `set(`",
     redStderr: /call `set\(`[\s\S]*call `set\(`/,
     greenStdout: /UPDATE fx_ref SET \(label, n\) = \('v', 1\) WHERE id = 1;[\s\S]*UPDATE ONLY fx_ref AS r SET \(label\) = ROW\('w'\) WHERE r\.id = 1;/,
+  },
+  {
+    id: "c5-update-default",
+    why: "C5 (review round 2, IN-05 / SFH R2-05): `SET col = DEFAULT` evaluates the column's default expression in the RESTORE session, and a default can read session state (auth.uid(), current_setting(…)) — the concern that got the niladic session functions refused. Refused, where round 1 admitted it as a reserved word. The green leg pins that the word in a string and a QUOTED column named default pass",
+    expect: "sets a column to DEFAULT",
+    greenStdout: /UPDATE fx_ref SET label = 'default', "default" = 1 WHERE id = 1;/,
+  },
+  {
+    id: "c5-update-nonbuiltin-cast",
+    why: "C5 (review round 2, IN-05 / SFH R2-05): a cast to a type C5 does not know can run code the statement does not show — a domain runs its CHECK, a CREATE CAST … WITH FUNCTION runs a function. Round 1 admitted any readable type name, `public.fx_kind` included. The red refuses an unqualified, a schema-qualified and a quoted spelling; the green pins built-ins bare, pg_catalog-qualified, with an array suffix and with a follow-word",
+    expect: "casts to the type `fx_kind`, which is not a built-in type",
+    redStderr: /casts to the type `public\.fx_kind`[\s\S]*casts to the type `"text"`/,
+    greenStdout: /UPDATE fx_ref SET label = 'v'::text, [^\n]*'1'::pg_catalog\.int4, tags = '\{\}'::uuid\[\], x = '1'::double precision, at = '2026-01-01'::timestamptz WHERE id = 1;/,
   },
   // ── C5 in --audit: every top-level UPDATE / DELETE on a replayed table is accounted for.
   {

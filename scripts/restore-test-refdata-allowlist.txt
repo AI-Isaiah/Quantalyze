@@ -187,6 +187,23 @@
 #     outside public (vault, cron, pg_net), would reach surviving shared-TEST
 #     state through that trigger, so such a line is a REVIEW decision, never a
 #     mechanical one. The INSERT class rests on the same premise.
+#     ⚠️ ADDED 2026-09-25 (164.9.2 review round 2, IN-05 / SFH R2-05). `DEFAULT`
+#     and `::` casts both run code the statement text does not show. `SET col =
+#     DEFAULT` evaluates the column default in the RESTORE session, and a cast
+#     to a domain runs its CHECK, a CREATE CAST … WITH FUNCTION a function.
+#     Refuse-when-uncertain, applied: C5 now REFUSES `DEFAULT` by name, and C2
+#     and C5 both refuse a cast to anything but a PostgreSQL built-in, bare or
+#     pg_catalog-qualified. C2 still ADMITS `DEFAULT` in a VALUES tuple, on a
+#     stated premise rather than by oversight: an INSERT that omits a column
+#     evaluates the very same default in the very same session, so refusing the
+#     keyword alone would close nothing. The premise is that the default
+#     expressions of the replayed tables carry no session state. Census, MEASURED
+#     2026-09-25 over the emitted replay: 0 `DEFAULT` tokens and four casts, all
+#     `::uuid`, in the teaser INSERTs; 0 of either in the six replayed UPDATEs.
+#     Per the round-2 reviewer's measurement, the non-constant defaults on
+#     public.profiles and public.strategies are now() and gen_random_uuid(). A
+#     line whose INSERT relies on a default that reads session state is a REVIEW
+#     decision.
 #
 # ── SCOPE BOUNDARY: THE REPLAY REPRODUCES INSERTS, NOT SUBSEQUENT EDITS ────
 # ⛔ MEASURED 2026-09-09. C1-C4 select INSERT statements, so the replay restores

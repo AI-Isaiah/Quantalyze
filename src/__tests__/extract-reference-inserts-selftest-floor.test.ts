@@ -128,6 +128,11 @@ const REQUIRED_KINDS = [
   // untraced shape (review round 2, IN-02 / SFH R2-03), MEASURED 2026-09-25 →
   // `OK: 62 kinds`.
   "begin-atomic-body",
+  // DEFAULT and non-built-in casts (review round 2, IN-05 / SFH R2-05), MEASURED
+  // 2026-09-25 → `OK: 65 kinds`.
+  "c2-nonbuiltin-cast",
+  "c5-update-default",
+  "c5-update-nonbuiltin-cast",
 ];
 
 describe("SELF_TEST_KINDS_FLOOR — the extractor's self-test corpus is ratcheted", () => {
