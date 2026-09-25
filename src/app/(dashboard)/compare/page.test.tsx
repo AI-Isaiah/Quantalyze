@@ -10,7 +10,7 @@
  * - Mixed holding + strategy side-by-side (finding g4)
  * - RLS-gated empty holdings → "not available" (D-15)
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import React from "react";
 
@@ -59,6 +59,9 @@ type MockSnapshot = {
 // Controls for the mock: strategy data + snapshot data
 let mockStrategyData: unknown[] = [];
 let mockSnapshotData: MockSnapshot[] = [];
+// Phase 167.1.2 review round 2 (SFH-R2-02): per-table query errors.
+let mockStrategyError: { message: string } | null = null;
+let mockSnapshotError: { message: string } | null = null;
 
 /**
  * Phase 159 (159-03 / RANK-02) — every `.select()` string issued against the
@@ -72,9 +75,14 @@ vi.mock("@/lib/supabase/server", () => ({
     function makeQueryBuilder(
       resolveData: () => unknown[],
       recordSelect = false,
+      resolveError: () => { message: string } | null = () => null,
     ): Record<string, unknown> {
       const resolve = () =>
-        Promise.resolve({ data: resolveData(), error: null });
+        Promise.resolve(
+          resolveError()
+            ? { data: null, error: resolveError() }
+            : { data: resolveData(), error: null },
+        );
       const builder: Record<string, unknown> = {
         // Phase 159 (159-03 / RANK-02): records the projection for the
         // strategies read. Written as an implementation rather than
@@ -89,7 +97,7 @@ vi.mock("@/lib/supabase/server", () => ({
         eq: vi.fn().mockReturnThis(),
         order: vi.fn().mockReturnThis(),
         // limit() is called as the terminal step for snapshot queries
-        limit: vi.fn(async () => ({ data: resolveData(), error: null })),
+        limit: vi.fn(() => resolve()),
         // maybeSingle() is the terminal step for the Phase 109 requireRolePage
         // guard's `profiles.select("role").eq("id", …).maybeSingle()` lookup.
         maybeSingle: vi.fn(async () => ({ data: resolveData()[0] ?? null, error: null })),
@@ -125,10 +133,10 @@ vi.mock("@/lib/supabase/server", () => ({
           return makeQueryBuilder(() => [{ role: "allocator" }]);
         }
         if (table === "strategies") {
-          return makeQueryBuilder(() => mockStrategyData, true);
+          return makeQueryBuilder(() => mockStrategyData, true, () => mockStrategyError);
         }
         if (table === "allocator_equity_snapshots") {
-          return makeQueryBuilder(() => mockSnapshotData);
+          return makeQueryBuilder(() => mockSnapshotData, false, () => mockSnapshotError);
         }
         return makeQueryBuilder(() => []);
       }),
@@ -396,5 +404,71 @@ describe("ComparePage — RANK-02 explicit analytics projection", () => {
     expect(cols).not.toContain("daily_returns");
     expect(cols).not.toContain("data_quality_flags");
     expect(embed).not.toMatch(/metrics_json(?!->)/);
+  });
+});
+
+/**
+ * Phase 167.1.2 review round 2 (SFH-R2-02). A failed read used to render
+ * "This comparison isn't available", which tells the allocator the strategy
+ * or holding does not exist. It must instead reach the route's error boundary
+ * (compare/error.tsx: digest-only, with a retry), with the database message
+ * logged server-side and never carried by the thrown error.
+ *
+ * D-15 is unchanged and pinned above: unowned or missing rows come back as
+ * ZERO rows and still render "not available". These cases FAIL if either read
+ * folds its error back into an empty list.
+ */
+describe("ComparePage — a failed load is surfaced, not reported as 'not available'", () => {
+  beforeEach(() => {
+    mockStrategyData = [
+      makeSampleStrategy("22222222-3333-4444-8555-666666666666", "Strategy Beta"),
+    ];
+    mockSnapshotData = makeSampleSnapshots("BTC", 40);
+    mockStrategyError = null;
+    mockSnapshotError = null;
+  });
+  afterEach(() => {
+    mockStrategyError = null;
+    mockSnapshotError = null;
+  });
+
+  const run = async (ids: string) => {
+    const ComparePage = await getComparePage();
+    return ComparePage({ searchParams: Promise.resolve({ ids }) });
+  };
+
+  it("a strategies query error throws to the error boundary and logs the message only", async () => {
+    mockStrategyError = { message: "strategies-boom" };
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const p = run("22222222-3333-4444-8555-666666666666");
+      await expect(p).rejects.toThrow("compare strategies load failed");
+      await expect(p).rejects.not.toThrow(/strategies-boom/);
+      expect(spy).toHaveBeenCalledWith(
+        "[compare/page] strategies query failed:",
+        "strategies-boom",
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a holding query error throws to the error boundary, even beside a strategy that loaded", async () => {
+    mockSnapshotError = { message: "snapshots-boom" };
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const p = run("holding:binance:BTC:spot,22222222-3333-4444-8555-666666666666");
+      await expect(p).rejects.toThrow("holding compare load failed");
+      await expect(p).rejects.not.toThrow(/snapshots-boom/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("positive control: the same ids with no error render, so the throws above are the error path", async () => {
+    const Page = await run("holding:binance:BTC:spot,22222222-3333-4444-8555-666666666666");
+    render(Page as React.ReactElement);
+    expect(screen.getByTestId("holding-factsheet")).toBeInTheDocument();
+    expect(screen.getByText("Strategy Beta")).toBeInTheDocument();
   });
 });

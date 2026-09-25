@@ -70,9 +70,14 @@ export type HoldingCompareAnalytics = {
  * anything other than an explicit "ready" renders the rebuilding note.
  *
  * Reversible by design: flipping this constant to "ready" restores the
- * pre-D-13 behaviour byte for byte. Plan 11 must DECIDE that flip for /compare
- * explicitly; it does not follow from the My Allocation curve becoming ready,
- * because the level-ratio defect is specific to this computation.
+ * pre-D-13 behaviour (the item carries the analytics computed from the
+ * trustworthy rows, and availability is unchanged). That claim is pinned by
+ * the adapter test through `fetchHoldingCompareItem`'s `historyState` test
+ * seam, so the "ready" branch stays under test while production uses this
+ * default. Plan 11 must DECIDE that flip for /compare explicitly
+ * (`167.1.2-11-PLAN.md` carries it as an acceptance line); it does not follow
+ * from the My Allocation curve becoming ready, because the level-ratio defect
+ * is specific to this computation.
  */
 export const HOLDING_COMPARE_HISTORY_STATE: "rebuilding" | "ready" =
   "rebuilding";
@@ -87,6 +92,18 @@ export type HoldingCompareItem = {
   | { historyState: "ready"; analytics: HoldingCompareAnalytics }
   | { historyState: "rebuilding"; analytics: null }
 );
+
+/**
+ * The holding read failed (Phase 167.1.2 review round 2, SFH-R2-02). The
+ * message is deliberately generic: the database's own message is logged
+ * server-side and never rides the thrown error.
+ */
+export class HoldingCompareLoadError extends Error {
+  constructor() {
+    super("holding compare load failed");
+    this.name = "HoldingCompareLoadError";
+  }
+}
 
 /**
  * Reconstruct per-symbol daily returns from breakdown jsonb + compute institutional metrics.
@@ -166,12 +183,26 @@ export function reconstructAndAnalyze(
  *
  * Per D-15: caller cannot distinguish "unowned holding" from "nonexistent
  * holding" — both return null with no additional error information.
+ *
+ * Throws `HoldingCompareLoadError` when the query itself fails (Phase 167.1.2
+ * review round 2, SFH-R2-02). A failed read is not "not available": RLS hides
+ * an unowned holding as ZERO rows, never as an error, so surfacing the failure
+ * leaks nothing about ownership (D-15 unchanged) and gives the allocator a
+ * retry instead of a false "this comparison isn't available".
  */
 export async function fetchHoldingCompareItem(params: {
   allocator_id: string;
   holding_ref: string;
   supabase: SupabaseClient;
+  /**
+   * @internal Test seam (Phase 167.1.2 review round 2, WR-01). Production
+   * callers omit it and get HOLDING_COMPARE_HISTORY_STATE (D-13). It exists so
+   * the "ready" branch, which the constant makes unreachable today, stays
+   * pinned until plan 11 decides the flip.
+   */
+  historyState?: "rebuilding" | "ready";
 }): Promise<HoldingCompareItem | null> {
+  const state = params.historyState ?? HOLDING_COMPARE_HISTORY_STATE;
   const parsed = parseHoldingCompareId(params.holding_ref);
   if (!parsed) return null;
 
@@ -183,14 +214,14 @@ export async function fetchHoldingCompareItem(params: {
     .limit(730);
 
   if (error) {
-    // Phase 167.1.2 review round 1 (SFH INFO-02): a query failure used to fold
-    // silently into "not available". The caller still gets null (D-15: no
-    // existence leak), but the failure is now logged server-side.
+    // Phase 167.1.2 review round 1 (SFH INFO-02) logged this; round 2
+    // (SFH-R2-02) stops folding it into "not available". Log the message only
+    // (never the row payload), then throw so the page surfaces a failed load.
     console.error(
       "[holding-compare-adapter.fetchHoldingCompareItem] supabase error:",
-      error.message ?? error,
+      error.message,
     );
-    return null;
+    throw new HoldingCompareLoadError();
   }
   if (!data || data.length === 0) return null;
 
@@ -236,8 +267,9 @@ export async function fetchHoldingCompareItem(params: {
 
   // Phase 167.1.2 / D-13: the analytics above decide AVAILABILITY only (the
   // pre-D-13 "not available" rule, unchanged). While the history is rebuilt
-  // the numbers themselves are dropped here, on the server.
-  if (HOLDING_COMPARE_HISTORY_STATE === "rebuilding") {
+  // the numbers themselves are dropped here, on the server. Fail-closed:
+  // anything other than an explicit "ready" withholds them.
+  if (state !== "ready") {
     return { ...base, historyState: "rebuilding", analytics: null };
   }
   return { ...base, historyState: "ready", analytics };
