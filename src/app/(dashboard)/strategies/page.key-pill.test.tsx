@@ -603,6 +603,10 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   const running = { kind: "process_key_long", status: "running", created_at: isoMinutesAgo(10) };
 
   it("COMPUTED-NO-NOTE: a row with a computed factsheet shows no note and asks the RPC nothing", async () => {
+    // Lineage, 167.2.1 D-08: "computed" here now means computed AND buildable.
+    // Both rows are probed and take the default admin row (a 30-point series),
+    // so the builder would build them; a computed row the builder refuses is
+    // COMPUTED-UNBUILDABLE below.
     state.strategies = [
       row("s-done", { strategy_analytics: { computation_status: "complete" } }),
       row("s-warn", { strategy_analytics: [{ computation_status: "complete_with_warnings" }] }),
@@ -615,6 +619,8 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     // A computed row has a factsheet; reading its jobs would be a wasted round
     // trip per row on the page every manager lands on.
     expect(state.rpcCalls).toEqual([]);
+    // 167.2.1 D-08: and it was asked, so "no note" is the builder's answer.
+    expect(state.adminStrategyReads).toEqual(["s-done", "s-warn"]);
   });
 
   // A finished factsheet-chain job: the share page's arm for it is
@@ -634,6 +640,153 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     const container = await renderPage();
 
     expect(noteOf(container, "Strategy s-short")).toBe(UNBUILDABLE_SHORT);
+  });
+
+  // ── Phase 167.2.1 — every probe outcome and share mode (D-02, D-05, D-08) ──
+  const UNBUILDABLE_COMPOSITE =
+    "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded, but its results cannot be built into a factsheet. Contact support@quantalyze.com to have this composite checked.";
+  const PUBLIC_UNBUILDABLE_SHORT =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.";
+  const onePoint = (id: string) => ({
+    data: adminStrategy(id, { daily_returns: points(1) }),
+    error: null,
+  });
+  const PROBE_TAGS = { tags: { route: "strategies/page", stage: "factsheet-probe" } };
+
+  it("COMPOSITE-UNBUILDABLE: a computed composite with no persisted headline says its results cannot be built and names support", async () => {
+    state.strategies = [row("c-pre86", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = {
+      "c-pre86": {
+        data: adminStrategy("c-pre86", {
+          data_quality_flags: { composite: true },
+          metrics_json_by_basis: null,
+        }),
+        error: null,
+      },
+    };
+    state.jobs = {
+      "c-pre86": [{ kind: "stitch_composite", status: "done", created_at: "2026-02-01T00:00:00.000Z" }],
+    };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy c-pre86")).toBe(UNBUILDABLE_COMPOSITE);
+  });
+
+  it("PUBLIC-UNBUILDABLE: a published computed row with one point takes the public unbuildable line and reads no jobs", async () => {
+    state.strategies = [row("s-pub", { status: "published", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = { "s-pub": onePoint("s-pub") };
+    state.jobs = { "s-pub": [running] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_UNBUILDABLE_SHORT);
+    // 167.2 IN-04: the public line does not depend on the arm.
+    expect(state.rpcCalls).toEqual([]);
+  });
+
+  it("UNBUILDABLE-IN-PROGRESS: an unbuildable row with a running chain job keeps KCS12-MINT-A, because the recipient sees 'being prepared'", async () => {
+    state.strategies = [row("s-short", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = { "s-short": onePoint("s-short") };
+    state.jobs = { "s-short": [{ ...running, created_at: isoMinutesAgo(5) }] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-short")).toBe(MINT_A);
+  });
+
+  it("UNBUILDABLE-RPC-ERROR: an unbuildable row whose job read fails renders KCS12-UNREADABLE", async () => {
+    state.strategies = [row("s-short", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = { "s-short": onePoint("s-short") };
+    state.jobsError = { message: "synthetic rpc failure" };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-short")).toBe(UNREADABLE);
+  });
+
+  it("PROBE-THROWS (D-05): a probe that throws renders KCS12-UNREADABLE, never 'no note', and is logged and captured with tags only", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminThrow = true;
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-1")).toBe(UNREADABLE);
+    expect(consoleError).toHaveBeenCalledWith(
+      "[strategies/page] factsheet probe failed",
+      expect.objectContaining({ id: "s-1" }),
+    );
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), PROBE_TAGS);
+    // Tags only: the id stays in the server log, never in the capture.
+    const [err, ctx] = captureToSentryMock.mock.calls[0] as [Error, unknown];
+    expect(err.message).not.toContain("s-1");
+    expect(JSON.stringify(ctx)).not.toContain("s-1");
+  });
+
+  it("PROBE-READ-ERROR (D-05): an admin read error renders KCS12-UNREADABLE and is logged and captured with tags only", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = { "s-1": { data: null, error: { message: "synthetic admin read failure" } } };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-1")).toBe(UNREADABLE);
+    expect(consoleError).toHaveBeenCalledWith(
+      "[strategies/page] factsheet probe could not read the row",
+      expect.objectContaining({ id: "s-1", reason: "read_error" }),
+    );
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), PROBE_TAGS);
+    const [err, ctx] = captureToSentryMock.mock.calls[0] as [Error, unknown];
+    expect(err.message).not.toContain("s-1");
+    expect(JSON.stringify(ctx)).not.toContain("s-1");
+  });
+
+  it("PROBE-NOT-COMPUTED (D-05): the embed says complete but the builder's read says failed, so the row takes the uncomputed path", async () => {
+    state.strategies = [row("c-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = {
+      "c-1": { data: adminStrategy("c-1", { computation_status: "failed" }), error: null },
+    };
+    state.jobs = {
+      "c-1": [
+        {
+          kind: "stitch_composite",
+          status: "failed_final",
+          error_kind: "permanent",
+          created_at: "2026-02-01T00:00:00.000Z",
+        },
+      ],
+    };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy c-1")).toBe(MINT_B);
+  });
+
+  it("NOT-PROBED-UNCOMPUTED (D-08): only the row the embed calls computed is probed", async () => {
+    state.strategies = [
+      row("s-a", { strategy_analytics: { computation_status: "failed" } }),
+      row("s-done", { strategy_analytics: { computation_status: "complete" } }),
+      row("s-b", { strategy_analytics: null }),
+    ];
+
+    await renderPage();
+
+    expect(state.adminStrategyReads).toEqual(["s-done"]);
+    // The uncomputed rows keep today's path: one RPC each, and no probe.
+    expect(state.rpcCalls.map((c) => (c.args as { p_strategy_id: string }).p_strategy_id)).toEqual([
+      "s-a",
+      "s-b",
+    ]);
+  });
+
+  it("OWNER-PREDICATE (T-167.2.1-14): the probe runs under withPublishedOrOwner with the session user id", async () => {
+    state.strategies = [row("s-done", { strategy_analytics: { computation_status: "complete" } })];
+
+    await renderPage();
+
+    expect(state.adminOrFilters).toHaveLength(1);
+    expect(state.adminOrFilters[0]).toContain(`user_id.eq.${state.user?.id}`);
   });
 
   it("MINT-A: an unpublished row whose computation is running says the private link shows it being prepared", async () => {

@@ -5,10 +5,14 @@ import {
   ownerRemedy,
   ownerStateLine,
   recipientShareNote,
+  recipientShareNoteFor,
   SHARE_CARD_COPY,
+  unbuildableNoteKindOf,
   untrustedKeyCaption,
   type OwnerRemedy,
 } from "./status-surface-copy";
+import { MIN_FACTSHEET_SERIES_POINTS } from "./factsheet/build-payload";
+import type { NotBuildableReason } from "./factsheet/fetch-and-build-payload";
 
 /**
  * Phase 167.2 / KCS-13, KCS-14 — the S4-S9 copy, pinned character for
@@ -192,6 +196,90 @@ describe("S5 / S7 — KCS-12 share notes", () => {
       expect(recipientShareNote("public-url", arm)).toBe(
         "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.",
       );
+    }
+  });
+});
+
+describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () => {
+  // A computed row whose factsheet cannot build. Typed out from
+  // 167.2.1-CONTEXT.md D-02, never imported. None of them says "yet": waiting
+  // does not change this row.
+  const UNBUILDABLE_SHORT =
+    "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.";
+  const UNBUILDABLE_COMPOSITE =
+    "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded, but its results cannot be built into a factsheet. Contact support@quantalyze.com to have this composite checked.";
+  const PUBLIC_UNBUILDABLE_SHORT =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.";
+  const PUBLIC_UNBUILDABLE_COMPOSITE =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its last computation succeeded, but its results cannot be built into a factsheet. Contact support@quantalyze.com to have this composite checked.";
+  const ARMS = ["in_progress", "not_available", "unreadable"] as const;
+
+  it("KCS12-UNBUILDABLE-SHORT: private link, single-key series too short, arm not_available", () => {
+    expect(recipientShareNoteFor("mint-token", "not_available", "too_short")).toBe(UNBUILDABLE_SHORT);
+  });
+
+  it("KCS12-UNBUILDABLE-COMPOSITE: private link, composite cannot build, arm not_available", () => {
+    expect(recipientShareNoteFor("mint-token", "not_available", "cannot_build")).toBe(
+      UNBUILDABLE_COMPOSITE,
+    );
+  });
+
+  it("KCS12-PUBLIC-UNBUILDABLE-SHORT: public URL, single-key series too short, any arm", () => {
+    for (const arm of ARMS) {
+      expect(recipientShareNoteFor("public-url", arm, "too_short")).toBe(PUBLIC_UNBUILDABLE_SHORT);
+    }
+  });
+
+  it("KCS12-PUBLIC-UNBUILDABLE-COMPOSITE: public URL, composite cannot build, any arm", () => {
+    for (const arm of ARMS) {
+      expect(recipientShareNoteFor("public-url", arm, "cannot_build")).toBe(
+        PUBLIC_UNBUILDABLE_COMPOSITE,
+      );
+    }
+  });
+
+  it("SELECTION: no unbuildable kind is exactly recipientShareNote, for both modes and every arm", () => {
+    for (const mode of ["mint-token", "public-url"] as const) {
+      for (const arm of ARMS) {
+        expect(recipientShareNoteFor(mode, arm, null)).toBe(recipientShareNote(mode, arm));
+      }
+    }
+  });
+
+  it("SELECTION: a private link keeps KCS12-MINT-A while a recompute runs and KCS12-UNREADABLE when the state is unreadable", () => {
+    // The recipient really does see "being prepared" while a recompute runs,
+    // and an unreadable state is not known to be "not available".
+    for (const kind of ["too_short", "cannot_build"] as const) {
+      expect(recipientShareNoteFor("mint-token", "in_progress", kind)).toBe(
+        "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.",
+      );
+      expect(recipientShareNoteFor("mint-token", "unreadable", kind)).toBe(
+        "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.",
+      );
+    }
+  });
+
+  it("unbuildableNoteKindOf maps every probe reason, and only the two build-time refusals to a kind", () => {
+    const table: Array<[NotBuildableReason, ReturnType<typeof unbuildableNoteKindOf>]> = [
+      ["too_few_points", "too_short"],
+      ["composite_unbuildable", "cannot_build"],
+      ["read_error", null],
+      ["not_visible", null],
+      ["not_computed", null],
+    ];
+    for (const [reason, kind] of table) {
+      expect(unbuildableNoteKindOf(reason)).toBe(kind);
+    }
+  });
+
+  it("DRIFT: the '2' in both SHORT lines is MIN_FACTSHEET_SERIES_POINTS, the builder's own gate", () => {
+    // If the gate moves, these sentences would state a false threshold.
+    for (const note of [
+      recipientShareNoteFor("mint-token", "not_available", "too_short"),
+      recipientShareNoteFor("public-url", "not_available", "too_short"),
+    ]) {
+      expect(note).toContain(`fewer than ${MIN_FACTSHEET_SERIES_POINTS} days`);
+      expect(note).toContain(`at least ${MIN_FACTSHEET_SERIES_POINTS}`);
     }
   });
 });
