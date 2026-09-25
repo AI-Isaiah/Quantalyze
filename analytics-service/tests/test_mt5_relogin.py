@@ -93,6 +93,7 @@ def _reset_state():
     # disarmed would make the next test's "fires once" depend on test ORDER.
     mt5_session_episodes._reset_session_episode_state_for_tests()
     yield
+    _FakeMt5.clock = None
     mt5_concurrency.reset_terminal_state_for_tests()
     mt5_relogin._reset_relogin_log_throttle_for_tests()
     mt5_session_episodes._reset_session_episode_state_for_tests()
@@ -101,6 +102,43 @@ def _reset_state():
 # --------------------------------------------------------------------------- #
 # The doubles — the contract suite's shape, trimmed to what the heal reaches.
 # --------------------------------------------------------------------------- #
+
+
+class _FakeClock:
+    """The heal's clock, advanced ONLY by the doubles' crossings (and, from WR-02,
+    by the heal's own sleeps). ⭐ It is what lets the budget be MEASURED against
+    the one condition it exists for — every rpyc crossing taking its full ceiling
+    — without a test waiting 280 real seconds (164.6.5 review round 1, WR-04)."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+@pytest.fixture(autouse=True)
+def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> "_FakeClock":
+    clock = _FakeClock()
+    monkeypatch.setattr(mt5_relogin, "_clock", clock.monotonic)
+    _FakeMt5.clock = clock
+    return clock
+
+
+
+
+class _FakeNamespace:
+    """``conn.namespace`` — a NETREF on the real transport, so ``[name]`` is its
+    own rpyc crossing (WR-04), recorded as one."""
+
+    def __init__(self, owner: "_FakeMt5 | None", entries: dict) -> None:
+        self._owner = owner
+        self._entries = entries
+
+    def __getitem__(self, name: str):
+        if self._owner is not None:
+            self._owner._trip("recycle_lookup")
+        return self._entries[name]
 
 
 class _FakeRpycConn:
@@ -130,13 +168,21 @@ class _FakeRpycConn:
         self.close_calls += 1
 
     def execute(self, source: str) -> None:
+        # ⛔ WR-04 — an rpyc CROSSING, bounded only by `sync_request_timeout`, and
+        # counted as one. The double used to record nothing here, so the gate that
+        # "counts the path, never restates it" counted 8 because the double
+        # under-reported the recycle's three crossings as one.
+        if self._owner is not None:
+            self._owner._trip("recycle_execute")
         self.executed.append(source)
 
     @property
-    def namespace(self) -> dict:
+    def namespace(self) -> "_FakeNamespace":
         from services import mt5_client as _mt5_client
 
-        return {_mt5_client._REMOTE_TERMINAL_RECYCLE_FN: self._recycle}
+        return _FakeNamespace(
+            self._owner, {_mt5_client._REMOTE_TERMINAL_RECYCLE_FN: self._recycle}
+        )
 
     def _recycle(self, *args, **kwargs) -> str:
         import json as _json
@@ -145,7 +191,7 @@ class _FakeRpycConn:
         owner = self._owner
         assert owner is not None, "the recycle seam needs its owning double"
         owner.call_order.append("recycle")
-        owner.round_trips.append("recycle")
+        owner._trip("recycle")
         exc = owner._scenario.get("recycle_raises")
         if exc is not None:
             raise exc
@@ -223,6 +269,16 @@ class _FakeMt5:
     answer a different code than the first.
     """
 
+    #: The shared `_FakeClock` (set by the autouse fixture). Every crossing
+    #: advances it by the scenario's ``crossing_cost_s`` (default 0).
+    clock: "_FakeClock | None" = None
+
+    def _trip(self, name: str) -> None:
+        """ONE rpyc crossing: recorded, and charged against the fake clock."""
+        self.round_trips.append(name)
+        if _FakeMt5.clock is not None:
+            _FakeMt5.clock.now += self._scenario.get("crossing_cost_s", 0.0)
+
     def __init__(self, scenario: dict) -> None:
         self._scenario = scenario
         self._MetaTrader5__conn = _FakeRpycConn(self)
@@ -245,9 +301,7 @@ class _FakeMt5:
         self.call_order.append(
             "initialize_credentialed" if credentialed else "initialize"
         )
-        self.round_trips.append(
-            "initialize_credentialed" if credentialed else "initialize"
-        )
+        self._trip("initialize_credentialed" if credentialed else "initialize")
         post_heal = not credentialed and self.credentialed_accepted
         sleep_s = self._scenario.get("initialize_sleep_s")
         if sleep_s:
@@ -291,23 +345,23 @@ class _FakeMt5:
 
     def terminal_info(self):
         self.call_order.append("terminal_info")
-        self.round_trips.append("terminal_info")
+        self._trip("terminal_info")
         return self._scenario.get("terminal_info")
 
     def account_info(self):
         self.call_order.append("account_info")
-        self.round_trips.append("account_info")
+        self._trip("account_info")
         return self._scenario.get("account_info")
 
     def login(self, *args, **kwargs):
         # ⭐ 164.6.5 SFH-05 — the JOB path's per-call login, reached only by the
         # gate proving a recovery the job path saw re-arms the escalation.
         self.call_order.append("login")
-        self.round_trips.append("login")
+        self._trip("login")
         return self._scenario.get("login", True)
 
     def last_error(self):
-        self.round_trips.append("last_error")
+        self._trip("last_error")
         if self.recycled and "last_error_after_recycle" in self._scenario:
             return self._scenario["last_error_after_recycle"]
         if self.credentialed_accepted and "last_error_after_heal" in self._scenario:
@@ -1887,12 +1941,12 @@ def test_ESCALATION_WR01_an_escalation_abandoned_BEFORE_the_recycle_crossed_keep
     client = _escalation_client(fake)
     real_capture = mt5_relogin._capture_wedge_evidence
 
-    def _capture_with_lease_release(c, env_server):
+    def _capture_with_lease_release(c, env_server, deadline):
         if released == "during_the_capture":
             c._assert_live("bind")  # first touch binds the generation
             bump_mt5_terminal_epoch(c.terminal_key)
-            return real_capture(c, env_server)  # its first read is refused
-        line = real_capture(c, env_server)
+            return real_capture(c, env_server, deadline)  # its first read is refused
+        line = real_capture(c, env_server, deadline)
         bump_mt5_terminal_epoch(c.terminal_key)
         return line
 
@@ -2239,38 +2293,109 @@ def test_ESCALATION_every_escalation_kind_degrades_to_NOT_MEASURED(kind: str) ->
 
 
 async def test_the_budget_covers_the_ESCALATION_path_too(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, _fake_clock: "_FakeClock"
 ) -> None:
-    """⛔ The escalation runs INSIDE the whole-heal budget, so its worst path is
-    now the module's worst path. Measured from the double, never restated: a
-    budget short of it fires `wait_for` MID-recycle (the WR-03 class)."""
+    """⛔ WR-04 (164.6.5 review round 1) — THE BUDGET IS THE MINIMUM THAT COVERS THE
+    ESCALATION'S UNCONDITIONAL PATH, MEASURED WITH EVERY RPYC CROSSING AT ITS FULL
+    CEILING — the one condition the budget exists for.
+
+    Plan 05 counted the recycle's remote call as ONE round-trip and asserted
+    `>=`. Its `_remote_call` makes THREE crossings (execute, the namespace
+    netref lookup, the call), and the double recorded none of the extra two, so
+    the gate counted 8 because the double under-reported; honestly counted the
+    path was 310 s against the 300 s ceiling. `>=` also stayed green for any
+    over-provision, which lengthens the unbounded lease wait batch jobs pay.
+
+    Both capture shapes are driven, because they spend differently: a FAILING
+    `terminal_info()` pays its `last_error()`, an ANSWERING one leaves the
+    budget-gated `account_info()` to decide whether it still fits."""
     from collections import namedtuple
 
-    terminal = namedtuple("TerminalInfo", "build connected")(1, False)
+    ceiling = mt5_relogin._MT5_REQUEST_TIMEOUT_S
+    monkeypatch.delenv("MT5_RELOGIN_BUDGET_S", raising=False)
+    budget = mt5_relogin._relogin_budget_s()
     _set_full_env(monkeypatch)
-    fake, _c = _install_client(
-        monkeypatch, {**_WEDGED, "terminal_info": terminal}  # account_info fails
-    )
-    _capture_outcomes(monkeypatch)
 
-    await _heal_n_times(1)
+    measured: dict[str, int] = {}
+    paths: dict[str, list[str]] = {}
+    for shape, extra in (
+        ("terminal_info_fails", {}),
+        (
+            "terminal_info_answers",
+            {"terminal_info": namedtuple("TerminalInfo", "build connected")(1, False)},
+        ),
+    ):
+        mt5_session_episodes._reset_session_episode_state_for_tests()
+        fake, _c = _install_client(
+            monkeypatch, {**_WEDGED, **extra, "crossing_cost_s": ceiling}
+        )
+        _capture_outcomes(monkeypatch)
+        started = _fake_clock.now
 
-    assert fake.round_trips == [
+        await _heal_n_times(1)
+
+        assert _recycle_count(fake) == 1, f"{shape}: the recycle did not run"
+        elapsed = _fake_clock.now - started
+        assert elapsed <= budget, (
+            f"{shape}: the path took {elapsed}s of rpyc ceilings against a "
+            f"{budget}s budget — the `wait_for` fires MID-escalation (WR-03 class)"
+        )
+        measured[shape] = len(fake.round_trips)
+        paths[shape] = list(fake.round_trips)
+
+    assert paths["terminal_info_fails"] == [
         "initialize",
         "last_error",
         "terminal_info",
-        "account_info",
         "last_error",
+        "recycle_execute",
+        "recycle_lookup",
         "recycle",
         "initialize",
         "last_error",
-    ], f"the escalation path changed shape: {fake.round_trips}"
-    measured = len(fake.round_trips)
-    assert mt5_relogin._MT5_RELOGIN_ROUND_TRIPS >= measured
-    monkeypatch.delenv("MT5_RELOGIN_BUDGET_S", raising=False)
-    budget = mt5_relogin._relogin_budget_s()
-    assert budget >= measured * mt5_relogin._MT5_REQUEST_TIMEOUT_S
+    ], f"the escalation path changed shape: {paths['terminal_info_fails']}"
+    assert "account_info" not in paths["terminal_info_answers"], (
+        "the budget-gated account_info() was read although the time left could "
+        "not also cover the recycle and its relaunch"
+    )
+    assert mt5_relogin._MT5_RELOGIN_ROUND_TRIPS == max(measured.values()), (
+        f"the budget is derived from {mt5_relogin._MT5_RELOGIN_ROUND_TRIPS} "
+        f"crossings and the worst unconditional path makes {max(measured.values())} "
+        f"({measured}). It must be EXACTLY the minimum: fewer lets the `wait_for` "
+        "fire mid-recycle, more lengthens the unbounded wait batch jobs pay."
+    )
     assert budget <= mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S
+
+
+async def test_WR04_a_recycle_the_budget_cannot_finish_is_never_started(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ WR-04 / SFH-06. With `MT5_RELOGIN_BUDGET_S` set below its derived default
+    (a Railway override still sized for the old 5-trip path, say), killing the
+    shared terminal and then being abandoned before the relaunch probe is the
+    worst outcome this heal has. The recycle must not START unless the time left
+    covers it and its relaunch — and the attempt must not be spent."""
+    _set_full_env(monkeypatch)
+    monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", "160")
+    fake, _c = _install_client(
+        monkeypatch,
+        {**_WEDGED, "crossing_cost_s": mt5_relogin._MT5_REQUEST_TIMEOUT_S},
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert _recycle_count(fake) == 0
+    assert outcomes[0].escalation_kind is None
+    assert any(
+        "recycle was NOT attempted" in r.getMessage() and r.levelno == logging.WARNING
+        for r in _records(caplog)
+    )
+    monkeypatch.delenv("MT5_RELOGIN_BUDGET_S")
+    fake._scenario["crossing_cost_s"] = 0.0
+    await _heal_n_times(1)
+    assert _recycle_count(fake) == 1, "the skipped attempt was spent anyway"
 
 
 def test_HealOutcome_escalation_field_is_appended_and_defaults_to_never_ran() -> None:

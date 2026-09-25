@@ -57,7 +57,8 @@ import asyncio
 import logging
 import math
 import os
-from typing import Final
+import time
+from typing import Callable, Final
 
 from services.closed_sets import mt5_enabled_server
 from services.mt5_client import MT5_REQUEST_TIMEOUT_S as _MT5_REQUEST_TIMEOUT_S
@@ -271,26 +272,66 @@ _MT5_RELOGIN_LEASE_WAIT_ENV: Final[str] = "MT5_RELOGIN_LEASE_WAIT_S"
 # counts the remote calls it actually makes. A sixth round-trip added to the path
 # reds there rather than silently re-opening this window.
 #
-# ⛔ 164.6.5 plan 05 — IT WAS 5, AND THE WORST PATH IS NOW THE ESCALATION's, AT 8.
-# The `ipc_fault` escalation runs INSIDE this budget (it must: see
-# `_escalate_ipc_fault`), and before it recycles it captures the wedge evidence
-# `MT5-SWITCH-WEDGE-CAUSE-01` needs, because the recycle erases it. Its worst
-# path, every row a terminal-touching call bounded by the rpyc ceiling:
+# ⛔ 164.6.5 plan 05 — IT WAS 5, AND THE WORST PATH IS NOW THE ESCALATION's. Plan
+# 05 re-derived it to 8, counting "terminal-touching calls" and treating the
+# recycle's bridge-served rpyc requests as free.
 #
-#   | the first probe: `initialize()` + `last_error()`             | 2 |
-#   | the capture: `terminal_info()` answers                       | 1 |
-#   | the capture: `account_info()` fails + its `last_error()`     | 2 |
-#   | the recycle's one remote call                                | 1 |
-#   | the relaunch: `initialize()` + `last_error()`                | 2 |
+# ⛔ 164.6.5 review round 1 (WR-04) — THAT COUNT WAS INCONSISTENT, AND HONESTLY
+# COUNTED THE PATH OVERRAN THE 300 s CEILING. The same table counts `last_error()`
+# — a BRIDGE-LOCAL read of the package's stored error — at a full 30 s, because
+# D-32's EVIDENCE §1b measured a failed attempt paying a SECOND 30 s there. The
+# unit is therefore the RPYC CROSSING, each bounded only by `sync_request_timeout`,
+# and `recycle_terminal_process._remote_call` makes THREE of them
+# (`conn.execute(SRC)`, the `conn.namespace[FN]` netref lookup, the call), not one.
+# Counted that way plan 05's path was 10 crossings = 310 s, over the ceiling: the
+# `wait_for` would fire mid-recycle (the WR-03 class, and the SFH-06 abandonment).
 #
-# (a failing `terminal_info()` SKIPS `account_info()`, so the capture is never
-# four). 8 x 30 + 10 = 250 s, under the 300 s ceiling, which is unchanged. ⚠️ The
-# per-field reads `_materialize` makes of an answered snapshot are served by the
-# BRIDGE, which is exactly the half this fault class says is alive, so they are
-# not counted as terminal round-trips. ⛔ Not raising this count would have
-# shipped the WR-03 defect on the new path: the `wait_for` firing mid-recycle.
-# Gated by `test_the_budget_covers_the_ESCALATION_path_too`.
-_MT5_RELOGIN_ROUND_TRIPS: Final[int] = 8
+# THE FIX IS NOT A BIGGER NUMBER. The budget now covers exactly the crossings the
+# escalation makes UNCONDITIONALLY, and every OPTIONAL read is taken only when the
+# time left still covers it AND everything the path must still do
+# (`_affordable`). The unconditional worst path:
+#
+#   | the first probe: `initialize()` + `last_error()`                 | 2 |
+#   | the capture: `terminal_info()` + its `last_error()`              | 2 |
+#   | the recycle: execute + namespace lookup + call                   | 3 |
+#   | the verb's relaunch probe: `initialize()` + `last_error()`        | 2 |
+#
+# 9 x 30 + 10 = 280 s, under the 300 s ceiling, which is unchanged. The capture's
+# `account_info()` read, the relaunch POLLS that let a slow relaunch be seen
+# answering, and the post-relaunch reads are all budget-gated, so none of them
+# can push the path past the `wait_for`. ⛔ It is the MINIMUM that covers the
+# unconditional path: `test_the_budget_covers_the_ESCALATION_path_too` drives the
+# worst path with every crossing at its ceiling and asserts EQUALITY, so an
+# over-provision (which lengthens the unbounded lease wait batch jobs pay, IN-04)
+# reds as surely as an under-count.
+_DETECTOR_READING_CROSSINGS: Final[int] = 2
+_CAPTURE_READ_CROSSINGS: Final[int] = 2
+_RECYCLE_CROSSINGS: Final[int] = 3
+_MT5_RELOGIN_ROUND_TRIPS: Final[int] = (
+    _DETECTOR_READING_CROSSINGS  # the first probe
+    + _CAPTURE_READ_CROSSINGS  # terminal_info(), unconditional
+    + _RECYCLE_CROSSINGS
+    + _DETECTOR_READING_CROSSINGS  # the verb's own relaunch probe
+)
+
+#: The crossings the escalation must still make once the capture is done: the
+#: recycle and its relaunch probe. An optional read is taken only if the time
+#: left covers it PLUS this reserve.
+_ESCALATION_RESERVE_CROSSINGS: Final[int] = (
+    _RECYCLE_CROSSINGS + _DETECTOR_READING_CROSSINGS
+)
+
+#: The heal's clock. ⛔ A module attribute, not a bare `time.monotonic` call, only
+#: so the budget-gated paths can be driven against a clock whose every crossing
+#: costs its full ceiling — the one condition the budget exists for.
+_clock: Callable[[], float] = time.monotonic
+
+
+def _affordable(deadline: float, crossings: int) -> bool:
+    """Whether ``crossings`` rpyc crossings, each at its full ceiling, still fit
+    before ``deadline``. The guard every OPTIONAL read takes (WR-04)."""
+    return deadline - _clock() >= crossings * _MT5_REQUEST_TIMEOUT_S
+
 
 # The slack over the round-trips, covering the unbounded `rpyc.classic.connect`.
 _MT5_RELOGIN_CONNECT_SLACK_S: Final[float] = 10.0
@@ -704,7 +745,9 @@ def _describe_capture_failure(exc: Exception) -> str:
     return f"exc_class={type(exc).__name__} code={code}"
 
 
-def _capture_wedge_evidence(client: Mt5Client, env_server: str) -> str:
+def _capture_wedge_evidence(
+    client: Mt5Client, env_server: str, deadline: float
+) -> str:
     """Read what the recycle is about to ERASE, and return it as a log fragment.
 
     ⭐ WHY (``TODOS.md`` ``MT5-SWITCH-WEDGE-CAUSE-01``). The wedge is PROCESS state,
@@ -731,8 +774,10 @@ def _capture_wedge_evidence(client: Mt5Client, env_server: str) -> str:
     ⛔ IT CANNOT RAISE, except ``Mt5SessionAbandoned``, which is re-raised for the
     same reason ``_escalate_ipc_fault`` re-raises it. ⚠️ A failing
     ``terminal_info()`` SKIPS ``account_info()``: a terminal that cannot answer
-    one cannot answer the other, and the skip is what keeps the path inside
-    ``_MT5_RELOGIN_ROUND_TRIPS``.
+    one cannot answer the other. ⛔ And ``account_info()`` is BUDGET-GATED (WR-04):
+    it is read only when the time left covers it AND the recycle and its relaunch
+    probe (``_ESCALATION_RESERVE_CROSSINGS``). Evidence is never bought with the
+    recovery it exists to precede.
     """
     try:
         terminal = client.terminal_info()
@@ -757,6 +802,14 @@ def _capture_wedge_evidence(client: Mt5Client, env_server: str) -> str:
         if isinstance(connected, bool)
         else "connected=not_captured (terminal_info carried no boolean)"
     )
+    if not _affordable(
+        deadline, _CAPTURE_READ_CROSSINGS + _ESCALATION_RESERVE_CROSSINGS
+    ):
+        return (
+            f"{build_part} {connected_part} session_server_matches_env=not_captured "
+            "(account_info skipped: the heal budget left is reserved for the "
+            "recycle and its relaunch)"
+        )
     try:
         account = client.account_info()
     except Mt5SessionAbandoned:
@@ -831,7 +884,7 @@ def _classify_recycle_verdict(verdict: dict[str, object]) -> str:
 
 
 def _escalate_ipc_fault(
-    client: Mt5Client, code: int, env_server: str
+    client: Mt5Client, code: int, env_server: str, deadline: float | None = None
 ) -> str | None:
     """ACT on an ``ipc_fault`` reading by recycling the terminal PROCESS (D-08),
     once per run, and return the escalation kind — or ``None`` when it did not run.
@@ -878,6 +931,8 @@ def _escalate_ipc_fault(
     ``not_healed:`` prefix is a contract downstream keys off. The line carries
     kinds, codes and counts only; never a credential, host, port or account.
     """
+    if deadline is None:
+        deadline = _clock() + _relogin_budget_s()
     if code not in _RECYCLE_REACHABLE_IPC_CODES:
         # ⛔ WR-08 — NO re-arm here. `0` measured nothing, and `-10003` / `-10004`
         # are the terminal NOT answering either; re-arming on them let a flaky
@@ -897,7 +952,7 @@ def _escalate_ipc_fault(
     # Logged on its own line BEFORE the recycle is attempted, so the evidence is
     # on record even if the recycle then hangs past the budget.
     try:
-        evidence = _capture_wedge_evidence(client, env_server)
+        evidence = _capture_wedge_evidence(client, env_server, deadline)
     except Mt5SessionAbandoned:
         raise
     except Exception as exc:  # noqa: BLE001 — belt and braces; see the docstring
@@ -915,6 +970,22 @@ def _escalate_ipc_fault(
     # escalation's first act. An escalation abandoned during the capture used to
     # have spent the run's one attempt already, with no process ended, so every
     # later `-10005` was debounced until a redeploy.
+    if not _affordable(deadline, _ESCALATION_RESERVE_CROSSINGS):
+        # ⛔ WR-04 / SFH-06 — NEVER START A RECYCLE THE BUDGET CANNOT FINISH. Under
+        # the derived default this cannot happen (the unconditional path is what
+        # the default is derived from); it is reachable when `MT5_RELOGIN_BUDGET_S`
+        # is set below that default. Killing the shared terminal and then being
+        # abandoned before the relaunch probe is the worst outcome here, so the
+        # attempt is NOT spent and NOT made.
+        logger.warning(
+            "mt5 session heal: ipc_fault code=%s — the terminal-process recycle was "
+            "NOT attempted: the heal budget left cannot cover the recycle and its "
+            "relaunch probe (%s is set below its derived default?). The attempt is "
+            "not spent; the next reading will try again.",
+            code,
+            _MT5_RELOGIN_BUDGET_ENV,
+        )
+        return None
     claim_ipc_fault_escalation(answers)
     verdict: dict[str, object] = {}
     try:
@@ -986,7 +1057,13 @@ def _escalate_ipc_fault(
 
 
 def _heal_blocking(
-    host: str, port: int, login: int, password: str, server: str
+    host: str,
+    port: int,
+    login: int,
+    password: str,
+    server: str,
+    *,
+    deadline: float | None = None,
 ) -> HealOutcome:
     """The BLOCKING body, run under ``to_thread``. Returns a ``HealOutcome``.
 
@@ -1050,6 +1127,8 @@ def _heal_blocking(
     be re-classified as a user credential fault; it propagates to the entry's
     catch-all, which logs its CLASS.
     """
+    if deadline is None:
+        deadline = _clock() + _relogin_budget_s()
     client = Mt5Client(host, port)
     try:
         try:
@@ -1077,7 +1156,9 @@ def _heal_blocking(
                     final_code=None,
                     # ⭐ D-08 — ACT, don't only report. Decided from the typed
                     # `err.code`, never from `verdict`. See `_escalate_ipc_fault`.
-                    escalation_kind=_escalate_ipc_fault(client, err.code, server),
+                    escalation_kind=_escalate_ipc_fault(
+                        client, err.code, server, deadline
+                    ),
                 )
             # ⭐ THE ONE READING THAT ESTABLISHES DARKNESS. `-6` means the bridge
             # ANSWERED and no account is authorized; every other code is an IPC
@@ -1377,7 +1458,15 @@ async def heal_mt5_terminal_session(
             ):
                 outcome = await asyncio.wait_for(
                     asyncio.to_thread(
-                        _heal_blocking, host, port, login, password, server
+                        _heal_blocking,
+                        host,
+                        port,
+                        login,
+                        password,
+                        server,
+                        # ⭐ WR-04 — the SAME instant the `wait_for` starts, so the
+                        # blocking body's optional reads can never outlive it.
+                        deadline=_clock() + budget_s,
                     ),
                     timeout=budget_s,
                 )
