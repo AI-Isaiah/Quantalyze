@@ -115,6 +115,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // code AND message: P0001 is the generic RAISE class, and any other
     // P0001 must still reach the logged 500 below.
     if (error.code === "P0001" && error.message === "api_key_disconnected") {
+      // Round-1 review (silent-failure-hunter M4): no ERROR log, but not
+      // nothing either. One info line gives the refusal a count, so a user
+      // stuck on a stale tab leaves a trace. It carries no user or key id.
+      console.info("[allocator/holdings/sync] refused: api key disconnected (409)");
       return NextResponse.json(
         {
           error:

@@ -176,6 +176,50 @@ function formatUsd(n: number | null): string {
 const SYNC_FAILED_HELPER =
   "Sync request failed — click Sync now to retry";
 
+// Phase 164.9.1 round-1 review (silent-failure-hunter HIGH-1). The sync route
+// answers 409 when the key is disconnected (the RPC's P0001
+// api_key_disconnected). Retrying cannot succeed, so SYNC_FAILED_HELPER's
+// "click Sync now to retry" would loop the user forever. The route's own
+// sentence is shown when it sent one; this is the fallback with the same
+// meaning.
+const SYNC_DISCONNECTED_HELPER =
+  "This API key is disconnected. Reconnect it before syncing holdings.";
+
+function disconnectedRefusalMessage(body: unknown): string {
+  const error =
+    body !== null && typeof body === "object"
+      ? (body as { error?: unknown }).error
+      : undefined;
+  return typeof error === "string" && error.length > 0
+    ? error
+    : SYNC_DISCONNECTED_HELPER;
+}
+
+// Phase 164.9.1 round-1 review (silent-failure-hunter LOW-1). An
+// `already_inflight` answer leaves api_keys.sync_status as it was (migration
+// 067's shape: the RPC reports the queued job, it does not restate the key's
+// status). So the next 5s refresh used to hand back the stored `idle` or
+// `complete`, the pill left "Syncing…" and the "Queued — retry in Ns" helper
+// vanished while the job was still queued. The hold below keeps the optimistic
+// `syncing` until the queued job has had its turn: it ends when the server
+// reports anything other than idle/complete (an error surfaces at once), when
+// last_sync_at moves (the job ran), or QUEUED_HOLD_GRACE_MS after the job's
+// next_attempt_at, whichever comes first. The RPC was not changed to write
+// `syncing` on that path: a job that finishes between the look-up and such a
+// write would leave the key stuck at `syncing`, which disables Sync now.
+const QUEUED_HOLD_GRACE_MS = 120_000;
+
+function isQueuedHold(k: InitialKey, prev?: ExchangeConnection): boolean {
+  if (prev === undefined || prev.sync_status !== "syncing") return false;
+  if (prev.queued_next_attempt_at === null) return false;
+  const queuedAt = Date.parse(prev.queued_next_attempt_at);
+  if (!Number.isFinite(queuedAt)) return false;
+  if (Date.now() >= queuedAt + QUEUED_HOLD_GRACE_MS) return false;
+  const server = k.sync_status ?? "idle";
+  if (server !== "idle" && server !== "complete") return false;
+  return k.last_sync_at === prev.last_sync_at;
+}
+
 function normalizeInitialKey(
   k: InitialKey,
   prev?: ExchangeConnection,
@@ -203,7 +247,10 @@ function normalizeInitialKey(
     is_active: k.is_active,
     // When a reconnect is in-flight, preserve the optimistic sync_status
     // ("syncing") rather than reverting to the stale server value.
-    sync_status: isReconnectInFlight ? prev!.sync_status : k.sync_status,
+    sync_status:
+      isReconnectInFlight || isQueuedHold(k, prev)
+        ? prev!.sync_status
+        : k.sync_status,
     last_sync_at: k.last_sync_at,
     account_balance_usdt: k.account_balance_usdt,
     created_at: k.created_at,
@@ -312,6 +359,34 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
     startTransition(() => router.refresh());
   }
 
+  // A 409 from the sync route means the key is disconnected on the server,
+  // whatever this tab believed. Move the row to the Disconnected section, where
+  // its Reconnect button is, and say why there. `fallbackDisconnectedAt` is the
+  // timestamp to show until the next refresh brings the server's own.
+  function markRefusedAsDisconnected(
+    keyId: string,
+    body: unknown,
+    fallbackDisconnectedAt: string | null,
+  ) {
+    const message = disconnectedRefusalMessage(body);
+    setKeys((prev) =>
+      prev.map((k) =>
+        k.id === keyId
+          ? {
+              ...k,
+              sync_status: "idle",
+              queued_next_attempt_at: null,
+              disconnected_at:
+                k.disconnected_at ??
+                fallbackDisconnectedAt ??
+                new Date().toISOString(),
+              helper_override: message,
+            }
+          : k,
+      ),
+    );
+  }
+
   async function handleReconnect(keyId: string) {
     // M2 (red-team): capture the original disconnected_at BEFORE the optimistic
     // update so the revert path can restore it exactly. Pre-fix: revert stamped
@@ -381,7 +456,13 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ api_key_id: keyId }),
       });
-      if (!syncRes.ok) {
+      if (syncRes.status === 409) {
+        // The reconnect RPC answered OK, yet the sync says the key is still
+        // (or again) disconnected. Put the row back where its Reconnect button
+        // is and say so, rather than inviting a Sync now that cannot succeed.
+        const body = await syncRes.json().catch(() => null);
+        markRefusedAsDisconnected(keyId, body, originalDisconnectedAt);
+      } else if (!syncRes.ok) {
         setKeys((prev) =>
           prev.map((k) =>
             k.id === keyId
@@ -503,6 +584,11 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
         body: JSON.stringify({ api_key_id: apiKeyId }),
       });
       const json = (await res.json().catch(() => null)) ?? {};
+      if (res.status === 409) {
+        markRefusedAsDisconnected(apiKeyId, json, null);
+        startTransition(() => router.refresh());
+        return;
+      }
       if (!res.ok) {
         // 4xx/5xx — row-scoped error surfaced via aria-live helper line.
         // Revert optimistic syncing so the Sync now button re-enables.
@@ -659,7 +745,9 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
           body: JSON.stringify({ api_key_id: inserted.id }),
         });
         const syncJson = (await syncRes.json().catch(() => null)) ?? {};
-        if (!syncRes.ok) {
+        if (syncRes.status === 409) {
+          markRefusedAsDisconnected(inserted.id, syncJson, null);
+        } else if (!syncRes.ok) {
           setKeys((prev) =>
             prev.map((k) =>
               k.id === inserted.id
@@ -895,6 +983,20 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                       {key.exchange} · Disconnected{" "}
                       {formatRelative(key.disconnected_at)}
                     </p>
+                    {/* Round-1 review (HIGH-1): a disconnected row carries a
+                        helper line too. Without it the sync refusal's reason and
+                        "Reconnect failed — try again" were set on this row and
+                        never shown. */}
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      data-testid="allocator-disconnected-helper"
+                      className="text-xs text-text-muted mt-1"
+                    >
+                      {key.helper_override ? (
+                        <span>{key.helper_override}</span>
+                      ) : null}
+                    </div>
                     {key.exchange === "mt5" && (
                       <p className="text-xs text-text-secondary font-metric mt-0.5">
                         MT5 account {key.venue_account_id ?? "—"}

@@ -194,6 +194,7 @@ describe("POST /api/allocator/holdings/sync", () => {
       error: { code: "P0001", message: "api_key_disconnected" },
     });
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
 
     const { POST } = await import("./route");
     const res = await POST(makeReq({ api_key_id: TEST_API_KEY_ID }));
@@ -208,7 +209,20 @@ describe("POST /api/allocator/holdings/sync", () => {
     expect(consoleSpy).not.toHaveBeenCalled();
     expect(mockLogAuditEvent).not.toHaveBeenCalled();
     expect(mockRpc).toHaveBeenCalledTimes(1);
+    // Round-1 review (silent-failure-hunter M4): the refusal leaves ONE info
+    // line, so it can be counted, and that line names no user and no key.
+    expect(
+      infoSpy,
+      "the 409 refusal left no trace at all — a user looping on a stale tab is invisible",
+    ).toHaveBeenCalledTimes(1);
+    const infoLine = infoSpy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
+    expect(infoLine).toContain("refused: api key disconnected");
+    expect(infoLine, "the info line leaked the key id").not.toContain(TEST_API_KEY_ID);
+    expect(infoLine, "the info line leaked the user id").not.toMatch(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+    );
     consoleSpy.mockRestore();
+    infoSpy.mockRestore();
   });
 
   // ── 5c. D-23 guard — the mapping keys on the MESSAGE, not all of P0001

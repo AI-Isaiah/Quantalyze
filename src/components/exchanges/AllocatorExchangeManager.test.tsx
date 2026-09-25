@@ -379,6 +379,62 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
     });
   });
 
+  // ⭐ Phase 164.9.1 round-1 review (silent-failure-hunter HIGH-1). The route
+  // answers 409 when the key is disconnected on the server (a stale tab, or a
+  // disconnect from another device). Retrying can never succeed, so the
+  // generic "click Sync now to retry" would loop the user forever. The row must
+  // move to the Disconnected section, where its Reconnect button is, and show
+  // the route's own sentence. Fails if a 409 is folded back into the generic
+  // non-OK branch.
+  it("handleSync on 409 (key disconnected) moves the row to Disconnected with the route's reason, never the retry helper", async () => {
+    const reason = "This API key is disconnected. Reconnect it before syncing holdings.";
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: reason }),
+    });
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Sync binance now/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: /Sync binance now/i }),
+      "a disconnected key still offers Sync now, the action that just failed",
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("allocator-disconnected-helper").textContent).toBe(reason);
+    expect(document.body.textContent).not.toContain("Sync request failed");
+    expect(routerRefreshMock).toHaveBeenCalled();
+  });
+
+  it("handleSync on 409 with no usable body still says the key is disconnected", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => {
+        throw new Error("not json");
+      },
+    });
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Sync binance now/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("allocator-disconnected-helper").textContent,
+      ).toMatch(/disconnected.*Reconnect/);
+    });
+    expect(document.body.textContent).not.toContain("Sync request failed");
+  });
+
   it("handleSync on network error (rejected fetch) surfaces 'Sync request failed' helper_override", async () => {
     fetchMock.mockRejectedValueOnce(new Error("network down"));
     render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
@@ -566,6 +622,52 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
     expect(
       screen.getByTestId("allocator-sync-helper").textContent,
     ).toContain("Sync request failed");
+  });
+
+  // Phase 164.9.1 round-1 review (HIGH-1): the first-run sync of a just-added
+  // key answering 409 means the key is already disconnected on the server.
+  // Same treatment as Sync now: the row goes where its Reconnect button is,
+  // with the reason, never the retry helper.
+  it("handleAddKey first-run sync answering 409 lands the new row in Disconnected with the reason", async () => {
+    const reason = "This API key is disconnected. Reconnect it before syncing holdings.";
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            api_key_id: "new-key-409",
+            valid: true,
+            read_only: true,
+          }),
+        });
+      }
+      if (url === "/api/allocator/holdings/sync") {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          json: async () => ({ error: reason }),
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    apiKeysRefetchMock.mockReturnValue({
+      data: makeKey({ id: "new-key-409", sync_status: "idle" }),
+      error: null,
+    });
+
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
+    await submitAddKeyForm();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("allocator-disconnected-helper").textContent,
+      ).toBe(reason);
+    });
+    expect(
+      screen.getByRole("button", { name: /Reconnect binance key/i }),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Sync request failed");
   });
 
   // 160-03 / RANK-03 — the three M-0407 (audit-2026-05-07) specs that lived
@@ -1124,6 +1226,80 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
     });
   });
 
+  // ⭐ Phase 164.9.1 round-1 review (HIGH-1): the reconnect RPC answered OK but
+  // the sync POST says the key is still disconnected. The row goes back where
+  // its Reconnect button is, with the reason, not to an active row that
+  // invites a Sync now that cannot succeed.
+  it("reconnect whose sync answers 409 puts the row back in Disconnected with the route's reason", async () => {
+    const reason = "This API key is disconnected. Reconnect it before syncing holdings.";
+    rpcMock.mockResolvedValue({ data: true, error: null });
+    fetchMockReconnect.mockResolvedValue(
+      new Response(JSON.stringify({ error: reason }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[
+          makeKey({
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("allocator-disconnected-helper").textContent,
+      ).toBe(reason);
+    });
+    expect(
+      screen.getByRole("button", { name: /Reconnect binance key/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Sync binance now/i }),
+    ).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Sync request failed");
+  });
+
+  // Same class, pre-existing: "Reconnect failed — try again" was set on a row
+  // that renders in the Disconnected section, which had no helper line, so the
+  // user never saw it. The row now shows it.
+  it("a failed reconnect RPC shows 'Reconnect failed — try again' on the disconnected row", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "XX000", message: "boom", hint: null },
+    });
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[
+          makeKey({
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("allocator-disconnected-helper").textContent,
+      ).toBe("Reconnect failed — try again");
+    });
+    errSpy.mockRestore();
+  });
+
   it("successful reconnect moves the row back into the active Exchange connections list", async () => {
     rpcMock.mockResolvedValue({ data: true, error: null });
     render(
@@ -1372,6 +1548,123 @@ describe("AllocatorExchangeManager — initialKeys prop→state merge (Landmine 
     expect(screen.getByTestId("allocator-sync-pill").textContent).toContain(
       "Synced",
     );
+  });
+
+  // ⭐ Phase 164.9.1 round-1 review (silent-failure-hunter LOW-1). The RPC's
+  // `already_inflight` answer does not restate api_keys.sync_status, so the
+  // next refresh hands back the stored `complete`. Server truth winning there
+  // made the Queued helper vanish while the job was still queued. The merge now
+  // holds the optimistic `syncing` until the job has had its turn.
+  describe("a queued (already_inflight) row survives a refresh until its job runs", () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+    beforeEach(() => {
+      fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+    });
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    async function queueRow(nextAttemptAt: string, expectQueuedHelper = true) {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          already_inflight: true,
+          next_attempt_at: nextAttemptAt,
+        }),
+      });
+      const view = render(
+        <AllocatorExchangeManager
+          hasHoldings={true} initialKeys={[makeKey({ sync_status: "complete" })]}
+        />,
+      );
+      await act(async () => {
+        fireEvent.click(
+          screen.getByRole("button", { name: /Sync binance now/i }),
+        );
+      });
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+      if (expectQueuedHelper) {
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("allocator-sync-helper").textContent,
+          ).toMatch(/Queued/);
+        });
+      }
+      return view;
+    }
+
+    it("a refresh that still reports the stored `complete` keeps the pill Syncing and the Queued helper", async () => {
+      const { rerender } = await queueRow(
+        new Date(Date.now() + 90_000).toISOString(),
+      );
+      rerender(
+        <AllocatorExchangeManager
+          hasHoldings={true} initialKeys={[makeKey({ sync_status: "complete" })]}
+        />,
+      );
+      expect(screen.getByTestId("allocator-sync-pill").textContent).toContain(
+        "Syncing\u2026",
+      );
+      expect(screen.getByTestId("allocator-sync-helper").textContent).toMatch(
+        /Queued/,
+      );
+    });
+
+    it("the hold ends as soon as last_sync_at moves (the job ran)", async () => {
+      const { rerender } = await queueRow(
+        new Date(Date.now() + 90_000).toISOString(),
+      );
+      rerender(
+        <AllocatorExchangeManager
+          hasHoldings={true} initialKeys={[
+            makeKey({
+              sync_status: "complete",
+              last_sync_at: new Date().toISOString(),
+            }),
+          ]}
+        />,
+      );
+      expect(screen.getByTestId("allocator-sync-pill").textContent).toContain(
+        "Synced",
+      );
+    });
+
+    it("the hold never masks a server error", async () => {
+      const { rerender } = await queueRow(
+        new Date(Date.now() + 90_000).toISOString(),
+      );
+      rerender(
+        <AllocatorExchangeManager
+          hasHoldings={true} initialKeys={[
+            makeKey({ sync_status: "error", sync_error: "exchange said no" }),
+          ]}
+        />,
+      );
+      expect(
+        screen.getByTestId("allocator-sync-pill").getAttribute("data-sync-status"),
+      ).toBe("error");
+    });
+
+    it("the hold ends once the job's turn is long past", async () => {
+      // next_attempt_at far in the past: the grace window has closed, so the
+      // stored status is believed again.
+      const { rerender } = await queueRow(
+        new Date(Date.now() - 10 * 60_000).toISOString(),
+        false,
+      );
+      rerender(
+        <AllocatorExchangeManager
+          hasHoldings={true} initialKeys={[makeKey({ sync_status: "complete" })]}
+        />,
+      );
+      expect(screen.getByTestId("allocator-sync-pill").textContent).toContain(
+        "Synced",
+      );
+    });
   });
 });
 
