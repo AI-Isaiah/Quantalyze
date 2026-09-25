@@ -181,6 +181,9 @@ DECLARE
   v_new_id UUID;
   v_target_count INT;
   v_initial_status TEXT;
+  v_parents_found  INT;
+  v_parents_failed INT;
+  v_parents_open   INT;
 BEGIN
   -- 4-way XOR guard (CHECK mirrors this; the function raises earlier with a
   -- clearer error message — defense in depth).
@@ -212,10 +215,62 @@ BEGIN
   -- 20260716090000): rows with parents start as done_pending_children so the
   -- fan-in advance in mark_compute_job_done holds them until a parent
   -- completes. Leaf rows (no parents) start as pending.
+  --
+  -- Round-1 review (silent-failure-hunter HIGH-2): the fan-in advance releases
+  -- a child only when a parent is marked done AND every listed parent is
+  -- 'done'. A child whose parents cannot all reach 'done' through a later
+  -- mark-done would sit in done_pending_children forever, holding its
+  -- (target, kind) in-flight slot, and every later enqueue for that target
+  -- and kind would be handed its id. So the parents are READ here:
+  --   * a NULL element, or an id with no row   -> refused, loudly;
+  --   * a parent that already ended failed_final -> refused, loudly;
+  --   * every parent already 'done'           -> no mark-done will ever
+  --     release the child, and nothing needs to hold it: it starts pending;
+  --   * otherwise a parent is still open       -> done_pending_children.
+  -- The parents are locked FOR SHARE, in id order, BEFORE they are counted.
+  -- mark_compute_job_done flips its parent with an UPDATE, which waits on
+  -- that lock, and runs its fan-in advance as a LATER statement, which sees
+  -- this child once this transaction commits. Without the lock a parent could
+  -- commit 'done' between this read and the INSERT below, and its fan-in
+  -- advance would miss a child it never saw.
   IF p_parent_job_ids IS NOT NULL
      AND array_length(p_parent_job_ids, 1) IS NOT NULL
      AND array_length(p_parent_job_ids, 1) > 0 THEN
-    v_initial_status := 'done_pending_children';
+    IF array_position(p_parent_job_ids, NULL) IS NOT NULL THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: p_parent_job_ids contains a NULL element; a fan-in child must name real parent jobs'
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    PERFORM 1
+       FROM compute_jobs pj
+      WHERE pj.id = ANY(p_parent_job_ids)
+      ORDER BY pj.id
+      FOR SHARE;
+
+    SELECT count(*),
+           count(*) FILTER (WHERE pj.status = 'failed_final'),
+           count(*) FILTER (WHERE pj.status <> 'done')
+      INTO v_parents_found, v_parents_failed, v_parents_open
+      FROM compute_jobs pj
+     WHERE pj.id = ANY(p_parent_job_ids);
+
+    IF v_parents_found <> cardinality(ARRAY(SELECT DISTINCT unnest(p_parent_job_ids))) THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: p_parent_job_ids names % parent job(s) with no compute_jobs row; a child of a missing parent could never be released by the fan-in advance',
+        cardinality(ARRAY(SELECT DISTINCT unnest(p_parent_job_ids))) - v_parents_found
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_parents_failed > 0 THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: % parent job(s) in p_parent_job_ids already ended failed_final; a child of a failed parent could never be released by the fan-in advance',
+        v_parents_failed
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_parents_open > 0 THEN
+      v_initial_status := 'done_pending_children';
+    ELSE
+      v_initial_status := 'pending';
+    END IF;
   ELSE
     v_initial_status := 'pending';
   END IF;

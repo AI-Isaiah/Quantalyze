@@ -959,6 +959,113 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
       }
     },
   );
+
+  // ⭐ Phase 164.9.1 round-1 review (silent-failure-hunter HIGH-2) — NO ENQUEUE
+  // CREATES A CHILD THAT NOTHING CAN RELEASE.
+  //
+  // `mark_compute_job_done` releases a done_pending_children row only when a
+  // parent is marked done AND every listed parent is 'done'. Once the ten-arg
+  // overload (the one every enqueue_compute_job mode reaches) starts parented
+  // children in done_pending_children, three parent lists would leave a child
+  // there for good, holding its (target, kind) in-flight slot so every later
+  // enqueue for that target and kind is handed the dead row's id:
+  //   (a) a parent id with no row, (b) a parent already failed_final, and
+  //   (c) parents that are ALL already done (no mark-done is left to run).
+  // (a) and (b) must be REFUSED loudly (22023) with no row written; (c) must
+  // start the child `pending`, because nothing needs to hold it. Each leg fails
+  // if the ten-arg goes back to "any parent list means done_pending_children".
+  it.skipIf(!HAS_LIVE_DB)(
+    "P12-dead-end: a missing or failed_final parent is refused, and a child of all-done parents starts pending",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const userId = await createTestUser(
+        admin,
+        `g10b-dead-end-${ts}@test.sec`,
+      );
+      // One strategy per leg, so the (strategy, kind) in-flight index cannot
+      // make one leg's child the answer to another leg's enqueue.
+      const strategyMissing = await seedStrategy(admin, userId, "dead-missing");
+      const strategyFailed = await seedStrategy(admin, userId, "dead-failed");
+      const strategyDone = await seedStrategy(admin, userId, "dead-done");
+      const childKind = "reconcile_strategy";
+      const childRowCount = async (strategyId: string): Promise<number> => {
+        const { data, error } = await admin
+          .from("compute_jobs")
+          .select("id")
+          .eq("strategy_id", strategyId)
+          .eq("kind", childKind);
+        expect(error).toBeNull();
+        return (data ?? []).length;
+      };
+      try {
+        // (a) a parent id with no compute_jobs row.
+        const { data: missingId, error: missingErr } = await admin.rpc(
+          "enqueue_compute_job",
+          {
+            p_strategy_id: strategyMissing,
+            p_kind: childKind,
+            p_idempotency_key: null,
+            p_parent_job_ids: [crypto.randomUUID()],
+          } as never,
+        );
+        expect(missingId).toBeNull();
+        expect(missingErr?.code).toBe("22023");
+        expect(missingErr?.message ?? "").toContain("with no compute_jobs row");
+        expect(await childRowCount(strategyMissing)).toBe(0);
+
+        // (b) a parent that already ended failed_final.
+        const failedParent = await insertComputeJob(admin, {
+          strategy_id: strategyFailed,
+          kind: "sync_trades",
+          status: "failed_final",
+          attempts: 3,
+          max_attempts: 3,
+        });
+        const { data: failedId, error: failedErr } = await admin.rpc(
+          "enqueue_compute_job",
+          {
+            p_strategy_id: strategyFailed,
+            p_kind: childKind,
+            p_idempotency_key: null,
+            p_parent_job_ids: [failedParent],
+          } as never,
+        );
+        expect(failedId).toBeNull();
+        expect(failedErr?.code).toBe("22023");
+        expect(failedErr?.message ?? "").toContain("already ended failed_final");
+        expect(await childRowCount(strategyFailed)).toBe(0);
+
+        // (c) every parent already done: the child starts pending.
+        const doneParent = await insertComputeJob(admin, {
+          strategy_id: strategyDone,
+          kind: "sync_trades",
+          status: "done",
+          attempts: 1,
+          max_attempts: 3,
+        });
+        const { data: doneChild, error: doneErr } = await admin.rpc(
+          "enqueue_compute_job",
+          {
+            p_strategy_id: strategyDone,
+            p_kind: childKind,
+            p_idempotency_key: null,
+            p_parent_job_ids: [doneParent],
+          } as never,
+        );
+        expect(doneErr).toBeNull();
+        expect(typeof doneChild).toBe("string");
+        expect((await fetchJob(admin, doneChild as unknown as string)).status).toBe(
+          "pending",
+        );
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyMissing, strategyFailed, strategyDone],
+        });
+      }
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

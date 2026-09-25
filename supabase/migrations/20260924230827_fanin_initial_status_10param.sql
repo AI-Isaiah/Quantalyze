@@ -23,13 +23,28 @@
 --
 -- THE FIX, AND ONLY THE FIX (D-04). The body below is the ten-arg body of
 -- 20260826150000_destrict_enqueue_internal_10param.sql, VERBATIM, with exactly
--- THREE edits, all about the initial status:
+-- FOUR edits, all about the initial status (three as first written, one added
+-- by the round-1 review):
 --   (1) DECLARE gains `v_initial_status TEXT`;
 --   (2) before the optimistic look-up, it is set to 'done_pending_children' when
 --       p_parent_job_ids is non-NULL with at least one element, else 'pending' —
 --       the SEVEN-arg's predicate from 20260716090000, mirrored exactly;
 --   (3) the INSERT names `status` last in its column list and `v_initial_status`
---       last in its VALUES.
+--       last in its VALUES;
+--   (4) ADDED BY THE ROUND-1 REVIEW (silent-failure-hunter HIGH-2, 2026-09-25):
+--       when parents are passed, the body locks them FOR SHARE and reads them.
+--       A NULL element, a parent id with no row, or a parent already
+--       'failed_final' is REFUSED with invalid_parameter_value; a child whose
+--       parents are ALL already 'done' starts 'pending'; only a child with at
+--       least one still-open parent starts 'done_pending_children'.
+--       ⚠️ THIS IS A DELIBERATE DEPARTURE FROM STRICT SEVEN-ARG PARITY (D-04
+--       said "exactly as the SEVEN-arg does"). The seven-arg sets
+--       'done_pending_children' for ANY non-empty parent list, and the round-1
+--       review measured what that costs once the TEN-arg, the overload every
+--       enqueue_compute_job mode reaches, copies it: a child that no mark-done
+--       can ever release, holding its in-flight slot for good. Parity with a
+--       dead end was not kept. The seven-arg itself stays byte-unchanged (it
+--       cannot be called, D-27), and arm (l) still pins its own assignment.
 -- Everything else is byte-identical to the source body: the signature (DEFAULT
 -- NULL on the last three parameters), SECURITY DEFINER, `SET search_path =
 -- public, pg_catalog`, the schema-qualified name, the 4-way XOR guard, the
@@ -37,9 +52,12 @@
 -- unchanged), the optimistic look-up (strategy arm included, indent and all),
 -- `ON CONFLICT DO NOTHING`, the four PLAIN lost-race re-reads into v_new_id and
 -- the serialization_failure raise with its operator-shaped message (WR-07).
--- D-10: the idempotent return-the-existing-id contract is UNCHANGED — no new
--- raise, no return-type change, no DROP FUNCTION (a DROP would destroy the
--- catalog COMMENT the recurring gate reads; see the note on COMMENT below).
+-- D-10: the idempotent return-the-existing-id contract is UNCHANGED — no
+-- collision raise, no return-type change, no DROP FUNCTION (a DROP would
+-- destroy the catalog COMMENT the recurring gate reads; see the note on COMMENT
+-- below). The only new raises are edit (4)'s refusals of an unusable parent
+-- list; a call that passes no parents, or parents that exist and have not
+-- failed, reaches the look-up and the INSERT exactly as before.
 -- The SEVEN-arg overload is NOT touched by this file.
 --
 -- RE-BASE DISCIPLINE (D-05), re-measured at execution, 2026-09-24 UTC:
@@ -68,16 +86,23 @@
 -- the seven-arg on the belief that it holds the fan-in logic — this file is
 -- where that logic now runs.
 --
--- ⚠️ KNOWN LIMIT, PRE-EXISTING IN THE SEVEN-ARG DESIGN AND INHERITED BY PARITY —
--- A STRANDED FAN-IN CHILD. A 'done_pending_children' row is released only by a
--- parent's `mark_compute_job_done`. A child whose parents are ALL already
--- 'done' at enqueue time, or whose parent ends 'failed_final', or whose parent
--- id does not exist, therefore never leaves 'done_pending_children'
--- (`mark_compute_job_failed` does not cascade). While stranded it also holds
--- its (target, kind) in-flight slot, and the optimistic look-up keeps returning
--- it. The optimistic look-up ignores p_parent_job_ids when an in-flight job
--- already exists, exactly as the seven-arg does. Latent for the same reason as
--- the harm: no caller passes parents (D-02). Recorded, not widened.
+-- ⚠️ KNOWN LIMIT — A STRANDED FAN-IN CHILD, NARROWED BY EDIT (4) BUT NOT CLOSED.
+-- A 'done_pending_children' row is released only by a parent's
+-- `mark_compute_job_done`, and only once EVERY listed parent is 'done'. Edit (4)
+-- closes the three dead ends that exist AT ENQUEUE TIME: a missing parent and a
+-- parent already 'failed_final' are refused, and a child whose parents are all
+-- 'done' starts 'pending'. What stays open is a parent that is still open at
+-- enqueue and LATER ends 'failed_final': `mark_compute_job_failed` does not
+-- cascade, so that child never leaves 'done_pending_children'. While stranded it
+-- holds its (target, kind) in-flight slot, the optimistic look-up keeps
+-- returning it, and nothing reaps it (`reset_stalled_compute_jobs` and the
+-- orphan terminalizer both key on 'running'). For a strategy-scoped child the
+-- USER-FACING effect is that `sync_strategy_analytics_status` counts it as
+-- non-terminal, so the strategy reads "computing" indefinitely. Latent for the
+-- same reason as the harm: no caller passes parents (D-02). Whoever first wires
+-- a caller that passes `p_parent_job_ids` must also make a parent's terminal
+-- failure reach its children. The optimistic look-up still ignores
+-- p_parent_job_ids when an in-flight job already exists, as the seven-arg does.
 --
 -- ══════════════════════════════════════════════════════════════════════════
 -- VAC-04 ACKNOWLEDGEMENT — the PROD body this CREATE OR REPLACE overwrites
@@ -128,8 +153,9 @@
 -- no '||' concatenation inside a RAISE format slot).
 --
 -- Execution proof is NOT this file's DO block (a copy-check, see below). It is
--- arm P12 and arm P12-harm of src/__tests__/compute-jobs-audit-2026-05-07-g10b.test.ts,
--- run against a database with this migration applied.
+-- arms P12, P12-harm and P12-dead-end of
+-- src/__tests__/compute-jobs-audit-2026-05-07-g10b.test.ts, run against a
+-- database with this migration applied.
 -- ==========================================================================
 
 SET LOCAL lock_timeout = '3s';
@@ -179,6 +205,9 @@ DECLARE
   v_new_id UUID;
   v_target_count INT;
   v_initial_status TEXT;
+  v_parents_found  INT;
+  v_parents_failed INT;
+  v_parents_open   INT;
 BEGIN
   -- 4-way XOR guard (CHECK mirrors this; the function raises earlier with a
   -- clearer error message — defense in depth).
@@ -210,10 +239,62 @@ BEGIN
   -- 20260716090000): rows with parents start as done_pending_children so the
   -- fan-in advance in mark_compute_job_done holds them until a parent
   -- completes. Leaf rows (no parents) start as pending.
+  --
+  -- Round-1 review (silent-failure-hunter HIGH-2): the fan-in advance releases
+  -- a child only when a parent is marked done AND every listed parent is
+  -- 'done'. A child whose parents cannot all reach 'done' through a later
+  -- mark-done would sit in done_pending_children forever, holding its
+  -- (target, kind) in-flight slot, and every later enqueue for that target
+  -- and kind would be handed its id. So the parents are READ here:
+  --   * a NULL element, or an id with no row   -> refused, loudly;
+  --   * a parent that already ended failed_final -> refused, loudly;
+  --   * every parent already 'done'           -> no mark-done will ever
+  --     release the child, and nothing needs to hold it: it starts pending;
+  --   * otherwise a parent is still open       -> done_pending_children.
+  -- The parents are locked FOR SHARE, in id order, BEFORE they are counted.
+  -- mark_compute_job_done flips its parent with an UPDATE, which waits on
+  -- that lock, and runs its fan-in advance as a LATER statement, which sees
+  -- this child once this transaction commits. Without the lock a parent could
+  -- commit 'done' between this read and the INSERT below, and its fan-in
+  -- advance would miss a child it never saw.
   IF p_parent_job_ids IS NOT NULL
      AND array_length(p_parent_job_ids, 1) IS NOT NULL
      AND array_length(p_parent_job_ids, 1) > 0 THEN
-    v_initial_status := 'done_pending_children';
+    IF array_position(p_parent_job_ids, NULL) IS NOT NULL THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: p_parent_job_ids contains a NULL element; a fan-in child must name real parent jobs'
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    PERFORM 1
+       FROM compute_jobs pj
+      WHERE pj.id = ANY(p_parent_job_ids)
+      ORDER BY pj.id
+      FOR SHARE;
+
+    SELECT count(*),
+           count(*) FILTER (WHERE pj.status = 'failed_final'),
+           count(*) FILTER (WHERE pj.status <> 'done')
+      INTO v_parents_found, v_parents_failed, v_parents_open
+      FROM compute_jobs pj
+     WHERE pj.id = ANY(p_parent_job_ids);
+
+    IF v_parents_found <> cardinality(ARRAY(SELECT DISTINCT unnest(p_parent_job_ids))) THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: p_parent_job_ids names % parent job(s) with no compute_jobs row; a child of a missing parent could never be released by the fan-in advance',
+        cardinality(ARRAY(SELECT DISTINCT unnest(p_parent_job_ids))) - v_parents_found
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_parents_failed > 0 THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: % parent job(s) in p_parent_job_ids already ended failed_final; a child of a failed parent could never be released by the fan-in advance',
+        v_parents_failed
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_parents_open > 0 THEN
+      v_initial_status := 'done_pending_children';
+    ELSE
+      v_initial_status := 'pending';
+    END IF;
   ELSE
     v_initial_status := 'pending';
   END IF;
@@ -402,7 +483,11 @@ COMMENT ON FUNCTION public._enqueue_compute_job_internal(
   '7-param overload''s mig 109 P3 fix). '
   'Computes the initial status and INSERTs it explicitly: done_pending_children '
   'when p_parent_job_ids has at least one element, else pending (Phase 164.9.1, '
-  'parity with the 7-param overload''s mig 109 P12 branch).';
+  'parity with the 7-param overload''s mig 109 P12 branch). '
+  'With parents, it locks and reads them first: a NULL element, a missing parent '
+  'or a failed_final parent is refused with invalid_parameter_value, and a child '
+  'whose parents are all done starts pending, so no enqueue creates a child that '
+  'no mark-done can release.';
 
 -- --------------------------------------------------------------------------
 -- Self-verifying DO block. Arms (a)-(h) are 20260826150000's, code verbatim,
@@ -428,7 +513,9 @@ COMMENT ON FUNCTION public._enqueue_compute_job_internal(
 --       not end its VALUES with v_initial_status;
 --   (l) the 7-param body lost its own done_pending_children assignment — a
 --       parity pin on a function this file does NOT write, so it carries
---       independent information (D-04: the seven-arg stays byte-unchanged).
+--       independent information (D-04: the seven-arg stays byte-unchanged);
+--   (m) the 10-param body lost edit (4): the FOR SHARE lock on the parents, the
+--       failed_final count, or either of the two parent refusals.
 -- Every RAISE format string is a SINGLE literal. Reads catalogs only
 -- (pg_proc, pg_constraint, pg_get_functiondef, obj_description,
 -- has_function_privilege, to_regprocedure, to_regrole) — never table data.
@@ -441,7 +528,8 @@ COMMENT ON FUNCTION public._enqueue_compute_job_internal(
 -- a truncated paste, or a body edited here without its assertion updated; they
 -- cannot catch a logic error that was faithfully transcribed. EXECUTION proof
 -- that a parented child lands done_pending_children and is held until its
--- parent completes is arm P12 and arm P12-harm of
+-- parent completes, and that a parent list no mark-done could release is
+-- refused or started pending, is arms P12, P12-harm and P12-dead-end of
 -- src/__tests__/compute-jobs-audit-2026-05-07-g10b.test.ts.
 -- --------------------------------------------------------------------------
 DO $$
@@ -486,6 +574,17 @@ DECLARE
   -- v_initial_status is the LAST VALUES item, immediately before ON CONFLICT.
   c_insert_vals_re    CONSTANT text :=
     'v_initial_status[[:space:]]*\)[[:space:]]*ON[[:space:]]+CONFLICT[[:space:]]+DO[[:space:]]+NOTHING';
+  -- Arm (m): edit (4), statement forms only. The lock must be FOR SHARE on the
+  -- parent rows, the failed count must read failed_final, and both refusals
+  -- must be RAISEs carrying their own message stems.
+  c_parent_lock_re    CONSTANT text :=
+    'WHERE[[:space:]]+pj\.id[[:space:]]*=[[:space:]]*ANY[[:space:]]*\([[:space:]]*p_parent_job_ids[[:space:]]*\)[[:space:]]+ORDER[[:space:]]+BY[[:space:]]+pj\.id[[:space:]]+FOR[[:space:]]+SHARE';
+  c_parent_failed_re  CONSTANT text :=
+    'FILTER[[:space:]]*\([[:space:]]*WHERE[[:space:]]+pj\.status[[:space:]]*=[[:space:]]*''failed_final''[[:space:]]*\)';
+  c_parent_missing_re CONSTANT text :=
+    'RAISE[[:space:]]+EXCEPTION[[:space:]]+''_enqueue_compute_job_internal: p_parent_job_ids names % parent job\(s\) with no compute_jobs row';
+  c_parent_dead_re    CONSTANT text :=
+    'RAISE[[:space:]]+EXCEPTION[[:space:]]+''_enqueue_compute_job_internal: % parent job\(s\) in p_parent_job_ids already ended failed_final';
 BEGIN
   -- Both overloads must resolve.
   IF v_oid7 IS NULL THEN
@@ -615,6 +714,19 @@ BEGIN
     RAISE EXCEPTION 'fanin-status-10param: the 7-param body lost its done_pending_children assignment (mig 109 P12 regressed) — this migration was written on the premise that the two overloads compute the initial status the same way';
   END IF;
 
-  RAISE NOTICE 'fanin-status-10param: the 10-param _enqueue_compute_job_internal computes and INSERTs the initial status (done_pending_children with parents, else pending), in parity with the 7-param overload; OPS-08 re-reads, retired-kind reject, SECDEF, the exact search_path pin, the ACL (PUBLIC + named roles), the revert-discriminator comment and the historical kind CHECK all intact.';
+  -- (m) COPY-CHECK: edit (4). Without the lock a parent can commit done between
+  -- the read and the INSERT and strand the child; without the refusals a
+  -- missing or failed parent strands it outright.
+  IF v_body10 !~ c_parent_lock_re THEN
+    RAISE EXCEPTION 'fanin-status-10param: the 10-param body no longer locks the parent rows FOR SHARE in id order before reading them — a parent that commits done between the read and the INSERT would strand the child in done_pending_children';
+  END IF;
+  IF v_body10 !~ c_parent_failed_re THEN
+    RAISE EXCEPTION 'fanin-status-10param: the 10-param body no longer counts failed_final parents, so a child of a dead parent would be enqueued into a state nothing can release';
+  END IF;
+  IF v_body10 !~ c_parent_missing_re OR v_body10 !~ c_parent_dead_re THEN
+    RAISE EXCEPTION 'fanin-status-10param: the 10-param body lost a parent refusal (missing parent or failed_final parent) — a child that no mark-done can release would be enqueued silently';
+  END IF;
+
+  RAISE NOTICE 'fanin-status-10param: the 10-param _enqueue_compute_job_internal computes and INSERTs the initial status (done_pending_children while a parent is still open, else pending) and refuses a missing or failed_final parent under a FOR SHARE lock; OPS-08 re-reads, retired-kind reject, SECDEF, the exact search_path pin, the ACL (PUBLIC + named roles), the revert-discriminator comment and the historical kind CHECK all intact.';
 END
 $$;
