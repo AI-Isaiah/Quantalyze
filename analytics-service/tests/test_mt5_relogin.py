@@ -1664,6 +1664,8 @@ _ESCALATION_KINDS = (
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET,
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_CAPPED,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_DEGRADED,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
 )
 
 
@@ -1783,6 +1785,7 @@ async def test_ESCALATION_CR01_a_recycle_that_WORKED_re_arms_so_the_NEXT_wedge_i
     assert _recycle_count(fake) == 1
     assert outcomes[0].escalation_kind in (
         mt5_session_episodes.KIND_IPC_FAULT_RECYCLED,
+        mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
         mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
     )
 
@@ -2315,9 +2318,11 @@ async def test_ESCALATION_an_unanswered_capture_is_recorded_not_captured_and_sti
     [
         pytest.param(
             {"initialize_after_recycle": True},
-            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED,
-            logging.INFO,
-            id="back-and-authorized",
+            # SFH-08 (review round 2) — authorized, but the house session could
+            # not be checked (WR-03), so it is unverified, never INFO.
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
+            logging.WARNING,
+            id="back-and-authorized-UNVERIFIED",
         ),
         pytest.param(
             {"last_error_after_recycle": (-6, "Terminal: Authorization failed")},
@@ -2365,7 +2370,9 @@ async def test_ESCALATION_the_outcome_kind_and_its_severity_follow_the_relaunch(
             (0, 0, 0),
             {"initialize": True},
             mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
-            logging.ERROR,
+            # ⭐ IN-02 (review round 2) — WARNING, qualified: the relaunch may
+            # have LAUNCHED a terminal that was not running at all.
+            logging.WARNING,
             id="matched-NOTHING-and-the-probe-answered",
         ),
         pytest.param(
@@ -2385,7 +2392,7 @@ async def test_ESCALATION_the_outcome_kind_and_its_severity_follow_the_relaunch(
         pytest.param(
             (1, 1, 0),
             {"initialize_after_recycle": True},
-            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED,
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
             logging.WARNING,
             id="terminated-but-exit-UNCONFIRMED",
         ),
@@ -2434,6 +2441,9 @@ async def test_ESCALATION_WR03_a_recycle_that_did_not_end_every_terminal_is_neve
     )
     assert line.levelno == expected_level
     assert f"matched={counts[0]} terminated={counts[1]}" in line.getMessage()
+    assert ("no_process_matched_relaunch_answered" in line.getMessage()) == (
+        counts[0] == 0
+    ), "IN-02: only matched=0 with an answering relaunch carries the qualifier"
 
 
 async def test_ESCALATION_SFH09_the_refusal_codes_are_NAMED_in_the_escalation_line(
@@ -2487,7 +2497,12 @@ async def test_ESCALATION_WR02_a_recycle_that_WORKS_slowly_is_logged_recycled_ne
     with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         await _heal_n_times(1)
 
-    assert outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
+    # SFH-08 (review round 2) — the house session is not checked on this path
+    # (WR-03: the reads never fit the budget), so the recovery is UNVERIFIED.
+    assert (
+        outcomes[0].escalation_kind
+        == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED
+    )
     assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR], (
         "a recycle that WORKED produced an ERROR line"
     )
@@ -2758,37 +2773,69 @@ def test_R2_WR02_a_fence_refusal_does_NOT_end_the_persistence_run(
 
 
 @pytest.mark.parametrize(
-    "connected,login,expected_level,expected_fragment",
+    "terminal,account,expected_kind,expected_level,expected_fragment",
     [
         pytest.param(
-            True,
-            int(_FAKE_LOGIN),
+            {"connected": True},
+            {"login": int(_FAKE_LOGIN), "server": _FAKE_SERVER},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED,
             logging.INFO,
             "post_relaunch: connected=True session_account_matches_env=True "
             "session_server_matches_env=True",
             id="house-account-connected",
         ),
         pytest.param(
-            True,
-            int(_FAKE_LOGIN) + 1,
+            {"connected": True},
+            {"login": int(_FAKE_LOGIN) + 1, "server": _FAKE_SERVER},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_DEGRADED,
             logging.WARNING,
             "session_account_matches_env=False",
             id="relaunched-on-ANOTHER-account",
         ),
         pytest.param(
-            False,
-            int(_FAKE_LOGIN),
+            {"connected": False},
+            {"login": int(_FAKE_LOGIN), "server": _FAKE_SERVER},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_DEGRADED,
             logging.WARNING,
             "connected=False",
             id="relaunched-DISCONNECTED",
+        ),
+        # ⛔ SFH-08 (164.6.5 review round 2) — a login number is only unique per
+        # server, so a server mismatch is a definite degradation too.
+        pytest.param(
+            {"connected": True},
+            {"login": int(_FAKE_LOGIN), "server": "Another-Broker-Server"},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_DEGRADED,
+            logging.WARNING,
+            "session_server_matches_env=False",
+            id="SFH08-relaunched-on-ANOTHER-server",
+        ),
+        # ⛔ SFH-08 — a check that could NOT complete is not "nothing for anyone
+        # to do": it is unverified, at WARNING, under its own kind.
+        pytest.param(
+            None,
+            None,
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
+            logging.WARNING,
+            "connected=not_captured (terminal_info failed",
+            id="SFH08-terminal_info-FAILED",
+        ),
+        pytest.param(
+            {"connected": True},
+            {"server": _FAKE_SERVER},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
+            logging.WARNING,
+            "session_account_matches_env=not_captured (no login)",
+            id="SFH08-account-NOT-captured",
         ),
     ],
 )
 async def test_ESCALATION_SFH07_authorized_after_a_relaunch_says_WHICH_account_and_whether_connected(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    connected: bool,
-    login: int,
+    terminal: dict | None,
+    account: dict | None,
+    expected_kind: str,
     expected_level: int,
     expected_fragment: str,
 ) -> None:
@@ -2798,9 +2845,13 @@ async def test_ESCALATION_SFH07_authorized_after_a_relaunch_says_WHICH_account_a
     does not show a trade-server connection either. `recycled` at INFO over a
     terminal on a client's account, or disconnected, says the house session was
     restored when it was not. The account is an EQUALITY VERDICT, never a value:
-    no account number may reach the line."""
-    from collections import namedtuple
+    no account number may reach the line.
 
+    ⛔ WR-04 / SFH-08 (164.6.5 review round 2) — THE KIND, NOT ONLY THE LEVEL.
+    Round 1 raised the level and kept `ipc_fault_recycled`, so every structured
+    consumer of `escalation_kind` saw a clean recovery. A definite mismatch is
+    `recycled_degraded`; a check that could not complete is
+    `recycled_unverified`; only a verified house session is `recycled`."""
     _set_full_env(monkeypatch)
     _make_the_optional_reads_affordable(monkeypatch)
     _install_client(
@@ -2808,11 +2859,13 @@ async def test_ESCALATION_SFH07_authorized_after_a_relaunch_says_WHICH_account_a
         {
             **_WEDGED,
             "initialize_after_recycle": True,
-            "terminal_info": namedtuple("TerminalInfo", "build connected")(
-                6182, connected
+            "terminal_info": (
+                None
+                if terminal is None
+                else _info_tuple("TerminalInfo", 2, build=6182, **terminal)
             ),
-            "account_info": namedtuple("AccountInfo", "login server")(
-                login, _FAKE_SERVER
+            "account_info": (
+                None if account is None else _info_tuple("AccountInfo", 2, **account)
             ),
         },
     )
@@ -2821,13 +2874,16 @@ async def test_ESCALATION_SFH07_authorized_after_a_relaunch_says_WHICH_account_a
     with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         await _heal_n_times(1)
 
-    assert outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
+    assert outcomes[0].escalation_kind == expected_kind
     line = next(
         r for r in _records(caplog) if "escalated to a terminal" in r.getMessage()
     )
     assert expected_fragment in line.getMessage()
     assert line.levelno == expected_level
-    assert str(login) not in line.getMessage(), "an account number reached the line"
+    if account is not None and "login" in account:
+        assert str(account["login"]) not in line.getMessage(), (
+            "an account number reached the line"
+        )
     _assert_no_credential_value_escaped(_records(caplog))
 
 
@@ -2857,7 +2913,10 @@ async def test_ESCALATION_SFH07_the_post_relaunch_reads_never_outlive_the_budget
     with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         await _heal_n_times(1)
 
-    assert outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
+    assert (
+        outcomes[0].escalation_kind
+        == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED
+    ), "the house session was never checked, so the recovery is UNVERIFIED (SFH-08)"
     assert _fake_clock.now - started <= budget
     line = next(
         r.getMessage()

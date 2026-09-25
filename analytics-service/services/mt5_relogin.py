@@ -86,9 +86,11 @@ from services.mt5_session_episodes import (
     KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
     KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET,
     KIND_IPC_FAULT_RECYCLED,
+    KIND_IPC_FAULT_RECYCLED_DEGRADED,
     KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
     KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
     KIND_IPC_FAULT_RECYCLED_STILL_FAULTED,
+    KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
     KIND_NO_AUTHORIZED_ACCOUNT,
     KIND_STILL_UNAUTHORIZED,
     IPC_FAULT_RECYCLE_CAP,
@@ -1073,11 +1075,19 @@ def _watch_relaunch(
         verdict["relaunch_polls"] = polls
 
 
+#: What the post-relaunch check came to (SFH-07 / SFH-08). ⛔ The order is the
+#: precedence: a definite mismatch outranks a check that could not complete.
+_POST_RELAUNCH_VERIFIED: Final[str] = "verified"
+_POST_RELAUNCH_UNVERIFIED: Final[str] = "unverified"
+_POST_RELAUNCH_DEGRADED: Final[str] = "degraded"
+
+
 def _read_post_relaunch_state(
     client: Mt5Client, env_login: int, env_server: str, deadline: float
-) -> tuple[str, bool]:
+) -> tuple[str, str]:
     """After a relaunch the detector called AUTHORIZED, read what "authorized"
-    did not say. Returns ``(log fragment, degraded)``.
+    did not say. Returns ``(log fragment, status)``, the status one of
+    ``_POST_RELAUNCH_VERIFIED`` / ``_UNVERIFIED`` / ``_DEGRADED``.
 
     ⛔ SFH-07 (164.6.5 review round 1). A bare ``initialize()`` returning True
     says a session exists — not WHICH account it is on, nor whether the terminal
@@ -1087,6 +1097,16 @@ def _read_post_relaunch_state(
     showed a terminal `disconnected` with no reconnect. Either way the heal's
     purpose — the house account's session — is not restored, the monitor's next
     probe reads `already_authorized`, and nothing said so.
+
+    ⛔ SFH-08 (164.6.5 review round 2) — "degraded" used to be set only by a
+    definite ``connected=False`` or login mismatch, so a check that could not
+    complete (``not_read``, a failed ``terminal_info()``, a field not captured)
+    left the recovery at INFO, "nothing for anyone to do". Now:
+
+      * ``degraded`` — MEASURED not the house session: disconnected, another
+        login, or another broker server (a login is only unique per server).
+      * ``unverified`` — the check could not complete, whatever the reason.
+      * ``verified`` — connected, on the environment's login and server.
 
     ⛔ CREDENTIAL-FREE and VALUE-FREE: two reads of the CURRENT session, no login.
     The account and server are recorded as EQUALITY VERDICTS against the
@@ -1098,16 +1118,21 @@ def _read_post_relaunch_state(
     It cannot raise except ``Mt5SessionAbandoned``.
     """
     degraded = False
+    complete = True
     # ⛔ WR-03 (review round 2) — each read is charged its ANSWERING cost, one
     # rpyc crossing per field (`_TERMINAL_INFO_READ_CROSSINGS` /
     # `_ACCOUNT_INFO_READ_CROSSINGS`), not the two crossings of a failing read.
     if not _affordable(deadline, _TERMINAL_INFO_READ_CROSSINGS):
-        return "post_relaunch=not_read (the heal budget left cannot cover it)", False
+        return (
+            "post_relaunch=not_read (the heal budget left cannot cover it)",
+            _POST_RELAUNCH_UNVERIFIED,
+        )
     try:
         terminal = client.terminal_info()
     except Mt5SessionAbandoned:
         raise
     except Exception as exc:  # noqa: BLE001 — a read must never undo the verdict
+        complete = False
         connected_part = (
             f"connected=not_captured (terminal_info failed: "
             f"{_describe_capture_failure(exc)})"
@@ -1118,18 +1143,20 @@ def _read_post_relaunch_state(
             connected_part = f"connected={connected}"
             degraded = degraded or not connected
         else:
+            complete = False
             connected_part = "connected=not_captured (no boolean)"
     if not _affordable(deadline, _ACCOUNT_INFO_READ_CROSSINGS):
         return (
             f"post_relaunch: {connected_part} session_account_matches_env=not_read "
             "(the heal budget left cannot cover it)",
-            degraded,
+            _POST_RELAUNCH_DEGRADED if degraded else _POST_RELAUNCH_UNVERIFIED,
         )
     try:
         account = client.account_info()
     except Mt5SessionAbandoned:
         raise
     except Exception as exc:  # noqa: BLE001 — a read must never undo the verdict
+        complete = False
         account_part = (
             f"session_account_matches_env=not_captured (account_info failed: "
             f"{_describe_capture_failure(exc)})"
@@ -1142,10 +1169,22 @@ def _read_post_relaunch_state(
             account_part = f"session_account_matches_env={matches}"
             degraded = degraded or not matches
         else:
+            complete = False
             account_part = "session_account_matches_env=not_captured (no login)"
         if isinstance(server, str) and server:
-            account_part += f" session_server_matches_env={server == env_server}"
-    return f"post_relaunch: {connected_part} {account_part}", degraded
+            server_matches = server == env_server
+            account_part += f" session_server_matches_env={server_matches}"
+            degraded = degraded or not server_matches
+        else:
+            complete = False
+            account_part += " session_server_matches_env=not_captured (no server)"
+    if degraded:
+        status = _POST_RELAUNCH_DEGRADED
+    elif complete:
+        status = _POST_RELAUNCH_VERIFIED
+    else:
+        status = _POST_RELAUNCH_UNVERIFIED
+    return f"post_relaunch: {connected_part} {account_part}", status
 
 
 def _classify_recycle_verdict(
@@ -1404,7 +1443,6 @@ def _escalate_ipc_fault(
         _clock(), _IPC_FAULT_RECYCLE_WINDOW_S
     )
     verdict: dict[str, object] = {}
-    degraded = False
     try:
         verdict = client.recycle_terminal_process()
         # ⭐ WR-02 — a recycle that landed is WATCHED until it answers or the
@@ -1416,12 +1454,24 @@ def _escalate_ipc_fault(
             else True
         )
         kind = _classify_recycle_verdict(verdict, settled=settled)
-        # ⭐ SFH-07 — "authorized" is not "the house account, connected".
-        post_relaunch, degraded = (
-            _read_post_relaunch_state(client, env_login, env_server, deadline)
-            if kind == KIND_IPC_FAULT_RECYCLED and env_login is not None
-            else ("", False)
-        )
+        post_relaunch = ""
+        if kind == KIND_IPC_FAULT_RECYCLED:
+            # ⭐ SFH-07 — "authorized" is not "the house account, connected".
+            # ⛔ WR-04 / SFH-08 (164.6.5 review round 2) — and what the check
+            # came to is the KIND, not only the level: every structured consumer
+            # of `escalation_kind` saw a clean recovery before. Only a VERIFIED
+            # house session stays `recycled`.
+            if env_login is None:
+                status = _POST_RELAUNCH_UNVERIFIED
+                post_relaunch = "post_relaunch=not_read (no environment login)"
+            else:
+                post_relaunch, status = _read_post_relaunch_state(
+                    client, env_login, env_server, deadline
+                )
+            if status == _POST_RELAUNCH_DEGRADED:
+                kind = KIND_IPC_FAULT_RECYCLED_DEGRADED
+            elif status == _POST_RELAUNCH_UNVERIFIED:
+                kind = KIND_IPC_FAULT_RECYCLED_UNVERIFIED
         detail = (
             f"matched={verdict.get('matched')} terminated={verdict.get('terminated')} "
             f"exited={verdict.get('exited')} authorized={verdict.get('authorized')} "
@@ -1475,19 +1525,36 @@ def _escalate_ipc_fault(
     elif kind in (
         KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
         KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
+        # ⛔ SFH-07 / WR-04 / SFH-08 — back up, but disconnected, on another
+        # account or server, or not checked at all: the house session was NOT
+        # shown restored, and INFO would say it was.
+        KIND_IPC_FAULT_RECYCLED_DEGRADED,
+        KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
     ):
         # ⛔ WR-02 — PENDING is "not yet known", never "a human is needed": the
         # next reading decides, and a persisting wedge is then re-raised at ERROR
         # by the persistence alarm.
         level = logging.WARNING
+    elif (
+        kind == KIND_IPC_FAULT_RECYCLE_NOT_LANDED
+        and _count(verdict, "matched") == 0
+        and answered
+    ):
+        # ⭐ IN-02 (164.6.5 review round 2) — `matched=0` with an ANSWERING
+        # relaunch is ambiguous, and one reading is a genuine heal: no
+        # `terminal64.exe` was running and the verb's relaunch `initialize()`
+        # LAUNCHED one. The other is an image name that did not match (SFH-01).
+        # WARNING, qualified on the line, until the first live run shows which.
+        level = logging.WARNING
+        detail = (
+            f"{detail} no_process_matched_relaunch_answered (either no terminal "
+            "was running and the relaunch launched one, or the process name did "
+            "not match; the first live run decides)"
+        )
     else:
         # Still faulted after a recycle, a recycle that did not land, or one
         # whose effect is unknown: a human is needed.
         level = logging.ERROR
-    if degraded:
-        # ⛔ SFH-07 — back up, but disconnected or on another account: the
-        # house session was NOT restored, and INFO would say it was.
-        level = max(level, logging.WARNING)
     exited = _count(verdict, "exited")
     terminated = _count(verdict, "terminated")
     if exited is not None and terminated is not None and exited < terminated:

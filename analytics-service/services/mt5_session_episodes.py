@@ -221,8 +221,23 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 # lesson IN-07 (round 2) above recorded when two operator faults shared one class
 # and broke the class-to-log pin:
 #
-#   * recycled                -> nothing for anyone to do; the terminal is back
-#                                and the detector found an authorized session.
+#   * recycled                -> nothing for anyone to do; the terminal is back,
+#                                the detector found an authorized session, and
+#                                the post-relaunch check VERIFIED it is the house
+#                                account, connected, on the environment's server.
+#   * recycled_degraded       -> the terminal is back and authorized, and the
+#                                post-relaunch check MEASURED it is not the house
+#                                session: disconnected, on another login, or on
+#                                another broker server (164.6.5 review round 2,
+#                                WR-04 / SFH-08). The next probe reads
+#                                `already_authorized` whichever account is up, so
+#                                this kind is the only record of it.
+#   * recycled_unverified     -> the terminal is back and authorized, and the
+#                                post-relaunch check could NOT complete: not read
+#                                (budget), a read failed, or a field was not
+#                                captured (SFH-08). ⚠️ Under the honest per-field
+#                                charge (WR-03) the check never fits the budget,
+#                                so this is what a working recycle reports today.
 #   * recycled_no_account     -> the terminal is back and ANSWERING, with no
 #                                account signed in yet (`-6`). The ordinary heal
 #                                owns that on the next reading; the escalation
@@ -248,6 +263,11 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 #                                "recycled" nor "still faulted after a recycle"
 #                                is true — the recycle VERB needs a human, since
 #                                the Wine-side terminate has never run live.
+#                                ⭐ IN-02 (review round 2): `matched=0` with an
+#                                ANSWERING relaunch is WARNING, qualified
+#                                `no_process_matched_relaunch_answered`, because
+#                                the relaunch may have launched a terminal that
+#                                was not running at all; the rest stay ERROR.
 #   * recycle_capped          -> the escalation RAN and DECLINED: the recycle
 #                                already ran `IPC_FAULT_RECYCLE_CAP` times in the
 #                                rolling window, each after the terminal had
@@ -273,6 +293,8 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 # --------------------------------------------------------------------------- #
 KIND_IPC_FAULT_RECYCLED: Final[str] = "ipc_fault_recycled"
 KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT: Final[str] = "ipc_fault_recycled_no_account"
+KIND_IPC_FAULT_RECYCLED_DEGRADED: Final[str] = "ipc_fault_recycled_degraded"
+KIND_IPC_FAULT_RECYCLED_UNVERIFIED: Final[str] = "ipc_fault_recycled_unverified"
 KIND_IPC_FAULT_RECYCLED_STILL_FAULTED: Final[str] = (
     "ipc_fault_recycled_still_faulted"
 )
