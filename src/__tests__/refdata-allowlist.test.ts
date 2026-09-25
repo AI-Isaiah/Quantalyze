@@ -21,7 +21,7 @@
  * ⛔ UNLIKE the VAC-08 test, this one IMPORTS the extractor's parser and
  * classifier rather than re-deriving them. That is deliberate and it is the
  * plan's instruction: the artifact under test here is the ALLOWLIST, and the
- * question is whether its 22 INSERT judgements and 6 C5 lines still describe the corpus. A
+ * question is whether its 22 INSERT judgements and 10 C5 lines (6 until the 164.9.2 review round 1) still describe the corpus. A
  * second, divergent parser would answer a different question — "do two parsers
  * agree" — and would let the allowlist rot behind a parser that the RESTORE
  * does not use. The classifier's own non-vacuity is carried by the AIM block
@@ -95,8 +95,16 @@ export const ENTRY_COUNT = 22;
  * two-direction rule as ENTRY_COUNT. GREW — a migration added a top-level UPDATE
  * on a replayed table; SHRANK — a line was deleted, which `--audit` refuses
  * because every such UPDATE must be accounted for.
+ *
+ * ⛔ RE-MEASURED 2026-09-25 (164.9.2 review round 1, WR-02 / SFH-02): 4 `update:`
+ * + 6 `decline:` = 10. The four new decline: lines account for DO-body writes
+ * on replayed public tables, which `--audit` could not see until it told a DO
+ * body (executed at apply time) from a CREATE FUNCTION body (only defined):
+ * 20260407164606 (profiles), 20260602183000 (profiles, strategies) and
+ * 20260713120000 (profiles). Counted with
+ * `grep -cE $'\t(update|decline):[0-9]+\t' scripts/restore-test-refdata-allowlist.txt`.
  */
-export const C5_ENTRY_COUNT = 6;
+export const C5_ENTRY_COUNT = 10;
 
 const SELF_TEST_CMD = "node scripts/extract-reference-inserts.mjs --self-test";
 const AUDIT_CMD = "node scripts/extract-reference-inserts.mjs --audit";
@@ -115,6 +123,7 @@ interface MatchResult {
   ok: { line: number; sql: string }[];
   body: { line: number }[];
   rejected: { line: number; reason: string; nonLiteral?: boolean }[];
+  doWrites?: { line: number; verb: string }[];
 }
 
 /** Classify one file against one table, failing loud rather than returning empty. */
@@ -138,7 +147,8 @@ function measureUpdate(src: string, qualified: string, label: string): MatchResu
 /**
  * What a line's pinned count is measured AGAINST, by its class: INSERT lines
  * against top-level literal INSERTs, `update:` lines against top-level literal
- * UPDATEs, `decline:` lines against top-level NON-literal UPDATEs.
+ * UPDATEs, `decline:` lines against top-level NON-literal UPDATEs plus the writes
+ * a DO body runs on the table at apply time (164.9.2 review WR-02 / SFH-02).
  */
 function measuredFor(e: Entry): { n: number; refused: string | null } {
   const src = readFileSync(join(MIGRATIONS_DIR, e.file), "utf8");
@@ -149,7 +159,10 @@ function measuredFor(e: Entry): { n: number; refused: string | null } {
   const m = measureUpdate(src, e.qualified, e.file);
   const hard = m.rejected.filter((r) => !r.nonLiteral);
   if (hard.length > 0) return { n: -1, refused: hard[0].reason };
-  return { n: e.kind === "update" ? m.ok.length : m.rejected.length, refused: null };
+  return {
+    n: e.kind === "update" ? m.ok.length : m.rejected.length + (m.doWrites?.length ?? 0),
+    refused: null,
+  };
 }
 
 /** The `-- refdata-expect: <table>=<n>` trailers of an emission, as a map. */
@@ -319,7 +332,7 @@ describe("the live allowlist still describes the migration corpus", () => {
     ).toBe(ENTRY_COUNT);
   });
 
-  it(`holds exactly ${C5_ENTRY_COUNT} C5 lines, 4 update: + 2 decline:`, () => {
+  it(`holds exactly ${C5_ENTRY_COUNT} C5 lines, 4 update: + 6 decline:`, () => {
     expect(
       c5.length,
       c5.length > C5_ENTRY_COUNT
@@ -333,7 +346,7 @@ describe("the live allowlist still describes the migration corpus", () => {
     expect(
       c5.filter((e) => e.kind === "decline").length,
       "the decline: lines (D-02, accounted for and not replayed) moved — re-measure with --audit",
-    ).toBe(2);
+    ).toBe(6);
     for (const e of c5) {
       expect(e.schema, `:${e.lineNo} is a C5 line on ${e.qualified}; C5 is public-only`).toBe("public");
     }

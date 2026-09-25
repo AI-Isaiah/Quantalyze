@@ -35,6 +35,14 @@
 #    LINES over 6 FILES over 2 TABLES (public.profiles, public.strategies); 4
 #    are update: lines replaying 6 STATEMENTS, 2 are decline: lines accounting
 #    for 2 STATEMENTS. `--audit` prints it as the `audit C5 OK:` line.
+# ⛔ CORRECTED 2026-09-25 (164.9.2 review round 1, WR-02 / SFH-02). The C5
+#    sentence above is kept as lineage. Once `--audit` could tell a DO body
+#    from a function body it measured four DO-body writes on replayed public
+#    tables, each now accounted for by a decline: line at the foot of this file:
+#    10 C5 LINES over 9 FILES over 2 TABLES; 4 update: lines replaying 6
+#    STATEMENTS, 6 decline: lines accounting for 6 writes over 5 files (2
+#    top-level non-literal UPDATEs, 4 DO-body writes). The recipe above answers
+#    9 for the files.
 #
 # ── WHAT AN ENTRY IS ───────────────────────────────────────────────────────
 # One line = one (migration file, target table, pinned top-level statement
@@ -121,7 +129,10 @@
 #     statements on auth.* is therefore by design, not an accident of the corpus.
 #     ⛔ DECLINE, NEVER SKIP (decision D-02). A top-level UPDATE on such a table
 #     that is NOT literal (a join, a sub-select, a function call) gets a
-#     `decline:<n>` line with its reason. It is emitted as nothing, counted in
+#     `decline:<n>` line with its reason. (Since 164.9.2 review round 1 a
+#     decline: count ALSO covers the writes a DO body runs on the table at apply
+#     time — WR-02 / SFH-02; see the DO-body block at the foot of this file.)
+#     It is emitted as nothing, counted in
 #     the C5 census every run, and refused if the statement ever turns literal
 #     ("a literal UPDATE is replayed, not declined"), so a decline can never hide
 #     a replayable effect. The INSERT side's limitation 2 below (an unlisted
@@ -221,6 +232,19 @@
 #    (it is a backfill by C2), and it is the second thing a reviewer must decide
 #    by hand rather than expect the gate to raise. (INSERT class only: C5 does
 #    NOT carry this over — every UPDATE on a replayed table is accounted for.)
+#    ⛔ CORRECTED 2026-09-25 (164.9.2 review round 1, WR-02 / SFH-02). "every
+#    UPDATE on a replayed table is accounted for" was stronger than the
+#    mechanism. What `--audit` accounts for is printed on its `C5 scope:` line:
+#    top-level UPDATE / DELETE / TRUNCATE / MERGE / COPY … FROM / INSERT … ON
+#    CONFLICT DO UPDATE, and the same writes inside a DO body. Three shapes it
+#    used to miss are now seen: an unlisted upsert (limitation 2 skipped it as a
+#    backfill, but its DO UPDATE arm rewrites an existing row), a DO-body write
+#    (a DO body EXECUTES at apply time; a CREATE FUNCTION body is only defined),
+#    and a head separated by \r or \f (the old separator was [\t\n ]). What it
+#    still does NOT trace, stated rather than hidden: a function CALLED at top
+#    level (`SELECT some_backfill();`), and dynamic SQL built from a string.
+#    DO-body writes on auth.* are not counted: auth.users survives the DROP,
+#    so a write a DO body made there is still on TEST after a restore.
 # 3. This file says nothing about whether the rows are on TEST right now. It says
 #    which statements the restore replays. The restore's own in-transaction gate
 #    and its `refdata:` census rows are what report presence.
@@ -302,3 +326,12 @@
 20260716120000_backfill_staff_role_both.sql	public.profiles	update:1	# C5 — its one top-level UPDATE, SET role = 'both' WHERE is_admin = true. The teaser sentinel profile is not an admin, so it reaches no replayed row today; replayed so the profiles row is in the state the ledger implies.
 20260521190243_canonicalize_supported_exchanges.sql	public.strategies	decline:1	# C5 DECLINE (D-02) — its one top-level UPDATE is UPDATE … AS s SET … FROM (a sub-select over unnest() with lower() and CASE). A FROM/sub-select with function calls is a non-literal join C5 does not replay. On the replayed sentinel (supported_exchanges defaults to an empty array) it changes nothing.
 20260530120000_admin_role_mutate.sql	public.profiles	decline:1	# C5 DECLINE (D-02) — its one top-level UPDATE is UPDATE profiles p SET is_admin = TRUE FROM user_app_roles. user_app_roles is a table the replay never fills, so on the emptied schema the join reaches no row; a non-literal join C5 does not replay.
+# ── C5 DECLINES FOR DO-BODY WRITES (164.9.2 review round 1, WR-02 / SFH-02) ──
+# A DO body EXECUTES when its migration applies, and C5 never replays one, so a
+# DO-body write on a replayed public table is accounted for by a decline: line
+# (D-02: decline, never skip). The four below were MEASURED on 2026-09-25 by the
+# first --audit that could see them; the round-1 reviewers had counted 0.
+20260407164606_perfect_match.sql	public.profiles	decline:1	# C5 DECLINE (D-02) — a DO-body UPDATE (:37) that sets is_admin from an app-namespace setting joined to auth.users. It reads session state and another schema, so it is not literal and never could be replayed; the only replayed profiles row is the teaser sentinel, which is not an admin, so it reaches no row the replay wrote.
+20260602183000_b5b_api_key_delete_atomicity.sql	public.profiles	decline:1	# C5 DECLINE (D-02) — a DO-body DELETE (:408) in the file's self-verification block, removing the probe profile the same block inserted under its own gen_random_uuid() id. It reaches no row the replay wrote.
+20260602183000_b5b_api_key_delete_atomicity.sql	public.strategies	decline:1	# C5 DECLINE (D-02) — a DO-body DELETE (:406) in the same self-verification block, removing the probe strategy the block inserted for its own probe user. It reaches no row the replay wrote.
+20260713120000_cleanup_abandoned_wizard_drafts.sql	public.profiles	decline:1	# C5 DECLINE (D-02) — a DO-body INSERT … ON CONFLICT DO UPDATE (:188) seeding the self-test profile under its own gen_random_uuid() id, inside a subtransaction the block rolls back on its success sentinel (:182). It reaches no row the replay wrote and nothing of it commits.

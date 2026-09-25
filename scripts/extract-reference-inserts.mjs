@@ -241,12 +241,19 @@ function lineIndexer(src) {
  * `api_keys` blob, say — reads as a top-level statement and would be replayed
  * into shared TEST. RESEARCH A4 assumed otherwise; A4 is false (header, note 3).
  *
- * @returns {{ ranges: Array<[number, number]> } | { error: string, line: number }}
+ * Each range carries a THIRD element: the offset of the top-level statement the
+ * body opens in (just past the previous top-level `;`). `prepareFile` reads the
+ * masked text between it and the body to tell a `DO` body — which the migration
+ * EXECUTES — from a `CREATE FUNCTION` body, which it only defines (164.9.2
+ * review WR-02 item 2 / SFH-02).
+ *
+ * @returns {{ ranges: Array<[number, number, number]> } | { error: string, line: number }}
  */
 export function dollarBodyRanges(src) {
   const n = src.length;
   const ranges = [];
   const lineAt = (idx) => src.slice(0, idx).split("\n").length;
+  let stmtStart = 0;
   let i = 0;
   while (i < n) {
     const c = src[i];
@@ -324,11 +331,12 @@ export function dollarBodyRanges(src) {
         // ⛔ The tag itself is never printed: the restore's redaction grep scans
         // captured output for a `$`-tag, so echoing one would trip it.
         if (close === -1) return { error: "unterminated dollar-quoted body", line: lineAt(i) };
-        ranges.push([i, close + tag.length]);
+        ranges.push([i, close + tag.length, stmtStart]);
         i = close + tag.length;
         continue;
       }
     }
+    if (c === ";") stmtStart = i + 1;
     i++;
   }
   return { ranges };
@@ -384,7 +392,7 @@ export function literalCheck(maskedStatement) {
     }
     const t = m[0];
     if (ALLOWED_BARE.has(t.toUpperCase())) continue;
-    if (ALLOWED_CALLS.has(t.toLowerCase()) && /^[\t\n ]*\(/.test(region.slice(m.index + t.length)))
+    if (ALLOWED_CALLS.has(t.toLowerCase()) && /^[\t\n\r\f\v ]*\(/.test(region.slice(m.index + t.length)))
       continue;
     return `the VALUES tuple carries the non-literal token \`${t}\` — only literals, ::casts, NULL/TRUE/FALSE/DEFAULT, now() and gen_random_uuid() are replayable (C2)`;
   }
@@ -401,6 +409,12 @@ export function prepareFile(src) {
   const dq = dollarBodyRanges(src);
   if (dq.error) return { error: dq.error, line: dq.line };
   const lineOf = lineIndexer(src);
+  // The dollar bodies a migration EXECUTES at apply time: a body whose enclosing
+  // top-level statement starts with DO (comments and strings are blanked in the
+  // masked text, so a leading comment cannot hide the keyword).
+  const doBodies = dq.ranges
+    .filter((r) => new RegExp(`^${WS}*DO(?![A-Za-z0-9_])`, "i").test(masked.code.slice(r[2], r[0])))
+    .map((r) => ({ start: r[0], end: r[1] }));
   const spans = [];
   for (const s of statements(masked.code)) {
     const off = s.text.search(/\S/);
@@ -416,7 +430,7 @@ export function prepareFile(src) {
       hasTag: dq.ranges.some((r) => r[0] < s.end + 1 && r[1] > first),
     });
   }
-  return { spans, lineOf };
+  return { spans, lineOf, doBodies, code: masked.code };
 }
 
 // `"?id"?` — the QUOTED spelling has to match too. `maskSql` deliberately does not
@@ -437,13 +451,21 @@ function quotedId(id) {
   return `"?${id}"?`;
 }
 
+// ⛔ PostgreSQL's whitespace is [ \t\n\r\f\v], and every head regex in this file
+// used `[\t\n ]` until 2026-09-25 (164.9.2 review WR-02 item 3). MEASURED at
+// 838312df3: `UPDATE\r\npublic.profiles SET …` and `DELETE\r\nFROM fx_ref;`
+// classified as ok 0, rejected 0, and `matchOtherDml` returned [] — a CRLF
+// migration vanished from C5 AND from the DML refusal, with the census still
+// reading clean. Not `\s`: that also admits Unicode spaces PostgreSQL does not.
+const WS = "[\\t\\n\\r\\f\\v ]";
+
 function headRe(schema, table) {
   const pfx =
     schema === "public"
-      ? `(?:${quotedId("public")}[\\t\\n ]*\\.[\\t\\n ]*)?`
-      : `${quotedId(schema)}[\\t\\n ]*\\.[\\t\\n ]*`;
+      ? `(?:${quotedId("public")}${WS}*\\.${WS}*)?`
+      : `${quotedId(schema)}${WS}*\\.${WS}*`;
   return new RegExp(
-    `^INSERT[\\t\\n ]+INTO[\\t\\n ]+${pfx}${quotedId(table)}(?![A-Za-z0-9_])`,
+    `^INSERT${WS}+INTO${WS}+${pfx}${quotedId(table)}(?![A-Za-z0-9_])`,
     "i",
   );
 }
@@ -457,10 +479,10 @@ function headRe(schema, table) {
 function cteHeadRe(schema, table) {
   const pfx =
     schema === "public"
-      ? `(?:${quotedId("public")}[\\t\\n ]*\\.[\\t\\n ]*)?`
-      : `${quotedId(schema)}[\\t\\n ]*\\.[\\t\\n ]*`;
+      ? `(?:${quotedId("public")}${WS}*\\.${WS}*)?`
+      : `${quotedId(schema)}${WS}*\\.${WS}*`;
   return new RegExp(
-    `^WITH\\b[\\s\\S]*\\bINSERT[\\t\\n ]+INTO[\\t\\n ]+${pfx}${quotedId(table)}(?![A-Za-z0-9_])`,
+    `^WITH\\b[\\s\\S]*\\bINSERT${WS}+INTO${WS}+${pfx}${quotedId(table)}(?![A-Za-z0-9_])`,
     "i",
   );
 }
@@ -479,11 +501,17 @@ export function matchTable(src, prep, qualified) {
   const ok = [];
   const body = [];
   const rejected = [];
+  // 164.9.2 review WR-02 item 1: an `ON CONFLICT … DO UPDATE` arm is an UPDATE
+  // effect on an existing row, so `--audit` refuses it even on an UNLISTED pair,
+  // where the INSERT side otherwise skips a non-literal as a backfill.
+  const upsertRe = new RegExp(`\\bON${WS}+CONFLICT\\b[\\s\\S]*\\bDO${WS}+UPDATE\\b`, "i");
   for (const s of prep.spans) {
+    const upsert = !s.inBody && upsertRe.test(s.masked);
     if (!re.test(s.masked)) {
       if (!s.inBody && cteRe.test(s.masked)) {
         rejected.push({
           line: s.line,
+          upsert,
           reason:
             "the statement is a CTE-prefixed INSERT (`WITH … INSERT INTO`) — a CTE can read existing rows, so whether this is literal reference data is not a judgement this extractor can make; classify it by hand rather than let it be skipped in silence (WR-06)",
         });
@@ -495,12 +523,13 @@ export function matchTable(src, prep, qualified) {
       continue;
     }
     if (!s.terminated) {
-      rejected.push({ line: s.line, reason: "the statement is not terminated by `;`" });
+      rejected.push({ line: s.line, upsert, reason: "the statement is not terminated by `;`" });
       continue;
     }
     if (s.hasTag) {
       rejected.push({
         line: s.line,
+        upsert,
         reason:
           "the statement carries a dollar-quoted body — the replay section is kept body-free so the restore's redaction grep has nothing to find",
       });
@@ -508,7 +537,7 @@ export function matchTable(src, prep, qualified) {
     }
     const why = literalCheck(s.masked);
     if (why) {
-      rejected.push({ line: s.line, reason: why });
+      rejected.push({ line: s.line, upsert, reason: why });
       continue;
     }
     // `first` is the byte offset of the statement's first token: the emit sorts
@@ -525,8 +554,8 @@ export function matchTable(src, prep, qualified) {
 
 function targetPfx(schema) {
   return schema === "public"
-    ? `(?:${quotedId("public")}[\\t\\n ]*\\.[\\t\\n ]*)?`
-    : `${quotedId(schema)}[\\t\\n ]*\\.[\\t\\n ]*`;
+    ? `(?:${quotedId("public")}${WS}*\\.${WS}*)?`
+    : `${quotedId(schema)}${WS}*\\.${WS}*`;
 }
 
 function splitQualified(qualified) {
@@ -844,7 +873,7 @@ export function updateLiteralCheck(masked) {
 
 function updateHeadRe(schema, table) {
   return new RegExp(
-    `^UPDATE[\\t\\n ]+(?:ONLY[\\t\\n ]+)?${targetPfx(schema)}${quotedId(table)}(?![A-Za-z0-9_])`,
+    `^UPDATE${WS}+(?:ONLY${WS}+)?${targetPfx(schema)}${quotedId(table)}(?![A-Za-z0-9_])`,
     "i",
   );
 }
@@ -852,7 +881,7 @@ function updateHeadRe(schema, table) {
 /** `UPDATE [ONLY] <target> [[AS] alias] SET` — the only head shape C5 replays. */
 function updateShapeRe(schema, table) {
   return new RegExp(
-    `^UPDATE[\\t\\n ]+(?:ONLY[\\t\\n ]+)?${targetPfx(schema)}${quotedId(table)}(?:[\\t\\n ]+(?:AS[\\t\\n ]+)?"?[A-Za-z_][A-Za-z0-9_]*"?)?[\\t\\n ]+SET(?![A-Za-z0-9_])`,
+    `^UPDATE${WS}+(?:ONLY${WS}+)?${targetPfx(schema)}${quotedId(table)}(?:${WS}+(?:AS${WS}+)?"?[A-Za-z_][A-Za-z0-9_]*"?)?${WS}+SET(?![A-Za-z0-9_])`,
     "i",
   );
 }
@@ -862,7 +891,7 @@ function updateShapeRe(schema, table) {
 // mirroring `cteHeadRe` on the INSERT side (RESEARCH Pitfall 7).
 function cteUpdateHeadRe(schema, table) {
   return new RegExp(
-    `^WITH\\b[\\s\\S]*\\bUPDATE[\\t\\n ]+(?:ONLY[\\t\\n ]+)?${targetPfx(schema)}${quotedId(table)}(?![A-Za-z0-9_])`,
+    `^WITH\\b[\\s\\S]*\\bUPDATE${WS}+(?:ONLY${WS}+)?${targetPfx(schema)}${quotedId(table)}(?![A-Za-z0-9_])`,
     "i",
   );
 }
@@ -875,6 +904,8 @@ function cteUpdateHeadRe(schema, table) {
  *   rejected — top-level hits C5 will not replay. `nonLiteral: true` marks the
  *              ones a `decline:` line may account for; every other rejection
  *              (CTE-prefixed, unterminated, off-shape) is a hard refusal.
+ *   doWrites — writes to the table inside a DO body (public tables only); like
+ *              a non-literal UPDATE, a `decline:` line accounts for them.
  */
 export function matchUpdate(src, prep, qualified) {
   const [schema, table] = splitQualified(qualified);
@@ -928,7 +959,15 @@ export function matchUpdate(src, prep, qualified) {
     }
     ok.push({ line: s.line, first: s.first, sql: src.slice(s.first, s.end + 1) });
   }
-  return { ok, body, rejected };
+  // 164.9.2 review WR-02 item 2 / SFH-02: writes inside a DO body EXECUTE when the
+  // migration applies, so they are this pair's business too. PUBLIC tables only:
+  // the restore drops `public` and rebuilds it, so a DO-body write there is LOST
+  // by a restore; `auth.users` survives the DROP, so a write a DO body made there
+  // is still on TEST afterwards and there is nothing to replay. (Measured
+  // 2026-09-25: the nine DO-body writes on auth.users in the corpus are all
+  // self-test fixtures deleting the uid they created.)
+  const doWrites = schema === "public" ? matchDoBodyWrites(prep, qualified) : [];
+  return { ok, body, rejected, doWrites };
 }
 
 /**
@@ -941,19 +980,21 @@ export function matchOtherDml(prep, qualified) {
   const pfx = targetPfx(schema);
   const id = `${pfx}${quotedId(table)}(?![A-Za-z0-9_])`;
   const heads = [
-    ["DELETE", new RegExp(`^DELETE[\\t\\n ]+FROM[\\t\\n ]+(?:ONLY[\\t\\n ]+)?${id}`, "i")],
+    ["DELETE", new RegExp(`^DELETE${WS}+FROM${WS}+(?:ONLY${WS}+)?${id}`, "i")],
     [
       "TRUNCATE",
       new RegExp(
-        `^TRUNCATE(?:[\\t\\n ]+TABLE)?[\\t\\n ]+(?:[^;]*?,[\\t\\n ]*)?(?:ONLY[\\t\\n ]+)?${id}`,
+        `^TRUNCATE(?:${WS}+TABLE)?${WS}+(?:[^;]*?,${WS}*)?(?:ONLY${WS}+)?${id}`,
         "i",
       ),
     ],
-    ["MERGE", new RegExp(`^MERGE[\\t\\n ]+INTO[\\t\\n ]+(?:ONLY[\\t\\n ]+)?${id}`, "i")],
+    ["MERGE", new RegExp(`^MERGE${WS}+INTO${WS}+(?:ONLY${WS}+)?${id}`, "i")],
+    // 164.9.2 review SFH-02: `COPY t FROM …` writes rows no allowlist line replays.
+    ["COPY … FROM", new RegExp(`^COPY${WS}+${id}(?:${WS}*\\([^)]*\\))?${WS}+FROM(?![A-Za-z0-9_])`, "i")],
     [
       "CTE-prefixed DELETE/MERGE",
       new RegExp(
-        `^WITH\\b[\\s\\S]*\\b(?:DELETE[\\t\\n ]+FROM|MERGE[\\t\\n ]+INTO)[\\t\\n ]+(?:ONLY[\\t\\n ]+)?${id}`,
+        `^WITH\\b[\\s\\S]*\\b(?:DELETE${WS}+FROM|MERGE${WS}+INTO)${WS}+(?:ONLY${WS}+)?${id}`,
         "i",
       ),
     ],
@@ -972,6 +1013,44 @@ export function matchOtherDml(prep, qualified) {
 }
 
 /**
+ * Writes to one target table INSIDE a `DO` body (164.9.2 review WR-02 item 2 /
+ * SFH-02). `matchUpdate` files every UPDATE inside a dollar body under `body`
+ * and C5 never replays one — right for a `CREATE FUNCTION` body, which the
+ * migration only DEFINES, and wrong for a `DO` body, which it EXECUTES. Until
+ * 2026-09-25 the two were not told apart, and a `DO $ … UPDATE profiles … $`
+ * backfill — this repository's house style for one — passed `--audit` as
+ * "0 unaccounted". The scan is unanchored over the masked body (strings are
+ * blanked, so dynamic SQL built from a string literal is NOT seen: that limit is
+ * printed on the audit's `C5 scope:` line).
+ * @returns {Array<{line:number, verb:string}>}
+ */
+export function matchDoBodyWrites(prep, qualified) {
+  const [schema, table] = splitQualified(qualified);
+  const id = `${targetPfx(schema)}${quotedId(table)}(?![A-Za-z0-9_])`;
+  const pre = '(?<![A-Za-z0-9_$"])';
+  const heads = [
+    ["UPDATE", `${pre}UPDATE${WS}+(?:ONLY${WS}+)?${id}`],
+    ["DELETE", `${pre}DELETE${WS}+FROM${WS}+(?:ONLY${WS}+)?${id}`],
+    ["TRUNCATE", `${pre}TRUNCATE(?:${WS}+TABLE)?${WS}+(?:[^;]*?,${WS}*)?(?:ONLY${WS}+)?${id}`],
+    ["MERGE", `${pre}MERGE${WS}+INTO${WS}+(?:ONLY${WS}+)?${id}`],
+    [
+      "INSERT … ON CONFLICT DO UPDATE",
+      `${pre}INSERT${WS}+INTO${WS}+${id}[^;]*\\bON${WS}+CONFLICT\\b[^;]*\\bDO${WS}+UPDATE(?![A-Za-z0-9_])`,
+    ],
+    ["COPY … FROM", `${pre}COPY${WS}+${id}(?:${WS}*\\([^)]*\\))?${WS}+FROM(?![A-Za-z0-9_])`],
+  ];
+  const hits = [];
+  for (const b of prep.doBodies) {
+    const text = prep.code.slice(b.start, b.end);
+    for (const [verb, src] of heads) {
+      const re = new RegExp(src, "gi");
+      for (let m; (m = re.exec(text)) !== null; ) hits.push({ line: prep.lineOf(b.start + m.index), verb });
+    }
+  }
+  return hits.sort((a, b) => a.line - b.line);
+}
+
+/**
  * THE ONE C5 VERDICT, shared by emit and `--audit` so the two can never
  * disagree. `upd` / `dec` are the pair's `update:` / `decline:` entries (either
  * may be absent; in `--audit` both may be).
@@ -980,7 +1059,18 @@ export function matchOtherDml(prep, qualified) {
 export function c5Verdict(m, qualified, upd, dec) {
   const refusals = [];
   const hard = m.rejected.filter((r) => !r.nonLiteral);
-  const nonLit = m.rejected.filter((r) => r.nonLiteral);
+  // A decline: line counts EVERY write of this (file, table) C5 will not replay:
+  // top-level non-literal UPDATEs AND, since 164.9.2 review WR-02 / SFH-02, the
+  // writes a DO body runs at apply time. Neither may pass unaccounted.
+  const nonLit = [
+    ...m.rejected.filter((r) => r.nonLiteral),
+    ...(m.doWrites ?? []).map((h) => ({
+      line: h.line,
+      nonLiteral: true,
+      doBody: true,
+      reason: `a DO block runs ${h.verb} on ${qualified} when this migration applies, and C5 never replays a DO body, so a restore commits the row without that write`,
+    })),
+  ].sort((a, b) => a.line - b.line);
   for (const r of hard) refusals.push({ line: r.line, reason: r.reason });
   const publicOnly = qualified.startsWith("public.");
 
@@ -1013,7 +1103,7 @@ export function c5Verdict(m, qualified, upd, dec) {
     if (nonLit.length !== dec.count) {
       refusals.push({
         line: nonLit[0]?.line ?? null,
-        reason: `the C5 line pins decline:${dec.count} top-level statement(s) but ${nonLit.length} were measured. A pinned count moves ONLY when an applied migration is edited — understand the edit, do not re-pin the number`,
+        reason: `the C5 line pins decline:${dec.count} top-level statement(s) but ${nonLit.length} were measured (top-level non-literal UPDATEs plus DO-body writes). A pinned count moves ONLY when an applied migration is edited — understand the edit, do not re-pin the number`,
       });
     }
   } else {
@@ -1028,7 +1118,9 @@ export function c5Verdict(m, qualified, upd, dec) {
               // decline it with a reason", and a classifier over-refusal then walked a
               // replayable UPDATE straight into a decline: line. A decline is for a
               // statement that really reads other rows or calls something.
-              `NO C5 allowlist line for a top-level UPDATE C5 will not replay — ${r.reason}. A decline: line is for a statement that genuinely reads other rows or calls a function (a join, a sub-select, a call); if this statement is literal, the classifier is wrong: fix the classifier, never decline a replayable effect (C5, D-02)`,
+              r.doBody
+              ? `NO C5 allowlist line for a DO-body write C5 will not replay — ${r.reason}. Account for it with a decline: line whose reason says why it reaches no row the replay wrote (a self-test fixture keyed by its own uid, say), or move the write to a top-level literal UPDATE (C5, D-02)`
+              : `NO C5 allowlist line for a top-level UPDATE C5 will not replay — ${r.reason}. A decline: line is for a statement that genuinely reads other rows or calls a function (a join, a sub-select, a call); if this statement is literal, the classifier is wrong: fix the classifier, never decline a replayable effect (C5, D-02)`,
       });
     }
   }
@@ -1353,6 +1445,19 @@ function modeAudit(io, allowlistPath, migrationsDir) {
       if (m.ok.length === 0 && m.rejected.length === 0) continue;
       const e = listed.get(`${file}|${qualified}`);
       if (!e) {
+        // 164.9.2 review WR-02 item 1: limitation 2 skips an unlisted non-literal
+        // INSERT as a backfill of NEW rows, but an `ON CONFLICT … DO UPDATE` arm
+        // rewrites an EXISTING replayed row — an UPDATE effect neither the INSERT
+        // class nor C5 would otherwise name. It is refused whatever its VALUES.
+        for (const r of m.rejected.filter((x) => x.upsert)) {
+          refuse(io, {
+            file,
+            line: r.line,
+            table: qualified,
+            reason: `a top-level INSERT … ON CONFLICT DO UPDATE on a table the replay fills, with no allowlist line — its DO UPDATE arm rewrites an existing replayed row, which no C5 line can replay; classify it by hand at review`,
+          });
+          bad = 1;
+        }
         if (m.ok.length === 0) continue; // limitation 2: an unlisted non-literal is a backfill
         refuse(io, {
           file,
@@ -1403,7 +1508,8 @@ function modeAudit(io, allowlistPath, migrationsDir) {
   }
 
   // ── C5 (Phase 164.9.2). EVERY top-level UPDATE / DELETE / TRUNCATE / MERGE on a
-  // table an INSERT entry fills is ACCOUNTED FOR: a literal UPDATE by an
+  // table an INSERT entry fills — and, since the 164.9.2 review round 1, every
+  // COPY … FROM, unlisted upsert and DO-body write (public tables) — is ACCOUNTED FOR: a literal UPDATE by an
   // `update:` line, a non-literal one by a `decline:` line with its reason, and
   // anything else is a named refusal. The INSERT side's limitation 2 (an
   // unlisted non-literal is skipped in silence) is deliberately NOT carried over.
@@ -1444,7 +1550,7 @@ function modeAudit(io, allowlistPath, migrationsDir) {
       if (!updCache.has(key)) updCache.set(key, matchUpdate(src, prep, qualified));
       const m = updCache.get(key);
       const pair = pairs.get(key);
-      if (!pair && m.ok.length === 0 && m.rejected.length === 0) continue;
+      if (!pair && m.ok.length === 0 && m.rejected.length === 0 && m.doWrites.length === 0) continue;
       const v = c5Verdict(m, qualified, pair?.upd, pair?.dec);
       for (const r of v.refusals) {
         refuse(io, { file, line: r.line, table: qualified, reason: r.reason });
@@ -1492,6 +1598,9 @@ function modeAudit(io, allowlistPath, migrationsDir) {
   io.out.push(
     "  ── C5, measured per table: update statements replayed / declined ──",
     `  C5 lines:             ${allEntries.length - entries.length}`,
+    // ⛔ 164.9.2 review WR-02 / SFH-02: "unaccounted" below is counted over THIS
+    // scope and no wider. Printed every run so the census cannot be read as more.
+    "  C5 scope:             top-level UPDATE / DELETE / TRUNCATE / MERGE / COPY … FROM / INSERT … ON CONFLICT DO UPDATE, and the same writes inside a DO body; NOT traced: a function called at top level, and dynamic SQL built from a string",
   );
   for (const t of c5Sorted) {
     const row = c5PerTable.get(t);
@@ -1544,8 +1653,14 @@ function modeAudit(io, allowlistPath, migrationsDir) {
  * each.`, exit 0. 39 → 49: ten `c5-update-*` kinds, one per refusal reason the
  * allowlist added. Before this raise the layer-2 vitest was observed RED with
  * `RATCHET STALE: … declares 49 … still 39`.
+ *
+ * MEASURED 2026-09-25 (review round 1, WR-02 / SFH-02, what "0 unaccounted" could
+ * not see): `extract-reference-inserts self-test OK: 53 kinds, red+green each.`,
+ * exit 0. 49 → 53: `c5-audit-crlf-head`, `-do-body-write`, `-unlisted-upsert`
+ * and `-unlisted-copy`. The layer-2 vitest was observed RED
+ * (`declares 53 … still 49`) before this raise.
  */
-export const SELF_TEST_KINDS_FLOOR = 49;
+export const SELF_TEST_KINDS_FLOOR = 53;
 
 /**
  * @type {Array<{id:string, why:string, audit?:boolean, expect:string, greenStdout?:RegExp, greenAbsent?:RegExp}>}
@@ -1851,6 +1966,35 @@ export const SELF_TEST_KINDS = [
     why: "C5 --audit: the non-literal twin of c5-audit-auth-update — a joined UPDATE of auth.users is refused by its own reason, never routed to a decline: line that parse would refuse",
     audit: true,
     expect: "a top-level non-literal UPDATE of auth.users, and C5 targets public only",
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
+  },
+  // ── What "0 unaccounted" could not see (164.9.2 review round 1, WR-02 / SFH-02).
+  {
+    id: "c5-audit-crlf-head",
+    why: "C5 --audit (review WR-02 item 3): every head regex separated tokens with [\\t\\n ], so `UPDATE\\r\\nfx_ref …` in a CRLF migration matched neither C5 nor the DML refusal and the census still read clean. The green leg pins that the same CRLF UPDATE, with its line, is seen and replayed",
+    audit: true,
+    expect: "NO C5 allowlist line; add an update: line for this top-level literal UPDATE",
+    greenStdout: /audit C5 OK: 1 update statement\(s\) over 1 file\(s\) and 1 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-do-body-write",
+    why: "C5 --audit (review WR-02 item 2 / SFH-02): a DO body EXECUTES when its migration applies, and C5 never replays one; its UPDATE of a replayed table used to fall into the body bucket in silence. The green leg accounts for it with decline:1 and pins that an UPDATE inside a CREATE FUNCTION body — defined, never executed — is NOT counted",
+    audit: true,
+    expect: "NO C5 allowlist line for a DO-body write C5 will not replay — a DO block runs UPDATE on public.fx_ref",
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 1 declined over 1 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-unlisted-upsert",
+    why: "C5 --audit (review WR-02 item 1): an unlisted INSERT … ON CONFLICT DO UPDATE rewrites an EXISTING replayed row, and limitation 2 skipped it as a backfill. The green leg pins that the DO NOTHING twin is still skipped",
+    audit: true,
+    expect: "a top-level INSERT … ON CONFLICT DO UPDATE on a table the replay fills, with no allowlist line",
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-unlisted-copy",
+    why: "C5 --audit (review SFH-02): COPY … FROM writes rows no allowlist line replays. The green leg pins that COPY … TO, a read, is not refused",
+    audit: true,
+    expect: "a top-level COPY … FROM on a table the replay fills, and C5 replays UPDATE only",
     greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
   },
 ];

@@ -102,6 +102,12 @@ const REQUIRED_KINDS = [
   "c5-audit-unfilled-table",
   "c5-audit-auth-update",
   "c5-audit-auth-nonliteral-update",
+  // What "0 unaccounted" could not see (review round 1, WR-02 / SFH-02), MEASURED
+  // 2026-09-25 → `OK: 53 kinds`.
+  "c5-audit-crlf-head",
+  "c5-audit-do-body-write",
+  "c5-audit-unlisted-upsert",
+  "c5-audit-unlisted-copy",
 ];
 
 describe("SELF_TEST_KINDS_FLOOR — the extractor's self-test corpus is ratcheted", () => {
