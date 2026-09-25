@@ -363,14 +363,23 @@ _RELAUNCH_POLL_INTERVAL_S: Final[float] = 10.0
 # one-recycle-per-run decision.
 _IPC_FAULT_ALARM_INTERVAL_S: Final[float] = 3600.0
 
-#: The codes whose PERSISTENCE is alarmed: the transport codes (`-10004`,
-#: `-10005`, derived from the shipped tuple) and `-10003` "IPC initialize
-#: failed", which the detector's own docstring names an IPC fault. ⛔ Not the `0`
-#: sentinel: it measured nothing.
-_MT5_IPC_INIT_FAILED_CODE: Final[int] = -10003
-_IPC_FAULT_ALARM_CODES: Final[frozenset[int]] = frozenset(_IPC_TRANSPORT_CODES) | {
-    _MT5_IPC_INIT_FAILED_CODE
-}
+#: `_raise_last`'s sentinel for "last_error() itself failed or answered
+#: malformed" — it measured NOTHING about the terminal.
+_MT5_UNATTRIBUTED_CODE: Final[int] = 0
+
+#: ⛔ R2-SFH-02 (164.6.5 review round 2) — THE ALARM IS A DENYLIST, NOT AN
+#: ALLOWLIST. It was the transport codes plus `-10003`, so every OTHER code
+#: `_heal_blocking` labels `ipc_fault` — `-10001` / `-10002` (the IPC-internal
+#: send/receive failures `services/mt5_validation.py` already lists), `-1`, any
+#: terminal-internal code — read `not_healed:ipc_fault:code=N` at WARNING forever
+#: (measured by the reviewer: 48 ticks, 0 ERROR). Now every first-probe code's
+#: persistence is alarmed EXCEPT the two that are not a fault of the terminal's
+#: IPC: `-6` (ours to heal, never reaches here) and the `0` sentinel (measured
+#: nothing). ⛔ The ACTION's gate stays narrow and separate:
+#: `_RECYCLE_REACHABLE_IPC_CODES`.
+_IPC_FAULT_ALARM_EXEMPT_CODES: Final[frozenset[int]] = frozenset(
+    {_MT5_NO_AUTHORIZED_ACCOUNT_CODE, _MT5_UNATTRIBUTED_CODE}
+)
 
 
 def _affordable(deadline: float, crossings: int) -> bool:
@@ -1128,9 +1137,9 @@ def _escalate_ipc_fault(
     # terminal answered anyone since this run started (the job path's `login()`
     # included), the run is over, gate AND alarm, before this reading is counted.
     answers = mt5_terminal_answer_count(client.terminal_key)
-    # ⭐ SFH-03 — every IPC-transport reading extends the persistence run. The `0`
-    # sentinel measured nothing and neither starts nor extends one.
-    if code in _IPC_FAULT_ALARM_CODES:
+    # ⭐ SFH-03 / R2-SFH-02 — every fault reading extends the persistence run.
+    # The `0` sentinel measured nothing and neither starts nor extends one.
+    if code not in _IPC_FAULT_ALARM_EXEMPT_CODES:
         since: float | None = note_ipc_fault_reading(now, answers)
     else:
         end_ipc_fault_run_if_answered(answers)

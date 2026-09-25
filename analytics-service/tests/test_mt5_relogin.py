@@ -2428,16 +2428,32 @@ async def test_ESCALATION_SFH03_a_wedge_the_recycle_did_not_cure_is_re_raised_HO
     assert all(b - a >= 60 for a, b in zip(elapsed, elapsed[1:])), elapsed
 
 
-@pytest.mark.parametrize("code", [-10004, -10003])
+@pytest.mark.parametrize(
+    "code",
+    [
+        -10004,
+        -10003,
+        # ⛔ R2-SFH-02 (164.6.5 review round 2) — the alarm was an ALLOWLIST of
+        # three codes, so these read `not_healed:ipc_fault:code=N` at WARNING
+        # forever (measured by the reviewer: 48 ticks, 0 ERROR records).
+        # `-10001` / `-10002` are the IPC-internal send/receive failures
+        # `services/mt5_validation.py` already lists; `-1` stands for any
+        # terminal-internal code.
+        pytest.param(-10001, id="R2-SFH-02-ipc-internal-send"),
+        pytest.param(-10002, id="R2-SFH-02-ipc-internal-receive"),
+        pytest.param(-1, id="R2-SFH-02-a-terminal-internal-code"),
+    ],
+)
 async def test_SFH03_a_NEVER_escalated_ipc_fault_that_persists_reaches_ERROR_hourly(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     _fake_clock: "_FakeClock",
     code: int,
 ) -> None:
-    """`-10004` / `-10003` are never escalated, so before this they never reached
-    ERROR at all, however long they lasted. A transient one (a redeploy blip)
-    must stay quiet; one that persists an hour is an ERROR, then hourly."""
+    """Every first-probe code other than `-6` and the `0` sentinel is never
+    escalated, so before this it never reached ERROR at all, however long it
+    lasted. A transient one (a redeploy blip) must stay quiet; one that persists
+    an hour is an ERROR, then hourly."""
     _set_full_env(monkeypatch)
     _install_client(
         monkeypatch, {"initialize": False, "last_error": (code, "No IPC connection")}
@@ -2455,6 +2471,27 @@ async def test_SFH03_a_NEVER_escalated_ipc_fault_that_persists_reaches_ERROR_hou
 
     errors = [r.getMessage() for r in _records(caplog) if r.levelno >= logging.ERROR]
     assert len(errors) == 2 and all("PERSISTED" in e for e in errors), errors
+
+
+async def test_R2_SFH02_the_zero_sentinel_never_starts_a_persistence_run(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+) -> None:
+    """The other side of R2-SFH-02's inversion: `0` is `_raise_last`'s sentinel
+    for "last_error() itself failed" and measured NOTHING, so three hours of it
+    must not page. (Its persistence is the blind-run escalation's job.)"""
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": False, "last_error": (0, "unknown")})
+    _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        for _ in range(18):
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+
+    assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR]
+    assert mt5_session_episodes._IPC_FAULT_RUN_SINCE is None
 
 
 async def test_SFH03_the_terminal_answering_ends_the_persistence_run(
