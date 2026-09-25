@@ -280,6 +280,18 @@ wait_for_apply() {
       # wait keys on GITHUB_SHA's own supabase-migrate.yml run, which never
       # exists on a PR. On a merge push a seconds-wide window also remains
       # between this wait's exit and VAC-08's first read.
+      # ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1 round-1 review, SFH-05): the
+      # first note's "an overlap makes them fail loudly, never pass falsely" and
+      # "A restore's lock blocks them until COMMIT" overstate it, and are kept
+      # as lineage. The restore takes ACCESS EXCLUSIVE on the ledger only at its
+      # TRUNCATE, late in its one transaction. Before that point, through the
+      # whole DROP SCHEMA public CASCADE and replay, VAC-08's reads go through
+      # against the pre-restore COMMITTED state and can PASS. An overlap with an
+      # apply can also PASS, through the frontier exemption. The real outcomes:
+      # an overlap either reads a committed state that really existed (and
+      # passes or fails on its merits), or fails loudly (the TRUNCATE holding a
+      # read past its statement timeout on every retry, or a body fetch racing
+      # a COMMIT). It cannot pass on a state that never committed.
       # `unknown` is deliberately NOT treated as clear: an unreadable probe
       # cannot rule an apply IN, which is the same reading the exhaustion
       # message already states.
