@@ -12,3 +12,10 @@
   specifies, and that step belongs to Phase 164.9 criterion 5. The remedy is the same shape as
   plan 04's: `status=0 … || status=$?`, `census_rc=0 … || census_rc=$?` with an rc>1 branch, and
   an executed harness arm with an `unbind` calibration.
+
+  **✅ RESOLVED 2026-09-25 in commit `78f9871c4`** (founder decision the same day, "Fix in this
+  PR"). The step now carries `status=0 … || status=$?` and `census_rc=0 … || census_rc=$?` with an
+  rc>1 branch, beside a dated correction of the false comment (kept as lineage). The wiring harness
+  executes the step body under `bash -e` with an `unbind` calibration per bound-dependent arm.
+  The entry above is kept as lineage. Details: `164.9.2-04-SUMMARY.md`, section
+  "164.9.2-04-FOLLOWUP".
