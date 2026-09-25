@@ -547,6 +547,17 @@ _DECLARED_MUTABLE_MODULE_GLOBALS = {
         "the debounced run. It gates the same ACTION as the bool above and never "
         "a dataset value; a redeploy resets it together with that bool."
     ),
+    "_IPC_FAULT_RUN_SINCE": (
+        "164.6.5 review round 1 (SFH-03) — a monotonic stamp of the FIRST reading "
+        "of a run of IPC faults, used only to state an elapsed time in an ERROR "
+        "log line. It names no row and no state; a redeploy resetting it restarts "
+        "the elapsed count and delays the next hourly alarm, nothing else."
+    ),
+    "_IPC_FAULT_LAST_ALARM_AT": (
+        "164.6.5 review round 1 (SFH-03) — a monotonic stamp of the last ERROR "
+        "about that run, which throttles the alarm to hourly. A LOG CADENCE, "
+        "never a dataset value."
+    ),
 }
 
 

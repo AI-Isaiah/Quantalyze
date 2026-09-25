@@ -91,7 +91,10 @@ from services.mt5_session_episodes import (
     KIND_STILL_UNAUTHORIZED,
     HealOutcome,
     claim_ipc_fault_escalation,
+    ipc_fault_alarm_due,
     ipc_fault_escalation_armed,
+    mark_ipc_fault_alarm,
+    note_ipc_fault_reading,
     rearm_ipc_fault_escalation,
     record_mt5_heal_outcome,
     record_mt5_session_reading,
@@ -350,6 +353,22 @@ _RELAUNCH_SETTLE_S: Final[float] = 90.0
 # spends its own 20 s IPC timeout, so this mostly matters when it fails FAST
 # (a terminal not yet listening), where it stops a tight loop against the bridge.
 _RELAUNCH_POLL_INTERVAL_S: Final[float] = 10.0
+
+# ⭐ SFH-03 (164.6.5 review round 1) — how often a PERSISTING IPC fault is
+# re-raised at ERROR. One hour, the cadence of the independent hourly prod-prober
+# (`mt5_session_monitor._MT5_SESSION_POLL_INTERVAL_CEILING_S`, not imported: that
+# module imports this one). Alarm cadence only: it never re-opens the
+# one-recycle-per-run decision.
+_IPC_FAULT_ALARM_INTERVAL_S: Final[float] = 3600.0
+
+#: The codes whose PERSISTENCE is alarmed: the transport codes (`-10004`,
+#: `-10005`, derived from the shipped tuple) and `-10003` "IPC initialize
+#: failed", which the detector's own docstring names an IPC fault. ⛔ Not the `0`
+#: sentinel: it measured nothing.
+_MT5_IPC_INIT_FAILED_CODE: Final[int] = -10003
+_IPC_FAULT_ALARM_CODES: Final[frozenset[int]] = frozenset(_IPC_TRANSPORT_CODES) | {
+    _MT5_IPC_INIT_FAILED_CODE
+}
 
 
 def _affordable(deadline: float, crossings: int) -> bool:
@@ -1014,20 +1033,58 @@ def _escalate_ipc_fault(
     """
     if deadline is None:
         deadline = _clock() + _relogin_budget_s()
+    now = _clock()
+    # ⭐ SFH-03 — every IPC-transport reading extends the persistence run. The `0`
+    # sentinel measured nothing and neither starts nor extends one.
+    since = note_ipc_fault_reading(now) if code in _IPC_FAULT_ALARM_CODES else None
     if code not in _RECYCLE_REACHABLE_IPC_CODES:
         # ⛔ WR-08 — NO re-arm here. `0` measured nothing, and `-10003` / `-10004`
         # are the terminal NOT answering either; re-arming on them let a flaky
         # bridge (-10005, 0, -10005, 0 ...) recycle the shared terminal every
         # other tick.
+        if since is not None and ipc_fault_alarm_due(
+            now, _IPC_FAULT_ALARM_INTERVAL_S, attempted=False
+        ):
+            # ⛔ SFH-03 — never escalated, so before this it never reached ERROR
+            # at all, however long it lasted.
+            mark_ipc_fault_alarm(now)
+            logger.error(
+                "mt5 session heal: ipc_fault code=%s has PERSISTED for %d min — the "
+                "terminal-process recycle cannot reach this code, so nothing "
+                "automatic will clear it; an OPERATOR is needed. Re-raised at "
+                "ERROR at most every %d min while it persists.",
+                code,
+                int((now - since) // 60),
+                int(_IPC_FAULT_ALARM_INTERVAL_S // 60),
+            )
         return None
     answers = mt5_terminal_answer_count(client.terminal_key)
     if not ipc_fault_escalation_armed(answers):
-        logger.info(
-            "mt5 session heal: ipc_fault code=%s persists — the terminal-process "
-            "recycle was already attempted in this run of consecutive faults, so "
-            "it is NOT repeated (once per run; the terminal answering re-arms it).",
-            code,
-        )
+        if since is not None and ipc_fault_alarm_due(
+            now, _IPC_FAULT_ALARM_INTERVAL_S, attempted=True
+        ):
+            # ⛔ SFH-03 — THE DEBOUNCE IS ON THE ACTION, NOT ON THE ALARM. A wedge
+            # the recycle did not cure used to be ONE ERROR at hour 0 and then
+            # INFO lines for as long as it lasted (four days, on the record).
+            mark_ipc_fault_alarm(now)
+            logger.error(
+                "mt5 session heal: ipc_fault code=%s PERSISTS %d min into this run, "
+                "after its one terminal-process recycle — an OPERATOR is needed. "
+                "The recycle is NOT repeated (once per run; the terminal answering "
+                "re-arms it); this alarm is re-raised at ERROR at most every %d min "
+                "while it persists.",
+                code,
+                int((now - since) // 60),
+                int(_IPC_FAULT_ALARM_INTERVAL_S // 60),
+            )
+        else:
+            logger.info(
+                "mt5 session heal: ipc_fault code=%s persists — the terminal-process "
+                "recycle was already attempted in this run of consecutive faults, "
+                "so it is NOT repeated (once per run; the terminal answering "
+                "re-arms it).",
+                code,
+            )
         return None
     # ⭐ EVIDENCE FIRST (`MT5-SWITCH-WEDGE-CAUSE-01`): the recycle erases it.
     # Logged on its own line BEFORE the recycle is attempted, so the evidence is
@@ -1141,6 +1198,9 @@ def _escalate_ipc_fault(
         # pipe the relaunch attached to.
         level = max(level, logging.WARNING)
         detail = f"{detail} exit_unconfirmed={terminated - exited}"
+    if level >= logging.ERROR:
+        # SFH-03 — this line IS the run's alarm; the next is due an interval on.
+        mark_ipc_fault_alarm(_clock())
     logger.log(
         level,
         "mt5 session heal: ipc_fault code=%s escalated to a terminal-process "

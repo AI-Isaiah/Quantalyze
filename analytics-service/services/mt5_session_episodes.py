@@ -561,11 +561,62 @@ def rearm_ipc_fault_escalation() -> None:
     ⭐ Called for an authorized reading or ``-6``, from any heal probe. ⛔ NEVER
     for the ``0`` sentinel, ``-10003`` or ``-10004``: those measured no answer,
     and re-arming on them is what let a flaky bridge recycle the terminal every
-    other tick (WR-08).
+    other tick (WR-08). It also ends the persistence alarm's run (SFH-03).
     """
     global _IPC_FAULT_ESCALATION_ARMED, _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER
+    global _IPC_FAULT_RUN_SINCE, _IPC_FAULT_LAST_ALARM_AT
     _IPC_FAULT_ESCALATION_ARMED = True
     _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER = None
+    _IPC_FAULT_RUN_SINCE = None
+    _IPC_FAULT_LAST_ALARM_AT = None
+
+
+# --------------------------------------------------------------------------- #
+# ⭐ THE PERSISTENCE ALARM (164.6.5 review round 1, SFH-03) — the debounce is on
+# the ACTION, never on the ALARM.
+#
+# After the one recycle, a wedge that persists went back to the pre-phase shape:
+# WARNING `not_healed:ipc_fault`, a blind-run WARNING and an INFO "already
+# attempted". A four-day wedge the recycle cannot cure (Cause A, the persisted
+# modal dialog) was ONE ERROR at hour 0 and then nothing for 96 hours — and
+# `-10004` / `-10003`, which are never escalated, produced no ERROR at all. These
+# two monotonic stamps let the heal re-raise a persisting IPC fault at ERROR at
+# most once per alarm interval, with its elapsed time. They are ended only by the
+# terminal being MEASURED answering (`rearm_ipc_fault_escalation`); the `0`
+# sentinel neither starts nor ends a run.
+# --------------------------------------------------------------------------- #
+_IPC_FAULT_RUN_SINCE: float | None = None
+_IPC_FAULT_LAST_ALARM_AT: float | None = None
+
+
+def note_ipc_fault_reading(now: float) -> float:
+    """Record an IPC-fault reading; return when this run of them STARTED."""
+    global _IPC_FAULT_RUN_SINCE
+    if _IPC_FAULT_RUN_SINCE is None:
+        _IPC_FAULT_RUN_SINCE = now
+    return _IPC_FAULT_RUN_SINCE
+
+
+def ipc_fault_alarm_due(now: float, interval_s: float, *, attempted: bool) -> bool:
+    """Whether a persisting IPC fault must be re-raised at ERROR now.
+
+    ``attempted`` — the run's one recycle was already made. Then the first
+    persisting reading after an attempt that did NOT itself alarm (a WARNING
+    ``relaunch_pending``, say) is due at once: the next reading has decided, and
+    it is still wedged. Otherwise, and for the never-escalated codes, it is due
+    once ``interval_s`` has passed since the run started or since the last alarm.
+    """
+    if _IPC_FAULT_LAST_ALARM_AT is not None:
+        return now - _IPC_FAULT_LAST_ALARM_AT >= interval_s
+    if attempted:
+        return True
+    return _IPC_FAULT_RUN_SINCE is not None and now - _IPC_FAULT_RUN_SINCE >= interval_s
+
+
+def mark_ipc_fault_alarm(now: float) -> None:
+    """An ERROR about this run was just logged."""
+    global _IPC_FAULT_LAST_ALARM_AT
+    _IPC_FAULT_LAST_ALARM_AT = now
 
 
 def _reset_session_episode_state_for_tests() -> None:

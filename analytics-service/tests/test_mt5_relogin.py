@@ -2383,6 +2383,101 @@ async def test_ESCALATION_WR02_still_faulted_only_after_the_WHOLE_settle_window(
     assert "initialize_credentialed" not in fake.call_order
 
 
+async def test_ESCALATION_SFH03_a_wedge_the_recycle_did_not_cure_is_re_raised_HOURLY(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+) -> None:
+    """⛔ SFH-03 (164.6.5 review round 1). The debounce is on the ACTION, never on
+    the ALARM. Before this, a wedge the recycle could not cure (Cause A, the
+    persisted modal dialog) was ONE ERROR at hour 0 and then INFO lines for as
+    long as it lasted — four days, on the record. Ten-minute ticks for four
+    hours must produce one ERROR per hour, each naming the elapsed time, and
+    still exactly ONE recycle."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, dict(_WEDGED))
+    _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        for _ in range(24):  # four hours of ten-minute ticks
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+
+    assert _recycle_count(fake) == 1
+    errors = [r.getMessage() for r in _records(caplog) if r.levelno >= logging.ERROR]
+    assert len(errors) == 4, (
+        f"expected the attempt's ERROR plus one per further hour, got {len(errors)}: "
+        f"{errors}"
+    )
+    # Each re-raise names the elapsed time, and none comes sooner than an hour
+    # after the one before it.
+    import re as _re
+
+    elapsed = [
+        int(m.group(1))
+        for m in (_re.search(r"PERSISTS (\d+) min", e) for e in errors[1:])
+        if m
+    ]
+    assert len(elapsed) == 3 and elapsed[0] >= 60, errors
+    assert all(b - a >= 60 for a, b in zip(elapsed, elapsed[1:])), elapsed
+
+
+@pytest.mark.parametrize("code", [-10004, -10003])
+async def test_SFH03_a_NEVER_escalated_ipc_fault_that_persists_reaches_ERROR_hourly(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+    code: int,
+) -> None:
+    """`-10004` / `-10003` are never escalated, so before this they never reached
+    ERROR at all, however long they lasted. A transient one (a redeploy blip)
+    must stay quiet; one that persists an hour is an ERROR, then hourly."""
+    _set_full_env(monkeypatch)
+    _install_client(
+        monkeypatch, {"initialize": False, "last_error": (code, "No IPC connection")}
+    )
+    _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        for _ in range(5):  # 40 minutes: transient, no ERROR
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+        assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR]
+        for _ in range(13):  # to ~3 h
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+
+    errors = [r.getMessage() for r in _records(caplog) if r.levelno >= logging.ERROR]
+    assert len(errors) == 2 and all("PERSISTED" in e for e in errors), errors
+
+
+async def test_SFH03_the_terminal_answering_ends_the_persistence_run(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+) -> None:
+    """A run of faults the terminal answered in the middle of is TWO runs: the
+    elapsed time must not accumulate across a recovery."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch, {"initialize": False, "last_error": (-10004, "No IPC")}
+    )
+    _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        for _ in range(5):
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+        fake._scenario["initialize"] = True  # the bridge is back
+        await _heal_n_times(1)
+        fake._scenario["initialize"] = False
+        for _ in range(5):
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+
+    assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR]
+
+
 @pytest.mark.parametrize("kind", _ESCALATION_KINDS)
 def test_ESCALATION_every_escalation_kind_degrades_to_NOT_MEASURED(kind: str) -> None:
     """An escalation ACTS on the terminal; it does not measure the session. If
