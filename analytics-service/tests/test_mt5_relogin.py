@@ -162,7 +162,13 @@ class _FakeRpycConn:
             # SAME, still-running terminal: the pre-recycle answers stand.
             owner.recycled = False
         return _json.dumps(
-            {"matched": matched, "terminated": terminated, "exited": exited}
+            {
+                "matched": matched,
+                "terminated": terminated,
+                "exited": exited,
+                "open_errors": owner._scenario.get("open_errors", []),
+                "terminate_errors": owner._scenario.get("terminate_errors", []),
+            }
         )
 
 
@@ -2195,6 +2201,33 @@ async def test_ESCALATION_WR03_a_recycle_that_did_not_end_every_terminal_is_neve
     )
     assert line.levelno == expected_level
     assert f"matched={counts[0]} terminated={counts[1]}" in line.getMessage()
+
+
+async def test_ESCALATION_SFH09_the_refusal_codes_are_NAMED_in_the_escalation_line(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⭐ SFH-09. A recycle that did not land must say WHY on the operator's line:
+    "access denied" (5) and "already gone" (87) have different remedies."""
+    _set_full_env(monkeypatch)
+    _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "recycle_counts": (1, 0, 0),
+            "terminate_errors": [5],
+        },
+    )
+    _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    line = next(
+        r.getMessage()
+        for r in _records(caplog)
+        if "escalated to a terminal" in r.getMessage()
+    )
+    assert "open_errors=[] terminate_errors=[5]" in line
 
 
 @pytest.mark.parametrize("kind", _ESCALATION_KINDS)

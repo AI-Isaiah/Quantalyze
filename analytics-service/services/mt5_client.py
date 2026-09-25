@@ -899,6 +899,14 @@ def {_REMOTE_MATERIALIZE_FN}(deals):
 # a by-value JSON string, never a proxy. A snapshot failure RAISES (and the
 # caller's `_guarded_read` scrubs it); a process that cannot be opened or
 # terminated is COUNTED (matched but not terminated), never silently dropped.
+#
+# ⭐ SFH-09 (164.6.5 review round 1) — AND ITS REASON TRAVELS WITH IT. A refused
+# `OpenProcess` or `TerminateProcess` used to add nothing but a smaller
+# `terminated`, so the first live run could not tell "access denied" (5) from
+# "the process is already gone" (87, invalid parameter, for a vanished pid).
+# Each refusal now appends its `GetLastError()` — an INT, read through
+# `use_last_error=True` — to `open_errors` / `terminate_errors`. Still a
+# committed literal: only the RETURN dict grew.
 _REMOTE_TERMINAL_RECYCLE_FN = "_qz_recycle_terminal_process"
 _REMOTE_TERMINAL_RECYCLE_SRC = """
 def _qz_recycle_terminal_process(exit_wait_ms):
@@ -955,19 +963,30 @@ def _qz_recycle_terminal_process(exit_wait_ms):
 
     terminated = 0
     exited = 0
+    open_errors = []
+    terminate_errors = []
     for pid in pids:
         handle = kernel32.OpenProcess(process_terminate | synchronize, False, pid)
         if not handle:
+            open_errors.append(int(ctypes.get_last_error()))
             continue
         try:
             if kernel32.TerminateProcess(handle, 1):
                 terminated += 1
                 if kernel32.WaitForSingleObject(handle, exit_wait_ms) == wait_object_0:
                     exited += 1
+            else:
+                terminate_errors.append(int(ctypes.get_last_error()))
         finally:
             kernel32.CloseHandle(handle)
     return json.dumps(
-        dict(matched=len(pids), terminated=terminated, exited=exited)
+        dict(
+            matched=len(pids),
+            terminated=terminated,
+            exited=exited,
+            open_errors=open_errors,
+            terminate_errors=terminate_errors,
+        )
     )
 """
 
@@ -2177,6 +2196,10 @@ class Mt5Client:
             matched = int(counts["matched"])
             terminated = int(counts["terminated"])
             exited = int(counts["exited"])
+            # SFH-09 — the Win32 codes of each refused open / terminate. Ints
+            # only: a remote string never reaches a log line from here.
+            open_errors = [int(code) for code in counts["open_errors"]]
+            terminate_errors = [int(code) for code in counts["terminate_errors"]]
         except (TypeError, ValueError, KeyError):
             raise Mt5ClientError(
                 0, "MT5 terminal recycle returned a malformed verdict"
@@ -2193,6 +2216,8 @@ class Mt5Client:
             "matched": matched,
             "terminated": terminated,
             "exited": exited,
+            "open_errors": open_errors,
+            "terminate_errors": terminate_errors,
             "authorized": authorized,
             "relaunch_code": relaunch_code,
         }

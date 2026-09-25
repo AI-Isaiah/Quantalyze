@@ -923,7 +923,9 @@ def _escalate_ipc_fault(
         detail = (
             f"matched={verdict.get('matched')} terminated={verdict.get('terminated')} "
             f"exited={verdict.get('exited')} authorized={verdict.get('authorized')} "
-            f"relaunch_code={verdict.get('relaunch_code')}"
+            f"relaunch_code={verdict.get('relaunch_code')} "
+            f"open_errors={verdict.get('open_errors')} "
+            f"terminate_errors={verdict.get('terminate_errors')}"
         )
     except Mt5SessionAbandoned as exc:
         # ⛔ WR-01 — `terminal_recycle` is the verb's OWN first-statement fence:

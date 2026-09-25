@@ -3888,8 +3888,117 @@ def _install_recycle_double(conn, *, returns=None, raises=None):
     return record
 
 
-def _recycle_verdict(matched=1, terminated=1, exited=1):
-    return json.dumps(dict(matched=matched, terminated=terminated, exited=exited))
+def _recycle_verdict(
+    matched=1, terminated=1, exited=1, open_errors=(), terminate_errors=()
+):
+    return json.dumps(
+        dict(
+            matched=matched,
+            terminated=terminated,
+            exited=exited,
+            open_errors=list(open_errors),
+            terminate_errors=list(terminate_errors),
+        )
+    )
+
+
+class _FakeWin32:
+    """The Win32 surface `_REMOTE_TERMINAL_RECYCLE_SRC` drives, faked so the
+    COMMITTED source itself can be executed offline (164.6.5 review round 1).
+
+    ⭐ WHY: every other recycle gate swaps the remote function for a stub, so the
+    body that ends the terminal — counting, refusal handling, the codes it
+    returns — had never executed anywhere, offline or live. Here the real string
+    is exec'd with real `ctypes` structures; only `WinDLL` and `get_last_error`
+    (Windows-only) are supplied. ``procs`` is ``[(pid, image), ...]``;
+    ``open_refused`` / ``terminate_refused`` map a pid to the error code the
+    refusal leaves in `GetLastError`; ``not_exiting`` is the pids whose wait
+    times out.
+    """
+
+    WAIT_TIMEOUT = 0x00000102
+
+    def __init__(
+        self,
+        procs,
+        *,
+        open_refused=None,
+        terminate_refused=None,
+        not_exiting=(),
+    ) -> None:
+        self.procs = list(procs)
+        self.open_refused = dict(open_refused or {})
+        self.terminate_refused = dict(terminate_refused or {})
+        self.not_exiting = set(not_exiting)
+        self.last_error = 0
+        self.terminated: list[int] = []
+        self._cursor = 0
+        self.kernel32 = types.SimpleNamespace()
+        for name in (
+            "CreateToolhelp32Snapshot",
+            "Process32FirstW",
+            "Process32NextW",
+            "OpenProcess",
+            "TerminateProcess",
+            "WaitForSingleObject",
+            "CloseHandle",
+        ):
+            setattr(self.kernel32, name, self._fn(getattr(self, "_" + name)))
+
+    @staticmethod
+    def _fn(impl):
+        def call(*args):
+            return impl(*args)
+
+        return call
+
+    def _fill(self, ref) -> int:
+        if self._cursor >= len(self.procs):
+            return 0
+        pid, image = self.procs[self._cursor]
+        self._cursor += 1
+        ref._obj.th32ProcessID = pid
+        ref._obj.szExeFile = image
+        return 1
+
+    def _CreateToolhelp32Snapshot(self, flags, pid):
+        return 4242
+
+    def _Process32FirstW(self, snapshot, ref):
+        self._cursor = 0
+        return self._fill(ref)
+
+    def _Process32NextW(self, snapshot, ref):
+        return self._fill(ref)
+
+    def _OpenProcess(self, access, inherit, pid):
+        if pid in self.open_refused:
+            self.last_error = self.open_refused[pid]
+            return 0
+        return 10_000 + pid
+
+    def _TerminateProcess(self, handle, code):
+        pid = handle - 10_000
+        if pid in self.terminate_refused:
+            self.last_error = self.terminate_refused[pid]
+            return 0
+        self.terminated.append(pid)
+        return 1
+
+    def _WaitForSingleObject(self, handle, ms):
+        return self.WAIT_TIMEOUT if handle - 10_000 in self.not_exiting else 0
+
+    def _CloseHandle(self, handle):
+        return 1
+
+    def run(self, monkeypatch) -> dict:
+        import ctypes
+
+        monkeypatch.setattr(ctypes, "WinDLL", lambda name, **_k: self.kernel32, raising=False)
+        monkeypatch.setattr(ctypes, "get_last_error", lambda: self.last_error, raising=False)
+        namespace: dict = {}
+        exec(mt5_client_mod._REMOTE_TERMINAL_RECYCLE_SRC, namespace)  # noqa: S102
+        return json.loads(namespace[_RECYCLE_FN_NAME](5000))
 
 
 def test_TERMINAL_RECYCLE_a_live_session_sends_the_committed_source_then_relaunches():
@@ -3925,6 +4034,8 @@ def test_TERMINAL_RECYCLE_a_live_session_sends_the_committed_source_then_relaunc
         "matched": 1,
         "terminated": 1,
         "exited": 1,
+        "open_errors": [],
+        "terminate_errors": [],
         "authorized": True,
         "relaunch_code": None,
     }
@@ -3959,6 +4070,64 @@ def test_TERMINAL_RECYCLE_a_relaunch_that_is_not_yet_authorized_is_recorded_not_
     assert verdict["terminated"] == 1
     assert verdict["authorized"] is False
     assert verdict["relaunch_code"] == -6
+
+
+def test_TERMINAL_RECYCLE_the_COMMITTED_remote_body_counts_and_names_every_refusal(
+    monkeypatch,
+):
+    """⭐ SFH-01 / SFH-09 (164.6.5 review round 1). The committed source, EXECUTED:
+    it matches only `terminal64.exe` (case-insensitively), counts what it ended,
+    and a refused open or terminate is COUNTED as not-terminated AND carries its
+    `GetLastError()` code — so the first live run can tell "access denied" (5)
+    from "the process is already gone" (87). Without the code, both read as a
+    smaller `terminated` and nothing else."""
+    win32 = _FakeWin32(
+        [
+            (11, "terminal64.exe"),
+            (12, "explorer.exe"),
+            (13, "TERMINAL64.EXE"),
+            (14, "terminal64.exe"),
+            (15, "terminal64.exe"),
+        ],
+        open_refused={13: 5},
+        terminate_refused={14: 87},
+        not_exiting={15},
+    )
+
+    verdict = win32.run(monkeypatch)
+
+    assert verdict == {
+        "matched": 4,
+        "terminated": 2,
+        "exited": 1,
+        "open_errors": [5],
+        "terminate_errors": [87],
+    }
+    assert win32.terminated == [11, 15], "a non-terminal process was ended"
+
+
+def test_TERMINAL_RECYCLE_the_COMMITTED_remote_body_reports_matching_NOTHING(monkeypatch):
+    """`matched=0` must come back as a count, never as a success shape: an
+    image-name difference under Wine would otherwise read as a recycle."""
+    verdict = _FakeWin32([(21, "wineserver.exe")]).run(monkeypatch)
+
+    assert verdict["matched"] == 0 and verdict["terminated"] == 0
+
+
+def test_TERMINAL_RECYCLE_the_refusal_codes_reach_the_verdict():
+    """The verb carries the remote codes into its verdict as INTS, so the caller's
+    log line can name them."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    _install_recycle_double(
+        fake._MetaTrader5__conn,
+        returns=_recycle_verdict(2, 0, 0, open_errors=[5], terminate_errors=[87]),
+    )
+
+    verdict = client.recycle_terminal_process()
+
+    assert verdict["open_errors"] == [5]
+    assert verdict["terminate_errors"] == [87]
 
 
 def test_TERMINAL_RECYCLE_the_remote_source_is_a_committed_literal_with_no_interpolation():
