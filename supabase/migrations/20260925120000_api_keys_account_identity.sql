@@ -1,0 +1,567 @@
+-- ============================================================================
+-- api_keys account identity: the duplicate marker, the departed-history flag,
+-- the reconnect named refusal, and COMMENTs that tell the truth about ccxt
+-- (2026-09-25, Phase 167.1.2 ACCOUNTTRUTH, plan 03, PR B)
+-- ============================================================================
+--
+-- ⛔⛔ DEPLOY ORDER — READ BEFORE MERGING. THIS MIGRATION SHIPS ALONE, AS PR B,
+-- AND MUST BE APPLIED ON PROD BEFORE ANY TYPESCRIPT READS ITS COLUMNS.
+--
+-- Merging supabase/migrations/** to `main` applies to shared TEST (`apply-test`)
+-- and then to PROD (`apply`) with NO human stop in between, while the Vercel
+-- promotion starts on the same push and finishes in minutes. A key-list SELECT
+-- that names a column PROD does not have yet answers PostgREST 42703/42501 and
+-- takes the Exchanges page down for every allocator (RESEARCH Pitfall 1 of the
+-- phase; the same hazard the DEPLOY ORDER header of 20260920120000 documents).
+-- So this PR carries the DDL and NOTHING that reads it: no constants.ts, no
+-- types.ts projection, no component, no route, no worker. Every reader ships in
+-- PR C, which starts only after this migration's PROD `apply` job concluded
+-- success on this PR's merge commit (plan 03 Task 4, D-12, prints
+-- D12_ORDER_OK). src/lib/database.types.ts is regenerated here, but a generated
+-- type reads nothing at runtime.
+--
+-- ⛔ NO DATA CENSUS RUNS INSIDE THIS MIGRATION, and no DO block here reads a
+-- row. Shared TEST holds PROD's catalogue and none of its data, and a failed
+-- TEST apply blocks the PROD apply, so a data-reading DO block that RAISEs on
+-- an unexpected count would block a production deploy on an empty database.
+-- Every check below is DDL or catalogue-only. The read-only PROD census of
+-- existing duplicates is plan 08's script, never this file.
+--
+-- ⛔ The composite key-add wizard RPC is not touched here (D-04): not dropped,
+-- not replaced, not altered. Its REVOKE/GRANT re-issue hazard (20260814120000)
+-- therefore does not arise.
+--
+-- What this migration does, in order
+-- ----------------------------------
+--   1. api_keys.account_shared_with_api_key_id + account_share_kind (D-11): the
+--      MARKER a service-role identity stamper (plan 04) writes when a second
+--      live key reads an exchange account another live key of the same owner
+--      already holds. Both-or-neither, never self-referencing, the holder must
+--      belong to the same owner. Nothing is ever auto-disconnected or deleted
+--      (D-01): the marker is shown on the key card beside the owner's own
+--      Disconnect and Delete controls.
+--   2. api_keys.history_inclusion (D-05, D-09): the owner's include/exclude
+--      choice for a departed (disconnected or revoked) key's history.
+--   3. set_departed_key_history_inclusion(uuid, text): the owner RPC that
+--      writes (2) and asks for the allocator curve to be recomposed.
+--   4. reconnect_allocator_api_key: refuses by name when a live sibling already
+--      holds the same (user, exchange, venue_account_id) (Pitfall 5). Once ccxt
+--      keys carry an account id (plan 02, PR C) a reconnect into an occupied
+--      slot stops being MT5-only, so the refusal ships BEFORE the stamping.
+--   5. COMMENT ON COLUMN api_keys.venue_account_id and COMMENT ON INDEX
+--      api_keys_user_exchange_venue_account_uniq re-stated: they said every ccxt
+--      venue is NULL, which this phase makes false for OKX, Bybit, Binance and
+--      Deribit. sFOX stays NULL, and that is UNKNOWABLE, not pending (D-10).
+--   6. Catalogue-only post-verify.
+--
+-- Why the FK is ON DELETE SET NULL and the trigger clears the kind
+-- ----------------------------------------------------------------
+-- delete_allocator_api_key HARD-deletes a key row (20260602183000). If another
+-- key names the deleted row as its holder, the FK's SET NULL action issues an
+-- UPDATE that nulls ONLY the holder column, and api_keys_account_share_both_or_
+-- neither would then abort the DELETE: a key the owner cannot delete. The
+-- action's UPDATE names the holder column, so the BEFORE UPDATE OF trigger
+-- below fires on it, and its NULL-holder branch clears the kind in the same
+-- row write. A BEFORE DELETE trigger that updated sibling rows was rejected:
+-- the account sanitiser deletes all of a user's keys in ONE statement, and a
+-- sibling UPDATE from inside that statement makes PostgreSQL refuse the delete
+-- ("tuple to be deleted was already modified by an operation triggered by the
+-- current command").
+--
+-- VAC-04 (PROD body drift) — ONE function body is replaced
+-- --------------------------------------------------------
+-- reconnect_allocator_api_key is re-based on its LATEST definition. MEASURED
+-- 2026-09-25 with grep over supabase/migrations/*.sql: exactly one migration
+-- defines it, 20260422101911_api_keys_disconnected_at.sql, and its body is
+-- byte-identical to supabase/schema/baseline.sql's and to the committed
+-- snapshot supabase/schema/functions/reconnect_allocator_api_key.sql. The
+-- edits are: the ownership SELECT also reads exchange and venue_account_id, and
+-- one refusal block sits between the idempotency check and the UPDATE. Every
+-- other line is the snapshot's.
+--
+-- The hash below is the `live` column (fifth TSV field) of
+--   node scripts/sql-body-normalize.mjs --diff-bodies \
+--     supabase/schema/functions/reconnect_allocator_api_key.sql \
+--     <origin/main's copy of that file>
+-- i.e. the normalized body origin/main carries today, standing in for PROD.
+-- It is EARNED only if VAC-04 on the PR reports the SAME hash for PROD. If it
+-- differs, PROD drifted out of band: fold the difference in and re-derive,
+-- never edit the pragma to match a gate log.
+--   reconnect_allocator_api_key/1
+-- prod-body-ack: 3fbe5e570b1b239ac3d90ce5ab8cb0e0474a14c2d2bc3dbff666083464198382
+--
+-- ROLLBACK: supabase/migrations/down/20260925120000-rollback.sql. Roll the
+-- PR C readers back FIRST; dropping these columns under a deployed reader is
+-- the same outage as the deploy-order hazard above, in reverse.
+-- ============================================================================
+
+BEGIN;
+
+SET lock_timeout = '3s';
+
+-- ───────────────────────────── 1. the duplicate marker (D-11)
+ALTER TABLE public.api_keys
+  ADD COLUMN account_shared_with_api_key_id uuid NULL,
+  ADD COLUMN account_share_kind text NULL;
+
+ALTER TABLE public.api_keys
+  ADD CONSTRAINT api_keys_account_shared_with_api_key_id_fkey
+    FOREIGN KEY (account_shared_with_api_key_id)
+    REFERENCES public.api_keys (id)
+    ON DELETE SET NULL;
+
+ALTER TABLE public.api_keys
+  ADD CONSTRAINT api_keys_account_share_kind_valid
+    CHECK (account_share_kind IS NULL
+           OR account_share_kind IN ('duplicate', 'composite_member'));
+
+ALTER TABLE public.api_keys
+  ADD CONSTRAINT api_keys_account_share_both_or_neither
+    CHECK ((account_shared_with_api_key_id IS NULL) = (account_share_kind IS NULL));
+
+ALTER TABLE public.api_keys
+  ADD CONSTRAINT api_keys_account_share_not_self
+    CHECK (account_shared_with_api_key_id IS NULL
+           OR account_shared_with_api_key_id <> id);
+
+-- The FK's SET NULL action looks the referencing rows up on every api_keys
+-- DELETE. Partial, because almost every row carries NULL here.
+CREATE INDEX api_keys_account_shared_with_idx
+  ON public.api_keys (account_shared_with_api_key_id)
+  WHERE account_shared_with_api_key_id IS NOT NULL;
+
+COMMENT ON COLUMN public.api_keys.account_shared_with_api_key_id IS
+  'Phase 167.1.2 D-11. The LIVE key of the same owner that already holds the '
+  'exchange account this key reads, or NULL. Written only by the service-role '
+  'identity stamper; no client INSERT or UPDATE path exists. Always set '
+  'together with account_share_kind (api_keys_account_share_both_or_neither), '
+  'never this row itself (api_keys_account_share_not_self), and the holder must '
+  'belong to the same user_id (trigger api_keys_account_share_same_owner). '
+  'ON DELETE SET NULL: hard-deleting the holder clears this column AND '
+  'account_share_kind together, so the delete never aborts. Nothing is ever '
+  'auto-disconnected or deleted because of this marker (D-01): the owner '
+  'decides, from the key card.';
+
+COMMENT ON COLUMN public.api_keys.account_share_kind IS
+  'Phase 167.1.2 D-11. Why account_shared_with_api_key_id is set, or NULL. '
+  'Written only by the service-role identity stamper. '
+  '''duplicate'' = a second live key on an exchange account another live key '
+  'of the same owner already holds; the allocator book counts that account '
+  'once, through the holder. '
+  '''composite_member'' = the D-04 exemption: both keys are members of one '
+  'composite strategy with disjoint declared windows (a key rotation inside a '
+  'composite), so the pair is legitimate and is not a duplicate. '
+  'Nothing is ever auto-disconnected or deleted because of this value.';
+
+-- ─────────── 1b. the same-owner trigger, with the NULL-holder short-circuit
+CREATE FUNCTION public.enforce_api_keys_account_share_same_owner()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $$
+DECLARE
+  v_holder_owner uuid;
+BEGIN
+  -- (1) NULL holder: no lookup, never a refusal. Every ordinary key INSERT, the
+  -- stamper's marker-clearing UPDATE and the FK's ON DELETE SET NULL action
+  -- take this branch.
+  IF NEW.account_shared_with_api_key_id IS NULL THEN
+    IF TG_OP = 'UPDATE' THEN
+      IF OLD.account_shared_with_api_key_id IS NOT NULL THEN
+        -- The holder is being cleared (by the stamper, or by the FK action
+        -- after the holder was hard-deleted). Clear the kind in the same row
+        -- write, or api_keys_account_share_both_or_neither aborts the
+        -- statement, and with it the owner's delete of the holder key.
+        NEW.account_share_kind := NULL;
+      END IF;
+    END IF;
+    -- On INSERT the kind is left as supplied, so a kind without a holder is
+    -- still refused by the CHECK.
+    RETURN NEW;
+  END IF;
+
+  -- (2) a holder is named: it must exist and belong to this row's owner.
+  -- SECURITY DEFINER so the lookup reads the holder row whatever the caller's
+  -- RLS view is; the only thing it returns is a refusal.
+  SELECT user_id INTO v_holder_owner
+    FROM public.api_keys
+   WHERE id = NEW.account_shared_with_api_key_id;
+
+  IF v_holder_owner IS NULL OR v_holder_owner IS DISTINCT FROM NEW.user_id THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER'
+      USING ERRCODE = '42501',
+            DETAIL  = 'api_keys.account_shared_with_api_key_id must name a key of the same user_id.';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.enforce_api_keys_account_share_same_owner()
+  FROM PUBLIC, anon, authenticated;
+
+COMMENT ON FUNCTION public.enforce_api_keys_account_share_same_owner() IS
+  'Phase 167.1.2 D-11. BEFORE INSERT OR UPDATE OF account_shared_with_api_key_id '
+  'on api_keys. A NULL holder short-circuits with no lookup (so no ordinary '
+  'insert pays for it or can be refused by it), and on an UPDATE that clears a '
+  'holder it clears account_share_kind too, so the FK''s ON DELETE SET NULL '
+  'action never trips api_keys_account_share_both_or_neither. A non-NULL holder '
+  'must exist and share the row''s user_id, else 42501 '
+  'ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER. Enforced in the database, not only in '
+  'the stamper, so no writer can point a key at another tenant''s key.';
+
+CREATE TRIGGER api_keys_account_share_same_owner
+BEFORE INSERT OR UPDATE OF account_shared_with_api_key_id
+ON public.api_keys
+FOR EACH ROW EXECUTE FUNCTION public.enforce_api_keys_account_share_same_owner();
+
+COMMENT ON TRIGGER api_keys_account_share_same_owner ON public.api_keys IS
+  'Phase 167.1.2 D-11. Fires only when account_shared_with_api_key_id is written, '
+  'so ordinary worker writes (sync_status, last_sync_at, cursors) never hit it.';
+
+-- ───────────── 2. the departed-history flag (D-05, D-09)
+ALTER TABLE public.api_keys
+  ADD COLUMN history_inclusion text NULL;
+
+ALTER TABLE public.api_keys
+  ADD CONSTRAINT api_keys_history_inclusion_valid
+    CHECK (history_inclusion IS NULL
+           OR history_inclusion IN ('include', 'exclude'));
+
+COMMENT ON COLUMN public.api_keys.history_inclusion IS
+  'Phase 167.1.2 D-05 / D-09. Whether a DEPARTED key''s history counts in the '
+  'allocator''s rebuilt equity series. Departed means soft-disconnected '
+  '(disconnected_at set) or credential-revoked (sync_status = ''revoked''). '
+  'The history runs up to the key''s END DAY, never past it: the UTC day of '
+  'disconnected_at, or for a revoked key its last returns day. '
+  'NULL = the default rule: included up to the end day, UNLESS the key''s '
+  'account identity is unknown (venue_account_id NULL), in which case it is '
+  'excluded by default, because an unknown account could be one a counted key '
+  'already reads and would be summed twice (founder-confirmed 2026-09-25). '
+  '''include'' / ''exclude'' = the owner''s explicit choice; ''include'' '
+  'overrides only the unknown-identity default and never re-opens days on '
+  'which another counted key holds the same known account. Written only by '
+  'set_departed_key_history_inclusion.';
+
+-- ─────── 3. the owner RPC for (2). Shape mirrors disconnect_allocator_api_key.
+CREATE FUNCTION public.set_departed_key_history_inclusion(
+  p_api_key_id uuid,
+  p_inclusion  text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $$
+DECLARE
+  v_uid          uuid := auth.uid();
+  v_owner        uuid;
+  v_disconnected timestamptz;
+  v_sync_status  text;
+  v_previous     text;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'not_authenticated'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT user_id, disconnected_at, sync_status, history_inclusion
+    INTO v_owner, v_disconnected, v_sync_status, v_previous
+    FROM api_keys
+   WHERE id = p_api_key_id
+     FOR UPDATE;
+
+  IF v_owner IS NULL OR v_owner <> v_uid THEN
+    RAISE EXCEPTION 'set_departed_key_history_inclusion: caller does not own api_key %', p_api_key_id
+      USING ERRCODE = '42501';  -- insufficient_privilege
+  END IF;
+
+  -- NULL resets to the default rule; anything else outside the two choices is
+  -- refused rather than stored.
+  IF p_inclusion IS NOT NULL AND p_inclusion NOT IN ('include', 'exclude') THEN
+    RAISE EXCEPTION 'HISTORY_INCLUSION_INVALID'
+      USING ERRCODE = '22023',
+            DETAIL  = 'p_inclusion must be ''include'', ''exclude'' or NULL (the default rule).';
+  END IF;
+
+  -- Only a departed key has an end day, so only a departed key has a choice.
+  IF v_disconnected IS NULL AND v_sync_status IS DISTINCT FROM 'revoked' THEN
+    RAISE EXCEPTION 'KEY_NOT_DEPARTED'
+      USING ERRCODE = '22023',
+            DETAIL  = 'Only a disconnected or revoked key''s history can be included or excluded; a live key always counts.';
+  END IF;
+
+  UPDATE api_keys
+     SET history_inclusion = p_inclusion
+   WHERE id = p_api_key_id
+     AND user_id = v_uid;
+
+  -- Recompose the caller's curve. Allocator-scoped, so enqueue_compute_job's
+  -- own gate requires p_allocator_id = auth.uid(), and its in-flight dedup
+  -- makes a burst of toggles one job.
+  PERFORM enqueue_compute_job(
+    p_strategy_id  := NULL,
+    p_kind         := 'derive_allocator_equity',
+    p_allocator_id := v_uid
+  );
+
+  RETURN v_previous IS DISTINCT FROM p_inclusion;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.set_departed_key_history_inclusion(uuid, text)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.set_departed_key_history_inclusion(uuid, text) TO authenticated;
+
+COMMENT ON FUNCTION public.set_departed_key_history_inclusion(uuid, text) IS
+  'Phase 167.1.2 D-05. The founder: "do not delete the data when a key is '
+  'disconnected. Leave it in an overview of disconnected accounts that can be '
+  'toggled on or off, to be included or excluded. They would be included only '
+  'till the day that the key was deleted." Writes api_keys.history_inclusion '
+  'for the CALLER''s departed key (disconnected or revoked) and enqueues '
+  'derive_allocator_equity for the caller. 42501 when unauthenticated or not '
+  'the owner; 22023 KEY_NOT_DEPARTED on a live, non-revoked key; 22023 '
+  'HISTORY_INCLUSION_INVALID on a value other than include / exclude / NULL '
+  '(NULL resets to the default rule). Returns true iff the stored value '
+  'changed; the recompose is requested either way. EXECUTE: authenticated only.';
+
+-- ───── 4. reconnect_allocator_api_key — re-based on 20260422101911, +1 refusal
+CREATE OR REPLACE FUNCTION public.reconnect_allocator_api_key(
+  p_api_key_id UUID
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_owner        UUID;
+  v_already_disc TIMESTAMPTZ;
+  v_exchange     TEXT;
+  v_venue_acct   TEXT;
+  v_uid          UUID := auth.uid();
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'not_authenticated'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT user_id, disconnected_at, exchange, venue_account_id
+    INTO v_owner, v_already_disc, v_exchange, v_venue_acct
+    FROM api_keys WHERE id = p_api_key_id;
+
+  IF v_owner IS NULL OR v_owner <> v_uid THEN
+    RAISE EXCEPTION 'reconnect_allocator_api_key: caller does not own api_key %', p_api_key_id
+      USING ERRCODE = '42501';  -- insufficient_privilege
+  END IF;
+
+  -- Idempotent: not disconnected → NO-OP.
+  IF v_already_disc IS NULL THEN
+    RETURN false;
+  END IF;
+
+  -- Phase 167.1.2 Pitfall 5: a LIVE sibling already holds this account. Refuse
+  -- by name before the UPDATE reaches api_keys_user_exchange_venue_account_uniq.
+  -- A concurrent race past this check still hits the index and raises the SAME
+  -- SQLSTATE, so one client mapping covers both.
+  IF v_venue_acct IS NOT NULL AND EXISTS (
+    SELECT 1
+      FROM api_keys s
+     WHERE s.user_id = v_uid
+       AND s.exchange = v_exchange
+       AND s.venue_account_id = v_venue_acct
+       AND s.disconnected_at IS NULL
+       AND s.id <> p_api_key_id
+  ) THEN
+    RAISE EXCEPTION 'KEY_VENUE_ALREADY_CONNECTED'
+      USING ERRCODE = 'unique_violation',
+            DETAIL  = 'Another connected key of this user already reads the same exchange account.';
+  END IF;
+
+  UPDATE api_keys
+    SET disconnected_at = NULL,
+        sync_error      = NULL,
+        sync_status     = 'idle'
+    WHERE id = p_api_key_id
+      AND user_id = v_uid
+      AND disconnected_at IS NOT NULL;
+
+  RETURN true;
+END;
+$$;
+
+COMMENT ON FUNCTION public.reconnect_allocator_api_key IS
+  'Migration 075: reverse of disconnect_allocator_api_key. Clears disconnected_at + resets sync_error and sync_status=idle so the next cron tick picks the key up fresh. Returns false if the key was not disconnected. Phase 167.1.2: refuses with SQLSTATE 23505 and message KEY_VENUE_ALREADY_CONNECTED, leaving the key disconnected, when a LIVE key of the same user, exchange and venue_account_id exists; a race that reaches api_keys_user_exchange_venue_account_uniq raises the same SQLSTATE.';
+
+REVOKE ALL ON FUNCTION public.reconnect_allocator_api_key(uuid)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.reconnect_allocator_api_key(uuid)
+  TO authenticated;
+
+-- ───────────── 5. column grants: SELECT to authenticated only, nothing to anon
+GRANT SELECT (account_shared_with_api_key_id, account_share_kind, history_inclusion)
+  ON public.api_keys TO authenticated;
+
+-- ───────────── 6. the COMMENTs that said every ccxt venue is NULL (D-10)
+COMMENT ON COLUMN public.api_keys.venue_account_id IS
+  'Phase 154/WIZCONT-02, RE-STAMPED by 164.5.3/MT5CREDS (founder decision '
+  'D-01-PRIME, 2026-09-20; full reasoning in 164.5.3-CONTEXT.md AMENDMENT '
+  'section, not restated here), and by Phase 167.1.2/ACCOUNTTRUTH (D-10). '
+  'NON-SECRET account identity for the credential in this row: the MT5 broker '
+  'login, which analytics-service/services/mt5_probe.py asserts against the '
+  'gateway at validation time, and since Phase 167.1.2 the venue''s own account '
+  'id for OKX, Bybit, Binance and Deribit, read at connect validation or stamped '
+  'by the service-role poll-time identity stamper. It is an ACCOUNT NUMBER, not '
+  'a credential. The secret half lives in api_key_encrypted and never comes near '
+  'this column. '
+  'TRUST BOUNDARY, STATED HONESTLY: DO NOT CALL THIS VALUE '
+  'VENUE-CONFIRMED. What is enforced, by FOUR independent fences (see the '
+  'header of migration 20260920120000 for the full argument): a direct client '
+  'INSERT is scrubbed to NULL by the scrub_client_supplied_venue_account_id '
+  'trigger (20260812083206); direct client INSERT and UPDATE on api_keys '
+  'are both fully revoked (20260823120000, 20260810120000 respectively); '
+  'and authenticated holds NO EXECUTE on either wizard RPC (20260814120000), '
+  'though that REVOKE is NOT durable across a future DROP+CREATE of either '
+  'RPC unless the REVOKE/GRANT pair is re-issued in the same change (see '
+  'the header of that migration). What is NOT enforced: the value has no '
+  'in-database oracle. The real guarantee is an account the server has '
+  'authenticated credentials for. The value is persisted only after the '
+  'credentials it is derived from authenticated read-only against the live '
+  'venue, at connect time or by decrypting the stored ciphertext already on '
+  'this same row, never accepted as a fresh caller-supplied string with no '
+  'server-side step behind it. A caller can choose which of their own working '
+  'accounts to connect; they cannot mint one they do not hold. Treat the value '
+  'as what the server derived, not what the venue confirmed: the CR-01 '
+  'provenance residual (164.5.3-CONTEXT.md AMENDMENT, D-01-PRIME) stays OPEN. '
+  'NULL means no server-derived account id is recorded for this row. For sFOX '
+  'it is PERMANENT: no stable non-secret account id is known in its balance '
+  'response, so its identity is UNKNOWABLE, not pending (Phase 167.1.2 D-10), '
+  'and api_keys_user_exchange_venue_account_uniq cannot fence an sFOX '
+  'duplicate. For any other venue it means neither the connect validation nor '
+  'the identity stamper has recorded one for this row yet. '
+  'api_keys_user_exchange_venue_account_uniq is PARTIAL so that it governs only '
+  'rows that carry a real identity. '
+  'api_keys_venue_account_id_nonblank forbids blank and whitespace-only '
+  'values, because a blank string is non-NULL and would otherwise be '
+  'governed by that index as if it were a real identity, collapsing two '
+  'DIFFERENT accounts onto one row. '
+  'OVERRIDE, RECORDED HONESTLY (164.5.3/MT5CREDS, founder decision '
+  'D-01-PRIME, 2026-09-20): the prior form of this comment said never to '
+  'echo this value to the browser, and said it was not readable by anon or '
+  'authenticated anyway. BOTH ARE NOW FALSE BY DESIGN. Migration '
+  '20260920120000 GRANTs authenticated SELECT on this column so the key card '
+  'can display it. That is a bounded confidentiality delta under the threat '
+  'model migration 027 states: a compromised user account or an XSS-captured '
+  'JWT can now also read this identifier, not just exchange/label. It is '
+  'accepted because the founder demonstrably needs the identifier to tell '
+  'same-venue cards apart, and because publishing discloses nothing '
+  'ACROSS a tenant boundary, since RLS still scopes every row to its own '
+  'owner. anon still has NO grant on this column: migration 20260410225608 '
+  'REVOKE-then-allowlist governs it and anon is not on the allowlist.';
+
+COMMENT ON INDEX public.api_keys_user_exchange_venue_account_uniq IS
+  'Phase 154 / WIZCONT-02: at most one api_keys row per (user, venue, '
+  'venue-confirmed account id). The DB half of "one fence, two keys" — the app '
+  'fence in /api/strategies/create-with-key keys on wizard_session_id, this one '
+  'keys on the credential identity, so a re-connect from a context that LOST the '
+  'session token still dedups. CONTRACT: it FAILS TOWARD THE EXISTING ROW — the '
+  'duplicate INSERT raises 23505 and the route resolves to the row already '
+  'there. It must never be "resolved" by overwriting: the existing api_keys row '
+  'carries strategy_keys membership and synced history other strategies depend '
+  'on. ⭐ SCOPED TO LIVE ROWS (disconnected_at IS NULL): api_keys rows are '
+  'RETAINED on soft-disconnect (20260422101911), so without that conjunct a DEAD '
+  'row squats the slot forever and the contract above hands a re-connecting user '
+  'a key every cron dispatcher skips — a strategy that silently never syncs, '
+  'which is worse than the duplicate this index prevents. sync_status = ''revoked'' '
+  'is deliberately NOT in the predicate (the worker rewrites sync_status on every '
+  'tick, and revoked is recovered in place by reconnect_allocator_api_key); see '
+  'the migration header. Since Phase 167.1.2, reconnect_allocator_api_key refuses '
+  'a reconnect into an occupied slot BY NAME before reaching this index '
+  '(KEY_VENUE_ALREADY_CONNECTED, SQLSTATE 23505), and a race that gets past that '
+  'check is refused here with the same SQLSTATE. PARTIAL because NULL means no '
+  'server-derived account id is recorded for the row: always for sFOX, whose '
+  'identity is UNKNOWABLE (Phase 167.1.2 D-10), so this index cannot fence an '
+  'sFOX duplicate; for OKX, Bybit, Binance and Deribit only until the connect '
+  'validation or the poll-time identity stamper records one (Phase 167.1.2). '
+  'api_keys_venue_account_id_nonblank keeps '''' out, since '''' is non-NULL and '
+  'would otherwise let two DIFFERENT accounts collide onto one row. user_id LEADS '
+  'deliberately — a non-tenant-leading unique index is the C-08 cross-tenant '
+  'leak (see 20260726000225 and 20260728120000). ⛔ The uniqueness target is the '
+  'PLAINTEXT identity, never api_key_encrypted: that column carries a per-row '
+  'dek_encrypted + nonce, so two encryptions of one secret differ and an index '
+  'over it would dedup nothing. Gate: '
+  'supabase/tests/test_api_keys_venue_identity_uniq.sql.';
+
+-- ───────────── 7. post-verify — CATALOGUE ONLY, passes on an empty database
+DO $verify$
+DECLARE
+  v_missing text;
+BEGIN
+  SELECT string_agg(c, ', ') INTO v_missing
+    FROM unnest(ARRAY['account_shared_with_api_key_id', 'account_share_kind', 'history_inclusion']) AS c
+   WHERE NOT EXISTS (
+     SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'api_keys' AND column_name = c
+   );
+  IF v_missing IS NOT NULL THEN
+    RAISE EXCEPTION 'Migration 20260925120000 failed: api_keys lacks column(s) %', v_missing;
+  END IF;
+
+  SELECT string_agg(n, ', ') INTO v_missing
+    FROM unnest(ARRAY[
+      'api_keys_account_shared_with_api_key_id_fkey',
+      'api_keys_account_share_kind_valid',
+      'api_keys_account_share_both_or_neither',
+      'api_keys_account_share_not_self',
+      'api_keys_history_inclusion_valid'
+    ]) AS n
+   WHERE NOT EXISTS (
+     SELECT 1 FROM pg_constraint
+      WHERE conrelid = 'public.api_keys'::regclass AND conname = n AND convalidated
+   );
+  IF v_missing IS NOT NULL THEN
+    RAISE EXCEPTION 'Migration 20260925120000 failed: missing or unvalidated constraint(s) %', v_missing;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'public.api_keys'::regclass
+       AND conname = 'api_keys_account_shared_with_api_key_id_fkey'
+       AND confdeltype = 'n'
+  ) THEN
+    RAISE EXCEPTION 'Migration 20260925120000 failed: the holder FK is not ON DELETE SET NULL';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+     WHERE tgrelid = 'public.api_keys'::regclass
+       AND tgname = 'api_keys_account_share_same_owner'
+       AND NOT tgisinternal
+  ) THEN
+    RAISE EXCEPTION 'Migration 20260925120000 failed: trigger api_keys_account_share_same_owner is not attached';
+  END IF;
+
+  IF NOT has_column_privilege('authenticated', 'public.api_keys', 'account_shared_with_api_key_id', 'SELECT')
+     OR NOT has_column_privilege('authenticated', 'public.api_keys', 'account_share_kind', 'SELECT')
+     OR NOT has_column_privilege('authenticated', 'public.api_keys', 'history_inclusion', 'SELECT') THEN
+    RAISE EXCEPTION 'Migration 20260925120000 failed: authenticated lacks SELECT on a new api_keys column';
+  END IF;
+  IF has_column_privilege('anon', 'public.api_keys', 'account_shared_with_api_key_id', 'SELECT')
+     OR has_column_privilege('anon', 'public.api_keys', 'account_share_kind', 'SELECT')
+     OR has_column_privilege('anon', 'public.api_keys', 'history_inclusion', 'SELECT') THEN
+    RAISE EXCEPTION 'Migration 20260925120000 failed: anon unexpectedly holds SELECT on a new api_keys column';
+  END IF;
+
+  IF NOT has_function_privilege('authenticated', 'public.set_departed_key_history_inclusion(uuid, text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Migration 20260925120000 failed: authenticated lacks EXECUTE on set_departed_key_history_inclusion';
+  END IF;
+  IF has_function_privilege('anon', 'public.set_departed_key_history_inclusion(uuid, text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Migration 20260925120000 failed: anon unexpectedly holds EXECUTE on set_departed_key_history_inclusion';
+  END IF;
+
+  RAISE NOTICE 'Migration 20260925120000: marker columns, history_inclusion, same-owner trigger, owner RPC, reconnect refusal and column grants in place.';
+END
+$verify$;
+
+COMMIT;

@@ -2,14 +2,8 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260422101911_api_keys_disconnected_at.sql
--- ---------------------------------------------------------------------------
--- STEP 3: reconnect_allocator_api_key RPC (clear disconnected_at)
--- ---------------------------------------------------------------------------
--- Reset sync_error + sync_status = 'idle' so the next tick picks the key
--- up fresh. last_sync_at is preserved so "last successful sync" history
--- stays accurate across a disconnect/reconnect cycle.
-
+-- source migration: 20260925120000_api_keys_account_identity.sql
+-- ───── 4. reconnect_allocator_api_key — re-based on 20260422101911, +1 refusal
 CREATE OR REPLACE FUNCTION public.reconnect_allocator_api_key(
   p_api_key_id UUID
 )
@@ -21,6 +15,8 @@ AS $$
 DECLARE
   v_owner        UUID;
   v_already_disc TIMESTAMPTZ;
+  v_exchange     TEXT;
+  v_venue_acct   TEXT;
   v_uid          UUID := auth.uid();
 BEGIN
   IF v_uid IS NULL THEN
@@ -28,7 +24,8 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  SELECT user_id, disconnected_at INTO v_owner, v_already_disc
+  SELECT user_id, disconnected_at, exchange, venue_account_id
+    INTO v_owner, v_already_disc, v_exchange, v_venue_acct
     FROM api_keys WHERE id = p_api_key_id;
 
   IF v_owner IS NULL OR v_owner <> v_uid THEN
@@ -39,6 +36,24 @@ BEGIN
   -- Idempotent: not disconnected → NO-OP.
   IF v_already_disc IS NULL THEN
     RETURN false;
+  END IF;
+
+  -- Phase 167.1.2 Pitfall 5: a LIVE sibling already holds this account. Refuse
+  -- by name before the UPDATE reaches api_keys_user_exchange_venue_account_uniq.
+  -- A concurrent race past this check still hits the index and raises the SAME
+  -- SQLSTATE, so one client mapping covers both.
+  IF v_venue_acct IS NOT NULL AND EXISTS (
+    SELECT 1
+      FROM api_keys s
+     WHERE s.user_id = v_uid
+       AND s.exchange = v_exchange
+       AND s.venue_account_id = v_venue_acct
+       AND s.disconnected_at IS NULL
+       AND s.id <> p_api_key_id
+  ) THEN
+    RAISE EXCEPTION 'KEY_VENUE_ALREADY_CONNECTED'
+      USING ERRCODE = 'unique_violation',
+            DETAIL  = 'Another connected key of this user already reads the same exchange account.';
   END IF;
 
   UPDATE api_keys
