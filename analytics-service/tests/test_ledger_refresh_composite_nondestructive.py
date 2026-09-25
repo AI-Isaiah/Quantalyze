@@ -56,6 +56,16 @@ required and each was observed RED against the pre-guard code. The mandated
 neutering — replace the marker comparison with ``if False`` so the destructive
 stamp always fires — must redden tests 1 and 2 and leave 3-6 green.
 
+Phase 164.6.7 adds a second neuter, for the live re-read (D-05). The job dict the
+handler receives is the CLAIM-TIME snapshot, and a marker retracted after the
+claim is visible only on the live ``compute_jobs`` row. Replace the awaited
+``_refresh_marker_still_on_row(...)`` at the composite site with ``True`` and
+``TestPostClaimRetractionTakesTheLoudPath``'s retracted, raising and no-row tests
+go RED while its still-marked control and ``TestGuardSuppressesTheUnpublish`` stay
+GREEN. ``_run`` seeds the live row EQUAL to the snapshot by default, so tests 1-8
+mean exactly what they meant before: the live row still carries whatever the
+snapshot carried.
+
 Driver: a composite with ZERO members. It is the earliest permanent failure in
 ``run_stitch_composite_job`` and it routes straight through the closure under
 test with no exchange I/O at all.
@@ -71,6 +81,7 @@ from tests.test_stitch_composite_job import (
     _STRATEGY_ID,
     _apply,
     _deribit_patches,
+    _LIVE_JOB_ABSENT,
     _FakeSupabase,
 )
 
@@ -103,19 +114,40 @@ def _analytics_upserts(fake: _FakeSupabase) -> list[dict[str, Any]]:
     ]
 
 
+# The id the claim returned. Not uuid-shaped on purpose: it never leaves the fake.
+_JOB_ID = "job-composite-refresh-1"
+
+
+class _FromSnapshot:
+    """Sentinel: the live ``compute_jobs`` row carries the snapshot's metadata."""
+
+
+_FROM_SNAPSHOT = _FromSnapshot()
+
+
 async def _run(
     *,
     metadata: object,
     existing_status: str | None,
     existing_flags: dict[str, Any] | None = None,
+    job_id: str = _JOB_ID,
+    live_metadata: object = _FROM_SNAPSHOT,
 ) -> _FakeSupabase:
-    """Drive the zero-member permanent failure through ``_stamp_failed``."""
+    """Drive the zero-member permanent failure through ``_stamp_failed``.
+
+    ``metadata`` is the claim-time snapshot on the job dict. ``live_metadata`` is
+    what the live ``compute_jobs`` row holds when the closure re-reads it; by
+    default it equals the snapshot (a dict) or is absent (anything else)."""
+    if isinstance(live_metadata, _FromSnapshot):
+        live_metadata = metadata if isinstance(metadata, dict) else _LIVE_JOB_ABSENT
     fake = _FakeSupabase(
         members=[],
         existing_flags=existing_flags or {},
         existing_status=existing_status,
+        live_job_metadata=live_metadata,
+        live_job_id=job_id,
     )
-    job: dict[str, Any] = {"strategy_id": _STRATEGY_ID}
+    job: dict[str, Any] = {"id": job_id, "strategy_id": _STRATEGY_ID}
     if metadata is not _UNSET:
         job["metadata"] = metadata
     with _apply(_deribit_patches(fake, combine_returns=[], has_option_activity=False)):
@@ -307,4 +339,41 @@ class TestGuardIsNotABlanketSuppression:
         ), (
             "a marked refresh with NO prior analytics row did not stamp failed — "
             "this is a first compute and it must reach a terminal gate"
+        )
+
+
+class TestPostClaimRetractionTakesTheLoudPath:
+    """Phase 164.6.7 / D-05: the composite run decides from the LIVE job row.
+
+    The enqueue dedup can hand a user's resync THIS job after it was claimed,
+    and the resync records that by retracting the marker on the row. The job
+    dict in the handler is the claim-time copy and never sees that write, so a
+    closure that trusts it keeps suppressing a failure somebody is now watching,
+    while the SQL bridge reads the same row as unprotected. Each test here keeps
+    the marker on the SNAPSHOT and varies only the live row: a test that removed
+    the marker before the run would be green against the bug."""
+
+    @pytest.mark.asyncio
+    async def test_marker_retracted_after_claim_takes_the_loud_path(self) -> None:
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            live_metadata={
+                "refresh_marker_retracted": _COMPOSITE_MARKER,
+                "correlation_id": "c",
+            },
+        )
+        payloads = _analytics_upserts(fake)
+        assert payloads, "the composite stamp wrote nothing to strategy_analytics"
+        last = payloads[-1]
+        assert last.get("computation_status") == "failed", (
+            "a marker RETRACTED from the live job row after the claim was still "
+            "honoured from the claim-time snapshot: the stamp wrote an error-only "
+            f"payload {sorted(last)} while the SQL bridge reads the same job as "
+            "unprotected. A user-initiated resync served by this job gets no "
+            "terminal gate."
+        )
+        assert last.get("computation_warned") is False, (
+            "the loud stamp must clear computation_warned, or a later bridge call "
+            "can restore complete_with_warnings over a failed run"
         )

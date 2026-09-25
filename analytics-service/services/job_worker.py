@@ -6234,10 +6234,34 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # failed refresh silently un-publishes a funded account. It is
         # deliberately a DIFFERENT string from the single-key arm's, so the two
         # guards cannot cross-fire.
-        if (
+        _honour_marker = (
             _job_source == "ledger-refresh-composite"
             and existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES
+        )
+        # ⛔ Phase 164.6.7 / D-05: `job` is the CLAIM-TIME copy of the row. A
+        # user's resync that the enqueue dedup handed THIS job after the claim
+        # records that by retracting the marker on the LIVE row, and the live row
+        # is the only place that write is visible. So the row is re-asked here,
+        # exactly as the single-key honour sites do; without it this closure
+        # suppresses a failure somebody is watching while the SQL bridge reads
+        # the same job as unprotected.
+        #
+        # ⚠️ It can only NARROW: the read runs only when protection would be
+        # granted, and every failure of the read (no id, no row, an exception)
+        # answers "not marked", which takes the LOUD path.
+        if _honour_marker and not await _refresh_marker_still_on_row(
+            supabase, job.get("id"), LEDGER_REFRESH_COMPOSITE_SOURCE
         ):
+            logger.warning(
+                "stitch_composite: the refresh marker on compute_job %s has been "
+                "RETRACTED since the claim — a user-initiated request was served "
+                "by this job through the enqueue dedup, so nobody unwatched owns "
+                "this failure. Taking the LOUD terminal path for strategy %s.",
+                job.get("id"), strategy_id,
+            )
+            _honour_marker = False
+
+        if _honour_marker:
 
             def _upsert_error_only() -> None:
                 _composite_error_only_payload: dict[str, Any] = {

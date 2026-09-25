@@ -186,7 +186,25 @@ class _FakeQuery:
                     "computation_status": self.fake.existing_status,
                 }
             )
+        if (
+            self.table == "compute_jobs"
+            and self.fake.live_job_metadata is not _LIVE_JOB_ABSENT
+            and self.fake.live_job_id is not None
+            and ("id", self.fake.live_job_id) in self._eqs
+        ):
+            # Phase 164.6.7 / D-05: the LIVE job row, as `_stamp_failed` re-reads
+            # it before honouring a refresh marker. Served only for the seeded
+            # id, so a fix that re-reads the wrong row gets `data=None` and takes
+            # the loud path, which the post-claim tests then catch.
+            return SimpleNamespace(data={"metadata": self.fake.live_job_metadata})
         return SimpleNamespace(data=None)
+
+
+class _LiveJobAbsent:
+    """Sentinel: the fake has NO live ``compute_jobs`` row to serve."""
+
+
+_LIVE_JOB_ABSENT = _LiveJobAbsent()
 
 
 class _FakeSupabase:
@@ -198,8 +216,18 @@ class _FakeSupabase:
         existing_flags: dict[str, Any] | None = None,
         existing_status: str | None = None,
         raise_on_rpc: str | None = None,
+        live_job_metadata: object = _LIVE_JOB_ABSENT,
+        live_job_id: str | None = None,
     ) -> None:
         self.members = members
+        # Phase 164.6.7 / D-05: the live `compute_jobs.metadata` for
+        # `live_job_id`, which `_stamp_failed` re-reads before it honours a
+        # refresh marker (the claim-time snapshot cannot see a retraction that
+        # lands after the claim). The default is ABSENT: a `compute_jobs` select
+        # then answers `data=None` exactly as it did before this seam existed, so
+        # every construction that does not pass it behaves byte-identically.
+        self.live_job_metadata = live_job_metadata
+        self.live_job_id = live_job_id
         # The strategy_analytics row's CURRENT computation_status, as
         # `_stamp_failed`'s non-destructive guard reads it. Defaults to None —
         # i.e. no prior row — which routes to the LOUD destructive stamp, so
