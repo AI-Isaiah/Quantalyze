@@ -1580,6 +1580,52 @@ async def test_ESCALATION_re_arms_after_a_reading_of_a_different_class(
 
 
 @pytest.mark.parametrize(
+    "answered,rewedge",
+    [
+        pytest.param(
+            {"initialize_after_recycle": True},
+            {"initialize_after_recycle": False},
+            id="relaunch-AUTHORIZED",
+        ),
+        pytest.param(
+            {"last_error_after_recycle": (-6, "Terminal: Authorization failed")},
+            {"last_error_after_recycle": (_IPC_TIMEOUT, _IPC_TIMEOUT_TEXT)},
+            id="relaunch-answered-NO-ACCOUNT",
+        ),
+    ],
+)
+async def test_ESCALATION_CR01_a_recycle_that_WORKED_re_arms_so_the_NEXT_wedge_is_recycled(
+    monkeypatch: pytest.MonkeyPatch, answered: dict, rewedge: dict
+) -> None:
+    """⛔ CR-01 (164.6.5 review round 1). The relaunch probe MEASURED the terminal
+    answering, so the run of faults is over. The failure it guards: a client
+    validation re-wedges the terminal BEFORE the next tick sees it healthy, so no
+    authorized first-probe reading ever arrives — and a gate that only a
+    first-probe reading could re-arm debounced every later `-10005` until a
+    redeploy. Wedge -> recycle that works -> wedge on the very NEXT tick must be
+    TWO recycles, with no healthy tick in between."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, {**_WEDGED, **answered})
+    outcomes = _capture_outcomes(monkeypatch)
+
+    await _heal_n_times(1)
+    assert _recycle_count(fake) == 1
+    assert outcomes[0].escalation_kind in (
+        mt5_session_episodes.KIND_IPC_FAULT_RECYCLED,
+        mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
+    )
+
+    fake._scenario.update(rewedge)  # re-wedged before any tick saw it healthy
+    await _heal_n_times(1)
+
+    assert outcomes[1].first_kind == mt5_session_episodes.KIND_IPC_FAULT
+    assert _recycle_count(fake) == 2, (
+        "a recycle whose relaunch MEASURED the terminal answering left the gate "
+        "disarmed, so the next wedge was debounced instead of recycled (CR-01)"
+    )
+
+
+@pytest.mark.parametrize(
     "code",
     [
         pytest.param(-10004, id="bridge-DETACHED"),

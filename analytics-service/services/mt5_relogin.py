@@ -879,6 +879,21 @@ def _escalate_ipc_fault(
             f"exc_class={type(exc).__name__} "
             f"code={exc.code if isinstance(exc, Mt5ClientError) else None}"
         )
+    else:
+        # ⛔ CR-01 (164.6.5 review round 1) — THE RELAUNCH PROBE IS A READING, AND
+        # WHEN IT MEASURED THE TERMINAL ANSWERING THE RUN IS OVER. The gate used to
+        # be re-armed only by a FIRST-probe reading of a later tick, so a recycle
+        # that WORKED left it disarmed: a client validation that re-wedged the
+        # terminal before the next tick saw it healthy was debounced forever, and
+        # the 1h39m manual outage came back with an INFO line per tick saying the
+        # recovery was withheld. `authorized` and `-6` are both the terminal
+        # answering (the ordinary heal owns `-6` on the next reading), so either
+        # one ends this run and the NEXT wedge earns its own attempt.
+        if (
+            verdict.get("authorized") is True
+            or verdict.get("relaunch_code") == _MT5_NO_AUTHORIZED_ACCOUNT_CODE
+        ):
+            rearm_ipc_fault_escalation()
     if kind == KIND_IPC_FAULT_RECYCLED:
         level = logging.INFO
     elif kind == KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT:
