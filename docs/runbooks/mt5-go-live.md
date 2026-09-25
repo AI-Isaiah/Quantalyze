@@ -288,7 +288,9 @@ Try the **PROCESS restart first**: kill and relaunch `terminal64.exe` under the 
 prefix, container and volume — do NOT touch or reset the volume itself. This is cheap,
 unattended, was measured at 2.0 s on 2026-09-21, and it cannot make Cause A worse: if a modal
 dialog was the problem, the restart either clears it along with the process or leaves it
-exactly as it was, so trying the restart first never destroys evidence. **If `-10005`
+exactly as it was, so trying the restart first never destroys Cause A's evidence. ⛔ CORRECTED
+2026-09-25 (Phase 164.6.5 round 2): under Cause B the restart DOES destroy the in-process
+readings, as the criterion-1 block above records — capture them first when time allows. **If `-10005`
 returns after the restart, THEN open the VNC console and clear the modal dialog** — that is
 the one step a process restart cannot do for you.
 

@@ -5453,6 +5453,11 @@ export function classifyKeyValidationError(error: unknown): {
  * byte-identical twins at this arm, and fixing one path of that pair is this
  * milestone's most repeated mistake. A route-local literal would drift on the
  * next edit; this import cannot.
+ *
+ * ⛔ CORRECTED 2026-09-25 (Phase 164.6.5 round 2): there are now THREE key
+ * routes on this set — `keys/[id]/rotate-secret` joined `create-with-key` and
+ * `composite/add-key`, so "both key routes" / "BOTH ROUTES" above read as
+ * "every key route". The sentences are kept as lineage.
  */
 export const OUR_DEFECT_KEY_ERROR_CODES: ReadonlySet<WizardErrorCode> =
   new Set<WizardErrorCode>([
