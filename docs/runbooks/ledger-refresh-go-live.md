@@ -648,7 +648,8 @@ SELECT completed_at,
   - ⚠️ **What is NOT watched.** The COMPOSITE fan-out's own runs. Its failure rows share the
     `cron_name` and are counted, but the prober reads only the `ledger_refresh_fanout` job's runs,
     so a failed or stuck composite run is invisible. The composite is dormant today; closing this
-    is a scheduling precondition, see item 6 of `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` below. Also
+    is a scheduling precondition, and since Phase 164.6.7 (2026-09-25) it is the ONLY one still
+    blocking: see item 6 of `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` below. Also
     not watched: the two-fault case in the "Zero rows" bullet above (L1).
   - **A failed candidate is skipped for 20 hours.** The candidate query excludes any strategy named
     in a failure row written in the last 20 hours, the same window as the attempt cooldown, so a
@@ -913,29 +914,64 @@ here, but this precondition sits here because this is where a reader would go to
 1. **Where it stands.** `public.enqueue_ledger_composite_refresh()` is DORMANT. No `cron.schedule`
    registration names it, and no migration may add one (the rule under Step 2 applies to it
    unchanged).
-2. ⛔ **BLOCKING.** No schedule naming `public.enqueue_ledger_composite_refresh()` may be
-   registered until `run_stitch_composite_job` in `analytics-service/services/job_worker.py`
-   re-reads the LIVE `compute_jobs` row's `metadata->>'source'` before it honours the
-   `ledger-refresh-composite` marker. The single-key honour sites already do this through
-   `_refresh_marker_still_on_row`. The composite guard today compares against the claim-time
-   `job.get("metadata")` snapshot instead.
-3. **Why.** A user-initiated composite resync (the `stitch_composite` enqueues in
+2. ✅ **MET by Phase 164.6.7 COMPOSITECLAIMSNAPSHOT (2026-09-25).** The `_stamp_failed` closure
+   of `run_stitch_composite_job` in `analytics-service/services/job_worker.py` now re-reads the
+   LIVE `compute_jobs` row through `_refresh_marker_still_on_row` before it honours the
+   `ledger-refresh-composite` marker, the same helper the single-key honour sites use. The
+   claim-time snapshot is still the first filter, and the live read can only narrow it: a marker
+   retracted after the claim, a missing row, or a re-read that fails all take the loud path.
+   📜 *Lineage, superseded 2026-09-25:* "⛔ **BLOCKING.** No schedule naming
+   `public.enqueue_ledger_composite_refresh()` may be registered until `run_stitch_composite_job`
+   in `analytics-service/services/job_worker.py` re-reads the LIVE `compute_jobs` row's
+   `metadata->>'source'` before it honours the `ledger-refresh-composite` marker. The single-key
+   honour sites already do this through `_refresh_marker_still_on_row`. The composite guard today
+   compares against the claim-time `job.get("metadata")` snapshot instead."
+3. **Why it was blocking.** A user-initiated composite resync (the `stitch_composite` enqueues in
    `src/app/api/keys/sync/route.ts` and `src/app/api/strategies/finalize-wizard/route.ts`) can
    dedup onto a fan-out job that already carries the marker. Since Phase 164.6 those TypeScript
-   sites retract the marker. A retraction that lands BEFORE the worker claims the job is fully
-   effective. A retraction that lands AFTER the claim is not: that run's Python guard still sees
-   the stale marker in its snapshot, treats the run as a protected ledger refresh, and suppresses
-   the user's failure. That is a silent data-integrity failure on a funded account, and the
-   schedule is what makes it reachable.
-4. **How to check it is met.** Read `run_stitch_composite_job`: a live re-read of the row (through
-   `_refresh_marker_still_on_row` or an equivalent) must sit before its composite-marker
-   comparison. A test must go RED when that re-read is removed. Both must be true on the commit
-   the worker is deployed from. A code comment promising it does not count.
-5. **Owner.** Phase 164.6 did NOT implement this. The Python change belongs to **Phase 164.6.7
-   COMPOSITECLAIMSNAPSHOT** (inserted into the ROADMAP on `main` by PR #849, 2026-09-24). This
-   precondition stays BLOCKING
-   until that phase ships. `TODOS.md` `161.1-D13` already requires the composite twin of the reuse
-   collision to be closed before this go-live op, not after.
+   sites retract the marker. A retraction that landed BEFORE the worker claimed the job was fully
+   effective. A retraction that landed AFTER the claim was not: that run's Python guard still saw
+   the stale marker in its snapshot, treated the run as a protected ledger refresh, and suppressed
+   the user's failure, while the SQL status bridge (`sync_strategy_analytics_status`), which reads
+   the live row, called the same job unprotected. The two layers disagreed about one job.
+   **What that was measured to do**, by the Phase 164.6.7 harm probe on the local loopback lane
+   (2026-09-25, lane only; no remote database was read):
+   > HARM-VERDICT: end-state harm shown on the lane for retracted-warned, retracted-warned-inflight; scoped to the lane, production cohort unmeasured
+
+   - **retracted-warned:** before the fix, the failed run ended `failed` with `computation_warned`
+     still set, and the next bridge call brought back `complete_with_warnings` over it; after the
+     fix it ends `failed` with the flag cleared and reads `computing` after the next bridge call.
+   - **retracted-unwarned:** `failed`, then `computing`, both before and after the fix; only the
+     decision differed.
+   - **retracted-warned-inflight** (modelled, another job in flight): before the fix, terminal
+     success (`complete_with_warnings`) straight after the failed run; after the fix, `computing`.
+
+   Whether production composite rows carry `computation_warned = TRUE` is unmeasured, so no
+   production cohort is claimed. ⚠️ A residual window remains: a retraction landing in the
+   milliseconds between the live re-read and `mark_compute_job_failed` still leaves the old
+   outcome, and the single-key derive honour site shares it. It is recorded, with its fix shape
+   and owner, as `TODOS.md` `[164.6.7-COMPOSITE-REREAD-RESIDUE]`.
+4. ✅ **MET in the tree; ⚠️ the deploy-time check is still yours.** The regression is
+   `TestPostClaimRetractionTakesTheLoudPath` in
+   `analytics-service/tests/test_ledger_refresh_composite_nondestructive.py`: its retraction, no-row
+   and failing-re-read tests were each observed RED with the re-read neutered and GREEN restored.
+   The harm probe, `analytics-service/scripts/probe_composite_claimtime.py`, is a recorded local run
+   on the loopback lane, not a CI gate. ⚠️ **Merging the fix does not satisfy this item on its
+   own.** At the moment the composite is scheduled, confirm the commit the worker is DEPLOYED from
+   carries the live re-read: read `run_stitch_composite_job` at that commit and find the
+   `_refresh_marker_still_on_row` call inside `_stamp_failed` before the marker is honoured. A code
+   comment promising it does not count.
+   📜 *Lineage, superseded 2026-09-25:* "**How to check it is met.** Read
+   `run_stitch_composite_job`: a live re-read of the row (through `_refresh_marker_still_on_row` or
+   an equivalent) must sit before its composite-marker comparison. A test must go RED when that
+   re-read is removed. Both must be true on the commit the worker is deployed from. A code comment
+   promising it does not count."
+5. ✅ **Owner: shipped.** Phase 164.6 did NOT implement the Python change; **Phase 164.6.7
+   COMPOSITECLAIMSNAPSHOT** (inserted into the ROADMAP on `main` by PR #849, 2026-09-24) did. This
+   precondition is now blocked ONLY by item 6. `TODOS.md` `161.1-D13` is closed on the same basis.
+   📜 *Lineage, superseded 2026-09-25:* "This precondition stays BLOCKING until that phase ships.
+   `TODOS.md` `161.1-D13` already requires the composite twin of the reuse collision to be closed
+   before this go-live op, not after."
 6. ⛔ **BLOCKING: the composite's runs must be watched before it is scheduled** (review WR-03).
    The prod prober's cron-obs arm reads only the `ledger_refresh_fanout` job's runs. The composite's
    failure rows are already counted, because they share its `cron_name`, but a failed, stuck or
@@ -952,7 +988,8 @@ here, but this precondition sits here because this is where a reader would go to
 - **The deribit composite.** The fan-out excludes composites by an explicit conjunct; deribit's
   sole live strategy is a composite, so it gets zero coverage from *this* mechanism. Its coverage
   is owed to the separate composite arm on `stitch_composite`. See `TODOS.md` item **0.3**.
-  ⛔ That arm's schedule is blocked by the precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in
-  the section directly above.
+  ⛔ That arm's schedule is blocked by item 6 (the composite's own runs are not yet watched) of
+  the precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in the section directly above. The
+  claim-time snapshot that gave the section its id was closed by Phase 164.6.7 (2026-09-25).
 - **The ccxt sibling defect.** ccxt strategies with no new fills also never recompute — a different
   venue class and a different mechanism, out of scope here. See `TODOS.md` item **0.2**.
