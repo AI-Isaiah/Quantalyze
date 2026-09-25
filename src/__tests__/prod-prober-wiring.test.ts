@@ -3042,6 +3042,24 @@ describe("[164.6.5-03] D-09: the -10005 remedy names both causes and asserts nei
   });
 });
 
+describe("[164.6.5 review round 1] the mt5 operator remedies state measured figures and the real trigger", () => {
+  // IN-04. The -10005 remedy called the recycle "measured at 2.0 s". That is
+  // the 2026-09-21 MANUAL restart. The 2026-09-25 spike — the mechanism the
+  // shipped recycle uses — measured 86 s from kill to logged in (run 1) and
+  // about 4m45s to a relaunched terminal when the relaunch waited for the
+  // next caller (run 2), per deploy/mt5-gateway/railway-gateway.md. An
+  // operator told "2.0 s" who waits two minutes concludes the recycle failed.
+  // The remedy also named no way to perform the recycle; it is automatic.
+  it("IN-04: the -10005 remedy cites every measured recycle figure and says the recycle is automatic", () => {
+    const remedy = MT5_ARM.REMEDIES["mt5-ipc-timeout"];
+    for (const figure of ["2.0 s", "86 s", "4m45s"]) {
+      expect(remedy, `the remedy omits the measured figure ${figure}`).toContain(figure);
+    }
+    expect(remedy).toContain("automatically");
+    expect(remedy).not.toContain("measured at 2.0 s,");
+  });
+});
+
 describe("[164.6.5-03] D-10: the mt5 arm's declared environment and the workflow's supplied environment agree", () => {
   /**
    * The `Probe production` step — the ONLY step that actually RUNS the arm
