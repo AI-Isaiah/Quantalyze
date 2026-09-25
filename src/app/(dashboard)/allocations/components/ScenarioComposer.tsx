@@ -5509,8 +5509,13 @@ export function ScenarioComposer({
         />
         {/* Phase 167.1.2 / D-02: the own-book comparison is withheld while the
             equity history is rebuilt; say so rather than leave a silent gap.
-            Not in blank mode, where there is no own book to compare with. */}
-        {isOwnBookRebuilding && !isBlankMode && (
+            Not in blank mode, where there is no own book to compare with.
+            Review round 1 (SFH-05): the producer sends [] for every allocator,
+            so the series cannot tell "withheld" from "none". `snapshotCount`
+            is computed before the history is withheld, so it can: with no
+            snapshot there is no own-book history to withhold, and the
+            sentence would explain an absence D-02 did not cause. */}
+        {isOwnBookRebuilding && !isBlankMode && snapshotCount > 0 && (
           <p
             data-testid="scenario-ownbook-rebuilding"
             className="mt-2 text-fixed-11 text-text-muted"

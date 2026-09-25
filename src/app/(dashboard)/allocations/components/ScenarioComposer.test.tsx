@@ -16772,6 +16772,37 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(live.max_drawdown).toBe(payload.liveBaselineMetrics.maxDd);
   });
 
+  // Review round 1 (SFH-05): the disclosure explains an absence D-02 caused.
+  // A book with no snapshot yet (a first connect) has no own-book history to
+  // withhold, so the sentence would be false there. `snapshotCount` survives
+  // the withholding, so the composer can tell the two apart.
+  it("rebuilding + a live book with NO snapshot yet: no disclosure (nothing was withheld); with snapshots it renders", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload({ equityHistoryState: "rebuilding", snapshotCount: 0 })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Book mode is live (the default fixture has holdings), so only the
+    // snapshot condition decides the absence.
+    expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+
+    cleanup();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ equityHistoryState: "rebuilding", snapshotCount: 3 })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
+  });
+
   // Review round 1 (WR-02): the `bookReturns.length < 2` guard in
   // `scenarioOwnBookDelta`. A 2-point book yields ONE return, and a Sharpe or
   // Sortino delta from one observation is not a number worth showing. The

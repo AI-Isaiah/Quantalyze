@@ -110,7 +110,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             connected key with reconstructed (if baseline-unknown) history.
             Surface the banner here too so the gap reads as a data-horizon
             limit, not a missing connection. */}
-        {equityBaselineUnknown && <BaselineUnknownBanner />}
+        {equityBaselineUnknown && (
+          <BaselineUnknownBanner historyRebuilding={isRebuilding} />
+        )}
         {/* DOGFOOD-1 (Phase 110.1): `hasConnectedKeys` is derived server-side
             from the canonical isPerKeyDailiesEligibleKey predicate, NOT
             `activeVenues.length > 0`. The venue set counts is_active keys
@@ -162,7 +164,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           venue's data horizon). Non-blocking — live holdings + AUM behind it
           remain accurate; the trustworthy curve rebuilds as daily snapshots
           accrue. */}
-      {equityBaselineUnknown && <BaselineUnknownBanner />}
+      {equityBaselineUnknown && (
+        <BaselineUnknownBanner historyRebuilding={isRebuilding} />
+      )}
       <InsightStrip
         analytics={analytics}
         portfolioId={portfolio?.id ?? null}
@@ -268,8 +272,17 @@ function StalenessBanner({ lastSyncAt }: { lastSyncAt: string | null }) {
  * condition is data-driven (resolves only as trustworthy daily-refresh rows
  * accrue), so a one-shot dismiss would let the user re-acquire the wrong mental
  * model on the next load.
+ *
+ * Phase 167.1.2 / D-02 (review round 1 SFH-05): while the equity history is
+ * rebuilt the curve stays hidden however many snapshots accrue, so the banner
+ * must not promise that "a full performance history builds up from here". The
+ * rebuilding variant keeps the data-horizon explanation and drops the promise.
  */
-function BaselineUnknownBanner() {
+function BaselineUnknownBanner({
+  historyRebuilding,
+}: {
+  historyRebuilding: boolean;
+}) {
   return (
     <div
       role="status"
@@ -285,8 +298,10 @@ function BaselineUnknownBanner() {
       <span>
         Some positions were funded before your exchange&apos;s available data
         window, so absolute equity and drawdown can&apos;t be reconstructed for
-        that earlier period. Your live holdings and current AUM are accurate, and
-        a full performance history builds up from here as daily snapshots accrue.
+        that earlier period.{" "}
+        {historyRebuilding
+          ? "Your live holdings and AUM do not use that history."
+          : "Your live holdings and current AUM are accurate, and a full performance history builds up from here as daily snapshots accrue."}
       </span>
     </div>
   );

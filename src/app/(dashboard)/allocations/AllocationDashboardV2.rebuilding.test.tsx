@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
@@ -124,7 +124,9 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
         name: "Your equity history is being rebuilt",
       }),
     ).toBeInTheDocument();
-    expect(panel.textContent).toContain("Holdings and AUM on this page are current.");
+    expect(panel.textContent).toContain(
+      "Holdings and AUM on this page do not use that history.",
+    );
 
     expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
     expect(screen.queryByTestId("mock-equity-chart")).toBeNull();
@@ -144,6 +146,81 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     expect(screen.getByTestId("overview-equity-rebuilding")).toBeInTheDocument();
     expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
     expect(screen.queryByText("Sharpe")).toBeNull();
+  });
+
+  // Review round 1 (WR-03 / SFH-05): the panel renders for every allocator
+  // with holdings, a first connect (holdingsEmpty && hasSyncing) and a book
+  // whose every key is stale. Each sentence must be true for all of them. The
+  // old copy named "the earlier chart" (a first connect never saw one), said it
+  // "added up snapshots from several keys" (false for a single-key book) and
+  // called holdings and AUM "current" directly under a banner saying
+  // "Analytics may be stale".
+  it("the panel copy holds for a stale, single-key book and a first connect: no 'current', no 'earlier chart', no 'several keys'", () => {
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityHistoryState="rebuilding"
+        allKeysStale
+        lastSyncAt="2026-03-01T00:00:00Z"
+      />,
+    );
+    // The stale banner IS on screen, so the contradiction would be visible.
+    expect(screen.getByTestId("dashboard-staleness-banner")).toBeInTheDocument();
+    const text = screen.getByTestId("overview-equity-rebuilding").textContent ?? "";
+    expect(text).not.toMatch(/\bcurrent\b/i);
+    expect(text).not.toMatch(/earlier chart/i);
+    expect(text).not.toMatch(/several keys/i);
+    // The duplicate-account cause is stated as conditional on more than one key.
+    expect(text).toContain("when more than one key reads it");
+
+    cleanup();
+    // First connect: no holdings yet, a sync in flight. The panel still renders
+    // (this branch passes the holdingsEmpty && !hasSyncing guard).
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityHistoryState="rebuilding"
+        holdingsSummary={[] as never}
+        hasSyncing
+      />,
+    );
+    expect(
+      screen.getByTestId("overview-equity-rebuilding").textContent,
+    ).not.toMatch(/earlier chart/i);
+  });
+
+  // Review round 1 (SFH-05): the baseline-unknown banner promised "a full
+  // performance history builds up from here as daily snapshots accrue" while
+  // the panel below it said the history is withheld however much accrues.
+  it("rebuilding: the baseline-unknown banner keeps the data-horizon reason and drops the accrual promise; 'ready' keeps it", () => {
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityHistoryState="rebuilding"
+        equityBaselineUnknown
+      />,
+    );
+    const banner = screen.getByTestId("dashboard-baseline-unknown-banner");
+    expect(banner.textContent).toContain("Limited equity history");
+    expect(banner.textContent).toContain("available data window");
+    expect(banner.textContent).not.toMatch(/accrue|builds up/i);
+    expect(banner.textContent).toContain(
+      "Your live holdings and AUM do not use that history.",
+    );
+
+    cleanup();
+    // Positive control: the "ready" variant still carries the promise, so the
+    // absence above is the rebuilding gate and not a deleted sentence.
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityHistoryState="ready"
+        equityBaselineUnknown
+      />,
+    );
+    expect(
+      screen.getByTestId("dashboard-baseline-unknown-banner").textContent,
+    ).toMatch(/builds up from here as daily snapshots accrue/);
   });
 
   // Review round 1 (WR-01 / SFH-01): a destructuring default fires on

@@ -8,7 +8,12 @@
  * number the allocator can act on is worse than an honest absence.
  *
  * Static copy only: no number, no date and no promise of when the history
- * returns. Tokens follow DESIGN.md (mono eyebrow at the 0.18em tracking step,
+ * returns. Every sentence must be true for EVERY allocator who sees it (review
+ * round 1 WR-03 / SFH-05): a single-key book, a first connect that never saw a
+ * chart, and a stale book under the StalenessBanner. So the cause is worded as
+ * a property of the history ("could", "when more than one key reads it"), no
+ * sentence refers to an "earlier chart", and the holdings sentence says those
+ * figures do not use this history rather than calling them current. Tokens follow DESIGN.md (mono eyebrow at the 0.18em tracking step,
  * DM Sans H3, secondary body text) and the layout is left-aligned (the
  * AI-Slop ban on centered-everything layouts).
  */
@@ -27,10 +32,10 @@ export function EquityHistoryRebuilding() {
         Your equity history is being rebuilt
       </h3>
       <p className="mt-2 max-w-prose text-sm text-text-secondary">
-        The earlier chart added up snapshots from several keys. It could count
-        one exchange account twice or read a day with no sync as zero, so its
-        curve and ratios were not reliable. Holdings and AUM on this page are
-        current.
+        The equity chart and the ratios built from it are hidden for now. The
+        history behind them could count one exchange account twice when more
+        than one key reads it, or read a day with no sync as zero. Holdings and
+        AUM on this page do not use that history.
       </p>
     </section>
   );
