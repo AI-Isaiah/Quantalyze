@@ -5767,6 +5767,15 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       // recoverable — and the founder gets a Retry control for a fault the
       // emitter marked `recoverable=False`.
       "KEY_SIGN_IN_FAILED",
+      // 164.6.5 / D-17 (review round 1 / CR-02) — the wedged-terminal verdict,
+      // on the same footing as the row above. `_validate_mt5_key_probe` mints
+      // wire `MT5_TERMINAL_UNRESPONSIVE` when the gateway terminal's IPC
+      // transport has stopped answering, and `rotate_key_secret` runs that
+      // probe, so the code reaches this route through `seamCode`. Omit this
+      // line and the dialog renders `UNKNOWN`, whose copy tells the owner to
+      // try the last action again: the Retry that 167's D-08 names as the
+      // harmful action against a terminal that will not answer.
+      "KEY_MT5_TERMINAL_UNRESPONSIVE",
     ]),
   ],
 ]);
