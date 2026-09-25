@@ -316,14 +316,56 @@ _MT5_RELOGIN_LEASE_WAIT_ENV: Final[str] = "MT5_RELOGIN_LEASE_WAIT_S"
 # worst path with every crossing at its ceiling and asserts EQUALITY, so an
 # over-provision (which lengthens the unbounded lease wait batch jobs pay, IN-04)
 # reds as surely as an under-count.
+#
+# ⛔ 164.6.5 review round 2 (WR-03, 2026-09-25) — THE CAPTURE ROW WAS AN
+# UNDER-COUNT, AND THE PATH IS NOW 7. `terminal_info()` was charged 2 crossings,
+# which is its FAILING shape (the read, then `_raise_last`'s `last_error()`). Its
+# ANSWERING shape is a netref namedtuple that `mt5_client._materialize` walks
+# once per field (`_TERMINAL_INFO_READ_CROSSINGS` below, 29), so "unconditional"
+# was never true of it at the ceiling. Charged honestly, no budget under the 300 s
+# ceiling can cover an answering read beside the recycle and its relaunch, so the
+# capture is now budget-gated like every other optional read, and the
+# unconditional path is:
+#
+#   | the first probe: `initialize()` + `last_error()`                 | 2 |
+#   | the recycle: execute + namespace lookup + call                   | 3 |
+#   | the verb's relaunch probe: `initialize()` + `last_error()`        | 2 |
+#
+# 7 x 30 + 10 = 220 s. ⚠️ THE CONSEQUENCE, STATED: at every budget the window
+# admits, the in-process capture (`terminal_info` / `account_info`) and the
+# SFH-07 post-relaunch check are SKIPPED, and their lines say so. They become
+# affordable only if these reads stop costing one crossing per field, i.e. are
+# materialized bridge-side the way `Mt5Client._materialize_rows` already does
+# deals (the review's other option, and `mt5_client`'s to take).
 _DETECTOR_READING_CROSSINGS: Final[int] = 2
-_CAPTURE_READ_CROSSINGS: Final[int] = 2
 _RECYCLE_CROSSINGS: Final[int] = 3
 _MT5_RELOGIN_ROUND_TRIPS: Final[int] = (
     _DETECTOR_READING_CROSSINGS  # the first probe
-    + _CAPTURE_READ_CROSSINGS  # terminal_info(), unconditional
     + _RECYCLE_CROSSINGS
     + _DETECTOR_READING_CROSSINGS  # the verb's own relaunch probe
+)
+
+# ⭐ WR-03 (164.6.5 review round 2) — WHAT AN ANSWERING `terminal_info()` /
+# `account_info()` COSTS, counted the way `mt5_client._materialize` walks a
+# netref namedtuple: the read itself (1), then `getattr(_asdict)` and its call
+# (2), `.items` and its call (2), the `__iter__` (1), one `next()` per field, and
+# the closing `next()` that raises `StopIteration` (1).
+# `test_R2_WR03_an_answering_read_is_charged_what_materialize_makes_it_cross`
+# drives the REAL client read against a netref-shaped double and requires these
+# charges to equal what it crossed.
+# ⚠️ THE FIELD COUNTS are the MetaTrader5 Python package's documented
+# `TerminalInfo` (22) and `AccountInfo` (28) namedtuples. They were NOT measured
+# on this gateway. They set only how far below reach the reads are: at the rpyc
+# ceiling, ANY answering read (at least 8 crossings) beside the recycle already
+# exceeds the 300 s budget ceiling.
+_MATERIALIZE_FIXED_CROSSINGS: Final[int] = 6
+_TERMINAL_INFO_FIELDS: Final[int] = 22
+_ACCOUNT_INFO_FIELDS: Final[int] = 28
+_TERMINAL_INFO_READ_CROSSINGS: Final[int] = (
+    1 + _MATERIALIZE_FIXED_CROSSINGS + _TERMINAL_INFO_FIELDS
+)
+_ACCOUNT_INFO_READ_CROSSINGS: Final[int] = (
+    1 + _MATERIALIZE_FIXED_CROSSINGS + _ACCOUNT_INFO_FIELDS
 )
 
 #: The crossings the escalation must still make once the capture is done: the
@@ -889,7 +931,26 @@ def _capture_wedge_evidence(
     it is read only when the time left covers it AND the recycle and its relaunch
     probe (``_ESCALATION_RESERVE_CROSSINGS``). Evidence is never bought with the
     recovery it exists to precede.
+
+    ⛔ WR-03 (164.6.5 review round 2) — ``terminal_info()`` IS BUDGET-GATED TOO,
+    on its ANSWERING cost (``_TERMINAL_INFO_READ_CROSSINGS``): it was read
+    unconditionally, charged as its failing shape, while an answering read
+    materializes one rpyc crossing per field. At every budget the window admits
+    that cost does not fit beside the recycle, so the line records the skip and
+    why; the bridge-side file version on the recycle's own line is the build
+    evidence that does not need the IPC.
     """
+    if not _affordable(
+        deadline, _TERMINAL_INFO_READ_CROSSINGS + _ESCALATION_RESERVE_CROSSINGS
+    ):
+        return (
+            "build=not_captured connected=not_captured "
+            "session_server_matches_env=not_captured (terminal_info and "
+            "account_info skipped: an answering read costs one rpyc crossing per "
+            "field, and the heal budget left cannot cover it beside the recycle "
+            "and its relaunch; the bridge-side file version is on the recycle's "
+            "own line)"
+        )
     try:
         terminal = client.terminal_info()
     except Mt5SessionAbandoned:
@@ -915,7 +976,7 @@ def _capture_wedge_evidence(
         else "connected=not_captured (terminal_info carried no boolean)"
     )
     if not _affordable(
-        deadline, _CAPTURE_READ_CROSSINGS + _ESCALATION_RESERVE_CROSSINGS
+        deadline, _ACCOUNT_INFO_READ_CROSSINGS + _ESCALATION_RESERVE_CROSSINGS
     ):
         return (
             f"{build_part} {connected_part} session_server_matches_env=not_captured "
@@ -1037,7 +1098,10 @@ def _read_post_relaunch_state(
     It cannot raise except ``Mt5SessionAbandoned``.
     """
     degraded = False
-    if not _affordable(deadline, _CAPTURE_READ_CROSSINGS):
+    # ⛔ WR-03 (review round 2) — each read is charged its ANSWERING cost, one
+    # rpyc crossing per field (`_TERMINAL_INFO_READ_CROSSINGS` /
+    # `_ACCOUNT_INFO_READ_CROSSINGS`), not the two crossings of a failing read.
+    if not _affordable(deadline, _TERMINAL_INFO_READ_CROSSINGS):
         return "post_relaunch=not_read (the heal budget left cannot cover it)", False
     try:
         terminal = client.terminal_info()
@@ -1055,7 +1119,7 @@ def _read_post_relaunch_state(
             degraded = degraded or not connected
         else:
             connected_part = "connected=not_captured (no boolean)"
-    if not _affordable(deadline, _CAPTURE_READ_CROSSINGS):
+    if not _affordable(deadline, _ACCOUNT_INFO_READ_CROSSINGS):
         return (
             f"post_relaunch: {connected_part} session_account_matches_env=not_read "
             "(the heal budget left cannot cover it)",

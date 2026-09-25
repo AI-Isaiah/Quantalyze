@@ -108,7 +108,7 @@ class _FakeClock:
     """The heal's clock, advanced ONLY by the doubles' crossings (and, from WR-02,
     by the heal's own sleeps). ⭐ It is what lets the budget be MEASURED against
     the one condition it exists for — every rpyc crossing taking its full ceiling
-    — without a test waiting 280 real seconds (164.6.5 review round 1, WR-04)."""
+    — without a test waiting 220 real seconds (164.6.5 review round 1, WR-04)."""
 
     def __init__(self) -> None:
         self.now = 1_000.0
@@ -229,6 +229,67 @@ class _FakeRpycConn:
                 ),
             }
         )
+
+
+def _crosses_by_value(value: object) -> bool:
+    """What rpyc's brine hands back BY VALUE rather than as a netref: scalars,
+    and plain tuples of them. A namedtuple, a dict, a bound method and an
+    iterator are all NETREFS on the real transport."""
+    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+        return True
+    return type(value) is tuple and all(_crosses_by_value(v) for v in value)
+
+
+class _FakeNetref:
+    """⭐ WR-03 (164.6.5 review round 2) — a NETREF to a remote object, so an
+    answering `terminal_info()` / `account_info()` costs what it costs on the
+    real transport. The double used to hand back a LOCAL namedtuple, which made
+    `_materialize` look like zero crossings; on the wire every attribute access,
+    every call, the `__iter__` and every `next()` is its own rpyc crossing (this
+    module's `_materialize` comment: ONE ROUND-TRIP PER FIELD). Each is recorded
+    and charged against the fake clock like any other crossing."""
+
+    def __init__(self, owner: "_FakeMt5", value: object) -> None:
+        self._nr_owner = owner
+        self._nr_value = value
+
+    @staticmethod
+    def wrap(owner: "_FakeMt5", value: object) -> object:
+        return value if _crosses_by_value(value) else _FakeNetref(owner, value)
+
+    def __getattr__(self, name: str) -> object:
+        self._nr_owner._trip("netref_getattr")
+        return _FakeNetref.wrap(self._nr_owner, getattr(self._nr_value, name))
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._nr_owner._trip("netref_call")
+        return _FakeNetref.wrap(self._nr_owner, self._nr_value(*args, **kwargs))  # type: ignore[operator]
+
+    def __iter__(self) -> "_FakeNetrefIterator":
+        self._nr_owner._trip("netref_iter")
+        return _FakeNetrefIterator(self._nr_owner, iter(self._nr_value))  # type: ignore[call-overload]
+
+
+class _FakeNetrefIterator:
+    def __init__(self, owner: "_FakeMt5", it) -> None:
+        self._owner = owner
+        self._it = it
+
+    def __iter__(self) -> "_FakeNetrefIterator":
+        return self
+
+    def __next__(self) -> object:
+        self._owner._trip("netref_next")  # the closing StopIteration crosses too
+        return _FakeNetref.wrap(self._owner, next(self._it))
+
+
+def _info_tuple(name: str, fields: int, **known: object):
+    """A namedtuple shaped like the MetaTrader5 package's, with exactly ``fields``
+    fields: the ``known`` ones first, then fillers."""
+    from collections import namedtuple
+
+    names = list(known) + [f"field_{i}" for i in range(fields - len(known))]
+    return namedtuple(name, names)(*known.values(), *range(fields - len(known)))
 
 
 class _FakeMt5:
@@ -368,12 +429,12 @@ class _FakeMt5:
     def terminal_info(self):
         self.call_order.append("terminal_info")
         self._trip("terminal_info")
-        return self._scenario.get("terminal_info")
+        return _FakeNetref.wrap(self, self._scenario.get("terminal_info"))
 
     def account_info(self):
         self.call_order.append("account_info")
         self._trip("account_info")
-        return self._scenario.get("account_info")
+        return _FakeNetref.wrap(self, self._scenario.get("account_info"))
 
     def login(self, *args, **kwargs):
         # ⭐ 164.6.5 SFH-05 — the JOB path's per-call login, reached only by the
@@ -1534,14 +1595,14 @@ async def test_an_ipc_fault_is_not_healed_and_the_verdict_names_the_code(
     if ipc_code == -10005:
         # ⭐ 164.6.5 WR-02 — the relaunch is WATCHED: after the verb's own
         # relaunch probe come the bare, credential-free relaunch polls, and
-        # nothing else.
-        assert fake.call_order[:4] == [
+        # nothing else. ⛔ WR-03 (review round 2) — no `terminal_info` capture:
+        # charged at its answering cost it never fits beside the recycle.
+        assert fake.call_order[:3] == [
             "initialize",
-            "terminal_info",
             "recycle",
             "initialize",
         ]
-        assert set(fake.call_order[4:]) <= {"initialize"}, fake.call_order
+        assert set(fake.call_order[3:]) <= {"initialize"}, fake.call_order
     else:
         assert fake.call_order == ["initialize"]
     assert not any("login" in kw for kw in fake.initialize_kwargs)
@@ -2009,6 +2070,7 @@ def test_ESCALATION_the_session_abandonment_exception_still_escapes_untouched(
             return {"matched": 1, "terminated": 1, "exited": 1,
                     "authorized": True, "relaunch_code": None}
 
+    _make_the_optional_reads_affordable(monkeypatch)
     for raise_in in ("capture", "recycle"):
         mt5_session_episodes._reset_session_episode_state_for_tests()
         with pytest.raises(Mt5SessionAbandoned):
@@ -2019,6 +2081,19 @@ def test_ESCALATION_the_session_abandonment_exception_still_escapes_untouched(
 
 def _escalation_client(fake) -> Mt5Client:
     return Mt5Client(_FAKE_HOST, int(_FAKE_PORT), _connect=lambda **_k: fake)
+
+
+def _make_the_optional_reads_affordable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⚠️ WR-03 (164.6.5 review round 2). Charged at their ANSWERING cost, one
+    rpyc crossing per field, the capture and post-relaunch reads never fit any
+    budget the window admits, so production SKIPS them (pinned by
+    `test_the_budget_covers_the_ESCALATION_path_too` and
+    `test_R2_WR03_an_answering_read_is_charged_what_materialize_makes_it_cross`).
+    The tests that use this are about what those reads SAY when they run, so
+    they lower the charge to one crossing, the cost a read materialized
+    bridge-side would approach. ⛔ Never used by a test about the budget."""
+    monkeypatch.setattr(mt5_relogin, "_TERMINAL_INFO_READ_CROSSINGS", 1)
+    monkeypatch.setattr(mt5_relogin, "_ACCOUNT_INFO_READ_CROSSINGS", 1)
 
 
 @pytest.mark.parametrize(
@@ -2038,13 +2113,14 @@ def test_ESCALATION_WR01_an_escalation_abandoned_BEFORE_the_recycle_crossed_keep
     The next escalation must still be allowed to recycle."""
     from services.mt5_client import Mt5SessionAbandoned, bump_mt5_terminal_epoch
 
+    _make_the_optional_reads_affordable(monkeypatch)
     fake = _FakeMt5(dict(_WEDGED))
     client = _escalation_client(fake)
     real_capture = mt5_relogin._capture_wedge_evidence
 
     def _capture_with_lease_release(c, env_server, deadline):
+        c._assert_live("bind")  # first touch binds the generation (the first probe, in production)
         if released == "during_the_capture":
-            c._assert_live("bind")  # first touch binds the generation
             bump_mt5_terminal_epoch(c.terminal_key)
             return real_capture(c, env_server, deadline)  # its first read is refused
         line = real_capture(c, env_server, deadline)
@@ -2186,6 +2262,7 @@ async def test_ESCALATION_the_wedge_evidence_is_captured_BEFORE_the_recycle(
         int(_FAKE_LOGIN), _FAKE_SERVER
     )
     _set_full_env(monkeypatch)
+    _make_the_optional_reads_affordable(monkeypatch)
     fake, _c = _install_client(
         monkeypatch, {**_WEDGED, "terminal_info": terminal, "account_info": account}
     )
@@ -2214,6 +2291,7 @@ async def test_ESCALATION_an_unanswered_capture_is_recorded_not_captured_and_sti
     then recorded `not_captured` WITH THE REASON — never filled in by logging in
     — the second read is skipped, and the recycle still runs."""
     _set_full_env(monkeypatch)
+    _make_the_optional_reads_affordable(monkeypatch)
     fake, _c = _install_client(monkeypatch, dict(_WEDGED))
     _capture_outcomes(monkeypatch)
 
@@ -2661,6 +2739,7 @@ def test_R2_WR02_a_fence_refusal_does_NOT_end_the_persistence_run(
     real_capture = mt5_relogin._capture_wedge_evidence
 
     def _capture_then_release(c, env_server, deadline):
+        c._assert_live("bind")  # first touch binds the generation (the first probe, in production)
         line = real_capture(c, env_server, deadline)
         bump_mt5_terminal_epoch(c.terminal_key)
         return line
@@ -2723,6 +2802,7 @@ async def test_ESCALATION_SFH07_authorized_after_a_relaunch_says_WHICH_account_a
     from collections import namedtuple
 
     _set_full_env(monkeypatch)
+    _make_the_optional_reads_affordable(monkeypatch)
     _install_client(
         monkeypatch,
         {
@@ -2810,10 +2890,14 @@ async def test_the_budget_covers_the_ESCALATION_path_too(
     over-provision, which lengthens the unbounded lease wait batch jobs pay.
 
     Both capture shapes are driven, because they spend differently: a FAILING
-    `terminal_info()` pays its `last_error()`, an ANSWERING one leaves the
-    budget-gated `account_info()` to decide whether it still fits."""
-    from collections import namedtuple
+    `terminal_info()` pays its `last_error()`, an ANSWERING one materializes per
+    field.
 
+    ⛔ WR-03 (164.6.5 review round 2) — THE ANSWERING SHAPE WAS UNDER-COUNTED.
+    Its double handed back a LOCAL namedtuple, one crossing, while the real
+    `_materialize` crosses once per field. It is now a netref-shaped double with
+    the documented field count, and the capture is budget-gated on that honest
+    charge, so it can never push the path past the `wait_for`."""
     ceiling = mt5_relogin._MT5_REQUEST_TIMEOUT_S
     monkeypatch.delenv("MT5_RELOGIN_BUDGET_S", raising=False)
     budget = mt5_relogin._relogin_budget_s()
@@ -2825,7 +2909,14 @@ async def test_the_budget_covers_the_ESCALATION_path_too(
         ("terminal_info_fails", {}),
         (
             "terminal_info_answers",
-            {"terminal_info": namedtuple("TerminalInfo", "build connected")(1, False)},
+            {
+                "terminal_info": _info_tuple(
+                    "TerminalInfo",
+                    mt5_relogin._TERMINAL_INFO_FIELDS,
+                    build=1,
+                    connected=False,
+                )
+            },
         ),
     ):
         mt5_session_episodes._reset_session_episode_state_for_tests()
@@ -2846,21 +2937,20 @@ async def test_the_budget_covers_the_ESCALATION_path_too(
         measured[shape] = len(fake.round_trips)
         paths[shape] = list(fake.round_trips)
 
-    assert paths["terminal_info_fails"] == [
+    unconditional = [
         "initialize",
-        "last_error",
-        "terminal_info",
         "last_error",
         "recycle_execute",
         "recycle_lookup",
         "recycle",
         "initialize",
         "last_error",
-    ], f"the escalation path changed shape: {paths['terminal_info_fails']}"
-    assert "account_info" not in paths["terminal_info_answers"], (
-        "the budget-gated account_info() was read although the time left could "
-        "not also cover the recycle and its relaunch"
-    )
+    ]
+    for shape, path in paths.items():
+        # ⛔ WR-03 — the capture is OPTIONAL now: an answering read costs
+        # `_TERMINAL_INFO_READ_CROSSINGS`, which no budget under the ceiling can
+        # cover beside the recycle and its relaunch, so it is never started.
+        assert path == unconditional, f"{shape}: the escalation path changed shape: {path}"
     assert mt5_relogin._MT5_RELOGIN_ROUND_TRIPS == max(measured.values()), (
         f"the budget is derived from {mt5_relogin._MT5_RELOGIN_ROUND_TRIPS} "
         f"crossings and the worst unconditional path makes {max(measured.values())} "
@@ -2868,6 +2958,73 @@ async def test_the_budget_covers_the_ESCALATION_path_too(
         "fire mid-recycle, more lengthens the unbounded wait batch jobs pay."
     )
     assert budget <= mt5_relogin._MT5_RELOGIN_BUDGET_CEILING_S
+
+
+@pytest.mark.parametrize(
+    "read,fields_name,charge_name",
+    [
+        ("terminal_info", "_TERMINAL_INFO_FIELDS", "_TERMINAL_INFO_READ_CROSSINGS"),
+        ("account_info", "_ACCOUNT_INFO_FIELDS", "_ACCOUNT_INFO_READ_CROSSINGS"),
+    ],
+)
+def test_R2_WR03_an_answering_read_is_charged_what_materialize_makes_it_cross(
+    read: str, fields_name: str, charge_name: str
+) -> None:
+    """⛔ WR-03 (164.6.5 review round 2). The unit is the rpyc crossing, and a
+    successful `terminal_info()` / `account_info()` is a netref namedtuple that
+    `_materialize` walks once per field. The heal's budget gate charged it ONE
+    crossing. This drives the REAL client read against the netref double and
+    requires the declared charge to equal what the read actually crossed, so a
+    change to `_materialize` reds here instead of silently re-opening the window
+    in which the `wait_for` fires mid-materialization."""
+    fields = getattr(mt5_relogin, fields_name)
+    fake = _FakeMt5({read: _info_tuple(read, fields, login=1, server="x")})
+    client = _escalation_client(fake)
+
+    getattr(client, read)()
+
+    assert len(fake.round_trips) == getattr(mt5_relogin, charge_name), fake.round_trips
+    assert fake.round_trips.count("netref_next") == fields + 1
+
+
+async def test_R2_WR03_no_optional_read_is_STARTED_at_its_answering_cost(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ WR-03 (164.6.5 review round 2), the post-relaunch half. The reads were
+    gated on 60 s left each, with nothing reserved after them, so a slow bridge
+    could fire the `wait_for` mid-materialization AFTER the recycle: the
+    escalation's verdict line was never emitted. Charged honestly they fit no
+    budget the window admits, so even on a terminal that answers instantly
+    neither the capture nor the post-relaunch check is started — and the line
+    says so rather than going quiet."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "initialize_after_recycle": True,
+            "terminal_info": _info_tuple(
+                "TerminalInfo", mt5_relogin._TERMINAL_INFO_FIELDS, connected=True
+            ),
+            "account_info": _info_tuple(
+                "AccountInfo",
+                mt5_relogin._ACCOUNT_INFO_FIELDS,
+                login=int(_FAKE_LOGIN),
+                server=_FAKE_SERVER,
+            ),
+        },
+    )
+    _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert _recycle_count(fake) == 1
+    assert "terminal_info" not in fake.call_order, fake.call_order
+    assert "account_info" not in fake.call_order, fake.call_order
+    messages = [r.getMessage() for r in _records(caplog)]
+    assert any("terminal_info and account_info skipped" in m for m in messages)
+    assert any("post_relaunch=not_read" in m for m in messages)
 
 
 async def test_WR04_a_recycle_the_budget_cannot_finish_is_never_started(
