@@ -50,4 +50,9 @@ INSERT INTO fx_keep (id, label) VALUES (3, 'ref_c') ON CONFLICT (id) DO NOTHING;
 -- the extractor's (basename, offset) sort replays it after the row exists (arm
 -- 33). It adds no row and no INSERT statement, so arm 22's counts, arm 23 legs
 -- (c)/(d) and arm 24's 2-over-3 shape are unaffected.
+-- CORRECTED 2026-09-25 (164.9.2 review round 1, WR-04): "only the extractor's
+-- (basename, offset) sort" is false (plan 03 SUMMARY deviation 1): the emit
+-- pushes INSERT blocks before C5 blocks, so without the sort this file still
+-- replays INSERT, INSERT, UPDATE. Arm 33 goes RED if blocks are emitted in
+-- allowlist-line order; sort removal alone is caught by the extractor self-test's `c5-update-count-drift.green` ORDER leg, not here. The sentence above is kept as lineage.
 UPDATE fx_keep SET status = 'verified' WHERE id = 3;

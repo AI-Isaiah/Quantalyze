@@ -3862,6 +3862,13 @@ FRESHSTUB
   # the `update:1` line ABOVE the INSERT line, so only a (basename, offset) sort
   # puts the UPDATE after the row it needs. The UNCHANGED wrong-state leg,
   # pointed at id=3, is the oracle: quiet here, loud in arm 34.
+  # ⛔ CORRECTED 2026-09-25 (164.9.2 review round 1, WR-04): "only a (basename,
+  # offset) sort" above is false, and was measured false by plan 03 (SUMMARY
+  # deviation 1). modeEmit pushes every INSERT block before every C5 block, so
+  # with the sort line deleted this fixture still emits INSERT, INSERT, UPDATE
+  # and this arm stays green. Arm 33 goes RED if blocks are emitted in
+  # allowlist-line order; sort removal alone is caught by the extractor self-test's `c5-update-count-drift.green` ORDER leg, not here (re-measured 2026-09-25: deleting the sort
+  # reddens that leg). The sentence above is kept as lineage.
   arm_c5_update_green() {
     setup_lane || return 1
     local ARM_WRONGSTATE_ID="3"
