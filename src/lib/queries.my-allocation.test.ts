@@ -1027,7 +1027,11 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     expect(result.portfolio).toBeNull();
     expect(result.snapshotCount).toBeGreaterThan(0);
     expect(result.equitySnapshots.length).toBeGreaterThan(0);
-    expect(result.equityDailyPoints.length).toBeGreaterThan(0);
+    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
+    // so the display series is [] for every allocator; plan 11 restores the
+    // content pin when it defines "ready".
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityDailyPoints).toEqual([]);
   });
 
   it("TC p7-CL9: terminus-flagged rows are excluded end-to-end + equityBaselineUnknown set (NEW-C01-11)", async () => {
@@ -1088,13 +1092,12 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
       "2026-03-11",
     ]);
     expect(result.snapshotCount).toBe(2);
-    // The garbage dates (and their forward-fill) never enter the daily series:
-    // the curve starts at the first TRUSTWORTHY row.
-    expect(result.equityDailyPoints.length).toBeGreaterThan(0);
-    expect(result.equityDailyPoints[0].date).toBe("2026-03-10");
-    expect(result.equityDailyPoints.some((p) => p.date < "2026-03-10")).toBe(
-      false,
-    );
+    // The garbage dates never reach the series the curve is built from (the
+    // `equitySnapshots` assertion above).
+    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
+    // so the display series is [] for every allocator; plan 11 restores the
+    // content pin when it defines "ready".
+    expect(result.equityDailyPoints).toEqual([]);
   });
 
   it("TC p7-CL9b: a fully-clean series leaves equityBaselineUnknown false and keeps every row", async () => {
@@ -1246,8 +1249,12 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     }));
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
-    expect(result.equityDailyPoints).toHaveLength(5);
-    expect(result.equityDailyPoints.map((p) => p.value)).toEqual(values);
+    // The five rows reach the series the curve is built from, in order.
+    expect(result.equitySnapshots.map((s) => s.value_usd)).toEqual(values);
+    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
+    // so the display series is [] for every allocator; plan 11 restores the
+    // content pin when it defines "ready".
+    expect(result.equityDailyPoints).toEqual([]);
   });
 
   it("TC p7-08 (f9): history_depth_months = [24,24,3] → minHistoryDepthMonths=3", async () => {
@@ -2962,6 +2969,52 @@ function derivedRow(isTrustworthy: boolean) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 / D-02 ("Hide it until correct") — the producer withholds the
+// allocator $-equity curve for EVERY allocator.
+//
+// Why this matters: the legacy snapshot sum and the derived curve can both count
+// one exchange account twice (two keys on one account) or read a day with no
+// sync as zero. The founder's own book showed a +100% jump, a -50% "crash" and a
+// Sharpe of 1.44 beside -42.8% cumulative, all computed from
+// `equityDailyPoints`. Withholding that one series at its one producer removes
+// every one of those numbers at once. A trustworthy-looking derived row is the
+// case that MUST still be withheld (it double-counts a shared account until
+// identity is resolved), so it is the fixture here, alongside legacy snapshots.
+// ---------------------------------------------------------------------------
+describe("167.1.2 D-02 — the allocator equity curve is withheld while it is rebuilt", () => {
+  beforeEach(resetState);
+
+  it("a trustworthy derived row AND legacy snapshots both present → equityDailyPoints is [] and equityHistoryState is 'rebuilding'", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
+    state.allocatorEquityDerived = [derivedRow(true)];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // Positive control: both candidate sources were really present and read —
+    // the derived row was selected as today — so the empty series below is the
+    // D-02 gate, not an absent input.
+    expect(result.equityCurveSource).toBe("derived");
+    expect(result.snapshotCount).toBe(3);
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityDailyPoints).toEqual([]);
+  });
+
+  it("the no-portfolio branch withholds the curve too (both branches spread the same producer)", async () => {
+    state.portfolios = [];
+    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.snapshotCount).toBe(3);
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityDailyPoints).toEqual([]);
+  });
+});
+
 describe("115.1 equity display-repoint", () => {
   beforeEach(resetState);
   // Guard against the CI Node-gap leaked-stub class (reference_ci_node22_vs_local_node25):
@@ -2981,8 +3034,13 @@ describe("115.1 equity display-repoint", () => {
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    // The load-bearing invariant: display series == legacy render, byte-for-byte.
-    expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
+    // Positive control: this fixture WOULD render a non-empty legacy curve, so
+    // the empty series below is the D-02 gate, not an empty input.
+    expect(legacyExpectedDailyPoints().length).toBeGreaterThan(0);
+    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
+    // so the display series is [] for every allocator; plan 11 restores the
+    // content pin when it defines "ready".
+    expect(result.equityDailyPoints).toEqual([]);
     // Neuter gap: the no-row case must ALSO stamp the source 'legacy' (only the
     // derived/untrusted pins asserted the source before) — a repoint that
     // defaulted to 'derived' on an absent row would mislabel the legacy render.
@@ -3009,10 +3067,10 @@ describe("115.1 equity display-repoint", () => {
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
     ).toBe("derived");
-    // The derived path maps the dense curve DIRECTLY — no snapshot forward-fill.
-    expect(result.equityDailyPoints).toEqual(
-      P1151_DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
-    );
+    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
+    // so the display series is [] for every allocator; plan 11 restores the
+    // content pin when it defines "ready".
+    expect(result.equityDailyPoints).toEqual([]);
   });
 
   it("RED (plan 05): an untrustworthy derived row falls back to the legacy render and marks the source 'legacy'", async () => {
@@ -3027,8 +3085,10 @@ describe("115.1 equity display-repoint", () => {
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
     ).toBe("legacy");
-    // is_trustworthy=false → the derived curve is NOT rendered; legacy stands.
-    expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
+    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
+    // so the display series is [] for every allocator; plan 11 restores the
+    // content pin when it defines "ready".
+    expect(result.equityDailyPoints).toEqual([]);
   });
 
   it("MALFORMED (T-115.1-18): is_trustworthy=true but curve is NOT an array → legacy fallback (no crash)", async () => {
@@ -3054,7 +3114,10 @@ describe("115.1 equity display-repoint", () => {
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
     ).toBe("legacy");
-    expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
+    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
+    // so the display series is [] for every allocator; plan 11 restores the
+    // content pin when it defines "ready".
+    expect(result.equityDailyPoints).toEqual([]);
   });
 
   it("MALFORMED (T-115.1-18): is_trustworthy=true but a curve point has non-finite equity_usd → legacy fallback (never NaN)", async () => {
@@ -3083,7 +3146,10 @@ describe("115.1 equity display-repoint", () => {
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
     ).toBe("legacy");
-    expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
+    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
+    // so the display series is [] for every allocator; plan 11 restores the
+    // content pin when it defines "ready".
+    expect(result.equityDailyPoints).toEqual([]);
   });
 
   it("B2 (empty curve): is_trustworthy=true but curve is [] → legacy fallback (never a blank chart labeled 'derived')", async () => {
@@ -3115,7 +3181,10 @@ describe("115.1 equity display-repoint", () => {
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
     ).toBe("legacy");
-    expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
+    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
+    // so the display series is [] for every allocator; plan 11 restores the
+    // content pin when it defines "ready".
+    expect(result.equityDailyPoints).toEqual([]);
   });
 
   it("MALFORMED (T-115.1-18): is_trustworthy present-but-non-boolean → legacy fallback", async () => {
@@ -3140,7 +3209,10 @@ describe("115.1 equity display-repoint", () => {
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
     ).toBe("legacy");
-    expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
+    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
+    // so the display series is [] for every allocator; plan 11 restores the
+    // content pin when it defines "ready".
+    expect(result.equityDailyPoints).toEqual([]);
   });
 
   it("MALFORMED (T-115.1-18): a curve point missing `date` or `equity_usd`, or a non-object point → legacy fallback", async () => {

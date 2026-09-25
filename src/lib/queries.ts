@@ -2905,6 +2905,17 @@ export interface MyAllocationDashboardPayload {
    */
   derivedCurveComputedAt: string | null;
   /**
+   * Phase 167.1.2 / D-02 ("Hide it until correct"). Whether the allocator's
+   * $-equity history may be shown. `"rebuilding"`: `equityDailyPoints` is
+   * withheld (always `[]`) because both the legacy snapshot sum and the derived
+   * curve can count one exchange account twice or read a no-sync day as zero,
+   * so the curve and every ratio built from it are unreliable. Consumers render
+   * an honest "being rebuilt" state instead and treat a payload WITHOUT this
+   * field as `"rebuilding"` (fail-closed). `"ready"` is defined by plan 11 of
+   * Phase 167.1.2; until then the producer never emits it.
+   */
+  equityHistoryState: "rebuilding" | "ready";
+  /**
    * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
    * allocator's snapshots, or null when every snapshot's column is
    * NULL (e.g., pure CoinGecko-fallback data). Drives the venue-
@@ -3693,6 +3704,7 @@ export function derivePhase07Fields(
   | "equityDailyPoints"
   | "equityCurveSource"
   | "derivedCurveComputedAt"
+  | "equityHistoryState"
   | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
@@ -3731,11 +3743,16 @@ export function derivePhase07Fields(
   );
   // f7 adapter (legacy path): DailyPoint[] for EquityCurve/DrawdownChart
   // parallel-prop.
-  const equityDailyPoints =
+  const candidateEquityDailyPoints =
     derivedCurve ??
     equitySnapshotsToDailyPoints(
       equitySnapshots.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
     );
+  // Phase 167.1.2 / D-02 ("Hide it until correct"): the curve is withheld here,
+  // at its one producer, for every allocator; plan 11 owns the "ready" condition.
+  const equityHistoryState: "rebuilding" | "ready" = "rebuilding";
+  const equityDailyPoints: DailyPoint[] =
+    equityHistoryState === "rebuilding" ? [] : candidateEquityDailyPoints;
   const equityCurveSource: "derived" | "legacy" =
     derivedCurve !== null ? "derived" : "legacy";
   const derivedCurveComputedAt =
@@ -3805,6 +3822,7 @@ export function derivePhase07Fields(
     equityDailyPoints,
     equityCurveSource,
     derivedCurveComputedAt,
+    equityHistoryState,
     minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,

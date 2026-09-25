@@ -238,6 +238,20 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — EquityChart tap-rect @ 32
       "env is present.",
   );
 
+  // Phase 167.1.2 / D-02 ("Hide it until correct"): the Overview no longer
+  // mounts the EquityChart for any allocator while the equity history is
+  // rebuilt (`equityHistoryState === "rebuilding"`; the producer withholds the
+  // curve). This gate measures that chart's tap surface, so it has nothing to
+  // measure until plan 11 of Phase 167.1.2 defines "ready" and the chart
+  // returns. Plan 11 removes this skip. Skipped rather than rewritten: the
+  // gate's subject (the chart's 44px tap rect) is unchanged and must be
+  // measured again the moment the chart is back.
+  test.skip(
+    true,
+    "Phase 167.1.2 D-02: the Overview EquityChart is hidden while the equity " +
+      "history is rebuilt; plan 11 re-enables this gate when it defines 'ready'.",
+  );
+
   test("EquityChart tap surface measures >= 44px at 320px (coarse) on /allocations", async ({
     page,
   }) => {

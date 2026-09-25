@@ -6,6 +6,7 @@ import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
 import EquityChartWidget from "./widgets/performance/EquityChart";
+import { EquityHistoryRebuilding } from "./components/EquityHistoryRebuilding";
 import { buildAllocatorPortfolioFactsheetPayload } from "@/lib/factsheet/allocator-portfolio-payload";
 import {
   FactsheetProvider,
@@ -63,21 +64,31 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // "connected — no positions synced yet" copy to an allocator who
     // disconnected their only key.
     hasConnectedKeys = false,
+    // Phase 167.1.2 / D-02 ("Hide it until correct"): while the history is
+    // rebuilt the producer withholds the curve, and neither the curve nor any
+    // factsheet KPI computed from it renders. A payload without the field is
+    // treated as "rebuilding" (fail-closed).
+    equityHistoryState = "rebuilding",
   } = props;
+  const isRebuilding = equityHistoryState === "rebuilding";
 
   const holdingsEmpty = holdingsSummary.length === 0;
 
   const factsheetPayload = useMemo(
     () =>
-      buildAllocatorPortfolioFactsheetPayload(equityDailyPoints, {
-        allocatorId: props.allocator_id,
-        portfolioName: portfolio?.name ?? "My Portfolio",
-        computedAt: analytics?.computed_at ?? null,
-        markets: activeVenues,
-        startDate: equityDailyPoints[0]?.date ?? null,
-        aum: analytics?.total_aum ?? null,
-      }),
+      // D-02: no factsheet payload (so no KPI) is built while rebuilding.
+      isRebuilding
+        ? null
+        : buildAllocatorPortfolioFactsheetPayload(equityDailyPoints, {
+            allocatorId: props.allocator_id,
+            portfolioName: portfolio?.name ?? "My Portfolio",
+            computedAt: analytics?.computed_at ?? null,
+            markets: activeVenues,
+            startDate: equityDailyPoints[0]?.date ?? null,
+            aum: analytics?.total_aum ?? null,
+          }),
     [
+      isRebuilding,
       equityDailyPoints,
       props.allocator_id,
       portfolio,
@@ -157,7 +168,11 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         className="mt-3 px-1"
       />
 
-      {factsheetPayload ? (
+      {isRebuilding ? (
+        // D-02: replaces BOTH the curve slot and the factsheet, and is checked
+        // BEFORE the warm-up fallback so its "appear once" copy never renders.
+        <EquityHistoryRebuilding />
+      ) : factsheetPayload ? (
         <FactsheetProvider payload={factsheetPayload}>
           <FactsheetBody
             payload={factsheetPayload}

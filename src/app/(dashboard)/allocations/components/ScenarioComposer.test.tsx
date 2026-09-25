@@ -562,6 +562,8 @@ function makePayload(
     ],
     equityCurveSource: "legacy",
     derivedCurveComputedAt: null,
+    // Phase 167.1.2 / D-02: the producer emits "rebuilding" for every allocator.
+    equityHistoryState: "rebuilding",
     minHistoryDepthMonths: 12,
     equityBaselineUnknown: false,
     activeVenues: ["Binance"],
