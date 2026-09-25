@@ -5525,6 +5525,14 @@ jobs:
     # TEST host fails in seconds rather than squatting a runner until this TTL. That
     # sums to well under 30m; 90m is a generous ceiling, not a sized number. Lowering
     # it is a separate decision (D-04), taken against that sum.
+    # ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1 round-2 review, IN-05): "a black-holed
+    # TEST host fails in seconds" holds at CONNECT only. `PGCONNECT_TIMEOUT` bounds
+    # the connect, and `statement_timeout` is enforced by the SERVER, so it bounds a
+    # running query only while the server can still answer. A network loss AFTER
+    # connect leaves psql blocked on a read until TCP keepalive gives up, which by
+    # default is far longer than this job, so that case is bounded only by this
+    # `timeout-minutes`. scripts/test-ledger-drift-check.sh carries the same
+    # qualification above its psql commands. The paragraph above is kept as lineage.
     timeout-minutes: 90
     # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
     # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
