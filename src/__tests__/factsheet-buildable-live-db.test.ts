@@ -31,7 +31,7 @@ import {
   cleanupLiveDbRow,
   advertiseLiveDbSkipReason,
 } from "@/lib/test-helpers/live-db";
-import { fetchAndBuildPayload } from "@/lib/factsheet/fetch-and-build-payload";
+import { fetchAndBuildPayload, probeFactsheetBuildable } from "@/lib/factsheet/fetch-and-build-payload";
 import { withPublishedOrOwner } from "@/lib/visibility";
 
 /** N consecutive synthetic calendar days from 2024-01-02, as {date, value}. */
@@ -159,5 +159,24 @@ describe.skipIf(!HAS_LIVE_DB)("FACTSHEETBUILDABLE SC1 — computed to the owner,
     const payload = await fetchAndBuildPayload(controlId, ownerVisibility);
     expect(payload).not.toBeNull();
     expect(payload?.strategyId).toBe(controlId);
+  });
+
+  // SC2 on real rows: the probe answers from the builder's own resolve stage.
+  it("PROBE-SINGLE: the probe names the one-point row too_few_points", async () => {
+    expect(await probeFactsheetBuildable(singleId, ownerVisibility)).toEqual({
+      buildable: false,
+      reason: "too_few_points",
+    });
+  });
+
+  it("PROBE-COMPOSITE: the probe names the pre-Phase-86 composite composite_unbuildable", async () => {
+    expect(await probeFactsheetBuildable(compositeId, ownerVisibility)).toEqual({
+      buildable: false,
+      reason: "composite_unbuildable",
+    });
+  });
+
+  it("PROBE-CONTROL: the probe calls the 30-point row buildable", async () => {
+    expect(await probeFactsheetBuildable(controlId, ownerVisibility)).toEqual({ buildable: true });
   });
 });

@@ -34,7 +34,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { isComputedAnalytics } from "@/lib/closed-sets";
-import { buildFactsheetPayload, deriveIngestSource } from "./build-payload";
+import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { readCompositeFactsheet, singleKeyDataQuality, readSingleKeyBasisOpts } from "./composite-read-path";
 import { resolveDailyReturnSeries } from "./allocator-portfolio-payload";
@@ -52,6 +52,201 @@ import type { FactsheetPayload, IngestSource } from "./types";
  * visibility decision; as written, omitting it is a compile error.
  */
 export type StrategyVisibility = <Q>(query: Q) => Q;
+
+/**
+ * Phase 167.2.1 (D-07) — why a factsheet cannot build, in the probe's closed
+ * vocabulary. `read_error` and `not_visible` are the admin read failing or
+ * finding no row under the visibility predicate; `not_computed` is an analytics
+ * row that is not a terminal success; `composite_unbuildable` is EVERY composite
+ * failure (a missing headline, an empty or failed csv read, too few points),
+ * because `readCompositeFactsheet` folds a read error into an empty series and
+ * the probe cannot tell them apart; `too_few_points` is a single-key series
+ * below `MIN_FACTSHEET_SERIES_POINTS` distinct dated returns.
+ */
+export type NotBuildableReason =
+  | "read_error"
+  | "not_visible"
+  | "not_computed"
+  | "composite_unbuildable"
+  | "too_few_points";
+
+/** The probe's answer: buildable, or not buildable with a typed reason. */
+export type FactsheetBuildability =
+  | { buildable: true }
+  | { buildable: false; reason: NotBuildableReason };
+
+/** A failed resolve: the builder returns null, the probe returns this reason. */
+function notBuildable(reason: NotBuildableReason): { ok: false; reason: NotBuildableReason } {
+  return { ok: false, reason };
+}
+
+/**
+ * Phase 167.2.1 (D-04) — THE RESOLVE STAGE, gates G0 to G4, shared by
+ * `fetchAndBuildPayload` and `probeFactsheetBuildable`. It holds EVERY null exit
+ * of the builder: the admin read under the injected visibility predicate (G0),
+ * the terminal-success gate (G1), the series resolution and the composite read
+ * (G2), the empty-series gate (G3) and the point-count gate (G4,
+ * `hasBuildableSeries`, the same predicate `buildFactsheetPayload` calls). The
+ * steps are the builder's own, moved here verbatim with their comments and log
+ * lines. Module-private: a reader asks through the probe.
+ */
+async function resolveFactsheetInputs(
+  supabase: ReturnType<typeof createAdminClient>,
+  id: string,
+  visibility: StrategyVisibility,
+) {
+  const { data: strategy, error } = await visibility(
+    supabase
+      .from("strategies")
+      .select(
+        `id, name, codename, disclosure_tier, status, markets, strategy_types,
+       description, subtypes, supported_exchanges, leverage_range, aum,
+       max_capacity, avg_daily_turnover, start_date, benchmark, asset_class,
+       returns_denominator_config,
+       strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status )`,
+      )
+      .eq("id", id),
+  )
+    .maybeSingle();
+  if (error || !strategy) {
+    console.warn("[factsheet] fetchAndBuildPayload — admin probe returned no strategy", {
+      id,
+      hasError: !!error,
+      errorMessage: error?.message,
+      errorCode: error?.code,
+    });
+    return notBuildable(error ? "read_error" : "not_visible");
+  }
+
+  const analytics = Array.isArray(strategy.strategy_analytics)
+    ? strategy.strategy_analytics[0]
+    : strategy.strategy_analytics;
+
+  // STALE-01 — THE SIDE DOOR. `computation_status` was already on this embed
+  // (:95) and already read here, but only as an argument to
+  // `readSingleKeyBasisOpts`; nothing gated the RENDER on it. The render gate
+  // was `dailyReturns.length === 0`, and a failed run leaves the previous run's
+  // series in `daily_returns` / `returns_series` untouched — the analytics
+  // writer stamps the status and the error, not the data. So every panel on the
+  // widest metric surface in the product was built from a track no finished run
+  // vouches for.
+  //
+  // ⚠️ This page is what BOTH PDF wrappers screenshot. `/api/factsheet/[id]/pdf`
+  // refuses a non-computed strategy with a 400 "Analytics not computed" and
+  // then `page.goto()`s `/factsheet/[id]` — which re-exports THIS module — while
+  // `/api/factsheet/[id]/tearsheet.pdf` does the same for the tearsheet. Those
+  // 400s were guarding a front door beside an open side door: both target pages
+  // are directly reachable URLs and neither refused anything. The wrappers are
+  // unchanged; the pages now hold the same line, which is what makes the
+  // wrappers' refusal mean something.
+  //
+  // The answer is the EXISTING one: return null, which the caller already
+  // renders as the "still computing" placeholder it shows for any strategy
+  // whose series has not been ingested. No new state, no new copy, nothing red
+  // — and the owner lane inherits it, so an owner previewing their own draft
+  // sees the same honest placeholder rather than a factsheet built on a dead
+  // run. `computing` is included for the reason `shapeRowAnalytics` gives:
+  // there is no honest date to show the previous run's numbers under.
+  if (!isComputedAnalytics(analytics?.computation_status)) {
+    console.warn(
+      "[factsheet] fetchAndBuildPayload — analytics row is not a terminal success; withholding the payload",
+      { id, computationStatus: analytics?.computation_status ?? null },
+    );
+    return notBuildable("not_computed");
+  }
+
+  const dailyRaw = analytics?.daily_returns;
+  // resolveDailyReturnSeries handles two real-world realities at once:
+  //   (a) `daily_returns` may be in one of three shapes (array of
+  //       {date,value}, flat {date:value} dict, nested {year:{MM-DD:value}}).
+  //   (b) analytics-service-only strategies have `daily_returns=null`; the
+  //       real series lives in `returns_series` as a cumprod equity curve.
+  // Both gates have to fall before we render the "still computing"
+  // placeholder.
+  let dailyReturns = resolveDailyReturnSeries(dailyRaw, analytics?.returns_series);
+  // Phase 90 (D6) — composite discriminator is SERVER TRUTH
+  // (`data_quality_flags.composite`), NEVER `apiKeyId === null` (Phase-89
+  // Pitfall 1). A stitched multi-key composite has `daily_returns=NULL` (so
+  // `deriveIngestSource` above classifies it "api" on the RAW column — LEFT
+  // UNTOUCHED, pinned by audit-c20 RED-TEAM-H1) but its honest cash series lives
+  // sparse in `csv_daily_returns`. We read that series, route the payload down
+  // the csv arm with an EXPLICIT `ingestSource:"csv"` at the build call, render
+  // the arithmetic running-cumulative curve, and thread the marker/basis fields.
+  const dqf = analytics?.data_quality_flags as
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown }
+    | null
+    | undefined;
+  const isComposite = dqf?.composite === true;
+  let compositeBuildOpts: BuildFactsheetOpts | undefined;
+  if (isComposite) {
+    // H-2: the composite read-path is shared with the discovery detail page via
+    // `readCompositeFactsheet` so the two surfaces can't diverge (the "one path"
+    // lesson). It REUSES the in-scope service-role admin `supabase` handle
+    // already created above under the SAME injected `visibility` predicate
+    // boundary — NO new client, NO broader privilege; the outer request-scoped
+    // RLS signature probe + notFound() remains the unchanged auth gate. The
+    // helper carries C-1 (config-driven method), F1/H-1 (headline gate), F2/M-1
+    // (MTM gate) and the FS-01/02 markers. A null result = data defect → the
+    // "still computing" placeholder below.
+    const composite = await readCompositeFactsheet(supabase, {
+      strategyId: id,
+      dqf,
+      metricsJsonByBasis: analytics?.metrics_json_by_basis,
+      returnsDenominatorConfig: strategy.returns_denominator_config,
+    });
+    if (!composite) return notBuildable("composite_unbuildable");
+    dailyReturns = composite.dailyReturns;
+    compositeBuildOpts = composite.buildOpts;
+  }
+  // Warn when both daily_returns (CSV indicator) and returns_series (API
+  // indicator) are populated — ambiguous provenance may mis-classify an
+  // api-verified strategy as csv if the ingester later back-fills the column.
+  // (IMPORTANT-3 — b06-codereview)
+  if (
+    Array.isArray(dailyRaw) &&
+    analytics?.returns_series != null &&
+    typeof analytics.returns_series === "object" &&
+    Object.keys(analytics.returns_series as object).length > 0
+  ) {
+    console.warn(
+      "[factsheet] fetchAndBuildPayload — both daily_returns and returns_series populated; ingestSource='csv' applied conservatively",
+      { id },
+    );
+  }
+  if (dailyReturns.length === 0) {
+    console.warn("[factsheet] fetchAndBuildPayload — no usable return series after normalization + equity-curve fallback", {
+      id,
+      hasAnalytics: !!analytics,
+      dailyType: typeof dailyRaw,
+      isArray: Array.isArray(dailyRaw),
+      returnsSeriesType: typeof analytics?.returns_series,
+    });
+    return notBuildable(isComposite ? "composite_unbuildable" : "too_few_points");
+  }
+
+  // G4 (Phase 167.2.1, D-04): the builder's own point-count predicate, asked
+  // HERE so that every null exit of `fetchAndBuildPayload` is a failed resolve
+  // and the probe never has to build to know. `buildFactsheetPayload` keeps the
+  // same gate for its other caller.
+  if (!hasBuildableSeries(dailyReturns)) {
+    console.warn(
+      "[factsheet] fetchAndBuildPayload — return series has fewer than the minimum distinct dated observations; withholding the payload",
+      { id, isComposite, rawCount: dailyReturns.length, minimum: MIN_FACTSHEET_SERIES_POINTS },
+    );
+    return notBuildable(isComposite ? "composite_unbuildable" : "too_few_points");
+  }
+
+  return {
+    ok: true as const,
+    strategy,
+    analytics,
+    dqf,
+    isComposite,
+    dailyRaw,
+    dailyReturns,
+    compositeBuildOpts,
+  };
+}
 
 /**
  * Two-layer visibility:
@@ -94,75 +289,11 @@ export async function fetchAndBuildPayload(
   visibility: StrategyVisibility,
 ): Promise<FactsheetPayload | null> {
   const supabase = createAdminClient();
-  const { data: strategy, error } = await visibility(
-    supabase
-      .from("strategies")
-      .select(
-        `id, name, codename, disclosure_tier, status, markets, strategy_types,
-       description, subtypes, supported_exchanges, leverage_range, aum,
-       max_capacity, avg_daily_turnover, start_date, benchmark, asset_class,
-       returns_denominator_config,
-       strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status )`,
-      )
-      .eq("id", id),
-  )
-    .maybeSingle();
-  if (error || !strategy) {
-    console.warn("[factsheet] fetchAndBuildPayload — admin probe returned no strategy", {
-      id,
-      hasError: !!error,
-      errorMessage: error?.message,
-      errorCode: error?.code,
-    });
-    return null;
-  }
+  // Phase 167.2.1 (D-04): every null exit lives in the shared resolve stage.
+  const resolved = await resolveFactsheetInputs(supabase, id, visibility);
+  if (!resolved.ok) return null;
+  const { strategy, analytics, dqf, isComposite, dailyRaw, dailyReturns } = resolved;
 
-  const analytics = Array.isArray(strategy.strategy_analytics)
-    ? strategy.strategy_analytics[0]
-    : strategy.strategy_analytics;
-
-  // STALE-01 — THE SIDE DOOR. `computation_status` was already on this embed
-  // (:95) and already read here, but only as an argument to
-  // `readSingleKeyBasisOpts`; nothing gated the RENDER on it. The render gate
-  // was `dailyReturns.length === 0`, and a failed run leaves the previous run's
-  // series in `daily_returns` / `returns_series` untouched — the analytics
-  // writer stamps the status and the error, not the data. So every panel on the
-  // widest metric surface in the product was built from a track no finished run
-  // vouches for.
-  //
-  // ⚠️ This page is what BOTH PDF wrappers screenshot. `/api/factsheet/[id]/pdf`
-  // refuses a non-computed strategy with a 400 "Analytics not computed" and
-  // then `page.goto()`s `/factsheet/[id]` — which re-exports THIS module — while
-  // `/api/factsheet/[id]/tearsheet.pdf` does the same for the tearsheet. Those
-  // 400s were guarding a front door beside an open side door: both target pages
-  // are directly reachable URLs and neither refused anything. The wrappers are
-  // unchanged; the pages now hold the same line, which is what makes the
-  // wrappers' refusal mean something.
-  //
-  // The answer is the EXISTING one: return null, which the caller already
-  // renders as the "still computing" placeholder it shows for any strategy
-  // whose series has not been ingested. No new state, no new copy, nothing red
-  // — and the owner lane inherits it, so an owner previewing their own draft
-  // sees the same honest placeholder rather than a factsheet built on a dead
-  // run. `computing` is included for the reason `shapeRowAnalytics` gives:
-  // there is no honest date to show the previous run's numbers under.
-  if (!isComputedAnalytics(analytics?.computation_status)) {
-    console.warn(
-      "[factsheet] fetchAndBuildPayload — analytics row is not a terminal success; withholding the payload",
-      { id, computationStatus: analytics?.computation_status ?? null },
-    );
-    return null;
-  }
-
-  const dailyRaw = analytics?.daily_returns;
-  // resolveDailyReturnSeries handles two real-world realities at once:
-  //   (a) `daily_returns` may be in one of three shapes (array of
-  //       {date,value}, flat {date:value} dict, nested {year:{MM-DD:value}}).
-  //   (b) analytics-service-only strategies have `daily_returns=null`; the
-  //       real series lives in `returns_series` as a cumprod equity curve.
-  // Both gates have to fall before we render the "still computing"
-  // placeholder.
-  let dailyReturns = resolveDailyReturnSeries(dailyRaw, analytics?.returns_series);
   // Ingest source classifies daily_returns (CSV path) vs returns_series-only
   // (live API path). The empty-array-is-csv invariant (FINDING-1) + the
   // no-invented-data rationale (NEW-C20-01) live in deriveIngestSource — the
@@ -170,40 +301,8 @@ export async function fetchAndBuildPayload(
   // audit-c20's RED-TEAM-H1.
   const ingestSource: IngestSource = deriveIngestSource(dailyRaw);
 
-  // Phase 90 (D6) — composite discriminator is SERVER TRUTH
-  // (`data_quality_flags.composite`), NEVER `apiKeyId === null` (Phase-89
-  // Pitfall 1). A stitched multi-key composite has `daily_returns=NULL` (so
-  // `deriveIngestSource` above classifies it "api" on the RAW column — LEFT
-  // UNTOUCHED, pinned by audit-c20 RED-TEAM-H1) but its honest cash series lives
-  // sparse in `csv_daily_returns`. We read that series, route the payload down
-  // the csv arm with an EXPLICIT `ingestSource:"csv"` at the build call, render
-  // the arithmetic running-cumulative curve, and thread the marker/basis fields.
-  const dqf = analytics?.data_quality_flags as
-    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown }
-    | null
-    | undefined;
-  const isComposite = dqf?.composite === true;
-  let buildOpts: BuildFactsheetOpts | undefined;
-  if (isComposite) {
-    // H-2: the composite read-path is shared with the discovery detail page via
-    // `readCompositeFactsheet` so the two surfaces can't diverge (the "one path"
-    // lesson). It REUSES the in-scope service-role admin `supabase` handle
-    // already created above under the SAME injected `visibility` predicate
-    // boundary — NO new client, NO broader privilege; the outer request-scoped
-    // RLS signature probe + notFound() remains the unchanged auth gate. The
-    // helper carries C-1 (config-driven method), F1/H-1 (headline gate), F2/M-1
-    // (MTM gate) and the FS-01/02 markers. A null result = data defect → the
-    // "still computing" placeholder below.
-    const composite = await readCompositeFactsheet(supabase, {
-      strategyId: id,
-      dqf,
-      metricsJsonByBasis: analytics?.metrics_json_by_basis,
-      returnsDenominatorConfig: strategy.returns_denominator_config,
-    });
-    if (!composite) return null;
-    dailyReturns = composite.dailyReturns;
-    buildOpts = composite.buildOpts;
-  } else {
+  let buildOpts: BuildFactsheetOpts | undefined = resolved.compositeBuildOpts;
+  if (!isComposite) {
     // HARD-04 (#67) / Finding B: single-key strategies persist
     // `insufficient_window` at the analytics_runner CAGR site too, but buildOpts
     // was assigned ONLY on the composite arm, so `payload.dataQuality` stayed
@@ -245,31 +344,6 @@ export async function fetchAndBuildPayload(
         analytics?.computation_status,
       )),
     };
-  }
-  // Warn when both daily_returns (CSV indicator) and returns_series (API
-  // indicator) are populated — ambiguous provenance may mis-classify an
-  // api-verified strategy as csv if the ingester later back-fills the column.
-  // (IMPORTANT-3 — b06-codereview)
-  if (
-    Array.isArray(dailyRaw) &&
-    analytics?.returns_series != null &&
-    typeof analytics.returns_series === "object" &&
-    Object.keys(analytics.returns_series as object).length > 0
-  ) {
-    console.warn(
-      "[factsheet] fetchAndBuildPayload — both daily_returns and returns_series populated; ingestSource='csv' applied conservatively",
-      { id },
-    );
-  }
-  if (dailyReturns.length === 0) {
-    console.warn("[factsheet] fetchAndBuildPayload — no usable return series after normalization + equity-curve fallback", {
-      id,
-      hasAnalytics: !!analytics,
-      dailyType: typeof dailyRaw,
-      isArray: Array.isArray(dailyRaw),
-      returnsSeriesType: typeof analytics?.returns_series,
-    });
-    return null;
   }
 
   // FINDING-5 (b06-silentfailure): Never fall back to "now" for a missing
@@ -318,4 +392,38 @@ export async function fetchAndBuildPayload(
     dailyReturns,
     buildOpts,
   );
+}
+
+/**
+ * Phase 167.2.1 (D-04, D-09) — can this strategy's factsheet build, answered by
+ * the builder's own code without building it. It creates the same service-role
+ * client and runs the SAME resolve stage `fetchAndBuildPayload` runs, and
+ * nothing else: no basis reads, no compute.
+ *
+ * INVARIANT: every null exit of `fetchAndBuildPayload` lives in that shared
+ * resolve stage, so `probe.buildable === (fetchAndBuildPayload(id, v) !== null)`
+ * for the same id, predicate and rows. DOMAIN: this holds for a builder that
+ * does not throw. A throw in the basis reads or the build is not a null exit,
+ * and the probe cannot see it; the page's own error handling owns that case.
+ * `fetch-and-build-payload.test.ts` pins the invariant with the parity table
+ * and NO-NULL-AFTER-RESOLVE. A rebase that adds a null exit to
+ * `fetchAndBuildPayload` OUTSIDE the resolve stage breaks it: move that exit
+ * into the stage, never special-case the probe (the D-09 post-rebase rule).
+ *
+ * `visibility` is REQUIRED for the reason `StrategyVisibility` gives: on the
+ * service role the predicate is the only row gate. The probe does not catch a
+ * throw; the caller maps a throw to "unreadable" (D-05).
+ *
+ * ⛔ Never route this probe through the id-keyed cached wrapper
+ * `buildFactsheetPayloadCached` (D-11): an id-only cache key would serve one
+ * viewer's answer to every later reader of that id.
+ */
+export async function probeFactsheetBuildable(
+  id: string,
+  visibility: StrategyVisibility,
+): Promise<FactsheetBuildability> {
+  const supabase = createAdminClient();
+  const resolved = await resolveFactsheetInputs(supabase, id, visibility);
+  if (!resolved.ok) return { buildable: false, reason: resolved.reason };
+  return { buildable: true };
 }

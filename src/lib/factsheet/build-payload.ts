@@ -174,6 +174,25 @@ function normalizeDailyReturns(rows: DailyReturn[]): DailyReturn[] {
 }
 
 /**
+ * Phase 167.2.1 (D-04) — the fewest distinct dated observations a factsheet
+ * builds from. The ONE constant behind the builder's point-count gate, the
+ * buildability probe in `fetch-and-build-payload.ts`, and the owner-facing
+ * "fewer than 2 days of returns" copy that cites it.
+ */
+export const MIN_FACTSHEET_SERIES_POINTS = 2;
+
+/**
+ * Phase 167.2.1 (D-04) — can this daily-return series build a factsheet? True
+ * when {@link normalizeDailyReturns} (sort, drop malformed rows, dedupe by date)
+ * leaves at least {@link MIN_FACTSHEET_SERIES_POINTS} rows. `buildFactsheetPayload`
+ * calls THIS predicate at its point-count gate, and the buildability probe calls
+ * it too, so the two cannot answer differently for the same series.
+ */
+export function hasBuildableSeries(rows: DailyReturn[]): boolean {
+  return normalizeDailyReturns(rows).length >= MIN_FACTSHEET_SERIES_POINTS;
+}
+
+/**
  * Phase 103 (MTM-04) — the ONE per-basis series derivation. Both the cash series
  * and the persisted MTM series flow through THIS function, so every dailies-
  * derivable panel (chart tracks + rolling + worst-10 + comparators + heatmaps +
@@ -364,7 +383,9 @@ export function buildFactsheetPayload(
   // bench window — comparator series just go flat on the unsupported
   // dates instead of dropping the whole factsheet. Drop only when the
   // raw series itself doesn't have 2 distinct dated observations.
-  if (dedup.length < 2) {
+  // D-04 (Phase 167.2.1): the gate is the shared predicate, so it normalizes a
+  // second time; O(n log n) on a few thousand rows, accepted for one gate.
+  if (!hasBuildableSeries(dailyReturns)) {
     console.warn(
       "[buildFactsheetPayload] strategy series has fewer than 2 unique dated observations — returning null",
       {
