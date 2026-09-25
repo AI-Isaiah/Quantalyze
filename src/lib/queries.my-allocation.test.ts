@@ -987,7 +987,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     expect(result).toHaveProperty("activeVenues");
   });
 
-  it("TC p7-02: no portfolio but has api_keys + snapshots → snapshotCount>0, equitySnapshots populated, equityDailyPoints derived", async () => {
+  it("TC p7-02: no portfolio but has api_keys + snapshots → snapshotCount>0 (the curve and its raw levels are withheld while rebuilding, D-02)", async () => {
     // SC3: allocator with no portfolio_strategies row still sees real
     // equity via the snapshot pipeline. Removes the !portfolio early-return.
     state.portfolios = [];
@@ -1025,8 +1025,10 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
     expect(result.portfolio).toBeNull();
-    expect(result.snapshotCount).toBeGreaterThan(0);
-    expect(result.equitySnapshots.length).toBeGreaterThan(0);
+    expect(result.snapshotCount).toBe(2);
+    // Phase 167.1.2 / D-02 (review round 1 SFH-03): the raw snapshot levels are
+    // withheld from the client payload with the curve; the count stays.
+    expect(result.equitySnapshots).toEqual([]);
     // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
     // so the display series is [] for every allocator; plan 11 restores the
     // content pin when it defines "ready".
@@ -1086,14 +1088,13 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
 
     // Any flagged row present → the dashboard explains the gap.
     expect(result.equityBaselineUnknown).toBe(true);
-    // Flagged rows excluded from the payload + the warm-up count.
-    expect(result.equitySnapshots.map((s) => s.asof)).toEqual([
-      "2026-03-10",
-      "2026-03-11",
-    ]);
+    // Flagged rows excluded from the warm-up count: 2 trustworthy of 4 rows. A
+    // call site that fed the raw array onward would count 4.
     expect(result.snapshotCount).toBe(2);
-    // The garbage dates never reach the series the curve is built from (the
-    // `equitySnapshots` assertion above).
+    // Phase 167.1.2 / D-02 (review round 1 SFH-03): the raw snapshot levels are
+    // withheld from the client payload with the curve, so the flagged rows'
+    // absence is pinned by the count above while the history is rebuilt.
+    expect(result.equitySnapshots).toEqual([]);
     // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
     // so the display series is [] for every allocator; plan 11 restores the
     // content pin when it defines "ready".
@@ -1236,7 +1237,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     expect(result.allKeysStale).toBe(true);
   });
 
-  it("TC p7-07 (f7): equitySnapshots of 5 daily rows → equityDailyPoints length 5, values preserved in order", async () => {
+  it("TC p7-07 (f7): 5 daily snapshot rows are counted; the curve and its raw levels are withheld while rebuilding (D-02)", async () => {
     state.portfolios = [P7_PORTFOLIO];
     const values = [100, 110, 105, 120, 115];
     state.allocatorEquitySnapshots = values.map((v, i) => ({
@@ -1249,8 +1250,12 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     }));
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
-    // The five rows reach the series the curve is built from, in order.
-    expect(result.equitySnapshots.map((s) => s.value_usd)).toEqual(values);
+    // The five rows were read. Phase 167.1.2 / D-02 (review round 1 SFH-03):
+    // their levels are withheld from the client payload with the curve, so the
+    // in-order content pin lives on the adapter itself
+    // (allocation-helpers.equity-adapter.test.ts) while the history is rebuilt.
+    expect(result.snapshotCount).toBe(5);
+    expect(result.equitySnapshots).toEqual([]);
     // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
     // so the display series is [] for every allocator; plan 11 restores the
     // content pin when it defines "ready".
@@ -3000,6 +3005,23 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     expect(result.snapshotCount).toBe(3);
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityDailyPoints).toEqual([]);
+  });
+
+  // Review round 1 (SFH-03): the raw levels the curve is built from are the
+  // same history. Leaving them on the payload meant a future widget, debug
+  // panel or export that reached for them would bypass D-02 with no test
+  // failing. The counts derived from them are computed first and stay.
+  it("the raw snapshot levels are withheld with the curve; snapshotCount and minHistoryDepthMonths stay", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.snapshotCount).toBe(3);
+    expect(result.minHistoryDepthMonths).toBe(24);
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equitySnapshots).toEqual([]);
   });
 
   it("the no-portfolio branch withholds the curve too (both branches spread the same producer)", async () => {

@@ -2803,6 +2803,12 @@ export interface MyAllocationDashboardPayload {
    * may still be running). The `history_depth_months` column carries
    * the per-venue retention cap so the UI can show venue-specific
    * warm-up copy (f9).
+   *
+   * Phase 167.1.2 / D-02: `[]` while `equityHistoryState` is not `"ready"`.
+   * These rows are the raw levels the withheld curve is built from, so they
+   * are withheld from the client payload with it (review round 1 SFH-03).
+   * `snapshotCount` and `minHistoryDepthMonths` are computed from the rows
+   * before they are withheld and stay populated.
    */
   equitySnapshots: Array<{
     asof: string;
@@ -3814,7 +3820,13 @@ export function derivePhase07Fields(
   }));
 
   return {
-    equitySnapshots,
+    // Phase 167.1.2 / D-02 (review round 1 SFH-03): the raw snapshot levels are
+    // the same history as the withheld curve, so they do not cross to the
+    // client either. Nothing on the client reads them today; withholding them
+    // keeps a future reader from bypassing D-02, and the 30s refresh from
+    // re-sending the full history. The two counts derived from them are
+    // computed above and stay.
+    equitySnapshots: equityHistoryState === "rebuilding" ? [] : equitySnapshots,
     holdingsSummary,
     snapshotCount,
     allKeysStale,
