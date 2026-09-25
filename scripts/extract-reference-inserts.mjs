@@ -1357,6 +1357,81 @@ export const SELF_TEST_KINDS = [
     audit: true,
     expect: "were measured — an applied migration was edited",
   },
+  // ── C5 (Phase 164.9.2): every C5 refusal reason has a red leg. Emit mode first.
+  {
+    id: "c5-update-nonliteral",
+    why: "C5: an UPDATE ... FROM reads EXISTING rows, which the restore has just dropped, so replaying it would write a value computed from nothing; an update: line over it must refuse, naming the token",
+    expect: "carries the token FROM — a joined, sub-selected or RETURNING UPDATE is not a literal C5 update (C5)",
+    greenStdout: /UPDATE fx_ref SET label = 'v' WHERE id IN \(1\);/,
+  },
+  {
+    id: "c5-update-function-call",
+    why: "C5: a call inside a replayed UPDATE can carry a side effect (net.http_*, pg_notify) or read session state (current_setting); only now() is admitted. The green leg also pins that `AND (` is a boolean group, not a call (plan 01 deviation 1)",
+    expect: "makes the non-literal call `current_setting(`",
+    greenStdout: /UPDATE fx_ref SET label = 'v', seen_at = now\(\) WHERE id = 1 AND \(label = 'a' OR label = 'b'\);/,
+  },
+  {
+    id: "c5-update-positional-param",
+    why: "C5: a `$1` outside a string is a positional parameter the replay cannot bind, so the statement is not literal. The green leg pins that a `$` INSIDE a string literal is masked and admitted",
+    expect: "carries a `$` (a dollar-quoted body or a positional parameter) — not a literal C5 update (C5)",
+    greenStdout: /UPDATE fx_ref SET label = 'costs \$1' WHERE id = 1;/,
+  },
+  {
+    id: "c5-update-dollar-tag",
+    why: "C5: a dollar-quoted literal in the SET would put a $-body into the replay section, where the restore's redaction grep must find none",
+    expect: "carries a dollar-quoted body — the replay section is kept body-free",
+    greenStdout: /UPDATE fx_ref SET label = 'plain' WHERE id = 1;/,
+  },
+  {
+    id: "c5-update-dollar-body",
+    why: "C1 for UPDATEs: an update: line whose only UPDATE sits inside a DO body must refuse, never descend into the body and replay it",
+    expect: "but the only UPDATE of public.fx_ref in this file is inside a dollar-quoted body at line",
+    greenStdout: /UPDATE fx_ref SET label = 'top-level' WHERE id = 1;/,
+  },
+  {
+    id: "c5-update-auth-target",
+    why: "C5 is public-only: auth.users survives the restore's DROP, so an UPDATE replayed there mutates a live shared-TEST row. The C3 auth.users exception is INSERT-only",
+    expect: "is on a C5 update: line, and C5 targets public only",
+    greenStdout: /-- refdata-update: 20260101000000_fx_a\.sql:\d+ public\.fx_ref/,
+  },
+  {
+    id: "c5-cte-prefixed-update",
+    why: "C5: `WITH … UPDATE` does not start with UPDATE and its CTE can read existing rows; it must be REFUSED by name rather than skipped in silence",
+    expect: "the statement is a CTE-prefixed UPDATE (`WITH … UPDATE`)",
+    greenStdout: /UPDATE fx_ref SET label = 'v' WHERE id = 1;/,
+  },
+  {
+    id: "c5-update-off-shape",
+    why: "C5: an UPDATE head the shape regex does not know (here the legal `UPDATE t * SET` inheritance spelling) is refused by name, never replayed on a guess. The green leg pins that ONLY and an AS alias are admitted",
+    expect: "the statement is not of the shape UPDATE [ONLY] public.fx_ref [[AS] alias] SET … (C5)",
+    greenStdout: /UPDATE ONLY fx_ref AS r SET label = 'v' WHERE r\.id = 1;/,
+  },
+  {
+    id: "c5-update-unterminated",
+    why: "C5: a trailing UPDATE with no `;` must never be emitted half-sliced (the INSERT side's unterminated-statement leg does not reach the UPDATE path)",
+    expect: "20260101000000_fx_a.sql:3 [public.fx_ref]: the statement is not terminated by `;`",
+    greenStdout: /UPDATE fx_ref SET label = 'v' WHERE id = 1;/,
+  },
+  {
+    id: "c5-update-count-drift",
+    why: "C5: pinned update:2, measured 1. ⛔ The GREEN leg is the ORDER leg: its allowlist lists the UPDATE line FIRST and the earlier file's INSERT line LAST, so only a (basename, offset) sort emits INSERT, UPDATE, then the later file's INSERT. Its greenAbsent refuses any refdata-expect for public.fx_ref other than its INSERT count of 1: an UPDATE adds no row",
+    expect: "the C5 line pins update:2 top-level statement(s) but 1 were measured",
+    greenStdout: /INSERT INTO fx_ref [\s\S]*UPDATE fx_ref [\s\S]*INSERT INTO fx_ref2/,
+    greenAbsent: /^-- refdata-expect: public\.fx_ref=(?!1$)/m,
+  },
+  {
+    id: "c5-duplicate-line",
+    why: "C5: two update: lines for one (file, table) would double-pin one measured count. The green leg pins the legal pair: one update: and one decline: line over a file holding a literal and a joined UPDATE, where only the literal one is emitted",
+    expect: "duplicate C5 line: a second update: line for",
+    greenStdout: /UPDATE fx_ref SET label = 'v' WHERE id = 1;/,
+    greenAbsent: /FROM fx_src/,
+  },
+  {
+    id: "c5-no-insert-line",
+    why: "C5: an allowlist of C5 lines alone replays no row the restore's count floor can measure, the same defect as an empty allowlist (plan 01 deviation 2)",
+    expect: "the allowlist carries C5 lines but NO INSERT line",
+    greenStdout: /-- refdata-update: 20260101000000_fx_a\.sql:\d+ public\.fx_ref/,
+  },
 ];
 
 function runLeg(kind, colour) {
