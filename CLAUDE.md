@@ -129,6 +129,10 @@ about the CLI link and the marker.
   for the key to do 2-5 s of work (`164.4.2.1-MEASUREMENT.md`). Re-measured 2026-09-25 with
   `grep -c 61616158`: **17×** in `ci.yml` (`python` 9, `e2e-seeded` 8, `test-db-drift` 0,
   `sql-tests` 0), **7×** in `supabase-migrate.yml`. This supersedes the 29× reading above.
+  ⛔ **CORRECTED 2026-09-25 (round-1 review, SFH-01):** "ordered after `apply-test` by the
+  schema-apply wait alone" is a MERGE-PUSH statement. The wait does not run on a
+  `pull_request`, so a PR-run `test-db-drift` has no ordering against `apply-test` or a
+  restore at all.
   (b) **Narrowed for `sql-tests`** by DECISION F. Its lane replays a PR's own new migration
   on top of the committed dump BEFORE merge (see the D-F note below), so its corpus gates
   run against the PR's schema instead of being red until merge. Nothing else about (b)
@@ -234,6 +238,11 @@ kept as lineage.
 schema-apply wait and the `needs: python` edge, and **no longer takes the mutex**. The
 wait is now its only ordering control, and `src/__tests__/critical-regressions.test.ts`
 pins it. The 2026-09-23 note above is kept as lineage.
+⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1 round-1 review, SFH-01):** "its only ordering
+control" holds on a merge push only. On a `pull_request` run the wait does not run, so
+VAC-08 has **NO ordering against `apply-test` or a dispatched restore** there. An overlap
+can red a PR, never turn a real drift green; re-run the check once both writers are idle.
+`docs/runbooks/shared-test-db-mutex.md` section 0 carries the detail.
 
 ### Current reading — ⛔ SUPERSEDED. The block below is the 2026-09-07 reading and it is STALE.
 

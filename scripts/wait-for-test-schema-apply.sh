@@ -10,6 +10,12 @@
 # step) and `test-db-drift` (before VAC-08). `test-db-drift` has had no acquire
 # step since Phase 164.4.2.1, so for it this wait is the ONLY ordering control
 # against `apply-test`. `sql-tests` stopped invoking it in Phase 164.4.2.
+# ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1 round-1 review, SFH-01 / WR-01):
+# "the ONLY ordering control" holds on a merge push only, and the sentence
+# above is kept as lineage. On a pull_request run this wait does not run (the
+# step's `if:` is merge-push only), so `test-db-drift`'s VAC-08 has NO ordering
+# against `apply-test` or a dispatched restore. See the note in `wait_for_apply`
+# and section 0 of docs/runbooks/shared-test-db-mutex.md.
 #
 # ⭐ WHY A WAIT AND NOT A LOCK. A mutex guarantees that no two holders overlap;
 # it never guarantees WHICH GOES FIRST. On a merge push, ci.yml's reader jobs
@@ -261,6 +267,19 @@ wait_for_apply() {
       # read-only, and an overlap makes them fail loudly, never pass falsely.
       # A restore's lock blocks them until COMMIT or their statement timeout.
       # A later commit's apply can only produce a loud false red.
+      # ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1 round-1 review, SFH-01 /
+      # WR-01): the note above is written from a merge push, and is kept as
+      # lineage. On a pull_request run this wait does not run (the step's
+      # `if:` is merge-push only), so VAC-08 has NO ordering against
+      # `apply-test` or a dispatched restore. An overlap can red a PR (a
+      # ledger lock wait past the retry budget, or a body-fetch race on the
+      # restore's COMMIT) that the key used to prevent. It cannot turn a real
+      # drift green: the restore is one transaction, and the frontier tip is
+      # computed from the checkout's own migrations. Re-run the PR check after
+      # the restore or apply. Do NOT widen the step's `if:` to PR events: this
+      # wait keys on GITHUB_SHA's own supabase-migrate.yml run, which never
+      # exists on a PR. On a merge push a seconds-wide window also remains
+      # between this wait's exit and VAC-08's first read.
       # `unknown` is deliberately NOT treated as clear: an unreadable probe
       # cannot rule an apply IN, which is the same reading the exhaustion
       # message already states.

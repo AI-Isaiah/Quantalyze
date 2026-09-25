@@ -64,6 +64,26 @@ lineage. Current state:
   dropping `needs: python`, which makes it queue behind `python` from the start and
   weakens the wait's appearance-grace assumption. **D**, a read-fence re-probe, which
   guards only against reds that already fail loudly.
+  ⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1 round-1 review, SFH-01 / WR-01): "That red
+  can already happen today … The key bought it nothing" is true for MERGE PUSHES ONLY,
+  and is kept above as lineage.** On a `pull_request` run the wait does not run (its
+  `if:` is merge-push only), so VAC-08 has **NO ordering against `apply-test` or a
+  dispatched restore**. Before this phase the key was the only thing keeping a PR-run
+  VAC-08 out of both, so on a PR the key did buy something, and three reds are new:
+  a restore's `TRUNCATE` of the ledger holds the presence query past its retry budget
+  (the "ledger presence query failed" MEASURE_FAIL); a body fetch races the restore's
+  COMMIT or a later apply's function replace ("could not read TEST's definition"); and
+  a multi-migration `apply-test` still in flight reads as a breach of
+  `FRONTIER_EXEMPT_CEILING`. On a merge push there is also a seconds-wide window
+  between the wait's exit and VAC-08's first read in which a later push's `apply-test`
+  or a restore can start. None of this turns a real drift green: the restore is one
+  transaction, and the frontier tip is computed from the checkout's own migrations.
+  It was accepted on that basis: every added outcome is loud, restores are rare
+  manual dispatches, and the key's cost was measured. **Triage:** a PR-run VAC-08 red
+  while `supabase-migrate.yml` or `test-restore-from-baseline.yml` was running is
+  this overlap. Re-run the PR check once both are idle. Do NOT widen the wait's `if:`
+  to PR events: it keys on `GITHUB_SHA`'s own `supabase-migrate.yml` run, which never
+  exists on a PR, so every PR run would sit out the appearance grace for nothing.
 - **The numbers live in
   `.planning/phases/164.4.2.1-driftoffmutex/164.4.2.1-MEASUREMENT.md`**: the BEFORE,
   the prediction, the verdict rule and the AFTER protocol. The AFTER is filled in from
@@ -738,6 +758,11 @@ acquire step any more. For it the wait runs before VAC-08, and it is the ONLY or
 control between VAC-08 and `apply-test`. `src/__tests__/critical-regressions.test.ts`
 pins that order. The two "before their acquire step" sentences in this section are
 kept as lineage and hold for `python` and `e2e-seeded`.
+⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1 round-1 review, SFH-01):** "the ONLY
+ordering control" holds on a merge push only. On a `pull_request` run the wait does
+not run, so `test-db-drift` has NO ordering control against `apply-test` or a
+restore at all (section 0 carries the consequence and the triage). The sentence
+above is kept as lineage.
 
 ⛔ **It waits BEFORE taking the key, never while holding it.** A job that waited
 while holding `61616158` would starve every other contender on a database other
