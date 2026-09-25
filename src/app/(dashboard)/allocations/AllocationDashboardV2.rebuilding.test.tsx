@@ -146,6 +146,29 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     expect(screen.queryByText("Sharpe")).toBeNull();
   });
 
+  // Review round 1 (WR-01 / SFH-01): a destructuring default fires on
+  // `undefined` alone, so a gate written as `=== "rebuilding"` let null, "" or
+  // any state added later (plan 11 may add one; a nullable DB column serialises
+  // as null) SHOW the curve and every KPI. Only an explicit "ready" may show it.
+  it.each([
+    ["null", null],
+    ["an empty string", ""],
+    ["an unrecognised state", "partial"],
+    ["a mis-cased ready", "Ready"],
+  ])("equityHistoryState = %s is treated as rebuilding (fail-closed)", (_label, value) => {
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityHistoryState={value as never}
+      />,
+    );
+    expect(screen.getByTestId("overview-equity-rebuilding")).toBeInTheDocument();
+    expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
+    expect(screen.queryByTestId("mock-factsheet-body")).toBeNull();
+    expect(screen.queryByText("Sharpe")).toBeNull();
+    expect(buildPayloadSpy).not.toHaveBeenCalled();
+  });
+
   // Positive control (moved behaviour, D-02): with the state explicitly "ready"
   // the same fixture DOES render the curve and the factsheet, so the absences
   // asserted above are the gate, not a broken fixture.

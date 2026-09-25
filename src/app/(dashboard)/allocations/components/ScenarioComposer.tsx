@@ -921,9 +921,8 @@ export function ScenarioComposer({
     allKeysStale,
     minHistoryDepthMonths,
     activeVenues,
-    // Phase 167.1.2 / D-02: a payload without the field is treated as
-    // "rebuilding" (fail-closed), matching the Overview.
-    equityHistoryState = "rebuilding",
+    // Phase 167.1.2 / D-02: read below as fail-closed, matching the Overview.
+    equityHistoryState,
   } = payload as MyAllocationDashboardPayload & {
     existingOutcomesByHoldingRef?: Record<string, unknown>;
   };
@@ -1027,7 +1026,9 @@ export function ScenarioComposer({
   // `scenarioOwnBookDelta` undefined (it needs >= 2 levels). The live-book KPIs
   // (`liveBaselineMetrics`) are a separate field and stay (D-03).
   const isBlankMode = entryMode === "blank";
-  const isOwnBookRebuilding = equityHistoryState === "rebuilding";
+  // Fail-closed: ONLY an explicit "ready" may show the own-book series. A
+  // missing field, null, "" or any later state all read as rebuilding.
+  const isOwnBookRebuilding = equityHistoryState !== "ready";
   const baselineEquityDailyPoints = useMemo(
     () => (isBlankMode || isOwnBookRebuilding ? [] : equityDailyPoints),
     [isBlankMode, isOwnBookRebuilding, equityDailyPoints],

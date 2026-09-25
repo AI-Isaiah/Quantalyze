@@ -16715,6 +16715,37 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
   });
 
+  // Review round 1 (WR-01 / SFH-01): the composer gate is fail-closed. A
+  // payload with NO field, null, "" or an unknown state withholds the own-book
+  // series exactly like "rebuilding"; only an explicit "ready" shows it. The
+  // 3-point curve is present in every case, so an absent delta is the gate.
+  it.each([
+    ["missing", undefined, true],
+    ["null", null, false],
+    ["an empty string", "", false],
+    ["an unrecognised state", "partial", false],
+  ])("equityHistoryState %s → the own-book series is withheld and disclosed (fail-closed)", (_label, value, deleteField) => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityHistoryState: value as never,
+    });
+    if (deleteField) {
+      delete (payload as Partial<MyAllocationDashboardPayload>).equityHistoryState;
+      expect("equityHistoryState" in payload).toBe(false);
+    }
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const props = lastChart();
+    expect(props.equityDailyPoints).toEqual([]);
+    expect(props.scenarioOwnBookDelta).toBeUndefined();
+    expect(screen.getByTestId("scenario-ownbook-rebuilding")).toBeInTheDocument();
+  });
+
   it("rebuilding: the live-book KPIs (liveBaselineMetrics) still reach the KPI strip (D-03)", () => {
     const payload = makePayload({
       equityDailyPoints: THREE_POINT_CURVE,

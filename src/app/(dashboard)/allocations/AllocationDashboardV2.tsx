@@ -66,11 +66,13 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     hasConnectedKeys = false,
     // Phase 167.1.2 / D-02 ("Hide it until correct"): while the history is
     // rebuilt the producer withholds the curve, and neither the curve nor any
-    // factsheet KPI computed from it renders. A payload without the field is
-    // treated as "rebuilding" (fail-closed).
-    equityHistoryState = "rebuilding",
+    // factsheet KPI computed from it renders.
+    equityHistoryState,
   } = props;
-  const isRebuilding = equityHistoryState === "rebuilding";
+  // Fail-closed: ONLY an explicit "ready" may show the curve. A missing field,
+  // null, "" or any state added later (a destructuring default fires on
+  // `undefined` alone) all read as rebuilding.
+  const isRebuilding = equityHistoryState !== "ready";
 
   const holdingsEmpty = holdingsSummary.length === 0;
 

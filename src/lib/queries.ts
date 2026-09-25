@@ -2910,8 +2910,9 @@ export interface MyAllocationDashboardPayload {
    * withheld (always `[]`) because both the legacy snapshot sum and the derived
    * curve can count one exchange account twice or read a no-sync day as zero,
    * so the curve and every ratio built from it are unreliable. Consumers render
-   * an honest "being rebuilt" state instead and treat a payload WITHOUT this
-   * field as `"rebuilding"` (fail-closed). `"ready"` is defined by plan 11 of
+   * an honest "being rebuilt" state instead and are fail-closed: every value
+   * other than an explicit `"ready"` (a missing field, `null`, `""`, a state
+   * added later) reads as `"rebuilding"`. `"ready"` is defined by plan 11 of
    * Phase 167.1.2; until then the producer never emits it.
    */
   equityHistoryState: "rebuilding" | "ready";
