@@ -806,6 +806,17 @@ def _capture_wedge_evidence(
     terminal cannot answer them, the fields are recorded ``not_captured`` WITH
     THE REASON — never filled in by logging in.
 
+    ⚠️ SFH-04 (164.6.5 review round 1) — ON A TRUE ``-10005`` THIS IS EXPECTED
+    TO CAPTURE NOTHING. Both reads cross the SAME terminal IPC the fault says is
+    dead (the MetaTrader5 package does not serve them for a session whose
+    ``initialize()`` just failed), so the realistic line is ``not_captured``
+    with the reason. It is kept because a partial wedge may still answer, and
+    the line says so honestly either way. The build evidence that does NOT need
+    that IPC — the terminal executable's file version — is read bridge-side by
+    the recycle's own remote source and logged as ``file_versions`` on the
+    recycle's lines. The broker server on each side of a switch is recorded by
+    nothing automatic (``TODOS.md`` ``MT5-SWITCH-WEDGE-CAUSE-01``).
+
     ⛔ THE BROKER SERVER IS RECORDED AS A COMPARISON, NEVER AS A NAME. This
     module's rule is that a value never reaches a log line (T-164.6.2-12), and
     ``MT5_SERVER`` is one of the three values ``_not_healed`` redacts BY VALUE, so
@@ -832,7 +843,8 @@ def _capture_wedge_evidence(
         return (
             f"build=not_captured connected=not_captured "
             f"session_server_matches_env=not_captured "
-            f"(terminal_info failed: {why}; account_info skipped)"
+            f"(terminal_info failed: {why}; account_info skipped; the "
+            "bridge-side file version is on the recycle's own line)"
         )
     build = terminal.get("build")
     connected = terminal.get("connected")
@@ -1226,7 +1238,9 @@ def _escalate_ipc_fault(
             f"relaunch_code={verdict.get('relaunch_code')} "
             f"relaunch_polls={verdict.get('relaunch_polls', 0)} "
             f"open_errors={verdict.get('open_errors')} "
-            f"terminate_errors={verdict.get('terminate_errors')}"
+            f"terminate_errors={verdict.get('terminate_errors')} "
+            f"file_versions={verdict.get('file_versions')} "
+            f"file_version_errors={verdict.get('file_version_errors')}"
             + (f" {post_relaunch}" if post_relaunch else "")
         )
     except Mt5SessionAbandoned as exc:

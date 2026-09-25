@@ -4851,6 +4851,23 @@ the verdicts into the repo. ⛔ Never write an account number or a broker server
 ⚠️ **The automatic recycle Phase 164.6.5 ships erases this evidence, because the wedge is process
 state.** Unless something records the build and the servers before the recycle, the next wedge
 heals with no evidence, and this item can never close by waiting.
+⛔ **CORRECTED 2026-09-25 (164.6.5 review round 1, SFH-04): what the heal records before the
+recycle is narrower than "the build and the servers", and this entry must not read as covered.**
+The sentence above is kept as lineage.
+- **In-process build and connection state: expected `not_captured` on a true `-10005`.** The
+  heal's pre-recycle `terminal_info()` crosses the same terminal IPC the fault names as dead, so
+  its evidence line records `not_captured` with the reason. It is kept only because a partial
+  wedge may still answer.
+- **Build, bridge-side: recorded, never run live.** The recycle's committed remote source reads
+  each `terminal64.exe` image's file version before ending it, and logs it as `file_versions` on
+  the recycle's lines. It is the file on disk at the running image's path. That equals the
+  running build unless a self-update replaced the file after launch, so it answers D-03a only
+  when no such replacement happened. This path has never run against the live terminal.
+- **Broker server on each side of the switch, and the Alerts and Journal state: recorded by
+  nothing automatic.** The pre-recycle `account_info()` needs the same dead IPC and is
+  budget-gated. The post-relaunch reads describe the NEW session, not the wedged one. Candidate
+  (c) still needs an operator reading taken before the heal's next monitor tick recycles the
+  terminal (`MT5_SESSION_POLL_INTERVAL_S`, 600 s by default).
 
 **Owner:** Phase 164.6.6 (MT5TERMINALISOLATION). It owns the shared-terminal ownership model that
 makes a switch happen at all, and the mechanism decides between its isolation options.

@@ -221,6 +221,12 @@ class _FakeRpycConn:
                 "exited": exited,
                 "open_errors": owner._scenario.get("open_errors", []),
                 "terminate_errors": owner._scenario.get("terminate_errors", []),
+                "file_versions": owner._scenario.get(
+                    "file_versions", [[5, 0, 0, 6182]] * matched
+                ),
+                "file_version_errors": owner._scenario.get(
+                    "file_version_errors", [0] * matched
+                ),
             }
         )
 

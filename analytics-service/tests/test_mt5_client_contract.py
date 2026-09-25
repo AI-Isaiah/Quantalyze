@@ -3889,7 +3889,13 @@ def _install_recycle_double(conn, *, returns=None, raises=None):
 
 
 def _recycle_verdict(
-    matched=1, terminated=1, exited=1, open_errors=(), terminate_errors=()
+    matched=1,
+    terminated=1,
+    exited=1,
+    open_errors=(),
+    terminate_errors=(),
+    file_versions=None,
+    file_version_errors=None,
 ):
     return json.dumps(
         dict(
@@ -3898,6 +3904,12 @@ def _recycle_verdict(
             exited=exited,
             open_errors=list(open_errors),
             terminate_errors=list(terminate_errors),
+            file_versions=(
+                [[5, 0, 0, 6182]] * matched if file_versions is None else file_versions
+            ),
+            file_version_errors=(
+                [0] * matched if file_version_errors is None else file_version_errors
+            ),
         )
     )
 
@@ -3925,11 +3937,16 @@ class _FakeWin32:
         open_refused=None,
         terminate_refused=None,
         not_exiting=(),
+        version=(5, 0, 0, 6182),
+        query_refused=None,
     ) -> None:
         self.procs = list(procs)
         self.open_refused = dict(open_refused or {})
         self.terminate_refused = dict(terminate_refused or {})
         self.not_exiting = set(not_exiting)
+        self.query_refused = dict(query_refused or {})
+        self.version = version
+        self.opened_for_query: list[int] = []
         self.last_error = 0
         self.terminated: list[int] = []
         self._cursor = 0
@@ -3942,8 +3959,17 @@ class _FakeWin32:
             "TerminateProcess",
             "WaitForSingleObject",
             "CloseHandle",
+            "QueryFullProcessImageNameW",
         ):
             setattr(self.kernel32, name, self._fn(getattr(self, "_" + name)))
+        self.version_dll = types.SimpleNamespace()
+        for name in (
+            "GetFileVersionInfoSizeW",
+            "GetFileVersionInfoW",
+            "VerQueryValueW",
+        ):
+            setattr(self.version_dll, name, self._fn(getattr(self, "_" + name)))
+        self._fixed = None
 
     @staticmethod
     def _fn(impl):
@@ -3972,6 +3998,12 @@ class _FakeWin32:
         return self._fill(ref)
 
     def _OpenProcess(self, access, inherit, pid):
+        if access == 0x1000:  # PROCESS_QUERY_LIMITED_INFORMATION — the version read
+            self.opened_for_query.append(pid)
+            if pid in self.query_refused:
+                self.last_error = self.query_refused[pid]
+                return 0
+            return 20_000 + pid
         if pid in self.open_refused:
             self.last_error = self.open_refused[pid]
             return 0
@@ -3991,10 +4023,39 @@ class _FakeWin32:
     def _CloseHandle(self, handle):
         return 1
 
+    def _QueryFullProcessImageNameW(self, handle, flags, buf, size_ref):
+        buf.value = "C:/terminal/terminal64.exe"
+        return 1
+
+    def _GetFileVersionInfoSizeW(self, path, _handle):
+        return 64
+
+    def _GetFileVersionInfoW(self, path, _zero, length, data):
+        return 1
+
+    def _VerQueryValueW(self, data, sub_block, block_ref, len_ref):
+        import ctypes
+        from ctypes import wintypes
+
+        # ⚠️ `wintypes.DWORD`, not `c_uint32`: off Windows it is `c_ulong` (8 bytes
+        # on this platform), and the struct the committed source casts to is
+        # built from it — a mismatched layout reads zeros (measured).
+        a, b, c, d = self.version
+        self._fixed = (wintypes.DWORD * 4)(
+            0xFEEF04BD, 0x10000, (a << 16) | b, (c << 16) | d
+        )
+        block_ref._obj.value = ctypes.addressof(self._fixed)
+        return 1
+
     def run(self, monkeypatch) -> dict:
         import ctypes
 
-        monkeypatch.setattr(ctypes, "WinDLL", lambda name, **_k: self.kernel32, raising=False)
+        monkeypatch.setattr(
+            ctypes,
+            "WinDLL",
+            lambda name, **_k: self.version_dll if name == "version" else self.kernel32,
+            raising=False,
+        )
         monkeypatch.setattr(ctypes, "get_last_error", lambda: self.last_error, raising=False)
         namespace: dict = {}
         exec(mt5_client_mod._REMOTE_TERMINAL_RECYCLE_SRC, namespace)  # noqa: S102
@@ -4036,6 +4097,8 @@ def test_TERMINAL_RECYCLE_a_live_session_sends_the_committed_source_then_relaunc
         "exited": 1,
         "open_errors": [],
         "terminate_errors": [],
+        "file_versions": [[5, 0, 0, 6182]],
+        "file_version_errors": [0],
         "authorized": True,
         "relaunch_code": None,
     }
@@ -4096,7 +4159,9 @@ def test_TERMINAL_RECYCLE_the_COMMITTED_remote_body_counts_and_names_every_refus
 
     verdict = win32.run(monkeypatch)
 
-    assert verdict == {
+    assert {k: verdict[k] for k in (
+        "matched", "terminated", "exited", "open_errors", "terminate_errors"
+    )} == {
         "matched": 4,
         "terminated": 2,
         "exited": 1,
@@ -4104,6 +4169,31 @@ def test_TERMINAL_RECYCLE_the_COMMITTED_remote_body_counts_and_names_every_refus
         "terminate_errors": [87],
     }
     assert win32.terminated == [11, 15], "a non-terminal process was ended"
+
+
+def test_TERMINAL_RECYCLE_SFH04_the_BUILD_is_read_bridge_side_before_the_terminate(
+    monkeypatch,
+):
+    """⭐ SFH-04 (164.6.5 review round 1). On a true `-10005` the heal's own
+    `terminal_info()` crosses the dead terminal IPC and is `not_captured`, so the
+    D-03a build hypothesis never got evidence. The executable's file version
+    does not need that IPC: the committed source reads it per matched process,
+    BEFORE ending it, as four ints and never the image path. A failed read is
+    an int code and must not stop the terminate."""
+    win32 = _FakeWin32(
+        [(31, "terminal64.exe"), (32, "terminal64.exe")],
+        version=(5, 0, 0, 6182),
+        query_refused={32: 5},
+    )
+
+    verdict = win32.run(monkeypatch)
+
+    assert verdict["file_versions"] == [[5, 0, 0, 6182], None]
+    assert verdict["file_version_errors"] == [0, 5]
+    assert win32.terminated == [31, 32], (
+        "a failed version read stopped the terminate that follows it"
+    )
+    assert "terminal64" not in json.dumps(verdict), "the image path left the bridge"
 
 
 def test_TERMINAL_RECYCLE_the_COMMITTED_remote_body_reports_matching_NOTHING(monkeypatch):

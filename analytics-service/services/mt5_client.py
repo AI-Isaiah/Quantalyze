@@ -907,6 +907,19 @@ def {_REMOTE_MATERIALIZE_FN}(deals):
 # Each refusal now appends its `GetLastError()` — an INT, read through
 # `use_last_error=True` — to `open_errors` / `terminate_errors`. Still a
 # committed literal: only the RETURN dict grew.
+#
+# ⭐ SFH-04 (164.6.5 review round 1) — THE BUILD, READ BRIDGE-SIDE, BEFORE THE
+# TERMINATE. The heal's pre-recycle capture reads the build through
+# `terminal_info()`, which crosses the SAME dead terminal IPC a `-10005` names,
+# so on a true wedge it is expected to be `not_captured`. The one piece of D-03a
+# evidence that does not need that IPC is the terminal's EXECUTABLE: for each
+# matched process this reads the file version of its image (`QueryFullProcess
+# ImageNameW` + `GetFileVersionInfoW`), returned as four INTS in
+# `file_versions` (the image PATH is never returned: it names the prefix). ⚠️ It
+# is the file ON DISK at the running image's path — the running build unless the
+# file was replaced after launch, which a self-update may do. A failure is an int
+# in `file_version_errors` (`-1` for a Python-side raise) and NEVER blocks the
+# terminate that follows it. ⚠️ Like the terminate, never exercised live.
 _REMOTE_TERMINAL_RECYCLE_FN = "_qz_recycle_terminal_process"
 _REMOTE_TERMINAL_RECYCLE_SRC = """
 def _qz_recycle_terminal_process(exit_wait_ms):
@@ -917,8 +930,17 @@ def _qz_recycle_terminal_process(exit_wait_ms):
     image = "terminal64.exe"
     th32cs_snapprocess = 0x00000002
     process_terminate = 0x0001
+    process_query_limited_information = 0x1000
     synchronize = 0x00100000
     wait_object_0 = 0x00000000
+
+    class FixedFileInfo(ctypes.Structure):
+        _fields_ = [
+            ("dwSignature", wintypes.DWORD),
+            ("dwStrucVersion", wintypes.DWORD),
+            ("dwFileVersionMS", wintypes.DWORD),
+            ("dwFileVersionLS", wintypes.DWORD),
+        ]
 
     class ProcessEntry32W(ctypes.Structure):
         _fields_ = [
@@ -945,6 +967,57 @@ def _qz_recycle_terminal_process(exit_wait_ms):
     kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     kernel32.WaitForSingleObject.restype = wintypes.DWORD
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+
+    def file_version(pid):
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return None, int(ctypes.get_last_error())
+        try:
+            size = wintypes.DWORD(1024)
+            path = ctypes.create_unicode_buffer(1024)
+            if not kernel32.QueryFullProcessImageNameW(
+                handle, 0, path, ctypes.byref(size)
+            ):
+                return None, int(ctypes.get_last_error())
+        finally:
+            kernel32.CloseHandle(handle)
+        ver = ctypes.WinDLL("version", use_last_error=True)
+        ver.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p]
+        ver.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+        ver.GetFileVersionInfoW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+        ]
+        ver.VerQueryValueW.argtypes = [
+            ctypes.c_void_p,
+            wintypes.LPCWSTR,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.UINT),
+        ]
+        length = ver.GetFileVersionInfoSizeW(path.value, None)
+        if not length:
+            return None, int(ctypes.get_last_error())
+        data = ctypes.create_string_buffer(length)
+        if not ver.GetFileVersionInfoW(path.value, 0, length, data):
+            return None, int(ctypes.get_last_error())
+        block = ctypes.c_void_p()
+        block_len = wintypes.UINT()
+        if not ver.VerQueryValueW(
+            data, chr(92), ctypes.byref(block), ctypes.byref(block_len)
+        ):
+            return None, int(ctypes.get_last_error())
+        fixed = ctypes.cast(block, ctypes.POINTER(FixedFileInfo)).contents
+        high = int(fixed.dwFileVersionMS)
+        low = int(fixed.dwFileVersionLS)
+        return [high >> 16, high & 0xFFFF, low >> 16, low & 0xFFFF], 0
 
     snapshot = kernel32.CreateToolhelp32Snapshot(th32cs_snapprocess, 0)
     if snapshot is None or snapshot == ctypes.c_void_p(-1).value:
@@ -965,7 +1038,15 @@ def _qz_recycle_terminal_process(exit_wait_ms):
     exited = 0
     open_errors = []
     terminate_errors = []
+    file_versions = []
+    file_version_errors = []
     for pid in pids:
+        try:
+            version, version_error = file_version(pid)
+        except Exception:
+            version, version_error = None, -1
+        file_versions.append(version)
+        file_version_errors.append(version_error)
         handle = kernel32.OpenProcess(process_terminate | synchronize, False, pid)
         if not handle:
             open_errors.append(int(ctypes.get_last_error()))
@@ -986,6 +1067,8 @@ def _qz_recycle_terminal_process(exit_wait_ms):
             exited=exited,
             open_errors=open_errors,
             terminate_errors=terminate_errors,
+            file_versions=file_versions,
+            file_version_errors=file_version_errors,
         )
     )
 """
@@ -2200,6 +2283,12 @@ class Mt5Client:
             # only: a remote string never reaches a log line from here.
             open_errors = [int(code) for code in counts["open_errors"]]
             terminate_errors = [int(code) for code in counts["terminate_errors"]]
+            # SFH-04 — four ints per matched process, or None; never a path.
+            file_versions = [
+                None if v is None else [int(part) for part in v][:4]
+                for v in counts["file_versions"]
+            ]
+            file_version_errors = [int(c) for c in counts["file_version_errors"]]
         except (TypeError, ValueError, KeyError):
             raise Mt5ClientError(
                 0, "MT5 terminal recycle returned a malformed verdict"
@@ -2216,13 +2305,16 @@ class Mt5Client:
         # account.
         logger.warning(
             "Mt5Client.recycle_terminal_process: terminate crossed — matched=%d "
-            "terminated=%d exited=%d open_errors=%s terminate_errors=%s; issuing "
-            "the relaunch probe now (a later abandonment does not undo this).",
+            "terminated=%d exited=%d open_errors=%s terminate_errors=%s "
+            "file_versions=%s file_version_errors=%s; issuing the relaunch probe "
+            "now (a later abandonment does not undo this).",
             matched,
             terminated,
             exited,
             open_errors,
             terminate_errors,
+            file_versions,
+            file_version_errors,
         )
         authorized = True
         relaunch_code: int | None = None
@@ -2237,6 +2329,8 @@ class Mt5Client:
             "exited": exited,
             "open_errors": open_errors,
             "terminate_errors": terminate_errors,
+            "file_versions": file_versions,
+            "file_version_errors": file_version_errors,
             "authorized": authorized,
             "relaunch_code": relaunch_code,
         }
