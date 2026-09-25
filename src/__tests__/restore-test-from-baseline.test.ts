@@ -2577,3 +2577,71 @@ describe("restore-test-from-baseline.sh — F-R2-02: the marker predicates are r
     ).toBe(0);
   });
 });
+
+describe("restore-test-from-baseline.sh — 164.9.2 W6: REFDATA_ENTRY_N counts INSERT-class lines only", () => {
+  // ⛔ WHY THIS MATTERS. `REFDATA_ENTRY_N` feeds two things: the restore note
+  // "… from N allowlist line(s) …, each with a pinned statement count", and the
+  // ZERO-entries refusal that stops a restore which would replay no row. A C5 line
+  // (`update:<n>` / `decline:<n>`) pins no row count. Counted as an entry, it makes
+  // the note false (the real allowlist would read 28, not 22) and lets an allowlist
+  // holding ONLY C5 lines pass the refusal while replaying nothing the count floor
+  // can measure: the Phase 164.8 empty-restore defect with a non-zero number on it.
+  // The arm is the shipped line's BYTES, executed, never a restatement of the awk.
+  const PREFIX = 'REFDATA_ENTRY_N=$(awk ';
+  const liveLine = (src: string): string => {
+    const hits = liveLines(src).filter(({ line }) => line.trim().startsWith(PREFIX));
+    expect(hits.length, "REFDATA_ENTRY_N is not assigned by exactly ONE live awk line").toBe(1);
+    return hits[0].line.trim();
+  };
+  const run = (line: string, allowlist: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), "refdata-entry-n-"));
+    try {
+      const p = join(dir, "allowlist.txt");
+      writeFileSync(p, allowlist);
+      const r = spawnSync("bash", ["-c", `${line}\nprintf '%s' "$REFDATA_ENTRY_N"`], {
+        encoding: "utf8",
+        env: { ...process.env, REFDATA_ALLOWLIST: p },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      return r.stdout;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const MIXED = [
+    "# header comment",
+    "",
+    "a.sql\tpublic.t\tupdate:1\t# C5 replay line, above its INSERT on purpose",
+    "a.sql\tpublic.t\t2\t# INSERT",
+    "b.sql\tpublic.u\t1\t# INSERT",
+    "c.sql\tpublic.t\tdecline:1\t# C5 decline",
+    "",
+  ].join("\n");
+  const ONLY_C5 = "a.sql\tpublic.t\tupdate:1\t# only a C5 line\nc.sql\tpublic.t\tdecline:1\t# and a decline\n";
+
+  it("the live line counts the two INSERT lines of a mixed allowlist, and ZERO for a C5-only one", () => {
+    const line = liveLine(SRC);
+    expect(run(line, MIXED)).toBe("2");
+    expect(run(line, ONLY_C5), "a C5-only allowlist must read 0 so the ZERO-entries refusal fires").toBe("0");
+  });
+
+  it("the real allowlist reads 22 INSERT entries and the fixture 1, although they hold C5 lines", () => {
+    const line = liveLine(SRC);
+    expect(run(line, read("scripts/restore-test-refdata-allowlist.txt"))).toBe("22");
+    expect(run(line, read(`${FIXTURES}/refdata-allowlist.txt`))).toBe("1");
+  });
+
+  it("CALIBRATION — with the field-3 filter removed, the same line counts C5 lines and the pin goes RED", () => {
+    const line = liveLine(SRC);
+    const filter = " && $3 ~ /^[1-9][0-9]*$/";
+    expect(line.includes(filter), "the field-3 filter is not in the live line, so this calibration cannot remove it").toBe(true);
+    const neutered = line.replace(filter, "");
+    expect(neutered).not.toBe(line);
+    expect(run(neutered, MIXED)).toBe("4");
+    expect(run(neutered, ONLY_C5)).toBe("2");
+    // …and the mutated SCRIPT fails the live-line pin above in the same way.
+    const mutatedSrc = SRC.replace(line, neutered);
+    expect(mutatedSrc).not.toBe(SRC);
+    expect(run(liveLine(mutatedSrc), ONLY_C5)).not.toBe("0");
+  });
+});

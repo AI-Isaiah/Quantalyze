@@ -105,6 +105,13 @@
 #                             not exist on the throwaway lane, so the self-test
 #                             points this at public.fx_keep's `status` column
 #                             (arms 31/32).
+#                             ⛔ CORRECTED 2026-09-25 (Phase 164.9.2 C5): the
+#                             INSERT-only sentence above is LINEAGE. Literal
+#                             top-level UPDATEs on replayed public tables now
+#                             replay in migration filename order, so a row still
+#                             in the wrong state means an UPDATE it needs was
+#                             declined, left unlisted, or replayed out of order
+#                             (arms 33/34). The leg itself is unchanged.
 #   REFDATA_WRONGSTATE_ID     default 00000000-0000-0000-0000-000000000000 (the
 #                             teaser sentinel row's id); compared as ::text so
 #                             both a uuid and the fixture's integer id resolve
@@ -114,6 +121,9 @@
 #                             20260521150000_universal_signup_approval_gate.sql
 #                             :28-31 sets and the INSERT-only replay never
 #                             re-applies.
+#                             ⛔ CORRECTED 2026-09-25 (Phase 164.9.2 C5): that
+#                             UPDATE is now replayed by an update: allowlist
+#                             line; the sentence above is lineage.
 #                             ⛔ ALL FOUR REACH SQL — TABLE and COL as bare
 #                             identifiers, ID and EXPECTED inside a string
 #                             literal — so each is CHARSET-REFUSED before any
@@ -378,6 +388,13 @@ REFDATA_KIND_CHECK="${REFDATA_KIND_CHECK:-compute_jobs_kind_check}"
 # default the leg would be a permanent no-op there; the self-test points it at
 # `public.fx_keep`'s new `status` column, which baseline-fixture.sql and its
 # allowlisted replay carry for exactly this reason (arms 31/32).
+# ⛔ CORRECTED 2026-09-25 (Phase 164.9.2 C5): the INSERT-only and "never
+# reapplies" sentences above are LINEAGE. Literal top-level UPDATEs on replayed
+# public tables now replay in migration filename order, 20260521150000's
+# sentinel UPDATE among them, so a row still in the wrong state means an UPDATE
+# it needs was declined, left unlisted, or replayed out of order. See the
+# allowlist's C5 and SCOPE BOUNDARY blocks. The seams and defaults below are
+# unchanged (criterion 3); arms 33/34 prove the leg against a replayed UPDATE.
 REFDATA_WRONGSTATE_TABLE="${REFDATA_WRONGSTATE_TABLE:-public.profiles}"
 REFDATA_WRONGSTATE_ID="${REFDATA_WRONGSTATE_ID:-00000000-0000-0000-0000-000000000000}"
 REFDATA_WRONGSTATE_COL="${REFDATA_WRONGSTATE_COL:-manager_status}"
@@ -859,9 +876,16 @@ refuse_bad_refdata_allowlist() {
   # EMPTY IS AN ERROR, and it is checked HERE rather than left to the extractor:
   # the extractor's own empty-allowlist refusal is a second reading of the same
   # fact, and a guard whose only arm reaches the OTHER layer is unmeasured.
-  REFDATA_ENTRY_N=$(awk '!/^[[:space:]]*(#|$)/ { c++ } END { print c+0 }' "$REFDATA_ALLOWLIST")
+  #
+  # ⛔ 164.9.2 (plan-checker W6): ONLY INSERT-class lines count — field 3 a bare
+  # positive integer. A C5 line (`update:<n>` / `decline:<n>`) pins no row
+  # count, so counting it would make the note below call it "a pinned statement
+  # count", and would let an allowlist holding ONLY C5 lines pass this refusal
+  # while replaying no row the count floor can measure. Arm 34 leg (b) feeds
+  # exactly that allowlist.
+  REFDATA_ENTRY_N=$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && $3 ~ /^[1-9][0-9]*$/ { c++ } END { print c+0 }' "$REFDATA_ALLOWLIST")
   if [ "$REFDATA_ENTRY_N" -eq 0 ]; then
-    fail "the reference-data allowlist ${REFDATA_ALLOWLIST} carries ZERO entries. An empty allowlist replays NOTHING, so this restore would commit a database whose ledger swears every seed migration applied while every table those migrations seeded is EMPTY — that is the Phase 164.8 defect, not a clean run."
+    fail "the reference-data allowlist ${REFDATA_ALLOWLIST} carries ZERO entries. An empty allowlist replays NOTHING, so this restore would commit a database whose ledger swears every seed migration applied while every table those migrations seeded is EMPTY — that is the Phase 164.8 defect, not a clean run. C5 lines (update: or decline:) alone do not count: they replay no row the count floor can measure."
   fi
 
   local tmp rc=0
@@ -1406,7 +1430,7 @@ TXN_MID
   # `refuse_bad_refdata_allowlist` made: that one is deleted with its mktemp, and
   # a `refdata.sql` that lives beside `restore.sql` is what arm 23 mutates and
   # what a human reads after a failed run.
-  local refdata_rc=0 refdata_n
+  local refdata_rc=0 refdata_n refdata_update_n
   node "$REFDATA_EXTRACTOR" --allowlist "$REFDATA_ALLOWLIST" --migrations "$MIGRATIONS_DIR" \
     > "$RESTORE_OUT_DIR/refdata.sql" 2> "$RESTORE_OUT_DIR/refdata.err" || refdata_rc=$?
   if [ "$refdata_rc" -ne 0 ]; then
@@ -1414,6 +1438,10 @@ TXN_MID
     fail "reference-data extraction refused (exit ${refdata_rc}); nothing was replayed and no transaction was assembled."
   fi
   refdata_n=$(awk '/^-- refdata: /{ c++ } END { print c+0 }' "$RESTORE_OUT_DIR/refdata.sql")
+  # 164.9.2 C5: the replayed literal UPDATEs carry their OWN trailer, so they
+  # never move `refdata_n` (the INSERT count the note below reports) or the
+  # count floor. Counted separately so a restore log is evidence that C5 ran.
+  refdata_update_n=$(awk '/^-- refdata-update: /{ c++ } END { print c+0 }' "$RESTORE_OUT_DIR/refdata.sql")
 
   # ⛔ PITFALL 1 — THE SEARCH_PATH BRACKET IS LOAD-BEARING, NOT HYGIENE. At this
   # point in the stream the session's path is `pg_catalog` (the TXN_MID line
@@ -1554,6 +1582,10 @@ BEGIN
   -- stay the two legs above's job. A scalar subquery, not a JOIN, so an ABSENT
   -- row is LOUD (actual is NULL, the CASE below names it) rather than
   -- vanishing out of the comparison the way a JOIN would silently drop it.
+  -- CORRECTED 2026-09-25 (Phase 164.9.2 C5): the INSERT-only sentence above is
+  -- LINEAGE. Literal top-level UPDATEs on replayed public tables now replay in
+  -- migration filename order, so this leg now catches an UPDATE that was
+  -- declined, left unlisted, or replayed out of order. The leg is unchanged.
   SELECT CASE
            WHEN w.actual IS NULL THEN
              format('%s.%s for id=%s: the row is ABSENT after the replay',
@@ -1585,7 +1617,13 @@ BEGIN
     RAISE EXCEPTION 'restore aborted: reference table(s) are SHORT after the replay — %, and each allowlisted statement inserts at least one row into a table the DROP had just emptied, so at least one statement did not land. A PARTIAL replay commits a ledger that swears its seed migration applied; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1)', v_short;
   END IF;
   IF v_wrong_state IS NOT NULL THEN
-    RAISE EXCEPTION 'restore aborted: reference row(s) came back in the WRONG STATE after the replay — %. The replay reproduces INSERT effects only; a later migration that UPDATEd this row was never re-applied, so the row is present at the right count but not the value a real restore should carry ([164.8.1-REPLAY-INSERT-ONLY-SCOPE]). Not closable by editing the allowlist — an UPDATE is not a literal INSERT (C2) — see the allowlist''s own SCOPE BOUNDARY block', v_wrong_state;
+    -- LINEAGE, the explanatory clause this RAISE carried until 2026-09-25: The
+    -- replay reproduces INSERT effects only; a later migration that UPDATEd this
+    -- row was never re-applied ... Not closable by editing the allowlist, an
+    -- UPDATE is not a literal INSERT (C2). CORRECTED 2026-09-25 (Phase 164.9.2
+    -- C5, D-01): only that clause changed. The prefix, the argument, the
+    -- predicate and the seams are byte-identical.
+    RAISE EXCEPTION 'restore aborted: reference row(s) came back in the WRONG STATE after the replay — %. CORRECTED 2026-09-25 (Phase 164.9.2 C5): literal top-level UPDATEs on replayed public tables now replay in migration filename order, so a row still in the wrong state means an UPDATE it needs was declined, left unlisted, or replayed out of order; the row is present at the right count but not the value a real restore should carry ([164.8.1-REPLAY-INSERT-ONLY-SCOPE]). See the allowlist''s C5 and SCOPE BOUNDARY blocks', v_wrong_state;
   END IF;
 
   -- The SECOND partial-replay leg, and it is INDEPENDENT of the count floor
@@ -1626,6 +1664,7 @@ END
 TXN_REFDATA_GATE
 
   note "refdata: ${refdata_n} statement(s) replayed into ${#REFDATA_TABLES[@]} table(s), gated inside the transaction against each table's pinned statement count (count(*) >= expected, not merely non-empty) and against ${REFDATA_KIND_CHECK} over ${REFDATA_KIND_REGISTRY}"
+  note "refdata: ${refdata_update_n} C5 update statement(s) replayed in migration filename order inside the same transaction"
 
   # ── the ledger ───────────────────────────────────────────────────────────
   # The DDL is the CLI's OWN (supabase/cli v2.98.2, its migration-history package).
@@ -2182,6 +2221,10 @@ main() {
 #            structural line moved -> it MUST; (d) the normalisation actually
 #            rewrote something, so (a) cannot pass vacuously. No lane: the
 #            function under test is pure text.
+#   arm 34 — (a) the fixture's C5 update: line removed -> the row stays at
+#            its DEFAULT and the unchanged value-pinning leg aborts, rolled back;
+#            (b) an allowlist holding ONLY that C5 line -> refused as EMPTY
+#            before any read, because REFDATA_ENTRY_N counts INSERT lines only.
 #
 # ── REDACTION IS A CHECK WITH A SUBJECT (T-164.8-05) ────────────────────────
 # Every arm's combined output is captured, and after EVERY arm the harness greps
@@ -3833,6 +3876,14 @@ FRESHSTUB
     local n
     n=$(lane_q "SELECT status FROM public.fx_keep WHERE id = 3;")
     [ "$n" = "verified" ] || { echo "MEASURE_FAIL: the premise is broken — public.fx_keep id=3 holds status='${n}', not 'verified', so the C5 UPDATE did not land after its INSERT"; return 1; }
+    # The C5 note is the restore log's evidence that C5 ran, and it reads the
+    # fixture's ONE update: line; the entry note still reads 1 although the
+    # fixture allowlist now holds two lines, because REFDATA_ENTRY_N counts
+    # INSERT-class lines only (164.9.2, plan-checker W6).
+    grep -aqF 'refdata: 1 C5 update statement(s) replayed in migration filename order inside the same transaction' "$out" \
+      || { echo "MEASURE_FAIL: the restore log does not carry the C5 note with count 1, so a green run is no evidence that the UPDATE replayed"; return 1; }
+    grep -aqF 'refdata: 1 table(s) from 1 allowlist line(s)' "$out" \
+      || { echo "MEASURE_FAIL: the entry note does not read 1 allowlist line(s) — the C5 update: line was counted as a pinned-statement entry"; return 1; }
     return 0
   }
 
@@ -3841,6 +3892,8 @@ FRESHSTUB
   # is not replayed, row id=3 stays at its DEFAULT, and the unchanged wrong-state
   # leg must abort and roll back. Without this RED, arm 33 alone would not rule
   # out a leg that is quiet on id=3 whatever the replay did.
+  # Leg (b) feeds an allowlist holding ONLY the C5 line and must be refused as
+  # empty (plan-checker W6).
   arm_c5_update_red() {
     setup_lane || return 1
     local scratch="$SELFTEST_TMPD/refdata-arm34"
@@ -3868,6 +3921,26 @@ FRESHSTUB
     local n
     n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
     [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — a WRONG-STATE row COMMITTED instead of rolling back."; return 1; }
+
+    # (b) AN ALLOWLIST HOLDING ONLY THE C5 LINE (plan-checker W6). It replays no
+    #     row the count floor can measure, so it is the empty-allowlist defect
+    #     and must be refused before any read, exactly as arm 24 leg (b) is.
+    awk -F '\t' '!/^[[:space:]]*(#|$)/ && $3 == "update:1"' "$FIXTURES/refdata-allowlist.txt" > "$scratch/only-c5.txt"
+    [ "$(wc -l < "$scratch/only-c5.txt" | tr -d ' ')" = "1" ] \
+      || { echo "MEASURE_FAIL (b): the only-C5 scratch allowlist does not hold exactly the one update:1 line, so this leg would prove nothing"; return 1; }
+    ARM_REFDATA_ALLOWLIST="$scratch/only-c5.txt"
+    out="$SELFTEST_TMPD/a34b.out"; rc=0
+    arm_env preflight a34b > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (b): an allowlist holding only a C5 line exited ${rc}, expected 1"; return 1; }
+    grep -aq 'carries ZERO entries' "$out" \
+      || { echo "MEASURE_FAIL (b): the refusal is not this script's empty-allowlist one — a C5 line was counted as an entry"; return 1; }
+    grep -aq 'that is the Phase 164.8 defect, not a clean run' "$out" \
+      || { echo "MEASURE_FAIL (b): the refusal does not say what emptiness would silently produce"; return 1; }
+    if grep -aq 'pre-census (read-only)' "$out"; then
+      echo "MEASURE_FAIL (b): the pre-census RAN. The refusal did not fire before the first read of the database."
+      return 1
+    fi
     return 0
   }
 

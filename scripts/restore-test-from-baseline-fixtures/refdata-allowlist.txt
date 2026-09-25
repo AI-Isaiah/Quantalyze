@@ -16,6 +16,11 @@
 # ONE entry, on purpose: the fixture proves the MECHANISM (extract → replay under a
 # public search_path → gate non-empty → census) end to end, not the corpus.
 #
+# ⭐ 164.9.2 C5: the `update:1` line below is NOT a second entry. It names the
+# fixture's one literal top-level UPDATE and pins no row count, so the restore's
+# REFDATA_ENTRY_N (INSERT lines only) still reads 1. It sits ABOVE the INSERT
+# line on purpose: arm 33 goes RED if the extractor ever emits in line order.
+#
 # ⛔ THE PINNED COUNT IS 2 STATEMENTS OVER 3 ROWS, AND THE GAP IS DELIBERATE. The
 # gate compares rows against STATEMENTS, so the fixture must be able to lose a row
 # and still clear the floor (arm 23 leg (c), which must reach the registry/CHECK
