@@ -31,10 +31,13 @@ The capability rule (``classify_trade_capability``) is TRI-state, not boolean:
 
     ⚠️ 161-02: TWO independent settings can put it off — the Expert-Advisors
     *"Allow algorithmic trading"* option (``Enabled`` in ``[Experts]``, which is
-    what ``trade_allowed`` actually reports and which the gateway re-sets off on
-    every account change) and MetaQuotes' separate *"Disable automatic trading
-    through the external Python API"* checkbox (``Api``, reported as
-    ``tradeapi_disabled``). The VERDICT is the same either way; only the operator
+    what ``trade_allowed`` actually reports) and MetaQuotes' separate *"Disable
+    automatic trading through the external Python API"* checkbox (``Api``,
+    reported as ``tradeapi_disabled``). ⛔ CORRECTED 2026-09-25 (164.6.5-06): this
+    paragraph said the gateway re-sets the first option off on EVERY account
+    change. It does so only while *"Disable algorithmic trading when the account
+    has been changed"* is ticked, and that box was founder-read UNCHECKED on
+    2026-09-24 — see ``ACCOUNT_CHANGE_ALGO_DISABLE_OPTION`` below. The VERDICT is the same either way; only the operator
     copy differs, which is why the cause is chosen at ONE seam
     (``mt5_probe.mt5_gateway_misconfigured_detail``) rather than assumed.
 
@@ -45,7 +48,7 @@ this module names that method only in prose, without call parentheses.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from services.mt5_client import Mt5ClientError, Mt5LoginRefusedError
 
@@ -295,6 +298,37 @@ def classify_trade_capability(
     return "read_only"
 
 
+#: 164.6.5 / D-15 — THE SETTINGS LANDMINE, by its exact on-screen label.
+#:
+#: WHAT IT IS. An option on the gateway terminal's Tools -> Options -> Expert
+#: Advisors tab. When it is ticked, MT5 switches *"Allow algorithmic trading"*
+#: off every time the terminal's logged-in account changes.
+#:
+#: WHY VALIDATION TRIPS IT. Validating an MT5 key LOGS THE SHARED TERMINAL IN as
+#: that key's account, so every validation is an account change. With this box
+#: ticked, one validation silently disables algo trading on the terminal serving
+#: EVERY client. ⛔ It must stay UNTICKED, and nothing in this repo may write a
+#: terminal option to "fix" it — D-15 pins it, it does not tick it.
+#:
+#: WHY IT IS NOT READ DIRECTLY. The option lives in the terminal's own config
+#: (``[Experts] Account=1`` when ticked), which reaches disk only on a CLEAN
+#: terminal exit, so a file read can disagree with the running terminal. Only its
+#: CONSEQUENCE is observable: ``terminal_info()['trade_allowed']`` false on a
+#: connected terminal, which :func:`terminal_trade_permission_off` already judges.
+#: This name exists so the call sites can NAME that cause — it adds no second
+#: judge.
+#:
+#: MEASURED. Founder-read over VNC 2026-09-24: this box UNCHECKED, *"Allow
+#: algorithmic trading"* CHECKED, every other "Disable ..." option on the tab
+#: UNCHECKED. ⚠️ A point-in-time reading, not a guarantee: the bridge has since
+#: relaunched the terminal with ``/portable`` (164.6.5-02), whose settings live
+#: in the install folder, so the LIVE state is only what ``terminal_info()``
+#: reports.
+ACCOUNT_CHANGE_ALGO_DISABLE_OPTION: Final[str] = (
+    "Disable algorithmic trading when the account has been changed"
+)
+
+
 def terminal_trade_permission_off(terminal_info: dict[str, Any] | None) -> bool:
     """True iff the terminal WAS read, IS connected, and its OWN trade permission
     is off — i.e. branch 5 of ``classify_trade_capability`` produced the
@@ -313,9 +347,16 @@ def terminal_trade_permission_off(terminal_info: dict[str, Any] | None) -> bool:
         setting is not decided here — this predicate answers "is it ours?", and
         ``mt5_probe.mt5_gateway_misconfigured_detail`` answers "which one?" from
         the same dict. The measured default cause is the Expert-Advisors "Allow
-        algorithmic trading" option, which the gateway re-sets off on every
-        account change (``Account=1``/``Profile=1``) while the worker logs in on
-        every job — which is why this fault RECURS after an operator clears it.
+        algorithmic trading" option being off. ⭐ 164.6.5 / D-15: a ``True`` here
+        is ALSO the only observable symptom of ``ACCOUNT_CHANGE_ALGO_DISABLE_OPTION``
+        being ticked, because every validation is an account change — which is
+        why the router's operator arm logs above an ordinary verdict.
+        ⛔ CORRECTED 2026-09-25 (164.6.5-06): this bullet said the gateway re-sets
+        the option off on EVERY account change, so the fault RECURS after an
+        operator clears it (dated 2026-08-13). That holds only while
+        ``ACCOUNT_CHANGE_ALGO_DISABLE_OPTION`` is ticked; it was founder-read
+        UNCHECKED on 2026-09-24, and a real login on 2026-09-16 left the options
+        byte-identical (164.6.4-UAT). The old sentence is kept here as lineage.
       * ``False`` -> the terminal was unreadable, malformed, or detached from the
         trade server. That is our bridge blipping and it clears on retry. Route
         to the TRANSIENT arm.

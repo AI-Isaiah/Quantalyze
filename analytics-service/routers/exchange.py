@@ -39,6 +39,7 @@ from services.mt5_concurrency import (
     mt5_terminal_lease,
 )
 from services.mt5_validation import (
+    ACCOUNT_CHANGE_ALGO_DISABLE_OPTION,
     Mt5ValidationError,
     classify_mt5_login_error,
     classify_trade_capability,
@@ -963,15 +964,39 @@ async def _validate_mt5_key_probe(
                         # ⚠️ 161-02: WHICH setting is derived from the terminal
                         # flags, not assumed. Founder-measured live 2026-08-13, the
                         # cause is the Expert-Advisors "Allow algorithmic trading"
-                        # option (`Enabled` in [Experts]), which the gateway re-sets
-                        # off on every account change; MetaQuotes' separate
+                        # option (`Enabled` in [Experts]); MetaQuotes' separate
                         # default-ON "Disable automatic trading through the external
                         # Python API" (`Api`, reported as `tradeapi_disabled`) was
                         # measured OFF at the same moment, and the old copy named it
                         # to the operator regardless.
-                        logger.warning(
-                            "validate_key: MT5 capability undetermined (terminal trade "
-                            "permission off) — refusing rather than stamping read-only"
+                        # ⛔ CORRECTED 2026-09-25 (164.6.5-06): this comment said
+                        # the gateway re-sets that option off on every account
+                        # change. Only while ACCOUNT_CHANGE_ALGO_DISABLE_OPTION is
+                        # ticked — founder-read UNCHECKED 2026-09-24.
+                        #
+                        # ⭐ 164.6.5 / D-15 — LOGGED AT ERROR, above an ordinary
+                        # verdict (WARNING) and level with the unset-env-var arms
+                        # above. This line means THE SHARED TERMINAL SERVING EVERY
+                        # CLIENT HAS LOST ALGO PERMISSION, and one likely cause is
+                        # validation itself: every validate is an account change,
+                        # so a ticked ACCOUNT_CHANGE_ALGO_DISABLE_OPTION is tripped
+                        # by the very call that observed it. Logging that below a
+                        # missing env var is the severity inversion mt5_relogin's
+                        # WR-01 already corrected for its own verdicts. The setting
+                        # cannot be read directly (it reaches disk only on a clean
+                        # exit), so this consequence IS the check — and it is
+                        # one-way: nothing here writes a terminal option.
+                        # Only the LEVEL and the line changed; the raised fault
+                        # below is byte-for-byte what it was.
+                        logger.error(
+                            "validate_key: MT5 capability undetermined — the shared "
+                            "gateway terminal reports its own trade permission OFF "
+                            "('Allow algorithmic trading' is not in force) for every "
+                            "client. Validation is an account change: if '%s' is "
+                            "ticked, every validate switches algo trading off again. "
+                            "Refusing rather than stamping read-only; needs an "
+                            "operator (docs/runbooks/mt5-go-live.md)",
+                            ACCOUNT_CHANGE_ALGO_DISABLE_OPTION,
                         )
                         # Distinct from the env-gap `gateway_unconfigured` above even
                         # though both answer the same code: this one means the terminal

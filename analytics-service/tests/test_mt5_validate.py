@@ -1019,8 +1019,10 @@ async def test_mt5_capability_refusal_logs_carry_no_credentials(
             rendered = repr(call)
             for secret in secrets:
                 assert secret not in rendered
-    # At least one WARNING was emitted, so the sweep above is not vacuous.
-    assert mock_logger.warning.call_args_list
+    # At least one line was emitted, so the sweep above is not vacuous. ⚠️
+    # 164.6.5-06: this fixture is the OPERATOR arm, which now logs at ERROR (D-15),
+    # so the non-vacuity check reads that level rather than WARNING.
+    assert mock_logger.error.call_args_list
 
     # The SECOND egress: every structured event emitted during this request.
     events = [e for e in captured if e.get("event") == "mt5.stage"]

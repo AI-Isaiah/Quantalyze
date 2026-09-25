@@ -477,11 +477,16 @@ def test_the_curated_family_is_the_measured_three_and_they_are_distinct():
 # WIZERR-01, never imported from the module under test. An oracle that reads its
 # expectation out of the thing it is testing asserts `copy(X) == copy(X)` and
 # cannot fail (161-VALIDATION § Anti-Vacuity).
+# ⛔ 164.6.5-06 (2026-09-25): the trade-permission sentence dropped its claim that
+# the gateway "switches it off again whenever it changes users". That re-clear is
+# gated by the account-change option, founder-read UNCHECKED 2026-09-24, so the
+# claim was false at HEAD. Still hand-typed, never imported.
 _EXPECTED_TRADE_PERMISSION_OFF = (
     "The MT5 gateway has 'Allow algorithmic trading' switched off, so read-only "
-    "capability cannot be proven. The gateway switches it off again whenever it "
-    "changes users, so turning it back on needs an operator, not a retry — see "
-    "docs/runbooks/mt5-go-live.md."
+    "capability cannot be proven. Turning it back on needs an operator, not a "
+    "retry, and the gateway's 'Disable algorithmic trading when the account has "
+    "been changed' option must stay unticked, because every key check changes "
+    "the account — see docs/runbooks/mt5-go-live.md."
 )
 _EXPECTED_EXTERNAL_API_BLOCKED = (
     "The MT5 gateway blocks outside automated access (the 'Disable automatic "
