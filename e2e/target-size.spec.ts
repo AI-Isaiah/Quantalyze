@@ -238,21 +238,7 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — EquityChart tap-rect @ 32
       "env is present.",
   );
 
-  // Phase 167.1.2 / D-02 ("Hide it until correct"): the Overview no longer
-  // mounts the EquityChart for any allocator while the equity history is
-  // rebuilt (`equityHistoryState === "rebuilding"`; the producer withholds the
-  // curve). This gate measures that chart's tap surface, so it has nothing to
-  // measure until plan 11 of Phase 167.1.2 defines "ready" and the chart
-  // returns. Plan 11 removes this skip. Skipped rather than rewritten: the
-  // gate's subject (the chart's 44px tap rect) is unchanged and must be
-  // measured again the moment the chart is back.
-  test.skip(
-    true,
-    "Phase 167.1.2 D-02: the Overview EquityChart is hidden while the equity " +
-      "history is rebuilt; plan 11 re-enables this gate when it defines 'ready'.",
-  );
-
-  test("EquityChart tap surface measures >= 44px at 320px (coarse) on /allocations", async ({
+  test("Overview shows the rebuilding panel, not the EquityChart, at 320px (coarse) on /allocations", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 320, height: 800 });
@@ -271,26 +257,25 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — EquityChart tap-rect @ 32
       );
     }
 
-    // Anchor on the EquityChart svg itself (role=img + aria-label="Equity
-    // chart"). A redirect-to-login / EmptyState page would NOT show it, so a
-    // hollow zero is impossible — the measurement only runs on a mounted chart.
-    const equity = page
-      .locator('[data-testid="overview-equity-curve"]')
-      .getByRole("img", { name: "Equity chart" })
-      .first();
-    await equity.scrollIntoViewIfNeeded();
+    // Phase 167.1.2 / D-02 ("Hide it until correct"): while the equity history
+    // is rebuilt the Overview withholds the EquityChart and mounts the
+    // rebuilding panel instead. This gate therefore pins the hidden state at
+    // 320px: the panel is visible and fits the viewport, and the chart is NOT
+    // mounted. Plan 11 of Phase 167.1.2 restores the 44px tap-rect measurement
+    // when it defines "ready" (the assertion below fails the moment the chart
+    // returns, so the restore cannot be forgotten).
+    const rebuilding = page.locator('[data-testid="overview-equity-rebuilding"]');
+    await rebuilding.scrollIntoViewIfNeeded();
     await expect(
-      equity,
-      "EquityChart svg not visible — EmptyState/login page would false-green",
+      rebuilding,
+      "rebuilding panel not visible — EmptyState/login page would false-green",
     ).toBeVisible({ timeout: 15_000 });
-
-    // Measure the coarse tap surface — the EquityChart svg (role=img) under its
-    // pointer-coarse:min-h-[44px] wrapper. assertTargetSizes asserts >= 44px
-    // and fails loud if zero elements are measured (false-green guard).
-    await assertTargetSizes(
-      page,
-      '[data-testid="overview-equity-curve"] [aria-label="Equity chart"]',
-      '[data-testid="overview-equity-curve"] [aria-label="Equity chart"]',
-    );
+    await expect(
+      page.locator('[data-testid="overview-equity-curve"]'),
+      "EquityChart is mounted while the history is rebuilding — restore the tap-rect gate (plan 11)",
+    ).toHaveCount(0);
+    const box = await rebuilding.boundingBox();
+    expect(box, "rebuilding panel has no layout box").not.toBeNull();
+    expect(box!.x + box!.width, "rebuilding panel overflows the 320px viewport").toBeLessThanOrEqual(320);
   });
 });
