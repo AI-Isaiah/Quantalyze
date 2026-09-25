@@ -611,10 +611,50 @@ const C5_NILADIC = new Set([
 ]);
 /**
  * A WORD directly followed by `(` that is NOT a function call: IN (…) is a list,
- * AND / OR / NOT (…) group a boolean. `now` is the one call, and only
- * unqualified and unquoted.
+ * AND / OR / NOT / WHEN / THEN / ELSE / WHERE (…) group an expression, SET (…)
+ * is the multi-column assignment head, ANY / ALL / SOME (…) compare against an
+ * array, and ROW / COALESCE / NULLIF / GREATEST / LEAST are GRAMMAR constructs,
+ * not functions looked up on the search_path. `now` is the one call, and only
+ * unqualified and unquoted. Every token inside the parentheses is still walked
+ * by the same allowlist, so none of these can smuggle a call or a sub-query in.
+ *
+ * ⛔ lower() / upper() are deliberately NOT here (review WR-03 proposed them):
+ * they are real functions resolved on the search_path, and the replay runs
+ * under `SET LOCAL search_path = public, pg_catalog`, so a `public.lower` would
+ * win. The grammar constructs above have no such lookup.
  */
-const C5_ALLOWED_CALLS = new Set(["IN", "AND", "OR", "NOT", "NOW"]);
+const C5_ALLOWED_CALLS = new Set([
+  "IN",
+  "AND",
+  "OR",
+  "NOT",
+  "WHEN",
+  "THEN",
+  "ELSE",
+  "WHERE",
+  "SET",
+  "ANY",
+  "ALL",
+  "SOME",
+  "ROW",
+  "COALESCE",
+  "NULLIF",
+  "GREATEST",
+  "LEAST",
+  "NOW",
+]);
+
+/**
+ * Phrases whose reserved words are not what they look like, blanked (length-
+ * preserving) before the walk. `IS [NOT] DISTINCT FROM` is a comparison
+ * operator, not a join; `WITH[OUT] TIME ZONE` is part of a type name, not a
+ * CTE. Refusing either sent a LITERAL UPDATE to a `decline:` line (review
+ * WR-03 / SFH-03) — the outcome decision D-02 forbids.
+ */
+const C5_BLANKED_PHRASES = [
+  /\bIS[\t\n\r\f\v ]+(?:NOT[\t\n\r\f\v ]+)?DISTINCT[\t\n\r\f\v ]+FROM\b/gi,
+  /\bWITH(?:OUT)?[\t\n\r\f\v ]+TIME[\t\n\r\f\v ]+ZONE\b/gi,
+];
 /** Built-in comparison, arithmetic, concatenation, pattern and jsonb operators. */
 const C5_ALLOWED_OPS = new Set(
   "= <> != < > <= >= + - * / % || ~ ~* !~ !~* -> ->> #> #>> @> <@ ? ?| ?&".split(" "),
@@ -740,7 +780,9 @@ export function updateLiteralCheck(masked) {
   if (masked.includes("$")) {
     return "carries a `$` (a dollar-quoted body or a positional parameter) — not a literal C5 update (C5)";
   }
-  const toks = c5Tokens(masked);
+  let text = masked;
+  for (const re of C5_BLANKED_PHRASES) text = text.replace(re, (p) => " ".repeat(p.length));
+  const toks = c5Tokens(text);
   for (let x = 0; x < toks.length; x++) {
     const t = toks[x];
     const prev = toks[x - 1];
@@ -982,7 +1024,11 @@ export function c5Verdict(m, qualified, upd, dec) {
           ? `a top-level non-literal UPDATE of ${qualified}, and C5 targets public only — no allowlist line can account for it (C5)`
           : upd
             ? r.reason
-            : `classify by hand: decline it with a reason, this extractor does not replay joins — ${r.reason}`,
+            : // ⛔ 164.9.2 review WR-03 / SFH-03: this used to say "classify by hand:
+              // decline it with a reason", and a classifier over-refusal then walked a
+              // replayable UPDATE straight into a decline: line. A decline is for a
+              // statement that really reads other rows or calls something.
+              `NO C5 allowlist line for a top-level UPDATE C5 will not replay — ${r.reason}. A decline: line is for a statement that genuinely reads other rows or calls a function (a join, a sub-select, a call); if this statement is literal, the classifier is wrong: fix the classifier, never decline a replayable effect (C5, D-02)`,
       });
     }
   }
@@ -1611,13 +1657,19 @@ export const SELF_TEST_KINDS = [
     id: "c5-update-nonliteral",
     why: "C5: an UPDATE ... FROM reads EXISTING rows, which the restore has just dropped, so replaying it would write a value computed from nothing; an update: line over it must refuse, naming the token",
     expect: "carries the token FROM — a joined, sub-selected or RETURNING UPDATE is not a literal C5 update (C5)",
-    greenStdout: /UPDATE fx_ref SET label = 'v' WHERE id IN \(1\);/,
+    // 164.9.2 review WR-03 / SFH-03: the green also replays both IS [NOT] DISTINCT
+    // FROM idioms; their FROM is an operator, and refusing it sent a replayable
+    // UPDATE to a decline: line.
+    greenStdout: /UPDATE fx_ref SET label = 'v' WHERE id IN \(1\);[\s\S]*UPDATE fx_ref SET label = 'v' WHERE label IS DISTINCT FROM 'v' AND id = 1;[\s\S]*UPDATE fx_ref SET label = 'w' WHERE label IS NOT DISTINCT FROM 'v';/,
   },
   {
     id: "c5-update-function-call",
     why: "C5: a call inside a replayed UPDATE can carry a side effect (net.http_*, pg_notify) or read session state (current_setting); only now() is admitted. The green leg also pins that `AND (` is a boolean group, not a call (plan 01 deviation 1)",
     expect: "makes the non-literal call `current_setting(`",
-    greenStdout: /UPDATE fx_ref SET label = 'v', seen_at = now\(\) WHERE id = 1 AND \(label = 'a' OR label = 'b'\);/,
+    // 164.9.2 review WR-03 / SFH-03: the green also replays ANY/ALL/SOME, ROW,
+    // COALESCE/NULLIF/GREATEST/LEAST, SET (a, b) = (...), parenthesised WHERE/THEN
+    // and a `timestamp with time zone` cast — literal shapes the denylist refused.
+    greenStdout: /UPDATE fx_ref SET label = 'v', seen_at = now\(\) WHERE id = 1 AND \(label = 'a' OR label = 'b'\);[\s\S]*ANY\(ARRAY\[1, 2\]\)[\s\S]*SET \(label, n\) = \('v', 1\) WHERE \(id, n\) = ROW\(1, 2\);[\s\S]*coalesce\(label, 'v'\)[\s\S]*'2026-01-01'::timestamp with time zone WHERE id = 1;/,
   },
   {
     id: "c5-update-positional-param",
@@ -1768,9 +1820,9 @@ export const SELF_TEST_KINDS = [
   },
   {
     id: "c5-audit-unlisted-nonliteral-update",
-    why: "C5 --audit: an unlisted JOINED UPDATE on a replayed table is refused, not skipped — the INSERT side's limitation 2 (an unlisted non-literal is silent) is deliberately not carried over",
+    why: "C5 --audit: an unlisted JOINED UPDATE on a replayed table is refused, not skipped — the INSERT side's limitation 2 (an unlisted non-literal is silent) is deliberately not carried over. Since review WR-03 the refusal no longer advises a decline outright: a decline is for a statement that genuinely reads other rows",
     audit: true,
-    expect: "classify by hand: decline it with a reason",
+    expect: "NO C5 allowlist line for a top-level UPDATE C5 will not replay — carries the token FROM",
     greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 1 declined over 1 file\(s\); 0 unaccounted\./,
   },
   {
