@@ -87,6 +87,11 @@ const analyticsBaselineMock = vi.fn();
 // .eq("api_key_id", …)`. The spy receives the key id; its default answer is
 // "a member of nothing", so every Delete case that predates the guard is
 // unchanged, and a case that means "member" has to say so.
+// Lineage, Phase 167.2.1 D-01: the card no longer reads `strategy_keys`; the
+// membership answer comes from `GET /api/keys/[id]/memberships` (see
+// `routeFetch`'s `memberships` option). This arm is kept so R2-WR02-VIA-ROUTE
+// can make the browser read answer an RLS regression's `[]` and prove the
+// confirm does not depend on it.
 const strategyKeysMemberMock = vi.fn();
 // 167.2-REVIEW WR-04: after the link update and before the enqueue,
 // `handleSyncTrades` reads the strategy's `api_key_id` back with
@@ -1973,9 +1978,21 @@ describe("[167-06] the persisted credential state renders on the manager's key c
         sync?: () => Response | Promise<Response>;
         rotate?: () => Response | Promise<Response>;
         validate?: () => Response | Promise<Response>;
+        // Phase 167.2.1 D-01: the Delete confirm's membership read. Default
+        // "a member of nothing", so every Delete case keeps its meaning.
+        memberships?: () => Response | Promise<Response>;
       } = {},
     ) {
       const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (/^\/api\/keys\/[^/]+\/memberships$/.test(url)) {
+          if (opts.memberships) return Promise.resolve(opts.memberships());
+          return Promise.resolve(
+            new Response(JSON.stringify({ memberships: [] }), {
+              status: 200,
+              headers: JSON_HEADERS,
+            }),
+          );
+        }
         if (url === "/api/keys/sync") {
           return Promise.resolve((opts.sync ?? syncAccepted)());
         }
@@ -3168,8 +3185,15 @@ describe("[167-06] the persisted credential state renders on the manager's key c
     // confirm and delete. A failed read says it could not check, and still
     // lets the owner choose (warn, don't block). Hand-typed from the UI-SPEC
     // round-2 founder-decision rows; composite names are synthetic.
+    // Phase 167.2.1 D-01 (lineage): this built a browser `strategy_keys` row;
+    // it now builds one element of the route's `{ memberships }` answer.
     function membership(name: string | null, status = "draft") {
-      return { strategy_id: `strat-composite-${name ?? "x"}`, strategies: name === null ? null : { name, status } };
+      return { name, status: name === null ? null : status };
+    }
+    /** The membership route's answer: `body` as JSON with `status`. */
+    function membershipsAnswer(body: unknown, status = 200) {
+      return () =>
+        new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
     }
     const WARN_ONE_ORACLE =
       'This key is part of 1 composite strategy: "Synthetic Composite A". Deleting it removes the key from every composite listed, and a composite with no other key left becomes unlinked.';
@@ -3183,10 +3207,13 @@ describe("[167-06] the persisted credential state renders on the manager's key c
     }
 
     it("R2-WR02-WARNING-NAMES: a composite member's confirm names the composite in amber, and the Delete still proceeds after confirm (founder decision)", async () => {
-      routeFetch();
+      // 167.2.1 D-01 (lineage): the membership answer moved from the browser
+      // `strategy_keys` read to the route; the oracle is unchanged.
+      const fetchMock = routeFetch({
+        memberships: membershipsAnswer({ memberships: [membership("Synthetic Composite A")] }),
+      });
       const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
       await renderRows([keyA]);
-      strategyKeysMemberMock.mockReturnValue({ data: [membership("Synthetic Composite A")], error: null });
       try {
         await act(async () => {
           fireEvent.click(cardButton("key-a", "Delete"));
@@ -3194,7 +3221,7 @@ describe("[167-06] the persisted credential state renders on the manager's key c
         await waitFor(() => {
           expect(within(confirmDialog()).getByTestId("delete-composite-warning")).toHaveTextContent(WARN_ONE_ORACLE);
         });
-        expect(strategyKeysMemberMock).toHaveBeenCalledWith("key-a");
+        expect(fetchMock).toHaveBeenCalledWith("/api/keys/key-a/memberships", { cache: "no-store" });
         const warning = within(confirmDialog()).getByTestId("delete-composite-warning");
         // DESIGN.md: a recoverable consequence is amber, never red.
         expect(warning.className).toContain("text-warning");
@@ -3212,13 +3239,14 @@ describe("[167-06] the persisted credential state renders on the manager's key c
     });
 
     it("R2-WR02-TWO-PUBLISHED: every composite is named, and a published one says its key cannot be deleted (the DB guard refuses it)", async () => {
-      routeFetch();
+      // 167.2.1 D-01 (lineage): answered by the route now; oracle unchanged.
+      routeFetch({
+        memberships: membershipsAnswer({
+          memberships: [membership("Synthetic Composite A", "archived"), membership("Synthetic Composite P", "published")],
+        }),
+      });
       const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
       await renderRows([keyA]);
-      strategyKeysMemberMock.mockReturnValue({
-        data: [membership("Synthetic Composite A", "archived"), membership("Synthetic Composite P", "published")],
-        error: null,
-      });
       try {
         await act(async () => {
           fireEvent.click(cardButton("key-a", "Delete"));
@@ -3235,10 +3263,11 @@ describe("[167-06] the persisted credential state renders on the manager's key c
     });
 
     it("R2-WR02-UNREADABLE: a failed membership read says so in the confirm, is captured (tags only), and still lets the owner delete", async () => {
-      routeFetch();
+      // 167.2.1 D-01 (lineage): a failed read is now the route answering an
+      // error; the oracle is unchanged.
+      routeFetch({ memberships: membershipsAnswer({ error: "RAW-PG-DETAIL-sentinel" }, 500) });
       const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
       await renderRows([keyA]);
-      strategyKeysMemberMock.mockReturnValue({ data: null, error: { message: "RAW-PG-DETAIL-sentinel" } });
       captureToSentryMock.mockClear();
       const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
       try {
@@ -3282,10 +3311,10 @@ describe("[167-06] the persisted credential state renders on the manager's key c
     });
 
     it("R2-WR02-UNNAMED: a membership whose composite cannot be read is still listed, never dropped", async () => {
-      routeFetch();
+      // 167.2.1 D-01 (lineage): answered by the route now; oracle unchanged.
+      routeFetch({ memberships: membershipsAnswer({ memberships: [membership(null)] }) });
       const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
       await renderRows([keyA]);
-      strategyKeysMemberMock.mockReturnValue({ data: [membership(null)], error: null });
       try {
         await act(async () => {
           fireEvent.click(cardButton("key-a", "Delete"));
@@ -3298,6 +3327,144 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       } finally {
         strategyKeysMemberMock.mockReset();
       }
+    });
+
+    // ── Phase 167.2.1 D-01 (ROADMAP criterion 5): the membership read is server-side ──
+    //
+    // The browser used to read `strategy_keys` through RLS, which FILTERS rather
+    // than errors, so a regressed policy answered `[]` and the confirm stayed
+    // silent while the Delete cascaded a composite's member away. The card now
+    // asks `GET /api/keys/[id]/memberships` (service role behind an explicit
+    // owner check), and EVERY way that answer can fail or be malformed reaches
+    // the owner as the "could not check" warning, never as "no memberships".
+
+    it("R2-WR02-VIA-ROUTE: the route's membership reaches the confirm, and the browser never reads strategy_keys (an RLS regression's [] cannot silence it)", async () => {
+      routeFetch({
+        memberships: membershipsAnswer({ memberships: [membership("Synthetic Composite A")] }),
+      });
+      const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
+      await renderRows([keyA]);
+      // The browser read, if it happened, would answer a regressed policy's [].
+      strategyKeysMemberMock.mockReturnValue({ data: [], error: null });
+      fromTableMock.mockClear();
+      try {
+        await act(async () => {
+          fireEvent.click(cardButton("key-a", "Delete"));
+        });
+        await waitFor(() => {
+          expect(within(confirmDialog()).getByTestId("delete-composite-warning")).toHaveTextContent(WARN_ONE_ORACLE);
+        });
+        expect(fromTableMock).not.toHaveBeenCalledWith("strategy_keys");
+        expect(strategyKeysMemberMock).not.toHaveBeenCalled();
+      } finally {
+        strategyKeysMemberMock.mockReset();
+      }
+    });
+
+    /** Open the confirm with the membership route answering `memberships`. */
+    async function openConfirmWith(memberships: () => Response | Promise<Response>) {
+      routeFetch({ memberships });
+      const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
+      await renderRows([keyA]);
+      captureToSentryMock.mockClear();
+      await act(async () => {
+        fireEvent.click(cardButton("key-a", "Delete"));
+      });
+    }
+
+    function membershipReadCaptures() {
+      return captureToSentryMock.mock.calls.filter(
+        ([, opts]) => (opts as { tags?: { stage?: string } })?.tags?.stage === "delete-membership-read",
+      );
+    }
+
+    /** The confirm says it could not check, lets the owner delete, and captured once with tags only. */
+    async function expectUncheckedWarning() {
+      await waitFor(() => {
+        expect(within(confirmDialog()).getByTestId("delete-composite-warning")).toHaveTextContent(
+          WARN_UNCHECKED_ORACLE,
+        );
+      });
+      // Warn, never block (founder decision): the Delete stays available.
+      expect(within(confirmDialog()).getByRole("button", { name: "Delete" })).toBeEnabled();
+      const captures = membershipReadCaptures();
+      expect(captures).toHaveLength(1);
+      expect(captures[0]).toEqual([
+        expect.any(Error),
+        { level: "warning", tags: { component: "ApiKeyManager", stage: "delete-membership-read" } },
+      ]);
+      expect(JSON.stringify(captures)).not.toContain("key-a");
+    }
+
+    it.each([
+      { label: "UNCHECKED-401", answer: membershipsAnswer({ error: "Unauthorized" }, 401) },
+      { label: "UNCHECKED-404", answer: membershipsAnswer({ error: "Key not found" }, 404) },
+      { label: "UNCHECKED-429", answer: membershipsAnswer({ error: "Too many requests" }, 429) },
+      { label: "UNCHECKED-500", answer: membershipsAnswer({ error: "Lookup failed" }, 500) },
+      {
+        label: "UNCHECKED-HTML",
+        answer: () =>
+          new Response("<html><body>gateway</body></html>", {
+            status: 200,
+            headers: { "content-type": "text/html" },
+          }),
+      },
+      { label: "UNCHECKED-NO-FIELD", answer: membershipsAnswer({}) },
+      { label: "UNCHECKED-NOT-ARRAY", answer: membershipsAnswer({ memberships: {} }) },
+      { label: "UNCHECKED-BAD-ELEMENT", answer: membershipsAnswer({ memberships: [null] }) },
+      {
+        label: "UNCHECKED-REJECTED",
+        answer: () => Promise.reject(new TypeError("Failed to fetch")),
+      },
+    ])("$label: the membership answer fails closed to the could-not-check warning, never to no memberships", async ({ answer }) => {
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await openConfirmWith(answer);
+        await expectUncheckedWarning();
+      } finally {
+        consoleError.mockRestore();
+      }
+    });
+
+    it("UNCHECKED-TIMEOUT: no answer inside the 15 s bound holds the confirm's Delete, then warns it could not check and lets the owner choose", async () => {
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
+      routeFetch({ memberships: () => new Promise<Response>(() => {}) });
+      await renderRows([keyA]);
+      captureToSentryMock.mockClear();
+      vi.useFakeTimers();
+      try {
+        await act(async () => {
+          fireEvent.click(cardButton("key-a", "Delete"));
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(14_999);
+        });
+        expect(within(confirmDialog()).queryByTestId("delete-composite-warning")).not.toBeInTheDocument();
+        expect(within(confirmDialog()).getByRole("button", { name: "Delete" })).toBeDisabled();
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1);
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+      try {
+        await expectUncheckedWarning();
+      } finally {
+        consoleError.mockRestore();
+      }
+    });
+
+    it("NULL-NAME: an element whose name is not a string is listed as an unreadable composite, never dropped", async () => {
+      await openConfirmWith(
+        membershipsAnswer({ memberships: [{ name: 42, status: "draft" }] }),
+      );
+      await waitFor(() => {
+        expect(within(confirmDialog()).getByTestId("delete-composite-warning")).toHaveTextContent(
+          "This key is part of 1 composite strategy: a composite whose name could not be read.",
+        );
+      });
+      expect(membershipReadCaptures()).toHaveLength(0);
     });
 
     // ── Retry after a post-add failure targets the key that failed (WR-01) ──

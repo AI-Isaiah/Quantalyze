@@ -32,7 +32,6 @@ import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus"
 import type { ApiKey } from "@/lib/types";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 import { isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
-import type { SupabaseClient } from "@supabase/supabase-js";
 
 interface ApiKeyManagerProps {
   strategyId: string;
@@ -917,17 +916,20 @@ export function ApiKeyManager({
    * such a Delete on every card; the owner may now delete after the confirm
    * names each composite and says what deleting does.
    *
-   * One owner-scoped read (RLS `strategy_keys_owner`), the composite's own
-   * name and status embedded through `strategy_keys_strategy_id_fkey`,
+   * One read of `GET /api/keys/[id]/memberships`, which checks ownership
+   * with an explicit equality and reads `strategy_keys` on the service role,
    * bounded like the card's other reads (`BASELINE_READ_BOUND_MS`, 15 s).
-   * Answers the memberships (a composite whose embed could not be read is
-   * listed with a null name, never dropped), or "unreadable" (an error, a
-   * throw or the bound: logged, and captured with tags only). Never throws.
+   * Answers the memberships (a composite whose name could not be read is
+   * listed with a null name, never dropped), or "unreadable": a non-2xx
+   * answer, a body that is not JSON, a missing or non-array `memberships`, an
+   * element that is not an object, a rejected fetch or the bound (logged, and
+   * captured with tags only). Never throws.
    *
-   * ⚠️ Residual (167.2-REVIEW-SFH-R2 R2-L4 (b)): RLS on SELECT filters rather
-   * than errors, so a regressed `strategy_keys_owner` answers `[]` and the
-   * confirm shows no warning. A server-side guard needs a migration and
-   * belongs to Phase 167.2.1 (KCS-15: no migration in this phase).
+   * Lineage (167.2-REVIEW-SFH-R2 R2-L4 (b)): this used to read `strategy_keys`
+   * in the browser through RLS, which FILTERS rather than errors, so a
+   * regressed `strategy_keys_owner` answered `[]` and the confirm showed no
+   * warning. Closed by Phase 167.2.1 D-01: the read is now server-side, and
+   * every failure of it reaches the owner as the "could not check" warning.
    */
   async function readKeyCompositeMemberships(
     keyId: string,
@@ -938,25 +940,36 @@ export function ApiKeyManager({
       const bound = new Promise<"timed_out">((resolve) => {
         boundTimer = setTimeout(() => resolve("timed_out"), BASELINE_READ_BOUND_MS);
       });
-      const supabase = createClient() as unknown as SupabaseClient;
-      const outcome = await Promise.race([
-        supabase
-          .from("strategy_keys")
-          .select("strategy_id, strategies ( name, status )")
-          .eq("api_key_id", keyId),
-        bound,
-      ]);
+      // One promise for the request AND its body, so a body that never
+      // finishes is bounded too.
+      const read = (async (): Promise<{ failure: string } | { body: unknown }> => {
+        const res = await fetch(`/api/keys/${encodeURIComponent(keyId)}/memberships`, {
+          cache: "no-store",
+        });
+        if (!res.ok) return { failure: `the membership read answered HTTP ${res.status}` };
+        return { body: (await res.json()) as unknown };
+      })();
+      const outcome = await Promise.race([read, bound]);
       if (outcome === "timed_out") {
         failure = `no answer within ${BASELINE_READ_BOUND_MS} ms`;
-      } else if (outcome.error || !Array.isArray(outcome.data)) {
-        failure = outcome.error?.message ?? "no rows array and no error";
+      } else if ("failure" in outcome) {
+        failure = outcome.failure;
       } else {
-        return (outcome.data as Array<{
-          strategies?: { name?: unknown; status?: unknown } | null;
-        }>).map((row) => ({
-          name: typeof row?.strategies?.name === "string" ? row.strategies.name : null,
-          status: typeof row?.strategies?.status === "string" ? row.strategies.status : null,
-        }));
+        const body = outcome.body;
+        const list =
+          body !== null && typeof body === "object"
+            ? (body as { memberships?: unknown }).memberships
+            : undefined;
+        if (!Array.isArray(list)) {
+          failure = "the membership answer carried no memberships array";
+        } else if (!list.every((m) => m !== null && typeof m === "object")) {
+          failure = "the membership answer carried an element that is not an object";
+        } else {
+          return (list as Array<{ name?: unknown; status?: unknown }>).map((m) => ({
+            name: typeof m.name === "string" ? m.name : null,
+            status: typeof m.status === "string" ? m.status : null,
+          }));
+        }
       }
     } catch (err) {
       failure = err instanceof Error ? err.message : String(err);

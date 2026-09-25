@@ -83,12 +83,6 @@ const mockState = vi.hoisted(() => ({
   linkCount: 0,
   /** 167.2-REVIEW WR-04: the key the last link update wrote (read back before the enqueue). */
   linkedKeyId: "key-h" as string | null,
-  /**
-   * 167.2-REVIEW-R2 WR-02: what the Delete's composite-membership read
-   * (`strategy_keys.select(...).eq("api_key_id", …)`) answers. Null answers
-   * "a member of nothing" at once.
-   */
-  membershipResult: null as Promise<{ data: unknown; error: unknown }> | null,
 }));
 
 vi.mock("@/lib/supabase/client", () => ({
@@ -102,10 +96,11 @@ vi.mock("@/lib/supabase/client", () => ({
           }
           return Promise.resolve({ data: mockState.keysRows, error: null });
         },
+        // Phase 167.2.1 D-01 (lineage): a `strategy_keys` arm answered the
+        // Delete's membership read here. The card reads it from
+        // `GET /api/keys/[id]/memberships` now, so the arm is gone.
         eq: () =>
-          table === "strategy_keys"
-            ? (mockState.membershipResult ?? Promise.resolve({ data: [], error: null }))
-            : ({
+          ({
           single: () => {
             if (table === "strategies") {
               return Promise.resolve({ data: { api_key_id: "key-h" }, error: null });
@@ -302,7 +297,6 @@ beforeEach(() => {
   mockState.jobStatuses = [];
   mockState.jobReadCount = 0;
   mockState.linkResult = null;
-  mockState.membershipResult = null;
 });
 
 afterEach(() => {
@@ -1069,8 +1063,16 @@ describe("ApiKeyManager: the Delete's membership read is bounded (167.2-REVIEW-R
 
   it("DELETE-MEMBERSHIP-BOUND: a membership read that never settles holds the confirm's Delete for 15 s, then warns it could not check and lets the owner choose", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    mockState.membershipResult = new Promise(() => {});
-    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(accepted())));
+    // Phase 167.2.1 D-01 (lineage): the never-settling read moved from the
+    // browser `strategy_keys` query to the membership route's fetch.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) =>
+        /^\/api\/keys\/[^/]+\/memberships$/.test(url)
+          ? new Promise(() => {})
+          : Promise.resolve(accepted()),
+      ),
+    );
 
     await act(async () => {
       render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-h" />);
