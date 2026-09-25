@@ -3003,12 +3003,13 @@ Plans:
 **Goal:** Every persisted `strategy_analytics` row that Phase 166 changes is recomputed on PROD, so stored numbers match what the fixed code would produce. The same fabricated-ratio class is also closed outside quantstats: exact `== 0` / `> 0` standard-deviation guards.
 **Requirements**: Phase 166 OPEN-2 (founder answer 2026-09-24: "Recompute affected rows after merge", AskUserQuestion). The round-2 fixer measured the non-quantstats sites.
 **Depends on:** Phase 166
-**Plans:** 0 plans
+**Plans:** 3 plans
 
 ## Success Criteria
 1. **Census first.** The five read-only census SELECTs in `166-09-SUMMARY.md` run on PROD. The founder runs them, or they run read-only and are recorded as counts only. The recompute set is derived from them.
 2. **Normal job path.** Affected rows are recomputed through the normal compute-job path, never by a hand-written UPDATE. Each is verified against the D-10 before/after rows, and the rendered rolling alpha/beta chart and greeks table show the new values.
 3. **Exact-zero guards close.** They exist today in `portfolio_optimizer.py`, `csv_validator.py`, `allocated_capital.py`, `equity_reconstruction.py` and `optimizer.py`. They move to the relative dispersion floor (`_dispersion_is_residue` semantics), and each gets a red test built from a compounding-NAV constant yield.
+   ⭐ **2026-09-25 (166.1-CONTEXT D-02):** criterion 3 now also covers the unguarded correlation sites outside `metrics.py` (same root cause: a ratio over a residue standard deviation), and `portfolio_risk.compute_risk_decomposition` (D-05).
 
 Plans:
 
