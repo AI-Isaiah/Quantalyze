@@ -1664,11 +1664,17 @@ describe("Critical regression guards", () => {
           wait < vac08,
           "ci.yml test-db-drift runs VAC-08 BEFORE the ordering wait — the wait orders nothing if it runs after the reads it is meant to order (SC-2, Phase 164.4.2.1)",
         ).toBe(true);
-        // The wait step itself: from its `- name:` line to the next step at
-        // six-space indent, or the end of the job.
-        const afterWait = body.slice(wait);
-        const nextStep = afterWait.slice(1).search(/\n {6}- /);
-        const waitStep = nextStep === -1 ? afterWait : afterWait.slice(0, nextStep + 1);
+        // A step: from its `- name:` line to the next step at six-space indent,
+        // or the end of the job. Both steps are cut this way, so a step added
+        // AFTER VAC-08 can neither false-red nor silently satisfy a VAC-08 pin
+        // (WR-02 / SFH-R2-07, 164.4.2.1 round 2: vac08Step used to run to the end
+        // of the job).
+        const stepAt = (at: number): string => {
+          const from = body.slice(at);
+          const next = from.slice(1).search(/\n {6}- /);
+          return next === -1 ? from : from.slice(0, next + 1);
+        };
+        const waitStep = stepAt(wait);
         expectMatch(
           waitStep,
           /^ {8}if: \$\{\{ needs\.changed-paths\.outputs\.docs_only != 'true' && vars\.E2E_TEST_DB_CONFIGURED == 'true' && github\.event_name == 'push' \}\}$/m,
@@ -1685,7 +1691,20 @@ describe("Critical regression guards", () => {
         // would leave every assertion above green while an exhausted wait turned
         // green and VAC-08 read TEST mid-apply on a merge push. Same for VAC-08
         // itself: a gate whose failure cannot fail the job is not a gate.
-        const vac08Step = body.slice(vac08);
+        const vac08Step = stepAt(vac08);
+        // ENABLEMENT (WR-01 / SFH-R2-01, 164.4.2.1 round 2). A skipped step leaves
+        // the job `success`, and the `frontend` aggregator reads only the JOB
+        // result — so a step-level condition is the degenerate way to make a gate
+        // unable to fail the job. The wait carries exactly ONE `if:` (the one
+        // pinned above); VAC-08 carries none.
+        expect(
+          waitStep.match(/^ {8}if:/gm)?.length ?? 0,
+          "ci.yml test-db-drift's ordering wait carries more than the one pinned step-level `if:` — YAML keeps the LAST duplicate key, so a second `if:` silently replaces the merge-push condition (SC-2)",
+        ).toBe(1);
+        expect(
+          /^ {8}if:/m.test(vac08Step),
+          "ci.yml test-db-drift's VAC-08 step carries a step-level `if:` — a condition can SKIP the gate, and a skipped step leaves the job `success`, so the aggregator reads a gate that never ran as green (SC-2)",
+        ).toBe(false);
         // The last command of a `run: |` block decides the step's exit status, so
         // "nothing after the invocation" is what makes it fail-closed; `set -e`
         // then covers any command a future edit puts BEFORE it.
@@ -1736,6 +1755,22 @@ describe("Critical regression guards", () => {
           commandsAfter(vac08Step, /^ {10}bash scripts\/test-ledger-drift-check\.sh$/),
           "ci.yml test-db-drift's VAC-08 step runs a command AFTER scripts/test-ledger-drift-check.sh — the step's exit status is the LAST command's, so a drift red is masked (SC-2)",
         ).toEqual([]);
+        // A `trap` can rewrite the step's exit status (`trap 'exit 0' EXIT`), and an
+        // `exit`/`exit 0` placed before the invocation ends the step green without
+        // running it. `commandsAfter` sees neither, because both can sit BEFORE the
+        // invocation (WR-01, 164.4.2.1 round 2).
+        const runCommands = (step: string): string[] =>
+          step.split("\n").filter((line) => /^ {10,}\S/.test(line) && !/^\s*#/.test(line));
+        for (const [label, step] of [["ordering wait", waitStep], ["VAC-08 step", vac08Step]] as const) {
+          expect(
+            runCommands(step).filter((line) => /\btrap\b/.test(line)),
+            `ci.yml test-db-drift's ${label} sets a \`trap\` — a trap can replace the invocation's exit status, so a failure no longer fails the job (SC-2)`,
+          ).toEqual([]);
+          expect(
+            runCommands(step).filter((line) => /(?:^|[;&|]|\s)exit(?:\s+0)?\s*(?:$|[;#&|])/.test(line)),
+            `ci.yml test-db-drift's ${label} runs a bare \`exit\` or \`exit 0\` — the step can end green without running (or despite) its invocation (SC-2)`,
+          ).toEqual([]);
+        }
         // IN-01: the drift check's psql connects are bounded here, not by the 90m TTL.
         expectMatch(
           vac08Step,
