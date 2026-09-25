@@ -1537,7 +1537,8 @@ describe("Critical regression guards", () => {
       // Phase 164.4.2.1 D-07: with the key gone, the ordering wait is SC-2's
       // ONLY ordering control on test-db-drift, and the per-holder TTL loop no
       // longer covers the job — so its order, its enablement, its invocation,
-      // the VAC-08 command, its TTL and its `needs:` are pinned here, one
+      // the fail-closed shape of both steps, the VAC-08 command and its connect
+      // bound, its TTL and its `needs:` are pinned here, one
       // expect per condition so a failure names the one it broke.
       it("test-db-drift runs the ordering wait BEFORE VAC-08 and keeps its TTL and needs: python (its only ordering control since 164.4.2.1)", () => {
         const body = jobSlice(readText(".github/workflows/ci.yml"), "test-db-drift");
@@ -1570,10 +1571,68 @@ describe("Critical regression guards", () => {
           /bash "\$\{GITHUB_WORKSPACE\}\/scripts\/wait-for-test-schema-apply\.sh"/,
           "ci.yml test-db-drift's ordering wait step no longer invokes scripts/wait-for-test-schema-apply.sh — a wait step that runs something else orders nothing (SC-2)",
         );
+        // FAIL-CLOSED (164.4.2.1 round-1 review, WR-05 / SFH-03). The wait's only
+        // stopping outcome is `wait-exhausted` (exit 1). Before this phase the key
+        // was a second, independent barrier; now each of these one-line edits
+        // would leave every assertion above green while an exhausted wait turned
+        // green and VAC-08 read TEST mid-apply on a merge push. Same for VAC-08
+        // itself: a gate whose failure cannot fail the job is not a gate.
+        const vac08Step = body.slice(vac08);
+        // The last command of a `run: |` block decides the step's exit status, so
+        // "nothing after the invocation" is what makes it fail-closed; `set -e`
+        // then covers any command a future edit puts BEFORE it.
+        const commandsAfter = (step: string, invocation: RegExp): string[] => {
+          const lines = step.split("\n");
+          const at = lines.findIndex((line) => invocation.test(line));
+          return at === -1
+            ? ["<invocation not found>"]
+            : lines.slice(at + 1).filter((line) => /^ {10,}\S/.test(line) && !/^\s*#/.test(line));
+        };
+        expect(
+          /^ {8}continue-on-error:/m.test(waitStep),
+          "ci.yml test-db-drift's ordering wait carries continue-on-error — a wait-exhausted outcome would no longer stop VAC-08, which is then unordered on a merge push (SC-2, Phase 164.4.2.1)",
+        ).toBe(false);
+        expect(
+          /^ {8}continue-on-error:/m.test(vac08Step),
+          "ci.yml test-db-drift's VAC-08 step carries continue-on-error — a drift the gate finds would no longer fail the job (SC-2)",
+        ).toBe(false);
+        expect(
+          /^ {4}continue-on-error:/m.test(body),
+          "ci.yml test-db-drift carries a JOB-level continue-on-error — neither the ordering wait nor VAC-08 could then fail the job the `frontend` aggregator reads (SC-2)",
+        ).toBe(false);
+        expectMatch(
+          waitStep,
+          /^ {10}set -euo pipefail$/m,
+          "ci.yml test-db-drift's ordering wait lost `set -euo pipefail` — a command a future edit places before the invocation could fail silently (SC-2)",
+        );
+        expectMatch(
+          waitStep,
+          /^ {10}bash "\$\{GITHUB_WORKSPACE\}\/scripts\/wait-for-test-schema-apply\.sh"$/m,
+          "ci.yml test-db-drift's ordering wait invocation is no longer bare (a trailing `|| true` or similar makes a wait-exhausted outcome non-fatal) (SC-2)",
+        );
+        expect(
+          commandsAfter(waitStep, /wait-for-test-schema-apply\.sh"$/),
+          "ci.yml test-db-drift's ordering wait runs a command AFTER scripts/wait-for-test-schema-apply.sh — the step's exit status is the LAST command's, so a wait-exhausted exit 1 is masked (SC-2)",
+        ).toEqual([]);
+        expectMatch(
+          vac08Step,
+          /^ {10}set -euo pipefail$/m,
+          "ci.yml test-db-drift's VAC-08 step lost `set -euo pipefail` (SC-2)",
+        );
         expectMatch(
           body,
           /^ {10}bash scripts\/test-ledger-drift-check\.sh$/m,
           "ci.yml test-db-drift's VAC-08 step no longer runs `bash scripts/test-ledger-drift-check.sh` bare — the gate a developer runs and the gate CI runs must be the same command (SC-2)",
+        );
+        expect(
+          commandsAfter(vac08Step, /^ {10}bash scripts\/test-ledger-drift-check\.sh$/),
+          "ci.yml test-db-drift's VAC-08 step runs a command AFTER scripts/test-ledger-drift-check.sh — the step's exit status is the LAST command's, so a drift red is masked (SC-2)",
+        ).toEqual([]);
+        // IN-01: the drift check's psql connects are bounded here, not by the 90m TTL.
+        expectMatch(
+          vac08Step,
+          /^ {10}PGCONNECT_TIMEOUT: "15"$/m,
+          "ci.yml test-db-drift's VAC-08 step lost `PGCONNECT_TIMEOUT` — its queries carry a 30s statement_timeout but nothing then bounds the CONNECT, so an unreachable TEST host holds the runner until the 90m TTL (IN-01, Phase 164.4.2.1)",
         );
         expectMatch(
           body,

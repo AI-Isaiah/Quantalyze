@@ -5512,6 +5512,16 @@ jobs:
     # is left unchanged per D-04, since SC-4 forbids raising it and lowering it is out
     # of scope. The pg_sleep sentence above now applies to `python` and `e2e-seeded`
     # only.)
+    # ⭐ WHAT 90m NOW BOUNDS, since the mutex derivation above no longer applies here:
+    # the `needs:` queue is outside this TTL (the timer starts when the job does), so
+    # the job's own worst case is setup (checkout, psql install, setup-node: minutes),
+    # plus the ordering wait's `WAIT_BUDGET_SECONDS` (900s, in
+    # scripts/wait-for-test-schema-apply.sh), plus VAC-08. VAC-08's statements carry a
+    # 30s `statement_timeout` with `LEDGER_QUERY_ATTEMPT_BUDGET` retries, and its
+    # connects are bounded by the step's `PGCONNECT_TIMEOUT` below, so a black-holed
+    # TEST host fails in seconds rather than squatting a runner until this TTL. That
+    # sums to well under 30m; 90m is a generous ceiling, not a sized number. Lowering
+    # it is a separate decision (D-04), taken against that sum.
     timeout-minutes: 90
     # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
     # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
@@ -5634,6 +5644,13 @@ jobs:
       - name: VAC-08 - repo-vs-TEST ledger and function body drift
         env:
           TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+          # Bounds every psql CONNECT the drift check makes (libpq reads it from the
+          # environment). Its queries set a 30s statement_timeout, but nothing bounded
+          # the connect, so an unreachable TEST host could hold the runner until the
+          # job's 90m TTL. 15s matches the mutex and ordering-wait probes. A timed-out
+          # connect fails LOUD: the ledger queries retry it within their attempt budget
+          # first, and the body fetch reports it as a failed read.
+          PGCONNECT_TIMEOUT: "15"
         run: |
           set -euo pipefail
           # Mode identity (Pitfall 2): the exact command a developer runs.
