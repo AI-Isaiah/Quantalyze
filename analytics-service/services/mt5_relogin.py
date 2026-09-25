@@ -83,6 +83,7 @@ from services.mt5_session_episodes import (
     KIND_IPC_FAULT,
     KIND_IPC_FAULT_RECYCLE_FAILED,
     KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
+    KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET,
     KIND_IPC_FAULT_RECYCLED,
     KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
     KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
@@ -620,14 +621,43 @@ def _env_float(name: str, default: float, *, floor: float, ceiling: float) -> fl
 
 def _relogin_budget_s() -> float:
     """The WHOLE heal's wall-clock budget — the rpyc connect plus the bounded
-    round-trips the `-6` path actually makes (see the derivation above)."""
-    return _env_float(
-        _MT5_RELOGIN_BUDGET_ENV,
+    round-trips the worst path actually makes (see the derivation above).
+
+    ⛔ R2-SFH-01 (164.6.5 review round 2) — A VALUE BELOW THE DERIVED DEFAULT IS
+    ACCEPTED AND NAMED. The window above admits anything from one round-trip
+    up, and every value below the derived default is one the ipc_fault
+    escalation can NEVER afford: its recycle is skipped on every wedge, forever.
+    It stays accepted (a shorter heal is a legitimate trade for the ``-6`` path,
+    and rejecting it would silently LENGTHEN an operator's deliberate choice),
+    but it is logged ONCE per process at WARNING, by NAME, never by value
+    (T-164.6.2-12). The escalation's own skip then reaches the persistence alarm
+    (WR-01). MEASURED 2026-09-25 by the orchestrator (read-only): the variable is
+    NOT set on the production analytics service, so the derived default applies
+    there today.
+    """
+    default = (
         _MT5_RELOGIN_ROUND_TRIPS * _MT5_REQUEST_TIMEOUT_S
-        + _MT5_RELOGIN_CONNECT_SLACK_S,
+        + _MT5_RELOGIN_CONNECT_SLACK_S
+    )
+    budget = _env_float(
+        _MT5_RELOGIN_BUDGET_ENV,
+        default,
         floor=_MT5_RELOGIN_BUDGET_FLOOR_S,
         ceiling=_MT5_RELOGIN_BUDGET_CEILING_S,
     )
+    if budget < default:
+        _log_configuration_fault_once(
+            f"{_MT5_RELOGIN_BUDGET_ENV}_below_derived_default",
+            "mt5 session path: %s is set below its derived default of %s seconds. "
+            "The value is accepted, but the ipc_fault escalation can never afford "
+            "its terminal-process recycle at it, so a -10005 wedge is never "
+            "recycled automatically; the persistence alarm raises it at ERROR "
+            "instead. This is a SERVER misconfiguration, never a credential "
+            "failure (D-02).",
+            _MT5_RELOGIN_BUDGET_ENV,
+            default,
+        )
+    return budget
 
 
 def _relogin_lease_wait_s() -> float:
@@ -1221,15 +1251,42 @@ def _escalate_ipc_fault(
         # is set below that default. Killing the shared terminal and then being
         # abandoned before the relaunch probe is the worst outcome here, so the
         # attempt is NOT spent and NOT made.
-        logger.warning(
-            "mt5 session heal: ipc_fault code=%s — the terminal-process recycle was "
-            "NOT attempted: the heal budget left cannot cover the recycle and its "
-            "relaunch probe (%s is set below its derived default?). The attempt is "
-            "not spent; the next reading will try again.",
-            code,
-            _MT5_RELOGIN_BUDGET_ENV,
-        )
-        return None
+        #
+        # ⛔ WR-01 / R2-SFH-01 (164.6.5 review round 2) — AND IT GOES THROUGH THE
+        # PERSISTENCE ALARM. The budget comes from the same variable every tick,
+        # so "the next reading will try again" never comes true: this exit used
+        # to be a WARNING per tick, forever, with no recycle and no ERROR — the
+        # four-day shape. It is a server misconfiguration preventing a recovery,
+        # so the first due reading is an ERROR that names the variable.
+        # ⭐ SFH-09 — the step ran and declined, so it returns its own kind.
+        if since is not None and ipc_fault_alarm_due(
+            now, _IPC_FAULT_ALARM_INTERVAL_S, attempted=False
+        ):
+            mark_ipc_fault_alarm(now)
+            logger.error(
+                "mt5 session heal: ipc_fault code=%s has PERSISTED for %d min and the "
+                "terminal-process recycle was NOT attempted on any reading of it: "
+                "the heal budget cannot cover the recycle and its relaunch probe, "
+                "because %s is set below its derived default. Nothing automatic "
+                "will clear it until that variable is corrected; an OPERATOR is "
+                "needed. Re-raised at ERROR at most every %d min while it persists.",
+                code,
+                int((now - since) // 60),
+                _MT5_RELOGIN_BUDGET_ENV,
+                int(_IPC_FAULT_ALARM_INTERVAL_S // 60),
+            )
+        else:
+            logger.warning(
+                "mt5 session heal: ipc_fault code=%s — the terminal-process recycle "
+                "was NOT attempted: the heal budget left cannot cover the recycle "
+                "and its relaunch probe (%s is set below its derived default?). The "
+                "attempt is not spent; a persisting fault is raised at ERROR once it "
+                "has lasted %d min.",
+                code,
+                _MT5_RELOGIN_BUDGET_ENV,
+                int(_IPC_FAULT_ALARM_INTERVAL_S // 60),
+            )
+        return KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET
     claim_ipc_fault_escalation()
     verdict: dict[str, object] = {}
     degraded = False

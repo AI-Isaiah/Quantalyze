@@ -1601,6 +1601,7 @@ _ESCALATION_KINDS = (
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_FAILED,
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET,
 )
 
 
@@ -2816,7 +2817,12 @@ async def test_WR04_a_recycle_the_budget_cannot_finish_is_never_started(
         await _heal_n_times(1)
 
     assert _recycle_count(fake) == 0
-    assert outcomes[0].escalation_kind is None
+    # ⭐ SFH-09 (164.6.5 review round 2) — the step RAN and DECLINED, so it has
+    # its own kind; `None` is "this step never ran".
+    assert (
+        outcomes[0].escalation_kind
+        == mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET
+    )
     assert any(
         "recycle was NOT attempted" in r.getMessage() and r.levelno == logging.WARNING
         for r in _records(caplog)
@@ -2825,6 +2831,67 @@ async def test_WR04_a_recycle_the_budget_cannot_finish_is_never_started(
     fake._scenario["crossing_cost_s"] = 0.0
     await _heal_n_times(1)
     assert _recycle_count(fake) == 1, "the skipped attempt was spent anyway"
+
+
+async def test_R2_WR01_a_budget_that_can_NEVER_afford_the_recycle_reaches_ERROR(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+) -> None:
+    """⛔ WR-01 / R2-SFH-01 (164.6.5 review round 2). The budget-short skip was
+    the ONE exit on the recycle-reachable path that never consulted the
+    persistence alarm. The budget comes from the same variable every tick, so a
+    Railway override below the derived default skips on EVERY wedge: "the next
+    reading will try again" never comes true, and the four-day shape (a WARNING
+    per tick, no recycle, no ERROR) was back — the reviewer measured 48 ticks,
+    0 recycles, 0 ERROR. Eighty minutes of ten-minute ticks must produce an
+    ERROR that names the variable, and still no recycle."""
+    _set_full_env(monkeypatch)
+    monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", "160")
+    fake, _c = _install_client(
+        monkeypatch,
+        {**_WEDGED, "crossing_cost_s": mt5_relogin._MT5_REQUEST_TIMEOUT_S},
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        for _ in range(8):
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+
+    assert _recycle_count(fake) == 0
+    assert {o.escalation_kind for o in outcomes} == {
+        mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET
+    }
+    errors = [r.getMessage() for r in _records(caplog) if r.levelno >= logging.ERROR]
+    assert len(errors) == 1, errors
+    assert "MT5_RELOGIN_BUDGET_S" in errors[0] and "160" not in errors[0], errors
+
+
+def test_R2_SFH01_a_budget_below_its_derived_default_is_WARNED_once_by_NAME(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ R2-SFH-01, the read-time half. A value inside the accepted window but
+    below the derived default can never run the escalation, so it is named at
+    WARNING once per process when it is read — the variable's NAME, never its
+    value (T-164.6.2-12). The default and anything at or above it stay quiet."""
+    monkeypatch.delenv("MT5_RELOGIN_BUDGET_S", raising=False)
+    default = mt5_relogin._relogin_budget_s()
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert mt5_relogin._relogin_budget_s() == default
+        monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", str(default))
+        assert mt5_relogin._relogin_budget_s() == default
+        assert not _records(caplog), "the derived default itself was warned about"
+
+        monkeypatch.setenv("MT5_RELOGIN_BUDGET_S", "161")
+        assert mt5_relogin._relogin_budget_s() == 161.0
+        assert mt5_relogin._relogin_budget_s() == 161.0
+
+    warnings = [r for r in _records(caplog) if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    message = warnings[0].getMessage()
+    assert "MT5_RELOGIN_BUDGET_S" in message and "161" not in message, message
 
 
 def test_HealOutcome_escalation_field_is_appended_and_defaults_to_never_ran() -> None:
@@ -3418,7 +3485,14 @@ async def test_a_hung_terminal_is_abandoned_at_the_budget_and_raises_nothing(
     with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         assert await mt5_relogin.heal_mt5_terminal_session() is None
 
-    records = _outcome_records(caplog)
+    # ⭐ R2-SFH-01 (164.6.5 review round 2) — a budget below the derived default
+    # is now NAMED once at WARNING when it is read. That line is a correct
+    # configuration note about this test's own tiny budget, not an outcome.
+    records = [
+        r
+        for r in _outcome_records(caplog)
+        if "below its derived default" not in r.getMessage()
+    ]
     assert len(records) == 1, [r.getMessage() for r in records]
     record = records[0]
     message = record.getMessage()

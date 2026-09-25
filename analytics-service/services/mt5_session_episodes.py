@@ -248,6 +248,13 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 #                                "recycled" nor "still faulted after a recycle"
 #                                is true — the recycle VERB needs a human, since
 #                                the Wine-side terminate has never run live.
+#   * recycle_skipped_budget  -> the escalation RAN and DECLINED: the heal
+#                                budget left could not cover the recycle and its
+#                                relaunch probe, so nothing was started and the
+#                                attempt was not spent (164.6.5 review round 2,
+#                                SFH-09 / WR-01). Reachable only when
+#                                `MT5_RELOGIN_BUDGET_S` is set below its derived
+#                                default, which is a SERVER misconfiguration.
 #
 # ⚠️ NONE OF THEM IS PASSED TO `classify_reading` BY THE HEAL, and if one ever is
 # it DEGRADES TO `not_measured` — none is a positive class and none carries
@@ -265,6 +272,7 @@ KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING: Final[str] = (
 )
 KIND_IPC_FAULT_RECYCLE_FAILED: Final[str] = "ipc_fault_recycle_failed"
 KIND_IPC_FAULT_RECYCLE_NOT_LANDED: Final[str] = "ipc_fault_recycle_not_landed"
+KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET: Final[str] = "ipc_fault_recycle_skipped_budget"
 
 #: The MT5 code meaning "the bridge ANSWERED and NO ACCOUNT IS AUTHORIZED" — the
 #: ONE code that establishes darkness. Re-spelled here rather than imported from
@@ -330,7 +338,11 @@ class HealOutcome(NamedTuple):
 
     ``escalation_kind`` (164.6.5 plan 05) is one of the ``KIND_IPC_FAULT_RECYCLE*``
     kinds when the ``ipc_fault`` escalation RAN, and ``None`` when it did not —
-    the ``final_kind`` precedent: ``None`` means this step never ran. ⛔ APPENDED
+    the ``final_kind`` precedent: ``None`` means this step never ran. ⭐ 164.6.5
+    review round 2 (SFH-09): an escalation that ran and DECLINED (the budget
+    could not cover the recycle) carries its own kind, never ``None``. ⚠️
+    ``None`` still also covers a code the recycle cannot reach and a reading
+    debounced within a run: in both the recycle step was not entered. ⛔ APPENDED
     and DEFAULTED, so every construction site that predates it stays valid and no
     positional construction is silently reordered. ⛔ The recorder does not read
     it: an escalation acts on the terminal, it does not measure the session.
