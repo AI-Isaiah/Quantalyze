@@ -409,6 +409,22 @@ export function prepareFile(src) {
   const dq = dollarBodyRanges(src);
   if (dq.error) return { error: dq.error, line: dq.line };
   const lineOf = lineIndexer(src);
+  // ⛔ 164.9.2 review round 2, IN-02 / SFH R2-03: a SQL-standard `BEGIN ATOMIC`
+  // function body is NOT dollar-quoted, so `statements()` splits it at every
+  // inner `;`: its first statement hides inside the CREATE span and each later
+  // one lexes as a TOP-LEVEL span. MEASURED on a fixture: `--audit` then told
+  // the reviewer to add the update: line that would replay an UPDATE the
+  // migration only DEFINED. Refused as unlexable, which every mode already
+  // treats as "could not measure, never a pass". Masked text, so the words in a
+  // comment or a string are not a body. 0 in the corpus (measured 2026-09-25).
+  const atomic = new RegExp(`\\bBEGIN${WS}+ATOMIC\\b`, "i").exec(masked.code);
+  if (atomic) {
+    return {
+      error:
+        "a SQL-standard BEGIN ATOMIC function body, which is not dollar-quoted, so its inner statements would lex as top-level spans; write the body dollar-quoted, or classify the file by hand",
+      line: lineOf(atomic.index),
+    };
+  }
   // The dollar bodies a migration EXECUTES at apply time: a body whose enclosing
   // top-level statement starts with DO (comments and strings are blanked in the
   // masked text, so a leading comment cannot hide the keyword).
@@ -1930,7 +1946,11 @@ function modeAudit(io, allowlistPath, migrationsDir) {
     `  C5 lines:             ${allEntries.length - entries.length}`,
     // ⛔ 164.9.2 review WR-02 / SFH-02: "unaccounted" below is counted over THIS
     // scope and no wider. Printed every run so the census cannot be read as more.
-    "  C5 scope:             top-level UPDATE / DELETE / TRUNCATE / MERGE / COPY … FROM / INSERT … ON CONFLICT DO UPDATE, and the same writes inside a DO body; NOT traced: a function called at top level, and dynamic SQL built from a string",
+    // ⛔ Round 2 (IN-02 / SFH R2-03): the NOT-traced list named two shapes and a
+    // reader took everything else as covered. Each shape below was MEASURED to
+    // return ok 0, rejected 0, doWrites 0 and no DML refusal, so each is named;
+    // BEGIN ATOMIC, which was worse than untraced, is refused at lex instead.
+    "  C5 scope:             top-level UPDATE / DELETE / TRUNCATE / MERGE / COPY … FROM / INSERT … ON CONFLICT DO UPDATE, and the same writes inside a DO body; a SQL-standard BEGIN ATOMIC body is refused as unlexable; NOT traced: a plain INSERT inside a DO body, a function or procedure called at top level (SELECT fn() / CALL) or from inside a DO body (PERFORM fn()), EXPLAIN ANALYZE of a write, PREPARE / EXECUTE, and dynamic SQL built from a string",
   );
   for (const t of c5Sorted) {
     const row = c5PerTable.get(t);
@@ -2009,8 +2029,13 @@ function modeAudit(io, allowlistPath, migrationsDir) {
  * inserts self-test OK: 61 kinds, red+green each.`, exit 0. 60 → 61:
  * `c5-audit-upsert-decline`. The layer-2 vitest was observed RED (`declares 61 …
  * still 60`) before this raise.
+ *
+ * MEASURED 2026-09-25 (review round 2, IN-02 / SFH R2-03): `extract-reference-
+ * inserts self-test OK: 62 kinds, red+green each.`, exit 0. 61 → 62:
+ * `begin-atomic-body`. The layer-2 vitest was observed RED (`declares 62 …
+ * still 61`) before this raise.
  */
-export const SELF_TEST_KINDS_FLOOR = 61;
+export const SELF_TEST_KINDS_FLOOR = 62;
 
 /**
  * @type {Array<{id:string, why:string, audit?:boolean, expect:string, redStderr?:RegExp, greenStdout?:RegExp, greenAbsent?:RegExp}>}
@@ -2097,6 +2122,13 @@ export const SELF_TEST_KINDS = [
     id: "unterminated-quote",
     why: "a file maskSql cannot lex is UNAUDITED, not clean",
     expect: "could not be lexed",
+  },
+  {
+    id: "begin-atomic-body",
+    why: "164.9.2 review round 2 (IN-02 / SFH R2-03): a SQL-standard BEGIN ATOMIC body is not dollar-quoted, so every statement after its first lexed as a TOP-LEVEL span and the audit advised replaying an UPDATE the migration only defined. It is refused as unlexable. The green leg pins that a dollar-quoted body and the words in a comment or a string are not refused, and that the audit's `C5 scope:` line names every shape C5 does NOT trace, so '0 unaccounted' cannot be read as wider than it is",
+    audit: true,
+    expect: "could not be lexed (a SQL-standard BEGIN ATOMIC function body",
+    greenStdout: /C5 scope: [^\n]*BEGIN ATOMIC[^\n]*NOT traced: [^\n]*a plain INSERT inside a DO body[^\n]*CALL[^\n]*PERFORM fn\(\)[^\n]*EXPLAIN ANALYZE[^\n]*PREPARE \/ EXECUTE[^\n]*dynamic SQL/,
   },
   {
     id: "txn-control",

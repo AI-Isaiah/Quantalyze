@@ -124,6 +124,10 @@ const REQUIRED_KINDS = [
   // One upsert rule, top level and DO body (review round 2, WR-02), MEASURED
   // 2026-09-25 → `OK: 61 kinds`.
   "c5-audit-upsert-decline",
+  // A BEGIN ATOMIC body is refused at lex, and the C5 scope line names every
+  // untraced shape (review round 2, IN-02 / SFH R2-03), MEASURED 2026-09-25 →
+  // `OK: 62 kinds`.
+  "begin-atomic-body",
 ];
 
 describe("SELF_TEST_KINDS_FLOOR — the extractor's self-test corpus is ratcheted", () => {

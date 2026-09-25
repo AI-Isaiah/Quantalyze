@@ -288,6 +288,19 @@
 #    gen_random_uuid() minted by the statement (top level) or by its block (a
 #    variable declared once and never reassigned). A proven one is accounted
 #    for by a decline: line. An upsert on auth.users is never declinable.
+#    ⛔ CORRECTED 2026-09-25 (164.9.2 review round 2, IN-02 / SFH R2-03). "What
+#    it still does NOT trace" above named two shapes, and a reader took every
+#    other shape as covered. The full list, each MEASURED to produce no C5 hit
+#    and no refusal, and printed on the `C5 scope:` line every run: a plain
+#    INSERT inside a DO body; a function or procedure called at top level
+#    (`SELECT fn()`, `CALL p()`) or from inside a DO body (`PERFORM fn()`; the
+#    corpus has one, 20260713120000's call of cleanup_abandoned_wizard_drafts(),
+#    inside the self-test subtransaction that rolls back); EXPLAIN ANALYZE of a
+#    write; PREPARE / EXECUTE; and dynamic SQL built from a string. A
+#    SQL-standard BEGIN ATOMIC function body is no longer untraced: it is
+#    REFUSED as unlexable, because its inner statements used to lex as
+#    top-level spans and the audit advised replaying an UPDATE the migration
+#    only defined. The corpus has none (measured).
 # 3. This file says nothing about whether the rows are on TEST right now. It says
 #    which statements the restore replays. The restore's own in-transaction gate
 #    and its `refdata:` census rows are what report presence.
