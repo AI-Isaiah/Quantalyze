@@ -85,6 +85,12 @@ interface ExchangeConnection {
   // a router.refresh() that resolves before replica propagation from dropping
   // the row from local state.
   pending_insert?: boolean;
+  // Phase 164.9.1 round-2 review (R2-3), client-only: true only while
+  // handleReconnect is running for this row. Set in its optimistic update and
+  // cleared in its `finally`, so it records a reconnect this tab started rather
+  // than guessing one from `syncing` + a null disconnected_at, a guess that also
+  // matched a row disconnected from elsewhere and held it active for good.
+  reconnect_in_flight?: boolean;
 }
 
 /**
@@ -211,6 +217,9 @@ const QUEUED_HOLD_GRACE_MS = 120_000;
 
 function isQueuedHold(k: InitialKey, prev?: ExchangeConnection): boolean {
   if (prev === undefined || prev.sync_status !== "syncing") return false;
+  // Round-2 review (R2-3): a disconnected key runs no queued job, so there is
+  // nothing to wait for, and holding `syncing` would disable its Reconnect.
+  if (k.disconnected_at != null) return false;
   if (prev.queued_next_attempt_at === null) return false;
   const queuedAt = Date.parse(prev.queued_next_attempt_at);
   if (!Number.isFinite(queuedAt)) return false;
@@ -224,21 +233,29 @@ function normalizeInitialKey(
   k: InitialKey,
   prev?: ExchangeConnection,
 ): ExchangeConnection {
-  // M1 (red-team): if the local state already cleared disconnected_at (the
-  // reconnect RPC succeeded and we optimistically set disconnected_at=null +
-  // sync_status="syncing"), do NOT let a stale server snapshot from a replica
-  // that hasn't caught up yet overwrite it with the old non-null timestamp.
-  // Guard: prev had disconnected_at=null AND sync_status="syncing" AND the
-  // server is still reporting a non-null disconnected_at → keep local null
-  // so the row stays in the active list and the Reconnect button stays
-  // disabled. The 5-second poll will pick up the committed server value once
-  // the replica propagates; until then, local truth wins.
+  // M1 (red-team): while this tab's own reconnect is running (the optimistic
+  // update set disconnected_at=null + sync_status="syncing"), do NOT let a
+  // server snapshot taken before the reconnect RPC committed overwrite it with
+  // the old non-null timestamp; keep local null so the row stays in the active
+  // list. Round-2 review (R2-3): the guard keys on the explicit
+  // `reconnect_in_flight` flag, which handleReconnect clears on every exit.
+  // It used to be inferred from `syncing` + a null disconnected_at, which also
+  // matched a row disconnected in another tab during a sync or a queued hold,
+  // and then kept that row active and "Syncing…" until the page was reloaded.
   const isReconnectInFlight =
-    prev !== undefined &&
-    prev.disconnected_at === null &&
-    prev.sync_status === "syncing" &&
-    !prev.pending_insert &&
-    k.disconnected_at != null;
+    prev?.reconnect_in_flight === true && k.disconnected_at != null;
+  const disconnectedAt = isReconnectInFlight
+    ? null
+    : (k.disconnected_at ?? null);
+  // Round-2 review (R2-1, R2-2): the client-only helper and queued timestamp
+  // describe the section the row was in. When a refresh moves the row between
+  // the active and the Disconnected lists (a disconnect or a reconnect made
+  // elsewhere), drop them: an active row's "click Sync now to retry" is wrong
+  // under a row with no Sync now button, and a 409's "Reconnect it" is wrong on
+  // a row that is connected again. Overrides set together with their section
+  // (the 409 path, "Reconnect failed") stay, because the row does not move.
+  const changedSection =
+    prev !== undefined && (prev.disconnected_at === null) !== (disconnectedAt === null);
 
   return {
     id: k.id,
@@ -257,12 +274,16 @@ function normalizeInitialKey(
     sync_error: k.sync_error ?? null,
     last_429_at: k.last_429_at ?? null,
     // M1: preserve local null (reconnect in-flight) against stale server snapshot.
-    disconnected_at: isReconnectInFlight ? null : (k.disconnected_at ?? null),
+    disconnected_at: disconnectedAt,
     venue_account_id: k.venue_account_id ?? null,
     // Landmine 8 + f8/f4 preservation: client-only fields carry over across
-    // router.refresh() server-state cycles when the row id matches.
-    queued_next_attempt_at: prev?.queued_next_attempt_at ?? null,
-    helper_override: prev?.helper_override ?? null,
+    // router.refresh() server-state cycles when the row id matches, unless the
+    // row changed section (R2-1, R2-2 above).
+    queued_next_attempt_at: changedSection
+      ? null
+      : (prev?.queued_next_attempt_at ?? null),
+    helper_override: changedSection ? null : (prev?.helper_override ?? null),
+    reconnect_in_flight: prev?.reconnect_in_flight === true,
     // NEW-C29-02: a row that arrives in the server snapshot is no longer pending.
     // pending_insert is cleared when the server confirms the id (this call
     // happens when the row appears in initialKeys).
@@ -345,10 +366,24 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
       // Stamp locally so the row re-renders in the Disconnected section
       // without waiting for router.refresh() to round-trip. Server truth
       // wins on the next merge via prevInitialKeys.
+      // Round-2 review (R2-1, R2-3): the row leaves the active list, so the
+      // active row's client-only state goes with it. A kept "Sync request
+      // failed — click Sync now to retry" would show under a row with no Sync
+      // now button, and a kept optimistic `syncing` (a queued hold) would show
+      // Reconnect disabled as "Reconnect in progress".
       const nowIso = new Date().toISOString();
       setKeys((prev) =>
         prev.map((k) =>
-          k.id === keyId ? { ...k, disconnected_at: nowIso } : k,
+          k.id === keyId
+            ? {
+                ...k,
+                disconnected_at: nowIso,
+                sync_status: "idle",
+                queued_next_attempt_at: null,
+                helper_override: null,
+                reconnect_in_flight: false,
+              }
+            : k,
         ),
       );
     }
@@ -408,61 +443,85 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
             sync_status: "syncing",
             sync_error: null,
             helper_override: null,
+            reconnect_in_flight: true,
           };
         }
         return k;
       });
     });
 
-    const { error: rpcErr } = await supabase.rpc(
-      "reconnect_allocator_api_key",
-      { p_api_key_id: keyId },
-    );
-    if (rpcErr) {
-      // SF-F3: log the RPC error before reverting so operators can see
-      // whether this is a permissions failure, network blip, deleted row,
-      // or constraint violation — previously rpcErr was silently absorbed
-      // with only a generic UI string, leaving no operator signal.
-      console.error("[AllocatorExchangeManager] handleReconnect RPC failed:", {
-        keyId,
-        code: rpcErr.code,
-        message: rpcErr.message,
-        hint: rpcErr.hint,
-      });
-      // Revert on failure — restore the original disconnected_at so the
-      // "Disconnected Nd ago" label stays accurate (M2 fix).
-      setKeys((prev) =>
-        prev.map((k) =>
-          k.id === keyId
-            ? {
-                ...k,
-                // M2: use the captured original timestamp, not a fresh one.
-                disconnected_at:
-                  originalDisconnectedAt ?? new Date().toISOString(),
-                sync_status: "idle",
-                helper_override: "Reconnect failed — try again",
-              }
-            : k,
-        ),
-      );
-      return;
-    }
-
-    // Kick off an immediate sync so the user doesn't wait for tomorrow's
-    // cron tick. Mirrors handleAddKey f4: 4xx/5xx surface via helper line.
+    // Round-2 review (R2-3): `finally` ends the in-flight guard on every exit
+    // (success, the RPC-failure revert, a 409, a failed or thrown sync POST),
+    // so a later server snapshot, a disconnect made elsewhere included, is
+    // believed again. A snapshot taken before the RPC committed and arriving
+    // after this returns is corrected by the next 5s poll.
     try {
-      const syncRes = await fetch("/api/allocator/holdings/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_key_id: keyId }),
-      });
-      if (syncRes.status === 409) {
-        // The reconnect RPC answered OK, yet the sync says the key is still
-        // (or again) disconnected. Put the row back where its Reconnect button
-        // is and say so, rather than inviting a Sync now that cannot succeed.
-        const body = await syncRes.json().catch(() => null);
-        markRefusedAsDisconnected(keyId, body, originalDisconnectedAt);
-      } else if (!syncRes.ok) {
+      const { error: rpcErr } = await supabase.rpc(
+        "reconnect_allocator_api_key",
+        { p_api_key_id: keyId },
+      );
+      if (rpcErr) {
+        // SF-F3: log the RPC error before reverting so operators can see
+        // whether this is a permissions failure, network blip, deleted row,
+        // or constraint violation — previously rpcErr was silently absorbed
+        // with only a generic UI string, leaving no operator signal.
+        console.error("[AllocatorExchangeManager] handleReconnect RPC failed:", {
+          keyId,
+          code: rpcErr.code,
+          message: rpcErr.message,
+          hint: rpcErr.hint,
+        });
+        // Revert on failure — restore the original disconnected_at so the
+        // "Disconnected Nd ago" label stays accurate (M2 fix).
+        setKeys((prev) =>
+          prev.map((k) =>
+            k.id === keyId
+              ? {
+                  ...k,
+                  // M2: use the captured original timestamp, not a fresh one.
+                  disconnected_at:
+                    originalDisconnectedAt ?? new Date().toISOString(),
+                  sync_status: "idle",
+                  helper_override: "Reconnect failed — try again",
+                }
+              : k,
+          ),
+        );
+        return;
+      }
+
+      // Kick off an immediate sync so the user doesn't wait for tomorrow's
+      // cron tick. Mirrors handleAddKey f4: 4xx/5xx surface via helper line.
+      try {
+        const syncRes = await fetch("/api/allocator/holdings/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ api_key_id: keyId }),
+        });
+        if (syncRes.status === 409) {
+          // The reconnect RPC answered OK, yet the sync says the key is still
+          // (or again) disconnected. Put the row back where its Reconnect button
+          // is and say so, rather than inviting a Sync now that cannot succeed.
+          const body = await syncRes.json().catch(() => null);
+          markRefusedAsDisconnected(keyId, body, originalDisconnectedAt);
+        } else if (!syncRes.ok) {
+          setKeys((prev) =>
+            prev.map((k) =>
+              k.id === keyId
+                ? {
+                    ...k,
+                    sync_status: "idle",
+                    helper_override: SYNC_FAILED_HELPER,
+                  }
+                : k,
+            ),
+          );
+        }
+      } catch (syncErr) {
+        // SF-F4: log the network/fetch error so operators can distinguish a
+        // transient network partition from a config regression — previously a
+        // bare catch {} absorbed TypeError/DOMException with no signal.
+        console.error("[AllocatorExchangeManager] handleReconnect sync POST failed:", syncErr);
         setKeys((prev) =>
           prev.map((k) =>
             k.id === keyId
@@ -475,25 +534,17 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
           ),
         );
       }
-    } catch (syncErr) {
-      // SF-F4: log the network/fetch error so operators can distinguish a
-      // transient network partition from a config regression — previously a
-      // bare catch {} absorbed TypeError/DOMException with no signal.
-      console.error("[AllocatorExchangeManager] handleReconnect sync POST failed:", syncErr);
+
+      startTransition(() => router.refresh());
+    } finally {
       setKeys((prev) =>
         prev.map((k) =>
-          k.id === keyId
-            ? {
-                ...k,
-                sync_status: "idle",
-                helper_override: SYNC_FAILED_HELPER,
-              }
+          k.id === keyId && k.reconnect_in_flight
+            ? { ...k, reconnect_in_flight: false }
             : k,
         ),
       );
     }
-
-    startTransition(() => router.refresh());
   }
 
   // Landmine 8: router.refresh() re-renders the server component which

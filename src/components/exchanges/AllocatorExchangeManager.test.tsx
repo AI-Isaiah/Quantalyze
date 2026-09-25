@@ -1755,80 +1755,99 @@ describe("AllocatorExchangeManager — M1 (red-team) Reconnect replica-lag guard
     rpcMock.mockReset();
   });
 
-  it("M1: re-rendering with a stale server snapshot (non-null disconnected_at) does NOT revert a reconnect-in-progress row back to the Disconnected section", async () => {
-    // Scenario: handleReconnect optimistically sets disconnected_at=null +
-    // sync_status="syncing". Before the replica propagates the RPC update,
-    // router.refresh() fires and the server snapshot still shows the old
-    // disconnected_at. Pre-fix: normalizeInitialKey would overwrite
-    // disconnected_at with the server value → row moved back to Disconnected
-    // section with Reconnect button re-enabled.
-    // Post-fix: the merge detects the in-flight state and preserves local null.
-    //
-    // We simulate the race by: (1) render with disconnected key, (2) simulate
-    // the optimistic state by re-rendering with the LOCAL optimistic state,
-    // then (3) rerender with the stale server snapshot and assert the row
-    // stays in the active section.
-    //
-    // The cleanest way to test normalizeInitialKey's guard without driving the
-    // full handleReconnect flow is to rerender the component with a key that
-    // was already in "reconnecting" local state. We do this by rendering the
-    // component twice:
-    //   - First with the row already showing sync_status="syncing" +
-    //     disconnected_at=null (simulating the state AFTER the optimistic
-    //     update has been applied in handleReconnect).
-    //   - Then rerender with the stale server snapshot (disconnected_at
-    //     non-null, sync_status="idle") and assert the row stays in the
-    //     active section.
-    //
-    // This is falsifiable: deleting the isReconnectInFlight guard from
-    // normalizeInitialKey causes the row to revert to the Disconnected section.
+  // Round-2 review (R2-3): this test used to seed a row that was merely
+  // `syncing` with a null disconnected_at and call that "a reconnect in
+  // progress". That inference was the defect: the same shape is a row whose
+  // key was disconnected elsewhere during a sync, and the guard pinned it
+  // active for good. The guard now keys on a flag handleReconnect sets, so the
+  // test drives the real Reconnect click and holds its RPC open.
+  it("M1: a stale server snapshot arriving while this tab's reconnect is running does NOT move the row back to Disconnected", async () => {
+    let resolveRpc!: (v: unknown) => void;
+    rpcMock.mockReturnValueOnce(
+      new Promise((r) => {
+        resolveRpc = r;
+      }),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, job_id: "j1" }),
+      }),
+    );
+    const staleSnapshot = () => [
+      makeKey({ sync_status: "idle", disconnected_at: "2026-04-22T09:00:00Z" }),
+    ];
+    const { rerender } = render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={staleSnapshot()} />,
+    );
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      );
+    });
+    // The optimistic update moved the row to the active list.
+    expect(
+      screen.getByRole("button", { name: /Sync binance now/i }),
+    ).toBeInTheDocument();
 
-    // Start: row is in active state with sync_status="syncing" and
-    // disconnected_at=null — this mimics the post-optimistic-update state
-    // that handleReconnect stamps before the RPC.
+    // A refresh taken before the reconnect RPC committed still reports the
+    // old disconnected_at. Local truth wins while the reconnect runs.
+    rerender(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={staleSnapshot()} />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /Reconnect binance key/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Sync binance now/i }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      resolveRpc({ data: true, error: null });
+    });
+    vi.unstubAllGlobals();
+  });
+
+  // The flag ends with handleReconnect: once it has returned, a snapshot that
+  // says the key is disconnected is believed (a disconnect made elsewhere).
+  it("M1: after the reconnect has finished, a snapshot reporting the key disconnected is believed", async () => {
+    rpcMock.mockResolvedValueOnce({ data: true, error: null });
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, job_id: "j1" }),
+    });
+    vi.stubGlobal("fetch", fetchSpy);
     const { rerender } = render(
       <AllocatorExchangeManager
         hasHoldings={true} initialKeys={[
-          makeKey({
-            sync_status: "syncing",
-            // disconnected_at is absent (undefined → normalized to null)
-          }),
+          makeKey({ sync_status: "idle", disconnected_at: "2026-04-22T09:00:00Z" }),
         ]}
       />,
     );
-
-    // The Reconnect button must NOT be in the DOM (row is in the active list).
-    expect(
-      screen.queryByRole("button", { name: /Reconnect binance key/i }),
-    ).not.toBeInTheDocument();
-    // The row IS in the active Exchange connections card.
-    expect(
-      screen.getByRole("button", { name: /Sync binance now/i }),
-    ).toBeInTheDocument();
-
-    // Simulate the stale server snapshot arriving: server still reports the
-    // old disconnected_at timestamp and sync_status="idle".
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(routerRefreshMock).toHaveBeenCalled();
+    });
     rerender(
       <AllocatorExchangeManager
         hasHoldings={true} initialKeys={[
-          makeKey({
-            sync_status: "idle",
-            disconnected_at: "2026-04-22T09:00:00Z",
-          }),
+          makeKey({ sync_status: "idle", disconnected_at: "2026-09-25T10:00:00Z" }),
         ]}
       />,
     );
-
-    // M1 post-fix: the row must STILL be in the active section (Reconnect
-    // button absent, Sync now present), because the merge recognised that
-    // local state had disconnected_at=null + sync_status="syncing" and
-    // preserved it against the stale snapshot.
-    expect(
-      screen.queryByRole("button", { name: /Reconnect binance key/i }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Sync binance now/i }),
-    ).toBeInTheDocument();
+    const reconnect = screen.getByRole("button", { name: /Reconnect binance key/i });
+    expect(reconnect).not.toBeDisabled();
+    vi.unstubAllGlobals();
   });
 });
 
@@ -2297,3 +2316,256 @@ describe("AllocatorExchangeManager — 160-03 server-side persist + row re-fetch
   });
 });
 
+
+// ===========================================================================
+// ⭐ Phase 164.9.1 round-2 review (silent-failure-hunter R2-1, R2-2, R2-3).
+// The client-only helper, queued timestamp and optimistic `syncing` describe
+// the section a row is in. When the row changes section (a disconnect in this
+// tab, or a disconnect or reconnect made elsewhere and seen on a refresh), the
+// user must not be left with a message that points at a button the row does
+// not have, or with a row pinned "Syncing…" that no refresh can release.
+// ===========================================================================
+
+describe("AllocatorExchangeManager — round-2 review: state crossing sections", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  const DISCONNECTED_REASON =
+    "This API key is disconnected. Reconnect it before syncing holdings.";
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    rpcMock.mockReset();
+    holdingsCountMock.mockReset();
+    holdingsCountMock.mockReturnValue({ count: 0, error: null });
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function clickSyncNow() {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Sync binance now/i }));
+    });
+  }
+
+  // Opens the Disconnect modal and confirms the soft disconnect (no holdings,
+  // so no cascade checkbox): the migration-075 path.
+  async function softDisconnectInThisTab() {
+    rpcMock.mockResolvedValue({ data: true, error: null });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Disconnect binance key/i }),
+      );
+    });
+    const confirm = screen
+      .getAllByRole("button")
+      .filter(
+        (b) => b.textContent === "Disconnect" && b.className.includes("bg-negative"),
+      )
+      .at(-1)!;
+    await act(async () => {
+      fireEvent.click(confirm);
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      ).toBeInTheDocument();
+    });
+    expect(rpcMock).toHaveBeenCalledWith("disconnect_allocator_api_key", {
+      p_api_key_id: "key-binance-1",
+    });
+  }
+
+  async function queueRow() {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        already_inflight: true,
+        next_attempt_at: new Date(Date.now() + 90_000).toISOString(),
+      }),
+    });
+    const view = render(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[makeKey({ sync_status: "complete" })]}
+      />,
+    );
+    await clickSyncNow();
+    await waitFor(() => {
+      expect(screen.getByTestId("allocator-sync-helper").textContent).toMatch(
+        /Queued/,
+      );
+    });
+    return view;
+  }
+
+  // R2-1: a failed sync leaves "Sync request failed — click Sync now to
+  // retry". Disconnecting the key must not carry that invitation onto a row
+  // that has only Reconnect.
+  it("R2-1: a stale 'click Sync now' helper does not follow a same-tab disconnect", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "boom" }),
+    });
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
+    await clickSyncNow();
+    await waitFor(() => {
+      expect(screen.getByTestId("allocator-sync-helper").textContent).toContain(
+        "Sync now",
+      );
+    });
+    await softDisconnectInThisTab();
+    expect(
+      screen.getByTestId("allocator-disconnected-helper").textContent,
+      "a disconnected row tells the user to press Sync now, which it does not have",
+    ).not.toContain("Sync now");
+  });
+
+  it("R2-1: a stale 'click Sync now' helper does not follow a disconnect made elsewhere (active → Disconnected on refresh)", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "boom" }),
+    });
+    const { rerender } = render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />,
+    );
+    await clickSyncNow();
+    await waitFor(() => {
+      expect(screen.getByTestId("allocator-sync-helper").textContent).toContain(
+        "Sync now",
+      );
+    });
+    rerender(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[
+          makeKey({ sync_status: "idle", disconnected_at: "2026-09-25T09:00:00Z" }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Reconnect binance key/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("allocator-disconnected-helper").textContent,
+    ).not.toContain("Sync now");
+  });
+
+  // R2-2, the converse: a 409 moved the row to Disconnected with "Reconnect
+  // it". The key is then reconnected elsewhere and a refresh brings the row
+  // back to the active list, where there is no Reconnect button.
+  it("R2-2: a 409's 'Reconnect it' sentence does not follow a reconnect made elsewhere (Disconnected → active on refresh)", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: DISCONNECTED_REASON }),
+    });
+    const { rerender } = render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />,
+    );
+    await clickSyncNow();
+    await waitFor(() => {
+      expect(screen.getByTestId("allocator-disconnected-helper").textContent).toBe(
+        DISCONNECTED_REASON,
+      );
+    });
+    rerender(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[makeKey({ sync_status: "complete" })]}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Sync binance now/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("allocator-sync-helper").textContent,
+      "a connected row still says it is disconnected and must be reconnected",
+    ).not.toContain("Reconnect it");
+    expect(document.body.textContent).not.toContain(DISCONNECTED_REASON);
+  });
+
+  // The override set together with its section stays: a 409 row refreshed
+  // while still disconnected keeps its reason.
+  it("R2-2: the 409 sentence stays while the refreshed row is still disconnected", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: DISCONNECTED_REASON }),
+    });
+    const { rerender } = render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />,
+    );
+    await clickSyncNow();
+    await waitFor(() => {
+      expect(screen.getByTestId("allocator-disconnected-helper").textContent).toBe(
+        DISCONNECTED_REASON,
+      );
+    });
+    rerender(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[
+          makeKey({ sync_status: "idle", disconnected_at: "2026-09-25T09:00:00Z" }),
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("allocator-disconnected-helper").textContent).toBe(
+      DISCONNECTED_REASON,
+    );
+  });
+
+  // R2-3: during a queued hold the key is disconnected elsewhere. The first
+  // refresh that shows disconnected_at must move the row to Disconnected with
+  // Reconnect usable, and later refreshes must not pin it back.
+  it("R2-3: a remote disconnect during a queued hold moves the row to Disconnected with Reconnect enabled", async () => {
+    const { rerender } = await queueRow();
+    const disconnectedSnapshot = [
+      makeKey({ sync_status: "complete", disconnected_at: "2026-09-25T09:00:00Z" }),
+    ];
+    rerender(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={disconnectedSnapshot} />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /Sync binance now/i }),
+      "the row is still pinned active after the server reported it disconnected",
+    ).not.toBeInTheDocument();
+    const reconnect = screen.getByRole("button", { name: /Reconnect binance key/i });
+    expect(reconnect).not.toBeDisabled();
+    // A second refresh (a new array, as router.refresh() hands back) keeps it.
+    rerender(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[
+          makeKey({ sync_status: "complete", disconnected_at: "2026-09-25T09:00:00Z" }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Reconnect binance key/i }),
+    ).not.toBeDisabled();
+    expect(document.body.textContent).not.toMatch(/Queued/);
+  });
+
+  // R2-3, same tab: Disconnect clicked while the hold is active. The row must
+  // not show Reconnect disabled as "Reconnect in progress" for minutes.
+  it("R2-3: a same-tab disconnect during a queued hold leaves Reconnect enabled, before and after the refresh", async () => {
+    const { rerender } = await queueRow();
+    await softDisconnectInThisTab();
+    const reconnect = screen.getByRole("button", { name: /Reconnect binance key/i });
+    expect(
+      reconnect,
+      "Reconnect is disabled on a disconnected row with no reconnect running",
+    ).not.toBeDisabled();
+    rerender(
+      <AllocatorExchangeManager
+        hasHoldings={true} initialKeys={[
+          makeKey({ sync_status: "complete", disconnected_at: "2026-09-25T09:00:00Z" }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Reconnect binance key/i }),
+    ).not.toBeDisabled();
+  });
+});
