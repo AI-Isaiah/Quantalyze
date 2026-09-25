@@ -2417,6 +2417,7 @@ on the shared terminal — and a shared-terminal outage reaches a human without 
 **Requirements**: TBD
 **Depends on:** Phase 164.6.5 (availability first: this phase changes the terminal's ownership model,
 which is only safe once validation stops wedging it)
+**Owns (2026-09-25, from 164.6.5 plan 01):** `TODOS.md` `MT5-SWITCH-WEDGE-CAUSE-01` — why some account switches on the shared terminal wedge it (`-10005`, Journal silent after `disconnected`) and others do not. Verdicts so far: same-vs-different account REJECTED, terminal self-update and same-vs-different broker server UNDECIDED. Closes only on evidence captured at the next wedge BEFORE any restart; a restart clearing the symptom is not a close.
 **Plans:** 0 plans
 
 ⛔ **SAME INCIDENT AS 164.6.5, DIFFERENT DEFECT.** 164.6.5 makes validation stop breaking the
