@@ -448,22 +448,22 @@ describe("restore-test-from-baseline.sh — the header's cross-file pointers res
 });
 
 describe("restore-test-from-baseline.sh — the arm ratchet", () => {
-  it("EXPECTED_ARMS=34 is a live line, exactly once, with its MEASURED date beside it", () => {
+  it("EXPECTED_ARMS=37 is a live line, exactly once, with its MEASURED date beside it", () => {
     const region = selfTestRegion(SRC);
     expect(
-      liveCount(region, "EXPECTED_ARMS=34"),
-      "the arm ratchet is no longer a single live `EXPECTED_ARMS=34` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
+      liveCount(region, "EXPECTED_ARMS=37"),
+      "the arm ratchet is no longer a single live `EXPECTED_ARMS=37` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
     ).toBe(1);
 
     // SC-9 (`gate-family-meta.test.ts:18-30`): a threshold constant needs a
     // measurement token AND a date beside it, or nobody can tell a measured floor
     // from a guessed one.
     const lines = region.split("\n");
-    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=34"));
+    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=37"));
     const beside = `${lines[at - 1] ?? ""}\n${lines[at]}`;
     expect(
       beside,
-      "EXPECTED_ARMS=34 carries no MEASURED date on its own or the preceding line — SC-9",
+      "EXPECTED_ARMS=37 carries no MEASURED date on its own or the preceding line — SC-9",
     ).toContain("MEASURED 2026-09-25");
 
     // The harness must ASSERT the count, not merely print it.
@@ -494,9 +494,9 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION for the pair above — move the constant and the prose must
     // disagree, or this assertion is measuring nothing.
-    const moved = SRC.replace("\nEXPECTED_ARMS=34\n", "\nEXPECTED_ARMS=35\n");
+    const moved = SRC.replace("\nEXPECTED_ARMS=37\n", "\nEXPECTED_ARMS=38\n");
     expect(moved).not.toBe(SRC);
-    const movedArms = 35;
+    const movedArms = 38;
     expect(
       SRC.split("\n").filter((l) => /prints \d+\/\d+/.test(l)).every((l) => l.includes(`prints ${movedArms}/${movedArms}`)),
       "the `prints N/N` prose still agrees with a MOVED constant, so the agreement check is vacuous.",
@@ -504,15 +504,15 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — comment the constant out; a whole-file `toContain` would
     // still pass, this pin must not.
-    const commented = SRC.replace("\nEXPECTED_ARMS=34\n", "\n# EXPECTED_ARMS=34\n");
+    const commented = SRC.replace("\nEXPECTED_ARMS=37\n", "\n# EXPECTED_ARMS=37\n");
     expect(commented).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=34")).toBe(0);
+    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=37")).toBe(0);
 
     // CALIBRATION — a second copy of the constant is a disagreement waiting to
     // happen, and must fail the "exactly once" leg.
-    const doubled = SRC.replace("\nEXPECTED_ARMS=34\n", "\nEXPECTED_ARMS=34\nEXPECTED_ARMS=34\n");
+    const doubled = SRC.replace("\nEXPECTED_ARMS=37\n", "\nEXPECTED_ARMS=37\nEXPECTED_ARMS=37\n");
     expect(doubled).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=34")).toBe(2);
+    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=37")).toBe(2);
   });
 
   it("plan 01's interim closing line is GONE — the word it used appears nowhere", () => {
@@ -531,8 +531,8 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — re-insert the interim line; the pin must flip.
     const restored = SRC.replace(
-      "\nEXPECTED_ARMS=34\n",
-      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=34\n`,
+      "\nEXPECTED_ARMS=37\n",
+      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=37\n`,
     );
     expect(restored).not.toBe(SRC);
     expect(restored.includes(interimWord)).toBe(true);
@@ -727,6 +727,57 @@ describe("restore-test-from-baseline.sh — L-01: the reference-data replay's po
     const passed = SRC.replace("--emit-restore-sql) || rearm_rc=$?", '--emit-restore-sql --mode "$mode") || rearm_rc=$?');
     expect(passed).not.toBe(SRC);
     expect(modeRefsInWindow(passed).length).toBeGreaterThan(0);
+  });
+
+  it("round-1 review (M1/M2): the emitter's exit code, its output's SHAPE and the self-test-only seam are all live guards", () => {
+    // Self-test arms 35-37 measure these on a lane, but that self-test runs on
+    // dispatch and by hand. These pins run on every PR and fail if a guard is
+    // deleted or defanged in the source. Each one is calibrated below.
+    const txn = txnRegion(SRC);
+    const CONCAT = `printf '%s\\n' "$rearm_sql" >> "$out"`;
+    const concatAt = liveIndexOf(txn, CONCAT);
+    expect(concatAt, "the normalisation concatenation is gone").toBeGreaterThan(0);
+
+    const RC_CAPTURE = "--emit-restore-sql) || rearm_rc=$?";
+    const RC_CHECK = 'if [ "$rearm_rc" -ne 0 ]; then';
+    const SHAPE_OPEN = "awk -v x='DO $tonau_rearm$'";
+    const SHAPE_IF = 'if [ "$rearm_open" != 1 ] || [ "$rearm_close" != 1 ]';
+    const guards = (t: string) => {
+      const x = txnRegion(t);
+      const c = liveIndexOf(x, CONCAT);
+      return [RC_CAPTURE, RC_CHECK, SHAPE_OPEN, SHAPE_IF].every((g) => {
+        const i = liveIndexOf(x, g);
+        return liveCount(x, g) === 1 && i >= 0 && i < c;
+      });
+    };
+    expect(guards(SRC), "an emitter guard is missing, doubled, or sits after the concatenation").toBe(true);
+
+    // CALIBRATION: the reviewer's two named mutations, and the shape check deleted.
+    const swallowed = SRC.replace(RC_CAPTURE, "--emit-restore-sql) || true");
+    expect(swallowed).not.toBe(SRC);
+    expect(guards(swallowed)).toBe(false);
+    const noShape = SRC.replace(SHAPE_IF, "if false");
+    expect(noShape).not.toBe(SRC);
+    expect(guards(noShape)).toBe(false);
+
+    // The seam: REARM_EMITTER is admitted only when the self-test's own legs say
+    // so, and those legs are the only place the flag is set.
+    const SEAM_IF = 'if [ "${RESTORE_SELFTEST_EMITTER_SEAM:-0}" = 1 ]; then';
+    expect(liveCount(runRegion(SRC), SEAM_IF), "REARM_EMITTER is no longer gated by the self-test seam").toBe(1);
+    expect(
+      liveCount(runRegion(SRC), 'REARM_EMITTER="$REARM_EMITTER_DEFAULT"'),
+      "outside the seam, REARM_EMITTER is no longer forced back to the script beside this one",
+    ).toBe(1);
+    const setters = liveLines(SRC).filter(
+      ({ line }) => /RESTORE_SELFTEST_EMITTER_SEAM=/.test(line) && !line.includes(":-0"),
+    );
+    expect(
+      setters.map(({ line }) => line.trim()),
+      "RESTORE_SELFTEST_EMITTER_SEAM is set somewhere other than the self-test's run_leg",
+    ).toEqual(['RESTORE_SELFTEST_EMITTER_SEAM="$ARM_EMITTER_SEAM" \\']);
+    const ungated = SRC.replace(SEAM_IF, "if true; then");
+    expect(ungated).not.toBe(SRC);
+    expect(liveCount(runRegion(ungated), SEAM_IF)).toBe(0);
   });
 
   it("the reference-data refusal is CALLED before the census is written, and the census carries the rows", () => {

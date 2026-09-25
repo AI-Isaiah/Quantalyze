@@ -72,6 +72,14 @@
 #                             an unreadable epoch.
 #   RESTORE_EXPECT_MARKER_RE  default: `test` as a whole word, case-insensitive
 #   RESTORE_REFUSE_MARKER_RE  default: `prod`, case-insensitive
+#                             ⚠️ Both are read in TWO dialects: here by `grep -Ei`
+#                             (POSIX ERE, line by line) before the transaction,
+#                             and inside it by the normalisation fragment with
+#                             PostgreSQL's `~*` (ARE). The defaults mean the same
+#                             in both. An override using `\b`, back-references or
+#                             anchors across a multi-line marker can disagree; the
+#                             only reachable disagreement is a LOUD in-transaction
+#                             refusal, because the grep check runs first.
 #   RESTORE_OUT_DIR           where the census / survivors / transaction files are
 #                             written; default a mktemp dir removed on exit. Plan 03
 #                             points this at the workflow's backup artifact so the
@@ -135,6 +143,16 @@
 #                             only because the self-test runs scratch copies of
 #                             this script from its mktemp dir, where the default
 #                             path beside the copy does not exist.
+#                             ⛔ HONOURED ONLY UNDER --self-test (round-1 review,
+#                             silent-failure-hunter M2). Outside it the value is
+#                             IGNORED and the script beside this one is used, with
+#                             a note saying so, so a stale export in an operator
+#                             shell or a workflow `env:` cannot swap the SQL that
+#                             makes a restore safe to commit.
+#   RESTORE_SELFTEST_EMITTER_SEAM
+#                             (self-test only) set to 1 by --self-test's own legs,
+#                             and only there, to admit the emitter seam above.
+#                             Never set it by hand.
 #   PGBIN                     (self-test only) server binaries for the throwaway lane
 #
 # ⚠️ psql's STDERR IS printed for the transaction — and it does NOT only name SQL
@@ -404,7 +422,16 @@ REFDATA_WRONGSTATE_EXPECTED="${REFDATA_WRONGSTATE_EXPECTED:-verified}"
 # script's fragment INSIDE the transaction, after the reference-data gate, so the
 # PROD-shaped value is never committed. The SQL is not copied here: it is emitted
 # by the one script that owns it (D-17), and so is the sink.
-REARM_EMITTER="${REARM_EMITTER:-$SCRIPT_DIR/test-only-normalize-analytics-url.sh}"
+REARM_EMITTER_DEFAULT="$SCRIPT_DIR/test-only-normalize-analytics-url.sh"
+REARM_EMITTER_IGNORED=0
+if [ "${RESTORE_SELFTEST_EMITTER_SEAM:-0}" = 1 ]; then
+  REARM_EMITTER="${REARM_EMITTER:-$REARM_EMITTER_DEFAULT}"
+else
+  if [ -n "${REARM_EMITTER:-}" ] && [ "$REARM_EMITTER" != "$REARM_EMITTER_DEFAULT" ]; then
+    REARM_EMITTER_IGNORED=1
+  fi
+  REARM_EMITTER="$REARM_EMITTER_DEFAULT"
+fi
 
 OWNED_OUT_DIR=""
 cleanup_out_dir() {
@@ -1667,7 +1694,12 @@ TXN_REFDATA_GATE
   # ⛔ A REFUSED EMIT IS A REFUSED RESTORE. The emitter prints nothing when it
   # refuses (every refusal fires before its first byte), and its exit code is
   # captured the refdata extractor's way, so there is no path on which the
-  # restore commits without the fragment.
+  # restore commits without the fragment. Self-test arm 35 refuses on a non-zero
+  # emitter and arm 36 on an exit-0 emitter whose output is not the guarded
+  # fragment; the shape check below is what makes arm 36 refuse.
+  if [ "$REARM_EMITTER_IGNORED" = 1 ]; then
+    note "rearm: REARM_EMITTER was set but is honoured only by --self-test, so it was IGNORED. The fragment comes from the normalize script beside this one."
+  fi
   local rearm_rc=0 rearm_sql
   rearm_sql=$(NORMALIZE_EXPECT_MARKER_RE="$RESTORE_EXPECT_MARKER_RE" \
               NORMALIZE_REFUSE_MARKER_RE="$RESTORE_REFUSE_MARKER_RE" \
@@ -1677,6 +1709,25 @@ TXN_REFDATA_GATE
   fi
   [ -n "$rearm_sql" ] \
     || fail "the analytics_service_url normalisation emitter exited 0 and printed nothing; no transaction was assembled. An empty fragment is not a normalisation."
+  # ⛔ NON-EMPTY IS NOT ENOUGH (round-1 review, silent-failure-hunter M2). An
+  # exit-0 emitter that printed only its header comment, or a truncated block,
+  # would otherwise be appended and the restore would COMMIT the PROD-shaped
+  # destination while printing the rearm note below. The fragment must be ONE
+  # guarded block: its opening and closing dollar-quote lines exactly once, the
+  # closing line last, the identity-marker read, and the one UPDATE of the row.
+  # Structure only; the SQL itself still has one owner (D-17).
+  # Counted with awk, which exits 0 on zero matches, so no softening token is
+  # needed and an empty count is a real 0.
+  local rearm_open rearm_close rearm_last rearm_marker rearm_update
+  rearm_open=$(printf '%s\n' "$rearm_sql" | awk -v x='DO $tonau_rearm$' '$0 == x { n++ } END { print n + 0 }')
+  rearm_close=$(printf '%s\n' "$rearm_sql" | awk -v x='$tonau_rearm$;' '$0 == x { n++ } END { print n + 0 }')
+  rearm_last=$(printf '%s\n' "$rearm_sql" | tail -n 1)
+  rearm_marker=$(printf '%s\n' "$rearm_sql" | awk -v x="shobj_description(d.oid, 'pg_database')" 'index($0, x) { n++ } END { print n + 0 }')
+  rearm_update=$(printf '%s\n' "$rearm_sql" | awk -v x='  UPDATE public.system_settings' '$0 == x { n++ } END { print n + 0 }')
+  if [ "$rearm_open" != 1 ] || [ "$rearm_close" != 1 ] || [ "$rearm_last" != '$tonau_rearm$;' ] \
+     || [ "$rearm_marker" != 1 ] || [ "$rearm_update" != 1 ]; then
+    fail "the analytics_service_url normalisation emitter exited 0 but its output is not the guarded fragment (open=${rearm_open} close=${rearm_close} marker-read=${rearm_marker} update=${rearm_update}, closing line last: $([ "$rearm_last" = '$tonau_rearm$;' ] && echo yes || echo no)); no transaction was assembled."
+  fi
   printf '%s\n' "$rearm_sql" >> "$out"
   note "rearm: the analytics_service_url normalisation fragment is in the transaction after the reference-data gate. It re-reads the identity marker, rewrites that one row to the loopback discard sink, and checks ROW_COUNT = 1 and the read-back. The row is committed only if the transaction COMMITs, and it is never printed."
 
@@ -2282,8 +2333,15 @@ main() {
 # sink in restore mode (33) and rolled back to the seeded stand-in in preflight
 # (34). Arm 33's falsifier (the concatenation deleted, observed RED, restored by
 # cp and cmp) is recorded in 164.9.1-05-SUMMARY.md.
-# MEASURED 2026-09-25 — `--self-test` prints 34/34 and exits 0 on a throwaway cluster.
-EXPECTED_ARMS=34
+#
+# Arms 35-37 are Phase 164.9.1 plan 11's (round-1 review, silent-failure-hunter
+# M1 and M2): a restore REFUSES when the emitter exits non-zero (35) and when it
+# exits 0 with output that is not the guarded fragment (36), committing nothing
+# either way, and REARM_EMITTER is IGNORED outside the self-test seam (37). Each
+# falsifier (the rc check, the shape check, the seam) was observed RED and is
+# recorded in 164.9.1-11-SUMMARY.md.
+# MEASURED 2026-09-25 — `--self-test` prints 37/37 and exits 0 on a throwaway cluster.
+EXPECTED_ARMS=37
 
 SELFTEST_MUTEX_HOLDER_PID=""
 SELFTEST_TMPD=""
@@ -2530,6 +2588,12 @@ FRESHSTUB
   local ARM_WRONGSTATE_ID="1"
   local ARM_WRONGSTATE_COL="status"
   local ARM_WRONGSTATE_EXPECTED="verified"
+  # The normalisation emitter, and the seam that admits it. The default is the
+  # real emitter, admitted, because a leg may run a scratch copy of this script
+  # whose own default path does not exist. Arms 35-36 override the emitter;
+  # arm 37 turns the seam off to prove the value is then ignored.
+  local ARM_REARM_EMITTER="$SCRIPT_DIR/test-only-normalize-analytics-url.sh"
+  local ARM_EMITTER_SEAM=1
 
   run_leg() {
     local script="$1" mode="$2" tag="$3"
@@ -2550,7 +2614,8 @@ FRESHSTUB
     REFDATA_WRONGSTATE_ID="$ARM_WRONGSTATE_ID" \
     REFDATA_WRONGSTATE_COL="$ARM_WRONGSTATE_COL" \
     REFDATA_WRONGSTATE_EXPECTED="$ARM_WRONGSTATE_EXPECTED" \
-    REARM_EMITTER="$SCRIPT_DIR/test-only-normalize-analytics-url.sh" \
+    RESTORE_SELFTEST_EMITTER_SEAM="$ARM_EMITTER_SEAM" \
+    REARM_EMITTER="$ARM_REARM_EMITTER" \
       bash "$script" --run --mode "$mode"
   }
   arm_env() { run_leg "$0" "$1" "${2:-$1}"; }
@@ -3962,6 +4027,67 @@ FRESHSTUB
     return 0
   }
 
+  # ═══ ARMS 35-37 — the emitter's failure modes and its seam (164.9.1-11) ════
+  # Round-1 review, silent-failure-hunter M1/M2. "A refused emit is a refused
+  # restore" had only GREEN arms. These run --mode restore, the mode that would
+  # COMMIT, against scratch emitters written into the self-test's temp dir.
+  rearm_scratch_emitter() {
+    # $1 = file name, $2 = body (after the shebang). Returns the path.
+    local f="$SELFTEST_TMPD/$1"
+    printf '#!/usr/bin/env bash\n%s\n' "$2" > "$f"
+    chmod +x "$f"
+    printf '%s' "$f"
+  }
+  rearm_refused_committed_nothing() {
+    # $1 = arm tag, $2 = refusal text to find. The stray table from the fixture
+    # and the ABSENCE of public.system_settings are what "nothing committed"
+    # means here: the transaction would have dropped the first and created the
+    # second.
+    local out="$SELFTEST_TMPD/$1.out" rc=0
+    arm_env restore "$1" > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: --run --mode restore exited ${rc}, expected 1 — the emitter's failure did not refuse the restore"; return 1; }
+    grep -aqF "$2" "$out" \
+      || { echo "MEASURE_FAIL: the refusal does not carry '$2' — some other guard fired, or none did"; return 1; }
+    ! grep -aq 'rearm: the analytics_service_url normalisation fragment is in the transaction' "$out" \
+      || { echo "MEASURE_FAIL: the rearm note was printed for a fragment that was refused"; return 1; }
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — the restore committed after the emitter failed."; return 1; }
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='system_settings';")
+    [ "$n" = "0" ] || { echo "MEASURE_FAIL: public.system_settings exists after a refused restore — something was committed."; return 1; }
+    return 0
+  }
+  arm_rearm_emitter_rc() {
+    setup_lane || return 1
+    local ARM_REARM_EMITTER
+    ARM_REARM_EMITTER=$(rearm_scratch_emitter a35-emitter.sh 'echo "scratch emitter refusing" >&2; exit 1')
+    rearm_refused_committed_nothing a35 'normalisation emitter refused (exit 1'
+  }
+  arm_rearm_emitter_shape() {
+    setup_lane || return 1
+    local ARM_REARM_EMITTER
+    ARM_REARM_EMITTER=$(rearm_scratch_emitter a36-emitter.sh "printf '%s\n' '-- test-only-normalize-analytics-url --emit-restore-sql: a header and nothing else'; exit 0")
+    rearm_refused_committed_nothing a36 'exited 0 but its output is not the guarded fragment'
+  }
+  arm_rearm_emitter_seam() {
+    local sink
+    sink=$(rearm_expected_sink) || return 1
+    setup_lane || return 1
+    local ARM_EMITTER_SEAM=0 ARM_REARM_EMITTER
+    ARM_REARM_EMITTER=$(rearm_scratch_emitter a37-emitter.sh 'exit 1')
+    local out="$SELFTEST_TMPD/a37.out" rc=0
+    arm_env restore a37 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: --run --mode restore exited ${rc}, expected 0 — REARM_EMITTER was honoured outside the self-test seam (the scratch emitter exits 1)"; return 1; }
+    grep -aq 'REARM_EMITTER was set but is honoured only by --self-test, so it was IGNORED' "$out" \
+      || { echo "MEASURE_FAIL: the ignored-seam note was not printed, so an operator would not learn the value was dropped"; return 1; }
+    local v
+    v=$(psql "$lane_dsn" -X -q -A -t -v ON_ERROR_STOP=1 -c "SELECT value FROM public.system_settings WHERE key = 'analytics_service_url';")
+    [ "$v" = "$sink" ] || { echo "MEASURE_FAIL: the committed analytics_service_url row is not the loopback sink (a value of length ${#v}) — the real fragment did not run"; return 1; }
+    return 0
+  }
+
   run_arm "1  RED   credential absent — a missing DSN is a hard failure, never a skip" 0 arm_credential_absent
   run_arm "2  RED   identity marker NULL — refused before any write" 0 arm_marker_null
   run_arm "3  RED   identity marker names PROD — refused, loudly" 0 arm_marker_prod
@@ -3997,6 +4123,9 @@ FRESHSTUB
   run_arm "32 GREEN the reference-data value-pinning leg is QUIET when the row holds its pinned value (164.9-07)" 0 arm_wrongstate_green
   run_arm "33 GREEN restore — the analytics destination is re-normalised INSIDE the transaction and the COMMITTED row is the sink (164.9.1-05)" 0 arm_rearm_restore_commits_sink
   run_arm "34 GREEN preflight — the same fragment runs and ROLLS BACK: the seeded stand-in survives and the census still matches (164.9.1-05)" 0 arm_rearm_preflight_writes_nothing
+  run_arm "35 RED   the normalisation emitter exits non-zero — the restore is refused and commits nothing (164.9.1-11)" 0 arm_rearm_emitter_rc
+  run_arm "36 RED   the normalisation emitter exits 0 printing only a comment — refused by the shape check, commits nothing (164.9.1-11)" 0 arm_rearm_emitter_shape
+  run_arm "37 GREEN REARM_EMITTER outside the self-test seam is IGNORED — the real fragment commits the sink (164.9.1-11)" 0 arm_rearm_emitter_seam
 
   release_mutex
 
@@ -4051,7 +4180,7 @@ FRESHSTUB
   # short: `refuse_backticks_in_txn_heredocs` arrived with its arm and the sentence
   # did not move. A narrative that miscounts or overstates its own guards is the same
   # defect class as a stale floor, so it is corrected rather than extended.
-  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — TEN refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, a credential in any of the four PUBLISHED .sql files is refused BY CLASS before the transaction runs, a short scan refuses too, and the one scoped-out pair (refdata.sql x ALTER DATABASE) is proven to be an exemption rather than a deleted class, the analytics destination is re-normalised INSIDE the transaction so a restore commits the loopback sink and a preflight rolls the same fragment back, harness calibrated)"
+  echo "${GATE}: self-test OK (${pass}/${EXPECTED_ARMS} arms — TEN refusals fire before any write and each is armed by a named-message arm, preflight rolls back byte-for-byte, restore commits the full shape, survivors round-trip search_path-independently and carry their trigger enabled-state, the derived census refuses an unlisted dependent with a full census AND with an empty one, redaction is checked with a subject, the census whitelist refuses an unresolvable class, default ACLs round-trip, allowlisted reference data is replayed and gated INSIDE the transaction, the gate bites on a scratch copy and rolls back — EMPTY, SHORT and row-level partial each by name, a bad allowlist is refused before any write, the preflight's rollback view normalises mutable reference counts and nothing else, a credential in any of the four PUBLISHED .sql files is refused BY CLASS before the transaction runs, a short scan refuses too, and the one scoped-out pair (refdata.sql x ALTER DATABASE) is proven to be an exemption rather than a deleted class, the analytics destination is re-normalised INSIDE the transaction so a restore commits the loopback sink and a preflight rolls the same fragment back, a failed or malformed emit refuses the restore and REARM_EMITTER is honoured only under the self-test, harness calibrated)"
   return 0
 }
 

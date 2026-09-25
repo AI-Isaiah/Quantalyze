@@ -331,6 +331,10 @@ sql_lit() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
 # the restore's own published `restore.sql` (credential-scanned) carries it.
 # Every refusal fires BEFORE the first byte of SQL is printed, so a refused
 # emit leaves a consumer with nothing to concatenate rather than half a block.
+# That includes emit_guard_block's own internal-policy checks: the block is
+# rendered into a variable first, and the header and block are printed only
+# once it rendered cleanly (round-1 review, silent-failure-hunter LOW-2; before
+# that, the header line was printed ahead of those checks).
 # ═══════════════════════════════════════════════════════════════════════════
 emit_restore_sql() {
   require_loopback_sink
@@ -350,9 +354,12 @@ emit_restore_sql() {
   for v in "$l_sink" "$l_expect" "$l_refuse"; do
     [ "$v" != "''" ] || fail "a value rendered into the restore fragment came back EMPTY, and an empty predicate matches every database. Nothing was printed."
   done
+  local block
+  block=$(emit_guard_block "$REARM_TAG" caller-asserts-held notice \
+            "$l_sink" "$l_expect" "$l_refuse" always) \
+    || fail "internal: the guard block could not be rendered. Nothing was printed."
   printf '%s\n' "-- test-only-normalize-analytics-url --emit-restore-sql: point the analytics_service_url row at the loopback discard sink, inside a transaction that already holds the shared-TEST mutex."
-  emit_guard_block "$REARM_TAG" caller-asserts-held notice \
-    "$l_sink" "$l_expect" "$l_refuse" always
+  printf '%s\n' "$block"
 }
 
 do_run() {
