@@ -3401,6 +3401,28 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       script that takes a shared-TEST lock.
       **Owner:** Phase 164.9 TESTISOLATION.
 
+- [ ] **`[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` the discovery detail page assembles the
+      factsheet builder a second time, beside `fetchAndBuildPayload` (booked 2026-09-25, Phase
+      167.2.1 D-03; routed to Phase 169 PAGETRUTH)** — `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx` calls the
+      builder's steps itself: `resolveDailyReturnSeries`, `readCompositeFactsheet`,
+      `readSingleKeyBasisOpts` and `buildFactsheetPayload`, instead of calling
+      `fetchAndBuildPayload`. Measured at HEAD on 2026-09-25 with
+      `grep -nE "resolveDailyReturnSeries\(|readCompositeFactsheet\(|readSingleKeyBasisOpts\(|buildFactsheetPayload\(|fetchAndBuildPayload" "src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx"`:
+      one call to each of the four steps and no reference to `fetchAndBuildPayload`. Regenerate
+      rather than trust that count.
+      **Why it is a drift risk and not a false claim today:** the page serves published rows only
+      and, when it cannot build, falls back to the KCS-10 sentence, which is true in every state.
+      But a gate added to the canonical builder does not reach this copy, so the two surfaces can
+      disagree on whether, and from which series, a factsheet's numbers are built.
+      **Shape of the fix:** Phase 167.2.1 split the builder into one shared resolve stage (gates
+      G0 to G4, including `hasBuildableSeries`) that `fetchAndBuildPayload` and
+      `probeFactsheetBuildable` both run (its D-04). The natural fix is for this page to call
+      `fetchAndBuildPayload`, or that resolve stage, rather than its own assembly.
+      **Severity:** a drift risk on a user-facing number surface. Nothing is broken today.
+      **Routing:** Phase 169 PAGETRUTH, which owns factsheet KPI sourcing (its SC4). The ROADMAP
+      carries the matching dated note under `### Phase 169`, "Routed in, 2026-09-25 (Phase 167.2.1
+      D-03)", written at planning time.
+
 ## Phase 164.9 (TESTISOLATION) — ids booked at planning time (logged 2026-09-21)
 
 - [x] **`[164.9-SHARED-TEST-TRANSPORT-FLAKE]` a shared-TEST run needed THREE attempts to go
