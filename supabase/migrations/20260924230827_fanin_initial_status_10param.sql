@@ -173,7 +173,9 @@ SET LOCAL lock_timeout = '3s';
 
 -- --------------------------------------------------------------------------
 -- 10-param overload — verbatim from 20260826150000's ten-arg CREATE, with ONLY
--- the three initial-status edits listed in the header.
+-- the four initial-status edits listed in the header, edit (4) being the
+-- parent FOR SHARE lock and its refusals (NULL element, missing parent,
+-- failed_final parent).
 --
 -- ⚠️ GATE-TOKEN HYGIENE (T-163-16), carried forward from 20260826150000.
 -- `pg_get_functiondef` returns a body's COMMENTS as well as its statements, so
@@ -493,12 +495,11 @@ COMMENT ON FUNCTION public._enqueue_compute_job_internal(
   'the caller can retry vs. surfacing a 500 (Phase 163 OPS-08, parity with the '
   '7-param overload''s mig 109 P3 fix). '
   'Computes the initial status and INSERTs it explicitly: done_pending_children '
-  'when p_parent_job_ids has at least one element, else pending (Phase 164.9.1, '
-  'parity with the 7-param overload''s mig 109 P12 branch). '
+  'while at least one listed parent is not yet done; a child whose parents are '
+  'all done starts pending, as does a child with no parents (Phase 164.9.1). '
   'With parents, it locks and reads them first: a NULL element, a missing parent '
-  'or a failed_final parent is refused with invalid_parameter_value, and a child '
-  'whose parents are all done starts pending, so no enqueue creates a child that '
-  'no mark-done can release.';
+  'or a failed_final parent is refused with invalid_parameter_value, so no '
+  'enqueue creates a child that no mark-done can release.';
 
 -- --------------------------------------------------------------------------
 -- Self-verifying DO block. Arms (a)-(h) are 20260826150000's, code verbatim,

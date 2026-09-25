@@ -138,7 +138,9 @@ $$;
 -- source migration: 20260924230827_fanin_initial_status_10param.sql
 -- --------------------------------------------------------------------------
 -- 10-param overload — verbatim from 20260826150000's ten-arg CREATE, with ONLY
--- the three initial-status edits listed in the header.
+-- the four initial-status edits listed in the header, edit (4) being the
+-- parent FOR SHARE lock and its refusals (NULL element, missing parent,
+-- failed_final parent).
 --
 -- ⚠️ GATE-TOKEN HYGIENE (T-163-16), carried forward from 20260826150000.
 -- `pg_get_functiondef` returns a body's COMMENTS as well as its statements, so

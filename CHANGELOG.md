@@ -132,7 +132,17 @@ catalogues only, so none of them can refuse on TEST's empty tables.
   deadlock (40P01) against the mark-done fan-in UPDATE on a diamond-shaped DAG, so whoever first
   passes parents must treat 40P01 as retryable; latent, recorded in M1's header (`c06bad985`). (3)
   A second `match_decisions` delete can raise 23505 through the cascade onto the md-NULL partial
-  index; pre-existing, and it fails loudly.
+  index; pre-existing, and it fails loudly. (4) A `failed_retry` row and a `pending` row on the
+  same `(kind, api_key_id)` make `claim_compute_jobs` and `claim_compute_jobs_with_priority`
+  raise 23505 on `compute_jobs_one_inflight_per_kind_api_key`, which stops every claim until the
+  pair clears, because their C39 guard does not exclude a partition that holds a `pending` row.
+  Pre-existing, not introduced here, loud. It was reproduced on the local-stack lane by the
+  pre-push review and routed with its suggested fixes and repro recipe.
+- **Two pre-push wording fixes in the fan-in migration, no body change.** The note above the
+  ten-argument `CREATE` now counts four edits, not three. The function's catalog comment now
+  states the shipped rule: `done_pending_children` while any listed parent is still open, else
+  `pending`. The function body is byte-identical, so the PROD-body acknowledgement is unchanged.
+  The regenerated function snapshot differs only in that leading comment.
 - **Other accepted limits.** Two concurrent sync calls that both pass the look-up still collapse
   onto one row, and the loser gets `{ok, job_id}` naming the winner's job (D-11, the race 067
   already tolerated). A seven-argument call cannot resolve (42725), so
