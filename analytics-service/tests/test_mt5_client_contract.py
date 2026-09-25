@@ -4130,6 +4130,46 @@ def test_TERMINAL_RECYCLE_the_refusal_codes_reach_the_verdict():
     assert verdict["terminate_errors"] == [87]
 
 
+def test_TERMINAL_RECYCLE_SFH06_the_counts_are_logged_even_when_the_relaunch_is_abandoned(
+    caplog,
+):
+    """⛔ SFH-06 (164.6.5 review round 1). The lease can release WHILE the remote
+    terminate is in flight (the heal's budget fired). The relaunch probe's fence
+    then raises `Mt5SessionAbandoned`, the verdict dict is discarded, and the only
+    evidence that the shared terminal was ENDED and not relaunched by us goes with
+    it — unless the counts were logged the moment they were parsed."""
+    import logging
+
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    record = _install_recycle_double(
+        fake._MetaTrader5__conn, returns=_recycle_verdict(1, 1, 0, terminate_errors=[])
+    )
+    client.assert_session_authorized()  # first touch binds the generation
+    real_execute = fake._MetaTrader5__conn.execute
+
+    def _execute_then_lease_releases(src):
+        real_execute(src)
+        bump_mt5_terminal_epoch(client.terminal_key)
+
+    fake._MetaTrader5__conn.execute = _execute_then_lease_releases
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        with pytest.raises(Mt5SessionAbandoned):
+            client.recycle_terminal_process()
+
+    assert record["calls"] == [(5000,)], "the terminate did not cross"
+    counts = [
+        r.getMessage()
+        for r in caplog.records
+        if "terminate crossed" in r.getMessage()
+    ]
+    assert counts and "matched=1 terminated=1 exited=0" in counts[0], (
+        "the relaunch was abandoned and the terminate counts never reached the "
+        "log — a killed shared terminal is invisible (SFH-06)"
+    )
+
+
 def test_TERMINAL_RECYCLE_the_remote_source_is_a_committed_literal_with_no_interpolation():
     """T-164.6.5-06. The command that crosses an arbitrary-remote-code channel
     must be FIXED in this file. Asserted structurally on the source file itself:

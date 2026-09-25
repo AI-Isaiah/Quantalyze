@@ -2205,6 +2205,25 @@ class Mt5Client:
                 0, "MT5 terminal recycle returned a malformed verdict"
             ) from None
 
+        # ⛔ SFH-06 (164.6.5 review round 1) — THE COUNTS REACH THE LOG BEFORE THE
+        # RELAUNCH, whatever happens to it. The relaunch below can raise
+        # `Mt5SessionAbandoned` (the heal's budget fired and the lease bumped the
+        # generation), which is not an `Mt5ClientError`, so it propagates out of
+        # this verb and the verdict dict is discarded — and the ONLY evidence that
+        # a shared terminal was ended and not relaunched by us went with it. The
+        # generic "ABANDONED at the budget" line says nothing about a process
+        # having been killed. Counts and Win32 codes only: no host, no port, no
+        # account.
+        logger.warning(
+            "Mt5Client.recycle_terminal_process: terminate crossed — matched=%d "
+            "terminated=%d exited=%d open_errors=%s terminate_errors=%s; issuing "
+            "the relaunch probe now (a later abandonment does not undo this).",
+            matched,
+            terminated,
+            exited,
+            open_errors,
+            terminate_errors,
+        )
         authorized = True
         relaunch_code: int | None = None
         try:
