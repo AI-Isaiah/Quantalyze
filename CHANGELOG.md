@@ -1,5 +1,159 @@
 # Changelog
 
+## [0.93.0.0] - 2026-09-25 — JOBRPCTRUTH: the compute-job RPC surface does what its own migrations say
+
+⭐ **What changed for whoever reads this next.** Phase 164.9.1 fixes three places where a
+compute-job or holdings-sync function in PRODUCTION had drifted from what the migrations that
+defined it say it does. Each drift came from a later re-base built on a stale copy of the
+function. (1) The ten-argument `_enqueue_compute_job_internal`, which every mode of the public
+`enqueue_compute_job` wrapper reaches, never wrote the fan-in initial status, so a child job with
+parents landed `pending` and could run before its parents finished. (2)
+`request_allocator_holdings_sync` had lost its in-flight look-up, so its "already queued" answer
+was unreachable, and it had lost the refusal of a disconnected key. (3) The `bridge_outcomes`
+catalogue comments named a unique index that migration 081 dropped. Separately, a restore of
+shared TEST now normalises the analytics service destination inside its own transaction, so a
+restore no longer re-arms that hazard.
+
+⚠️ **This is a minor bump because behaviour a caller can see changes, on purpose.** The holdings
+sync RPC now answers `{already_inflight, next_attempt_at}` when a poll job for the key is live, and
+a disconnected key gets HTTP 409 from `POST /api/allocator/holdings/sync` instead of a generic 500.
+Precedent: KEYCARDSYNC (0.88.0.0) and GATEHYGIENE (0.90.0.0) were fix phases on the same key-card
+and job surfaces, and each took a minor bump because visible behaviour changed. 0.92.0.0 belongs
+to PR #859, which lands before this one.
+
+⛔ **This release carries THREE migrations, and merging it applies them to shared TEST and then to
+PRODUCTION with no human stop.** They are `20260924230827_fanin_initial_status_10param`,
+`20260924233749_allocator_sync_restore_inflight_prefetch` and
+`20260925071300_bridge_outcomes_invariant_comments`. All three went through two review rounds by
+`migration-reviewer`, `rls-policy-auditor` and `silent-failure-hunter`. Each one's DO block reads
+catalogues only, so none of them can refuse on TEST's empty tables.
+
+### Fixed
+
+- **A job enqueued with parents now enters the fan-in state** (M1, `ee325bfee`). The ten-argument
+  enqueue computes the initial status and INSERTs it: `done_pending_children` when the parent list
+  has an element, `pending` otherwise. On the lane, a parented child is no longer claimable while
+  its parent runs, and the parent's mark-done releases it. Before the fix, the lane showed a child
+  claimed while its parent was still running (`163cb233c`). The body is migration
+  `20260826150000`'s ten-argument CREATE with three edits. COPY-CHECK arms pin every edit, and a
+  parity arm pins it against the seven-argument overload, which still carries migration 109's
+  branch.
+- **The ten-argument enqueue refuses a parent list that no mark-done could release** (review round
+  1, `74a125a64`). It locks the parents `FOR SHARE` in id order, refuses a NULL, missing or
+  `failed_final` parent with 22023, and starts a child `pending` when every parent is already
+  `done`. Strict parity with the seven-argument body would have left such a child in
+  `done_pending_children` forever, holding its target's in-flight slot. The two bodies now differ
+  on those three inputs only, and M1's header says so (the D-04 amendment, recorded in
+  `bce6c5171`).
+- **The holdings sync RPC reports a job that is already queued, and refuses a disconnected key
+  again** (M2, `dd1fb6d25`). Migration 067's in-flight look-up is back: a live poll job for the key
+  returns `{already_inflight: true, next_attempt_at}`. That answer used to come only from an
+  `EXCEPTION WHEN unique_violation` handler that could never fire, because the enqueue returns the
+  existing id instead of raising. Migration 075's refusal is back too (D-23): a soft-disconnected
+  key raises `P0001 api_key_disconnected` after the ownership check and before the look-up, so a
+  disconnected key never reports "queued". Review round 1 tightened the reconstruct-gate arm, and a
+  live arm now pins the order: a non-owner gets the same 42501 as for a missing key, never the
+  disconnected answer (`f72d9dd4c`).
+- **A disconnected key gets a 409 with a sentence the user can act on** (`250762420`). The route
+  maps exactly that error to HTTP 409, no-store, with "This API key is disconnected. Reconnect it
+  before syncing holdings." Before, it fell through to the generic 500, which invites a retry that
+  can never succeed. Any other `P0001` still reaches the logged 500. The branch writes one info line
+  that carries no user or key id (`eb4c5407e`).
+- **The allocator exchange card shows that 409, and holds a queued row across a refresh**
+  (`eb4c5407e`). A 409 from Sync now, Reconnect or Add key moves the row to Disconnected and shows
+  the route's sentence. Disconnected rows now carry the same live helper line as active rows, so the
+  existing "Reconnect failed — try again" message is finally visible too. After an "already queued"
+  answer, the card keeps the row syncing until the server moves it, `last_sync_at` changes, or two
+  minutes pass after `next_attempt_at`.
+- **Review round 2: three stale states in the exchange card** (`57f999b88`). A "click Sync now to
+  retry" message no longer follows a row into Disconnected, where there is no Sync now button. The
+  409 sentence no longer stays on a row that a reconnect made elsewhere has brought back. A remote
+  disconnect during a queued hold no longer pins the row as syncing until reload, because the
+  inferred reconnect latch is replaced by an explicit flag that `handleReconnect` sets and clears.
+- **The `bridge_outcomes` comments name the current uniqueness invariant** (M3, `0725da4e2`,
+  corrected in review by `f72d9dd4c`). They name `bridge_outcomes_allocator_match_decision_unique`
+  (081) and the md-NULL partial index (083), and neither names the index 081 dropped. Two
+  strategy-sourced outcomes for the same (allocator, strategy) under two different decisions are
+  allowed by design.
+
+### Changed
+
+- **A restore of shared TEST normalises the analytics service destination inside its own
+  transaction** (`8559c9e2d`, emitter `48f84c232`). `scripts/test-only-normalize-analytics-url.sh`
+  gains an `--emit-restore-sql` mode that prints one guarded fragment, built by the same function
+  the hand-run path uses. The fragment re-reads the database marker; refuses PROD, an absent
+  marker, a foreign marker and a missing row; rewrites the row to the script's own loopback sink;
+  and checks that exactly one row changed and reads back. It never prints the value.
+  `restore-test-from-baseline.sh` appends it after the reference-data gate and before the ledger
+  DDL, byte-identical in both modes: a restore commits it and a preflight rolls it back. The
+  runbook and arm D1's prose say so (`2a8bcbe10`).
+- **The restore refuses a failed or malformed fragment, and the emitter self-tests before every
+  live restore** (review round 1, `8a3053f1e`). A non-zero emitter exit, an empty fragment or a
+  fragment of the wrong shape aborts the restore. The emitter override is honoured only inside the
+  restore's own self-test. `test-restore-from-baseline.yml` gains a `Normalize script self-test`
+  step before `--run`.
+- **The live-DB execution ledger shrinks from 10 entries to 7** (`0e559db17`). The three arms this
+  phase fixed left the ledger and `K3_ARMS`, and `ENTRY_CEILING` follows the count down. On a clean
+  lane with all three migrations replayed, the gate reads the failing set as exactly the ledger.
+
+### Tests
+
+- **A harm probe for the fan-in defect, lane-RED by design before M1** (`163cb233c`). The dedupe
+  gate's mutation twins are re-pointed at M1's body, so they still bite on the body that is live
+  (`44bc7d93d`). Arm P12 was observed RED with M1's status neutered and GREEN restored.
+- **The normalisation fragment is pinned in place** (`bb0fd0b7f`). Static pins fail if the emitter
+  call or its concatenation leaves the slot between the gate and the ledger DDL, or if `$mode` is
+  read inside that window. Each pin has in-memory calibrations and was seen RED against a neutered
+  live script.
+- **The emitter's refusals are self-tested on throwaway clusters** (`d9730d004`), and the restore
+  self-test proves both the commit and the rollback (`8559c9e2d`). The restore self-test now runs
+  37 arms (`EXPECTED_ARMS`, read from the script).
+- **The XOR file asserts the current `bridge_outcomes` invariant, by SQLSTATE and by constraint
+  name** (`97d987661`). It replaces an arm that asserted migration 072's retired index.
+- **Review round 2 added seven exchange-card tests** (`57f999b88`). Each went RED with its guard
+  neutered.
+
+### Root cause
+
+- **Stale re-bases.** Migration 070 rebuilt the holdings sync RPC without 067's look-up, and 076
+  rebuilt it without 075's refusal. The ten-argument enqueue was cut without the seven-argument
+  body's status branch, while its own comment said it INSERTs the status. Each later migration
+  copied a definition that was not the latest one. All three fixes re-base on the latest definition
+  after a grep of every migration, and each migration's header records the lineage.
+
+### Notes
+
+- **Mechanism demonstrated, production harm latent** (D-02). The fan-in defect was shown by
+  execution on the lane. No production caller passes parents today, so no production row is known
+  to be affected.
+- **Known limits, recorded rather than fixed, routed to Phase 164.5.2 BRIDGELOCK.** (1) A parent
+  that is still open at enqueue and later ends `failed_final` still strands its child in
+  `done_pending_children`; latent, because no caller passes parents. (2) The parent lock can
+  deadlock (40P01) against the mark-done fan-in UPDATE on a diamond-shaped DAG, so whoever first
+  passes parents must treat 40P01 as retryable; latent, recorded in M1's header (`c06bad985`). (3)
+  A second `match_decisions` delete can raise 23505 through the cascade onto the md-NULL partial
+  index; pre-existing, and it fails loudly.
+- **Other accepted limits.** Two concurrent sync calls that both pass the look-up still collapse
+  onto one row, and the loser gets `{ok, job_id}` naming the winner's job (D-11, the race 067
+  already tolerated). A seven-argument call cannot resolve (42725), so
+  `enqueue_compute_portfolio_job` raises on every call; it has no caller and is not fixed here.
+- **The normalize self-test runs only in the dispatch restore job, not on PRs.** That job runs it
+  before every live restore, which is where it guards. A PR job would need PostgreSQL server
+  binaries and is not in this phase.
+- **One red row is pre-declared for this PR.** VAC-08 in `test-db-drift` reports one
+  `_enqueue_compute_job_internal/10 DRIFT` row whose TEST hash is the pre-change body's, because
+  TEST runs the old body until `apply-test` runs on merge. Any other red blocks the merge.
+- **The live restore on shared TEST is the founder's step after merge** (FC-3). It is blocked on
+  the founder-owned baseline re-dump and is not a completion gate of this phase.
+- **Backlog.** `[164.9-FANIN-STATUS-NEVER-SET]`, `[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]` and
+  `[164.9-TEST-ANALYTICS-URL-REARM]` are closed in `TODOS.md`.
+- **Planning record.** Context, research, patterns, the 14-plan set, the plan summaries, both
+  review rounds, the FC-2 re-sync onto main, the verification and the security record are under
+  `.planning/phases/164.9.1-*` (`d8702293c`, `d5d2d9c60`, `342188b10`, `f6191aa6f`, `d0057747d`,
+  `e1c4d2e90`, `f7f96c162`, `381798e02`, `dbe9f867d`, `40aa2643a`, `ec2336967`, `810659108`,
+  `0fec29911`, `c12842fad`, `80e07112b`, `411b56e9d`, `5e43d4d97`, `616b95aaf`, `c07e8a409`,
+  `a892e8560`).
+
 ## [0.91.0.0] - 2026-09-24 — QSTATS-TRUTH: every quantstats-derived number reflects the returns it was given
 
 ⭐ **What changed for whoever reads this next.** Phase 166 (RANK-05) removes the quantstats 0.0.81
