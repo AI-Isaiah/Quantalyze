@@ -1602,6 +1602,7 @@ _ESCALATION_KINDS = (
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_CAPPED,
 )
 
 
@@ -1732,6 +1733,78 @@ async def test_ESCALATION_CR01_a_recycle_that_WORKED_re_arms_so_the_NEXT_wedge_i
         "a recycle whose relaunch MEASURED the terminal answering left the gate "
         "disarmed, so the next wedge was debounced instead of recycled (CR-01)"
     )
+
+
+async def test_R2_CR01_a_wedge_that_RECURS_after_each_working_recycle_is_CAPPED_and_raised_at_ERROR(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _fake_clock: "_FakeClock",
+) -> None:
+    """⛔ CR-01 (164.6.5 review round 2). Round 1's CR-01 re-arm is right for the
+    ACTION, but composed with the alarm's reset it let a wedge that returns every
+    tick recycle the SHARED terminal every tick, unbounded, and never reach
+    ERROR: each recycle "worked", each ended the run, each logged at INFO. That
+    is Cause B as the runbook describes it — a client validation's account
+    switch re-wedging the terminal — and nothing emitted the signal.
+
+    ⭐ ORCHESTRATOR DECISION 2026-09-25 (recorded in CONTEXT.md): a rolling
+    one-hour window caps recycles at 2; the 2nd within the hour is an ERROR
+    naming the Cause B signal; once capped nothing is recycled until the
+    oldest recycle is an hour old, and the cap is re-raised at ERROR hourly."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch, {**_WEDGED, "initialize_after_recycle": True}
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    def _tick() -> None:
+        fake.recycled = False  # a client validation re-wedged it before this tick
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        for _ in range(4):  # t = 0, 10, 20, 30 min
+            _tick()
+            await _heal_n_times(1)
+            _fake_clock.now += 600.0
+
+        assert _recycle_count(fake) == 2, (
+            f"{_recycle_count(fake)} recycles of the shared terminal in 30 min; "
+            "the rolling-hour cap is 2"
+        )
+        kinds = [o.escalation_kind for o in outcomes]
+        assert kinds[2:] == [mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_CAPPED] * 2
+        errors = [r.getMessage() for r in _records(caplog) if r.levelno >= logging.ERROR]
+        assert len(errors) == 1, errors
+        assert "Cause B" in errors[0] and "REPEATED WEDGE" in errors[0], errors
+
+        # An hour after the FIRST recycle it has left the window: the remedy is
+        # available again, and the recurrence is raised again.
+        _fake_clock.now += 2 * 600.0  # t = 60 min (the loop left it at 40)
+        _tick()
+        await _heal_n_times(1)
+
+    assert _recycle_count(fake) == 3
+    errors = [r.getMessage() for r in _records(caplog) if r.levelno >= logging.ERROR]
+    assert len(errors) == 2 and "Cause B" in errors[1], errors
+
+
+def test_R2_CR01_the_recycle_window_is_TWO_stamps_and_a_refused_claim_takes_its_entry_back() -> None:
+    """The window is two monotonic stamps because the cap is 2 (a list would be
+    unbounded module state). ⛔ Raising the cap without widening the storage
+    would silently count at most two, so the cap is pinned beside it. And a
+    claim the verb's own fence refused recycled NOTHING: its window entry must
+    go, or a refused attempt would count toward the Cause B cap."""
+    episodes = mt5_session_episodes
+    assert episodes.IPC_FAULT_RECYCLE_CAP == 2
+    window = mt5_relogin._IPC_FAULT_RECYCLE_WINDOW_S
+
+    assert episodes.claim_ipc_fault_escalation(100.0, window) == 1
+    episodes.restore_ipc_fault_attempt()
+    assert episodes.ipc_fault_recycles_in_window(100.0, window) == 0
+
+    assert episodes.claim_ipc_fault_escalation(100.0, window) == 1
+    episodes.end_ipc_fault_run()  # a working recycle ends the RUN...
+    assert episodes.claim_ipc_fault_escalation(200.0, window) == 2  # ...not the window
+    assert episodes.ipc_fault_recycles_in_window(100.0 + window, window) == 1
 
 
 @pytest.mark.parametrize(

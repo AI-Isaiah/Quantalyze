@@ -248,6 +248,15 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 #                                "recycled" nor "still faulted after a recycle"
 #                                is true — the recycle VERB needs a human, since
 #                                the Wine-side terminate has never run live.
+#   * recycle_capped          -> the escalation RAN and DECLINED: the recycle
+#                                already ran `IPC_FAULT_RECYCLE_CAP` times in the
+#                                rolling window, each after the terminal had
+#                                answered, and the wedge came back (164.6.5
+#                                review round 2, CR-01). A wedge that RECURS
+#                                after working recycles is the Cause B signal
+#                                (`MT5-SWITCH-WEDGE-CAUSE-01`); a human is
+#                                needed, and recycling the shared terminal every
+#                                tick is not a recovery.
 #   * recycle_skipped_budget  -> the escalation RAN and DECLINED: the heal
 #                                budget left could not cover the recycle and its
 #                                relaunch probe, so nothing was started and the
@@ -273,6 +282,7 @@ KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING: Final[str] = (
 KIND_IPC_FAULT_RECYCLE_FAILED: Final[str] = "ipc_fault_recycle_failed"
 KIND_IPC_FAULT_RECYCLE_NOT_LANDED: Final[str] = "ipc_fault_recycle_not_landed"
 KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET: Final[str] = "ipc_fault_recycle_skipped_budget"
+KIND_IPC_FAULT_RECYCLE_CAPPED: Final[str] = "ipc_fault_recycle_capped"
 
 #: The MT5 code meaning "the bridge ANSWERED and NO ACCOUNT IS AUTHORIZED" — the
 #: ONE code that establishes darkness. Re-spelled here rather than imported from
@@ -552,15 +562,21 @@ def ipc_fault_escalation_armed() -> bool:
     return _IPC_FAULT_ESCALATION_ARMED
 
 
-def claim_ipc_fault_escalation() -> None:
+def claim_ipc_fault_escalation(now: float, window_s: float) -> int:
     """DISARM the gate for the rest of this run: the recycle is about to cross.
+    Record it in the rolling recycle window and return how many recycles that
+    window now holds, this one included (CR-01, round 2).
 
     Called only after ``ipc_fault_escalation_armed`` said yes, and only after
     ``note_ipc_fault_reading`` opened the run, so the run's answered-count is the
     baseline a later answer is measured against. It cannot raise.
     """
     global _IPC_FAULT_ESCALATION_ARMED
+    global _IPC_FAULT_RECYCLED_AT, _IPC_FAULT_RECYCLED_BEFORE_AT
     _IPC_FAULT_ESCALATION_ARMED = False
+    _IPC_FAULT_RECYCLED_BEFORE_AT = _IPC_FAULT_RECYCLED_AT
+    _IPC_FAULT_RECYCLED_AT = now
+    return ipc_fault_recycles_in_window(now, window_s)
 
 
 def restore_ipc_fault_attempt() -> None:
@@ -572,9 +588,17 @@ def restore_ipc_fault_attempt() -> None:
     measured NOTHING about the terminal, so it gives the attempt back and leaves
     the persistence alarm's run exactly as it was. Ending the run here erased
     the alarm's memory of a fault that was still there.
+
+    It also takes back the recycle-window entry the claim recorded: nothing was
+    recycled. The entry before it moves back into place; the one before THAT is
+    dropped, which is harmless because the claim is only ever made with at most
+    one recycle in the window (see ``IPC_FAULT_RECYCLE_CAP``).
     """
     global _IPC_FAULT_ESCALATION_ARMED
+    global _IPC_FAULT_RECYCLED_AT, _IPC_FAULT_RECYCLED_BEFORE_AT
     _IPC_FAULT_ESCALATION_ARMED = True
+    _IPC_FAULT_RECYCLED_AT = _IPC_FAULT_RECYCLED_BEFORE_AT
+    _IPC_FAULT_RECYCLED_BEFORE_AT = None
 
 
 def end_ipc_fault_run() -> None:
@@ -674,6 +698,70 @@ def mark_ipc_fault_alarm(now: float) -> None:
     _IPC_FAULT_LAST_ALARM_AT = now
 
 
+# --------------------------------------------------------------------------- #
+# ⭐ THE RECYCLE CAP (164.6.5 review round 2, CR-01) — the memory the run does
+# NOT have.
+#
+# Round 1's CR-01 made a recycle whose relaunch MEASURED the terminal answering
+# end the run, so the NEXT wedge earns its own attempt. That is right for the
+# action, but the run is also what the persistence alarm measures, so a wedge
+# that returns every tick after a working recycle recycled the ONE shared
+# terminal every tick, unbounded, each at INFO, and never reached ERROR. That
+# pattern is Cause B (`MT5-SWITCH-WEDGE-CAUSE-01`): a client validation's
+# account switch re-wedging the terminal. Nothing emitted it.
+#
+# ⭐ ORCHESTRATOR DECISION 2026-09-25 (founder standing rule: no clients, take
+# decisions; recorded in the phase CONTEXT.md): a ROLLING window caps recycles
+# at `IPC_FAULT_RECYCLE_CAP`. The window's length is the caller's (one hour in
+# `mt5_relogin`). The cap'th recycle inside it is an ERROR naming the Cause B
+# signal; once capped, nothing is recycled until the oldest recycle leaves the
+# window, and the cap is re-raised at ERROR at most once per alarm interval.
+# ⛔ `end_ipc_fault_run` NEVER clears this window: that is the whole point.
+#
+# ⚠️ TWO STAMPS, NOT A LIST. The cap is 2, so the window needs only the last two
+# recycle times; a list here would be the unbounded module state the closed-set
+# assertion in `tests/test_mt5_session_episodes.py` forbids. ⛔ Raising the cap
+# means widening this storage too; the pin beside the cap names that.
+# --------------------------------------------------------------------------- #
+IPC_FAULT_RECYCLE_CAP: Final[int] = 2
+
+_IPC_FAULT_RECYCLED_AT: float | None = None
+_IPC_FAULT_RECYCLED_BEFORE_AT: float | None = None
+
+#: When the cap was last raised at ERROR (the cap'th recycle, or a capped reading).
+_IPC_FAULT_CAP_ALARM_AT: float | None = None
+
+
+def ipc_fault_recycles_in_window(now: float, window_s: float) -> int:
+    """How many recycles were made less than ``window_s`` before ``now``."""
+    return sum(
+        1
+        for stamp in (_IPC_FAULT_RECYCLED_AT, _IPC_FAULT_RECYCLED_BEFORE_AT)
+        if stamp is not None and now - stamp < window_s
+    )
+
+
+def ipc_fault_cap_alarm_due(now: float, interval_s: float) -> bool:
+    """Whether the recycle cap must be raised at ERROR now."""
+    return _IPC_FAULT_CAP_ALARM_AT is None or now - _IPC_FAULT_CAP_ALARM_AT >= interval_s
+
+
+def mark_ipc_fault_cap_alarm(now: float) -> None:
+    """An ERROR about the recycle cap was just logged."""
+    global _IPC_FAULT_CAP_ALARM_AT
+    _IPC_FAULT_CAP_ALARM_AT = now
+
+
+def _clear_ipc_fault_recycle_window() -> None:
+    """Forget every recycle. ⛔ Test-only, via
+    ``_reset_session_episode_state_for_tests``; production never clears it."""
+    global _IPC_FAULT_RECYCLED_AT, _IPC_FAULT_RECYCLED_BEFORE_AT
+    global _IPC_FAULT_CAP_ALARM_AT
+    _IPC_FAULT_RECYCLED_AT = None
+    _IPC_FAULT_RECYCLED_BEFORE_AT = None
+    _IPC_FAULT_CAP_ALARM_AT = None
+
+
 def _reset_session_episode_state_for_tests() -> None:
     """Clear the previous-reading stamp and the consecutive-blind counter.
 
@@ -692,6 +780,7 @@ def _reset_session_episode_state_for_tests() -> None:
     _LAST_MEASURED_READING_MONOTONIC = None
     _clear_blind_run()
     end_ipc_fault_run()
+    _clear_ipc_fault_recycle_window()
 
 
 def _stamp_reading_and_measure_gap() -> tuple[float | None, bool]:

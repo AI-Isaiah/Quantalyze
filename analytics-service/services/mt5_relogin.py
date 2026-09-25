@@ -81,6 +81,7 @@ from services.mt5_session_episodes import (
     KIND_HEAL_SENT_IPC_FAULT_ON_REPROBE,
     KIND_HEALED,
     KIND_IPC_FAULT,
+    KIND_IPC_FAULT_RECYCLE_CAPPED,
     KIND_IPC_FAULT_RECYCLE_FAILED,
     KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
     KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET,
@@ -90,13 +91,17 @@ from services.mt5_session_episodes import (
     KIND_IPC_FAULT_RECYCLED_STILL_FAULTED,
     KIND_NO_AUTHORIZED_ACCOUNT,
     KIND_STILL_UNAUTHORIZED,
+    IPC_FAULT_RECYCLE_CAP,
     HealOutcome,
     claim_ipc_fault_escalation,
     end_ipc_fault_run,
     end_ipc_fault_run_if_answered,
     ipc_fault_alarm_due,
+    ipc_fault_cap_alarm_due,
     ipc_fault_escalation_armed,
+    ipc_fault_recycles_in_window,
     mark_ipc_fault_alarm,
+    mark_ipc_fault_cap_alarm,
     note_ipc_fault_reading,
     restore_ipc_fault_attempt,
     record_mt5_heal_outcome,
@@ -363,6 +368,16 @@ _RELAUNCH_POLL_INTERVAL_S: Final[float] = 10.0
 # module imports this one). Alarm cadence only: it never re-opens the
 # one-recycle-per-run decision.
 _IPC_FAULT_ALARM_INTERVAL_S: Final[float] = 3600.0
+
+# ⭐ CR-01 (164.6.5 review round 2) — THE ROLLING WINDOW the recycle cap
+# (`mt5_session_episodes.IPC_FAULT_RECYCLE_CAP`, 2) is counted over. ORCHESTRATOR
+# DECISION 2026-09-25, recorded in the phase CONTEXT.md: one hour, the same hour
+# as the persistence alarm, so a recurring wedge is raised at ERROR about hourly
+# and the shared terminal is recycled at most twice an hour. Without it, a wedge
+# that returned every tick after a WORKING recycle was recycled every tick,
+# unbounded, and never reached ERROR (round 1's CR-01 re-arm composed with the
+# alarm's reset).
+_IPC_FAULT_RECYCLE_WINDOW_S: Final[float] = _IPC_FAULT_ALARM_INTERVAL_S
 
 #: `_raise_last`'s sentinel for "last_error() itself failed or answered
 #: malformed" — it measured NOTHING about the terminal.
@@ -1144,6 +1159,10 @@ def _escalate_ipc_fault(
     ⛔ THE DEBOUNCE: without it, a ten-minute cadence recycles a shared terminal
     every ten minutes forever when the recycle does not help — a self-inflicted
     outage wearing a recovery's name. Five readings of one wedge, one attempt.
+    ⛔ AND THE CAP (CR-01, review round 2; CONTEXT D-18): the debounce is per
+    RUN, and a run ends whenever the terminal answers, so a wedge that returns
+    after every working recycle is capped separately at
+    ``IPC_FAULT_RECYCLE_CAP`` recycles per rolling ``_IPC_FAULT_RECYCLE_WINDOW_S``.
 
     ⛔ IT CANNOT RAISE OUT OF THE HEAL, and that is the highest-severity property
     in this module: a raise here unwinds the heal and, from inside the entry's
@@ -1222,6 +1241,36 @@ def _escalate_ipc_fault(
                 code,
             )
         return None
+    if (
+        ipc_fault_recycles_in_window(now, _IPC_FAULT_RECYCLE_WINDOW_S)
+        >= IPC_FAULT_RECYCLE_CAP
+    ):
+        # ⛔ CR-01 (164.6.5 review round 2) — CAPPED. The recycle already ran
+        # the cap's number of times inside the window, each after the terminal
+        # had answered, and the wedge came back. Recycling the ONE shared
+        # terminal again is not a recovery; it is the Cause B pattern, and a
+        # human is needed. Nothing is read or recycled until the oldest recycle
+        # leaves the window. ⭐ SFH-09 — its own kind.
+        if ipc_fault_cap_alarm_due(now, _IPC_FAULT_ALARM_INTERVAL_S):
+            mark_ipc_fault_cap_alarm(now)
+            log_capped = logger.error
+        else:
+            log_capped = logger.warning
+        log_capped(
+            "mt5 session heal: ipc_fault code=%s — REPEATED WEDGE, recycle CAPPED: "
+            "the terminal-process recycle already ran %d times in the last %d min, "
+            "each after the terminal had answered, and the wedge came back. That "
+            "recurrence is the Cause B signal (MT5-SWITCH-WEDGE-CAUSE-01: an "
+            "account switch on the shared terminal re-wedging it); an OPERATOR is "
+            "needed. NOT recycled now; the cap frees once the oldest recycle is "
+            "%d min old. Raised at ERROR at most every %d min while capped.",
+            code,
+            IPC_FAULT_RECYCLE_CAP,
+            int(_IPC_FAULT_RECYCLE_WINDOW_S // 60),
+            int(_IPC_FAULT_RECYCLE_WINDOW_S // 60),
+            int(_IPC_FAULT_ALARM_INTERVAL_S // 60),
+        )
+        return KIND_IPC_FAULT_RECYCLE_CAPPED
     # ⭐ EVIDENCE FIRST (`MT5-SWITCH-WEDGE-CAUSE-01`): the recycle erases it.
     # Logged on its own line BEFORE the recycle is attempted, so the evidence is
     # on record even if the recycle then hangs past the budget.
@@ -1287,7 +1336,9 @@ def _escalate_ipc_fault(
                 int(_IPC_FAULT_ALARM_INTERVAL_S // 60),
             )
         return KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET
-    claim_ipc_fault_escalation()
+    recent_recycles = claim_ipc_fault_escalation(
+        _clock(), _IPC_FAULT_RECYCLE_WINDOW_S
+    )
     verdict: dict[str, object] = {}
     degraded = False
     try:
@@ -1381,6 +1432,21 @@ def _escalate_ipc_fault(
         # pipe the relaunch attached to.
         level = max(level, logging.WARNING)
         detail = f"{detail} exit_unconfirmed={terminated - exited}"
+    if recent_recycles >= IPC_FAULT_RECYCLE_CAP:
+        # ⛔ CR-01 (164.6.5 review round 2) — THE RECURRENCE IS THE SIGNAL. This
+        # is the cap'th recycle inside the window: the last one "worked" and the
+        # wedge came back. Whatever this recycle's own outcome, that is an ERROR,
+        # and the next recycle is withheld until the oldest leaves the window.
+        level = logging.ERROR
+        mark_ipc_fault_cap_alarm(_clock())
+        detail = (
+            f"{detail} — REPEATED WEDGE: {recent_recycles} recycles in the last "
+            f"{int(_IPC_FAULT_RECYCLE_WINDOW_S // 60)} min. A wedge that returns "
+            "after a working recycle is the Cause B signal "
+            "(MT5-SWITCH-WEDGE-CAUSE-01); an OPERATOR is needed. The recycle is "
+            f"now CAPPED at {IPC_FAULT_RECYCLE_CAP} per rolling "
+            f"{int(_IPC_FAULT_RECYCLE_WINDOW_S // 60)} min"
+        )
     if answered:
         end_ipc_fault_run()
     elif level >= logging.ERROR:

@@ -555,6 +555,21 @@ _DECLARED_MUTABLE_MODULE_GLOBALS = {
         "log line. It names no row and no state; a redeploy resetting it restarts "
         "the elapsed count and delays the next hourly alarm, nothing else."
     ),
+    "_IPC_FAULT_RECYCLED_AT": (
+        "164.6.5 review round 2 (CR-01) — a monotonic stamp of the LAST terminal "
+        "recycle, half of the two-stamp rolling window the recycle cap counts "
+        "over. It gates an ACTION and a LOG LEVEL, never a dataset value; a "
+        "redeploy resetting it frees the cap early, at most once per deploy."
+    ),
+    "_IPC_FAULT_RECYCLED_BEFORE_AT": (
+        "164.6.5 review round 2 (CR-01) — the recycle before that one, the other "
+        "half of the same window. Same reasoning as the stamp above."
+    ),
+    "_IPC_FAULT_CAP_ALARM_AT": (
+        "164.6.5 review round 2 (CR-01) — a monotonic stamp of the last ERROR "
+        "about the recycle cap, which throttles it to hourly. A LOG CADENCE, "
+        "never a dataset value."
+    ),
     "_IPC_FAULT_LAST_ALARM_AT": (
         "164.6.5 review round 1 (SFH-03) — a monotonic stamp of the last ERROR "
         "about that run, which throttles the alarm to hourly. A LOG CADENCE, "
