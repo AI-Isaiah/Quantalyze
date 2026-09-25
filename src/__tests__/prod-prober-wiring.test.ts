@@ -3058,6 +3058,20 @@ describe("[164.6.5 review round 1] the mt5 operator remedies state measured figu
     expect(remedy).toContain("automatically");
     expect(remedy).not.toContain("measured at 2.0 s,");
   });
+
+  // The not-authorized remedy said "MT5 re-clears those options on every
+  // account change" — unconditionally. It does so only while "Disable
+  // algorithmic trading when the account has been changed" is ticked, and that
+  // box was founder-read UNCHECKED on 2026-09-24 (164.6.5-06 corrected the same
+  // sentence in the Python sources). Expected text is typed here, not imported.
+  it("the -6 remedy states the account-change re-clear as CONDITIONAL on the option being ticked", () => {
+    const remedy = MT5_ARM.REMEDIES["mt5-not-authorized"];
+    expect(remedy).toContain(
+      "Disable algorithmic trading when the account has been changed",
+    );
+    expect(remedy).toContain("only while");
+    expect(remedy).not.toContain("MT5 re-clears those options on every account change");
+  });
 });
 
 describe("[164.6.5-03] D-10: the mt5 arm's declared environment and the workflow's supplied environment agree", () => {
