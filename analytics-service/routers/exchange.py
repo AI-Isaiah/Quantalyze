@@ -824,6 +824,13 @@ async def _validate_mt5_key_probe(
                     # event, and this path does not trigger the heal, so nothing
                     # reached an operator. The Next-side key routes also page it
                     # (`OUR_DEFECT_KEY_ERROR_CODES`). Codes only, as before.
+                    # ⛔ CORRECTED 2026-09-25 (164.6.5 review round 2 / R2-SFH-10):
+                    # the sentence above was true for two of the three routes —
+                    # `keys/[id]/rotate-secret` only logged it — and is true for
+                    # all three now that that route captures the same set. So one
+                    # wedged validate is TWO Sentry events (this line and the Next
+                    # capture). Recorded as noise and kept: this one carries the
+                    # IPC code, the Next one the key route the user was on.
                     logger.error(
                         "validate_key: MT5 terminal IPC transport fault (code=%s)",
                         e.code,
