@@ -15,7 +15,8 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 // curve, no factsheet KPI built from the curve, and not the warm-up copy (which
 // would promise panels "once two days of history are available" — a wrong
 // reason, since the history is withheld, not short). Holdings-backed chrome
-// (InsightStrip) stays.
+// (InsightStrip) stays. The one exception is IN-01: a brand-new book with no
+// history at all has nothing withheld, so it gets the warm-up note and no panel.
 //
 // The factsheet body mock renders a "Sharpe" label and the payload builder
 // returns a non-null stub, so a regression that let the factsheet mount would
@@ -253,6 +254,68 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     expect(screen.queryByText("Sharpe")).toBeNull();
     expect(buildPayloadSpy).not.toHaveBeenCalled();
   });
+
+  // Phase 167.1.2 / IN-01 (founder copy call 2026-09-25, "Warm-up note on
+  // Overview"). A brand-new book, with no legacy snapshot and no derived curve,
+  // has no history for D-02 to withhold. The "being rebuilt" panel would tell
+  // that allocator their chart is hidden because the history could double-count
+  // an account, which says nothing about their book, while the Scenario
+  // composer on the same page stays silent for the same book. They get the
+  // warm-up note, which says what unlocks the panels. The curve and the
+  // factsheet stay unmounted. This is a first connect: no holdings yet and a
+  // sync in flight.
+  it("rebuilding + a brand-new book (0 snapshots, no derived curve): the warm-up note renders INSTEAD of the rebuilding panel", () => {
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityHistoryState="rebuilding"
+        equityDailyPoints={[]}
+        snapshotCount={0}
+        equityCurveSource="legacy"
+        holdingsSummary={[] as never}
+        hasSyncing
+      />,
+    );
+    const note = screen.getByTestId("overview-factsheet-warmup");
+    expect(note.textContent).toContain(
+      "Aggregated factsheet panels appear once at least two days of blended equity history are available.",
+    );
+    // With zero snapshots the "N snapshot recorded so far" line stays hidden.
+    expect(note.textContent).not.toMatch(/recorded so far/);
+    expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
+    // D-02 still holds: no curve, no factsheet, no KPI built.
+    expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
+    expect(screen.queryByTestId("mock-equity-chart")).toBeNull();
+    expect(screen.queryByTestId("mock-factsheet-body")).toBeNull();
+    expect(screen.queryByText("Sharpe")).toBeNull();
+    expect(buildPayloadSpy).not.toHaveBeenCalled();
+  });
+
+  // Once there is history, the rebuilding panel shows as before. The history
+  // has two sources, and either one alone decides it: a derived curve with no
+  // legacy snapshot, and legacy snapshots with no derived curve.
+  it.each([
+    ["a derived curve and 0 legacy snapshots", 0, "derived"],
+    ["1 legacy snapshot and no derived curve", 1, "legacy"],
+  ])(
+    "rebuilding + history from %s: the rebuilding panel renders and the warm-up note does not",
+    (_label, snapshotCount, equityCurveSource) => {
+      render(
+        <AllocationDashboardV2
+          {...baseProps}
+          equityHistoryState="rebuilding"
+          snapshotCount={snapshotCount}
+          equityCurveSource={equityCurveSource as "derived" | "legacy"}
+        />,
+      );
+      expect(
+        screen.getByTestId("overview-equity-rebuilding"),
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId("overview-factsheet-warmup")).toBeNull();
+      expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
+      expect(buildPayloadSpy).not.toHaveBeenCalled();
+    },
+  );
 
   // Positive control (moved behaviour, D-02): with the state explicitly "ready"
   // the same fixture DOES render the curve and the factsheet, so the absences

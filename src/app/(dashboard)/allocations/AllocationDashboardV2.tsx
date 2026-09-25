@@ -73,11 +73,22 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // rebuilt the producer withholds the curve, and neither the curve nor any
     // factsheet KPI computed from it renders.
     equityHistoryState,
+    equityCurveSource,
   } = props;
   // Fail-closed: ONLY an explicit "ready" may show the curve. A missing field,
   // null, "" or any state added later (a destructuring default fires on
   // `undefined` alone) all read as rebuilding.
   const isRebuilding = equityHistoryState !== "ready";
+  // Phase 167.1.2 / IN-01 (founder copy call 2026-09-25): a brand-new book has
+  // no history for D-02 to withhold. Its own-book series has two sources, the
+  // derived curve (`equityCurveSource === "derived"`) and the legacy snapshots
+  // (`snapshotCount > 0`), and this is true only when both are empty. It is the
+  // negation of the Scenario composer's rebuilding-note gate, so the Overview
+  // and the composer read the same book the same way. Such a book gets the
+  // warm-up note instead of the "being rebuilt" panel. An undefined count is
+  // not `=== 0`, so a malformed payload falls through to the panel.
+  const hasNoHistoryYet =
+    snapshotCount === 0 && equityCurveSource !== "derived";
 
   const holdingsEmpty = holdingsSummary.length === 0;
 
@@ -181,8 +192,15 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
 
       {isRebuilding ? (
         // D-02: replaces BOTH the curve slot and the factsheet, and is checked
-        // BEFORE the warm-up fallback so its "appear once" copy never renders.
-        <EquityHistoryRebuilding />
+        // BEFORE the warm-up fallback, so a book whose history is withheld
+        // never sees the "appear once" copy. IN-01: a brand-new book has
+        // nothing withheld, so it gets the warm-up note alone. The curve slot
+        // stays unmounted either way, as D-02 requires.
+        hasNoHistoryYet ? (
+          <FactsheetWarmupNote snapshotCount={snapshotCount} />
+        ) : (
+          <EquityHistoryRebuilding />
+        )
       ) : factsheetPayload ? (
         <FactsheetProvider payload={factsheetPayload}>
           <FactsheetBody
@@ -196,26 +214,38 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       ) : (
         <>
           {equitySlot}
-          <div
-            role="status"
-            data-testid="overview-factsheet-warmup"
-            className="mx-auto mt-8 max-w-[1100px] py-12 text-center"
-          >
-            <p className="text-fixed-10 font-mono uppercase tracking-[0.18em] text-text-muted">
-              Portfolio factsheet
-            </p>
-            <p className="mt-3 text-sm text-text-secondary">
-              Aggregated factsheet panels appear once at least two days of
-              blended equity history are available. The data flows from
-              the API keys you connect on the My Allocation page.
-            </p>
-            {snapshotCount > 0 && snapshotCount < 2 && (
-              <p className="mt-2 text-fixed-11 text-text-muted">
-                {snapshotCount} snapshot recorded so far.
-              </p>
-            )}
-          </div>
+          <FactsheetWarmupNote snapshotCount={snapshotCount} />
         </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The Overview's warm-up note, shown when there is too little history to build
+ * factsheet panels from. It renders in two places: the "ready" branch before
+ * two days have accrued, and (Phase 167.1.2 / IN-01) a brand-new book under
+ * D-02 that has no history for the rebuilding panel to describe.
+ */
+function FactsheetWarmupNote({ snapshotCount }: { snapshotCount: number }) {
+  return (
+    <div
+      role="status"
+      data-testid="overview-factsheet-warmup"
+      className="mx-auto mt-8 max-w-[1100px] py-12 text-center"
+    >
+      <p className="text-fixed-10 font-mono uppercase tracking-[0.18em] text-text-muted">
+        Portfolio factsheet
+      </p>
+      <p className="mt-3 text-sm text-text-secondary">
+        Aggregated factsheet panels appear once at least two days of
+        blended equity history are available. The data flows from
+        the API keys you connect on the My Allocation page.
+      </p>
+      {snapshotCount > 0 && snapshotCount < 2 && (
+        <p className="mt-2 text-fixed-11 text-text-muted">
+          {snapshotCount} snapshot recorded so far.
+        </p>
       )}
     </div>
   );
