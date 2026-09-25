@@ -46,6 +46,10 @@ const SCRIPT = join(REPO_ROOT, "scripts", "extract-reference-inserts.mjs");
  * `node scripts/extract-reference-inserts.mjs --self-test` → `OK: 19 kinds`.
  * Each entry is a distinct way the extractor refuses; losing any of them means
  * a shape it used to refuse becomes replayable into shared TEST silently.
+ *
+ * MEASURED 2026-09-25 (Phase 164.9.2 plan 02) → `OK: 39 kinds`. The twenty `c5-*`
+ * ids appended below are the C5 class (top-level literal UPDATE on a replayed
+ * public table), one kind per C5 refusal reason: emit-mode first, `--audit` after.
  */
 const REQUIRED_KINDS = [
   "audit-count-drift",
@@ -64,6 +68,28 @@ const REQUIRED_KINDS = [
   "unterminated-quote",
   "unterminated-statement",
   "zero-span",
+  // C5, emit mode
+  "c5-update-nonliteral",
+  "c5-update-function-call",
+  "c5-update-positional-param",
+  "c5-update-dollar-tag",
+  "c5-update-dollar-body",
+  "c5-update-auth-target",
+  "c5-cte-prefixed-update",
+  "c5-update-off-shape",
+  "c5-update-unterminated",
+  "c5-update-count-drift",
+  "c5-duplicate-line",
+  "c5-no-insert-line",
+  // C5, --audit
+  "c5-decline-literal",
+  "c5-decline-count-drift",
+  "c5-audit-unlisted-update",
+  "c5-audit-unlisted-nonliteral-update",
+  "c5-audit-unlisted-delete",
+  "c5-audit-unfilled-table",
+  "c5-audit-auth-update",
+  "c5-audit-auth-nonliteral-update",
 ];
 
 describe("SELF_TEST_KINDS_FLOOR — the extractor's self-test corpus is ratcheted", () => {
@@ -105,7 +131,7 @@ describe("the load-bearing refusal kinds are present BY NAME", () => {
     expect(kind?.expect).toBe("inside a dollar-quoted body");
   });
 
-  it("every kind measured on 2026-09-09 is still declared — delete-one-add-one nets zero on the COUNT and fails here", () => {
+  it("every pinned kind (measured 2026-09-09, C5 added 2026-09-25) is still declared — delete-one-add-one nets zero on the COUNT and fails here", () => {
     const ids = SELF_TEST_KINDS.map((k) => k.id);
     const missing = REQUIRED_KINDS.filter((id) => !ids.includes(id));
     expect(

@@ -1249,8 +1249,13 @@ function modeAudit(io, allowlistPath, migrationsDir) {
  * MEASURED 2026-09-09 on a clean tree: `extract-reference-inserts self-test OK:
  * 19 kinds, red+green each.`, exit 0. Raise this constant when the corpus grows
  * durably; never lower it to clear a red.
+ *
+ * MEASURED 2026-09-25 (Phase 164.9.2 plan 02, after the C5 kinds landed):
+ * `extract-reference-inserts self-test OK: 39 kinds, red+green each.`, exit 0.
+ * 19 → 39: twenty C5 kinds, one per C5 refusal reason. Before this raise the
+ * layer-2 vitest was observed RED with `RATCHET STALE: … declares 39 … still 19`.
  */
-export const SELF_TEST_KINDS_FLOOR = 19;
+export const SELF_TEST_KINDS_FLOOR = 39;
 
 /**
  * @type {Array<{id:string, why:string, audit?:boolean, expect:string, greenStdout?:RegExp, greenAbsent?:RegExp}>}
@@ -1431,6 +1436,63 @@ export const SELF_TEST_KINDS = [
     why: "C5: an allowlist of C5 lines alone replays no row the restore's count floor can measure, the same defect as an empty allowlist (plan 01 deviation 2)",
     expect: "the allowlist carries C5 lines but NO INSERT line",
     greenStdout: /-- refdata-update: 20260101000000_fx_a\.sql:\d+ public\.fx_ref/,
+  },
+  // ── C5 in --audit: every top-level UPDATE / DELETE on a replayed table is accounted for.
+  {
+    id: "c5-decline-literal",
+    why: "C5 --audit: a decline: line over a LITERAL UPDATE would hide a replayable effect; a decline is for joins only",
+    audit: true,
+    expect: "a literal UPDATE is replayed, not declined",
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 1 declined over 1 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-decline-count-drift",
+    why: "C5 --audit: pinned decline:2, measured 1 — a decline count is a pin like any other",
+    audit: true,
+    expect: "the C5 line pins decline:2 top-level statement(s) but 1 were measured",
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 1 declined over 1 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-unlisted-update",
+    why: "C5 --audit: a migration gains a top-level literal UPDATE on a replayed table with no C5 line — the drift a static list cannot see about itself",
+    audit: true,
+    expect: "NO C5 allowlist line; add an update: line",
+    greenStdout: /audit C5 OK: 1 update statement\(s\) over 1 file\(s\) and 1 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-unlisted-nonliteral-update",
+    why: "C5 --audit: an unlisted JOINED UPDATE on a replayed table is refused, not skipped — the INSERT side's limitation 2 (an unlisted non-literal is silent) is deliberately not carried over",
+    audit: true,
+    expect: "classify by hand: decline it with a reason",
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 1 declined over 1 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-unlisted-delete",
+    why: "C5 --audit: C5 replays UPDATE only, so a top-level DELETE on a table the replay fills has no line that can account for it. The green leg pins that a DELETE on a table no INSERT entry fills is outside C5",
+    audit: true,
+    expect: "a top-level DELETE on a table the replay fills, and C5 replays UPDATE only",
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-unfilled-table",
+    why: "C5 --audit membership: an update: line on a table no INSERT entry fills reaches nothing the restore rebuilt",
+    audit: true,
+    expect: "which NO INSERT entry fills",
+    greenStdout: /audit C5 OK: 1 update statement\(s\) over 1 file\(s\) and 1 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-auth-update",
+    why: "C5 --audit: a top-level literal UPDATE of auth.users (which an INSERT entry fills) has no line that can account for it, because C5 is public-only; the green leg is the named remedy, the UPDATE moved out of the top level",
+    audit: true,
+    expect: "a top-level UPDATE of auth.users, which an INSERT entry replays, and C5 targets public only",
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-auth-nonliteral-update",
+    why: "C5 --audit: the non-literal twin of c5-audit-auth-update — a joined UPDATE of auth.users is refused by its own reason, never routed to a decline: line that parse would refuse",
+    audit: true,
+    expect: "a top-level non-literal UPDATE of auth.users, and C5 targets public only",
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
   },
 ];
 
