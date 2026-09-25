@@ -829,6 +829,14 @@ async def _validate_mt5_key_probe(
                         e.code,
                     )
                     trace.outcome = "terminal_unresponsive"
+                    # ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1 / WR-05): the
+                    # detail said "This needs an operator, not a retry", which
+                    # asserted permanence. -10004 (bridge not attached) clears on a
+                    # gateway redeploy, -10005 is what this phase's heal recycles,
+                    # and the recycle's own relaunch window answers both. The detail
+                    # now matches the wizard copy: NOT NOW and OURS, and a later
+                    # attempt can succeed. `retryable=False` stands — it describes
+                    # an IMMEDIATE retry, which is the harmful action (167 D-08).
                     raise service_error(
                         500,
                         "MT5_TERMINAL_UNRESPONSIVE",
@@ -836,7 +844,8 @@ async def _validate_mt5_key_probe(
                         retryable=False,
                         detail=(
                             "The MetaTrader terminal we use to check this key "
-                            "stopped answering. This needs an operator, not a retry."
+                            "stopped answering. This is ours to fix: an immediate "
+                            "retry will not help, but a later attempt can succeed."
                         ),
                     )
                 logger.warning(

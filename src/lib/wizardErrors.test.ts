@@ -4203,7 +4203,14 @@ describe("[164.6.5 / criterion 5] the wedged-terminal arm renders honest, non-re
     // concurrent plan) may not have shipped when this renders. Expressed as a
     // property of what the copy DOES say — a bare grep for an absent phrase
     // goes green the moment someone rewords it, so this also asserts the
-    // POSITIVE half: the copy must say the draft is safe.
+    // POSITIVE half: the copy must say a LATER attempt can succeed.
+    //
+    // ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1 / WR-05): the positive
+    // half used to be "the copy must say the draft is safe". That sentence is
+    // now gated to the connect step (the rotate-secret dialog has no draft), so
+    // it is asserted in the surface case below instead. The copy also used to
+    // claim PERMANENCE, which was false for -10004 (a redeploy clears it) and
+    // for the heal's own relaunch window; those phrases are now banned too.
     const copy = formatKeyError("KEY_MT5_TERMINAL_UNRESPONSIVE");
     const haystack = [copy.title, copy.cause, ...copy.fix]
       .join("   ")
@@ -4222,8 +4229,32 @@ describe("[164.6.5 / criterion 5] the wedged-terminal arm renders honest, non-re
           `self-heal promise this arm exists to remove.`,
       ).toBe(false);
     }
-    // The POSITIVE half: the reader's position, stated honestly.
-    expect(/draft/i.test(haystack)).toBe(true);
+    for (const permanence of [
+      "will not clear",
+      "nothing you do",
+      "nothing you can do",
+    ]) {
+      expect(
+        haystack.includes(permanence),
+        `The wedged-terminal copy says "${permanence}" — a permanence claim ` +
+          `that is false for -10004 and for the heal's relaunch window (WR-05).`,
+      ).toBe(false);
+    }
+    // The POSITIVE half: not now, but not never.
+    expect(haystack).toContain("a later attempt can succeed");
+  });
+
+  it("the draft sentence renders on the connect step and nowhere that names no surface", () => {
+    // 164.6.5 review round 1 / WR-05 + CR-02. The same code reaches the
+    // rotate-secret dialog, which has no draft and names no surface.
+    const connect = formatKeyError("KEY_MT5_TERMINAL_UNRESPONSIVE", {
+      surface: "connect",
+    });
+    expect(connect.fix).toContain("Your draft is saved.");
+    const noSurface = formatKeyError("KEY_MT5_TERMINAL_UNRESPONSIVE");
+    expect(noSurface.fix.join(" ")).not.toMatch(/draft/i);
+    // Non-vacuity: the unconditional remedy still renders without a surface.
+    expect(noSurface.fix.length).toBe(2);
   });
 
   it("the classifier matches the MACHINE code, not message text", () => {

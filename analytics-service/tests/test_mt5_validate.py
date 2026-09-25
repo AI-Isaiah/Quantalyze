@@ -1391,6 +1391,12 @@ async def test_mt5_ipc_transport_fault_maps_to_terminal_unresponsive(
     assert body["detail"] != AUTH_FAILED_DETAIL
     assert body["detail"] != MT5_WRONG_SERVER_DETAIL
     assert "read_only" not in repr(body)
+    # 164.6.5 review round 1 / WR-05 — not now, but not never. The detail used
+    # to say "This needs an operator, not a retry", a permanence claim that is
+    # false for -10004 (a redeploy clears it) and for the heal's own relaunch
+    # window, which answers both codes.
+    assert "a later attempt can succeed" in body["detail"]
+    assert "needs an operator" not in body["detail"]
     client.release.assert_called_once()
 
 

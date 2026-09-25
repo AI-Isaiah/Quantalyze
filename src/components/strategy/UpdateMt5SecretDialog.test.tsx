@@ -277,6 +277,9 @@ describe("UpdateMt5SecretDialog", () => {
     );
     expect(envelope.textContent).not.toContain("Try the last action again.");
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    // 164.6.5 review round 1 / WR-05 — this dialog has no draft, so the card
+    // must not claim one is saved (the wizard's connect step alone earns it).
+    expect(envelope.textContent).not.toMatch(/draft/i);
   });
 
   it("the submit button is disabled while the field is empty", () => {

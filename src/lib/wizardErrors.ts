@@ -1846,14 +1846,37 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // copy that promises an automatic recovery which has not shipped is the
   // same class of false statement `KEY_NETWORK_TIMEOUT`'s "try again" was,
   // pointed the other way.
+  //
+  // ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1 / WR-05) — the copy used
+  // to state PERMANENCE ("it will not clear on a retry", "nothing you do from
+  // this screen can clear it"), and that was false in the other direction.
+  // The arm fires for BOTH -10004 and -10005. -10004 is the bridge not
+  // attached, which a gateway redeploy clears; -10005 is what this phase's
+  // own heal recycles; and the recycle itself opens a window in which every
+  // validate reads one of the two while the terminal relaunches. A user told
+  // "nothing will help, contact support" in that window would have succeeded
+  // a few minutes later. The copy now says NOT NOW and OURS, and that a later
+  // attempt can succeed, without asserting when or promising the heal (it
+  // does not cure every cause: a persisted modal dialog needs an operator).
+  //
+  // ⚠️ THE DRAFT SENTENCE IS GATED to the connect step. The same code reaches
+  // `UpdateMt5SecretDialog` (D-17, rotate-secret), which has no draft, and
+  // absence of a surface SUPPRESSES a `surface` requirement — so the dialog,
+  // which names none, never reads a claim about a draft it does not have.
+  // "nothing was stored" is true on both: a failed validate stores no key on
+  // the wizard routes and changes no password on the rotate route.
   KEY_MT5_TERMINAL_UNRESPONSIVE: {
     title: "Our MetaTrader terminal stopped answering.",
     cause:
-      "The terminal we use to check MT5 keys is not responding. This is ours to fix — not your key, your password, or your broker server — and it will not clear on a retry. Your draft is saved; nothing you do from this screen can clear it.",
+      "The terminal we use to check MT5 keys is not responding. This is ours to fix — not your key, your password, or your broker server — and nothing was stored. It can come back without anything from you, but not fast enough for an immediate retry to help.",
     fix: [
-      "Nothing you can do from here — tell us and we will fix it.",
-      "Your draft is saved. You can come back to it once we have.",
+      "Come back to this in a little while. A later attempt can succeed once the terminal is answering again.",
+      "If it is still failing then, tell us and we will fix it.",
+      "Your draft is saved.",
     ],
+    // Index-aligned to `fix`. Slot 2 is a claim about the wizard draft behind
+    // the panel — see the ⚠️ note above.
+    fixRequires: [null, null, REQUIRES_CONNECT_SURFACE],
     docsHref: "/security#readonly-key",
     actions: ["request_call"],
   },
