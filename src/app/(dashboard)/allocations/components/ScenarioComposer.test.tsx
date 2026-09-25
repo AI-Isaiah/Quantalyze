@@ -16646,3 +16646,110 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 / D-02 + D-03 — the own-book comparison is hidden while the
+// allocator's equity history is rebuilt, and the absence is DISCLOSED.
+//
+// Why this matters: the own-book line and the "vs your book" delta are built
+// from `equityDailyPoints`, the curve D-02 withholds because it could count one
+// exchange account twice or read a no-sync day as zero. A Sharpe/Sortino/max-DD
+// delta against that curve would be a wrong number the allocator can act on.
+// Hiding it silently would read as "no book"; the one sentence says why.
+// The live-book KPIs (`liveBaselineMetrics`) come from the per-key blend, not
+// from that curve, so D-03 keeps them visible.
+//
+// The fixture carries a 3-point curve (2 derivable returns, the minimum for a
+// delta), so case 3 proves the SAME fixture yields a delta when "ready" and the
+// absences in case 1 are the gate, not a too-short series.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while rebuilding", () => {
+  const OWN_BOOK_REBUILDING_COPY =
+    "Your book's own history is being rebuilt, so the comparison with your current book is not shown.";
+  const THREE_POINT_CURVE = [
+    { date: "2026-01-01", value: 100_000 },
+    { date: "2026-01-02", value: 101_000 },
+    { date: "2026-01-03", value: 99_500 },
+  ];
+  type D02ChartProps = {
+    equityDailyPoints: Array<{ date: string; value: number }>;
+    scenarioOwnBookDelta?: { book_n?: number } | undefined;
+  };
+  const lastChart = (): D02ChartProps =>
+    vi.mocked(ScenarioFactsheetChart).mock.calls.at(-1)![0] as D02ChartProps;
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    cleanup();
+  });
+
+  it("rebuilding: no own-book series reaches the chart, no own-book delta, and the disclosure renders once (and not in blank mode)", () => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityHistoryState: "rebuilding",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    const props = lastChart();
+    expect(props.equityDailyPoints).toEqual([]);
+    expect(props.scenarioOwnBookDelta).toBeUndefined();
+
+    const notes = screen.getAllByTestId("scenario-ownbook-rebuilding");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].textContent).toBe(OWN_BOOK_REBUILDING_COPY);
+
+    // Blank slate has no own book to compare against, so the sentence would
+    // explain an absence the user chose; it does not render there.
+    fireEvent.click(screen.getByRole("radio", { name: /blank slate/i }));
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  });
+
+  it("rebuilding: the live-book KPIs (liveBaselineMetrics) still reach the KPI strip (D-03)", () => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityHistoryState: "rebuilding",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const kpiProps = vi.mocked(KpiStrip).mock.calls.at(-1)![0];
+    const live = kpiProps.liveMetrics as unknown as {
+      twr?: number | null;
+      sharpe?: number | null;
+      max_drawdown?: number | null;
+    };
+    expect(live.twr).toBe(payload.liveBaselineMetrics.ytdTwr);
+    expect(live.sharpe).toBe(payload.liveBaselineMetrics.sharpe);
+    expect(live.max_drawdown).toBe(payload.liveBaselineMetrics.maxDd);
+  });
+
+  it("ready (regression guard): the own-book series and delta flow as before and no disclosure renders", () => {
+    const payload = makePayload({
+      equityDailyPoints: THREE_POINT_CURVE,
+      equityHistoryState: "ready",
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const props = lastChart();
+    expect(props.equityDailyPoints).toEqual(THREE_POINT_CURVE);
+    expect(props.scenarioOwnBookDelta).toBeDefined();
+    expect(props.scenarioOwnBookDelta?.book_n).toBe(2);
+    expect(screen.queryByTestId("scenario-ownbook-rebuilding")).toBeNull();
+  });
+});
