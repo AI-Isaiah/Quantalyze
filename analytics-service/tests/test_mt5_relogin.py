@@ -153,7 +153,17 @@ class _FakeRpycConn:
         hook = owner._scenario.get("after_recycle_crossed")
         if hook is not None:
             hook()
-        return _json.dumps({"matched": 1, "terminated": 1, "exited": 1})
+        # ⭐ WR-03 / SFH-01 — the counts are a SCENARIO KNOB. A double that always
+        # answered (1, 1, 1) made every "the recycle landed" test pass by
+        # construction: no case could express a recycle that ended nothing.
+        matched, terminated, exited = owner._scenario.get("recycle_counts", (1, 1, 1))
+        if terminated == 0:
+            # Nothing was ended, so the next bare `initialize()` attaches to the
+            # SAME, still-running terminal: the pre-recycle answers stand.
+            owner.recycled = False
+        return _json.dumps(
+            {"matched": matched, "terminated": terminated, "exited": exited}
+        )
 
 
 class _FakeMt5:
@@ -1503,6 +1513,7 @@ _ESCALATION_KINDS = (
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_STILL_FAULTED,
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_FAILED,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
 )
 
 
@@ -2106,6 +2117,84 @@ async def test_ESCALATION_the_outcome_kind_and_its_severity_follow_the_relaunch(
     )
     assert line.levelno == expected_level
     assert "initialize_credentialed" not in fake.call_order
+
+
+@pytest.mark.parametrize(
+    "counts,relaunch,expected_kind,expected_level",
+    [
+        pytest.param(
+            (0, 0, 0),
+            {"initialize": True},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
+            logging.ERROR,
+            id="matched-NOTHING-and-the-probe-answered",
+        ),
+        pytest.param(
+            (1, 0, 0),
+            {},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
+            logging.ERROR,
+            id="terminate-REFUSED-and-still-wedged",
+        ),
+        pytest.param(
+            (2, 1, 1),
+            {"initialize_after_recycle": True},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
+            logging.ERROR,
+            id="PARTIAL-one-terminal-survived",
+        ),
+        pytest.param(
+            (1, 1, 0),
+            {"initialize_after_recycle": True},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED,
+            logging.WARNING,
+            id="terminated-but-exit-UNCONFIRMED",
+        ),
+    ],
+)
+async def test_ESCALATION_WR03_a_recycle_that_did_not_end_every_terminal_is_never_recycled(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    counts: tuple[int, int, int],
+    relaunch: dict,
+    expected_kind: str,
+    expected_level: int,
+) -> None:
+    """⛔ WR-03 / SFH-01 (164.6.5 review round 1). The counts are the ONLY evidence
+    the Wine-side terminate landed, and it has never run live. A verdict that
+    ended nothing (`matched=0`: an image-name difference under Wine;
+    `terminated=0`: the open or terminate refused) must never read `recycled`
+    — at INFO, "nothing for anyone to do" — because the relaunch probe happened
+    to attach to the SAME terminal and it answered; nor `still_faulted`, which
+    says a recycle ran. A partial landing leaves a terminal alive that may be the
+    wedged one. And a terminate whose exit was not confirmed is at least a
+    WARNING, never INFO."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch, {**_WEDGED, **relaunch, "recycle_counts": counts}
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+    if relaunch.get("initialize") is True:
+        # The terminal answers only AFTER the (non-)recycle: the first probe
+        # must still read the wedge so the escalation runs at all.
+        answers = iter([False, True])
+        real = fake.initialize
+
+        def _first_wedged(**kwargs):
+            real(**kwargs)
+            return next(answers)
+
+        fake.initialize = _first_wedged
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert outcomes[0].escalation_kind == expected_kind
+    line = next(
+        r for r in _records(caplog) if "escalated to a terminal" in r.getMessage()
+    )
+    assert line.levelno == expected_level
+    assert f"matched={counts[0]} terminated={counts[1]}" in line.getMessage()
 
 
 @pytest.mark.parametrize("kind", _ESCALATION_KINDS)

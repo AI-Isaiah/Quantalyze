@@ -217,7 +217,7 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 # name a RESPONSE to that fault, which is a different fact about a different
 # moment.
 #
-# ⭐ FOUR KINDS, NOT ONE KIND WITH A CODE, because the REMEDIES differ — the
+# ⭐ SEPARATE KINDS, NOT ONE KIND WITH A CODE, because the REMEDIES differ — the
 # lesson IN-07 (round 2) above recorded when two operator faults shared one class
 # and broke the class-to-log pin:
 #
@@ -233,6 +233,14 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 #   * recycle_failed          -> the recycle verb itself raised (the channel, the
 #                                seam, the snapshot). Whether the process was
 #                                ended is not known from here.
+#   * recycle_not_landed      -> the verb RAN and reported that it did not end
+#                                every terminal it matched (`terminated <
+#                                matched`), or matched none at all (164.6.5
+#                                review round 1, WR-03 / SFH-01). Nothing, or
+#                                not everything, was recycled, so neither
+#                                "recycled" nor "still faulted after a recycle"
+#                                is true — the recycle VERB needs a human, since
+#                                the Wine-side terminate has never run live.
 #
 # ⚠️ NONE OF THEM IS PASSED TO `classify_reading` BY THE HEAL, and if one ever is
 # it DEGRADES TO `not_measured` — none is a positive class and none carries
@@ -246,6 +254,7 @@ KIND_IPC_FAULT_RECYCLED_STILL_FAULTED: Final[str] = (
     "ipc_fault_recycled_still_faulted"
 )
 KIND_IPC_FAULT_RECYCLE_FAILED: Final[str] = "ipc_fault_recycle_failed"
+KIND_IPC_FAULT_RECYCLE_NOT_LANDED: Final[str] = "ipc_fault_recycle_not_landed"
 
 #: The MT5 code meaning "the bridge ANSWERED and NO ACCOUNT IS AUTHORIZED" — the
 #: ONE code that establishes darkness. Re-spelled here rather than imported from

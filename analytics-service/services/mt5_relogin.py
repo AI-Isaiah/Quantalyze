@@ -81,6 +81,7 @@ from services.mt5_session_episodes import (
     KIND_HEALED,
     KIND_IPC_FAULT,
     KIND_IPC_FAULT_RECYCLE_FAILED,
+    KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
     KIND_IPC_FAULT_RECYCLED,
     KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
     KIND_IPC_FAULT_RECYCLED_STILL_FAULTED,
@@ -779,14 +780,49 @@ def _capture_wedge_evidence(client: Mt5Client, env_server: str) -> str:
     return f"{build_part} {connected_part} {server_part}"
 
 
+def _count(verdict: dict[str, object], key: str) -> int | None:
+    """One of the verb's integer counts, or ``None`` when it is not an int."""
+    value = verdict.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _recycle_landed(verdict: dict[str, object]) -> bool:
+    """Whether the recycle ended EVERY terminal process it matched, and matched
+    at least one. ⛔ The counts are the ONLY evidence the terminate landed
+    (``deploy/mt5-gateway/railway-gateway.md``, D-05 caveats): the Wine-side
+    ``TerminateProcess`` path has never run live."""
+    matched = _count(verdict, "matched")
+    terminated = _count(verdict, "terminated")
+    return (
+        matched is not None
+        and terminated is not None
+        and matched >= 1
+        and terminated == matched
+    )
+
+
 def _classify_recycle_verdict(verdict: dict[str, object]) -> str:
     """Map the plan-02 recycle verb's verdict to one escalation kind.
 
-    Read from the verb's STRUCTURED keys (``authorized`` / ``relaunch_code``),
-    never from any text. ``relaunch_code == -6`` is the terminal back up and
-    answering with no account signed in yet: the ordinary heal owns that on the
-    next reading, because the escalation never sends a credential (D-08).
+    Read from the verb's STRUCTURED keys, never from any text.
+
+    ⛔ WR-03 / SFH-01 (164.6.5 review round 1) — THE COUNTS DECIDE FIRST. This
+    read only ``authorized`` / ``relaunch_code``, so a recycle that ENDED NOTHING
+    (``matched=0``: an image-name or case difference under Wine; or ``matched=1
+    terminated=0``: ``OpenProcess`` / ``TerminateProcess`` refused) was labelled
+    ``recycled`` at INFO whenever the relaunch probe happened to attach to the
+    same, still-running terminal and it answered — and ``still_faulted`` ("the
+    recycle ran and did not help") when it did not. Both claim a recycle that
+    never happened, and the second points the operator at the VNC console for a
+    broken VERB. ``terminated < matched`` is ``recycle_not_landed``, whatever the
+    relaunch said.
+
+    ``relaunch_code == -6`` is the terminal back up and answering with no account
+    signed in yet: the ordinary heal owns that on the next reading, because the
+    escalation never sends a credential (D-08).
     """
+    if not _recycle_landed(verdict):
+        return KIND_IPC_FAULT_RECYCLE_NOT_LANDED
     if verdict.get("authorized") is True:
         return KIND_IPC_FAULT_RECYCLED
     if verdict.get("relaunch_code") == _MT5_NO_AUTHORIZED_ACCOUNT_CODE:
@@ -880,6 +916,7 @@ def _escalate_ipc_fault(
     # have spent the run's one attempt already, with no process ended, so every
     # later `-10005` was debounced until a redeploy.
     claim_ipc_fault_escalation(answers)
+    verdict: dict[str, object] = {}
     try:
         verdict = client.recycle_terminal_process()
         kind = _classify_recycle_verdict(verdict)
@@ -924,9 +961,17 @@ def _escalate_ipc_fault(
     elif kind == KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT:
         level = logging.WARNING
     else:
-        # Still faulted after a recycle, or a recycle whose effect is unknown: a
-        # human is needed and no second automatic attempt will come this run.
+        # Still faulted after a recycle, a recycle that did not land, or one
+        # whose effect is unknown: a human is needed.
         level = logging.ERROR
+    exited = _count(verdict, "exited")
+    terminated = _count(verdict, "terminated")
+    if exited is not None and terminated is not None and exited < terminated:
+        # ⚠️ SFH-01 — a terminated process that did not confirm its exit inside
+        # the wait is a QUALIFIER, never an INFO: the terminal may still hold the
+        # pipe the relaunch attached to.
+        level = max(level, logging.WARNING)
+        detail = f"{detail} exit_unconfirmed={terminated - exited}"
     logger.log(
         level,
         "mt5 session heal: ipc_fault code=%s escalated to a terminal-process "
