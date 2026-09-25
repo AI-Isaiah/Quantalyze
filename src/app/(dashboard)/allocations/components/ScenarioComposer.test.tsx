@@ -956,6 +956,10 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const payload = makePayload({
       lastSyncAt: "2026-06-24T00:00:00.000Z",
       allKeysStale: true,
+      // Phase 167.1.2 / D-02: moved to "ready" explicitly. While "rebuilding"
+      // the own-book series is withheld in BOTH modes, so the blank-mode gate
+      // this test pins is only observable once the history may be shown.
+      equityHistoryState: "ready",
     });
     render(
       <ScenarioComposer

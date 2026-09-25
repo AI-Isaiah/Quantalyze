@@ -921,6 +921,9 @@ export function ScenarioComposer({
     allKeysStale,
     minHistoryDepthMonths,
     activeVenues,
+    // Phase 167.1.2 / D-02: a payload without the field is treated as
+    // "rebuilding" (fail-closed), matching the Overview.
+    equityHistoryState = "rebuilding",
   } = payload as MyAllocationDashboardPayload & {
     existingOutcomesByHoldingRef?: Record<string, unknown>;
   };
@@ -1018,10 +1021,16 @@ export function ScenarioComposer({
   // (empty-until-added) scenario overlay. Gate the baseline + stamps the same
   // single-switch way. A no-book allocator already renders with an empty
   // baseline, so blank mode just reproduces that already-handled state.
+  //
+  // Phase 167.1.2 / D-02 ("Hide it until correct"): the same switch withholds
+  // the own-book series while the equity history is rebuilt, which also leaves
+  // `scenarioOwnBookDelta` undefined (it needs >= 2 levels). The live-book KPIs
+  // (`liveBaselineMetrics`) are a separate field and stay (D-03).
   const isBlankMode = entryMode === "blank";
+  const isOwnBookRebuilding = equityHistoryState === "rebuilding";
   const baselineEquityDailyPoints = useMemo(
-    () => (isBlankMode ? [] : equityDailyPoints),
-    [isBlankMode, equityDailyPoints],
+    () => (isBlankMode || isOwnBookRebuilding ? [] : equityDailyPoints),
+    [isBlankMode, isOwnBookRebuilding, equityDailyPoints],
   ) as typeof equityDailyPoints;
 
   const scenario = useScenarioState({
@@ -5497,6 +5506,18 @@ export function ScenarioComposer({
           // absent) when there is no live book series.
           scenarioOwnBookDelta={scenarioOwnBookDelta}
         />
+        {/* Phase 167.1.2 / D-02: the own-book comparison is withheld while the
+            equity history is rebuilt; say so rather than leave a silent gap.
+            Not in blank mode, where there is no own book to compare with. */}
+        {isOwnBookRebuilding && !isBlankMode && (
+          <p
+            data-testid="scenario-ownbook-rebuilding"
+            className="mt-2 text-fixed-11 text-text-muted"
+          >
+            Your book&apos;s own history is being rebuilt, so the comparison
+            with your current book is not shown.
+          </p>
+        )}
         {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted line
             swatch via the `--color-chart-benchmark` token (UI-SPEC §Copywriting
             / §Color). Disabled when the
