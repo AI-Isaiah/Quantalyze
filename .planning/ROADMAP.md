@@ -867,9 +867,11 @@ Plans:
 **Goal:** A merge push to `main` is no slower than before Phase 164.4.2. `test-db-drift` (VAC-08, read-only against shared TEST's migration ledger and function bodies) stops queueing behind `python` and `e2e-seeded` for the advisory key, without weakening VAC-08's verdict and without breaking the ordering against `supabase-migrate.yml`'s `apply-test`.
 **Requirements**: the Phase 164.4.2 speed goal, clauses (a) and (c) of `164.4.2-MEASUREMENT.md`.
 **Depends on:** Phase 164.4.2
-**Plans:** 0 plans
+**Plans:** 3 plans
 
 ⭐ **Founder decision, 2026-09-24 (AskUserQuestion): "Book the phase if it holds."** It held.
+
+⭐ **Founder decision, 2026-09-25 (AskUserQuestion, Q1): "Judge by the goal."** SC-3's clause (a) is graded as a non-degenerate run-total inside or below 16m18s–18m50s; the strict below-16m18s reading is recorded per run as evidence for Phase 164.9, not as this phase's pass/fail (`164.4.2.1-CONTEXT.md` D-01).
 
 **Evidence.** `164.4.2-MEASUREMENT.md` `## AFTER`, merge-push runs 1–5 (CI `35939061930`, `35943402509`, `35943407413`, `35957479474`, `35958026743`):
 - (a) critical path: FAIL. Non-degenerate run-totals were 18m26s, 32m32s and 32m30s, against a band of 16m18s–18m50s.
