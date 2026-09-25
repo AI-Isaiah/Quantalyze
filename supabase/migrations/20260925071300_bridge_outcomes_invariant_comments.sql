@@ -61,6 +61,14 @@
 -- col_description over pg_attribute, to_regclass and pg_constraint. Every
 -- RAISE format string below is a SINGLE literal (Phase 85 invariant #21).
 --
+-- ROUND-1 REVIEW CORRECTION (migration-reviewer LOW, 2026-09-25). The first
+-- draft of the two comments below said the column "feeds" the md-NULL index and
+-- that the md-NULL arm is one outcome per (allocator, strategy, HOLDING). The
+-- sync trigger bridge_outcomes_sync_holding_ref() sets original_holding_ref to
+-- NULL whenever match_decision_id IS NULL, so every md-NULL row it touches keys
+-- as (allocator, strategy, ''). The comments now say that. D-13's written
+-- answer above is unchanged: it quotes the index DEFINITION, which is correct.
+--
 -- Execution proof of the invariant itself is NOT this file. It is the live-DB
 -- arms of src/__tests__/match-decisions-xor-rls.test.ts, which assert both
 -- constraints by SQLSTATE AND by name.
@@ -75,7 +83,8 @@ COMMENT ON TABLE public.bridge_outcomes IS
   'UNIQUE (allocator_id, match_decision_id): one outcome per decision (migration 081). '
   '(ii) bridge_outcomes_legacy_per_strategy_holding_when_md_null, a partial UNIQUE on '
   '(allocator_id, strategy_id, COALESCE(original_holding_ref, '''')) WHERE match_decision_id IS NULL '
-  '(migration 083): one outcome per (allocator, strategy, holding) only for rows whose decision was nulled out. '
+  '(migration 083), for rows whose decision was nulled out. The sync trigger writes NULL to original_holding_ref '
+  'for every such row it touches, so that index is in effect one outcome per (allocator, strategy) among them. '
   'Two outcomes for the same (allocator, strategy) under two different decisions are allowed by design. '
   'Outcomes are editable by owner (D-17) and append-only from an audit perspective '
   '(no DELETE policy; corrective edits via UPSERT). '
@@ -86,8 +95,10 @@ COMMENT ON COLUMN public.bridge_outcomes.original_holding_ref IS
   'populated by bridge_outcomes_sync_holding_ref_trigger on INSERT/UPDATE OF match_decision_id. '
   'NULL for strategy-sourced rows (original_strategy_id path). '
   'NULL when match_decision_id IS NULL (the trigger writes NULL for those rows). '
-  'Via that sync trigger it feeds the md-NULL partial index '
-  'bridge_outcomes_legacy_per_strategy_holding_when_md_null (migration 083). '
+  'The md-NULL partial index bridge_outcomes_legacy_per_strategy_holding_when_md_null (migration 083) '
+  'keys on COALESCE(original_holding_ref, ''''), but because the trigger nulls this column for md-NULL rows, '
+  'that index is in effect per (allocator, strategy); a non-empty holding reaches it only through a direct '
+  'UPDATE of this column that leaves match_decision_id unchanged. '
   'Rows with a decision are keyed by bridge_outcomes_allocator_match_decision_unique '
   '(migration 081), which does not read this column.';
 

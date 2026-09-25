@@ -342,6 +342,82 @@ describe("ISSUE-008 — request_allocator_holdings_sync f8 Queued path", () => {
     30_000,
   );
 
+  // ⭐ Phase 164.9.1 round-1 review (rls-policy-auditor, below threshold) — THE
+  // REFUSAL IS NOT AN ORACLE. The disconnected-key refusal (P0001) must sit
+  // AFTER the ownership check, so only the key's OWNER can learn that it is
+  // disconnected. A caller who does not own the key must get the SAME answer
+  // as for a key that does not exist: 42501 api_key_not_found_or_not_owned.
+  // Until this arm, only the migration's DO block pinned that order, by
+  // position in the stored text; this pins it by execution. It fails if the
+  // refusal moves above the ownership check (a non-owner would read P0001) or
+  // if the two 42501 answers ever diverge.
+  it.skipIf(!HAS_LIVE_DB)(
+    "a NON-OWNER syncing someone else's disconnected key gets 42501, the same answer as for a missing key, never P0001",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const cleanup = { userIds: [] as string[] };
+      const apiKeyIds: string[] = [];
+      let keyId: string | null = null;
+
+      try {
+        const ownerId = await createTestUser(
+          admin,
+          `issue-008-owner-${ts}@test.sec`,
+          `Issue008Owner${ts}!`,
+        );
+        cleanup.userIds.push(ownerId);
+        const otherEmail = `issue-008-other-${ts}@test.sec`;
+        const otherPassword = `Issue008Other${ts}!`;
+        const otherId = await createTestUser(admin, otherEmail, otherPassword);
+        cleanup.userIds.push(otherId);
+
+        keyId = await seedApiKey(admin, ownerId, `foreign-disconnected-${ts}`);
+        apiKeyIds.push(keyId);
+        // A live job too, so a prefetch placed above the ownership check
+        // would answer {already_inflight} to the non-owner and fail here.
+        await pinInflightJob(admin, keyId, 600);
+        const { error: discErr } = await admin
+          .from("api_keys")
+          .update({ disconnected_at: new Date().toISOString() } as never)
+          .eq("id", keyId);
+        if (discErr) {
+          throw new Error(`disconnect ${keyId}: ${discErr.message}`);
+        }
+
+        const other = await createAuthedClient(otherEmail, otherPassword);
+        const foreign = await other.rpc("request_allocator_holdings_sync", {
+          p_api_key_id: keyId,
+        });
+        const missing = await other.rpc("request_allocator_holdings_sync", {
+          p_api_key_id: crypto.randomUUID(),
+        });
+
+        expect(foreign.error?.code).toBe("42501");
+        expect(foreign.error?.message).toBe("api_key_not_found_or_not_owned");
+        expect(foreign.data).toBeNull();
+        // Same code, same message, as a key that does not exist at all.
+        expect(missing.error?.code).toBe("42501");
+        expect(foreign.error?.message).toBe(missing.error?.message);
+      } finally {
+        if (keyId) {
+          try {
+            await admin.from("compute_jobs").delete().eq("api_key_id", keyId);
+          } catch (err) {
+            console.warn(
+              `[issue-008] cleanup compute_jobs for ${keyId}: ${(err as Error).message}`,
+            );
+          }
+        }
+        await cleanupLiveDbRow(admin, {
+          apiKeyIds,
+          userIds: cleanup.userIds,
+        });
+      }
+    },
+    30_000,
+  );
+
   it("advertises skip reason when live DB is unavailable", () => {
     advertiseLiveDbSkipReason("issue-008-queued");
     expect(true).toBe(true);

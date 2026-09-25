@@ -276,6 +276,15 @@ DECLARE
   c_recon_re   CONSTANT text :=
     'p_kind[[:space:]]*:=[[:space:]]*''reconstruct_allocator_history''';
   c_uv_re      CONSTANT text := 'EXCEPTION[[:space:]]+WHEN[[:space:]]+unique_violation';
+  -- Arm (e), tightened in the round-1 review (migration-reviewer INFO): the
+  -- gate is the SELECT EXISTS that fills v_prior_reconstruct from THIS key's
+  -- reconstruct jobs, and the IF that reads it. Word probes alone survived the
+  -- SELECT being deleted, which turns the IF into `IF NULL` and silently stops
+  -- every first-connect reconstruct. [^;]* keeps each match inside one statement.
+  c_gate_re    CONSTANT text :=
+    'SELECT[[:space:]]+EXISTS[^;]*api_key_id[[:space:]]*=[[:space:]]*p_api_key_id[^;]*''reconstruct_allocator_history''[^;]*INTO[[:space:]]+v_prior_reconstruct';
+  c_gate_if_re CONSTANT text :=
+    'IF[[:space:]]+NOT[[:space:]]+v_prior_reconstruct[[:space:]]+THEN';
 BEGIN
   IF v_oid IS NULL THEN
     RAISE EXCEPTION 'allocator-sync-prefetch: public.request_allocator_holdings_sync(uuid) not found';
@@ -345,10 +354,10 @@ BEGIN
     RAISE EXCEPTION 'allocator-sync-prefetch: the one remaining unique_violation handler is not the one after the reconstruct_allocator_history enqueue';
   END IF;
 
-  -- (e) 076's per-api_key reconstruct gate is intact (076's own assertions).
-  IF v_body !~ 'v_prior_reconstruct'
-     OR v_body !~ '''reconstruct_allocator_history'''
-     OR v_body !~ 'api_key_id[[:space:]]*=[[:space:]]*p_api_key_id' THEN
+  -- (e) 076's per-api_key reconstruct gate is intact: the SELECT EXISTS that
+  -- fills v_prior_reconstruct for this key, and the IF that reads it.
+  IF v_body !~ c_gate_re
+     OR v_body !~ c_gate_if_re THEN
     RAISE EXCEPTION 'allocator-sync-prefetch: the per-api_key reconstruct gate from migration 076 is not intact in request_allocator_holdings_sync';
   END IF;
   IF v_body ~ 'v_snapshot_count' THEN
