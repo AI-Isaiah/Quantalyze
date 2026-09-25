@@ -1447,7 +1447,7 @@ async def test_mt5_ipc_transport_fault_emits_its_own_outcome_category(
 async def test_mt5_ipc_transport_fault_logs_scrubbed_code_no_credentials(
     exchange_router, monkeypatch
 ):
-    """The WARNING for this arm carries the SCRUBBED code only — never the
+    """The line for this arm carries the SCRUBBED code only — never the
     interpolated remote text, never a login, password, or broker server
     value. Asserted as a PROPERTY of what was logged (secrets absent), never
     by constructing a credential-shaped literal as the thing searched for
@@ -1474,8 +1474,11 @@ async def test_mt5_ipc_transport_fault_logs_scrubbed_code_no_credentials(
             rendered = repr(call)
             for secret in secrets:
                 assert secret not in rendered
-    assert mock_logger.warning.call_args_list, (
-        "the sweep above is vacuous unless at least one WARNING was captured"
+    # 164.6.5 review round 1 / SFH-08 — the arm now logs at ERROR, so the
+    # non-vacuity check reads the ERROR calls (the level itself is pinned by
+    # `test_ipc_transport_fault_logs_at_error_like_the_d15_arm`).
+    assert mock_logger.error.call_args_list, (
+        "the sweep above is vacuous unless at least one ERROR was captured"
     )
 
     events = [e for e in captured if e.get("event") == "mt5.stage"]
@@ -2976,6 +2979,38 @@ async def test_d15_the_line_names_the_setting_and_why_validation_trips_it(
     assert "every" in line and "client" in line, (
         f"the line does not say the terminal is SHARED by every client: {line!r}"
     )
+
+
+@pytest.mark.parametrize("code", sorted(_IPC_TRANSPORT_CODES))
+async def test_ipc_transport_fault_logs_at_error_like_the_d15_arm(
+    exchange_router, caplog, code
+):
+    """164.6.5 review round 1 / SFH-08 + WR-06. An IPC-wedged gateway terminal is
+    the SAME reach as the D-15 arm above: the one shared terminal serving every
+    MT5 client. The card tells the user "tell us", so the fault must reach an
+    operator. At WARNING it never became a Sentry event, and the validate path
+    does not trigger the heal, so a user hitting it produced log lines only.
+
+    Asserted on level AND content: the line must carry the scrubbed code, and
+    nothing else from the error (no credential, no broker server)."""
+    router = exchange_router
+    client = _make_client(login_raises=Mt5ClientError(code, "IPC fault"))
+    _install_mt5_client(router, client)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.detail["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    records = [
+        r
+        for r in caplog.records
+        if r.name == _ANALYTICS_LOGGER and "IPC transport fault" in r.getMessage()
+    ]
+    assert len(records) == 1, f"expected ONE IPC-arm line, got {records!r}"
+    assert records[0].levelno >= logging.ERROR, (
+        f"the wedged-terminal line logged at {records[0].levelname}: below ERROR it "
+        "is no Sentry event, and the user's card promised that someone was told"
+    )
+    assert f"code={code}" in records[0].getMessage()
 
 
 @pytest.mark.parametrize(

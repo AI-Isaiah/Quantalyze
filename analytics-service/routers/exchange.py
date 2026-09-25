@@ -817,7 +817,14 @@ async def _validate_mt5_key_probe(
                 # post-login read timing out. The login-stage -10005 overlap is
                 # recorded in the merge commit body for a founder decision.
                 if is_ipc_transport_fault(e):
-                    logger.warning(
+                    # 164.6.5 review round 1 / SFH-08 + WR-06 — LOGGED AT ERROR,
+                    # on the D-15 arm's reasoning below: this is THE SHARED
+                    # TERMINAL SERVING EVERY CLIENT, not one user's refusal, and
+                    # the user's card says "tell us". At WARNING it was no Sentry
+                    # event, and this path does not trigger the heal, so nothing
+                    # reached an operator. The Next-side key routes also page it
+                    # (`OUR_DEFECT_KEY_ERROR_CODES`). Codes only, as before.
+                    logger.error(
                         "validate_key: MT5 terminal IPC transport fault (code=%s)",
                         e.code,
                     )

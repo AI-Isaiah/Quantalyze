@@ -5440,6 +5440,17 @@ export const OUR_DEFECT_KEY_ERROR_CODES: ReadonlySet<WizardErrorCode> =
     // operator configuration. All three are worth a page and none is the
     // caller's doing.
     "SEAM_INTERNAL_FAULT",
+    // 164.6.5 review round 1 / WR-06 + SFH-08. The gateway terminal every MT5
+    // client validates against has stopped answering on its IPC transport.
+    // That terminal is infrastructure WE run, so it meets the rule above, and
+    // the card tells the user to "tell us" — a promise nothing kept while this
+    // verdict paged nobody. Before 164.6.5 the same fault was the unpaged
+    // `KEY_NETWORK_TIMEOUT`; minting an honest code was not a reason to stay
+    // quiet about it (the WR-02 lesson this set exists for).
+    // ⚠️ It IS an IPC timeout at the protocol level, and the rule above
+    // excludes timeouts. That exclusion is for an upstream WE DO NOT own being
+    // slow; this is our own terminal, and one wedge takes down every client.
+    "KEY_MT5_TERMINAL_UNRESPONSIVE",
   ]);
 
 /**
