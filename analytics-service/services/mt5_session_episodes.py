@@ -498,12 +498,18 @@ _IPC_FAULT_ESCALATION_ARMED: bool = True
 _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER: int | None = None
 
 
-def claim_ipc_fault_escalation(answer_count: int) -> bool:
-    """``True`` exactly once per run of escalating readings, and DISARMS on it.
+def ipc_fault_escalation_armed(answer_count: int) -> bool:
+    """Whether the heal may recycle now. It does NOT claim the attempt.
 
     ``answer_count`` is the terminal's answered-count NOW. If it has moved since
-    the previous claim, the terminal answered in between — the run that claim
-    belonged to is over — so the gate re-arms before it is claimed (SFH-05).
+    the claim, the terminal answered in between — the run that claim belonged to
+    is over — so the gate re-arms first (SFH-05).
+
+    ⭐ A PEEK, SEPARATE FROM THE CLAIM (WR-01). The claim used to be the FIRST
+    act of the escalation, ahead of the evidence capture and ahead of the
+    recycle verb's own fence, so an escalation abandoned there spent the run's
+    one attempt with no process ended. The heal now peeks, captures, and claims
+    only immediately before the recycle crosses.
 
     ⛔ A SEPARATE FUNCTION for the same reason ``_count_blind_reading`` is one: a
     ``global`` declaration is a statement, and the heal's own bodies are held to
@@ -515,10 +521,19 @@ def claim_ipc_fault_escalation(answer_count: int) -> bool:
         and answer_count != _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER
     ):
         _IPC_FAULT_ESCALATION_ARMED = True
-    armed = _IPC_FAULT_ESCALATION_ARMED
+        _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER = None
+    return _IPC_FAULT_ESCALATION_ARMED
+
+
+def claim_ipc_fault_escalation(answer_count: int) -> None:
+    """DISARM the gate for the rest of this run: the recycle is about to cross.
+
+    Records ``answer_count`` so a later answer from the terminal re-arms it.
+    Called only after ``ipc_fault_escalation_armed`` said yes. It cannot raise.
+    """
+    global _IPC_FAULT_ESCALATION_ARMED, _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER
     _IPC_FAULT_ESCALATION_ARMED = False
     _IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER = answer_count
-    return armed
 
 
 def rearm_ipc_fault_escalation() -> None:

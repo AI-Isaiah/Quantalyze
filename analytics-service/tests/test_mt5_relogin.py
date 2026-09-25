@@ -150,6 +150,9 @@ class _FakeRpycConn:
         if exc is not None:
             raise exc
         owner.recycled = True
+        hook = owner._scenario.get("after_recycle_crossed")
+        if hook is not None:
+            hook()
         return _json.dumps({"matched": 1, "terminated": 1, "exited": 1})
 
 
@@ -1840,6 +1843,90 @@ def test_ESCALATION_the_session_abandonment_exception_still_escapes_untouched(
             mt5_relogin._escalate_ipc_fault(
                 _Client(raise_in), _IPC_TIMEOUT, "unused-server"  # type: ignore[arg-type]
             )
+
+
+def _escalation_client(fake) -> Mt5Client:
+    return Mt5Client(_FAKE_HOST, int(_FAKE_PORT), _connect=lambda **_k: fake)
+
+
+@pytest.mark.parametrize(
+    "released", ["during_the_capture", "after_the_capture"]
+)
+def test_ESCALATION_WR01_an_escalation_abandoned_BEFORE_the_recycle_crossed_keeps_the_attempt(
+    monkeypatch: pytest.MonkeyPatch, released: str
+) -> None:
+    """⛔ WR-01 (164.6.5 review round 1). The gate used to be claimed as the
+    escalation's FIRST act, so an escalation abandoned during the evidence
+    capture, or refused by the recycle verb's own first-statement fence, had
+    spent the run's one attempt with NO process ended — and every later `-10005`
+    was debounced until a redeploy.
+
+    Driven through the REAL verb: the lease releases (the generation bumps)
+    after the capture, so the verb's own fence refuses before anything crosses.
+    The next escalation must still be allowed to recycle."""
+    from services.mt5_client import Mt5SessionAbandoned, bump_mt5_terminal_epoch
+
+    fake = _FakeMt5(dict(_WEDGED))
+    client = _escalation_client(fake)
+    real_capture = mt5_relogin._capture_wedge_evidence
+
+    def _capture_with_lease_release(c, env_server):
+        if released == "during_the_capture":
+            c._assert_live("bind")  # first touch binds the generation
+            bump_mt5_terminal_epoch(c.terminal_key)
+            return real_capture(c, env_server)  # its first read is refused
+        line = real_capture(c, env_server)
+        bump_mt5_terminal_epoch(c.terminal_key)
+        return line
+
+    monkeypatch.setattr(
+        mt5_relogin, "_capture_wedge_evidence", _capture_with_lease_release
+    )
+    with pytest.raises(Mt5SessionAbandoned) as refused:
+        mt5_relogin._escalate_ipc_fault(client, _IPC_TIMEOUT, _FAKE_SERVER)
+    if released == "after_the_capture":
+        assert refused.value.stage == mt5_relogin._RECYCLE_FENCE_STAGE
+    assert fake._MetaTrader5__conn.recycle_calls == [], "the refused recycle crossed"
+
+    monkeypatch.setattr(mt5_relogin, "_capture_wedge_evidence", real_capture)
+    fresh = _FakeMt5(dict(_WEDGED))
+    kind = mt5_relogin._escalate_ipc_fault(
+        _escalation_client(fresh), _IPC_TIMEOUT, _FAKE_SERVER
+    )
+    assert kind is not None and _recycle_count(fresh) == 1, (
+        "an escalation refused BEFORE the recycle crossed spent the run's one "
+        "attempt, so the next wedged reading was debounced (WR-01)"
+    )
+
+
+def test_ESCALATION_WR01_an_escalation_abandoned_AFTER_the_terminate_crossed_spends_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half, so the re-arm above cannot be widened into "re-arm on
+    ANY abandonment": once the terminate has crossed, the shared terminal WAS
+    recycled, and a second attempt in the same run is exactly what the debounce
+    refuses. Here the lease releases while the remote call is in flight, so the
+    relaunch probe's fence is the one that refuses."""
+    from services.mt5_client import Mt5SessionAbandoned, bump_mt5_terminal_epoch
+
+    fake = _FakeMt5(dict(_WEDGED))
+    client = _escalation_client(fake)
+    fake._scenario["after_recycle_crossed"] = lambda: bump_mt5_terminal_epoch(
+        client.terminal_key
+    )
+    with pytest.raises(Mt5SessionAbandoned) as refused:
+        mt5_relogin._escalate_ipc_fault(client, _IPC_TIMEOUT, _FAKE_SERVER)
+    assert refused.value.stage != mt5_relogin._RECYCLE_FENCE_STAGE
+    assert _recycle_count(fake) == 1
+
+    fresh = _FakeMt5(dict(_WEDGED))
+    assert (
+        mt5_relogin._escalate_ipc_fault(
+            _escalation_client(fresh), _IPC_TIMEOUT, _FAKE_SERVER
+        )
+        is None
+    )
+    assert _recycle_count(fresh) == 0
 
 
 async def test_ESCALATION_the_verdict_string_did_not_move(

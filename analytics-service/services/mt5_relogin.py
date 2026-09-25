@@ -88,6 +88,7 @@ from services.mt5_session_episodes import (
     KIND_STILL_UNAUTHORIZED,
     HealOutcome,
     claim_ipc_fault_escalation,
+    ipc_fault_escalation_armed,
     rearm_ipc_fault_escalation,
     record_mt5_heal_outcome,
     record_mt5_session_reading,
@@ -142,6 +143,12 @@ _MT5_NO_AUTHORIZED_ACCOUNT_CODE: Final[int] = -6
 # sentinel are not transport codes and never escalate.
 # --------------------------------------------------------------------------- #
 _MT5_IPC_BRIDGE_DETACHED_CODE: Final[int] = -10004
+
+#: The stage name `Mt5Client.recycle_terminal_process` passes to its OWN
+#: first-statement fence. An `Mt5SessionAbandoned` carrying it was refused before
+#: the recycle crossed the wire (WR-01).
+_RECYCLE_FENCE_STAGE: Final[str] = "terminal_recycle"
+
 _RECYCLE_REACHABLE_IPC_CODES: Final[frozenset[int]] = frozenset(
     _IPC_TRANSPORT_CODES
 ) - {_MT5_IPC_BRIDGE_DETACHED_CODE}
@@ -841,7 +848,8 @@ def _escalate_ipc_fault(
         # bridge (-10005, 0, -10005, 0 ...) recycle the shared terminal every
         # other tick.
         return None
-    if not claim_ipc_fault_escalation(mt5_terminal_answer_count(client.terminal_key)):
+    answers = mt5_terminal_answer_count(client.terminal_key)
+    if not ipc_fault_escalation_armed(answers):
         logger.info(
             "mt5 session heal: ipc_fault code=%s persists — the terminal-process "
             "recycle was already attempted in this run of consecutive faults, so "
@@ -867,6 +875,11 @@ def _escalate_ipc_fault(
         code,
         evidence,
     )
+    # ⛔ WR-01 — CLAIMED HERE, immediately before the recycle, and NOT as the
+    # escalation's first act. An escalation abandoned during the capture used to
+    # have spent the run's one attempt already, with no process ended, so every
+    # later `-10005` was debounced until a redeploy.
+    claim_ipc_fault_escalation(answers)
     try:
         verdict = client.recycle_terminal_process()
         kind = _classify_recycle_verdict(verdict)
@@ -875,7 +888,13 @@ def _escalate_ipc_fault(
             f"exited={verdict.get('exited')} authorized={verdict.get('authorized')} "
             f"relaunch_code={verdict.get('relaunch_code')}"
         )
-    except Mt5SessionAbandoned:
+    except Mt5SessionAbandoned as exc:
+        # ⛔ WR-01 — `terminal_recycle` is the verb's OWN first-statement fence:
+        # it refused BEFORE anything crossed, so no process was ended and the
+        # attempt was not spent. Any other stage is the relaunch, i.e. AFTER the
+        # terminate crossed, and the attempt stands.
+        if exc.stage == _RECYCLE_FENCE_STAGE:
+            rearm_ipc_fault_escalation()
         raise
     except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
         kind = KIND_IPC_FAULT_RECYCLE_FAILED
