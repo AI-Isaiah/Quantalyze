@@ -2298,7 +2298,7 @@ Plans:
 **Success criteria:** (1) the harm is shown on the local lane first (claim, then retract, then observe the run's decision), or the phase shrinks; (2) the composite guard and `is_protected` reach the same verdict for a marker retracted after the claim, proven by execution; (3) a regression test observed RED when the fix is neutered; (4) the runbook precondition is removed or restated to match.
 **Requirements**: TBD
 **Depends on:** Phase 164.6
-**Plans:** 0 plans
+**Plans:** 3 plans
 
 Plans:
 
