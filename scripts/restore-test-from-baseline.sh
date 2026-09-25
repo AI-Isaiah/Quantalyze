@@ -917,6 +917,22 @@ refuse_bad_refdata_allowlist() {
     REFDATA_TABLES+=("$tbl")
     REFDATA_EXPECT+=("$expect")
   done < <(awk '/^-- refdata-expect: /' "$tmp")
+
+  # ⛔ 164.9.2 review SFH-05 — THE C5 SIDE GETS TWO READINGS TOO. The INSERT side
+  # is read twice, independently: the allowlist's bytes (REFDATA_ENTRY_N) and the
+  # extractor's `-- refdata-expect:` trailers. C5 was read once: the restore
+  # counted `-- refdata-update:` trailers into a NOTE and compared them to
+  # nothing, so an extractor on the REFDATA_EXTRACTOR seam that replays UPDATE SQL
+  # under a drifted trailer spelling (or none) logged "0 C5 update statement(s)
+  # replayed" and went on. The SQL still ran, so no row was wrong — but the log
+  # stopped being evidence that C5 ran. Both C5 kinds are now summed from the
+  # allowlist's own pins, the same awk shape REFDATA_ENTRY_N uses, and must equal
+  # the trailers the extractor emitted. Arm 24 legs (d) and (e) drive each way.
+  local update_pinned decline_pinned update_emitted decline_emitted
+  update_pinned=$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && $3 ~ /^update:[1-9][0-9]*$/ { sub(/^update:/, "", $3); s += $3 } END { print s+0 }' "$REFDATA_ALLOWLIST")
+  decline_pinned=$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && $3 ~ /^decline:[1-9][0-9]*$/ { sub(/^decline:/, "", $3); s += $3 } END { print s+0 }' "$REFDATA_ALLOWLIST")
+  update_emitted=$(awk '/^-- refdata-update: /{ c++ } END { print c+0 }' "$tmp")
+  decline_emitted=$(awk '/^-- refdata-decline: /{ c++ } END { print c+0 }' "$tmp")
   rm -f "$tmp" "${tmp}.err"
 
   # A SECOND, INDEPENDENT EMPTINESS READING, of the extractor's OUTPUT rather than
@@ -926,6 +942,14 @@ refuse_bad_refdata_allowlist() {
   # 24 leg (c) drives exactly that through the REFDATA_EXTRACTOR seam.
   if [ "${#REFDATA_TABLES[@]}" -eq 0 ]; then
     fail "the reference-data extractor exited 0 but emitted NO \`-- refdata-expect:\` trailer for ${REFDATA_ALLOWLIST}. With no table list the in-transaction gate has nothing to count and would pass vacuously; refusing rather than restoring unguarded."
+  fi
+  # The C5 pin comparison (SFH-05) runs AFTER the zero-trailer refusal above, so
+  # an extractor that emitted nothing at all is named as exactly that (arm 24 c).
+  if [ "$update_emitted" -ne "$update_pinned" ]; then
+    fail "the reference-data extractor emitted ${update_emitted} \`-- refdata-update:\` trailer(s) but the update: lines of ${REFDATA_ALLOWLIST} pin ${update_pinned} C5 statement(s). The two are independent readings of one fact; when they disagree the restore log cannot say what C5 replayed, so this restore is refused rather than run on an unmeasured replay."
+  fi
+  if [ "$decline_emitted" -ne "$decline_pinned" ]; then
+    fail "the reference-data extractor named ${decline_emitted} declined write(s) on \`-- refdata-decline:\` lines but the decline: lines of ${REFDATA_ALLOWLIST} pin ${decline_pinned}. When they disagree the restore log cannot say what it deliberately left out, so this restore is refused."
   fi
   note "refdata: ${#REFDATA_TABLES[@]} table(s) from ${REFDATA_ENTRY_N} allowlist line(s) under ${REFDATA_ALLOWLIST}, each with a pinned statement count"
 }
@@ -3358,6 +3382,8 @@ FRESHSTUB
   # at least one arm asserting a NAMED message — not that every branch is armed.
   #
   # All three driven branches are pure filesystem, so they fire before the first
+  # (164.9.2 review SFH-05 added legs (d) and (e), the C5 trailer-vs-pin drift,
+  # which are pure filesystem too and carry the same no-write check)
   # connection: the arm asserts the pre-census banner NEVER PRINTED, which is what
   # makes "before any write" a measurement rather than a claim about ordering in
   # the source. ⚠️ That is a NEGATIVE assertion and cannot stand alone — arm 8
@@ -3433,6 +3459,42 @@ FRESHSTUB
     grep -aq 'would pass vacuously' "$out" \
       || { echo "MEASURE_FAIL (c): the refusal does not say WHY an empty table list is unacceptable"; return 1; }
     no_write_check "$out" c || return 1
+
+    # (d)/(e) 164.9.2 review SFH-05 — THE C5 TRAILERS DISAGREE WITH THE PINS. A
+    #     wrapper around the REAL extractor rewrites only its stdout: (d) drops
+    #     every `-- refdata-update:` trailer while the UPDATE SQL still runs, (e)
+    #     adds one `-- refdata-decline:` line the allowlist does not pin. Each is
+    #     one independent reading drifting from the other; each must be refused
+    #     before the first read, by name.
+    printf '%s\n' \
+      '#!/usr/bin/env node' \
+      'import { spawnSync } from "node:child_process";' \
+      'const r = spawnSync(process.execPath, [process.env.ARM24_REAL_EXTRACTOR, ...process.argv.slice(2)], { encoding: "utf8" });' \
+      'process.stderr.write(r.stderr ?? "");' \
+      'const drop = process.env.ARM24_DROP ?? "";' \
+      'let out = (r.stdout ?? "").split("\n").filter((l) => !(drop && l.startsWith(drop))).join("\n");' \
+      'if (process.env.ARM24_EXTRA) out += process.env.ARM24_EXTRA + "\n";' \
+      'process.stdout.write(out);' \
+      'process.exitCode = r.status ?? 1;' \
+      > "$scratch/c5-drift-extractor.mjs"
+    ARM_REFDATA_EXTRACTOR="$scratch/c5-drift-extractor.mjs"
+    out="$SELFTEST_TMPD/a24d.out"; rc=0
+    ARM24_REAL_EXTRACTOR="$SCRIPT_DIR/extract-reference-inserts.mjs" ARM24_DROP="-- refdata-update: " \
+      arm_env preflight a24d > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (d): an extractor that replays the C5 UPDATE with no \`-- refdata-update:\` trailer was ACCEPTED (exit ${rc}); the restore log would read 0 C5 updates replayed"; return 1; }
+    grep -aq 'emitted 0 `-- refdata-update:` trailer(s) but the update: lines of' "$out" \
+      || { echo "MEASURE_FAIL (d): the refusal is not the C5 update-pin one"; return 1; }
+    no_write_check "$out" d || return 1
+
+    out="$SELFTEST_TMPD/a24e.out"; rc=0
+    ARM24_REAL_EXTRACTOR="$SCRIPT_DIR/extract-reference-inserts.mjs" ARM24_EXTRA="-- refdata-decline: 20260103000000_fixture_c.sql:1 public.fx_keep" \
+      arm_env preflight a24e > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (e): an extractor naming a declined write the allowlist does not pin was ACCEPTED (exit ${rc})"; return 1; }
+    grep -aq 'named 2 declined write(s) on `-- refdata-decline:` lines but the decline: lines of' "$out" \
+      || { echo "MEASURE_FAIL (e): the refusal is not the C5 decline-pin one"; return 1; }
+    no_write_check "$out" e || return 1
     return 0
   }
 
@@ -4001,7 +4063,7 @@ FRESHSTUB
   run_arm "21 RED   migration corpus: bad charset, empty, absent (A3)" 0 arm_bad_migration_corpus
   run_arm "22 GREEN reference data replayed, gated and censused — the transaction commits" 0 arm_g_refdata_replay
   run_arm "23 RED   the reference-data gate BITES: no replay, no search_path, partial replay" 0 arm_refdata_gate_bites
-  run_arm "24 RED   reference-data allowlist: count drift, empty, silent extractor" 0 arm_bad_refdata_allowlist
+  run_arm "24 RED   reference-data allowlist: count drift, empty, silent extractor, C5 trailers vs pins (164.9.2 SFH-05)" 0 arm_bad_refdata_allowlist
   run_arm "25 GREEN the preflight rollback view normalises mutable reference counts and NOTHING else (CR-01)" 0 arm_census_rollback_view
   run_arm "26 RED   a backtick inside ANY unquoted heredoc is refused — SEVEN evasions closed — and THIS script is clean" 0 arm_backtick_in_txn_heredoc
   run_arm "27 RED   a credential in a PUBLISHED .sql file, a file the scan could not find, and the refdata.sql ALTER DATABASE exemption in BOTH directions" 0 arm_published_sql_credential_scan
