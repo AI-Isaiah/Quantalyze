@@ -448,22 +448,22 @@ describe("restore-test-from-baseline.sh — the header's cross-file pointers res
 });
 
 describe("restore-test-from-baseline.sh — the arm ratchet", () => {
-  it("EXPECTED_ARMS=34 is a live line, exactly once, with its MEASURED date beside it", () => {
+  it("EXPECTED_ARMS=36 is a live line, exactly once, with its MEASURED date beside it", () => {
     const region = selfTestRegion(SRC);
     expect(
-      liveCount(region, "EXPECTED_ARMS=34"),
-      "the arm ratchet is no longer a single live `EXPECTED_ARMS=34` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
+      liveCount(region, "EXPECTED_ARMS=36"),
+      "the arm ratchet is no longer a single live `EXPECTED_ARMS=36` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
     ).toBe(1);
 
     // SC-9 (`gate-family-meta.test.ts:18-30`): a threshold constant needs a
     // measurement token AND a date beside it, or nobody can tell a measured floor
     // from a guessed one.
     const lines = region.split("\n");
-    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=34"));
+    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=36"));
     const beside = `${lines[at - 1] ?? ""}\n${lines[at]}`;
     expect(
       beside,
-      "EXPECTED_ARMS=34 carries no MEASURED date on its own or the preceding line — SC-9",
+      "EXPECTED_ARMS=36 carries no MEASURED date on its own or the preceding line — SC-9",
     ).toContain("MEASURED 2026-09-25");
 
     // The harness must ASSERT the count, not merely print it.
@@ -494,9 +494,9 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION for the pair above — move the constant and the prose must
     // disagree, or this assertion is measuring nothing.
-    const moved = SRC.replace("\nEXPECTED_ARMS=34\n", "\nEXPECTED_ARMS=35\n");
+    const moved = SRC.replace("\nEXPECTED_ARMS=36\n", "\nEXPECTED_ARMS=37\n");
     expect(moved).not.toBe(SRC);
-    const movedArms = 35;
+    const movedArms = 37;
     expect(
       SRC.split("\n").filter((l) => /prints \d+\/\d+/.test(l)).every((l) => l.includes(`prints ${movedArms}/${movedArms}`)),
       "the `prints N/N` prose still agrees with a MOVED constant, so the agreement check is vacuous.",
@@ -504,15 +504,15 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — comment the constant out; a whole-file `toContain` would
     // still pass, this pin must not.
-    const commented = SRC.replace("\nEXPECTED_ARMS=34\n", "\n# EXPECTED_ARMS=34\n");
+    const commented = SRC.replace("\nEXPECTED_ARMS=36\n", "\n# EXPECTED_ARMS=36\n");
     expect(commented).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=34")).toBe(0);
+    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=36")).toBe(0);
 
     // CALIBRATION — a second copy of the constant is a disagreement waiting to
     // happen, and must fail the "exactly once" leg.
-    const doubled = SRC.replace("\nEXPECTED_ARMS=34\n", "\nEXPECTED_ARMS=34\nEXPECTED_ARMS=34\n");
+    const doubled = SRC.replace("\nEXPECTED_ARMS=36\n", "\nEXPECTED_ARMS=36\nEXPECTED_ARMS=36\n");
     expect(doubled).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=34")).toBe(2);
+    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=36")).toBe(2);
   });
 
   it("plan 01's interim closing line is GONE — the word it used appears nowhere", () => {
@@ -531,8 +531,8 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — re-insert the interim line; the pin must flip.
     const restored = SRC.replace(
-      "\nEXPECTED_ARMS=34\n",
-      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=34\n`,
+      "\nEXPECTED_ARMS=36\n",
+      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=36\n`,
     );
     expect(restored).not.toBe(SRC);
     expect(restored.includes(interimWord)).toBe(true);
@@ -542,9 +542,11 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 describe("restore-test-from-baseline.sh — L-01: the reference-data replay's position", () => {
   it("the bracket, the replay, the path restore, the gate and the ledger DDL are emitted IN THAT ORDER", () => {
     // ⛔ THIS ORDERING IS THE WHOLE DESIGN, AND EVERY STEP OF IT IS SILENT WHEN
-    // WRONG. `SET LOCAL search_path = public, pg_catalog` must precede the replay
+    // WRONG. `SET LOCAL search_path = pg_catalog, public` must precede the replay
     // because the replayed statements are the migrations' ORIGINAL bytes and name
-    // their targets UNQUALIFIED; `pg_catalog` must be restored before the ledger
+    // their targets UNQUALIFIED (and `pg_catalog` is listed FIRST, 164.9.2 review
+    // round 2 WR-03, so a `public.now()` or `public.=` cannot shadow a built-in;
+    // self-test arm 35 measures that); `pg_catalog` must be restored before the ledger
     // DDL because everything below is written expecting it; and the GATE must sit
     // ABOVE the ledger seed, because a gate below it aborts a transaction whose
     // ledger rows were already written — same rollback, but the artifact a reader
@@ -562,7 +564,7 @@ describe("restore-test-from-baseline.sh — L-01: the reference-data replay's po
     ).toBeGreaterThan(3);
 
     const STEPS = [
-      ["the search_path bracket", "SET LOCAL search_path = public, pg_catalog;"],
+      ["the search_path bracket", "SET LOCAL search_path = pg_catalog, public;"],
       ["the replay concatenation", 'cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"'],
       ["the path restore", "TXN_REFDATA_TAIL"],
       ["the gate", "TXN_REFDATA_GATE"],
@@ -599,12 +601,12 @@ describe("restore-test-from-baseline.sh — L-01: the reference-data replay's po
 
     // CALIBRATION 2 — the bracket alone, demoted below the replay. This is the
     // reordering that costs nothing to make and breaks every unqualified target.
-    const bracket = "SET LOCAL search_path = public, pg_catalog;\n";
+    const bracket = "SET LOCAL search_path = pg_catalog, public;\n";
     const replay = '  cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"\n';
     const demoted = SRC.replace(bracket, "").replace(replay, () => `${replay}${bracket}`);
     expect(demoted).not.toBe(SRC);
     const dTxn = txnRegion(demoted);
-    expect(liveIndexOf(dTxn, "SET LOCAL search_path = public, pg_catalog;")).toBeGreaterThan(
+    expect(liveIndexOf(dTxn, "SET LOCAL search_path = pg_catalog, public;")).toBeGreaterThan(
       liveIndexOf(dTxn, 'cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"'),
     );
   });

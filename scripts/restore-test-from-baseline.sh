@@ -934,6 +934,10 @@ refuse_bad_refdata_allowlist() {
   update_emitted=$(awk '/^-- refdata-update: /{ c++ } END { print c+0 }' "$tmp")
   decline_emitted=$(awk '/^-- refdata-decline: /{ c++ } END { print c+0 }' "$tmp")
   rm -f "$tmp" "${tmp}.err"
+  # 164.9.2 review round 2 (SFH R2-06): kept in scope for `build_transaction`,
+  # which compares the REPLAYED emission with the same pins.
+  REFDATA_UPDATE_PINNED="$update_pinned"
+  REFDATA_DECLINE_PINNED="$decline_pinned"
 
   # A SECOND, INDEPENDENT EMPTINESS READING, of the extractor's OUTPUT rather than
   # the allowlist's bytes. A stubbed or half-working extractor that exits 0 and
@@ -1473,6 +1477,21 @@ TXN_MID
   # out. Before this, only refdata.err said so, and it is printed on failure only.
   refdata_decline_n=$(awk '/^-- refdata-decline: /{ c++ } END { print c+0 }' "$RESTORE_OUT_DIR/refdata.sql")
 
+  # ⛔ 164.9.2 review round 2 (SFH R2-06) — THE REPLAYED EMISSION IS COMPARED
+  # WITH THE PINS TOO. `refuse_bad_refdata_allowlist` compared ITS emission, the
+  # preflight run, with the allowlist's update:/decline: sums. This run is a
+  # second one, and it is the one psql executes. Two runs of the shipped
+  # extractor over the same inputs agree, but a nondeterministic extractor on the
+  # REFDATA_EXTRACTOR seam could emit different C5 trailers here, and the notes
+  # below would report them as fact. This is still before `run_transaction`, so a
+  # disagreement writes nothing. Arm 36 drives both kinds.
+  if [ "$refdata_update_n" -ne "$REFDATA_UPDATE_PINNED" ]; then
+    fail "the REPLAYED reference-data emission carries ${refdata_update_n} \`-- refdata-update:\` trailer(s) but the update: lines of ${REFDATA_ALLOWLIST} pin ${REFDATA_UPDATE_PINNED} C5 statement(s). The extractor's two runs disagree, so the restore log cannot say what C5 replayed; refused before the transaction runs."
+  fi
+  if [ "$refdata_decline_n" -ne "$REFDATA_DECLINE_PINNED" ]; then
+    fail "the REPLAYED reference-data emission names ${refdata_decline_n} declined write(s) on \`-- refdata-decline:\` lines but the decline: lines of ${REFDATA_ALLOWLIST} pin ${REFDATA_DECLINE_PINNED}. The extractor's two runs disagree, so the restore log cannot say what it left out; refused before the transaction runs."
+  fi
+
   # ⛔ PITFALL 1 — THE SEARCH_PATH BRACKET IS LOAD-BEARING, NOT HYGIENE. At this
   # point in the stream the session's path is `pg_catalog` (the TXN_MID line
   # above, itself recovering from the dump's own `set_config('search_path','',
@@ -1482,6 +1501,20 @@ TXN_MID
   # with "relation does not exist" and the whole restore would roll back.
   # `pg_catalog` is restored immediately after, BEFORE the ledger DDL, because
   # everything below is written expecting it.
+  #
+  # ⛔ AND `pg_catalog` COMES FIRST IN THE BRACKET (164.9.2 review round 2,
+  # WR-03 / SFH R2-02). The bracket read `public, pg_catalog` until 2026-09-25. A
+  # `pg_catalog` named explicitly is searched at its LISTED position, so under that
+  # order a `public.now()`, or an exact-match `public.=`, won over the built-in
+  # inside the transaction that COMMITs on shared TEST. The migrations ran in PROD
+  # under the default path, where `pg_catalog` is searched implicitly FIRST, so the
+  # replay could resolve a name differently from the run it reproduces.
+  # `pg_catalog, public` is PROD's effective order: built-in functions and
+  # operators always win, and the unqualified TABLES still resolve to `public`,
+  # because `pg_catalog` holds none of them — MEASURED 2026-09-25 on a throwaway
+  # cluster: all 140 `pg_catalog` tables and views are named `pg_*`, and none is
+  # named like an allowlisted table. Arm 35 plants a public `now()` and `=` and
+  # measures both orders.
   #
   # ⛔ PITFALL 2 — THE REPLAY RELIES ON THE CONNECTING ROLE BYPASSING RLS, AND
   # THAT RELIANCE IS ASSERTED RATHER THAN ASSUMED. `public.compute_job_kinds` is
@@ -1506,7 +1539,7 @@ BEGIN
   END IF;
 END
 $rlsguard$;
-SET LOCAL search_path = public, pg_catalog;
+SET LOCAL search_path = pg_catalog, public;
 TXN_REFDATA_HEAD
   cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"
   cat >> "$out" <<'TXN_REFDATA_TAIL'
@@ -2236,7 +2269,7 @@ main() {
 #            (c) an ABSENT migrations dir.
 #   arm 23 — three SCRATCH COPIES, one per link of the reference-data chain:
 #            (a) the replay concatenation deleted -> the emptiness leg names the
-#            table; (b) the `SET LOCAL search_path = public, pg_catalog` bracket
+#            table; (b) the `SET LOCAL search_path = pg_catalog, public` bracket
 #            deleted -> the migrations' unqualified targets stop resolving
 #            (RESEARCH Pitfall 1); (c) one registry row DELETEd inside the
 #            transaction after the replay -> the table is NOT empty, the count
@@ -2264,6 +2297,11 @@ main() {
 #            its DEFAULT and the unchanged value-pinning leg aborts, rolled back;
 #            (b) an allowlist holding ONLY that C5 line -> refused as EMPTY
 #            before any read, because REFDATA_ENTRY_N counts INSERT lines only.
+#   arm 35 — (a) the real bracket with a public `now()` and `=` planted -> the
+#            replay is quiet; (b) the old `public, pg_catalog` order reaches the
+#            `=` shadow; (c) the old order reaches the `now()` shadow.
+#   arm 36 — the REPLAYED emission (a) drops every update trailer, (b) names an
+#            extra declined write -> each refused before the transaction runs.
 #
 # ── REDACTION IS A CHECK WITH A SUBJECT (T-164.8-05) ────────────────────────
 # Every arm's combined output is captured, and after EVERY arm the harness greps
@@ -2314,8 +2352,14 @@ main() {
 # falsifiers (arm 33 RED before the fixture UPDATE existed, and RED again through
 # a neutered-sort COPY of the extractor) were observed and are recorded verbatim
 # in 164.9.2-03-SUMMARY.md.
-# MEASURED 2026-09-25 — `--self-test` prints 34/34 and exits 0 on a throwaway cluster.
-EXPECTED_ARMS=34
+#
+# Arms 35-36 are Phase 164.9.2's review round 2: a public `now()` or `=` cannot
+# shadow the built-in inside the replay, and the old bracket order reaches both
+# (35, WR-03 / SFH R2-02); the REPLAYED refdata.sql's C5 trailers are compared
+# with the pins before the transaction runs (36, SFH R2-06). Both were observed
+# RED against the unfixed script and are recorded in 164.9.2-REVIEW-FIX.md.
+# MEASURED 2026-09-25 — `--self-test` prints 36/36 and exits 0 on a throwaway cluster.
+EXPECTED_ARMS=36
 
 SELFTEST_MUTEX_HOLDER_PID=""
 SELFTEST_TMPD=""
@@ -3272,11 +3316,11 @@ FRESHSTUB
     #     to resolve. Without this leg the bracket is an assertion nobody has seen
     #     matter — it would look like hygiene and be deleted by the next reader.
     copy="$SELFTEST_TMPD/refdata-no-searchpath.sh"
-    awk '!d && $0 == "SET LOCAL search_path = public, pg_catalog;" { d = 1; next }
+    awk '!d && $0 == "SET LOCAL search_path = pg_catalog, public;" { d = 1; next }
          { print }
          END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
       || { echo "MEASURE_FAIL (b): could not build the no-search_path scratch copy — the bracket anchor moved."; return 1; }
-    if grep -aqxF 'SET LOCAL search_path = public, pg_catalog;' "$copy"; then
+    if grep -aqxF 'SET LOCAL search_path = pg_catalog, public;' "$copy"; then
       echo "MEASURE_FAIL (b): the scratch copy STILL carries the search_path bracket."
       return 1
     fi
@@ -4039,6 +4083,177 @@ FRESHSTUB
     return 0
   }
 
+  # ═══ ARM 35 (164.9.2 review round 2, WR-03 / SFH R2-02) — a public built-in ═══
+  # SHADOW cannot reach the replay. The replay runs the migrations' ORIGINAL
+  # bytes, which call `now()` and compare with `=` UNQUALIFIED. PROD ran them
+  # under the default path, where `pg_catalog` is searched implicitly FIRST. The
+  # bracket used to read `public, pg_catalog`, and a `pg_catalog` listed
+  # explicitly is searched at its LISTED position, so a `public.now()` or an
+  # exact-match `public.=` won over the built-in inside the transaction that
+  # COMMITs on shared TEST. The bracket now reads `pg_catalog, public`.
+  #
+  # The shadows are planted INSIDE the transaction, after the dump has re-created
+  # `public` and before the bracket, on a SCRATCH COPY of this script (arm 23's
+  # idiom): a shadow planted in the lane before the restore would die with the
+  # DROP SCHEMA. They are dropped again right after the replay, so nothing
+  # downstream of it (the gate, the shape assertions) sees them. The fixture's
+  # replayed UPDATE is given a `now()` call on a scratch copy of the migrations,
+  # which the extractor admits (C5 allows `now()`).
+  #
+  #   (a) the REAL bracket with both shadows planted -> the replay is QUIET and
+  #       the preflight completes: `now()` and `=` resolved to pg_catalog's.
+  #   (b) the OLD bracket (`public, pg_catalog`) with the `=` shadow planted ->
+  #       the shadow runs and aborts by name, rolled back.
+  #   (c) the OLD bracket with the `now()` shadow planted -> the same, by name.
+  # (b) and (c) are what make (a) mean anything: the SAME statements, under the
+  # order this script used to ship, reach each shadow. Delete them and (a) could
+  # be quiet because the replay never called `now()` or `=` at all.
+  arm_refdata_builtin_shadow() {
+    local scratch="$SELFTEST_TMPD/refdata-arm35" out rc n
+    rm -rf "$scratch"
+    mkdir -p "$scratch/mig"
+    cp "$FIXTURES"/migrations/*.sql "$scratch/mig/"
+    awk '!d && sub(/ WHERE id = 3;$/, " WHERE id = 3 AND now() IS NOT NULL;") { d = 1 }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' \
+      "$FIXTURES/migrations/20260103000000_fixture_c.sql" > "$scratch/mig/20260103000000_fixture_c.sql" \
+      || { echo "MEASURE_FAIL: could not give the fixture's replayed UPDATE a now() call — its anchor moved."; return 1; }
+
+    cat > "$scratch/shadow-op.sql" <<'ARM35_SHADOW_OP'
+CREATE FUNCTION public.arm35_shadow_int4eq(integer, integer) RETURNS boolean
+  LANGUAGE plpgsql AS $arm35$ BEGIN RAISE EXCEPTION 'arm35 SHADOWED: public.=(integer,integer) ran in the replay, not pg_catalog.='; END $arm35$;
+CREATE OPERATOR public.= (LEFTARG = integer, RIGHTARG = integer, FUNCTION = public.arm35_shadow_int4eq);
+ARM35_SHADOW_OP
+    cat > "$scratch/shadow-now.sql" <<'ARM35_SHADOW_NOW'
+CREATE FUNCTION public.now() RETURNS timestamptz
+  LANGUAGE plpgsql AS $arm35$ BEGIN RAISE EXCEPTION 'arm35 SHADOWED: public.now() ran in the replay, not pg_catalog.now()'; END $arm35$;
+ARM35_SHADOW_NOW
+    cat "$scratch/shadow-op.sql" "$scratch/shadow-now.sql" > "$scratch/shadow-both.sql"
+    cat > "$scratch/unshadow.sql" <<'ARM35_UNSHADOW'
+DROP OPERATOR IF EXISTS public.= (integer, integer);
+DROP FUNCTION IF EXISTS public.arm35_shadow_int4eq(integer, integer);
+DROP FUNCTION IF EXISTS public.now();
+ARM35_UNSHADOW
+
+    # $1 source script, $2 shadow SQL, $3 the copy. Plants before the bracket's
+    # heredoc, unplants after the replay concatenation.
+    arm35_copy() {
+      awk -v shadow="$2" -v unshadow="$scratch/unshadow.sql" '
+        index($0, "cat >> \"$out\" <<\047TXN_REFDATA_HEAD\047") > 0 {
+          print "  cat \"" shadow "\" >> \"$out\"  # arm 35: a public built-in shadow, scratch copy only"; p++ }
+        { print }
+        index($0, "cat \"$RESTORE_OUT_DIR/refdata.sql\" >> \"$out\"") > 0 {
+          print "  cat \"" unshadow "\" >> \"$out\"  # arm 35: the shadow dropped after the replay, scratch copy only"; u++ }
+        END { if (p != 1 || u != 1) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$1" > "$3"
+    }
+    local ARM_MIGRATIONS_DIR="$scratch/mig"
+
+    # (a) the real bracket, both shadows planted.
+    arm35_copy "$0" "$scratch/shadow-both.sql" "$scratch/real.sh" \
+      || { echo "MEASURE_FAIL (a): could not build the shadowed scratch copy — an anchor moved."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a35a.out"; rc=0
+    run_leg "$scratch/real.sh" preflight a35a > "$out" 2>&1 || rc=$?
+    cat "$out"
+    grep -aqF 'WHERE id = 3 AND now() IS NOT NULL;' "$SELFTEST_TMPD/out-a35a/refdata.sql" \
+      || { echo "MEASURE_FAIL (a): the replayed refdata.sql does not carry the now() call, so a quiet replay would prove nothing about now()"; return 1; }
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL (a): with a public now() and a public = planted, the replay exited ${rc}, expected 0 — a public object shadowed a built-in inside the replay (WR-03 / R2-02)"; return 1; }
+    if grep -aq 'arm35 SHADOWED' "$out"; then
+      echo "MEASURE_FAIL (a): a planted public shadow RAN inside the replay"
+      return 1
+    fi
+
+    # (b) and (c): the bracket reverted to the order this script used to ship.
+    awk '!d && $0 == "SET LOCAL search_path = pg_catalog, public;" { print "SET LOCAL search_path = public, pg_catalog;"; d = 1; next }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$scratch/old-order.sh" \
+      || { echo "MEASURE_FAIL (b): could not build the old-order scratch copy — the bracket anchor moved."; return 1; }
+    local leg sql needle
+    for leg in b c; do
+      if [ "$leg" = b ]; then sql="$scratch/shadow-op.sql"; needle='arm35 SHADOWED: public.=(integer,integer) ran in the replay'
+      else sql="$scratch/shadow-now.sql"; needle='arm35 SHADOWED: public.now() ran in the replay'; fi
+      arm35_copy "$scratch/old-order.sh" "$sql" "$scratch/old-${leg}.sh" \
+        || { echo "MEASURE_FAIL (${leg}): could not build the old-order shadowed copy — an anchor moved."; return 1; }
+      setup_lane || return 1
+      out="$SELFTEST_TMPD/a35${leg}.out"; rc=0
+      run_leg "$scratch/old-${leg}.sh" preflight "a35${leg}" > "$out" 2>&1 || rc=$?
+      cat "$out"
+      [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (${leg}): under the OLD bracket the planted shadow did not abort the replay (exit ${rc}), so leg (a) being quiet proves nothing"; return 1; }
+      grep -aqF "$needle" "$out" \
+        || { echo "MEASURE_FAIL (${leg}): the abort is not the planted shadow's — the old bracket did not reach it, and leg (a) is unmeasured"; return 1; }
+      n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+      [ "$n" = "1" ] || { echo "MEASURE_FAIL (${leg}): the stray table is gone (count=${n}) — the aborted replay did not roll back."; return 1; }
+    done
+    return 0
+  }
+
+  # ═══ ARM 36 (164.9.2 review round 2, SFH R2-06) — the REPLAYED emission's C5 ═══
+  # trailers are compared with the allowlist's pins, not only the preflight's.
+  # The extractor runs twice: `refuse_bad_refdata_allowlist` reads one emission
+  # and compares it with the pins, and `build_transaction` writes the SECOND into
+  # refdata.sql, which is what psql executes. The second was noted and compared
+  # with nothing. A wrapper on the REFDATA_EXTRACTOR seam passes the first run
+  # through untouched and rewrites only the second: (a) drops every
+  # `-- refdata-update:` trailer, (b) adds a `-- refdata-decline:` line. Each must
+  # be refused by name AFTER the pre-census read and BEFORE the transaction runs,
+  # with the database untouched.
+  arm_refdata_replayed_c5_pins() {
+    local scratch="$SELFTEST_TMPD/refdata-arm36" out rc n leg
+    rm -rf "$scratch"
+    mkdir -p "$scratch"
+    printf '%s\n' \
+      '#!/usr/bin/env node' \
+      'import { spawnSync } from "node:child_process";' \
+      'import { readFileSync, writeFileSync, existsSync } from "node:fs";' \
+      'const st = process.env.ARM36_STATE;' \
+      'const call = (existsSync(st) ? Number(readFileSync(st, "utf8")) : 0) + 1;' \
+      'writeFileSync(st, String(call));' \
+      'const r = spawnSync(process.execPath, [process.env.ARM36_REAL_EXTRACTOR, ...process.argv.slice(2)], { encoding: "utf8" });' \
+      'process.stderr.write(r.stderr ?? "");' \
+      'let out = r.stdout ?? "";' \
+      'if (call === 2) {' \
+      '  const drop = process.env.ARM36_DROP ?? "";' \
+      '  out = out.split("\n").filter((l) => !(drop && l.startsWith(drop))).join("\n");' \
+      '  if (process.env.ARM36_EXTRA) out += process.env.ARM36_EXTRA + "\n";' \
+      '}' \
+      'process.stdout.write(out);' \
+      'process.exitCode = r.status ?? 1;' \
+      > "$scratch/second-run-drift.mjs"
+    local ARM_REFDATA_EXTRACTOR="$scratch/second-run-drift.mjs"
+    for leg in a b; do
+      setup_lane || return 1
+      rm -f "$scratch/state-${leg}"
+      out="$SELFTEST_TMPD/a36${leg}.out"; rc=0
+      if [ "$leg" = a ]; then
+        ARM36_STATE="$scratch/state-${leg}" ARM36_REAL_EXTRACTOR="$SCRIPT_DIR/extract-reference-inserts.mjs" ARM36_DROP="-- refdata-update: " \
+          arm_env restore "a36${leg}" > "$out" 2>&1 || rc=$?
+      else
+        ARM36_STATE="$scratch/state-${leg}" ARM36_REAL_EXTRACTOR="$SCRIPT_DIR/extract-reference-inserts.mjs" ARM36_EXTRA="-- refdata-decline: 20260103000000_fixture_c.sql:1 public.fx_keep" \
+          arm_env restore "a36${leg}" > "$out" 2>&1 || rc=$?
+      fi
+      cat "$out"
+      [ "$(cat "$scratch/state-${leg}" 2>/dev/null)" = "2" ] \
+        || { echo "MEASURE_FAIL (${leg}): the extractor ran $(cat "$scratch/state-${leg}" 2>/dev/null || echo 0) time(s), not 2 — the drift never reached the replayed emission, so this leg measures nothing"; return 1; }
+      [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (${leg}): a replayed emission whose C5 trailers disagree with the pins was ACCEPTED (exit ${rc}); only the preflight emission was compared"; return 1; }
+      if [ "$leg" = a ]; then
+        grep -aq 'the REPLAYED reference-data emission carries 0 `-- refdata-update:` trailer(s) but the update: lines of' "$out" \
+          || { echo "MEASURE_FAIL (a): the refusal is not the replayed-emission C5 update-pin one"; return 1; }
+      else
+        grep -aq 'the REPLAYED reference-data emission names 2 declined write(s) on `-- refdata-decline:` lines but the decline: lines of' "$out" \
+          || { echo "MEASURE_FAIL (b): the refusal is not the replayed-emission C5 decline-pin one"; return 1; }
+      fi
+      grep -aq 'pre-census (read-only)' "$out" \
+        || { echo "MEASURE_FAIL (${leg}): the pre-census never ran, so the refusal fired at the FIRST reading and the second is still unmeasured"; return 1; }
+      if grep -aq '── transaction (mode=' "$out"; then
+        echo "MEASURE_FAIL (${leg}): the transaction banner printed — the refusal did not fire before the write"
+        return 1
+      fi
+      n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+      [ "$n" = "1" ] || { echo "MEASURE_FAIL (${leg}): the stray table is gone (count=${n}) — the database was written."; return 1; }
+    done
+    return 0
+  }
+
   run_arm "1  RED   credential absent — a missing DSN is a hard failure, never a skip" 0 arm_credential_absent
   run_arm "2  RED   identity marker NULL — refused before any write" 0 arm_marker_null
   run_arm "3  RED   identity marker names PROD — refused, loudly" 0 arm_marker_prod
@@ -4074,6 +4289,8 @@ FRESHSTUB
   run_arm "32 GREEN the reference-data value-pinning leg is QUIET when the row holds its pinned value (164.9-07)" 0 arm_wrongstate_green
   run_arm "33 GREEN a replayed C5 UPDATE lands after its INSERT inside the transaction, and the value-pinning leg is QUIET (164.9.2 C5)" 0 arm_c5_update_green
   run_arm "34 RED   without the C5 update: line the row stays at its DEFAULT and the value-pinning leg aborts (164.9.2 C5)" 0 arm_c5_update_red
+  run_arm "35 RED   a public now() or = cannot shadow the built-in inside the replay; the old bracket order reaches both (164.9.2 WR-03)" 0 arm_refdata_builtin_shadow
+  run_arm "36 RED   the REPLAYED refdata.sql's C5 trailers are compared with the pins, before the transaction runs (164.9.2 SFH R2-06)" 0 arm_refdata_replayed_c5_pins
 
   release_mutex
 

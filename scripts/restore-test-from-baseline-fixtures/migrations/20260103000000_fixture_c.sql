@@ -7,7 +7,7 @@
 -- scripts/extract-reference-inserts.mjs and replayed inside the restore
 -- transaction. It is UNQUALIFIED on purpose — at the replay site the session's
 -- search_path is `pg_catalog`, so an unqualified target only resolves because the
--- replay is bracketed by `SET LOCAL search_path = public, pg_catalog` (RESEARCH
+-- replay is bracketed by `SET LOCAL search_path = pg_catalog, public` (RESEARCH
 -- Pitfall 1). Delete that bracket and this statement fails to find the table.
 --
 -- The three labels are exactly the values baseline-fixture.sql's `fx_keep_kind_check`
