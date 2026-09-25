@@ -1043,8 +1043,14 @@ export function matchUpdate(src, prep, qualified) {
   // the restore drops `public` and rebuilds it, so a DO-body write there is LOST
   // by a restore; `auth.users` survives the DROP, so a write a DO body made there
   // is still on TEST afterwards and there is nothing to replay. (Measured
-  // 2026-09-25: the nine DO-body writes on auth.users in the corpus are all
-  // self-test fixtures deleting the uid they created.)
+  // 2026-09-25: the EIGHT DO-body writes on auth.users in the corpus, over 7
+  // files, are all self-test fixtures deleting the uid they created. Round 1
+  // said nine here and in REVIEW-FIX.md; round 2's IN-04 re-measured 8, and
+  // the count is re-derivable, so re-derive it rather than trust this one:
+  //   for each corpus file, matchDoBodyWrites(prepareFile(src), "auth.users")
+  // → 8 hits, all DELETE. 5 of them pass freshKeyProof; the other 3 are keyed
+  // by `IN (v_a, v_b)` or by a probe variable the proof does not accept, which
+  // is moot here because auth.* DO-body writes are never counted.)
   const doWrites = schema === "public" ? matchDoBodyWrites(prep, qualified) : [];
   return { ok, body, rejected, doWrites };
 }
