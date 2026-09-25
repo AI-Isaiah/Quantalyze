@@ -1471,8 +1471,16 @@ describe("Critical regression guards", () => {
     // asserts that set EXACTLY against ci.yml in both directions — a new
     // holder that is not listed here, or `sql-tests` re-acquiring the key,
     // fails rather than passing unexamined.
+    //
+    // Re-subjected by Phase 164.4.2.1 (D-02 / D-07), 2026-09-25. `test-db-drift`
+    // left the key: VAC-08 is read-only and is ordered after apply-test by its
+    // `Wait for the TEST schema apply` step, so DB_JOBS is `python` and
+    // `e2e-seeded`. A negative pin says `test-db-drift` holds no key, the
+    // ordering pin now carries SC-2 for `test-db-drift`, and its TTL and
+    // `needs: python` moved into that pin because the per-holder TTL loop no
+    // longer covers it.
     describe("shared-test-db serialization via the advisory-lock mutex (D-05 / Phase 158)", () => {
-      const DB_JOBS = ["python", "e2e-seeded", "test-db-drift"] as const;
+      const DB_JOBS = ["python", "e2e-seeded"] as const;
       // Same job-slicing idiom as the supabase-migrate describes above:
       // anchor on the start-of-line job key, stop at the next top-level one.
       const jobSlice = (src: string, job: string): string =>
@@ -1491,10 +1499,11 @@ describe("Critical regression guards", () => {
       // this phase's own invariant: re-acquiring would re-serialize the
       // tracer behind the key it was moved off, erasing the measured win
       // without any other test noticing.
-      it("the set of jobs holding the shared-test-db key is EXACTLY DB_JOBS, and sql-tests is not among them", () => {
-        const src = readText(".github/workflows/ci.yml");
-        const jobKeys = [...src.matchAll(/^ {2}([a-z0-9-]+):\s*$/gm)].map((m) => m[1]);
-        const holders = jobKeys
+      // ONE detector, shared by the holder-set pin and the test-db-drift
+      // negative below, so the two can never disagree about what "holds" means.
+      const measureHolders = (src: string): string[] =>
+        [...src.matchAll(/^ {2}([a-z0-9-]+):\s*$/gm)]
+          .map((m) => m[1])
           .filter((job) => {
             const body = src.match(
               new RegExp(`^ {2}${job}:\\s*\\n([\\s\\S]*?)(?=\\n {2}[a-z]|$(?![\\s\\S]))`, "m"),
@@ -1502,6 +1511,8 @@ describe("Critical regression guards", () => {
             return /- name: Acquire shared-test-db mutex|61616158/.test(body);
           })
           .sort();
+      it("the set of jobs holding the shared-test-db key is EXACTLY DB_JOBS, and sql-tests is not among them", () => {
+        const holders = measureHolders(readText(".github/workflows/ci.yml"));
         expect(
           holders,
           `ci.yml: the jobs that hold (or name) shared-test-db key 61616158 are [${holders.join(", ")}], but DB_JOBS pins [${[...DB_JOBS].sort().join(", ")}]. A holder missing from DB_JOBS runs a mutex protocol no pin below inspects; a DB_JOBS entry that no longer holds means the list describes a mechanism that moved. Update DB_JOBS in the same commit as the ci.yml change, with its reason (D-05 / Phase 164.4.2 DECISION B)`,
@@ -1512,7 +1523,81 @@ describe("Critical regression guards", () => {
         ).toBe(false);
       });
 
-      it("all three DB-touching jobs acquire the mutex on ONE shared advisory-lock key", () => {
+      // Phase 164.4.2.1 D-02, in its OWN `it`: vitest reports only the first
+      // failing expect of an `it`, so a negative placed after the DB_JOBS
+      // equality above could never be seen failing on its own.
+      it("test-db-drift holds and names no shared-test-db key (Phase 164.4.2.1 D-02)", () => {
+        const holders = measureHolders(readText(".github/workflows/ci.yml"));
+        expect(
+          holders.includes("test-db-drift"),
+          "ci.yml test-db-drift acquires (or names) shared-test-db key 61616158 again — Phase 164.4.2.1 D-02 took it off the key: VAC-08 is read-only, it is ordered after apply-test by the `Wait for the TEST schema apply` step, and holding the key made it wait up to 20m31s for 2-5 s of work. Name the key in prose, never by number, inside this job",
+        ).toBe(false);
+      });
+
+      // Phase 164.4.2.1 D-07: with the key gone, the ordering wait is SC-2's
+      // ONLY ordering control on test-db-drift, and the per-holder TTL loop no
+      // longer covers the job — so its order, its enablement, its invocation,
+      // the VAC-08 command, its TTL and its `needs:` are pinned here, one
+      // expect per condition so a failure names the one it broke.
+      it("test-db-drift runs the ordering wait BEFORE VAC-08 and keeps its TTL and needs: python (its only ordering control since 164.4.2.1)", () => {
+        const body = jobSlice(readText(".github/workflows/ci.yml"), "test-db-drift");
+        const wait = body.indexOf("- name: Wait for the TEST schema apply to conclude (merge pushes only)");
+        const vac08 = body.indexOf("- name: VAC-08 - repo-vs-TEST ledger and function body drift");
+        expect(
+          wait,
+          "ci.yml test-db-drift lost its `Wait for the TEST schema apply to conclude (merge pushes only)` step — since Phase 164.4.2.1 it is the ONLY thing ordering VAC-08 after apply-test's schema apply, so without it VAC-08 can judge a half-applied push (SC-2)",
+        ).toBeGreaterThan(-1);
+        expect(
+          vac08,
+          "ci.yml test-db-drift lost its `VAC-08 - repo-vs-TEST ledger and function body drift` step — the job exists only to run it (SC-2)",
+        ).toBeGreaterThan(-1);
+        expect(
+          wait < vac08,
+          "ci.yml test-db-drift runs VAC-08 BEFORE the ordering wait — the wait orders nothing if it runs after the reads it is meant to order (SC-2, Phase 164.4.2.1)",
+        ).toBe(true);
+        // The wait step itself: from its `- name:` line to the next step at
+        // six-space indent, or the end of the job.
+        const afterWait = body.slice(wait);
+        const nextStep = afterWait.slice(1).search(/\n {6}- /);
+        const waitStep = nextStep === -1 ? afterWait : afterWait.slice(0, nextStep + 1);
+        expectMatch(
+          waitStep,
+          /^ {8}if: \$\{\{ needs\.changed-paths\.outputs\.docs_only != 'true' && vars\.E2E_TEST_DB_CONFIGURED == 'true' && github\.event_name == 'push' \}\}$/m,
+          "ci.yml test-db-drift's ordering wait no longer carries its merge-push `if:` exactly — a changed condition can DISABLE the wait while the step stays in place and in order, and VAC-08 then reads TEST unordered on the one event (a merge push) that applies migrations (SC-2)",
+        );
+        expectMatch(
+          waitStep,
+          /bash "\$\{GITHUB_WORKSPACE\}\/scripts\/wait-for-test-schema-apply\.sh"/,
+          "ci.yml test-db-drift's ordering wait step no longer invokes scripts/wait-for-test-schema-apply.sh — a wait step that runs something else orders nothing (SC-2)",
+        );
+        expectMatch(
+          body,
+          /^ {10}bash scripts\/test-ledger-drift-check\.sh$/m,
+          "ci.yml test-db-drift's VAC-08 step no longer runs `bash scripts/test-ledger-drift-check.sh` bare — the gate a developer runs and the gate CI runs must be the same command (SC-2)",
+        );
+        expectMatch(
+          body,
+          /^ {4}timeout-minutes: 90$/m,
+          "ci.yml test-db-drift lost (or changed) `timeout-minutes: 90` — SC-4 forbids raising it and lowering it is out of scope for Phase 164.4.2.1 (D-04); the per-holder TTL loop no longer covers this job, so this is its only pin",
+        );
+        const needsBlock = findOrFail(
+          body,
+          /^ {4}needs:\n((?: {6}- [\w-]+\n)+)/m,
+          "ci.yml test-db-drift: no needs: list found",
+        );
+        expectMatch(
+          needsBlock,
+          /^ {6}- python$/m,
+          "ci.yml test-db-drift dropped `needs: python` — it makes the same-commit supabase-migrate.yml run register long before the ordering wait's appearance grace expires, and it is the downstream backstop for a skipped python job (Phase 164.4.2.1 D-02)",
+        );
+        expectMatch(
+          needsBlock,
+          /^ {6}- changed-paths$/m,
+          "ci.yml test-db-drift dropped `needs: changed-paths` — its `if:` and the wait's `if:` read needs.changed-paths.outputs.docs_only, which is empty without the edge (Phase 164.4.2.1 D-02)",
+        );
+      });
+
+      it("every DB-touching holder job acquires the mutex on ONE shared advisory-lock key", () => {
         const src = readText(".github/workflows/ci.yml");
         const keyByJob = new Map<string, string>();
         for (const job of DB_JOBS) {
@@ -1543,7 +1628,7 @@ describe("Critical regression guards", () => {
       // Phase 158 introduced, both of which are one-line YAML deletions away
       // from silently regressing. That is precisely the silent-green class this
       // phase exists to kill, so they are pinned here too.
-      it("all three DB-touching jobs carry the mutex TTL (timeout-minutes)", () => {
+      it("every DB-touching holder job carries the mutex TTL (timeout-minutes)", () => {
         const src = readText(".github/workflows/ci.yml");
         for (const job of DB_JOBS) {
           expectMatch(
@@ -1604,7 +1689,7 @@ describe("Critical regression guards", () => {
       // pg_advisory_lock so the lock wait itself is exempt/covered and the
       // pid is in the log before MUTEX-ACQUIRED can be grepped — so the pin
       // asserts the whole ordered sequence, not bare membership.
-      it("the mutex holder opens with both session GUCs and the backend-pid marker before pg_advisory_lock in all three acquire steps", () => {
+      it("the mutex holder opens with both session GUCs and the backend-pid marker before pg_advisory_lock in every holder's acquire step", () => {
         const src = readText(".github/workflows/ci.yml");
         const exemptHolderRe =
           /-c "SET statement_timeout = 0;" \\\n\s+-c "SET client_connection_check_interval = '30s';" \\\n\s+-c "SELECT 'HOLDER-BACKEND-PID ' \|\| pg_backend_pid\(\);" \\\n\s+-c "SELECT pg_advisory_lock\(61616158\);"/;
@@ -1625,7 +1710,7 @@ describe("Critical regression guards", () => {
       // Extracting the WHOLE acquire step from each DB job and asserting
       // pairwise string equality mechanically enforces byte-identity, subsumes
       // that count, and names the drifted site on failure.
-      it("the three Acquire shared-test-db mutex steps are byte-identical and carry libpq keepalives", () => {
+      it("every holder's Acquire shared-test-db mutex step is byte-identical and carries libpq keepalives", () => {
         const src = readText(".github/workflows/ci.yml");
         // From the step's `- name:` line (6-space step indent) to the next
         // sibling step or comment at that indent — everything inside the step
@@ -1647,7 +1732,7 @@ describe("Critical regression guards", () => {
         for (const job of otherJobs) {
           expect(
             stepByJob.get(job),
-            `ci.yml ${job}: its "Acquire shared-test-db mutex" step is no longer byte-identical to ${refJob}'s — the three DB-touching jobs' acquire steps are identical BY DESIGN (every mutex invariant is reasoned about once and applied three times), so a single-site drift means one job runs a DIFFERENT mutex protocol than the other two and every per-fragment pin here can still pass (158-MUTEX-01 review)`,
+            `ci.yml ${job}: its "Acquire shared-test-db mutex" step is no longer byte-identical to ${refJob}'s — every holder's acquire step is identical BY DESIGN (every mutex invariant is reasoned about once and applied to each holder), so a single-site drift means one job runs a DIFFERENT mutex protocol than the rest and every per-fragment pin here can still pass (158-MUTEX-01 review)`,
           ).toBe(stepByJob.get(refJob));
         }
         // [158-MUTEX-01 F2]: during the contended pg_advisory_lock wait and
@@ -1656,7 +1741,7 @@ describe("Critical regression guards", () => {
         // invisibly — the backend keeps the lock after the job is gone, and
         // the release step's dead-holder witness never fires. Presence is
         // asserted once on the reference job; byte-identity above extends it
-        // to all three sites.
+        // to every holder.
         expectMatch(
           stepByJob.get(refJob)!,
           /keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4/,
@@ -1673,10 +1758,10 @@ describe("Critical regression guards", () => {
       // janitor for such orphans; zeroing it made them immortal. The real
       // janitor is client_connection_check_interval: the backend polls its
       // client socket during query execution AND lock waits, aborting within
-      // ~30s of the client dying. Every mutex session needs it — the three
+      // ~30s of the client dying. Every mutex session needs it — the
       // ci.yml holders AND the probe's contenders (a probe job timeout kills
       // a contender mid-wait the same way, leaving a zombie waiter).
-      it("every mutex session sets client_connection_check_interval (all three acquire steps + the probe contender)", () => {
+      it("every mutex session sets client_connection_check_interval (every holder's acquire step + the probe contender)", () => {
         const ccciRe = /-c "SET client_connection_check_interval = '30s';"/;
         const src = readText(".github/workflows/ci.yml");
         for (const job of DB_JOBS) {
@@ -1699,7 +1784,7 @@ describe("Critical regression guards", () => {
       // same pid) is what makes the terminate safe against pid recycling —
       // a bare pg_terminate_backend would not be, so the pin asserts the
       // whole guarded statement.
-      it("all three release steps carry the guarded server-side pg_terminate_backend of the holder backend", () => {
+      it("every holder's release step carries the guarded server-side pg_terminate_backend of the holder backend", () => {
         const src = readText(".github/workflows/ci.yml");
         const reapRe =
           /pg_terminate_backend\(\$\{backend\}\) FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158 AND pid = \$\{backend\};/;
