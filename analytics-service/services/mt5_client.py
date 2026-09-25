@@ -818,6 +818,125 @@ def {_REMOTE_MATERIALIZE_FN}(deals):
 """
 
 
+# 164.6.5 / D-05 (Option 2, founder-ratified 2026-09-25) — the TERMINAL-PROCESS
+# recycle. `Mt5Client.recycle_terminal_process` pushes this source across the rpyc
+# classic channel and calls it; see that method for the whole contract. The name
+# the remote function is bound to, and the source that defines it.
+#
+# ⛔ THIS IS A STRING EXECUTED IN A REMOTE INTERPRETER — the WINE-SIDE `python.exe`
+# that serves the rpyc bridge, i.e. WINDOWS Python. It cannot import from this
+# module, cannot be type-checked, and must stay self-contained. Its imports live
+# inside the function body so defining it is harmless on any platform.
+#
+# ⛔ A PLAIN LITERAL, NOT AN F-STRING, AND NEVER ASSEMBLED AT RUN TIME. The rpyc
+# channel is the unauthenticated arbitrary-remote-code channel T-134-03 names;
+# the only way it carries a new class of command safely is if that command is
+# fixed in this file. The function name is therefore written out inside the
+# source rather than interpolated from `_REMOTE_TERMINAL_RECYCLE_FN`, and the ONE
+# run-time value (the exit wait) crosses as a by-value int ARGUMENT, never as
+# text. `tests/test_mt5_client_contract.py` asserts the assignment is an AST
+# string constant, that it carries no brace at all, and that the two names agree.
+#
+# ⛔ IT TERMINATES A PROCESS AND DOES NOTHING ELSE. It does not delete, move,
+# reset or rebuild ANYTHING under the persistent Wine prefix or the named volume
+# (D-07, ONE-WAY). The saved terminal state there is what made the MEASURED
+# unattended recoveries possible; restoring it after a wipe needs a human at the
+# VNC console, which is exactly the 1h39m manual step this phase removes. It takes
+# NO credential and names no account, server or path.
+#
+# ⭐ WHY TERMINATE-ONLY IS A FULL RECYCLE (founder live spike, 2026-09-25). Nothing
+# supervises the terminal, but the MetaTrader5 package's own `initialize()`
+# LAUNCHES a terminal that is not running. Twice the terminal process was killed
+# and, with no human action, the bridge's next `initialize()` relaunched it and it
+# came back authorized with live quotes. So the relaunch is the next bare
+# `initialize()` — which `recycle_terminal_process` issues itself — and no
+# Linux-side launch command is needed or sent.
+#
+# Mechanism: Toolhelp32 enumerates processes, `TerminateProcess` ends every one
+# whose image is `terminal64.exe` (an abrupt end, the same class as the spike's
+# `kill`), and `WaitForSingleObject` bounds the wait for each to exit. It returns
+# a by-value JSON string, never a proxy. A snapshot failure RAISES (and the
+# caller's `_guarded_read` scrubs it); a process that cannot be opened or
+# terminated is COUNTED (matched but not terminated), never silently dropped.
+_REMOTE_TERMINAL_RECYCLE_FN = "_qz_recycle_terminal_process"
+_REMOTE_TERMINAL_RECYCLE_SRC = """
+def _qz_recycle_terminal_process(exit_wait_ms):
+    import ctypes
+    import json
+    from ctypes import wintypes
+
+    image = "terminal64.exe"
+    th32cs_snapprocess = 0x00000002
+    process_terminate = 0x0001
+    synchronize = 0x00100000
+    wait_object_0 = 0x00000000
+
+    class ProcessEntry32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(th32cs_snapprocess, 0)
+    if snapshot is None or snapshot == ctypes.c_void_p(-1).value:
+        raise OSError(ctypes.get_last_error(), "process snapshot failed")
+    pids = []
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(ProcessEntry32W)
+        more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            if entry.szExeFile.lower() == image:
+                pids.append(int(entry.th32ProcessID))
+            more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+    terminated = 0
+    exited = 0
+    for pid in pids:
+        handle = kernel32.OpenProcess(process_terminate | synchronize, False, pid)
+        if not handle:
+            continue
+        try:
+            if kernel32.TerminateProcess(handle, 1):
+                terminated += 1
+                if kernel32.WaitForSingleObject(handle, exit_wait_ms) == wait_object_0:
+                    exited += 1
+        finally:
+            kernel32.CloseHandle(handle)
+    return json.dumps(
+        dict(matched=len(pids), terminated=terminated, exited=exited)
+    )
+"""
+
+# How long the remote source waits for EACH terminated terminal to exit. The one
+# remote crossing is bounded by the rpyc `sync_request_timeout` (30s on the worker
+# chain), so this stays far below it; the relaunch that follows is a SEPARATE
+# round-trip carrying its own registered `initialize` ceiling.
+_TERMINAL_EXIT_WAIT_MS = 5000
+
+
 class Mt5Client:
     """Read-only narrowing facade over `mt5linux.MetaTrader5` (RPyC). Synchronous
     by construction — rpyc classic is blocking. See module docstring."""
@@ -1931,6 +2050,106 @@ class Mt5Client:
             self._teardown_transport(stale, who="Mt5Client.restart", stage=None)
 
         self._timed("restart", _reconnect_then_dispose_stale)
+
+    def recycle_terminal_process(self) -> dict[str, Any]:
+        """Recycle the Wine-hosted ``terminal64.exe`` PROCESS — terminate it over the
+        rpyc channel, then relaunch it with a bare ``initialize()`` (164.6.5 / D-05,
+        Option 2, founder-ratified 2026-09-25).
+
+        ⛔ NOT ``restart``. ``restart`` replaces the rpyc CONNECTION and never touches
+        the terminal; this ends the terminal PROCESS and leaves the connection
+        alone (the bridge is a separate process and survived both spike runs with
+        its pids unchanged). A reader who conflates the two believes the terminal
+        was recycled when only the socket was.
+
+        ⭐ THE ACTION HALF ONLY. Whether to recycle is DECIDED elsewhere, by the
+        credential-free detector ``assert_session_authorized`` (D-06: a process-,
+        window- or UI-liveness probe passed for the whole 1h39m outage). This verb
+        never decides; it is dumb, callable once per call, and never loops — the
+        once-per-episode debounce belongs to its caller.
+
+        ⭐ WHAT IT DOES, AND WHY THAT IS A WHOLE RECYCLE (live spike, 2026-09-25).
+          1. Executes the committed ``_REMOTE_TERMINAL_RECYCLE_SRC`` in the bridge's
+             interpreter, ending every ``terminal64.exe``. A snapshot failure or a
+             dead transport RAISES a typed, scrubbed ``Mt5ClientError`` — it never
+             returns a verdict it did not measure.
+          2. Calls ``assert_session_authorized`` — the same bare, bounded
+             ``initialize()`` the detector uses. The MetaTrader5 package LAUNCHES a
+             terminal that is not running, which is exactly what relaunched it,
+             unattended, in both spike runs. No Linux-side launch command exists
+             in this path.
+        Step 2's failure is RECORDED, not raised: by then the process is already
+        gone, and a raise would hide that from the caller. ``authorized`` is the
+        detector's own answer; ``relaunch_code`` is its ``last_error()`` code
+        (``-6`` no account yet, ``-10003``/``-10004``/``-10005`` IPC, ``0`` a
+        transport failure) and ``None`` when it answered.
+
+        ⛔ TAKES NO CREDENTIAL AND STRUCTURALLY CANNOT. Its signature has no login,
+        password or server, and nothing about it crosses the wire as text. The
+        terminal re-authorizes from the state it keeps in the persistent Wine
+        prefix, or from whichever per-call login next selects an account — MEASURED:
+        after a relaunch the terminal sat on whichever account the last service
+        call had logged in to, so no caller may assume a fixed account after this.
+
+        ⛔ NEVER TOUCHES THE PREFIX OR THE VOLUME (D-07, one-way). See the constant.
+
+        ⚠️ DISRUPTIVE BY DESIGN: the terminal is shared, so this drops the IPC for
+        every caller. Call it only under the terminal lease, and only after the
+        detector has named an IPC fault.
+
+        ⚠️ The spike measured a Linux-side ``kill`` followed by ``initialize()``;
+        issuing the terminate FROM the bridge interpreter via ``TerminateProcess``
+        is the same abrupt end but was NOT itself exercised live before this
+        shipped — see ``deploy/mt5-gateway/railway-gateway.md``'s D-05 record.
+        """
+        # WIZFORM-ABANDON / D-36 — FIRST executable statement, ahead of every
+        # `_timed` bracket and every except arm, exactly as every other session
+        # touch does it. An abandoned recycle would kill the terminal out from
+        # under whoever holds the lease now.
+        self._assert_live("terminal_recycle")
+        conn = getattr(self._mt5, "_MetaTrader5__conn", None)
+        if conn is None:
+            # The same seam `_materialize_rows` depends on. Absent ⇒ nothing was
+            # sent and nothing was terminated; say so rather than return a verdict.
+            raise Mt5ClientError(
+                0, "MT5 rpyc transport is not reachable for the terminal recycle"
+            )
+
+        def _remote_call() -> str:
+            conn.execute(_REMOTE_TERMINAL_RECYCLE_SRC)
+            return cast(
+                str,
+                conn.namespace[_REMOTE_TERMINAL_RECYCLE_FN](_TERMINAL_EXIT_WAIT_MS),
+            )
+
+        # Through `_guarded_read` for the reason every remote crossing is: a remote
+        # traceback carries the executed source line and must be scrubbed, and the
+        # stage bracket is what makes the recycle's cost visible.
+        payload = self._guarded_read(_remote_call, stage="terminal_recycle")
+        try:
+            counts = json.loads(payload)
+            matched = int(counts["matched"])
+            terminated = int(counts["terminated"])
+            exited = int(counts["exited"])
+        except (TypeError, ValueError, KeyError):
+            raise Mt5ClientError(
+                0, "MT5 terminal recycle returned a malformed verdict"
+            ) from None
+
+        authorized = True
+        relaunch_code: int | None = None
+        try:
+            self.assert_session_authorized()
+        except Mt5ClientError as exc:
+            authorized = False
+            relaunch_code = exc.code
+        return {
+            "matched": matched,
+            "terminated": terminated,
+            "exited": exited,
+            "authorized": authorized,
+            "relaunch_code": relaunch_code,
+        }
 
     @property
     def terminal_key(self) -> str:

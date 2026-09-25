@@ -41,6 +41,7 @@ Regression gates — WHY each case matters (Rule 9):
 from __future__ import annotations
 
 import ast
+import json
 import pathlib
 import re
 import sys
@@ -1595,6 +1596,12 @@ def test_public_surface_is_exactly_the_contract():
         # raw-surface attribute — that prohibition is untouched and still bites.
         "assert_session_authorized",
         "initialize_with_credentials",
+        # 164.6.5 / D-05 — the TERMINAL-PROCESS recycle. It wraps no mt5linux
+        # trade or read surface: it ends the terminal process through ONE
+        # committed remote constant and relaunches it with the same bare
+        # `initialize()` the detector above uses. Named apart from `restart`,
+        # which reconnects the rpyc SOCKET and never touches the terminal.
+        "recycle_terminal_process",
     }
 
 
@@ -3822,3 +3829,295 @@ def test_CREDENTIAL_REDACTION_the_falsy_arm_is_SYMMETRIC_across_both_drivable_ve
         "redaction. Only the freeform TEXT may be rewritten — a failure that lost "
         "its code is undebuggable from a log."
     )
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.5 / D-05 (Option 2, founder-ratified 2026-09-25) — THE TERMINAL RECYCLE
+#
+# WHY these matter (Rule 9). The rpyc classic channel is the unauthenticated
+# arbitrary-remote-code channel Phase 134 recorded as T-134-03. D-05 makes it a
+# production RECOVERY path, which is safe only while every property below holds:
+# the command it carries is FIXED in the source (nothing assembled at run time),
+# the verb cannot be handed a credential, an abandoned session cannot fire it,
+# a dead transport can never read as a success, a remote traceback is scrubbed,
+# and the remote source can never touch the Wine prefix that holds the saved
+# terminal state (D-07, ONE-WAY).
+#
+# Every test here carries the token `TERMINAL_RECYCLE` in its name so the CI
+# verify can filter on it and assert a NON-ZERO count.
+#
+# ⛔ The function name and stage name are HAND-TYPED here, never read from the
+# module: an oracle derived from the thing under test cannot fail a rename.
+# --------------------------------------------------------------------------- #
+
+_RECYCLE_FN_NAME = "_qz_recycle_terminal_process"
+_RECYCLE_STAGE = "terminal_recycle"
+
+
+def _install_recycle_double(conn, *, returns=None, raises=None):
+    """Wrap the fake rpyc `execute` so the REAL committed source is still exec'd —
+    proving it compiles and binds the hand-typed name — and then swap the bound
+    function for a recording stub.
+
+    The swap is unavoidable offline: the real body drives Win32 through `ctypes`
+    and exists only in the gateway's Windows interpreter. What CAN be proven
+    offline is proven for real: the exact string that crossed, the argument it
+    was called with, and everything the client does around the crossing.
+    """
+    record: dict = {"sources": [], "calls": []}
+    real_execute = conn.execute
+
+    def _execute(src):
+        record["sources"].append(src)
+        real_execute(src)
+        assert _RECYCLE_FN_NAME in conn.namespace, (
+            "the committed recycle source did not bind the hand-typed name "
+            f"{_RECYCLE_FN_NAME!r} — the client would call a name that does not exist"
+        )
+
+        def _stub(*args):
+            record["calls"].append(args)
+            record["order"] = record.get("order", []) + ["remote"]
+            if raises is not None:
+                raise raises
+            return returns
+
+        dict.__setitem__(conn.namespace, _RECYCLE_FN_NAME, _stub)
+
+    conn.execute = _execute
+    return record
+
+
+def _recycle_verdict(matched=1, terminated=1, exited=1):
+    return json.dumps(dict(matched=matched, terminated=terminated, exited=exited))
+
+
+def test_TERMINAL_RECYCLE_a_live_session_sends_the_committed_source_then_relaunches():
+    """The whole recycle, in order: the COMMITTED constant crosses once, is called
+    with the by-value exit wait, and only THEN is the bare bounded `initialize()`
+    issued that relaunches the terminal (what the founder's 2026-09-25 spike
+    MEASURED relaunching it, unattended, twice).
+
+    The order matters: an `initialize()` issued BEFORE the terminate would attach
+    to the wedged terminal that is about to be killed and report on the wrong
+    process.
+    """
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    conn = fake._MetaTrader5__conn
+    record = _install_recycle_double(conn, returns=_recycle_verdict())
+    real_initialize = fake.initialize
+
+    def _ordered_initialize(**kwargs):
+        record["order"] = record.get("order", []) + ["initialize"]
+        return real_initialize(**kwargs)
+
+    fake.initialize = _ordered_initialize
+
+    with capture_logs() as captured:
+        verdict = client.recycle_terminal_process()
+
+    events = _stage_events(captured, _RECYCLE_STAGE)
+    assert len(events) == 1 and events[0]["ok"] is True, (
+        f"the recycle crossing emitted no timed stage event: {captured}"
+    )
+    assert verdict == {
+        "matched": 1,
+        "terminated": 1,
+        "exited": 1,
+        "authorized": True,
+        "relaunch_code": None,
+    }
+    assert record["sources"] == [mt5_client_mod._REMOTE_TERMINAL_RECYCLE_SRC], (
+        "something other than the committed constant crossed the wire"
+    )
+    assert record["calls"] == [(5000,)], (
+        "the exit wait must cross as ONE by-value int argument — never as text"
+    )
+    assert record["order"] == ["remote", "initialize"]
+    # The relaunch is the detector's own bare, bounded call — timeout only.
+    assert fake.initialize_kwargs == [{"timeout": MT5_INITIALIZE_TIMEOUT_MS}]
+    assert fake.login_calls == []
+
+
+def test_TERMINAL_RECYCLE_a_relaunch_that_is_not_yet_authorized_is_recorded_not_raised():
+    """By the time the relaunch runs the process is already gone. A raise there
+    would hide that from the caller, so the relaunch's answer is RECORDED with
+    its code preserved: `-6` (terminal up, no account yet) is a different next
+    step from an IPC code, and a verdict that lost the code is undebuggable.
+    `authorized` is False — never a success shape the verb did not measure."""
+    connect, fake, _rec = _make(
+        {"initialize": False, "last_error": (-6, "Authorization failed")}
+    )
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    _install_recycle_double(
+        fake._MetaTrader5__conn, returns=_recycle_verdict(1, 1, 1)
+    )
+
+    verdict = client.recycle_terminal_process()
+
+    assert verdict["terminated"] == 1
+    assert verdict["authorized"] is False
+    assert verdict["relaunch_code"] == -6
+
+
+def test_TERMINAL_RECYCLE_the_remote_source_is_a_committed_literal_with_no_interpolation():
+    """T-164.6.5-06. The command that crosses an arbitrary-remote-code channel
+    must be FIXED in this file. Asserted structurally on the source file itself:
+    the module-level assignment is an AST string CONSTANT — not an f-string, not
+    a `.format`, not a concatenation — so nothing assembled at run time can reach
+    the container. The prober asserts the same property one layer over on its own
+    probe body (no `${` marker); the Python analog is no brace at all, which also
+    rules out `str.format` placeholders.
+    """
+    source = pathlib.Path(mt5_client_mod.__file__).read_text()
+    tree = ast.parse(source)
+    assigned = [
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "_REMOTE_TERMINAL_RECYCLE_SRC"
+            for t in node.targets
+        )
+    ]
+    assert len(assigned) == 1, "the recycle source must be assigned exactly once"
+    value = assigned[0]
+    assert isinstance(value, ast.Constant) and isinstance(value.value, str), (
+        f"the recycle source is a {type(value).__name__}, not a plain string "
+        "literal — something is assembled at run time (T-164.6.5-06)"
+    )
+    src = value.value
+    assert src == mt5_client_mod._REMOTE_TERMINAL_RECYCLE_SRC
+    for marker in ("{", "}", "%(", "%s", "%d"):
+        assert marker not in src, f"interpolation marker {marker!r} in the recycle source"
+    assert f"def {_RECYCLE_FN_NAME}(" in src
+    assert mt5_client_mod._REMOTE_TERMINAL_RECYCLE_FN == _RECYCLE_FN_NAME
+    compile(src, "<recycle>", "exec")
+
+
+def test_TERMINAL_RECYCLE_the_remote_source_can_only_end_a_process():
+    """T-164.6.5-09 (D-07, ONE-WAY) and T-164.6.5-05. The remote source may end a
+    process and do nothing else. A body that learned to delete, move or rewrite
+    files could wipe the Wine prefix whose saved state made both measured
+    unattended recoveries possible; restoring it takes a human at the VNC console.
+    A body that learned to log in, trade or `shutdown()` the shared IPC would be a
+    different verb wearing this one's name.
+
+    ⚠️ Positive control at the end: a body that stopped calling `TerminateProcess`
+    would pass every absence above while recycling nothing.
+    """
+    src = mt5_client_mod._REMOTE_TERMINAL_RECYCLE_SRC
+    forbidden = (
+        # filesystem mutation — the D-07 prefix
+        "shutil", "rmtree", "remove", "unlink", "rename", "replace(", "open(",
+        "DeleteFile", "MoveFile", "RemoveDirectory", ".wine", "drive_c", "config",
+        # process launch / shell — no Linux-side command is sent
+        "subprocess", "system(", "popen", "CreateProcess", "ShellExecute",
+        # credentials and the MT5 surface
+        "login", "password", "server", "MetaTrader5", "shutdown", "order_",
+    )
+    lowered = src.lower()
+    present = [token for token in forbidden if token.lower() in lowered]
+    assert not present, f"the recycle source reaches beyond ending a process: {present}"
+    assert "TerminateProcess" in src and "terminal64.exe" in src
+
+
+def test_TERMINAL_RECYCLE_the_verb_structurally_cannot_accept_a_credential():
+    """T-164.6.5-05. Asserted on the SIGNATURE, not the body: a verb that takes no
+    parameter cannot be handed a login, password or server by any future caller,
+    and so can never carry one into a remote-executed source on a public repo.
+    The terminal re-authorizes from its own persistent state or the next per-call
+    login — never from this verb."""
+    import inspect
+
+    params = inspect.signature(Mt5Client.recycle_terminal_process).parameters
+    assert list(params) == ["self"], (
+        f"recycle_terminal_process grew parameters {list(params)[1:]} — it must "
+        "take none, so no credential can ever be routed into it"
+    )
+
+
+def test_TERMINAL_RECYCLE_an_abandoned_session_is_refused_before_anything_crosses():
+    """WIZFORM-ABANDON / D-36. A recycle fired from work that outlived its lease
+    would kill the terminal under whoever holds it NOW. Oracled on the fake's
+    recorded crossings, never on the exception alone — the harm is a crossing
+    LANDING, not an exception going unraised."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    conn = fake._MetaTrader5__conn
+    record = _install_recycle_double(conn, returns=_recycle_verdict())
+
+    client.assert_session_authorized()  # first touch binds the generation
+    initialize_before = fake.initialize_calls
+    bump_mt5_terminal_epoch(client.terminal_key)  # the lease released
+
+    with capture_logs() as captured:
+        with pytest.raises(Mt5SessionAbandoned):
+            client.recycle_terminal_process()
+
+    assert record["sources"] == [], "the refused recycle still sent its source"
+    assert record["calls"] == [], "the refused recycle still ran the terminate"
+    assert fake.initialize_calls == initialize_before, (
+        "the refused recycle still issued the relaunch"
+    )
+    assert _stage_events(captured, _RECYCLE_STAGE) == [], (
+        "a fence refusal is not a round-trip and must emit no stage event"
+    )
+
+
+def test_TERMINAL_RECYCLE_an_absent_transport_raises_and_never_reports_success():
+    """No rpyc transport ⇒ nothing was sent and nothing was ended. The verb must
+    say so with the module's typed error — a success-shaped verdict here would
+    tell the caller the terminal was recycled when it was never reached."""
+    connect, fake, _rec = _make({"no_transport": True, "initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.recycle_terminal_process()
+
+    assert type(exc_info.value) is Mt5ClientError
+    assert "not reachable" in str(exc_info.value)
+    assert fake.initialize_calls == 0, "a relaunch ran after a recycle that never happened"
+
+
+def test_TERMINAL_RECYCLE_a_malformed_remote_verdict_raises_and_skips_the_relaunch():
+    """The remote answer is a by-value JSON string. Anything else means we do not
+    know what happened on the far side, and a verdict built from it would be
+    invented — typed raise, and no relaunch claimed on top of an unknown."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    _install_recycle_double(fake._MetaTrader5__conn, returns="not json at all")
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.recycle_terminal_process()
+
+    assert "malformed" in str(exc_info.value)
+    assert fake.initialize_calls == 0
+
+
+def test_TERMINAL_RECYCLE_a_remote_traceback_is_scrubbed_typed_and_timed():
+    """T-164.6.5-08. A remote failure arrives as a traceback carrying the executed
+    source and whatever the far side printed; raw, it would reach a public Actions
+    log or Sentry. It must leave as a scrubbed, typed `Mt5ClientError` — and the
+    failing crossing must still emit its stage event, or the recycle's failures
+    would be censored out of the timing population."""
+    connect, fake, _rec = _make({"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    _install_recycle_double(
+        fake._MetaTrader5__conn,
+        raises=RuntimeError(
+            "remote traceback in _qz_recycle_terminal_process; apikey=SUPERSECRET"
+        ),
+    )
+
+    with capture_logs() as captured:
+        with pytest.raises(Mt5ClientError) as exc_info:
+            client.recycle_terminal_process()
+
+    assert type(exc_info.value) is Mt5ClientError
+    assert "SUPERSECRET" not in str(exc_info.value)
+    assert fake.initialize_calls == 0
+    events = _stage_events(captured, _RECYCLE_STAGE)
+    assert len(events) == 1 and events[0]["ok"] is False
+    assert events[0]["error_class"] == "RuntimeError"
