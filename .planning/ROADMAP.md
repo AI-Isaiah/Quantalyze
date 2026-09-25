@@ -3152,11 +3152,15 @@ Plans:
 **Success criteria:** (1) the mismatch is reproduced first (a computed row whose payload does not build) on the local lane, or the phase shrinks; (2) buildability is recorded where the owner lane can read it (e.g. a bridge-maintained column written by the compute path), or decided server-side for the list; (3) the list, the share note and the share page agree for that row, proven by a test observed RED against today's code; (4) any migration passes the three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before merge, because merge auto-applies to PROD. **Added 2026-09-24 (167.2 review R2-L4(b), data-integrity):** (5) the key-card Delete warning cannot be silenced by an RLS-filtered membership read — a `strategy_keys` read that comes back empty with no error because of a policy regression shows no composite warning, and the delete then cascades a composite's member away; the guard belongs server-side (a migration), so it lands here with WR-02.
 **Requirements**: TBD
 **Depends on:** Phase 167.2
-**Plans:** 0 plans
+**Note 2026-09-25 (planning, 167.2.1-CONTEXT.md D-01):** criterion 5's "(a migration)" is superseded. The guard is a server route, `GET /api/keys/[id]/memberships`, which checks ownership with an explicit equality and reads on the service role. It needs no migration, so criterion 4 is vacuous. The SECURITY DEFINER RPC in `167.2.1-RESEARCH.md` stays the recorded fallback. Reversible.
+**Plans:** 4 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 167.2.1 to break down)
+- [ ] 167.2.1-01-PLAN.md — BUILDPROBE: reproduce on the local lane, split resolve from build, export hasBuildableSeries + probeFactsheetBuildable with a parity table (wave 1)
+- [ ] 167.2.1-02-PLAN.md — MEMBERSGUARD: GET /api/keys/[id]/memberships on the service role after an explicit owner check; the key card fails closed to KCS-DELETE-UNCHECKED (wave 1)
+- [ ] 167.2.1-03-PLAN.md — LISTTRUTH: /strategies probes computed rows and shows the D-02 unbuildable note, RED first (wave 2)
+- [ ] 167.2.1-04-PLAN.md — OWNERNOTE: the owner factsheet's S7 note uses the same derivation, and the D-03 TODOS entry (wave 3)
 
 ### Phase 168: DRBOPTIONS — a Deribit options account ingests end to end
 
