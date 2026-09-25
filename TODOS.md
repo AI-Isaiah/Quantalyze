@@ -1347,6 +1347,32 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[164.6.7-COMPOSITE-REREAD-RESIDUE]` A marker retraction that lands between the Python live
+      re-read and `mark_compute_job_failed` still leaves the pre-fix outcome, over a window of
+      milliseconds (booked 2026-09-25, Phase 164.6.7 COMPOSITECLAIMSNAPSHOT, decision D-03).**
+      - **What remains.** Phase 164.6.7 made the `_stamp_failed` closure of
+        `run_stitch_composite_job` re-read the live `compute_jobs` row through
+        `_refresh_marker_still_on_row` before it honours the `ledger-refresh-composite` marker. A
+        retraction committing AFTER that re-read and BEFORE `mark_compute_job_failed` PERFORMs the
+        SQL bridge `sync_strategy_analytics_status` still yields an error-only Python write followed by a loud SQL status: the
+        `computation_warned` residue (research H2), so a warned composite can read
+        `complete_with_warnings` again at the next bridge call over a failed run.
+      - **Both honour arms share it.** The single-key derive honour site in
+        `run_derive_broker_dailies_job`, which calls the same `_refresh_marker_still_on_row`,
+        carries the identical window. A fix is one change for both.
+      - **Fix shape.** In `sync_strategy_analytics_status`, either branch (b) clears
+        `computation_warned`, or the protect/loud decision moves inside the bridge's transaction.
+        Either is a migration to a bridge every job kind shares, and a merge touching
+        `supabase/migrations/**` auto-applies to PROD, so it is not a ride-along.
+      - **Owner:** whoever next changes `sync_strategy_analytics_status`. **Trigger:** any change
+        to that function.
+      - **Not data-integrity-reachable today (2026-09-25).** The composite fan-out is unscheduled
+        (runbook precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]`, item 6 still blocking), so no
+        composite job carries the marker. Re-read this line before the composite is scheduled.
+        ⚠️ This covers the COMPOSITE arm only. The single-key arm is reachable whenever the
+        single-key fan-out is scheduled, and whether it is was not measured here (no remote
+        database is read in Phase 164.6.7).
+
 - [ ] **`[STRATTABLE-DESC-01]` The strategy list shows only the NAME, so two strategies
       with the same name are indistinguishable — the `description` that disambiguates them is
       already fetched and simply not rendered (founder-reported 2026-09-11 from the /browse
@@ -9295,6 +9321,17 @@ follows is what was deliberately left, with the reason.
     protection, and its failure is suppressed exactly as the single-key case was.
   - ⚠️ The composite fan-out ships DORMANT, so this is not reachable on production until the
     schedule is registered — but it must be closed BEFORE that founder-gated go-live op, not after.
+  - ✅ **CLOSED 2026-09-25, in two halves.** The retraction call at the two TypeScript
+    `stitch_composite` enqueue sites closed in **Phase 164.6 plan 02**. ⛔ The "*honouring* side is
+    covered" sentence above was WRONG for the composite until **Phase 164.6.7
+    COMPOSITECLAIMSNAPSHOT**: the composite honour site read the claim-time snapshot, so a
+    retraction landing after the claim was never seen by the Python stamp. Since Phase 164.6.7,
+    the `_stamp_failed` closure of `run_stitch_composite_job` re-reads the live `compute_jobs` row
+    through `_refresh_marker_still_on_row` before it honours the marker, and the regression is
+    `TestPostClaimRetractionTakesTheLoudPath`. The text above is kept as lineage. A residual window
+    of milliseconds remains and is booked as `[164.6.7-COMPOSITE-REREAD-RESIDUE]` (FIX MID-TERM).
+    The composite schedule itself is still blocked by item 6 of the runbook precondition
+    `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` (its own runs are not yet watched).
 
 161.1-D14. **The redact pre-push guard cries wolf on migration timestamps — INVESTIGATED, nothing
   to fix, do not re-investigate.** `gstack-redact` flags 14-digit migration timestamps as
