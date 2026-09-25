@@ -2134,6 +2134,8 @@ Plans:
 4. Arm failures print `TEST FAILED (X):`, not `ARM x FAILED` which the runner's identity regex cannot see. An arm no production mutation can redden is labelled an INVARIANT rather than counted.
 5. ⛔ Production DDL: merging `supabase/migrations/**` to `main` AUTO-APPLIES to PROD, so three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before any apply, and the apply is a founder gate.
 
+⭐ **ROUTED HERE 2026-09-25 (Phase 164.6.7 round-1 review WR-04):** `TODOS.md` `[164.6.7-COMPOSITE-REREAD-RESIDUE]`, a data-integrity residue in the same bridge fan-in: a marker retraction committing between the Python live re-read and `mark_compute_job_failed` still yields an error-only write followed by a loud `sync_strategy_analytics_status`, leaving `computation_warned` set. Fix shape per that entry (branch (b) clears `computation_warned`, or the protect/loud decision moves inside the bridge's transaction). It is ⛔ BLOCKING item 7 of the runbook precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in `docs/runbooks/ledger-refresh-go-live.md`, so the composite schedule waits on this phase unless the founder accepts the window there with a date.
+
 **Requirements**: TODOS entries `161.1-D1`, DEC-4
 **Depends on:** Phase 164.4.1 (pg-lane with pg_cron). ⚠️ NOT Phase 164.5 — the plan is file-disjoint from it and was lifted whole.
 **Plans:** 1 plan (lifted from Phase 164.5 plan 08, unmodified)

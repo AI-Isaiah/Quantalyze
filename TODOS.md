@@ -1372,6 +1372,25 @@ true for 146 and half of 142–145, and **false for 141**.
         ⚠️ This covers the COMPOSITE arm only. The single-key arm is reachable whenever the
         single-key fan-out is scheduled, and whether it is was not measured here (no remote
         database is read in Phase 164.6.7).
+      - ⛔ **CORRECTED 2026-09-25 (Phase 164.6.7 round-1 review WR-04 and IN-06); the bullets
+        above are kept as lineage.**
+        - **Routed, not event-owned.** This is a data-integrity deferral, and the repo rule is
+          that one must name a phase. "Whoever next changes the function" had no date and no
+          gate, and nothing forces that change before the composite is scheduled. **Destination:
+          Phase 164.5.2 BRIDGELOCK** (dated routing line under `### Phase 164.5.2` in
+          `.planning/ROADMAP.md`), the phase that already changes the terminal mark RPCs fanning
+          into this bridge. This overrides the owner line above, which followed CONTEXT D-03.
+        - **It blocks composite scheduling, in the runbook.** "Re-read this line before the
+          composite is scheduled" is superseded. The operator's instruction now lives where it
+          is read at scheduling time: item 7 of `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in
+          `docs/runbooks/ledger-refresh-go-live.md` is ⛔ BLOCKING until this entry is closed,
+          or the founder accepts the window there with a date and a reason.
+        - **"Milliseconds" was never measured.** The window's length is unmeasured, and several
+          contributors have no bound: the error-only upsert through `db_execute`; on the
+          member-ledger-error path, the `aclose_exchange` network close in the `finally` that
+          runs after `_stamp_failed` returns; the heartbeat cancel in `main_worker`; and
+          `_safe_mark` → `db_execute` for `mark_compute_job_failed`, which can queue behind a
+          saturated `_DB_EXECUTOR`. The harm probe's zero-member driver exercises none of them.
 
 - [ ] **`[STRATTABLE-DESC-01]` The strategy list shows only the NAME, so two strategies
       with the same name are indistinguishable — the `description` that disambiguates them is
@@ -9330,6 +9349,9 @@ follows is what was deliberately left, with the reason.
     through `_refresh_marker_still_on_row` before it honours the marker, and the regression is
     `TestPostClaimRetractionTakesTheLoudPath`. The text above is kept as lineage. A residual window
     of milliseconds remains and is booked as `[164.6.7-COMPOSITE-REREAD-RESIDUE]` (FIX MID-TERM).
+    ⛔ CORRECTED 2026-09-25 (round-1 review IN-06): the window's length is unmeasured, not
+    "milliseconds"; that entry lists its unbounded contributors and is routed to Phase 164.5.2.
+    The residue is also runbook item 7, which blocks the composite schedule alongside item 6.
     The composite schedule itself is still blocked by item 6 of the runbook precondition
     `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` (its own runs are not yet watched).
 

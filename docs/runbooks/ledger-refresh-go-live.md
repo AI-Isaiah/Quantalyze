@@ -651,6 +651,10 @@ SELECT completed_at,
     is a scheduling precondition, and since Phase 164.6.7 (2026-09-25) it is the ONLY one still
     blocking: see item 6 of `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` below. Also
     not watched: the two-fault case in the "Zero rows" bullet above (L1).
+    ⛔ **CORRECTED 2026-09-25 (Phase 164.6.7 round-1 review WR-04):** "the ONLY one still
+    blocking" was wrong. TWO preconditions still block the composite schedule: item 6 (its runs
+    are not watched) and item 7 (the re-read residue `[164.6.7-COMPOSITE-REREAD-RESIDUE]`). The
+    sentence above is kept as lineage.
   - **A failed candidate is skipped for 20 hours.** The candidate query excludes any strategy named
     in a failure row written in the last 20 hours, the same window as the attempt cooldown, so a
     poisoned candidate no longer takes the same slot every tick and a healthy candidate takes it.
@@ -920,6 +924,14 @@ here, but this precondition sits here because this is where a reader would go to
    `ledger-refresh-composite` marker, the same helper the single-key honour sites use. The
    claim-time snapshot is still the first filter, and the live read can only narrow it: a marker
    retracted after the claim, a missing row, or a re-read that fails all take the loud path.
+   ⚠️ **Being changed as of 2026-09-25 (round-1 silent-failure review SFH-01, orchestrator
+   decision):** a re-read that fails TRANSIENTLY, because the read itself raised, is to fail the
+   job as TRANSIENT so it retries, instead of taking the loud path and un-publishing a live
+   factsheet over one network blip. A retracted marker or a missing row still takes the loud
+   path. ⛔ At scheduling time, read the failure arm of `_refresh_marker_still_on_row` and the
+   composite honour site in `_stamp_failed` on the DEPLOYED commit. Until that change is in the
+   commit the worker runs, "a re-read that fails" above still means the loud path, which is an
+   un-publish.
    📜 *Lineage, superseded 2026-09-25:* "⛔ **BLOCKING.** No schedule naming
    `public.enqueue_ledger_composite_refresh()` may be registered until `run_stitch_composite_job`
    in `analytics-service/services/job_worker.py` re-reads the LIVE `compute_jobs` row's
@@ -934,8 +946,10 @@ here, but this precondition sits here because this is where a reader would go to
    the stale marker in its snapshot, treated the run as a protected ledger refresh, and suppressed
    the user's failure, while the SQL status bridge (`sync_strategy_analytics_status`), which reads
    the live row, called the same job unprotected. The two layers disagreed about one job.
-   **What that was measured to do**, by the Phase 164.6.7 harm probe on the local loopback lane
-   (2026-09-25, lane only; no remote database was read):
+   **What that was measured to do**, on the local loopback lane (2026-09-25, lane only; no
+   remote database was read). The quoted line is **the verdict recorded in the Phase 164.6.7
+   plan 02 SUMMARY**, derived from the harm probe's per-arm `HARM-PROBE verdict:` lines. The
+   three bullets under it transcribe those readings; they are not probe output.
    > HARM-VERDICT: end-state harm shown on the lane for retracted-warned, retracted-warned-inflight; scoped to the lane, production cohort unmeasured
 
    - **retracted-warned:** before the fix, the failed run ended `failed` with `computation_warned`
@@ -951,6 +965,20 @@ here, but this precondition sits here because this is where a reader would go to
    milliseconds between the live re-read and `mark_compute_job_failed` still leaves the old
    outcome, and the single-key derive honour site shares it. It is recorded, with its fix shape
    and owner, as `TODOS.md` `[164.6.7-COMPOSITE-REREAD-RESIDUE]`.
+   ⛔ **CORRECTED 2026-09-25 (round-1 review IN-01 and IN-06), two sentences above kept as
+   lineage.** (a) This item used to credit the quoted verdict to "the Phase 164.6.7 harm probe",
+   which reads as if the probe printed it. At plan 02 it did not: the probe printed only
+   `HARM-PROBE` lines, and the `HARM-VERDICT:` sentence was composed from them by hand. A
+   round-1 review fix makes the probe derive and print a `HARM-VERDICT:` line itself. If a
+   re-run on your lane prints one that disagrees with the quote above, the run is right and the
+   quote is stale. If the probe you run prints none, the quote above is the only record.
+   (b) "In the milliseconds" was asserted, not measured. The window's length is **unmeasured**,
+   and several of its contributors have no bound: the error-only upsert through `db_execute`; on
+   the member-ledger-error path, the `aclose_exchange` network close in the `finally` that runs
+   after `_stamp_failed` returns; the heartbeat cancel in `main_worker`; and `_safe_mark` →
+   `db_execute` for `mark_compute_job_failed`, which can queue behind a saturated `_DB_EXECUTOR`.
+   The harm probe's zero-member driver exercises none of them. Item 7 makes the residue a
+   scheduling precondition.
 4. ✅ **MET in the tree; ⚠️ the deploy-time check is still yours.** The regression is
    `TestPostClaimRetractionTakesTheLoudPath` in
    `analytics-service/tests/test_ledger_refresh_composite_nondestructive.py`: its retraction, no-row
@@ -969,6 +997,8 @@ here, but this precondition sits here because this is where a reader would go to
 5. ✅ **Owner: shipped.** Phase 164.6 did NOT implement the Python change; **Phase 164.6.7
    COMPOSITECLAIMSNAPSHOT** (inserted into the ROADMAP on `main` by PR #849, 2026-09-24) did. This
    precondition is now blocked ONLY by item 6. `TODOS.md` `161.1-D13` is closed on the same basis.
+   ⛔ **CORRECTED 2026-09-25 (round-1 review WR-04):** not "ONLY by item 6". Items 6 AND 7 both
+   block. The sentence above is kept as lineage.
    📜 *Lineage, superseded 2026-09-25:* "This precondition stays BLOCKING until that phase ships.
    `TODOS.md` `161.1-D13` already requires the composite twin of the reuse collision to be closed
    before this go-live op, not after."
@@ -980,6 +1010,20 @@ here, but this precondition sits here because this is where a reader would go to
    together with that extension. ⛔ Never add it as a second statement of `ledger_refresh_fanout`'s
    command: pg_cron runs a multi-statement command as one transaction, so one fan-out's error
    would roll back the other's enqueues.
+7. ⛔ **BLOCKING: the re-read residue must be closed, or accepted by the founder with a date,
+   before the composite is scheduled** (added 2026-09-25, round-1 review WR-04). The residue is
+   `TODOS.md` `[164.6.7-COMPOSITE-REREAD-RESIDUE]`: a retraction that commits after the live
+   re-read (item 2) and before `mark_compute_job_failed` PERFORMs `sync_strategy_analytics_status`
+   still yields an error-only Python write followed by a loud SQL status, so a warned composite
+   can read `complete_with_warnings` again over a failed run. That is a data-integrity outcome on
+   a funded account, and the window is unmeasured (item 3). Today it is unreachable only because
+   the composite is unscheduled. Scheduling the composite is what makes it reachable, so this is
+   the document that has to stop you. **Closed** means the fix shape in that entry has shipped:
+   the bridge's branch (b) clears `computation_warned`, or the protect/loud decision moves inside
+   the bridge's transaction. It is routed to **Phase 164.5.2 BRIDGELOCK** in `ROADMAP.md`, the
+   phase that already changes the terminal mark RPCs fanning into that bridge. **Accepted** means
+   a founder decision recorded here, with its date and reason, before the schedule is
+   registered. Neither exists as of 2026-09-25.
 
 ---
 
@@ -989,7 +1033,9 @@ here, but this precondition sits here because this is where a reader would go to
   sole live strategy is a composite, so it gets zero coverage from *this* mechanism. Its coverage
   is owed to the separate composite arm on `stitch_composite`. See `TODOS.md` item **0.3**.
   ⛔ That arm's schedule is blocked by item 6 (the composite's own runs are not yet watched) of
-  the precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in the section directly above. The
+  the precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in the section directly above.
+  ⛔ **CORRECTED 2026-09-25 (round-1 review WR-04):** and by item 7 of the same precondition
+  (the re-read residue `[164.6.7-COMPOSITE-REREAD-RESIDUE]`). The
   claim-time snapshot that gave the section its id was closed by Phase 164.6.7 (2026-09-25).
 - **The ccxt sibling defect.** ccxt strategies with no new fills also never recompute — a different
   venue class and a different mechanism, out of scope here. See `TODOS.md` item **0.2**.
