@@ -1676,8 +1676,13 @@ function modeAudit(io, allowlistPath, migrationsDir) {
  * exit 0. 49 → 53: `c5-audit-crlf-head`, `-do-body-write`, `-unlisted-upsert`
  * and `-unlisted-copy`. The layer-2 vitest was observed RED
  * (`declares 53 … still 49`) before this raise.
+ *
+ * MEASURED 2026-09-25 (review round 1, IN-04): `extract-reference-inserts
+ * self-test OK: 56 kinds, red+green each.`, exit 0. 53 → 56: the TRUNCATE,
+ * MERGE and CTE-prefixed DELETE heads of `matchOtherDml`, which had no leg. The
+ * layer-2 vitest was observed RED (`declares 56 … still 53`) before this raise.
  */
-export const SELF_TEST_KINDS_FLOOR = 53;
+export const SELF_TEST_KINDS_FLOOR = 56;
 
 /**
  * @type {Array<{id:string, why:string, audit?:boolean, expect:string, redStderr?:RegExp, greenStdout?:RegExp, greenAbsent?:RegExp}>}
@@ -2017,6 +2022,29 @@ export const SELF_TEST_KINDS = [
     why: "C5 --audit (review SFH-02): COPY … FROM writes rows no allowlist line replays. The green leg pins that COPY … TO, a read, is not refused",
     audit: true,
     expect: "a top-level COPY … FROM on a table the replay fills, and C5 replays UPDATE only",
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
+  },
+  // ── matchOtherDml's other three heads (164.9.2 review IN-04): only DELETE had a
+  // leg, so a regression in any of these left the self-test green.
+  {
+    id: "c5-audit-unlisted-truncate",
+    why: "C5 --audit (review IN-04): a TRUNCATE naming a replayed table — here SECOND in its list — empties rows the replay wrote. The green leg pins that a TRUNCATE of an unfilled table is outside C5",
+    audit: true,
+    expect: "a top-level TRUNCATE on a table the replay fills, and C5 replays UPDATE only",
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-unlisted-merge",
+    why: "C5 --audit (review IN-04): a MERGE INTO a replayed table can update, insert or delete its rows. The green leg pins that a MERGE into an unfilled table is outside C5",
+    audit: true,
+    expect: "a top-level MERGE on a table the replay fills, and C5 replays UPDATE only",
+    greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
+  },
+  {
+    id: "c5-audit-unlisted-cte-delete",
+    why: "C5 --audit (review IN-04): a data-modifying CTE deletes from a replayed table without starting with DELETE. The green leg pins the same CTE on an unfilled table",
+    audit: true,
+    expect: "a top-level CTE-prefixed DELETE/MERGE on a table the replay fills, and C5 replays UPDATE only",
     greenStdout: /audit C5 OK: 0 update statement\(s\) over 0 file\(s\) and 0 table\(s\) replayed; 0 declined over 0 file\(s\); 0 unaccounted\./,
   },
 ];

@@ -108,6 +108,11 @@ const REQUIRED_KINDS = [
   "c5-audit-do-body-write",
   "c5-audit-unlisted-upsert",
   "c5-audit-unlisted-copy",
+  // matchOtherDml's other heads (review round 1, IN-04), MEASURED 2026-09-25 →
+  // `OK: 56 kinds`.
+  "c5-audit-unlisted-truncate",
+  "c5-audit-unlisted-merge",
+  "c5-audit-unlisted-cte-delete",
 ];
 
 describe("SELF_TEST_KINDS_FLOOR — the extractor's self-test corpus is ratcheted", () => {
