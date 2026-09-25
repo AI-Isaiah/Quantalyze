@@ -4990,6 +4990,7 @@ describe("164.8-03 A1 — the reference-data assertions' MEASURE_FAILs are reach
     "Assert the extractor self-test PRINTED its kind census and cleared the floor";
   const AUDIT_STEP =
     "Assert the allowlist audit PRINTED its census over a non-empty corpus";
+  const MIGDEP_STEP = "Assert the data-dependence scan PRINTED its corpus census";
 
   const workdir = mkdtempSync(join(tmpdir(), "a1-"));
   const bindir = join(workdir, "bin");
@@ -5003,6 +5004,7 @@ if [ "$1" = "-e" ]; then
   exit 0
 fi
 case "$*" in
+  *lint-migration-data-dependence.mjs*) printf '%s' "\${STUB_MIGDEP_OUT:-}"; exit "\${STUB_MIGDEP_RC:-0}" ;;
   *--self-test*) printf '%s' "\${STUB_SELFTEST_OUT:-}"; exit "\${STUB_SELFTEST_RC:-0}" ;;
   *--audit*)     printf '%s' "\${STUB_AUDIT_OUT:-}";    exit "\${STUB_AUDIT_RC:-0}" ;;
 esac
@@ -5049,6 +5051,7 @@ exec ${REAL_GREP} "$@"
         PATH: `${bindir}:${process.env.PATH ?? ""}`,
         REFDATA_SELFTEST_LOG: join(dir, "selftest.log"),
         REFDATA_AUDIT_LOG: join(dir, "audit.log"),
+        MIGDEP_SCAN_LOG: join(dir, "migdep.log"),
         ...stub,
       },
     });
@@ -5390,6 +5393,94 @@ exec ${REAL_GREP} "$@"
       });
     });
   }
+
+  // Phase 164.9.2 plan 04 FOLLOW-UP (2026-09-25, founder: "Fix in this PR"). The
+  // THIRD sibling in ci.yml's `sql-gate-lint`, the Phase 164.9 criterion 5 census
+  // step, carried the same false "WITHOUT `-e`" comment and the same unbounded
+  // captures, and plan 04 recorded it in deferred-items.md rather than fixing it.
+  // It lives only in ci.yml (the restore workflow has no twin), so it runs once.
+  describe(`${MIGDEP_STEP} — ${CI_PATH}`, () => {
+    const script = extractRunScript(CI, MIGDEP_STEP);
+    const BOUNDS = [" || status=$?", " || census_rc=$?"];
+    const CENSUS =
+      "lint-migration-data-dependence: corpus 271 migration(s), 40 anonymous block(s); 3 refusal(s), 3 allowlisted, 0 NEW.\n";
+    const SILENT_REASON = "printed NO 'lint-migration-data-dependence: corpus";
+
+    it("GREEN — a census over a non-empty corpus with blocks exits 0 and echoes it", () => {
+      const r = runStep(script, { STUB_MIGDEP_OUT: CENSUS });
+      expect(r.code, r.out).toBe(0);
+      expect(r.out).toContain(CENSUS.trim());
+    });
+
+    it("a SILENT ZERO reaches its own MEASURE_FAIL (pre-fix: bash's silence)", () => {
+      const r = runStep(script, { STUB_MIGDEP_OUT: "" });
+      expect(
+        r.out,
+        "the silent-no-op MEASURE_FAIL did not print — under `bash -e` the non-matching grep killed the step before its own diagnosis",
+      ).toContain(SILENT_REASON);
+      expect(r.code, r.out).toBe(1);
+
+      const pre = runStep(unbind(script, BOUNDS), { STUB_MIGDEP_OUT: "" });
+      expect(
+        pre.out.includes(SILENT_REASON),
+        "CALIBRATION: the UNBOUNDED script printed the MEASURE_FAIL too, so the bound is not what makes it reachable",
+      ).toBe(false);
+      expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
+    });
+
+    it("a NON-ZERO scan reaches its named error AND its log (pre-fix: neither)", () => {
+      const stub = { STUB_MIGDEP_OUT: "refused: some_migration.sql\n", STUB_MIGDEP_RC: "5" };
+      const r = runStep(script, stub);
+      expect(r.out).toContain("the data-dependence corpus scan failed (exit 5).");
+      expect(
+        r.out,
+        "the captured log was never `cat`ted, so the operator gets a status with no refusal to read",
+      ).toContain("refused: some_migration.sql");
+      expect(r.code, r.out).toBe(5);
+
+      const pre = runStep(unbind(script, BOUNDS), stub);
+      expect(
+        pre.out.includes("the data-dependence corpus scan failed"),
+        "CALIBRATION: the unbounded script named the failure too",
+      ).toBe(false);
+      expect(
+        pre.out.includes("refused: some_migration.sql"),
+        "CALIBRATION: the unbounded script still printed the log, so `cat` was reached and the abort this arm is about did not happen",
+      ).toBe(false);
+      expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
+    });
+
+    it("a FAULTING grep for the census reaches its rc>1 branch by name", () => {
+      const stub = {
+        STUB_MIGDEP_OUT: CENSUS,
+        STUB_GREP_FAIL_ON: "lint-migration-data-dependence: corpus",
+      };
+      const r = runStep(script, stub);
+      expect(r.out).toContain("grep exited 2 reading");
+      expect(r.code, r.out).toBe(1);
+
+      const pre = runStep(unbind(script, BOUNDS), stub);
+      expect(
+        pre.out.includes("grep exited 2"),
+        "CALIBRATION: the unbounded script named the grep fault too",
+      ).toBe(false);
+      expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
+    });
+
+    it("an EMPTY corpus and a corpus with NO blocks are each a named MEASURE_FAIL", () => {
+      const noMigrations = runStep(script, {
+        STUB_MIGDEP_OUT: CENSUS.replace("corpus 271 migration", "corpus 0 migration"),
+      });
+      expect(noMigrations.code, noMigrations.out).toBe(1);
+      expect(noMigrations.out).toContain("the scan read 0 migrations");
+
+      const noBlocks = runStep(script, {
+        STUB_MIGDEP_OUT: CENSUS.replace("40 anonymous block", "0 anonymous block"),
+      });
+      expect(noBlocks.code, noBlocks.out).toBe(1);
+      expect(noBlocks.out).toContain("found 0 anonymous blocks across 271 migrations");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

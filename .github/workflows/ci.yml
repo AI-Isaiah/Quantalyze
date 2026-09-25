@@ -1964,19 +1964,36 @@ jobs:
       # non-matching `grep` yields the empty string instead of aborting the step,
       # so an absent line reaches its own MEASURE_FAIL message rather than dying
       # with no `::error::` at all.
+      #
+      # ⛔ CORRECTED 2026-09-25 (Phase 164.9.2 plan 04 follow-up). The paragraph
+      # above is FALSE and is kept as lineage; it is the same false claim the
+      # reference-data steps' dated correction answers. The runner gives every
+      # `run:` here `bash -e {0}`, and `set -uo pipefail` never turns `-e` off, so
+      # the unbounded `node` status capture and `census` grep aborted this step
+      # BEFORE their own `::error::` lines: red, but unnamed. Both now carry the
+      # reference-data steps' `|| <name>=$?` bound (and an rc>1 branch for the
+      # grep), and src/__tests__/test-restore-workflow-wiring.test.ts EXECUTES
+      # this body under `bash -e`.
       - name: Assert the data-dependence scan PRINTED its corpus census
         env:
           MIGDEP_SCAN_LOG: ${{ runner.temp }}/lint-migration-data-dependence.log
         run: |
           set -uo pipefail
-          node scripts/lint-migration-data-dependence.mjs > "$MIGDEP_SCAN_LOG" 2>&1
-          status=$?
+          status=0
+          node scripts/lint-migration-data-dependence.mjs > "$MIGDEP_SCAN_LOG" 2>&1 || status=$?
           cat "$MIGDEP_SCAN_LOG"
           if [ "$status" -ne 0 ]; then
             echo "::error::the data-dependence corpus scan failed (exit $status). Make the migration's self-verification CATALOGUE-ONLY, or make the read tolerant of an empty table. Do NOT widen scripts/lint-migration-data-dependence-baseline.txt and do NOT relax the classifier."
             exit "$status"
           fi
-          census=$(grep -a -m1 -E '^lint-migration-data-dependence: corpus [0-9]+ migration\(s\), [0-9]+ anonymous block\(s\); [0-9]+ refusal\(s\), [0-9]+ allowlisted, [0-9]+ NEW\.$' "$MIGDEP_SCAN_LOG")
+          # `grep` exits 1 on NO MATCH and >1 on a real fault. Only the first is this
+          # step's MEASURE_FAIL; the second means the line was never looked for.
+          census_rc=0
+          census=$(grep -a -m1 -E '^lint-migration-data-dependence: corpus [0-9]+ migration\(s\), [0-9]+ anonymous block\(s\); [0-9]+ refusal\(s\), [0-9]+ allowlisted, [0-9]+ NEW\.$' "$MIGDEP_SCAN_LOG") || census_rc=$?
+          if [ "$census_rc" -gt 1 ]; then
+            echo "::error::MEASURE_FAIL: grep exited $census_rc reading $MIGDEP_SCAN_LOG, so the census line was NOT looked for. That is an unanswered question, not an absent line."
+            exit 1
+          fi
           if [ -z "$census" ]; then
             echo "::error::MEASURE_FAIL: the scan exited 0 but printed NO 'lint-migration-data-dependence: corpus ... NEW.' census line. A zero status with no output is what a main guard that never fired looks like; it is not a clean corpus."
             exit 1
