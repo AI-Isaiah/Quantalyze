@@ -132,6 +132,7 @@ async def _run(
     existing_flags: dict[str, Any] | None = None,
     job_id: str = _JOB_ID,
     live_metadata: object = _FROM_SNAPSHOT,
+    live_job_read_raises: bool = False,
 ) -> _FakeSupabase:
     """Drive the zero-member permanent failure through ``_stamp_failed``.
 
@@ -146,6 +147,7 @@ async def _run(
         existing_status=existing_status,
         live_job_metadata=live_metadata,
         live_job_id=job_id,
+        live_job_read_raises=live_job_read_raises,
     )
     job: dict[str, Any] = {"id": job_id, "strategy_id": _STRATEGY_ID}
     if metadata is not _UNSET:
@@ -377,3 +379,61 @@ class TestPostClaimRetractionTakesTheLoudPath:
             "the loud stamp must clear computation_warned, or a later bridge call "
             "can restore complete_with_warnings over a failed run"
         )
+
+    @pytest.mark.asyncio
+    async def test_marker_still_on_the_live_row_stays_error_only(self) -> None:
+        """The control. The live row still carries the marker, so protection
+        holds: no publish-state key is written and the error still lands. It
+        guards the driver: a seam that never served the live row would make the
+        loud tests pass for the wrong reason and turn this one RED."""
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            live_metadata={"source": _COMPOSITE_MARKER},
+        )
+        payloads = _analytics_upserts(fake)
+        assert payloads, "the composite stamp wrote nothing to strategy_analytics"
+        for payload in payloads:
+            leaked = sorted(key for key in _PUBLISH_STATE_KEYS if key in payload)
+            assert not leaked, (
+                f"a marked refresh whose LIVE row still carries the marker wrote "
+                f"{leaked}. The live re-read may only narrow the protection; it "
+                "must never withdraw it from a refresh nobody is watching."
+            )
+        assert any("computation_error" in payload for payload in payloads), (
+            "the protected branch must still record computation_error"
+        )
+
+    @pytest.mark.asyncio
+    async def test_live_reread_that_raises_takes_the_loud_path(self) -> None:
+        """Fail-safe direction: an unreadable live row answers "not marked"."""
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            live_job_read_raises=True,
+        )
+        payloads = _analytics_upserts(fake)
+        assert payloads, "the composite stamp wrote nothing to strategy_analytics"
+        last = payloads[-1]
+        assert last.get("computation_status") == "failed", (
+            "a live re-read that RAISED was treated as still marked. Every "
+            "failure of that read must take the loud path, never suppression."
+        )
+        assert last.get("computation_warned") is False
+
+    @pytest.mark.asyncio
+    async def test_marker_with_no_live_row_takes_the_loud_path(self) -> None:
+        """Fail-safe direction: no live row to read answers "not marked"."""
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            live_metadata=_LIVE_JOB_ABSENT,
+        )
+        payloads = _analytics_upserts(fake)
+        assert payloads, "the composite stamp wrote nothing to strategy_analytics"
+        last = payloads[-1]
+        assert last.get("computation_status") == "failed", (
+            "a marked snapshot with NO live job row was still honoured. A row "
+            "that cannot be read cannot vouch for the marker; take the loud path."
+        )
+        assert last.get("computation_warned") is False
