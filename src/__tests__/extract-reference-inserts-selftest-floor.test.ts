@@ -81,6 +81,18 @@ const REQUIRED_KINDS = [
   "c5-update-count-drift",
   "c5-duplicate-line",
   "c5-no-insert-line",
+  // C5's token allowlist (164.9.2 review round 1: CR-01, SFH-01, WR-01), MEASURED
+  // 2026-09-25 → `OK: 49 kinds`. One kind per refusal reason the allowlist added.
+  "c5-update-quoted-call",
+  "c5-update-qualified-now",
+  "c5-update-psql-metachar",
+  "c5-update-unknown-operator",
+  "c5-update-unreadable-cast",
+  "c5-update-table-subquery",
+  "c5-update-values-subquery",
+  "c5-update-niladic",
+  "c5-update-array-subquery",
+  "c5-update-reserved-word",
   // C5, --audit
   "c5-decline-literal",
   "c5-decline-count-drift",

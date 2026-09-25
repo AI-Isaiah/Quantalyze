@@ -534,30 +534,268 @@ function splitQualified(qualified) {
   return [qualified.slice(0, dot), qualified.slice(dot + 1)];
 }
 
+// ── C5's TOKEN ALLOWLIST (164.9.2 review round 1: CR-01, SFH-01, WR-01) ─────────
+// ⛔ WHY AN ALLOWLIST, AND WHY THIS REPLACED A DENYLIST. Until 2026-09-25 this
+// check was a DENYLIST: five banned words, a `$`, and a call regex
+// `/([A-Za-z_][A-Za-z0-9_]*)[\t\n ]*\(/` with `now` exempt BY NAME. `maskSql`
+// keeps quoted identifiers ("Quoted identifiers are CODE, not data"), so in
+// `"pg_notify"('c','p')` the character before `(` is `"` and the regex never
+// saw a call; in `net.now()` it saw `now(` and exempted it whatever its schema.
+// MEASURED at 838312df3, each classified LITERAL (ok 1, rejected []):
+//   SET x = "pg_notify"('c','p')            SET x = "net"."http_post"('u')
+//   SET x = net.now()                        WHERE id IN (TABLE other_ids)
+//   SET x = current_user                     (a niladic session function)
+// and `--audit` then told the reviewer to ADD THE update: LINE that replays it
+// inside the transaction that COMMITs on shared TEST — a pg_net request queued
+// there is sent on commit and cannot be rolled back. C2's `literalCheck` on the
+// INSERT side was never exposed: it walks EVERY token of the tuple against a
+// permitted set. This is the same shape for an UPDATE, where column references
+// are free identifiers and so cannot be enumerated. What CAN be enumerated, and
+// is, is everything else a token may be:
+//   * a WORD (unquoted identifier) is a column/table/alias reference UNLESS it
+//     is followed by `(` (a CALL: admitted only from C5_ALLOWED_CALLS, and never
+//     schema-qualified), is a niladic session function (C5_NILADIC), or is a
+//     PostgreSQL RESERVED word outside C5_ADMITTED_RESERVED. A reserved word can
+//     never be a bare column name, so that set is finite and complete;
+//   * a QUOTED identifier is a reference, and followed by `(` is ALWAYS refused;
+//   * an OPERATOR must be spelled from C5_ALLOWED_OPS (an operator resolves to a
+//     function, so an unknown spelling is an unknown call);
+//   * `::` must be followed by a readable type name (skipC5CastType);
+//   * numbers and `( ) [ ] , . ;` are structure; ANY other character — a
+//     backslash (a psql meta-command), a lone `:` (a psql variable), a
+//     non-ASCII byte — is refused, because psql would act on it at replay.
+//
+// PostgreSQL 17 Appendix C, the key words marked "reserved" (not "reserved
+// (can be function or type)"). VALUES is only "non-reserved (cannot be function
+// or type)", and is added because `IN (VALUES …)` is a sub-query spelled without
+// SELECT (WR-01).
+const PG_RESERVED = new Set(
+  (
+    "ALL ANALYSE ANALYZE AND ANY ARRAY AS ASC ASYMMETRIC BOTH CASE CAST CHECK COLLATE " +
+    "COLUMN CONSTRAINT CREATE CURRENT_CATALOG CURRENT_DATE CURRENT_ROLE CURRENT_TIME " +
+    "CURRENT_TIMESTAMP CURRENT_USER DEFAULT DEFERRABLE DESC DISTINCT DO ELSE END EXCEPT " +
+    "FALSE FETCH FOR FOREIGN FROM GRANT GROUP HAVING IN INITIALLY INTERSECT INTO LATERAL " +
+    "LEADING LIMIT LOCALTIME LOCALTIMESTAMP NOT NULL OFFSET ON ONLY OR ORDER PLACING " +
+    "PRIMARY REFERENCES RETURNING SELECT SESSION_USER SOME SYMMETRIC SYSTEM_USER TABLE " +
+    "THEN TO TRAILING TRUE UNION UNIQUE USER USING VARIADIC WHEN WHERE WINDOW WITH VALUES"
+  ).split(" "),
+);
+/**
+ * The reserved words a literal `UPDATE [ONLY] t [[AS] a] SET … WHERE …` carries.
+ * The CURRENT_DATE family is admitted for the reason now() is: it is the
+ * statement's clock, not another row and not a side effect.
+ */
+const C5_ADMITTED_RESERVED = new Set(
+  (
+    "AND OR NOT IN NULL TRUE FALSE DEFAULT ONLY AS WHERE CASE WHEN THEN ELSE END ARRAY " +
+    "CURRENT_DATE CURRENT_TIME CURRENT_TIMESTAMP LOCALTIME LOCALTIMESTAMP"
+  ).split(" "),
+);
+/** Joins, sub-selects and RETURNING: the pre-allowlist message, kept verbatim. */
+const C5_JOIN_WORDS = new Set(["FROM", "USING", "SELECT", "RETURNING", "WITH"]);
+/** `TABLE t` and `VALUES (…)` are sub-queries spelled without SELECT or FROM (WR-01). */
+const C5_SUBQUERY_WORDS = new Set(["TABLE", "VALUES"]);
+/**
+ * SQL-standard niladic session functions: no parentheses, so they read as column
+ * references, and they return the RESTORE session's value, not PROD's (WR-01).
+ * Refused unquoted only — `"user"` is a column, `user` is a function.
+ */
+const C5_NILADIC = new Set([
+  "CURRENT_USER",
+  "SESSION_USER",
+  "USER",
+  "CURRENT_ROLE",
+  "CURRENT_SCHEMA",
+  "CURRENT_CATALOG",
+  "SYSTEM_USER",
+]);
+/**
+ * A WORD directly followed by `(` that is NOT a function call: IN (…) is a list,
+ * AND / OR / NOT (…) group a boolean. `now` is the one call, and only
+ * unqualified and unquoted.
+ */
+const C5_ALLOWED_CALLS = new Set(["IN", "AND", "OR", "NOT", "NOW"]);
+/** Built-in comparison, arithmetic, concatenation, pattern and jsonb operators. */
+const C5_ALLOWED_OPS = new Set(
+  "= <> != < > <= >= + - * / % || ~ ~* !~ !~* -> ->> #> #>> @> <@ ? ?| ?&".split(" "),
+);
+const C5_OP_CHARS = /^[+\-*/<>=~!@#%^&|`?]+/;
+
+/** PostgreSQL's lexer rule: a multi-char operator ending in + or - sheds it unless it holds ~!@#%^&|`?. */
+function c5OperatorAllowed(op) {
+  let o = op;
+  for (;;) {
+    if (C5_ALLOWED_OPS.has(o)) return true;
+    if (o.length > 1 && /[+-]$/.test(o) && !/[~!@#%^&|`?]/.test(o)) {
+      o = o.slice(0, -1);
+      continue;
+    }
+    return false;
+  }
+}
+
+/** Tokenise a MASKED statement. String interiors are already blanked. */
+export function c5Tokens(s) {
+  const toks = [];
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (/[\t\n\r\f\v ]/.test(c)) {
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < s.length) {
+        if (s[j] === '"') {
+          if (s[j + 1] === '"') {
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        j++;
+      }
+      toks.push({ k: "qid", v: s.slice(i, j + 1) });
+      i = j + 1;
+      continue;
+    }
+    const rest = s.slice(i);
+    let m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(rest);
+    if (m) {
+      toks.push({ k: "word", v: m[0] });
+      i += m[0].length;
+      continue;
+    }
+    m = /^(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?/.exec(rest);
+    if (m) {
+      toks.push({ k: "num", v: m[0] });
+      i += m[0].length;
+      continue;
+    }
+    if (rest.startsWith("::")) {
+      toks.push({ k: "cast", v: "::" });
+      i += 2;
+      continue;
+    }
+    if ("()[],.;".includes(c)) {
+      toks.push({ k: "p", v: c });
+      i++;
+      continue;
+    }
+    m = C5_OP_CHARS.exec(rest);
+    if (m) {
+      toks.push({ k: "op", v: m[0] });
+      i += m[0].length;
+      continue;
+    }
+    toks.push({ k: "bad", v: c });
+    i++;
+  }
+  return toks;
+}
+
+const isP = (t, v) => t !== undefined && t.k === "p" && t.v === v;
+const isName = (t) => t !== undefined && (t.k === "word" || t.k === "qid");
+
+/**
+ * `::` then a type: a (qualified) name, VARYING / PRECISION follow-words, an
+ * optional numeric typmod `(n[, m])` and `[]` array suffixes. Returns the index
+ * of the type's last token, or -1 when the cast is not one C5 can read.
+ */
+function skipC5CastType(toks, x) {
+  let y = x + 1;
+  if (!isName(toks[y])) return -1;
+  while (isP(toks[y + 1], ".") && isName(toks[y + 2])) y += 2;
+  while (toks[y + 1]?.k === "word" && /^(VARYING|PRECISION)$/i.test(toks[y + 1].v)) y++;
+  if (isP(toks[y + 1], "(")) {
+    let z = y + 2;
+    if (toks[z]?.k !== "num") return -1;
+    z++;
+    if (isP(toks[z], ",")) {
+      z++;
+      if (toks[z]?.k !== "num") return -1;
+      z++;
+    }
+    if (!isP(toks[z], ")")) return -1;
+    y = z;
+  }
+  while (isP(toks[y + 1], "[")) {
+    let z = y + 2;
+    if (toks[z]?.k === "num") z++;
+    if (!isP(toks[z], "]")) return -1;
+    y = z;
+  }
+  return y;
+}
+
 /**
  * C5's literal check, over the MASKED statement (string interiors are already
  * blanked, so what remains is code). Column references in SET and WHERE are
- * admitted — that is the one real difference from C2's VALUES-tuple rule.
+ * admitted — that is the one real difference from C2's VALUES-tuple rule —
+ * and every OTHER token must be on the allowlist above.
  * @returns {string|null} the refusal reason, or null when the UPDATE is literal.
  */
 export function updateLiteralCheck(masked) {
-  const word = /\b(FROM|USING|SELECT|RETURNING|WITH)\b/i.exec(masked);
-  if (word) {
-    return `carries the token ${word[1].toUpperCase()} — a joined, sub-selected or RETURNING UPDATE is not a literal C5 update (C5)`;
-  }
   if (masked.includes("$")) {
     return "carries a `$` (a dollar-quoted body or a positional parameter) — not a literal C5 update (C5)";
   }
-  // Any `identifier(` is a call, except the IN-list and now(). That bans
-  // current_setting(), net.http_*(), pg_notify() and every other side effect.
-  // AND / OR / NOT before a parenthesis group a boolean, they never call a
-  // function (all three are reserved words in PostgreSQL). Refusing them would
-  // push a LITERAL UPDATE into a `decline:` line, i.e. hide a replayable effect.
-  const call = /([A-Za-z_][A-Za-z0-9_]*)[\t\n ]*\(/g;
-  const notCalls = new Set(["IN", "AND", "OR", "NOT"]);
-  for (let m; (m = call.exec(masked)) !== null; ) {
-    if (notCalls.has(m[1].toUpperCase()) || m[1].toLowerCase() === "now") continue;
-    return `makes the non-literal call \`${m[1]}(\` — only literals, column references, IN lists and now() are replayable (C5)`;
+  const toks = c5Tokens(masked);
+  for (let x = 0; x < toks.length; x++) {
+    const t = toks[x];
+    const prev = toks[x - 1];
+    const next = toks[x + 1];
+    const callNext = isP(next, "(");
+    if (t.k === "bad") {
+      return `carries the character \`${t.v}\` outside a string literal — C5 admits only names, numbers, operators and ( ) [ ] , . ; there, and psql acts on a backslash or a lone colon at replay (C5)`;
+    }
+    if (t.k === "op") {
+      if (c5OperatorAllowed(t.v)) continue;
+      return `carries the operator \`${t.v}\`, which is not on C5's operator allowlist — an operator resolves to a function, so an unknown spelling is an unknown call (C5)`;
+    }
+    if (t.k === "cast") {
+      const y = skipC5CastType(toks, x);
+      if (y < 0) return "carries a `::` cast whose type C5 cannot read — not a literal C5 update (C5)";
+      x = y;
+      continue;
+    }
+    if (t.k === "qid") {
+      if (callNext) {
+        return `makes the quoted-identifier call \`${t.v}(\` — quoting a function name does not make it a column reference, and no quoted call is replayable (C5)`;
+      }
+      continue;
+    }
+    if (t.k !== "word") continue; // num, p
+    const up = t.v.toUpperCase();
+    if (isP(prev, ".")) {
+      // The tail of a qualified name: a column after `alias.` may be any label,
+      // a reserved word included. A call here is schema-qualified — `net.now()`
+      // is whatever `net` says it is, not pg_catalog's now().
+      if (callNext) {
+        return `makes the schema-qualified call \`…${t.v}(\` — only an unqualified now() is replayable, and a qualified name is whatever that schema defines (C5)`;
+      }
+      continue;
+    }
+    if (C5_JOIN_WORDS.has(up)) {
+      return `carries the token ${up} — a joined, sub-selected or RETURNING UPDATE is not a literal C5 update (C5)`;
+    }
+    if (C5_SUBQUERY_WORDS.has(up)) {
+      return `carries the token ${up} — \`TABLE t\` and \`VALUES (…)\` are sub-queries spelled without SELECT or FROM, so the UPDATE's effect would depend on rows other than the ones the replay wrote (C5)`;
+    }
+    if (C5_NILADIC.has(up)) {
+      return `reads the niladic session function ${up} — it takes no parentheses, so it reads like a column reference, but it replays the RESTORE session's value rather than the one PROD had (C5)`;
+    }
+    if (up === "ARRAY") {
+      if (isP(next, "[")) continue;
+      return "carries ARRAY without `[` — `ARRAY(…)` is a sub-query constructor, not a literal array (C5)";
+    }
+    if (callNext) {
+      if (C5_ALLOWED_CALLS.has(up)) continue;
+      return `makes the non-literal call \`${t.v}(\` — only literals, column references, IN lists and now() are replayable (C5)`;
+    }
+    if (PG_RESERVED.has(up) && !C5_ADMITTED_RESERVED.has(up)) {
+      return `carries the reserved word ${up}, which C5's token allowlist does not admit — a reserved word is never a bare column reference, so it is syntax C5 has not been taught to read (C5)`;
+    }
   }
   return null;
 }
@@ -1254,8 +1492,14 @@ function modeAudit(io, allowlistPath, migrationsDir) {
  * `extract-reference-inserts self-test OK: 39 kinds, red+green each.`, exit 0.
  * 19 → 39: twenty C5 kinds, one per C5 refusal reason. Before this raise the
  * layer-2 vitest was observed RED with `RATCHET STALE: … declares 39 … still 19`.
+ *
+ * MEASURED 2026-09-25 (Phase 164.9.2 review round 1, CR-01 / SFH-01 / WR-01, the
+ * token allowlist): `extract-reference-inserts self-test OK: 49 kinds, red+green
+ * each.`, exit 0. 39 → 49: ten `c5-update-*` kinds, one per refusal reason the
+ * allowlist added. Before this raise the layer-2 vitest was observed RED with
+ * `RATCHET STALE: … declares 49 … still 39`.
  */
-export const SELF_TEST_KINDS_FLOOR = 39;
+export const SELF_TEST_KINDS_FLOOR = 49;
 
 /**
  * @type {Array<{id:string, why:string, audit?:boolean, expect:string, greenStdout?:RegExp, greenAbsent?:RegExp}>}
@@ -1436,6 +1680,69 @@ export const SELF_TEST_KINDS = [
     why: "C5: an allowlist of C5 lines alone replays no row the restore's count floor can measure, the same defect as an empty allowlist (plan 01 deviation 2)",
     expect: "the allowlist carries C5 lines but NO INSERT line",
     greenStdout: /-- refdata-update: 20260101000000_fx_a\.sql:\d+ public\.fx_ref/,
+  },
+  // ── C5's token allowlist (164.9.2 review round 1: CR-01, SFH-01, WR-01). One
+  // kind per refusal reason the allowlist added; each green twin pins the
+  // literal shape the same rule must still ADMIT.
+  {
+    id: "c5-update-quoted-call",
+    why: "C5 (review CR-01): maskSql keeps quoted identifiers, so the denylist's call regex never saw `\"pg_notify\"(` and classified it literal; the audit then advised adding the update: line that would fire it inside a COMMITting transaction on shared TEST. The green leg pins that a quoted COLUMN is still a reference",
+    expect: 'makes the quoted-identifier call `"pg_notify"(`',
+    greenStdout: /UPDATE fx_ref SET "label" = 'v' WHERE "id" = 1;/,
+  },
+  {
+    id: "c5-update-qualified-now",
+    why: "C5 (review SFH-01): the denylist exempted `now` BY NAME, so `net.now()` — any schema's function called now — passed. The green leg pins that an unqualified now() and a qualified COLUMN are still admitted",
+    expect: "makes the schema-qualified call `…now(`",
+    greenStdout: /UPDATE fx_ref AS r SET seen_at = now\(\) WHERE r\.id = 1;/,
+  },
+  {
+    id: "c5-update-psql-metachar",
+    why: "C5: the restore replays through psql, which acts on a backslash (a meta-command) or a lone colon (a variable) outside a string; the token allowlist refuses any character it does not know. The green leg pins that a backslash INSIDE a string is masked and admitted",
+    expect: "carries the character `\\` outside a string literal",
+    greenStdout: /UPDATE fx_ref SET label = 'a\\b' WHERE id = 1;/,
+  },
+  {
+    id: "c5-update-unknown-operator",
+    why: "C5: an operator resolves to a function, so a spelling outside the built-in set is an unknown call. The green leg pins the admitted comparison, arithmetic and concatenation operators, and PostgreSQL's `=-1` split",
+    expect: "carries the operator `<=>`, which is not on C5's operator allowlist",
+    greenStdout: /UPDATE fx_ref SET label = label \|\| 'v', n = n \+ 1 WHERE id >= 1 AND id <> 2 AND id =-1;/,
+  },
+  {
+    id: "c5-update-unreadable-cast",
+    why: "C5: after `::` the allowlist reads a type name and a NUMERIC typmod; anything else in the parentheses is code. The green leg pins qualified, multi-word, typmod'd and array casts",
+    expect: "carries a `::` cast whose type C5 cannot read",
+    greenStdout: /UPDATE fx_ref SET label = 'v'::character varying\(20\), n = '1'::numeric\(10, 2\), tags = '\{\}'::text\[\], kind = 'k'::public\.fx_kind WHERE id = 1;/,
+  },
+  {
+    id: "c5-update-table-subquery",
+    why: "C5 (review WR-01): `IN (TABLE t)` is a sub-query spelled without SELECT or FROM, and `IN (` was exempt from the call ban, so the denylist read it as literal. The green leg pins a literal IN list",
+    expect: "carries the token TABLE — `TABLE t` and `VALUES (…)` are sub-queries spelled without SELECT or FROM",
+    greenStdout: /UPDATE fx_ref SET label = 'v' WHERE id IN \(1, 2\);/,
+  },
+  {
+    id: "c5-update-values-subquery",
+    why: "C5 (review WR-01): `IN (VALUES (…))` is the other sub-query spelled without SELECT or FROM. The green leg pins that the word inside a string, and a QUOTED column named values, are admitted",
+    expect: "carries the token VALUES — `TABLE t` and `VALUES (…)` are sub-queries spelled without SELECT or FROM",
+    greenStdout: /UPDATE fx_ref SET "values" = 'values' WHERE id IN \(1\);/,
+  },
+  {
+    id: "c5-update-niladic",
+    why: "C5 (review WR-01): current_user takes no parentheses, so the denylist read it as a column; it replays the RESTORE session's role, a value PROD never held. The green leg pins that a QUOTED \"user\" column and CURRENT_TIMESTAMP (the statement clock, admitted as now() is) pass",
+    expect: "reads the niladic session function CURRENT_USER",
+    greenStdout: /UPDATE fx_ref SET "user" = 'v', seen_at = CURRENT_TIMESTAMP WHERE id = 1;/,
+  },
+  {
+    id: "c5-update-array-subquery",
+    why: "C5: `ARRAY(…)` is a sub-query constructor; only `ARRAY[…]`, a literal array, is admitted. The green leg pins the literal form",
+    expect: "carries ARRAY without `[`",
+    greenStdout: /UPDATE fx_ref SET tags = ARRAY\['a', 'b'\] WHERE id = 1;/,
+  },
+  {
+    id: "c5-update-reserved-word",
+    why: "C5: a PostgreSQL reserved word is never a bare column reference, so one outside the admitted set is syntax C5 has not been taught to read, and it is refused rather than replayed on a guess. The green leg pins the admitted CASE/WHEN/THEN/ELSE/END, TRUE, NULL and DEFAULT",
+    expect: "carries the reserved word COLLATE, which C5's token allowlist does not admit",
+    greenStdout: /UPDATE fx_ref SET label = CASE WHEN id = 1 THEN 'a' ELSE 'b' END, flag = TRUE, note = NULL, kind = DEFAULT WHERE id = 1;/,
   },
   // ── C5 in --audit: every top-level UPDATE / DELETE on a replayed table is accounted for.
   {

@@ -130,6 +130,18 @@
 #     statement on such a table by name: C5 replays UPDATE only. At most one
 #     `update:` and one `decline:` line per (file, table); a second line of one
 #     kind is refused as a duplicate.
+#     ⛔ CORRECTED 2026-09-25 (164.9.2 review round 1, CR-01 / SFH-01 / WR-01).
+#     "no FROM, USING, SELECT, RETURNING or WITH, no `$`, and no call but
+#     `now()`" above was a DENYLIST, and it admitted `"pg_notify"(…)` (a quoted
+#     call), `net.now()` (a schema-qualified one), `IN (TABLE t)` and
+#     `current_user` as literal. The rule is now a TOKEN ALLOWLIST, the shape
+#     C2's check has always had: outside string literals a C5 UPDATE may carry
+#     only column references, numbers, the admitted reserved words, the built-in
+#     operators, readable `::` casts, `( ) [ ] , . ;`, and an UNQUALIFIED,
+#     UNQUOTED now(). A quoted or schema-qualified call, a niladic session
+#     function (current_user and its kin), TABLE / VALUES / ARRAY( sub-queries,
+#     an unknown operator, and a backslash or lone colon (psql acts on both at
+#     replay) are each refused by name. The sentence above is kept as lineage.
 #
 # ── SCOPE BOUNDARY: THE REPLAY REPRODUCES INSERTS, NOT SUBSEQUENT EDITS ────
 # ⛔ MEASURED 2026-09-09. C1-C4 select INSERT statements, so the replay restores
