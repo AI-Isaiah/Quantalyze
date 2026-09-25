@@ -510,6 +510,12 @@ def _clear_blind_run() -> None:
 # the cadence, and it is cheap against a second durable write path whose own
 # failure would have to be handled inside a heal that must never raise.
 # --------------------------------------------------------------------------- #
+# ⚠️ 164.6.6 CONSTRAINT (recorded 2026-09-25, 164.6.5 review round 1, IN-06):
+# this gate — and the persistence alarm below — is PROCESS-GLOBAL, not keyed by
+# terminal. That is correct while v1 runs ONE shared terminal (the answered-count
+# it reads is already per `terminal_key`). Under per-client terminals (Phase
+# 164.6.6, MT5TERMINALISOLATION) one terminal's wedge would debounce another's
+# recycle; key the gate by `terminal_key` before a second terminal ships.
 _IPC_FAULT_ESCALATION_ARMED: bool = True
 
 #: The terminal's answered-count (``mt5_client.mt5_terminal_answer_count``) at

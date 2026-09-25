@@ -885,6 +885,13 @@ def {_REMOTE_MATERIALIZE_FN}(deals):
 # VNC console, which is exactly the 1h39m manual step this phase removes. It takes
 # NO credential and names no account, server or path.
 #
+# ⚠️ 164.6.6 CONSTRAINT (recorded 2026-09-25, 164.6.5 review round 1, IN-07): it
+# ends EVERY `terminal64.exe` in the bridge's wineserver. That is correct while
+# v1 runs ONE shared terminal. Under per-client terminals (Phase 164.6.6,
+# MT5TERMINALISOLATION) one client's wedge would kill every client's terminal;
+# the match must then be scoped to the wedged terminal's own process before a
+# second terminal ships.
+#
 # ⭐ WHY TERMINATE-ONLY IS A FULL RECYCLE (founder live spike, 2026-09-25). Nothing
 # supervises the terminal, but the MetaTrader5 package's own `initialize()`
 # LAUNCHES a terminal that is not running. Twice the terminal process was killed
@@ -1790,6 +1797,17 @@ class Mt5Client:
             was false — two independent switches, each sufficient on its own.
             The gateway re-sets ``Enabled`` off on every account change
             (``Account=1``/``Profile=1``), which is why the fault recurs.
+
+            ⛔ CORRECTED 2026-09-25 (164.6.5; the sentence above is kept as
+            lineage): the re-clear is CONDITIONAL, not on every account change.
+            It happens only while the Experts option *"Disable algorithmic
+            trading when the account has been changed"* (``[Experts]
+            Account=1``) — or its profile sibling (``Profile=1``) — is TICKED.
+            The founder read the gateway's Experts tab on 2026-09-24: *"Allow
+            algorithmic trading"* checked and all four *"Disable ..."* options
+            UNCHECKED, and a real authorization on 2026-09-16 left the options
+            byte-identical. So the fault recurs when that box is ticked (the
+            D-15 landmine), not because an account changed.
 
         That is why this method exists: a false ``trade_allowed`` here makes the
         account-level negatives UNINFORMATIVE, and a rule that concluded
