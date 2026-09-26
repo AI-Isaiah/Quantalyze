@@ -187,6 +187,42 @@ async function readRecipientArm(
   );
 }
 
+/**
+ * 167.2.1-REVIEW WR-01 — how many buildability probes one page load runs at
+ * once. Each probe is a service-role read of the strategy row with its largest
+ * JSON columns (`daily_returns`, `returns_series`, `metrics_json_by_basis`),
+ * plus up to 20,000 `csv_daily_returns` rows for a composite. The list has no
+ * pagination, so an unbounded fan-out fired one such read per computed row at
+ * once on the dashboard's landing page, and pooler exhaustion then read as a
+ * failed check on every row.
+ */
+const PROBE_CONCURRENCY = 4;
+
+/**
+ * A FIFO slot limiter: at most `limit` tasks run at once, the rest wait in
+ * arrival order. A finishing task hands its slot straight to the next waiter
+ * (`active` is not decremented then), so a caller arriving in between cannot
+ * take the slot too and push the count past `limit`.
+ */
+function concurrencyLimiter(limit: number) {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  const release = () => {
+    const next = waiting.shift();
+    if (next) next();
+    else active -= 1;
+  };
+  return async function run<T>(task: () => Promise<T>): Promise<T> {
+    if (active < limit) active += 1;
+    else await new Promise<void>((resolve) => waiting.push(resolve));
+    try {
+      return await task();
+    } finally {
+      release();
+    }
+  };
+}
+
 export default async function StrategiesPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -377,6 +413,13 @@ export default async function StrategiesPage() {
     mode: ReturnType<typeof shareAffordanceMode>,
   ): Promise<string> => recipientShareNote(mode, await armOf(s, mode));
 
+  // WR-01: the probes share one limiter per page load, and a probe that
+  // THROWS is recorded here and captured ONCE after the fan-out, with the
+  // count as a tag, never once per row: a saturated pool makes every row
+  // throw, and N events per page load hid the one fact that mattered.
+  const runProbe = concurrencyLimiter(PROBE_CONCURRENCY);
+  const probeThrows: unknown[] = [];
+
   const shareNotes = new Map<string, string>(
     (
       await Promise.all(
@@ -388,9 +431,19 @@ export default async function StrategiesPage() {
           }
           // D-08: a computed row is probed, uncached, under the owner
           // predicate. Only ids from the owner-filtered list reach here.
+          // COST, accepted (167.2.1-REVIEW WR-01): one heavy service-role
+          // read per computed row per page load (the strategy row with its
+          // series and basis columns; a composite adds its csv read), at most
+          // PROBE_CONCURRENCY at once. The list is unpaginated, so the cost
+          // still grows linearly with the owner's computed strategies; the
+          // parity invariant needs the resolve stage itself, so a cheaper
+          // answer is a writer-side verdict or a column-light resolve, not a
+          // shortcut here.
           let probe: Awaited<ReturnType<typeof probeFactsheetBuildable>>;
           try {
-            probe = await probeFactsheetBuildable(s.id, (q) => withPublishedOrOwner(q, user.id));
+            probe = await runProbe(() =>
+              probeFactsheetBuildable(s.id, (q) => withPublishedOrOwner(q, user.id)),
+            );
           } catch (err) {
             // D-05: a probe that throws is never read as "buildable".
             // 167.2.1-REVIEW-SFH H-2: nor as "not available". Every failed
@@ -399,13 +452,13 @@ export default async function StrategiesPage() {
             // It used to render `recipientShareNote(mode, "unreadable")`,
             // which for a PUBLISHED row is KCS12-PUBLIC, "… not available yet
             // …", while the public factsheet most likely rendered fine.
+            // Logged here per row, with its id; captured once per page load
+            // after the fan-out (WR-01).
             console.error("[strategies/page] factsheet probe failed", {
               id: s.id,
               message: err instanceof Error ? err.message : String(err),
             });
-            captureToSentry(err instanceof Error ? err : new Error(String(err)), {
-              tags: { route: "strategies/page", stage: "factsheet-probe" },
-            });
+            probeThrows.push(err);
             return [s.id, probeUnreadableShareNote(mode)] as const;
           }
           if (probe.buildable) return [s.id, null] as const;
@@ -449,6 +502,19 @@ export default async function StrategiesPage() {
       )
     ).filter((entry): entry is readonly [string, string] => entry[1] !== null),
   );
+  if (probeThrows.length > 0) {
+    // WR-01: one event per page load. The first error is the payload (the
+    // per-row console lines above carry every row's message and id); the
+    // count is a tag, so a saturation event reads as one event with its size.
+    const first = probeThrows[0];
+    captureToSentry(first instanceof Error ? first : new Error(String(first)), {
+      tags: {
+        route: "strategies/page",
+        stage: "factsheet-probe",
+        probe_failures: String(probeThrows.length),
+      },
+    });
+  }
 
   return (
     <>

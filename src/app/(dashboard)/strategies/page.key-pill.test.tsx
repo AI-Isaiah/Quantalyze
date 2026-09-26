@@ -148,6 +148,15 @@ const state = vi.hoisted(() => ({
   adminStrategyReads: [] as string[],
   /** Every `.or(filter)` applied to an admin read (the visibility predicate). */
   adminOrFilters: [] as string[],
+  /**
+   * 167.2.1-REVIEW WR-01 — a concurrency gauge on the probe's strategy read.
+   * With a delay set, each read stays open across a timer, so reads that run
+   * at once overlap and `adminMaxInFlight` records the peak. 0 = no delay (the
+   * read resolves in one tick, as every other case expects).
+   */
+  adminReadDelayMs: 0,
+  adminInFlight: 0,
+  adminMaxInFlight: 0,
 }));
 
 /** N consecutive synthetic calendar days from 2024-01-02, as {date, value}. */
@@ -215,6 +224,12 @@ vi.mock("@/lib/supabase/admin", () => ({
         b.maybeSingle = async () => {
           if (table !== "strategies") return { data: null, error: null };
           state.adminStrategyReads.push(id);
+          state.adminInFlight += 1;
+          state.adminMaxInFlight = Math.max(state.adminMaxInFlight, state.adminInFlight);
+          if (state.adminReadDelayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, state.adminReadDelayMs));
+          }
+          state.adminInFlight -= 1;
           return (
             state.adminRows[id] ?? {
               data: adminStrategy(id, { daily_returns: points(30) }),
@@ -368,6 +383,9 @@ beforeEach(() => {
   state.adminTables = [];
   state.adminStrategyReads = [];
   state.adminOrFilters = [];
+  state.adminReadDelayMs = 0;
+  state.adminInFlight = 0;
+  state.adminMaxInFlight = 0;
   captureToSentryMock.mockClear();
   consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -729,7 +747,10 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       expect.objectContaining({ id: "s-1" }),
     );
     expect(captureToSentryMock).toHaveBeenCalledTimes(1);
-    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), PROBE_TAGS);
+    // WR-01: one event per page load, carrying the count.
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { ...PROBE_TAGS.tags, probe_failures: "1" },
+    });
     // Tags only: the id stays in the server log, never in the capture.
     const [err, ctx] = captureToSentryMock.mock.calls[0] as [Error, unknown];
     expect(err.message).not.toContain("s-1");
@@ -815,6 +836,41 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     const container = await renderPage();
 
     expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_PROBE_UNREADABLE);
+  });
+
+  it("PROBE-CONCURRENCY (167.2.1-REVIEW WR-01): at most 4 probe reads run at once, and every computed row is still probed, in list order", async () => {
+    // Each probe is a heavy service-role read. The list is unpaginated, so an
+    // unbounded fan-out fired one per computed row at once, and a saturated
+    // pool then failed the check on every row.
+    const ids = Array.from({ length: 10 }, (_, i) => `s-${i}`);
+    state.strategies = ids.map((id) => row(id, { strategy_analytics: { computation_status: "complete" } }));
+    state.adminReadDelayMs = 5;
+
+    const container = await renderPage();
+
+    expect(state.adminMaxInFlight).toBe(4);
+    expect(state.adminStrategyReads).toEqual(ids);
+    // All buildable: the cap changes the timing, never the answer.
+    expect(container.querySelector('[data-testid="strategy-row-share-note"]')).toBeNull();
+  });
+
+  it("PROBE-THROWS-ONE-EVENT (167.2.1-REVIEW WR-01): six probes that throw on one page load are one Sentry event carrying the count, and six notes", async () => {
+    const ids = Array.from({ length: 6 }, (_, i) => `s-${i}`);
+    state.strategies = ids.map((id) => row(id, { strategy_analytics: { computation_status: "complete" } }));
+    state.adminThrow = true;
+
+    const container = await renderPage();
+
+    for (const id of ids) expect(noteOf(container, `Strategy ${id}`)).toBe(PROBE_UNREADABLE);
+    // Every row is still in the server log, with its id...
+    expect(
+      consoleError.mock.calls.filter((call: unknown[]) => call[0] === "[strategies/page] factsheet probe failed"),
+    ).toHaveLength(6);
+    // ...and Sentry gets ONE event for the page load, sized by a tag.
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { ...PROBE_TAGS.tags, probe_failures: "6" },
+    });
   });
 
   it("PROBE-NOT-COMPUTED (D-05, SFH M-5): the embed says complete but the builder's read says failed, so the row takes the uncomputed path, logged at warn", async () => {
