@@ -2373,6 +2373,51 @@ jobs:
           ls -l "$("$pgbin/pg_config" --pkglibdir)/pg_cron.so"
           ls -l "$("$pgbin/pg_config" --sharedir)/extension/pg_cron.control"
 
+      - name: Probe - dblink contrib is present for the lane's PostgreSQL (Phase 164.5.2)
+        # ⚠️ THIS STEP'S FIRST PR RUN IS THE MEASUREMENT. 164.5.2-RESEARCH
+        # assumption A1 ("ubuntu's PostgreSQL server package carries contrib,
+        # so dblink is loadable on this runner") was INSPECTED, never executed:
+        # the lane was only ever run on the authoring box. The LANE-ONLY gate
+        # supabase/tests/test_mark_rpc_bridge_advisory_lock.sql opens a second
+        # backend through dblink, so without it that gate's baseline dies at
+        # `CREATE EXTENSION IF NOT EXISTS dblink` and the runner reports an
+        # anonymous `baseline` defect that names the wrong layer. This probe
+        # names the missing contrib instead, before the long mutation run.
+        #
+        # ⛔ NOTHING IS INSTALLED PRE-EMPTIVELY, mirroring the pg_cron step's own
+        # "measure first" stance. Install a contrib package ONLY if this probe
+        # goes red on a real run. It reads the SAME `--print-pgbin` answer and
+        # the SAME pg_config the lane boots, so it cannot pass on one tree
+        # while the lane runs another. `.so` is the Linux module suffix, as in
+        # the pg_cron step's own `ls`: a macOS PostgreSQL 16 names the same
+        # module `dblink.dylib`, so this body is written for this runner only
+        # and is not a local check. The pg_cron step above is deliberately
+        # not edited: its script is exercised by the calibration harness in
+        # src/__tests__/test-restore-workflow-wiring.test.ts.
+        run: |
+          set -euo pipefail
+          pgbin_err="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/pgbin-dblink.err"
+          pgbin=$(bash scripts/pg-lane/run.sh --print-pgbin 2>"$pgbin_err" || true)
+          echo "PGBIN the lane will boot: ${pgbin:-(unresolved)}"
+          if [ -z "$pgbin" ]; then
+            echo "--- scripts/pg-lane/run.sh --print-pgbin said (stderr) ---" >&2
+            cat "$pgbin_err" >&2 || true
+            echo "--- end of the lane's own diagnosis ---" >&2
+            echo "::error::MEASURE_FAIL: scripts/pg-lane/run.sh --print-pgbin could not resolve any PostgreSQL server binaries on this runner, so this probe cannot say whether dblink is present for the lane's PostgreSQL. The lane's own diagnosis is printed on stderr immediately above this line."
+            exit 1
+          fi
+          dblink_so="$("$pgbin/pg_config" --pkglibdir)/dblink.so"
+          dblink_control="$("$pgbin/pg_config" --sharedir)/extension/dblink.control"
+          echo "--- the two dblink artifacts the lane needs ---"
+          missing=0
+          ls -l "$dblink_so" || missing=1
+          ls -l "$dblink_control" || missing=1
+          if [ "$missing" -ne 0 ]; then
+            major=$("$pgbin/pg_config" --version | awk '{print $2}' | cut -d. -f1 || true)
+            echo "::error::dblink is NOT present for the lane's PostgreSQL (major ${major:-unknown}, bindir $pgbin): expected dblink.so under pg_config --pkglibdir and extension/dblink.control under pg_config --sharedir. The Phase 164.5.2 LANE-ONLY gate supabase/tests/test_mark_rpc_bridge_advisory_lock.sql cannot run without it. Remedy: install the PostgreSQL contrib package for major ${major:-unknown} in this job (assumption A1 did not hold on this runner image)."
+            exit 1
+          fi
+
       - name: Probe - the runner image's PostgreSQL server binaries resolve
         # 164.3-RESEARCH assumption A1 ("ubuntu-latest ships PostgreSQL server
         # binaries under /usr/lib/postgresql/<major>/bin") has NEVER been
