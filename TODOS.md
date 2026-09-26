@@ -1347,6 +1347,29 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[164.6.7-RETRY-PLAIN-COMPLETE]` The transient retry keeps a factsheet published only if
+      its row was `complete_with_warnings` or warned; a plain `complete` row is not protected across
+      the retry (booked 2026-09-26, Phase 164.6.7 round-2 review WR-01 / SFH-R2-03).**
+      - **What happens.** A marked refresh whose marker re-read fails now raises
+        `RefreshMarkerRereadUnavailable` and retries. The move to `failed_retry` runs
+        `mark_compute_job_failed`, whose bridge `sync_strategy_analytics_status` branch (a) keeps
+        `complete_with_warnings` but rewrites a plain `complete` row to `computing`. On attempt 2
+        `_read_entry_publish_state` reads `computing`, so no protection is granted and a recurring
+        failure takes the loud, un-publishing path.
+      - **Why not fixed in 164.6.7.** Keeping the attempt-1 publish state in job metadata cannot
+        close it: branch (a) has already rewritten the row before attempt 2 reads anything, and on
+        the final attempt the bridge decides in SQL with no Python running. The root fix is a
+        bridge migration (the non-terminal branch keeps a healthy publish state for a job carrying
+        a refresh marker). Migrations auto-apply to PROD on merge, so it is not a ride-along.
+      - **Reachability (dated, not re-measured).** The code comment records the live ledger cohort
+        as 0 plain `complete` and 5 `complete_with_warnings` rows, so nothing is exposed today.
+        The condition is stated at `MarkerLiveState` in `job_worker.py`, in runbook item 2 and in
+        164.6.7 CONTEXT D-10.
+      - **Destination: Phase 164.5.2 BRIDGELOCK**, the phase that already changes the terminal
+        mark RPCs fanning into this bridge (same routing as
+        `[164.6.7-COMPOSITE-REREAD-RESIDUE]` below). Dated routing line under `### Phase 164.5.2`
+        in `.planning/ROADMAP.md`.
+
 - [ ] **`[164.6.7-COMPOSITE-REREAD-RESIDUE]` A marker retraction that lands between the Python live
       re-read and `mark_compute_job_failed` still leaves the pre-fix outcome, over a window of
       milliseconds (booked 2026-09-25, Phase 164.6.7 COMPOSITECLAIMSNAPSHOT, decision D-03).**

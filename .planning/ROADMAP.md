@@ -2136,6 +2136,8 @@ Plans:
 
 ⭐ **ROUTED HERE 2026-09-25 (Phase 164.6.7 round-1 review WR-04):** `TODOS.md` `[164.6.7-COMPOSITE-REREAD-RESIDUE]`, a data-integrity residue in the same bridge fan-in: a marker retraction committing between the Python live re-read and `mark_compute_job_failed` still yields an error-only write followed by a loud `sync_strategy_analytics_status`, leaving `computation_warned` set. Fix shape per that entry (branch (b) clears `computation_warned`, or the protect/loud decision moves inside the bridge's transaction). It is ⛔ BLOCKING item 7 of the runbook precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in `docs/runbooks/ledger-refresh-go-live.md`, so the composite schedule waits on this phase unless the founder accepts the window there with a date.
 
+⭐ **ROUTED HERE 2026-09-26 (Phase 164.6.7 round-2 review WR-01 / SFH-R2-03):** `TODOS.md` `[164.6.7-RETRY-PLAIN-COMPLETE]`. The bridge's non-terminal branch rewrites a plain `complete` row to `computing` on `failed_retry`, so the 164.6.7 transient retry protects only `complete_with_warnings` or warned rows. Fix shape: the non-terminal branch keeps a healthy publish state for a job carrying a refresh marker. Latent today (dated reading: 0 plain `complete` rows in the live ledger cohort).
+
 **Requirements**: TODOS entries `161.1-D1`, DEC-4
 **Depends on:** Phase 164.4.1 (pg-lane with pg_cron). ⚠️ NOT Phase 164.5 — the plan is file-disjoint from it and was lifted whole.
 **Plans:** 1 plan (lifted from Phase 164.5 plan 08, unmodified)
