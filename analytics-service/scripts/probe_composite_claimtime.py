@@ -9,8 +9,11 @@ by ``scripts/local-stack/run.sh up`` and nothing else:
 2. claim it through ``claim_compute_jobs_with_priority`` on the handler's own
    service-role client, with a batch of ONE and only after checking that no
    other claimable ``stitch_composite`` job is on the lane, so the handler
-   receives the claim-time snapshot exactly as the worker does and the probe
-   never claims a job it did not seed;
+   receives the claim-time snapshot exactly as the worker does. If the claim
+   still takes a job the probe did not seed (the pre-check is check-then-act),
+   the probe releases that job back to ``pending`` through
+   ``defer_compute_job`` with its claim token and stops (exit 2); it never
+   reads a verdict from a run that claimed a foreign job;
 3. optionally retract the marker on the LIVE row with the TypeScript helper's
    write shape (``src/lib/ledger-refresh-marker.ts``), AFTER the claim and
    BEFORE the run, which is the window under test;
@@ -122,6 +125,8 @@ _INFLIGHT_KIND = "sync_trades"
 
 _WORKER_ID = "probe-164.6.7-claimtime"
 _CORRELATION_ID = "probe-164.6.7-retraction"
+# Written to a released foreign job's last_error by defer_compute_job; no id.
+_FOREIGN_RELEASE_REASON = "probe-164.6.7 released a job it claimed but did not seed"
 
 _PRE_FIX_SUMMARY = f"HARM-PROBE summary: expect=pre-fix arms={len(_ARMS)} result=ok"
 _SAFE_TOKEN = re.compile(r"^[a-z_]+$")
@@ -179,7 +184,11 @@ def _assert_loopback_dsn(dsn: str, environ: Mapping[str, str]) -> None:
 
 
 def _assert_connected_loopback(conn: Any) -> None:
-    """The peer the connection actually reached, checked before any statement."""
+    """The peer the connection actually reached, checked before any statement.
+
+    A Unix-socket connection is refused ON PURPOSE: its ``hostaddr`` is empty,
+    so it cannot prove the peer is loopback. Do not turn that into an
+    allowance (round-2 silent-failure review I-R2-3)."""
     host = conn.info.host
     hostaddr = conn.info.hostaddr
     if host not in _LOOPBACK_HOSTS or hostaddr not in _LOOPBACK_ADDRS:
@@ -417,9 +426,9 @@ def _judge(
 ) -> tuple[str, int]:
     """Assert the DECISION readings for the chosen mode.
 
-    A claimed job the probe did not seed is FAIL in every mode, including the
-    unasserted one: the lane's queue was not the probe's alone, so no reading
-    from it is trustworthy.
+    A claim that takes a job the probe did not seed never reaches this
+    function: ``_claim_own`` releases that job and raises, so the run stops at
+    exit 2 with no verdict (round-2 review IN-04).
 
     Without ``--expect`` nothing is asserted and the result says so
     (``unasserted``), so a copied command that drops the flag cannot read as a
@@ -439,8 +448,6 @@ def _judge(
     during the run: a failed re-read is loud too, so it would pass for the
     wrong reason.
     """
-    if any(int(r["foreign_rows_claimed"]) != 0 for _, r in readings):
-        return "FAIL", 1
     if expect is None:
         return "unasserted", 0
 
@@ -585,8 +592,40 @@ def _assert_no_foreign_claimable(conn: Any, own_job_id: str) -> None:
         )
 
 
-async def _claim_own(supabase: Any, conn: Any, own_job_id: str) -> tuple[dict[str, Any], int]:
-    """Claim a batch of ONE and return (the probe's own row, foreign rows)."""
+async def _release_foreign(supabase: Any, rows: list[dict[str, Any]]) -> int:
+    """Hand each foreign row the claim took back to ``pending`` through
+    ``defer_compute_job`` with that row's own claim token (the RPC's fence, so
+    it can release only the claim this probe just made). It restores
+    ``pending``, gives the attempt back and clears the claim. Returns how many
+    were released; a release that fails is logged to the handler log and
+    counted as not released, never raised past the caller's refusal."""
+    released = 0
+    for row in rows:
+        params = {
+            "p_job_id": row.get("id"),
+            "p_defer_seconds": 0,
+            "p_reason": _FOREIGN_RELEASE_REASON,
+            "p_claim_token": row.get("claim_token"),
+        }
+
+        def _release(params: dict[str, Any] = params) -> Any:
+            return supabase.rpc("defer_compute_job", params).execute()
+
+        try:
+            await asyncio.to_thread(_release)
+        except Exception:  # noqa: BLE001
+            logger.exception("probe could not release a job it claimed but did not seed")
+            continue
+        released += 1
+    return released
+
+
+async def _claim_own(supabase: Any, conn: Any, own_job_id: str) -> dict[str, Any]:
+    """Claim a batch of ONE and return the probe's own row.
+
+    A claim that took a job the probe did not seed is released, then refused:
+    the run stops, and no foreign row is left ``running`` under the probe's
+    worker id unless its release failed, which the refusal then says."""
     _assert_no_foreign_claimable(conn, own_job_id)
     claimed = await asyncio.to_thread(
         lambda: supabase.rpc(
@@ -600,17 +639,25 @@ async def _claim_own(supabase: Any, conn: Any, own_job_id: str) -> tuple[dict[st
             },
         ).execute()
     )
-    rows = list(getattr(claimed, "data", None) or [])
+    rows: list[dict[str, Any]] = list(getattr(claimed, "data", None) or [])
     own = [r for r in rows if str(r.get("id")) == own_job_id]
-    foreign = len(rows) - len(own)
-    if foreign:
-        raise ProbeError(
-            f"the claim took {foreign} job(s) the probe did not seed; they are left "
-            "running under the probe's worker id"
+    foreign_rows = [r for r in rows if str(r.get("id")) != own_job_id]
+    if foreign_rows:
+        released = await _release_foreign(supabase, foreign_rows)
+        stuck = len(foreign_rows) - released
+        message = (
+            f"the claim took {len(foreign_rows)} job(s) the probe did not seed; "
+            f"released {released} back to pending"
         )
+        if stuck:
+            message += (
+                f"; {stuck} could not be released and are left running under the "
+                "probe's worker id (see the handler log)"
+            )
+        raise ProbeError(message)
     if len(own) != 1:
         raise ProbeError("the claim did not return the probe's own job")
-    return own[0], foreign
+    return own[0]
 
 
 def _read_analytics(conn: Any, strategy_id: str) -> tuple[str | None, bool | None, bool]:
@@ -711,7 +758,7 @@ async def _run_arm_body(
         raise ProbeError("the seeded strategy_analytics row already carries an error")
     job_id = _enqueue(conn, strategy_id, "stitch_composite", {"source": _COMPOSITE_MARKER})
 
-    snapshot, foreign_rows_claimed = await _claim_own(supabase, conn, job_id)
+    snapshot = await _claim_own(supabase, conn, job_id)
     snapshot_meta = snapshot.get("metadata")
     if not (
         isinstance(snapshot_meta, dict)
@@ -797,7 +844,6 @@ async def _run_arm_body(
         "status_after_next_bridge": status_after_next_bridge,
         "warned_after_next_bridge": warned_after_next_bridge,
         "next_bridge_method": next_bridge_method,
-        "foreign_rows_claimed": foreign_rows_claimed,
     }
 
 
@@ -818,7 +864,7 @@ async def _drive_next_bridge(
     except psycopg.errors.InsufficientPrivilege:
         pass
 
-    row, _ = await _claim_own(supabase, conn, next_job_id)
+    row = await _claim_own(supabase, conn, next_job_id)
     token = row.get("claim_token")
     if not token:
         raise ProbeError("the next-bridge fallback could not claim the fresh job")
@@ -855,8 +901,7 @@ def _verdict_line(name: str, r: dict[str, Any]) -> str:
         f"warned_after_fail={_fmt(r['warned_after_fail'])} "
         f"bridge_agrees={r['bridge_agrees']} "
         f"status_after_next_bridge={_fmt(r['status_after_next_bridge'])} "
-        f"warned_after_next_bridge={_fmt(r['warned_after_next_bridge'])} "
-        f"foreign_rows_claimed={r['foreign_rows_claimed']}"
+        f"warned_after_next_bridge={_fmt(r['warned_after_next_bridge'])}"
     )
 
 

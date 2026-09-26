@@ -10,8 +10,9 @@ database that is not the private lane or print a verdict that was not earned:
   (SFH-03), so an untouched row can never read as "protected";
 - a cleanup error never replaces the arm's own failure (SFH-05);
 - a run without ``--expect`` says ``unasserted``, never ``ok`` (SFH-06);
-- a claimed job the probe did not seed fails every mode, and the probe refuses
-  to claim while one is claimable (SFH-07 / IN-03);
+- the probe refuses to claim while a job it did not seed is claimable, and a
+  claim that still takes one releases it back to ``pending`` and stops, so no
+  foreign row is left ``running`` (SFH-07 / IN-03, round-2 IN-04);
 - a post-fix LOUD arm does not count if a live re-read failed (SFH-08);
 - the handler log cannot sit in a git work tree, and no traceback reaches
   stderr (SFH-09 / IN-04);
@@ -180,7 +181,6 @@ def _reading(
     branch: str,
     protected: bool,
     inflight: str = "none",
-    foreign: int = 0,
 ) -> dict[str, Any]:
     return {
         "retracted": retracted,
@@ -189,17 +189,16 @@ def _reading(
         "sql_is_protected": protected,
         "layers_agree": (branch == "error_only") == protected,
         "bridge_agrees": "true" if inflight == "none" else "n/a",
-        "foreign_rows_claimed": foreign,
     }
 
 
-def _post_fix_readings(foreign: int = 0) -> list[tuple[str, dict[str, Any]]]:
+def _post_fix_readings() -> list[tuple[str, dict[str, Any]]]:
     return [
         ("control", _reading(retracted=False, branch="error_only", protected=True)),
         ("retracted-warned", _reading(retracted=True, branch="loud", protected=False)),
         (
             "retracted-unwarned",
-            _reading(retracted=True, branch="loud", protected=False, foreign=foreign),
+            _reading(retracted=True, branch="loud", protected=False),
         ),
         (
             "retracted-warned-inflight",
@@ -215,10 +214,6 @@ class TestJudge:
 
     def test_no_expect_is_unasserted_not_ok(self) -> None:
         assert probe._judge(None, _post_fix_readings()) == ("unasserted", 0)
-
-    @pytest.mark.parametrize("expect", [None, "pre-fix", "post-fix"])
-    def test_a_foreign_claim_fails_every_mode(self, expect: str | None) -> None:
-        assert probe._judge(expect, _post_fix_readings(foreign=1)) == ("FAIL", 1)
 
     def test_a_failed_live_reread_voids_a_post_fix_loud_reading(self) -> None:
         assert probe._judge("post-fix", _post_fix_readings(), reread_failures=1) == (
@@ -269,8 +264,73 @@ class TestClaimOnlyWhatTheProbeSeeded:
                 return SimpleNamespace(data=[{"id": "own", "claim_token": "t"}])
 
         supabase = SimpleNamespace(rpc=lambda _name, params: _Rpc(params))
-        row, foreign = asyncio.run(probe._claim_own(supabase, _CountConn(0), "own"))
-        assert (row["id"], foreign, seen["p_batch_size"]) == ("own", 0, 1)
+        row = asyncio.run(probe._claim_own(supabase, _CountConn(0), "own"))
+        assert (row["id"], seen["p_batch_size"]) == ("own", 1)
+
+
+class _RecordingSupabase:
+    """``rpc`` by name: the claim returns ``claim_rows``; every other call is
+    recorded, and ``defer_compute_job`` raises when ``release_fails``."""
+
+    def __init__(self, claim_rows: list[dict[str, Any]], *, release_fails: bool = False):
+        self.claim_rows = claim_rows
+        self.release_fails = release_fails
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def rpc(self, name: str, params: dict[str, Any]) -> SimpleNamespace:
+        self.calls.append((name, params))
+
+        def _execute() -> SimpleNamespace:
+            if name == "claim_compute_jobs_with_priority":
+                return SimpleNamespace(data=self.claim_rows)
+            if self.release_fails:
+                raise RuntimeError("release refused")
+            return SimpleNamespace(data=None)
+
+        return SimpleNamespace(execute=_execute)
+
+
+class TestAForeignClaimIsReleasedNotLeftRunning:
+    """Round-2 IN-04: ``_assert_no_foreign_claimable`` is check-then-act, so the
+    claim can still take a job the probe did not seed. Before this fix the
+    probe raised and left that job ``running`` under its worker id until the
+    stalled-job reaper, and returned a foreign count that was always 0. Now it
+    hands the job back through ``defer_compute_job`` with that job's own claim
+    token (the RPC's fence), THEN refuses: fail-closed, and nothing stuck."""
+
+    def test_the_foreign_row_is_released_with_its_own_token_then_refused(self) -> None:
+        supabase = _RecordingSupabase([{"id": "foreign", "claim_token": "ft"}])
+        with pytest.raises(probe.ProbeError, match="released 1 back to pending") as err:
+            asyncio.run(probe._claim_own(supabase, _CountConn(0), "own"))
+        assert "left running" not in str(err.value)
+        releases = [p for name, p in supabase.calls if name == "defer_compute_job"]
+        assert releases == [
+            {
+                "p_job_id": "foreign",
+                "p_defer_seconds": 0,
+                "p_reason": probe._FOREIGN_RELEASE_REASON,
+                "p_claim_token": "ft",
+            }
+        ]
+
+    def test_a_failed_release_is_named_in_the_refusal(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        supabase = _RecordingSupabase(
+            [{"id": "foreign", "claim_token": "ft"}], release_fails=True
+        )
+        with caplog.at_level(logging.ERROR, logger=probe.logger.name):
+            with pytest.raises(probe.ProbeError, match="released 0 back to pending") as err:
+                asyncio.run(probe._claim_own(supabase, _CountConn(0), "own"))
+        assert "1 could not be released and are left running" in str(err.value)
+        assert any(r.exc_info for r in caplog.records)
+
+    def test_the_refusal_names_no_job_id(self) -> None:
+        supabase = _RecordingSupabase([{"id": "foreign-id-xyz", "claim_token": "ft"}])
+        with pytest.raises(probe.ProbeError) as err:
+            asyncio.run(probe._claim_own(supabase, _CountConn(0), "own"))
+        assert "foreign-id-xyz" not in str(err.value)
+        assert "foreign-id-xyz" not in probe._FOREIGN_RELEASE_REASON
 
 
 class TestRereadFailureScan:
