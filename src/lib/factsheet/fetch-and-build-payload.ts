@@ -388,9 +388,17 @@ async function resolveFactsheetInputs(
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
  * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v6", id,
- * computedAt]: every successful analytics run (the finalizer stamps
- * `computed_at = now()`) gets a fresh entry, a `null` included. Entries still
- * live up to revalidate=3600s within one run, and the admin publish flow's
+ * computedAt], a `null` computedAt included. 167.2.1-REVIEW-R2 IN-01: the key
+ * moves more often than "once per successful run". The status bridge
+ * `sync_strategy_analytics_status` (latest definition: migration
+ * 20260906120000) stamps `computed_at = now()` on every job transition it
+ * resolves: branch (a), the non-terminal arm, on every call, so the move INTO
+ * `computing` at job start stamps it; branch (b) on an unprotected failure;
+ * and branch (c) at a successful completion. Its protected branch (b-prime)
+ * writes neither status nor `computed_at`, and so
+ * changes nothing the builder reads. So a status change is never served from
+ * an entry keyed before it. Entries live up to revalidate=3600s only while no
+ * transition happens, and the admin publish flow's
  * revalidateTag(`factsheet-v2:${id}`) still handles publish/unpublish flips.
  *
  * ⛔ Corollary: viewer/lane separation can NEVER be expressed through the
@@ -493,9 +501,10 @@ async function buildFromResolved(
     // The F-4 `computation_status`-DONE gate was documented as riding a
     // computed_at-bearing cache key; until 167.2.1-REVIEW WR-02 it did not (the
     // effective key was id-only). It does now: `computed_at` is a keyParts
-    // member (see the header comment above), so a run that stamps a fresh
-    // computed_at gets a fresh build; a status change within one run still
-    // drains on the TTL / publish tag. Status is public-safe on a published row
+    // member (see the header comment above). The status bridge stamps a fresh
+    // computed_at on every job transition it resolves, at job start and at
+    // its end (167.2.1-REVIEW-R2 IN-01), so a status change always moves
+    // the key; nothing waits on the TTL. Status is public-safe on a published row
     // (unchanged RLS boundary — the outer
     // request-scoped signature probe stays the auth gate). The assembly returns
     // `{}` for every non-options single-key strategy → byte-identical.
