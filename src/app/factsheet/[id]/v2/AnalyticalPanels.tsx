@@ -344,9 +344,12 @@ export function BootstrapCIPanel() {
     ] as const
   )
     .filter(([, used]) => used < b.n_resamples)
-    .map(
-      ([label, used]) =>
-        `${label} from ${used.toLocaleString()} of ${b.n_resamples.toLocaleString()} resamples (the rest have no ${label})`,
+    .map(([label, used]) =>
+      // None survived: say so plainly, as degenerateNote does, never "from 0 of
+      // 2,000 resamples (the rest have no …)" (review round 3 IN3-01).
+      used === 0
+        ? `no resample has a ${label}`
+        : `${label} from ${used.toLocaleString()} of ${b.n_resamples.toLocaleString()} resamples (the rest have no ${label})`,
     );
   return (
     <section>

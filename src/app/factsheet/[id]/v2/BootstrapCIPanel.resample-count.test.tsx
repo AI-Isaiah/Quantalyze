@@ -89,6 +89,24 @@ describe("BootstrapCIPanel names the resamples a ratio rests on (SFH-R2-M2, IN-0
     expect(text).toContain("all resamples produced 1.25");
   });
 
+  it("IN3-01: when no resample has a ratio the caption says so plainly, never 'from 0 of'", () => {
+    const text = renderWith((b) => ({
+      ...b,
+      sharpe: { ...b.sharpe, n_valid: 0 },
+      sortino: { ...b.sortino, n_valid: 0 },
+    }));
+    expect(text).toContain("no resample has a Sharpe");
+    expect(text).toContain("no resample has a Sortino");
+    expect(text).not.toMatch(/from 0 of/);
+    expect(text).not.toContain("the rest have no");
+  });
+
+  it("IN3-01 control: a partial survival still names its count", () => {
+    const text = renderWith((b) => ({ ...b, sortino: { ...b.sortino, n_valid: 1 } }));
+    expect(text).toContain("Sortino from 1 of 2,000 resamples (the rest have no Sortino)");
+    expect(text).not.toContain("no resample has a Sortino");
+  });
+
   it("a payload cached before n_valid existed reads as all resamples (no count, no crash)", () => {
     const text = renderWith((b) => {
       const { n_valid: _s, ...sharpe } = b.sharpe;
