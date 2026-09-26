@@ -1,5 +1,860 @@
 # Changelog
 
+## [0.93.0.0] - 2026-09-25 — JOBRPCTRUTH: the compute-job RPC surface does what its own migrations say
+
+⭐ **What changed for whoever reads this next.** Phase 164.9.1 fixes three places where a
+compute-job or holdings-sync function in PRODUCTION had drifted from what the migrations that
+defined it say it does. Each drift came from a later re-base built on a stale copy of the
+function. (1) The ten-argument `_enqueue_compute_job_internal`, which every mode of the public
+`enqueue_compute_job` wrapper reaches, never wrote the fan-in initial status, so a child job with
+parents landed `pending` and could run before its parents finished. (2)
+`request_allocator_holdings_sync` had lost its in-flight look-up, so its "already queued" answer
+was unreachable, and it had lost the refusal of a disconnected key. (3) The `bridge_outcomes`
+catalogue comments named a unique index that migration 081 dropped. Separately, a restore of
+shared TEST now normalises the analytics service destination inside its own transaction, so a
+restore no longer re-arms that hazard.
+
+⚠️ **This is a minor bump because behaviour a caller can see changes, on purpose.** The holdings
+sync RPC now answers `{already_inflight, next_attempt_at}` when a poll job for the key is live, and
+a disconnected key gets HTTP 409 from `POST /api/allocator/holdings/sync` instead of a generic 500.
+Precedent: KEYCARDSYNC (0.88.0.0) and GATEHYGIENE (0.90.0.0) were fix phases on the same key-card
+and job surfaces, and each took a minor bump because visible behaviour changed. 0.92.0.0 belongs
+to PR #859, which lands before this one.
+
+⛔ **This release carries THREE migrations, and merging it applies them to shared TEST and then to
+PRODUCTION with no human stop.** They are `20260924230827_fanin_initial_status_10param`,
+`20260924233749_allocator_sync_restore_inflight_prefetch` and
+`20260925071300_bridge_outcomes_invariant_comments`. All three went through two review rounds by
+`migration-reviewer`, `rls-policy-auditor` and `silent-failure-hunter`. Each one's DO block reads
+catalogues only, so none of them can refuse on TEST's empty tables.
+
+### Fixed
+
+- **A job enqueued with parents now enters the fan-in state** (M1, `ee325bfee`). The ten-argument
+  enqueue computes the initial status and INSERTs it: `done_pending_children` when the parent list
+  has an element, `pending` otherwise. On the lane, a parented child is no longer claimable while
+  its parent runs, and the parent's mark-done releases it. Before the fix, the lane showed a child
+  claimed while its parent was still running (`163cb233c`). The body is migration
+  `20260826150000`'s ten-argument CREATE with three edits. COPY-CHECK arms pin every edit, and a
+  parity arm pins it against the seven-argument overload, which still carries migration 109's
+  branch.
+- **The ten-argument enqueue refuses a parent list that no mark-done could release** (review round
+  1, `74a125a64`). It locks the parents `FOR SHARE` in id order, refuses a NULL, missing or
+  `failed_final` parent with 22023, and starts a child `pending` when every parent is already
+  `done`. Strict parity with the seven-argument body would have left such a child in
+  `done_pending_children` forever, holding its target's in-flight slot. The two bodies now differ
+  on those three inputs only, and M1's header says so (the D-04 amendment, recorded in
+  `bce6c5171`).
+- **The holdings sync RPC reports a job that is already queued, and refuses a disconnected key
+  again** (M2, `dd1fb6d25`). Migration 067's in-flight look-up is back: a live poll job for the key
+  returns `{already_inflight: true, next_attempt_at}`. That answer used to come only from an
+  `EXCEPTION WHEN unique_violation` handler that could never fire, because the enqueue returns the
+  existing id instead of raising. Migration 075's refusal is back too (D-23): a soft-disconnected
+  key raises `P0001 api_key_disconnected` after the ownership check and before the look-up, so a
+  disconnected key never reports "queued". Review round 1 tightened the reconstruct-gate arm, and a
+  live arm now pins the order: a non-owner gets the same 42501 as for a missing key, never the
+  disconnected answer (`f72d9dd4c`).
+- **A disconnected key gets a 409 with a sentence the user can act on** (`250762420`). The route
+  maps exactly that error to HTTP 409, no-store, with "This API key is disconnected. Reconnect it
+  before syncing holdings." Before, it fell through to the generic 500, which invites a retry that
+  can never succeed. Any other `P0001` still reaches the logged 500. The branch writes one info line
+  that carries no user or key id (`eb4c5407e`).
+- **The allocator exchange card shows that 409, and holds a queued row across a refresh**
+  (`eb4c5407e`). A 409 from Sync now, Reconnect or Add key moves the row to Disconnected and shows
+  the route's sentence. Disconnected rows now carry the same live helper line as active rows, so the
+  existing "Reconnect failed — try again" message is finally visible too. After an "already queued"
+  answer, the card keeps the row syncing until the server moves it, `last_sync_at` changes, or two
+  minutes pass after `next_attempt_at`.
+- **Review round 2: three stale states in the exchange card** (`57f999b88`). A "click Sync now to
+  retry" message no longer follows a row into Disconnected, where there is no Sync now button. The
+  409 sentence no longer stays on a row that a reconnect made elsewhere has brought back. A remote
+  disconnect during a queued hold no longer pins the row as syncing until reload, because the
+  inferred reconnect latch is replaced by an explicit flag that `handleReconnect` sets and clears.
+- **The `bridge_outcomes` comments name the current uniqueness invariant** (M3, `0725da4e2`,
+  corrected in review by `f72d9dd4c`). They name `bridge_outcomes_allocator_match_decision_unique`
+  (081) and the md-NULL partial index (083), and neither names the index 081 dropped. Two
+  strategy-sourced outcomes for the same (allocator, strategy) under two different decisions are
+  allowed by design.
+
+### Changed
+
+- **A restore of shared TEST normalises the analytics service destination inside its own
+  transaction** (`8559c9e2d`, emitter `48f84c232`). `scripts/test-only-normalize-analytics-url.sh`
+  gains an `--emit-restore-sql` mode that prints one guarded fragment, built by the same function
+  the hand-run path uses. The fragment re-reads the database marker; refuses PROD, an absent
+  marker, a foreign marker and a missing row; rewrites the row to the script's own loopback sink;
+  and checks that exactly one row changed and reads back. It never prints the value.
+  `restore-test-from-baseline.sh` appends it after the reference-data gate and before the ledger
+  DDL, byte-identical in both modes: a restore commits it and a preflight rolls it back. The
+  runbook and arm D1's prose say so (`2a8bcbe10`).
+- **The restore refuses a failed or malformed fragment, and the emitter self-tests before every
+  live restore** (review round 1, `8a3053f1e`). A non-zero emitter exit, an empty fragment or a
+  fragment of the wrong shape aborts the restore. The emitter override is honoured only inside the
+  restore's own self-test. `test-restore-from-baseline.yml` gains a `Normalize script self-test`
+  step before `--run`.
+- **The live-DB execution ledger shrinks from 10 entries to 7** (`0e559db17`). The three arms this
+  phase fixed left the ledger and `K3_ARMS`, and `ENTRY_CEILING` follows the count down. On a clean
+  lane with all three migrations replayed, the gate reads the failing set as exactly the ledger.
+
+### Tests
+
+- **A harm probe for the fan-in defect, lane-RED by design before M1** (`163cb233c`). The dedupe
+  gate's mutation twins are re-pointed at M1's body, so they still bite on the body that is live
+  (`44bc7d93d`). Arm P12 was observed RED with M1's status neutered and GREEN restored.
+- **The normalisation fragment is pinned in place** (`bb0fd0b7f`). Static pins fail if the emitter
+  call or its concatenation leaves the slot between the gate and the ledger DDL, or if `$mode` is
+  read inside that window. Each pin has in-memory calibrations and was seen RED against a neutered
+  live script.
+- **The emitter's refusals are self-tested on throwaway clusters** (`d9730d004`), and the restore
+  self-test proves both the commit and the rollback (`8559c9e2d`). The restore self-test now runs
+  37 arms (`EXPECTED_ARMS`, read from the script).
+- **The XOR file asserts the current `bridge_outcomes` invariant, by SQLSTATE and by constraint
+  name** (`97d987661`). It replaces an arm that asserted migration 072's retired index.
+- **Review round 2 added seven exchange-card tests** (`57f999b88`). Each went RED with its guard
+  neutered.
+
+### Root cause
+
+- **Stale re-bases.** Migration 070 rebuilt the holdings sync RPC without 067's look-up, and 076
+  rebuilt it without 075's refusal. The ten-argument enqueue was cut without the seven-argument
+  body's status branch, while its own comment said it INSERTs the status. Each later migration
+  copied a definition that was not the latest one. All three fixes re-base on the latest definition
+  after a grep of every migration, and each migration's header records the lineage.
+
+### Notes
+
+- **Mechanism demonstrated, production harm latent** (D-02). The fan-in defect was shown by
+  execution on the lane. No production caller passes parents today, so no production row is known
+  to be affected.
+- **Known limits, recorded rather than fixed, routed to Phase 164.5.2 BRIDGELOCK.** (1) A parent
+  that is still open at enqueue and later ends `failed_final` still strands its child in
+  `done_pending_children`; latent, because no caller passes parents. (2) The parent lock can
+  deadlock (40P01) against the mark-done fan-in UPDATE on a diamond-shaped DAG, so whoever first
+  passes parents must treat 40P01 as retryable; latent, recorded in M1's header (`c06bad985`). (3)
+  A second `match_decisions` delete can raise 23505 through the cascade onto the md-NULL partial
+  index; pre-existing, and it fails loudly. (4) A `failed_retry` row and a `pending` row on the
+  same `(kind, api_key_id)` make `claim_compute_jobs` and `claim_compute_jobs_with_priority`
+  raise 23505 on `compute_jobs_one_inflight_per_kind_api_key`, which stops every claim until the
+  pair clears, because their C39 guard does not exclude a partition that holds a `pending` row.
+  Pre-existing, not introduced here, loud. It was reproduced on the local-stack lane by the
+  pre-push review and routed with its suggested fixes and repro recipe.
+- **Two pre-push wording fixes in the fan-in migration, no body change.** The note above the
+  ten-argument `CREATE` now counts four edits, not three. The function's catalog comment now
+  states the shipped rule: `done_pending_children` while any listed parent is still open, else
+  `pending`. The function body is byte-identical, so the PROD-body acknowledgement is unchanged.
+  The regenerated function snapshot differs only in that leading comment.
+- **Other accepted limits.** Two concurrent sync calls that both pass the look-up still collapse
+  onto one row, and the loser gets `{ok, job_id}` naming the winner's job (D-11, the race 067
+  already tolerated). A seven-argument call cannot resolve (42725), so
+  `enqueue_compute_portfolio_job` raises on every call; it has no caller and is not fixed here.
+- **The normalize self-test runs only in the dispatch restore job, not on PRs.** That job runs it
+  before every live restore, which is where it guards. A PR job would need PostgreSQL server
+  binaries and is not in this phase.
+- **One red row is pre-declared for this PR.** VAC-08 in `test-db-drift` reports one
+  `_enqueue_compute_job_internal/10 DRIFT` row whose TEST hash is the pre-change body's, because
+  TEST runs the old body until `apply-test` runs on merge. Any other red blocks the merge.
+- **The live restore on shared TEST is the founder's step after merge** (FC-3). It is blocked on
+  the founder-owned baseline re-dump and is not a completion gate of this phase.
+- **Backlog.** `[164.9-FANIN-STATUS-NEVER-SET]`, `[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]` and
+  `[164.9-TEST-ANALYTICS-URL-REARM]` are closed in `TODOS.md`.
+- **Planning record.** Context, research, patterns, the 14-plan set, the plan summaries, both
+  review rounds, the FC-2 re-sync onto main, the verification and the security record are under
+  `.planning/phases/164.9.1-*` (`d8702293c`, `d5d2d9c60`, `342188b10`, `f6191aa6f`, `d0057747d`,
+  `e1c4d2e90`, `f7f96c162`, `381798e02`, `dbe9f867d`, `40aa2643a`, `ec2336967`, `810659108`,
+  `0fec29911`, `c12842fad`, `80e07112b`, `411b56e9d`, `5e43d4d97`, `616b95aaf`, `c07e8a409`,
+  `a892e8560`).
+
+## [0.92.0.0] - 2026-09-25 — ACCOUNTTRUTH PR A: the allocation history is hidden while it is rebuilt
+
+⭐ **What changed for whoever reads this next.** Phase 167.1.2 (ACCOUNTTRUTH) rebuilds the
+allocator's account history. Until that lands, the history behind the allocator equity curve can
+count one exchange account twice when more than one key reads it, and it can read a day with no
+sync as zero. D-02 ("Hide it until correct") is the founder's call: a wrong number an allocator can
+act on is worse than an honest absence. This PR hides the equity curve, every factsheet ratio built
+from it (Sharpe among them), the Scenario composer's own-book comparison and, under D-13, the
+per-holding return, Sharpe, drawdown and vol on `/compare`. Each surface shows a short note that
+says what is hidden and why. Holdings and AUM are unchanged; they never read that history.
+
+⚠️ **This is a minor bump because what allocators see changes, on purpose.** No number is
+recomputed, no migration ships and no database row moves. The withholding happens at the producer
+and on the server, so the hidden values never reach the client payload.
+
+### Changed
+
+- **The allocator equity curve is withheld at its one producer** (`01d96ab5b`). `derivePhase07Fields`
+  in `src/lib/queries.ts` now returns `equityHistoryState: "rebuilding"` and an empty
+  `equityDailyPoints` for every allocator. The new `equityHistoryState` field on
+  `MyAllocationDashboardPayload` is the single switch that plan 11 flips.
+- **The Overview shows a "being rebuilt" panel in place of the curve and the factsheet**
+  (`01d96ab5b`). `EquityHistoryRebuilding` replaces both, and no factsheet payload is built while
+  the history is rebuilt, so no KPI is computed from it either. The baseline-unknown banner drops
+  its promise that "a full performance history builds up from here" while the history is hidden.
+- **The Scenario composer drops the own-book comparison and says so** (`d87b19aca` pinned it
+  first, `ca2f8d431`). The own-book series is empty while the history is rebuilt, so the own-book
+  delta is undefined. A one-line note explains the gap instead of leaving it silent. The live-book
+  KPIs are a separate field and stay (D-03).
+- **The raw snapshot levels are withheld with the curve** (`29e52dcf9`, review round 1 SFH-03).
+  `equitySnapshots` is `[]` in the client payload while the history is rebuilt. `snapshotCount` and
+  `minHistoryDepthMonths` are computed before the rows are withheld and stay populated. Nothing on
+  the client read the rows, so this stops a future reader from getting around D-02, and stops the
+  30-second refresh from re-sending the full history.
+- **D-13: `/compare` withholds per-holding return, Sharpe, max drawdown and vol** (`efba46454`,
+  review round 1 WR-05). These are level ratios over the same snapshot store, and a $-level ratio
+  also reads buying or selling more of a symbol as a gain or loss. `HOLDING_COMPARE_HISTORY_STATE`
+  in `holding-compare-adapter.ts` is `"rebuilding"`, so `fetchHoldingCompareItem` returns the item
+  with `analytics: null` and the numbers never leave the server. The analytics still decide
+  availability, so the "not available" rule is unchanged. `HoldingFactsheet` shows a note in place
+  of the four metrics.
+- **The `/allocations` loading skeleton draws the rebuilding panel, not a KPI strip and a chart**
+  (`b1fcba6c9`, review round 1 IN-04). A skeleton that promised numbers and then swapped to a
+  paragraph was a layout shift that implied figures that would not come.
+- **A brand-new book sees the warm-up note, not the rebuilding panel** (`5d1cc6304`, founder copy
+  call IN-01, 2026-09-25). A book with no snapshots and no derived curve has nothing for D-02 to
+  withhold, so the Overview shows the existing "Portfolio factsheet" warm-up note, now extracted as
+  `FactsheetWarmupNote`. The test is the exact negation of the composer's note gate, so the two
+  surfaces read the same book the same way. The curve slot stays unmounted either way.
+
+### Fixed
+
+- **Every equity-history gate fails closed** (`5aea287b3`, review round 1 WR-01). The Overview and
+  the composer show the curve only on an explicit `"ready"`. A missing field, `null`, `""` or any
+  state added later all read as rebuilding. `HoldingFactsheet` applies the same rule to
+  `historyState`.
+- **The rebuilding copy is true for every allocator who reads it** (`e49867349`, review round 1
+  WR-03 and SFH-05). The panel names the cause as a property of the history ("could", "when more
+  than one key reads it"). It does not refer to an "earlier chart" that a first connect never saw,
+  and it says holdings and AUM do not use that history rather than calling them current. The
+  composer's note shows only when there is an own-book history to withhold.
+- **The rebuilding panel is a labelled region with an `h2`** (`c50cb3fa9`, review round 1 WR-04).
+  An `h3` under the page `h1` failed axe's `heading-order` rule. A static panel mounted at first
+  render announces nothing as a live region, so it is a `section` labelled by its heading.
+- **The composer's note covers both sources of the own-book series** (`a41f1725d`, review round 2
+  WR-02). Gating on the legacy snapshot count alone hid the note from a book whose history comes
+  only from the derived curve. It now also checks `equityCurveSource === "derived"`.
+- **`/compare` surfaces a failed load instead of calling it "not available"** (`a588b3189`, review
+  round 2 SFH-R2-02). A failed holding read now throws `HoldingCompareLoadError`, and a failed
+  strategies read throws, both to the route's error boundary with a retry. Each logs the database
+  message server-side only. D-15 is unchanged: RLS hides an unowned row as zero rows, never as an
+  error, so a failure reveals nothing about ownership.
+
+### Tests
+
+- **New suites pin the hidden state and the copy.** `AllocationDashboardV2.rebuilding.test.tsx`,
+  `HoldingFactsheet.test.tsx` and the new composer cases pin the panel, the notes, the fail-closed
+  reading of every non-`"ready"` value, and the brand-new-book branch (`01d96ab5b`, `d87b19aca`,
+  `5aea287b3`, `e49867349`, `c50cb3fa9`, `a41f1725d`, `5d1cc6304`). The five `AllocationsTabs`
+  fixtures carry the new payload field.
+- **The derived-curve pins read the withheld series** (`5d112ae63`). The Phase 115.1 flip pins in
+  `queries.test.ts` would otherwise pass vacuously against an empty curve.
+- **The 115.1 derived-curve pins assert the extractor directly, so they can still fail**
+  (`6d7b77ca9`, review round 1 SFH-04). A later cleanup drops a constant assertion and stops the
+  producer comments promising a restore that plan 11 has not decided (`7f58e1ff8`, review round 1
+  IN-02 and IN-03).
+- **The own-book delta's two-return floor has its own `"ready"` case** (`1d629924d`, review round 1
+  WR-02), so hiding the series cannot silently take the floor's coverage with it.
+- **`/compare`'s `"ready"` branch stays under test** (`a588b3189`, review round 2 WR-01).
+  `fetchHoldingCompareItem` takes an internal `historyState` test seam, and
+  `reconstructAndAnalyze` is exported for unit tests, so the math and the pre-D-13 behaviour are
+  pinned while production uses the `"rebuilding"` default. `compare-holding-rls.test.ts` asserts
+  availability plus `historyState: "rebuilding"` and `analytics: null` (`efba46454`).
+- **The seeded 320px Overview e2e gate pins the rebuilding panel** (`fb24fb49d`, then `20ffb2803`
+  for review round 1 IN-01). It had been skipping unconditionally. It now checks that the panel is
+  visible and fits the 320px viewport on both edges, and that the equity-curve slot is NOT mounted,
+  so the 44px tap-rect measurement cannot be forgotten when the chart returns.
+- **`loading.test.tsx` pins the new skeleton shape** (`b1fcba6c9`).
+
+### Notes
+
+- **Known limit: the curve, Sharpe and the scenario comparison come back only in PR C.** Plan 11
+  of Phase 167.1.2 defines `"ready"` and flips `equityHistoryState` and
+  `HOLDING_COMPARE_HISTORY_STATE` with evidence. The `/compare` flip is a separate decision, because
+  the level-ratio defect is specific to that computation. Until then the producer never emits
+  `"ready"`.
+- **Known limit: the reused warm-up sentence promises panels "once at least two days of blended
+  equity history are available".** For a brand-new book under D-02 that is true only once PR C
+  flips the state. It was kept on the founder's copy call (IN-01).
+- **Known limit (accepted): a failed holding read fails the whole `/compare` page** to its error
+  boundary, not only the holding card.
+- **Merged `origin/main` into the branch** (`80d6627e2`) with no conflicts, to pick up the
+  verification-paperwork close for 164.6, 161, 164.5.3 and 164.4.2 (#856).
+
+## [0.91.0.0] - 2026-09-24 — QSTATS-TRUTH: every quantstats-derived number reflects the returns it was given
+
+⭐ **What changed for whoever reads this next.** Phase 166 (RANK-05) removes the quantstats 0.0.81
+"is this a price series?" guess from every number the analytics service derives through
+quantstats. When a returns series had no losing day and at least one day of +100% or more,
+quantstats silently re-read it as PRICES, so it computed the ratio of something else. The
+`prepare_returns=False` keyword did not help: it never reached the transitive preparers. Every
+affected site is now either a proven leaf call or an inline mirror of 0.0.81 with the guess removed.
+A stdlib-`ast` gate with a printed census replaces the old line-of-text gate. quantstats stays
+pinned at `0.0.81`.
+
+⚠️ **This is a minor bump because values users can see change, on purpose.** The founder approved
+D-15, D-16 and D-17 on 2026-09-24. The before and after values below were measured by running the
+phase-base `services/` tree and the release tree side by side on the same fixtures
+(`166-09-SUMMARY.md`, "Before / after (D-10)"). No measured movement fell outside the admitted set.
+
+⛔ **No PRODUCTION row was recomputed, and this release carries no migration.** A persisted value
+changes only on that strategy's next compute, and ledger venues never re-compute on their own. The
+founder answered OPEN-2 on 2026-09-24: after this merges, the founder runs the read-only census SQL
+in `166-09-SUMMARY.md` ("Census SQL for the founder"), and a NEW phase owns queueing the recomputes
+through the normal job path.
+
+### Fixed
+
+- **The price guess is closed on the four drawdown-family scalars** (`202c1c838`, pinned by
+  `c99b86b02`). `recovery_factor`, `ulcer_index`, `upi` and `serenity_index` are inline mirrors of
+  0.0.81 without the guess. On an all-winning series, `ulcer_index` is now `0.0` and the three
+  ratios are `None`, because there is no drawdown to divide by. On benign input all four are
+  bit-equal to live quantstats.
+- **The price guess is closed on the four loss-family scalars** (`09eb012f6`, pinned by
+  `ca9b2a3d3`). `kelly_criterion`, `probabilistic_sharpe_ratio`, `common_sense_ratio` and
+  `cpc_index` are inline mirrors. A leaf fault stays failure-soft: it logs and yields `None` for
+  that key, and the other keys still compute.
+- **D-16: PSR uses the non-excess fourth moment, as the published formula does** (`b5d96e9d5`).
+  0.0.81 fed pandas EXCESS kurtosis into a term that expects the raw fourth moment (finding F-2).
+- **The price guess is closed on `r_squared`'s benchmark leg** (`df4c09de5`). The benchmark goes
+  through `_align_benchmark_like_qs`, which is 0.0.81's `_prepare_benchmark` without the guess.
+- **D-15: scalar alpha and beta no longer persist a fabricated zero** (`097966d84`). 0.0.81's
+  `greeks` ended in `.fillna(0)`, so a benchmarked strategy with NaN days stored `alpha = 0.0,
+  beta = 0.0` (finding F-3). Alpha and beta are now computed pairwise-complete, and an undefined
+  beta is `None`.
+- **The price guess is closed on the rolling benchmark leg, and D-17 makes rolling alpha a windowed
+  intercept** (`8dbcd8bff`, pinned at full precision by `dbb7a64da`). `_rolling_alpha_beta` makes
+  one call to the inline `_rolling_greeks`. Rendered rolling alpha was a full-sample-mean transform
+  of rolling beta (finding F-4). It is now each window's own intercept. Its point count still equals
+  rolling beta's.
+- **Code review round 1: a constant series no longer persists a ratio built on float residue**
+  (`7c75e5ea7`; the same class in `979ae5bb4` and `a6bd778d9`; disclosed under D-10 in
+  `09cd04bd1`). pandas `std()` of a constant series is about `1e-19`, not `0.0`, so the
+  exact-zero guards let the quotient through. The results were a headline Sharpe of `3.645e+16`,
+  ranked at the top of every Sharpe percentile and reported by the backbone with status `ok`; a
+  beta of `-1.92` over a constant benchmark; and a serenity of `-2.2e-18`. The new
+  `_dispersion_is_residue` helper treats a standard deviation at or below `1e-12 x |mean|` as no
+  dispersion. It is used in `_annualized_vol_sharpe`, `_greeks_no_guess` and `_serenity_index`, so
+  each of those ratios is undefined (`None`) on constant input, never a synthesized number. Round 2
+  (next bullet) found that floor too low for NAV-derived returns and made it absolute.
+- **Code review round 2: the residue floor is absolute, and every divisor site uses it**
+  (`bf47b6e4c`, disclosed under D-10 in `3bdc59ff6`). Returns taken as `pct_change` of an exactly
+  compounding NAV carry a residue of about `1e-16` in ABSOLUTE terms, whatever the yield, so
+  round 1's `1e-12 x |mean|` sank under it below about 5% APY. A `1e-4` daily yield (about 3.7%
+  APY, a stablecoin-lending shape) still persisted a headline Sharpe of `1.49e13` with status `ok`
+  and a PSR of `1.0`. `_residue_floor` is now `1e-12 x max(1, |mean|)`, and it guards every site
+  that divides by a standard deviation: the headline Sharpe, the backbone, `info_ratio`, PSR,
+  `smart_sharpe` (review WR-01: `4.6e15` on round 1's own constant fixture), the rolling Sharpe
+  series, scalar and rolling greeks, the headline and rolling correlation, the outlier ratios, and
+  serenity. A constant strategy's beta is the true `0.0`, so treynor is no longer a `1e15`
+  quotient. The headline `volatility` reports the same `0.0` as the backbone (IN-02). `r_squared`
+  asks whether the pair defines an R^2 before regressing (WR-02): a constant non-zero benchmark
+  gave about `1e-34` with status `ok`, and a two-row pair gave `1.0` whatever the data. The other
+  side is pinned too (SFH R2-MED-2): a cent-rounded NAV keeps its exact Sharpe, and a wider floor
+  goes RED.
+- **Code review round 2: a strategy and benchmark labelled in different time zones are refused,
+  not paired a day apart** (`5f75633a4`, IN-03). A naive strategy against an Asia/Tokyo benchmark
+  persisted `r_squared = 0.009` with status `ok` on a one-day shift. The pair now raises by name,
+  and `r_squared_status` is `error` with a WARNING. Naive pairs, same-zone pairs and a naive leg
+  with a UTC leg give identical values.
+- **The benchmark mirrors accept a tz-aware pair** (`7c1e8863c`). `_align_benchmark_like_qs`
+  normalises the benchmark before comparing indexes, the same way every caller already normalises
+  the strategy leg. A UTC pair used to raise `TypeError`, and the fan-out `except` would have turned
+  that into five missing metrics.
+- **PSR on a one-row series is undefined, and logs no false "scalar failed" WARNING**
+  (`c1d343022`).
+
+### Changed
+
+These values move on each affected strategy's next compute. Figures are from `166-09-SUMMARY.md`.
+
+- **Rolling alpha, for every benchmarked strategy (D-17). This is rendered** in the rolling
+  alpha/beta chart. On the golden fixture, 154 of 163 points changed. The last point went from
+  `0.0002` to `0.0023`, and every date is unchanged. On the golden series with a benchmark,
+  403 of 411 points changed, and the last point went from `-0.0002` to `0.0002`. Rolling beta is
+  unchanged unless the benchmark leg tripped the guess.
+- **Alpha, beta and Treynor for a benchmarked strategy with NaN days (D-15). This is rendered** in
+  the Benchmark greeks table. On the golden series with three NaN days, alpha went from `0.0` to
+  `-0.05937915926821179` and beta from `0.0` to `-0.020437191682559225`. Treynor went from absent
+  to `3.891200099567501`, because it had been skipped while beta was 0. CAGR is unchanged. On a
+  NaN-free series, alpha, beta and Treynor are bit-identical.
+- **PSR, for every strategy with a non-zero Sharpe (D-16). It is persisted only**, with no reader
+  under `src/`. The golden value went from `0.5815691494050974` to `0.5815640555270074`. The
+  all-positive benign fixture went from `None` to `1.0`, because 0.0.81's variance term went
+  negative.
+- **The eight dispatched scalars on a guess-tripping strategy. They are persisted only.** On the
+  canonical trigger fixture: `ulcer_index` went from `0.9947130555497081` to `0.0`,
+  `recovery_factor` from `2.0737188382869305` to `None`, `upi` from `2.9998728744771372` to
+  `None`, `serenity_index` from `0.3204442673452879` to `None`, `common_sense_ratio` from `0.0` to
+  `None`, and PSR from `0.1531252134903383` to `0.9998517975825096`. A PSR below 0.5 for a series
+  that never lost a day was the guess at work.
+- **`r_squared`, alpha, beta and rolling greeks where the BENCHMARK leg tripped the guess.** On the
+  benchmark-trigger fixture, `r_squared` went from `0.006670639650444322` to
+  `0.0037210240094842093`, which is the squared Pearson correlation of the raw pair. Beta went
+  from `-0.015400848308443902` to `0.007651507459018336`, and Treynor changed sign. Census query
+  (2) checks whether the cached BTC series ever had a day of +100% or more. That is expected never
+  to happen.
+- **Ratios over a constant series or a constant benchmark (code review round 1).** A constant
+  `0.001` series' Sharpe went from `3.645128673430614e+16` to `None`, and its backbone status from
+  `ok` to `zero_volatility`. A constant `-0.002` series' PSR went from `1.29e-110` to `None` and
+  its serenity from `-2.2e-18` to `None`. Over a constant benchmark, beta went from
+  `-1.9200000000000002` to `None`, alpha from `0.3386020485210516` to `None`, and treynor from
+  present to absent. The golden, parity and trigger fixtures do not move. The rows are in the
+  `166-09-SUMMARY.md` D-10 section.
+- **Ratios over a NAV-derived constant yield, and R^2 over pairs that define none (code review
+  round 2).** On 366 days of a compounding `1e-4` daily yield, the headline Sharpe went from
+  `14947982154235.418` to `None`, the backbone from `ok` to `zero_volatility`, PSR from `1.0` to
+  `None`, smart_sharpe from `8648671718935.608` to `None`, the rolling Sharpe series from 337, 277
+  and 2 points (around `1e13`) to empty, correlation from `0.0467` to `None`, beta from `2.2e-16`
+  to `0.0`, and treynor from `1.7e14` to absent. Against a constant-yield benchmark the rendered
+  rolling beta went from 277 points up to `4.3e13` to empty, and beta and alpha from `-8.9e12` and
+  `3.3e11` to `None`. `r_squared` over a constant non-zero benchmark went from `3.2e-34` (`ok`) to
+  `None` (`error`). The golden, parity and trigger fixtures do not move, and a cent-rounded NAV
+  moves on no key. Every row is in the `166-09-SUMMARY.md` D-10 section.
+
+### Added
+
+- **A stdlib-`ast` quantstats gate over every production module, with a census printed on every
+  pytest run** (`38ec7cc44`, `2abc1775e`). `tests/qstats_gate.py` resolves aliases. It then checks
+  four things. A module that imports quantstats must be in `COVERED_MODULES`. A direct call must be
+  a `KWARG_PROVEN` leaf called with the constant `prepare_returns=False`, or the `EXEMPT`
+  `drawdown_details`. Aliased references are checked. So is indirect reach into quantstats:
+  `getattr` dispatch and any path to the preparers. The census prints through the existing
+  `pytest_terminal_summary`, a green run included: `13 quantstats node(s) in services/metrics.py,
+  11 mirror(s), 0 violation(s); arms kwarg-proven=12 exempt=1 inline=11`. A reconciliation line
+  sits next to it. It explains ROADMAP's "30 call sites" as a text count (30 text occurrences
+  against 9 AST nodes at phase start, and 33 against 13 now).
+- **Permanent proof that the gate can fail** (`4d338a183`, `9e89ec533`). There are 12 RED needles,
+  an importer needle and 3 GREEN needles, all through the same `scan_source` / `scan_tree` the
+  real-corpus gate uses. Behavioural preparer-spy pins cover every `KWARG_PROVEN` leaf, with
+  `cvar` / `payoff_ratio` calibration rows showing that the spy sees a function that accepts the
+  keyword and then drops it.
+- **Code review round 1: the gate fails closed on every quantstats surface other than `qs.stats`**
+  (`dbefdca56`). The gate used to return `violations=[]` and `nodes=0` for all of the following,
+  measured on each new needle against the previous gate: `qs.reports`, `qs.plots`,
+  `qs.extend_pandas()` (which monkeypatches every guessing function onto pandas), a star import,
+  `from quantstats import reports`, `importlib` / `__import__` / `sys.modules`, `vars(qs)`, and a
+  module borrowing `services.metrics`'s own `qs` to bypass the importer rule. It now has three more
+  rules. Rule B5 makes any non-`stats` alias use or import form RED. Rule B6 makes string-named or
+  computed-name dynamic access RED. Rule A' makes a re-export of a covered module's quantstats
+  binding RED, reading the bound names from the covered module itself. There are now 26 RED
+  needles, 8 re-export needles, a `scan_tree` re-export needle, and a GREEN needle for legitimate
+  `services.metrics` use. The real corpus still reads clean at 13 nodes. One limit is recorded: an
+  attribute name computed at run time. Round 2 closed it (next bullet).
+- **Code review round 2: the gate follows the module object, and a computed name fails closed**
+  (`577bd8582`, review WR-03 / SFH R2-LOW-4). Each of these reached `services.metrics`' `qs` with
+  `nodes=0, violations=[]`: `import_module("services.metrics").qs`, `__import__`,
+  `sys.modules[...]`, `vars(metrics)["qs"]`, `metrics.__dict__["qs"]`, `f.__globals__["qs"]`,
+  `getattr(sys.modules[__name__], "qs")` inside the covered module, `globals()["q" + "s"]`, and a
+  module alias rebound by assignment or walrus. The gate now resolves module-shaped expressions,
+  applies Rule A' inside covered modules too, and makes a covered namespace read with a computed
+  name, or handed on as a value, RED. The shapes a static walk still cannot follow (a module
+  object passed through a parameter or container, `operator.attrgetter`, `pkgutil.resolve_name`,
+  `eval` and similar) are listed exactly under KNOWN LIMITS. Two more needles pin arms round 1 left
+  unpinned (`863c8d04e`, SFH R2-LOW-3): `globals().get("qs")` and a two-level relative import.
+  B6 no longer turns `importlib.metadata.version("quantstats")` or
+  `logging.getLogger("quantstats.stats")` RED (`6300e2646`, IN-01). The exemption matches the
+  callee's resolved path, so a look-alike local function stays RED.
+- **A broken mirror logs a named WARNING, and a legitimately undefined ratio does not**
+  (`7bd93b80c`). `_every_mirror_ratio_is_defined` names the inputs on which all eight dispatched
+  mirrors are defined: a loss, a gain, a negative 5% quantile, and at least 4 observations. All
+  eight mirrors were finite on 11,843 random series with that shape (measured). A non-finite mirror
+  on such a series now logs `... the mirror is suspect`. `r_squared_status = "error"` logs the same
+  way when both legs vary. A D-09 `None` stays silent.
+- **Code review round 2: that signal is per mirror** (`3c2562c5e`, SFH R2-MED-1). Round 1's single
+  predicate required a NEGATIVE 5% quantile, so a strategy losing on fewer than 5% of days (a carry
+  or option-selling shape, where all eight mirrors are finite) had no signal for any mirror.
+  `_mirror_keys_defined_by` returns the keys the input defines, each on its own mirror's
+  precondition. Fuzzing measured 164,357 key-and-series checks with no mirror non-finite where its
+  precondition held. A predicate that raises now logs by name instead of silently switching the
+  signal off (`9366a512f`, SFH R2-LOW-1).
+- **A census that cannot be built prints one named line instead of an INTERNALERROR**
+  (`562a6d139`). `safe_census_lines` guards the `pytest_terminal_summary` hook. The gate tests
+  still fail on the same cause.
+- **The money-math primitives, each defined once** (`88dd7fafe`, `c94788406`). The drawdown
+  primitives, `_annualized_vol_sharpe`, `_downside_rms` and `_cvar_of_tail` are module-level in
+  `services/metrics.py`, and every bit-identical inline spelling calls them. This change is
+  byte-neutral: the golden file and the full suite passed with no test edited.
+
+### Changed (code shape, no value change)
+
+- **The two hand-kept KPI column lists are derived from `PERCENTILE_METRICS`** (`1e998899e`,
+  `da13b3cd6`). They are the `src/lib/queries.ts` percentile projection and the csv-finalize
+  clock-safety columns with their guard select. A hand-written literal byte pin was observed failing
+  for each, and each proves the string sent to PostgREST did not change by one byte. The mirror prose
+  in `src/lib/closed-sets.ts` was corrected.
+- **Code review round 1, no value change.** The csv-finalize guard's `.select()` and its presence
+  check now both read `CLOCK_SAFETY_KPI_COLUMNS` (`edaf8ad33`, byte pin still green).
+  `_safe_qstats_scalar` is typed `Callable[[pd.Series], float]` and described as the mirror runner
+  it is (`41317e64f`).
+
+### Removed
+
+- **The RANK-05 line-of-text gate** (`38ec7cc44`). It was deleted in the same commit that added
+  the AST gate, so no commit is ever without a gate. It scanned the lines of `compute_all_metrics`
+  and trusted the text `prepare_returns=False`.
+- **The dead rolling missing-columns branch and its test** (`8dbcd8bff`). Once rolling greeks is
+  an inline mirror that always returns both columns, that branch cannot run. The test was deleted
+  together with its branch.
+
+### Tests
+
+- Live 0.0.81 is the non-self-referential parity anchor on benign fixtures for every mirror
+  (`c99b86b02`, `ca9b2a3d3`, `dbb7a64da`). The three disclosed corrections (D-15, D-16, D-17) are
+  anchored to an independent in-test formula instead. The golden file moved on exactly two key
+  paths, both disclosed: `probabilistic_sharpe_ratio` and `sibling.rolling_alpha`.
+- Four real-file neuter drills against `services/metrics.py` were each observed RED naming the
+  site, then restored byte-identical (plan 08).
+- **Code review round 1.** `test_q166_greeks_undefined_beta_is_none_not_zero` now requires alpha
+  and beta to be PRESENT and `None`, info_ratio to survive, and no fan-out WARNING (`1c9fb0c04`).
+  Before, it passed on a crashed fan-out. Both `_serenity_index` undefined arms are pinned
+  (`a6bd778d9`). Every new guard was neutered, observed RED, restored and `cmp`-verified. The
+  review's surviving drills N8, N10, N11, N12 and N15 now go RED.
+- **Code review round 2.** 30 metrics drills and 19 gate drills, each neutered, observed RED,
+  restored and `cmp`-verified. Three first survived and were answered at the root: serenity's
+  separate loss test was redundant (a real drawdown dispersion implies a loss) and was removed,
+  and the PSR-dispersion and walrus arms each got the needle that turns them RED. The review's surviving drills M7, M8, M9, M10, M12, M16a, G1 and
+  G3 now go RED. With round 1's floor restored, 7 of the 11 constant-yield fixtures go RED (daily
+  `1e-5` and `1e-4`, and APY 0.01% through 5%); daily `1e-3` and APY 10%, 50% and 100% were already
+  caught by it and stay as the pin for that end of the scale. Every intermediate commit's tree was
+  assembled in a scratch directory and passed the metrics, gate and parity suites.
+
+### Root cause
+
+- quantstats 0.0.81's `_prepare_returns` and `_prepare_prices` guess the input's kind from its
+  values. When `min(r) >= 0` and `max(r) >= 1`, the returns are treated as prices. Passing
+  `prepare_returns=False` to a top-level stats function does not stop the guess inside the
+  helpers it calls (`comp`, `ulcer_index`, `_prepare_benchmark`, `greeks`, `rolling_greeks`), so
+  the keyword closed only the leaves that call nothing else. Research §Q2 measured this with a
+  preparer spy.
+
+### Notes
+
+- **Recorded, not changed (D-08).** F-1: scalar alpha is annualized on the FREQUENCY clock
+  (`periods_per_year`), not the calendar clock. The mirrors keep this, and it is pinned. Separately,
+  `recovery_factor`'s numerator is arithmetic (`returns.sum()`) while `upi`'s is compounded. That
+  inconsistency is inside 0.0.81, and the mirrors reproduce it so benign values do not move.
+- **A ledger claim was refuted.** WINDOWS entry 9 and the 159-05 residual table called
+  `recovery_factor`, `kelly_criterion`, `common_sense_ratio`, `cpc_index` and `r_squared`
+  "kwarg-closable". The preparer spy showed that none of them honours the keyword all the way down,
+  so each became an inline mirror. WINDOWS entries 5 and 9 are fixed and TODOS 0f
+  `[159-SIMPLIFY-DEFER]` is closed (`9aadde8c0`).
+- **quantstats stays at 0.0.81.** PyPI was re-read on 2026-09-24 and 0.0.81 is still the latest.
+  Upstream `main` equals the tag, and both the maintained fork and the open upstream PRs keep the
+  guess. Removing the dependency belongs to Phase 165. Two findings are routed there: scipy is
+  pinned only `# via quantstats` although `services/metrics.py` now imports it directly, and
+  `requirements.in` says pandas 2.2.3 while the lock has 3.0.3.
+- **Out of scope:** the SQL RPC's own KPI list.
+- **Recorded in code review round 1, not changed (D-08)** (`5183ca295`, `6ed841c11`, `b6e914c05`).
+  Rolling greeks keep 0.0.81's `fillna(0)` gap-day convention, while the scalar greeks are
+  pairwise-complete (D-15). `_recovery_factor`'s `abs()` shows a net-losing strategy as a positive
+  ratio. Both notes are in the docstrings and in `166-CONTEXT.md`. `_payoff_ratio_no_guess`'s
+  `avg_loss == 0` arm is unreachable, and it is kept for parity. The golden fixture's cosmetic
+  `mean_*_usd` key reorder now has its own D-10 row.
+- **No TypeScript change was needed for null values (D-13).** Every rendered surface shows `—` for
+  a null or non-finite value. The eight dispatched scalars and `r_squared` have no `metrics_json`
+  reader under `src/`.
+- **Planning and merge commits.** These commits changed no shipped code: context, research and
+  plan (`e91226a6c`, `a1d479c22`, `9007cceb0`, `c388fbd6f`, `73cbf2995`), one per-plan SUMMARY
+  each (`c0779f1ba`, `7d1f03098`, `c702b19fb`, `497d90914`, `270ef0912`, `54ab93333`,
+  `8be6b11a0`, `c7d5aafb8`, `de4607e51`), the plan 10 SUMMARY and the two review reports
+  (`aeefaf733`, `2c5733bb7`), and three merges (`850ce0d9d` and `f22e63712` from
+  `origin/main`, `13ad4850e` for the plan 02 worktree).
+- The branch has 35 commits before this release commit, and each one maps to at least one bullet
+  above. Code review round 1 added 15 `fix(166)` commits and this CHANGELOG fold. They are
+  `7c75e5ea7`, `979ae5bb4`, `a6bd778d9`, `1c9fb0c04`, `7c1e8863c`, `c1d343022`, `41317e64f`,
+  `7bd93b80c`, `6ed841c11`, `5183ca295`, `edaf8ad33`, `dbefdca56`, `b6e914c05`, `562a6d139` and
+  `09cd04bd1`. Each one is cited in a bullet above. The version is not bumped, because round 1
+  folds into this release.
+- **Code review round 2** added 8 `fix(166)` commits and this CHANGELOG fold: `bf47b6e4c`,
+  `3c2562c5e`, `9366a512f`, `5f75633a4`, `577bd8582`, `863c8d04e`, `6300e2646` and `3bdc59ff6`,
+  each cited in a bullet above. Two planning commits between the folds changed no shipped code:
+  the round-1 fix report (`c6f32f95f`) and the round-2 review reports (`dcbd1749f`). The version
+  is not bumped, because round 2 also folds into this release.
+- **Observed in round 2, outside this phase's files, not changed.** Other modules still guard a
+  standard deviation with an exact `== 0` or `> 0` (`services/portfolio_optimizer.py`,
+  `services/csv_validator.py`, `services/allocated_capital.py`, `services/equity_reconstruction.py`,
+  `services/optimizer.py`). They are not quantstats-derived, and no review finding names them.
+## [0.90.1.0] - 2026-09-24 — WIZRESYNC: a wizard reload no longer starts a second sync, Retry shows only when the server needs one, and Submit promotes the strategy
+
+⭐ **What changed for whoever reads this next.** Four defects found live on 2026-09-24 while a
+manager ran the strategy wizard on a Bybit key, plus one misleading log line. The stall had one root
+cause: a resync only deduped against a verification still in `draft`, and `process_key_long` moves
+it out of draft within about 3 s. So every wizard reload or Retry during a ~16-minute chain started a
+whole second chain. The SQL bridge `sync_strategy_analytics_status` then wrote `computing` back
+while any job of the strategy was non-terminal. The first chain's `complete` lived about half a
+second, and the wizard poll (every 10 s) never saw it. **No migration; the SQL bridge is
+unchanged.**
+
+### Root cause
+
+- **The resync dedup looked at the wrong object.** It matched a `draft` verification, which lives
+  for seconds. The chain it was meant to protect lives for minutes. The fix below keys the dedup on
+  the chain's own jobs.
+
+### Fixed
+
+- **A single-key manager's Submit now actually moves the strategy to `pending_review`**
+  (`unifiedFinalizeWizardHandler`, merged from `fix/wizard-submit-promote`, 2a054b692). The unified
+  single-key finalize arm called only `postProcessKey` and answered a hard-coded
+  `pending_review`. Nothing on it called `finalize_wizard_strategy`, and Python never writes
+  `strategies.status`. So the row stayed `source='wizard'`, `status='draft'`: its wizard metadata
+  was dropped, it never reached the admin queue, and after 7 days the `cleanup-wizard-drafts` cron
+  deleted it and revoked its key. The bug had been latent since Phase 106 Stage B. The fix:
+  - The RPC call is extracted as `callFinalizeWizardRpc`, the one caller, carrying the argument
+    list and the SQLSTATE-to-envelope mapping byte-identical to `runLegacyFinalize`'s.
+  - The unified arm calls it with `p_terminal_status='pending_review'` before `postProcessKey`.
+    A refused promotion answers the RPC's own envelope and dispatches nothing.
+  - A replay (the RPC's 22023 on a non-draft row) is accepted through `acceptAlreadyPromoted`: a
+    row already at (wizard, pending_review) answers success and still dispatches, so a Retry after
+    a failed dispatch recovers. The legacy arm keeps its 409, so its founder email is not re-fired.
+- **LOW-8: a recurring job holding `computing` after the chain finishes no longer raises Retry.**
+  The SQL status bridge `sync_strategy_analytics_status` holds `computing` while ANY job of the
+  strategy is non-terminal (`v_nonterminal_count`), but the sync-progress route read chain kinds
+  only. So a finished chain plus a pending `reconcile_strategy` or `poll_positions` showed Retry
+  after the 60 s grace on a healthy completion. The route now adds `otherJobInFlight: true` when a
+  non-factsheet job is in flight (`isNonFactsheetJobInFlight`), and omits it otherwise so existing
+  bodies stay byte-identical. `SyncPreviewStep` counts it as in-flight evidence, still under the
+  60-minute ceiling. `jobStatus` keeps its factsheet-only meaning for the key card's gate.
+- **A resync while the factsheet chain is running starts no second chain** (`process_key`, the
+  resync chain-in-flight guard). A resync `/process-key` now answers `WIZARD_DUPLICATE` with
+  `queued: true` and `job_state: "running"`, mints no draft and enqueues nothing while any job of
+  the chain it would start is non-terminal for that strategy. The kinds are walked from
+  `JOB_CHAIN_FOLLOW_ON` starting at `process_key_long`. The statuses are `CLAIMABLE_STATUSES` plus
+  `_IN_FLIGHT_JOB_STATUSES`. Neither set is re-listed. The existing draft pre-check still runs first,
+  so a wedged draft is still resumed.
+- **`sync-progress` no longer reports `done` while a second chain is still running.**
+  `selectFactsheetJob` picked the newest-created chain job, which could be the first chain's
+  finished compute. It now prefers the newest in-flight chain job and falls back to the newest one.
+  With `preferStitch: false`, an in-flight chain job also outranks a finished stitch. Every caller
+  shares this selection: the sync-progress route, `deriveComputeState` (owner factsheet, share page,
+  `/strategies` list) and `readChainJobState` (the key card gate and KCS-18's success gate).
+- **A wizard reload no longer re-kicks a running sync.** On a first mount the sync step skips the
+  `/api/keys/sync` POST when the strategy is proven single-key (`strategies.api_key_id` is set,
+  the rule `/api/keys/sync` routes on) and a real sync-progress read says a job is in flight. An
+  analytics status of `computing` alone is not treated as evidence, because a dead chain can leave
+  it there and the POST is then what restarts the work. A composite, an unreadable row, a degraded
+  read and an explicit retry all POST as before, and the server dedups them.
+- **"Retry sync" shows only when the server says a retry is needed** (founder, 2026-09-24:
+  "Shouldn't the system check and only show it, if it is absolutely necessary"). The analytics
+  status holds at `computing` for a whole chain, so the 15-minute wall-clock backstop fired on a
+  healthy run that was simply long (sync_trades 4.7 min, derive 9.7 min). The banner now comes up
+  for a stalled stitch; after real reads have said nothing is in flight for a 60 s grace while the
+  status is still not computed; for a kickoff that queued nothing when no read says a job runs; or
+  from the backstop, which now fires only with no in-flight evidence from the last minute. A dead
+  sync-progress channel still reaches the backstop.
+- **The progress row always shows a stage label while polling.** At 1061 s it rendered empty
+  beside the seconds counter, because the backstop's banner hid the in-flight label and nothing
+  replaced it. A healthy chain now keeps its label. When the banner is up the row reads
+  `Checking for progress…`. The "Usually takes 15–30 seconds" copy is unchanged.
+- **The benchmark cache is used again.** `get_benchmark_returns` called the imported `rows()`
+  helper in its cache-read branch and bound a local `rows` list later in the same function, so
+  every cache read with more than 10 rows raised `UnboundLocalError`. The broad `except` SWALLOWED
+  it: it logged only a generic "cache read failed" warning, and every compute refetched Binance
+  klines, from v0.35.0.4 (PR #536) until now. The local list is `cache_rows`.
+- **Review round 1: a crash-looping or ancient chain job no longer refuses every resync.**
+  `reset_stalled_compute_jobs` puts a stuck `running` job back to `pending` without counting it,
+  and the claim does not cap `attempts`, so such a job never goes terminal. The guard now skips a
+  row whose `last_error` is `worker_stalled`, one that has spent its attempt budget and is not
+  running, one running past its budget, and one older than `_RESYNC_CHAIN_JOB_LIVE_WINDOW` (8 h,
+  derived beside the constant). Each skipped row is logged at warning and captured to Sentry. A
+  running job AT its budget is its legitimate final attempt and still refuses.
+- **Review round 1: a failed guard read never becomes a 500.** Both guard reads go through
+  `db_read_with_retry`. If the job read still fails, the guard is skipped and the resync takes its
+  pre-guard path, logged with context. If only the verification read fails, the reply is still a
+  duplicate with no verification status.
+- **Review round 1: the duplicate reply never borrows another verification's status.** Only a
+  `process_key_long` job carries its session's `verification_id`. The reply carries the newest
+  verification's status only when that id matches. Otherwise it carries the job's own id (None for
+  a follow-on hop) and `status: None`, and logs a warning. The comment that said the reply names
+  the chain's own session was false and is replaced.
+- **Review round 1: `selectFactsheetJob`'s in-flight preference is bounded.** An in-flight chain
+  row answers over a newer finished one only while it was created less than
+  `IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS` (8 h) before it, so a dead job cannot read as running
+  for ever once a later chain finishes.
+- **Review round 1: the wizard trusts "in flight" for 60 minutes at most.** Past
+  `IN_FLIGHT_TRUST_CEILING_MS` with the analytics status unchanged, the banner shows even while
+  reads say a job is in flight: "A sync is still queued or running on our side; it may be stuck."
+  (Round 2 removed the Retry this banner carried: see below.)
+- **Review round 1: a Retry answered `WIZARD_DUPLICATE` keeps the banner.** It resets no clock
+  and clears nothing, and the banner says "A sync is already running." Before, each press hid the
+  banner for a full grace window for a Retry that started nothing.
+- **Review round 1: the envelope Retry starts a fresh settled grace.** `handleKickoffRetry` and
+  the kickoff effect now clear the in-flight evidence refs and `settledPastGrace`. Before, the
+  previous attempt's grace put the Retry banner straight back up over the sync just started.
+- **Review round 1: the mount's in-flight probe times out after 5 s** (`MOUNT_PROBE_TIMEOUT_MS`),
+  so a hanging sync-progress read cannot hold the kickoff back. A failed `strategies` read is now
+  logged instead of dropped.
+- **Review round 1: today's partial-day benchmark close is never cached, served or counted as
+  fresh.** Freshness is now "the newest completed day cached is yesterday (UTC) or later", in place
+  of the 48-hour age check.
+- **Review round 1: a benchmark cache that does not span the requested days is a miss, and a code
+  bug in the read is loud.** The newest `days` completed dates must be a contiguous run ending
+  yesterday or later. The read's `except` is narrowed to DB and network errors
+  (`_CACHE_READ_ERRORS`). Any other exception still falls back to a fetch, but logs at error level
+  and is captured to Sentry, so the `UnboundLocalError` class above can no longer pass as a miss.
+- **Review round 2: a dispatch failure after the Submit promotion says the submission is saved**
+  (SFH HIGH-1). When `callFinalizeWizardRpc` committed and `postProcessKey` then failed, the route
+  forwarded the dispatch's own copy, which told a manager whose strategy WAS submitted that nothing
+  was. `answerDispatchFailedAfterPromotion` now answers `SUBMITTED_ANALYTICS_NOT_QUEUED`: 503,
+  recoverable, relays `Retry-After`, with new `wizardErrors` copy ("Your strategy is submitted, but
+  its analytics are not queued yet"; retrying is safe) admitted to `KNOWN_FINALIZE_CODES`. It logs
+  one line built from our own tokens and captures the hoisted Error with `strategy_id` and
+  `upstream_code`. The Retry replays the finalize (`acceptAlreadyPromoted`) and runs the dispatch
+  again, so a promoted strategy gets its job.
+- **Review round 2: no Retry renders that the server would refuse** (reviewer #1, SFH MED-3). While
+  reads say a job is in flight (the 60-minute ceiling, a stalled stitch) the banner says "A sync is
+  still queued or running on our side; it may be stuck." with no Retry control, and after a
+  duplicate-refused Retry it says "A sync is already running" with none either.
+- **Review round 2: the surfaces skip a job the resync guard would call dead.**
+  `computeJobDeadReason` mirrors the observable arms of Python's `_chain_job_dead_reason` (budget
+  spent and not running, running past it, 8 h old at the caller's `nowMs`).
+  - `selectFactsheetJob` skips a dead chain row.
+  - `isNonFactsheetJobInFlight` skips a dead recurring row (SFH MED-4).
+  - Python's `worker_stalled` arm is not observable: `get_user_compute_jobs` redacts `last_error`.
+- **Review round 2: a reload never starts a sync once a chain row exists** (reviewer #2, LOW-5).
+  `probeExistingChain` answers `in_flight` (including `otherJobInFlight`), `settled` or `none`, and
+  only `none` (no chain row yet) lets a first mount POST. A done or failed chain on reload now waits
+  and offers Retry. The 5 s probe deadline covers the strategies read too. A non-ok answer, an
+  unparseable body and a degraded answer are logged.
+- **Review round 2: the "already running" note clears once a read says nothing is in flight**
+  (reviewer #3), so the Retry returns exactly when the server would act. And a WIZARD_DUPLICATE with
+  `queued: true` and `job_state: "enqueued"` (the resumed wedge) is treated as queued work that
+  resets the clocks (SFH LOW-8). `/api/keys/sync` now forwards `job_state`.
+- **Review round 2: a failed chain-guard read is classified and the fall-through is reported**
+  (SFH MED-2, LOW-6). `APIError`, `httpx.HTTPError` and `OSError` log at warning, anything else logs
+  at error and is captured, and the skip itself always reaches Sentry. The bare `except: pass`
+  around a Sentry call is gone (`_sentry_report` logs a failed report).
+- **Review round 2: a failed benchmark fetch serves the recent cached days, flagged stale**
+  (reviewer #4). When the cache misses and the fetch fails, the completed days already read are
+  served with `is_stale=True` if the newest is at most 48 h old, never None. `RuntimeError` left
+  `_CACHE_READ_ERRORS` (SFH LOW-7): only `get_supabase`'s "not configured" raise stays quiet, caught
+  at that call.
+
+### Removed
+
+- **The discarded position reconstruction in `process_key_long` step 5, and the same call in the
+  synchronous `process_key` pipeline.** Both awaited `adapter.reconstruct_positions(trades)` and
+  threw the result away (the sync-path comment said "persisted in P8"; it never was). Each call
+  still logged "equity understated" for every open position without a mark price. Every adapter's
+  implementation is pure (an in-memory FIFO match plus logging, or `[]` for CSV), so nothing
+  depended on it. The call was removed rather than the warning downgraded, because
+  `EquityCurveBuilder` also feeds the equity curve, where a missing mark really does understate
+  equity. That warning stays as it is.
+
+### Tests
+
+- `tests/test_resync_draft_dedup.py`: 16 parametrised cases (4 chain kinds by 4 non-terminal
+  statuses) plus controls for a terminal job, a non-chain kind, another strategy's chain, and a
+  drift pin of the derived kinds against `FACTSHEET_CHAIN_KINDS`. Both supabase fakes gained a real
+  `in_` filter, so deleting the guard's kind or status filter turns a test RED.
+- `tests/test_benchmark.py`: a fresh-cache hit that asserts no fetch. On the old code it failed on
+  `fetch.assert_not_awaited()`: the `except` swallowed the `UnboundLocalError`, so the only visible
+  symptom was the refetch. Round 1 moved it to 30 completed days, the full requested window.
+- Review round 1, `tests/test_resync_draft_dedup.py`: four not-live job shapes let a resync
+  through, and two controls still refuse (a running job on its final attempt, and a live job beside
+  a newer dead one). Read failures fall through, a single 504 is retried, and a failed verification
+  read still refuses. A newer unrelated verification's status is never borrowed. The drift pin now
+  also reads `IN_FLIGHT_JOB_STATUSES` against `_NON_TERMINAL_JOB_STATUSES`. The fake gained a
+  per-table, per-call read-failure queue.
+- Review round 1, `src/lib/compute-state.test.ts`: an in-flight row 9 h older than a finished one
+  does not answer, with a control just inside the window.
+- Review round 1, `SyncPreviewStep.inflight-guard.runtime.test.tsx`: the 60-minute ceiling, a
+  duplicate-answered Retry with its control, the envelope-retry flow, the probe timeout and the
+  logged strategies read.
+- `src/app/api/strategies/finalize-wizard/route.test.ts` (submit fix): three rows that asserted
+  the RPC was NOT called on the unified arm pinned the defect, and now assert it is. New rows cover
+  the call and its order, the forwarded metadata, the replay, a non-replay 22023, a failed re-read,
+  RPC failures never answering `pending_review`, and the legacy arm's unchanged replay answer.
+- LOW-8: `SyncPreviewStep.inflight-guard.runtime.test.tsx` (chain done, a pending recurring job,
+  status `computing` for 120 s: no banner; control with nothing else in flight: Retry), and
+  `sync-progress/route.test.ts` (the flag beside a pending `reconcile_strategy`, and absent beside
+  finished recurring jobs). Both were RED without the fix.
+- Review round 1, `tests/test_benchmark.py` and `tests/test_benchmark_extras.py`: today's partial
+  close never served, cached or counted as fresh; a gappy, short or sparse cache is refetched; a
+  programming error is logged at error and captured, and a DB error is not.
+- `tests/test_long_fetch.py` and `tests/test_process_key.py`: the reconstruction is asserted NOT
+  awaited on both paths.
+- `src/lib/compute-state.test.ts`: two overlapping chains (newest done, older running) in both
+  orders and all four in-flight statuses, a nothing-in-flight control, and the `preferStitch: false`
+  case.
+- `SyncPreviewStep.inflight-guard.runtime.test.tsx` (new): the reload guard with three
+  POST-as-before controls, a healthy chain at 1061 s and at 40 min with its label and no Retry,
+  Retry after the server reports the chain finished without a factsheet, and a queued-nothing
+  kickoff with a running job. Four of its seven cases fail against the original component.
+- Two `SyncPreviewStep.progress.render.test.tsx` cases pinned a Retry on a live, running chain. They
+  now drive the backstop through a channel that goes dark, which is the case the backstop is for.
+- Every new guard was neutered, observed RED, and restored from a byte backup confirmed with `cmp`.
+- Review round 2:
+  - `finalize-wizard/route.test.ts` `[SUBMITFIX-R2]`: RATE_LIMITED, CIRCUIT_OPEN and
+    SEAM_MISCONFIGURED after a successful RPC, with the rendered title, Retry and Sentry tags. Also
+    replay-then-dispatch, and replay-then-failed-dispatch.
+  - `wizardErrors.invariant.test.ts`: the rejection-site pins move 32 -> 33 for the new CODED site.
+  - `compute-state.test.ts`: the dead-row selection, the final-attempt control, and the age arm
+    with and without `nowMs`.
+  - `test_resync_draft_dedup.py`: pins `CHAIN_JOB_LIVE_WINDOW_MS` to
+    `_RESYNC_CHAIN_JOB_LIVE_WINDOW`, and covers the classified guard-read failures and the logged
+    Sentry failure.
+  - `sync-progress/route.test.ts`: a dead recurring job leaves `otherJobInFlight` off.
+  - `keys/sync/route.test.ts`: forwards `job_state`.
+  - `SyncPreviewStep.inflight-guard.runtime.test.tsx`: no Retry at the ceiling or after a
+    duplicate, the note clearing, the resumed wedge, no POST on reload over a done or failed chain,
+    `otherJobInFlight` on mount, the strategies-read timeout, and the logged fallbacks.
+  - `SyncPreviewStep.progress.render.test.tsx`: a single-key RUNNING-and-stalled read now asserts
+    the may-be-stuck copy and no Retry, not the Retry it used to pin.
+  - `test_benchmark.py`: the stale fallback, its 48 h bound, a loud RuntimeError, and a quiet
+    unconfigured client.
+  - Every round-2 guard was neutered, observed RED, and restored via `cp`/`cmp`.
+  - CI fix (run 36063849235):
+    - `wizardErrors.test.ts`: both copy-table size pins move 95 -> 96 for the new entry, each
+      after its own reasoning was re-run over it.
+    - `factsheet-share/[token]/page.test.tsx` and `strategies/page.key-pill.test.tsx`: in-flight
+      job fixtures now sit on the real clock. Their fixed past dates had aged past the 8 h
+      dead-row window. The rule is right for those cards, so the fixtures were fixed and the rule
+      was not loosened. Each file gains a DEAD-ROW test: a 9-hour-old "running" job never gets
+      the "being prepared" copy.
+
+### Notes
+
+- **The server guard is the real one.** The client reload guard only skips a request whose answer
+  is already known. A composite still POSTs on reload. Its `stitch_composite` enqueue is deduped by
+  the per-kind in-flight index, and the cross-kind second-chain defect never applied to it.
+- **The 60 s evidence window and the 60 s settled grace are new constants in `SyncPreviewStep`**
+  (`IN_FLIGHT_EVIDENCE_TTL_MS`, `SETTLED_WITHOUT_COMPLETE_GRACE_MS`). Each is documented beside its
+  definition. Review round 1 added `IN_FLIGHT_TRUST_CEILING_MS` (60 min) and
+  `MOUNT_PROBE_TIMEOUT_MS` (5 s) there, `_RESYNC_CHAIN_JOB_LIVE_WINDOW` (8 h) in `process_key.py`,
+  and `IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS` (8 h, mirroring it) in `compute-state.ts`.
+- **Review round 1 decisions, recorded so they read as decisions.** (1) For `selectFactsheetJob`
+  the staleness bound was taken over "prefer an in-flight row only when newer than the latest
+  terminal row", which reduces to newest-row-wins and would revert the in-flight-first rule.
+  (2) A running job AT its attempt budget stays live. The claim counts the attempt it starts, so
+  treating `attempts >= max_attempts` as dead for a running row would admit a second chain during
+  a legitimate final attempt. (3) The probe timeout uses an `AbortController` and
+  `window.setTimeout`, not `AbortSignal.timeout`, which does not run on the test's fake clock
+  (measured). (4) The job's kind and status were not added to the duplicate reply. The code
+  alone decides the Retry branch, and no TS reader would use them.
+- Review round 1, style only: the `services.job_worker` import in `process_key.py` now sits in
+  alphabetical order.
+- **Known limit (submit fix): the founder notification email is not sent on the unified arm.**
+  Only `runLegacyFinalize`'s `after()` fan-out calls `notifyFounderNewStrategy`, and the unified
+  arm has no such fan-out. Email is disabled anyway (RESEND off), so nothing is lost today.
+- **Known limit (submit fix): drafts already stranded at `status='draft'` are not repaired.** Only
+  test data was affected. The fix applies to submits from this release on.
+- **Known limit, now documented (round 2, SFH LOW-9): a Submit replay writes nothing.**
+  `callFinalizeWizardRpc`'s docblock says so: form fields edited between the first submit and a
+  Retry are not applied, and the row keeps what the first submit wrote.
+- **Review round 2 decisions.**
+  - (1) `SUBMITTED_ANALYTICS_NOT_QUEUED` also answers a SEAM_MISCONFIGURED dispatch failure,
+    recoverable. A Retry cannot win until we redeploy, but it is safe, and the submission IS saved;
+    the upstream code rides along for support.
+  - (2) Hiding the Retry at the ceiling means that brief's "ceiling, then Retry, then duplicate"
+    sequence cannot occur. It is covered as its two halves.
+  - (3) A mount whose probe cannot tell (failed, timed out, unreadable) still POSTs, logged. The
+    server's chain-in-flight guard refuses a duplicate there, and not POSTing would strand a first
+    kickoff.
+  - (4) The `worker_stalled` arm has no TS mirror, because the RPC redacts `last_error`.
+- **Known limit: a partial-day benchmark close cached BEFORE this release can still be served.**
+  A row cached on day D for date D held D's price so far. From D+1 it is a completed-day row in
+  every respect this code can see, so it is served until a fresh fetch overwrites it by upsert. A
+  full cache is not refetched, so that may not happen. Recorded, not fixed: telling such a row
+  from a true close needs a write timestamp the table does not carry.
 ## [0.90.0.1] - 2026-09-24 — the committed baseline catches up with the Phase 164.6 apply
 
 Same shape as v0.77.51.1 and v0.77.46.1: a read-only re-dump taken after a migration reached

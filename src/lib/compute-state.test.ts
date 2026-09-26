@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  computeJobDeadReason,
   COMPUTE_STATE_READ_LIMIT,
   deriveComputeState,
   FACTSHEET_CHAIN_KINDS,
@@ -151,6 +152,90 @@ describe("selectFactsheetJob", () => {
     const b = row("derive_broker_dailies", { created_at: "2026-07-12T11:38:05.000Z", status: "done" });
     const c = row("compute_analytics_from_csv", { created_at: "2026-07-12T11:39:02.000Z" });
     expect(selectFactsheetJob([a, c, b])).toBe(c);
+  });
+
+  it("2026-09-24: an OLDER in-flight chain row answers over a NEWER finished one (two overlapping chains)", () => {
+    // The live incident: a duplicate resync started a second chain. The first
+    // chain's compute finished AFTER the second chain's process_key_long was
+    // created, so newest-created said `done` while the second chain ran on and
+    // the SQL bridge held the strategy at `computing`.
+    const secondChainHead = row("process_key_long", {
+      created_at: "2026-07-12T11:45:00.000Z",
+      status: "running",
+    });
+    const firstChainTail = row("compute_analytics_from_csv", {
+      created_at: "2026-07-12T11:50:00.000Z",
+      status: "done",
+    });
+    expect(selectFactsheetJob([firstChainTail, secondChainHead])).toBe(secondChainHead);
+    expect(selectFactsheetJob([secondChainHead, firstChainTail])).toBe(secondChainHead);
+    for (const status of ["pending", "running", "failed_retry", "done_pending_children"]) {
+      const inFlight = row("sync_trades", { created_at: "2026-07-12T11:40:00.000Z", status });
+      expect(selectFactsheetJob([firstChainTail, inFlight])).toBe(inFlight);
+    }
+    // Every KCS-20 surface derives from the same selection.
+    expect(
+      deriveComputeState({ rows: [firstChainTail, secondChainHead], readExhaustive: true, nowMs: NOW_MS }).state,
+    ).toBe("running");
+  });
+
+  it("review-fix round 1: an in-flight chain row far OLDER than the newest finished one is stale and does not answer", () => {
+    // A crash-looping job cycles running -> pending and never goes terminal.
+    // A later chain finished 9 hours after it was created: the finished row
+    // answers, so the surface does not report a dead job as running for ever.
+    const staleInFlight = row("sync_trades", { created_at: "2026-07-12T02:00:00.000Z", status: "pending" });
+    const newerDone = row("compute_analytics_from_csv", { created_at: "2026-07-12T11:00:00.000Z", status: "done" });
+    expect(selectFactsheetJob([staleInFlight, newerDone])).toBe(newerDone);
+    expect(selectFactsheetJob([newerDone, staleInFlight])).toBe(newerDone);
+    expect(
+      selectFactsheetJob([staleInFlight, stitch({ created_at: "2026-07-12T11:30:00.000Z", status: "done" }), newerDone], {
+        preferStitch: false,
+      })?.kind,
+    ).not.toBe("sync_trades");
+    // Control: just inside the window the in-flight row still answers.
+    const recentInFlight = row("sync_trades", { created_at: "2026-07-12T03:00:01.000Z", status: "pending" });
+    expect(selectFactsheetJob([recentInFlight, newerDone])).toBe(recentInFlight);
+  });
+
+  it("round-2 review: a chain row the resync guard calls dead takes no part in the selection", () => {
+    const done = row("compute_analytics_from_csv", { created_at: "2026-07-12T10:00:00.000Z", status: "done" });
+    // Crash-looping: pending with its budget spent, and running past it.
+    const exhausted = { ...row("sync_trades", { created_at: "2026-07-12T11:00:00.000Z", status: "pending" }), attempts: 3, max_attempts: 3 };
+    const overBudget = { ...row("sync_trades", { created_at: "2026-07-12T11:10:00.000Z", status: "running" }), attempts: 5, max_attempts: 3 };
+    expect(selectFactsheetJob([done, exhausted])).toBe(done);
+    expect(selectFactsheetJob([done, overBudget])).toBe(done);
+    // Only dead rows: nothing is selected, so an exhaustive read is settled.
+    expect(selectFactsheetJob([exhausted])).toBeNull();
+    expect(
+      deriveComputeState({ rows: [exhausted], readExhaustive: true, nowMs: NOW_MS }).state,
+    ).toBe("never_started");
+    // Control: a running row AT its budget is its legitimate final attempt.
+    const finalAttempt = { ...row("sync_trades", { created_at: "2026-07-12T11:10:00.000Z", status: "running" }), attempts: 3, max_attempts: 3 };
+    expect(selectFactsheetJob([done, finalAttempt])).toBe(finalAttempt);
+  });
+
+  it("round-2 review: an in-flight chain row older than CHAIN_JOB_LIVE_WINDOW_MS at nowMs is dead; without nowMs the age arm is off", () => {
+    const nowMs = Date.parse("2026-07-12T20:00:00.000Z");
+    const ancient = row("sync_trades", { created_at: "2026-07-12T11:59:59.000Z", status: "running" });
+    const recent = row("sync_trades", { created_at: "2026-07-12T12:00:01.000Z", status: "running" });
+    expect(selectFactsheetJob([ancient], { nowMs })).toBeNull();
+    expect(selectFactsheetJob([recent], { nowMs })).toBe(recent);
+    expect(selectFactsheetJob([ancient])).toBe(ancient);
+    expect(computeJobDeadReason(ancient, nowMs)).toBe("older_than_live_window");
+    // A finished row is never "dead", whatever its age.
+    expect(computeJobDeadReason(row("sync_trades", { created_at: "2026-01-01T00:00:00.000Z", status: "done" }), nowMs)).toBeNull();
+  });
+
+  it("2026-09-24: with nothing in flight, the newest chain row still answers (finished vs failed)", () => {
+    const olderFailed = row("sync_trades", { created_at: "2026-07-12T11:40:00.000Z", status: "failed_final" });
+    const newerDone = row("compute_analytics_from_csv", { created_at: "2026-07-12T11:50:00.000Z", status: "done" });
+    expect(selectFactsheetJob([olderFailed, newerDone])).toBe(newerDone);
+  });
+
+  it("2026-09-24: with preferStitch false, an in-flight chain row outranks a NEWER finished stitch", () => {
+    const chain = row("process_key_long", { created_at: "2026-07-12T11:00:00.000Z", status: "running" });
+    const s = stitch({ created_at: "2026-07-12T11:59:00.000Z", status: "done" });
+    expect(selectFactsheetJob([chain, s], { preferStitch: false })).toBe(chain);
   });
 
   it("skips null and undefined rows, and an empty list selects nothing", () => {

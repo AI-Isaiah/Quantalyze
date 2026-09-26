@@ -668,6 +668,35 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    byte-freeze + mirror-prose machinery can be deleted. Skipped same-pass because each
    reshapes just-red-teamed money-math or test machinery right before ship.
    **Recorded:** 2026-08-23 (/simplify, phase 159)
+   ✅ **CLOSED 2026-09-24 by Phase 166 QSTATS-TRUTH. All three items landed, in the order this
+   entry asked for.** The text above is kept as lineage.
+   - **Primitives, extracted first (plan 01), before any new mirror:** `_drawdown_series_from_wealth`,
+     `_max_drawdown_from_wealth`, `_annualized_vol_sharpe`, `_downside_rms` and `_cvar_of_tail`
+     in `analytics-service/services/metrics.py`. Every bit-identical inline spelling now calls them,
+     including the headline Sharpe, the backbone Sharpe/vol and `info_ratio`. The golden parity file
+     passed unedited. The phase's new mirrors (plans 03-06) are built on these primitives, so no
+     third hand-copy was written.
+   - **AST gate (plans 07-08):** `analytics-service/tests/qstats_gate.py`, tested by
+     `analytics-service/tests/test_qstats_gate.py`, replaces the line-oriented RANK-05 region gate.
+     It walks every production module that imports quantstats. It sees direct calls, the
+     `getattr(qs.stats, ...)` dispatch, aliases and preparer reach-ins. It allowlists named leaf
+     FUNCTIONS, each pinned by a behavioural preparer-spy test, never the keyword text. Its census
+     prints on every pytest run. Needles for each call shape, plus four neuter drills on the real
+     file, show that it can fail.
+   - **KPI array (plan 02):** `PERCENTILE_ANALYTICS_COLUMNS` (`src/lib/queries.ts`) and csv-finalize's
+     `CLOCK_SAFETY_KPI_COLUMNS` plus its guard select are derived from the existing exported
+     `PERCENTILE_METRICS` (`src/lib/percentile-core.ts`). Two hand-written byte pins, both observed
+     RED on a separator mutation, prove that no string sent to PostgREST changed.
+   - ⛔ **The "kwarg-closable" claim was REFUTED by measurement.** WINDOWS.md entry 9 and the 159-05
+     SUMMARY "Residual" table said `recovery_factor`, `kelly_criterion`, `common_sense_ratio`,
+     `cpc_index` and `r_squared` could be closed with `prepare_returns=False`. The phase's
+     preparer-spy measurement (166-RESEARCH §Q2) showed that none of them honours the keyword.
+     Each still reaches quantstats' preparers through a helper that is not passed the keyword:
+     `max_drawdown`, `payoff_ratio`, `win_rate`, `profit_factor`, `tail_ratio` and
+     `win_loss_ratio`, plus `_prepare_benchmark` on the benchmark leg of `r_squared`, `greeks` and
+     `rolling_greeks`. So `recovery_factor`, `kelly_criterion`, `common_sense_ratio`, `cpc_index`
+     and the benchmark leg of `r_squared` / `greeks` / `rolling_greeks` all went to inline
+     mirrors. WINDOWS.md entries 5 and 9 are marked fixed in the same commit as this note.
 
 0.12. **🎨 FreshnessChip's longest label overflows its masthead column — measured in a real browser.**
    Found 2026-08-26 during the phase-162 browser pass on localhost/TEST (the first time this phase
@@ -1280,11 +1309,26 @@ true for 146 and half of 142–145, and **false for 141**.
       rather than trusted at face value by a later reader.
       Owner: Phase 164.5.1 CRONREPOINT.
 
-- [ ] ⛔ **`[164.9-FANIN-STATUS-NEVER-SET]` a job enqueued through the PUBLIC wrapper with
+- [x] ⛔ **`[164.9-FANIN-STATUS-NEVER-SET]` a job enqueued through the PUBLIC wrapper with
       `parent_job_ids` NEVER enters the fan-in state in production — a confirmed production
       defect, data integrity (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 11, surfaced by
       the live-DB lane in the plan 08 fix round and VERIFIED INDEPENDENTLY by the orchestrator
       rather than merely reported).**
+      ✅ **CLOSED 2026-09-25 by Phase 164.9.1 JOBRPCTRUTH (v0.93.0.0), by a MIGRATION, as this
+      entry demanded.** `20260924230827_fanin_initial_status_10param` re-bases the TEN-arg
+      `_enqueue_compute_job_internal` on its latest definition (`20260826150000`, found by a grep
+      of every migration for both overloads) and INSERTs the computed status:
+      `done_pending_children` when the parent list has an element, `pending` otherwise. Review
+      round 1 added a `FOR SHARE` parent lock and a 22023 refusal of any parent list no mark-done
+      could release. The arm was NOT rewritten, deleted or skipped: it went GREEN against the new
+      body on the lane, and the harm probe was RED against the old one. Three reviewers, two
+      rounds, findings fixed before any apply. Evidence: `164.9.1-01-SUMMARY.md` (harm probe),
+      `164.9.1-02-SUMMARY.md` (M1), `164.9.1-03-SUMMARY.md` (P12 calibrated),
+      `164.9.1-11-SUMMARY.md` and `164.9.1-12-SUMMARY.md` (review rounds). ⚠️ The fix reaches
+      PRODUCTION when the PR merges (apply-test, then the PROD apply); the SHA-bound post-merge
+      check is the phase's FC-1. Residuals (a parent that later fails strands its child; a 40P01
+      diamond deadlock on the parent lock) are latent, recorded in M1's header and routed to
+      Phase 164.5.2 BRIDGELOCK.
       **THE MECHANISM, named by SYMBOL because line numbers drift
       (`[164.7-CITATION-DRIFT-01]`):** `enqueue_compute_job` routes all three of its modes to the
       **TEN-ARG** `_enqueue_compute_job_internal`, whose `INSERT` column list OMITS `status`, so
@@ -1759,8 +1803,24 @@ true for 146 and half of 142–145, and **false for 141**.
       `docs/runbooks/test-analytics-url.md`. Both traps above are restated in the runbook verbatim,
       because they are the two ways a green reading here means nothing.
 
-- [ ] **`[164.9-TEST-ANALYTICS-URL-REARM]` A RESTORE RE-ARMS the hazard above, by design, so
+- [x] **`[164.9-TEST-ANALYTICS-URL-REARM]` A RESTORE RE-ARMS the hazard above, by design, so
       closing it once does not close it (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 10).**
+      ✅ **CLOSED 2026-09-25 by Phase 164.9.1 JOBRPCTRUTH (v0.93.0.0) — the post-restore step this
+      entry named as "what would actually close it" now exists, inside the restore's OWN
+      transaction.** `scripts/restore-test-from-baseline.sh` `build_transaction` appends the
+      fragment that `scripts/test-only-normalize-analytics-url.sh --emit-restore-sql` prints, after
+      the reference-data replay and before the ledger DDL, byte-identical in both modes. The
+      fragment re-reads the marker, refuses PROD / absent / foreign markers and a missing row,
+      rewrites the row to the script's sink and checks ROW_COUNT = 1 and the read-back. The
+      allowlist was NOT edited (the reseed stays faithful) and no migration was used. A failed or
+      malformed fragment aborts the restore, and the workflow runs the emitter's self-test before
+      `--run`. Evidence: `164.9.1-04-SUMMARY.md` (emitter), `164.9.1-05-SUMMARY.md` (in-transaction
+      step, self-test arms), `164.9.1-06-SUMMARY.md` (position and byte-identity pins),
+      `164.9.1-10-SUMMARY.md` (runbook and arm D1 prose), `164.9.1-11-SUMMARY.md` (refusal hardening).
+      ⚠️ **The LIVE observation on shared TEST is FC-3: founder-owned, blocked on the founder's
+      baseline re-dump, and NOT a completion gate.** No agent dispatches the restore. Arm D1 still
+      reads the live row on every gate run, so a future re-arm is still reported by name.
+      `[164.9-BASELINE-PRIVILEGES-ABSENT]` is untouched by this closure.
       Owner: Phase 164.9 TESTISOLATION.
       ⭐ **RE-HOMED 2026-09-21 — THE `Owner:` LINE ABOVE IS SUPERSEDED, kept only as lineage.**
       Phase 164.9 TESTISOLATION is CLOSING and did not build the post-restore step, so leaving it
@@ -9989,9 +10049,23 @@ a tail residual section is the same disappearance this residue exists to prevent
       the re-homed `[164.9-TEST-ANALYTICS-URL-REARM]`. ⚠️ Until that phase exists the owner is
       THE FOUNDER, who inserts it.**
 
-- [ ] **`[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]` two lane failures that need a PRODUCTION change or
+- [x] **`[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]` two lane failures that need a PRODUCTION change or
       an INTENT decision — distinct from F1 and from each other (booked 2026-09-21, Phase 164.9
       TESTISOLATION plan 11, out of the plan 08 fix round).**
+      ✅ **CLOSED 2026-09-25 by Phase 164.9.1 JOBRPCTRUTH (v0.93.0.0), both halves, neither by
+      rewriting an assertion to match observed behaviour.** **(a)** by a MIGRATION:
+      `20260924233749_allocator_sync_restore_inflight_prefetch` re-bases
+      `request_allocator_holdings_sync` on 076 and restores 067's in-flight look-up, so the Queued
+      shape is returned again; the same migration restores 075's `api_key_disconnected` refusal
+      (D-23, the route maps it to 409). The Queued arms were RED before and GREEN after, each
+      calibrated. **(b)** by an INTENT decision written down (D-13): the CURRENT invariant is 081's
+      one-outcome-per-decision UNIQUE plus 083's md-NULL partial unique, so two outcomes under two
+      different decisions are allowed by design. `20260925071300_bridge_outcomes_invariant_comments`
+      puts that in the catalogue, and the XOR file now asserts the current invariant by SQLSTATE and
+      constraint name. The live-DB ledger shrank 10 → 7 for the arms this phase fixed. Evidence:
+      `164.9.1-07-SUMMARY.md`, `164.9.1-08-SUMMARY.md`, `164.9.1-09-SUMMARY.md`,
+      `164.9.1-10-SUMMARY.md`. ⚠️ Takes effect on PRODUCTION when the PR merges. The D-11
+      concurrent-prefetch race stays accepted, as 067 accepted it.
       **(a) AN UNREACHABLE BRANCH — needs an RPC change.**
       `request_allocator_holdings_sync` returns its `{already_inflight, next_attempt_at}` shape
       ONLY from an `EXCEPTION WHEN unique_violation` handler around `enqueue_compute_job`. But

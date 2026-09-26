@@ -488,7 +488,13 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     return card?.querySelector('[data-testid="strategy-row-share-note"]')?.textContent ?? null;
   }
 
-  const running = { kind: "process_key_long", status: "running", created_at: "2026-02-01T00:00:00.000Z" };
+  // In-flight rows are RECENT on the real clock the page reads. A fixed past
+  // date (they used to be 2026-02-01) ages past `CHAIN_JOB_LIVE_WINDOW_MS`, and
+  // since WIZRESYNC review round 2 `selectFactsheetJob` treats an in-flight row
+  // that old as dead, as the resync guard does. Terminal rows keep fixed dates:
+  // a finished row is never "dead".
+  const isoMinutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
+  const running = { kind: "process_key_long", status: "running", created_at: isoMinutesAgo(10) };
 
   it("COMPUTED-NO-NOTE: a row with a computed factsheet shows no note and asks the RPC nothing", async () => {
     state.strategies = [
@@ -512,6 +518,15 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     const container = await renderPage();
 
     expect(noteOf(container, "Strategy s-1")).toBe(MINT_A);
+  });
+
+  it("DEAD-ROW (WIZRESYNC round 2): a 'running' chain job 9 h old is not in progress, so the note never says 'being prepared'", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "computing" } })];
+    state.jobs = { "s-1": [{ ...running, created_at: isoMinutesAgo(9 * 60) }] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-1")).not.toBe(MINT_A);
   });
 
   it("MINT-B: an unpublished row whose stitch failed permanently says the private link shows it not available", async () => {
@@ -578,7 +593,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     state.members = [];
     state.jobs = {
       "s-1": [
-        { kind: "process_key_long", status: "running", created_at: "2026-02-02T00:00:00.000Z" },
+        { kind: "process_key_long", status: "running", created_at: isoMinutesAgo(5) },
         { kind: "stitch_composite", status: "failed_final", created_at: "2026-01-01T00:00:00.000Z" },
       ],
     };
@@ -593,7 +608,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     state.members = [];
     state.jobs = {
       "s-1": [
-        { kind: "process_key_long", status: "running", created_at: "2026-02-02T00:00:00.000Z" },
+        { kind: "process_key_long", status: "running", created_at: isoMinutesAgo(5) },
         { kind: "stitch_composite", status: "failed_final", created_at: "2026-01-01T00:00:00.000Z" },
       ],
     };

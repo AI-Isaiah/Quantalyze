@@ -728,6 +728,15 @@ async function unifiedKeysSyncHandler(args: {
           // what the backbone just did: a job IS enqueued. Re-pointing the
           // branch without this would have moved the lie instead of removing it.
           queued: upstream.queued === true,
+          // Round-2 review (SFH LOW-8) — the JOB's state, forwarded verbatim
+          // from `process_key.py`: "enqueued" when the duplicate path
+          // (`_resume_duplicate_job`, the resumed wedge) queued or found a
+          // PENDING job, "running" when the job is already in flight (that
+          // path, or the chain-in-flight guard). The wizard needs it to tell a
+          // Retry that queued work from one the server refused.
+          ...(typeof upstream.job_state === "string"
+            ? { job_state: upstream.job_state }
+            : {}),
           code: "WIZARD_DUPLICATE",
           idempotent: true,
           // Unified is a single-key resync path — never a composite.

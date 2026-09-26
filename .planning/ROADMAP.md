@@ -862,6 +862,32 @@ Plans:
 
 ⭐ **SCOPE ADDED 2026-09-23 BY FOUNDER DECISION (DECISION G in `164.4.2-CONTEXT.md`):** the lane replays the PROD objects that live OUTSIDE `public`, which the schema-only dump does not carry: the trigger on `auth.users` and the `pg_cron` job registrations (24 migrations). They are extracted from the migration files, and a check fails the boot if the lane's set drifts from what the migrations declare. Measured by plan 08's SHA-bound CI read: once the lane ACL defect was fixed, 8 of 76 SQL files still failed on the lane for exactly this reason. Plan 04's probe measured that the lane HOSTS these schemas, not that it carries the objects registered in them. Realised as a new plan, executed before plan 08's CI checkpoint is re-read.
 
+### Phase 164.4.2.1: DRIFTOFFMUTEX — `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work, so a merge push's critical path falls back inside its BEFORE band (INSERTED)
+
+**Goal:** A merge push to `main` is no slower than before Phase 164.4.2. `test-db-drift` (VAC-08, read-only against shared TEST's migration ledger and function bodies) stops queueing behind `python` and `e2e-seeded` for the advisory key, without weakening VAC-08's verdict and without breaking the ordering against `supabase-migrate.yml`'s `apply-test`.
+**Requirements**: the Phase 164.4.2 speed goal, clauses (a) and (c) of `164.4.2-MEASUREMENT.md`.
+**Depends on:** Phase 164.4.2
+**Plans:** 0 plans
+
+⭐ **Founder decision, 2026-09-24 (AskUserQuestion): "Book the phase if it holds."** It held.
+
+**Evidence.** `164.4.2-MEASUREMENT.md` `## AFTER`, merge-push runs 1–5 (CI `35939061930`, `35943402509`, `35943407413`, `35957479474`, `35958026743`):
+- (a) critical path: FAIL. Non-degenerate run-totals were 18m26s, 32m32s and 32m30s, against a band of 16m18s–18m50s.
+- (b) `sql-tests` job: PASS, about 2m20s.
+- (c) combined lock-wait: FAIL. It was 13m26s, 39m51s and 27m17s, against a band of 12m05s–14m56s.
+
+`test-db-drift` waited up to 20m31s to hold the key for seconds of work. Phase 164.4.2 moved the wait off `sql-tests` without removing it.
+
+## Success Criteria
+1. `test-db-drift` no longer holds, or waits for, advisory key `61616158` for its read-only VAC-08 reads. Alternatively, it waits in a way that is off the merge push's critical path. The choice is recorded with its reason.
+2. VAC-08's verdict is unchanged: it still reads shared TEST after `apply-test`'s schema apply, a red stays red, and a missing credential still exits 1.
+3. The five non-degenerate merge-push runs after the merge meet 164.4.2's clauses (a) and (c), measured with that file's own method and bands.
+4. No timeout is raised, no gate is skipped and no job leaves the `frontend` aggregator.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.4.2.1 to break down)
+
 ### Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral (INSERTED)
 
 **Goal:** The pg-lane can host pg_cron, so the `[REDUNDER-PGCRON]` deferral is RETIRED
@@ -2110,6 +2136,7 @@ Plans:
 
 **Requirements**: TODOS entries `161.1-D1`, DEC-4
 **Depends on:** Phase 164.4.1 (pg-lane with pg_cron). ⚠️ NOT Phase 164.5 — the plan is file-disjoint from it and was lifted whole.
+**Routed here 2026-09-25 (from 164.9.1 review round 1), both latent or loud, both on the terminal-mark / bridge surface this phase owns:** (1) a fan-in child whose parent is still open at enqueue and later ends `failed_final` stays in `done_pending_children` forever (no caller passes parents today); (2) a second `match_decisions` delete can raise 23505 through the ON DELETE SET NULL cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null` (pre-existing, fails loudly, the admin decisions route issues these deletes). (3) the fan-in parent lock `FOR SHARE ... ORDER BY id` can deadlock (40P01) against `mark_compute_job_done` in a diamond (a child whose parents include another waiting child); latent, recorded in M1's header — whoever passes parents must treat 40P01 as retryable on both the enqueue and the worker's mark path. (4) **Routed 2026-09-25 from the 164.9.1 pre-push silent-failure-hunter (MEDIUM, pre-existing, NOT introduced by 164.9.1): one `failed_retry` + `pending` pair on the same `(kind, api_key_id)` wedges the WHOLE claim.** `claim_compute_jobs` and `claim_compute_jobs_with_priority` rank `pending` and `failed_retry` candidates together, and their C39 / NEW-C39-01 `NOT EXISTS` guard excludes a partition only when it already holds a `running` or `done_pending_children` row — never a `pending` one. The enqueue look-up (`_enqueue_compute_job_internal`) treats only `pending`/`running`/`done_pending_children` as in-flight, so it inserts a fresh `pending` beside a `failed_retry`. When the `failed_retry` wins `rn_k` (earlier `next_attempt_at`, or the `pending` is not yet due), the batch `UPDATE ... SET status = 'running'` puts two rows into `compute_jobs_one_inflight_per_kind_api_key` and raises 23505 — and because it is ONE statement, no job of ANY kind is claimed until the pair clears. Loud, not silent: every claim call errors. The same guard shape exists for the portfolio, strategy and allocator partitions against their sibling indexes; audit all four. **Suggested fixes (not decided):** (a) add `'pending'` to each guard's `x.status` list with `x.id <> ranked.id`, in BOTH claim RPCs — a `pending` candidate can have no `pending` sibling under the index, so this only removes the colliding `failed_retry`; (b) and/or make the enqueue look-up fold into, or supersede, an existing `failed_retry` for the partition instead of inserting beside it; (c) whichever is chosen, a `RED-UNDER`-annotated SQL gate on the lane must pin it. **Measured repro, local-stack lane only (`scripts/local-stack/run.sh up`, loopback DSN from its `.stack-env`, then `down`):** in one transaction that ends in `ROLLBACK`, with `SET LOCAL session_replication_role = replica` so a synthetic `api_key_id` needs no FK rows, insert two `poll_allocator_positions` rows sharing one `api_key_id` — a `failed_retry` with `next_attempt_at = now() - 10 min` and a `pending` with `next_attempt_at = now() + 10 min` — reset the role to `origin`, then call `claim_compute_jobs(10, 'repro-worker')` (and, after a savepoint rollback, `claim_compute_jobs_with_priority(10, 'repro-worker', NULL::boolean, NULL::text[], NULL::text[])`; the two-arg call is ambiguous across its overloads). Both raised `duplicate key value violates unique constraint "compute_jobs_one_inflight_per_kind_api_key"` on 2026-09-25 at the 164.9.1 release head.
 **Plans:** 1 plan (lifted from Phase 164.5 plan 08, unmodified)
 
 Plans:
@@ -2362,6 +2389,23 @@ already_authorized` in 33 ms. **Outage 11:02:38Z → 12:41:46Z = 1h39m.**
 6. ⚠️ `correlation_id` is minted PER WIZARD SESSION, not per request — measured identical across
    attempts HOURS apart, so two different failures are indistinguishable in support. That undercuts
    the "email us with the correlation id" instruction in the same copy.
+
+**Inherited success criteria — routed here by founder decision 2026-09-24 (AskUserQuestion).** Both
+need a live MT5 validate against a terminal this phase makes trustworthy, so they close with it,
+not in their source phases. Each source VERIFICATION marks its item resolved-by-routing to here.
+
+7. **(from Phase 161, human item 1: the live MT5 `undetermined` verdict.)** One live MT5 validate
+   that lands an `undetermined` capability verdict is read, and its sentence names *"Allow
+   algorithmic trading"* (arm 1) when the Experts setting is off, or the external-Python-API option
+   (arm 2) only when `terminal_info` reports `tradeapi_disabled`. It must never name the
+   external-Python-API option while that flag is off. ⚠️ The verdict has no durable sink today (it
+   is a structured log event only), so the reading must be captured when it happens.
+8. **(from Phase 164.5.3, human item 2: the end-to-end live MT5 credential update.)** On an MT5 key
+   whose status the worker has already set to `revoked` or `error` by a wrong password, the
+   founder uses "Update password" with the correct password. The PATCH returns 200, the card drops
+   the revoked pill at once, and on the next ledger-refresh or allocator-poll tick the automated
+   fan-out picks the key up again. A row reading `sync_status = 'idle'` alone does not close it.
+   Founder-only: no agent enters or drives a real credential.
 
 ⚠️ **PIN, DO NOT FIX — a settings landmine:** the terminal's Experts tab has *"Disable algorithmic
 trading when the account has been changed"* UNCHECKED. Validation IS an account change, so ticking
@@ -2825,11 +2869,28 @@ Phase 164.9 plan 10 normalised shared TEST's `analytics_service_url` row to a lo
 
 **Requirements**: `[164.9-FANIN-STATUS-NEVER-SET]` (`TODOS.md`, `## FIX NOW`), `[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]`, `[164.9-TEST-ANALYTICS-URL-REARM]`
 **Depends on:** Phase 164.9
-**Plans:** 0 plans
+⭐ **Founder decision 2026-09-24 (AskUserQuestion): D-23 "Restore it"** — migration 075's `api_key_disconnected` refusal (409) is restored. FC-3's blocker (the baseline re-dump) cleared with v0.90.0.1 (#855).
+**Amended 2026-09-25 (review round 1):** D-04 now departs from strict seven-arg parity: M1 refuses a NULL/missing/failed parent (22023) and starts a child `pending` when its parents are all done (164.9.1-CONTEXT D-04). The normalize self-test runs in the dispatch-only restore job, not on PRs — accepted: that job runs it before every live restore, which is where it guards. A ci.yml PR job for it needs PostgreSQL server binaries and is not in this phase.
+**Plans:** 14 plans (10 waves; planned 2026-09-24, plan-checker passed after 3 revision rounds, 1 info advisory open)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.1 to break down)
+⚠️ 164.4.2 pins (ledger counts, lane image, job names, mutex-key counts) are re-measured by whichever of 164.4.2 / 164.9.1 merges second; 164.4.2 is already on `main` as #842, so plan 01 re-measures them after bringing `main` in.
+
+- [ ] 164.9.1-01-PLAN.md — wave 1 — bring `main` (incl. 164.4.2) in, re-measure pins, record the pre-fix harm verdict on the local lane (criterion 1)
+- [ ] 164.9.1-02-PLAN.md — wave 2 — tracer: M1 (ten-arg `_enqueue_compute_job_internal` computes and inserts the initial status), P12 green by execution (criteria 2, 3)
+- [ ] 164.9.1-03-PLAN.md — wave 3 — P12 calibrated neuter -> RED -> restore; dedupe-gate twins re-pointed (criterion 6)
+- [ ] 164.9.1-04-PLAN.md — wave 2 — single-sourced analytics-URL normalisation emitter (REARM)
+- [ ] 164.9.1-05-PLAN.md — wave 3 — restore transaction concatenates the emitter output, identical in both modes (REARM)
+- [ ] 164.9.1-06-PLAN.md — wave 4 — restore static pins re-measured (REARM)
+- [ ] 164.9.1-07-PLAN.md — wave 4 — M2: `request_allocator_holdings_sync` regains 067's in-flight prefetch and 075's disconnected refusal (criterion 4)
+- [ ] 164.9.1-08-PLAN.md — wave 5 — sync route maps the disconnected refusal to 409 (D-23)
+- [ ] 164.9.1-09-PLAN.md — wave 5 — M3 catalog comments + XOR arm asserts the current bridge_outcomes invariant (criterion 5)
+- [ ] 164.9.1-10-PLAN.md — wave 6 — live-DB ledger shrinks by three, ceiling lowered in the same commit; whole-phase gate sweep
+- [ ] 164.9.1-11-PLAN.md — wave 7 — three-reviewer gate round 1 (orchestrator dispatches; not autonomous)
+- [ ] 164.9.1-12-PLAN.md — wave 8 — three-reviewer gate round 2 + gate re-run (not autonomous)
+- [ ] 164.9.1-13-PLAN.md — wave 9 — ⛔ FOUNDER CHECKPOINT FC-2 (merge order) + re-sync onto `main`
+- [ ] 164.9.1-14-PLAN.md — wave 10 — release record; ⛔ FOUNDER CHECKPOINTS FC-1 (merge = auto-apply TEST then PROD) and FC-3 (live restore dispatch, not a completion gate)
 
 ### Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD (INSERTED)
 
@@ -2855,6 +2916,8 @@ Plans:
 - [ ] TBD (run /gsd-plan-phase 164.9.2 to break down)
 
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
+
+⭐ **Founder answers, 2026-09-24:** D-15, D-16 and D-17 are APPROVED. OPEN-2: after merge, run plan 10's read-only census, then queue a recompute of the affected PROD rows.
 
 **Goal:** No metric persisted to `metrics_json` or rendered in a chart is the output of quantstats'
 price-detection heuristic misreading a return series as prices. RANK-05 (Phase 159) closed that
@@ -2917,11 +2980,57 @@ hand-copy is added, and derive `PERCENTILE_ANALYTICS_COLUMNS` + csv-finalize's
 `CLOCK_SAFETY_KPI_COLUMNS` from one exported KPI array. TODOS 0f explicitly says to do this extraction
 as part of the scalars closure, not before.
 
-**Plans:** 0 plans
+**Plans:** 10 plans (planned 2026-09-24; decisions in `166-CONTEXT.md` D-01…D-19)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 166 to break down)
+**Wave 1**
+- [ ] 166-01-PLAN.md — D-04: extract the shared money-math primitives from `compute_all_metrics`, byte-neutral (zero golden movement)
+- [ ] 166-02-PLAN.md — D-12/D-18: byte-pin, then derive `PERCENTILE_ANALYTICS_COLUMNS` and `CLOCK_SAFETY_KPI_COLUMNS` from `PERCENTILE_METRICS` (TS, file-disjoint from 01)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 166-03-PLAN.md — drawdown-family scalar mirrors (recovery_factor, ulcer_index, ulcer_performance_index, serenity_index) and the dispatch table retyped off `getattr(qs.stats, …)`
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 166-04-PLAN.md — kelly_criterion, probabilistic_ratio, common_sense_ratio, cpc_index mirrors; D-16 PSR kurtosis fix (golden PSR moves, disclosed)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 166-05-PLAN.md — r_squared and scalar greeks on the benchmark leg (D-05); D-15 NaN-greeks: complete pairs, None never 0.0
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 166-06-PLAN.md — rolling greeks on both legs (D-06); D-17 windowed rolling alpha (golden rolling_alpha moves, disclosed)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 166-07-PLAN.md — D-14 AST gate over every production quantstats importer, printed census; the line gate deleted
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 166-08-PLAN.md — per-shape red/green needles, behavioural kwarg pins with calibration rows, neuter drills on the real module
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 166-09-PLAN.md — D-10 measured before/after table, D-11 read-only census SQL, closes WINDOWS 5 and 9 and TODOS 0f
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 166-10-PLAN.md — full gate sweep, the one release commit, OPEN-2 recorded as a founder `checkpoint:decision` (no production write)
+
+**Cross-cutting constraints:**
+
+- the SUMMARY passed the planning-hygiene check while staged, before it was committed
+
+### Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go (INSERTED)
+
+**Goal:** Every persisted `strategy_analytics` row that Phase 166 changes is recomputed on PROD, so stored numbers match what the fixed code would produce. The same fabricated-ratio class is also closed outside quantstats: exact `== 0` / `> 0` standard-deviation guards.
+**Requirements**: Phase 166 OPEN-2 (founder answer 2026-09-24: "Recompute affected rows after merge", AskUserQuestion). The round-2 fixer measured the non-quantstats sites.
+**Depends on:** Phase 166
+**Plans:** 0 plans
+
+## Success Criteria
+1. **Census first.** The five read-only census SELECTs in `166-09-SUMMARY.md` run on PROD. The founder runs them, or they run read-only and are recorded as counts only. The recompute set is derived from them.
+2. **Normal job path.** Affected rows are recomputed through the normal compute-job path, never by a hand-written UPDATE. Each is verified against the D-10 before/after rows, and the rendered rolling alpha/beta chart and greeks table show the new values.
+3. **Exact-zero guards close.** They exist today in `portfolio_optimizer.py`, `csv_validator.py`, `allocated_capital.py`, `equity_reconstruction.py` and `optimizer.py`. They move to the relative dispersion floor (`_dispersion_is_residue` semantics), and each gets a red test built from a compounding-NAV constant yield.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 166.1 to break down)
 
 ### Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error
 
@@ -2979,11 +3088,44 @@ Plans:
 **Success criteria:** (1) a test with two keys holding the same asset on one venue shows both positions surviving the collapse, in AUM, in Open Positions and in the 167.1 marker, observed RED against today's key; (2) every consumer of `holdingScopeKey` is enumerated by symbol and each is either re-keyed or shown not to need it; (3) the discuss step records how a soft-disconnected key's holdings are counted (founder queue item 11's second question); (4) no change to the analytics service's own math unless the collapse lives there too.
 **Requirements**: TBD
 **Depends on:** Phase 167.1
+⚠️ **2026-09-24 correction (read-only root-cause trace at `96b5db4c`):** the collapse also lives in the analytics-side unique index `(allocator_id, venue, symbol, asof)` on `allocator_holdings`, and for ONE account behind several keys it merges CORRECTLY but attributes the row to whichever key polled last. Adding `api_key_id` to the key as framed above would triple-count that case. Phase 167.1.2 ACCOUNTTRUTH decides account identity first (founder: refuse a second key on the same account); re-scope this phase against it before planning.
 **Plans:** 0 plans
 
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.1 to break down)
+
+### Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports (INSERTED)
+
+**Goal:** An allocator's book counts each exchange ACCOUNT exactly once, and "My Allocation" never shows an equity curve, return or ratio that the data does not support. A second key on an account that is already connected is refused. The equity history is rebuilt as one series per account from per-key returns and flows, and hidden until that series exists.
+**Requirements**: TBD. Source: founder browser UAT 2026-09-24 on the founder's own allocator book ("completely wrong, obviously"), with a read-only root-cause trace at `96b5db4c`.
+**Depends on:** Phase 167.1
+**Plans:** 0 plans
+
+⭐ **Founder decisions, 2026-09-24 (AskUserQuestion):**
+- (1) Several keys on the SAME exchange account: **"Refuse a second key."**
+- (2) The broken curve: **"Hide it until correct."**
+
+**Evidence (root cause, by symbol; measured in code, not yet on PROD rows):**
+- **Equity writes.** `allocator_equity_snapshots` holds one row per `(allocator_id, asof)`, written first-writer-wins (`persist_equity_snapshots`, `ignore_duplicates=True`) by the daily refresh (`run_refresh_allocator_equity_daily_job`, which sums only holdings with `asof = today`, so a key that did not poll today counts as $0) and by the per-key backfill (`run_reconstruct_allocator_history_job`). The history is therefore a patchwork of writers. It produces a +100% jump, a flicker in May, and a −50% "crash" on the day two revoked keys stopped polling.
+- **Returns.** `equityCurveToDailyReturns` (`src/lib/factsheet/resolve-series.ts`) turns those level jumps into returns with no flow or key-set adjustment. That is why the page showed Sharpe 1.44 beside −42.8% cumulative.
+- **Holdings attribution.** The `allocator_holdings` unique index `(allocator_id, venue, symbol, asof)` attributes a shared account to the last-polling key. The Scenario composer then gets zero weight mass: `computeScenario` normalises to 0 instead of returning an honest empty, so it shows all +0.00% over 100 days. `summarizeLiveHoldings` silently drops a trusted but non-contributing key's dollars ("live-holdings total is $0").
+- **Account identity.** `api_keys.venue_account_id` is NULL for every ccxt venue, so "same account" cannot be detected today.
+
+## Success Criteria
+1. **Detect and refuse duplicates.** Connecting a key reads the exchange's account identity (for example the OKX/Bybit uid) into `venue_account_id`. A key whose account is already connected for this user is refused with a clear message. Existing duplicate keys get a named cleanup path; nothing is silently deleted.
+2. **Hide the broken curve now.** Until criterion 3 ships, "My Allocation" shows an honest "history is being rebuilt" state instead of the legacy snapshot curve and its KPIs. There are no invented numbers. This lands first, as its own plan.
+3. **Rebuild the history.** It is rebuilt as one series per account: carried forward over missing polls, never read as $0, and flow-adjusted so that deposits, withdrawals and keys joining or leaving are not returns. The KPIs derive from that series. There is a test for each: a revoked key's stop, a duplicate-writer date, and a deposit.
+4. **No fabricated zeros or silent drops.** `computeScenario` returns an honest empty on zero weight mass. `summarizeLiveHoldings` never drops trusted dollars silently; every excluded dollar sits in a disclosed part.
+5. **Small fixes on the same surface.**
+   - The Scenario UI shows no raw key id: `buildPerKeyStrategyForBuilderSet` names a key through `apiKeyLabelById`, and so do the correlation headers.
+   - `MetricsColumn`'s years derive from `periodsPerYear`, not `/252`.
+   - A tab switch on /allocations does not re-run the whole server render.
+6. **Recompute on PROD.** Affected rows are recomputed after the merge, behind a read-only census first.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 167.1.2 to break down)
 
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 
@@ -3057,6 +3199,56 @@ Plans:
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 168 to break down)
+
+### Phase 169: PAGETRUTH — every number agrees across pages and with its own record length
+
+**Goal:** Every number a page shows agrees with the same number on every other page and with the length of the record it describes. Each contradiction below is traced to ONE source of truth and fixed there, not patched per page.
+**Founder decision, 2026-09-25 (AskUserQuestion):** the session QA sweep and the 2026-09-24 layout notes book as TWO phases; this numbers phase ships FIRST, Phase 170 PAGECOPY second. Phase 167.1.2 ACCOUNTTRUTH already owns the Allocations equity curve, Sharpe beside a negative return, the Scenario zero weights/UUID/$0 total, and the holdings total; they are EXCLUDED here.
+**Evidence:** the 2026-09-25 in-depth QA sweep of every page in the logged-in account (14 data-integrity findings) and the 2026-09-24 visual UAT. Counts only here; the reports hold no identifiers and are not tracked.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** none in code. Plan after 167.1.2 plan 01 (HIDE) so the two do not edit the same Allocations widgets at once.
+
+## Success Criteria
+
+1. `/admin` Compute Jobs: the list request no longer returns HTTP 500, and the tab never says "No compute jobs found" while the header counts a job in progress. A failed load says it failed.
+2. The Allocations Risk tab and the Overview / Scenario tabs read VaR, alpha/beta and correlation from the same series; one never says "insufficient data" while another shows a value.
+3. The BTC benchmark is current: MTD and 3-month returns, win rate, volatility and drawdown come from a benchmark series that is refreshed, and a stale benchmark is shown as stale rather than as +0.00%.
+4. A strategy's CAGR and Sharpe are identical on discovery, recommendations, my-strategies and its factsheet (one computation, one stored value), or a surface that must differ says why.
+5. A factsheet's header date, its "track record through" date and its stated record length agree, and record length is stated one way.
+6. 3-year and 5-year rows are not shown for a record shorter than that period.
+7. `/profile` Exchanges counts only live keys as connected and never repeats one balance across keys.
+8. `/recommendations` does not say "set your mandate" while listing "fits your mandate", and does not recommend a record that ended long ago without saying so.
+9. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 169 to break down)
+
+### Phase 170: PAGECOPY — layout and copy read clean on every page
+
+**Goal:** Pages read as a finished product: no stacked look-alike panels, no raw ids or internal labels, no test text, no typos, and the layout holds at 320 px and 200% zoom.
+**Founder decision, 2026-09-25 (AskUserQuestion):** the second of the two QA phases; ships after Phase 169 PAGETRUTH.
+**Evidence:** the founder's 2026-09-24 layout notes ("too many similar layers stacked", the "get private link" control too dominant and overlapping) and the 2026-09-25 QA sweep (4 user-facing broken, 14 cosmetic findings). Counts only here.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 169
+
+## Success Criteria
+
+1. Factsheet and Allocations panels no longer stack as near-identical layers; the private-link control is secondary and never overlaps content.
+2. No page shows a short id where a name exists, or a raw internal value as a label (strategy type, allocator type, event kinds, roles).
+3. No production page carries QA, test or internal-phase text, including strategy descriptions and the placeholder Referral page.
+4. The recorded typos are fixed and pages that share a title are distinguished.
+5. `/security` and the legal pages show the signed-in header when signed in; the floating tweaks control never covers the bottom navigation; `/compare` does not point to controls that do not exist; `/admin/match` on mobile is read-only in fact, not only in words; no page scrolls horizontally at 320 px.
+6. The wizard's post-Submit copy says "submitted" on success, not "already submitted".
+7. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 170 to break down)
 
 ---
 

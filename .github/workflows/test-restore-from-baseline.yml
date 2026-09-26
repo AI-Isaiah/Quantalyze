@@ -798,6 +798,15 @@ jobs:
       - name: Restore script self-test
         run: bash scripts/restore-test-from-baseline.sh --self-test
 
+      # Phase 164.9.1 round-1 review (silent-failure-hunter M3). The restore below
+      # concatenates the analytics_service_url fragment that the normalize script
+      # emits, and only that script's OWN self-test exercises the fragment's
+      # in-transaction refusals (marker PROD, absent, foreign; no row) and the
+      # check that the value is never echoed. Run it here, on this runner's
+      # throwaway cluster, before the live restore. Pasted VERBATIM, as above.
+      - name: Normalize script self-test
+        run: bash scripts/test-only-normalize-analytics-url.sh --self-test
+
       # ── THE SHARED-TEST ADVISORY MUTEX, HELD ACROSS THE WHOLE ACT ──────────
       # CONTEXT safety rule 2. Acquired HERE, before the backup, and released only
       # after the post-verify, so backup → script → post-verify is one serialized
