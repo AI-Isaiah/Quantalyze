@@ -13,8 +13,13 @@ export type BootstrapHistogram = {
 };
 
 export type BootstrapCISummary = {
-  sharpe: { point: number; lo: number; hi: number; hist: BootstrapHistogram };
-  sortino: { point: number; lo: number; hi: number; hist: BootstrapHistogram };
+  /** `n_valid`: how many of the `n_resamples` resamples HAVE the ratio. A
+   *  resample with no dispersion has no Sharpe, one with no losing day no
+   *  Sortino; both are dropped (D7), so the CI and histogram rest on
+   *  `n_valid` draws. Optional: a payload cached before it existed lacks it,
+   *  and a reader then treats it as `n_resamples`. */
+  sharpe: { point: number; lo: number; hi: number; hist: BootstrapHistogram; n_valid?: number };
+  sortino: { point: number; lo: number; hi: number; hist: BootstrapHistogram; n_valid?: number };
   max_dd: { point: number; lo: number; hi: number; hist: BootstrapHistogram };
   n_resamples: number;
   block_len: number;
@@ -79,11 +84,13 @@ export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, s
       point: point.sharpe,
       ...(sharpes.length >= MIN_SHARPE_RESAMPLES ? ci95(sharpes) : { lo: NaN, hi: NaN }),
       hist: histogram(sharpes, 40),
+      n_valid: sharpes.length,
     },
     sortino: {
       point: point.sortino,
       ...(sortinos.length >= MIN_SHARPE_RESAMPLES ? ci95(sortinos) : { lo: NaN, hi: NaN }),
       hist: histogram(sortinos, 40),
+      n_valid: sortinos.length,
     },
     max_dd: { point: point.max_dd, ...ci95(maxDds), hist: histogram(maxDds, 40) },
     n_resamples,

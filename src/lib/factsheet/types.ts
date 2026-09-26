@@ -155,8 +155,10 @@ export type BootstrapMetricHist = { lo: number; hi: number; bins: number[]; dege
 
 /** Block-bootstrap 95% CIs + resample-distribution histograms. */
 export type BootstrapCIPayload = {
-  sharpe: { point: number; lo: number; hi: number; hist: BootstrapMetricHist };
-  sortino: { point: number; lo: number; hi: number; hist: BootstrapMetricHist };
+  /** `n_valid`: the resamples that have the ratio (see `BootstrapCISummary`);
+   *  absent on a payload cached before it existed, read as `n_resamples`. */
+  sharpe: { point: number; lo: number; hi: number; hist: BootstrapMetricHist; n_valid?: number };
+  sortino: { point: number; lo: number; hi: number; hist: BootstrapMetricHist; n_valid?: number };
   max_dd: { point: number; lo: number; hi: number; hist: BootstrapMetricHist };
   n_resamples: number;
   block_len: number;

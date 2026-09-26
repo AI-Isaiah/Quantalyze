@@ -259,6 +259,19 @@ describe("HI-02 compute, bootstrapCI and computePeerPercentile: Sortino and Calm
     expect(got.hist.bins.reduce((a, c) => a + c, 0)).toBe(200);
   });
 
+  it("bootstrapCI reports how many resamples have each ratio (SFH-R2-M2): fewer when some are dropped, all otherwise", () => {
+    const k = 500;
+    const sparse = new Array(200).fill(0);
+    sparse[57] = 0.01;
+    const sp = bootstrapCI(sparse, k, 5, 42, 365);
+    const counted = sp.sharpe.hist.bins.reduce((a, c) => a + c, 0);
+    expect(sp.sharpe.n_valid).toBe(counted);
+    expect(sp.sharpe.n_valid).toBeLessThan(k);
+    const full = bootstrapCI(NOISY_A, 200, 5, 42, 365);
+    expect(full.sharpe.n_valid).toBe(200);
+    expect(full.sortino.n_valid).toBe(200);
+  });
+
   it("computePeerPercentile: a NaN Sortino ranks as NaN, never the 5th percentile; a finite one keeps its rank", () => {
     const none = computePeerPercentile(1, Number.NaN, -0.1);
     expect(Number.isNaN(none.sortino)).toBe(true);

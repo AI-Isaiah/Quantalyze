@@ -331,6 +331,23 @@ export function BootstrapCIPanel() {
   const view = useBasisSeriesView(usePayload());
   const b = view.bootstrapCI;
   const lowN = b.n < 252;
+  // A resample with no Sharpe (no dispersion) or no Sortino (no losing day) is
+  // dropped, not counted as 0 (founder decision D7). Say how many were used
+  // whenever that is fewer than all of them (review round 2, SFH-R2-M2). A
+  // payload cached before `n_valid` existed reads as "all of them".
+  const sharpeUsed = b.sharpe.n_valid ?? b.n_resamples;
+  const sortinoUsed = b.sortino.n_valid ?? b.n_resamples;
+  const droppedNote = (
+    [
+      ["Sharpe", sharpeUsed],
+      ["Sortino", sortinoUsed],
+    ] as const
+  )
+    .filter(([, used]) => used < b.n_resamples)
+    .map(
+      ([label, used]) =>
+        `${label} from ${used.toLocaleString()} of ${b.n_resamples.toLocaleString()} resamples (the rest have no ${label})`,
+    );
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
@@ -361,13 +378,14 @@ export function BootstrapCIPanel() {
           density, not just the CI bounds. Sharpe = primary (accent), Sortino
           + Max-DD stacked below in muted tones. */}
       <div className="mt-3 flex flex-col gap-2.5">
-        <BootHist title="Sharpe" hist={b.sharpe.hist} point={b.sharpe.point} ci={[b.sharpe.lo, b.sharpe.hi]} fmt={n => n.toFixed(2)} accent />
-        <BootHist title="Sortino" hist={b.sortino.hist} point={b.sortino.point} ci={[b.sortino.lo, b.sortino.hi]} fmt={n => n.toFixed(2)} />
+        <BootHist title="Sharpe" hist={b.sharpe.hist} point={b.sharpe.point} ci={[b.sharpe.lo, b.sharpe.hi]} fmt={n => n.toFixed(2)} nValid={sharpeUsed} nTotal={b.n_resamples} accent />
+        <BootHist title="Sortino" hist={b.sortino.hist} point={b.sortino.point} ci={[b.sortino.lo, b.sortino.hi]} fmt={n => n.toFixed(2)} nValid={sortinoUsed} nTotal={b.n_resamples} />
         <BootHist title="Max DD" hist={b.max_dd.hist} point={b.max_dd.point} ci={[b.max_dd.lo, b.max_dd.hi]} fmt={n => `${(n * 100).toFixed(1)}%`} />
       </div>
 
       <p className="mt-2 text-micro italic text-text-muted">
         {b.n_resamples.toLocaleString()} stationary block-bootstrap resamples · {b.block_len}-day block length · 95% CI
+        {droppedNote.map(note => ` · ${note}`).join("")}
       </p>
     </section>
   );
@@ -379,6 +397,8 @@ function BootHist({
   point,
   ci,
   fmt,
+  nValid,
+  nTotal,
   accent,
 }: {
   title: string;
@@ -386,6 +406,9 @@ function BootHist({
   point: number;
   ci: [number, number];
   fmt: (n: number) => string;
+  /** Resamples that have this metric, out of `nTotal`; both omitted = all of them. */
+  nValid?: number;
+  nTotal?: number;
   accent?: boolean;
 }) {
   const isMobile = useBreakpoint() === "mobile";
@@ -428,7 +451,7 @@ function BootHist({
           <span className="normal-case tracking-normal text-text-muted">no variance</span>
         </div>
         <div className="h-[36px] flex items-center justify-center text-micro text-text-muted italic">
-          all resamples produced {fmt(point)}
+          {degenerateNote(title, nValid, nTotal, fmt(point))}
         </div>
       </div>
     );
@@ -484,6 +507,18 @@ function BootHist({
       </ResponsiveChartFrame>
     </div>
   );
+}
+
+/**
+ * The line under a no-variance histogram. "all resamples produced X" is true
+ * only when every resample has the metric (IN-01, review round 2). When some
+ * were dropped (no Sharpe or no Sortino, D7) it names how many the value rests
+ * on, and when none has it, it says so.
+ */
+function degenerateNote(title: string, nValid: number | undefined, nTotal: number | undefined, shown: string): string {
+  if (nValid == null || nTotal == null || nValid >= nTotal) return `all resamples produced ${shown}`;
+  if (nValid === 0) return `no resample has a ${title}`;
+  return `all ${nValid.toLocaleString()} of ${nTotal.toLocaleString()} resamples with a ${title} produced ${shown}`;
 }
 
 function Row({ label, point, ci }: { label: string; point: string; ci: string }) {
