@@ -98,7 +98,11 @@ export function compute(
   const winRate = n > 0 ? winCount / n : 0;
   const avgWin = winCount > 0 ? winSum / winCount : 0;
   const avgLoss = lossCount > 0 ? lossSum / lossCount : 0;
-  const profitFactor = lossSum !== 0 ? winSum / Math.abs(lossSum) : 0;
+  // A book with no losing day has no profit factor: gross gain over a gross
+  // loss of 0 is infinite, which means "does not exist", not 0. NaN renders
+  // "—", as omega_ratio below (the same number) and the analytics service's
+  // None already say (founder decision D7; review round 3 HI3-01).
+  const profitFactor = lossSum !== 0 ? winSum / Math.abs(lossSum) : NaN;
   const sortedRets = [...rets].sort((a, b) => a - b);
   const var95 = sortedRets[Math.max(0, Math.floor(0.05 * n))];
   const cvar95Slice = sortedRets.slice(0, Math.max(1, Math.floor(0.05 * n)));
@@ -126,6 +130,8 @@ export function compute(
   // null when there are no losses (no probability mass below threshold).
   const omegaRatio = lossSum !== 0 ? winSum / Math.abs(lossSum) : null;
   // Common-sense ratio — tail × profit_factor. null if either input is null.
+  // tailRatio is null whenever there is no losing day (p5 ≥ 0), which is the
+  // only case profitFactor is NaN, so a NaN never reaches this product.
   const commonSenseRatio = tailRatio != null ? tailRatio * profitFactor : null;
 
   // Bucketed returns — compound returns within each bucket.

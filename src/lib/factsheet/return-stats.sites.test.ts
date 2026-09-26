@@ -407,3 +407,31 @@ describe("T14 computeOgHeadline (the computed arm, no persisted scalars): the OG
     expect(got.cagr).toBe(Math.pow(cum, 1 / years) - 1);
   });
 });
+
+describe("HI3-01 compute: a book with no losing day has no Profit Factor (D7), as Omega already says", () => {
+  /** Every return positive, and dispersing: a real Sharpe, no losing day. */
+  const ALL_POSITIVE = NOISY_A.map((r) => Math.abs(r) + 0.0005);
+
+  it("the all-positive series' Profit Factor is NaN beside a null Omega, never 0", () => {
+    const got = compute(ALL_POSITIVE, DATES, 0, 365);
+    expect(got.omega_ratio).toBeNull();
+    expect(Number.isNaN(got.profit_factor), `profit_factor=${got.profit_factor}`).toBe(true);
+    // No left tail, so the common-sense ratio stays null and never multiplies a NaN.
+    expect(got.common_sense_ratio).toBeNull();
+  });
+
+  it("every constant yield's Profit Factor equals the all-zero series' (NaN)", () => {
+    const zero = compute(ZEROS, DATES, 0, 365);
+    expect(Number.isNaN(zero.profit_factor)).toBe(true);
+    for (const id of YIELD_IDS) {
+      const got = compute(navConstantYield(CONSTANT_YIELDS[id], N), DATES, 0, 365);
+      expect(Object.is(got.profit_factor, zero.profit_factor), `${id} profit_factor=${got.profit_factor}`).toBe(true);
+    }
+  });
+
+  it("control: a two-sided series keeps a finite Profit Factor equal to its Omega", () => {
+    const got = compute(NOISY_A, DATES, 0, 365);
+    expect(Number.isFinite(got.profit_factor) && got.profit_factor > 0).toBe(true);
+    expect(got.profit_factor).toBe(got.omega_ratio);
+  });
+});
