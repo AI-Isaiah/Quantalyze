@@ -3186,7 +3186,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 166.2-06-PLAN.md — the compute-once source-scan gate (import rule, retired-expression table, whole-tree shape matcher with a count-pinned allowlist; D-17, D-20), then merge `origin/main` and re-prove T1-T20 on the merged tree (D-20 W1)
+- [x] 166.2-06-PLAN.md — the compute-once source-scan gate (import rule, retired-expression table, whole-tree shape matcher with a count-pinned allowlist; D-17, D-20), then merge `origin/main` and re-prove T1-T20 on the merged tree (D-20 W1)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
