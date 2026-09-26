@@ -72,13 +72,24 @@ import { RECORDED_SHA_RE_ALL } from "./check-baseline-staleness.mjs";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /**
- * The five-class secret scan, as a plain STRING byte-equal to the argument of the
+ * The secret scan, as a plain STRING byte-equal to the argument of the
  * `grep -anE '…'` line in `supabase/schema/BASELINE.md` `## Regenerating` (D-06).
  * A STRING, not a regex literal: a literal's `.source` escapes `/`, so it could
  * never compare equal to the ERE text the doc carries. The self-test asserts the
  * equality against the doc, so the prose and the command cannot drift apart.
+ *
+ * D-06's five classes, then WR-03's two:
+ * - `sb_secret_…`, Supabase's current secret-key format, which is not a JWT.
+ * - `password` as a word (never `encrypted_password`, the committed dump's one
+ *   hit), followed by `=` (libpq keyword form, as in `CREATE SUBSCRIPTION …
+ *   CONNECTION` or a `COMMENT ON` literal) or by a space and a quote (`CREATE
+ *   USER MAPPING … OPTIONS (password '…')`). The quote is written as `[^ -&(-~]`,
+ *   "any byte but printable ASCII other than the quote", because the doc's grep
+ *   sits inside single quotes and cannot spell one.
+ * Portable ERE only (no `\s`, `\b`, `(?:` or POSIX classes): the same text must
+ * mean the same thing to JS `RegExp`, GNU grep and BSD grep.
  */
-export const SECRET_SCAN_PATTERN = String.raw`postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|ALTER DATABASE|eyJ[A-Za-z0-9_-]{10,}`;
+export const SECRET_SCAN_PATTERN = String.raw`postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|ALTER DATABASE|eyJ[A-Za-z0-9_-]{10,}|sb_secret_[A-Za-z0-9_-]{16,}|(^|[^_A-Za-z])password( ?= ?[^ ,)]| [^ -&(-~])`;
 export const SECRET_SCAN_RE = new RegExp(SECRET_SCAN_PATTERN);
 
 /**
@@ -1616,12 +1627,12 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 206;
+export const EXPECTED_ASSERTIONS = 209;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
  */
-export const EXPECTED_GITLEAKS_ASSERTIONS = 7;
+export const EXPECTED_GITLEAKS_ASSERTIONS = 8;
 
 function selfTest({ withGitleaks = false } = {}) {
   let pass = true;
@@ -2320,6 +2331,16 @@ function selfTest({ withGitleaks = false } = {}) {
       ["the psql connect meta-command", ["\\", "con", "nect", " fixture"].join("")],
       ["ALTER DATABASE", ["ALTER", " DATA", "BASE", " fixture SET x = 1;"].join("")],
       ["a JWT-shaped token", jwtValue],
+      // WR-03: random at run time, so no credential-shaped literal is ever committed.
+      ["a Supabase sb_secret_ key in a COMMENT ON literal", `COMMENT ON TABLE "public"."t" IS '${["sb", "_secret_"].join("")}${randomBytes(24).toString("base64url")}';`],
+      [
+        "a password in a SUBSCRIPTION connection string",
+        `CREATE SUBSCRIPTION "s" CONNECTION 'host=h ${["pass", "word="].join("")}${randomBytes(12).toString("hex")} dbname=d' PUBLICATION "p";`,
+      ],
+      [
+        "a password in a USER MAPPING OPTIONS list",
+        `CREATE USER MAPPING FOR "u" SERVER "s" OPTIONS ("user" 'u', ${["pass", "word"].join("")} '${randomBytes(12).toString("hex")}');`,
+      ],
     ];
     for (const [label, value] of secretClasses) {
       const r = redGate(withLine(`-- ${value}`));
@@ -3116,6 +3137,22 @@ function selfTest({ withGitleaks = false } = {}) {
       ok(
         allowed.threw !== null && allowed.text.includes("RuleID=jwt line=2") && !allowed.text.includes(jwtValue),
         "[real gitleaks] the same fixture with an inline allow comment STILL refuses (--ignore-gitleaks-allow)",
+      );
+      // WR-03: the two rules this phase adds to .gitleaks.toml. The password rule is
+      // path-scoped to a file named baseline.sql, which is the dump's name in redump-dump.
+      const wr03File = join(gdir, "baseline.sql");
+      const sbValue = ["sb", "_secret_"].join("") + randomBytes(24).toString("base64url");
+      const pwValue = randomBytes(12).toString("hex");
+      writeFileSync(
+        wr03File,
+        `SET client_encoding = 'UTF8';\nCOMMENT ON TABLE "t" IS '${sbValue}';\n` +
+          `CREATE SUBSCRIPTION "s" CONNECTION 'host=h ${["pass", "word="].join("")}${pwValue} dbname=d' PUBLICATION "p";\n`,
+      );
+      const wr03 = capture(() => runGitleaksGate({ gitleaks: counted, repoRoot: REPO_ROOT, target: wr03File }));
+      ok(
+        wr03.threw !== null && wr03.text.includes("RuleID=supabase-secret-key line=2") && wr03.text.includes("RuleID=baseline-dump-password line=3") &&
+          !wr03.text.includes(sbValue) && !wr03.text.includes(pwValue),
+        "[real gitleaks] a runtime sb_secret_ key and a connection-string password in baseline.sql both refuse by RuleID, printing neither value (WR-03)",
       );
       const before = spawned;
       ok(

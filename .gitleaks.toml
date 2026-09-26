@@ -393,3 +393,30 @@ targetRules = ["generic-api-key"]
 condition = "AND"
 paths = ['''(^|/)analytics-service/tests/test_allocator_positions\.py$''']
 regexes = ['''^fetch=_raise_sign_in_failed$''']
+
+# ── Phase 164.9.5 WR-03: two rules the default set lacks ──────────────────────
+# The automated baseline re-dump (`scripts/baseline-redump.mjs --gate-dump`) runs
+# gitleaks over the PROD dump with THIS config before a bot branch is pushed to a
+# PUBLIC repository, and the default rules did not match either class (measured
+# with gitleaks 8.30.1: exit 0, no finding). Both are RULES, not allowlist entries,
+# and neither widens any allowlist. Measured on 2026-09-26 over this working tree:
+# 0 findings from either rule.
+
+# Supabase's current secret-key format, which is not a JWT.
+[[rules]]
+id = "supabase-secret-key"
+description = "Supabase secret API key (sb_secret_ prefix)"
+regex = '''sb_secret_[A-Za-z0-9_-]{16,}'''
+keywords = ["sb_secret_"]
+
+# A password as a libpq keyword (`password=…`, e.g. CREATE SUBSCRIPTION … CONNECTION
+# or a COMMENT ON literal) or as an OPTIONS entry (`password '…'`, e.g. CREATE USER
+# MAPPING). PATH-SCOPED to a file named baseline.sql, the dump's name in redump-dump:
+# repo-wide, the same text appears in prose and tests dozens of times. The regex is
+# the same alternation as the script's SECRET_SCAN_PATTERN class.
+[[rules]]
+id = "baseline-dump-password"
+description = "Password in a connection string or OPTIONS list inside a schema dump"
+path = '''(^|/)baseline\.sql$'''
+regex = '''(^|[^_A-Za-z])password( ?= ?[^ ,)]| [^ -&(-~])'''
+keywords = ["password"]
