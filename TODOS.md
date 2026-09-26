@@ -1329,6 +1329,9 @@ true for 146 and half of 142–145, and **false for 141**.
       check is the phase's FC-1. Residuals (a parent that later fails strands its child; a 40P01
       diamond deadlock on the parent lock) are latent, recorded in M1's header and routed to
       Phase 164.5.2 BRIDGELOCK.
+      ⛔ **CORRECTED 2026-09-26 (founder decision, "Re-route, don't start"):** both residuals
+      now belong to Phase 164.9.3.1 FANINGRAPH under `[164.9.3.1-FANIN-GRAPH-RESIDUALS]`, not
+      164.5.2. The sentence above is kept as lineage.
       **THE MECHANISM, named by SYMBOL because line numbers drift
       (`[164.7-CITATION-DRIFT-01]`):** `enqueue_compute_job` routes all three of its modes to the
       **TEN-ARG** `_enqueue_compute_job_internal`, whose `INSERT` column list OMITS `status`, so
@@ -1361,6 +1364,74 @@ true for 146 and half of 142–145, and **false for 141**.
 ---
 
 ## 🟡 FIX MID-TERM
+
+- [ ] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
+      queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
+      **Measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).** `python` took
+      50 min: 36 min in "Acquire shared-test-db mutex" and 13 min in pytest. `e2e-seeded` took
+      36 min: 28 min on the mutex and 5 min on specs. Every other job took 12 min or less. The wait
+      grows with the number of open PRs. Precedents: 164.4.2 (`sql-tests` to the local stack) and
+      164.4.2.1 (`test-db-drift` off the key).
+      ✅ **Destination: Phase 164.9.4 CIOFFMUTEX** — routed there 2026-09-26 via
+      `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
+      evidence.
+
+- [ ] **`[164.9.5-MANUAL-BASELINE-REDUMP]` Every PROD migration apply leaves `main` red on
+      baseline-content-drift until someone runs a manual schema dump (booked 2026-09-26, founder
+      decision).**
+      **Measured 2026-09-26.** PR #864 needed a founder-run `supabase db dump --linked`. `main` was
+      red on `sql-gate-lint` from the Phase 164.9.1 apply (run `36221903717`) until that dump
+      landed, and Railway skips deploys while `main` is red. The manual procedure is
+      `supabase/schema/BASELINE.md` "## Regenerating". ⛔ The automation is security-sensitive: it
+      reads PROD's schema with a repository secret and opens PRs on a public repo.
+      ✅ **Destination: Phase 164.9.5 AUTOREDUMP** — routed there 2026-09-26 via
+      `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
+      evidence.
+
+- [ ] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
+      same (kind, allocator) makes every claim entry point raise `23505` (booked 2026-09-26, found
+      on the pg-lane by the Phase 167.1.2 PR B fixer).**
+      **Repro, measured 2026-09-26.** Seed a `failed_retry` `derive_allocator_equity` row with
+      `next_attempt_at` in the past and a `pending` row for the same allocator. Then
+      `claim_compute_jobs_with_priority` (6-arg and 2-arg) and `claim_compute_jobs` all raise
+      `23505` on `compute_jobs_one_inflight_per_kind_allocator`.
+      **Why.** The claim's C39 guard skips a candidate only for a `running` or
+      `done_pending_children` sibling, not a `pending` one. `_enqueue_compute_job_internal`'s dedup
+      and the unique index cover `pending`, `running` and `done_pending_children`, not
+      `failed_retry`. So any enqueue made while a retry is outstanding creates the pairing. This is
+      the 2026-04-28 worker-spin class.
+      **Latent, not observed live:** Sentry showed 0 matching issues over 90 days and 0 matching
+      logs over 30 days. 167.1.2 PR B's owner RPC is being fixed so that it never creates the
+      pairing; that closes one caller, not the class.
+      ✅ **Destination: Phase 164.9.3 CLAIMPAIR** — routed there 2026-09-26 via
+      `/gsd-phase --insert` (orchestrator decision). The ROADMAP section holds the success
+      criteria; this entry is the evidence.
+      ⭐ **WIDENED 2026-09-26 by founder decision ("Re-route, don't start"): this entry now also
+      carries the `(kind, api_key_id)` partition**, item (4) of the list Phase 164.5.2 held. It
+      was measured 2026-09-25 on the local-stack lane by the 164.9.1 pre-push silent-failure-hunter:
+      a `poll_allocator_positions` `failed_retry` plus a `pending` twin on one `api_key_id` make
+      both claim RPCs raise 23505 on `compute_jobs_one_inflight_per_kind_api_key`, and no job of
+      any kind is claimed until the pair clears. The full repro is kept verbatim in the Phase
+      164.5.2 ROADMAP section as lineage. **Owner: Phase 164.9.3 CLAIMPAIR**, whose criterion 4
+      now covers all four partitions (api_key_id, portfolio, strategy, allocator).
+
+- [ ] **`[164.9.3.1-FANIN-GRAPH-RESIDUALS]` Three latent or loud defects on the fan-in graph and
+      the bridge's decision cascade (booked 2026-09-26; routed 2026-09-25 from the Phase 164.9.1
+      review round 1 to Phase 164.5.2, re-routed 2026-09-26 by founder decision).**
+      (1) **Stranded child:** a fan-in child whose parent is still open at enqueue and later
+      ends `failed_final` stays in `done_pending_children` forever. Latent: no caller passes
+      parents today.
+      (2) **Cascade 23505:** a second `match_decisions` delete can raise 23505 through the
+      `ON DELETE SET NULL` cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null`.
+      Pre-existing and loud; the admin decisions route issues these deletes.
+      (3) **Diamond deadlock:** the fan-in parent lock `FOR SHARE ... ORDER BY id` can deadlock
+      (40P01) against `mark_compute_job_done` when a child's parents include another waiting
+      child. Latent. Whoever first passes parents must treat 40P01 as retryable on both the
+      enqueue and the worker's mark path.
+      (1) and (3) are recorded in the header of M1, `20260924230827_fanin_initial_status_10param.sql`.
+      ✅ **Destination: Phase 164.9.3.1 FANINGRAPH**, inserted 2026-09-26 via `/gsd-phase --insert`
+      and booked under the new-phase freeze, NOT started. The ROADMAP section holds one success
+      criterion per defect; this entry is the evidence.
 
 - [ ] **`[STRATTABLE-DESC-01]` The strategy list shows only the NAME, so two strategies
       with the same name are indistinguishable — the `description` that disambiguates them is
@@ -5084,10 +5155,14 @@ The sentence above is kept as lineage.
   (c) still needs an operator reading taken before the heal's next monitor tick recycles the
   terminal (`MT5_SESSION_POLL_INTERVAL_S`, 600 s by default).
 
-**Owner:** Phase 164.6.6 (MT5TERMINALISOLATION). It owns the shared-terminal ownership model that
-makes a switch happen at all, and the mechanism decides between its isolation options.
+**Owner:** Phase 164.6.8 (OUTAGEALERT). ⛔ **CORRECTED 2026-09-26:** moved from Phase 164.6.6 by the
+founder's one-topic-per-phase split, with `MT5-PROBER-WEDGE-CALIBRATION-01`, because both close only on
+the same next-wedge capture. The original owner text is kept as lineage: *Phase 164.6.6
+(MT5TERMINALISOLATION). It owns the shared-terminal ownership model that makes a switch happen at
+all, and the mechanism decides between its isolation options.* The verdict still informs 164.6.6's
+isolation choice.
 **Trigger:** the next `-10005` that has Journal silence after a `disconnected` line, or the start of
-164.6.6 planning, whichever comes first.
+164.6.8 planning, whichever comes first (was: 164.6.6 planning).
 ⛔ **Not a close:** a retry, a sleep, a serialisation or the automatic recycle making the symptom go
 away (D-02). Those are mitigations, not a mechanism.
 ⚠️ **Also recorded, not reconciled:** on 2026-09-25 the Journal showed the terminal `disconnected`
@@ -5112,8 +5187,10 @@ came apart:
   captured from a wedge, and is unchanged since Phase 164.8.3. So the arm's `-10005` branch is proven only against the shape
   we believe a wedge prints, never against one.
 
-**Owner:** Phase 164.6.6 (MT5TERMINALISOLATION). It already owns `MT5-SWITCH-WEDGE-CAUSE-01`
-directly above, whose close needs the same next-wedge capture.
+**Owner:** Phase 164.6.8 (OUTAGEALERT). ⛔ **CORRECTED 2026-09-26:** moved from Phase 164.6.6 by the
+founder's one-topic-per-phase split. It was: *Phase 164.6.6 (MT5TERMINALISOLATION). It already owns
+`MT5-SWITCH-WEDGE-CAUSE-01` directly above, whose close needs the same next-wedge capture.* Both
+items moved together.
 **Trigger:** the next live `-10005` (Journal silent after `disconnected`), captured BEFORE the
 heal recycles the terminal. A founder-supervised induced wedge also qualifies.
 **Gate (what closes it):** a real-wedge transcript, scrubbed of every account-shaped digit run,
@@ -10188,9 +10265,25 @@ a prose id. The fourth is owned by the founder outright and needs no phase.
 deliberately NOT here — it is in `## 🔴 FIX NOW`**, because a live data-integrity defect filed in
 a tail residual section is the same disappearance this residue exists to prevent.
 
-- [ ] **`[164.9-CRIT8-RESTORE-DISPATCH-RECORD]` the ROADMAP criterion 8 restore dispatch is
+- [x] **`[164.9-CRIT8-RESTORE-DISPATCH-RECORD]` the ROADMAP criterion 8 restore dispatch is
       POST-MERGE BY CONSTRUCTION, and the act of RECORDING its result is what makes the founder's
       Option A honest (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 11).**
+      ✅ **CLOSED 2026-09-26: the gate is met.** Its evidence arrived through Phase 164.9.2
+      REFDATAUPDATES criterion 4. Both committing dispatches were made by the founder with the
+      confirm token. The text below is kept as lineage.
+      - preflight run `36235362126` at `06cbe2030`: **success**, restore self-test 41/41 arms, marker names TEST.
+      - restore attempt run `36237060668`: **refused by the activity gate** (2 non-idle sessions besides the holder); nothing was written.
+      - restore run `36242946174` at `ea4167a3f`: **success**, marker names TEST, activity gate quiet (holder only, idle x16).
+      - The committing run's printed summary line, VERBATIM:
+        `restore: tables=63 policies=155 functions=121 ledger_rows=277 survivors=2/2 filtered=1 mode=restore`.
+      **The guards ran.** `restore_mode` prints that line only after `check_extension_guard` and
+      the ownership-list comparison pass. The value-pinning leg runs inside the transaction
+      that committed, and the same run printed its C5 replay: 6 UPDATEs in filename order. Both
+      guards are silent when clean, so per the reading rule below this is "the run reached the
+      point past it". The first criterion-8 preflight, `35662948549`, refused on a stale dump
+      and stays on the record. ⚠️ The limit below still holds: in `mode=restore` the extension
+      guard LABELS an outcome after COMMIT and does not PREVENT one. Recorded in the ROADMAP
+      criterion 8 block, `### Phase 164.9.2` criterion 4 and `164.9-11-SUMMARY.md`.
       Owner: **THE FOUNDER — the human who merges this phase.** Not a phase. Not an agent.
       ⭐ **AMENDED 2026-09-21 — THE FOUNDER EXPLICITLY DELEGATED BOTH ACTS TO THE AGENT**, in
       session, in these words: *"I authorize you to do this: the post-merge
