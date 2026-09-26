@@ -13,10 +13,13 @@ twenty copies with ONE module, `src/lib/return-stats.ts`, and every site now cal
 ⚠️ **This is a minor bump because values a user can see change, on purpose.** For a series with no
 real dispersion, the Sharpe, correlation, beta, information ratio and related cells on `/compare`,
 in the scenario composer and its benchmark and stress panels, on the Risk tab, on the factsheet and
-on the OG card now show the value an exactly constant series already shows at that site (null, 0 or
-NaN, whichever that site used), instead of a residue number. Series with real dispersion are
-unchanged: every shared function keeps the arithmetic order the factsheet already used, and the
-factsheet snapshot did not move.
+on the OG card no longer show a residue number. ⭐ **Founder decision D7 (2026-09-26, "Show —
+everywhere"), taken in the review round:** a statistic that does not exist stays empty end to end
+and reads "—" or a gap on EVERY page, never 0.00 and never "unchanged", and every page agrees. The
+plans first mapped it to whatever each site showed for an exact constant (D-07), which was 0.00 at
+eight sites; D7 reversed that for display. Series with real dispersion are unchanged: every shared
+function keeps the arithmetic order the factsheet already used, and the factsheet snapshot did not
+move.
 
 ⛔ **This entry claims the TypeScript half only.** Since the 2026-09-26 split (D-23), the Python
 floor sites ship as Phase 166.1 and the PROD recompute of rows computed before Phase 166 ships as
@@ -56,14 +59,49 @@ Phase 166.3. Neither is in this release. This release carries no migration and n
   `pearsonCorr` body and `buildAllocatorMetrics`' correlation all call the shared module, and
   their local `mean` / `pstdev` helpers are gone.
 
+### Fixed (review round 1, founder decision D7: an absent statistic reads "—" everywhere)
+
+- **The factsheet Sharpe that does not exist reads "—", as the OG card does** (CR-01 / SFH-H1,
+  `9670242ae`). `compute`'s Sharpe was 0 ("0.00") where the OG card and tearsheet said "—" for the
+  same series; it is NaN now, which also reaches the levered browser re-derive, the benchmark
+  column and the style-drift halves. The peer rank of a strategy with no Sharpe is "—", not the
+  0th percentile. The bootstrap drops resamples with no Sharpe instead of counting them as 0, and
+  its CI reads "—" below 40 resamples that have one (`MIN_SHARPE_RESAMPLES`).
+- **`jointMetrics` reads "—" for every ratio that does not exist** (WR-01 / SFH-M3, `9d07bbec0`):
+  beta, correlation, R², information ratio, Treynor and alpha, and the up / down capture against a
+  benchmark with no dispersion or no up / down days. The page used to say "Correlation 0.00" in
+  one panel and "—" in the next for one pair; a constant-yield benchmark's up capture read -0.012
+  to -4.47.
+- **The Risk tab's correlation matrix renders an unmeasurable pair "—"** titled "Insufficient
+  data", as `/compare` does, instead of "0.00" on the neutral colour; a missing precomputed cell is
+  the same absence (WR-02 / SFH-H2, `2b32a15f3`).
+- **"Avg |ρ|" no longer counts an undefined pair as ρ = 0** (WR-03 / SFH-M2, `c772b173b`). The
+  pair leaves the matrix and the average's sum and count, and the heatmap caption says how many
+  pairs it averages when some are missing. One all-zero member used to pull a three-member
+  fixture's average from 0.654 to 0.218, a "better diversified" book by construction.
+- **Rolling Sharpe and beta leave a gap, the allocator correlation reads "—", and alpha / beta
+  can be absent** (WR-04 / SFH-M1 / SFH-M4 / SFH-M5 / IN-04, `339d1c9e7`, `9a36a749b`). A window
+  with no ratio is null (a gap, not a drawn 0); `buildAllocatorMetrics` refuses legs of unequal
+  length and drops the grid scan's cross term when the correlation is undefined (it is 0 there by
+  construction); `computeAlphaBeta` returns `{ alpha: null, beta: null }` for an undefined beta and
+  `AlphaBetaDecomposition` shows "—"; the shared `beta()` returns null for a non-finite value in
+  EITHER leg (a NaN in `y` used to come back as NaN).
+- **One σ_p floor, and every local sd reads the shared module** (WR-06 / SFH-M6 / SFH-M7,
+  `d8c98e54c`, with the `rollingVol` and scenario-volatility moves in `339d1c9e7` and
+  `c772b173b`). `percentContributionToRisk` uses the same floor as `diversificationRatio`, so the
+  panel can no longer show a DR beside "—" for PCR and ENB. `computeTrackingError`, `rollingVol`,
+  the scenario's volatility and the benchmark / stress degeneracy tests use the shared
+  `dispersion`; scenario-benchmark's own local test is gone, because `computeAlphaBeta` now answers
+  a constant benchmark with null itself.
+
 ### Changed
 
 - **What a user sees for a constant-yield series.** The TS-computed Sharpe, correlation, beta,
-  information-ratio and ratio cells listed above now read as absent (or 0, where that site already
-  showed 0 for an exact constant) instead of a residue value, on `/compare`, the scenario composer
-  and benchmark panel, the Risk tab, the factsheet and the OG card's computed Sharpe
-  (`ff613e350`, `c2cddfb4a`, `ac1946d31`, `90476b60b`, `839fff99b`, `8b0577585`, `22bfcdca0`,
-  `7b8053e98`, `32ceb7236`).
+  information-ratio and ratio cells listed above read "—" (or leave a gap on a rolling chart)
+  instead of a residue value, on `/compare`, the scenario composer and benchmark panel, the Risk
+  tab, the factsheet and the OG card's computed Sharpe (`ff613e350`, `c2cddfb4a`, `ac1946d31`,
+  `90476b60b`, `839fff99b`, `8b0577585`, `22bfcdca0`, `7b8053e98`, `32ceb7236`, and the review-round
+  commits above).
 - **Two `og-metrics.test.ts` assertions now say the constant series has no Sharpe** (plan 04,
   `22bfcdca0`). Both `expect(Number.isFinite(sharpe))` side assertions became
   `expect(Number.isNaN(sharpe))`, each with a one-line D-07 comment, and nothing else in that
@@ -119,6 +157,25 @@ Phase 166.3. Neither is in this release. This release carries no migration and n
   count-pinned allowlist, and liveness fixtures prove the matcher fires. A second copy of a formula
   now fails CI instead of waiting for a reviewer.
 - **The env-key registration above** (`4c50d206b`).
+- **The review-round tests** (every one seen RED under a neuter of its fix first, then GREEN after a
+  byte-verified restore). One test renders the factsheet page AND the OG card from one constant
+  series and asserts "—" on both, plus no literal "NaN" on the page (`9670242ae`). The site tests
+  that pinned 0 now pin the absence, and the constant-yield-equals-all-zero equalities stand; T16
+  now covers every field that divides by the benchmark's dispersion (`9d07bbec0`). The Risk-tab
+  residue test asserts "—" where it used to pin "0.00" (`2b32a15f3`). A leverage test that held as
+  0 = 2 * 0 (its dates predated the bundled BTC history) now runs on a real beta (`9d07bbec0`).
+- **The compute-once gate, hardened** (WR-05 / IN-01 / IN-02, `4ae579ca2`). Five new shapes and
+  two widened ones catch the spellings the review measured at 0 hits (the textbook
+  `(m - rf) / sd * Math.sqrt(N)`, `m * periodsPerYear / sd`, `annRet / annVol`, `sxy / sxx`,
+  `cov / sx / sy` and more), each with its own fixture; the live tree gained 0 hits and no
+  allowlist entry. The seven known-unmatched forms are pinned at 0. The 26-hit merge-base pin now
+  runs in CI: the test archives the diff base with `git archive` and fails loudly if the commit is
+  unreachable. Re-measured with the wider matcher: still 26. The comment stripper steps over
+  string, template and regex literals, retired tokens ignore whitespace, and both walks have a
+  file-count floor.
+- **Two `og-metrics.test.ts` Sharpe arms test what they claim again** (IN-03, `a05d06851`): the
+  sub-year CAGR case asserts a finite Sharpe on a dispersing fixture, the below-30 case bites on
+  the observation gate alone, and the constant-series "—" has its own named case.
 
 ### Notes
 
@@ -135,7 +192,14 @@ Phase 166.3. Neither is in this release. This release carries no migration and n
 - **The D-19 amendment** (`c19e0f9e4`): because phases still in planning (169 included) may not
   start execution, 166.2 plan 04 owns the two `og-metrics.test.ts` assertions that pinned the D-07
   defect, rather than waiting on 169 plan 04 indefinitely. Not taken: keeping `s > 0`, mapping null
-  to a finite number, or widening a floor.
+  to a finite number, or widening a floor. ⚠️ The review round's IN-03 fix (`a05d06851`) edits that
+  Phase 169 file beyond those two lines; the deviation is recorded in `166.2-CONTEXT.md` (D-24) and
+  the ROADMAP.
+- **Founder decision D7** is recorded in `166.2-CONTEXT.md` as an amendment to D-07 (with D-24
+  listing the sites) and in the ROADMAP's Phase 166.2 section.
+- **Known limit, recorded:** the scenario composer's blend rolling-Sharpe chart drops a null
+  window through `zipDrop` rather than drawing a break, so a mid-series gap there is joined by the
+  line; the factsheet rolling charts do break. No 0 is drawn on either.
 - **The 2026-09-26 split**: the Python floor sites ship as Phase 166.1 and the PROD recompute as
   Phase 166.3; this entry claims neither.
 - **No migration.**
@@ -144,7 +208,10 @@ Phase 166.3. Neither is in this release. This release carries no migration and n
 - **Planning records**: execution start, per-plan SUMMARYs, tracking updates, the T7 residue-cell
   measurement, and a dated note on plan 06's SUMMARY naming the env-key gap (`f2ad38a02`,
   `78d521b94`, `df75f6a77`, `0b1028968`, `bcd5b2d42`, `dc9f3a174`, `2e1070bd2`, `ba6cd782c`,
-  `160e13a05`, `ea5db9cae`, `520b34a93`, `20784b5a7`, `e9a19682d`).
+  `160e13a05`, `ea5db9cae`, `520b34a93`, `20784b5a7`, `e9a19682d`), then the release-sweep
+  SUMMARY and tracking (`92bcaf85a`, `0fdca6ed1`), the round-1 code review and silent-failure
+  reports (`9382856a1`, `66db2b143`), and the D7 record with the round-1 fix report (the
+  `docs(166.2)` commits that follow this entry's update).
 
 ## [0.96.0.0] - 2026-09-26 — MT5VALIDATEWEDGE: the gateway can restart a wedged MT5 terminal on its own (not yet seen live), and the wizard stops promising a retry that cannot work
 
