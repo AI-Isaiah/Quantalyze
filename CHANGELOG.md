@@ -164,6 +164,13 @@ Review round 2 (`e42d1f551` silent-failure review, `7cc7e4eb9` code review):
   `SUBMITTED_ANALYTICS_NOT_QUEUED` together. Both `EXPECTED_TABLE_SIZE` pins were read off the
   guard's own failure message. `SyncPreviewStep` keeps main's `probeExistingChain` guard AND this
   phase's correlation-id capture.
+- **The D-09 calibration reads the arm, not its own literal.** The blocking self-referential-oracle
+  gate flagged the `CALIBRATION: a single-cause revert` case in `prod-prober-wiring.test.ts`: it
+  asserted on a retyped copy of the pre-D-09 sentence, so it could not fail. Its subject is now
+  derived from `MT5_ARM.REMEDIES["mt5-ipc-timeout"]` with the both-causes disclaimer sentence
+  removed. It was observed RED when the disclaimer was dropped from the arm and when a cause was
+  named outside that sentence, then restored from a byte backup. Nothing was added to
+  `SRO_ALLOWLIST`.
 
 ### Notes
 

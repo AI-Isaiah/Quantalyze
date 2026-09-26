@@ -3054,14 +3054,19 @@ describe("[164.6.5-03] D-09: the -10005 remedy names both causes and asserts nei
   });
 
   it("CALIBRATION: a single-cause revert (the pre-D-09 shape) FAILS the ambiguity-property assertion", () => {
-    // The mutant is the REAL pre-D-09 sentence this arm shipped, not a
-    // paraphrase — so this calibration proves the assertion above is a
-    // reading, not a predicate only ever shown passing input.
-    const preD09 =
-      "The bridge IS ATTACHED but the terminal is NOT ANSWERING (-10005). Open the gateway's VNC console and clear the MODAL LOGIN DIALOG by completing any login — ⛔ a redeploy does NOT fix this, because the Wine prefix and the dialog live on the persistent volume and come straight back. A transient reading is possible while a real validate call holds the terminal's IPC bridge, so a SECOND consecutive hourly hit is the confirmation.";
-    expect(preD09, "the pre-D-09 sentence must actually differ from the shipped remedy").not.toBe(remedy);
-    expect(preD09.includes("cannot tell them apart")).toBe(false);
-    expect(preD09.includes("account-switch")).toBe(false);
+    // The mutant is DERIVED FROM THE SHIPPED REMEDY's own bytes, not retyped:
+    // it is `MT5_ARM.REMEDIES["mt5-ipc-timeout"]` with the D-09 sentence that
+    // names both causes and disclaims telling them apart removed, the shape a
+    // revert to the pre-D-09 single-cause remedy leaves behind. A retyped copy
+    // of the old sentence could not fail (SRO-01); this subject moves with the
+    // arm, so the calibration proves the ambiguity assertion above is a
+    // reading of the arm, not a predicate only ever shown passing input.
+    const sentences = remedy.split(/(?<=\.)\s+/);
+    const singleCause = sentences.filter((s) => !s.includes("cannot tell them apart")).join(" ");
+    expect(singleCause, "the revert must actually remove a sentence from the shipped remedy").not.toBe(remedy);
+    expect(singleCause, "the revert keeps the rest of the shipped remedy").toContain("(-10005)");
+    expect(singleCause.includes("cannot tell them apart")).toBe(false);
+    expect(singleCause.includes("account-switch")).toBe(false);
   });
 });
 
