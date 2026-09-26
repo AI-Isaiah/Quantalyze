@@ -126,7 +126,10 @@ export function rollingSortino(
       }
     }
     const dd = hasNeg ? Math.sqrt(downSq / window) * sqrtN : 0;
-    out[i] = dd > 0 ? (m * periodsPerYear) / dd : 0;
+    // A window with no losing day has no Sortino: a gap (null), as a window
+    // with no Sharpe is, never a drawn 0 that the Rolling panel's "Now" would
+    // print as "0.00" (founder decision D7; review round 2, HI-02 class).
+    out[i] = dd > 0 ? (m * periodsPerYear) / dd : null;
   }
   return out;
 }

@@ -286,6 +286,23 @@ describe("T17 rollingBeta and rollingSharpe on return-stats (D-07, D-17)", () =>
     }
   });
 
+  // D7, review round 2 (HI-02 class): a window with no losing day has no
+  // Sortino. It is a gap (null), like a window with no Sharpe, never a drawn 0,
+  // which the Rolling panel's "Now" (the last element) would print as "0.00".
+  it("T17 rollingSortino: a window with no losing day is null, a gap, not 0", () => {
+    expect(rollingSortino(zeros(N), WINDOW, PPY).every((v) => v === null)).toBe(true);
+    for (const id of YIELD_IDS) {
+      expect(rollingSortino(navConstantYield(CONSTANT_YIELDS[id], N), WINDOW, PPY).every((v) => v === null), id).toBe(true);
+    }
+    // An active series whose last window is flat: the current window has no Sortino.
+    const flatTail = STRAT.slice();
+    for (let i = N - WINDOW; i < N; i++) flatTail[i] = 0;
+    const s = rollingSortino(flatTail, WINDOW, PPY);
+    expect(s[N - 1]).toBeNull();
+    // Control: a window that still holds losing days keeps a finite Sortino.
+    expect(Number.isFinite(s[N - WINDOW - 1] as number)).toBe(true);
+  });
+
   it("T17 cent-rounded 1% APY keeps a finite, non-zero rolling beta and Sharpe (floor control)", () => {
     const b = rollingBeta(STRAT, CENT_1PCT, WINDOW);
     const s = rollingSharpe(CENT_1PCT, WINDOW, PPY);

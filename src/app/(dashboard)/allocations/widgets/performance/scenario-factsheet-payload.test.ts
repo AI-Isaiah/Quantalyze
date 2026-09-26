@@ -258,7 +258,14 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
     // Rolling series populated for a 252-day blend (post-warmup values exist).
     expect(p.strategyRollingVol.some((v) => v != null)).toBe(true);
     expect(p.strategyRollingSharpe.some((v) => v != null)).toBe(true);
-    expect(p.strategyRollingSortino.some((v) => v != null)).toBe(true);
+    // BLEND_252 has no losing day, so no window has a Sortino: every window is a
+    // gap (null), never a drawn 0 (founder decision D7; Phase 166.2 review
+    // round 2). A 252-day blend WITH losing days populates the series.
+    expect(p.strategyRollingSortino.every((v) => v == null)).toBe(true);
+    const withLosses = buildScenarioFactsheetPayload({
+      portfolioDaily: BLEND_252.map((pt, i) => ({ ...pt, value: i % 2 === 0 ? 0.01 : -0.005 })),
+    });
+    expect(withLosses.strategyRollingSortino.some((v) => v != null && Number.isFinite(v))).toBe(true);
     // quantiles match the shared parity source.
     expect(p.quantiles).toEqual(quantileSummary(rets));
     // bootstrapCI is internally seeded → deterministic vs a fresh call.
