@@ -27,8 +27,23 @@ in turn and asserts, for every one:
 
 A programming-error variant (``TypeError``, a ``_READ_PROGRAMMING_ERRORS``
 member) asserts ``unknown`` instead, with the ERROR line and the capture still
-present. A call added to either closure later is picked up by discovery and
-held to the same assertions without editing this file.
+present. A call added later ON ONE OF THE ``_SCENARIOS`` PATHS, and issued on
+the closure's own thread, is picked up by discovery and held to the same
+assertions without editing this file.
+
+⛔ Corrected in round 5 (R5 IN-01 / SFH-R5-02): that sentence used to say "a
+call added to either closure later", and it was false in two ways. Discovery
+sees only the branches a scenario drives (a call on the composite
+``OTHER_SOURCE`` branch passed all 84 cases), and it sees nothing issued through
+``asyncio.to_thread``, ``run_in_executor`` or ``create_task``, where the
+closure's frame is not on the stack. Two answers, both below:
+- four more scenarios (``OTHER_SOURCE`` and a marked job over an unpublished
+  row, in each closure);
+- a STATIC scan of every line of both closures,
+  ``test_every_io_call_in_a_stamp_closure_is_inside_stamp_io``, which also
+  covers the branches still without a scenario: ``NO_ID`` (the re-read answers
+  it before any I/O, then the same loud path as ``NO_ROW``) and a
+  ``detail``-bearing stamp (the branch only logs).
 
 ⚠️ The one call with a DIFFERENT, asserted disposition is the single-key series
 heal. It is identified by its own property, not by name: it is closure I/O
@@ -222,6 +237,25 @@ _SCENARIOS: tuple[_Scenario, ...] = (
     ),
     _Scenario("composite", "loud-over-missing-row", True, _LIVE_JOB_ABSENT, True, False, True),
     _Scenario("composite", "unmarked-first-compute", False, _LIVE_JOB_ABSENT, False, False),
+    # Round 5 (R5 IN-01 / SFH-R5-02): two branches the first eight did not
+    # drive. OTHER_SOURCE (the live row carries another source) and a marked
+    # job over a row that is NOT published (no re-read, straight to loud).
+    _Scenario(
+        "single-key", "loud-over-other-source", True,
+        {"source": "some-other-source"}, True, False,
+    ),
+    _Scenario(
+        "single-key", "marked-over-unpublished-row", True,
+        {"source": _SINGLE_KEY_MARKER}, False, False,
+    ),
+    _Scenario(
+        "composite", "loud-over-other-source", True,
+        {"source": "some-other-source"}, True, False,
+    ),
+    _Scenario(
+        "composite", "marked-over-unpublished-row", True,
+        {"source": _COMPOSITE_MARKER}, False, False,
+    ),
 )
 
 
@@ -395,15 +429,20 @@ def test_discovery_sees_the_stamp(scenario: _Scenario) -> None:
     """A broken recorder (a thread hop, a renamed closure) would discover zero
     calls and every parametrised case below would vanish, passing vacuously.
     Each scenario must discover a read BEFORE its one ``strategy_analytics``
-    write, and the marked scenarios must discover the live ``compute_jobs``
-    re-read."""
+    write. The marked scenarios over a published row must discover the live
+    ``compute_jobs`` re-read, and a marked one over an unpublished row must
+    not (there is nothing to protect)."""
     calls = _discovered(scenario)
     stamp_at = _stamp_index(calls)
     assert stamp_at >= 1 or scenario.closure == "single-key", (
         f"no read precedes the stamp: {[c.label() for c in calls]!r}"
     )
     targets = [c.target for c in calls[:stamp_at]]
-    if scenario.marked:
+    if scenario.marked and not scenario.published:
+        # Nothing to protect, so the live row is never re-read (IN-05's
+        # "it can only NARROW").
+        assert "compute_jobs" not in targets, [c.label() for c in calls]
+    elif scenario.marked:
         assert "compute_jobs" in targets, (
             f"the marked scenario discovered no live marker re-read: "
             f"{[c.label() for c in calls]!r}"
@@ -949,3 +988,191 @@ def test_every_stamp_message_survives_the_500_character_cut() -> None:
         texts = asyncio.run(_all())
     missing = [t for t in texts if t.startswith("MISSING: ")]
     assert not missing, missing[:3]
+
+
+# ---------------------------------------------------------------------------
+# R5 IN-01 / SFH-R5-02: the STATIC complement to discovery.
+# ---------------------------------------------------------------------------
+# Discovery above sees a call only when it runs on one of ``_SCENARIOS``' paths
+# AND on the closure's own thread. A call on a branch no scenario drives, or one
+# issued through ``asyncio.to_thread`` / ``run_in_executor`` / ``create_task``
+# (where the closure's frame is not on the stack), escaped it and failed GREEN.
+# This scan reads every line of both closures instead. The two are paired on
+# purpose: the frame walk catches a helper this scan's name list misses, and the
+# scan catches a call no scenario reaches or that runs off the frame.
+#
+# The closures are cut out by the house idiom, INDENTATION
+# (``tests/test_ledger_refresh_gates.py``, ``guard_region`` and
+# ``composite_guard_region``, each with its own anti-vacuity floor and
+# sentinel), then parsed, never regexed: both closures are full of prose that
+# names ``db_execute`` and ``.execute()``, and prose must never satisfy or trip
+# a gate.
+_IO_CALL_NAMES = frozenset(
+    {
+        "db_execute",
+        "db_read_with_retry",
+        "_read_refresh_marker_state",
+        "to_thread",
+        "run_in_executor",
+        "create_task",
+        "ensure_future",
+        "execute",
+        "get_supabase",
+    }
+)
+# The one database call a stamp closure makes outside ``_stamp_io``, on
+# purpose: it runs after the loud stamp has landed (see ``_stamp_io``'s
+# docstring). It is a call to a helper defined OUTSIDE the closure, so the scan
+# names it rather than reading it.
+_EXEMPT_CALLS = frozenset({"_heal_delete_basis_series"})
+
+
+def _unwrapped_io(region: str) -> tuple[list[str], int]:
+    """Every I/O call in ``region`` (one closure's source) that does not run
+    inside a ``_stamp_io(...)`` argument, plus how many covered I/O calls it
+    saw. A call is covered when a ``_stamp_io`` call is among its ancestors, or
+    when it sits in a nested ``def`` every reference to which is itself covered
+    (the payload builders handed to ``db_execute`` by name)."""
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(region))
+    closure = tree.body[0]
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(closure):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    def ancestors(node: ast.AST) -> list[ast.AST]:
+        out = []
+        while node in parents:
+            node = parents[node]
+            out.append(node)
+        return out
+
+    def name_of(call: ast.Call) -> str | None:
+        if isinstance(call.func, ast.Name):
+            return call.func.id
+        if isinstance(call.func, ast.Attribute):
+            return call.func.attr
+        return None
+
+    calls = [n for n in ast.walk(closure) if isinstance(n, ast.Call)]
+    stamp_io = {c for c in calls if name_of(c) == "_stamp_io"}
+    defs = [
+        d for d in ast.walk(closure)
+        if isinstance(d, (ast.FunctionDef, ast.AsyncFunctionDef)) and d is not closure
+    ]
+    wrapped: set[ast.AST] = set()
+
+    def covered(node: ast.AST) -> bool:
+        return any(a in stamp_io or a in wrapped for a in ancestors(node))
+
+    changed = True
+    while changed:
+        changed = False
+        for d in defs:
+            if d in wrapped:
+                continue
+            refs = [
+                n for n in ast.walk(closure)
+                if isinstance(n, ast.Name) and n.id == d.name
+                and isinstance(n.ctx, ast.Load)
+            ]
+            if refs and all(covered(r) for r in refs):
+                wrapped.add(d)
+                changed = True
+
+    unwrapped: list[str] = []
+    seen_covered = 0
+    for call in calls:
+        name = name_of(call)
+        if name in _EXEMPT_CALLS or name not in _IO_CALL_NAMES:
+            continue
+        if covered(call):
+            seen_covered += 1
+        else:
+            unwrapped.append(f"closure line {call.lineno}: {ast.unparse(call)[:100]}")
+    return unwrapped, seen_covered
+
+
+def _closure_regions() -> dict[str, str]:
+    from tests.test_ledger_refresh_gates import composite_guard_region, guard_region
+
+    return {"single-key": guard_region(), "composite": composite_guard_region()}
+
+
+@pytest.mark.parametrize("closure", ["single-key", "composite"])
+def test_every_io_call_in_a_stamp_closure_is_inside_stamp_io(closure: str) -> None:
+    """R5 IN-01 / SFH-R5-02. It covers the branches no scenario drives
+    (``NO_ID``, a ``detail``-bearing stamp and any branch added later) and a
+    call issued off the closure's thread.
+
+    Neuter to redden: add an unwrapped
+    ``await asyncio.to_thread(lambda: supabase.table(...).select(...).execute())``
+    in the composite ``OTHER_SOURCE`` branch (``_log_marker_not_confirmed``'s
+    caller). Discovery stays GREEN on that, measured in round 5. This goes RED."""
+    region = _closure_regions()[closure]
+    unwrapped, seen_covered = _unwrapped_io(region)
+    assert not unwrapped, (
+        f"the {closure} stamp closure makes database calls outside _stamp_io, "
+        f"so a failure there loses the curated cause: {unwrapped!r}"
+    )
+    # Anti-vacuity: the scan must see the calls the closure is known to make
+    # (single-key: marker re-read, two writes; composite: those plus the
+    # status read), each through at least one I/O name.
+    assert seen_covered >= (3 if closure == "single-key" else 4), seen_covered
+    if closure == "single-key":
+        assert "_heal_delete_basis_series()" in region, (
+            "the named exemption no longer appears in the closure; drop it from "
+            "_EXEMPT_CALLS rather than let it exempt nothing"
+        )
+
+
+_SCAN_GREEN = """
+async def _stamp_failed(message):
+    def _read():
+        return supabase.table("t").select("x").execute()
+
+    row = await _stamp_io(lambda: db_read_with_retry(_read), op=OP)
+
+    def _write():
+        def _inner():
+            supabase.table("t").upsert({}).execute()
+
+        upsert_or_drop_provenance({}, _inner)
+
+    await _stamp_io(lambda: db_execute(_write), op=OP)
+"""
+
+_SCAN_REDS = {
+    "unwrapped-db-execute": _SCAN_GREEN.replace(
+        "await _stamp_io(lambda: db_execute(_write), op=OP)",
+        "await db_execute(_write)",
+    ),
+    "off-thread-read-in-a-branch": _SCAN_GREEN.replace(
+        "    row = await",
+        "    if row_state is OTHER:\n"
+        "        await asyncio.to_thread(\n"
+        "            lambda: supabase.table('t').select('x').execute()\n"
+        "        )\n"
+        "    row = await",
+    ),
+    "wrapped-def-also-called-directly": _SCAN_GREEN
+    + "    _read()\n",
+    "inline-execute": _SCAN_GREEN + "    supabase.rpc('f', {}).execute()\n",
+    "a-new-client": _SCAN_GREEN + "    get_supabase()\n",
+}
+
+
+def test_the_scan_passes_its_green_fixture() -> None:
+    unwrapped, seen_covered = _unwrapped_io(_SCAN_GREEN)
+    assert not unwrapped, unwrapped
+    assert seen_covered == 4, seen_covered
+
+
+@pytest.mark.parametrize("name", sorted(_SCAN_REDS))
+def test_the_scan_fails_each_red_fixture(name: str) -> None:
+    """The scan can fail: each fixture adds one unwrapped call shape."""
+    unwrapped, _covered = _unwrapped_io(_SCAN_REDS[name])
+    assert unwrapped, f"the scan passed its red fixture {name!r}"
