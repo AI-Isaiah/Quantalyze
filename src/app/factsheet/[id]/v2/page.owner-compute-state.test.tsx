@@ -1005,11 +1005,11 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
       // 167.2.1-REVIEW WR-03: one resolve, so ONE composite csv read, not two.
       expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
       // 167.2.1-REVIEW-SFH H-1: the refusal the note sends to support is
-      // captured, once, at warning, with tags only.
+      // captured, once, at warning. 167.2.1-REVIEW-R2 IN-02: it names the row.
       expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
         level: "warning",
-        tags: { stage: "factsheet-resolve-composite", caller: "build", gate: "headline" },
+        tags: { stage: "factsheet-resolve-composite", caller: "build", gate: "headline", strategy_id: STRATEGY_ID },
       });
       expect(STATE.observed.adminTables.filter((t) => t === "strategies")).toHaveLength(1);
       expect(STATE.observed.adminTables.filter((t) => t === "csv_daily_returns")).toHaveLength(1);
@@ -1156,7 +1156,7 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
       // One event, from the stage that saw the error, carrying the code.
       expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
-        tags: { stage: "factsheet-resolve", caller: "build", reason: "read_error", code: "57014" },
+        tags: { stage: "factsheet-resolve", caller: "build", reason: "read_error", code: "57014", strategy_id: STRATEGY_ID },
       });
     } finally {
       errSpy.mockRestore();

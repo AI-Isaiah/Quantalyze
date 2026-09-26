@@ -408,7 +408,8 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
     await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
     expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
-      tags: { stage: "factsheet-resolve", caller: "build", reason: "read_error", code: "XX000" },
+      // 167.2.1-REVIEW-R2 IN-02: a build's event names its row.
+      tags: { stage: "factsheet-resolve", caller: "build", reason: "read_error", code: "XX000", strategy_id: STRATEGY_ID },
     });
 
     seed(outage.row, [], outage.error);
@@ -456,7 +457,7 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
       expect(vi.mocked(captureToSentry), name).toHaveBeenCalledTimes(1);
       expect(vi.mocked(captureToSentry).mock.calls[0][1], name).toEqual({
         level: "warning",
-        tags: { stage: "factsheet-resolve-composite", caller: "build", gate },
+        tags: { stage: "factsheet-resolve-composite", caller: "build", gate, strategy_id: STRATEGY_ID },
       });
     }
     // The case the finding is about: a csv read OUTAGE folds into an empty
@@ -498,6 +499,7 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
       expect(ctx.tags.caller, f.name).toBe("build");
       expect(ctx.tags.gate, f.name).toBe((probe as { gate?: string }).gate);
       expect(ctx.tags.source, f.name).toBe(source);
+      expect(ctx.tags.strategy_id, f.name).toBe(STRATEGY_ID);
       expect(ctx.extra.storedReturns, f.name).toBeGreaterThanOrEqual(2);
       expect(ctx.extra.resolvedEntries, f.name).toBeLessThan(2);
     }

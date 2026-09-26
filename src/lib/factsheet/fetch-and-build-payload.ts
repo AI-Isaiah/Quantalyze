@@ -190,8 +190,11 @@ function countedSeriesColumn(
  * stored data is malformed: the owner is not told a false "fewer than 2
  * days", and the defect is captured, since it is the analytics writer's and
  * nothing else records it. The capture names the counted column (`source`).
+ * 167.2.1-REVIEW-R2 IN-02: a build's capture carries `strategy_id`, so
+ * support can find the row from the event alone.
  */
 function singleKeyUnbuildable(
+  id: string,
   caller: ResolveCaller,
   gate: "empty_series" | "short_series",
   dailyRaw: unknown,
@@ -203,7 +206,7 @@ function singleKeyUnbuildable(
   // WR-01: captured for a build only; a probe carries gate and source out.
   if (caller === "build") {
     captureToSentry(new Error(`factsheet resolve: stored single-key series is malformed (${gate})`), {
-      tags: { stage: "factsheet-resolve-malformed", caller, gate, source },
+      tags: { stage: "factsheet-resolve-malformed", caller, gate, source, strategy_id: id },
       extra: { storedReturns, resolvedEntries },
     });
   }
@@ -212,24 +215,29 @@ function singleKeyUnbuildable(
 
 /**
  * 167.2.1-REVIEW-SFH H-1 — every `composite_unbuildable` answer a BUILD
- * reaches is CAPTURED, at level warning, with tags only. D-07 folds a failed
+ * reaches is CAPTURED, at level warning. D-07 folds a failed
  * `csv_daily_returns` read into this reason (`readCompositeFactsheet` turns
  * the error into an empty series and only console-logs it, which never reaches
  * Sentry here), and the copy then sends the owner to support. The event is not
- * proof of an outage; it is what makes "contact support" answerable. `gate`
+ * proof of an outage; it is what makes "contact support" answerable, and
+ * 167.2.1-REVIEW-R2 IN-02 tags it with `strategy_id` so the event alone names
+ * the row (before, support had to join its timestamp to the
+ * `resolve(<caller>)` log line). A probe's refusal never carries an id to
+ * Sentry: `StrategiesPage` aggregates it per page load, id-free. `gate`
  * names which check refused: the helper (a missing or untrusted headline,
  * `headline`), an empty series (`empty_series`) or a short one
  * (`short_series`). 167.2.1-REVIEW-R2 WR-01: a probe carries `gate` out and
  * `StrategiesPage` counts it into its one event per page load.
  */
 function compositeUnbuildable(
+  id: string,
   caller: ResolveCaller,
   gate: "headline" | "empty_series" | "short_series",
 ): NotBuildable {
   if (caller === "build") {
     captureToSentry(new Error(`factsheet resolve: composite cannot build (${gate})`), {
       level: "warning",
-      tags: { stage: "factsheet-resolve-composite", caller, gate },
+      tags: { stage: "factsheet-resolve-composite", caller, gate, strategy_id: id },
     });
   }
   return notBuildable("composite_unbuildable", { gate });
@@ -282,7 +290,8 @@ async function resolveFactsheetInputs(
     // 167.2.1-REVIEW-SFH M-2: a failed admin read is an outage, not a data
     // fact. `console.*` does not reach Sentry in this repo (no console
     // integration in `instrumentation.ts`), so it is captured HERE, once, with
-    // its PostgREST / SQLSTATE code as a tag (a code is not identifying). That
+    // its PostgREST / SQLSTATE code and (167.2.1-REVIEW-R2 IN-02) the
+    // `strategy_id` as tags, so the event names the row it failed on. That
     // covers every lane: the public and token builders used to render the
     // placeholder for it with no event at all, and the probe callers captured
     // a fixed message with no code.
@@ -299,7 +308,7 @@ async function resolveFactsheetInputs(
     });
     if (caller === "build") {
       captureToSentry(new Error(`factsheet resolve: admin strategy read failed (${code})`), {
-        tags: { stage: "factsheet-resolve", caller, reason: "read_error", code },
+        tags: { stage: "factsheet-resolve", caller, reason: "read_error", code, strategy_id: id },
       });
     }
     return notBuildable("read_error", { code });
@@ -388,7 +397,7 @@ async function resolveFactsheetInputs(
       metricsJsonByBasis: analytics?.metrics_json_by_basis,
       returnsDenominatorConfig: strategy.returns_denominator_config,
     });
-    if (!composite) return compositeUnbuildable(caller, "headline");
+    if (!composite) return compositeUnbuildable(id, caller, "headline");
     dailyReturns = composite.dailyReturns;
     compositeBuildOpts = composite.buildOpts;
   }
@@ -417,8 +426,8 @@ async function resolveFactsheetInputs(
       returnsSeriesType: typeof analytics?.returns_series,
     });
     return isComposite
-      ? compositeUnbuildable(caller, "empty_series")
-      : singleKeyUnbuildable(caller, "empty_series", dailyRaw, analytics?.returns_series, 0);
+      ? compositeUnbuildable(id, caller, "empty_series")
+      : singleKeyUnbuildable(id, caller, "empty_series", dailyRaw, analytics?.returns_series, 0);
   }
 
   // G4 (Phase 167.2.1, D-04): the builder's own point-count predicate, asked
@@ -431,8 +440,8 @@ async function resolveFactsheetInputs(
       { id, caller, isComposite, rawCount: dailyReturns.length, minimum: MIN_FACTSHEET_SERIES_POINTS },
     );
     return isComposite
-      ? compositeUnbuildable(caller, "short_series")
-      : singleKeyUnbuildable(caller, "short_series", dailyRaw, analytics?.returns_series, dailyReturns.length);
+      ? compositeUnbuildable(id, caller, "short_series")
+      : singleKeyUnbuildable(id, caller, "short_series", dailyRaw, analytics?.returns_series, dailyReturns.length);
   }
 
   return {
