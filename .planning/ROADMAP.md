@@ -3230,6 +3230,8 @@ Plans:
 
 **⭐ D-32 (round-2 code review CR-03, 2026-09-26):** the run-attempt refusal is removed; the listing check alone guards re-runs. Refusing every `GITHUB_RUN_ATTEMPT` other than 1 turned a correct "Re-run failed jobs" red on `main` with no way back to green. `judgeMainListing` already covers the hazard: a stale re-run is judged `ahead` (skipped under D-31) or `equal` (a valid dump). ⛔ **This amends the D-31 line above:** "a re-run attempt … still refuse" is no longer true; that line is kept as lineage. Recorded in `164.9.5-CONTEXT.md` D-32.
 
+**⭐ D-33 (founder, 2026-09-26, "Revert the tail check"):** the round-2 tail-count floor (`judgeTail`) is reverted. It caused round-3 HIGH CR-04 (DROP COLUMN reddens main on a correct dump). Truncation is a recorded MEDIUM limit, and the main-listing verdict now runs before the completeness floor. Recorded in `164.9.5-CONTEXT.md` D-33.
+
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
 ⭐ **Founder answers, 2026-09-24:** D-15, D-16 and D-17 are APPROVED. OPEN-2: after merge, run plan 10's read-only census, then queue a recompute of the affected PROD rows.
