@@ -3190,7 +3190,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 166.2-07-PLAN.md — whole-phase gate sweep at one SHA containing `origin/main` (anchor check in CI's `--pending` form, D-20 B2) and the single TS release commit (VERSION, package.json, CHANGELOG)
+- [x] 166.2-07-PLAN.md — whole-phase gate sweep at one SHA containing `origin/main` (anchor check in CI's `--pending` form, D-20 B2) and the single TS release commit (VERSION, package.json, CHANGELOG)
 
 ### Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path (founder production steps) (INSERTED)
 
