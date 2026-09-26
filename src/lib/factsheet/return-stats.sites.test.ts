@@ -470,3 +470,22 @@ describe("HI3-02 calmarByYear: a year with no drawdown has no Calmar (D7), as co
     expect(zeros.every((r) => Number.isNaN(r.calmar))).toBe(true);
   });
 });
+
+describe("WR3-01 compute: a series with no dispersion has no skew and no kurtosis (D7, superseding T13's 0)", () => {
+  it("the all-zero series and every constant yield give NaN skew and kurtosis, never 0", () => {
+    const zero = compute(ZEROS, DATES, 0, 365);
+    expect(Number.isNaN(zero.skew), `skew=${zero.skew}`).toBe(true);
+    expect(Number.isNaN(zero.kurt), `kurt=${zero.kurt}`).toBe(true);
+    for (const id of YIELD_IDS) {
+      const got = compute(navConstantYield(CONSTANT_YIELDS[id], N), DATES, 0, 365);
+      expect(Object.is(got.skew, zero.skew), `${id} skew=${got.skew}`).toBe(true);
+      expect(Object.is(got.kurt, zero.kurt), `${id} kurt=${got.kurt}`).toBe(true);
+    }
+  });
+
+  it("control: a dispersing series keeps a finite skew and kurtosis", () => {
+    const got = compute(NOISY_A, DATES, 0, 365);
+    expect(Number.isFinite(got.skew) && got.skew !== 0).toBe(true);
+    expect(Number.isFinite(got.kurt) && got.kurt !== 0).toBe(true);
+  });
+});

@@ -63,8 +63,12 @@ export function compute(
   for (let i = 0; i < dd.length; i++) if (dd[i] < maxDd) maxDd = dd[i];
   const calmar = maxDd !== 0 ? cagr / Math.abs(maxDd) : NaN;
 
-  const skew = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 3), 0) / n : 0;
-  const kurt = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 4), 0) / n - 3 : 0;
+  // With no dispersion the standardised moments are 0/0: the series has no
+  // skew and no kurtosis. NaN renders "—", never a measured-looking "+0.00"
+  // (founder decision D7; review round 3 WR3-01, superseding CONTEXT T13's
+  // "keep the s > 0 gate" answer of 0).
+  const skew = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 3), 0) / n : NaN;
+  const kurt = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 4), 0) / n - 3 : NaN;
 
   let longestDd = 0;
   let curRun = 0;

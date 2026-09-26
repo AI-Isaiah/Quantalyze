@@ -142,3 +142,28 @@ describe("HI3-02: Calmar by Year reads \"—\" for a year with no drawdown", () 
     });
   }
 });
+
+describe("WR3-01: Skew and Kurtosis read \"—\" for a series with no dispersion", () => {
+  /** A compounding constant yield: no dispersion, so no standardised moments. */
+  const CONSTANT = Array.from({ length: 400 }, () => 0.0002);
+
+  for (const [name, wrap] of [
+    ["fresh payload", (p: FactsheetPayload) => p],
+    ["after the JSON cache round trip", viaCache],
+  ] as const) {
+    it(`Main Metrics and Extended Metrics read "—" beside Sharpe "—" (${name})`, () => {
+      const read = renderColumn(wrap(payloadFrom(CONSTANT)));
+      expect(read("Main Metrics", "Sharpe")).toBe("—");
+      expect(read("Main Metrics", "Skew")).toBe("—");
+      expect(read("Main Metrics", "Kurtosis")).toBe("—");
+      expect(read("Extended Metrics", "Skew")).toBe("—");
+      expect(read("Extended Metrics", "Kurtosis (excess)")).toBe("—");
+    });
+
+    it(`control: a dispersing book keeps a numeric Skew and Kurtosis (${name})`, () => {
+      const read = renderColumn(wrap(payloadFrom(TWO_SIDED)));
+      expect(read("Main Metrics", "Skew")).toMatch(/^[+-]\d+\.\d{2}$/);
+      expect(read("Main Metrics", "Kurtosis")).toMatch(/^-?\d+\.\d{2}$/);
+    });
+  }
+});
