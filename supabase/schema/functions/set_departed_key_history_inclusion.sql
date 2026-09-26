@@ -122,73 +122,132 @@ BEGIN
   -- one makes claim_compute_jobs and both claim_compute_jobs_with_priority
   -- overloads raise 23505 on that index (the worker-spin class of 2026-04-28).
   -- So when a failed_retry row is the caller's ONLY recompose row, it is
-  -- REUSED: it is already locked by step 1, and moving next_attempt_at to now()
-  -- is all the claim functions need to take it (status IN ('pending',
-  -- 'failed_retry') AND next_attempt_at <= now()); they clear its last_error
-  -- and error_kind themselves. attempts is left alone, so the toggle grants no
-  -- retry budget: a row one attempt short of max_attempts ends failed_final if
-  -- it fails again, and the next toggle then enqueues a fresh job. The job
-  -- reads history_inclusion when it runs, so it picks up the new value.
-  -- When a pending or done_pending_children row also exists (a pairing this
-  -- RPC did not create), the failed_retry row is NOT moved forward, because
-  -- ranking it first is exactly the 23505 shape; the enqueue's dedup hands
-  -- back the in-flight row instead and inserts nothing.
-  SELECT cj.id INTO v_job
-    FROM public.compute_jobs cj
-   WHERE cj.allocator_id = v_uid
-     AND cj.kind = 'derive_allocator_equity'
-     AND cj.status = 'failed_retry'
-     AND NOT EXISTS (
-           SELECT 1
-             FROM public.compute_jobs o
-            WHERE o.allocator_id = v_uid
-              AND o.kind = 'derive_allocator_equity'
-              AND o.status IN ('pending', 'done_pending_children'))
-   ORDER BY cj.next_attempt_at, cj.id
-   LIMIT 1;
+  -- REUSED: it goes back to status 'pending' with next_attempt_at = now(), the
+  -- state reset_stalled_compute_jobs already writes for a reclaimed job. A
+  -- pending row sits inside that unique index and inside the enqueue's dedup,
+  -- so a later enqueue for the caller (a derive_broker_dailies epilogue among
+  -- them) folds onto it instead of inserting a twin, which merely moving
+  -- next_attempt_at forward would not prevent: the failed_retry row would rank
+  -- first in its claim partition beside the epilogue's pending row, the same
+  -- 23505. attempts is left alone, so the toggle grants no retry budget: a row
+  -- one attempt short of max_attempts ends failed_final if it fails again, and
+  -- the next toggle then enqueues a fresh job. The claim functions clear
+  -- last_error and error_kind themselves. The job reads history_inclusion when
+  -- it runs, so it picks up the new value.
+  -- The NOT EXISTS narrowing is still needed. The flip is a write into that
+  -- unique index, so beside a visible pending or done_pending_children row it
+  -- would raise 23505 every time and refuse a toggle that can succeed: without
+  -- the flip, the enqueue's dedup hands that in-flight row back and the toggle
+  -- takes effect on it. The failed_retry row is then left where it is (a
+  -- pairing this RPC did not create).
+  -- The flip's WHERE repeats status = 'failed_retry'. A failed_retry row that
+  -- appeared after step 1 is not locked by it, and if a claimer takes that row
+  -- first, the repeated predicate fails on the re-read, nothing is written, and
+  -- the enqueue below hands back the running row for step 3 to refuse; a flip
+  -- keyed on the id alone would put a running job back to pending.
+  -- The 23505 handler covers the one sibling the NOT EXISTS cannot see: a
+  -- pending row another transaction inserts after that lookup, which the flip's
+  -- unique check waits on and then collides with once it commits.
+  --
+  -- Step 3. Lock and re-check the job the reuse or the enqueue returned.
+  -- Step 1 cannot see a job that another transaction enqueued, and a worker
+  -- claimed, after step 1 ran; the enqueue's dedup (a plain read, no lock)
+  -- would then hand back that RUNNING job, which read the old value. The row
+  -- is locked here, so if a claimer holds it this waits, re-reads it as READ
+  -- COMMITTED does, and judges what it finds. Only 'pending' or
+  -- 'done_pending_children' passes (a reused row is 'pending' by now): such a
+  -- job has not run, and every claimer skips it until the new value commits.
+  -- 'running' is refused, and the refusal rolls the UPDATE above back. A job
+  -- that FINISHED between the dedup and this lock (done, failed_retry,
+  -- failed_final, or a row that is gone) read the old value too, and
+  -- refusing it would be wrong because nothing is in flight any more: the
+  -- right outcome is one fresh job that reads the new value, so the reuse or
+  -- the enqueue runs once more. The second pass sees an in-flight set without
+  -- that row (a failed_retry result is reused rather than given a twin, and
+  -- this transaction holds its lock). If that pass also hands back a finished
+  -- job, two recomposes started and ended inside this one call; that is too
+  -- close to call, so it is refused by name, 55006
+  -- HISTORY_RECOMPOSE_RACED, rather than retried without bound.
+  -- A NULL job id is refused outright (HISTORY_RECOMPOSE_NOT_QUEUED): no path
+  -- in enqueue_compute_job returns one today, and a toggle that queues nothing
+  -- must not report success.
+  -- REASONED, NOT MEASURED: steps 1 and 3, the 23505 handler and the second
+  -- pass close races between TWO backends, and the SQL gate corpus runs one
+  -- session, so none of those windows has been exercised. Step 3's running
+  -- refusal is gated (arm HIST-running) only in the single-session shape where
+  -- the job is already running.
+  FOR v_attempt IN 1..2 LOOP
+    SELECT cj.id INTO v_job
+      FROM public.compute_jobs cj
+     WHERE cj.allocator_id = v_uid
+       AND cj.kind = 'derive_allocator_equity'
+       AND cj.status = 'failed_retry'
+       AND NOT EXISTS (
+             SELECT 1
+               FROM public.compute_jobs o
+              WHERE o.allocator_id = v_uid
+                AND o.kind = 'derive_allocator_equity'
+                AND o.status IN ('pending', 'done_pending_children'))
+     ORDER BY cj.next_attempt_at, cj.id
+     LIMIT 1;
 
-  IF v_job IS NOT NULL THEN
-    UPDATE public.compute_jobs
-       SET next_attempt_at = now()
-     WHERE id = v_job;
-  ELSE
-    -- Allocator-scoped, so enqueue_compute_job's own gate requires
-    -- p_allocator_id = auth.uid(), and its in-flight dedup hands back the
-    -- pending job locked above, so a burst of toggles is one job.
-    v_job := enqueue_compute_job(
-      p_strategy_id  := NULL,
-      p_kind         := 'derive_allocator_equity',
-      p_allocator_id := v_uid
-    );
-  END IF;
+    IF v_job IS NOT NULL THEN
+      BEGIN
+        UPDATE public.compute_jobs
+           SET status = 'pending',
+               next_attempt_at = now()
+         WHERE id = v_job
+           AND status = 'failed_retry'
+        RETURNING id INTO v_job;
+      EXCEPTION WHEN unique_violation THEN
+        RAISE EXCEPTION 'HISTORY_RECOMPOSE_IN_PROGRESS'
+          USING ERRCODE = '55006',
+                DETAIL  = 'Another recompose of your equity history was queued while this change was being saved. Try again; nothing was changed.',
+                HINT    = 'A retry folds your change into the recompose that is now queued.';
+      END;
+    END IF;
 
-  -- Step 3. Lock and re-check the job the enqueue returned (a reused
-  -- failed_retry row is already locked by step 1 and passes). Step 1 cannot see
-  -- a job that another transaction enqueued, and a worker claimed, after
-  -- step 1 ran; the dedup would then hand back that RUNNING job, which read
-  -- the old value. The row returned here is either this transaction's own
-  -- uncommitted insert (invisible to every claimer) or an existing row that is
-  -- now locked (skipped by every claimer), so once this check passes no
-  -- worker can start the job before the new value commits. If a claimer holds
-  -- the row, this waits, re-reads the row as READ COMMITTED does, sees
-  -- running, and refuses; the refusal rolls the UPDATE above back.
-  -- REASONED, NOT MEASURED: steps 1 and 3 close races between TWO backends,
-  -- and the SQL gate corpus runs one session, so neither window has been
-  -- exercised. Step 3's refusal is gated (arm HIST-running) only in the
-  -- single-session shape where the job is already running.
-  SELECT status, claimed_at INTO v_job_status, v_claimed_at
-    FROM public.compute_jobs
-   WHERE id = v_job
-     FOR UPDATE;
+    IF v_job IS NULL THEN
+      -- Allocator-scoped, so enqueue_compute_job's own gate requires
+      -- p_allocator_id = auth.uid(), and its in-flight dedup hands back the
+      -- pending job locked above, so a burst of toggles is one job.
+      v_job := enqueue_compute_job(
+        p_strategy_id  := NULL,
+        p_kind         := 'derive_allocator_equity',
+        p_allocator_id := v_uid
+      );
+    END IF;
 
-  IF v_job_status = 'running' THEN
-    RAISE EXCEPTION 'HISTORY_RECOMPOSE_IN_PROGRESS'
-      USING ERRCODE = '55006',
-            DETAIL  = format('A recompose of your equity history has been running for %s. Try again when it finishes; nothing was changed.',
-                             CASE WHEN v_claimed_at IS NULL THEN 'an unknown time'
-                                  ELSE floor(extract(epoch FROM now() - v_claimed_at) / 60)::int || ' minute(s)' END),
-            HINT    = 'If it does not finish, a running worker reclaims a recompose that has run for more than 10 minutes and queues it again. Retry after that.';
-  END IF;
+    IF v_job IS NULL THEN
+      RAISE EXCEPTION 'HISTORY_RECOMPOSE_NOT_QUEUED'
+        USING ERRCODE = 'XX000',
+              DETAIL  = 'enqueue_compute_job returned no job id for the caller''s recompose; nothing was changed.';
+    END IF;
+
+    SELECT status, claimed_at INTO v_job_status, v_claimed_at
+      FROM public.compute_jobs
+     WHERE id = v_job
+       FOR UPDATE;
+
+    IF v_job_status = 'running' THEN
+      RAISE EXCEPTION 'HISTORY_RECOMPOSE_IN_PROGRESS'
+        USING ERRCODE = '55006',
+              DETAIL  = format('A recompose of your equity history has been running for %s. Try again when it finishes; nothing was changed.',
+                               CASE WHEN v_claimed_at IS NULL THEN 'an unknown time'
+                                    ELSE floor(extract(epoch FROM now() - v_claimed_at) / 60)::int || ' minute(s)' END),
+              HINT    = 'If it does not finish, a running worker reclaims a recompose that has run for more than 10 minutes and queues it again. Retry after that.';
+    END IF;
+
+    EXIT WHEN v_job_status IN ('pending', 'done_pending_children');
+
+    IF v_attempt = 2 THEN
+      RAISE EXCEPTION 'HISTORY_RECOMPOSE_RACED'
+        USING ERRCODE = '55006',
+              DETAIL  = format('A recompose of your equity history finished (%s) while this change was being saved, and so did the one queued after it. Try again; nothing was changed.',
+                               COALESCE(v_job_status, 'removed')),
+              HINT    = 'Retry now. The next attempt either queues a recompose that reads your change or reports the one that is running.';
+    END IF;
+  END LOOP;
 
   RAISE NOTICE 'set_departed_key_history_inclusion: recompose job % queued for the caller', v_job;
 
