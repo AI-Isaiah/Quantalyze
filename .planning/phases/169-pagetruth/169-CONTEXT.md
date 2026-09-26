@@ -1088,6 +1088,22 @@ call the research left to the plan.
   169.x phase edits.
 - **Reversibility:** reversible (packaging and ordering only).
 
+### D-45: Phase 169.4.1's entry gate detects 166.2 by its real shape (orchestrator decision (a), 2026-09-26)
+- **The defect.** D-44 prescribed `git grep -q 'sharpe(' origin/main -- src/lib/factsheet/og-metrics.ts`.
+  Measured on branch `feat/166.2`: its `og-metrics.ts` imports `sharpe as sharpeRatio` from
+  `@/lib/return-stats` and calls `sharpeRatio(values, { periodsPerYear, ddof: 0 }) ?? NaN`, so the literal
+  `sharpe(` never matches and the gate would have failed forever after 166.2 merged. The orchestrator
+  recorded that literal as its brief's mistake.
+- **Decision.** Plan 169.4.1-01's gate, its HEAD check, its Task 2 acceptance line and its artifact
+  `contains` detect 166.2 by BOTH an import from `@/lib/return-stats` AND a `sharpeRatio(` or `sharpe(`
+  call. Measured 2026-09-26: against `feat/166.2` import=1 call=1 (pass); against `origin/main` at
+  `ea4167a3f` import=0 call=0 (fail, 166.2 not merged). D-44's literal command is superseded by this and
+  kept as lineage.
+- **Also decided in the same revision (orchestrator):** a stored key that is ABSENT falls back to the
+  computed value and a key PRESENT and null hides; a route-level test with an argument-forwarding spy and a
+  pass-through neuter pins the route wiring; plan 169.4.1-02's step 0 (the 166.1 check) is lineage, because
+  it cannot tell 166.1 from 166.2.
+- **Reversibility:** reversible (gate expression and test plan only).
 ### Claude's Discretion
 - Test file names, helper names not fixed above, and the exact caption wording within DESIGN.md's
   em-dash and dated-document rules.
