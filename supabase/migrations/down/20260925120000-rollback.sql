@@ -21,6 +21,20 @@
 --
 -- ⚠️ DATA: the duplicate markers and every owner's include/exclude choice are
 -- LOST with the columns. They are not recoverable from anything else.
+--
+-- ⚠️ THE MIGRATION LEDGER ROW IS LEFT IN PLACE. This file does not touch
+-- supabase_migrations.schema_migrations, so after it runs the ledger still
+-- records version 20260925120000 as applied while the schema no longer
+-- carries it. `supabase db push` will therefore NOT re-apply the migration.
+-- To re-apply it, delete that ledger row in the same change that re-applies
+-- it (or mark it reverted with `supabase migration repair --status reverted
+-- 20260925120000` against the intended database, after the marker query in
+-- CLAUDE.md names that database). Until then VAC-08's ledger check reports the
+-- version as present, which is true of the ledger and false of the schema.
+--
+-- The DO block at the end is catalogue-only: it RAISEs, and so aborts the
+-- whole rollback, if any object the migration added survives or the reconnect
+-- body still carries the refusal or the history reset.
 -- ============================================================================
 
 BEGIN;
@@ -157,5 +171,59 @@ COMMENT ON COLUMN public.api_keys.venue_account_id IS
 -- produces. The rollback restores what PROD had, not what the file says.
 COMMENT ON INDEX public.api_keys_user_exchange_venue_account_uniq IS
   'Phase 154 / WIZCONT-02: at most one LIVE api_keys row per (user, venue, account id). FAILS TOWARD THE EXISTING ROW — the duplicate INSERT raises 23505 and the route resolves to the row already there; never overwrite. ⭐ SCOPED TO LIVE ROWS (disconnected_at IS NULL): api_keys rows are RETAINED on soft-disconnect (20260422101911), so without that conjunct a DEAD row squats the slot forever and a re-connecting user gets a key every cron dispatcher skips — a strategy that silently never syncs. sync_status = ''revoked'' is deliberately NOT in the predicate. PARTIAL because NULL is the majority value; api_keys_venue_account_id_nonblank keeps '''' out. user_id LEADS deliberately — a non-tenant-leading unique index is the C-08 cross-tenant leak. Gate: supabase/tests/test_api_keys_venue_identity_uniq.sql.';
+
+
+-- ───────────── post-verify — CATALOGUE ONLY, reads no row
+DO $verify$
+DECLARE
+  v_left text;
+  v_src  text;
+BEGIN
+  SELECT string_agg(attname, ', ') INTO v_left
+    FROM pg_attribute
+   WHERE attrelid = 'public.api_keys'::regclass
+     AND NOT attisdropped
+     AND attname IN ('account_shared_with_api_key_id', 'account_share_kind', 'history_inclusion');
+  IF v_left IS NOT NULL THEN
+    RAISE EXCEPTION 'Rollback 20260925120000 failed: api_keys still has column(s) %', v_left;
+  END IF;
+
+  SELECT string_agg(conname, ', ') INTO v_left
+    FROM pg_constraint
+   WHERE conrelid = 'public.api_keys'::regclass
+     AND conname IN ('api_keys_account_shared_with_api_key_id_fkey',
+                     'api_keys_account_share_kind_valid',
+                     'api_keys_account_share_both_or_neither',
+                     'api_keys_account_share_not_self',
+                     'api_keys_history_inclusion_valid');
+  IF v_left IS NOT NULL THEN
+    RAISE EXCEPTION 'Rollback 20260925120000 failed: constraint(s) survive: %', v_left;
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM pg_trigger
+              WHERE tgrelid = 'public.api_keys'::regclass
+                AND tgname = 'api_keys_account_share_same_owner') THEN
+    RAISE EXCEPTION 'Rollback 20260925120000 failed: trigger api_keys_account_share_same_owner survives';
+  END IF;
+
+  IF to_regprocedure('public.enforce_api_keys_account_share_same_owner()') IS NOT NULL
+     OR to_regprocedure('public.set_departed_key_history_inclusion(uuid, text)') IS NOT NULL THEN
+    RAISE EXCEPTION 'Rollback 20260925120000 failed: enforce_api_keys_account_share_same_owner or set_departed_key_history_inclusion survives';
+  END IF;
+
+  IF to_regclass('public.api_keys_account_shared_with_idx') IS NOT NULL THEN
+    RAISE EXCEPTION 'Rollback 20260925120000 failed: index api_keys_account_shared_with_idx survives';
+  END IF;
+
+  SELECT prosrc INTO v_src
+    FROM pg_proc WHERE oid = 'public.reconnect_allocator_api_key(uuid)'::regprocedure;
+  IF position('KEY_VENUE_ALREADY_CONNECTED' IN v_src) > 0
+     OR position('history_inclusion' IN v_src) > 0 THEN
+    RAISE EXCEPTION 'Rollback 20260925120000 failed: reconnect_allocator_api_key still carries the refusal or the history_inclusion reset';
+  END IF;
+
+  RAISE NOTICE 'Rollback 20260925120000: every added column, constraint, trigger, function and index is gone, and reconnect_allocator_api_key is the 20260422101911 body. The migration ledger row is left in place (see the header).';
+END
+$verify$;
 
 COMMIT;
