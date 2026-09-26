@@ -512,11 +512,16 @@ BEGIN
   -- A NULL job id is refused outright (HISTORY_RECOMPOSE_NOT_QUEUED): no path
   -- in enqueue_compute_job returns one today, and a toggle that queues nothing
   -- must not report success.
-  -- REASONED, NOT MEASURED: steps 1 and 3, the 23505 handler and the second
-  -- pass close races between TWO backends, and the SQL gate corpus runs one
-  -- session, so none of those windows has been exercised. Step 3's running
-  -- refusal is gated (arm HIST-running) only in the single-session shape where
-  -- the job is already running.
+  -- REASONED, NOT MEASURED: steps 1 and 3, the second pass and the
+  -- serialization_failure wrapper around the enqueue close races between TWO
+  -- backends, and the SQL gate corpus runs one session, so none of those
+  -- windows has been exercised. Step 3's running refusal is gated (arm
+  -- HIST-running) only in the single-session shape where the job is already
+  -- running. The 23505 handler is gated (arm HIST-requeued) in a
+  -- single-session stand-in: a test-local trigger inserts the pending twin
+  -- under the flip, so the collision and the REQUEUED answer are measured.
+  -- What stays reasoned there is a real second backend, whose row the flip's
+  -- unique check waits on before it collides.
   FOR v_attempt IN 1..2 LOOP
     SELECT cj.id INTO v_job
       FROM public.compute_jobs cj
