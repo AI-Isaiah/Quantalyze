@@ -649,6 +649,19 @@ _SHAPE_FIELDS: tuple[str, ...] = (
 _SIBLING_TYPES: tuple[str, ...] = ("delivery", "settlement", "trade", "assignment")
 
 
+def _instrument_key(value: Any) -> str | None:
+    """The comparison key for a same-instrument sibling match: the stripped,
+    upper-cased name, or ``None`` when ``value`` names no instrument (absent,
+    non-string, or blank). SFH-05 (Phase 168 review): ``classify_instrument``
+    upper-cases before classifying, so a case-variant sibling IS the same option;
+    matching it by raw equality let it be summed without contesting. The sibling
+    ``type`` is already normalised the same way. Pure / never raises."""
+    if not isinstance(value, str):
+        return None
+    key = value.strip().upper()
+    return key or None
+
+
 def describe_unclassified_row(
     row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
 ) -> str:
@@ -673,9 +686,12 @@ def describe_unclassified_row(
             shape_parts.append(f"info.reason={info.get('reason')!r}")
         shape = " ".join(shape_parts) if shape_parts else "<no renderable fields>"
 
-        instrument = row.get("instrument_name")
-        if instrument in (None, ""):
-            siblings = "instrument_name absent — no sibling census possible"
+        instrument = _instrument_key(row.get("instrument_name"))
+        if instrument is None:
+            siblings = (
+                "instrument_name absent, blank or not a string — no sibling census "
+                "possible"
+            )
         else:
             counts = []
             for sibling_type in _SIBLING_TYPES:
@@ -687,7 +703,7 @@ def describe_unclassified_row(
                     for other in rows
                     if other is not row
                     and isinstance(other, Mapping)
-                    and other.get("instrument_name") == instrument
+                    and _instrument_key(other.get("instrument_name")) == instrument
                     and str(other.get("type", "")).strip().lower() == sibling_type
                 )
                 counts.append(f"{sibling_type}={n}")
@@ -973,8 +989,10 @@ def assert_assignment_uncontested(
     equal-but-distinct rows still contest each other. Non-Mapping entries are
     skipped, as the twins skip them. Row detail reaches the message only through
     the whitelist renderer ``describe_unclassified_row``."""
-    instrument = row.get("instrument_name")
-    if instrument is None or (isinstance(instrument, str) and not instrument.strip()):
+    # SFH-05: absent, None, blank AND non-string names are all unnamed; the match
+    # below is on the normalised key, as the sibling ``type`` already is.
+    instrument = _instrument_key(row.get("instrument_name"))
+    if instrument is None:
         raise LedgerValuationError(
             f"Deribit {_ASSIGNMENT_UNNAMED_PHRASE} (row id={row.get('id')!r}) — "
             "the assignment classification is licensed only for the census shape "
@@ -984,7 +1002,7 @@ def assert_assignment_uncontested(
     for other in rows:
         if other is row or not isinstance(other, Mapping):
             continue
-        if other.get("instrument_name") != instrument:
+        if _instrument_key(other.get("instrument_name")) != instrument:
             continue
         if str(other.get("type", "")).strip().lower() in _ASSIGNMENT_CONTESTING_TYPES:
             raise LedgerValuationError(

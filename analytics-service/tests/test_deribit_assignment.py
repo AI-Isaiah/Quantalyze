@@ -816,3 +816,41 @@ def test_sfh06_one_non_mapping_row_does_not_blank_the_refusal_evidence(
     assert _ASSIGNMENT_CONTESTED_PHRASE in msg, f"{twin_name}: {msg}"
     assert "<unrenderable" not in msg, msg
     assert "delivery=1" in msg, msg
+
+
+@pytest.mark.parametrize("twin_name,twin", TWINS, ids=[t[0] for t in TWINS])
+@pytest.mark.parametrize(
+    "variant", [PUT.lower(), f"  {PUT} "], ids=["lower_case", "padded"]
+)
+def test_sfh05_a_case_or_space_variant_sibling_still_contests(
+    variant: str, twin_name: str, twin: Callable[[list[dict[str, Any]]], Any]
+) -> None:
+    """SFH-05: `classify_instrument` upper-cases before classifying, so a
+    delivery on a case- or whitespace-variant of the assigned put is still an
+    option delivery and is summed. It must therefore also CONTEST the
+    assignment, or the expiry cash is counted twice. The census in the message
+    counts it too, so the evidence agrees with the refusal."""
+    rows = _indexed(_census_rows()) + [_sibling("delivery", instrument=variant)]
+    with pytest.raises(LedgerValuationError) as exc:
+        twin(rows)
+    msg = str(exc.value)
+    assert _ASSIGNMENT_CONTESTED_PHRASE in msg, f"{twin_name}: {msg}"
+    assert "delivery=1" in msg, msg
+
+
+@pytest.mark.parametrize("twin_name,twin", TWINS, ids=[t[0] for t in TWINS])
+@pytest.mark.parametrize(
+    "bad_name", [12345, {"name": PUT}, ["x"]], ids=["int", "dict", "list"]
+)
+def test_sfh05_a_non_string_instrument_is_unnamed(
+    bad_name: Any, twin_name: str, twin: Callable[[list[dict[str, Any]]], Any]
+) -> None:
+    """SFH-05: a non-string instrument_name names no instrument. It used to pass
+    the unnamed check (which tested only None and blank strings) and be summed by
+    the USD twin. It must refuse with the unnamed branch's OWN phrase on both
+    twins."""
+    opening, assigned = _indexed(_census_rows())
+    rows = [opening, dict(assigned, instrument_name=bad_name)]
+    with pytest.raises(LedgerValuationError) as exc:
+        twin(rows)
+    assert _ASSIGNMENT_UNNAMED_PHRASE in str(exc.value), f"{twin_name}: {exc.value}"
