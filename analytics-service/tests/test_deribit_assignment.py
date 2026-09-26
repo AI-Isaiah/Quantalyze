@@ -39,6 +39,7 @@ import pytest
 
 from services.deribit_txn import (
     _ASSIGNMENT_CONTESTED_PHRASE,
+    _ASSIGNMENT_UNNAMED_PHRASE,
     _NATIVE_OPTIONS_SUMMARY_TYPES,
     _OPTION_BOOK_EVENT_TYPES,
     _OPTION_EXPIRY_TYPES,
@@ -276,3 +277,208 @@ def test_option_book_vocabulary_is_cash_bearing_and_not_a_summary_type() -> None
     assert _OPTION_EXPIRY_TYPES == {"delivery", "assignment"}
     assert _OPTION_BOOK_EVENT_TYPES == {"trade", "delivery", "assignment"}
     assert "assignment" not in _NATIVE_OPTIONS_SUMMARY_TYPES
+
+
+# ---------------------------------------------------------------------------
+# D-02 edges — each pinned so a looser guard cannot pass silently.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("twin_name,twin", TWINS, ids=[t[0] for t in TWINS])
+def test_settlement_contests_an_assignment_on_the_same_instrument(
+    twin_name: str, twin: Callable[[list[dict[str, Any]]], Any]
+) -> None:
+    """SETTLEMENT-CONTESTS: a same-instrument `settlement` books expiry cash too,
+    so it contests the assignment exactly as a `delivery` does."""
+    rows = _indexed(_census_rows()) + [_sibling("settlement")]
+    with pytest.raises(LedgerValuationError) as exc:
+        twin(rows)
+    msg = str(exc.value)
+    assert _ASSIGNMENT_CONTESTED_PHRASE in msg, f"{twin_name}: {msg}"
+    assert "settlement=1" in msg, msg
+
+
+def test_other_instrument_delivery_does_not_contest() -> None:
+    """OTHER-INSTRUMENT-OK: the census is PER INSTRUMENT. A delivery on a
+    different put is its own expiry, not a sibling of this assignment, so both
+    are summed on both twins — a guard keyed on "any delivery in the batch" would
+    refuse every account that ever had an expiry."""
+    rows = _indexed(_census_rows()) + [_sibling("delivery", instrument=OTHER_PUT)]
+
+    usd = txn_rows_to_daily_records(rows)
+    by_day = {r["timestamp"][:10]: (r["side"], r["price"]) for r in usd}
+    assert by_day[DAY_EXPIRY] == (
+        "sell", pytest.approx(abs(ASSIGNED + 0.02) * INDEX)
+    )
+
+    native = txn_rows_to_native_daily(rows)
+    assert native["BTC"][DAY_EXPIRY] == pytest.approx(ASSIGNED + 0.02)
+
+
+_UNNAMED_CASES = {
+    "absent": lambda r: {k: v for k, v in r.items() if k != "instrument_name"},
+    "none": lambda r: dict(r, instrument_name=None),
+    "blank": lambda r: dict(r, instrument_name="  "),
+}
+
+
+@pytest.mark.parametrize("twin_name,twin", TWINS, ids=[t[0] for t in TWINS])
+@pytest.mark.parametrize("case", sorted(_UNNAMED_CASES))
+def test_empty_instrument_assignment_refuses(
+    case: str, twin_name: str, twin: Callable[[list[dict[str, Any]]], Any]
+) -> None:
+    """EMPTY-INSTRUMENT: without an instrument the same-instrument census cannot
+    be computed, so the licence (which names an option instrument) does not
+    apply — fail closed. Matched on the branch's OWN phrase, imported from the
+    module: on the native twin a bare raises-check would also pass on the option
+    arm's non-derivative refusal, which such a row trips when this branch is
+    removed."""
+    opening, assigned = _indexed(_census_rows())
+    rows = [opening, _UNNAMED_CASES[case](assigned)]
+    with pytest.raises(LedgerValuationError, match=re.escape(_ASSIGNMENT_UNNAMED_PHRASE)):
+        twin(rows)
+
+
+def test_empty_batch_is_empty_on_both_twins() -> None:
+    """EMPTY-BATCH: no rows, no records — the guard adds no refusal of its own."""
+    assert txn_rows_to_daily_records([]) == []
+    assert txn_rows_to_native_daily([]) == {}
+
+
+def test_a_lone_census_shape_assignment_is_summed_on_both_twins() -> None:
+    """A single assignment with a named instrument and no sibling at all is the
+    census shape too (trade=0 changes nothing about double counting): summed."""
+    (_opening, assigned) = _indexed(_census_rows())
+    usd = txn_rows_to_daily_records([assigned])
+    assert [(r["timestamp"][:10], r["side"], r["price"]) for r in usd] == [
+        (DAY_EXPIRY, "sell", pytest.approx(abs(ASSIGNED) * INDEX))
+    ]
+    assert txn_rows_to_native_daily([assigned]) == {
+        "BTC": {DAY_EXPIRY: pytest.approx(ASSIGNED)}
+    }
+
+
+@pytest.mark.parametrize("twin_name,twin", TWINS, ids=[t[0] for t in TWINS])
+def test_zero_change_assignment_is_still_guarded(
+    twin_name: str, twin: Callable[[list[dict[str, Any]]], Any]
+) -> None:
+    """ZERO-CHANGE-STILL-GUARDED: the guard fires on EVERY assignment. Letting a
+    zero-change one through beside a same-instrument delivery would be a
+    decision made on the size of `change` — a magnitude rule, which the
+    classification forbids."""
+    opening, assigned = _indexed(_census_rows())
+    rows = [opening, dict(assigned, change=0.0), _sibling("delivery")]
+    with pytest.raises(LedgerValuationError) as exc:
+        twin(rows)
+    assert _ASSIGNMENT_CONTESTED_PHRASE in str(exc.value), f"{twin_name}: {exc.value}"
+
+
+@pytest.mark.parametrize("twin_name,twin", TWINS, ids=[t[0] for t in TWINS])
+@pytest.mark.parametrize("order", ["assignment_first", "delivery_first"])
+def test_order_independent_refusal(
+    order: str, twin_name: str, twin: Callable[[list[dict[str, Any]]], Any]
+) -> None:
+    """ORDER-INDEPENDENT (refusal): crawl concat order is not trusted, so the
+    co-occurring pair must refuse whichever row comes first — a guard that only
+    looked BACK at earlier rows would pass the assignment-first order."""
+    opening, assigned = _indexed(_census_rows())
+    delivery = _sibling("delivery")
+    rows = (
+        [opening, assigned, delivery]
+        if order == "assignment_first"
+        else [delivery, opening, assigned]
+    )
+    with pytest.raises(LedgerValuationError) as exc:
+        twin(rows)
+    assert _ASSIGNMENT_CONTESTED_PHRASE in str(exc.value), f"{twin_name}/{order}"
+
+
+def test_order_independent_sums() -> None:
+    """ORDER-INDEPENDENT (sums): the census-shape sums are identical when the
+    batch is reversed, on both twins."""
+    rows = _indexed(_census_rows())
+    reversed_rows = list(reversed(rows))
+    assert txn_rows_to_daily_records(rows) == txn_rows_to_daily_records(reversed_rows)
+    assert txn_rows_to_native_daily(rows) == txn_rows_to_native_daily(reversed_rows)
+
+
+# ---------------------------------------------------------------------------
+# D-02 amended — a windowed crawl cannot classify an assignment.
+# ---------------------------------------------------------------------------
+
+_FLAT_SUMMARIES = [
+    {"currency": "BTC", "equity": PREMIUM + ASSIGNED, "session_upl": 0.0,
+     "options_value": 0.0}
+]
+
+
+def test_windowed_refuses_an_assignment(monkeypatch: Any) -> None:
+    """WINDOWED-REFUSES: the same-instrument census is only sound over the
+    instrument's WHOLE history. A since_ms-cropped crawl could hold the
+    assignment and miss its sibling, so it must refuse; the same rows crawled
+    in full ingest; and a windowed crawl WITHOUT an assignment is unchanged
+    (the backstop is inert off-shape)."""
+    with pytest.raises(LedgerValuationError) as exc:
+        _run_options_ledger(
+            monkeypatch,
+            btc_rows=_census_rows(),
+            summaries=_FLAT_SUMMARIES,
+            charts={},
+            pnl_basis="cash_settlement",
+            since_ms=1,
+        )
+    msg = str(exc.value)
+    assert "full-history crawl" in msg, msg
+    assert "assignment" in msg, msg
+
+    ledger, _r, _s = _run_options_ledger(
+        monkeypatch,
+        btc_rows=_census_rows(),
+        summaries=_FLAT_SUMMARIES,
+        charts={},
+        pnl_basis="cash_settlement",
+        since_ms=None,
+    )
+    assert "BTC" in ledger.native_pnl
+
+    opening, assigned = _census_rows()
+    no_assignment = [opening, dict(assigned, type="delivery")]
+    ledger, _r, _s = _run_options_ledger(
+        monkeypatch,
+        btc_rows=no_assignment,
+        summaries=_FLAT_SUMMARIES,
+        charts={},
+        pnl_basis="cash_settlement",
+        since_ms=1,
+    )
+    assert "BTC" in ledger.native_pnl
+
+
+async def test_windowed_refuses_before_the_usd_twin(monkeypatch: Any) -> None:
+    """WINDOWED-REFUSES-BEFORE-USD-TWIN: the USD twin runs INSIDE the crawl loop,
+    per (scope, currency), before the native adapter ever sees the rows. So the
+    backstop must fire in the crawl, before the USD twin: on a batch the USD
+    twin itself would refuse (the co-occurring shape), a windowed crawl must
+    raise the full-history refusal — not the co-occurrence or unknown-type text."""
+    from services import deribit_ingest as di
+    from tests.test_deribit_ingest import _patch_pipeline
+
+    batch = _indexed(_census_rows()) + [_sibling("delivery")]
+
+    async def _paginate(
+        _ex: Any, _scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        return list(batch) if currency == "BTC" else []
+
+    _patch_pipeline(
+        monkeypatch,
+        scopes=[di.Scope("main", None, True)],
+        currencies={"main": ["BTC"]},
+        paginate=_paginate,
+    )
+    with pytest.raises(LedgerValuationError) as exc:
+        await di.fetch_deribit_ledger_daily_records(object(), 1)
+    msg = str(exc.value)
+    assert "assignment classification requires a full-history crawl" in msg, msg
+    assert _ASSIGNMENT_CONTESTED_PHRASE not in msg, msg
+    assert "unknown Deribit transaction-log type" not in msg, msg
