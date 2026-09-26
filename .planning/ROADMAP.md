@@ -3173,7 +3173,7 @@ Plans:
 **Goal:** After a migration applies to PROD, the committed baseline is re-dumped and proposed automatically, so main never sits red on baseline-content-drift waiting for a manual dump.
 **Requirements**: TODOS `[164.9.5-MANUAL-BASELINE-REDUMP]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 1/9 plans executed
+**Plans:** 3/9 plans executed
 
 ⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
 
@@ -3200,8 +3200,8 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 164.9.5-02-PLAN.md — wave 2: gate-side refusals (five-class scan with counts and lines only, gitleaks with the empty-file trap closed, integrity, shape counts, MERGE-tree marker, D-10 no-op)
-- [ ] 164.9.5-04-PLAN.md — wave 2: the `redump-dump` and `redump-pr` jobs in `supabase-migrate.yml`, ghcr roster, softening scan
+- [x] 164.9.5-02-PLAN.md — wave 2: gate-side refusals (five-class scan with counts and lines only, gitleaks with the empty-file trap closed, integrity, shape counts, MERGE-tree marker, D-10 no-op)
+- [x] 164.9.5-04-PLAN.md — wave 2: the `redump-dump` and `redump-pr` jobs in `supabase-migrate.yml`, ghcr roster, softening scan
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
