@@ -699,9 +699,10 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
 
     # Phase 164.6.7 / D-09. A read a marked refresh's D-15 decision rests on
     # failed: the live marker re-read at a terminal stamp (the composite stitch,
-    # or since 2026-09-26 the single-key derive stamp), or the single-key ENTRY
-    # publish-state read (round 2). The handler could not tell whether a failure
-    # may be recorded without un-publishing a funded account, and wrote nothing.
+    # or since 2026-09-26 the single-key derive stamp), the single-key ENTRY
+    # publish-state read, or the single-key chain edge's re-read (both round 2).
+    # The handler could not tell whether a failure may be recorded without
+    # un-publishing a funded account, and wrote nothing.
     # TRANSIENT: the queue retries the whole job and the next attempt reads again.
     if isinstance(exc, RefreshMarkerRereadUnavailable):
         return ("transient", str(exc)[:500])
@@ -2609,11 +2610,12 @@ async def _resolve_ccxt_flow_price_index(
 # TERMINAL-STAMP sites treat it differently from the rest (CONTEXT D-09): they
 # stamp nothing and raise ``RefreshMarkerRereadUnavailable`` so the job fails
 # TRANSIENT and retries. D-09 (2026-09-25) decided this for the composite stamp;
-# its 2026-09-26 amendment extended it to the single-key derive stamp closure.
+# its 2026-09-26 amendment extended it to the single-key derive stamp closure,
+# and round 2 (2026-09-26) to the single-key CHAIN EDGE, which now enqueues
+# nothing and raises the same way, before ``_enqueue_csv_analytics``.
 # Every other state is a DEFINITIVE answer and still takes the loud path.
-# ⚠️ The two non-stamp single-key sites are unchanged: on ``READ_ERROR`` the
-# chain-edge forward still drops the marker (hop 2 would fail loud) and the tail
-# mirror only logs.
+# ⚠️ The tail mirror is the one site that only logs on ``READ_ERROR``: the
+# follow-on is already enqueued, and nothing it could do would change hop 2.
 #
 # ⚠️ The read goes through ``db_read_with_retry``, so a gateway 504 is retried
 # inside that helper's bounded budget before it counts as a failure (WR-03). The
@@ -2653,7 +2655,8 @@ class RefreshMarkerRereadUnavailable(Exception):
     """A read that a marked refresh's D-15 decision rests on FAILED, so the
     handler wrote nothing and stops. Raised by the live marker re-read at a
     terminal stamp (the composite one, or the single-key derive one) and, since
-    round 2 (SFH-R2-02), by the single-key ENTRY publish-state read. The text
+    round 2, by the single-key ENTRY publish-state read (SFH-R2-02) and by the
+    single-key chain edge before it enqueues hop 2 (WR-02). The text
     names the handler's real cause where one exists. ``classify_exception`` maps
     it to TRANSIENT."""
 
@@ -2685,9 +2688,9 @@ async def _refresh_marker_still_on_row(
         logger.error(
             "ledger-refresh: could not re-read the refresh marker on compute_job "
             "%s (%s: %s) — its live state is UNKNOWN. The caller decides: a "
-            "terminal stamp (composite or single-key) writes nothing and fails "
-            "the job TRANSIENT so it retries; the single-key chain edge forwards "
-            "no marker.",
+            "terminal stamp (composite or single-key) writes nothing and the "
+            "single-key chain edge enqueues nothing; both fail the job "
+            "TRANSIENT. The tail mirror only logs.",
             job_id, type(exc).__name__, exc,
         )
         sentry_sdk.capture_exception(exc)
@@ -6037,10 +6040,45 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # hop 2 — the hop that COMPILES THE FACTSHEET — a protection that no longer
     # describes anything, and hop 2 has no other way to learn the truth: it reads
     # this metadata and nothing else.
+    #
+    # ⛔ D-09 at the chain edge (orchestrator decision 2026-09-26, round 2 WR-02 /
+    # SFH-R2-04): a read that FAILED is not an answer here either. Dropping the
+    # marker on it enqueued a hop 2 the bridge can never protect, and the read
+    # failing after ``db_read_with_retry`` is a database-health signal that hop 2,
+    # claimed against the same database moments later, shares. So the job fails
+    # TRANSIENT BEFORE ``_enqueue_csv_analytics`` (a retry therefore never
+    # enqueues twice) and the marker stays on this row. Forwarding it unverified
+    # is ruled out: if it had in fact been retracted, that would suppress a
+    # failure somebody is watching. The cost is a re-crawl on retry. The worker
+    # already pays that on a transient (``run_stitch_composite_job``'s
+    # degraded-set divergence), and the writes above are upserts. If every retry
+    # fails, the bridge's branch (b-prime) keeps the factsheet published but
+    # stale, because the marker is still on this job. ⚠️ That holds while the
+    # row is ``complete_with_warnings`` or ``computation_warned``. A plain
+    # ``complete`` row is rewritten to ``computing`` by the bridge's branch (a)
+    # on the first ``failed_retry``, and is then un-published on exhaustion (see
+    # the block comment above ``MarkerLiveState``).
     if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
         _live_state_out = await _refresh_marker_still_on_row(
             ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
         )
+        if _live_state_out is MarkerLiveState.READ_ERROR:
+            _log_marker_not_confirmed(
+                _live_state_out,
+                site="derive_broker_dailies",
+                job_id=job.get("id"),
+                strategy_id=strategy_id,
+                consequence=(
+                    f"Enqueueing NO chain edge to {_csv_analytics_kind}; failing "
+                    "the job TRANSIENT so the queue can retry it with the marker "
+                    "still on the row"
+                ),
+            )
+            raise RefreshMarkerRereadUnavailable(
+                "derive_broker_dailies: the live re-read of the refresh marker "
+                f"failed at the chain edge, so no {_csv_analytics_kind} follow-on "
+                "was enqueued"
+            )
         if _live_state_out is not MarkerLiveState.PRESENT:
             _log_marker_not_confirmed(
                 _live_state_out,
@@ -6049,7 +6087,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 strategy_id=strategy_id,
                 consequence=(
                     f"The chain edge to {_csv_analytics_kind} carries NO marker "
-                    "and no publish state, so hop 2 fails LOUDLY"
+                    "and no publish state, so a hop-2 failure is LOUD"
                 ),
             )
             _refresh_source_out = None

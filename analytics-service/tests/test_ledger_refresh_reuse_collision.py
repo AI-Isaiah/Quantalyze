@@ -472,6 +472,92 @@ class TestChainEdgeDoesNotForwardARetractedMarker:
         )
 
 
+class TestChainEdgeReadErrorFailsTransient:
+    """Orchestrator decision 2026-09-26 (round 2 WR-02 / SFH-R2-04): a chain-edge
+    re-read that RAISED is not an answer. Before it, the edge dropped the marker
+    and enqueued hop 2 with no protection, so a read blip followed by a hop-2
+    failure (correlated: same database) un-published a funded account. Now the
+    job fails TRANSIENT BEFORE ``_enqueue_csv_analytics`` (a retry never enqueues
+    twice) and the marker stays on the claimed row.
+
+    Neuter to redden: delete the ``READ_ERROR`` arm at the chain edge (the read
+    error falls through to the marker drop). The test goes RED on the error kind
+    (``DONE`` instead of ``FAILED``/``transient``) and on the enqueue count."""
+
+    @pytest.mark.asyncio
+    async def test_a_raising_chain_edge_reread_enqueues_nothing_and_fails_transient(
+        self,
+    ) -> None:
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-1", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": _STRATEGY_ID, "user_id": "user-1"},
+        )
+        original = ctx.supabase.table.side_effect
+        job_updates: list[Any] = []
+
+        def _table(name: str) -> MagicMock:
+            tbl: MagicMock = original(name)
+
+            def _select(_columns: str, **_kw: object) -> MagicMock:
+                chain = MagicMock()
+                chain.eq.return_value = chain
+                chain.maybe_single.return_value = chain
+                if name == "compute_jobs":
+                    chain.execute.side_effect = RuntimeError("simulated read failure")
+                else:
+                    chain.execute.return_value = MagicMock(
+                        data={"computation_status": "complete_with_warnings"}
+                    )
+                return chain
+
+            def _update(payload: Any, **_kw: object) -> MagicMock:
+                if name == "compute_jobs":
+                    job_updates.append(payload)
+                return MagicMock()
+
+            tbl.select.side_effect = _select
+            tbl.update.side_effect = _update
+            return tbl
+
+        ctx.supabase.table.side_effect = _table
+        patches = _patches_with_combine(
+            ctx, key_mode=False, combine_mock=_success_combine()
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6], \
+             patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            result = await _jw.dispatch(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+
+        assert result.outcome == DispatchOutcome.FAILED, result
+        assert result.error_kind == "transient", (
+            "a chain-edge re-read that RAISED did not fail the job TRANSIENT "
+            f"({result.error_kind!r}: {result.error_message!r})"
+        )
+        enqueues = [p for (n, p) in capture["rpc_calls"] if n == "enqueue_compute_job"]
+        assert not enqueues, (
+            "the chain edge enqueued hop 2 after its re-read failed "
+            f"({enqueues!r}). That hop 2 carries no marker, so the bridge can "
+            "never protect it; and a retry would enqueue a second one."
+        )
+        assert not job_updates, (
+            "the handler wrote the claimed compute_jobs row; the marker must stay "
+            f"on it for the retry and the bridge: {job_updates!r}"
+        )
+        assert _CSV_KIND in (result.error_message or "")
+        assert sentry.capture_exception.call_count == 1
+        assert any(
+            c.args and "FAILED" in str(c.args[0]) for c in log.error.call_args_list
+        ), f"no READ_ERROR line at the chain edge: {log.error.call_args_list!r}"
+
+
 # ---------------------------------------------------------------------------
 # 3 — the retraction helper, at its own boundary
 # ---------------------------------------------------------------------------
