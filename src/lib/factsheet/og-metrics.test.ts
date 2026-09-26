@@ -5,6 +5,21 @@ import { computeOgHeadline } from "./og-metrics";
 const DAY = 86_400_000;
 const iso = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
+/**
+ * N consecutive-day rows alternating +0.002 / -0.001: real dispersion and a
+ * positive drift, so a Sharpe EXISTS and only a gate can hide it. Phase 166.2
+ * review round 1 (IN-03): two Sharpe arms below ran on constant fixtures, which
+ * have no Sharpe at all since the shared floor (D-07 / D7), so one lost its
+ * "Sharpe still shown" intent and the other's "hidden below 30" arm held
+ * whether or not the gate existed.
+ */
+function alternating(n: number, startMs = Date.parse("2023-01-01")): Array<{ date: unknown; value: number }> {
+  return Array.from({ length: n }, (_, i) => ({
+    date: iso(startMs + i * DAY),
+    value: i % 2 === 0 ? 0.002 : -0.001,
+  }));
+}
+
 /** N consecutive-day rows starting at `startMs`, each carrying `value`. */
 function consecutive(
   n: number,
@@ -50,10 +65,17 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
   it("CAGR hidden (NaN) for a dense sub-year series (300 trading days < 0.95y)", () => {
     // 300 consecutive days spans ~299 days ≈ 0.82y < 0.95y → CAGR suppressed,
     // even though there are plenty of observations for Sharpe.
-    const rows = consecutive(300, 0.001);
+    const rows = alternating(300);
     const { sharpe, cagr } = computeOgHeadline(rows, "crypto");
     expect(Number.isFinite(sharpe)).toBe(true); // Sharpe still shown
     expect(Number.isNaN(cagr)).toBe(true); // CAGR hidden — sub-calendar-year
+  });
+
+  it("a constant series has no Sharpe even with plenty of observations (D-07 floor, D7 '—')", () => {
+    // 300 identical returns: no dispersion, so the Sharpe does not exist and the
+    // card shows "—", never the ~1e16 residue ratio it showed before Phase 166.
+    const { sharpe } = computeOgHeadline(consecutive(300, 0.001), "crypto");
+    expect(Number.isNaN(sharpe)).toBe(true);
   });
 
   it("CAGR shown for a sparse-but-year-long weekday series", () => {
@@ -77,11 +99,13 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
   });
 
   it("Sharpe hidden (NaN) below the 30-observation floor", () => {
-    const rows = consecutive(29, 0.01);
-    const { sharpe, cagr, maxDd } = computeOgHeadline(rows, "crypto");
+    // Dispersing rows, so the Sharpe is hidden by the observation gate alone:
+    // the same fixture one row longer shows it.
+    const { sharpe, cagr, maxDd } = computeOgHeadline(alternating(29), "crypto");
     expect(Number.isNaN(sharpe)).toBe(true);
     expect(Number.isNaN(cagr)).toBe(true);
     expect(Number.isNaN(maxDd)).toBe(true);
+    expect(Number.isFinite(computeOgHeadline(alternating(30), "crypto").sharpe)).toBe(true);
   });
 
   it("single / duplicate / unsorted dates never produce Infinity", () => {
@@ -91,7 +115,8 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
       value: 0.002,
     }));
     const r1 = computeOgHeadline(same, "crypto");
-    expect(Number.isFinite(r1.sharpe)).toBe(true);
+    // A constant series has no dispersion, so no Sharpe (D-07).
+    expect(Number.isNaN(r1.sharpe)).toBe(true);
     expect(r1.cagr === Infinity || r1.cagr === -Infinity).toBe(false);
     expect(Number.isNaN(r1.cagr)).toBe(true);
 

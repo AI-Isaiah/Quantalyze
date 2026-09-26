@@ -3351,26 +3351,34 @@ Plans:
    ⭐ **2026-09-25 (plan-check revision, 166.1-CONTEXT D-15, orchestrator decision under the founder rule "close the whole class, not point-fixes"):** criterion 3 also covers the TS sites that compute a Sharpe, correlation, beta or related ratio from daily returns behind a `> 0` / `!== 0` guard or a relative-only floor (RESEARCH A5, T1-T20). The earlier premise that TS only reads stored values was false. **D-16:** the `analytics_runner` SQN block is site S8 (measured SQN -4.03e16 on 21 identical losses).
    ⭐ **2026-09-25 (FOUNDER DIRECTION, 166.1-CONTEXT D-17, verbatim: "Why don't you calculate Sharpe once and the 20 places all read it from there?"):** the TS half is re-planned around computing each ratio ONCE. Every TS site is classified Tier 1 (a persisted value exists for the same series: delete and read it), Tier 2 (the series exists only in TS: call ONE shared module, `src/lib/return-stats.ts`, and remove the local formula) or Dead (no production caller: delete). The factsheet's single-key headline and the OG card's PERSISTED Sharpe read are Phase 169 plan 04's and are excluded here; the Sharpe the OG card still computes is 166.1-06's (D-19, matching 169 D-25). A source-scan gate pins the rule.
 
+⛔ **2026-09-26 AMENDMENT (orchestrator decision at plan 04's Task 2 checkpoint; deviation recorded here AND in 166.2-CONTEXT D-19):** plan 166.2-04 may change exactly two Sharpe side assertions in `src/lib/factsheet/og-metrics.test.ts` (Phase 169's file) from `Number.isFinite` to `Number.isNaN`, because they pin the D-07 defect the plan removes (residue-dispersion inputs whose old Sharpe was about 2.9e16); both tests keep their inputs, and the plan's diff gate admits only those lines. Waiting for Phase 169 was rejected: the founder ruled that phases still in planning must not start execution. Phase 169's plan files are not edited from this branch. Plan 06 also rewords two stale comments (`correlation-math`, `rollingCorrelation`) found in wave 2.
+
+⛔ **2026-09-26 FOUNDER DECISION D7 (AskUserQuestion, "Show — everywhere"; recorded here AND in 166.2-CONTEXT as a D-07 amendment and D-24):** a statistic that does not exist stays empty end to end and renders "—" or a gap on every page, never 0.00 or "unchanged". This REVERSES D-07 for display: D-07 mapped null to the value each site already emitted for an exact constant, which was 0 at eight sites, so the factsheet read "Sharpe 0.00" where the OG card for the same series read "—". The constant-yield-equals-all-zero invariant stands; both now read "—". Applied in the round-1 fix pass (every finding of `166.2-REVIEW.md` and `166.2-REVIEW-SFH.md`; see `166.2-REVIEW-FIX.md`). ⚠️ Deviation: that pass (IN-03) edits Phase 169's `src/lib/factsheet/og-metrics.test.ts` beyond the two lines the D-19 amendment above admitted, to put two Sharpe arms back on a dispersing fixture; Phase 169's plan files are not edited.
+
 Plans:
 
 **Wave 1**
 
-- [ ] 166.2-01-PLAN.md — ONE TS module `src/lib/return-stats.ts` (floor pinned to Python, dispersion, Sharpe, Pearson, beta); T1-T5 (/compare, sampleBasisRatios, computeScenario, diversificationRatio) call it (D-15, D-17)
+- [x] 166.2-01-PLAN.md — ONE TS module `src/lib/return-stats.ts` (floor pinned to Python, dispersion, Sharpe, Pearson, beta); T1-T5 (/compare, sampleBasisRatios, computeScenario, diversificationRatio) call it (D-15, D-17)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 166.2-02-PLAN.md — TS T6-T7 on `return-stats`: one Pearson (`correlation-math.ts` deleted with the dead `rollingCorrelation`), /compare's matrix and the Risk-tab widget (D-15, D-17, D-20)
-- [ ] 166.2-03-PLAN.md — TS T8-T12 on `return-stats`: portfolio-stats beta and risk share, the scenario benchmark (its correlation and information ratio) and stress; dead `computeRollingMetric` deleted (D-15, D-17, D-20)
-- [ ] 166.2-04-PLAN.md — TS T13, T15, T14's computed arm and T18: the factsheet headline family and the OG card's computed Sharpe (T14's persisted read is Phase 169's), T18 fixed at its source (D-15, D-17, D-19, D-20)
-- [ ] 166.2-05-PLAN.md — TS T16, T17, T19, T20: the factsheet's beta, correlation, information ratio and rolling Sharpe (D-15, D-17, D-20)
+- [x] 166.2-02-PLAN.md — TS T6-T7 on `return-stats`: one Pearson (`correlation-math.ts` deleted with the dead `rollingCorrelation`), /compare's matrix and the Risk-tab widget (D-15, D-17, D-20)
+- [x] 166.2-03-PLAN.md — TS T8-T12 on `return-stats`: portfolio-stats beta and risk share, the scenario benchmark (its correlation and information ratio) and stress; dead `computeRollingMetric` deleted (D-15, D-17, D-20)
+- [x] 166.2-04-PLAN.md — TS T13, T15, T14's computed arm and T18: the factsheet headline family and the OG card's computed Sharpe (T14's persisted read is Phase 169's), T18 fixed at its source (D-15, D-17, D-19, D-20)
+- [x] 166.2-05-PLAN.md — TS T16, T17, T19, T20: the factsheet's beta, correlation, information ratio and rolling Sharpe (D-15, D-17, D-20)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 166.2-06-PLAN.md — the compute-once source-scan gate (import rule, retired-expression table, whole-tree shape matcher with a count-pinned allowlist; D-17, D-20), then merge `origin/main` and re-prove T1-T20 on the merged tree (D-20 W1)
+- [x] 166.2-06-PLAN.md — the compute-once source-scan gate (import rule, retired-expression table, whole-tree shape matcher with a count-pinned allowlist; D-17, D-20), then merge `origin/main` and re-prove T1-T20 on the merged tree (D-20 W1)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 166.2-07-PLAN.md — whole-phase gate sweep at one SHA containing `origin/main` (anchor check in CI's `--pending` form, D-20 B2) and the single TS release commit (VERSION, package.json, CHANGELOG)
+- [x] 166.2-07-PLAN.md — whole-phase gate sweep at one SHA containing `origin/main` (anchor check in CI's `--pending` form, D-20 B2) and the single TS release commit (VERSION, package.json, CHANGELOG)
+
+**⭐ D-27 (2026-09-26, under founder decision D7):** T13's "skew and kurtosis stay 0 with no dispersion" is superseded, and they now read "—". Profit Factor, Calmar by Year, Avg Loss and Avg Win likewise show "—" where they do not exist. Recorded in `166.2-CONTEXT.md` D-27.
+
+**⭐ D-29 (recorded 2026-09-26):** a deviation from D-17. The D7 fix rounds edited Phase 169's `types.ts` (NaN/null fields, `n_valid`) and `fetch-and-build-payload.ts` (the v7 cache-key note). Phase 169 must rebase over them. Recorded in `166.2-CONTEXT.md` D-29.
 
 ### Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path (founder production steps) (INSERTED)
 
@@ -3600,6 +3608,8 @@ Plans:
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 169 to break down)
+
+**⚠️ REBASE NOTE 2026-09-26 (from 166.2 D-29):** 166.2 edited `src/app/factsheet/[id]/v2/types.ts` and `fetch-and-build-payload.ts` (NaN/null statistic fields, the optional `n_valid`, the v7 payload cache key). 169's plans must re-read both at HEAD before editing.
 
 ### Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers (INSERTED)
 

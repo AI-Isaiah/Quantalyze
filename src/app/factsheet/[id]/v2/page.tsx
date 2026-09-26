@@ -169,7 +169,11 @@ function buildFactsheetPayloadCached(
     // wrongly SUPPRESSED (for cash too) during the 1h TTL drain. Busting the shape
     // version forces a fresh build carrying `bootstrapCI.n` rather than silently
     // hiding the caveat.
-    ["factsheet-v2-payload-v6", id, computedAt],
+    // Bumped v6→v7 (Phase 166.2 review round 2, IN-03): the shape is unchanged
+    // but the VALUES are not. A ratio that does not exist (Sharpe, Sortino,
+    // Calmar, a peer rank) is now NaN, "—", where a v6 entry holds a fabricated
+    // 0; bumping serves the fix at deploy instead of after the 1h TTL drain.
+    ["factsheet-v2-payload-v7", id, computedAt],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],

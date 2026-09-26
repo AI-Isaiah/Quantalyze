@@ -1,4 +1,5 @@
 import type { ComputeResult } from "./types";
+import { dispersion, sharpe as sharpeRatio } from "@/lib/return-stats";
 
 /**
  * Headline per-series metrics for the strategy and each benchmark. Mirrors the
@@ -28,8 +29,11 @@ export function compute(
 
   const eq = cumEq(rets);
   const dd = drawdowns(eq);
-  const m = mean(rets);
-  const s = pstdev(rets, m);
+  // Phase 166.2 (D-17, D-07): the mean and the population sd come from the
+  // shared return-stats module, which reports a float-residue sd (a
+  // compounding constant yield) as exactly 0, so ann_vol, skew and kurtosis
+  // below answer such a series exactly as they answer an all-zero one.
+  const { mean: m, sd: s } = dispersion(rets, 0);
   const startDate = new Date(dates[0]);
   const endDate = new Date(dates[n - 1]);
   const days = Math.max(1, (endDate.getTime() - startDate.getTime()) / 86_400_000);
@@ -38,18 +42,33 @@ export function compute(
   const cumRet = eq[n - 1] - 1;
   const cagr = years > 0 && eq[n - 1] > 0 ? Math.pow(eq[n - 1], 1 / years) - 1 : 0;
   const annVol = s * Math.sqrt(periodsPerYear);
-  const sharpe = s > 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / (s * Math.sqrt(periodsPerYear)) : 0;
+  // The Sharpe is the shared one. A null (no dispersion, or a non-finite
+  // return) stays an absence: NaN, which every factsheet formatter renders as
+  // "—", as the OG card and the tearsheet do for the same series (founder
+  // decision D7, 2026-09-26, reversing D-07's "answer null as 0" for display).
+  // `ComputeResult.sharpe` stays a `number`; NaN (or the null a JSON cache turns
+  // it into) is the absent value, so a consumer tests `Number.isFinite`.
+  const sharpe = sharpeRatio(rets, { periodsPerYear, ddof: 0, rf }) ?? NaN;
 
   const neg = rets.filter(x => x < 0);
   const ddDev = neg.length > 0 ? Math.sqrt(neg.reduce((a, x) => a + x * x, 0) / n) * Math.sqrt(periodsPerYear) : 0;
-  const sortino = ddDev > 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / ddDev : 0;
+  // A series with no losing day has no Sortino, and one with no drawdown has no
+  // Calmar: the ratio would be infinite, which means "does not exist", not 0.
+  // Both stay NaN and render "—", as the tearsheet shows for the same series
+  // (the analytics service persists None for both) and as the Sharpe above
+  // does (founder decision D7, 2026-09-26; review round 2 HI-02).
+  const sortino = ddDev > 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / ddDev : NaN;
 
   let maxDd = 0;
   for (let i = 0; i < dd.length; i++) if (dd[i] < maxDd) maxDd = dd[i];
-  const calmar = maxDd !== 0 ? cagr / Math.abs(maxDd) : 0;
+  const calmar = maxDd !== 0 ? cagr / Math.abs(maxDd) : NaN;
 
-  const skew = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 3), 0) / n : 0;
-  const kurt = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 4), 0) / n - 3 : 0;
+  // With no dispersion the standardised moments are 0/0: the series has no
+  // skew and no kurtosis. NaN renders "—", never a measured-looking "+0.00"
+  // (founder decision D7; review round 3 WR3-01, superseding CONTEXT T13's
+  // "keep the s > 0 gate" answer of 0).
+  const skew = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 3), 0) / n : NaN;
+  const kurt = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 4), 0) / n - 3 : NaN;
 
   let longestDd = 0;
   let curRun = 0;
@@ -81,9 +100,16 @@ export function compute(
     if (r < worstDay) worstDay = r;
   }
   const winRate = n > 0 ? winCount / n : 0;
-  const avgWin = winCount > 0 ? winSum / winCount : 0;
-  const avgLoss = lossCount > 0 ? lossSum / lossCount : 0;
-  const profitFactor = lossSum !== 0 ? winSum / Math.abs(lossSum) : 0;
+  // No winning (losing) day means no average win (loss): NaN, rendered "—",
+  // never a measured-looking 0.00% (founder decision D7; review round 3
+  // SFH-R3 MEDIUM-2 for Avg Loss, and the symmetric Avg Win arm).
+  const avgWin = winCount > 0 ? winSum / winCount : NaN;
+  const avgLoss = lossCount > 0 ? lossSum / lossCount : NaN;
+  // A book with no losing day has no profit factor: gross gain over a gross
+  // loss of 0 is infinite, which means "does not exist", not 0. NaN renders
+  // "—", as omega_ratio below (the same number) and the analytics service's
+  // None already say (founder decision D7; review round 3 HI3-01).
+  const profitFactor = lossSum !== 0 ? winSum / Math.abs(lossSum) : NaN;
   const sortedRets = [...rets].sort((a, b) => a - b);
   const var95 = sortedRets[Math.max(0, Math.floor(0.05 * n))];
   const cvar95Slice = sortedRets.slice(0, Math.max(1, Math.floor(0.05 * n)));
@@ -111,6 +137,8 @@ export function compute(
   // null when there are no losses (no probability mass below threshold).
   const omegaRatio = lossSum !== 0 ? winSum / Math.abs(lossSum) : null;
   // Common-sense ratio — tail × profit_factor. null if either input is null.
+  // tailRatio is null whenever there is no losing day (p5 ≥ 0), which is the
+  // only case profitFactor is NaN, so a NaN never reaches this product.
   const commonSenseRatio = tailRatio != null ? tailRatio * profitFactor : null;
 
   // Bucketed returns — compound returns within each bucket.
@@ -338,17 +366,4 @@ export function findDrawdownPeriods(dd: number[]): DrawdownPeriod[] {
 /** Indices of the N deepest drawdowns. Used by the Worst-N DDs chart. */
 export function worstDrawdowns(dd: number[], n = 10): DrawdownPeriod[] {
   return [...findDrawdownPeriods(dd)].sort((a, b) => a.depth - b.depth).slice(0, n);
-}
-
-function mean(xs: number[]): number {
-  let s = 0;
-  for (const x of xs) s += x;
-  return s / xs.length;
-}
-
-/** Population stdev — matches Python's `statistics.pstdev`. */
-function pstdev(xs: number[], m: number): number {
-  let s = 0;
-  for (const x of xs) s += (x - m) * (x - m);
-  return Math.sqrt(s / xs.length);
 }
