@@ -28,13 +28,15 @@ LOCKED design pins (analytics-service/docs/deribit-ingestion-design.md):
 * ⚠️ PHASE 82 (options-aware, native path — MARK_TO_MARKET BASIS ONLY) — the
   amendment below applies ONLY when ``pnl_basis == mark_to_market``. Under
   ``cash_settlement`` (the DEFAULT and the shipped/Zavara basis) NONE of this runs:
-  the coverage window is never consulted, option `trade`/`delivery` rows book their
-  FULL cash `change` on the settlement day, and `options_settlement_summary` rows
+  the coverage window is never consulted, option `trade`/`delivery`/`assignment`
+  rows (``_OPTION_BOOK_EVENT_TYPES``) book their FULL cash `change` on the
+  settlement day, and `options_settlement_summary` rows
   are INERT (their 0.0 change is ignored). Debugging the LIVE factsheet? It is
   cash_settlement — the fee-only reclass / summary channel described here is dark.
   MARK_TO_MARKET amendment: inside a currency's summary coverage window
-  `[first_summary−24h, last_summary]` an option `trade`/`delivery` contributes
-  `−commission` (NOT its premium `change`), and `options_settlement_summary`
+  `[first_summary−24h, last_summary]` an option `trade`/`delivery`/`assignment`
+  contributes `−commission` (NOT its premium or payout `change` — an expiry event,
+  `delivery` or `assignment`, is fee-only there too), and `options_settlement_summary`
   contributes `realized_pl + unrealized_pl` (a session DELTA — load-bearing).
   This REDEFINES option native_pnl from a "cash-balance delta" to an "MTM
   (settled-equity) delta" for covered option rows: the premium/payout cash is
@@ -1025,9 +1027,10 @@ def _row_is_native_cash_bearing(row: Mapping[str, Any]) -> bool:
 # (the `use_mtm` gate in `txn_rows_to_native_daily`); its row `change` is always 0.0
 # (nonzero → fail loud). Under CASH_SETTLEMENT (the DEFAULT / shipped basis) the
 # summary is INERT — it falls through to the unknown-type guard where its 0.0 change
-# is harmlessly ignored (option P&L is carried by the trade/delivery cash `change`
-# instead). In the USD sibling it stays DELIBERATELY unclassified (P70 H3) —
-# zero-change → ignored, nonzero → loud.
+# is harmlessly ignored (option P&L is carried by the trade/delivery/assignment
+# cash `change`, i.e. the ``_OPTION_BOOK_EVENT_TYPES`` rows, instead). In the USD
+# sibling it stays DELIBERATELY unclassified (P70 H3) — zero-change → ignored,
+# nonzero → loud.
 _NATIVE_OPTIONS_SUMMARY_TYPES: frozenset[str] = frozenset(
     {"options_settlement_summary"}
 )
@@ -1047,8 +1050,9 @@ _COVERAGE_DAY_MS: float = 24 * 60 * 60 * 1000.0
 # --- daily-P&L accrual basis (user-selectable per strategy/account) -----------
 # ``cash_settlement`` (DEFAULT, zavara-validated): book each option/perp/future
 #   P&L on its CASH-SETTLEMENT day — the raw ``change`` of trade/settlement/
-#   delivery rows (option premium net of commission on the trade day, expiry
-#   payout on the delivery day, perp session/funding on the settlement day). NO
+#   delivery/assignment rows (option premium net of commission on the trade day,
+#   expiry payout on the delivery or assignment day, perp session/funding on the
+#   settlement day). NO
 #   ``options_settlement_summary`` MTM channel, NO coverage-window reshaping.
 #   Reproduces zavara's cash-basis daily track to 4-5 decimals.
 # ``mark_to_market``: Deribit's OWN daily marks — the
@@ -1670,7 +1674,8 @@ def _pre_coverage_option_days(
     rows: Sequence[Mapping[str, Any]],
 ) -> list[tuple[str, str]]:
     """Sorted-unique ``(currency, utc_day)`` buckets carrying option
-    ``trade``/``delivery`` rows that fall OUTSIDE their currency's coverage window
+    ``trade``/``delivery``/``assignment`` rows (``_OPTION_BOOK_EVENT_TYPES``) that
+    fall OUTSIDE their currency's coverage window
     (pre-rollout or trailing-edge cash-fallback). This is the list the adapter
     stamps as ``pre_summary_rollout_option_dailies`` → ``complete_with_warnings``
     (Q6). Empty for fully-covered and perp-only fixtures.
@@ -1701,7 +1706,8 @@ def _option_activity_after_coverage(
     rows: Sequence[Mapping[str, Any]],
 ) -> frozenset[str]:
     """CR-01 — currencies that HAVE an options-settlement coverage window AND carry
-    an option ``trade``/``delivery`` row with ``instant > window_end`` (the
+    an option ``trade``/``delivery``/``assignment`` row (``_OPTION_BOOK_EVENT_TYPES``)
+    with ``instant > window_end`` (the
     trailing-edge open-book signal).
 
     An option position opened/closed AFTER the last summary landed leaves the book
@@ -2106,10 +2112,11 @@ def _summary_contribution(row: Mapping[str, Any]) -> float:
 
 
 def _option_commission(row: Mapping[str, Any]) -> float:
-    """The POSITIVE commission on an option ``trade``/``delivery`` row (present +
-    numeric on 100% of option rows — E3). Absent / null / blank / non-numeric →
-    ``LedgerValuationError`` (inside coverage the fee leg is the ONLY contribution;
-    fabricating it would silently mis-state P&L)."""
+    """The POSITIVE commission on an option ``trade``/``delivery``/``assignment``
+    row (``_OPTION_BOOK_EVENT_TYPES``; present + numeric on 100% of option rows —
+    E3). Absent / null / blank / non-numeric → ``LedgerValuationError`` (inside
+    coverage the fee leg is the ONLY contribution — for an expiry event, delivery
+    or assignment, too; fabricating it would silently mis-state P&L)."""
     raw = row.get("commission", _MISSING)
     if raw is _MISSING or raw is None or (
         isinstance(raw, str) and not raw.strip()
@@ -2143,9 +2150,11 @@ def replay_option_positions(
 ) -> dict[str, dict[str, Any]]:
     """Reconstruct the per-instrument, per-UTC-day signed OPEN option book by PURE
     replay of the signed post-trade ``position`` field on option ``trade``/
-    ``delivery`` rows (M3 evidence: shorts negative, deliveries zero the position;
-    no Greeks, no settlement math). NOT yet called by any production path — the
-    ``smoothed_mtm`` basis wiring lands in 131-01b.
+    ``delivery``/``assignment`` rows (``_OPTION_BOOK_EVENT_TYPES``; M3 evidence:
+    shorts negative, deliveries zero the position — and so does an assignment,
+    which closes the assigned short at expiry; no Greeks, no settlement math).
+    NOT yet called by any production path — the ``smoothed_mtm`` basis wiring
+    lands in 131-01b.
 
     Gated on the EXISTING :func:`classify_instrument` option arm — perp / future /
     spot rows are IGNORED (they carry their P&L on the cash ``change`` channel, not
@@ -2159,10 +2168,11 @@ def replay_option_positions(
     signed_size}}}`` where ``positions`` is keyed ONLY on event days (the caller
     :func:`option_mtm_daily` carries them forward across no-trade days).
 
-    Fail-loud (leak-safe): an option trade/delivery row whose ``position`` is
-    absent / null / blank / non-numeric raises ``LedgerValuationError`` naming the
-    row ``id``/``type`` ONLY (the field is the SOLE book source — fabricating it
-    would silently mis-state MTM; never echo the row payload or balances)."""
+    Fail-loud (leak-safe): an option trade/delivery/assignment row whose
+    ``position`` is absent / null / blank / non-numeric raises
+    ``LedgerValuationError`` naming the row ``id``/``type`` ONLY (the field is the
+    SOLE book source — fabricating it would silently mis-state MTM; never echo the
+    row payload or balances)."""
     per_instr: dict[str, list[Mapping[str, Any]]] = {}
     ccy_of: dict[str, str] = {}
     for row in rows:
@@ -2394,13 +2404,14 @@ def txn_rows_to_native_daily(
         )
     use_mtm = pnl_basis == PNL_BASIS_MARK_TO_MARKET
     # Phase 131 SMOOTHED_MTM: the cash channel here is BYTE-IDENTICAL to
-    # cash_settlement — option trade/delivery rows book their FULL cash `change`
-    # (coverage_windows below is empty for every non-mtm basis, so the coverage-
-    # gated −commission arm is never entered) and the summary channel contributes
-    # NOTHING (handled by the smoothed summary arm below, which still enforces
-    # change==0). The per-(day,ccy) ΔMTM redistribution is merged by the ADAPTER
-    # (``build_deribit_native_ledger``, Task 4), NOT here — keeping this module
-    # pandas/async-free (AST purity) and the signature marks-free (83-PLAN Q2).
+    # cash_settlement — option trade/delivery/assignment rows book their FULL cash
+    # `change` (coverage_windows below is empty for every non-mtm basis, so the
+    # coverage-gated −commission arm is never entered) and the summary channel
+    # contributes NOTHING (handled by the smoothed summary arm below, which still
+    # enforces change==0). The per-(day,ccy) ΔMTM redistribution is merged by the
+    # ADAPTER (``build_deribit_native_ledger``, Task 4), NOT here — keeping this
+    # module pandas/async-free (AST purity) and the signature marks-free (83-PLAN
+    # Q2).
     use_smoothed = pnl_basis == PNL_BASIS_SMOOTHED_MTM
     # Phase 82 pre-pass (MARK_TO_MARKET only): per-currency options coverage
     # windows from this batch's own summary rows. Value-inert for perp-only /
@@ -2450,7 +2461,8 @@ def txn_rows_to_native_daily(
         # change==0 skip (its P&L is in the summary fields, not change). Under
         # CASH_SETTLEMENT the summary row falls through to the unknown-type guard
         # where its 0.0 change is harmlessly ignored (its P&L is carried instead
-        # by the option trade/delivery cash `change` on the settlement day).
+        # by the option trade/delivery/assignment cash `change` on the settlement
+        # day).
         if use_mtm and row_type in _NATIVE_OPTIONS_SUMMARY_TYPES:
             contribution = _summary_contribution(row)
             try:
@@ -2555,10 +2567,13 @@ def txn_rows_to_native_daily(
             # Phase 82 coverage-gated option re-attribution (classification-gated —
             # NEVER consulted for non-option rows, so the perp/future/spot path is
             # byte-identical: contribution stays `change`). Inside a currency's
-            # summary coverage window an option trade/delivery contributes ONLY the
-            # fee (−commission); the premium/payout cash is carried by the summary
-            # channel. Outside the window (pre-rollout or trailing-edge) it keeps
-            # the full `change` (cash fallback, flagged by _pre_coverage_option_days).
+            # summary coverage window an option trade/delivery/assignment
+            # (``_OPTION_BOOK_EVENT_TYPES``) contributes ONLY the fee (−commission);
+            # the premium/payout cash is carried by the summary channel — an expiry
+            # event (delivery or assignment) is fee-only too, so it is never counted
+            # both in the ledger and in the summary. Outside the window (pre-rollout
+            # or trailing-edge) it keeps the full `change` (cash fallback, flagged
+            # by _pre_coverage_option_days).
             contribution = change
             if row_type in _OPTION_BOOK_EVENT_TYPES:
                 cls = classify_instrument(str(row.get("instrument_name", "")))
@@ -2572,7 +2587,8 @@ def txn_rows_to_native_daily(
                     and cls in ("unknown", "spot")
                     and change != 0.0
                 ):
-                    # A delivery ALWAYS names an expiring DERIVATIVE instrument. An
+                    # An expiry event (``_OPTION_EXPIRY_TYPES``: delivery or
+                    # assignment) ALWAYS names an expiring DERIVATIVE instrument. An
                     # unknown-classified delivery with nonzero cash would mis-route
                     # expiry P&L; a SPOT-named delivery (underscore BASE_QUOTE) is
                     # nonsensical — spot does not deliver (S4: classify_instrument now

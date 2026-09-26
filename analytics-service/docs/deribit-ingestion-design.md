@@ -44,14 +44,24 @@ official OpenAPI schema + practitioner sources + ccxt source + a 3-account live 
 ### Type allow-list (fail loud on unknown — the enum is officially extensible)
 
 - **INCLUDE (return-bearing, sum `change`):** `trade`, `settlement`, `delivery`, `liquidation`,
-  `negative_balance_fee`. (Settlement/delivery carry the realized PnL + funding — MUST include.
-  `negative_balance_fee` is a genuine cost, live-confirmed cash-bearing.)
+  `negative_balance_fee`, `assignment`. (Settlement/delivery carry the realized PnL + funding — MUST
+  include. `negative_balance_fee` is a genuine cost, live-confirmed cash-bearing.)
+  `assignment` (Phase 168) is option expiry cash on the assigned (short) side, licensed ONLY for the
+  census shape recorded counts-only in `docs/evidence/drb-assignment-census-2026-09.json` (D-03): no
+  same-instrument `delivery` or `settlement` row in the batch. Any other shape refuses on both twins
+  (D-02, `assert_assignment_uncontested`): an assignment beside a same-instrument `delivery` or
+  `settlement` (a possible double count), an assignment naming no instrument, and any assignment on a
+  `since_ms`-windowed crawl (the census is only sound over full history). Like `delivery` it is an
+  option book event (`_OPTION_EXPIRY_TYPES`), so every basis treats it as `delivery` is treated below.
+  `exercise` and `expiry`, which Deribit's transaction-log documentation also lists, remain
+  unclassified and keep the unknown-type refusal (no census exists for either).
 - **EXCLUDE (external flow / informational — NOT trading return):** `deposit`, `withdrawal`,
   `transfer`, `swap`, `correction`, `usdc_reward`, `options_settlement_summary`.
   (`options_settlement_summary` is a zero-cash aggregate — live-confirmed Σ`change`=0.0 on all 3
   accounts; excluding it also avoids double-counting the real `settlement`/`delivery` rows.)
   ⚠️ **Native path, basis-gated (see D-13, the current pin):** under the DEFAULT `cash_settlement`
-  basis option `trade`/`delivery` rows contribute their FULL native `change` on the settlement day and
+  basis option `trade`/`delivery`/`assignment` rows contribute their FULL native `change` on the
+  settlement day and
   `options_settlement_summary` is INERT (change==0, contributes NOTHING); an OPEN option book at crawl
   reconciles at §5 via the terminal wedge (`options_value`, H1). Under the OPT-IN `mark_to_market`
   basis the D-11 coverage-gated `−commission`/summary re-attribution applies instead. (The Phase-83
@@ -98,8 +108,9 @@ reverted. Option daily attribution is now selected per strategy/account by
 `returns_denominator_config.pnl_basis` (`services/deribit_txn.py`, threaded through
 `build_deribit_native_ledger`):
 
-- **`cash_settlement` — the DEFAULT and the fleet / Zavara basis.** Option `trade`/`delivery` rows
-  book their **FULL native `change`** on the settlement day; `options_settlement_summary` is INERT
+- **`cash_settlement` — the DEFAULT and the fleet / Zavara basis.** Option
+  `trade`/`delivery`/`assignment` rows book their **FULL native `change`** on the settlement day;
+  `options_settlement_summary` is INERT
   (its 0.0 `change` is ignored, no `rpl+upl` attribution). There is NO coverage window, NO ΔMTM, NO
   `pre_summary_rollout` warning. The balance identity is a plain arithmetic `Σnative == Σchange` over
   cash-bearing rows and closes trivially — its job here is to catch a DROPPED / MIS-CLASSIFIED cash
@@ -145,7 +156,8 @@ Zavara/allocated factsheet.
 > `cash_settlement` it is inert.)
 
 Resolves the **F2 known limitation** above (open-option UPL in the anchor but not in Σrealized) for
-the NATIVE path. Deribit's `change` on an option `trade`/`delivery` is the **premium/payout cash**, a
+the NATIVE path. Deribit's `change` on an option `trade`/`delivery`/`assignment` is the
+**premium/payout cash**, a
 swap of cash for position value — NOT P&L. Summing it counted premium as return (live: strategy
 `c225840c` key `95089958` "Phoenix Protocol" showed ±51–78% daily returns, +235% Aug-2025 on ~$150k
 NAV; the 2025-07-13 option-trade day summed to +2.736 BTC ≈ +65%). The real option P&L lives in the
@@ -156,8 +168,10 @@ NAV; the 2025-07-13 option-trade day summed to +2.736 BTC ≈ +65%). The real op
 - Deribit began emitting `options_settlement_summary` ~**2025-01-12** (exchange-side rollout). The
   per-currency coverage window is `[first_summary_ts[c] − 24h, last_summary_ts[c]]`; a currency with
   no summaries has no window.
-- **Inside coverage:** option `trade`/`delivery` contribute `−commission` (fee kept; premium/payout
-  cash EXCLUDED — carried by the summary channel), and `options_settlement_summary` contributes
+- **Inside coverage:** option `trade`/`delivery`/`assignment` contribute `−commission` (fee kept;
+  premium/payout cash EXCLUDED — carried by the summary channel; an expiry event, `delivery` or
+  `assignment`, is fee-only too, so it is never counted both in the ledger and in the summary), and
+  `options_settlement_summary` contributes
   `realized_pl + unrealized_pl`. `unrealized_pl` is a per-session **DELTA** (not a level) and is
   **LOAD-BEARING** — dropping it breaks closure. Summary `change` is always 0.0 (nonzero → fail loud);
   absent/null/non-numeric `commission` / `realized_pl` / `unrealized_pl` → `LedgerValuationError`.
@@ -241,7 +255,8 @@ green by construction).
 
 **The rule (per currency `c`, native path only):**
 
-- Option `trade`/`delivery` rows contribute their **FULL native `change`** everywhere (the D-11
+- Option `trade`/`delivery`/`assignment` rows contribute their **FULL native `change`** everywhere
+  (the D-11
   coverage-gated `−commission` arm is REMOVED). `options_settlement_summary` is **CLASSIFIED-BUT-INERT**:
   its `change` is always 0.0 (nonzero → fail loud) and it contributes NOTHING to attribution.
 - **Daily MTM channel:** `replay_option_positions(rows)` reconstructs per-instrument end-of-day signed

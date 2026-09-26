@@ -2265,10 +2265,10 @@ async def build_deribit_native_ledger(
     # below). A ``since_ms``-cropped crawl would see positions only from the
     # first in-window row: earlier held days silently unmarked, the first
     # in-window day absorbing a book jump, and the option-activity gate (ANY
-    # option-evidence row) disagreeing with the replay (trade/delivery rows
-    # only) — terminal_book {} vs a nonzero venue anchor. Fail loud before
-    # crawling rather than misattribute; the other bases keep accepting
-    # ``since_ms`` (SC-4).
+    # option-evidence row) disagreeing with the replay (trade/delivery/assignment
+    # rows only, ``_OPTION_BOOK_EVENT_TYPES``) — terminal_book {} vs a nonzero
+    # venue anchor. Fail loud before crawling rather than misattribute; the other
+    # bases keep accepting ``since_ms`` (SC-4).
     if pnl_basis == PNL_BASIS_SMOOTHED_MTM and since_ms is not None:
         raise LedgerValuationError(
             "smoothed_mtm requires a full-history crawl (since_ms=None): the "

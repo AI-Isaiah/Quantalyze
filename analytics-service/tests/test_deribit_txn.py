@@ -2668,10 +2668,10 @@ def test_perp_only_ledger_byte_identical() -> None:
 
 def test_option_activity_after_coverage_detects_trailing_option_rows() -> None:
     """CR-01: `_option_activity_after_coverage` returns exactly the currencies that
-    HAVE a coverage window AND carry an option trade/delivery AFTER window_end —
-    the trailing-edge open-book signal (the option book closed intra-session after
-    the last summary, so `options_value==0` NOW yet the strict guard would still
-    false-fire)."""
+    HAVE a coverage window AND carry an option trade/delivery/assignment AFTER
+    window_end — the trailing-edge open-book signal (the option book closed
+    intra-session after the last summary, so `options_value==0` NOW yet the strict
+    guard would still false-fire)."""
     # BTC: an option delivery AFTER the last summary (2025-07-14T08:00) → trailing.
     trailing = [
         _summary_row(_SUM_LO, rid=40),
@@ -2691,7 +2691,7 @@ def test_option_activity_after_coverage_detects_trailing_option_rows() -> None:
     assert _option_activity_after_coverage(covered) == frozenset()
 
     # A PERP trade after the window is NOT option activity → empty (classification
-    # gated: only option trade/delivery rows count).
+    # gated: only option trade/delivery/assignment rows count).
     perp_after = [
         _summary_row(_SUM_LO, rid=44),
         _summary_row(_SUM_HI, rid=45),
@@ -2841,8 +2841,9 @@ from services.deribit_txn import (  # noqa: E402
 def _opt_row(
     *, instrument: str, ccy: str, day: str, position: object, id: int, type: str = "trade"
 ) -> dict[str, object]:
-    """A minimal Deribit option trade/delivery row carrying a signed post-trade
-    `position` — the ONLY field replay_option_positions reads for the book."""
+    """A minimal Deribit option trade/delivery/assignment row carrying a signed
+    post-trade `position` — the ONLY field replay_option_positions reads for the
+    book."""
     return {
         "type": type,
         "instrument_name": instrument,
