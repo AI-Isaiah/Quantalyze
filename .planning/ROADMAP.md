@@ -2164,6 +2164,8 @@ Plans:
 
 ⭐ **ROUTED HERE 2026-09-26 (164.5.2 research, Open Question 1):** the per-strategy lock 164.5.2 adds sits in the two mark RPCs, so the bridge's OTHER callers stay unserialized: the Python DEFERRED direct call to `sync_strategy_analytics_status`, and the non-mark writers (claims, `reset_stalled_compute_jobs`, the orphan terminalizer, the marker retraction). A lock inside the bridge itself would cover every caller (transaction advisory locks re-enter within a session, so the mark RPCs can keep theirs). Decide it here, because this phase owns the bridge body.
 
+⭐ **ROUTED HERE 2026-09-26 (164.5.2 research, Open Question 3; test-only):** `analytics-service/tests/test_ledger_refresh_kind_scope_drift.py` pins the kind-scope list against `20260825150000`, not against the LIVE bridge definition. Move its pin to the newest bridge definition this phase creates, so the drift gate reads the body that actually ships.
+
 **Requirements**: TODOS entries `[164.6.7-COMPOSITE-REREAD-RESIDUE]`, `[164.6.7-RETRY-PLAIN-COMPLETE]` (both booked on `feat/164.6.7`; they reach `main` when Phase 164.6.7 lands)
 **Depends on:** Phase 164.5.2 (migration ordering and the shared gate census), Phase 164.6.7 (its TODOS entries and its Python ends of both residues)
 **Plans:** 0 plans
