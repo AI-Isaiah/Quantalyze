@@ -3025,7 +3025,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 166.1-01b-PLAN.md — the SQN block S8 on the floor, red test and drill (D-16; split from plan 01 by D-21 W3)
+- [x] 166.1-01b-PLAN.md — the SQN block S8 on the floor, red test and drill (D-16; split from plan 01 by D-21 W3)
 - [ ] 166.1-03-PLAN.md — Python correlation sites C1-C8 on two shared helpers (D-02)
 
 **Wave 3** *(blocked on Wave 2 completion)*

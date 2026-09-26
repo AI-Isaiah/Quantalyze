@@ -19,3 +19,15 @@ alone.
 
 Neither is a data-integrity or user-facing gate. Both are fix-or-drop flake candidates for
 whoever next owns the Python test infrastructure.
+
+## From plan 166.1-01b (2026-09-26)
+
+Full-suite run 1 on the plan's final tree had 2 failures, both in files this plan does not touch;
+run 2 on the same tree was fully green (`6444 passed, 90 skipped`), and both pass when their files
+run alone (`154 passed`).
+
+1. `test_limiter_identity` again: item 1 above, same `AttributeError`.
+2. NEW: `tests/test_mt5_session_monitor.py::test_CRITERION_2_a_dark_reading_drives_the_heal_with_no_human_and_no_restart`
+   failed `assert 'dark' in []` while the monitor logged that a tick "did not complete inside its own
+   0.0s cadence", at a host load average of about 48. A wall-clock timing dependency under load, not a
+   logic failure. Same disposition as the two above: fix-or-drop flake candidate.
