@@ -1047,6 +1047,45 @@ class TestLiveStateNamesItsReason:
             f"warnings={log.warning.call_args_list!r}"
         )
 
+    def test_the_not_confirmed_logger_refuses_a_state_it_has_no_arm_for(
+        self,
+    ) -> None:
+        """I-R3-1 (round 3): the last arm used to be a bare ``else`` that
+        labelled ANY state it did not name as "no live row". A member added to
+        ``MarkerLiveState`` later would then be misreported as an invariant
+        breach. The arm is now ``elif`` on ``NO_ID`` / ``NO_ROW``, and anything
+        else raises. A stand-in object plays the future member here, because an
+        Enum cannot be extended in a test.
+
+        Neuter to redden: turn the ``elif`` back into ``else``. The call then
+        logs "no live row" and returns, and both assertions fail."""
+        future_state: Any = object()
+        with patch.object(_jw, "logger") as log:
+            with pytest.raises(ValueError, match="no arm"):
+                _jw._log_marker_not_confirmed(
+                    future_state,
+                    site="test-site",
+                    job_id="job-1",
+                    strategy_id=_STRATEGY_ID,
+                    consequence="Taking the LOUD terminal path",
+                )
+        assert log.error.call_count == 0, log.error.call_args_list
+
+    @pytest.mark.parametrize("state", ["NO_ID", "NO_ROW"])
+    def test_the_breach_arm_still_covers_no_id_and_no_row(self, state: str) -> None:
+        """Control for the test above: narrowing the arm must not drop either
+        of the two states it exists for."""
+        with patch.object(_jw, "logger") as log:
+            _jw._log_marker_not_confirmed(
+                _jw.MarkerLiveState[state],
+                site="test-site",
+                job_id="job-1",
+                strategy_id=_STRATEGY_ID,
+                consequence="Taking the LOUD terminal path",
+            )
+        assert log.error.call_count == 1
+        assert "invariant breach" in str(log.error.call_args.args[0])
+
 
 def _entry_read_ctx(entry_answers: list[Any]) -> tuple[MagicMock, dict[str, Any]]:
     """A derive context whose ``strategy_analytics`` select answers
@@ -1178,14 +1217,22 @@ class TestEntryPublishStateReadFailsTransient:
         as a busy database. Nothing is crawled or written, and the exchange the
         preflight opened is still closed.
 
+        It is still REPORTED (one ERROR line naming it, one tagged capture):
+        ``dispatch`` does not log a handler's exception and the worker loop logs
+        a failed job at WARNING, so an unreported code defect here would reach
+        Sentry as no event at all.
+
         Neuter to redden: delete the ``_READ_PROGRAMMING_ERRORS`` re-raise in
-        the entry arm. Every case then comes back ``transient``."""
+        the entry arm. Every case then comes back ``transient``. Delete its
+        ``logger.error`` / ``_capture_read_failure`` pair and every case goes
+        RED on the report."""
         ctx, capture = _entry_read_ctx([bug])
         combine = _insufficient_combine()
         patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
         with patches[0], patches[1], patches[2] as aclose, patches[3], patches[4], \
              patches[5], patches[6], \
-             patch("services.job_worker.sentry_sdk"):
+             patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
             result = await _jw.dispatch(
                 {
                     "id": "job-1",
@@ -1211,6 +1258,16 @@ class TestEntryPublishStateReadFailsTransient:
         assert aclose.await_count == 1, (
             "the exchange the preflight opened was not closed on the "
             "programming-error exit"
+        )
+        assert any(
+            c.args
+            and "programming error" in str(c.args[0])
+            and any(type(bug).__name__ in str(a) for a in c.args)
+            for c in log.error.call_args_list
+        ), f"the programming error was not reported at ERROR: {log.error.call_args_list!r}"
+        assert sentry.capture_exception.call_count == 1
+        sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+            "compute_job_id", "job-1"
         )
 
     def test_classify_exception_files_programming_errors_unknown(self) -> None:

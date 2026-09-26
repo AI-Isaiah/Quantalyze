@@ -2642,7 +2642,11 @@ async def _resolve_ccxt_flow_price_index(
 #
 # ⚠️ The read goes through ``db_read_with_retry``, so a gateway 504 is retried
 # inside that helper's bounded budget before it counts as a failure (WR-03). The
-# cost is up to about 3-4 s more wall time on a gateway-timeout path. The helper
+# cost is up to about 3-4 s more wall time per read on a gateway-timeout path
+# (IN-03, round 3). The composite ``_stamp_failed`` makes TWO such reads before
+# any write (``_read_existing_failed_row``, then this one), so its worst case is
+# about 6-8 s of backoff plus the request timeouts. Both precede every write, so
+# a cancellation inside that time writes nothing. The helper
 # sleeps BEFORE the attempt that answers, so the window between the answering
 # read and the stamp (``[164.6.7-COMPOSITE-REREAD-RESIDUE]``) is unchanged
 # (round 2, IN-02).
@@ -2831,7 +2835,8 @@ def _log_marker_not_confirmed(
             "because the live re-read FAILED. %s (strategy %s).",
             site, job_id, consequence, strategy_id,
         )
-    else:  # NO_ID / NO_ROW — a claimed or just-enqueued job must have both.
+    elif state in (MarkerLiveState.NO_ID, MarkerLiveState.NO_ROW):
+        # A claimed or just-enqueued job must have both.
         logger.error(
             "%s: cannot confirm the refresh marker on compute_job %s — %s. A "
             "%s with no id or no live row is an invariant breach. %s "
@@ -2839,6 +2844,18 @@ def _log_marker_not_confirmed(
             site, job_id,
             "no job id" if state is MarkerLiveState.NO_ID else "no live row",
             subject, consequence, strategy_id,
+        )
+    else:
+        # I-R3-1 (round 3): the arms above are exhaustive for today's enum. A
+        # state added later must say what it means; it is never silently
+        # reported as "no live row". The raise is filed ``unknown`` and retried.
+        # The stamp and chain-edge callers reach it before any write of their
+        # own. The tail mirror reaches it after its enqueue, so there a retry
+        # re-runs the derive and re-enqueues (the enqueue dedup serves an
+        # in-flight hop 2). Only a new enum member can reach this line.
+        raise ValueError(
+            f"{site}: _log_marker_not_confirmed has no arm for {state!r}; add "
+            "one that names what the state records"
         )
 
 
@@ -2990,7 +3007,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # class and text, exactly as it does anywhere else in the
                 # worker. Relabelling it TRANSIENT would report a code defect as
                 # "the database was busy" on every attempt.
+                # ⚠️ It is still reported here first. ``dispatch`` does not log
+                # a handler's exception and the worker loop logs a failed job at
+                # WARNING, so without this pair a code defect in the read would
+                # reach Sentry as no event at all.
                 if isinstance(_entry_exc, _READ_PROGRAMMING_ERRORS):
+                    logger.error(
+                        "derive_broker_dailies: the pre-refresh publish-state read "
+                        "for strategy %s on marked compute_job %s raised a "
+                        "programming error (%s). No crawl ran and nothing was "
+                        "written; the error propagates unchanged.",
+                        strategy_id, job.get("id"), _read_failure_text(_entry_exc),
+                    )
+                    _capture_read_failure(_entry_exc, job_id=job.get("id"))
                     raise
                 logger.error(
                     "derive_broker_dailies: could not read the pre-refresh publish "
@@ -6178,7 +6207,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # already pays that on a transient (``run_stitch_composite_job``'s
     # degraded-set divergence), and the writes above are upserts. If every retry
     # fails, the bridge's branch (b-prime) keeps the factsheet published but
-    # stale, because the marker is still on this job. ⚠️ That holds while the
+    # stale, because the marker is still on this job.
+    # ⚠️ SFH-R3-04, the END STATE of that exhaustion: "stale" means a
+    # MIXED-GENERATION row, not an untouched one. By this line hop 1 has already
+    # written ``_prestamp_dq_flags`` (``data_quality_flags`` replaced wholesale,
+    # ``series_completeness`` and ``metrics_json_by_basis``) and persisted or
+    # healed the MTM series. Hop 2 never runs, so the headline ``metrics_json``
+    # is still the PREVIOUS hop 2's. The row stays published with hop 1's
+    # flags, verdict and by-basis values beside the previous hop 2's headline
+    # metrics. That is the same class as a protected hop-2 failure, which D-15
+    # already accepts, so it is not new harm. The upserts make the RETRY safe;
+    # they do not make the terminal state consistent. ⚠️ That holds while the
     # row is ``complete_with_warnings`` or ``computation_warned``. A plain
     # ``complete`` row is rewritten to ``computing`` by the bridge's branch (a)
     # on the first ``failed_retry``, and is then un-published on exhaustion (see
