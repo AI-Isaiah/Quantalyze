@@ -2,10 +2,10 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "164.6"
-current_phase_name: "GATE-HYGIENE — pruned to criteria 2, 3, 4"
-status: "Phase 166 in code review; wizard fix + baseline re-dump shipping"
-stopped_at: Completed 164.6-05-PLAN.md
+current_phase: "166.1"
+current_phase_name: ENGINEFLOOR
+status: executing
+stopped_at: Completed 166.1-01-PLAN.md
 last_updated: "2026-09-24T21:30:00.000Z"
 last_activity: 2026-09-24
 last_activity_desc: "2026-09-24: 164.6 (v0.90.0.0), 167.1, 167.2 shipped; 166 executed 10/10 (v0.91.0.0) and in review; PROD baseline re-dumped after the 164.6 apply (v0.90.0.1). Census by VERIFICATION status==passed across all worktrees: 35/54 phases."
@@ -179,6 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
+Phase: 166.1 (ENGINEFLOOR) — EXECUTING
+Plan: 2 of 4
 Phase: 166 (QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given) — READY TO EXECUTE
 Plan: Not started
 Phase: 164.6 (gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers) — EXECUTING
@@ -484,7 +486,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 167.1
+Status: Executing Phase 166.1
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -500,7 +502,7 @@ Status: Executing Phase 167.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-24 — Phase 164.6 plan 05 (runbooks and phase-level suite pass) executed
+Last activity: 2026-09-26 — Phase 166.1 plan 01 executed (dispersion floor in services/dispersion.py; variance sites S1-S7 on it, red tests and drills; S3 keeps its verdict and drops the fabricated number)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight

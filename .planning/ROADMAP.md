@@ -3021,7 +3021,7 @@ Plans:
 
 **Wave 1**
 
-- [ ] 166.1-01-PLAN.md — the floor moves to `services/dispersion.py`; Python variance sites S1-S7 on it, red tests and drills
+- [x] 166.1-01-PLAN.md — the floor moves to `services/dispersion.py`; Python variance sites S1-S7 on it, red tests and drills
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
