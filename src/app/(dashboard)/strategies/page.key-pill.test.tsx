@@ -749,6 +749,28 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(JSON.stringify(ctx)).not.toContain("s-1");
   });
 
+  it("PROBE-NOT-VISIBLE (167.2.1-REVIEW IN-01): a row deleted between the list read and the probe is a warning, never a capture", async () => {
+    // The id came from the owner's own list read, and the probe runs under
+    // the owner predicate, so "no row" here is a delete race, not an outage.
+    // Capturing it would put it in the same event group as a real read error.
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+      state.adminRows = { "s-1": { data: null, error: null } };
+
+      const container = await renderPage();
+
+      expect(noteOf(container, "Strategy s-1")).toBe(UNREADABLE);
+      expect(consoleWarn).toHaveBeenCalledWith(
+        "[strategies/page] factsheet probe found no row (deleted since the list read)",
+        expect.objectContaining({ id: "s-1", reason: "not_visible" }),
+      );
+      expect(captureToSentryMock).not.toHaveBeenCalled();
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
   it("PROBE-NOT-COMPUTED (D-05): the embed says complete but the builder's read says failed, so the row takes the uncomputed path", async () => {
     state.strategies = [row("c-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
     state.adminRows = {

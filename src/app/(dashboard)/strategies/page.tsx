@@ -411,14 +411,15 @@ export default async function StrategiesPage() {
             return [s.id, recipientShareNote(mode, "unreadable")] as const;
           }
           if (probe.reason === "not_visible") {
-            // D-05: the probe could not see the row. Logged and captured,
-            // tags only.
-            console.error("[strategies/page] factsheet probe could not read the row", {
+            // D-05: the probe found no row. 167.2.1-REVIEW IN-01: on THIS page
+            // that is not an outage. The id came from the owner's own list
+            // read moments earlier and the probe runs under the owner
+            // predicate, so no row means the strategy was deleted between the
+            // two reads. A warning, never a capture: counting it as an error
+            // would inflate the outage signal the read_error capture carries.
+            console.warn("[strategies/page] factsheet probe found no row (deleted since the list read)", {
               id: s.id,
               reason: probe.reason,
-            });
-            captureToSentry(new Error(`factsheet probe answered ${probe.reason}`), {
-              tags: { route: "strategies/page", stage: "factsheet-probe" },
             });
             return [s.id, recipientShareNote(mode, "unreadable")] as const;
           }
