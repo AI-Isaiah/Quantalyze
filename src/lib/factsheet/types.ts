@@ -244,6 +244,7 @@ export type AllocatorPortfolioPayload = {
   ann_vol: number;
   cum_ret: number;
   max_dd: number;
+  /** NaN (null after a JSON round-trip) when the correlation is undefined (D7). */
   corr: number;
   sleeve_pct: number;
   blend_vol: number;

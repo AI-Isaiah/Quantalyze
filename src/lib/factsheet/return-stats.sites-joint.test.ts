@@ -201,6 +201,34 @@ describe("T17 rollingBeta and rollingSharpe on return-stats (D-07, D-17)", () =>
   const betaOnZeroBench = rollingBeta(STRAT, zeros(N), WINDOW);
   const sharpeOnZeros = rollingSharpe(zeros(N), WINDOW, PPY);
 
+  // D7 (founder, 2026-09-26), SFH-M1: a window with no ratio is a GAP (null),
+  // the value the warm-up region already carries, never a drawn 0.
+  it("T17 every window of an all-zero series (bench) is null, a gap, not 0", () => {
+    expect(betaOnZeroBench.every((v) => v === null)).toBe(true);
+    expect(sharpeOnZeros.every((v) => v === null)).toBe(true);
+  });
+
+  it("T17 a flat stretch inside a noisy series is a gap only where the window is flat", () => {
+    const mixed = STRAT.slice();
+    for (let i = 100; i < 100 + 2 * WINDOW; i++) mixed[i] = 0;
+    const s = rollingSharpe(mixed, WINDOW, PPY);
+    // The first window wholly inside the flat stretch ends at 100 + WINDOW - 1.
+    expect(s[100 + WINDOW - 1]).toBeNull();
+    expect(Number.isFinite(s[99] as number)).toBe(true);
+    expect(Number.isFinite(s[N - 1] as number)).toBe(true);
+    const b = rollingBeta(STRAT, mixed, WINDOW);
+    expect(b[100 + WINDOW - 1]).toBeNull();
+    expect(Number.isFinite(b[N - 1] as number)).toBe(true);
+  });
+
+  it("T17 rollingVol of a constant yield is exactly the all-zero series' 0 (SFH-M7, shared sd)", () => {
+    for (const id of YIELD_IDS) {
+      expect(rollingVol(navConstantYield(CONSTANT_YIELDS[id], N), WINDOW, PPY), id).toEqual(
+        rollingVol(zeros(N), WINDOW, PPY),
+      );
+    }
+  });
+
   for (const id of YIELD_IDS) {
     const y = CONSTANT_YIELDS[id];
 
@@ -313,6 +341,27 @@ describe("T19 buildFactsheetPayload correlations on return-stats (D-07, D-17)", 
 describe("T20 buildAllocatorMetrics correlation on return-stats (D-07, D-17)", () => {
   const onZeroLeg = buildAllocatorMetrics(BENCH, zeros(N));
   const zeroPortfolio = buildAllocatorMetrics(zeros(N), STRAT);
+
+  // D7 (founder, 2026-09-26), WR-04: a leg with no dispersion has no
+  // correlation, NaN ("—"), never "+0.00". The sleeve scan stays exact: the
+  // cross term it drops is 0 by construction (one vol is 0).
+  it("T20 an all-zero leg has no correlation (NaN), and the sleeve scan still runs", () => {
+    expect(Number.isNaN(onZeroLeg.corr)).toBe(true);
+    expect(Number.isNaN(zeroPortfolio.corr)).toBe(true);
+    expect(Number.isFinite(onZeroLeg.blend_vol)).toBe(true);
+    expect(Number.isFinite(onZeroLeg.sleeve_pct)).toBe(true);
+    // With the MultiMarket leg flat, blend vol at sleeve w is (1-w) * annVol.
+    const annVol = buildAllocatorMetrics(BENCH, zeros(N)).ann_vol;
+    expect(onZeroLeg.blend_vol).toBeCloseTo((1 - onZeroLeg.sleeve_pct) * annVol, 12);
+  });
+
+  // SFH-M4 / IN-04: every figure is over one window, so unequal legs are refused
+  // loudly, as jointMetrics refuses them, instead of computing vol over n and the
+  // correlation over min(n, m).
+  it("T20 refuses legs of unequal length", () => {
+    expect(() => buildAllocatorMetrics(BENCH, STRAT.slice(0, N - 1))).toThrow(/same length/);
+    expect(() => buildAllocatorMetrics(BENCH.slice(0, N - 1), STRAT)).toThrow(/same length/);
+  });
 
   for (const id of YIELD_IDS) {
     const y = CONSTANT_YIELDS[id];
