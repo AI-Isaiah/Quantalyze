@@ -291,8 +291,8 @@ def test_live_driver_pure_surface_imports() -> None:
 
 
 def test_perp_only_eligibility_zero_option_zero_summary_passes() -> None:
-    """A pure perp/future ledger (no option trade/delivery, no summary) is a valid
-    byte-identity control key → passes 0/0."""
+    """A pure perp/future ledger (no option trade/delivery/assignment, no
+    summary) is a valid byte-identity control key → passes 0/0."""
     rows = [
         {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
          "change": -0.01},
@@ -317,7 +317,7 @@ def test_perp_only_eligibility_option_trade_fails_and_names_count() -> None:
     ]
     chk = check_perp_only_eligibility(rows)
     assert not chk.passed
-    assert "1 option trade/delivery row(s)" in chk.detail
+    assert "1 option trade/delivery/assignment row(s)" in chk.detail
 
 
 def test_perp_only_eligibility_summary_row_fails() -> None:
@@ -330,6 +330,24 @@ def test_perp_only_eligibility_summary_row_fails() -> None:
     chk = check_perp_only_eligibility(rows)
     assert not chk.passed
     assert "options_settlement_summary row(s)" in chk.detail
+
+
+def test_site7_acceptance_eligibility_counts_a_lone_assignment() -> None:
+    """SITE7-ACCEPTANCE-ELIGIBILITY (Phase 168, D-04): the option book is
+    trade, delivery AND assignment (``_OPTION_BOOK_EVENT_TYPES``). A key whose
+    only option-book event is an assignment traded options, so its native P&L
+    legitimately moves with the options fix and it is NOT a valid byte-identity
+    control. Counting only the old trade/delivery pair would call it eligible
+    and turn a real options key into a false control."""
+    rows = [
+        {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.01},
+        {"type": "assignment", "instrument_name": "BTC-16JAN26-60000-P",
+         "currency": "BTC", "change": -0.03},
+    ]
+    chk = check_perp_only_eligibility(rows)
+    assert not chk.passed
+    assert "1 option trade/delivery/assignment row(s)" in chk.detail
 
 
 # ---------------------------------------------------------------------------
