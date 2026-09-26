@@ -24,8 +24,9 @@
  * engine `correlation_matrix` to 3 decimals.
  *
  * This lib NEVER recomputes ρ for display — the matrix comes from the engine,
- * read-only. `correlation-math.ts::pearson` is used only as a defensive cross-
- * check inside the test, never in production output.
+ * read-only. Neither this lib nor its test calls a Pearson: the consistency
+ * test rebuilds ρ from this lib's own covariance and σ and compares it with the
+ * engine matrix. The one TS Pearson is `return-stats.ts` `pearson`.
  *
  * Pattern precedent: src/lib/scenario-blend-adapter.ts (pure-TS engine-output
  * adapter, MIN_USABLE floor, degenerate→empty, golden-tested). This file is the
