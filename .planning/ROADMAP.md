@@ -3003,7 +3003,7 @@ Plans:
 **Goal:** Every persisted `strategy_analytics` row that Phase 166 changes is recomputed on PROD, so stored numbers match what the fixed code would produce. The same fabricated-ratio class is also closed outside quantstats: exact `== 0` / `> 0` standard-deviation guards.
 **Requirements**: Phase 166 OPEN-2 (founder answer 2026-09-24: "Recompute affected rows after merge", AskUserQuestion). The round-2 fixer measured the non-quantstats sites.
 **Depends on:** Phase 166
-**Plans:** 10 plans
+**Plans:** 11 plans
 
 ## Success Criteria
 1. **Census first.** The five read-only census SELECTs in `166-09-SUMMARY.md` run on PROD. The founder runs them, or they run read-only and are recorded as counts only. The recompute set is derived from them.
@@ -3013,17 +3013,19 @@ Plans:
    ⭐ **2026-09-25 (plan-check revision, 166.1-CONTEXT D-15, orchestrator decision under the founder rule "close the whole class, not point-fixes"):** criterion 3 also covers the TS sites that compute a Sharpe, correlation, beta or related ratio from daily returns behind a `> 0` / `!== 0` guard or a relative-only floor (RESEARCH A5, T1-T20). The earlier premise that TS only reads stored values was false. **D-16:** the `analytics_runner` SQN block is site S8 (measured SQN -4.03e16 on 21 identical losses).
    ⭐ **2026-09-25 (FOUNDER DIRECTION, 166.1-CONTEXT D-17, verbatim: "Why don't you calculate Sharpe once and the 20 places all read it from there?"):** the TS half is re-planned around computing each ratio ONCE. Every TS site is classified Tier 1 (a persisted value exists for the same series: delete and read it), Tier 2 (the series exists only in TS: call ONE shared module, `src/lib/return-stats.ts`, and remove the local formula) or Dead (no production caller: delete). The factsheet's single-key headline and the OG card's PERSISTED Sharpe read are Phase 169 plan 04's and are excluded here; the Sharpe the OG card still computes is 166.1-06's (D-19, matching 169 D-25). A source-scan gate pins the rule.
    ⭐ **2026-09-26 (plan-check round 3, 166.1-CONTEXT D-20):** plans 05 and 06 are split into file-disjoint halves in the same wave (05a/05b, 06a/06b, so 169 D-25's "166.1 plan 05 / plan 06" citations still name the right families), and plan 07 into the gate plus the `origin/main` merge (07) and the sweep plus the release (08). The gate now also carries every retired expression the plans grep for and a whole-tree Sharpe / Pearson / beta shape matcher under `src/`. T_DEPLOY is the go-live of the FIRST fixed worker deployment, read from the deployment history.
+   ⭐ **2026-09-26 (plan-check round 4, 166.1-CONTEXT D-21):** plan 01's SQN task moves to a new wave-2 plan 01b (budget, wave-neutral); the whole-tree matcher is widened and re-pinned from a measurement (26 hits: 20 in-class + 5 Sortino + 1 Treynor); plan 02 adds a counts-only stored-SQN read (Q6) and derives each enqueue's kind from the class.
 
 Plans:
 
 **Wave 1**
 
-- [ ] 166.1-01-PLAN.md — the floor moves to `services/dispersion.py`; Python variance sites S1-S8 (incl. SQN, D-16) on it, red tests and drills
-- [ ] 166.1-02-PLAN.md — founder-gated PROD recompute: Q1-Q5 read-only pack, tracer then one-at-a-time enqueues, blocking rendered check per published row (independent of the code plans)
+- [ ] 166.1-01-PLAN.md — the floor moves to `services/dispersion.py`; Python variance sites S1-S7 on it, red tests and drills
+- [ ] 166.1-02-PLAN.md — founder-gated PROD recompute: Q1-Q6 read-only pack (Q6: stored residue SQN, D-21 W1), tracer then one-at-a-time enqueues with the kind derived from the class (D-21 W2), blocking rendered check per published row (independent of the code plans)
 - [ ] 166.1-04-PLAN.md — ONE TS module `src/lib/return-stats.ts` (floor pinned to Python, dispersion, Sharpe, Pearson, beta); T1-T5 (/compare, sampleBasisRatios, computeScenario, diversificationRatio) call it (D-15, D-17)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
+- [ ] 166.1-01b-PLAN.md — the SQN block S8 on the floor, red test and drill (D-16; split from plan 01 by D-21 W3)
 - [ ] 166.1-03-PLAN.md — Python correlation sites C1-C8 on two shared helpers (D-02)
 - [ ] 166.1-05a-PLAN.md — TS T6-T7 on `return-stats`: one Pearson (`correlation-math.ts` deleted with the dead `rollingCorrelation`), /compare's matrix and the Risk-tab widget (D-15, D-17, D-20)
 - [ ] 166.1-05b-PLAN.md — TS T8-T12 on `return-stats`: portfolio-stats beta and risk share, the scenario benchmark (its correlation and information ratio) and stress; dead `computeRollingMetric` deleted (D-15, D-17, D-20)
