@@ -34,7 +34,8 @@
  * to fail independently.
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import {
@@ -1059,4 +1060,24 @@ describe("164.9.5-09 — no merge path, one push, one scan pattern, and a self-t
     },
     SELF_TEST_IT_TIMEOUT_MS,
   );
+
+  it("--gate-dump reads GITHUB_RUN_ATTEMPT from the runner's environment and refuses a re-run (WR-02)", () => {
+    // The gate step must not override the variable Actions sets: the script is the
+    // only reader, and an `env:` entry here could pin it to 1 on every attempt.
+    const gate = jobBlock(WF, DUMP_JOB);
+    expect(gate, `${DUMP_JOB} is absent`).not.toBe("");
+    expect(gate.includes("GITHUB_RUN_ATTEMPT"), `${DUMP_JOB} must not set or pass GITHUB_RUN_ATTEMPT itself`).toBe(false);
+    const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf8" }).stdout.trim();
+    const out = join(tmpdir(), `baseline-redump-attempt-${process.pid}-${Date.now()}`);
+    const run = (attempt: string) =>
+      spawnSync(
+        process.execPath,
+        [SCRIPT, "--gate-dump", "--dump", "supabase/schema/baseline.sql", "--merge", head, "--run-id", "1", "--cli-version", "2.98.2", "--out", out],
+        { cwd: ROOT, encoding: "utf8", timeout: 30_000, env: { ...process.env, GITHUB_RUN_ATTEMPT: attempt, GITHUB_OUTPUT: "" } },
+      );
+    const second = run("2");
+    expect(second.status, `a second attempt must exit 1. stderr:\n${second.stderr}`).toBe(1);
+    expect(second.stderr).toContain("GITHUB_RUN_ATTEMPT is 2, and only attempt 1 may dump");
+    expect(existsSync(out), "a refused attempt wrote its out dir").toBe(false);
+  });
 });

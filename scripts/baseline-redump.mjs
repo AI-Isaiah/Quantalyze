@@ -981,6 +981,57 @@ function lsRemoteBotRefs(repoRoot, remote) {
   return anonGit(repoRoot, ["ls-remote", remote, BOT_REF, "refs/pull/*/head"]);
 }
 
+/** The `.sql` basenames of one `git ls-tree --name-only <ref> supabase/migrations/` listing, in listing order. */
+function migrationBasenames(lsTreeText) {
+  return String(lsTreeText)
+    .split("\n")
+    .filter((p) => p.endsWith(".sql"))
+    .map((p) => p.replace(/^.*\//, ""));
+}
+
+/**
+ * SFH-01: the migration basenames on the remote's CURRENT `main`, fetched with
+ * anonGit (no credential; the repository is public). Any failure is MEASURE_FAIL:
+ * a comparison that could not run is never a match. No `--depth`: the fetch only
+ * adds the commits between this checkout and `main`.
+ */
+function anonMainMigrationListing({ repoRoot, remote }) {
+  assertRemoteName(remote);
+  const track = `refs/remotes/${remote}/main`;
+  const fetched = anonGit(repoRoot, ["fetch", "--quiet", "--no-tags", remote, `+refs/heads/main:${track}`]);
+  if (fetched.status !== 0) {
+    throw new Error(`MEASURE_FAIL: git fetch of main exit ${fetched.status}; main's migration listing was not measured, so no marker is written`);
+  }
+  const ls = anonGit(repoRoot, ["ls-tree", "--name-only", track, MIGRATIONS_REL]);
+  if (ls.status !== 0) throw new Error(`MEASURE_FAIL: git ls-tree of main exit ${ls.status}; main's migration listing was not measured`);
+  return migrationBasenames(ls.stdout);
+}
+
+/**
+ * SFH-01 / WR-02: the merge's migration set against current `main`'s. The marker is
+ * built from the merge tree while the dump is taken from PROD NOW, so the two agree
+ * only while `main` carries exactly the merge's migrations. Returns the defect text,
+ * or null. Counts only: `main`'s basenames were never put through the strict rule.
+ */
+export function judgeMainListing(mergeListing, mainListing) {
+  const merge = new Set(mergeListing);
+  const main = new Set(mainListing);
+  const mainOnly = [...main].filter((b) => !merge.has(b)).length;
+  const mergeOnly = [...merge].filter((b) => !main.has(b)).length;
+  if (mainOnly === 0 && mergeOnly === 0) return null;
+  if (mainOnly > 0) {
+    return (
+      `main carries ${mainOnly} migration(s) this merge does not: a later migration merge landed after this run's apply. ` +
+      "PROD may already hold them, so a marker built from this merge could disagree with the dump, and nothing is written. " +
+      "The later merge's own apply run re-dumps; if none is queued, dispatch a fresh run: gh workflow run supabase-migrate.yml --ref main"
+    );
+  }
+  return (
+    `main lacks ${mergeOnly} migration(s) this merge carries: main no longer holds what PROD was given, so no marker from this merge ` +
+    "is safe to write. Find out how main lost them before re-dispatching supabase-migrate.yml on main"
+  );
+}
+
 /**
  * The bot-PR status the D-10 no-op notice carries (RESEARCH Open Question 3). It
  * never throws and never touches a PR (D-13): a lookup that fails yields a
@@ -1185,7 +1236,9 @@ export function openOrEditPr({ titleFile, bodyFile, repo, token, gh = realGh, em
  * `{changed, measured}`. Throws on any refusal; the caller maps a throw to
  * `::error::` + exit 1.
  */
-export function gateDump({ repoRoot, dump, merge, runId, cliVersion, out, emit, gitleaks, remote = "origin" }) {
+export function gateDump({
+  repoRoot, dump, merge, runId, runAttempt, cliVersion, out, emit, gitleaks, remote = "origin", mainListing = anonMainMigrationListing,
+}) {
   if (typeof gitleaks !== "function") throw new Error("gateDump was given no gitleaks runner; the gate is never skipped");
   if (!/^[0-9a-f]{40}$/.test(merge)) throw new Error("--merge must be a full 40-hex commit sha");
   if (!/^[0-9]+$/.test(runId)) throw new Error("--run-id must be digits only");
@@ -1193,6 +1246,17 @@ export function gateDump({ repoRoot, dump, merge, runId, cliVersion, out, emit, 
   const head = git(repoRoot, ["rev-parse", "HEAD"]).trim();
   // D-09. A refusal names the flag and the rule, never a value: argv is runner text.
   if (head !== merge) throw new Error("--merge is not this checkout's HEAD; the marker must come from the MERGE tree");
+  // WR-02 (defence in depth beside the main-listing check below). "Re-run failed
+  // jobs" keeps the old run's github.sha but dumps PROD as it is NOW; D-01(ii)'s
+  // concurrency argument holds for the first attempt only.
+  if (runAttempt !== "1") {
+    const shown = runAttempt === undefined || runAttempt === "" ? "unset" : /^[0-9]{1,6}$/.test(String(runAttempt)) ? runAttempt : "unreadable";
+    throw new Error(
+      `GITHUB_RUN_ATTEMPT is ${shown}, and only attempt 1 may dump: a re-run keeps this run's merge sha but dumps PROD as it is now, ` +
+        "so its marker could disagree with its dump. Dispatch a fresh run instead: gh workflow run supabase-migrate.yml --ref main " +
+        "(a local run sets GITHUB_RUN_ATTEMPT=1)",
+    );
+  }
 
   // Every section-C gate runs BEFORE the out dir is written, and on the D-10
   // no-op path too: a run that writes nothing still proves the dump is clean.
@@ -1226,10 +1290,7 @@ export function gateDump({ repoRoot, dump, merge, runId, cliVersion, out, emit, 
 
   // D-09: the MERGE tree, never the working tree — an uncommitted migration in
   // the checkout is not one PRODUCTION received.
-  const listed = git(repoRoot, ["ls-tree", "--name-only", merge, MIGRATIONS_REL])
-    .split("\n")
-    .filter((p) => p.endsWith(".sql"))
-    .map((p) => p.replace(/^.*\//, ""));
+  const listed = migrationBasenames(git(repoRoot, ["ls-tree", "--name-only", merge, MIGRATIONS_REL]));
   // D-27: refused by count and 1-based position, never by name — a basename
   // that fails the rule is exactly the text that must not reach a log.
   const badAt = listed.flatMap((b, i) => (MIGRATION_BASENAME_STRICT_RE.test(b) ? [] : [i + 1]));
@@ -1239,6 +1300,10 @@ export function gateDump({ repoRoot, dump, merge, runId, cliVersion, out, emit, 
         `${MIGRATION_BASENAME_STRICT_RE}; refusing to write them anywhere`,
     );
   }
+  // SFH-01: refuse unless current main carries exactly the merge's migrations.
+  const mainDefect = judgeMainListing(listed, mainListing({ repoRoot, remote }));
+  console.log(`baseline-redump main-listing: ${mainDefect === null ? "equal to the merge's" : "differs from the merge's"}`);
+  if (mainDefect !== null) throw new Error(mainDefect);
 
   const committedMarker = committedBytes(repoRoot, merge, MARKER_REL).toString("utf8");
   const committedDumpSha = sha256(committedBytes(repoRoot, merge, BASELINE_SQL_REL));
@@ -1504,7 +1569,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 198;
+export const EXPECTED_ASSERTIONS = 204;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -1574,6 +1639,13 @@ function selfTest({ withGitleaks = false } = {}) {
     return f;
   };
   const cleanGl = () => fakeGitleaks({ rc: 0, reportText: "[]", version: "self-test-fake" });
+  /**
+   * gateDump as the arms that test something else call it: attempt 1, and `main`
+   * standing exactly at the checkout's HEAD. The attempt refusal and the real
+   * anonymous main fetch have their own arms in 4b (SFH-01, WR-02).
+   */
+  const mainAtHead = ({ repoRoot }) => migrationBasenames(git(repoRoot, ["ls-tree", "--name-only", "HEAD", MIGRATIONS_REL]));
+  const gateDumpT = (o) => gateDump({ runAttempt: "1", mainListing: mainAtHead, ...o });
   /** The runner for the happy-path and no-op arms: the real binary under --with-gitleaks. */
   const gl = () => (withGitleaks ? realGitleaks : cleanGl());
   /** A JWT-shaped value joined at runtime; this file never carries one (RESEARCH F13). */
@@ -2088,7 +2160,7 @@ function selfTest({ withGitleaks = false } = {}) {
     const outputs = [];
     const emit = (k, v) => outputs.push(`${k}=${v}`);
 
-    const same = gateDump({
+    const same = gateDumpT({
       repoRoot: repo, dump: join(repo, BASELINE_SQL_REL), merge: base, runId: "1", cliVersion: "2.98.2",
       out: join(dir, "art0"), emit, gitleaks: gl(),
     });
@@ -2101,7 +2173,7 @@ function selfTest({ withGitleaks = false } = {}) {
     writeFileSync(dumpPath, Buffer.concat([realDump, Buffer.from("\n")]));
     const newSha = sha256(readFileSync(dumpPath));
     outputs.length = 0;
-    const gd = gateDump({ repoRoot: repo, dump: dumpPath, merge: base, runId: "4242", cliVersion: "2.98.2", out: join(dir, "art"), emit, gitleaks: gl() });
+    const gd = gateDumpT({ repoRoot: repo, dump: dumpPath, merge: base, runId: "4242", cliVersion: "2.98.2", out: join(dir, "art"), emit, gitleaks: gl() });
     ok(gd.changed === true && outputs.join(",") === "changed=true", "a changed dump emits changed=true");
     const art = readFileSync(join(dir, "art/baseline-carried-migrations.txt"), "utf8");
     ok(markerBasenames(art).join(",") === [M1, M2].join(","), "the marker lists exactly the two committed basenames");
@@ -2169,7 +2241,7 @@ function selfTest({ withGitleaks = false } = {}) {
       "judgeMeasured refuses a PARTIAL measured.json (truncated, so not JSON) by kind",
     );
     ok(
-      throws(() => gateDump({ repoRoot: repo, dump: dumpPath, merge: "d".repeat(40), runId: "1", cliVersion: "2.98.2", out: join(dir, "x"), emit, gitleaks: cleanGl() })),
+      throws(() => gateDumpT({ repoRoot: repo, dump: dumpPath, merge: "d".repeat(40), runId: "1", cliVersion: "2.98.2", out: join(dir, "x"), emit, gitleaks: cleanGl() })),
       "a --merge that names no commit in this repository is refused (the real not-HEAD arm is in 4b/4)",
     );
 
@@ -2190,7 +2262,7 @@ function selfTest({ withGitleaks = false } = {}) {
       if (bytes !== null) writeFileSync(p, bytes);
       outputs.length = 0;
       const r = capture(() =>
-        gateDump({ repoRoot: repo, dump: p, merge: base, runId: "1", cliVersion: "2.98.2", out: outDir, emit, gitleaks }),
+        gateDumpT({ repoRoot: repo, dump: p, merge: base, runId: "1", cliVersion: "2.98.2", out: outDir, emit, gitleaks }),
       );
       return { ...r, wroteNothing: !existsSync(outDir) && outputs.length === 0 };
     };
@@ -2244,7 +2316,7 @@ function selfTest({ withGitleaks = false } = {}) {
     g(["commit", "-q", "-m", "bad basename"], { cwd: repo2 });
     outputs.length = 0;
     const badName = capture(() =>
-      gateDump({
+      gateDumpT({
         repoRoot: repo2, dump: join(repo2, BASELINE_SQL_REL), merge: g(["rev-parse", "HEAD"], { cwd: repo2 }).trim(),
         runId: "1", cliVersion: "2.98.2", out: join(dir, "bad-out"), emit, gitleaks: cleanGl(),
       }),
@@ -2305,7 +2377,7 @@ function selfTest({ withGitleaks = false } = {}) {
       "a gitleaks run that could not complete (exit 2, no report) is MEASURE_FAIL and refuses",
     );
     const noRunner = capture(() =>
-      gateDump({ repoRoot: repo, dump: join(repo, BASELINE_SQL_REL), merge: base, runId: "1", cliVersion: "2.98.2", out: join(dir, "nr"), emit }),
+      gateDumpT({ repoRoot: repo, dump: join(repo, BASELINE_SQL_REL), merge: base, runId: "1", cliVersion: "2.98.2", out: join(dir, "nr"), emit }),
     );
     ok(noRunner.threw !== null && /gitleaks runner/.test(noRunner.threw.message), "a gateDump call with no gitleaks runner refuses, never skips the gate");
     ok(
@@ -2397,7 +2469,7 @@ function selfTest({ withGitleaks = false } = {}) {
     ok(again.committed === false && outputs.join(",") === "committed=false", "composing the already-committed pair is a no-op: committed=false");
     writeFileSync(dumpPath, Buffer.concat([realDump, Buffer.from("\n\n")]));
     const head2 = g(["rev-parse", "HEAD"]).trim();
-    gateDump({ repoRoot: repo, dump: dumpPath, merge: head2, runId: "5", cliVersion: "2.98.2", out: join(dir, "art2"), emit, gitleaks: cleanGl() });
+    gateDumpT({ repoRoot: repo, dump: dumpPath, merge: head2, runId: "5", cliVersion: "2.98.2", out: join(dir, "art2"), emit, gitleaks: cleanGl() });
     const redRunner = (cmd, args) => (args.includes("--check-currency") ? { status: 1, stdout: "", stderr: "" } : fakeRunner(cmd, args));
     ok(
       throws(() => compose({ repoRoot: repo, inDir: join(dir, "art2"), out: join(dir, "pr3"), runner: redRunner, emit, date: "2026-02-03" })) &&
@@ -2546,7 +2618,7 @@ function selfTest({ withGitleaks = false } = {}) {
     // a format-valid but absent sha the arm above would refuse even without the
     // equality check (`git show` fails); a real older commit refuses ONLY on it.
     const notHead = capture(() =>
-      gateDump({ repoRoot: repo, dump: join(dir, "dump.sql"), merge: base, runId: "1", cliVersion: "2.98.2", out: join(dir, "nh"), emit, gitleaks: cleanGl() }),
+      gateDumpT({ repoRoot: repo, dump: join(dir, "dump.sql"), merge: base, runId: "1", cliVersion: "2.98.2", out: join(dir, "nh"), emit, gitleaks: cleanGl() }),
     );
     ok(
       notHead.threw !== null && /--merge/.test(notHead.threw.message) && /MERGE tree/.test(notHead.threw.message) &&
@@ -2561,7 +2633,7 @@ function selfTest({ withGitleaks = false } = {}) {
     for (const [flag, bad, re] of argCases) {
       const value = Object.values(bad)[0];
       const r = capture(() =>
-        gateDump({ repoRoot: repo, dump: dumpPath, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "arg"), emit, gitleaks: cleanGl(), ...bad }),
+        gateDumpT({ repoRoot: repo, dump: dumpPath, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "arg"), emit, gitleaks: cleanGl(), ...bad }),
       );
       ok(r.threw !== null && re.test(r.threw.message) && !r.text.includes(value), `a malformed ${flag} refuses by name without echoing the value`);
     }
@@ -2579,7 +2651,7 @@ function selfTest({ withGitleaks = false } = {}) {
     writeFileSync(committedDump, g(["show", `HEAD:${BASELINE_SQL_REL}`], { encoding: "buffer" }));
     outputs.length = 0;
     const noop = capture(() =>
-      gateDump({ repoRoot: repo, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "noop"), emit, gitleaks: cleanGl() }),
+      gateDumpT({ repoRoot: repo, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "noop"), emit, gitleaks: cleanGl() }),
     );
     ok(
       noop.threw === null && /^::notice::baseline-redump: dump and marker are byte-identical to the committed pair — no PR; bot branch absent$/m.test(noop.text) &&
@@ -2594,12 +2666,12 @@ function selfTest({ withGitleaks = false } = {}) {
     try {
       process.env.GITHUB_OUTPUT = ghOut;
       capture(() =>
-        gateDump({ repoRoot: repo, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "gh1"), emit: emitToGithubOutput, gitleaks: cleanGl() }),
+        gateDumpT({ repoRoot: repo, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "gh1"), emit: emitToGithubOutput, gitleaks: cleanGl() }),
       );
       ghLines = readFileSync(ghOut, "utf8").split("\n").filter((l) => l.startsWith("changed="));
       delete process.env.GITHUB_OUTPUT;
       capture(() =>
-        gateDump({ repoRoot: repo, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "gh2"), emit: emitToGithubOutput, gitleaks: cleanGl() }),
+        gateDumpT({ repoRoot: repo, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "gh2"), emit: emitToGithubOutput, gitleaks: cleanGl() }),
       );
       ghLinesAfterUnset = readFileSync(ghOut, "utf8").split("\n").filter((l) => l.startsWith("changed="));
     } finally {
@@ -2617,12 +2689,66 @@ function selfTest({ withGitleaks = false } = {}) {
     const head3 = g(["rev-parse", "HEAD"]).trim();
     outputs.length = 0;
     const newMig = capture(() =>
-      gateDump({ repoRoot: repo, dump: committedDump, merge: head3, runId: "1", cliVersion: "2.98.2", out: join(dir, "art3"), emit, gitleaks: cleanGl() }),
+      gateDumpT({ repoRoot: repo, dump: committedDump, merge: head3, runId: "1", cliVersion: "2.98.2", out: join(dir, "art3"), emit, gitleaks: cleanGl() }),
     );
     ok(
       newMig.threw === null && outputs.join(",") === "changed=true" &&
         markerBasenames(readFileSync(join(dir, "art3/baseline-carried-migrations.txt"), "utf8")).includes(M3),
       "an unchanged dump with a NEW committed migration at the merge is changed=true, and the marker carries it",
+    );
+
+    console.log("=== SELF-TEST 4b2/4: only attempt 1 may dump, and only while main carries exactly the merge's migrations (WR-02, SFH-01)");
+    // A clone detached at head2 (the committed dump is a no-op there), whose `origin`
+    // is a bare repository whose `main` this arm moves. gateDump runs with the REAL
+    // anonymous fetch here: no mainListing is injected.
+    const mainBare = join(dir, "main-listing.git");
+    g(["init", "-q", "--bare", mainBare], { cwd: dir });
+    const atHead2 = join(dir, "at-head2");
+    g(["clone", "-q", repo, atHead2], { cwd: dir });
+    g(["checkout", "-q", head2], { cwd: atHead2 });
+    g(["remote", "set-url", "origin", mainBare], { cwd: atHead2 });
+    const realMain = (over = {}) => {
+      outputs.length = 0;
+      const outDir = join(dir, `main-listing-out-${randomBytes(4).toString("hex")}`);
+      const r = capture(() =>
+        gateDump({
+          repoRoot: atHead2, dump: committedDump, merge: head2, runId: "1", runAttempt: "1", cliVersion: "2.98.2", out: outDir, emit,
+          gitleaks: cleanGl(), ...over,
+        }),
+      );
+      return { ...r, wroteNothing: !existsSync(outDir) && outputs.length === 0 };
+    };
+    for (const [attempt, shown] of [["2", "2"], [undefined, "unset"]]) {
+      const r = realMain({ runAttempt: attempt });
+      ok(
+        r.threw !== null && r.threw.message.includes(`GITHUB_RUN_ATTEMPT is ${shown}, and only attempt 1 may dump`) &&
+          r.threw.message.includes("gh workflow run supabase-migrate.yml --ref main") && r.wroteNothing,
+        `a GITHUB_RUN_ATTEMPT of ${shown} refuses before any gate, naming the attempt and the fresh-dispatch remedy, and writes nothing (WR-02)`,
+      );
+    }
+    g(["push", "-q", mainBare, `${head3}:refs/heads/main`]);
+    const ahead = realMain();
+    ok(
+      ahead.threw !== null && ahead.threw.message.startsWith("main carries 1 migration(s) this merge does not") &&
+        ahead.text.includes("baseline-redump main-listing: differs from the merge's") && !ahead.text.includes(M3) && ahead.wroteNothing,
+      "a merge whose main (fetched anonymously) carries one more migration refuses by count, never echoing the name, and writes nothing (SFH-01)",
+    );
+    g(["push", "-q", "--force", mainBare, `${head2}:refs/heads/main`]);
+    const equal = realMain();
+    ok(
+      equal.threw === null && equal.text.includes("baseline-redump main-listing: equal to the merge's") && outputs.join(",") === "changed=false",
+      "the same merge passes once main carries exactly its migrations: the real anonymous fetch reads main and the no-op proceeds",
+    );
+    const lacks = realMain({ mainListing: () => [M1] });
+    ok(
+      lacks.threw !== null && lacks.threw.message.startsWith("main lacks 1 migration(s) this merge carries") && lacks.wroteNothing,
+      "a main that LACKS a migration the merge carries refuses too, naming the other direction by count",
+    );
+    g(["remote", "set-url", "origin", join(dir, "no-such-main-remote.git")], { cwd: atHead2 });
+    const unmeasured = realMain();
+    ok(
+      unmeasured.threw !== null && /^MEASURE_FAIL: git fetch of main exit [0-9]+/.test(unmeasured.threw.message) && unmeasured.wroteNothing,
+      "a main that cannot be fetched is MEASURE_FAIL and writes nothing: a comparison that could not run is never a match",
     );
 
     console.log("=== SELF-TEST 4c/4: --check-bot-branch and the bot-PR status of the D-10 no-op (D-11, D-24, Open Question 3)");
@@ -2752,7 +2878,7 @@ function selfTest({ withGitleaks = false } = {}) {
     const noopNotice = (remote) => {
       outputs.length = 0;
       const r = capture(() =>
-        gateDump({
+        gateDumpT({
           repoRoot: noopClone, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, `noop-${remote}`), emit,
           gitleaks: cleanGl(), remote,
         }),
@@ -2998,6 +3124,8 @@ function main(argv) {
         dump: resolve(f["--dump"]),
         merge: f["--merge"],
         runId: f["--run-id"],
+        // WR-02: Actions always sets it; it reaches the script through the runner's environment, never an expression.
+        runAttempt: process.env.GITHUB_RUN_ATTEMPT,
         cliVersion: f["--cli-version"],
         out: resolve(f["--out"]),
         emit: emitToGithubOutput,
