@@ -1121,8 +1121,13 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // census moved in the same commit as the other three.
     // MOVED 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03), 77 -> 78:
     // supabase/tests/test_mark_rpc_bridge_advisory_lock.sql joined the corpus.
-    // MEASURED: `node scripts/lint-sql-gates.mjs` printed `scanned 78 file(s)`.
-    expect(res.out).toMatch(/scanned 78 file/);
+    // MOVED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03), 77 -> 78:
+    // supabase/tests/test_api_keys_account_identity.sql joined the corpus.
+    // MOVED 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK), 78 -> 79:
+    // the UNION of the two lines above. Each side added one file over the common
+    // base of 77, so BOTH joined the corpus: 77 + 1 + 1 = 79.
+    // MEASURED: `node scripts/lint-sql-gates.mjs` printed `scanned 79 file(s)` on the merged tree.
+    expect(res.out).toMatch(/scanned 79 file/);
     expect(res.status, res.out).toBe(0);
   });
 

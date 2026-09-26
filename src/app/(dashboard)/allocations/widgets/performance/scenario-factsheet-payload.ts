@@ -52,7 +52,8 @@
  *   - ONE degenerate gate governs everything: when `portfolioDaily` is degenerate
  *     (empty / ANY non-finite return / < 2 dated points) the WHOLE payload is
  *     safe-empty (dates [], equity [], drawdowns [], all panels empty, comparator
- *     null) and NEVER throws — no NaN/Inf reaches the chart.
+ *     null) and NEVER throws — no NaN/Inf reaches the chart arrays. Its scalar
+ *     statistics are NaN (D7), which every renderer formats as "—".
  *   - The `csv` arm is correct by construction: a hypothetical scenario
  *     physically cannot carry peer-rank / portfolio panels (no-invented-data).
  */
@@ -135,48 +136,55 @@ export interface ScenarioFactsheetPayloadArgs {
   periodsPerYear?: number;
 }
 
-/** Zeroed scalar metrics — no KpiStrip mounts in the composer, so the two
- *  charts never read these. Present only for `FactsheetPayload` completeness. */
-function zeroedComputeSummary(): ComputeSummary {
+/**
+ * The scalar metrics of a blend with no usable observations. The composer's
+ * FactsheetBody renders these in its KPI strip and MetricsColumn, so a statistic
+ * over zero observations is NaN, never 0 (founder decision D7, "Show —
+ * everywhere"): every renderer formats NaN, and the JSON `null` it becomes, as
+ * "—", matching the composer's own KpiStrip for the same blend. Only the counts
+ * and spans stay 0 (`n`, `years`, `longest_dd`): zero observations, zero years
+ * observed and zero drawdown days are measured facts, not statistics.
+ */
+function emptyComputeSummary(): ComputeSummary {
   return {
     n: 0,
     start: "",
     end: "",
     years: 0,
-    cum_ret: 0,
-    cagr: 0,
-    ann_vol: 0,
-    sharpe: 0,
-    sortino: 0,
-    calmar: 0,
-    max_dd: 0,
+    cum_ret: NaN,
+    cagr: NaN,
+    ann_vol: NaN,
+    sharpe: NaN,
+    sortino: NaN,
+    calmar: NaN,
+    max_dd: NaN,
     longest_dd: 0,
-    skew: 0,
-    kurt: 0,
-    mtd: 0,
-    ytd: 0,
-    p3m: 0,
-    p6m: 0,
-    p1y: 0,
-    best_day: 0,
-    worst_day: 0,
-    best_week: 0,
-    worst_week: 0,
-    best_month: 0,
-    worst_month: 0,
-    best_quarter: 0,
-    worst_quarter: 0,
-    best_year: 0,
-    worst_year: 0,
-    win_rate: 0,
-    avg_win: 0,
-    avg_loss: 0,
-    profit_factor: 0,
-    var95: 0,
-    cvar95: 0,
+    skew: NaN,
+    kurt: NaN,
+    mtd: NaN,
+    ytd: NaN,
+    p3m: NaN,
+    p6m: NaN,
+    p1y: NaN,
+    best_day: NaN,
+    worst_day: NaN,
+    best_week: NaN,
+    worst_week: NaN,
+    best_month: NaN,
+    worst_month: NaN,
+    best_quarter: NaN,
+    worst_quarter: NaN,
+    best_year: NaN,
+    worst_year: NaN,
+    win_rate: NaN,
+    avg_win: NaN,
+    avg_loss: NaN,
+    profit_factor: NaN,
+    var95: NaN,
+    cvar95: NaN,
     recovery_factor: null,
-    pain_index: 0,
-    ulcer_index: 0,
+    pain_index: NaN,
+    ulcer_index: NaN,
     tail_ratio: null,
     omega_ratio: null,
     common_sense_ratio: null,
@@ -223,12 +231,15 @@ function emptyStreaks(): FactsheetCsvPayload["streaks"] {
   };
 }
 
-/** Safe-empty bootstrap-CI block — zeroed point/lo/hi + empty histograms. */
+/**
+ * Safe-empty bootstrap-CI block: no resamples, so every point and CI bound is
+ * NaN ("—" under D7, never "0.00"), over empty histograms.
+ */
 function emptyBootstrapCI(): FactsheetCsvPayload["bootstrapCI"] {
   return {
-    sharpe: { point: 0, lo: 0, hi: 0, hist: { lo: 0, hi: 0, bins: [] } },
-    sortino: { point: 0, lo: 0, hi: 0, hist: { lo: 0, hi: 0, bins: [] } },
-    max_dd: { point: 0, lo: 0, hi: 0, hist: { lo: 0, hi: 0, bins: [] } },
+    sharpe: { point: NaN, lo: NaN, hi: NaN, hist: { lo: 0, hi: 0, bins: [] } },
+    sortino: { point: NaN, lo: NaN, hi: NaN, hist: { lo: 0, hi: 0, bins: [] } },
+    max_dd: { point: NaN, lo: NaN, hi: NaN, hist: { lo: 0, hi: 0, bins: [] } },
     n_resamples: 0,
     block_len: 0,
     // Phase 103 (MTM-04, Finding #6): degenerate-path default — zero
@@ -265,8 +276,9 @@ function emptyQuantiles(): FactsheetCsvPayload["quantiles"] {
  *
  * Returns the safe-empty defaults when `portfolioDaily` is degenerate (empty /
  * any non-finite return / < 2 dated points) WITHOUT calling `compute()` (which
- * throws on empty) — never NaN/Inf, never fabricated zeros presented as real
- * metrics (PAYLOAD-05). `strategyMetrics.n` flows from `rets.length` (the true
+ * throws on empty). No NaN/Inf reaches a chart array, and no fabricated zero is
+ * presented as a real metric (PAYLOAD-05): a statistic over no observations is
+ * NaN, rendered "—" (D7). `strategyMetrics.n` flows from `rets.length` (the true
  * overlapping-observation count), driving the unchanged n<252 caveat.
  */
 type ReturnsBody = {
@@ -318,7 +330,7 @@ function buildReturnsBody(
       rollingWindow: notEnoughWindow(),
       rollingBetaWindow: notEnoughWindow(),
       strategyWorst10: [],
-      strategyMetrics: zeroedComputeSummary(),
+      strategyMetrics: emptyComputeSummary(),
       streaks: emptyStreaks(),
       calmarByYear: [],
       bootstrapCI: emptyBootstrapCI(),
@@ -398,7 +410,8 @@ function buildReturnsBody(
  *
  * ONE degenerate gate: a poisoned/empty/sub-2-date RETURNS series collapses the
  * ENTIRE payload to safe-empty (dates [], equity [], drawdowns [], all panels
- * empty, comparator null) BEFORE any compute() call. Never NaN/Inf.
+ * empty, comparator null) BEFORE any compute() call. No NaN/Inf in any chart
+ * array; the scalar statistics are NaN ("—" under D7).
  */
 export function buildScenarioFactsheetPayload(
   args: ScenarioFactsheetPayloadArgs,

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 
 import AlphaBetaDecomposition from "./AlphaBetaDecomposition";
+import { CONSTANT_YIELDS, navConstantYield } from "@/__tests__/fixtures/dispersion-nav";
 
 // ---------------------------------------------------------------------------
 // Recharts ResponsiveContainer needs a measured container. Mock it so
@@ -103,5 +104,76 @@ describe("AlphaBetaDecomposition", () => {
     expect(
       screen.getByText("Insufficient data for alpha/beta decomposition."),
     ).toBeTruthy();
+  });
+
+  // Phase 166.2 review round 1 (WR-04), founder decision D7: when every strategy
+  // is a compounding constant yield, the equal-weight benchmark has no dispersion,
+  // so beta does not exist and neither does alpha. The widget must say "—", never
+  // a beta of 0 that labels the whole return "alpha".
+  it("renders alpha as a dash, with no chart, when the benchmark has no dispersion", () => {
+    const flat = navConstantYield(CONSTANT_YIELDS["apy_1pct"], dailyReturns.length);
+    const flatStrategy = (id: string, name: string, weight: number) => {
+      const s = mockStrategy(id, name, weight);
+      return {
+        ...s,
+        strategy: {
+          ...s.strategy,
+          strategy_analytics: {
+            ...s.strategy.strategy_analytics,
+            daily_returns: dailyReturns.map((d, i) => ({ date: d.date, value: flat[i] })),
+          },
+        },
+      };
+    };
+    render(
+      <AlphaBetaDecomposition
+        {...widgetProps}
+        data={{
+          ...mockData,
+          strategies: [flatStrategy("s1", "A", 0.5), flatStrategy("s2", "B", 0.5)],
+        }}
+      />,
+    );
+    expect(screen.getByTestId("alpha-value").textContent).toBe("—");
+    expect(screen.getByText(/the benchmark has no dispersion/)).toBeTruthy();
+  });
+
+  // Phase 166.2 review round 2 (IN-02 / SFH-R2 LOW-2): the muted line names the
+  // benchmark's dispersion only when that is the cause. Here the benchmark
+  // DISPERSES, but one day's equal-weight sum overflows to Infinity (two finite
+  // 1e308 returns), so beta is undefined for a different reason. Blaming "no
+  // dispersion" would send the reader after the wrong fault.
+  it("uses neutral wording when beta is undefined for a reason other than a flat benchmark", () => {
+    const overflowStrategy = (id: string, name: string, weight: number) => {
+      const s = mockStrategy(id, name, weight);
+      return {
+        ...s,
+        strategy: {
+          ...s.strategy,
+          strategy_analytics: {
+            ...s.strategy.strategy_analytics,
+            daily_returns: dailyReturns.map((d, i) => (i === 30 ? { ...d, value: 1e308 } : d)),
+          },
+        },
+      };
+    };
+    render(
+      <AlphaBetaDecomposition
+        {...widgetProps}
+        data={{
+          ...mockData,
+          strategies: [overflowStrategy("s1", "A", 0.5), overflowStrategy("s2", "B", 0.5)],
+        }}
+      />,
+    );
+    expect(screen.getByTestId("alpha-value").textContent).toBe("—");
+    expect(screen.getByText("Alpha and beta cannot be measured over this window.")).toBeTruthy();
+    expect(screen.queryByText(/no dispersion/)).toBeNull();
+  });
+
+  it("control: a dispersing benchmark renders a signed percentage alpha, not a dash", () => {
+    render(<AlphaBetaDecomposition {...widgetProps} />);
+    expect(screen.queryByTestId("alpha-value")).toBeNull();
+    expect(screen.getByText("annualized")).toBeTruthy();
   });
 });
