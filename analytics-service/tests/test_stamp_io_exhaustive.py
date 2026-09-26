@@ -1101,11 +1101,22 @@ def test_every_stamp_message_survives_the_500_character_cut() -> None:
 # sentinel), then parsed, never regexed: both closures are full of prose that
 # names ``db_execute`` and ``.execute()``, and prose must never satisfy or trip
 # a gate.
-_IO_CALL_NAMES = frozenset(
+#
+# ⛔ R6-03 (round 6): the name list used to be HAND-WRITTEN, and it missed
+# every helper defined outside the closures that reaches the database
+# (``_refresh_marker_live_state``, ``_refresh_marker_still_on_row``,
+# ``sync_strategy_analytics_status``): a direct ``await`` of one of them in a
+# closure passed the scan. So only the BASE names are listed. Every other I/O
+# name is DERIVED: a module-level function in ``services/`` is I/O when its body
+# calls a base name or an already-derived one, to a fixpoint.
+# ⚠️ What the derivation cannot see: a method (``self.x()``), a function
+# outside ``services/``, and I/O reached only through a callable passed in
+# (``upsert_or_drop_provenance`` runs the write it is handed; that write is a
+# nested ``def`` here and is scanned where it is defined).
+_BASE_IO_CALL_NAMES = frozenset(
     {
         "db_execute",
         "db_read_with_retry",
-        "_read_refresh_marker_state",
         "to_thread",
         "run_in_executor",
         "create_task",
@@ -1114,6 +1125,37 @@ _IO_CALL_NAMES = frozenset(
         "get_supabase",
     }
 )
+
+
+def _derive_io_call_names() -> frozenset[str]:
+    import ast
+    import pathlib
+
+    services = pathlib.Path(_JOB_WORKER_FILE).parent
+    calls_by_def: dict[str, list[set[str]]] = {}
+    for path in sorted(services.glob("*.py")):
+        for node in ast.parse(path.read_text()).body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                called: set[str] = set()
+                for call in ast.walk(node):
+                    if isinstance(call, ast.Call):
+                        if isinstance(call.func, ast.Name):
+                            called.add(call.func.id)
+                        elif isinstance(call.func, ast.Attribute):
+                            called.add(call.func.attr)
+                calls_by_def.setdefault(node.name, []).append(called)
+    names = set(_BASE_IO_CALL_NAMES)
+    changed = True
+    while changed:
+        changed = False
+        for name, bodies in calls_by_def.items():
+            if name not in names and any(body & names for body in bodies):
+                names.add(name)
+                changed = True
+    return frozenset(names)
+
+
+_IO_CALL_NAMES = _derive_io_call_names()
 # The one database call a stamp closure makes outside ``_stamp_io``, on
 # purpose: it runs after the loud stamp has landed (see ``_stamp_io``'s
 # docstring). It is a call to a helper defined OUTSIDE the closure, so the scan
@@ -1256,7 +1298,33 @@ _SCAN_REDS = {
     + "    _read()\n",
     "inline-execute": _SCAN_GREEN + "    supabase.rpc('f', {}).execute()\n",
     "a-new-client": _SCAN_GREEN + "    get_supabase()\n",
+    # R6-03: helpers defined OUTSIDE the closure, found only by derivation.
+    "a-derived-marker-read": _SCAN_GREEN
+    + "    await _refresh_marker_live_state(supabase, job_id, expected, "
+    "raise_programming_errors=True)\n",
+    "a-derived-status-sync": _SCAN_GREEN
+    + "    await sync_strategy_analytics_status(strategy_id)\n",
 }
+
+
+def test_the_io_name_set_is_derived_not_listed() -> None:
+    """R6-03: the derivation must reach the helpers the hand-written list
+    missed, or it silently collapses to the base names and proves nothing. The
+    wrapper itself must NOT be an I/O name, or every covered call would be
+    flagged through it.
+
+    Neuter to redden: make ``_derive_io_call_names`` return
+    ``_BASE_IO_CALL_NAMES`` (the two derived red fixtures also pass then)."""
+    for helper in (
+        "_read_refresh_marker_state",
+        "_refresh_marker_live_state",
+        "_refresh_marker_still_on_row",
+        "sync_strategy_analytics_status",
+        "persist_basis_series",
+    ):
+        assert helper in _IO_CALL_NAMES, helper
+    assert "_stamp_io" not in _IO_CALL_NAMES
+    assert len(_IO_CALL_NAMES) > len(_BASE_IO_CALL_NAMES) + 20, len(_IO_CALL_NAMES)
 
 
 def test_the_scan_passes_its_green_fixture() -> None:
