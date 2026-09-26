@@ -2617,6 +2617,28 @@ async def _resolve_ccxt_flow_price_index(
 # ⚠️ The tail mirror is the one site that only logs on ``READ_ERROR``: the
 # follow-on is already enqueued, and nothing it could do would change hop 2.
 #
+# ⛔ WHAT THE TRANSIENT RETRY DOES AND DOES NOT PRESERVE (round 2, WR-01 /
+# SFH-R2-03). It holds ONLY while the strategy row is
+# ``complete_with_warnings`` or ``computation_warned``. The raise sends the job
+# to ``failed_retry``, and ``mark_compute_job_failed`` runs the SQL status bridge
+# on that transition too. With a non-terminal job present and no protect-hold,
+# the bridge's branch (a) KEEPS ``complete_with_warnings`` but REWRITES a plain
+# ``complete`` row to ``computing``. On the next attempt, the entry snapshot
+# (single-key) and the stamp-time status read (composite) therefore see
+# ``computing``, which is not terminal-success, so no protection arms and a
+# recurring failure stamps loudly. If the retries run out instead, the bridge
+# finds the row at ``computing``, which is not publish-healthy, and branch (b)
+# un-publishes it. So for a plain-``complete`` row the retry helps only when the
+# ORIGINAL failure clears on retry.
+# Python cannot close this, and the reason is the SQL bridge, not a missing
+# snapshot. A publish state kept in job metadata would still meet a row the
+# bridge has already moved to ``computing``, and on exhaustion no Python code
+# runs at all. The closure is a bridge migration: its non-terminal branch has to
+# keep a healthy publish state for a job carrying a refresh marker. That was not
+# written in this phase. The live-cohort figure (``complete`` 0 /
+# ``complete_with_warnings`` 5) is dated in the REUSE-01 comment above and was
+# not re-measured for this note.
+#
 # ⚠️ The read goes through ``db_read_with_retry``, so a gateway 504 is retried
 # inside that helper's bounded budget before it counts as a failure (WR-03). The
 # cost is a slightly longer window between this read and the stamp, on exactly
@@ -2845,6 +2867,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # fails, the job fails TRANSIENT (``RefreshMarkerRereadUnavailable``) BEFORE
     # any crawl or write, so the retry costs one queue round trip and no work.
     # A DEFINITIVE answer (no row) keeps its meaning above.
+    # ⚠️ The retry reads a row the SQL bridge may already have moved. A plain
+    # ``complete`` row is rewritten to ``computing`` on the ``failed_retry``
+    # transition, so the retry's snapshot is not terminal-success and the
+    # refresh runs unprotected. This protects ``complete_with_warnings`` / warned
+    # rows only. See the WR-01 note above ``MarkerLiveState``.
     #
     # ⚠️ RESIDUAL WINDOW, stated rather than hidden: the fan-out enqueues this
     # job in SQL, so the earliest oracle Python can take is here — a sibling
@@ -3192,7 +3219,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # Stamping loud on it turned one gateway blip into a funded
                 # account going dark on a refresh nobody watches. So nothing is
                 # written and the job fails TRANSIENT: the queue retries it and
-                # the retry re-reads the row. The read already logged at ERROR
+                # the retry re-reads the row. ⚠️ That preserves the publish state
+                # only for a ``complete_with_warnings`` / warned row. The bridge
+                # rewrites a plain ``complete`` row to ``computing`` on the
+                # ``failed_retry`` transition, so the retry's entry snapshot no
+                # longer protects it. See the WR-01 note above
+                # ``MarkerLiveState``. The read already logged at ERROR
                 # and reported to Sentry. Every caller of this closure awaits it
                 # directly, and no handler between here and ``dispatch`` catches
                 # ``RefreshMarkerRereadUnavailable`` (traced in the 164.6.7
@@ -6503,8 +6535,13 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # answer. Stamping loud on it turned one gateway blip into a funded
         # composite going dark on a refresh nobody watches. So nothing is written
         # and the job fails TRANSIENT: the queue retries it, and the retry
-        # re-reads the row. The read already logged at ERROR and reported to
-        # Sentry. Nothing is suppressed either — no error-only write happens.
+        # re-reads the row. ⚠️ That keeps the factsheet live only for a
+        # ``complete_with_warnings`` / warned row. The bridge rewrites a plain
+        # ``complete`` row to ``computing`` on the ``failed_retry`` transition,
+        # so the retry's ``_read_existing_failed_row`` answers ``computing`` and
+        # the guard does not arm. See the WR-01 note above ``MarkerLiveState``. The read already logged at ERROR
+        # and reported to Sentry. Nothing is suppressed either — no error-only
+        # write happens.
         #
         # ⛔ WR-03 / SFH-R2-01: the CAUSE is recorded before the read that may
         # postpone it. On ``READ_ERROR`` the raise below replaces this stamp and
