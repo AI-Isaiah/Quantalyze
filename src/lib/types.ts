@@ -1472,8 +1472,13 @@ export interface BenchmarkComparison {
 export interface OptimizerSuggestionRow {
   strategy_id: string;
   strategy_name: string;
-  corr_with_portfolio: number;
-  sharpe_lift: number;
+  /**
+   * null = the correlation does not exist (the portfolio or the candidate
+   * does not disperse). Never read as 0 (166.1 D7, founder 2026-09-26).
+   */
+  corr_with_portfolio: number | null;
+  /** null = the portfolio has no Sharpe, so a lift over it does not exist (166.1 D7). */
+  sharpe_lift: number | null;
   dd_improvement: number;
   score: number;
 }

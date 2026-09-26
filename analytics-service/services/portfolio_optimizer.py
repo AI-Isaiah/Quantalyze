@@ -105,15 +105,22 @@ def find_improvement_candidates(
         # guarantees the overlap, and a fallback would state a correlation of 0.
         corr_with_portfolio = pairwise_correlation_or_none(port_baseline, aligned[cid])
         # A None metric on EITHER side of a delta means that axis has no
-        # comparable baseline (uniform across candidates), so it contributes 0.
-        sharpe_lift = (new_sharpe - current_sharpe) if current_sharpe is not None else 0
+        # comparable baseline (uniform across candidates), so it contributes 0
+        # to the SCORE. The EMITTED lift stays None (166.1 D7, founder
+        # 2026-09-26): a lift over a portfolio with no Sharpe does not exist,
+        # and a 0.0 there was rendered as "no change" (round-1 SFH HIGH-1).
+        sharpe_lift = (new_sharpe - current_sharpe) if current_sharpe is not None else None
         corr_reduction = (
             (current_avg_corr - new_avg_corr)
             if current_avg_corr is not None and new_avg_corr is not None
             else 0
         )
         dd_improvement = (current_max_dd - new_max_dd) if current_max_dd is not None else 0
-        score = w1 * sharpe_lift + w2 * corr_reduction + w3 * dd_improvement
+        score = (
+            w1 * (sharpe_lift if sharpe_lift is not None else 0.0)
+            + w2 * corr_reduction
+            + w3 * dd_improvement
+        )
         results.append({
             "strategy_id": cid,
             "corr_with_portfolio": _safe_float(corr_with_portfolio),
@@ -231,8 +238,10 @@ def generate_narrative(analytics: dict[str, Any]) -> str:
     if suggestions and len(suggestions) > 0 and attr:
         worst_attr = min(attr, key=lambda a: a.get("contribution", 0))
         best_suggestion = suggestions[0]
-        sharpe_lift = best_suggestion.get("sharpe_lift", 0)
-        if sharpe_lift > 0 and worst_attr.get("strategy_name"):
+        # 166.1 D7: a None lift (no Sharpe on the baseline) is present as a key,
+        # so `.get(..., 0)` returns None; it states no recommendation.
+        sharpe_lift = best_suggestion.get("sharpe_lift")
+        if sharpe_lift is not None and sharpe_lift > 0 and worst_attr.get("strategy_name"):
             # The recommendation sentence requires both a non-empty risk
             # decomposition AND a portfolio-level Sharpe to quote the before/after.
             portfolio_sharpe = analytics.get("portfolio_sharpe")

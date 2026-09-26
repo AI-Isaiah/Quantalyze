@@ -216,6 +216,37 @@ def test_c3_corr_with_a_constant_yield_portfolio_equals_the_all_zero_portfolio(y
     assert _c3_corr(const, candidate) == with_zero
 
 
+@pytest.mark.parametrize("flat", ["constant_yield", "all_zero"])
+def test_c3_sharpe_lift_over_a_flat_portfolio_is_none_not_zero(flat: str) -> None:
+    """HIGH-1 (round-1 SFH), D7 (founder 2026-09-26): a portfolio that does not
+    disperse has no Sharpe, so the lift over it does not exist. It was a
+    fabricated 0.0, which the card read as "no change". The score still ranks:
+    the missing axis contributes an explicit 0 there, uniform across candidates.
+    Constant-yield and all-zero books must read the same."""
+    const = _residue_leg("daily_1e-4")
+    port = const if flat == "constant_yield" else _zeros_like(const)
+    out = find_improvement_candidates({"p": port}, {"c": _noise(const.index, seed=34)}, {"p": 1.0})
+    assert [r["strategy_id"] for r in out] == ["c"], "the noisy candidate must still be ranked"
+    row = out[0]
+    assert row["sharpe_lift"] is None
+    assert row["corr_with_portfolio"] is None
+    assert isinstance(row["score"], float) and math.isfinite(row["score"])
+
+
+def test_c3_narrative_tolerates_a_none_sharpe_lift() -> None:
+    """The narrative read `sharpe_lift > 0` off the top suggestion; a None lift
+    (HIGH-1) must drop the recommendation sentence, not raise TypeError."""
+    from services.portfolio_optimizer import generate_narrative
+
+    text = generate_narrative({
+        "optimizer_suggestions": [{"strategy_id": "c", "sharpe_lift": None}],
+        "attribution_breakdown": [{"strategy_name": "A", "contribution": -0.01}],
+        "portfolio_sharpe": 1.0,
+        "risk_decomposition": [{"strategy_id": "a"}],
+    })
+    assert "expected Sharpe moves" not in text
+
+
 def test_c3_two_correlated_noisy_legs_keep_a_correlation() -> None:
     idx = nav_constant_yield(1e-4).index
     port = _noise(idx, seed=32)
