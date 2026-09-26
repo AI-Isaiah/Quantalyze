@@ -274,13 +274,35 @@ def test_s6_optimizer_constant_yield_column_is_constant_series(daily_yield):
 @_YIELD_PARAMS
 def test_s7_risk_decomposition_of_constant_yields_splits_no_risk(daily_yield):
     """Two strategies that do not move carry no risk, so there is no share of it
-    to apportion. Today the ~1e-32 residue covariance splits it 48.6% / 51.4%."""
+    to apportion. Before 166.1 the ~1e-32 residue covariance split it 48.6% /
+    51.4%. The share is undefined, so it is None (round-1 SFH MEDIUM-2, founder
+    decision D7 2026-09-26), not the 0 that made the rows sum to 0%. The
+    all-zero book reads the same (D7)."""
     a = nav_constant_yield(daily_yield)
     b = nav_constant_yield(daily_yield / 2)
+    for sd, mean in ((float(a.std()), float(a.mean())), (float(b.std()), float(b.mean()))):
+        assert 0.0 < sd <= residue_floor(mean), "precondition: residue, not an exact zero"
     cov = pd.DataFrame({"a": a, "b": b}).cov().to_numpy()
-    out = compute_risk_decomposition([0.5, 0.5], cov)
-    assert [row["marginal_risk_pct"] for row in out] == [0, 0]
-    assert [row["component_var"] for row in out] == [0, 0]
+    zero_cov = pd.DataFrame({"a": a * 0.0, "b": b * 0.0}).cov().to_numpy()
+    for matrix in (cov, zero_cov):
+        out = compute_risk_decomposition([0.5, 0.5], matrix)
+        assert [row["marginal_risk_pct"] for row in out] == [None, None]
+        assert [row["component_var"] for row in out] == [None, None]
+        assert all(row["standalone_vol"] is not None for row in out)
+
+
+def test_s7_narrative_skips_a_risk_split_that_does_not_exist():
+    """generate_narrative took max() over marginal_risk_pct; None rows must not
+    raise and must not produce a concentration sentence."""
+    from services.portfolio_optimizer import generate_narrative
+
+    text = generate_narrative({
+        "risk_decomposition": [
+            {"strategy_name": "A", "marginal_risk_pct": None, "weight_pct": 50},
+            {"strategy_name": "B", "marginal_risk_pct": None, "weight_pct": 50},
+        ],
+    })
+    assert "Risk is concentrated" not in text
 
 
 def test_s7_risk_decomposition_of_real_risk_still_splits():

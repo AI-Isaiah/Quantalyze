@@ -201,9 +201,14 @@ def generate_narrative(analytics: dict[str, Any]) -> str:
     if avg_corr is not None:
         quality = "well-diversified" if avg_corr < 0.3 else "moderately correlated" if avg_corr < 0.6 else "highly correlated"
         parts.append(f"Average pairwise correlation is {avg_corr:.2f}, which is {quality}")
-    risk = analytics.get("risk_decomposition", [])
+    # 166.1 D7 (SFH MEDIUM-2): a portfolio that carries no risk has no risk
+    # share, so its rows carry None. Only rows with a share can be concentrated.
+    risk = [
+        r for r in analytics.get("risk_decomposition", [])
+        if r.get("marginal_risk_pct") is not None
+    ]
     if risk:
-        top_risk = max(risk, key=lambda r: r.get("marginal_risk_pct", 0))
+        top_risk = max(risk, key=lambda r: r["marginal_risk_pct"])
         if top_risk.get("marginal_risk_pct", 0) > top_risk.get("weight_pct", 0) * 1.2:
             parts.append(
                 f"Risk is concentrated in {top_risk.get('strategy_name', 'unknown')} "

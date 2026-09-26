@@ -1455,9 +1455,14 @@ export interface AttributionRow {
 export interface RiskDecompositionRow {
   strategy_id: string;
   strategy_name: string;
-  marginal_risk_pct: number;
+  /**
+   * null = the portfolio carries no risk, so no share of it exists to
+   * apportion (166.1 D7, founder 2026-09-26; round-1 SFH MEDIUM-2). Never 0.
+   */
+  marginal_risk_pct: number | null;
   standalone_vol: number;
-  component_var: number;
+  /** null for the same reason as `marginal_risk_pct`. */
+  component_var: number | null;
   weight_pct: number;
 }
 

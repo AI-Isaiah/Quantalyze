@@ -123,9 +123,11 @@ function parseRiskDecompositionRow(v: Json): RiskDecompositionRow | null {
   return {
     strategy_id,
     strategy_name: asString(v.strategy_name) ?? strategy_id,
-    marginal_risk_pct: asNumber(v.marginal_risk_pct) ?? 0,
+    // 166.1 D7: a risk share that does not exist (a portfolio with no risk)
+    // stays null; `?? 0` read it as "carries none of the risk".
+    marginal_risk_pct: asNumber(v.marginal_risk_pct),
     standalone_vol: asNumber(v.standalone_vol) ?? 0,
-    component_var: asNumber(v.component_var) ?? 0,
+    component_var: asNumber(v.component_var),
     weight_pct: asNumber(v.weight_pct) ?? 0,
   };
 }
