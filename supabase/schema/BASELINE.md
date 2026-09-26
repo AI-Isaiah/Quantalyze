@@ -483,7 +483,8 @@ comments ignored, a missing or empty dump refused rather than read as clean); a 
 `SET client_encoding` count other than one, or a home-directory path; zero tables or any data
 statement; a marker not taken from the tree of the applied merge; a red currency, content-drift
 or staleness gate on the composed tree; the skip trailer in the commit message or the PR text;
-and a commit on the bot branch that the bot did not author. It writes only the six paths PR #864
+and a commit on the bot branch that the bot did not author, while an open pull request has that
+branch as its head (once that pull request is merged or closed, the next run resets the branch). It writes only the six paths PR #864
 changed (the dump, the marker, this file, `CHANGELOG.md`, `VERSION`, `package.json`), with
 measured values only. It never writes the "what it adds" column; the PR body asks the reviewer
 to add it. ⛔ **It never merges.** Its CI runs wait for a human to click

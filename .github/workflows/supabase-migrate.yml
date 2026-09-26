@@ -1448,8 +1448,12 @@ jobs:
         id: compose
         run: node scripts/baseline-redump.mjs --compose --in "${RUNNER_TEMP}/redump-in" --out "${RUNNER_TEMP}/redump-pr"
       # D-24: a commit on the bot branch by anyone but the bot is a human edit,
-      # and it is refused loudly rather than force-pushed away. The public repo
-      # is fetched anonymously, so this step carries no token.
+      # and it is refused loudly rather than force-pushed away while an OPEN pull
+      # request has the branch as its head (CR-02). Once that PR is merged or
+      # closed, the branch is reset under the lease with a ::notice::, so a
+      # squash merge cannot wedge every later run. The public repo is fetched,
+      # and its open PRs listed through the REST API, anonymously, so this step
+      # carries no token.
       - name: Refuse to overwrite a human commit on the bot branch
         id: botbranch
         if: steps.compose.outputs.committed == 'true'

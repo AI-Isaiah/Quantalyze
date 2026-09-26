@@ -641,8 +641,9 @@ export function composePrBody(m) {
     `Newly carried migrations: ${carried}.`,
     "",
     `The bot writes measured values only. Add the "what it adds" column for each newly carried migration to the ` +
-      `\`### Regenerated ${m.date}\` section of \`supabase/schema/BASELINE.md\`, as a commit on this branch. A later ` +
-      "re-dump refuses to force-push over a commit that is not the bot's, and names this PR instead.",
+      `\`### Regenerated ${m.date}\` section of \`supabase/schema/BASELINE.md\`, as a commit on this branch. While this PR ` +
+      "is open, a later re-dump refuses to force-push over a commit that is not the bot's, and names this PR instead. Once " +
+      "this PR is merged or closed, the next re-dump resets the branch, so land that commit through this PR.",
     "",
     `## If \`main\` has moved, or VERSION \`${m.newVersion}\` collides`,
     "",
@@ -1118,6 +1119,68 @@ export function botPrStatus(repoRoot, remote, lsRemote = lsRemoteBotRefs) {
 }
 
 /**
+ * CR-02: judge the REST answer to "open pull requests whose head is the bot
+ * branch". Only an array of objects with a positive-integer `number`, `state`
+ * `open` and `head.ref` equal to BOT_BRANCH is read; anything else is
+ * MEASURE_FAIL, because an unreadable answer is never "no open PR".
+ */
+export function judgeOpenBotPrs(bodyText) {
+  let parsed;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    return { verdict: "measure_fail", detail: "the answer is not JSON", numbers: [] };
+  }
+  if (!Array.isArray(parsed)) return { verdict: "measure_fail", detail: "the answer is not a JSON array", numbers: [] };
+  const readable = parsed.every(
+    (p) => p && Number.isInteger(p.number) && p.number > 0 && p.state === "open" && p.head && p.head.ref === BOT_BRANCH,
+  );
+  if (!readable) return { verdict: "measure_fail", detail: "an entry is not an open pull request headed by the bot branch", numbers: [] };
+  return { verdict: "pass", detail: "", numbers: parsed.map((p) => p.number).sort((a, b) => a - b) };
+}
+
+/**
+ * CR-02: the curl argv for the anonymous open-PR lookup. `-q` FIRST stops curl
+ * reading a `.curlrc`, and no header carries a credential: the repository is
+ * public, and the step that runs this holds no token. `gh` is deliberately not
+ * used here, because it picks up GH_TOKEN / GITHUB_TOKEN by itself.
+ */
+export function openBotPrsCurlArgv(repo) {
+  if (!REPO_SLUG_RE.test(String(repo))) throw new Error("the repository slug is not <owner>/<name>; refusing to look up its pull requests");
+  const head = encodeURIComponent(`${repo.split("/")[0]}:${BOT_BRANCH}`);
+  return [
+    "-q", "-sS", "--max-time", "30",
+    "-H", "Accept: application/vnd.github+json",
+    "-H", "X-GitHub-Api-Version: 2022-11-28",
+    "-H", "User-Agent: baseline-redump",
+    "-w", "\n%{http_code}",
+    `https://api.github.com/repos/${repo}/pulls?head=${head}&state=open&per_page=100`,
+  ];
+}
+
+/**
+ * The real lookup. Anonymous api.github.com calls share a small per-IP budget on
+ * hosted runners, so a non-200 (403 above all) is MEASURE_FAIL naming the status,
+ * never "no open PR". It runs only when a foreign commit was found.
+ */
+function anonOpenBotPrs({ repo }) {
+  const r = spawnSync("curl", openBotPrsCurlArgv(repo), { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  if (r.error || r.status !== 0) {
+    throw new Error(`MEASURE_FAIL: curl exit ${r.error ? -1 : r.status}; the bot branch's open pull requests were not measured, so nothing may be pushed`);
+  }
+  const out = String(r.stdout ?? "");
+  const cut = out.lastIndexOf("\n");
+  const code = out.slice(cut + 1).trim();
+  if (code !== "200") {
+    const shown = /^[0-9]{3}$/.test(code) ? code : "unreadable";
+    throw new Error(`MEASURE_FAIL: the open pull request lookup answered HTTP ${shown}; nothing may be pushed until it is measured (re-dispatch supabase-migrate.yml on main)`);
+  }
+  const judged = judgeOpenBotPrs(out.slice(0, cut));
+  if (judged.verdict !== "pass") throw new Error(`MEASURE_FAIL: the open pull request lookup: ${judged.detail}; nothing may be pushed`);
+  return judged.numbers;
+}
+
+/**
  * --check-bot-branch (D-24, D-11). Emits `lease` for the push, or refuses.
  *
  * ⛔ The lease closes the window between this check and the push: plan 04's push
@@ -1126,12 +1189,15 @@ export function botPrStatus(repoRoot, remote, lsRemote = lsRemoteBotRefs) {
  * whose commits were judged here. An EMPTY lease means "must not exist": if anyone
  * creates the branch after this check, the push is rejected.
  *
- * The refusal always NAMES where the human commit sits: every PR whose head ref is
- * the tip, or, when none is, the measured negative that no PR's head points at it.
- * Both come from the same anonymous `ls-remote`, so there is no path that refuses
- * without having determined which of the two it is.
+ * A commit the bot did not author (D-24) refuses ONLY while an OPEN pull request
+ * has the bot branch as its head (CR-02), and the refusal names that PR. With no
+ * open PR, the branch is reset under the lease, and a `::notice::` records the
+ * released commits' short shas and the closed or merged PRs at the tip (or the
+ * measured negative that none points at it). The open-PR lookup is anonymous
+ * (`openBotPrsCurlArgv`) and runs only when a foreign commit was found; a lookup
+ * that fails is MEASURE_FAIL and emits no lease.
  */
-export function checkBotBranch({ repoRoot, remote, emit, lsRemote = lsRemoteBotRefs }) {
+export function checkBotBranch({ repoRoot, remote, emit, repo = DEFAULT_REPO, lsRemote = lsRemoteBotRefs, openPrs = anonOpenBotPrs }) {
   assertRemoteName(remote);
   const ls = lsRemote(repoRoot, remote);
   if (ls.status !== 0) {
@@ -1167,15 +1233,28 @@ export function checkBotBranch({ repoRoot, remote, emit, lsRemote = lsRemoteBotR
     emit("lease", tip);
     return { present: true, lease: tip, prs };
   }
-  const where =
-    prs.length > 0
-      ? `It sits on pull request(s) ${prList}, whose head points at tip ${short(tip)}. Merge or close that pull request, or move the commit to a branch of your own,`
-      : `No pull request's head points at tip ${short(tip)}, so the commit was pushed after the branch's pull requests closed. Move the commit to a branch of your own,`;
-  throw new Error(
-    `a human commit sits on ${BOT_BRANCH} and the redump will not overwrite it: ${judged.foreign.length} of ${judged.total} commit(s) over main ` +
-      `are not authored by ${BOT_NAME} (${judged.foreign.slice(0, MAX_LINES_PRINTED).join(", ")}). ${where} ` +
-      "then re-dispatch supabase-migrate.yml on main",
+  // CR-02: a human commit is protected only while it is under review. The repo
+  // squash-merges and keeps merged branches, so after a merge the commit is never
+  // an ancestor of main and would wedge every later run; once no OPEN pull request
+  // has the branch as its head, a human has accepted or abandoned that work.
+  const foreignText = `${judged.foreign.length} of ${judged.total} commit(s) over main are not authored by ${BOT_NAME} (${judged.foreign.slice(0, MAX_LINES_PRINTED).join(", ")})`;
+  const open = openPrs({ repo });
+  if (open.length > 0) {
+    const openList = open.map((n) => `#${n}`).join(", ");
+    throw new Error(
+      `a human commit sits on ${BOT_BRANCH} and the redump will not overwrite it while it is under review: ${foreignText}. ` +
+        `It is on OPEN pull request(s) ${openList}. Merge ${openList} (or close it, or move the commit to a branch of your own), ` +
+        "then re-dispatch supabase-migrate.yml on main: once no open pull request has the branch as its head, the re-dump resets it",
+    );
+  }
+  const closed = prs.length > 0 ? `closed or merged pull request(s) ${prList} point at its tip` : "no pull request points at its tip";
+  console.log(
+    `::notice::baseline-redump: ${foreignText} on ${BOT_BRANCH}, and no OPEN pull request has the branch as its head (${closed}); ` +
+      `the branch is reset under the lease on tip ${short(tip)}`,
   );
+  console.log(`baseline-redump bot-branch: present tip=${short(tip)} prs=${prs.length > 0 ? prs.map((n) => `#${n}`).join(",") : "none"} released=${judged.foreign.length}`);
+  emit("lease", tip);
+  return { present: true, lease: tip, prs, released: judged.foreign };
 }
 
 // ── the one pull request: create or edit, never merge (D-11, D-13, D-14) ──────
@@ -1627,7 +1706,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 209;
+export const EXPECTED_ASSERTIONS = 213;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -2889,10 +2968,31 @@ function selfTest({ withGitleaks = false } = {}) {
       g(["remote", "set-url", "origin", bare], { cwd: checkout });
       return { bare, checkout, tip };
     };
+    // CR-02: the open-PR lookup is injected in every arm, so the self-test never
+    // reaches the network. By default it counts its calls and THROWS, so an arm that
+    // should never look (every all-bot branch) fails loud if it does.
+    const noLookup = () => {
+      const f = () => {
+        f.calls += 1;
+        throw new Error("self-test: the open-PR lookup ran on a path that must not look");
+      };
+      f.calls = 0;
+      return f;
+    };
+    const openAre = (numbers) => {
+      const f = ({ repo }) => {
+        f.calls += 1;
+        f.repo = repo;
+        return numbers;
+      };
+      f.calls = 0;
+      return f;
+    };
     const botRun = (scenario, remote = "origin", extra = {}) => {
       outputs.length = 0;
-      const r = capture(() => checkBotBranch({ repoRoot: scenario.checkout, remote, emit, ...extra }));
-      return { ...r, outputs: [...outputs] };
+      const openPrs = extra.openPrs ?? noLookup();
+      const r = capture(() => checkBotBranch({ repoRoot: scenario.checkout, remote, emit, repo: "fixture-owner/fixture-repo", ...extra, openPrs }));
+      return { ...r, outputs: [...outputs], lookups: openPrs.calls };
     };
     const absentScenario = botRemote({ branch: false });
     const absentRun = botRun(absentScenario);
@@ -2903,7 +3003,7 @@ function selfTest({ withGitleaks = false } = {}) {
     const allBot = botRemote();
     const allBotRun = botRun(allBot);
     ok(
-      allBotRun.threw === null && allBotRun.outputs.join(",") === `lease=${allBot.tip}` &&
+      allBotRun.threw === null && allBotRun.outputs.join(",") === `lease=${allBot.tip}` && allBotRun.lookups === 0 &&
         allBotRun.text.includes(`baseline-redump bot-branch: present tip=${short(allBot.tip)} prs=none`),
       "a bot branch whose commits over main are all bot-authored emits lease=<its tip sha> and prs=none",
     );
@@ -2915,23 +3015,73 @@ function selfTest({ withGitleaks = false } = {}) {
       "an all-bot branch whose tip refs/pull/7/head points at prints prs=#7 beside its lease",
     );
     const foreign7 = botRemote({ foreign: true, pull7: true });
-    const foreign7Run = botRun(foreign7);
+    const open7 = openAre([7]);
+    const foreign7Run = botRun(foreign7, "origin", { openPrs: open7 });
     ok(
       foreign7Run.threw !== null && /^::error::/m.test(foreign7Run.text) && foreign7Run.text.includes(BOT_BRANCH) &&
-        /\b1 of 2 commit/.test(foreign7Run.text) && /#7\b/.test(foreign7Run.text) && foreign7Run.outputs.length === 0,
-      "a commit on the bot branch authored by anyone but the bot REFUSES (D-24), naming the branch, a foreign count of 1 and pull request #7, and emits no lease",
+        /\b1 of 2 commit/.test(foreign7Run.text) && foreign7Run.text.includes("It is on OPEN pull request(s) #7. Merge #7") &&
+        open7.calls === 1 && open7.repo === "fixture-owner/fixture-repo" && foreign7Run.outputs.length === 0,
+      "a commit on the bot branch authored by anyone but the bot, while OPEN pull request #7 has the branch as its head, REFUSES (D-24, CR-02), naming the branch, a foreign count of 1 and #7 with the remedy, and emits no lease",
     );
     ok(
       foreign7Run.threw !== null && foreign7Run.text.includes(BOT_BRANCH) && /\b1 of 2 commit/.test(foreign7Run.text) &&
         !foreign7Run.text.includes(foreignMessage) && !foreign7Run.text.includes("self-test@invalid"),
       "the refusal never prints the foreign commit's message or its author's email",
     );
-    const foreignNone = botRemote({ foreign: true });
-    const foreignNoneRun = botRun(foreignNone);
+    // CR-02: the squash-merge wedge. PR #7 was merged (or closed): its head ref is
+    // frozen at the tip, the human commit is not an ancestor of main, and no PR is open.
+    const closed7Run = botRun(foreign7, "origin", { openPrs: openAre([]) });
     ok(
-      foreignNoneRun.threw !== null && foreignNoneRun.text.includes(`No pull request's head points at tip ${short(foreignNone.tip)}`) &&
-        !/#[0-9]/.test(foreignNoneRun.text) && foreignNoneRun.outputs.length === 0,
-      "the same foreign commit with NO pull ref at its tip refuses and states, as a measured negative, that no pull request's head points at the tip",
+      closed7Run.threw === null && closed7Run.outputs.join(",") === `lease=${foreign7.tip}` &&
+        closed7Run.text.includes("closed or merged pull request(s) #7 point at its tip") &&
+        closed7Run.text.includes(`the branch is reset under the lease on tip ${short(foreign7.tip)}`) && /^::notice::/m.test(closed7Run.text) &&
+        !closed7Run.text.includes(foreignMessage),
+      "the same human commit after PR #7 was merged or closed, with no OPEN pull request, PASSES with lease=<tip> and a ::notice:: naming #7 (CR-02: no permanent wedge)",
+    );
+    const foreignNone = botRemote({ foreign: true });
+    const foreignNoneRun = botRun(foreignNone, "origin", { openPrs: openAre([]) });
+    ok(
+      foreignNoneRun.threw === null && foreignNoneRun.outputs.join(",") === `lease=${foreignNone.tip}` &&
+        foreignNoneRun.text.includes("no pull request points at its tip") && !/#[0-9]/.test(foreignNoneRun.text),
+      "a foreign commit with NO pull ref at its tip and no open pull request passes too, stating the measured negative that no pull request points at the tip",
+    );
+    const lookupFail = botRun(foreign7, "origin", {
+      openPrs: () => {
+        throw new Error("MEASURE_FAIL: the open pull request lookup answered HTTP 403; nothing may be pushed until it is measured");
+      },
+    });
+    ok(
+      lookupFail.threw !== null && /MEASURE_FAIL: .*HTTP 403/.test(lookupFail.threw.message) && lookupFail.outputs.length === 0,
+      "an open-PR lookup that fails (HTTP 403, the shared anonymous budget) refuses as MEASURE_FAIL and emits no lease: unmeasured is never 'no open PR'",
+    );
+    const pr = (o) => ({ number: 7, state: "open", head: { ref: BOT_BRANCH }, ...o });
+    const jo = (v) => {
+      try {
+        return judgeOpenBotPrs(JSON.stringify(v));
+      } catch {
+        return null;
+      }
+    };
+    ok(
+      jo([pr({ number: 12 }), pr()])?.numbers.join(",") === "7,12" && jo([])?.verdict === "pass" && jo([])?.numbers.length === 0 &&
+        [{ message: "API rate limit exceeded" }, [pr({ state: "closed" })], [pr({ head: { ref: "main" } })], [pr({ number: 0 })]].every(
+          (bad) => jo(bad)?.verdict === "measure_fail",
+        ) &&
+        judgeOpenBotPrs("not json").verdict === "measure_fail",
+      "judgeOpenBotPrs reads only open PRs headed by the bot branch; an error object, a closed or foreign-headed entry, a bad number or non-JSON is MEASURE_FAIL",
+    );
+    const curlArgv = (() => {
+      try {
+        return openBotPrsCurlArgv("fixture-owner/fixture-repo");
+      } catch {
+        return null;
+      }
+    })();
+    ok(
+      curlArgv !== null && curlArgv[0] === "-q" &&
+        curlArgv.at(-1) === `https://api.github.com/repos/fixture-owner/fixture-repo/pulls?head=fixture-owner%3A${encodeURIComponent(BOT_BRANCH)}&state=open&per_page=100` &&
+        !curlArgv.some((a) => /authorization|token|bearer|--netrc|^-n$|^-u$|--user/i.test(a)) && throws(() => openBotPrsCurlArgv("not a slug")),
+      "the open-PR lookup is anonymous: curl's -q comes first (no .curlrc), no argument carries a credential, and a malformed slug refuses",
     );
     const missingScenario = botRemote({ branch: false });
     g(["remote", "set-url", "origin", join(dir, "no-such-remote.git")], { cwd: missingScenario.checkout });
@@ -3236,7 +3386,7 @@ function main(argv) {
     }
     if (argv[0] === "--check-bot-branch") {
       const f = parseFlags(argv.slice(1), ["--remote"]);
-      checkBotBranch({ repoRoot: cwdRepoRoot(), remote: f["--remote"], emit: emitToGithubOutput });
+      checkBotBranch({ repoRoot: cwdRepoRoot(), remote: f["--remote"], emit: emitToGithubOutput, repo: process.env.GITHUB_REPOSITORY || DEFAULT_REPO });
       return 0;
     }
     if (argv[0] === "--open-or-edit-pr") {
