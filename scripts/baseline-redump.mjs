@@ -543,9 +543,8 @@ export function gateDump({ repoRoot, dump, merge, runId, cliVersion, out, emit, 
   if (!/^[0-9]+$/.test(runId)) throw new Error("--run-id must be digits only");
   if (!/^\d+\.\d+\.\d+$/.test(cliVersion)) throw new Error("--cli-version must be X.Y.Z");
   const head = git(repoRoot, ["rev-parse", "HEAD"]).trim();
-  if (head !== merge) {
-    throw new Error(`--merge ${short(merge, 12)} is not this checkout's HEAD (${short(head, 12)}); the marker must come from the MERGE tree`);
-  }
+  // D-09. A refusal names the flag and the rule, never a value: argv is runner text.
+  if (head !== merge) throw new Error("--merge is not this checkout's HEAD; the marker must come from the MERGE tree");
 
   // Every section-C gate runs BEFORE the out dir is written, and on the D-10
   // no-op path too: a run that writes nothing still proves the dump is clean.
@@ -1036,7 +1035,7 @@ function selfTest({ withGitleaks = false } = {}) {
     );
     ok(
       throws(() => gateDump({ repoRoot: repo, dump: dumpPath, merge: "d".repeat(40), runId: "1", cliVersion: "2.98.2", out: join(dir, "x"), emit, gitleaks: cleanGl() })),
-      "a --merge that is not HEAD is refused",
+      "a --merge that names no commit in this repository is refused (the real not-HEAD arm is in 4b/4)",
     );
 
     console.log("=== SELF-TEST 2b/4: every section-C refusal fires on a red fixture built at runtime");
