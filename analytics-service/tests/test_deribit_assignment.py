@@ -23,7 +23,12 @@ What these tests pin, and why each can fail:
     account, a job, an instrument or a change value (the repo is public).
   * D-07 — the option book vocabulary is one constant that is a subset of the
     cash-bearing set, so no expiry type can be summed as cash while the
-    mark-to-market arm treats it as invisible.
+    mark-to-market arm treats it as invisible. Each of the option-book sites that
+    reads it (pre-coverage flag, trailing activity, summary cross-check, replay,
+    the mark_to_market option arm, its non-derivative guard) has its own
+    `test_site<N>_*` pin here, each seen red when only that site is reverted to
+    the old trade/delivery pair; the mark_to_market and smoothed_mtm end-to-end
+    runs (`*_mtm_e2e_*`, `test_smoothed_e2e_*`) pin them through the adapter.
 
 Synthetic identifiers only. No broker call: the end-to-end case runs through the
 monkeypatched crawl harness in tests/test_smoothed_mtm_core.py.
@@ -45,11 +50,20 @@ from services.deribit_txn import (
     _OPTION_EXPIRY_TYPES,
     CASH_BEARING_TYPES,
     LedgerValuationError,
+    _assert_smoothed_summary_cross_check,
+    _option_activity_after_coverage,
+    _pre_coverage_option_days,
     assert_balance_identity,
+    replay_option_positions,
     txn_rows_to_daily_records,
     txn_rows_to_native_daily,
 )
-from tests.test_smoothed_mtm_core import _mk_ms, _opt_row, _run_options_ledger
+from tests.test_smoothed_mtm_core import (
+    _mk_ms,
+    _opt_row,
+    _run_options_ledger,
+    _series_to_daymap,
+)
 
 EVIDENCE_FILE = (
     Path(__file__).resolve().parent.parent
@@ -482,3 +496,301 @@ async def test_windowed_refuses_before_the_usd_twin(monkeypatch: Any) -> None:
     assert "assignment classification requires a full-history crawl" in msg, msg
     assert _ASSIGNMENT_CONTESTED_PHRASE not in msg, msg
     assert "unknown Deribit transaction-log type" not in msg, msg
+
+
+# ---------------------------------------------------------------------------
+# D-07 / D-04 — each option-book site treats `assignment` like `delivery`.
+#
+# Plan 01 swapped six literal ("trade", "delivery") sites to the shared
+# vocabulary constants. Each test below pins ONE site, so reverting that site
+# alone to the old pair turns its test red: a mark_to_market double count, an
+# un-zeroed assigned short, or a silently mis-routed expiry cannot come back
+# without a named failure. The seventh site (the acceptance script's eligibility
+# check) is pinned in tests/test_deribit_acceptance.py.
+# ---------------------------------------------------------------------------
+
+# The (non-assignment) commission on the synthetic assignment rows below.
+ASSIGNED_FEE = 0.0005
+
+
+def _summary(
+    day: str, *, hour: int = 8, rpl: float = 0.0, upl: float = 0.0, id: int = 900
+) -> dict[str, Any]:
+    """A synthetic BTC options_settlement_summary. Its instrument_name is the
+    assigned put's: a summary is not a delivery or settlement, so it must NOT
+    contest the assignment (the D-02 guard is type-scoped)."""
+    return {
+        "type": "options_settlement_summary",
+        "instrument_name": PUT,
+        "currency": "BTC",
+        "change": 0.0,
+        "realized_pl": rpl,
+        "unrealized_pl": upl,
+        "timestamp": _mk_ms(day, hour),
+        "id": id,
+    }
+
+
+def _assignment(
+    day: str, *, instrument: str = PUT, change: float = ASSIGNED,
+    commission: float = ASSIGNED_FEE, position: float = 0.0, id: int = 2,
+    hour: int = 10,
+) -> dict[str, Any]:
+    row = _opt_row(
+        instrument=instrument, day=day, change=change, position=position, id=id,
+        type="assignment", commission=commission,
+    )
+    row["timestamp"] = _mk_ms(day, hour)
+    row["side"] = "close buy"
+    return row
+
+
+def test_site1_pre_coverage_flags_an_assignment_day() -> None:
+    """SITE1-PRE-COVERAGE-FLAG (`_pre_coverage_option_days`): an assignment
+    before its currency's summary coverage is booked at its full cash change
+    (the pre-rollout fallback), so its day must be flagged for the
+    complete_with_warnings stamp exactly as a delivery day is. Reverting the
+    site to the old pair drops the flag: the day ships as a clean covered day."""
+    rows = [_summary("2026-01-20"), _assignment("2026-01-16")]
+    assert _pre_coverage_option_days(rows) == [("BTC", "2026-01-16")]
+
+
+def test_site2_trailing_assignment_marks_its_currency() -> None:
+    """SITE2-TRAILING-ACTIVITY (`_option_activity_after_coverage`): an
+    assignment after the last summary is trailing-edge option activity, so its
+    currency must be exempted from the strict mark_to_market identity (the §5
+    gate reconciles it). Reverting the site leaves the currency unmarked and the
+    strict guard false-fires on a healthy account."""
+    rows = [_summary("2026-01-15"), _assignment("2026-01-16")]
+    assert _option_activity_after_coverage(rows) == frozenset({"BTC"})
+
+
+def _cross_check_rows(*, with_assignment: bool) -> list[dict[str, Any]]:
+    # Sold one put at 01-15 10:00 (premium 0.04, fee 0.01 -> change +0.03) and
+    # were assigned at 01-15 14:00 (payout 0.02, no fee -> change -0.02). The
+    # summary at 01-16 08:00 settles that session: rpl = 0.04 - 0.02 = 0.02, gross
+    # of fees, flat at both window ends (so ΔBook = 0).
+    opening = _opt_row(
+        instrument=PUT, day=DAY_OPEN, change=0.03, position=-1.0, id=1
+    )
+    rows = [opening, _summary(DAY_EXPIRY, rpl=0.02)]
+    if with_assignment:
+        rows.append(
+            _assignment(DAY_OPEN, change=-0.02, commission=0.0, hour=14)
+        )
+    return rows
+
+
+def test_site3_cross_check_includes_the_assignment() -> None:
+    """SITE3-CROSS-CHECK-INCLUDES (`_assert_smoothed_summary_cross_check`):
+    Deribit's own session P&L carries the assignment's economics, so our
+    reconstruction must include the assignment's change plus commission inside
+    the window. Built so that leaving the assignment out breaches (the second
+    half proves it): reverting the site to the old pair raises on a summary that
+    is right."""
+    throughput = {"BTC": 0.05}
+    _assert_smoothed_summary_cross_check(
+        _cross_check_rows(with_assignment=True), {}, {}, throughput
+    )
+    # Calibration: the same summary WITHOUT the assignment row in the
+    # reconstruction is a real breach, so the pass above is not vacuous.
+    with pytest.raises(LedgerValuationError, match="summary cross-check breach"):
+        _assert_smoothed_summary_cross_check(
+            _cross_check_rows(with_assignment=False), {}, {}, throughput
+        )
+
+
+def test_site4_replay_zeroes_the_assigned_short() -> None:
+    """SITE4-REPLAY-ZEROES-SHORT (`replay_option_positions`): an assignment
+    closes the assigned short (its post-event position is 0). The replay must
+    see it, or the smoothed book carries a short position past its expiry and
+    marks a position the account no longer holds."""
+    rows = _census_rows()
+    book = replay_option_positions(rows)
+    assert set(book) == {PUT}
+    assert book[PUT]["positions"] == {DAY_OPEN: -1.0, DAY_EXPIRY: 0.0}
+    assert book[PUT]["last_day"] == DAY_EXPIRY
+
+
+_MISSING_FIELD_CASES = {
+    "absent": lambda r, f: {k: v for k, v in r.items() if k != f},
+    "none": lambda r, f: dict(r, **{f: None}),
+    "blank": lambda r, f: dict(r, **{f: "  "}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_MISSING_FIELD_CASES))
+def test_site4_missing_position_refuses(case: str) -> None:
+    """SITE4-MISSING-POSITION: the post-event position is the ONLY book source,
+    so an assignment without it refuses (never defaulted to 0, which would look
+    like a correct close). Matched on the replay guard's own wording."""
+    opening, assigned = _census_rows()
+    rows = [opening, _MISSING_FIELD_CASES[case](assigned, "position")]
+    with pytest.raises(
+        LedgerValuationError, match="absent/null/blank/non-numeric position"
+    ) as exc:
+        replay_option_positions(rows)
+    assert "type='assignment'" in str(exc.value)
+
+
+def _mtm_rows() -> list[dict[str, Any]]:
+    # Coverage window [01-13 08:00, 01-18 08:00]; the summaries carry no P&L so
+    # the only native entries come from the assignment rows under test.
+    inside = _assignment("2026-01-16")
+    outside = _assignment("2026-01-20", instrument=OTHER_PUT, id=3)
+    return [_summary("2026-01-14", id=901), _summary("2026-01-18", id=902),
+            inside, outside]
+
+
+def test_site5_mtm_inside_coverage_contributes_minus_commission() -> None:
+    """SITE5-MTM-INSIDE-COVERAGE (the option arm of `txn_rows_to_native_daily`):
+    under mark_to_market the summary channel carries the expiry cash inside its
+    coverage, so an assignment there contributes ONLY its fee, exactly as a
+    delivery does. Outside coverage it keeps its full change (cash fallback).
+    Reverting the site double counts: the full change AND the summary."""
+    native = txn_rows_to_native_daily(_mtm_rows(), pnl_basis="mark_to_market")
+    assert native == {
+        "BTC": {
+            "2026-01-16": pytest.approx(-ASSIGNED_FEE),
+            "2026-01-20": pytest.approx(ASSIGNED),
+        }
+    }
+
+
+@pytest.mark.parametrize("case", sorted(_MISSING_FIELD_CASES))
+def test_site5_missing_commission_refuses(case: str) -> None:
+    """SITE5-MISSING-COMMISSION: inside coverage the fee is the assignment's
+    only contribution, so a missing commission refuses rather than defaulting to
+    zero (which would silently drop the fee)."""
+    rows = _mtm_rows()
+    rows[2] = _MISSING_FIELD_CASES[case](rows[2], "commission")
+    with pytest.raises(LedgerValuationError, match="absent/null commission") as exc:
+        txn_rows_to_native_daily(rows, pnl_basis="mark_to_market")
+    assert "type='assignment'" in str(exc.value)
+
+
+# The native twin's non-derivative guard wording, as that guard emits it.
+_NON_DERIVATIVE_WORDING = "names an unclassifiable or spot instrument yet carries nonzero cash"
+
+
+@pytest.mark.parametrize("instrument", ["BTC_USDC", "BTC"], ids=["spot", "unknown"])
+def test_site6_spot_named_assignment_refuses(instrument: str) -> None:
+    """SITE6-SPOT-NAMED-REFUSES (the option arm's non-derivative guard): an
+    expiry event always names an expiring derivative, so an assignment naming a
+    spot pair or an unclassifiable name with nonzero cash refuses rather than
+    being booked on a guessed channel. The instrument is NON-BLANK, so plan 01's
+    unnamed-instrument refusal cannot fire first; the message is the
+    non-derivative guard's and nothing else, and names the row by type and id
+    only (never its change)."""
+    rows = [_assignment(DAY_EXPIRY, instrument=instrument)]
+    with pytest.raises(LedgerValuationError) as exc:
+        txn_rows_to_native_daily(rows)
+    msg = str(exc.value)
+    assert _ASSIGNMENT_UNNAMED_PHRASE not in msg, msg
+    assert _NON_DERIVATIVE_WORDING in msg, msg
+    assert "Deribit assignment row id=2" in msg, msg
+    assert repr(ASSIGNED) not in msg, msg
+
+
+async def test_site5_mtm_e2e_assignment_through_the_native_ledger(
+    monkeypatch: Any,
+) -> None:
+    """SITE5-MTM-E2E: a covered BTC options account through the REAL adapter
+    under mark_to_market. The assignment is inside coverage, so its day carries
+    minus its commission and NOT its change (the summary carries the expiry
+    economics); the ledger builds, so `assert_balance_identity` closes; and
+    `combine_native_ledger` returns a returns series without raising. The
+    summaries share the option rows' instrument_name, so this also pins that the
+    D-02 guard contests only delivery and settlement rows.
+
+    Arithmetic: trade change +1.0, fee 0.01; assignment change −0.4, fee 0.02.
+    The carrying summary's rpl = Σ(change + commission) = 1.01 − 0.38 = 0.63, and
+    the anchor equity = Σchange = 0.6 (flat book, zero inception capital, the
+    same arithmetic as the covered-options model test)."""
+    import pandas as pd
+
+    from services import deribit_ingest as di
+    from services.broker_dailies import combine_native_ledger
+    from tests.test_deribit_ingest import (
+        _NativeAnchorStub,
+        _btc_option_trade,
+        _btc_summary,
+        _patch_jul_index,
+        _patch_pipeline,
+    )
+
+    assignment = dict(
+        _btc_option_trade(13, change=-0.4, commission=0.02), type="assignment"
+    )
+
+    async def _paginate(
+        _ex: Any, _scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [
+                _btc_summary(11, rpl=0.0, upl=0.0),     # lower window bound
+                _btc_summary(14, rpl=0.63, upl=0.0),    # carries the economics
+                _btc_option_trade(12, change=1.0, commission=0.01),
+                assignment,
+            ]
+        return []
+
+    _patch_pipeline(
+        monkeypatch,
+        scopes=[di.Scope("main", None, True)],
+        currencies={"main": ["BTC"]},
+        paginate=_paginate,
+    )
+    _patch_jul_index(monkeypatch)
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 0.6, "session_upl": 0.0}],
+        index_price={"BTC": 60000.0},
+    )
+    ledger, report = await di.build_deribit_native_ledger(
+        ex, pnl_basis="mark_to_market"
+    )
+
+    btc = ledger.native_pnl["BTC"]
+    assert btc.loc[pd.Timestamp("2025-07-13")] == pytest.approx(-0.02, abs=1e-9)
+    assert btc.loc[pd.Timestamp("2025-07-12")] == pytest.approx(-0.01, abs=1e-9)
+    assert btc.loc[pd.Timestamp("2025-07-14")] == pytest.approx(0.63, abs=1e-9)
+    assert float(btc.sum()) == pytest.approx(0.6, abs=1e-9)
+    assert report.pre_coverage_option_days == []
+
+    returns, _meta = combine_native_ledger(ledger, report.indexable_currencies)
+    assert isinstance(returns, pd.Series)
+
+
+def test_smoothed_e2e_short_put_assigned_ingests_flat(monkeypatch: Any) -> None:
+    """SMOOTHED-E2E: a short put opened by a trade and closed by an assignment
+    ingests under smoothed_mtm through the real adapter. The replay zeroes the
+    short on the assignment day, so the book is marked on each held day and is
+    zero from the assignment day on. Asserting the DAY MAP (not only the sum) is
+    what makes a replay that keeps the short open visible.
+
+    Book = position × mark: −1 × 0.05 (01-15), −1 × 0.06 (01-16), 0 (01-17) ⇒
+    ΔMTM −0.05, −0.01, +0.06. Cash: +0.04 premium (01-15), −0.03 assignment
+    (01-17). Merged: −0.01, −0.01, +0.03; Σ == Σ cash == +0.01 (flat terminal)."""
+    short_put = "BTC-17JAN26-60000-P"
+    opening = _opt_row(
+        instrument=short_put, day="2026-01-15", change=0.04, position=-1.0, id=1
+    )
+    opening["side"] = "sell"
+    assigned = _opt_row(
+        instrument=short_put, day="2026-01-17", change=-0.03, position=0.0, id=2,
+        type="assignment",
+    )
+    assigned["side"] = "close buy"
+    ledger, _report, _stub = _run_options_ledger(
+        monkeypatch,
+        btc_rows=[opening, assigned],
+        summaries=[{"currency": "BTC", "equity": 0.01, "session_upl": 0.0,
+                    "options_value": 0.0}],
+        charts={short_put: {"2026-01-15": 0.05, "2026-01-16": 0.06}},
+        pnl_basis="smoothed_mtm",
+    )
+    got = _series_to_daymap(ledger.native_pnl["BTC"])
+    assert got == pytest.approx(
+        {"2026-01-15": -0.01, "2026-01-16": -0.01, "2026-01-17": 0.03}, abs=1e-9
+    )
+    assert sum(got.values()) == pytest.approx(0.04 - 0.03, abs=1e-9)
