@@ -2803,6 +2803,12 @@ export interface MyAllocationDashboardPayload {
    * may still be running). The `history_depth_months` column carries
    * the per-venue retention cap so the UI can show venue-specific
    * warm-up copy (f9).
+   *
+   * Phase 167.1.2 / D-02: `[]` while `equityHistoryState` is not `"ready"`.
+   * These rows are the raw levels the withheld curve is built from, so they
+   * are withheld from the client payload with it (review round 1 SFH-03).
+   * `snapshotCount` and `minHistoryDepthMonths` are computed from the rows
+   * before they are withheld and stay populated.
    */
   equitySnapshots: Array<{
     asof: string;
@@ -2904,6 +2910,18 @@ export interface MyAllocationDashboardPayload {
    * provenance indicator (a muted freshness stamp); null on the legacy path.
    */
   derivedCurveComputedAt: string | null;
+  /**
+   * Phase 167.1.2 / D-02 ("Hide it until correct"). Whether the allocator's
+   * $-equity history may be shown. `"rebuilding"`: `equityDailyPoints` is
+   * withheld (always `[]`) because both the legacy snapshot sum and the derived
+   * curve can count one exchange account twice or read a no-sync day as zero,
+   * so the curve and every ratio built from it are unreliable. Consumers render
+   * an honest "being rebuilt" state instead and are fail-closed: every value
+   * other than an explicit `"ready"` (a missing field, `null`, `""`, a state
+   * added later) reads as `"rebuilding"`. `"ready"` is defined by plan 11 of
+   * Phase 167.1.2; until then the producer never emits it.
+   */
+  equityHistoryState: "rebuilding" | "ready";
   /**
    * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
    * allocator's snapshots, or null when every snapshot's column is
@@ -3693,6 +3711,7 @@ export function derivePhase07Fields(
   | "equityDailyPoints"
   | "equityCurveSource"
   | "derivedCurveComputedAt"
+  | "equityHistoryState"
   | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
@@ -3731,11 +3750,16 @@ export function derivePhase07Fields(
   );
   // f7 adapter (legacy path): DailyPoint[] for EquityCurve/DrawdownChart
   // parallel-prop.
-  const equityDailyPoints =
+  const candidateEquityDailyPoints =
     derivedCurve ??
     equitySnapshotsToDailyPoints(
       equitySnapshots.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
     );
+  // Phase 167.1.2 / D-02 ("Hide it until correct"): the curve is withheld here,
+  // at its one producer, for every allocator; plan 11 owns the "ready" condition.
+  const equityHistoryState: "rebuilding" | "ready" = "rebuilding";
+  const equityDailyPoints: DailyPoint[] =
+    equityHistoryState === "rebuilding" ? [] : candidateEquityDailyPoints;
   const equityCurveSource: "derived" | "legacy" =
     derivedCurve !== null ? "derived" : "legacy";
   const derivedCurveComputedAt =
@@ -3796,7 +3820,13 @@ export function derivePhase07Fields(
   }));
 
   return {
-    equitySnapshots,
+    // Phase 167.1.2 / D-02 (review round 1 SFH-03): the raw snapshot levels are
+    // the same history as the withheld curve, so they do not cross to the
+    // client either. Nothing on the client reads them today; withholding them
+    // keeps a future reader from bypassing D-02, and the 30s refresh from
+    // re-sending the full history. The two counts derived from them are
+    // computed above and stay.
+    equitySnapshots: equityHistoryState === "rebuilding" ? [] : equitySnapshots,
     holdingsSummary,
     snapshotCount,
     allKeysStale,
@@ -3805,6 +3835,7 @@ export function derivePhase07Fields(
     equityDailyPoints,
     equityCurveSource,
     derivedCurveComputedAt,
+    equityHistoryState,
     minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,

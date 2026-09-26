@@ -135,57 +135,32 @@ BEGIN
 END;
 $$;
 
--- source migration: 20260826150000_destrict_enqueue_internal_10param.sql
+-- source migration: 20260924230827_fanin_initial_status_10param.sql
 -- --------------------------------------------------------------------------
--- 10-param overload — verbatim from 20260716090000:181 with ONLY the four
--- lost-race re-reads de-strict-ed and the serialization_failure raise added.
+-- 10-param overload — verbatim from 20260826150000's ten-arg CREATE, with ONLY
+-- the four initial-status edits listed in the header, edit (4) being the
+-- parent FOR SHARE lock and its refusals (NULL element, missing parent,
+-- failed_final parent).
 --
--- ⚠️ GATE-TOKEN HYGIENE (T-163-16). `pg_get_functiondef` returns the body's
--- COMMENTS as well as its statements, so a gate grepping for a bare identifier
--- can be satisfied by prose the function carries about itself. Two layers close
--- that here — but they do NOT both cover both overloads, and the difference is
--- the point:
---   1. CONVENTION — the comments inside the body BELOW are phrased as "the
---      strict re-read" rather than as the statement form. Belt, and it governs
---      ONLY the 10-param body, because that is the only body this file writes.
---   2. MECHANISM — the DO block at the end of this file, and the recurring gate
---      in supabase/tests/, both match against a COMMENT-STRIPPED copy of the
---      definition, stripping BOTH plpgsql comment syntaxes (line and block).
---      It was added because the hole was DEMONSTRATED, not hypothesised: on a
---      scratch Postgres 16, a body whose raise had been changed to
---      `no_data_found` while one comment quoted the old ERRCODE clause passed
---      the presence arms GREEN. The phase-163 review then demonstrated the SAME
---      hole a second time through the block-comment syntax, which the first
---      strip did not cover — hence both.
+-- ⚠️ GATE-TOKEN HYGIENE (T-163-16), carried forward from 20260826150000.
+-- `pg_get_functiondef` returns a body's COMMENTS as well as its statements, so
+-- every arm of the DO block below matches a COMMENT-STRIPPED copy, stripping
+-- BOTH plpgsql comment syntaxes. The comments inside the body below say "the
+-- strict re-read", never the statement form, and name the initial status in
+-- prose only. ⛔ For the 7-PARAM overload the strip is the ONLY layer and it is
+-- load-bearing on PROD alone: PROD's 7-param body quotes the strict construct
+-- in a line comment (20260716090000's lost-race note), so regressing the strip
+-- makes arm (c) match that comment and ABORT THE PROD DEPLOY, while on TEST
+-- there is nothing to strip and CI stays GREEN. Do not "simplify" the strip on
+-- the evidence of a green CI run.
 --
--- ⛔ AND FOR THE 7-PARAM OVERLOAD LAYER 2 IS NOT "BRACES" — IT IS THE ONLY
--- LAYER, AND IT IS LOAD-BEARING ON PROD ALONE. Layer 1 cannot apply there: that
--- body is 20260716090000's and this file does not write it, and it carries the
--- construct in a LINE COMMENT at 20260716090000:143 ("the original SELECT INTO
--- STRICT ..."), which plpgsql stores in prosrc verbatim. MEASURED on the live
--- projects 2026-08-26 by the phase-163 re-audit: the PROD 7-param body contains
--- ONE raw occurrence, comment-stripped ZERO; the TEST 7-param body contains
--- none even before stripping.
--- The consequence is asymmetric and must not be mistaken for redundancy:
---   * On PROD the strip is the SOLE reason arm (c)'s 7-param check passes.
---     Regress the strip — or narrow it to the line syntax only, or let a string
---     literal truncate it — and arm (c) matches that comment and RAISEs, which
---     ABORTS THE PROD DEPLOY of whatever migration is being applied.
---   * On TEST there is nothing to strip in that body, so removing the strip
---     changes no result the recurring gate reports. CI would stay GREEN.
--- A change to the strip is therefore INVISIBLE to CI and FATAL at deploy time.
--- Do not "simplify" it on the evidence of a green CI run.
+-- ⚠️ SCHEMA-QUALIFIED DELIBERATELY, as in 20260826150000. An unqualified
+-- CREATE OR REPLACE resolves against the SESSION search_path, so under a
+-- search_path that does not put public first it CREATES a second function in
+-- another schema — and a create arrives with default privileges, which on a
+-- Supabase project is where the default-grant event trigger recorded in
+-- 20260515130001 hands EXECUTE to anon and authenticated.
 -- --------------------------------------------------------------------------
--- ⚠️ SCHEMA-QUALIFIED DELIBERATELY, unlike 20260716090000:181 and every other
--- ancestor. Every other statement in this file names public. explicitly; this
--- one did not, and it is the single statement where that matters. An unqualified
--- CREATE OR REPLACE resolves against the SESSION search_path, so if a migration
--- ever runs with a search_path that does not put public first, it does not
--- "replace" — it CREATES a second function in another schema, leaving the real
--- one un-fixed. And a create, unlike a replace, arrives with default privileges:
--- on a Supabase project that is where the default-grant event trigger recorded
--- in 20260515130001 hands EXECUTE to anon and authenticated, on a function that
--- is SECURITY DEFINER and performs no ownership check.
 CREATE OR REPLACE FUNCTION public._enqueue_compute_job_internal(
   p_strategy_id     UUID,
   p_portfolio_id    UUID,
@@ -207,6 +182,10 @@ DECLARE
   v_existing_id UUID;
   v_new_id UUID;
   v_target_count INT;
+  v_initial_status TEXT;
+  v_parents_found  INT;
+  v_parents_failed INT;
+  v_parents_open   INT;
 BEGIN
   -- 4-way XOR guard (CHECK mirrors this; the function raises earlier with a
   -- clearer error message — defense in depth).
@@ -232,6 +211,70 @@ BEGIN
   IF p_kind = 'compute_analytics' THEN
     RAISE EXCEPTION '_enqueue_compute_job_internal: kind compute_analytics is retired (Phase 106) — no enqueue path remains'
       USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Phase 164.9.1 (mig 109 P12 intent, mirrored from the 7-param overload in
+  -- 20260716090000): rows with parents start as done_pending_children so the
+  -- fan-in advance in mark_compute_job_done holds them until a parent
+  -- completes. Leaf rows (no parents) start as pending.
+  --
+  -- Round-1 review (silent-failure-hunter HIGH-2): the fan-in advance releases
+  -- a child only when a parent is marked done AND every listed parent is
+  -- 'done'. A child whose parents cannot all reach 'done' through a later
+  -- mark-done would sit in done_pending_children forever, holding its
+  -- (target, kind) in-flight slot, and every later enqueue for that target
+  -- and kind would be handed its id. So the parents are READ here:
+  --   * a NULL element, or an id with no row   -> refused, loudly;
+  --   * a parent that already ended failed_final -> refused, loudly;
+  --   * every parent already 'done'           -> no mark-done will ever
+  --     release the child, and nothing needs to hold it: it starts pending;
+  --   * otherwise a parent is still open       -> done_pending_children.
+  -- The parents are locked FOR SHARE, in id order, BEFORE they are counted.
+  -- mark_compute_job_done flips its parent with an UPDATE, which waits on
+  -- that lock, and runs its fan-in advance as a LATER statement, which sees
+  -- this child once this transaction commits. Without the lock a parent could
+  -- commit 'done' between this read and the INSERT below, and its fan-in
+  -- advance would miss a child it never saw.
+  IF p_parent_job_ids IS NOT NULL
+     AND array_length(p_parent_job_ids, 1) IS NOT NULL
+     AND array_length(p_parent_job_ids, 1) > 0 THEN
+    IF array_position(p_parent_job_ids, NULL) IS NOT NULL THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: p_parent_job_ids contains a NULL element; a fan-in child must name real parent jobs'
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    PERFORM 1
+       FROM compute_jobs pj
+      WHERE pj.id = ANY(p_parent_job_ids)
+      ORDER BY pj.id
+      FOR SHARE;
+
+    SELECT count(*),
+           count(*) FILTER (WHERE pj.status = 'failed_final'),
+           count(*) FILTER (WHERE pj.status <> 'done')
+      INTO v_parents_found, v_parents_failed, v_parents_open
+      FROM compute_jobs pj
+     WHERE pj.id = ANY(p_parent_job_ids);
+
+    IF v_parents_found <> cardinality(ARRAY(SELECT DISTINCT unnest(p_parent_job_ids))) THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: p_parent_job_ids names % parent job(s) with no compute_jobs row; a child of a missing parent could never be released by the fan-in advance',
+        cardinality(ARRAY(SELECT DISTINCT unnest(p_parent_job_ids))) - v_parents_found
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_parents_failed > 0 THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: % parent job(s) in p_parent_job_ids already ended failed_final; a child of a failed parent could never be released by the fan-in advance',
+        v_parents_failed
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_parents_open > 0 THEN
+      v_initial_status := 'done_pending_children';
+    ELSE
+      v_initial_status := 'pending';
+    END IF;
+  ELSE
+    v_initial_status := 'pending';
   END IF;
 
   -- Optimistic look-up per target type.
@@ -273,13 +316,13 @@ BEGIN
   INSERT INTO compute_jobs (
     strategy_id, portfolio_id, allocator_id, api_key_id,
     kind, parent_job_ids, idempotency_key, exchange, metadata,
-    next_attempt_at
+    next_attempt_at, status
   )
   VALUES (
     p_strategy_id, p_portfolio_id, p_allocator_id, p_api_key_id,
     p_kind, COALESCE(p_parent_job_ids, '{}'::uuid[]), p_idempotency_key,
     p_exchange, p_metadata,
-    COALESCE(p_run_at, now())
+    COALESCE(p_run_at, now()), v_initial_status
   )
   ON CONFLICT DO NOTHING
   RETURNING id INTO v_new_id;

@@ -385,6 +385,14 @@ export function CsvUploadStep({
     // survive into this attempt (TRAP-3 — the half a copy-paste of this pattern
     // drops).
     showCsvEnvelope(null);
+    // 164.6.5-07 / D-14 — the id of THIS attempt, captured off the
+    // csv-validate wizardFetch call itself (task 1's `onCorrelationId`). A
+    // LOCAL variable, deliberately NOT React state: `surfacedId` below reads
+    // it synchronously, later in this SAME async function — a state
+    // setter's update is not visible to this closure until the next render,
+    // so reading a `useState` value here would silently see the STALE
+    // (null) value from render time (see CsvSubmitStep's identical fix).
+    let requestCorrelationId: string | null = null;
 
     try {
       const formData = new FormData();
@@ -393,10 +401,19 @@ export function CsvUploadStep({
       formData.append("wizard_session_id", wizardSessionId);
       // NOTE: strategy_name is NOT sent here — finalize-time only.
 
-      const res = await wizardFetch("/api/strategies/csv-validate", {
-        method: "POST",
-        body: formData,
-      });
+      const res = await wizardFetch(
+        "/api/strategies/csv-validate",
+        {
+          method: "POST",
+          body: formData,
+        },
+        {
+          // 164.6.5-07 / D-14 — capture the id THIS request put on the wire.
+          onCorrelationId: (id) => {
+            requestCorrelationId = id;
+          },
+        },
+      );
 
       const data = (await res.json().catch(() => ({}))) as ValidateResponse;
 
@@ -460,12 +477,15 @@ export function CsvUploadStep({
         const code: WizardErrorCode =
           translated !== "UNKNOWN" ? translated : "CSV_UPSTREAM_FAIL";
         // §4a requires an id to RENDER. Prefer what the wire named; fall back
-        // to the session id `wizardFetch` already sent as `X-Correlation-Id`,
-        // so the id on screen is joinable to the server's log either way. Never
-        // `—`: an empty support reference is a deleted diagnostic, not a
-        // relocated one.
+        // to the id `wizardFetch` sent as `X-Correlation-Id` on THIS request
+        // (164.6.5-07 / D-14 — the id of the attempt, not the page load), and
+        // only then to the page-load id itself. Never `—`: an empty support
+        // reference is a deleted diagnostic, not a relocated one.
         const surfacedId =
-          seamCorrelationId(data) ?? data.correlation_id ?? correlationId;
+          seamCorrelationId(data) ??
+          data.correlation_id ??
+          requestCorrelationId ??
+          correlationId;
         // The wait rides the HEADER, read through the ONE parser
         // (`quantalyze/no-raw-retry-after-parse` is a repo-wide lint error).
         // Read from the SAME response as the code, so a wait and a code can

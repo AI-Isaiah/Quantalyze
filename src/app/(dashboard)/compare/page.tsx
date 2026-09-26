@@ -84,6 +84,21 @@ export default async function ComparePage({
     ),
   ]);
 
+  // Phase 167.1.2 review round 2 (SFH-R2-02): a failed strategies read used to
+  // fold into `data ?? []` and render "This comparison isn't available", which
+  // tells the allocator the strategies do not exist. Log the message only and
+  // throw to the route's error boundary (compare/error.tsx: digest-only, with a
+  // retry). D-15 is unchanged: an unpublished or unowned row is filtered out as
+  // ZERO rows, never as an error, so a query failure reveals nothing about it.
+  // The holding read throws HoldingCompareLoadError from the adapter for the
+  // same reason, which rejects the Promise.all above the same way.
+  const strategiesError = (strategiesRes as { error: { message: string } | null })
+    .error;
+  if (strategiesError) {
+    console.error("[compare/page] strategies query failed:", strategiesError.message);
+    throw new Error("compare strategies load failed");
+  }
+
   const strategyItems = ((strategiesRes as { data: unknown[] | null }).data ?? []).map((s) => {
     const strat = s as Strategy & { strategy_analytics: unknown };
     const row = extractAnalytics(strat.strategy_analytics) as

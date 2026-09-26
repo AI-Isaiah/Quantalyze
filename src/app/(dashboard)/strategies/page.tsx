@@ -26,10 +26,20 @@ import {
 import { captureToSentry } from "@/lib/sentry-capture";
 import {
   KEY_STATUS_UNREADABLE_NOTE,
+  probeUnreadableShareNote,
   recipientShareNote,
+  recipientShareNoteFor,
   STRATEGIES_LIST_UNREADABLE,
+  unbuildableNoteKindOf,
   untrustedKeyCaption,
 } from "@/lib/status-surface-copy";
+// Phase 167.2.1 (D-04, D-08): the builder's own resolve stage, so the list and
+// the share page decide "can this factsheet build?" from the same code.
+import {
+  FactsheetProbeTimeoutError,
+  probeFactsheetBuildable,
+} from "@/lib/factsheet/fetch-and-build-payload";
+import { withPublishedOrOwner } from "@/lib/visibility";
 import { PendingIntros } from "@/components/strategy/PendingIntros";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -178,6 +188,164 @@ async function readRecipientArm(
       }),
     }),
   );
+}
+
+/**
+ * 167.2.1-REVIEW WR-01 — how many buildability probes one page load runs at
+ * once. Each probe is a service-role read of the strategy row with its largest
+ * JSON columns (`daily_returns`, `returns_series`, `metrics_json_by_basis`),
+ * plus up to 20,000 `csv_daily_returns` rows for a composite. The list has no
+ * pagination, so an unbounded fan-out fired one such read per computed row at
+ * once on the dashboard's landing page, and pooler exhaustion then read as a
+ * failed check on every row.
+ */
+const PROBE_CONCURRENCY = 4;
+
+/**
+ * A FIFO slot limiter: at most `limit` tasks run at once, the rest wait in
+ * arrival order. A finishing task hands its slot straight to the next waiter
+ * (`active` is not decremented then), so a caller arriving in between cannot
+ * take the slot too and push the count past `limit`.
+ */
+function concurrencyLimiter(limit: number) {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  const release = () => {
+    const next = waiting.shift();
+    if (next) next();
+    else active -= 1;
+  };
+  return async function run<T>(task: () => Promise<T>): Promise<T> {
+    if (active < limit) active += 1;
+    else await new Promise<void>((resolve) => waiting.push(resolve));
+    try {
+      return await task();
+    } finally {
+      release();
+    }
+  };
+}
+
+/**
+ * 167.2.1-REVIEW-R2 WR-01 / SFH-R2 N-1 — the probe answers Sentry should hear
+ * about, counted over one page load. The resolve stage no longer captures for
+ * a probe (it captures for a factsheet BUILD only), because pool saturation
+ * arrives as a returned `read_error`, one per computed row, and durable data
+ * states (`composite_unbuildable`, `malformed_series`) recur on every
+ * navigation. The page sends ONE event carrying the counts instead.
+ * `not_visible`, `not_computed` and `too_few_points` are not counted: the
+ * first two are races logged at warn, the last is an honest data fact.
+ * `timeout` (SFH-R2 N-3) is a probe that missed its deadline
+ * (`FactsheetProbeTimeoutError`): an outage signal, counted here and never
+ * grouped with the code throws.
+ */
+const COUNTED_PROBE_REASONS = ["read_error", "composite_unbuildable", "malformed_series", "timeout"] as const;
+type CountedProbeReason = (typeof COUNTED_PROBE_REASONS)[number];
+
+interface ProbeOutcomeTally {
+  counts: Record<CountedProbeReason, number>;
+  /** read_error rows per PostgREST / SQLSTATE code. */
+  readErrorCodes: Map<string, number>;
+  /** composite_unbuildable and malformed_series rows per `reason:gate`. */
+  gates: Map<string, number>;
+  /** malformed_series rows per counted column (SFH-R2 N-5). */
+  sources: Map<string, number>;
+}
+
+function newProbeOutcomeTally(): ProbeOutcomeTally {
+  return {
+    counts: { read_error: 0, composite_unbuildable: 0, malformed_series: 0, timeout: 0 },
+    readErrorCodes: new Map(),
+    gates: new Map(),
+    sources: new Map(),
+  };
+}
+
+function bump(map: Map<string, number>, key: string): void {
+  map.set(key, (map.get(key) ?? 0) + 1);
+}
+
+/**
+ * `key:count` pairs, largest first, as one tag value. A code is a short
+ * PostgREST / SQLSTATE token; anything else is reduced to that shape, and the
+ * list is capped, so the tag stays inside Sentry's value limit.
+ */
+function formatCounts(map: ReadonlyMap<string, number>, cap = 10): string {
+  return [...map]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, cap)
+    .map(([k, n]) => `${k.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 16)}:${n}`)
+    .join(",");
+}
+
+/** One event for the page load, or none when nothing was counted. */
+function captureProbeOutcomes(tally: ProbeOutcomeTally): void {
+  const total = COUNTED_PROBE_REASONS.reduce((sum, r) => sum + tally.counts[r], 0);
+  if (total === 0) return;
+  const tags: Record<string, string> = {
+    route: "strategies/page",
+    stage: "factsheet-probe-outcomes",
+    counted_rows: String(total),
+  };
+  for (const reason of COUNTED_PROBE_REASONS) tags[reason] = String(tally.counts[reason]);
+  if (tally.readErrorCodes.size > 0) tags.read_error_codes = formatCounts(tally.readErrorCodes);
+  // A composite refusal alone is a warning, as the build's own capture is. An
+  // outage (a read error, a timeout) or a writer defect is an error.
+  const level =
+    tally.counts.read_error > 0 || tally.counts.malformed_series > 0 || tally.counts.timeout > 0
+      ? "error"
+      : "warning";
+  captureToSentry(
+    new Error("factsheet probe: computed rows could not be confirmed buildable on one page load"),
+    {
+      level,
+      tags,
+      extra: {
+        gates: Object.fromEntries(tally.gates),
+        malformedSources: Object.fromEntries(tally.sources),
+      },
+    },
+  );
+}
+
+/**
+ * 167.2.1-REVIEW-SFH-R2 N-2 — at most this many throw events per page load.
+ */
+const MAX_PROBE_THROW_EVENTS = 3;
+
+/**
+ * 167.2.1-REVIEW WR-01, SFH-R2 N-2 — the probes that THREW on one page load,
+ * grouped by error name and message, one event per group. Sending only the
+ * first throw let whichever cause finished first hide every other one: a
+ * transient `fetch failed` could mask a `TypeError` from a code regression,
+ * and the issue changed identity between loads. The largest groups go first,
+ * capped at `MAX_PROBE_THROW_EVENTS`; every event carries the load's total
+ * (`probe_throws`), its number of distinct causes (`probe_throw_kinds`) and its
+ * own group's size (`group_throws`). The per-row console lines keep the ids.
+ */
+function captureProbeThrows(throws: readonly unknown[]): void {
+  if (throws.length === 0) return;
+  const groups = new Map<string, { error: Error; count: number }>();
+  for (const thrown of throws) {
+    const error = thrown instanceof Error ? thrown : new Error(String(thrown));
+    const key = `${error.name}:${error.message.slice(0, 80)}`;
+    const group = groups.get(key);
+    if (group) group.count += 1;
+    else groups.set(key, { error, count: 1 });
+  }
+  // A stable sort: equal groups keep first-seen order.
+  const ranked = [...groups.values()].sort((a, b) => b.count - a.count);
+  for (const group of ranked.slice(0, MAX_PROBE_THROW_EVENTS)) {
+    captureToSentry(group.error, {
+      tags: {
+        route: "strategies/page",
+        stage: "factsheet-probe",
+        probe_throws: String(throws.length),
+        probe_throw_kinds: String(groups.size),
+        group_throws: String(group.count),
+      },
+    });
+  }
 }
 
 export default async function StrategiesPage() {
@@ -331,42 +499,167 @@ export default async function StrategiesPage() {
   }
 
   // Phase 167.2 / KCS-12 — beside each share control, what a recipient of that
-  // link sees right now, for every row WITHOUT a computed factsheet. "Has a
-  // computed factsheet" is `isComputedAnalytics(computation_status)`: the
-  // factsheet builder's own first gate (STALE-01 in fetchAndBuildPayload), so a
-  // row this predicate calls uncomputed is one the builder refuses. A computed
-  // row performs no RPC and shows no note. Known limit: a computed row whose
-  // series cannot build still reads as "has a factsheet" here; that is decided
-  // from data this request client cannot read (167.2-09 SUMMARY).
+  // link sees right now, for every row WITHOUT a buildable factsheet. "Has a
+  // computed factsheet" starts at `isComputedAnalytics(computation_status)`:
+  // the factsheet builder's own first gate (STALE-01 in fetchAndBuildPayload),
+  // so a row this predicate calls uncomputed is one the builder refuses.
+  // Lineage: 167.2-REVIEW WR-02 (a computed row whose series cannot build read
+  // as "has a factsheet" here) is closed by 167.2.1 D-04 and D-08. A computed
+  // row is now asked `probeFactsheetBuildable`, the builder's own resolve
+  // stage, so the list and the share page decide from the builder's own code
+  // whether the factsheet has a null exit. They do not decide whether it
+  // renders: a builder throw is outside that answer (IN-03, below).
+  //
+  // The recipient arm, and the note an uncomputed row has always shown. One
+  // function, so the uncomputed path and the probe's fallbacks read the arm
+  // the same way.
+  const armOf = async (
+    s: NonNullable<typeof strategies>[number],
+    mode: ReturnType<typeof shareAffordanceMode>,
+  ): Promise<RecipientArm> =>
+    // 167.2-REVIEW IN-04: a published row's note is the public line whatever
+    // the arm (`recipientShareNote` / `recipientShareNoteFor` ignore it for
+    // "public-url"), so its jobs are not read: that was one RPC per row whose
+    // answer, and whose failure log, described a value nobody reads. The arm
+    // passed for it is the one that claims least; it is never rendered.
+    mode === "public-url"
+      ? "not_available"
+      : readRecipientArm(
+          supabase,
+          s.id,
+          // IN-03: a failed member read keeps stitch preference.
+          {
+            memberCount: membersReadFailed
+              ? { ok: false, message: "strategy_keys member read failed" }
+              : { ok: true, count: membersByStrategy.get(s.id)?.length ?? 0 },
+            apiKeyId: s.api_key_id,
+          },
+        );
+  const uncomputedNote = async (
+    s: NonNullable<typeof strategies>[number],
+    mode: ReturnType<typeof shareAffordanceMode>,
+  ): Promise<string> => recipientShareNote(mode, await armOf(s, mode));
+
+  // WR-01: the probes share one limiter per page load, and a probe that
+  // THROWS is recorded here and captured after the fan-out, one event per
+  // distinct cause (`captureProbeThrows`, SFH-R2 N-2), never once per row.
+  const runProbe = concurrencyLimiter(PROBE_CONCURRENCY);
+  const probeThrows: unknown[] = [];
+  // 167.2.1-REVIEW-R2 WR-01: the RETURNED failures, counted, and captured
+  // once after the fan-out (`captureProbeOutcomes`).
+  const probeOutcomes = newProbeOutcomeTally();
+
   const shareNotes = new Map<string, string>(
-    await Promise.all(
-      (strategies ?? [])
-        .filter((s) => !isComputedAnalytics(computationStatusOf(s.strategy_analytics)))
-        .map(async (s) => {
+    (
+      await Promise.all(
+        (strategies ?? []).map(async (s): Promise<readonly [string, string | null]> => {
           const mode = shareAffordanceMode(isPublishedStatus(s.status));
-          // 167.2-REVIEW IN-04: a published row's note is KCS12-PUBLIC whatever
-          // the arm (`recipientShareNote` ignores it for "public-url"), so its
-          // jobs are not read: that was one RPC per row whose answer, and whose
-          // failure log, described a value nobody reads. The arm passed for it
-          // is the one that claims least; it is never rendered.
-          const arm: RecipientArm =
-            mode === "public-url"
-              ? "not_available"
-              : await readRecipientArm(
-                  supabase,
-                  s.id,
-                  // IN-03: a failed member read keeps stitch preference.
-                  {
-                    memberCount: membersReadFailed
-                      ? { ok: false, message: "strategy_keys member read failed" }
-                      : { ok: true, count: membersByStrategy.get(s.id)?.length ?? 0 },
-                    apiKeyId: s.api_key_id,
-                  },
-                );
-          return [s.id, recipientShareNote(mode, arm)] as const;
+          // D-08: an uncomputed row is never probed; it keeps today's path.
+          if (!isComputedAnalytics(computationStatusOf(s.strategy_analytics))) {
+            return [s.id, await uncomputedNote(s, mode)] as const;
+          }
+          // D-08: a computed row is probed, uncached, under the owner
+          // predicate. Only ids from the owner-filtered list reach here.
+          // COST, accepted (167.2.1-REVIEW WR-01): one heavy service-role
+          // read per computed row per page load (the strategy row with its
+          // series and basis columns; a composite adds its csv read), at most
+          // PROBE_CONCURRENCY at once. The list is unpaginated, so the cost
+          // still grows linearly with the owner's computed strategies; the
+          // parity invariant needs the resolve stage itself, so a cheaper
+          // answer is a writer-side verdict or a column-light resolve, not a
+          // shortcut here.
+          let probe: Awaited<ReturnType<typeof probeFactsheetBuildable>>;
+          let kind: ReturnType<typeof unbuildableNoteKindOf>;
+          try {
+            probe = await runProbe(() =>
+              probeFactsheetBuildable(s.id, (q) => withPublishedOrOwner(q, user.id)),
+            );
+            // 167.2.1-REVIEW-SFH-R2 N-7: inside the per-row try. Its `never`
+            // arm throws on a reason it does not know (reachable only through
+            // a type lie). Out here, that throw rejected `Promise.all` and put
+            // the whole list behind the error boundary; in here it fails this
+            // row's check, and is captured with the other throws.
+            kind = probe.buildable ? null : unbuildableNoteKindOf(probe.reason);
+          } catch (err) {
+            if (err instanceof FactsheetProbeTimeoutError) {
+              // 167.2.1-REVIEW-SFH-R2 N-3: no answer within the probe's
+              // deadline. Its own reason in the page's one event, and the
+              // same "could not check" line as any failed check.
+              console.error("[strategies/page] factsheet probe timed out", {
+                id: s.id,
+                deadlineMs: err.deadlineMs,
+              });
+              probeOutcomes.counts.timeout += 1;
+              return [s.id, probeUnreadableShareNote(mode)] as const;
+            }
+            // D-05: a probe that throws is never read as "buildable".
+            // 167.2.1-REVIEW-SFH H-2: nor as "not available". Every failed
+            // check (this throw, and the read_error and not_visible arms
+            // below) renders the "could not check" line for its share mode.
+            // It used to render `recipientShareNote(mode, "unreadable")`,
+            // which for a PUBLISHED row is KCS12-PUBLIC, "… not available yet
+            // …", while the public factsheet most likely rendered fine.
+            // Logged here per row, with its id; captured once per page load
+            // after the fan-out (WR-01).
+            console.error("[strategies/page] factsheet probe failed", {
+              id: s.id,
+              message: err instanceof Error ? err.message : String(err),
+            });
+            probeThrows.push(err);
+            return [s.id, probeUnreadableShareNote(mode)] as const;
+          }
+          // 167.2.1-REVIEW IN-03: "buildable" means "no null exit", not
+          // "renders". A builder throw at the recipient's request (the basis
+          // reads, the build itself) is outside the probe's domain, so it is
+          // outside this note's domain too: such a row shows no note here and
+          // its recipient gets the error boundary.
+          if (probe.buildable) return [s.id, null] as const;
+          if (probe.reason === "read_error" || probe.reason === "composite_unbuildable" || probe.reason === "malformed_series") {
+            probeOutcomes.counts[probe.reason] += 1;
+            if (probe.code !== undefined) bump(probeOutcomes.readErrorCodes, probe.code);
+            if (probe.gate !== undefined) bump(probeOutcomes.gates, `${probe.reason}:${probe.gate}`);
+            if (probe.source !== undefined) bump(probeOutcomes.sources, probe.source);
+          }
+          if (probe.reason === "read_error") {
+            // D-05: the probe could not read the row, so what the recipient
+            // sees is not known. The resolve stage logged this read with its
+            // id and code (`resolve(probe)`). 167.2.1-REVIEW-R2 WR-01: it no
+            // longer captures it; the count above does, once per page load.
+            return [s.id, probeUnreadableShareNote(mode)] as const;
+          }
+          if (probe.reason === "not_visible") {
+            // D-05: the probe found no row. 167.2.1-REVIEW IN-01: on THIS page
+            // that is not an outage. The id came from the owner's own list
+            // read moments earlier and the probe runs under the owner
+            // predicate, so no row means the strategy was deleted between the
+            // two reads. A warning, never a capture: counting it as an error
+            // would inflate the outage signal the read_error capture carries.
+            console.warn("[strategies/page] factsheet probe found no row (deleted since the list read)", {
+              id: s.id,
+              reason: probe.reason,
+            });
+            return [s.id, probeUnreadableShareNote(mode)] as const;
+          }
+          // D-05: the embed and the admin read disagree (a race): the admin
+          // read is the builder's, so the row takes the uncomputed path.
+          // 167.2.1-REVIEW-SFH M-5: logged at warn so the race rate is
+          // measurable. Not captured: a status flip between two reads is
+          // legitimate, and one event per occurrence would be noise.
+          if (probe.reason === "not_computed") {
+            console.warn("[strategies/page] factsheet probe found the analytics row not computed (the list embed said computed)", {
+              id: s.id,
+              reason: probe.reason,
+            });
+            return [s.id, await uncomputedNote(s, mode)] as const;
+          }
+          // D-02: computed, but the builder refuses it (`kind`, above).
+          return [s.id, recipientShareNoteFor(mode, await armOf(s, mode), kind)] as const;
         }),
-    ),
+      )
+    ).filter((entry): entry is readonly [string, string] => entry[1] !== null),
   );
+  captureProbeOutcomes(probeOutcomes);
+  captureProbeThrows(probeThrows);
 
   return (
     <>

@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join, posix } from "node:path";
 import { describe, it, expect } from "vitest";
 
 // ⛔ THE DELIBERATE DEGENERACY DEMONSTRATION, ROUTED THROUGH ITS ONE NAMED HOME
@@ -1471,14 +1471,25 @@ describe("Critical regression guards", () => {
     // asserts that set EXACTLY against ci.yml in both directions — a new
     // holder that is not listed here, or `sql-tests` re-acquiring the key,
     // fails rather than passing unexamined.
+    //
+    // Re-subjected by Phase 164.4.2.1 (D-02 / D-07), 2026-09-25. `test-db-drift`
+    // left the key: VAC-08 is read-only and is ordered after apply-test by its
+    // `Wait for the TEST schema apply` step, so DB_JOBS is `python` and
+    // `e2e-seeded`. A negative pin says `test-db-drift` holds no key, the
+    // ordering pin now carries SC-2 for `test-db-drift`, and its TTL and
+    // `needs: python` moved into that pin because the per-holder TTL loop no
+    // longer covers it.
     describe("shared-test-db serialization via the advisory-lock mutex (D-05 / Phase 158)", () => {
-      const DB_JOBS = ["python", "e2e-seeded", "test-db-drift"] as const;
+      const DB_JOBS = ["python", "e2e-seeded"] as const;
       // Same job-slicing idiom as the supabase-migrate describes above:
       // anchor on the start-of-line job key, stop at the next top-level one.
+      // A key line may carry a trailing comment, and the next key may start with
+      // a capital, a digit or an underscore (SFH-R2-06, same tolerance as
+      // measureHolders' enumeration below).
       const jobSlice = (src: string, job: string): string =>
         findOrFail(
           src,
-          new RegExp(`^ {2}${job}:\\s*\\n([\\s\\S]*?)(?=\\n {2}[a-z])`, "m"),
+          new RegExp(`^ {2}${job}:[ \\t]*(?:#[^\\n]*)?\\n([\\s\\S]*?)(?=\\n {2}[A-Za-z0-9_])`, "m"),
           `ci.yml: ${job} job not found`,
         );
 
@@ -1491,17 +1502,397 @@ describe("Critical regression guards", () => {
       // this phase's own invariant: re-acquiring would re-serialize the
       // tracer behind the key it was moved off, erasing the measured win
       // without any other test noticing.
-      it("the set of jobs holding the shared-test-db key is EXACTLY DB_JOBS, and sql-tests is not among them", () => {
-        const src = readText(".github/workflows/ci.yml");
-        const jobKeys = [...src.matchAll(/^ {2}([a-z0-9-]+):\s*$/gm)].map((m) => m[1]);
-        const holders = jobKeys
+      // ONE detector, shared by the holder-set pin and the test-db-drift
+      // negative below, so the two can never disagree about what "holds" means.
+      //
+      // Widened 2026-09-25 (164.4.2.1 round-1 review, SFH-02 / IN-05). It used to
+      // see only the literal step name or the literal key in the job's YAML, so a
+      // job that took the key through a renamed step with a variable key, or by
+      // running a script that takes or asserts it (`restore-test-from-baseline.sh`
+      // and `test-only-normalize-analytics-url.sh` both do, via `MUTEX_KEY=`), read
+      // as a non-holder — and `test-db-drift` could have re-acquired that way with
+      // both pins green. Every spelling of TAKING the key the repo uses now counts.
+      // ⛔ CORRECTED 2026-09-25 (164.4.2.1 round-2 review, WR-03 / SFH-R2-03..06 /
+      // SFH-R2-08 / IN-01 / IN-02 / IN-03): "every spelling" was not true — `_shared`,
+      // upper case, a space before `(`, a `::bigint` cast, a key held in any other
+      // variable name, `. x.sh || exit 1`, an executed child script, a node or
+      // python entry point, `cd scripts && bash x.sh`, a `..` path into the lane
+      // directories and a job key line carrying a comment all read as "no holder".
+      // And `restore-test-from-baseline.sh` ASSERTS the workflow's held mutex rather
+      // than taking it; its `MUTEX_KEY=` still marks the job as a key-bound TEST
+      // session, which over-counts in the safe direction. The sentence above is
+      // kept as lineage. What the detector does now, and what it does not:
+      //
+      // In the job's own YAML the rule is the stricter "holds OR NAMES": the
+      // literal key anywhere (comments included), an Acquire…mutex step, any
+      // `…MUTEX_KEY` assignment, the mutex's PGAPPNAME, or any advisory-lock CALL
+      // (any case, `try_`/`xact_`/`_shared`, space before `(`) except one on a
+      // DIFFERENT numeric literal (a variable argument counts).
+      const JOB_TAKES_KEY =
+        /- name: Acquire\b[^\n]*mutex|61616158|MUTEX_KEY\s*[=:]|PGAPPNAME=ci-shared-test-db-mutex|pg_(?:try_)?advisory(?:_xact)?_lock(?:_shared)?\s*\(\s*(?:\d+\s*,\s*)?(?!\d)/i;
+      // In a file the job RUNS, a MENTION is not a take, and the difference is
+      // load-bearing: the ordering wait sources scripts/shared-test-db-keys.sh,
+      // which holds the key as a read-only comparison operand and try-locks a
+      // DIFFERENT key (the in-flight flag), and VAC-08's script names the key in a
+      // comment. Neither holds anything. So on a file's NON-comment lines the rule
+      // FAILS CLOSED rather than listing spellings:
+      //   - ANY advisory-lock call (same verb family as above) is a take, unless its
+      //     argument is PROVABLY another key: a different numeric literal (a cast
+      //     is ignored), the two-int4 form, or exactly the in-flight key constant;
+      //   - the key literal assigned to ANY variable is a take, unless the
+      //     assignment is `local`, never exported, and every later use of that
+      //     name is an operand of a `[ … ]` comparison (keys.sh's self-test);
+      //   - any `…MUTEX_KEY` assignment, or the mutex's PGAPPNAME.
+      const MUTEX_KEY_LITERAL = "61616158";
+      const LOCK_CALL = /pg_(?:try_)?advisory(?:_xact)?_lock(?:_shared)?\s*\(((?:[^()]|\([^()]*\))*)\)/gi;
+      const provablyAnotherKey = (arg: string): boolean => {
+        const a = arg.replace(/::\s*\w+/g, "").replace(/["'\s]/g, "");
+        return (
+          (/^\d+$/.test(a) && a !== MUTEX_KEY_LITERAL) ||
+          /^\d+,\d+$/.test(a) ||
+          /^\$\{?SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY\}?$/.test(a)
+        );
+      };
+      // Full-line comments in shell, python, SQL and JS/TS. A trailing comment is
+      // kept, which can only over-count.
+      const codeOf = (text: string): string =>
+        text
+          .split("\n")
+          .filter((line) => !/^\s*(?:#|\/\/|--|\/?\*)/.test(line))
+          .join("\n");
+      const fileTakesKey = (text: string): boolean => {
+        const code = codeOf(text);
+        if (/(?:PGAPPNAME|application_name)\s*[=:]\s*["']?ci-shared-test-db-mutex/i.test(code)) return true;
+        if (/\w*MUTEX_KEY\w*\s*:?=(?!=)/.test(code)) return true;
+        if ([...code.matchAll(LOCK_CALL)].some((m) => !provablyAnotherKey(m[1]))) return true;
+        const lines = code.split("\n");
+        return [
+          ...code.matchAll(
+            /(?:\b(?:local|export|readonly|typeset|declare(?:\s+-\w+)*)\s+)?\b([A-Za-z_]\w*)(?:\s+[A-Za-z_]\w*)?\s*:?=\s*["']?61616158\b/g,
+          ),
+        ].some((m) => {
+          const name = m[1];
+          const at = lines.find((line) => line.includes(m[0])) ?? "";
+          const exported = new RegExp(`\\bexport\\b[^\\n]*\\b${name}\\b|\\bdeclare\\s+-\\w*x\\w*\\b[^\\n]*\\b${name}\\b`).test(code);
+          const uses = lines.filter((line) => line !== at && new RegExp(`\\b${name}\\b`).test(line));
+          const comparisonOnly =
+            /\blocal\s/.test(at) &&
+            !exported &&
+            uses.length > 0 &&
+            uses.every((line) => /^\s*(?:if\s+|elif\s+|!\s*)?\[\[?\s[^\n]*\s(?:!?=|==|-eq|-ne)\s[^\n]*\]\]?/.test(line));
+          return !comparisonOnly;
+        });
+      };
+      // The private-database lane exemption is a NAMED FILE LIST, and each entry
+      // must PROVE on every run that it never reaches shared TEST, rather than
+      // being trusted for the directory it sits in (IN-02 / SFH-R2-05: a new
+      // `scripts/pg-lane/*.sh` that honoured TEST_SUPABASE_DB_URL used to be exempt
+      // by path alone). A named file whose proof no longer holds is simply NOT
+      // exempt, so its take counts and the holder-set pin names its job.
+      // scripts/pg-lane/mutex-dead-holder-lane.sh takes the literal key on purpose,
+      // as a drill on a throwaway cluster: it refuses every argument (no caller can
+      // hand it a target), binds its cluster to 127.0.0.1, and never expands the
+      // shared DSN. It is the only lane file whose text takes the key today.
+      const READS_SHARED_DSN = /\$\{?TEST_SUPABASE_DB_URL\b/;
+      const PRIVATE_LANE_PROOF: Record<string, RegExp[]> = {
+        "scripts/pg-lane/mutex-dead-holder-lane.sh": [
+          /^if \[ "\$#" -gt 0 \]; then\n\s+fail /m,
+          /listen_addresses=127\.0\.0\.1/,
+        ],
+      };
+      const laneProvenPrivate = (path: string, text: string): boolean =>
+        path in PRIVATE_LANE_PROOF &&
+        !READS_SHARED_DSN.test(text) &&
+        PRIVATE_LANE_PROOF[path].every((proof) => proof.test(text));
+      // A reader returns undefined for a path that is not a repo file, so the walk
+      // can name a miss instead of dying on a bare ENOENT (IN-03).
+      type RepoReader = (path: string) => string | undefined;
+      const readRepoFile: RepoReader = (path) => {
+        const abs = join(REPO_ROOT, path);
+        return existsSync(abs) && statSync(abs).isFile() ? readFileSync(abs, "utf8") : undefined;
+      };
+      // Every repo file a job's NON-comment lines run or name, transitively through
+      // SHELL files. From the job body and from every `.sh` it reaches, each token
+      // ending in .sh/.bash/.mjs/.cjs/.js/.ts/.py is followed, whether it is
+      // sourced, executed, or passed to node/python/tsx. `npm run <name>` is
+      // expanded from package.json. A path is resolved after substituting
+      // `${GITHUB_WORKSPACE}`, `$(dirname "$0")`/`${BASH_SOURCE[0]}` forms and any
+      // variable the file assigns from them (`SCRIPT_DIR`, `REPO_ROOT`, …), then
+      // normalised (`..` included) against the file's own directory, the repo
+      // root, every `cd` target and every `working-directory:`. A commented-out
+      // line runs nothing and is not followed.
+      // It FAILS LOUD, never silent: an invoked token (after bash/sh/./source/exec/
+      // node/python/tsx) that resolves to no repo file, or a job-body path that
+      // does, or an invocation under a variable directory it cannot resolve, or an
+      // `npm run` of an undefined script, throws with the form named.
+      // NOT covered, stated so no one reads completeness into it: a node/python/TS
+      // entry point is a LEAF — it is grepped with the rule above, but what it
+      // imports or spawns is not walked (its imports reach every test fixture in
+      // the repo). A file name built from a variable (`"${x}.sh"`) is not a token.
+      // A MENTIONED path under an unresolvable variable directory (`$tmp/x.sh`,
+      // a self-test's scratch file) is skipped, because it is not a repo file.
+      const DIRNAME_FORM = /\$\(\s*dirname\s+"?\$(?:\{BASH_SOURCE(?:\[0\])?\}|BASH_SOURCE|\{0\}|0)"?\s*\)/g;
+      const PATH_TOKEN = /(?<![\w./@$-])((?:@[RV]@\/)?(?:[\w.-]+\/)*[\w.-]+\.(?:sh|bash|mjs|cjs|js|ts|py))(?![\w/-])/g;
+      const INVOKED_BY = /(?:^|[\s;&|(!])(?:bash|sh|zsh|source|\.|exec|node|python3?|tsx|npx\s+tsx|bun)(?:\s+-{1,2}[\w-]+(?:=\S+)?)*\s+$/;
+      const toRepoPath = (path: string): string => {
+        const n = posix.normalize(path).replace(/\/$/, "");
+        return n === "." ? "" : n;
+      };
+      const escapesRepo = (path: string): boolean => path === ".." || path.startsWith("../") || path.startsWith("/");
+      // `@R@` marks the repo root, `@V@` a directory the walk cannot resolve.
+      const substitutePaths = (s: string, dir: string, vars: Record<string, string>): string =>
+        s
+          .replace(DIRNAME_FORM, `@R@/${dir}`)
+          .replace(/\$\{\{\s*github\.workspace\s*\}\}/g, "@R@")
+          .replace(/\$\(\s*cd\s+"?([^"()]*)"?\s*&&\s*pwd\s*\)/g, "$1")
+          .replace(/\$\{([A-Za-z_]\w*)(?::?-([^}]*))?\}|\$([A-Za-z_]\w*)/g, (_m: string, a: string | undefined, dflt: string | undefined, b: string | undefined) => {
+            const name = (a ?? b) as string;
+            if (name === "GITHUB_WORKSPACE") return "@R@";
+            if (name in vars) return `@R@/${vars[name]}`;
+            if (dflt !== undefined && !dflt.includes("$")) return dflt;
+            return "@V@";
+          })
+          .replace(/["']/g, "")
+          .replace(/@R@\/(?=\/|\s|$)/g, "@R@")
+          .replace(/@R@\/\.?(?=\/)/g, "@R@");
+      const filesRunBy = (jobBody: string, read: RepoReader): Map<string, string> => {
+        const seen = new Map<string, string>();
+        const queue: { text: string; dir: string; from: string; isJob: boolean }[] = [
+          { text: jobBody, dir: "", from: "the job body", isJob: true },
+        ];
+        while (queue.length > 0) {
+          const { text, dir, from, isJob } = queue.shift() as (typeof queue)[number];
+          if (!isJob && !/\.(?:sh|bash)$/.test(from)) continue; // a node/python/TS entry point is a leaf
+          const vars: Record<string, string> = {};
+          const lines: string[] = [];
+          for (const raw of codeOf(text).split("\n")) {
+            const assign = isJob ? null : raw.match(/^\s*(?:export\s+|local\s+|readonly\s+)?([A-Za-z_]\w*)=(\S.*)$/);
+            if (assign) {
+              const v = substitutePaths(assign[2], dir, vars).trim();
+              if (/^@R@(?:\/[\w./-]*)?$/.test(v)) {
+                const resolved = toRepoPath(v.replace(/^@R@\/?/, "") || ".");
+                if (!escapesRepo(resolved)) vars[assign[1]] = resolved;
+              }
+            }
+            lines.push(substitutePaths(raw, dir, vars));
+          }
+          const bases = new Set([dir, ""]);
+          for (const line of lines) {
+            for (const m of line.matchAll(/(?:^|[\s;&|(])(?:cd|pushd)\s+(\S+)/g)) {
+              if (m[1].includes("@V@")) continue;
+              const target = m[1].startsWith("@R@")
+                ? toRepoPath(m[1].replace(/^@R@\/?/, "") || ".")
+                : toRepoPath(posix.join(dir, m[1]));
+              if (!escapesRepo(target)) bases.add(target);
+            }
+            const wd = line.match(/^\s*(?:-\s+)?working-directory:\s*(\S+)\s*$/);
+            if (wd && !wd[1].includes("@V@")) bases.add(toRepoPath(wd[1].replace(/^@R@\/?/, "") || "."));
+          }
+          const npmScripts = lines.flatMap((line) => [...line.matchAll(/\bnpm\s+run(?:-script)?\s+([\w:.-]+)/g)].map((m) => m[1]));
+          if (npmScripts.length > 0) {
+            const pkg = JSON.parse(read("package.json") ?? "{}") as { scripts?: Record<string, string> };
+            for (const name of npmScripts) {
+              const cmd = pkg.scripts?.[name];
+              if (cmd === undefined) {
+                throw new Error(`measureHolders: ${from} runs \`npm run ${name}\`, which package.json does not define — the detector cannot read what it runs`);
+              }
+              lines.push(cmd);
+            }
+          }
+          for (const line of lines) {
+            for (const m of line.matchAll(PATH_TOKEN)) {
+              const token = m[1];
+              const invoked = INVOKED_BY.test(line.slice(0, m.index));
+              if (token.startsWith("@V@")) {
+                if (invoked) {
+                  throw new Error(`measureHolders: ${from} runs "${token.replace("@V@", "$…")}" under a directory the detector cannot resolve — a holder it cannot read would count as none`);
+                }
+                continue;
+              }
+              const candidates = [
+                ...new Set(
+                  token.startsWith("@R@/")
+                    ? [toRepoPath(token.slice(4))]
+                    : [...bases].map((base) => toRepoPath(posix.join(base, token))),
+                ),
+              ];
+              const found = candidates.filter((c) => !escapesRepo(c) && read(c) !== undefined);
+              if (found.length === 0) {
+                if (invoked || (isJob && token.includes("/"))) {
+                  throw new Error(`measureHolders: ${from} ${invoked ? "runs" : "names"} "${token.replace("@R@/", "")}", which resolves to no repo file (tried ${candidates.join(", ")}) — a holder the detector cannot read would count as none`);
+                }
+                continue;
+              }
+              for (const file of found) {
+                if (seen.has(file)) continue;
+                const body = read(file) as string;
+                seen.set(file, body);
+                queue.push({ text: body, dir: posix.dirname(file) === "." ? "" : posix.dirname(file), from: file, isJob: false });
+              }
+            }
+          }
+        }
+        return seen;
+      };
+      // Job keys may carry a trailing comment, capitals and underscores (SFH-R2-06).
+      const JOB_KEY = /^ {2}([A-Za-z0-9_-]+):[ \t]*(?:#[^\n]*)?$/gm;
+      const measureHolders = (src: string, read: RepoReader = readRepoFile): string[] =>
+        [...src.matchAll(JOB_KEY)]
+          .map((m) => m[1])
           .filter((job) => {
             const body = src.match(
-              new RegExp(`^ {2}${job}:\\s*\\n([\\s\\S]*?)(?=\\n {2}[a-z]|$(?![\\s\\S]))`, "m"),
+              new RegExp(`^ {2}${job}:[ \\t]*(?:#[^\\n]*)?\\n([\\s\\S]*?)(?=\\n {2}[A-Za-z0-9_]|$(?![\\s\\S]))`, "m"),
             )?.[1] ?? "";
-            return /- name: Acquire shared-test-db mutex|61616158/.test(body);
+            if (JOB_TAKES_KEY.test(body)) return true;
+            return [...filesRunBy(body, read)].some(
+              ([path, text]) => !laneProvenPrivate(path, text) && fileTakesKey(text),
+            );
           })
           .sort();
+
+      // The detector's own calibration: each spelling it claims to see must be
+      // SEEN, and each mention it claims to ignore must be IGNORED, measured on
+      // synthetic jobs that run the repo's REAL scripts (and, where a form needs a
+      // file the repo does not have, a named fake). Without this, a detector that
+      // silently stopped walking scripts would keep the two pins below green.
+      it("measureHolders sees every spelling of taking the shared-test-db key, and no mere mention (SFH-02 / IN-05)", () => {
+        const job = (name: string, lines: string): string =>
+          `  ${name}:\n    runs-on: ubuntu-latest\n    steps:\n${lines}\n`;
+        const withFakes = (fakes: Record<string, string>): RepoReader => (p) => fakes[p] ?? readRepoFile(p);
+        const verdict = (lines: string, read?: RepoReader): boolean =>
+          measureHolders(`jobs:\n${job("probe", lines)}`, read).includes("probe");
+        expect(
+          verdict(`      - run: bash scripts/test-only-normalize-analytics-url.sh`),
+          "measureHolders missed a job that runs scripts/test-only-normalize-analytics-url.sh, which takes the key through `MUTEX_KEY=` — a job could re-acquire by running a script and pass the holder-set pin",
+        ).toBe(true);
+        expect(
+          verdict(`      - run: bash "\${GITHUB_WORKSPACE}/scripts/restore-test-from-baseline.sh" --mode preflight`),
+          "measureHolders missed a job that runs scripts/restore-test-from-baseline.sh through a workspace-rooted path",
+        ).toBe(true);
+        expect(
+          verdict(`      - name: Take the shared TEST lock\n        run: psql "$DSN" -c "SELECT pg_try_advisory_lock($KEY);"`),
+          "measureHolders missed a renamed step that takes an advisory lock on a VARIABLE key in the job's own YAML",
+        ).toBe(true);
+        expect(
+          verdict(`      - run: PGAPPNAME=ci-shared-test-db-mutex psql "$DSN" -c "SELECT 1;"`),
+          "measureHolders missed a job that opens a session under the mutex's PGAPPNAME",
+        ).toBe(true);
+        const sourced = withFakes({
+          "scripts/fake-outer.sh": '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n. "${SCRIPT_DIR}/fake-inner.sh"\n',
+          "scripts/fake-inner.sh": "MUTEX_KEY=61616158\n",
+        });
+        expect(
+          verdict(`      - run: bash scripts/fake-outer.sh`, sourced),
+          "measureHolders does not follow a `.`-sourced helper — a script that takes the key only through a file it sources read as a non-holder",
+        ).toBe(true);
+
+        // Round 2 (WR-03 / SFH-R2-03): the take is recognised by the ACT, not a spelling.
+        const takes: [string, string][] = [
+          ["a key held in an arbitrary variable (probe C)", 'LOCK=61616158\npsql "$DSN" -c "SELECT pg_advisory_lock(${LOCK});"\n'],
+          ["a shared-mode lock on a variable key (probe D)", 'psql "$DSN" -c "SELECT pg_advisory_lock_shared(${SHARED_KEY});"\n'],
+          ["upper case, a space before `(`, a ::bigint cast", 'psql "$DSN" -c "SELECT PG_ADVISORY_LOCK (61616158::bigint);"\n'],
+          ["the key assigned to a longer name (`SHARED_TEST_DB_MUTEX_KEY=`)", "SHARED_TEST_DB_MUTEX_KEY=61616158\n"],
+          ["a `local` key used as a psql variable, not a comparison", 'f() {\n  local key=61616158\n  psql "$DSN" -v k="${key}" -f lock.sql\n}\n'],
+          ["a PL/pgSQL key variable locked by name", "DO $$ DECLARE c_key bigint := 61616158; BEGIN PERFORM pg_try_advisory_xact_lock(c_key); END $$;\n"],
+        ];
+        for (const [what, text] of takes) {
+          expect(
+            verdict(`      - run: bash scripts/fake-take.sh`, withFakes({ "scripts/fake-take.sh": text })),
+            `measureHolders missed a script that takes the key through ${what} — the holder-set pin and the D-02 negative would both stay green`,
+          ).toBe(true);
+        }
+        expect(
+          verdict(`      - run: psql "$DSN" -c "SELECT pg_advisory_lock_shared(:k);"`),
+          "measureHolders missed a shared-mode advisory lock on a psql variable in the job's own YAML (probe J)",
+        ).toBe(true);
+        const notTakes: [string, string][] = [
+          ["a lock on a DIFFERENT numeric literal", 'psql "$DSN" -c "SELECT pg_advisory_lock(12345);"\n'],
+          ["a try-lock on the in-flight key constant", 'psql "$DSN" -c "SELECT pg_try_advisory_lock(${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY});"\n'],
+          ["a `local` key used only as a comparison operand", 'f() {\n  local mutex_key=61616158\n  if [ "${X}" = "${mutex_key}" ]; then exit 1; fi\n}\n'],
+        ];
+        for (const [what, text] of notTakes) {
+          expect(
+            verdict(`      - run: bash scripts/fake-take.sh`, withFakes({ "scripts/fake-take.sh": text })),
+            `measureHolders counted ${what} as a take — the rule's only exemptions are the ones it can prove`,
+          ).toBe(false);
+        }
+
+        // Round 2 (WR-03 / SFH-R2-04 / SFH-R2-08): every ordinary way to RUN the file.
+        const inner = { "scripts/fake-inner.sh": "MUTEX_KEY=61616158\n" };
+        const runs: [string, string, RepoReader][] = [
+          ["`. x.sh || exit 1` (probe E)", "      - run: bash scripts/fake-outer.sh", withFakes({ ...inner, "scripts/fake-outer.sh": 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n. "${SCRIPT_DIR}/fake-inner.sh" || exit 1\n' })],
+          ["`. ./x.sh # comment`", "      - run: bash scripts/fake-outer.sh", withFakes({ ...inner, "scripts/fake-outer.sh": ". ./fake-inner.sh # the helper\n" })],
+          ['`source "$(dirname "$0")/x.sh"`', "      - run: bash scripts/fake-outer.sh", withFakes({ ...inner, "scripts/fake-outer.sh": 'source "$(dirname "$0")/fake-inner.sh"\n' })],
+          ["a child script the followed script EXECUTES (probe F)", "      - run: bash scripts/fake-outer.sh", withFakes({ "scripts/fake-outer.sh": 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nbash "${SCRIPT_DIR}/restore-test-from-baseline.sh" --mode preflight\n' })],
+          ["a node entry point (probe G)", "      - run: node scripts/fake-entry.mjs", withFakes({ "scripts/fake-entry.mjs": 'await client.query("SELECT pg_advisory_lock($1)", [key]);\n' })],
+          ["a python entry point", "      - run: python3 scripts/fake_entry.py", withFakes({ "scripts/fake_entry.py": 'cur.execute("SELECT pg_advisory_lock(%s)", (key,))\n' })],
+          ["`cd scripts && bash x.sh` (probe H)", "      - run: cd scripts && bash restore-test-from-baseline.sh --mode preflight", readRepoFile],
+          ["a bare path under `working-directory: scripts`", "      - working-directory: scripts\n        run: bash restore-test-from-baseline.sh --mode preflight", readRepoFile],
+          ["a `..` path through a lane directory (probe L)", "      - run: bash scripts/pg-lane/../restore-test-from-baseline.sh --mode preflight", readRepoFile],
+          ["a sourced `../lib/x.sh` resolved by its whole path, not its basename (SFH-R2-08)", "      - run: bash scripts/fake-outer.sh", withFakes({ "scripts/fake-outer.sh": 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n. "${SCRIPT_DIR}/../lib/fake-k.sh"\n', "lib/fake-k.sh": "MUTEX_KEY=61616158\n", "scripts/fake-k.sh": "echo decoy\n" })],
+          ["`npm run <name>` expanded from package.json", "      - run: npm run fake-restore", withFakes({ "package.json": JSON.stringify({ scripts: { "fake-restore": "bash scripts/restore-test-from-baseline.sh --mode preflight" } }) })],
+          ["a NEW lane-directory script that is not a proven-private named file (probe I, any DSN)", "      - run: bash scripts/pg-lane/fake-other-lane.sh", withFakes({ "scripts/pg-lane/fake-other-lane.sh": 'psql "$DATABASE_URL" -c "SELECT pg_advisory_lock(61616158);"\n' })],
+          ["a NEW lane-directory script that reads the shared DSN (probe I)", "      - run: bash scripts/pg-lane/fake-new-lane.sh", withFakes({ "scripts/pg-lane/fake-new-lane.sh": 'psql "$TEST_SUPABASE_DB_URL" -c "SELECT pg_advisory_lock(61616158);"\n' })],
+        ];
+        for (const [what, lines, read] of runs) {
+          expect(
+            verdict(lines, read),
+            `measureHolders did not follow ${what} to a file that takes the key — the job read as a non-holder`,
+          ).toBe(true);
+        }
+        expect(
+          measureHolders(
+            `jobs:\n  Probe_Job:  # a holder whose key line carries a comment\n    runs-on: ubuntu-latest\n    steps:\n      - run: psql "$DSN" -c "SELECT pg_advisory_lock(61616158);"\n`,
+          ),
+          "measureHolders never enumerated a job whose key line has a capital, an underscore and a trailing comment (probe A, SFH-R2-06)",
+        ).toEqual(["Probe_Job"]);
+
+        // Fail LOUD, never a bare ENOENT and never a silent non-holder (IN-03).
+        expect(
+          () => verdict(`      - run: bash scripts/r2-fake-does-not-exist.sh`),
+          "measureHolders did not name an invoked script that resolves to no repo file",
+        ).toThrow(/runs "scripts\/r2-fake-does-not-exist\.sh", which resolves to no repo file/);
+        expect(
+          () => verdict(`      - run: echo "see scripts/r2-fake-gone.sh"`),
+          "measureHolders did not name a job-body path that resolves to no repo file",
+        ).toThrow(/names "scripts\/r2-fake-gone\.sh", which resolves to no repo file/);
+        expect(
+          () => verdict(`      - run: bash "$RUNNER_TEMP/x.sh"`),
+          "measureHolders silently skipped an invocation under a directory it cannot resolve",
+        ).toThrow(/under a directory the detector cannot resolve/);
+        expect(
+          () => verdict(`      - run: npm run r2-fake-undefined-script`),
+          "measureHolders silently skipped an `npm run` of a script package.json does not define",
+        ).toThrow(/which package\.json does not define/);
+
+        expect(
+          verdict(`      - run: |\n          bash "\${GITHUB_WORKSPACE}/scripts/wait-for-test-schema-apply.sh"\n          bash scripts/test-ledger-drift-check.sh`),
+          "measureHolders counted test-db-drift's two REAL scripts as a holder — the ordering wait (and the shared-test-db-keys.sh it sources) and VAC-08 only NAME the key; a detector that reads a mention as a take would red the D-02 negative on a job that holds nothing",
+        ).toBe(false);
+        expect(
+          verdict(`      - run: echo ok\n        # bash scripts/restore-test-from-baseline.sh`),
+          "measureHolders followed a COMMENTED-OUT script invocation, which runs nothing",
+        ).toBe(false);
+        const drill = readRepoFile("scripts/pg-lane/mutex-dead-holder-lane.sh") ?? "";
+        expect(
+          fileTakesKey(drill),
+          "scripts/pg-lane/mutex-dead-holder-lane.sh no longer takes the key literal — the PRIVATE_LANE_PROOF exemption below is then unproven; re-point this calibration at a lane script that does",
+        ).toBe(true);
+        expect(
+          laneProvenPrivate("scripts/pg-lane/mutex-dead-holder-lane.sh", drill),
+          "scripts/pg-lane/mutex-dead-holder-lane.sh no longer PROVES it is private (it must refuse every argument, bind 127.0.0.1 and never expand TEST_SUPABASE_DB_URL) — its literal-key take now counts as a shared-TEST holder, as it should until the proof is restored",
+        ).toBe(true);
+        expect(
+          laneProvenPrivate("scripts/pg-lane/mutex-dead-holder-lane.sh", `${drill}\npsql "$TEST_SUPABASE_DB_URL" -c "SELECT 1;"\n`),
+          "the private-lane proof still exempted the named drill after it started expanding TEST_SUPABASE_DB_URL — a named file that reaches the shared DSN is not private, whatever its name",
+        ).toBe(false);
+        expect(
+          verdict(`      - run: bash scripts/pg-lane/mutex-dead-holder-lane.sh`),
+          "measureHolders counted a private-lane drill (a throwaway 127.0.0.1 cluster on the runner) as a shared-TEST holder",
+        ).toBe(false);
+      });
+      it("the set of jobs holding the shared-test-db key is EXACTLY DB_JOBS, and sql-tests is not among them", () => {
+        const holders = measureHolders(readText(".github/workflows/ci.yml"));
         expect(
           holders,
           `ci.yml: the jobs that hold (or name) shared-test-db key 61616158 are [${holders.join(", ")}], but DB_JOBS pins [${[...DB_JOBS].sort().join(", ")}]. A holder missing from DB_JOBS runs a mutex protocol no pin below inspects; a DB_JOBS entry that no longer holds means the list describes a mechanism that moved. Update DB_JOBS in the same commit as the ci.yml change, with its reason (D-05 / Phase 164.4.2 DECISION B)`,
@@ -1512,7 +1903,175 @@ describe("Critical regression guards", () => {
         ).toBe(false);
       });
 
-      it("all three DB-touching jobs acquire the mutex on ONE shared advisory-lock key", () => {
+      // Phase 164.4.2.1 D-02, in its OWN `it`: vitest reports only the first
+      // failing expect of an `it`, so a negative placed after the DB_JOBS
+      // equality above could never be seen failing on its own.
+      it("test-db-drift holds and names no shared-test-db key (Phase 164.4.2.1 D-02)", () => {
+        const holders = measureHolders(readText(".github/workflows/ci.yml"));
+        expect(
+          holders.includes("test-db-drift"),
+          "ci.yml test-db-drift acquires (or names) shared-test-db key 61616158 again — Phase 164.4.2.1 D-02 took it off the key: VAC-08 is read-only, it is ordered after apply-test by the `Wait for the TEST schema apply` step, and holding the key made it wait up to 20m31s for 2-5 s of work. Name the key in prose, never by number, inside this job",
+        ).toBe(false);
+      });
+
+      // Phase 164.4.2.1 D-07: with the key gone, the ordering wait is SC-2's
+      // ONLY ordering control on test-db-drift, and the per-holder TTL loop no
+      // longer covers the job — so its order, its enablement, its invocation,
+      // the fail-closed shape of both steps, the VAC-08 command and its connect
+      // bound, its TTL and its `needs:` are pinned here, one
+      // expect per condition so a failure names the one it broke.
+      it("test-db-drift runs the ordering wait BEFORE VAC-08 and keeps its TTL and needs: python (its only ordering control since 164.4.2.1)", () => {
+        const body = jobSlice(readText(".github/workflows/ci.yml"), "test-db-drift");
+        const wait = body.indexOf("- name: Wait for the TEST schema apply to conclude (merge pushes only)");
+        const vac08 = body.indexOf("- name: VAC-08 - repo-vs-TEST ledger and function body drift");
+        expect(
+          wait,
+          "ci.yml test-db-drift lost its `Wait for the TEST schema apply to conclude (merge pushes only)` step — since Phase 164.4.2.1 it is the ONLY thing ordering VAC-08 after apply-test's schema apply, so without it VAC-08 can judge a half-applied push (SC-2)",
+        ).toBeGreaterThan(-1);
+        expect(
+          vac08,
+          "ci.yml test-db-drift lost its `VAC-08 - repo-vs-TEST ledger and function body drift` step — the job exists only to run it (SC-2)",
+        ).toBeGreaterThan(-1);
+        expect(
+          wait < vac08,
+          "ci.yml test-db-drift runs VAC-08 BEFORE the ordering wait — the wait orders nothing if it runs after the reads it is meant to order (SC-2, Phase 164.4.2.1)",
+        ).toBe(true);
+        // A step: from its `- name:` line to the next step at six-space indent,
+        // or the end of the job. Both steps are cut this way, so a step added
+        // AFTER VAC-08 can neither false-red nor silently satisfy a VAC-08 pin
+        // (WR-02 / SFH-R2-07, 164.4.2.1 round 2: vac08Step used to run to the end
+        // of the job).
+        const stepAt = (at: number): string => {
+          const from = body.slice(at);
+          const next = from.slice(1).search(/\n {6}- /);
+          return next === -1 ? from : from.slice(0, next + 1);
+        };
+        const waitStep = stepAt(wait);
+        expectMatch(
+          waitStep,
+          /^ {8}if: \$\{\{ needs\.changed-paths\.outputs\.docs_only != 'true' && vars\.E2E_TEST_DB_CONFIGURED == 'true' && github\.event_name == 'push' \}\}$/m,
+          "ci.yml test-db-drift's ordering wait no longer carries its merge-push `if:` exactly — a changed condition can DISABLE the wait while the step stays in place and in order, and VAC-08 then reads TEST unordered on the one event (a merge push) that applies migrations (SC-2)",
+        );
+        expectMatch(
+          waitStep,
+          /bash "\$\{GITHUB_WORKSPACE\}\/scripts\/wait-for-test-schema-apply\.sh"/,
+          "ci.yml test-db-drift's ordering wait step no longer invokes scripts/wait-for-test-schema-apply.sh — a wait step that runs something else orders nothing (SC-2)",
+        );
+        // FAIL-CLOSED (164.4.2.1 round-1 review, WR-05 / SFH-03). The wait's only
+        // stopping outcome is `wait-exhausted` (exit 1). Before this phase the key
+        // was a second, independent barrier; now each of these one-line edits
+        // would leave every assertion above green while an exhausted wait turned
+        // green and VAC-08 read TEST mid-apply on a merge push. Same for VAC-08
+        // itself: a gate whose failure cannot fail the job is not a gate.
+        const vac08Step = stepAt(vac08);
+        // ENABLEMENT (WR-01 / SFH-R2-01, 164.4.2.1 round 2). A skipped step leaves
+        // the job `success`, and the `frontend` aggregator reads only the JOB
+        // result — so a step-level condition is the degenerate way to make a gate
+        // unable to fail the job. The wait carries exactly ONE `if:` (the one
+        // pinned above); VAC-08 carries none.
+        expect(
+          waitStep.match(/^ {8}if:/gm)?.length ?? 0,
+          "ci.yml test-db-drift's ordering wait carries more than the one pinned step-level `if:` — YAML keeps the LAST duplicate key, so a second `if:` silently replaces the merge-push condition (SC-2)",
+        ).toBe(1);
+        expect(
+          /^ {8}if:/m.test(vac08Step),
+          "ci.yml test-db-drift's VAC-08 step carries a step-level `if:` — a condition can SKIP the gate, and a skipped step leaves the job `success`, so the aggregator reads a gate that never ran as green (SC-2)",
+        ).toBe(false);
+        // The last command of a `run: |` block decides the step's exit status, so
+        // "nothing after the invocation" is what makes it fail-closed; `set -e`
+        // then covers any command a future edit puts BEFORE it.
+        const commandsAfter = (step: string, invocation: RegExp): string[] => {
+          const lines = step.split("\n");
+          const at = lines.findIndex((line) => invocation.test(line));
+          return at === -1
+            ? ["<invocation not found>"]
+            : lines.slice(at + 1).filter((line) => /^ {10,}\S/.test(line) && !/^\s*#/.test(line));
+        };
+        expect(
+          /^ {8}continue-on-error:/m.test(waitStep),
+          "ci.yml test-db-drift's ordering wait carries continue-on-error — a wait-exhausted outcome would no longer stop VAC-08, which is then unordered on a merge push (SC-2, Phase 164.4.2.1)",
+        ).toBe(false);
+        expect(
+          /^ {8}continue-on-error:/m.test(vac08Step),
+          "ci.yml test-db-drift's VAC-08 step carries continue-on-error — a drift the gate finds would no longer fail the job (SC-2)",
+        ).toBe(false);
+        expect(
+          /^ {4}continue-on-error:/m.test(body),
+          "ci.yml test-db-drift carries a JOB-level continue-on-error — neither the ordering wait nor VAC-08 could then fail the job the `frontend` aggregator reads (SC-2)",
+        ).toBe(false);
+        expectMatch(
+          waitStep,
+          /^ {10}set -euo pipefail$/m,
+          "ci.yml test-db-drift's ordering wait lost `set -euo pipefail` — a command a future edit places before the invocation could fail silently (SC-2)",
+        );
+        expectMatch(
+          waitStep,
+          /^ {10}bash "\$\{GITHUB_WORKSPACE\}\/scripts\/wait-for-test-schema-apply\.sh"$/m,
+          "ci.yml test-db-drift's ordering wait invocation is no longer bare (a trailing `|| true` or similar makes a wait-exhausted outcome non-fatal) (SC-2)",
+        );
+        expect(
+          commandsAfter(waitStep, /wait-for-test-schema-apply\.sh"$/),
+          "ci.yml test-db-drift's ordering wait runs a command AFTER scripts/wait-for-test-schema-apply.sh — the step's exit status is the LAST command's, so a wait-exhausted exit 1 is masked (SC-2)",
+        ).toEqual([]);
+        expectMatch(
+          vac08Step,
+          /^ {10}set -euo pipefail$/m,
+          "ci.yml test-db-drift's VAC-08 step lost `set -euo pipefail` (SC-2)",
+        );
+        expectMatch(
+          body,
+          /^ {10}bash scripts\/test-ledger-drift-check\.sh$/m,
+          "ci.yml test-db-drift's VAC-08 step no longer runs `bash scripts/test-ledger-drift-check.sh` bare — the gate a developer runs and the gate CI runs must be the same command (SC-2)",
+        );
+        expect(
+          commandsAfter(vac08Step, /^ {10}bash scripts\/test-ledger-drift-check\.sh$/),
+          "ci.yml test-db-drift's VAC-08 step runs a command AFTER scripts/test-ledger-drift-check.sh — the step's exit status is the LAST command's, so a drift red is masked (SC-2)",
+        ).toEqual([]);
+        // A `trap` can rewrite the step's exit status (`trap 'exit 0' EXIT`), and an
+        // `exit`/`exit 0` placed before the invocation ends the step green without
+        // running it. `commandsAfter` sees neither, because both can sit BEFORE the
+        // invocation (WR-01, 164.4.2.1 round 2).
+        const runCommands = (step: string): string[] =>
+          step.split("\n").filter((line) => /^ {10,}\S/.test(line) && !/^\s*#/.test(line));
+        for (const [label, step] of [["ordering wait", waitStep], ["VAC-08 step", vac08Step]] as const) {
+          expect(
+            runCommands(step).filter((line) => /\btrap\b/.test(line)),
+            `ci.yml test-db-drift's ${label} sets a \`trap\` — a trap can replace the invocation's exit status, so a failure no longer fails the job (SC-2)`,
+          ).toEqual([]);
+          expect(
+            runCommands(step).filter((line) => /(?:^|[;&|]|\s)exit(?:\s+0)?\s*(?:$|[;#&|])/.test(line)),
+            `ci.yml test-db-drift's ${label} runs a bare \`exit\` or \`exit 0\` — the step can end green without running (or despite) its invocation (SC-2)`,
+          ).toEqual([]);
+        }
+        // IN-01: the drift check's psql connects are bounded here, not by the 90m TTL.
+        expectMatch(
+          vac08Step,
+          /^ {10}PGCONNECT_TIMEOUT: "15"$/m,
+          "ci.yml test-db-drift's VAC-08 step lost `PGCONNECT_TIMEOUT` — its queries carry a 30s statement_timeout but nothing then bounds the CONNECT, so an unreachable TEST host holds the runner until the 90m TTL (IN-01, Phase 164.4.2.1)",
+        );
+        expectMatch(
+          body,
+          /^ {4}timeout-minutes: 90$/m,
+          "ci.yml test-db-drift lost (or changed) `timeout-minutes: 90` — SC-4 forbids raising it and lowering it is out of scope for Phase 164.4.2.1 (D-04); the per-holder TTL loop no longer covers this job, so this is its only pin",
+        );
+        const needsBlock = findOrFail(
+          body,
+          /^ {4}needs:\n((?: {6}- [\w-]+\n)+)/m,
+          "ci.yml test-db-drift: no needs: list found",
+        );
+        expectMatch(
+          needsBlock,
+          /^ {6}- python$/m,
+          "ci.yml test-db-drift dropped `needs: python` — it makes the same-commit supabase-migrate.yml run register long before the ordering wait's appearance grace expires, and it is the downstream backstop for a skipped python job (Phase 164.4.2.1 D-02)",
+        );
+        expectMatch(
+          needsBlock,
+          /^ {6}- changed-paths$/m,
+          "ci.yml test-db-drift dropped `needs: changed-paths` — its `if:` and the wait's `if:` read needs.changed-paths.outputs.docs_only, which is empty without the edge (Phase 164.4.2.1 D-02)",
+        );
+      });
+
+      it("every DB-touching holder job acquires the mutex on ONE shared advisory-lock key", () => {
         const src = readText(".github/workflows/ci.yml");
         const keyByJob = new Map<string, string>();
         for (const job of DB_JOBS) {
@@ -1543,7 +2102,7 @@ describe("Critical regression guards", () => {
       // Phase 158 introduced, both of which are one-line YAML deletions away
       // from silently regressing. That is precisely the silent-green class this
       // phase exists to kill, so they are pinned here too.
-      it("all three DB-touching jobs carry the mutex TTL (timeout-minutes)", () => {
+      it("every DB-touching holder job carries the mutex TTL (timeout-minutes)", () => {
         const src = readText(".github/workflows/ci.yml");
         for (const job of DB_JOBS) {
           expectMatch(
@@ -1604,7 +2163,7 @@ describe("Critical regression guards", () => {
       // pg_advisory_lock so the lock wait itself is exempt/covered and the
       // pid is in the log before MUTEX-ACQUIRED can be grepped — so the pin
       // asserts the whole ordered sequence, not bare membership.
-      it("the mutex holder opens with both session GUCs and the backend-pid marker before pg_advisory_lock in all three acquire steps", () => {
+      it("the mutex holder opens with both session GUCs and the backend-pid marker before pg_advisory_lock in every holder's acquire step", () => {
         const src = readText(".github/workflows/ci.yml");
         const exemptHolderRe =
           /-c "SET statement_timeout = 0;" \\\n\s+-c "SET client_connection_check_interval = '30s';" \\\n\s+-c "SELECT 'HOLDER-BACKEND-PID ' \|\| pg_backend_pid\(\);" \\\n\s+-c "SELECT pg_advisory_lock\(61616158\);"/;
@@ -1625,7 +2184,7 @@ describe("Critical regression guards", () => {
       // Extracting the WHOLE acquire step from each DB job and asserting
       // pairwise string equality mechanically enforces byte-identity, subsumes
       // that count, and names the drifted site on failure.
-      it("the three Acquire shared-test-db mutex steps are byte-identical and carry libpq keepalives", () => {
+      it("every holder's Acquire shared-test-db mutex step is byte-identical and carries libpq keepalives", () => {
         const src = readText(".github/workflows/ci.yml");
         // From the step's `- name:` line (6-space step indent) to the next
         // sibling step or comment at that indent — everything inside the step
@@ -1647,7 +2206,7 @@ describe("Critical regression guards", () => {
         for (const job of otherJobs) {
           expect(
             stepByJob.get(job),
-            `ci.yml ${job}: its "Acquire shared-test-db mutex" step is no longer byte-identical to ${refJob}'s — the three DB-touching jobs' acquire steps are identical BY DESIGN (every mutex invariant is reasoned about once and applied three times), so a single-site drift means one job runs a DIFFERENT mutex protocol than the other two and every per-fragment pin here can still pass (158-MUTEX-01 review)`,
+            `ci.yml ${job}: its "Acquire shared-test-db mutex" step is no longer byte-identical to ${refJob}'s — every holder's acquire step is identical BY DESIGN (every mutex invariant is reasoned about once and applied to each holder), so a single-site drift means one job runs a DIFFERENT mutex protocol than the rest and every per-fragment pin here can still pass (158-MUTEX-01 review)`,
           ).toBe(stepByJob.get(refJob));
         }
         // [158-MUTEX-01 F2]: during the contended pg_advisory_lock wait and
@@ -1656,7 +2215,7 @@ describe("Critical regression guards", () => {
         // invisibly — the backend keeps the lock after the job is gone, and
         // the release step's dead-holder witness never fires. Presence is
         // asserted once on the reference job; byte-identity above extends it
-        // to all three sites.
+        // to every holder.
         expectMatch(
           stepByJob.get(refJob)!,
           /keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4/,
@@ -1673,10 +2232,10 @@ describe("Critical regression guards", () => {
       // janitor for such orphans; zeroing it made them immortal. The real
       // janitor is client_connection_check_interval: the backend polls its
       // client socket during query execution AND lock waits, aborting within
-      // ~30s of the client dying. Every mutex session needs it — the three
+      // ~30s of the client dying. Every mutex session needs it — the
       // ci.yml holders AND the probe's contenders (a probe job timeout kills
       // a contender mid-wait the same way, leaving a zombie waiter).
-      it("every mutex session sets client_connection_check_interval (all three acquire steps + the probe contender)", () => {
+      it("every mutex session sets client_connection_check_interval (every holder's acquire step + the probe contender)", () => {
         const ccciRe = /-c "SET client_connection_check_interval = '30s';"/;
         const src = readText(".github/workflows/ci.yml");
         for (const job of DB_JOBS) {
@@ -1699,7 +2258,7 @@ describe("Critical regression guards", () => {
       // same pid) is what makes the terminate safe against pid recycling —
       // a bare pg_terminate_backend would not be, so the pin asserts the
       // whole guarded statement.
-      it("all three release steps carry the guarded server-side pg_terminate_backend of the holder backend", () => {
+      it("every holder's release step carries the guarded server-side pg_terminate_backend of the holder backend", () => {
         const src = readText(".github/workflows/ci.yml");
         const reapRe =
           /pg_terminate_backend\(\$\{backend\}\) FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158 AND pid = \$\{backend\};/;

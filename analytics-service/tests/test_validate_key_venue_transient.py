@@ -616,6 +616,19 @@ def test_c5_mt5_transient_client_error_carries_a_machine_code(
     sites (C1-C4, C6, C7 and the two others) are BYTE-UNCHANGED — see C3
     immediately below for the sibling-arm-unchanged control that proves the
     narrowing did not widen.
+
+    📜 164.6.5 lineage (kept on merge 2026-09-23). On the 164.6.5 branch this
+    case was RE-CUT 2026-09-22 (criterion 5, D-12/D-13) off -10004 for a
+    different reason from 167's WR-01: -10004 and -10005 LEAVE the
+    venue-transient class for an honest, non-retryable 500
+    (`MT5_TERMINAL_UNRESPONSIVE`, see
+    `test_c5b_ipc_transport_codes_leave_the_venue_transient_class` below).
+    Both phases moved the case off -10004, and 167's trigger (a login-stage
+    code-0 refusal) is the one kept. ⚠️ MERGED ROUTING: 167's refusal
+    predicate runs FIRST, so a login-stage -10005 stays here (SIGN_IN_FAILED);
+    164.6.5's arm then claims every OTHER -10004/-10005 — an `initialize()`
+    failure, a login-stage -10004 and a post-login IPC fault — so those no
+    longer keep NETWORK_UNAVAILABLE as the 167 text above says.
     """
     from services.mt5_client import Mt5LoginRefusedError
 
@@ -680,12 +693,20 @@ def test_c5_mt5_post_login_client_error_keeps_the_network_code(
     byte-for-byte: `NETWORK_UNAVAILABLE`, the shared network detail and
     `recoverable=True`, so the Retry survives. Before WR-01 this answered
     `SIGN_IN_FAILED` / `recoverable=False` after a sign-in that had succeeded.
+
+    ⚠️ MERGE 2026-09-23 (164.6.5 integrated) — this case drove an IPC timeout
+    (-10005) on `account_info()`. An IPC-coded post-login fault now leaves this
+    class for 164.6.5's `MT5_TERMINAL_UNRESPONSIVE` (pinned by the post-login
+    case of `test_c5b_ipc_transport_codes_leave_the_venue_transient_class`), so
+    the case drives a NON-IPC post-login fault: the population that still keeps
+    the pre-167 answer. Its claim, "no sign-in failed, so not SIGN_IN_FAILED",
+    is unchanged.
     """
     from services.mt5_client import Mt5ClientError
 
     _arrange_mt5(
         monkeypatch,
-        account_info_raises=Mt5ClientError(-10005, "IPC timeout"),
+        account_info_raises=Mt5ClientError(0, "account_info returned no data"),
     )
 
     r = _post_validate_key(app_client, **_MT5_FIELDS)
@@ -697,6 +718,70 @@ def test_c5_mt5_post_login_client_error_keeps_the_network_code(
         code="NETWORK_UNAVAILABLE",
         recoverable=True,
     )
+
+
+@pytest.mark.parametrize(
+    ("stage", "code", "detail"),
+    [
+        ("login", -10004, "No IPC connection"),
+        ("login", -10005, "IPC timeout"),
+        # MERGE 2026-09-23 (164.6.5 integrated with 167) — the post-login IPC
+        # fault 167's `test_c5_mt5_post_login_client_error_keeps_the_network_code`
+        # used to drive: not a sign-in failure (167 WR-01), and an IPC code, so
+        # it leaves the class too.
+        ("post_login", -10005, "IPC timeout"),
+    ],
+)
+def test_c5b_ipc_transport_codes_leave_the_venue_transient_class(
+    app_client, monkeypatch, stage: str, code: int, detail: str
+) -> None:
+    """164.6.5 / criterion 5 (D-12/D-13) — THE CLASS BOUNDARY, proven at the
+    LIVE route. Both IPC transport codes no longer answer this file's flat
+    424 venue-transient shape at all: they answer a DIFFERENT, honest,
+    non-retryable 500 — the wedged terminal is ours to fix, not a venue
+    hiccup a retry can clear. MEASURED 2026-09-21: -10005 stayed wedged
+    1h39m across two retries, one with CORRECT credentials — the "try again
+    in a moment" copy this class's shape carries was false both times.
+
+    The router-level assertions (machine code, dependency, retryable, outcome
+    category, log scrub) live in `test_mt5_validate.py`; this test's job is
+    narrower and specific to THIS file: prove the live route no longer routes
+    this pair through the flat venue-transient body at all.
+
+    ⚠️ MERGE 2026-09-23 — a PLAIN `Mt5ClientError` only (what `initialize()`
+    raises for an already-wedged terminal). A login-stage
+    `Mt5LoginRefusedError(-10005)` is 167's refused sign-in and stays in the
+    class as SIGN_IN_FAILED (`test_c5_mt5_login_stage_refusal_codes_share_the_sign_in_body`).
+    """
+    from services.mt5_client import Mt5ClientError
+
+    if stage == "login":
+        _arrange_mt5(monkeypatch, login_raises=Mt5ClientError(code, detail))
+    else:
+        _arrange_mt5(
+            monkeypatch, account_info_raises=Mt5ClientError(code, detail)
+        )
+
+    r = _post_validate_key(app_client, **_MT5_FIELDS)
+
+    assert r.status_code == 500, (
+        f"an IPC transport fault (code={code}) must not answer this class's "
+        f"424 shape any more — got {r.status_code} with {r.json()!r}"
+    )
+    assert r.status_code != EXPECTED_STATUS, (
+        f"EXPECTED_STATUS ({EXPECTED_STATUS}) is this file's flat "
+        f"venue-transient 424 — an IPC transport fault must have LEFT that "
+        f"class, not merely changed its body"
+    )
+    body = r.json()
+    assert body["detail"]["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    assert body["detail"]["retryable"] is False
+    assert body["detail"]["dependency"] == "mt5-gateway"
+    # Never the class's own flat shape — that shape's `code` lives at the top
+    # level of `detail`, not nested one further, and never claims recoverable.
+    assert "recoverable" not in body["detail"] or body["detail"].get(
+        "recoverable"
+    ) is not True
 
 
 # --------------------------------------------------------------------------- #
