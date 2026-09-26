@@ -3236,7 +3236,7 @@ Plans:
 **Goal:** After a migration applies to PROD, the committed baseline is re-dumped and proposed automatically, so main never sits red on baseline-content-drift waiting for a manual dump.
 **Requirements**: TODOS `[164.9.5-MANUAL-BASELINE-REDUMP]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 0 plans
+**Plans:** 9/9 plans executed
 
 ⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
 
@@ -3257,7 +3257,43 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.5 to break down)
+**Wave 1**
+
+- [x] 164.9.5-01-PLAN.md — wave 1: base sync onto #864 (D-29), then the thin end-to-end tracer: `scripts/baseline-redump.mjs` with its frozen CLI, one dump through `--gate-dump` and `--compose` to six staged paths and a bot commit
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 164.9.5-02-PLAN.md — wave 2: gate-side refusals (five-class scan with counts and lines only, gitleaks with the empty-file trap closed, integrity, shape counts, MERGE-tree marker, D-10 no-op)
+- [x] 164.9.5-04-PLAN.md — wave 2: the `redump-dump` and `redump-pr` jobs in `supabase-migrate.yml`, ghcr roster, softening scan
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 164.9.5-07-PLAN.md — wave 3: writer refusals, the `## Provenance`-scoped BASELINE.md writer on the real file, the D-16 CHANGELOG and `### Regenerated` composers and the D-23 PR body
+- [x] 164.9.5-09-PLAN.md — wave 3: the calibrated wiring test for both jobs
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 164.9.5-03-PLAN.md — wave 4: compose-side refusals (child-gate line judges, staged set, skip-token guard) and the real-file `--compose` run after the last refusal
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [x] 164.9.5-08-PLAN.md — wave 5: `--check-bot-branch` naming the open PR token-free (D-24), the D-10 no-op notice naming an open bot PR, `--open-or-edit-pr`
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [x] 164.9.5-05-PLAN.md — wave 6: `BASELINE.md` `## Regenerating` automation paragraph, TODOS closure, post-merge human-verification items
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [x] 164.9.5-06-PLAN.md — wave 7: pre-merge security review (actionlint, injection checklist, threat map for `/gsd-secure-phase`, optional zizmor behind a human checkpoint)
+
+**⭐ D-30 (founder, 2026-09-26, "I'll enable the setting"):** the bot PR is opened with the workflow token, and the founder turns on the repository's "Allow GitHub Actions to create and approve pull requests" (measured OFF by the round-1 review, CR-01). The accepted side effect is that workflows with `pull-requests: write` can approve PRs. The setting being ON is a human-verification item. Recorded in `164.9.5-CONTEXT.md` D-30.
+
+**⭐ D-31 (founder, 2026-09-26, "Notice + skip"):** when `main` already carries a migration the applied merge lacks, `gateDump` no longer refuses. It prints a `::notice::` with the count, emits `changed=false` and writes nothing, so `redump-dump` ends green, the baseline is left alone and `redump-pr` skips. The concurrency group means PROD has not applied the newer migration yet, so the dump is correct but superseded, and that migration's own run re-dumps. This avoids a false red on `main` that would make Railway skip the analytics deploy. A `main` that LACKS a merge migration still refuses; a re-run attempt and a failed fetch of `main` still refuse. Recorded in `164.9.5-CONTEXT.md` D-31.
+
+**⭐ D-32 (round-2 code review CR-03, 2026-09-26):** the run-attempt refusal is removed; the listing check alone guards re-runs. Refusing every `GITHUB_RUN_ATTEMPT` other than 1 turned a correct "Re-run failed jobs" red on `main` with no way back to green. `judgeMainListing` already covers the hazard: a stale re-run is judged `ahead` (skipped under D-31) or `equal` (a valid dump). ⛔ **This amends the D-31 line above:** "a re-run attempt … still refuse" is no longer true; that line is kept as lineage. Recorded in `164.9.5-CONTEXT.md` D-32.
+
+**⭐ D-33 (founder, 2026-09-26, "Revert the tail check"):** the round-2 tail-count floor (`judgeTail`) is reverted. It caused round-3 HIGH CR-04 (DROP COLUMN reddens main on a correct dump). Truncation is a recorded MEDIUM limit, and the main-listing verdict now runs before the completeness floor. Recorded in `164.9.5-CONTEXT.md` D-33.
 
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 

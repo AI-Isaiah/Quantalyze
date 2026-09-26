@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 168
-current_phase_name: DRBOPTIONS
+current_phase: 164.9.5
+current_phase_name: AUTOREDUMP
 status: executing
-stopped_at: Completed 168-02-PLAN.md
-last_updated: "2026-09-26T10:53:17.000Z"
+stopped_at: Completed 164.6-05-PLAN.md
+last_updated: "2026-09-26T14:13:30.050Z"
 last_activity: 2026-09-26
-last_activity_desc: "2026-09-26: Phase 168 plan 02 executed (per-site pins for every option-book reader, acceptance eligibility reads the vocabulary, refusal evidence gains assignment/commission/position, prose sweep); plan 03 (founder post-deploy checkpoint) next"
-state_head: d448599c5c37885d7fefd3e548f3520df1e5973d
+last_activity_desc: Phase 164.9.5 verified (human_needed, 4/6; 2 live-only) and shipped as a PR
+state_head: 0c6c7185a4e88cb86ad0c3732f66ae933607a00a
 progress:
   total_phases: 54
   completed_phases: 35
@@ -179,6 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
+Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
+Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
 Plan: 1 of 7
 Phase: 166.1 (ENGINEFLOOR) — EXECUTING
@@ -490,8 +492,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 166.2
-Status: Executing Phase 168
+Status: Executing Phase 164.9.5
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -507,8 +508,7 @@ Status: Executing Phase 168
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-26 — Phase 166.2 execution started
-Last activity: 2026-09-26 — Phase 168 plan 02 executed; plan 03 (founder post-deploy checkpoint) next
+Last activity: 2026-09-26 — Phase 164.9.5 verified (human_needed) and shipped as a PR
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
