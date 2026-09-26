@@ -2239,6 +2239,48 @@ def _iter_utc_days(first_day: str, last_day: str) -> list[str]:
     return out
 
 
+# D-09 (founder decision D6, 2026-09-26): the zero-cash events that CLOSE an
+# option position without being cash-bearing. Deribit's transaction-log
+# documentation: "when an option expires out of the money the transaction-log
+# type is `expiry` and it remains the only entry for that expiration" (quoted in
+# docs/evidence/drb-assignment-census-2026-09.json). NOT cash-bearing and NOT in
+# ``_OPTION_BOOK_EVENT_TYPES`` (that set must stay a subset of the cash-bearing
+# set): a nonzero-change `expiry` still refuses on both twins through the
+# unknown-type guard. Only the smoothed replay reads this set.
+_OPTION_BOOK_CLOSE_TYPES: frozenset[str] = frozenset({"expiry"})
+assert not (_OPTION_BOOK_CLOSE_TYPES & CASH_BEARING_TYPES), (
+    "an option book CLOSE type carries no cash and must never be cash-bearing"
+)
+# The in-the-money LONG side's expiry label per the same documentation. Its row
+# shape is unmeasured, so the replay refuses it by name (D-09).
+_OPTION_EXERCISE_TYPE: str = "exercise"
+
+
+def _expiry_close(row: Mapping[str, Any]) -> float:
+    """The post-event position of a D-09 ``expiry`` row: always 0.0 (an expired
+    option is no longer held). Fails closed on the shapes the documentation does
+    not describe: a nonzero ``change`` (the documented OTM expiry carries no
+    cash) or a present, nonzero ``position`` (the option did not close). An
+    absent or null ``position`` is accepted, because whether Deribit's expiry row
+    carries one is unmeasured and the close does not depend on it."""
+    change = _coerce_float(row.get("change", 0.0) or 0.0, field="change", row=row)
+    if change != 0.0:
+        raise LedgerValuationError(
+            f"option Deribit row id={row.get('id')!r}: expiry row carries nonzero "
+            "cash — the documented out-of-the-money expiry is zero-cash, so this "
+            "shape is unobserved; refusing to guess (D-09)"
+        )
+    raw_pos = row.get("position")
+    if raw_pos is not None and not (isinstance(raw_pos, str) and not raw_pos.strip()):
+        if _coerce_float(raw_pos, field="position", row=row) != 0.0:
+            raise LedgerValuationError(
+                f"option Deribit row id={row.get('id')!r}: expiry row carries a "
+                "nonzero position — an expired option is no longer held, so this "
+                "shape is unobserved; refusing to guess (D-09)"
+            )
+    return 0.0
+
+
 def replay_option_positions(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -2258,6 +2300,12 @@ def replay_option_positions(
     nonzero post-trade position is ACCEPTED as data (Deribit's call), never asserted
     zero.
 
+    D-09 (founder decision D6, 2026-09-26): an option ``expiry`` row
+    (``_OPTION_BOOK_CLOSE_TYPES``, zero-cash) closes the position to 0 on its
+    day, so an out-of-the-money expiry no longer leaves the option open past its
+    life (which raised the daily-MTM hole on any later option activity). An
+    ``exercise`` row on an option refuses: its shape is unmeasured.
+
     Returns ``{instrument: {currency, first_day, last_day, positions: {day:
     signed_size}}}`` where ``positions`` is keyed ONLY on event days (the caller
     :func:`option_mtm_daily` carries them forward across no-trade days).
@@ -2270,11 +2318,27 @@ def replay_option_positions(
     per_instr: dict[str, list[Mapping[str, Any]]] = {}
     ccy_of: dict[str, str] = {}
     for row in rows:
-        if str(row.get("type", "")) not in _OPTION_BOOK_EVENT_TYPES:
+        row_type = str(row.get("type", ""))
+        if (
+            row_type not in _OPTION_BOOK_EVENT_TYPES
+            and row_type not in _OPTION_BOOK_CLOSE_TYPES
+            and row_type != _OPTION_EXERCISE_TYPE
+        ):
             continue
         instrument = str(row.get("instrument_name", ""))
         if classify_instrument(instrument) != "option":
             continue
+        if row_type == _OPTION_EXERCISE_TYPE:
+            # D-09 ITM variant, chosen to REFUSE: the long side of an in-the-money
+            # expiry is logged as `exercise`, and no census has measured its row
+            # shape. A zero-change one passes both cash twins, so without this it
+            # would leave the long open in the book. Named, never guessed.
+            raise LedgerValuationError(
+                f"option Deribit row id={row.get('id')!r} type='exercise': the "
+                "exercise row shape is unmeasured (no census), so the smoothed "
+                "option book cannot tell whether it closes the position; refusing "
+                "to guess (D-09)"
+            )
         per_instr.setdefault(instrument, []).append(row)
         # WR-03: UPPERCASE like every other currency read site in this module —
         # the adapter merges the day-keyed ΔMTM into the UPPERCASE-keyed
@@ -2299,6 +2363,9 @@ def replay_option_positions(
         )
         positions: dict[str, float] = {}
         for r in ordered:
+            if str(r.get("type", "")) in _OPTION_BOOK_CLOSE_TYPES:
+                positions[_row_utc_day(r.get("timestamp"))] = _expiry_close(r)
+                continue
             raw_pos = r.get("position", _MISSING)
             if raw_pos is _MISSING or raw_pos is None or (
                 isinstance(raw_pos, str) and not raw_pos.strip()

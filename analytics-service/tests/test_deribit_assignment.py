@@ -1041,3 +1041,145 @@ def test_sfh04_a_missing_position_raises_the_distinct_class(case: str) -> None:
         OptionRowFieldMissingError, match="absent/null/blank/non-numeric position"
     ):
         replay_option_positions([opening, bad])
+
+
+# ---------------------------------------------------------------------------
+# D-09 (founder decision D6, 2026-09-26) — an option EXPIRY closes the book.
+#
+# Deribit's transaction-log documentation says an option that expires out of
+# the money is logged as `type=expiry`, and that row is the only entry for that
+# expiration. The smoothed replay used to ignore it, so the short stayed open
+# past expiry: any later option activity on another instrument then raised the
+# daily-MTM hole naming the expired option, and the smoothed basis was lost for
+# the whole account.
+# ---------------------------------------------------------------------------
+
+OTM_PUT = "BTC-17JAN26-50000-P"
+LATER_PUT = "BTC-30JAN26-50000-P"
+
+
+def _otm_expiry(**overrides: Any) -> dict[str, Any]:
+    """A zero-cash `expiry` row on the OTM put, with the fields the replay needs
+    and nothing else. Its position field is omitted: whether Deribit's expiry row
+    carries one is unmeasured, and a closed book does not depend on it."""
+    row = {
+        "type": "expiry",
+        "instrument_name": OTM_PUT,
+        "currency": "BTC",
+        "change": 0.0,
+        "timestamp": _mk_ms("2026-01-17", 8),
+        "id": 2,
+    }
+    row.update(overrides)
+    return row
+
+
+def _otm_short_then_later_activity() -> list[dict[str, Any]]:
+    opening = _opt_row(
+        instrument=OTM_PUT, day="2026-01-15", change=0.04, position=-1.0, id=1
+    )
+    later_open = _opt_row(
+        instrument=LATER_PUT, day="2026-01-20", change=0.01, position=-1.0, id=3
+    )
+    later_close = _opt_row(
+        instrument=LATER_PUT, day="2026-01-21", change=-0.01, position=0.0, id=4
+    )
+    return [opening, _otm_expiry(), later_open, later_close]
+
+
+def test_d09_replay_closes_an_otm_short_at_its_expiry_row() -> None:
+    """D-09 (pure): the expiry row sets the expired option's position to 0 on
+    its day, so the book is closed from the expiry day on."""
+    book = replay_option_positions(_otm_short_then_later_activity())
+    assert book[OTM_PUT]["positions"] == {"2026-01-15": -1.0, "2026-01-17": 0.0}
+    assert book[OTM_PUT]["last_day"] == "2026-01-17"
+
+
+def test_d09_smoothed_e2e_otm_expiry_then_later_activity_ingests(
+    monkeypatch: Any,
+) -> None:
+    """D-09 (real smoothed harness): an OTM short expires, then another put is
+    traded later. Before the fix this raised `option daily-MTM hole:
+    instrument=BTC-17JAN26-50000-P carries a nonzero position on 2026-01-18`.
+    Now the ledger builds, the expired put's book is zero from the expiry day
+    on (no entry on the quiet days after it), and the smoothed total equals the
+    cash total (a closed terminal book).
+
+    Book: −1 × 0.01 (01-15), −1 × 0.005 (01-16), 0 (01-17 expiry) ⇒ ΔMTM
+    −0.01, +0.005, +0.005; the later put −1 × 0.02 (01-20), 0 (01-21) ⇒ −0.02,
+    +0.02. Cash: +0.04 (01-15), +0.01 (01-20), −0.01 (01-21)."""
+    ledger, _report, _stub = _run_options_ledger(
+        monkeypatch,
+        btc_rows=_otm_short_then_later_activity(),
+        summaries=[{"currency": "BTC", "equity": 0.04, "session_upl": 0.0,
+                    "options_value": 0.0}],
+        charts={
+            OTM_PUT: {"2026-01-15": 0.01, "2026-01-16": 0.005, "2026-01-17": 0.0},
+            LATER_PUT: {"2026-01-20": 0.02, "2026-01-21": 0.02},
+        },
+        pnl_basis="smoothed_mtm",
+    )
+    got = _series_to_daymap(ledger.native_pnl["BTC"])
+    expected = {
+        "2026-01-15": 0.03, "2026-01-16": 0.005, "2026-01-17": 0.005,
+        "2026-01-20": -0.01, "2026-01-21": 0.01,
+    }
+    assert {d: v for d, v in got.items() if v != 0.0} == pytest.approx(
+        expected, abs=1e-9
+    )
+    assert sum(got.values()) == pytest.approx(0.04, abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    "overrides,wording",
+    [
+        ({"position": -1.0}, "expiry row carries a nonzero position"),
+        ({"change": 0.002}, "expiry row carries nonzero cash"),
+    ],
+    ids=["nonzero_position", "nonzero_change"],
+)
+def test_d09_an_unobserved_expiry_shape_refuses_in_the_replay(
+    overrides: dict[str, Any], wording: str
+) -> None:
+    """D-09 fails closed on what the documentation does not describe: an
+    expiry row whose position is nonzero (the option did not close) or that
+    carries cash (the documented OTM expiry is zero-cash; the cash side of an
+    in-the-money expiry is `assignment` or `exercise`). Neither is guessed."""
+    opening = _opt_row(
+        instrument=OTM_PUT, day="2026-01-15", change=0.04, position=-1.0, id=1
+    )
+    with pytest.raises(LedgerValuationError, match=re.escape(wording)):
+        replay_option_positions([opening, _otm_expiry(**overrides)])
+
+
+def test_d09_an_exercise_row_refuses_in_the_replay() -> None:
+    """D-09 ITM variant, chosen to REFUSE: the long side of an in-the-money
+    expiry is logged as `exercise`, whose row shape no census has measured
+    (the short side is `assignment`, already replayed). A zero-change exercise
+    would pass both cash twins and leave the long open in the book, so the
+    replay refuses it by name rather than guess its position."""
+    opening = _opt_row(
+        instrument=OTM_PUT, day="2026-01-15", change=-0.04, position=1.0, id=1
+    )
+    exercise = _otm_expiry(type="exercise")
+    with pytest.raises(LedgerValuationError, match="exercise row shape is unmeasured"):
+        replay_option_positions([opening, exercise])
+
+
+@pytest.mark.parametrize("twin_name,twin", TWINS, ids=[t[0] for t in TWINS])
+def test_d09_both_twins_agree_on_an_expiry_row(
+    twin_name: str, twin: Callable[[list[dict[str, Any]]], Any]
+) -> None:
+    """D-09 twin consistency: `expiry` stays out of the cash-bearing set. A
+    zero-cash expiry adds nothing on either twin; one carrying cash refuses on
+    both through the unknown-type guard (no census licenses expiry cash)."""
+    opening = dict(
+        _opt_row(instrument=OTM_PUT, day="2026-01-15", change=0.04,
+                 position=-1.0, id=1),
+        index_price=INDEX,
+    )
+    quiet = dict(_otm_expiry(), index_price=INDEX)
+    alone = twin([opening])
+    assert twin([opening, quiet]) == alone, twin_name
+    with pytest.raises(LedgerValuationError, match="unknown Deribit transaction-log type 'expiry'"):
+        twin([opening, dict(quiet, change=0.002)])

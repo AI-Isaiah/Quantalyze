@@ -61,6 +61,12 @@ official OpenAPI schema + practitioner sources + ccxt source + a 3-account live 
   option book event (`_OPTION_EXPIRY_TYPES`), so every basis treats it as `delivery` is treated below.
   `exercise` and `expiry`, which Deribit's transaction-log documentation also lists, remain
   unclassified and keep the unknown-type refusal (no census exists for either).
+  D-09 (founder decision D6, 2026-09-26) adds one non-cash reading: the smoothed option-book replay
+  (`replay_option_positions`) closes an option's position to 0 at a zero-cash `expiry` row, the
+  documented out-of-the-money expiry, so an expired option no longer stays open in the book. An
+  `expiry` row with nonzero cash or a nonzero position, and any `exercise` row on an option, refuse
+  in the replay (unmeasured shapes). Neither type becomes cash-bearing: on both twins a zero-cash
+  `expiry` adds nothing and one carrying cash still refuses.
 - **EXCLUDE (external flow / informational — NOT trading return):** `deposit`, `withdrawal`,
   `transfer`, `swap`, `correction`, `usdc_reward`, `options_settlement_summary`.
   (`options_settlement_summary` is a zero-cash aggregate — live-confirmed Σ`change`=0.0 on all 3
