@@ -31,7 +31,11 @@ import {
   cleanupLiveDbRow,
   advertiseLiveDbSkipReason,
 } from "@/lib/test-helpers/live-db";
-import { fetchAndBuildPayload, probeFactsheetBuildable } from "@/lib/factsheet/fetch-and-build-payload";
+import {
+  fetchAndBuildPayload,
+  fetchAndBuildPayloadWithReason,
+  probeFactsheetBuildable,
+} from "@/lib/factsheet/fetch-and-build-payload";
 import { withPublishedOrOwner } from "@/lib/visibility";
 
 /** N consecutive synthetic calendar days from 2024-01-02, as {date, value}. */
@@ -178,5 +182,17 @@ describe.skipIf(!HAS_LIVE_DB)("FACTSHEETBUILDABLE SC1 — computed to the owner,
 
   it("PROBE-CONTROL: the probe calls the 30-point row buildable", async () => {
     expect(await probeFactsheetBuildable(controlId, ownerVisibility)).toEqual({ buildable: true });
+  });
+
+  // 167.2.1-REVIEW WR-03 on real rows: the owner lane's one build carries the
+  // same reason the probe names, and a payload with no reason.
+  it("WITH-REASON: the reason-carrying build agrees with the probe on all three rows", async () => {
+    const single = await fetchAndBuildPayloadWithReason(singleId, ownerVisibility);
+    expect(single).toEqual({ payload: null, reason: "too_few_points" });
+    const composite = await fetchAndBuildPayloadWithReason(compositeId, ownerVisibility);
+    expect(composite).toEqual({ payload: null, reason: "composite_unbuildable" });
+    const control = await fetchAndBuildPayloadWithReason(controlId, ownerVisibility);
+    expect(control.reason).toBeNull();
+    expect(control.payload?.strategyId).toBe(controlId);
   });
 });
