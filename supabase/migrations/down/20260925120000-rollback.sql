@@ -32,14 +32,42 @@
 -- CLAUDE.md names that database). Until then VAC-08's ledger check reports the
 -- version as present, which is true of the ledger and false of the schema.
 --
+-- The DO block at the top is a catalogue-only PRECONDITION: it RAISEs, before
+-- any DROP runs, unless all three columns the migration added exist. Every DROP
+-- below is IF EXISTS, so without it this file run against a database that
+-- never had 20260925120000 would drop nothing and still report success.
+--
 -- The DO block at the end is catalogue-only: it RAISEs, and so aborts the
--- whole rollback, if any object the migration added survives or the reconnect
--- body still carries the refusal or the history reset.
+-- whole rollback, if any object the migration added survives, if the reconnect
+-- body still carries the refusal or the history reset or lacks the
+-- 20260422101911 ownership SELECT, if a restored COMMENT is not the restored
+-- text, or if reconnect_allocator_api_key's EXECUTE is not what
+-- supabase/schema/baseline.sql grants (authenticated and service_role, never
+-- anon).
 -- ============================================================================
 
 BEGIN;
 
 SET lock_timeout = '3s';
+
+-- ───────────── precondition — CATALOGUE ONLY, reads no row
+DO $precondition$
+DECLARE
+  v_missing text;
+BEGIN
+  SELECT string_agg(c, ', ') INTO v_missing
+    FROM unnest(ARRAY['account_shared_with_api_key_id', 'account_share_kind', 'history_inclusion']) AS c
+   WHERE NOT EXISTS (
+     SELECT 1 FROM pg_attribute
+      WHERE attrelid = 'public.api_keys'::regclass
+        AND attname = c
+        AND NOT attisdropped
+   );
+  IF v_missing IS NOT NULL THEN
+    RAISE EXCEPTION 'Rollback 20260925120000 refused: api_keys lacks column(s) % that the migration adds, so this database does not carry 20260925120000. Nothing was dropped. Run the marker query in CLAUDE.md to see which database this is.', v_missing;
+  END IF;
+END
+$precondition$;
 
 DROP FUNCTION IF EXISTS public.set_departed_key_history_inclusion(uuid, text);
 
@@ -222,7 +250,41 @@ BEGIN
     RAISE EXCEPTION 'Rollback 20260925120000 failed: reconnect_allocator_api_key still carries the refusal or the history_inclusion reset';
   END IF;
 
-  RAISE NOTICE 'Rollback 20260925120000: every added column, constraint, trigger, function and index is gone, and reconnect_allocator_api_key is the 20260422101911 body. The migration ledger row is left in place (see the header).';
+  -- Positive: the restored body is 20260422101911's, not merely a body that
+  -- lacks the two additions.
+  IF position('SELECT user_id, disconnected_at INTO v_owner, v_already_disc' IN v_src) = 0 THEN
+    RAISE EXCEPTION 'Rollback 20260925120000 failed: reconnect_allocator_api_key lacks the 20260422101911 ownership SELECT';
+  END IF;
+
+  IF obj_description('public.reconnect_allocator_api_key(uuid)'::regprocedure, 'pg_proc')
+     IS DISTINCT FROM 'Migration 075: reverse of disconnect_allocator_api_key. Clears disconnected_at + resets sync_error and sync_status=idle so the next cron tick picks the key up fresh. Returns false if the key was not disconnected.' THEN
+    RAISE EXCEPTION 'Rollback 20260925120000 failed: reconnect_allocator_api_key''s COMMENT is not the 20260422101911 text';
+  END IF;
+
+  v_src := col_description('public.api_keys'::regclass,
+             (SELECT attnum FROM pg_attribute
+               WHERE attrelid = 'public.api_keys'::regclass AND attname = 'venue_account_id'));
+  IF v_src IS NULL
+     OR position('NULL is the NORMAL value' IN v_src) = 0
+     OR position('Phase 167.1.2' IN v_src) > 0 THEN
+    RAISE EXCEPTION 'Rollback 20260925120000 failed: COMMENT ON COLUMN api_keys.venue_account_id is not the 20260920120000 text';
+  END IF;
+
+  v_src := obj_description('public.api_keys_user_exchange_venue_account_uniq'::regclass, 'pg_class');
+  IF v_src IS NULL
+     OR position('PARTIAL because NULL is the majority value' IN v_src) = 0
+     OR position('Phase 167.1.2' IN v_src) > 0 THEN
+    RAISE EXCEPTION 'Rollback 20260925120000 failed: COMMENT ON INDEX api_keys_user_exchange_venue_account_uniq is not the text PROD carried';
+  END IF;
+
+  -- The ACL supabase/schema/baseline.sql records for this function.
+  IF NOT has_function_privilege('authenticated', 'public.reconnect_allocator_api_key(uuid)', 'EXECUTE')
+     OR NOT has_function_privilege('service_role', 'public.reconnect_allocator_api_key(uuid)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.reconnect_allocator_api_key(uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Rollback 20260925120000 failed: reconnect_allocator_api_key EXECUTE is not authenticated and service_role only (anon must hold none)';
+  END IF;
+
+  RAISE NOTICE 'Rollback 20260925120000: every added column, constraint, trigger, function and index is gone; reconnect_allocator_api_key is the 20260422101911 body with its COMMENT, and EXECUTE for authenticated and service_role only; the venue_account_id and index COMMENTs are restored. The migration ledger row is left in place (see the header).';
 END
 $verify$;
 
