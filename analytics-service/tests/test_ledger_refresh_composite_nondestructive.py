@@ -529,6 +529,8 @@ class TestTransientReReadFailureRetries:
             f"({payloads!r}). Nothing is known yet, so nothing is written; the "
             "retry decides."
         )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 2, log.error.call_args_list
         assert sentry.capture_exception.call_count == 1, (
             "the re-read failure was not captured as an exception. The ERROR "
             "lines already reach Sentry as message events, but only this "
@@ -663,6 +665,8 @@ class TestEveryNotConfirmedStateNamesItsOwnCause:
             "stamp's cause line does not count: it records the stamp, not the "
             "marker's state.)"
         )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 2, log.error.call_args_list
 
     @pytest.mark.asyncio
     async def test_a_different_live_source_is_not_called_a_retraction(self) -> None:
@@ -825,6 +829,8 @@ class TestAFailedStampReadKeepsTheCause:
         assert sentry.capture_exception.call_count == 1, (
             "the failed stamp read's traceback was not captured"
         )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list
         sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
             "compute_job_id", _JOB_ID
         )
@@ -906,3 +912,5 @@ class TestAProtectedFailurePagesNobody:
             "the loud stamp over a live row did not log its cause at ERROR: "
             f"{log.error.call_args_list!r}"
         )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list

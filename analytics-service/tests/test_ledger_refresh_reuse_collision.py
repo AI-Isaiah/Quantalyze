@@ -476,6 +476,8 @@ class TestUserResyncInheritsAMarkedRefresh:
             "the loud stamp over a live row did not log its cause at ERROR: "
             f"{log.error.call_args_list!r}"
         )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +610,8 @@ class TestChainEdgeReadErrorFailsTransient:
         assert "RuntimeError: simulated read failure" in (result.error_message or ""), (
             f"last_error does not name the failed read: {result.error_message!r}"
         )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 2, log.error.call_args_list
         assert sentry.capture_exception.call_count == 1
         sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
             "compute_job_id", "job-1"
@@ -892,6 +896,8 @@ class TestReReadFailsSafe:
             "error-only write suppresses a failure nobody decided to protect. "
             "The retry decides."
         )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 2, log.error.call_args_list
         assert sentry.capture_exception.call_count == 1
         assert any(
             c.args and "could not re-read" in str(c.args[0])
@@ -1179,6 +1185,8 @@ class TestEntryPublishStateReadFailsTransient:
         assert aclose.await_count == 1, (
             "the exchange the preflight opened was not closed on the early raise"
         )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list
         assert sentry.capture_exception.call_count == 1
         assert any(
             c.args and "pre-refresh publish" in str(c.args[0])
@@ -1265,6 +1273,8 @@ class TestEntryPublishStateReadFailsTransient:
             and any(type(bug).__name__ in str(a) for a in c.args)
             for c in log.error.call_args_list
         ), f"the programming error was not reported at ERROR: {log.error.call_args_list!r}"
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list
         assert sentry.capture_exception.call_count == 1
         sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
             "compute_job_id", "job-1"
@@ -1373,6 +1383,8 @@ class TestSingleKeySitesNameTheRealCause:
             "a claimed job whose row has vanished is an invariant breach; it must "
             f"go out at ERROR. errors: {log.error.call_args_list!r}"
         )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 2, log.error.call_args_list
 
     @pytest.mark.asyncio
     async def test_chain_edge_calls_a_missing_row_an_error(self) -> None:

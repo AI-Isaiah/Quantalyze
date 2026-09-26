@@ -1070,6 +1070,13 @@ here, but this precondition sits here because this is where a reader would go to
      own failure before it does, and the worker loop logs every failed job at WARNING (`Job %s
      failed`); both predate this phase and are the same on every row. If the deployed commit adds
      an ERROR line or a capture on any of these paths, re-count.
+     Every row except the tail mirror's is PINNED by an exact `log.error.call_count` (and, where
+     a capture is expected, `capture_exception.call_count`) in its driving test in
+     `tests/test_ledger_refresh_composite_nondestructive.py` or
+     `tests/test_ledger_refresh_reuse_collision.py`, each marked "pins this path's row of the
+     runbook's alert-volume table". A change to the count turns the test RED, so this table
+     cannot go stale silently the way the bullet above did. The tail-mirror row has no dispatch
+     driver and is counted from the code only.
    📜 *Lineage, superseded 2026-09-25:* "⛔ **BLOCKING.** No schedule naming
    `public.enqueue_ledger_composite_refresh()` may be registered until `run_stitch_composite_job`
    in `analytics-service/services/job_worker.py` re-reads the LIVE `compute_jobs` row's
