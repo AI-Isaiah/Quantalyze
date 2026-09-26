@@ -40,6 +40,7 @@ import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACT
 import type { BuildFactsheetOpts } from "./build-payload";
 import { readCompositeFactsheet, singleKeyDataQuality, readSingleKeyBasisOpts } from "./composite-read-path";
 import { resolveDailyReturnSeries } from "./allocator-portfolio-payload";
+import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload, IngestSource } from "./types";
 
 /**
@@ -125,13 +126,38 @@ function storedEntryCount(raw: unknown): number {
 }
 
 /**
+ * 167.2.1-REVIEW-SFH-R2 N-5 — which stored column the builder's series comes
+ * from, and how many dated returns that column holds. The rule is
+ * `resolveDailyReturnSeries`'s own, asked through the same
+ * `normalizeDailyReturns`: `daily_returns` whenever it normalizes to at least
+ * one entry, and only otherwise the `returns_series` wealth curve (N points
+ * make N-1 returns). A long `returns_series` beside a short but valid
+ * `daily_returns` is therefore never counted: the builder never reads it.
+ * When neither column normalizes, the count is the larger of the two columns'
+ * stored entries, and `source` names the column that held them.
+ */
+function countedSeriesColumn(
+  dailyRaw: unknown,
+  returnsSeriesRaw: unknown,
+): { source: "daily_returns" | "returns_series"; storedReturns: number } {
+  const dailyStored = storedEntryCount(dailyRaw);
+  if (normalizeDailyReturns(dailyRaw).length > 0) {
+    return { source: "daily_returns", storedReturns: dailyStored };
+  }
+  const wealthStored = storedEntryCount(returnsSeriesRaw) - 1;
+  return dailyStored >= wealthStored
+    ? { source: "daily_returns", storedReturns: dailyStored }
+    : { source: "returns_series", storedReturns: wealthStored };
+}
+
+/**
  * 167.2.1-REVIEW-SFH M-3 — a single-key series the resolve stage refused.
- * `too_few_points` only when the stored columns really hold fewer than
- * `MIN_FACTSHEET_SERIES_POINTS` dated returns: `daily_returns` entries, or
- * `returns_series` wealth points less one (N points make N-1 returns). When
- * they hold enough and normalization left too few, the stored data is
- * malformed: the owner is not told a false "fewer than 2 days", and the defect
- * is captured, since it is the analytics writer's and nothing else records it.
+ * `too_few_points` only when the column the builder reads really holds fewer
+ * than `MIN_FACTSHEET_SERIES_POINTS` dated returns (`countedSeriesColumn`,
+ * SFH-R2 N-5). When it holds enough and normalization left too few, the
+ * stored data is malformed: the owner is not told a false "fewer than 2
+ * days", and the defect is captured, since it is the analytics writer's and
+ * nothing else records it. The capture names the counted column (`source`).
  */
 function singleKeyUnbuildable(
   caller: ResolveCaller,
@@ -140,13 +166,10 @@ function singleKeyUnbuildable(
   returnsSeriesRaw: unknown,
   resolvedEntries: number,
 ): { ok: false; reason: NotBuildableReason } {
-  const storedReturns = Math.max(
-    storedEntryCount(dailyRaw),
-    storedEntryCount(returnsSeriesRaw) - 1,
-  );
+  const { source, storedReturns } = countedSeriesColumn(dailyRaw, returnsSeriesRaw);
   if (storedReturns < MIN_FACTSHEET_SERIES_POINTS) return notBuildable("too_few_points");
   captureToSentry(new Error(`factsheet resolve: stored single-key series is malformed (${gate})`), {
-    tags: { stage: "factsheet-resolve-malformed", caller, gate },
+    tags: { stage: "factsheet-resolve-malformed", caller, gate, source },
     extra: { storedReturns, resolvedEntries },
   });
   return notBuildable("malformed_series");

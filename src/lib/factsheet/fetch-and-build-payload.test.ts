@@ -284,6 +284,23 @@ const PARITY: Fixture[] = [
     reason: "too_few_points",
   },
   {
+    // 167.2.1-REVIEW-SFH-R2 N-5: the builder reads `daily_returns` whenever it
+    // normalizes to an entry, so the long wealth curve is never read and is
+    // never counted. This was `malformed_series` until the fix.
+    name: "single-key, one valid daily_returns point beside a long returns_series",
+    row: single({ daily_returns: [{ date: "2024-01-02", value: 0.01 }], returns_series: wealthCurve(31) }),
+    reason: "too_few_points",
+  },
+  {
+    // N-5: the same shadowing, with the read column genuinely malformed.
+    name: "single-key, one finite point plus one NaN beside a long returns_series",
+    row: single({
+      daily_returns: [{ date: "2024-01-02", value: 0.01 }, { date: "2024-01-03", value: NaN }],
+      returns_series: wealthCurve(31),
+    }),
+    reason: "malformed_series",
+  },
+  {
     name: "single-key, two good points",
     row: single({ daily_returns: [{ date: "2024-01-02", value: 0.01 }, { date: "2024-01-03", value: -0.02 }] }),
     reason: null,
@@ -431,6 +448,11 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
       };
       expect(ctx.tags.stage, f.name).toBe("factsheet-resolve-malformed");
       expect(ctx.tags.caller, f.name).toBe("probe");
+      // SFH-R2 N-5: the capture names the column that was counted, which is
+      // the one the builder reads.
+      expect(ctx.tags.source, f.name).toBe(
+        f.name.includes("returns_series-only") ? "returns_series" : "daily_returns",
+      );
       expect(ctx.extra.storedReturns, f.name).toBeGreaterThanOrEqual(2);
       expect(ctx.extra.resolvedEntries, f.name).toBeLessThan(2);
     }
