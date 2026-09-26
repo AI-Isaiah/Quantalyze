@@ -1602,12 +1602,28 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
   if (bad.length > 0) throw new Error(`${bad.length} marker basename(s) do not match ${MIGRATION_BASENAME_STRICT_RE}`);
   const newlyCarried = newBasenames.filter((b) => !oldBasenames.has(b)).sort();
   // SFH-02: the new marker must carry every migration main's committed marker carries.
+  // WR-07: except one main's own checkout no longer holds. That is a migration file
+  // renamed or deleted on main, not a newer baseline, and refusing it would wedge
+  // every later re-dump (the committed marker only moves through this compose).
   const newSet = new Set(newBasenames);
-  const dropped = [...oldBasenames].filter((b) => !newSet.has(b)).length;
+  const mainTree = new Set(migrationBasenames(git(repoRoot, ["ls-tree", "--name-only", "HEAD", MIGRATIONS_REL])));
+  const omitted = [...oldBasenames].filter((b) => !newSet.has(b)).sort();
+  const exempt = omitted.filter((b) => !mainTree.has(b));
+  if (exempt.length > 0) {
+    // main's committed marker was never put through the strict rule: print only what passes it.
+    const shown = exempt.filter((b) => MIGRATION_BASENAME_STRICT_RE.test(b));
+    const hidden = exempt.length - shown.length;
+    console.log(
+      `::notice::baseline-redump: main's committed marker carries ${exempt.length} migration(s) main's checkout no longer holds ` +
+        `(renamed or deleted on main), so the new marker may omit them: ${shown.join(", ")}` +
+        `${hidden > 0 ? `${shown.length > 0 ? ", " : ""}${hidden} with a name outside the strict rule` : ""}`,
+    );
+  }
+  const dropped = omitted.length - exempt.length;
   if (dropped > 0) {
     throw new Error(
-      `the new marker omits ${dropped} migration(s) main's committed marker carries: an older dump must never replace a newer ` +
-        "baseline. Nothing was written; dispatch a fresh run on main",
+      `the new marker omits ${dropped} migration(s) main's committed marker carries and main's checkout still holds: an older dump ` +
+        "must never replace a newer baseline. Nothing was written; dispatch a fresh run on main",
     );
   }
 
@@ -1745,7 +1761,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 216;
+export const EXPECTED_ASSERTIONS = 217;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -2812,9 +2828,31 @@ function selfTest({ withGitleaks = false } = {}) {
     const dropped = composeIn(droppedArt);
     ok(
       !droppedMarker.includes(M1) && dropped.threw !== null &&
-        dropped.threw.message.startsWith("the new marker omits 1 migration(s) main's committed marker carries") && !dropped.text.includes(M1) &&
+        dropped.threw.message.startsWith("the new marker omits 1 migration(s) main's committed marker carries and main's checkout still holds") &&
+        !dropped.text.includes(M1) &&
         dropped.noCommit && dropped.untouched && dropped.noPr,
       "compose refuses a marker that omits a migration main's committed marker carries, by count only, before any file is written (SFH-02)",
+    );
+
+    // WR-07: main's committed marker names migrations main's checkout no longer holds
+    // (renamed or deleted on main). The artifact's marker omits them, and that is not
+    // an older dump: compose proceeds and names each exempted file in a ::notice::,
+    // counting (never printing) a name outside the strict rule.
+    const GHOST = "20251231000000_renamed_away.sql";
+    const GHOST_BAD = ["Ghost", "Not", "Strict.sql"].join("_");
+    const renamed = composeIn(join(dir, "art2"), fakeRunner, {}, (c) => {
+      const mk = join(c, MARKER_REL);
+      writeFileSync(mk, readFileSync(mk, "utf8") + `${GHOST}\n${GHOST_BAD}\n`);
+      g(["add", "--", MARKER_REL], { cwd: c });
+      g(["commit", "-q", "-m", "main's marker names migrations its tree lacks"], { cwd: c });
+    });
+    ok(
+      renamed.threw === null && !renamed.noCommit &&
+        renamed.text.includes(
+          `::notice::baseline-redump: main's committed marker carries 2 migration(s) main's checkout no longer holds (renamed or deleted on main), ` +
+            `so the new marker may omit them: ${GHOST}, 1 with a name outside the strict rule`,
+        ) && !renamed.text.includes(GHOST_BAD),
+      "compose exempts a migration main's committed marker carries but main's checkout lacks (a rename or deletion on main), naming it in a ::notice:: and committing (WR-07)",
     );
 
     console.log("=== SELF-TEST 4a2/4: --compose stages exactly the six paths and refuses a skip token before committing (D-14, D-17)");
