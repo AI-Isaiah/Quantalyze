@@ -21,6 +21,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { compute, cumEq } from "./compute";
+import { calmarByYear } from "./calmar-by-year";
 import { buildComparatorBlock } from "./comparator-block";
 import { buildFactsheetPayload } from "./build-payload";
 import { bootstrapCI, MIN_SHARPE_RESAMPLES } from "./bootstrap";
@@ -433,5 +434,39 @@ describe("HI3-01 compute: a book with no losing day has no Profit Factor (D7), a
     const got = compute(NOISY_A, DATES, 0, 365);
     expect(Number.isFinite(got.profit_factor) && got.profit_factor > 0).toBe(true);
     expect(got.profit_factor).toBe(got.omega_ratio);
+  });
+});
+
+describe("HI3-02 calmarByYear: a year with no drawdown has no Calmar (D7), as compute's headline does", () => {
+  /** 2022 every day a dispersing gain (no drawdown), then 2023 two-sided (a real drawdown). */
+  const dates = isoDates(730, "2022-01-01");
+  const rets = dates.map((d, i) =>
+    d.startsWith("2022") ? 0.0005 + Math.abs(Math.sin(i / 5)) * 0.004 : Math.sin(i / 7) * 0.01 + 0.0004,
+  );
+
+  it("the no-drawdown year's Calmar is NaN, never 0; the drawdown year keeps a finite value", () => {
+    const rows = calmarByYear(rets, dates);
+    expect(rows.map((r) => r.year)).toEqual(["2022", "2023"]);
+    const [clean, drawn] = rows;
+    // Precondition: 2022 is a real gain with no drawdown; 2023 has one.
+    expect(clean.max_dd).toBe(0);
+    expect(clean.ret).toBeGreaterThan(0);
+    expect(drawn.max_dd).toBeLessThan(0);
+    expect(Number.isNaN(clean.calmar), `2022 calmar=${clean.calmar}`).toBe(true);
+    expect(Number.isFinite(drawn.calmar) && drawn.calmar !== 0).toBe(true);
+    // Counts are measured facts and stay numbers.
+    expect(clean.days).toBe(365);
+    expect(drawn.days).toBe(365);
+  });
+
+  it("a constant yield's every row equals the all-zero series' row (NaN)", () => {
+    const zeros = calmarByYear(new Array(730).fill(0), dates);
+    for (const id of YIELD_IDS) {
+      const got = calmarByYear(navConstantYield(CONSTANT_YIELDS[id], 730), dates);
+      got.forEach((row, i) =>
+        expect(Object.is(row.calmar, zeros[i].calmar), `${id} ${row.year} calmar=${row.calmar}`).toBe(true),
+      );
+    }
+    expect(zeros.every((r) => Number.isNaN(r.calmar))).toBe(true);
   });
 });

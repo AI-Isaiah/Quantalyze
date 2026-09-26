@@ -100,3 +100,45 @@ describe("HI3-01: a book with no losing day has no Profit Factor", () => {
     });
   }
 });
+
+describe("HI3-02: Calmar by Year reads \"—\" for a year with no drawdown", () => {
+  /** 2022 every day a dispersing gain (no drawdown), then 2023 two-sided. */
+  const TWO_YEARS = Array.from({ length: 730 }, (_, i) =>
+    i < 365 ? 0.0005 + Math.abs(Math.sin(i / 5)) * 0.004 : Math.sin(i / 7) * 0.01 + 0.0004,
+  );
+
+  function calmarCells(payload: FactsheetPayload): Record<string, string> {
+    const { getAllByText } = render(
+      <FactsheetProvider payload={payload}>
+        <MetricsColumn />
+      </FactsheetProvider>,
+    );
+    const section = getAllByText("Calmar by Year", { selector: "h3" })[0].closest("section") as HTMLElement;
+    const out: Record<string, string> = {};
+    for (const tr of section.querySelectorAll("tbody tr")) {
+      const tds = tr.querySelectorAll("td");
+      // Year cell may carry a partial-year marker; the Calmar cell is the fourth.
+      out[(tds[0].textContent ?? "").slice(0, 4)] = tds[3].textContent ?? "";
+    }
+    return out;
+  }
+
+  it("precondition: 2022 has no drawdown and 2023 has one", () => {
+    const p = payloadFrom(TWO_YEARS);
+    const rows = p.calmarByYear;
+    expect(rows.map(r => r.year)).toEqual(["2022", "2023"]);
+    expect(rows[0].max_dd).toBe(0);
+    expect(rows[1].max_dd).toBeLessThan(0);
+  });
+
+  for (const [name, wrap] of [
+    ["fresh payload", (p: FactsheetPayload) => p],
+    ["after the JSON cache round trip", viaCache],
+  ] as const) {
+    it(`the no-drawdown year reads "—", the drawdown year a number (${name})`, () => {
+      const cells = calmarCells(wrap(payloadFrom(TWO_YEARS)));
+      expect(cells["2022"]).toBe("—");
+      expect(cells["2023"]).toMatch(/^-?\d+\.\d{2}$/);
+    });
+  }
+});

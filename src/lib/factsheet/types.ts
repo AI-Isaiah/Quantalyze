@@ -141,7 +141,7 @@ export type StreakPayload = {
   maxLen: number;
 };
 
-/** Per-year Calmar (year return / |year max DD|). */
+/** Per-year Calmar (year return / |year max DD|); NaN (or null after a JSON cache) for a year with no drawdown (D7). */
 export type CalmarYearPayload = {
   year: string;
   ret: number;
