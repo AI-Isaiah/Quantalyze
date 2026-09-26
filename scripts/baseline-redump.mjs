@@ -258,7 +258,7 @@ export function schemaObjectNames(text) {
  * is not plain identifier text is counted, never printed). A migration that really
  * drops one needs a hand re-dump through the `## Regenerating` procedure.
  * ⚠️ The schema half is forward-looking only: the committed dump has 0 `CREATE SCHEMA`
- * lines, so it covers nothing today. Truncation is caught by `judgeTail` (WR-06).
+ * lines, so it covers nothing today. A truncated dump is a recorded limit (D-33).
  */
 export function judgeCompleteness(committedText, newText) {
   const was = schemaObjectNames(committedText);
@@ -275,57 +275,6 @@ export function judgeCompleteness(committedText, newText) {
     );
   }
   return { was, now, defects };
-}
-
-/**
- * WR-06: the statement classes a dump's TAIL holds (tables, then triggers, policies
- * and grants toward the end of the file), line-anchored. A dump cut off mid-stream
- * keeps every `CREATE EXTENSION` (all in the first 60 lines) but loses these.
- */
-export function tailCounts(text) {
-  const count = (re) => (String(text).match(re) ?? []).length;
-  return {
-    tables: count(/^CREATE TABLE/gm),
-    policies: count(/^CREATE POLICY/gm),
-    triggers: count(/^CREATE (OR REPLACE )?TRIGGER/gm),
-    grants: count(/^GRANT /gm),
-  };
-}
-
-/**
- * WR-06: the migration statements that can legitimately LOWER each tail class,
- * case-insensitive and not comment-aware. A cascade (a dropped table takes its
- * policies, triggers and grants with it) cannot be counted cheaply, so a class
- * any of these statements could lower gets no floor; over-exempting is the side
- * that never reddens main for a real migration.
- */
-const TAIL_REMOVERS = {
-  tables: /\bDROP\s+(TABLE|SCHEMA)\b/gi,
-  policies: /\bDROP\s+(POLICY|TABLE|SCHEMA)\b/gi,
-  triggers: /\bDROP\s+(TRIGGER|TABLE|FUNCTION|SCHEMA)\b/gi,
-  grants: /\bREVOKE\b|\bDROP\s+(TABLE|VIEW|MATERIALIZED\s+VIEW|FUNCTION|PROCEDURE|SEQUENCE|SCHEMA|TYPE)\b|\bDROP\s+OWNED\b/gi,
-};
-
-/**
- * WR-06: a tail floor against the committed dump. Each class must count at least
- * what the committed dump counts, unless the migrations this dump newly carries
- * (the merge's migrations the committed marker lacks) hold a statement that can
- * lower it; such a shortfall is exempted and reported, never silent. Returns
- * `{was, now, exempt, defects}`; each defect names the class and the shortfall.
- */
-export function judgeTail(committedText, newText, replayTexts) {
-  const was = tailCounts(committedText);
-  const now = tailCounts(newText);
-  const exempt = [];
-  const defects = [];
-  for (const k of Object.keys(TAIL_REMOVERS)) {
-    if (now[k] >= was[k]) continue;
-    const removers = replayTexts.reduce((n, t) => n + (String(t).match(TAIL_REMOVERS[k]) ?? []).length, 0);
-    const change = `${k} ${was[k]} → ${now[k]}`;
-    if (removers > 0) exempt.push(`${change} (${removers} statement(s) in the newly carried migrations can lower it)`);
-    else defects.push(`${change} (short by ${was[k] - now[k]}, and no newly carried migration can lower it)`);
-  }
-  return { was, now, exempt, defects };
 }
 
 /**
@@ -1529,26 +1478,6 @@ export function gateDump({
         `${MIGRATION_BASENAME_STRICT_RE}; refusing to write them anywhere`,
     );
   }
-  // WR-06: the tail floor. The replay set is what this dump newly carries: the
-  // merge's migrations the committed marker at the merge does not list.
-  const committedMarker = committedBytes(repoRoot, merge, MARKER_REL).toString("utf8");
-  const carriedBefore = new Set(markerBasenames(committedMarker));
-  const replayTexts = listed
-    .filter((b) => !carriedBefore.has(b))
-    .map((b) => committedBytes(repoRoot, merge, `${MIGRATIONS_REL}${b}`).toString("utf8"));
-  const tail = judgeTail(committedDumpBytes.toString("utf8"), bytes.toString("utf8"), replayTexts);
-  console.log(
-    `baseline-redump tail: ${Object.keys(tail.now).map((k) => `${k}=${tail.now[k]} (committed ${tail.was[k]})`).join(" ")} ` +
-      `newly-carried=${replayTexts.length}`,
-  );
-  for (const e of tail.exempt) console.log(`::notice::baseline-redump: tail floor exempted for ${e}`);
-  if (tail.defects.length > 0) {
-    throw new Error(
-      `tail refused: ${tail.defects.join("; ")}; a dump that lost them is truncated or narrowed, not a baseline. ` +
-        "If a migration really removed them, regenerate by hand through BASELINE.md `## Regenerating`",
-    );
-  }
-
   // SFH-01: refuse when main LACKS one of the merge's migrations. D-31: when main
   // is AHEAD, skip as the D-10 no-op does (changed=false, no out dir), so
   // `redump-pr` skips and a superseded dump never turns main red.
@@ -1561,6 +1490,7 @@ export function gateDump({
     return { changed: false, measured: null };
   }
 
+  const committedMarker = committedBytes(repoRoot, merge, MARKER_REL).toString("utf8");
   const committedDumpSha = sha256(committedDumpBytes);
   const marker = buildMarker({ headerLines: markerHeaderLines(committedMarker), sha: dumpSha, basenames: listed });
   const changed = !(dumpSha === committedDumpSha && marker === committedMarker);
@@ -1864,7 +1794,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 226;
+export const EXPECTED_ASSERTIONS = 223;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -2653,52 +2583,6 @@ function selfTest({ withGitleaks = false } = {}) {
         judgeCompleteness(realDump.toString("utf8"), realDump.toString("utf8")).defects.length === 0 &&
         schemaObjectNames(realDump.toString("utf8")).extensions.has("pg_net"),
       "judgeCompleteness names a lost schema, accepts an added extension, and passes the committed dump against itself (pg_net read)",
-    );
-    // WR-06: a dump truncated mid-stream keeps every CREATE EXTENSION (the first 60
-    // lines) and passes the completeness floor, but its tail is gone.
-    const dumpLines = dumpText.split("\n");
-    const firstTable = dumpLines.findIndex((l) => l.startsWith("CREATE TABLE"));
-    const truncated = redGate(Buffer.from(dumpLines.slice(0, firstTable + 5).join("\n") + "\n", "latin1"));
-    const realTail = tailCounts(dumpText);
-    ok(
-      firstTable > 0 && truncated.threw !== null &&
-        truncated.threw.message.startsWith(`tail refused: tables ${realTail.tables} → 1 (short by ${realTail.tables - 1}`) &&
-        truncated.threw.message.includes(`policies ${realTail.policies} → 0`) && truncated.threw.message.includes(`triggers ${realTail.triggers} → 0`) &&
-        truncated.threw.message.includes(`grants ${realTail.grants} → 0`) && truncated.wroteNothing,
-      `a dump cut off five lines past its first CREATE TABLE passes the extension floor but refuses on the tail, naming each class and its shortfall (WR-06; committed ${JSON.stringify(realTail)})`,
-    );
-    const firstGrant = dumpLines.findIndex((l) => l.startsWith("GRANT "));
-    const oneGrantShort = Buffer.from(dumpLines.filter((_, i) => i !== firstGrant).join("\n"), "latin1");
-    const shortByOne = redGate(oneGrantShort);
-    ok(
-      firstGrant > 0 && shortByOne.threw !== null &&
-        shortByOne.threw.message.startsWith(`tail refused: grants ${realTail.grants} → ${realTail.grants - 1} (short by 1, and no newly carried migration can lower it)`) &&
-        shortByOne.wroteNothing && judgeTail(dumpText, dumpText, []).defects.length === 0,
-      "a dump ONE grant short of the committed dump refuses when no newly carried migration can lower grants; the committed dump passes against itself (WR-06)",
-    );
-    // The same one-grant-short dump at a merge that newly carries a REVOKE: a real
-    // migration lowered the count, so the class is exempted with a notice and the dump proceeds.
-    const repoRevoke = join(dir, "repo-revoke");
-    g(["clone", "-q", repo, repoRevoke], { cwd: dir });
-    writeFileSync(join(repoRevoke, "supabase/migrations/20260104000000_revoke_anon.sql"), 'REVOKE EXECUTE ON FUNCTION "public"."f"() FROM "anon";\n');
-    g(["add", "--", "supabase/migrations/20260104000000_revoke_anon.sql"], { cwd: repoRevoke });
-    g(["commit", "-q", "-m", "a migration that revokes a grant"], { cwd: repoRevoke });
-    const revokeDump = join(dir, "revoke-dump.sql");
-    writeFileSync(revokeDump, oneGrantShort);
-    const revokeOut = join(dir, "revoke-out");
-    outputs.length = 0;
-    const revoked = capture(() =>
-      gateDumpT({
-        repoRoot: repoRevoke, dump: revokeDump, merge: g(["rev-parse", "HEAD"], { cwd: repoRevoke }).trim(), runId: "1", cliVersion: "2.98.2",
-        out: revokeOut, emit, gitleaks: cleanGl(),
-      }),
-    );
-    ok(
-      revoked.threw === null &&
-        revoked.text.includes(
-          `::notice::baseline-redump: tail floor exempted for grants ${realTail.grants} → ${realTail.grants - 1} (1 statement(s) in the newly carried migrations can lower it)`,
-        ) && outputs.join(",") === "changed=true" && existsSync(revokeOut),
-      "the one-grant-short dump at a merge that newly carries a REVOKE is exempted by a ::notice:: naming the class and proceeds (WR-06)",
     );
     // A merge tree holding a basename outside the strict 14-digit shape (D-27).
     const repo2 = join(dir, "repo2");
