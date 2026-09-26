@@ -8,7 +8,10 @@ import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimi
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { SeamBodyReadError } from "@/lib/seam-errors";
 import { seamHumanMessage, seamErrorCode } from "@/lib/seam-discriminator";
-import { classifyKeyValidationError } from "@/lib/wizardErrors";
+import {
+  classifyKeyValidationError,
+  OUR_DEFECT_KEY_ERROR_CODES,
+} from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
 import { RotateSecretResponseSchema } from "@/lib/analytics-schemas";
 import { pgConstraintName, VENUE_IDENTITY_CONSTRAINT } from "@/lib/api/pgConstraintName";
@@ -390,6 +393,26 @@ export async function PATCH(
       scrubSeamError(err, perRequestSecrets),
     );
     const { code, status } = classifyKeyValidationError(err);
+    // 164.6.5 review round 2 / R2-SFH-10 — page OUR OWN defects, exactly as
+    // `create-with-key` and `composite/add-key` do at their twin arm, and on
+    // the SAME shared set (`OUR_DEFECT_KEY_ERROR_CODES`), so the three key
+    // routes cannot disagree about what pages. Before this, a wedged gateway
+    // terminal (`KEY_MT5_TERMINAL_UNRESPONSIVE`) reached through THIS route went
+    // only to `console.error`, while the comment beside the Python probe's
+    // `logger.error` said the Next-side key routes page it.
+    //
+    // ⚠️ One wedged validate therefore produces TWO Sentry events: the Python
+    // probe's `logger.error` and this capture. Recorded as noise and KEPT: each
+    // carries context the other lacks (the terminal's IPC code there; which
+    // key route the user was on here), and neither side can see whether the
+    // other's reporting is wired.
+    if (OUR_DEFECT_KEY_ERROR_CODES.has(code)) {
+      captureToSentry(err, {
+        tags: { surface: "keys-rotate-secret", step: "unclassified-key-error" },
+        extra: { exchange: keyRow.exchange },
+        secrets: perRequestSecrets,
+      });
+    }
     const envelope = buildEnvelope(code, correlationId);
     return NextResponse.json(envelope, { status, headers: NO_STORE_HEADERS });
   }

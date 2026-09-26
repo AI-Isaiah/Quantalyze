@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "164.6"
-current_phase_name: "GATE-HYGIENE — pruned to criteria 2, 3, 4"
-status: "Phase 166 in code review; wizard fix + baseline re-dump shipping"
-stopped_at: Completed 164.6-05-PLAN.md
-last_updated: "2026-09-24T21:30:00.000Z"
-last_activity: 2026-09-24
-last_activity_desc: "2026-09-24: 164.6 (v0.90.0.0), 167.1, 167.2 shipped; 166 executed 10/10 (v0.91.0.0) and in review; PROD baseline re-dumped after the 164.6 apply (v0.90.0.1). Census by VERIFICATION status==passed across all worktrees: 35/54 phases."
-state_head: 93d2ab394092fca23d41972ae4e573f84d58fe99
+current_phase: 168
+current_phase_name: DRBOPTIONS
+status: executing
+stopped_at: Completed 168-02-PLAN.md
+last_updated: "2026-09-26T10:53:17.000Z"
+last_activity: 2026-09-26
+last_activity_desc: "2026-09-26: Phase 168 plan 02 executed (per-site pins for every option-book reader, acceptance eligibility reads the vocabulary, refusal evidence gains assignment/commission/position, prose sweep); plan 03 (founder post-deploy checkpoint) next"
+state_head: d448599c5c37885d7fefd3e548f3520df1e5973d
 progress:
   total_phases: 54
   completed_phases: 35
@@ -181,6 +181,8 @@ is decided by verification status, never by plan counts.**
 
 Phase: 166 (QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given) — READY TO EXECUTE
 Plan: Not started
+Phase: 168 (DRBOPTIONS — a Deribit options account ingests end to end) — EXECUTING 2026-09-26, 3 plans; plan 03 is a founder post-deploy checkpoint
+Plan: 2 of 3 DONE (`168-01-SUMMARY.md`: `assignment` cash-bearing in the census shape only, `assert_assignment_uncontested` in both twins, `_OPTION_BOOK_EVENT_TYPES` at the six literal sites in one commit, windowed-crawl backstop in `_crawl_deribit_ledger`, counts-only evidence file; `168-02-SUMMARY.md`: one pin per option-book site, each seen RED under a one-site revert, mark_to_market and smoothed_mtm end to end, `check_perp_only_eligibility` reads `_OPTION_BOOK_EVENT_TYPES`, `_SIBLING_TYPES` + assignment, `_SHAPE_FIELDS` + commission/position, prose sweep, full suite green). Next is plan 03, a founder post-deploy checkpoint.
 Phase: 164.6 (gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers) — EXECUTING
 Plan: 5 of 5 DONE (`164.6-01-SUMMARY.md`, OPS-08-TS: a 40001 is retried once at csv-finalize and holdings sync; `164.6-02-SUMMARY.md`, 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker; `164.6-03-SUMMARY.md`, OPS-08-F2 SQL layer: migration 20260924120000 makes both fan-outs write one counted cron_runs row naming failed candidates, arm N in both ledger gates, 36 twins re-pointed; `164.6-04-SUMMARY.md`, OPS-08-F2 pins: ARMS_FLOOR 428 from a full lane run with no defects, parser/floors/registry censuses at 428 arms and 443 steps/needles, ci.yml sentinel rows 16/19 and ARMS_FLOOR 215; `164.6-05-SUMMARY.md`, runbooks read the candidate_enqueue_failed row counts-only and carry the BLOCKING precondition [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT] owned by Phase 164.6.7, phase-level vitest/typecheck/lint/anchors green)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
@@ -484,7 +486,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 167.1
+Status: Executing Phase 168
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -500,7 +502,7 @@ Status: Executing Phase 167.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-24 — Phase 164.6 plan 05 (runbooks and phase-level suite pass) executed
+Last activity: 2026-09-26 — Phase 168 plan 02 executed; plan 03 (founder post-deploy checkpoint) next
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1173,11 +1175,13 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.6 P03 | ~20 min | 3 tasks | 1 created, 5 modified |
 | Phase 164.6 P04 | ~26 min | 2 tasks | 6 modified |
 | Phase 164.6 P05 | ~9 min | 2 tasks | 2 modified |
+| Phase 164.6.5 P08 | ~40 min | 2 tasks | 11 modified |
 
 ## Accumulated Context
 
 ### Roadmap Evolution
 
+- Phase 164.6.5 MT5VALIDATEWEDGE **per-criterion outcome recorded 2026-09-26 (plan 08, hand-edited)**: C3, C5, C6, C7 MET. C1 OPEN (D-03 path, `MT5-SWITCH-WEDGE-CAUSE-01`, Phase 164.6.6). C2 OPEN on its live half (`.planning/WINDOWS.md` entry 68, widened to name the first live `Mt5Client.session_snapshot` read beside the terminate step; founder, post-deploy). C4 OPEN on its calibration half: D-10 answered by scheduled prod-prober run 36134914962 (head `01dcf1cc`) onward; D-11 booked as `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01`, owned by Phase 164.6.6, trigger the next live `-10005` captured before the heal recycles it. Inherited criteria 7 and 8 OPEN (founder UAT). The phase is NOT transitioned to complete: verification is `gaps_found`. ⛔ Scope fence: the eviction is Phase 164.6.6; `[MT5-VERDICT-SINK-01]` stays deferred under its own owner.
 - Phase 164.6.5 MT5VALIDATEWEDGE **edited 2026-09-24 (hand-edited)**: inherited success criteria 7 and 8 were added, routed by founder decision 2026-09-24 (via AskUserQuestion). 7 comes from 161's live MT5 `undetermined` verdict and 8 from 164.5.3's end-to-end live MT5 credential update. Both source VERIFICATION files mark the item resolved-by-routing. The same day, 164.6-VERIFICATION.md was closed to `passed` (7/7 post-merge items, evidence by run id), and 164.4.2's Area E was measured FINAL at 5 runs: the change did not work and the slowdown holds. The founder's follow-up phase for that is NOT booked yet. The frontmatter census above was not recomputed.
 - Phase 164.5.3 inserted after Phase 164.5: MT5CREDS — MT5 account number on the key card + a credential-update path (URGENT)
 - Phase 164.5.4 inserted after Phase 164.5: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently (URGENT)
@@ -1292,6 +1296,20 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.9.2 REFDATAUPDATES inserted after Phase 164.9 on 2026-09-24 (via `/gsd-phase --insert`, founder-approved by AskUserQuestion): the shared-TEST restore replay also replays migration UPDATEs on public tables it just filled. Found by preflight run `36003106273`, which aborted on the 164.9 plan-07 wrong-state check. It owns `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` and unblocks 164.9 criterion 8.
 - Phase 164.4.2.1 DRIFTOFFMUTEX inserted after Phase 164.4.2 on 2026-09-24 (hand-inserted; founder rule "book the phase if it holds", AskUserQuestion; runs 2–5 confirmed the slowdown)
 - Phase 167.1.2 ACCOUNTTRUTH inserted after Phase 167.1.1 on 2026-09-24 (hand-inserted; founder UAT on the allocator book; founder decisions "Refuse a second key" and "Hide it until correct", AskUserQuestion)
+- Phase 164.6.6 edited: edited fields: goal, success_criteria (criterion 3 split out to 164.6.8 OUTAGEALERT, founder decision 2026-09-26: one topic per phase)
+- Phase 164.6.8 inserted after Phase 164.6.6: OUTAGEALERT, split from 164.6.6 criterion 3 by founder decision 2026-09-26 (one topic per phase); owns MT5-PROBER-WEDGE-CALIBRATION-01 (routed by PR #863)
+- Phase 170 edited: edited fields: title (PAGECOPY → LAYOUT), goal, success_criteria (criteria 2, 3, 4, 6 split out to 170.1 COPY, founder decision 2026-09-26: one topic per phase)
+- Phase 170.1 inserted after Phase 170: COPY, split from 170 criteria 2, 3, 4, 6 (plus its own copy of criterion 7) by founder decision 2026-09-26 (one topic per phase)
+- Phase 165 edited: title (DEPS → ACTIONSDEPS), goal, success_criteria: three-way split by ecosystem in the verified order, founder decision 2026-09-26 (one topic per phase); replaces the declined PYDEPS/JSDEPS split
+- Phase 165.1 inserted after Phase 165: PIPDEPS, the pandas prerequisite commit + #685 (now #755), split from 165 by founder decision 2026-09-26
+- Phase 165.2 inserted after Phase 165.1: NPMDEPS, #686 (now #836), #645, #646, #614 and #606 closures, [165-NIGHTLY-AUDIT-RED], zero-open close criterion, split from 165 by founder decision 2026-09-26
+- Phase 164.6.8 edited: owns MT5-SWITCH-WEDGE-CAUSE-01 (moved from 164.6.6, same next-wedge capture as the calibration item); #863-side re-homing deferred until #863 merges
+- Phase 164.9.3 inserted after Phase 164.9.2: CLAIMPAIR, a due failed_retry job plus a pending twin of the same (kind, allocator) raises 23505 in every claim entry point (latent; measured on the pg-lane 2026-09-26); owns [164.9.3-CLAIM-PAIR-23505]; orchestrator decision
+- Phase 164.9.4 inserted after Phase 164.9.3: CIOFFMUTEX, python and e2e-seeded off the shared-TEST advisory lock (36 and 28 min of mutex wait on run 36229959820); owns [164.9.4-CI-MUTEX-QUEUE]; founder decision
+- Phase 164.9.5 inserted after Phase 164.9.4: AUTOREDUMP, the baseline is re-dumped and proposed automatically after a PROD migration apply; security-sensitive workflow; owns [164.9.5-MANUAL-BASELINE-REDUMP]; founder decision
+- Phase 164.9.3.1 inserted after Phase 164.9.3: FANINGRAPH, the stranded fan-in child, the match_decisions cascade 23505 and the 40P01 diamond deadlock (items 1-3 of 164.5.2's routed list); owns [164.9.3.1-FANIN-GRAPH-RESIDUALS]; founder decision 2026-09-26 ("Re-route, don't start"); booked under the new-phase freeze, NOT started
+- Phase 164.9.3 edited: scope widened to the (kind, api_key_id) claim wedge, item 4 of 164.5.2's routed list, and to all four claim partitions; founder decision 2026-09-26
+- Phase 164.9.2 criterion 4 recorded 2026-09-26: preflight 36235362126 success, restore 36242946174 success (attempt 36237060668 refused by the activity gate); closes Phase 164.9 criterion 8 and [164.9-CRIT8-RESTORE-DISPATCH-RECORD]
 
 ### Decisions
 
@@ -1302,6 +1320,16 @@ Load-bearing sequencing (real dependencies, do not reorder):
      every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
      The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
      FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 168 DRBOPTIONS — plan 02, 2026-09-26)*
+
+- **D-168-02-A — `assignment` is APPENDED to `_SIBLING_TYPES`** (after delivery/settlement/trade), so the existing census rendering order is unchanged and the next unknown-type refusal (likely `exercise` or `expiry`) reports whether an assignment co-occurred. `_SHAPE_FIELDS` gains only `commission` and `position` (a fee and a signed size; no identifier). Both neutered RED.
+- **D-168-02-B — the historical Phase-82 section comment in `tests/test_deribit_txn.py` that describes PRE-FIX code as summing option `trade`/`delivery` premium is kept verbatim**: it describes code as it was, not today's option book, and rewriting it would falsify lineage.
+
+*(execution-time, Phase 168 DRBOPTIONS — plan 01, 2026-09-26)*
+
+- **D-168-01-A — the co-occurrence guard fires on EVERY `assignment`, regardless of `change`** (plan must_haves, overriding RESEARCH's nonzero-only recommendation): deciding by size would be a magnitude rule, which D-01 forbids. Pinned by ZERO-CHANGE-STILL-GUARDED, neutered RED.
+- **D-168-01-B — the guard's self-skip is by IDENTITY (`other is row`), not equality**, so two equal-but-distinct rows still contest each other. The refusal phrases are module constants (`_ASSIGNMENT_CONTESTED_PHRASE`, `_ASSIGNMENT_UNNAMED_PHRASE`) that the tests import; each appears once in `services/deribit_txn.py`.
 
 *(execution-time, Phase 167.1 AUMTRUST — plan 06, the release, 2026-09-24)*
 

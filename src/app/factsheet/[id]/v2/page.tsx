@@ -18,7 +18,10 @@ import {
 // canonical home is pinned by phase-148-owner-lane-cache-isolation.test.ts.
 // ⛔ `buildFactsheetPayloadCached` deliberately did NOT move: the lane decision
 // that makes the cached wrapper safe lives in this file, and only here.
-import { fetchAndBuildPayload } from "@/lib/factsheet/fetch-and-build-payload";
+import {
+  fetchAndBuildPayloadWithReason,
+  type NotBuildableReason,
+} from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
 import {
   deriveComputeState,
@@ -33,8 +36,11 @@ import {
   KCS10_PUBLIC_SENTENCE,
   ownerRemedy,
   ownerStateLine,
-  recipientShareNote,
+  probeUnreadableShareNote,
+  recipientShareNoteFor,
+  unbuildableNoteKindOf,
   type StateLineTone,
+  type UnbuildableNoteKind,
 } from "@/lib/status-surface-copy";
 import {
   countCompositeMembers,
@@ -70,10 +76,39 @@ const STATE_LINE_TONE_CLASS = {
 // pin, which carries the same reasoning for the disclosure-tier redaction.
 export const dynamic = "force-dynamic";
 
+/**
+ * 167.2.1-REVIEW-R2 WR-02 / SFH-R2 N-4 — the public build's admin read failed
+ * (`read_error`). Thrown from inside the `unstable_cache` callback so a
+ * transient outage is never stored as the answer for this analytics run.
+ * Module-private: the page catches it and renders the placeholder, uncached.
+ */
+class FactsheetReadError extends Error {
+  constructor() {
+    super("public factsheet build: the admin read failed");
+    this.name = "FactsheetReadError";
+  }
+}
+
 function buildFactsheetPayloadCached(
-  cacheKey: string,
+  id: string,
+  computedAt: string,
 ): Promise<FactsheetPayload | null> {
-  const [id] = cacheKey.split("::");
+  // 167.2.1-REVIEW WR-02 (closes DEF-148-A): the key is the shape version, the
+  // id AND `computed_at`, as real `keyParts` members. Before, the page passed
+  // `${id}::${computedAt}` and this wrapper split the suffix off, so the
+  // effective key was the id only, and an entry (a `null` included, which
+  // unstable_cache stores unconditionally) outlived the analytics run it was
+  // built from for the full TTL. /strategies decides its "right now" share
+  // notes with a FRESH probe, so for up to an hour it could say "no note" while
+  // this lane served a cached placeholder, or "not available" while it served
+  // a cached payload. `sync_strategy_analytics_status` stamps
+  // `computed_at = now()` on every status write, so the key moves when a
+  // compute starts AND when it completes, i.e. on every run that can change
+  // what the builder answers. Nothing else can revalidate on a compute: the
+  // writer is the Python worker, which cannot reach Next's cache.
+  // `computed_at` is a property of the ROW, never of the viewer, so the key
+  // stays viewer-independent (the corollary below still holds).
+  //
   // Per-id `factsheet-v2:${id}` tag lets admin status flips invalidate ONE
   // strategy's payload rather than busting every factsheet at once. The
   // global `factsheet-v2` tag is retained so a schema-level migration can
@@ -81,14 +116,33 @@ function buildFactsheetPayloadCached(
   //
   // ⛔ This wrapper takes NO visibility parameter, and the predicate below is a
   // LITERAL, never a variable. Whatever this callback builds is shared with
-  // every subsequent reader of the same id for the full TTL (the key is
-  // id-only — see the CACHE KEY REALITY note in
+  // every subsequent reader of the same id and run for the full TTL (the key
+  // carries nothing about the viewer — see the CACHE KEY REALITY note in
   // `@/lib/factsheet/fetch-and-build-payload`), so a viewer-dependent predicate here
   // would be a disclosure bug. Keeping the parameter off the signature makes
   // that unrepresentable: a caller cannot pass one, and the literal cannot be
   // reached by a caller at all.
+  //
+  // 167.2.1-REVIEW-R2 WR-02 / SFH-R2 N-4: a `read_error` THROWS instead of
+  // returning null. Measured in the bundled Next (16.2.11,
+  // `next/dist/server/web/spec-extension/unstable-cache.js`, `unstable_cache`):
+  // on a miss the callback is awaited BEFORE `cacheNewResult`, so a throw
+  // propagates and nothing is stored; on a stale entry the background
+  // revalidation's `.catch` returns the cached value and does not call
+  // `cacheNewResult`, so the last good entry survives. A one-request read blip
+  // therefore can no longer pin a placeholder under this `computed_at` for the
+  // TTL while /strategies' fresh probe shows no note. Every OTHER reason is a
+  // fact about the stored row and is cached as `null`, as before.
+  // ⚠️ Accepted residual under D-07, owned by Phase 169 plan 04: a composite's
+  // failed `csv_daily_returns` read still arrives as `composite_unbuildable`
+  // (`readCompositeFactsheet` folds the error into an empty series), so that
+  // outage cannot be told apart here and its `null` is still cached.
   return unstable_cache(
-    async () => fetchAndBuildPayload(id, withPublishedOnly),
+    async () => {
+      const built = await fetchAndBuildPayloadWithReason(id, withPublishedOnly);
+      if (built.reason === "read_error") throw new FactsheetReadError();
+      return built.payload;
+    },
     // Cache key carries a shape-version suffix. Bump it (e.g. -v2 → -v3)
     // whenever FactsheetPayload adds non-optional fields, so unstable_cache
     // entries from the previous shape don't crash readers expecting the new
@@ -103,7 +157,9 @@ function buildFactsheetPayloadCached(
     // dataQuality). Because they are optional-absent, a stale v3 entry
     // deserialized as v4 degrades gracefully (missing marker/basis fields → no
     // toggle / no markers during the TTL drain, never a crash) — the bump is
-    // belt-and-suspenders. `computedAt` in the key busts on any re-stitch.
+    // belt-and-suspenders. (Its claim that `computedAt` in the key busted on
+    // a re-stitch was false until 167.2.1-REVIEW WR-02 made it a keyParts
+    // member below.)
     // Bumped v4→v5 (Phase 90.5): payload carries optional periodsPerYear for the
     // client leverage recompute; stale v4 entries lack it -> leverage control
     // hidden (fail-closed) during the TTL drain, never a crash.
@@ -113,7 +169,7 @@ function buildFactsheetPayloadCached(
     // wrongly SUPPRESSED (for cash too) during the 1h TTL drain. Busting the shape
     // version forces a fresh build carrying `bootstrapCI.n` rather than silently
     // hiding the caveat.
-    ["factsheet-v2-payload-v6", id],
+    ["factsheet-v2-payload-v6", id, computedAt],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
@@ -208,9 +264,9 @@ export default async function FactsheetV2Page({
   // TWO-LANE SELECTION (phase 148 / OWN-02). Lane A is the published/cached
   // lane above and is byte-unchanged. Lane B exists ONLY on a Lane A miss: an
   // authenticated owner may read their OWN unpublished strategy, built directly
-  // (never through the shared cache — see the header comment: the cache key is
-  // id-only, so an owner-built entry would be served to anonymous readers for
-  // the full TTL).
+  // (never through the shared cache — see the header comment: the cache key
+  // carries no viewer, only the id and `computed_at`, so an owner-built entry
+  // would be served to anonymous readers for the full TTL).
   //
   // ⛔ LANE ORDER IS LOAD-BEARING. The published probe runs FIRST and the
   // session probe only on its miss, so a public (even authed) view pays ZERO
@@ -402,20 +458,47 @@ export default async function FactsheetV2Page({
 
   // ⛔ The owner arm calls the builder DIRECTLY: no cache read, no cache write.
   // It cannot route through `buildFactsheetPayloadCached` — the effective
-  // unstable_cache key is id-ONLY (header comment), so an owner-built payload
-  // would be served to every subsequent reader of this id, anonymous ones
+  // unstable_cache key carries no viewer (the id and `computed_at` only, header
+  // comment), so an owner-built payload would be served to every subsequent
+  // reader of this id and run, anonymous ones
   // included, for the full 3600s TTL. The same applies to a `null`: unstable_cache
   // stores it unconditionally, so a draft that fails to build must not reach the
   // wrapper either. The lambda closes over `ownerUid` (the session id captured in
   // the miss branch above), never over `user`, which is out of scope here.
-  const payload =
+  //
+  // 167.2.1-REVIEW WR-03: the owner arm takes the build's own reason with its
+  // payload (`fetchAndBuildPayloadWithReason`, the SAME resolve-and-build), so
+  // its S7 share note below needs no second resolve and cannot disagree with
+  // the payload.
+  const ownerBuild =
     lane === "owner"
-      ? await fetchAndBuildPayload(id, (q) => withPublishedOrOwner(q, ownerUid!))
-      : await buildFactsheetPayloadCached(`${id}::${computedAt}`);
+      ? await fetchAndBuildPayloadWithReason(id, (q) => withPublishedOrOwner(q, ownerUid!))
+      : null;
+  // 167.2.1-REVIEW-R2 WR-02: a public build whose admin read failed throws
+  // `FactsheetReadError` out of the cache (uncached, see the wrapper). It
+  // renders the same public placeholder as any null payload: KCS10's one
+  // sentence is true in every state, an outage included, and it is not a 500.
+  // The resolve stage has already captured the read error once, with its code,
+  // so it is not captured again here. Any other throw stays the error
+  // boundary's.
+  let publicReadFailed = false;
+  let payload: FactsheetPayload | null;
+  if (ownerBuild) {
+    payload = ownerBuild.payload;
+  } else {
+    try {
+      payload = await buildFactsheetPayloadCached(id, computedAt);
+    } catch (err) {
+      if (!(err instanceof FactsheetReadError)) throw err;
+      publicReadFailed = true;
+      payload = null;
+    }
+  }
   if (!payload) {
     console.warn("[factsheet/v2/page] payload pending -> rendering fallback", {
       id,
       computedAt,
+      publicReadFailed,
       hint: "buildFactsheetPayload returned null — check (a) admin client visibility on strategies row, (b) strategy_analytics.daily_returns shape, (c) series clipped to BENCH_START/BENCH_END (2023-04-26 onward) has at least 2 points",
     });
     // The strategy passed the signature gate (published, or the viewer's own
@@ -458,10 +541,31 @@ export default async function FactsheetV2Page({
             apiKeyId: ownerApiKeyId,
           })
         : null;
-    const ownerLine = ownerStatus && ownerStateLine(ownerStatus.state);
+    // Phase 167.2.1 (D-05, D-06) — the S7 share note is derived the way the
+    // /strategies list derives it: the builder's own resolve stage says why
+    // this payload is null, and the same selection rule and error mapping pick
+    // the note. 167.2.1-REVIEW WR-03: that reason is the one the build above
+    // already produced, so nothing is resolved twice (IN-04, the two sequential
+    // reads, goes with it). It is lane-local like `ownerStatus` and never
+    // reaches the payload or the cached wrapper.
+    const ownerBuildability =
+      ownerBuild && ownerBuild.reason !== null
+        ? ownerBuildabilityOf(id, ownerBuild.reason)
+        : null;
+    // 167.2.1-REVIEW-R2 WR-03: the state line is about the compute JOBS, the
+    // share note about the owner BUILD. When the build could not read the row,
+    // KCS09-FINISHED ("could not be built from its results") would claim a
+    // build outcome the page never learned, beside a note that says it could
+    // not check. The build's facts go to the copy module so that line becomes
+    // KCS09-FINISHED-UNREADABLE with the read-again remedy.
+    const ownerBuildFacts = {
+      buildUnreadable: ownerBuildability?.unreadable === true,
+    };
+    const ownerLine =
+      ownerStatus && ownerStateLine(ownerStatus.state, ownerBuildFacts);
     const ownerRemedyLine =
       ownerStatus &&
-      ownerRemedy(ownerStatus.state, ownerStatus.shape, signature.id);
+      ownerRemedy(ownerStatus.state, ownerStatus.shape, signature.id, ownerBuildFacts);
     return (
       <article className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12">
         {/* WR-02: the owner lane's placeholder must carry the visibility
@@ -477,9 +581,19 @@ export default async function FactsheetV2Page({
             // KCS-12 (S7): what a recipient of the private link sees right
             // now. This lane is reachable only for an UNPUBLISHED strategy,
             // so the share mode is always mint-token.
+            // 167.2.1-REVIEW-SFH H-2 (D-06: the list's mapping): when the
+            // build could not read the row, what a recipient sees is not
+            // known, so the note says the check failed rather than claiming a
+            // placeholder, exactly as /strategies does for a failed probe.
             shareNote={
               ownerStatus
-                ? recipientShareNote("mint-token", recipientArm(ownerStatus.state))
+                ? ownerBuildability?.unreadable
+                  ? probeUnreadableShareNote("mint-token")
+                  : recipientShareNoteFor(
+                      "mint-token",
+                      recipientArm(ownerStatus.state),
+                      ownerBuildability?.kind ?? null,
+                    )
                 : undefined
             }
           />
@@ -746,4 +860,43 @@ async function readOwnerPendingStatus(
     });
     return { state: deriveComputeState({ readError: true }), shape };
   }
+}
+
+/**
+ * Phase 167.2.1 (D-05, D-06) — why the owner lane's payload is null, in the
+ * two facts the S7 share note needs: an unbuildable note kind, and whether the
+ * answer is unreadable. Called only from the owner `!payload` branch above, so
+ * the public lane and the full owner render never ask.
+ *
+ * 167.2.1-REVIEW WR-03: the reason is the one the owner build itself produced
+ * (`fetchAndBuildPayloadWithReason`), not a second resolve, so the old race
+ * arms (`buildable: true` on a null payload, SFH M-5) cannot occur.
+ * `too_few_points` and `composite_unbuildable` give their D-02 kind;
+ * `not_computed` keeps today's arm-derived note. `read_error` and
+ * `not_visible` are unreadable, exactly as on /strategies (D-05), and since
+ * 167.2.1-REVIEW-SFH H-2 an unreadable answer renders the "could not check"
+ * line (`probeUnreadableShareNote`), never a recipient-view claim. The resolve
+ * stage itself logs and captures a `read_error`, once, with its code
+ * (167.2.1-REVIEW-SFH M-2), so it is not captured a second time here.
+ * `not_visible` is logged with the id and captured with tags only: this lane
+ * passed the owner signature gate, so an admin read finding no row under the
+ * same predicate is a race or a predicate mismatch. A builder THROW is outside
+ * this function's domain: the page's error handling owns it.
+ */
+function ownerBuildabilityOf(
+  id: string,
+  reason: NotBuildableReason,
+): { unreadable: boolean; kind: UnbuildableNoteKind | null } {
+  if (reason === "read_error") return { unreadable: true, kind: null };
+  if (reason === "not_visible") {
+    console.error("[factsheet/v2/page] owner build found no row under the owner predicate", {
+      id,
+      reason,
+    });
+    captureToSentry(new Error(`factsheet owner build answered ${reason}`), {
+      tags: { route: "factsheet/v2/page", stage: "factsheet-owner-build" },
+    });
+    return { unreadable: true, kind: null };
+  }
+  return { unreadable: false, kind: unbuildableNoteKindOf(reason) };
 }

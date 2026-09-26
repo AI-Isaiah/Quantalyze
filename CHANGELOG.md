@@ -1,5 +1,821 @@
 # Changelog
 
+## [0.97.0.0] - 2026-09-26 — DRBOPTIONS: a Deribit options account with an `assignment` row can be ingested, and every shape the census did not see still refuses
+
+⭐ **What changed for whoever reads this next.** On 2026-09-23 a Deribit options account inside a
+multi-account composite failed its first reconstruction. Its transaction log held an `assignment`
+row, a type the ingester had never classified, so the unknown-type refusal stopped the whole stitch
+job. Phase 168 classifies `assignment` as cash-bearing, but ONLY in the one shape a captured census
+licenses: a named option instrument with no same-instrument `delivery`, `settlement` or second
+`assignment` row in the batch. Every other shape still refuses loudly. It neither sums nor skips
+the row. The census is recorded as counts only in
+`analytics-service/docs/evidence/drb-assignment-census-2026-09.json`.
+
+⚠️ **This is a minor bump because ingestion behaviour changes on purpose.** A row type that used to
+fail the job is now summed into realized cash on both twins (the USD daily records and the native
+ledger). There is a new mark-to-market degrade reason and new factsheet copy. The smoothed replay
+now closes an option at its `expiry` row. Precedent: MT5VALIDATEWEDGE (0.96.0.0) and JOBRPCTRUTH
+(0.93.0.0) each took a minor bump for a behaviour change. This release carries no migration and
+touches no `supabase/` path.
+
+⛔ **Merging this deploys new ingestion to production.** Railway redeploys the analytics service
+once `main`'s CI is green. The phase is NOT complete: verification is `human_needed` at 12/13. The
+one open item is the founder's post-deploy retry (plan 168-03), described under Notes.
+
+### Added
+- **`assignment` is cash-bearing, in the census shape only** (plan 01). It joins
+  `CASH_BEARING_TYPES`, cited to the new evidence file. The file records one row: census delivery 0,
+  settlement 0, trade 1, n 1. The reading that `assignment` is Deribit's newer label for the short
+  in-the-money expiry once logged as `delivery` is marked an ASSUMPTION, not a measurement. No
+  change magnitude is cited anywhere.
+- **`assert_assignment_uncontested`, called in both twins at the correction-gate position** (plan
+  01, then widened in review). It refuses with `LedgerValuationError` in four cases: a
+  same-instrument `delivery`/`settlement`/second `assignment`, an assignment naming no instrument,
+  one naming a non-option instrument, or one naming an instrument that is not a string. Each refusal
+  uses a unique module constant (`_ASSIGNMENT_CONTESTED_PHRASE`, `_ASSIGNMENT_UNNAMED_PHRASE` and
+  `_ASSIGNMENT_NON_OPTION_PHRASE`), and the tests import those constants. It fires on every
+  assignment whatever its `change`, because a size rule would be a magnitude rule. Its verdict does
+  not depend on row order.
+- **A windowed crawl refuses an assignment** (plan 01). `_crawl_deribit_ledger` raises
+  "assignment classification requires a full-history crawl" when a `since_ms` batch holds one. It
+  runs right after pagination, before the settlement-index fetch and before the USD twin. It is
+  inert on every production path, because all of them crawl with `since_ms=None`.
+- **One option-book vocabulary** (plan 01). `_OPTION_EXPIRY_TYPES` (`delivery`, `assignment`) and
+  `_OPTION_BOOK_EVENT_TYPES` (those plus `trade`) replace six literal trade/delivery sites: coverage
+  days, trailing-edge activity, the smoothed cross-check, the option-book replay, the native option
+  arm and its non-derivative guard. An import-time assert keeps the book a subset of
+  `CASH_BEARING_TYPES`. `assignment` is NOT in `_NATIVE_OPTIONS_SUMMARY_TYPES`, and `exercise` and
+  `expiry` are NOT cash-bearing.
+- **The refusal evidence reports more** (plan 02). `_SIBLING_TYPES` gains `assignment`, so the next
+  unknown-type refusal shows whether an assignment co-occurred on the instrument. `_SHAPE_FIELDS`
+  gains `commission` and `position`, a fee and a signed size, neither of them an identifier.
+- **A named degrade reason for a missing option fee or position** (SFH-04, round 1).
+  `OptionRowFieldMissingError` subclasses `LedgerValuationError`, so every existing handler still
+  catches it. The job worker's mark-to-market degrade stamps it `mtm_option_row_field_missing`
+  (`MTM_REASON_OPTION_ROW_FIELD`, owned by `stitch_composite.py`), instead of the summary-coverage
+  reason that named the wrong cause. The cash headline still ships. The factsheet's
+  `mtmDisabledReasonCopy` renders it in the steady tone.
+
+### Changed
+- **The smoothed replay closes an option at its `expiry` row** (D-09, founder decision D6,
+  2026-09-26). Deribit logs an out-of-the-money expiry as a zero-cash `expiry` row, the only entry
+  for that expiration. The replay ignored it, so an OTM short stayed open past its life. Any later
+  option activity then raised the daily-MTM hole, and the smoothed basis was lost for the whole
+  account. A zero-cash `expiry` now sets the position to 0 on its day
+  (`_OPTION_BOOK_CLOSE_TYPES`). An `expiry` carrying nonzero cash or a nonzero position refuses. An
+  `exercise` row on an option refuses too, because its shape is unmeasured. Recorded as scope
+  amendment D-09 in the phase CONTEXT and in the ROADMAP.
+- **The acceptance eligibility check reads the book vocabulary** (plan 02).
+  `check_perp_only_eligibility` counts option rows by membership in `_OPTION_BOOK_EVENT_TYPES`. A key
+  whose only option-book event is an assignment is therefore not accepted as a byte-identity
+  control.
+- **Every prose description of the option book names `assignment`** (plan 02). This covers the
+  `deribit_txn.py` docstrings and comments, the WR-05 comment in `build_deribit_native_ledger`, the
+  design doc's INCLUDE list with its census licence and the D-02 refusal, and the test prose. A
+  dated CORRECTED note sits on the 2026-09-12 design-doc block. Deribit's transaction-log docs do
+  list `expiry`, `assignment` and `exercise`. The old block stays as lineage.
+
+### Fixed
+- **WR-01 / SFH-01** (round 1): the assignment guard refuses any non-option instrument on both
+  twins.
+- **WR-02** (round 1): the census stays inside one subaccount on the native twin. Each retained raw
+  row is a copy stamped with its scope under `ROW_SCOPE_KEY`, and a sibling from another scope is
+  skipped. The stamp is not in `_SHAPE_FIELDS`, so it never reaches a message.
+- **SFH-02**: a second same-instrument assignment contests the first. The self-skip is by identity,
+  so two equal-but-distinct rows still contest each other.
+- **SFH-03**: the contested refusal names the contesting row by id and type.
+- **SFH-05**: sibling matching normalises `instrument_name` (stripped, upper-cased) and refuses a
+  non-string name.
+- **SFH-06**: one non-Mapping row no longer blanks the refusal census. It used to raise
+  `AttributeError`, and the renderer's broad except swallowed the whole shape.
+
+### Tests
+- `analytics-service/tests/test_deribit_assignment.py` is new. It covers the census shape end to
+  end through `build_deribit_native_ledger`, summed once on both twins with the balance identity
+  closed. It also covers each refusal class, order independence, the zero-change guard, the
+  windowed refusal before the USD twin, per-site pins with one-site-revert RED runs, the
+  `combine_native_ledger` MTM run and the assigned-short smoothed run ending flat.
+- The evidence-file leak test (IN-02) now catches an ISO-dated or lower-cased expiry. It was seen RED
+  under two neuters on a byte backup, each restored and compared.
+- `basis-context.test.tsx` pins the new reason copy. The acceptance, txn, unclassified-evidence,
+  single-key MTM and smoothed-core suites are updated for the vocabulary.
+
+### Notes
+- **Planning and review record**: phase context, research, pattern map and validation strategy.
+  Three plans passed plan-check after two revision rounds. Two code-review rounds and two
+  silent-failure rounds ran, with a fix report for each round (the round-1 report carries the
+  plan-anchor reading and founder decision D6). The verification is `human_needed` 12/13, and the
+  security verification is SECURED 13/13. STATE.md records the phase as planned, written by hand.
+- **The founder's post-deploy retry is still owed** (plan 168-03). Once the analytics service runs
+  the merge commit, retry the Deribit options strategy whose stitch job failed on 2026-09-23. Report
+  counts only. Expected: the job completes, no assignment refusal appears, and the return-point
+  count is nonzero. Any other refusal class gets its own phase.
+- ⚠️ **`SMOOTHED_MTM_ENABLED` caveat.** The smoothed pass, and with it the D-09 expiry close, runs
+  only when that flag is on. Its production value was not measured, so the retry may not exercise
+  D-09 at all.
+- **Known limits, recorded and not fixed:**
+  - **WR-01 (round 2): a malformed expiry timestamp fails the job.** An `expiry` row whose timestamp
+    cannot be parsed makes `replay_option_positions` raise a bare `ValueError`, not
+    `LedgerValuationError`. It escapes the smoothed pass's structural catch, is retried as
+    transient and ends `failed_final`, so the healthy cash headline does not ship. The verifier
+    reproduced it. It is reachable only with `SMOOTHED_MTM_ENABLED` on and an undatable expiry row
+    from the venue.
+  - **LR-01**: a whitespace-padded assignment instrument name passes the guard as an option but is
+    unknown elsewhere, so the twins can still disagree.
+  - **LR-02 / SFH-R2-02**: the smoothed replay keys the option book on the raw `instrument_name`. A
+    case or padding variant splits one position, and a variant-named expiry closes a phantom
+    instrument.
+  - **LR-03 / SFH-R2-03**: a non-numeric option commission is still stamped with the
+    summary-coverage reason. Only an absent one gets `mtm_option_row_field_missing`.
+  - **SFH-R2-01**: a case-variant or padded exercise type skips the D-09 refusal, and a
+    case-variant expiry does not close.
+  - **SFH-R2-04**: no test pins the mixed stamped/unstamped rule, which keeps the stricter
+    batch-wide check.
+  - **IN-01**: the WR-02 scope stamp is inert in production today, because each crawl covers one
+    scope.
+  - **IN-05**: the new factsheet copy says "fee or position", but only a missing fee can stamp that
+    reason today.
+  - The census is n=1. It shows what Deribit emitted when it emitted no sibling. It cannot show that
+    Deribit never emits both.
+
+## [0.96.0.1] - 2026-09-26 — the unstarted phases split into one-topic phases, and the backlog re-routed to them
+
+### Notes
+- Roadmap and backlog only; no code, workflow or migration changes. Five commits, five themes:
+  - **The unstarted phases are split by topic.** 164.6.6 is narrowed, and 164.6.8 OUTAGEALERT is new. 170 splits into 170 LAYOUT and 170.1 COPY. 165 splits three ways by ecosystem into 165 ACTIONSDEPS, 165.1 PIPDEPS and 165.2 NPMDEPS.
+  - **Three new phases are booked.** 164.9.3 CLAIMPAIR takes the claim-time 23505 pairing, booked as `[164.9.3-CLAIM-PAIR-23505]`. 164.9.4 CIOFFMUTEX takes `python` and `e2e-seeded` off the shared-TEST mutex, which a measured CI run spent 36 of 50 minutes waiting on. 164.9.5 AUTOREDUMP re-dumps the committed baseline after each PROD migration apply.
+  - **The MT5 wedge items move to 164.6.8.** `MT5-SWITCH-WEDGE-CAUSE-01` and `MT5-PROBER-WEDGE-CALIBRATION-01` now name it as owner. This was applied after Phase 164.6.5 merged.
+  - **Four items leave 164.5.2 by founder decision.** The claim wedge (a `failed_retry` job plus a `pending` job make every claim raise 23505) goes to 164.9.3. The three fan-in graph bugs (a child stranded when its parent fails, a 23505 when a `match_decisions` delete cascades, a 40P01 deadlock in a diamond) go to the newly booked 164.9.3.1 FANINGRAPH, recorded as `[164.9.3.1-FANIN-GRAPH-RESIDUALS]`.
+  - **The 164.9.2 SC-4 restore is recorded, and `[164.9-CRIT8-RESTORE-DISPATCH-RECORD]` is closed.** The preflight run printed a 41/41 self-test. The first restore attempt was refused by the activity gate, and nothing was written. The second restore committed `tables=63 policies=155 functions=121 ledger_rows=277 survivors=2/2`.
+- **Known limit:** every booked phase above is unstarted and stays frozen until the founder lifts the new-phase freeze.
+
+## [0.96.0.0] - 2026-09-26 — MT5VALIDATEWEDGE: the gateway can restart a wedged MT5 terminal on its own (not yet seen live), and the wizard stops promising a retry that cannot work
+
+_PR #866 (167.2.1 FACTSHEETBUILDABLE) landed first as 0.95.0.0, so this entry, first written as 0.94.0.0, re-bumped to 0.96.0.0._
+
+⭐ **What changed for whoever reads this next.** Phase 164.6.5 answers a production incident from
+2026-09-21. One shared MetaTrader terminal serves every client's MT5 key check. A key check
+switched it to a client account and it stopped answering (`-10005`). Every check after that failed
+for 1h39m, until a human restarted the process, which then logged back in by itself in 2.0 s.
+Four things change. (1) The analytics service can now end and relaunch that terminal process
+itself, over the bridge it already holds, with no credential. (2) The periodic session heal uses
+that verb when it reads `-10005`, instead of reporting `not_healed` forever. (3) A key check that
+hits a dead terminal tells the user it is ours and not now, instead of "try again in a moment". (4)
+Each wizard request carries its own correlation id, so two failures are no longer
+indistinguishable in support.
+
+⚠️ **This is a minor bump because behaviour a user and an operator can see changes, on purpose.**
+There is a new wizard error code and copy (`KEY_MT5_TERMINAL_UNRESPONSIVE`). An initial MT5
+validate that hits an IPC fault now answers a non-retryable 500 instead of a retryable 424. A
+production loop can now end the terminal process every client depends on. And the wizard's
+`X-Correlation-Id` changes from one value per page load to one per request. Precedent: JOBRPCTRUTH
+(0.93.0.0), GATEHYGIENE (0.90.0.0) and KEYCARDSYNC (0.88.0.0) each took a minor bump for a visible
+behaviour change.
+
+⛔ **Merging this deploys the self-healing loop to production.** Railway redeploys the analytics
+service once `main`'s CI is green. From then on, the session monitor can end `terminal64.exe` on
+the shared gateway. It is capped at two recycles per rolling hour, and the second is an ERROR
+naming the repeated wedge. This release carries no migration.
+
+⛔ **THIS PHASE DID NOT FIX THE EVICTION.** A key check that SUCCEEDS still switches the shared
+terminal away from whoever was on it. That is Phase 164.6.6. "MT5 is back" is not "the finding is
+closed": the outage was the symptom, the shared mutable terminal is the defect.
+
+### Added
+
+- **A credential-free terminal-process recycle verb** (plan 02, `b0a537b98`).
+  `Mt5Client.recycle_terminal_process` sends ONE committed, non-interpolated remote source,
+  `_REMOTE_TERMINAL_RECYCLE_SRC`, over the existing rpyc channel. That source walks the process
+  list and ends every `terminal64.exe`. The verb then relaunches the terminal through the
+  detector's own bare `initialize()`, which the 2026-09-25 founder spike proved logs back in
+  unattended. It takes no parameter and sits behind `_assert_live` and `_guarded_read`. The D-05
+  decision, and the fact that it makes the Phase-134 unauthenticated channel (`T-134-03`) a
+  load-bearing recovery path, are recorded beside the gateway constraint in
+  `deploy/mt5-gateway/railway-gateway.md` (`be67187cd`).
+- **The heal acts on `ipc_fault`** (plan 05, `7037055cf`, `87123dbfc`). When the credential-free
+  detector reads `-10005`, `_escalate_ipc_fault` logs the wedge evidence first, then recycles.
+  It recycles once per run of consecutive readings, inside the module's one lease and budget, and
+  nothing it raises escapes the heal. The `not_healed:ipc_fault:` verdict string is
+  byte-identical. The outcome is a new `escalation_kind` field drawn from a closed set of
+  `ipc_fault_recycle*` kinds in `mt5_session_episodes`.
+- **`KEY_MT5_TERMINAL_UNRESPONSIVE` / `MT5_TERMINAL_UNRESPONSIVE`** (plan 04, `3222bf83c`,
+  `81af07dce`). `_validate_mt5_key_probe` asks `is_ipc_transport_fault` before the generic
+  transient tail. It answers 500, `retryable=False`, dependency `mt5-gateway`, and logs at ERROR.
+  The wizard copy says the terminal is ours, that the key, password and broker server are not at
+  fault, that nothing was stored, and that a later attempt can succeed. It offers only
+  `request_call`. ⛔ `KEY_NETWORK_TIMEOUT` is neither deleted nor widened: it stays correct for a
+  genuine transport failure.
+- **A per-request correlation id** (plan 07, D-14, `de4c0720d`, `d21696fe4`, `34a1750be`).
+  `wizardFetch` mints `wizard:<uuid>` for every call on `X-Correlation-Id`, respects a caller's
+  value, and hands it back through `onCorrelationId`. All six wizard envelope surfaces render the
+  failed attempt's own id. The per-page-load id is kept, on its own `X-Wizard-Page-Load-Id`
+  header, for the telemetry that joins on it.
+- **A `-10005` differential diagnosis in the go-live runbook** (plan 01, `fec4397e4`,
+  `ee224d576`). `docs/runbooks/mt5-go-live.md` Step 2b names two causes: A, the modal login dialog
+  (2026-09-01), and B, the account-switch wedge (2026-09-21). It gives a numbered evidence
+  procedure and a remedy order that is safe under both: process restart first, then VNC. Each
+  candidate mechanism for Cause B has a dated verdict. `MT5-WEDGE-OBS-01` is refined and
+  cross-linked, not reopened.
+
+### Changed
+
+- **The prober's `-10005` remedy names both causes and asserts neither** (plan 03, D-09,
+  `3cb4f0624`). The classifier was not split. Both causes produce the same `initialize()` code,
+  the arm is pinned import-free, and a second kind would need a fabricated fixture. The three
+  reasons are recorded above `REMEDIES` in `scripts/prod-prober/arms/mt5.mjs`. Review round 1 made
+  it cite every measured recycle time, 2.0 s, 86 s and 4m45s, and say the recycle is automatic
+  (IN-04, `93fab8e3f`).
+- **The algo-trading landmine is pinned, not ticked** (plan 06, D-15, `7a7a310af`, `c6fb7d23a`).
+  Five places, one of them user-facing copy, said the gateway re-clears "Allow algorithmic
+  trading" on every account change. It does so only while "Disable algorithmic trading when the
+  account has been changed" is ticked, and the founder read it UNCHECKED on 2026-09-24. The
+  sentences are corrected with lineage in `mt5_validation`, `exchange.py`, `job_worker` and the
+  prober arm. The option now has a name, `ACCOUNT_CHANGE_ALGO_DISABLE_OPTION`. A shared terminal
+  that has lost trade permission logs at ERROR and names both the option and the fact that every
+  validate is an account change. Nothing writes a terminal option. The runbook and TODOS
+  corrections are in `40e7606fd`.
+- **Merge with Phase 167 CREDTRUST** (`7fb575d08`, D-16/D-17). 167's sign-in refusal check runs
+  before this phase's IPC check. So a `-10005` at the login stage still answers `SIGN_IN_FAILED`,
+  and only the other IPC faults move to `MT5_TERMINAL_UNRESPONSIVE`. The new code joins
+  `DASHBOARD_DIALOG_ROUTE_CODES` (recorded in `6406087ba`).
+
+### Fixed
+
+Review round 1 (`45aa1d5d8` code review, `b571e727b` silent-failure review):
+
+- **A recycle whose relaunch answered re-arms the escalation** (CR-01, `6a0823d6f`). Round 2
+  narrowed the re-arm to the terminal being SEEN answering (WR-08, SFH-05, `85cebe5d5`), and the
+  attempt is claimed only when the recycle is about to cross (WR-01, `49d26446b`).
+- **The rotate-secret dialog knows the wedged-terminal code** (CR-02, `fc77d3e8a`).
+- **A wedged shared terminal reaches an operator.** The validate arm logs at ERROR instead of
+  WARNING (WR-06, SFH-08, `f62a5ebec`).
+- **The copy says not now, not never** (WR-05, `61d4350c0`). The detail used to say "This needs
+  an operator, not a retry", which asserted permanence.
+- **A server reader for the page-load id, and a true docblock** (WR-07, `91640498c`). An empty
+  caller id mints like an absent one (IN-08, `0b591e9a1`). The finalize dedupe comment names the
+  per-request header (IN-02, `b7adc2cd4`).
+- **A recycle that did not end every terminal is never logged "recycled"** (WR-03, SFH-01,
+  `8393aa73b`). The remote source returns `GetLastError` for each refused open or terminate
+  (SFH-09, `dad768a48`). The terminate counts are logged before the relaunch, so an abandonment
+  cannot lose them (SFH-06, `0663229a4`).
+- **The budget counts every rpyc crossing** (WR-04, `3c0139e0e`). The path was really 10 crossings
+  against the 300 s ceiling, not 8. The optional reads are now gated on the time left.
+- **A working recycle is watched, not declared failed** (WR-02, SFH-02, `1a3541814`). The relaunch
+  is polled for 90 s, longer than the measured 86 s cold relaunch.
+- **A persisting fault re-raises at ERROR hourly; the debounce is on the action only** (SFH-03,
+  `8a7c35149`). Before this, a four-day wedge was one ERROR at hour 0 and then nothing.
+- **After an authorized relaunch the line says which account and whether it is connected**
+  (SFH-07, `23f44cc53`).
+- **The terminal build is read bridge-side before the terminate** (SFH-04, `35f80c0a0`). The line
+  also says what the capture cannot see.
+- **The monitor's cadence note cites the budget by symbol** (SFH-10, IN-01, `72bcea3d7`). The
+  restated figure had drifted twice.
+
+Review round 2 (`e42d1f551` silent-failure review, `7cc7e4eb9` code review):
+
+- **The recycle is capped at 2 per rolling hour, with an ERROR on recurrence** (R2 CR-01,
+  `6beb13ff6`, D-18). Round 1's re-arm could recycle the one shared terminal every tick, unbounded
+  and at INFO.
+- **"Undo the claim" and "the terminal answered" are two functions** (R2 WR-02, R2-SFH-03,
+  `9abd42fa7`). A fence refusal no longer ends the alarm's run, and a recovery clears both alarm
+  stamps.
+- **The remote recycle keeps its counts** (R2-SFH-04, WR-06, R2-SFH-06, R2-SFH-07, IN-01,
+  `dd2ceb0e3`). Each diagnostic field parses on its own. Each process is ended under its own catch.
+  The exit waits fit a total budget.
+- **Every fault code except `-6` and the 0 sentinel alarms on persistence** (R2-SFH-02,
+  `68ceee3cc`). The alarm set was an allowlist that left `-10001`, `-10002` and `-1` at WARNING
+  forever.
+- **A budget-skipped recycle reaches the alarm** (R2 WR-01, R2-SFH-01, SFH-09, `3d02f846e`). It
+  also gets its own kind, `ipc_fault_recycle_skipped_budget`.
+- **An answering info read is charged per field** (R2 WR-03, `7662d7d8b`). Then the root cause:
+  **the heal's session is read bridge-side in ONE crossing** through the new
+  `Mt5Client.session_snapshot` and the committed `_REMOTE_SESSION_SNAPSHOT_SRC` (`c23221cde`).
+  Without it, the evidence capture and the post-relaunch check fit no budget, and a working recycle
+  could only ever read `unverified`.
+- **A relaunch not shown to be the house session gets its own kind** (R2 WR-04, SFH-08, IN-02,
+  `a53275f0e`). `ipc_fault_recycled_degraded` is a measured mismatch;
+  `ipc_fault_recycled_unverified` is a check that could not complete.
+- **A failed recycle takes one gated reading, which relaunches a terminal the failed call may have
+  ended** (R2-SFH-04, `9b4041dc8`).
+- **The rotate-secret route pages our-defect key verdicts like its two sibling routes**
+  (R2-SFH-10, `3a8212c2f`), on the shared `OUR_DEFECT_KEY_ERROR_CODES` set.
+- **`onRequestError` takes Next's header type and tags a malformed page-load id as `<malformed>`**
+  (IN-03, R2-SFH-11, `9b1ea9825`).
+
+### Tests
+
+- **Plan gates.** The IPC-transport arm is gated on both halves, and the honest
+  `KEY_NETWORK_TIMEOUT` arm is proven untouched (`38c1ad007`). The mt5 arm's declared environment
+  is tied to the prober workflow's supplied environment by set equality (D-10, `93a2cd782`). The
+  D-15 landmine check has six gates that keep it loud, honest and write-free (`3b313a94e`). The
+  escalation is gated at five readings and one recycle (`a50569376`). RED-first tests preceded
+  the per-request id (`16fb1c655`) and the per-surface id (`2c347f7f4`).
+- **Merging `main` (0.93.0.0) into the branch** (`ef9d43681`, and earlier `7fb575d08`) moved the
+  wizard error table to 97 entries: `KEY_MT5_TERMINAL_UNRESPONSIVE`, `KEY_SIGN_IN_FAILED` and
+  `SUBMITTED_ANALYTICS_NOT_QUEUED` together. Both `EXPECTED_TABLE_SIZE` pins were read off the
+  guard's own failure message. `SyncPreviewStep` keeps main's `probeExistingChain` guard AND this
+  phase's correlation-id capture.
+- **The D-09 calibration reads the arm, not its own literal.** The blocking self-referential-oracle
+  gate flagged the `CALIBRATION: a single-cause revert` case in `prod-prober-wiring.test.ts`: it
+  asserted on a retyped copy of the pre-D-09 sentence, so it could not fail. Its subject is now
+  derived from `MT5_ARM.REMEDIES["mt5-ipc-timeout"]` with the both-causes disclaimer sentence
+  removed. It was observed RED when the disclaimer was dropped from the arm and when a cause was
+  named outside that sentence, then restored from a byte backup. Nothing was added to
+  `SRO_ALLOWLIST`.
+
+### Notes
+
+- **Criterion outcomes** (the ROADMAP holds the full table): C3, C5, C6 and C7 MET. C1 (root
+  cause) OPEN by design (D-03): `MT5-SWITCH-WEDGE-CAUSE-01`, owned by Phase 164.6.6 (`2d176b924`).
+  C2 OPEN on its live half. C4 OPEN on its calibration half.
+- ⚠️ **Known limits, recorded rather than fixed:**
+  - **C4 / D-11.** The prober's `-10005` kind has never been calibrated against a real wedge.
+    Booked as `MT5-PROBER-WEDGE-CALIBRATION-01`, owned by Phase 164.6.6. Its trigger is the next
+    live `-10005`, captured before the heal recycles it. D-10, the measuring half, IS answered:
+    scheduled prober run 36134914962 (head `01dcf1cc`) is the first to read the terminal, and every
+    scheduled run since reads it.
+  - **`.planning/WINDOWS.md` entry 68.** Two remote paths have never run live over the bridge:
+    the recycle's TerminateProcess half and the first `Mt5Client.session_snapshot` read. The first
+    live recycle closes it, and only if both are read.
+  - **D-16 and D-17 (founder-confirmed after release, see the D-19 bullet below).** Under
+    D-16, the FIRST, wedge-causing validate still answers `SIGN_IN_FAILED`. Only retries against
+    an already-wedged terminal get the new code.
+  - **No Sentry alert rule exists yet** for the hourly ERROR re-raise and the capped-recycle ERROR
+    (R2-SFH-05). The runbook says so (`754a02152`, `4e22f73f2`). Also booked: a copy read-through
+    of the new code on the connect step and the rotate dialog.
+  - Inherited criteria 7 (Phase 161's live `undetermined` verdict) and 8 (Phase 164.5.3's live
+    credential update) stay open for the founder. `[MT5-VERDICT-SINK-01]` stays deferred under
+    its own owner.
+- **Founder rulings after the release commit (D-19, 2026-09-26, `d7bcfd590`).** C4's calibration
+  half is routed to Phase 164.6.6 as `MT5-PROBER-WEDGE-CALIBRATION-01`, and D-16/D-17 are
+  confirmed as shipped; the headline no longer claims a live self-heal. The plan 08 close, the
+  security re-audit (43/43 closed) and the re-verification (`human_needed`) are `120c1e065`,
+  `d4e8db5fb` and `b17c16b34`.
+- **Process.** Context, research, patterns and plans: `337f2827f`, `42b296b8f`, `8288ad458`,
+  `3925a55e5`, `65b7b986f`. Plan SUMMARYs and wave notes: `47bb479d5`, `64c318cdd`, `d671e1eb9`,
+  `22e2fbb00`, `031891432`, `2e2033dad`, `20422b71f`, `29e010f1d`, `71a8b187f`. Worktree merges:
+  `6c515b5b0`, `a91675aa8`, `e50da1dd3`, `6e4a9aab3`. Review fix reports: `7400392f8`,
+  `0ecf94557`, `716b994c2`, `ebfe94dab`, `35e63761e`, `4c0c10feb`. Verification (`gaps_found`,
+  5/7) is `38647f8b5`. The security audit is `96ba93be7`; its 5 open threats were this release's
+  own. The per-criterion ledger close is `196dea9a1`. The `tdd-red-evidence` tool misreads vitest
+  output, which is logged as WINDOWS entry 67 (`2fa71d3e2`).
+
+## [0.95.0.0] - 2026-09-26 — FACTSHEETBUILDABLE: a strategy is called computed only when its factsheet can actually build
+
+⭐ **What changed for whoever reads this next.** Phase 167.2.1 makes the owner's `/strategies`
+list and the owner factsheet agree with what a share-link recipient actually sees. Before it, a
+strategy whose analytics row was computed but whose factsheet the builder refuses (for example a
+one-point single-key series, or a composite the builder cannot assemble) showed no share note,
+which implied a working factsheet, while its link rendered "not available". Both owner surfaces
+now ask the builder's OWN resolve stage and name the stored-results reason. The key card's Delete
+confirm now reads a key's composite memberships on the server, so an RLS-filtered empty read can
+no longer silence the composite warning (ROADMAP criterion 5).
+
+⚠️ **Why a minor bump.** Owners see new share-note lines, a new owner-factsheet state line, a new
+Delete-confirm read path and a changed public factsheet cache key. There is no migration and no
+`analytics-service/` change: criterion 5's "(a migration)" was superseded by a server route
+(CONTEXT D-01, dated ROADMAP note), so criterion 4 (three reviewers on a migration) is vacuous.
+0.93.0.1 is the base on `main`; 0.93.0.2, 0.93.0.3 and 0.94.0.0 are held by open PRs.
+
+### Added
+
+- **`probeFactsheetBuildable`: "can this factsheet build?" with a typed reason, from the builder's
+  own code** (`5e83cd3b9`). `fetchAndBuildPayload` in `src/lib/factsheet/fetch-and-build-payload.ts`
+  is split into one shared resolve stage (`resolveFactsheetInputs`, gates G0 to G4) and the build.
+  G4 is `hasBuildableSeries`, the predicate `buildFactsheetPayload` itself uses, now exported from
+  `build-payload.ts` with `MIN_FACTSHEET_SERIES_POINTS`. The probe runs the resolve stage and
+  nothing else, and answers one of `NotBuildableReason`: `read_error`, `not_visible`,
+  `not_computed`, `composite_unbuildable`, `too_few_points`, `malformed_series`. Parity
+  (`probe.buildable === (fetchAndBuildPayload(...) !== null)` for a builder that does not throw) holds
+  by construction and is sampled by a PARITY table (D-04).
+- **`GET /api/keys/[id]/memberships`** (`087bbd3c1`). It checks ownership with an explicit
+  `api_keys.user_id` equality, then reads `strategy_keys` joined to `strategies` on the service
+  role. A non-array answer is a 500, never `[]`. The route is no-store and rate-limited, and it
+  joins the no-store and limiter-ordering gates (`ad00e9ba5`).
+- **The `/strategies` share note probes every computed row** (`59728f481`). A computed row the
+  builder refuses gets a precise D-02 line (`MINT_UNBUILDABLE_NOTES`, `PUBLIC_UNBUILDABLE_NOTES`,
+  `MINT_UNBUILDABLE_UNREADABLE_NOTES` in `src/lib/status-surface-copy.ts`, picked by
+  `recipientShareNoteFor` and `unbuildableNoteKindOf`), never KCS12-MINT-B with its false tail. The
+  "2 days" in the copy is pinned to `MIN_FACTSHEET_SERIES_POINTS` by a DRIFT test, and the support
+  address comes from `SUPPORT_EMAIL`.
+- **The owner factsheet's S7 pending panel names an unbuildable factsheet like the list**
+  (`f068b0030`, D-06). A new state line, KCS09-FINISHED-UNREADABLE, says the last computation
+  finished but its results could not be read to build the factsheet (`7e184c79c`).
+
+### Changed
+
+- **The owner lane takes its share-note reason from its own build** (`b8ec66c93`, WR-03 / IN-04).
+  `fetchAndBuildPayloadWithReason` serves the payload and the reason from ONE resolve, so the owner
+  factsheet no longer runs a second probe that could disagree with the build it rendered.
+- **No null can leave the resolve stage and reach the build** (`3e1723cb7`, WR-04). A branded
+  `BuildableSeries` type makes `buildFromResolved` non-null by construction; an unchecked series
+  does not compile.
+- **The unbuildable note states the reason from the stored results, in the active voice**
+  (`ca87ab09b`, CR-01 / IN-02; `fdfce3c3b`, N-5). The too-short line speaks of the results the
+  factsheet is built from.
+- **`unbuildableNoteKindOf` is exhaustive over `NotBuildableReason`** (`46e17081c`, L-1), and an
+  exhaustiveness throw now fails only that row's check, as its "could not check" line, not the
+  whole `/strategies` list (`5d515a623`, N-7).
+- **`/strategies` probes are bounded** (`d58cfbafd`, WR-01; `8fb9eadb5`, N-3). At most
+  `PROBE_CONCURRENCY` probes run at once through `concurrencyLimiter`, and each probe has a
+  deadline (`FACTSHEET_PROBE_DEADLINE_MS`) that aborts its read and raises
+  `FactsheetProbeTimeoutError`. Uncomputed rows are never probed, and probes are uncached (D-08).
+- **Sentry capture follows one rule per stage** (`20df828a7`, M-2; `e167f1f36`; `73b902ac5`, H-1;
+  `244b80ac8`, WR-01; `5d7d5e38e`, N-2; `c77f4c3b0`, IN-02; `2fcbb5340`, M-5; `a1a39b8fe`,
+  IN-01). The resolve stage captures only when the caller is the build, once, with the error code,
+  and every composite refusal the unbuildable note sends to support is captured. `/strategies`
+  sends one aggregated event per load (`captureProbeOutcomes`) and at most
+  `MAX_PROBE_THROW_EVENTS` events grouped by distinct throw cause (`captureProbeThrows`). Build-caller
+  captures carry `strategy_id` as a tag, not `extra` (D-13, `199eb302e`). The `not_computed` race arm
+  and a row deleted before its probe log at warn. Every resolve log line is labelled with its caller
+  (`71d869a48`, M-1).
+- **The public factsheet cache is keyed by the analytics run it was built from** (`bea5fd373`,
+  WR-02). `buildFactsheetPayloadCached` in `src/app/factsheet/[id]/v2/page.tsx` now passes
+  `computed_at` as a real `keyParts` member, so a fresh run gets a fresh entry instead of draining on
+  the TTL. This closes `DEF-148-A` in `TODOS.md` (`a053c83e5`).
+- **The key card's Delete confirm reads memberships from the route, not through RLS**
+  (`087bbd3c1`). Any non-2xx, non-JSON, non-array or timed-out answer renders
+  KCS-DELETE-UNCHECKED instead of an empty list, and the fetch is aborted when the bound wins
+  (`4a23ca769`, L-2).
+
+### Fixed
+
+- **A failed buildability check says the check failed, never "not available"** (`f0b654b93`, H-2).
+  A throw, a `read_error`, a `not_visible` or a timeout renders `probeUnreadableShareNote`.
+- **`malformed_series` is answered when stored entries were dropped, not `too_few_points`**
+  (`0b6fcb6e3`, M-3), and the stored count reads the series column the builder actually reads
+  (`55bc6f0a3`, N-5).
+- **A transient read error is never cached on the public factsheet** (`d7cd45e56`, WR-02 round 2).
+  A `read_error` throws `FactsheetReadError` inside the `unstable_cache` callback, so nothing is
+  stored and the page renders the placeholder uncached.
+- **The owner page makes no build claim when the build could not read** (`7e184c79c`, WR-03).
+- **The membership route is heard when it fails** (`d3b4557e1`, L-3; `46c9c9b37`, M-4;
+  `8fa8e8cfa`, M-6). Its Sentry events carry the error code, the owner-coherence tripwire (a
+  membership whose strategy is not the key owner's, or a dangling embed) captures, and a limiter
+  deny is logged.
+
+### Tests
+
+- **The WR-02 mismatch was reproduced before any fix** (`a961cdd43`). Unit REPRO arms against the
+  unchanged builder, plus `src/__tests__/factsheet-buildable-live-db.test.ts` on real rows in the
+  local-stack lane (REPRO-SINGLE-ONE-POINT, REPRO-COMPOSITE-PRE86, CONTROL-BUILDABLE, the three
+  PROBE arms and WITH-REASON). `CORPUS_FLOOR` in `scripts/live-db-lane-corpus.mjs` moves by one.
+  `PROBE-COMPOSITE` expects the headline gate the probe now returns (`de34ff19f`).
+- **The reason-carrying build agrees with the probe on real rows** (`301432989`, WR-03).
+- **Every `/strategies` probe outcome and the D-02 copy rows are pinned** (`fc9a27238`,
+  `99daacab2`). COMPUTED-UNBUILDABLE was observed RED against the pre-change page, and the verifier
+  re-observed the SC3 cases RED under a neuter.
+- **Public cache key tests** in `src/app/factsheet/[id]/v2/page.public-cache-key.test.tsx`
+  (CACHED-NULL-THEN-COMPUTED, CACHED-PAYLOAD-THEN-UNBUILDABLE, READ-ERROR-NOT-CACHED, KEY SHAPE), and
+  the share page and Phase 148 cache-isolation tests re-pinned to the new key shape.
+- **Route and client tests for criterion 5**: RLS-REGRESSION, MEMBERS-NOT-ARRAY-500,
+  R2-WR02-VIA-ROUTE, R2-WR02-UNREADABLE, UNCHECKED-TIMEOUT.
+- The Phase 147 series-resolution guard now accepts either exported builder on the v2 page. The page calls `fetchAndBuildPayloadWithReason`, which runs the same `resolveAndBuild` as `fetchAndBuildPayload`, and the old literal match failed CI shard 1 once the page moved.
+
+### Notes
+
+- **Research, plans and plan-completion records** (`07c30f0fc`, `8d9480e1f`, `6bb5a43f6`,
+  `a45b6ad13`, `0eb52c8c5`, `4be53ffdd`, `40c4b043c`).
+- **Two review rounds, each fixed by topic-split fixers and re-reviewed** (`fa06a379e`,
+  `0f6741450`, `2c06496fb`, `4354705b3`, `d61eeb440`, `d2e1583e8`, `0779ce56b`, `f662adab2`,
+  `d95460ef1`, `8cb7abee0`, `57d7d5e6b`, `24183042b`). Comment-only fixes: the IN-03 note that a
+  builder throw is outside the share note's domain (`6f1a4e51c`, `ec5829857`) and the IN-01
+  cache-key comments saying when `computed_at` really moves (`5bd1a29ef`, `0ada43731`). The latest
+  round has no high or critical finding open.
+- **Security and verification** (`b5d3b3f82`, `31d2d2347`, `187d2d9a3`). SECURITY is SECURED,
+  `threats_open: 0`, 26 of 26 threats closed. VERIFICATION is `human_needed`, 11/12; the open truth
+  is SC1's lane run, below. The duplicate D-12 was renumbered D-13 (`187d2d9a3`).
+- ⚠️ **Routed: the composite csv-outage residual goes to Phase 169** (`187d2d9a3`, CONTEXT D-07).
+  A composite whose `csv_daily_returns` read fails transiently is still cached as a null payload on
+  the public factsheet until the TTL, because `readCompositeFactsheet` cannot tell a read error from
+  an empty composite. The single-key half is fixed above. A dated note under `### Phase 169` in the
+  ROADMAP names it.
+- ⚠️ **Routed: the discovery detail page assembles the builder a second time**
+  (`76637077f`, D-03). `[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` in `TODOS.md`, owned by
+  Phase 169. A drift risk, not a false claim today.
+- ⚠️ **Booked in `TODOS.md`** (`9e12e006d`):
+  `[167.2.1-CLIENT-SENTRY-NOOP]` (every browser `captureToSentry` is a silent no-op because there is
+  no client `Sentry.init`; a client init is a security decision, so the founder chooses the fix),
+  `[167.2.1-LOCAL-STACK-NO-CROSS-WORKTREE-LOCK]` (two worktrees on the local-stack lane collide on
+  the same containers; interim `mkdir` lock convention), and `[167.2.1-STRATEGIES-PROBE-COST]`
+  (`/strategies` runs one heavy probe per computed row per load, bounded but linear in the owner's
+  computed strategies; upgrade path is a persisted buildable flag).
+- ⚠️ **Accepted: the Delete TOCTOU window** (D-10, founder "warn, never block"). A membership added
+  between the read and the delete is not caught.
+- ⚠️ **Post-deploy checks, owned by the orchestrator/founder:** (1) the `frontend-live-db-lane` job
+  green on the PR head, 7 of 7 for the FACTSHEETBUILDABLE spec, bound by head SHA (the verifier's own
+  lane boot failed, so the lane evidence is otherwise narration); (2) a visual check at 320px and
+  200% zoom in the logged-in browser of the `/strategies` unbuildable and "could not check" notes,
+  the owner S7 panel with KCS09-FINISHED-UNREADABLE, and the Delete confirm's composite warning and
+  KCS-DELETE-UNCHECKED; (3) a live PROD read that the list note, the owner S7 note and a signed-out
+  share page agree for a computed-but-unbuildable row, and that a buildable row shows no note.
+  Record counts and verdicts only.
+- ⚠️ **D-09 merge order:** if Phase 169 merges first, this phase re-runs the parity table and the
+  SC1 lane reproduction after its rebase.
+
+## [0.93.0.3] - 2026-09-26 — REFDATAUPDATES: the shared-TEST restore also replays the literal UPDATEs a migration made to the reference rows it just rebuilt
+
+⭐ **What changed for whoever reads this next.** Phase 164.9.2 closes
+`[164.8.1-REPLAY-INSERT-ONLY-SCOPE]`. Until now, a restore of shared TEST rebuilt its reference
+rows from the migrations' literal `INSERT`s only, so a row that a LATER migration had changed with
+an `UPDATE` came back in its seed state while the ledger said that migration ran. A new criterion,
+**C5**, replays a migration's literal top-level `UPDATE` of a `public` table the replay has just
+filled, in migration filename order, inside the same transaction as the INSERTs. A non-literal
+write is DECLINED by name and never replayed, and each declined write is named in the restore log.
+The wrong-state check and its `verified` default are byte-unchanged: nothing was waived, relaxed or
+widened to make the restore pass.
+
+⚠️ **A build-segment bump because nothing a user of the product can see changes.** Everything here
+is restore tooling, its self-tests and two CI steps; no route, page, RPC or migration moves.
+⚠️ PR #861 (DRIFTOFFMUTEX) landed first as 0.93.0.1 and PR #864 (the baseline re-dump) as 0.93.0.2,
+so this entry re-bumped to 0.93.0.3 when origin/main was merged in.
+
+✅ **No migration.** Merging this applies nothing to TEST or PROD. It changes only what the NEXT
+dispatch of `test-restore-from-baseline.yml` does.
+
+### Added
+
+- **C5, a separately pinned class for top-level UPDATEs on a replayed public table**
+  (`9d5fc8ef7`, `337f8e0ea`). An allowlist line's third field now spells its class: `<n>`
+  (INSERT, unchanged), `update:<n>` or `decline:<n>`. A C5 line is public-only (an `auth.users`
+  target is refused by name) and a duplicate is refused. The extractor emits every block sorted by
+  (basename, byte offset), so an UPDATE lands after the INSERT it modifies. An UPDATE block carries
+  only a `-- refdata-update:` trailer and never feeds `refdata-expect`, so the INSERT half of the
+  emission is byte-identical to the pre-phase one. `--audit` walks every migration against every
+  table an INSERT line fills: a literal UPDATE needs an `update:` line, a non-literal one a
+  `decline:` line, and a DELETE, TRUNCATE, MERGE, COPY or CTE-prefixed write is refused by name. A
+  new census line follows the unchanged INSERT line. At this commit it reads
+  `audit C5 OK: 6 update statement(s) over 4 file(s) and 2 table(s) replayed; 6 declined over 5 file(s); 0 unaccounted.`
+- **The restore notes the C5 replay and refuses a C5 allowlist with no INSERT entry**
+  (`229cc9d24`). `build_transaction` counts the update trailers and prints its own note beside the
+  byte-identical INSERT note. `REFDATA_ENTRY_N` counts INSERT-class lines only, so C5 lines neither
+  inflate the count nor satisfy the zero-entries refusal. The explanatory clause of the
+  `v_wrong_state` RAISE gets a dated correction. Its prefix, argument, predicate, the four
+  `REFDATA_WRONGSTATE_*` seams and their defaults are byte-unchanged.
+- **Both workflows refuse a missing C5 census line** (`465d56168`, `1ed444bd5`, D-03). The audit
+  census step of `test-restore-from-baseline.yml` and of `ci.yml`'s `sql-gate-lint` greps the C5
+  line, pinned to `0 unaccounted`, and a missing line is a named `MEASURE_FAIL`.
+- **A successful restore log names every declined C5 write** (`1ffb228fe`). The extractor emits
+  one `-- refdata-decline:` comment per declined write (file, line and table, never statement
+  text), and the restore notes each one. Before this, a green log never said a write was left out.
+
+### Changed
+
+- **The replay bracket lists `pg_catalog` first** (`6498c10c5`, WR-03). The bracket's
+  `search_path` was `public, pg_catalog`, and an explicitly listed `pg_catalog` is searched where
+  it is listed, so a `public.now()` or an exact-match `public.=` beat the built-in inside the
+  transaction that commits on shared TEST. It now reads `pg_catalog, public`, PROD's effective
+  order. Arm 35 plants both shadows and shows the old order reaching them.
+- **C5's literal check is an allowlist of tokens, not a list of banned words** (`0d1adc12a`,
+  CR-01). The first version admitted a quoted-identifier call, a schema-qualified `now()`,
+  `IN (TABLE t)` and `current_user` as literal, and `--audit` then advised the `update:` line that
+  would run them. Every token outside a string literal must now be on a permitted set; a call only
+  from `C5_ALLOWED_CALLS`, a cast only to a readable type, and a backslash or lone colon (which psql
+  acts on at replay) is refused.
+- **Literal shapes are no longer steered into `decline:`** (`e0da7509e`, `13dbb7d7d`). `IS [NOT]
+  DISTINCT FROM`, `= ANY(ARRAY[...])`, a multi-column `SET (a, b) = (...)`, `ROW(...)`,
+  `COALESCE(...)`, a parenthesised `WHERE` and a `timestamp with time zone` cast used to read as
+  non-literal, which is the path D-02 forbids: a replayable effect hidden behind a decline. Round
+  2 replaces `IS [NOT] DISTINCT FROM` with a padded `=` instead of blanking it, so a parenthesised
+  right operand is no longer refused as a call.
+- **The audit sees DO-body writes, upserts, COPY and CRLF heads** (`436da37a9`). A DO body executes
+  when its migration applies, and its writes on a replayed table used to fall into the
+  function-body bucket in silence. An unlisted `INSERT ... ON CONFLICT DO UPDATE` was skipped as a
+  backfill. Every head regex missed a CRLF migration. The first audit that could see DO bodies
+  found four writes the round-1 reviewers had counted as zero; each has a `decline:` line whose
+  reason says why it reaches no row the replay wrote. The emitted SQL is byte-identical.
+- **A DO body no longer launders a write into a decline** (`1fb24c36c`, round 2 WR-01). Each
+  DO-body write now carries its own verdict. A literal UPDATE, and any TRUNCATE, MERGE or COPY, is
+  a hard refusal that names the remedy for an unapplied and an applied migration. A non-literal
+  UPDATE stays declinable by a reasoned line. A DELETE or an upsert is declinable only when
+  `freshKeyProof` proves it is keyed by a `gen_random_uuid()` the block declares once and never
+  reassigns.
+- **A top-level upsert and its DO-body twin follow one rule** (`8daf20899`, round 2 WR-02). An
+  upsert on a replayed table is declinable under the same proof and refused otherwise, with the
+  remedy named. The INSERT-loop refusal that no line could clear is gone.
+- **`set(` is a call everywhere except the UPDATE head** (`d42c3b71e`, round 2 CR-01). `SET` is an
+  unreserved keyword and a legal function name, and admitting it everywhere let `SET x = set(1)`
+  classify literal.
+- **C5 refuses `DEFAULT`, and C2 and C5 refuse a cast to a non-built-in type** (`4f1fb3875`, round
+  2 IN-05). A column default and a domain CHECK can read session state that the statement text does
+  not show. C2 now reads the type after `::` instead of skipping one word. C2 keeps `DEFAULT`, with
+  the reason recorded in the allowlist.
+- **C2's literal check refuses a psql backslash or a lone colon** (`9811b54a1`). The INSERT side
+  scanned identifiers only, so a bare psql meta-command or a quoted psql variable classified
+  literal and would have been replayed through `psql -f`. The emission and `--audit` over the real
+  corpus are byte-identical.
+- **A SQL-standard `BEGIN ATOMIC` body is refused as unlexable** (`f598e0739`, round 2 IN-02). It is
+  not dollar-quoted, so its later statements lexed as top-level spans and the audit advised
+  replaying an UPDATE the migration only defined. The `C5 scope:` line now names every shape the
+  audit does not trace (a function called at top level, dynamic SQL, a plain INSERT in a DO body,
+  CALL, a writer PERFORMed from a DO body, EXPLAIN ANALYZE, PREPARE / EXECUTE).
+
+### Fixed
+
+- **`ci.yml`'s `sql-gate-lint` captures fail by name under `bash -e`** (`1ed444bd5`, `78f9871c4`).
+  The runner uses `bash -e`, so the unbounded `status` / `census` / `ok_line` / `floor` captures in
+  the audit census, extractor self-test and data-dependence census steps aborted the step before
+  their own `MEASURE_FAIL` printed: red, but unnamed. Each capture is bounded with an rc>1 branch.
+  A dated comment corrects the false "WITHOUT -e" paragraph, which stays as lineage.
+- **The C5 census's `unaccounted` count is computed** (`34af4676d`). It was a hardcoded
+  `0 unaccounted.` printed only on success, so the workflows' `0 unaccounted` term could never fail.
+- **The audit's FAILED line names the class that failed** (`00c955046`, round 2 IN-01). An INSERT
+  pin drift used to read `audit C5 FAILED: 0 unaccounted`, and a C5 line on a table no INSERT fills
+  was never tallied.
+- **A stray non-literal UPDATE beside an `update:` line names its remedy** (`ec291346a`): a
+  `decline:` line for the same pair is legal and required.
+- **The restore compares the C5 trailers with the allowlist's pins, twice** (`b17fe0fbe`,
+  `6498c10c5` R2-06). The update and decline trailers are checked against the `update:` /
+  `decline:` sums before any read of the database, and again on the extractor's second run that
+  `build_transaction` executes. Before, a drifted extractor logged "0 C5 update statement(s)
+  replayed" and carried on.
+
+### Tests
+
+- **Extractor self-test at 67 kinds, red+green each**; `SELF_TEST_KINDS_FLOOR` and
+  `REQUIRED_KINDS` moved together at every step, each raise after the floor vitest was observed
+  RED (`d3cbb00f0`, `b382f1589` 19 → 39, then the review rounds up to 67). Every new guard was
+  neutered in place, observed RED and restored by `cp` + `cmp`.
+- **Restore self-test at 41/41 arms.** A replayed C5 UPDATE lands after its INSERT inside the
+  transaction, GREEN and RED (`32ef481f9`); arm 24 gains trailer-drift legs (`b17fe0fbe`); arms 35
+  and 36 cover the bracket and the second-run pins (`6498c10c5`). The merge of main
+  (`07ba72750`, Phase 164.9.1) kept main's arms 33-37 and moved this branch's to 38-41, with a dated
+  RENUMBERED note beside `EXPECTED_ARMS`.
+- **`matchOtherDml`'s TRUNCATE, MERGE and CTE-DELETE heads each get a leg** (`c6039673d`).
+- **Vitest pins** (`cad3d8046`): `ENTRY_COUNT` stays 22 and counts INSERT lines only; a separate
+  `C5_ENTRY_COUNT` pins the update and decline lines; a lasting pin checks that the real extractor
+  over the real allowlist never lets an UPDATE move `refdata-expect`. The wiring harness executes
+  both workflows' copies of the census and self-test steps, GREEN and RED, each bound-dependent arm
+  with its unbind calibration (`465d56168`, `1ed444bd5`, `78f9871c4`).
+
+### Notes
+
+- **Comment and reason corrections, no behaviour change:** C5's safety premise covers statement
+  text, not triggers, with today's census of the seven BEFORE triggers on the two replayed tables
+  (`875875904`); arm 33 does not catch removal of the sort, and the self-test's ORDER leg does
+  (`9d5b55f79`); two decline reasons now argue their case correctly (`9cb35ee1a`); the `auth.users`
+  DO-body write count is 8, not 9 (`2d12341f5`); the `C5_ALLOWED_CALLS` comment states the bracket
+  as it now is (`d6f20ccfe`).
+- **`[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` is closed in `TODOS.md`** (`e4165c13e`), with a dated note
+  that C5 is a new criterion rather than a relaxation of C2. Its original text stays as lineage.
+- **Planning record:** research, plans and plan-check (`1a55e566a`, `42f414f6a`, `614deacbc`,
+  `6dece5623`); plan summaries (`4e3c8407d`, `2907467c8`, `f9b095fbd`, `305299b0d`, `838312df3`,
+  `e4a11398c`); two review rounds of code review and silent-failure review, with fix reports
+  (`a146b7ad0`, `b9d9ce960`, `d29198277`, `3ea6689fd`, `39d741755`, `cbc5c0fec`, `b24ee7cd6`);
+  security verification, 0 open threats (`36766298c`); phase verification (`ca23d10d0`,
+  `26ac3aa52`).
+
+### Known limits
+
+- ⛔ **Success criterion 4 is post-merge and currently BLOCKED on a baseline re-dump.** It needs a
+  green `mode=preflight` and then a green `mode=restore` of `test-restore-from-baseline.yml` on
+  shared TEST, from `main`. `node scripts/check-baseline-currency.mjs` in default mode, the one the
+  restore path uses, exits 1 (`baseline-stale`, `defects=1`), because the three migrations #860
+  brought postdate `supabase/schema/baseline.sql`. The preflight will refuse until the dump is
+  regenerated from PROD with its carried-migrations marker in the same commit. When it runs, the
+  preflight must print `self-test OK (41/41 arms` (the plan text's 34/34 is stale), and both run
+  ids go under `[164.9-CRIT8-RESTORE-DISPATCH-RECORD]`. A 42501 on that run is read from the
+  `profiles_lock_privileged_cols` trigger (`prevent_profile_privileged_change`) and recorded as a
+  role finding, never dispatched around; which role the shared-TEST session runs as is unmeasured.
+- ⚠️ **An accepted deviation: `freshKeyProof`.** The round-2 finding asked for every DO-body DELETE
+  and upsert to be refused outright. That would keep `--audit` permanently red on three APPLIED
+  migrations that cannot be edited, all of which pass the proof. The orchestrator accepted the
+  proof at verification; the founder may still take the literal rule, which would need a decision
+  on those three migrations.
+- ⚠️ **The local-stack lane has no cross-worktree lock.** Two worktrees derive the same docker
+  project id from the tracked `supabase/config.toml`, and `supabase start` treats an
+  already-running stack of that project as success, so two lanes booted at once share one stack.
+  Plan 05's rehearsal confirmed it started its own stack.
+
+## [0.93.0.2] - 2026-09-26 — the committed baseline catches up with the Phase 164.9.1 apply
+
+Same shape as v0.90.0.1: a read-only re-dump taken after migrations reached PRODUCTION, so the
+local-stack lane loads a dump that already carries them, and `main`'s red `sql-gate-lint` clears.
+
+### Changed
+- **`supabase/schema/baseline.sql` regenerated from PROD**, read-only `supabase db dump --linked`
+  taken by the founder AFTER Supabase Migrate run `36221903723` applied Phase 164.9.1's three
+  migrations on merge commit `96219c04a`. sha256 `b473ab7e…` → `22cce9c0…`, recorded in
+  `BASELINE.md` with a dated section of what was measured. Shape unchanged: 63 tables,
+  155 policies, 123 function statements, **0** data statements.
+- **`supabase/schema/baseline-carried-migrations.txt` regenerated in the same commit** (DECISION F)
+  from the tree of `96219c04a`: three migrations added, sha line rebound.
+  `baseline-currency: carried=277 replay=0 marker-sha=match defects=0`.
+
+### Fixed
+- **`main` CI is green again on `sql-gate-lint`.** Its `baseline-content-drift` step had read
+  DRIFT 5 with findings since the 164.9.1 apply (`_enqueue_compute_job_internal/10`,
+  `request_allocator_holdings_sync/1`, …), because the committed dump predated the bodies PROD
+  now runs. It now reads compared 123, MATCH 120, DRIFT 3 (the three allowlisted `[DRIFT-06]`
+  rows), findings **0**. Railway skips an analytics deploy while `main` is red, so this also
+  unblocks the next analytics-service deploy.
+
+### Notes
+- **Secret-scanned before commit** with all five classes from `BASELINE.md`'s own command: **0**
+  matches; gitleaks over the file: no leaks; no home path or local username; one
+  `SET client_encoding`, no NUL bytes.
+- Gates re-run on the new dump: `dump-sql-functions.ts --check` current (121 names, 0 ratcheted
+  disagreements); `baseline-content-drift --self-test` OK.
+
+## [0.93.0.1] - 2026-09-26 — DRIFTOFFMUTEX: `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work
+
+⭐ **What changed for whoever reads this next.** Phase 164.4.2.1 takes `ci.yml`'s `test-db-drift`
+job off the shared-TEST advisory key. That job runs VAC-08, which only READS shared TEST's
+migration ledger and function bodies, yet on a merge push it queued behind `python` and
+`e2e-seeded` for up to 20m31s to do 2-5 s of work (`164.4.2.1-MEASUREMENT.md` BEFORE). What orders
+VAC-08 after `supabase-migrate.yml`'s `apply-test` is the schema-apply wait, not the key, and that
+wait stays (the phase's decision D-02, Option A). The goal is that a merge push to `main` is no
+slower than before Phase 164.4.2.
+
+⚠️ **This is a build-segment bump because nothing a user or an API caller sees changes.** The diff is
+CI workflows, two CI scripts, tests, a runbook and ledger prose. There is no migration and no
+`analytics-service/` or app code. 0.93.0.0 is JOBRPCTRUTH, already on `main`.
+
+### Changed
+
+- **`test-db-drift` no longer takes, holds or judges the shared-TEST key** (`15d8bfd77`). Its
+  `Acquire`, `Release` and dead-holder `Verdict` steps are gone, and `grep -c 61616158` inside the
+  job is 0. It keeps the secret, the schema-apply wait before VAC-08 on merge pushes, the
+  `needs: python` edge, `timeout-minutes: 90` and its row in the `frontend` aggregator. No gate
+  was skipped and no timeout was raised. The job's comments stop naming an acquire it no longer
+  has (`244a1cde4`). The deleted `Verdict` step judged a holder this job no
+  longer has, so it is a removed mechanism, not a skipped gate.
+- **The holder set moved by measurement in the same commit** (`15d8bfd77`). The `ci.yml` jobs that
+  hold the key are now `python` (9 hits) and `e2e-seeded` (8), 17 in total, down from 29.
+  `mutex-dead-holder-verdict.test.ts` Test 2's floor went from 5 to 4 with a dated reason.
+- **Holder-set currency in the prose that names the holders** (`579ab9c33`, `3bfd6d12e`,
+  `92d3499d7`, `003dd466d`). `CLAUDE.md` and `docs/runbooks/shared-test-db-mutex.md` carry dated
+  addenda with re-measured counts, and the old sentences stay as lineage. The runbook's new
+  section 0 records why the wait, not the key, orders VAC-08. `TODOS.md`
+  `[164.4.2-REMAINING-KEY-HOLDERS]` now names `python` and `e2e-seeded` only. The
+  `analytics-deploy-verify.yml` issue text names what reds `test-db-drift` now.
+- **Two restore safety texts stop claiming the mutex keeps ALL other CI out** (`72d12cf9c`,
+  `a72f2d809`, `c946f78ab`, `848543db4`, `e9e46c1bc`). It keeps other CI WRITERS out; one
+  read-only reader, VAC-08, is no longer kept out and cannot harm a restore. The
+  `restore-test-from-baseline.sh` refusal text, the `test-restore-from-baseline.yml` NOT-ANNOUNCED
+  error and their comments now say so, with dated corrections.
+
+### Fixed
+
+- **A PR-run VAC-08 overlap with a TEST writer now reds with its real cause named** (`f180241cd`,
+  `2f5549f8b`, `51727e666`, `01c938583`). On a `pull_request` run the schema-apply wait does not
+  run, so VAC-08 has no ordering against a concurrent `apply-test` or a dispatched restore. The
+  `ci.yml` header, `CLAUDE.md`, the VAC-08 query-failure and `FRONTIER_EXEMPT_CEILING` messages and
+  the aggregator's red `test-db-drift` message now name that overlap as a possible cause.
+- **VAC-08's connects are bounded** (`b3e86e58e`). The VAC-08 step sets `PGCONNECT_TIMEOUT: "15"`.
+  A failed connect exits non-zero, so this can add a loud red and never a green. The script
+  header states what bounds each phase of a psql call, and that a network loss after connect is
+  bounded only by the job's `timeout-minutes` (`01c938583`, `9da73dc52`).
+- **The ordering wait names a missing psql up front** (`bf9901398`). `wait-for-test-schema-apply.sh`
+  exits 1 with `wait-outcome: psql-missing` instead of failing later and less clearly. Two new
+  self-test checks cover it (48 in total).
+- **The redundant conditional psql install in `test-db-drift`'s wait step is gone** (`b3e86e58e`).
+  The `Install psql client` step before it installs psql unconditionally.
+
+### Tests
+
+- **Pins that `test-db-drift` holds no key and that its ordering still holds** (`15d8bfd77`,
+  `b3e86e58e`, `db8c570ff`, `e2b81e0f4`). `critical-regressions.test.ts` pins the holder set, the
+  absence of any key in `test-db-drift`, the wait running before VAC-08 under its merge-push `if:`,
+  and that neither the wait nor VAC-08 can be disabled or masked by an `if:`. The verifier neutered
+  each pin (a lock line added, the wait's `if:` disabled, `if: false` on VAC-08, the timeout raised
+  to 120, the job dropped from `needs:`) and watched every one go RED.
+- **The holder detector cannot silently miss a holder** (`6806e1c9e`, `4c0ace777`). `measureHolders`
+  recognises a take by the act: any lock call whose argument is not provably another key counts.
+  It follows sourced, executed and node/python entry points, `npm run`, `cd` and
+  `working-directory`, and it throws on an invoked path it cannot resolve.
+
+### Notes
+
+- **Measurement before code** (`517f51f83`, `42dba0e48`, `844a39953`, `d04f580a2`, `c79e1e0c6`).
+  `164.4.2.1-MEASUREMENT.md` holds the BEFORE, the verdict rule and a prediction, committed at
+  `d04f580a2`, an ancestor of the `ci.yml` change. SC-3 is graded on the Goal reading (founder,
+  D-01): a non-degenerate run-total inside or below 16m18s–18m50s. The strict below-16m18s reading
+  is recorded per run as evidence for Phase 164.9.
+- **Two review rounds, each fixed and re-reviewed** (`c8f7e1379`, `31899f7a7`, `14d128b6a`,
+  `d1ba1793d`, `df88e0624`, `f82f85594`, `bae975b54`, `c98f1cb34`). Code review and silent-failure
+  review in both rounds, fixers split by topic.
+- **Plan completion, security and verification records** (`b579f0110`, `6cdf6134f`, `678f7e906`,
+  `249c3c4bd`, `77edbf9b2`). SECURITY is SECURED with 0 open threats. VERIFICATION is
+  `human_needed` 3/4, the missing one being SC-3 below. The founder ratified the PR-run ordering
+  loss as D-10 on 2026-09-26, recorded in CONTEXT and ROADMAP.
+
+- ⚠️ **SC-3, the five-run AFTER table, can be measured only after this merges** (D-05).
+  `164.4.2.1-MEASUREMENT.md`'s AFTER is PROTOCOL ONLY at this SHA, and the phase may not read
+  `passed` until it is filled and graded. **Owner: the session that lands this PR**, as the
+  post-merge re-verification of 164.4.2.1.
+- ⚠️ **Accepted: a PR-run VAC-08 has no ordering against a TEST writer** (D-10, accepted risk
+  AR-164.4.2.1-01). An overlap can red a PR, never turn real drift green. Re-run the check once
+  both writers are idle; runbook section 0 has the triage. Merge pushes keep the wait.
+- ⚠️ **One assumption is recorded, not measured:** that `supabase db push` commits each
+  migration's ledger row in the same transaction as the file (research A1). Neither ordering gives
+  a false green: a row committing late is exempted above the frontier within the ceiling, and a row
+  committing early reds the function-body half.
+- ⚠️ **The holder detector treats a node/python/TS entry point as a leaf.** It does not walk what
+  that entry point imports or spawns, so a future writer that takes the key only inside an imported
+  module would read as a non-holder. No such file exists today, and the limit is stated in the
+  detector's header comment.
+
 ## [0.93.0.0] - 2026-09-25 — JOBRPCTRUTH: the compute-job RPC surface does what its own migrations say
 
 ⭐ **What changed for whoever reads this next.** Phase 164.9.1 fixes three places where a

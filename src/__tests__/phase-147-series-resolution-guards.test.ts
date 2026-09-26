@@ -421,7 +421,9 @@ describe("SCEN-01 LAYER B — every series reader resolves through the ONE resol
   it("REFERENCE factsheet v2 page still resolves its series THROUGH that builder", () => {
     const src = stripComments(readSource("src/app/factsheet/[id]/v2/page.tsx"));
     expect(src).toContain("@/lib/factsheet/fetch-and-build-payload");
-    expect(src).toContain("fetchAndBuildPayload(");
+    // Either exported builder counts: 167.2.1 (WR-03) moved the page onto
+    // `fetchAndBuildPayloadWithReason`, which runs the same `resolveAndBuild`.
+    expect(src).toMatch(/fetchAndBuildPayload(?:WithReason)?\(/);
   });
 
   it("REFERENCE discovery strategy page still resolves through the same resolver", () => {

@@ -715,7 +715,12 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     # 2026-08-13, the actual blocker was the Expert-Advisors "Allow algorithmic
     # trading" option (`Enabled` in [Experts]) — which the gateway re-sets off on
     # every account change while THIS worker logs in on every job, so the fault
-    # recurs after every operator fix. MetaQuotes' default-ON "Disable automatic
+    # recurs after every operator fix.
+    # ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1): the re-set happens ONLY
+    # while "Disable algorithmic trading when the account has been changed"
+    # (`ACCOUNT_CHANGE_ALGO_DISABLE_OPTION`, services/mt5_validation.py) is
+    # ticked, and that box was founder-read UNCHECKED on 2026-09-24. The
+    # sentence above is kept as lineage. MetaQuotes' default-ON "Disable automatic
     # trading through the external Python API" (`Api`, reported as
     # `tradeapi_disabled`) was measured OFF at the same time, yet the message this
     # arm returned named it — a sentence that was false about the operator's own
@@ -3207,11 +3212,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 LedgerValuationError,
                 PNL_BASIS_MARK_TO_MARKET,
                 PNL_BASIS_SMOOTHED_MTM,
+                OptionRowFieldMissingError,
             )
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
             from services.native_nav import InceptionReconciliationError
             from services.stitch_composite import (
                 MTM_REASON_ANCHOR_RACE,
+                MTM_REASON_OPTION_ROW_FIELD,
                 MTM_REASON_SECOND_PASS_TIMEOUT,
                 MTM_REASON_SUMMARY_COVERAGE,
             )
@@ -3551,10 +3558,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             # PERSISTENT inception breach also lands here and STILL
                             # degrades (cash ships) — never propagate-to-retry, which
                             # would sink the healthy cash headline (deferred-items.md).
+                            #
+                            # Phase 168 (SFH-04): an option row missing its
+                            # commission/position (OptionRowFieldMissingError) gets
+                            # its OWN reason too, label-only like the anchor race —
+                            # the coverage stamp would name the wrong cause.
                             mtm_returns = None
                             mtm_gated_reason = (
                                 MTM_REASON_ANCHOR_RACE
                                 if isinstance(_mtm_exc, InceptionReconciliationError)
+                                else MTM_REASON_OPTION_ROW_FIELD
+                                if isinstance(_mtm_exc, OptionRowFieldMissingError)
                                 else MTM_REASON_SUMMARY_COVERAGE
                             )
                             logger.warning(
