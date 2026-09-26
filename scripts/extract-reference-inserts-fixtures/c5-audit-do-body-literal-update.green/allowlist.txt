@@ -1,0 +1,4 @@
+# fixture allowlist — c5-audit-do-body-literal-update.green
+20260101000000_fx_a.sql	public.fx_ref	1	# consumer: the extractor self-test
+20260102000000_fx_b.sql	public.fx_ref	update:1	# consumer: the extractor self-test
+20260102000000_fx_b.sql	public.fx_ref	decline:1	# consumer: the extractor self-test

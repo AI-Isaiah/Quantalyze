@@ -84,10 +84,10 @@ replay it, and boot green on a schema missing it. A full list cannot make that m
 
 | | |
 |---|---|
-| Taken | 2026-09-24 |
+| Taken | 2026-09-26 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
 | Supabase CLI | 2.84.2 (CI pins 2.98.2 — see the caveat below) |
-| sha256 | `b473ab7e48df967d981e99c1b366ca26bf9d1ccf81066df5c44c112413dcb21f` |
+| sha256 | `22cce9c0241f01090ff9d46208391654660c49233945364c9ba96db28a69d076` |
 | Shape | 63 tables, 155 policies, 123 function statements (121 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
@@ -95,6 +95,37 @@ Secret-scanned before commit with the exact pattern recorded in
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-09-26 — the Phase 164.9.1 apply, three migrations, no shape change
+
+⛔ **A SEPARATE REVIEWED ACT, taken by the founder** with a read-only `supabase db dump --linked`
+(CLI 2.84.2); this checkout runs no database command against a remote. Taken AFTER Phase 164.9.1's
+migrations had applied to PRODUCTION (Supabase Migrate run `36221903723`, `apply-test` and `apply`
+jobs success, on merge commit `96219c04a`, the `MERGE` used to regenerate the marker). No later
+merge touches `supabase/migrations/**` (`096671f2d`, #861, changes CI only).
+
+**Which migrations the new dump now carries** — measured from the marker diff, the complete set
+added since the 2026-09-24 capture:
+
+| migration | what it adds | expected shape delta |
+|---|---|---|
+| `20260924230827_fanin_initial_status_10param.sql` | `CREATE OR REPLACE` + `COMMENT ON FUNCTION` of `_enqueue_compute_job_internal` | none of the counted shapes (body replacement of an existing function) |
+| `20260924233749_allocator_sync_restore_inflight_prefetch.sql` | `CREATE OR REPLACE` + `COMMENT ON FUNCTION` of `request_allocator_holdings_sync` | none of the counted shapes |
+| `20260925071300_bridge_outcomes_invariant_comments.sql` | `COMMENT ON TABLE` / `COMMENT ON COLUMN` on `bridge_outcomes` | none of the counted shapes |
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Shape | 63 tables, 155 policies, 123 function statements — **unchanged** |
+| Data statements | **0** — unchanged |
+| sha256 | `b473ab7e…` → `22cce9c0…` |
+| Secret scan (all five classes) | **0** matches; gitleaks over the file: no leaks |
+| Home path / local username | 0 matches |
+| File integrity | single `SET client_encoding`, no NUL bytes |
+| Currency gate | `baseline-currency: carried=277 replay=0 marker-sha=match defects=0` |
+| Function snapshot | `dump-sql-functions.ts --check`: 121 names agree, 0 ratcheted disagreements |
+| Body drift | `baseline-content-drift`: compared 123 — MATCH 120, DRIFT 3 (the three allowlisted `[DRIFT-06]` rows), findings **0**. The pre-dump reading on `main` was DRIFT 5 with findings, the red `sql-gate-lint` this dump clears. |
 
 ### Regenerated 2026-09-24 — the Phase 164.6 apply, two function bodies, nothing else
 
