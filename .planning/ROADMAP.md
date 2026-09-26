@@ -2426,10 +2426,14 @@ Plans:
 ### Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session (INSERTED)
 
 **Goal:** A client's key validation cannot evict, disturb or expose another client's broker session
-on the shared terminal — and a shared-terminal outage reaches a human without one clicking a button.
+on the shared terminal.
 **Requirements**: TBD
 **Depends on:** Phase 164.6.5 (availability first: this phase changes the terminal's ownership model,
 which is only safe once validation stops wedging it)
+**Split 2026-09-26 by founder decision: one topic per phase.** Sibling: Phase 164.6.8 OUTAGEALERT
+took the goal's outage clause ("and a shared-terminal outage reaches a human without one clicking
+a button") and the former criterion 3 verbatim. This phase keeps the former criteria 1, 2 and 4;
+the former 4 is renumbered 3 below, text unchanged.
 **Plans:** 0 plans
 
 ⛔ **SAME INCIDENT AS 164.6.5, DIFFERENT DEFECT.** 164.6.5 makes validation stop breaking the
@@ -2448,7 +2452,37 @@ independently shippable; this is the architecture.
    Navigator tree holds registered accounts across SEVERAL broker servers — one per client who has
    ever validated. Anyone with VNC access to the gateway container can read the full list of client
    account numbers and their brokers. ⛔ This does NOT go away by fixing the wedge.
-3. **A shared-terminal outage reaches a human.** Measured across the 1h39m total outage: `/health`
+3. ⚠️ **A founder decision, not to be taken silently:** per-validation isolation (ephemeral or
+   pooled terminals) vs serialize-and-restore on one terminal. Both have real cost; record the
+   reasoning wherever this repo tracks decisions.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.6.6 to break down)
+
+### Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button (INSERTED)
+
+**Goal:** A shared-terminal outage reaches a human without one clicking a button.
+**Requirements**: TBD
+**Depends on:** Phase 164.6.5 (the salience work sits on 164.6.5's terminal-measuring prober arm, and
+a real-wedge capture has to beat 164.6.5's own heal, which can recycle a wedge before a scheduled
+prober run reads it). It does NOT depend on Phase 164.6.6: alerting on an outage does not need the
+terminal's ownership model changed.
+**Split 2026-09-26 by founder decision: one topic per phase.** Sibling: Phase 164.6.6
+MT5TERMINALISOLATION, whose former criterion 3 moved here verbatim as criterion 1 below, with the
+outage clause of its goal.
+**Owns (routed 2026-09-26, founder decision):** `MT5-PROBER-WEDGE-CALIBRATION-01` — Phase 164.6.5
+D-11, the calibration half of 164.6.5 criterion 4: the prod-prober's `-10005` classification
+(`mt5-ipc-timeout`) has never been calibrated against a REAL wedge; its fixture was constructed, not
+captured. ⚠️ **Not yet on `main` at the time of this split:** the `TODOS.md` entry, the 164.6.5
+founder-ruling note and an `**Owns**` line under Phase 164.6.6 all arrive with PR #863 (164.6.5,
+open), which routes the item to 164.6.6. Whichever of the two PRs merges second must re-home that
+`**Owns**` line here and point the `TODOS.md` `Owner:` at Phase 164.6.8.
+**Plans:** 0 plans
+
+**Success criteria (to be derived properly at planning):**
+
+1. **A shared-terminal outage reaches a human.** Measured across the 1h39m total outage: `/health`
    returned `"status":"ok"` throughout; the escalation at `consecutive_not_measured=6` flipped log
    level INFO→WARNING and set `blind=True`, which NOTHING outside its own module reads; the
    prod-prober run concluded `success` BY DESIGN (status-class defects exit 0 so Railway's
@@ -2458,13 +2492,10 @@ independently shippable; this is the architecture.
    view reads green. ⛔ Do NOT reopen `MT5-WEDGE-OBS-01`; cross-link instead.
    ⭐ **The way this incident was actually found was a founder clicking a button.** That is the
    finding this criterion exists to answer.
-4. ⚠️ **A founder decision, not to be taken silently:** per-validation isolation (ephemeral or
-   pooled terminals) vs serialize-and-restore on one terminal. Both have real cost; record the
-   reasoning wherever this repo tracks decisions.
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.6.6 to break down)
+- [ ] TBD (run /gsd-plan-phase 164.6.8 to break down)
 
 ### Phase 164.6.1: MYPYSTRICT — the strict gate claims to cover all running-service code and does not cover the module that IS the service (INSERTED)
 
@@ -3230,29 +3261,49 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 169 to break down)
 
-### Phase 170: PAGECOPY — layout and copy read clean on every page
+### Phase 170: LAYOUT — page layout reads clean and holds on every page
 
-**Goal:** Pages read as a finished product: no stacked look-alike panels, no raw ids or internal labels, no test text, no typos, and the layout holds at 320 px and 200% zoom.
+**Goal:** Pages read as a finished product: no stacked look-alike panels, and the layout holds at 320 px and 200% zoom.
 **Founder decision, 2026-09-25 (AskUserQuestion):** the second of the two QA phases; ships after Phase 169 PAGETRUTH.
 **Evidence:** the founder's 2026-09-24 layout notes ("too many similar layers stacked", the "get private link" control too dominant and overlapping) and the 2026-09-25 QA sweep (4 user-facing broken, 14 cosmetic findings). Counts only here.
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 169
+**Split 2026-09-26 by founder decision: one topic per phase.** Sibling: Phase 170.1 COPY. This phase was 170 PAGECOPY and keeps the former criteria 1 and 5 (renumbered 1 and 2 below) plus its own copy of the former criterion 7 (now 3), text unchanged. The former criteria 2, 3, 4 and 6 and the goal's copy clauses ("no raw ids or internal labels, no test text, no typos") moved to 170.1 verbatim. The phase directory keeps its original `170-pagecopy` slug.
 
 ## Success Criteria
 
 1. Factsheet and Allocations panels no longer stack as near-identical layers; the private-link control is secondary and never overlaps content.
-2. No page shows a short id where a name exists, or a raw internal value as a label (strategy type, allocator type, event kinds, roles).
-3. No production page carries QA, test or internal-phase text, including strategy descriptions and the placeholder Referral page.
-4. The recorded typos are fixed and pages that share a title are distinguished.
-5. `/security` and the legal pages show the signed-in header when signed in; the floating tweaks control never covers the bottom navigation; `/compare` does not point to controls that do not exist; `/admin/match` on mobile is read-only in fact, not only in words; no page scrolls horizontally at 320 px.
-6. The wizard's post-Submit copy says "submitted" on success, not "already submitted".
-7. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
+2. `/security` and the legal pages show the signed-in header when signed in; the floating tweaks control never covers the bottom navigation; `/compare` does not point to controls that do not exist; `/admin/match` on mobile is read-only in fact, not only in words; no page scrolls horizontally at 320 px.
+3. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
 
 **Plans:** 0 plans
 
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 170 to break down)
+
+### Phase 170.1: COPY — page copy reads clean on every page (INSERTED)
+
+**Goal:** Pages read as a finished product: no raw ids or internal labels, no test text, no typos.
+**Founder decision, 2026-09-25 (AskUserQuestion):** the second of the two QA phases; ships after Phase 169 PAGETRUTH.
+**Evidence:** the 2026-09-25 QA sweep (4 user-facing broken, 14 cosmetic findings). Counts only here.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 169
+**Split 2026-09-26 by founder decision: one topic per phase.** Sibling: Phase 170 LAYOUT (formerly 170 PAGECOPY). The former 170 criteria 2, 3, 4 and 6 moved here verbatim (renumbered 1–4 below) with the goal's copy clauses, and this phase carries its own copy of the former criterion 7 (now 5). It does not depend on Phase 170: the two touch different concerns and either may ship first after Phase 169.
+
+## Success Criteria
+
+1. No page shows a short id where a name exists, or a raw internal value as a label (strategy type, allocator type, event kinds, roles).
+2. No production page carries QA, test or internal-phase text, including strategy descriptions and the placeholder Referral page.
+3. The recorded typos are fixed and pages that share a title are distinguished.
+4. The wizard's post-Submit copy says "submitted" on success, not "already submitted".
+5. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 170.1 to break down)
 
 ---
 
@@ -3262,6 +3313,7 @@ Plans:
 **Depends on**: Phase 158 (⛔ HARD: OPS-01 — nine CI runs against the unfixed group guarantees a silently-skipped Railway deploy, and #685 is 100% `analytics-service/`). LAST phase of the milestone — dependency churn lands after the correctness work, never before
 **Requirements**: DEPS-01
 **Ordering (2026-09-05):** runs AFTER Phase 166 — dependency churn lands LAST in the milestone. Carried decision: when v1.21 is created and 165 is still open, it moves there.
+**Split considered 2026-09-26 and NOT taken (founder decision: one topic per phase, with the rule "do not split if the verified landing order interleaves the ecosystems").** The proposed split was 165 PYDEPS (the pandas prerequisite commit + the Python PRs) and 165.1 JSDEPS (npm/CI PRs, the #614/#606 closures, the nightly audit). Ecosystem per PR, read from `gh pr view <n> --json files` on 2026-09-26: #643, #627, #626, #612 touch only `.github/workflows/*` (GitHub Actions); #685 touches only `analytics-service/requirements{.in,.txt,-dev.txt}` (pip); #686, #645, #646, #614 touch only `package.json` + `package-lock.json` (npm). Criterion 2's verified order is therefore actions → pip → npm, so the JSDEPS half would sit on BOTH sides of the PYDEPS half; no ordering of two phases keeps it. `.planning/research/STACK.md`'s "Ordering rationale" makes the actions-first step load-bearing, not cosmetic: the actions PRs "change *how CI runs*, and you want that settled before you start trusting CI's verdict on library bumps". A three-way split (actions, then pip, then npm) would keep the order; that is a founder call and was not taken here. Also measured the same day, and not yet reflected in the criteria: #685 and #686 are CLOSED (2026-08-24), with open group successors #755 (pip) and #836 (npm); #606 is an ISSUE (the 2026-07-10 nightly npm-audit report), not a PR.
 **Success Criteria** (what must be TRUE):
 
   1. A prerequisite commit on `main` (not a PR) fixes `requirements.in` `pandas==2.2.3` → `3.0.3` with its comment corrected and `requirements.txt` untouched, BEFORE #685 is touched at all; #685 then lands rebased with pandas OUT of its diff and `make lock` re-run — production pandas stays 3.0.3. ⚠️ A green pytest is NOT proof of safety here; the pin itself is the assertion.
