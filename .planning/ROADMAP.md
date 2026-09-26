@@ -3050,14 +3050,14 @@ Plans:
 
 **Wave 1**
 
-- [ ] 166.2-01-PLAN.md — ONE TS module `src/lib/return-stats.ts` (floor pinned to Python, dispersion, Sharpe, Pearson, beta); T1-T5 (/compare, sampleBasisRatios, computeScenario, diversificationRatio) call it (D-15, D-17)
+- [x] 166.2-01-PLAN.md — ONE TS module `src/lib/return-stats.ts` (floor pinned to Python, dispersion, Sharpe, Pearson, beta); T1-T5 (/compare, sampleBasisRatios, computeScenario, diversificationRatio) call it (D-15, D-17)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 166.2-02-PLAN.md — TS T6-T7 on `return-stats`: one Pearson (`correlation-math.ts` deleted with the dead `rollingCorrelation`), /compare's matrix and the Risk-tab widget (D-15, D-17, D-20)
-- [ ] 166.2-03-PLAN.md — TS T8-T12 on `return-stats`: portfolio-stats beta and risk share, the scenario benchmark (its correlation and information ratio) and stress; dead `computeRollingMetric` deleted (D-15, D-17, D-20)
+- [x] 166.2-02-PLAN.md — TS T6-T7 on `return-stats`: one Pearson (`correlation-math.ts` deleted with the dead `rollingCorrelation`), /compare's matrix and the Risk-tab widget (D-15, D-17, D-20)
+- [x] 166.2-03-PLAN.md — TS T8-T12 on `return-stats`: portfolio-stats beta and risk share, the scenario benchmark (its correlation and information ratio) and stress; dead `computeRollingMetric` deleted (D-15, D-17, D-20)
 - [ ] 166.2-04-PLAN.md — TS T13, T15, T14's computed arm and T18: the factsheet headline family and the OG card's computed Sharpe (T14's persisted read is Phase 169's), T18 fixed at its source (D-15, D-17, D-19, D-20)
-- [ ] 166.2-05-PLAN.md — TS T16, T17, T19, T20: the factsheet's beta, correlation, information ratio and rolling Sharpe (D-15, D-17, D-20)
+- [x] 166.2-05-PLAN.md — TS T16, T17, T19, T20: the factsheet's beta, correlation, information ratio and rolling Sharpe (D-15, D-17, D-20)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
