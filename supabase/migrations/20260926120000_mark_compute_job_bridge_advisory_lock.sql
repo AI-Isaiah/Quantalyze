@@ -216,6 +216,110 @@ $$;
 REVOKE ALL ON FUNCTION mark_compute_job_done(UUID, UUID) FROM PUBLIC, anon, authenticated;
 
 -- --------------------------------------------------------------------------
+-- mark_compute_job_failed
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION mark_compute_job_failed(
+  p_job_id      UUID,
+  p_error       TEXT,
+  p_error_kind  TEXT DEFAULT 'unknown',
+  p_claim_token UUID DEFAULT NULL
+)
+RETURNS TIMESTAMPTZ
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $$
+DECLARE
+  v_attempts      INTEGER;
+  v_max_attempts  INTEGER;
+  v_next_attempt  TIMESTAMPTZ;
+  v_new_status    TEXT;
+  v_strategy_id   UUID;
+  v_current_token UUID;
+  v_current_status TEXT;
+BEGIN
+  -- audit-2026-05-07 B5: token mandatory (see mark_compute_job_done above).
+  IF p_claim_token IS NULL THEN
+    RAISE EXCEPTION 'mark_compute_job_failed: p_claim_token is required (post-mig-117 strict fence)'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  IF p_error_kind IS NOT NULL
+     AND p_error_kind NOT IN ('transient', 'permanent', 'unknown') THEN
+    RAISE EXCEPTION 'mark_compute_job_failed: p_error_kind must be transient/permanent/unknown, got %', p_error_kind
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  SELECT attempts, max_attempts, strategy_id
+    INTO v_attempts, v_max_attempts, v_strategy_id
+    FROM compute_jobs
+    WHERE id = p_job_id
+      AND status = 'running'
+      AND claim_token = p_claim_token
+    FOR UPDATE;
+
+  IF NOT FOUND THEN
+    SELECT status, claim_token
+      INTO v_current_status, v_current_token
+      FROM compute_jobs
+      WHERE id = p_job_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'mark_compute_job_failed: job % not found', p_job_id
+        USING ERRCODE = 'no_data_found';
+    END IF;
+
+    -- mig 117 P97: token mismatch on a still-running row.
+    IF v_current_status = 'running'
+       AND v_current_token IS DISTINCT FROM p_claim_token THEN
+      RAISE EXCEPTION 'mark_compute_job_failed: job % preempted by watchdog reclaim (caller token=%, current token=%)',
+        p_job_id, p_claim_token, v_current_token
+        USING ERRCODE = 'serialization_failure';
+    END IF;
+
+    RAISE EXCEPTION 'mark_compute_job_failed: job % not running (status=%)', p_job_id, v_current_status
+      USING ERRCODE = 'no_data_found';
+  END IF;
+
+  IF p_error_kind = 'permanent' THEN
+    v_new_status := 'failed_final';
+    v_next_attempt := now();
+  ELSIF v_attempts >= v_max_attempts THEN
+    v_new_status := 'failed_final';
+    v_next_attempt := now();
+  ELSE
+    v_new_status := 'failed_retry';
+    CASE
+      WHEN v_attempts <= 1 THEN v_next_attempt := now() + interval '30 seconds';
+      WHEN v_attempts = 2 THEN v_next_attempt := now() + interval '2 minutes';
+      WHEN v_attempts = 3 THEN v_next_attempt := now() + interval '10 minutes';
+      WHEN v_attempts = 4 THEN v_next_attempt := now() + interval '1 hour';
+      ELSE                     v_next_attempt := now() + interval '6 hours';
+    END CASE;
+  END IF;
+
+  -- HOTFIX 2026-05-29: write `error_kind` (the real column + CHECK target),
+  -- NOT the non-existent `last_error_kind` that mig 20260528183100 introduced.
+  UPDATE compute_jobs
+     SET status = v_new_status,
+         last_error = p_error,
+         error_kind = p_error_kind,
+         next_attempt_at = v_next_attempt
+   WHERE id = p_job_id;
+
+  -- Phase 18: atomic UI bridge (preserved from mig 099).
+  IF v_strategy_id IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));
+    PERFORM sync_strategy_analytics_status(v_strategy_id);
+  END IF;
+
+  RETURN v_next_attempt;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION mark_compute_job_failed(UUID, TEXT, TEXT, UUID) FROM PUBLIC, anon, authenticated;
+
+-- --------------------------------------------------------------------------
 -- Self-verify: catalog reads only. Every body check runs on the
 -- COMMENT-STRIPPED `pg_get_functiondef`, so prose can neither satisfy a
 -- positive anchor over a deleted statement nor trip a negative one.
@@ -228,8 +332,18 @@ DECLARE
   v_done_cfg            text[];
   v_done_secdef         boolean;
   v_done_lock_anchored  boolean;
+  v_failed_oid          oid := to_regprocedure('public.mark_compute_job_failed(uuid, text, text, uuid)');
+  v_failed_fn           text;
+  v_failed_body         text;
+  v_failed_cfg          text[];
+  v_failed_secdef       boolean;
+  v_failed_lock_anchored boolean;
+  v_raised_null_token   boolean := false;
+  v_raised_bad_kind     boolean := false;
+  v_raised_not_found    boolean := false;
   c_search_path         CONSTANT text := 'search_path=public, pg_catalog';
   c_done_sig            CONSTANT text := 'public.mark_compute_job_done(uuid, uuid)';
+  c_failed_sig          CONSTANT text := 'public.mark_compute_job_failed(uuid, text, text, uuid)';
   -- The guard, then the lock (two-integer form, this namespace, the strategy
   -- id as the second key), then the bridge call, as consecutive STATEMENTS.
   -- One regex pins presence, form, namespace, guard and placement together.
@@ -299,6 +413,68 @@ BEGIN
     RAISE EXCEPTION 'mark-compute-job-bridge-lock: anon or authenticated holds EXECUTE on the SECURITY DEFINER mark_compute_job_done — ACL drifted open. The PUBLIC probe above already passed, so this is a grant held by the named role directly.';
   END IF;
 
-  RAISE NOTICE 'mark-compute-job-bridge-lock: mark_compute_job_done takes the per-strategy two-integer advisory lock inside its strategy guard before the bridge; namespace distinct from admin_role_mutate; carried-forward fan-in, strict-token and bridge anchors, SECURITY DEFINER, the exact search_path pin and the ACL all intact.';
+  -- ===== mark_compute_job_failed =====
+  IF v_failed_oid IS NULL THEN
+    RAISE EXCEPTION 'mark-compute-job-bridge-lock: public.mark_compute_job_failed(uuid, text, text, uuid) does not resolve after its CREATE OR REPLACE';
+  END IF;
+
+  v_failed_fn := pg_get_functiondef(v_failed_oid);
+  v_failed_body := regexp_replace(regexp_replace(v_failed_fn, '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
+
+  -- ⛔ NULL FAILS OPEN THROUGH EVERY REGEX ARM BELOW.
+  IF v_failed_body IS NULL THEN
+    RAISE EXCEPTION 'mark-compute-job-bridge-lock: the comment-stripped mark_compute_job_failed body came back NULL, so every regex arm below would pass without reading anything. Refusing to report compliance on an unread body.';
+  END IF;
+
+  -- (5) the lock, statement-shaped, first inside the strategy guard. Both
+  -- RPCs must carry it: a half-applied lock discipline reads as protection
+  -- while providing none (D-01).
+  v_failed_lock_anchored := v_failed_body ~ c_lock_re;
+  IF NOT v_failed_lock_anchored THEN
+    RAISE EXCEPTION 'mark-compute-job-bridge-lock: mark_compute_job_failed does not take the two-integer mark_compute_job_bridge advisory lock on the strategy id as the first statement inside its non-NULL strategy guard, directly before the bridge call. A failure mark and a second terminal mark on one strategy would interleave inside the bridge again (161.1-D1).';
+  END IF;
+
+  -- (6) carried forward from 20260529180000: behavioural probes on RANDOM
+  -- uuids. They seed nothing and read no row content.
+  BEGIN
+    PERFORM mark_compute_job_failed(gen_random_uuid(), 'probe', 'permanent', NULL);
+  EXCEPTION WHEN invalid_parameter_value THEN v_raised_null_token := true;
+  END;
+  IF NOT v_raised_null_token THEN
+    RAISE EXCEPTION 'mark-compute-job-bridge-lock: mark_compute_job_failed with a NULL claim token did not raise invalid_parameter_value (the B5 strict fence regressed)';
+  END IF;
+  BEGIN
+    PERFORM mark_compute_job_failed(gen_random_uuid(), 'probe', 'bogus_kind', gen_random_uuid());
+  EXCEPTION WHEN invalid_parameter_value THEN v_raised_bad_kind := true;
+  END;
+  IF NOT v_raised_bad_kind THEN
+    RAISE EXCEPTION 'mark-compute-job-bridge-lock: mark_compute_job_failed with an out-of-vocabulary error_kind did not raise invalid_parameter_value';
+  END IF;
+  BEGIN
+    PERFORM mark_compute_job_failed(gen_random_uuid(), 'probe', 'permanent', gen_random_uuid());
+  EXCEPTION WHEN no_data_found THEN v_raised_not_found := true;
+  END;
+  IF NOT v_raised_not_found THEN
+    RAISE EXCEPTION 'mark-compute-job-bridge-lock: mark_compute_job_failed on an unknown job did not raise no_data_found';
+  END IF;
+
+  -- (7) SECURITY DEFINER, and the search_path pin is the VALUE.
+  SELECT p.prosecdef, p.proconfig INTO v_failed_secdef, v_failed_cfg
+    FROM pg_proc p WHERE p.oid = v_failed_oid;
+  IF v_failed_secdef IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'mark-compute-job-bridge-lock: mark_compute_job_failed is no longer SECURITY DEFINER, so the worker (service_role) could not reach compute_jobs through it';
+  END IF;
+  IF v_failed_cfg IS NULL OR NOT (c_search_path = ANY(v_failed_cfg)) THEN
+    RAISE EXCEPTION 'mark-compute-job-bridge-lock: mark_compute_job_failed does not pin search_path to the exact declared value (pg_proc.proconfig=%). A SECURITY DEFINER function whose pin is missing, empty or reordered is search-path-hijackable.', v_failed_cfg;
+  END IF;
+
+  -- (8) ACL re-convergence (the role-existence guard above already ran).
+  PERFORM public._assert_no_public_execute(c_failed_sig);
+  IF has_function_privilege('anon', v_failed_oid, 'EXECUTE')
+     OR has_function_privilege('authenticated', v_failed_oid, 'EXECUTE') THEN
+    RAISE EXCEPTION 'mark-compute-job-bridge-lock: anon or authenticated holds EXECUTE on the SECURITY DEFINER mark_compute_job_failed — ACL drifted open. The PUBLIC probe above already passed, so this is a grant held by the named role directly.';
+  END IF;
+
+  RAISE NOTICE 'mark-compute-job-bridge-lock: mark_compute_job_done and mark_compute_job_failed both take the per-strategy two-integer advisory lock inside their strategy guard before the bridge; namespace distinct from admin_role_mutate; carried-forward anchors and probes, SECURITY DEFINER, the exact search_path pin and the ACL all intact for both.';
 END
 $verify$;
