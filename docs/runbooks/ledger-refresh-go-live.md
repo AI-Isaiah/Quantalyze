@@ -952,6 +952,59 @@ here, but this precondition sits here because this is where a reader would go to
    mirror only logs. The deploy-time instruction above now covers both stamps: on the DEPLOYED
    commit, find the `READ_ERROR` arm in `_stamp_failed` AND in
    `_stamp_strategy_analytics_failed`.
+   ⛔ **CORRECTED 2026-09-26 (round-2 review, orchestrator decisions, CONTEXT D-10). Both
+   paragraphs above are kept as lineage. One of their sentences is superseded and two overclaim.**
+   - **Superseded: "the chain-edge forward still sends hop 2 no marker".** On `READ_ERROR`, the
+     REUSE-01 forward in `run_derive_broker_dailies_job` now raises `RefreshMarkerRereadUnavailable`
+     BEFORE `_enqueue_csv_analytics`. No follow-on is enqueued, and the marker stays on hop 1's
+     row, so the job retries TRANSIENT. The tail mirror still only logs. On the DEPLOYED commit,
+     confirm the raise sits before `_enqueue_csv_analytics`; a commit that predates it still
+     drops the marker. The orchestrator REJECTED the alternative of forwarding the marker with
+     an "unverified" flag, for two reasons.
+     First, the failures are correlated, not independent: a read that still fails after
+     `db_read_with_retry` means the database is unhealthy, and hop 2 runs against the same
+     database. Second, re-crawling on a transient already has a precedent in this worker:
+     `run_stitch_composite_job` returns transient after two complete crawls when its smoothed
+     pass diverges.
+   - **Extended: D-09 now covers the entry publish-state read.** `_read_entry_publish_state` at
+     the top of `run_derive_broker_dailies_job` reads through `db_read_with_retry`. If a marked
+     refresh's read still fails, the job fails TRANSIENT (`RefreshMarkerRereadUnavailable`)
+     before any crawl or write. Before this change, a failed entry read left the publish state
+     unknown, logged only at WARNING, and sent a live factsheet down the destructive path at
+     both hops.
+   - **Overclaim: "the queue retries the whole job" does not mean the factsheet is protected
+     for every row.** When the job goes to `failed_retry`, `mark_compute_job_failed` PERFORMs
+     `sync_strategy_analytics_status`, and the bridge's non-terminal branch (a) rewrites the
+     row's status. It KEEPS `complete_with_warnings`, and any row with
+     `computation_warned = TRUE`. It REWRITES a plain `complete` to `computing`. **So the retry's
+     protection holds for `complete_with_warnings` / warned rows only, unless the DEPLOYED commit
+     carries a fix that persists the attempt-1 publish state somewhere the bridge cannot
+     overwrite (round-2 review WR-01 / SFH-R2-03).** Confirm that on the deployed commit; do not
+     assume it. Without that fix, a plain-`complete` row is unprotected in two ways. Attempt 2
+     reads `computing`, which is not terminal-success, so a recurrence of the original failure
+     stamps loudly. And if the retry budget runs out instead, branch (b) sees an unhealthy row
+     and un-publishes it.
+   - **Overclaim: "ends `failed_final` with no terminal stamp from this site" is true of Python
+     and says nothing about the bridge.** If the re-read also fails on the FINAL attempt, the job
+     ends `failed_final` with `last_error_kind = 'transient'`. Its `last_error` should carry the
+     curated cause sentence the stamp was about to write (round-2 review WR-03 / SFH-R2-01).
+     Check that on the deployed commit by reading the `RefreshMarkerRereadUnavailable` raises;
+     a commit that predates that fix records only the read failure. What the account holder
+     then sees is decided by the bridge from the live marker and the live status. If the marker
+     is still present and the row is still healthy, branch (b-prime) keeps the factsheet
+     PUBLISHED BUT STALE, and overwrites `computation_error` with
+     `computation_error_copy('transient')`, the generic "automatic retries" sentence, even when
+     the underlying cause was permanent. If the marker was retracted, branch (b) takes the loud
+     path, which is the right answer.
+   - **Alert volume, a known property.** `init_sentry` does not disable the default
+     `LoggingIntegration`, so every `logger.error` is a Sentry event. One failed re-read at a
+     stamp site or at the chain edge produces 3 events: the helper's ERROR line, its explicit
+     `capture_exception` (the only event with the traceback, and it carries no job tag), and the
+     call site's ERROR line. A failed entry publish-state read produces 2. At most one read fails
+     per attempt, because each failure ends the attempt, so with the default `max_attempts` of 3
+     one job produces **at most 9 events**. A database outage multiplies that by the number of
+     marked refreshes in flight. Global Sentry config is deliberately unchanged in this phase. If
+     the deployed commit adds an ERROR line on this path, re-count the bound.
    📜 *Lineage, superseded 2026-09-25:* "⛔ **BLOCKING.** No schedule naming
    `public.enqueue_ledger_composite_refresh()` may be registered until `run_stitch_composite_job`
    in `analytics-service/services/job_worker.py` re-reads the LIVE `compute_jobs` row's
@@ -1017,6 +1070,14 @@ here, but this precondition sits here because this is where a reader would go to
    with the composite `READ_ERROR` arm neutered (the read error falling through to the loud
    stamp) and GREEN restored. The retraction and no-row tests in
    `TestPostClaimRetractionTakesTheLoudPath` still pin the loud path for a DEFINITIVE answer.
+   ⛔ **CORRECTED 2026-09-26 (round-2 review WR-01 / SFH-R2-03), the paragraph above kept as
+   lineage.** "No write to `strategy_analytics` and a TRANSIENT job failure" is what the test
+   pins for ONE attempt against a fake. It does not show that the factsheet stays published
+   across the retry. The bridge rewrites a plain-`complete` row to `computing` on `failed_retry`,
+   so the protection holds for `complete_with_warnings` / warned rows only, under the condition
+   stated in item 2's 2026-09-26 correction. No test drives one marked job through the Python
+   `READ_ERROR` raise, the bridge on `failed_retry` and the next attempt in a single run; the
+   `supabase/tests` corpus exercises the bridge on `failed_retry` on its own. Item 4 is met for the Python decision. Do not read it as met for the end state.
    📜 *Lineage, superseded 2026-09-25:* "**How to check it is met.** Read
    `run_stitch_composite_job`: a live re-read of the row (through `_refresh_marker_still_on_row` or
    an equivalent) must sit before its composite-marker comparison. A test must go RED when that
