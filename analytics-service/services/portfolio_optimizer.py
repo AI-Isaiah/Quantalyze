@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from datetime import date as _date
 from typing import Any, Optional
+from services.dispersion import dispersion_is_residue
 from services.metrics import _safe_float
 
 logger = logging.getLogger("quantalyze.analytics.portfolio_optimizer")
@@ -248,9 +249,16 @@ def generate_narrative(analytics: dict[str, Any]) -> str:
 
 
 def _compute_sharpe(returns: pd.Series, rf: float = 0) -> Optional[float]:
-    if returns.empty or returns.std() == 0:
+    if returns.empty:
         return None
-    return _safe_float(float((returns.mean() - rf) / returns.std() * np.sqrt(252)))
+    # Phase 166.1 (S1): a constant yield derived from a compounding NAV has a
+    # ~1e-16 std, never exactly 0, so an ``== 0`` guard let a ~1e13 Sharpe
+    # through. Residue dispersion means no Sharpe. A NaN ``sd`` (one row) is
+    # not residue; it gives a NaN quotient, which ``_safe_float`` maps to None.
+    sd = float(returns.std())
+    if dispersion_is_residue(sd, float(returns.mean())):
+        return None
+    return _safe_float(float((returns.mean() - rf) / sd * np.sqrt(252)))
 
 
 def _avg_corr(df: pd.DataFrame) -> Optional[float]:
