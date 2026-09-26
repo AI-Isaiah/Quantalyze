@@ -1305,6 +1305,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.9.3 inserted after Phase 164.9.2: CLAIMPAIR, a due failed_retry job plus a pending twin of the same (kind, allocator) raises 23505 in every claim entry point (latent; measured on the pg-lane 2026-09-26); owns [164.9.3-CLAIM-PAIR-23505]; orchestrator decision
 - Phase 164.9.4 inserted after Phase 164.9.3: CIOFFMUTEX, python and e2e-seeded off the shared-TEST advisory lock (36 and 28 min of mutex wait on run 36229959820); owns [164.9.4-CI-MUTEX-QUEUE]; founder decision
 - Phase 164.9.5 inserted after Phase 164.9.4: AUTOREDUMP, the baseline is re-dumped and proposed automatically after a PROD migration apply; security-sensitive workflow; owns [164.9.5-MANUAL-BASELINE-REDUMP]; founder decision
+- Phase 164.9.3.1 inserted after Phase 164.9.3: FANINGRAPH, the stranded fan-in child, the match_decisions cascade 23505 and the 40P01 diamond deadlock (items 1-3 of 164.5.2's routed list); owns [164.9.3.1-FANIN-GRAPH-RESIDUALS]; founder decision 2026-09-26 ("Re-route, don't start"); booked under the new-phase freeze, NOT started
+- Phase 164.9.3 edited: scope widened to the (kind, api_key_id) claim wedge, item 4 of 164.5.2's routed list, and to all four claim partitions; founder decision 2026-09-26
+- Phase 164.9.2 criterion 4 recorded 2026-09-26: preflight 36235362126 success, restore 36242946174 success (attempt 36237060668 refused by the activity gate); closes Phase 164.9 criterion 8 and [164.9-CRIT8-RESTORE-DISPATCH-RECORD]
 
 ### Decisions
 
