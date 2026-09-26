@@ -1248,6 +1248,16 @@ here, but this precondition sits here because this is where a reader would go to
    `metadata->>'source'` before it honours the `ledger-refresh-composite` marker. The single-key
    honour sites already do this through `_refresh_marker_still_on_row`. The composite guard today
    compares against the claim-time `job.get("metadata")` snapshot instead."
+   ⛔ **CORRECTED 2026-09-26 (164.6.7 re-verification W-3, after review rounds 3–7), every
+   deploy-time instruction above that names a `READ_ERROR` arm or `_refresh_marker_still_on_row`
+   inside a stamp closure is kept as lineage and superseded.** Since round 4 neither stamp closure
+   holds a `READ_ERROR` arm. On the DEPLOYED commit, check instead that `_stamp_failed` (inside
+   `run_stitch_composite_job`) and `_stamp_strategy_analytics_failed` (inside
+   `run_derive_broker_dailies_job`) read the live marker through
+   `_stamp_io(lambda: _read_refresh_marker_state(...), op=_STAMP_OP_MARKER_READ)`, and that a
+   failed read raises `StampIOUnavailable`, which `classify_exception` files transient. The static
+   test `test_every_io_call_in_a_stamp_closure_is_inside_stamp_io` pins that every database call in
+   both closures sits inside `_stamp_io`.
 3. **Why it was blocking.** A user-initiated composite resync (the `stitch_composite` enqueues in
    `src/app/api/keys/sync/route.ts` and `src/app/api/strategies/finalize-wizard/route.ts`) can
    dedup onto a fan-out job that already carries the marker. Since Phase 164.6 those TypeScript
@@ -1320,6 +1330,13 @@ here, but this precondition sits here because this is where a reader would go to
    exist. There is no condition: the protection holds for `complete_with_warnings` /
    `computation_warned` rows only, and a plain-`complete` row is not protected across the retry.
    The gap is `TODOS.md` `[164.6.7-RETRY-PLAIN-COMPLETE]`, routed to Phase 164.5.2 BRIDGELOCK.
+   ⛔ **CORRECTED 2026-09-26 (164.6.7 re-verification W-3), the deploy-time check above ("find
+   the `_refresh_marker_still_on_row` call inside `_stamp_failed`") kept as lineage.** Round 4
+   removed that call from the closure. On the DEPLOYED commit, find instead, inside `_stamp_failed`
+   before the marker is honoured, `_stamp_io(lambda: _read_refresh_marker_state(...),
+   op=_STAMP_OP_MARKER_READ)`, and confirm that a failed read raises `StampIOUnavailable`. The
+   routing sentence above also moved: `[164.6.7-RETRY-PLAIN-COMPLETE]` now belongs to Phase
+   164.5.2.1 BRIDGERESIDUE, split from 164.5.2 on 2026-09-26.
    📜 *Lineage, superseded 2026-09-25:* "**How to check it is met.** Read
    `run_stitch_composite_job`: a live re-read of the row (through `_refresh_marker_still_on_row` or
    an equivalent) must sit before its composite-marker comparison. A test must go RED when that
