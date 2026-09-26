@@ -1125,7 +1125,8 @@ here, but this precondition sits here because this is where a reader would go to
      - The entry read precedes the crawl, and every failure of it raises.
      - The chain edge raises on `READ_ERROR` and on a programming error. On a definitive
        non-`PRESENT` answer it drops the marker, so the tail mirror does not run.
-     - The tail mirror runs only after a clean chain edge, and it never raises.
+     - The tail mirror runs only after a clean chain edge, and it never raises for a failed
+       read (only a future `MarkerLiveState` member with no logging arm can raise there).
 
      So one attempt reaches at most one row, plus the heal row after a landed single-key loud
      stamp. The largest is **4 events**: a loud stamp that lands after a `NO_ROW` breach line (2)
