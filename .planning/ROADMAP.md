@@ -3228,6 +3228,8 @@ Plans:
 
 **⭐ D-31 (founder, 2026-09-26, "Notice + skip"):** when `main` already carries a migration the applied merge lacks, `gateDump` no longer refuses. It prints a `::notice::` with the count, emits `changed=false` and writes nothing, so `redump-dump` ends green, the baseline is left alone and `redump-pr` skips. The concurrency group means PROD has not applied the newer migration yet, so the dump is correct but superseded, and that migration's own run re-dumps. This avoids a false red on `main` that would make Railway skip the analytics deploy. A `main` that LACKS a merge migration still refuses; a re-run attempt and a failed fetch of `main` still refuse. Recorded in `164.9.5-CONTEXT.md` D-31.
 
+**⭐ D-32 (round-2 code review CR-03, 2026-09-26):** the run-attempt refusal is removed; the listing check alone guards re-runs. Refusing every `GITHUB_RUN_ATTEMPT` other than 1 turned a correct "Re-run failed jobs" red on `main` with no way back to green. `judgeMainListing` already covers the hazard: a stale re-run is judged `ahead` (skipped under D-31) or `equal` (a valid dump). ⛔ **This amends the D-31 line above:** "a re-run attempt … still refuse" is no longer true; that line is kept as lineage. Recorded in `164.9.5-CONTEXT.md` D-32.
+
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
 ⭐ **Founder answers, 2026-09-24:** D-15, D-16 and D-17 are APPROVED. OPEN-2: after merge, run plan 10's read-only census, then queue a recompute of the affected PROD rows.
