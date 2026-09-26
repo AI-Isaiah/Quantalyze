@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.97.0.0] - 2026-09-26 — ENGINEFLOOR: every Python ratio site reads the one dispersion floor, so a constant yield never produces a fabricated ratio
+## [0.100.0.0] - 2026-09-26 — ENGINEFLOOR: every Python ratio site reads the one dispersion floor, so a constant yield never produces a fabricated ratio
 
 ⭐ **What changed for whoever reads this next.** Phase 166 put a relative dispersion floor into
 `services/metrics.py`: a standard deviation at or below `1e-12 * max(1, |mean|)` is float residue,
@@ -24,6 +24,11 @@ MT5VALIDATEWEDGE (0.96.0.0) and JOBRPCTRUTH (0.93.0.0) each took a minor bump fo
 behaviour change. This release carries **no migration** (D-13). ⛔ **CORRECTED in the round-1
 review fix:** it said "no TypeScript change". Under D7 it now changes the direct TypeScript
 consumers of its own Python outputs, and nothing else under `src/` (the rest is Phase 166.2's).
+
+⚠️ **Why the number is 0.100.0.0 (T-166.1-35).** This entry was first committed as 0.97.0.0
+(`46fcca88e`). Phase 168 DRBOPTIONS then took 0.97.0.0 on `main`, and the open PRs #868, #869 and
+#870 already claim 0.97.0.1, 0.98.0.0 and 0.99.0.0. A minor bump past all of them is 0.100.0.0. The
+release commit moves this heading only; exactly one `[0.97.0.0]` heading remains, Phase 168's.
 
 ### Root cause
 
@@ -188,9 +193,62 @@ consumers of its own Python outputs, and nothing else under `src/` (the rest is 
   Phase 166.2 COMPUTEONCE, and the production recompute runs as Phase 166.3 RECOMPUTE. This entry
   claims neither. The planning commits for the phase, the split and the 166.2 / 166.3 plans are
   recorded here and change no shipped file.
-- **Two merges of `origin/main`** bring other phases' work, which their own entries cover:
-  `7bfce8490` (PR #859, before wave 1) and `3a8f8ad01` (main at `ea4167a3f`, before the release
-  sweep, no conflicted path).
+- **Three merges of `origin/main`** bring other phases' work, which their own entries cover:
+  `7bfce8490` (PR #859, before wave 1), `3a8f8ad01` (main at `ea4167a3f`, before the release
+  sweep, no conflicted path) and `1664bd800` (main at `3b923498e`, Phase 168, at ship). The last
+  conflicted in `CHANGELOG.md` and `.planning/STATE.md` only, and no code path: this entry sits
+  above main's, and STATE takes main's version plus this branch's three split lines.
+- **Round-1 review records** (planning commits, no shipped file): the fix report `84d252bfc`, its
+  frontmatter counting the 17 actionable findings `dc690c802`, and the CHANGELOG commit that
+  folded the round-1 fixes into this entry `1c2fff365`.
+- **Round-2 confirmation review (2026-09-26, `09fc1649f`):** `166.1-REVIEW.md` round 2 and
+  `166.1-REVIEW-SFH-R2.md`. **0 CRITICAL, 0 HIGH**; both round-1 HIGHs are closed at HEAD and the
+  fix pass added no new HIGH. Under the review policy MEDIUM-or-lower earns no fix round, so the
+  findings below ship as recorded limits.
+- ⚠️ **Known limits carried by this release (none fixed here):**
+  - **MEDIUM-A: the pair counts are stored but not shown.** `data_quality` records
+    `avg_pairwise_correlation_pairs_used` and `avg_pairwise_correlation_pairs_total`, but no page
+    reads them yet. The average-correlation KPI and `generate_narrative`'s sentence still present
+    an average over the defined pairs as the whole book's. On the TypeScript side, Phase 166.2's
+    KpiStrip is planned to show "k of n pairs measured".
+  - **MEDIUM-B: the replacement fit label is computed from the axes that exist.** In
+    `bridge_scoring.find_replacement_candidates`, a flat book's candidate shows "— Sharpe" and
+    "— Corr" beside a fit badge judged from the drawdown axis alone, with 0 standing in for the
+    two missing axes, and the badge does not say so.
+  - **SFH MEDIUM-1: the file-level cause line on a parse error.** A single-rule payload whose
+    errors all carry `row: 0` now reads "We checked the whole file, so no single row is at fault".
+    That is false for `parse_error`, whose parser message names a line; the line number is still
+    on the page, inside the collapsed details, and the upload is still refused. `parse_error` also
+    has no `CSV_RULE_LABELS` entry, so the raw key is shown.
+  - **LOW-A:** `WhatWedDoCard` falls back to "diversify the portfolio" when the lift and the
+    correlation are both null and no drawdown win exists. Pre-existing phrase; before this release
+    the same row read "toward 0.00".
+  - **LOW-B:** `simulator_scoring._zero_deltas` still sends 0.0 deltas on the insufficient-data
+    branch. Nothing renders them today (the panel gates on `status === "ok"`).
+  - **IN-05:** two exactly identical constant-yield series no longer match (see the accepted-loss
+    bullet above).
+- ⭐ **D-25 (founder, 2026-09-26, "Keep the rule"; `0365d4f13`).** The average pairwise
+  correlation averages only the defined pairs and records the pair counts, and a flat added or
+  swapped leg shows "—" for its correlation change. The stricter "—"-when-any-pair-is-undefined
+  rule was declined. This closes verification human item 3.
+- **Verification (`c8218585f`): `human_needed`, 10/10 must-haves verified.** The human items:
+  (1) re-derive the version on the merged tree, closed by this release; (2) the Phase 166.3 PROD
+  recompute, founder-gated and pending; (3) the WR-03 product call, closed by D-25; (4) the
+  post-deploy browser check, pending: the wizard's constant-CSV copy and the D7 "—" on the
+  optimizer, replacement, simulator and risk-attribution surfaces, in the logged-in browser.
+- **Security (`7777438db`): secured, no threat at or above the blocking threshold open.** The two
+  medium ship-time threats close here: T-166.1-34 (green sweep on the wrong tree) by merging
+  `origin/main` at `3b923498e` and re-running the gates on the merged tree `1664bd800`, and
+  T-166.1-35 (duplicated version) by the 0.100.0.0 re-derivation above.
+- ⚠️ **Pending after merge:** the Phase 166.3 RECOMPUTE of PROD rows (founder, PROD access) and the
+  post-deploy browser check above. Neither has run.
+- **Routed out, pre-existing and outside this diff** (both routed in PR #871, open at ship time):
+  - the drawdown-delta sign is inverted in `simulator_scoring.simulate_add_candidate`,
+    `portfolio_optimizer.find_improvement_candidates` and
+    `match_engine._compute_portfolio_fit_components`, so a shallower drawdown reads as worse. It
+    goes to **Phase 166.1.1 DDSIGN**;
+  - `RiskAttribution` formats `marginal_risk_pct` and `weight_pct`, which are already percent, as
+    percent a second time. It goes to **Phase 169**.
 - **Gates at the sweep SHA `3a8f8ad01`:** the full analytics-service suite `6737 passed, 90
   skipped`; `qstats-gate census: 13 quantstats node(s) in services/metrics.py, 11 mirror(s), 0
   violation(s)`; strict mypy `Success: no issues found in 101 source files`; ruff with no new
@@ -206,6 +264,11 @@ consumers of its own Python outputs, and nothing else under `src/` (the rest is 
   - vitest over every test file that reads a changed field: `25 passed (25)` files, `806 passed
     (806)` tests;
   - `tsc --noEmit` and eslint on the 16 changed TypeScript files: both clean.
+- **Gates at ship, on the merged tree `1664bd800` (the SWEEP_SHA that closes T-166.1-34):**
+  - the full analytics-service suite: `6847 passed, 90 skipped`;
+  - strict mypy over `services/ routers/ models/`: `Success: no issues found in 97 source files`;
+  - `tsc --noEmit`: exit 0;
+  - `src/__tests__/critical-regressions.test.ts`: `169 passed (169)`.
 
 ## [0.97.0.0] - 2026-09-26 — DRBOPTIONS: a Deribit options account with an `assignment` row can be ingested, and every shape the census did not see still refuses
 
