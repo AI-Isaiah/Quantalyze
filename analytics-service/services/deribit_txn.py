@@ -611,6 +611,23 @@ assert not (CASH_BEARING_TYPES & INFORMATIONAL_TYPES), (
 # and a customer-facing diagnostics panel. A blacklist would leak the next field
 # Deribit adds; only the fields below are ever rendered, and anything unexpected
 # is dropped rather than passed through.
+#
+# ⛔ CORRECTED 2026-09-26 (Phase 168): the claim above that Deribit does NOT
+# enumerate the `type` enum is stale. Deribit's current
+# `private/get_transaction_log` documentation does list `expiry`, `assignment`
+# and `exercise`. The deciding measurement arrived on 2026-09-23 through this
+# very channel (an `assignment` with same-instrument `delivery=0 settlement=0
+# trade=1`), recorded counts-only in
+# docs/evidence/drb-assignment-census-2026-09.json, and `assignment` is now
+# classified cash-bearing under that census licence (``CASH_BEARING_TYPES``,
+# guarded by ``assert_assignment_uncontested``). `exercise` and `expiry` remain
+# unclassified and keep this refusal. The block above is kept as lineage.
+#
+# Phase 168 adds `commission` and `position` to the whitelist: they are a fee and
+# a signed size, not identifiers, and they answer the open question on the next
+# refusal — whether an option expiry row carries the two fields the
+# mark_to_market fee arm (``_option_commission``) and the smoothed replay
+# (``replay_option_positions``) require.
 _SHAPE_FIELDS: tuple[str, ...] = (
     "type",
     "currency",
@@ -618,10 +635,16 @@ _SHAPE_FIELDS: tuple[str, ...] = (
     "instrument_name",
     "timestamp",
     "side",
+    "commission",
+    "position",
 )
 # Types whose presence for the SAME instrument is what makes the offending row
 # interpretable. Kept narrow and named, so the sentence stays readable.
-_SIBLING_TYPES: tuple[str, ...] = ("delivery", "settlement", "trade")
+# Phase 168 appends `assignment` (last, so the existing delivery/settlement/trade
+# rendering order is unchanged): the next unknown-type refusal is likely an
+# option `exercise` or `expiry`, and whether an `assignment` co-occurred on the
+# same instrument is the first thing its classification will need.
+_SIBLING_TYPES: tuple[str, ...] = ("delivery", "settlement", "trade", "assignment")
 
 
 def describe_unclassified_row(
