@@ -506,6 +506,46 @@ async def test_a_programming_error_in_a_stamp_call_is_unknown_and_captured(
     assert not [c for c in recorder.landed if c.is_analytics_write], recorder.landed
 
 
+@pytest.mark.asyncio
+async def test_a_stamp_call_cut_off_by_the_handler_deadline_logs_the_cause() -> None:
+    """SFH-R5-01: ``dispatch``'s per-kind ``wait_for`` cancels a stamp call
+    that is still waiting. ``CancelledError`` is a ``BaseException``, so
+    ``_stamp_io``'s ``except Exception`` never sees it. Before its own arm, the
+    job was filed ``transient`` with only "Handler exceeded timeout" and the
+    curated cause was on no line at all. Now ONE ERROR line carries it, with no
+    capture, and the cancel still propagates (the filing is unchanged).
+
+    Neuter to redden: delete the ``except asyncio.CancelledError`` arm in
+    ``_stamp_io``. No ERROR line carries the cause."""
+
+    async def _hang(_fn: Any) -> Any:
+        await asyncio.sleep(30)
+
+    fake = _FakeSupabase(members=[], existing_flags={}, existing_status=None)
+    log = MagicMock()
+    sentry = MagicMock()
+    job = {"id": _JOB_ID, "kind": "stitch_composite", "strategy_id": _COMPOSITE_STRATEGY_ID}
+    with ExitStack() as stack:
+        stack.enter_context(
+            _apply(_deribit_patches(fake, combine_returns=[], has_option_activity=False))
+        )
+        stack.enter_context(patch.dict(_jw.TIMEOUT_PER_KIND, {"stitch_composite": 0.2}))
+        stack.enter_context(patch.object(_jw, "db_read_with_retry", _hang))
+        stack.enter_context(patch("services.job_worker.logger", log))
+        stack.enter_context(patch("services.job_worker.sentry_sdk", sentry))
+        result = await _jw.dispatch(job)
+
+    assert result.error_kind == "transient", result
+    assert (result.error_message or "").startswith("Handler exceeded timeout"), result
+    cause_lines = [line for line in _rendered_errors(log) if _COMPOSITE_CAUSE in line]
+    assert len(cause_lines) == 1, log.error.call_args_list
+    assert "CANCELLED" in cause_lines[0], cause_lines
+    assert _jw._STAMP_OP_STATUS_READ in cause_lines[0], cause_lines
+    assert log.error.call_count == 1, log.error.call_args_list
+    assert sentry.capture_exception.call_count == 0
+    assert not fake.upserts, fake.upserts
+
+
 # ---------------------------------------------------------------------------
 # Every call AFTER the stamp write landed (the single-key series heal).
 # ---------------------------------------------------------------------------

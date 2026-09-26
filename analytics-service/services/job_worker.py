@@ -2897,7 +2897,9 @@ async def _stamp_io(
     and raises ``StampIOUnavailable`` (TRANSIENT) whose text carries the failure
     BEFORE ``scrubbed``, so ``classify_exception``'s 500-character cut cannot
     drop the cause. A ``_READ_PROGRAMMING_ERRORS`` member is logged and captured
-    the same way and then re-raised unchanged (``unknown``).
+    the same way and then re-raised unchanged (``unknown``). A cancellation (a
+    deadline or a shutdown) logs ONE ERROR with the cause and is re-raised
+    unchanged, with no capture (round 5, SFH-R5-01).
 
     ⚠️ Not wrapped, deliberately: the single-key series heal
     (``_heal_delete_basis_series``). It runs only AFTER the loud stamp has
@@ -2906,6 +2908,23 @@ async def _stamp_io(
     transient raise there would retry a job whose stamp already landed."""
     try:
         return await call()
+    except asyncio.CancelledError:
+        # SFH-R5-01 (round 5): a deadline (``dispatch``'s per-kind
+        # ``wait_for``, or an inner one) or a worker shutdown cancelled this
+        # call while it waited. ``CancelledError`` is a ``BaseException``, so
+        # the ``except Exception`` below never sees it, and without this arm
+        # the curated cause was logged nowhere: ``dispatch`` files the job
+        # ``transient`` with only "Handler exceeded timeout". Log the cause at
+        # ERROR and re-raise the cancel UNCHANGED; swallowing it would break
+        # cancellation. No capture: the cancel is not a fault of this call.
+        # ⚠️ The executor thread behind a cancelled write keeps running, so
+        # that write can still land after the job is filed.
+        logger.error(
+            "%s: %s for strategy %s on compute_job %s was CANCELLED (a deadline "
+            "or a worker shutdown). No terminal stamp is confirmed for: %s.",
+            site, op, strategy_id, job_id, cause,
+        )
+        raise
     except Exception as exc:  # noqa: BLE001 — reported, then re-raised
         failure = _read_failure_text(exc)
         if isinstance(exc, _READ_PROGRAMMING_ERRORS):
