@@ -168,6 +168,12 @@ COMMENT ON COLUMN public.api_keys.account_share_kind IS
   'through a departed holder would count the account up to that holder''s '
   'end day only, or not at all if the owner excluded its history, while a '
   'live key still reads the account. '
+  'That definition of a working holder (not disconnected, not revoked) is '
+  'PROVISIONAL: a holder stuck in sync_status sign_in_failed or error still '
+  'counts as working, so its dependents stay marked and are not counted on '
+  'their own. It is the same definition as the KEY_NOT_DEPARTED test in '
+  'set_departed_key_history_inclusion, and Phase 167.1.2 PR C plan 04 '
+  'decides it with the founder; the two move together. '
   'Nothing is ever auto-disconnected or deleted because of this value.';
 
 -- ─────────── 1b. the same-owner trigger, with the NULL-holder short-circuit
