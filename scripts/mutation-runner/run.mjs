@@ -2407,7 +2407,27 @@ export const FILES_FLOOR = 51;
 //    `✅ No defects. Every annotated arm bit its own arm first.`, exit 0.
 //    Per-file line: `test_api_keys_account_identity.sql: sections 35 / judged
 //    35 / annotated 35 / waived 0 / biting 35`.
-export const ARMS_FLOOR = 485;
+//
+// ⭐ RE-DERIVED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, PR B review round 4):
+//    485 -> 486. ONE new arm, HIST-tenant, in the ALREADY-ANNOTATED
+//    supabase/tests/test_api_keys_account_identity.sql (35 -> 36): user A's
+//    toggle leaves user B's failed_retry derive_allocator_equity row exactly as
+//    it was; its twin drops the allocator filter from the RPC's failed_retry
+//    lookup (WHERE TRUE), so A's toggle would reuse B's row. HIST-lock's and
+//    HIST-enqueues' find strings moved with step 3's new loop indentation,
+//    which moves no arm or step. No file joined the annotated set, so
+//    FILES_FLOOR stays 51; WAIVED_CEILING stays 0. MEASURED first on a
+//    narrowed `--file` run: `arms: 36/36/0`, `biting: 36`, `No defects in the
+//    narrowed scope.` Then ONE full lane run with no file edited and no git
+//    command run during it, and this constant still at 485: `scope: FULL
+//    51/51 annotated files`, `coverage: files 51/78`, `arms: 486/486/0`,
+//    `biting: 486`, `lane-invocations: 486` (plus 51 baseline / 51 restore
+//    legs), `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`,
+//    `per-arm lane time: mean 1.5s over 486 arm run(s)`, `✅ No defects. Every
+//    annotated arm bit its own arm first.`, exit 0. Per-file line:
+//    `test_api_keys_account_identity.sql: sections 36 / judged 36 / annotated
+//    36 / waived 0 / biting 36`.
+export const ARMS_FLOOR = 486;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

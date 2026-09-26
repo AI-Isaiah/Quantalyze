@@ -33,6 +33,9 @@
 --     same trigger raises, so dropping it reddens ACCT-d first;
 --   * RECON-tenant runs before the other-exchange key is inserted, so its
 --     sibling mutation cannot trip on that key first;
+--   * HIST-tenant is judged before HIST-retry on the same call: under its twin
+--     user A's own row stays failed_retry, which HIST-retry would otherwise
+--     report first;
 --   * HIST-writes leaves the RPC's HISTORY_RECOMPOSE_NOT_QUEUED refusal to
 --     HIST-enqueues, whose twin (no enqueue) makes the FIRST call raise it;
 --   * every action whose success an arm asserts is captured, never left to
@@ -495,6 +498,7 @@ DECLARE
   v_val      text;
   v_jobs     int;
   v_retry_id uuid;                        -- user A's failed_retry recompose
+  v_b_job    uuid;                        -- user B's failed_retry recompose
 BEGIN
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid_a, '00000000-0000-0000-0000-000000000000', 'test-acct-identity-ha-' || v_run || '@quantalyze.test', now(), now()),
@@ -740,6 +744,26 @@ BEGIN
    WHERE allocator_id = uid_a AND kind = 'derive_allocator_equity' AND status = 'running'
   RETURNING id INTO v_retry_id;
 
+  -- ----- HIST-tenant: the reuse never touches ANOTHER tenant's recompose -----
+  -- User B holds a failed_retry derive_allocator_equity row of their own, due
+  -- before user A's (next_attempt_at -infinity), so it is the first row the
+  -- reuse lookup would take if its allocator filter were gone. A's toggle must
+  -- leave it exactly as it was: still failed_retry, still -infinity.
+  -- RED-UNDER: drop the allocator filter from the RPC's failed_retry lookup in
+  --            migration 20260925120000 (WHERE TRUE). A's toggle then reuses
+  --            B's row, putting another tenant's job back to pending.
+  -- RED-UNDER-M: {"arm":"HIST-tenant","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"     WHERE cj.allocator_id = v_uid","replace":"     WHERE TRUE","occurrences":1}]}
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
+  v_b_job := public.enqueue_compute_job(
+    p_strategy_id  := NULL,
+    p_kind         := 'derive_allocator_equity',
+    p_allocator_id := uid_b
+  );
+  UPDATE compute_jobs
+     SET status = 'failed_retry', attempts = 1, next_attempt_at = '-infinity'
+   WHERE id = v_b_job;
+
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
   v_err := NULL; v_msg := NULL; v_ret := NULL;
@@ -749,6 +773,12 @@ BEGIN
     GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
   END;
   PERFORM set_config('request.jwt.claims', '', true);
+
+  IF NOT EXISTS (SELECT 1 FROM compute_jobs
+                  WHERE id = v_b_job AND allocator_id = uid_b
+                    AND status = 'failed_retry' AND next_attempt_at = '-infinity') THEN
+    RAISE EXCEPTION 'TEST FAILED (HIST-tenant): user A''s toggle changed user B''s failed_retry recompose % (status or next_attempt_at moved). The reuse must stay inside the caller''s own allocator.', v_b_job;
+  END IF;
 
   SELECT history_inclusion INTO v_val FROM api_keys WHERE id = k_gone;
   SELECT count(*) INTO v_jobs
@@ -766,7 +796,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (HIST-retry): a toggle beside the caller''s failed_retry recompose did not reuse it (SQLSTATE %, %; stored %, in-flight-or-retry rows %, expected exactly 1: the original row %, back to pending and due now, with no failed_retry row and no twin).', v_err, v_msg, v_val, v_jobs, v_retry_id;
   END IF;
 
-  RAISE NOTICE 'PASS (HIST behavioural): bad value refused by CHECK; exclude stored on a disconnected key with exactly one recompose job; NULL resets; revoked key accepted; live key refused 55000 KEY_NOT_DEPARTED; bad value refused 22023; cross-tenant refused 42501 with nothing written; a toggle while the recompose runs refused 55006 with nothing written or queued; a toggle beside a failed_retry recompose puts that same row back to pending, due now, with no twin.';
+  RAISE NOTICE 'PASS (HIST behavioural): bad value refused by CHECK; exclude stored on a disconnected key with exactly one recompose job; NULL resets; revoked key accepted; live key refused 55000 KEY_NOT_DEPARTED; bad value refused 22023; cross-tenant refused 42501 with nothing written; a toggle while the recompose runs refused 55006 with nothing written or queued; a toggle beside a failed_retry recompose puts that same row back to pending, due now, with no twin; another tenant''s failed_retry row is left untouched.';
 
   DELETE FROM compute_jobs WHERE allocator_id IN (uid_a, uid_b);
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
