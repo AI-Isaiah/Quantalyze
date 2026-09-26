@@ -300,6 +300,46 @@ function captureProbeOutcomes(tally: ProbeOutcomeTally): void {
   );
 }
 
+/**
+ * 167.2.1-REVIEW-SFH-R2 N-2 — at most this many throw events per page load.
+ */
+const MAX_PROBE_THROW_EVENTS = 3;
+
+/**
+ * 167.2.1-REVIEW WR-01, SFH-R2 N-2 — the probes that THREW on one page load,
+ * grouped by error name and message, one event per group. Sending only the
+ * first throw let whichever cause finished first hide every other one: a
+ * transient `fetch failed` could mask a `TypeError` from a code regression,
+ * and the issue changed identity between loads. The largest groups go first,
+ * capped at `MAX_PROBE_THROW_EVENTS`; every event carries the load's total
+ * (`probe_throws`), its number of distinct causes (`probe_throw_kinds`) and its
+ * own group's size (`group_throws`). The per-row console lines keep the ids.
+ */
+function captureProbeThrows(throws: readonly unknown[]): void {
+  if (throws.length === 0) return;
+  const groups = new Map<string, { error: Error; count: number }>();
+  for (const thrown of throws) {
+    const error = thrown instanceof Error ? thrown : new Error(String(thrown));
+    const key = `${error.name}:${error.message.slice(0, 80)}`;
+    const group = groups.get(key);
+    if (group) group.count += 1;
+    else groups.set(key, { error, count: 1 });
+  }
+  // A stable sort: equal groups keep first-seen order.
+  const ranked = [...groups.values()].sort((a, b) => b.count - a.count);
+  for (const group of ranked.slice(0, MAX_PROBE_THROW_EVENTS)) {
+    captureToSentry(group.error, {
+      tags: {
+        route: "strategies/page",
+        stage: "factsheet-probe",
+        probe_throws: String(throws.length),
+        probe_throw_kinds: String(groups.size),
+        group_throws: String(group.count),
+      },
+    });
+  }
+}
+
 export default async function StrategiesPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -493,9 +533,8 @@ export default async function StrategiesPage() {
   ): Promise<string> => recipientShareNote(mode, await armOf(s, mode));
 
   // WR-01: the probes share one limiter per page load, and a probe that
-  // THROWS is recorded here and captured ONCE after the fan-out, with the
-  // count as a tag, never once per row: a saturated pool makes every row
-  // throw, and N events per page load hid the one fact that mattered.
+  // THROWS is recorded here and captured after the fan-out, one event per
+  // distinct cause (`captureProbeThrows`, SFH-R2 N-2), never once per row.
   const runProbe = concurrencyLimiter(PROBE_CONCURRENCY);
   const probeThrows: unknown[] = [];
   // 167.2.1-REVIEW-R2 WR-01: the RETURNED failures, counted, and captured
@@ -595,19 +634,7 @@ export default async function StrategiesPage() {
     ).filter((entry): entry is readonly [string, string] => entry[1] !== null),
   );
   captureProbeOutcomes(probeOutcomes);
-  if (probeThrows.length > 0) {
-    // WR-01: one event per page load. The first error is the payload (the
-    // per-row console lines above carry every row's message and id); the
-    // count is a tag, so a saturation event reads as one event with its size.
-    const first = probeThrows[0];
-    captureToSentry(first instanceof Error ? first : new Error(String(first)), {
-      tags: {
-        route: "strategies/page",
-        stage: "factsheet-probe",
-        probe_failures: String(probeThrows.length),
-      },
-    });
-  }
+  captureProbeThrows(probeThrows);
 
   return (
     <>

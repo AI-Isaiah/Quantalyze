@@ -142,6 +142,11 @@ const state = vi.hoisted(() => ({
   adminRows: {} as Record<string, { data: unknown; error: { message: string; code?: string } | null }>,
   /** 167.2.1 D-05: the admin factory itself throws. */
   adminThrow: false,
+  /**
+   * 167.2.1-REVIEW-SFH-R2 N-2 — per strategy id, the error its probe's read
+   * throws (a different cause per row, unlike `adminThrow`).
+   */
+  adminReadThrows: {} as Record<string, Error>,
   /** Every `from(table)` the admin client was asked for. */
   adminTables: [] as string[],
   /** The id of every strategies read the admin client answered. */
@@ -224,6 +229,7 @@ vi.mock("@/lib/supabase/admin", () => ({
         b.maybeSingle = async () => {
           if (table !== "strategies") return { data: null, error: null };
           state.adminStrategyReads.push(id);
+          if (state.adminReadThrows[id]) throw state.adminReadThrows[id];
           state.adminInFlight += 1;
           state.adminMaxInFlight = Math.max(state.adminMaxInFlight, state.adminInFlight);
           if (state.adminReadDelayMs > 0) {
@@ -380,6 +386,7 @@ beforeEach(() => {
   state.calls = [];
   state.adminRows = {};
   state.adminThrow = false;
+  state.adminReadThrows = {};
   state.adminTables = [];
   state.adminStrategyReads = [];
   state.adminOrFilters = [];
@@ -749,9 +756,9 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       expect.objectContaining({ id: "s-1" }),
     );
     expect(captureToSentryMock).toHaveBeenCalledTimes(1);
-    // WR-01: one event per page load, carrying the count.
+    // WR-01, SFH-R2 N-2: one event per distinct cause, carrying the counts.
     expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
-      tags: { ...PROBE_TAGS.tags, probe_failures: "1" },
+      tags: { ...PROBE_TAGS.tags, probe_throws: "1", probe_throw_kinds: "1", group_throws: "1" },
     });
     // Tags only: the id stays in the server log, never in the capture.
     const [err, ctx] = captureToSentryMock.mock.calls[0] as [Error, unknown];
@@ -881,8 +888,44 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     // ...and Sentry gets ONE event for the page load, sized by a tag.
     expect(captureToSentryMock).toHaveBeenCalledTimes(1);
     expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
-      tags: { ...PROBE_TAGS.tags, probe_failures: "6" },
+      tags: { ...PROBE_TAGS.tags, probe_throws: "6", probe_throw_kinds: "1", group_throws: "6" },
     });
+  });
+
+  it("N2-THROW-GROUPS (167.2.1-REVIEW-SFH-R2 N-2): throws of different causes on one page load are one event per cause, largest first, capped at 3, each carrying the total", async () => {
+    // Only the FIRST throw used to reach Sentry, so a transient cause that
+    // finished first hid a code regression that threw on another row.
+    const causes: Array<[string, Error]> = [
+      ["t-0", new Error("fetch failed")],
+      ["t-1", new TypeError("Cannot read properties of null (reading 'x')")],
+      ["t-2", new Error("fetch failed")],
+      ["t-3", new TypeError("Cannot read properties of null (reading 'x')")],
+      ["t-4", new Error("fetch failed")],
+      ["t-5", new RangeError("synthetic range")],
+      ["t-6", new Error("synthetic other")],
+      ["t-7", new SyntaxError("synthetic syntax")],
+    ];
+    state.strategies = causes.map(([id]) => row(id, { strategy_analytics: { computation_status: "complete" } }));
+    state.adminReadThrows = Object.fromEntries(causes);
+
+    const container = await renderPage();
+
+    for (const [id] of causes) expect(noteOf(container, `Strategy ${id}`)).toBe(PROBE_UNREADABLE);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(3);
+    const sent = captureToSentryMock.mock.calls.map((call) => {
+      const [err, ctx] = call as [Error, { tags: Record<string, string> }];
+      return { name: err.name, message: err.message, group: ctx.tags.group_throws, ctx };
+    });
+    expect(sent.map(({ name, message, group }) => ({ name, message, group }))).toEqual([
+      { name: "Error", message: "fetch failed", group: "3" },
+      { name: "TypeError", message: "Cannot read properties of null (reading 'x')", group: "2" },
+      { name: "RangeError", message: "synthetic range", group: "1" },
+    ]);
+    for (const { ctx } of sent) {
+      expect(ctx).toEqual({
+        tags: { ...PROBE_TAGS.tags, probe_throws: "8", probe_throw_kinds: "5", group_throws: ctx.tags.group_throws },
+      });
+    }
   });
 
   it("WR01-OUTCOMES-ONE-EVENT (167.2.1-REVIEW-R2 WR-01, SFH-R2 N-1): six read errors and two unbuildable composites on one page load are ONE Sentry event carrying the counts and the codes", async () => {
