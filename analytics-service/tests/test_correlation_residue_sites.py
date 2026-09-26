@@ -450,22 +450,79 @@ def test_c6_a_noisy_portfolio_keeps_its_benchmark_correlation() -> None:
 # C7 - the corrwith matching block inside routers/portfolio.py verify_strategy
 # ---------------------------------------------------------------------------
 #
-# C7 has no pure seam (it sits inside the verify-strategy endpoint, after a
-# venue fetch), so its semantics are tested through dispersing_corrwith exactly
-# as the block uses it (corrwith, then dropna, then idxmax over the threshold),
-# and the block is pinned to call it.
+# Round-1 IN-04 / SFH LOW-2: the behaviour tests drive the REAL
+# `verify_strategy` with the venue, the trade-to-returns step and supabase
+# mocked, and read its `matching_status`. They used to run a hand copy of the
+# matching block, which a divergence in the real one (`>=` against the
+# threshold, a different `aligned`, the `len(aligned) >= 30` gate) would have
+# left green. The source pin below stays as a second, cheaper guard.
 
 
-def _c7_block(target: pd.Series, existing: dict[str, pd.Series]) -> str | None:
-    """The verify_strategy matching block's decision, fed by the helper."""
-    from routers.portfolio import _MATCH_CORRELATION_THRESHOLD
+def _c7_supabase(existing: dict[str, pd.Series]) -> MagicMock:
+    strategies = MagicMock()
+    (strategies.select.return_value.eq.return_value.order.return_value
+     .limit.return_value.execute.return_value) = MagicMock(
+        data=[{"id": sid} for sid in existing]
+    )
+    analytics = MagicMock()
+    analytics.select.return_value.in_.return_value.execute.return_value = MagicMock(data=[
+        {
+            "strategy_id": sid,
+            "returns_series": [
+                {"date": d.strftime("%Y-%m-%d"), "value": float(v)} for d, v in s.items()
+            ],
+        }
+        for sid, s in existing.items()
+    ])
+    tables = {"strategies": strategies, "strategy_analytics": analytics}
+    sb = MagicMock()
+    sb.table.side_effect = lambda name: tables.setdefault(name, MagicMock())
+    return sb
 
-    aligned = pd.concat([target.rename("_target"), pd.DataFrame(existing)], axis=1).dropna()
-    corrs_clean = dispersing_corrwith(aligned.drop(columns=["_target"]), aligned["_target"]).dropna()
-    if corrs_clean.empty:
+
+def _c7_verify(target: pd.Series, existing: dict[str, pd.Series]) -> dict:
+    """``verify_strategy``'s response for a venue whose daily returns are ``target``."""
+    from models.schemas import VerifyStrategyRequest
+    from routers import portfolio as portfolio_mod
+    from starlette.requests import Request as StarletteRequest
+
+    reset = getattr(portfolio_mod.limiter, "reset", None)
+    if callable(reset):
+        reset()
+
+    class _Venue:
+        async def close(self) -> None:
+            return None
+
+    async def _ok(_exchange: object) -> dict:
+        return {"error": None}
+
+    async def _trades(_exchange: object) -> list[dict]:
+        return [{"id": 1}, {"id": 2}]
+
+    async def _balance(_exchange: object) -> float:
+        return 1000.0
+
+    async def _close(_exchange: object) -> None:
         return None
-    best = corrs_clean.idxmax()
-    return str(best) if corrs_clean[best] > _MATCH_CORRELATION_THRESHOLD else None
+
+    req = VerifyStrategyRequest(
+        email="c7@example.com", exchange="binance", api_key="k" * 24, api_secret="s" * 24,
+    )
+    request = StarletteRequest({
+        "type": "http", "method": "POST", "path": "/api/verify-strategy",
+        "headers": [], "client": ("127.0.0.1", 12345), "query_string": b"",
+    })
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(portfolio_mod, "_check_verify_strategy_email_rate", lambda _e: True)
+        mp.setattr(portfolio_mod, "create_exchange", lambda *a, **kw: _Venue())
+        mp.setattr(portfolio_mod, "validate_key_permissions", _ok)
+        mp.setattr(portfolio_mod, "aclose_exchange", _close)
+        mp.setattr(portfolio_mod, "fetch_all_trades", _trades)
+        mp.setattr(portfolio_mod, "fetch_usdt_balance", _balance)
+        mp.setattr(portfolio_mod, "trades_to_daily_returns", lambda *a, **kw: target)
+        mp.setattr(portfolio_mod, "get_supabase", lambda: _c7_supabase(existing))
+        return asyncio.run(portfolio_mod.verify_strategy(request, req))
 
 
 def _verify_strategy_source() -> str:
@@ -496,16 +553,18 @@ def test_c7_verify_strategy_matches_through_dispersing_corrwith() -> None:
 def test_c7_two_strategies_with_the_same_constant_yield_do_not_match(yield_id: str) -> None:
     target = _residue_leg(yield_id)
     twin = _residue_leg(yield_id, start=5_000.0)
-    assert _c7_block(target, {"twin": twin}) is None
-    zero = _zeros_like(target)
-    assert _c7_block(zero, {"twin": _zeros_like(twin)}) is None, "D-07 reference: no_match"
+    out = _c7_verify(target, {"twin": twin})
+    assert (out["matching_status"], out["matched_strategy_id"]) == ("no_match", None)
+    zero = _c7_verify(_zeros_like(target), {"twin": _zeros_like(twin)})
+    assert zero["matching_status"] == "no_match", "D-07 reference: no_match"
 
 
 def test_c7_a_near_identical_noisy_candidate_still_matches() -> None:
     idx = nav_constant_yield(1e-4).index
     target = _noise(idx, seed=71)
     near = target + _noise(idx, seed=72, scale=0.0005)
-    assert _c7_block(target, {"near": near, "other": _noise(idx, seed=73)}) == "near"
+    out = _c7_verify(target, {"near": near, "other": _noise(idx, seed=73)})
+    assert (out["matching_status"], out["matched_strategy_id"]) == ("matched", "near")
 
 
 # ---------------------------------------------------------------------------
