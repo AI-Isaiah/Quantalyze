@@ -19,12 +19,12 @@ const USER_ID = "00000000-0000-4000-8000-000000000001";
 const OTHER_USER_ID = "00000000-0000-4000-8000-000000000002";
 const KEY_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
-type Result = { data: unknown; error: { message: string } | null };
+type Result = { data: unknown; error: { message: string; code?: string } | null };
 
 const STATE = vi.hoisted(() => ({
   /** The api_keys rows the admin client can see: id + owner. */
   adminKeys: [] as Array<{ id: string; user_id: string }>,
-  ownershipError: null as { message: string } | null,
+  ownershipError: null as { message: string; code?: string } | null,
   /** What the admin client's strategy_keys read answers. */
   adminMembers: { data: [], error: null } as Result,
   /** What the request-scoped (RLS) client's strategy_keys read would answer. */
@@ -215,15 +215,17 @@ describe("GET /api/keys/[id]/memberships", () => {
   });
 
   it("OWNERSHIP-ERROR-500: an ownership read error answers 500 and is captured with tags only", async () => {
-    STATE.ownershipError = { message: "RAW-PG-DETAIL-sentinel" };
+    STATE.ownershipError = { message: "RAW-PG-DETAIL-sentinel", code: "57014" };
     const res = await GET(request(KEY_ID));
     expect(res.status).toBe(500);
     expectNoStore(res);
     const body = await res.text();
     expect(body).not.toContain("RAW-PG-DETAIL-sentinel");
     expect(STATE.captured).toHaveLength(1);
+    // 167.2.1-REVIEW-SFH L-3: the error code rides as a tag, so the event
+    // separates a statement timeout (57014) from a permission regression.
     expect(STATE.captured[0].options).toEqual({
-      tags: { route: "api/keys/[id]/memberships", stage: "ownership" },
+      tags: { route: "api/keys/[id]/memberships", stage: "ownership", code: "57014" },
     });
     const serialized = JSON.stringify(STATE.captured.map((c) => [String(c.err), c.options]));
     expect(serialized).not.toContain(KEY_ID);
@@ -232,14 +234,15 @@ describe("GET /api/keys/[id]/memberships", () => {
   });
 
   it("MEMBERS-ERROR-500: a membership read error answers 500 and is captured with tags only", async () => {
-    STATE.adminMembers = { data: null, error: { message: "RAW-PG-DETAIL-sentinel" } };
+    STATE.adminMembers = { data: null, error: { message: "RAW-PG-DETAIL-sentinel", code: "42501" } };
     const res = await GET(request(KEY_ID));
     expect(res.status).toBe(500);
     expectNoStore(res);
     expect(await res.text()).not.toContain("RAW-PG-DETAIL-sentinel");
     expect(STATE.captured).toHaveLength(1);
+    // 167.2.1-REVIEW-SFH L-3: the error code rides as a tag.
     expect(STATE.captured[0].options).toEqual({
-      tags: { route: "api/keys/[id]/memberships", stage: "memberships" },
+      tags: { route: "api/keys/[id]/memberships", stage: "memberships", code: "42501" },
     });
     const serialized = JSON.stringify(STATE.captured.map((c) => [String(c.err), c.options]));
     expect(serialized).not.toContain(KEY_ID);
@@ -253,6 +256,16 @@ describe("GET /api/keys/[id]/memberships", () => {
     expectNoStore(res);
     expect(STATE.captured).toHaveLength(1);
     expect(STATE.captured[0].options.tags.stage).toBe("memberships");
+    // No error object at all is its own code, never an empty tag.
+    expect(STATE.captured[0].options.tags.code).toBe("no_error");
+  });
+
+  it("ERROR-CODE-ABSENT: an error that carries no code is tagged \"none\", never dropped from the event", async () => {
+    STATE.ownershipError = { message: "RAW-PG-DETAIL-sentinel" };
+    const res = await GET(request(KEY_ID));
+    expect(res.status).toBe(500);
+    expect(STATE.captured).toHaveLength(1);
+    expect(STATE.captured[0].options.tags.code).toBe("none");
   });
 
   it("RATE-LIMITED: the limiter's deny answer, no-store, and no client read", async () => {

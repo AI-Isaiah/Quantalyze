@@ -54,6 +54,16 @@ function unwrapEmbed(embed: unknown): Record<string, unknown> | null {
   return one !== null && typeof one === "object" ? (one as Record<string, unknown>) : null;
 }
 
+/**
+ * The Sentry `code` tag for a failed read: the PostgREST/SQLSTATE code when the
+ * error carries one, "none" when it does not, and "no_error" when there was no
+ * error object at all (a read that answered no rows array and no error).
+ */
+function errorCodeTag(err: { code?: unknown } | null | undefined): string {
+  if (!err) return "no_error";
+  return typeof err.code === "string" && err.code.length > 0 ? err.code : "none";
+}
+
 export const GET = withAuth(
   async (req: NextRequest, user: User): Promise<NextResponse> => {
     // The id comes from the path segment after `keys`, as the sibling
@@ -82,10 +92,12 @@ export const GET = withAuth(
       .eq("user_id", user.id)
       .maybeSingle();
     if (keyErr) {
-      console.error("[keys/memberships] ownership read failed:", keyErr.message);
-      // Tags only: no key id, no user id.
+      console.error("[keys/memberships] ownership read failed:", keyErr.code, keyErr.message);
+      // Tags only: no key id, no user id. The PostgREST/SQLSTATE code is not
+      // identifying, and it is what separates a timeout from a permission
+      // regression (167.2.1-REVIEW-SFH L-3).
       captureToSentry(new Error("key memberships ownership read failed"), {
-        tags: { route: ROUTE_TAG, stage: "ownership" },
+        tags: { route: ROUTE_TAG, stage: "ownership", code: errorCodeTag(keyErr) },
       });
       return NextResponse.json(
         { error: "Lookup failed" },
@@ -106,10 +118,11 @@ export const GET = withAuth(
     if (membersErr || !Array.isArray(rows)) {
       console.error(
         "[keys/memberships] membership read failed:",
+        membersErr?.code,
         membersErr?.message ?? "no rows array and no error",
       );
       captureToSentry(new Error("key memberships read failed"), {
-        tags: { route: ROUTE_TAG, stage: "memberships" },
+        tags: { route: ROUTE_TAG, stage: "memberships", code: errorCodeTag(membersErr) },
       });
       return NextResponse.json(
         { error: "Lookup failed" },
