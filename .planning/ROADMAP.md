@@ -2140,6 +2140,7 @@ Plans:
 
 **Requirements**: TODOS entries `161.1-D1`, DEC-4
 **Depends on:** Phase 164.4.1 (pg-lane with pg_cron). ⚠️ NOT Phase 164.5 — the plan is file-disjoint from it and was lifted whole.
+**Routed here 2026-09-25 (from 164.9.1 review round 1), both latent or loud, both on the terminal-mark / bridge surface this phase owns:** (1) a fan-in child whose parent is still open at enqueue and later ends `failed_final` stays in `done_pending_children` forever (no caller passes parents today); (2) a second `match_decisions` delete can raise 23505 through the ON DELETE SET NULL cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null` (pre-existing, fails loudly, the admin decisions route issues these deletes). (3) the fan-in parent lock `FOR SHARE ... ORDER BY id` can deadlock (40P01) against `mark_compute_job_done` in a diamond (a child whose parents include another waiting child); latent, recorded in M1's header — whoever passes parents must treat 40P01 as retryable on both the enqueue and the worker's mark path. (4) **Routed 2026-09-25 from the 164.9.1 pre-push silent-failure-hunter (MEDIUM, pre-existing, NOT introduced by 164.9.1): one `failed_retry` + `pending` pair on the same `(kind, api_key_id)` wedges the WHOLE claim.** `claim_compute_jobs` and `claim_compute_jobs_with_priority` rank `pending` and `failed_retry` candidates together, and their C39 / NEW-C39-01 `NOT EXISTS` guard excludes a partition only when it already holds a `running` or `done_pending_children` row — never a `pending` one. The enqueue look-up (`_enqueue_compute_job_internal`) treats only `pending`/`running`/`done_pending_children` as in-flight, so it inserts a fresh `pending` beside a `failed_retry`. When the `failed_retry` wins `rn_k` (earlier `next_attempt_at`, or the `pending` is not yet due), the batch `UPDATE ... SET status = 'running'` puts two rows into `compute_jobs_one_inflight_per_kind_api_key` and raises 23505 — and because it is ONE statement, no job of ANY kind is claimed until the pair clears. Loud, not silent: every claim call errors. The same guard shape exists for the portfolio, strategy and allocator partitions against their sibling indexes; audit all four. **Suggested fixes (not decided):** (a) add `'pending'` to each guard's `x.status` list with `x.id <> ranked.id`, in BOTH claim RPCs — a `pending` candidate can have no `pending` sibling under the index, so this only removes the colliding `failed_retry`; (b) and/or make the enqueue look-up fold into, or supersede, an existing `failed_retry` for the partition instead of inserting beside it; (c) whichever is chosen, a `RED-UNDER`-annotated SQL gate on the lane must pin it. **Measured repro, local-stack lane only (`scripts/local-stack/run.sh up`, loopback DSN from its `.stack-env`, then `down`):** in one transaction that ends in `ROLLBACK`, with `SET LOCAL session_replication_role = replica` so a synthetic `api_key_id` needs no FK rows, insert two `poll_allocator_positions` rows sharing one `api_key_id` — a `failed_retry` with `next_attempt_at = now() - 10 min` and a `pending` with `next_attempt_at = now() + 10 min` — reset the role to `origin`, then call `claim_compute_jobs(10, 'repro-worker')` (and, after a savepoint rollback, `claim_compute_jobs_with_priority(10, 'repro-worker', NULL::boolean, NULL::text[], NULL::text[])`; the two-arg call is ambiguous across its overloads). Both raised `duplicate key value violates unique constraint "compute_jobs_one_inflight_per_kind_api_key"` on 2026-09-25 at the 164.9.1 release head.
 **Plans:** 1 plan (lifted from Phase 164.5 plan 08, unmodified)
 
 Plans:
@@ -2872,11 +2873,28 @@ Phase 164.9 plan 10 normalised shared TEST's `analytics_service_url` row to a lo
 
 **Requirements**: `[164.9-FANIN-STATUS-NEVER-SET]` (`TODOS.md`, `## FIX NOW`), `[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]`, `[164.9-TEST-ANALYTICS-URL-REARM]`
 **Depends on:** Phase 164.9
-**Plans:** 0 plans
+⭐ **Founder decision 2026-09-24 (AskUserQuestion): D-23 "Restore it"** — migration 075's `api_key_disconnected` refusal (409) is restored. FC-3's blocker (the baseline re-dump) cleared with v0.90.0.1 (#855).
+**Amended 2026-09-25 (review round 1):** D-04 now departs from strict seven-arg parity: M1 refuses a NULL/missing/failed parent (22023) and starts a child `pending` when its parents are all done (164.9.1-CONTEXT D-04). The normalize self-test runs in the dispatch-only restore job, not on PRs — accepted: that job runs it before every live restore, which is where it guards. A ci.yml PR job for it needs PostgreSQL server binaries and is not in this phase.
+**Plans:** 14 plans (10 waves; planned 2026-09-24, plan-checker passed after 3 revision rounds, 1 info advisory open)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.1 to break down)
+⚠️ 164.4.2 pins (ledger counts, lane image, job names, mutex-key counts) are re-measured by whichever of 164.4.2 / 164.9.1 merges second; 164.4.2 is already on `main` as #842, so plan 01 re-measures them after bringing `main` in.
+
+- [ ] 164.9.1-01-PLAN.md — wave 1 — bring `main` (incl. 164.4.2) in, re-measure pins, record the pre-fix harm verdict on the local lane (criterion 1)
+- [ ] 164.9.1-02-PLAN.md — wave 2 — tracer: M1 (ten-arg `_enqueue_compute_job_internal` computes and inserts the initial status), P12 green by execution (criteria 2, 3)
+- [ ] 164.9.1-03-PLAN.md — wave 3 — P12 calibrated neuter -> RED -> restore; dedupe-gate twins re-pointed (criterion 6)
+- [ ] 164.9.1-04-PLAN.md — wave 2 — single-sourced analytics-URL normalisation emitter (REARM)
+- [ ] 164.9.1-05-PLAN.md — wave 3 — restore transaction concatenates the emitter output, identical in both modes (REARM)
+- [ ] 164.9.1-06-PLAN.md — wave 4 — restore static pins re-measured (REARM)
+- [ ] 164.9.1-07-PLAN.md — wave 4 — M2: `request_allocator_holdings_sync` regains 067's in-flight prefetch and 075's disconnected refusal (criterion 4)
+- [ ] 164.9.1-08-PLAN.md — wave 5 — sync route maps the disconnected refusal to 409 (D-23)
+- [ ] 164.9.1-09-PLAN.md — wave 5 — M3 catalog comments + XOR arm asserts the current bridge_outcomes invariant (criterion 5)
+- [ ] 164.9.1-10-PLAN.md — wave 6 — live-DB ledger shrinks by three, ceiling lowered in the same commit; whole-phase gate sweep
+- [ ] 164.9.1-11-PLAN.md — wave 7 — three-reviewer gate round 1 (orchestrator dispatches; not autonomous)
+- [ ] 164.9.1-12-PLAN.md — wave 8 — three-reviewer gate round 2 + gate re-run (not autonomous)
+- [ ] 164.9.1-13-PLAN.md — wave 9 — ⛔ FOUNDER CHECKPOINT FC-2 (merge order) + re-sync onto `main`
+- [ ] 164.9.1-14-PLAN.md — wave 10 — release record; ⛔ FOUNDER CHECKPOINTS FC-1 (merge = auto-apply TEST then PROD) and FC-3 (live restore dispatch, not a completion gate)
 
 ### Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD (INSERTED)
 

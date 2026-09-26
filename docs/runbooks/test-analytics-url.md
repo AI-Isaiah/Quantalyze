@@ -149,11 +149,23 @@ IS the hazard being reported. ⛔ Do not weaken it to green a board.
 
 ## 7. The loop, stated rather than glossed
 
-The reference-data replay reseeds this row **faithfully**, on purpose. So **any
-future restore re-arms the hazard** and this runbook has to be run again. That is
-not a defect in the remedy — it is why the durable deliverable is arm D1's
-measurement rather than the one-off write. Booked in `TODOS.md` as
-`[164.9-TEST-ANALYTICS-URL-REARM]`.
+The reference-data replay reseeds this row **faithfully**, on purpose, and the
+allow-list is not edited to change that.
+
+⭐ **Since 2026-09-25 (Phase 164.9.1) a restore re-normalises the row inside its own
+transaction.** `scripts/restore-test-from-baseline.sh` appends the fragment that
+`scripts/test-only-normalize-analytics-url.sh --emit-restore-sql` prints, after the
+reference-data gate and before the ledger DDL. The fragment re-reads the identity
+marker, rewrites the one row to the loopback discard sink and checks the read-back,
+so the sink commits only if the restore commits. A **preflight** runs the same
+fragment and rolls it back, so it writes nothing. A restore whose emitter refuses
+assembles no transaction and fails loud.
+
+⚠️ **A hand run of this runbook is still the remedy in two cases:** a **migration**
+re-seeds the row (the restore is not involved, so nothing re-normalises it), or the
+restore **refuses** and leaves the row as it was. Arm D1 stays the durable
+measurement in both, and it stays RED until the row holds the sink. Booked in
+`TODOS.md` as `[164.9-TEST-ANALYTICS-URL-REARM]`.
 
 ## 8. Proving the guards still bite
 
