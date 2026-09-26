@@ -798,3 +798,154 @@ async def test_the_composite_reread_failure_line_carries_the_probe_fragment(
     ]
     assert len(cause_lines) == 1, outcome.log.error.call_args_list
     assert probe._REREAD_FAILURE_FRAGMENT in cause_lines[0], cause_lines
+
+
+# ---------------------------------------------------------------------------
+# SFH-R5-04: the curated cause survives ``classify_exception``'s 500 cut.
+# ---------------------------------------------------------------------------
+# A placeholder in an f-string message is bounded by this many characters. The
+# f-string sites today interpolate a member count and a maximum (ints, at most
+# 20 digits) and a venue ``!r`` (``api_keys.exchange``, a closed set of short
+# names held by ``api_keys_exchange_check``, plus two quotes). A placeholder
+# that can be longer needs its own bound here.
+_FSTRING_PLACEHOLDER_ALLOWANCE = 24
+# The Name arguments a stamp call may pass, each resolved to the expressions it
+# can hold. A Name not listed here fails the test, loudly and by name.
+_STAMP_NAME_SOURCES = {
+    # ``_dispose_broker_nav_error(..., stamp_detail=...)`` passes it through.
+    "stamp_detail": ("keyword", "_dispose_broker_nav_error"),
+    # The MT5-12 verdict refusal assigns it right above its stamp call.
+    "_message": ("assign", "_message"),
+}
+
+
+class AVeryLongGatewayExceptionClassNameStandingIn(Exception):
+    """The class name ``_read_failure_text`` puts in front of its 120-character
+    cut. 46 characters, longer than any client-library exception in use."""
+
+
+def _string_bound(node: Any) -> str:
+    import ast
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value
+            if isinstance(part, ast.Constant)
+            else "v" * _FSTRING_PLACEHOLDER_ALLOWANCE
+            for part in node.values
+        )
+    raise AssertionError(
+        f"a stamp message is neither a literal nor an f-string: {ast.unparse(node)!r}. "
+        "Bound it here before it can reach last_error unmeasured."
+    )
+
+
+def _stamp_messages() -> tuple[list[str], int]:
+    """Every message a terminal stamp can be handed, from the AST of
+    ``services/job_worker.py``, plus the number of stamp call sites seen."""
+    import ast
+
+    tree = ast.parse(open(_JOB_WORKER_FILE, encoding="utf-8").read())
+    calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    ]
+    messages: list[str] = []
+    sites = 0
+    for call in calls:
+        if call.func.id not in _STAMP_CLOSURES or not call.args:  # type: ignore[attr-defined]
+            continue
+        sites += 1
+        arg = call.args[0]
+        if not isinstance(arg, ast.Name):
+            messages.append(_string_bound(arg))
+            continue
+        assert arg.id in _STAMP_NAME_SOURCES, (
+            f"stamp call at line {call.lineno} passes the unlisted name {arg.id!r}; "
+            "add its source to _STAMP_NAME_SOURCES"
+        )
+        how, owner = _STAMP_NAME_SOURCES[arg.id]
+        if how == "keyword":
+            values = [
+                kw.value
+                for c in calls
+                if c.func.id == owner  # type: ignore[attr-defined]
+                for kw in c.keywords
+                if kw.arg == arg.id
+            ]
+        else:
+            values = [
+                n.value
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == owner for t in n.targets)
+            ]
+        assert values, f"no value found for {arg.id!r} ({how} of {owner})"
+        messages.extend(_string_bound(v) for v in values)
+    return messages, sites
+
+
+def test_every_stamp_message_survives_the_500_character_cut() -> None:
+    """SFH-R5-04: ``StampIOUnavailable``'s text is site, operation, the failure
+    (a class name plus 120 scrubbed characters) and then the scrubbed curated
+    message, and ``classify_exception`` cuts it to 500 for ``last_error``. The
+    cause sits LAST, so a long enough message loses its tail. This builds the
+    real exception through ``_stamp_io`` for every stamp message, both sites,
+    every operation and a worst-case failure, and asserts the whole scrubbed
+    message is in what ``classify_exception`` returns.
+
+    Neuter to redden: cut ``classify_exception``'s ``HandlerIOUnavailable``
+    arm to 300 characters."""
+    import re
+
+    from services.redact import scrub_freeform_string
+
+    messages, sites = _stamp_messages()
+    source = open(_JOB_WORKER_FILE, encoding="utf-8").read()
+    textual_sites = len(
+        re.findall(r"\bawait\s+_stamp_(?:failed|strategy_analytics_failed)\(", source)
+    )
+    # Two independent tallies of the stamp call sites must agree, so a site the
+    # AST walk missed cannot pass unmeasured.
+    assert sites == textual_sites and sites > 0, (sites, textual_sites)
+    assert len(messages) >= sites
+    # Anti-vacuity: the longest literal today is the composite annualization
+    # refusal, measured at 187 characters in round 5.
+    assert max(len(m) for m in messages) >= 187, max(len(m) for m in messages)
+
+    ops = (
+        _jw._STAMP_OP_STATUS_READ,
+        _jw._STAMP_OP_MARKER_READ,
+        _jw._STAMP_OP_ERROR_ONLY_WRITE,
+        _jw._STAMP_OP_LOUD_WRITE,
+    )
+    failure = AVeryLongGatewayExceptionClassNameStandingIn("g" * 300)
+
+    async def _fail() -> None:
+        raise failure
+
+    async def _collect(message: str, site: str, op: str) -> str:
+        scrubbed = str(scrub_freeform_string(message))
+        with pytest.raises(_jw.StampIOUnavailable) as raised:
+            await _jw._stamp_io(
+                _fail, op=op, site=site, strategy_id="s", job_id=_JOB_ID,
+                cause=scrubbed, scrubbed=scrubbed,
+            )
+        kind, text = _jw.classify_exception(raised.value)
+        assert kind == "transient"
+        return text if scrubbed in text else f"MISSING: {scrubbed!r} not in {text!r}"
+
+    async def _all() -> list[str]:
+        return [
+            await _collect(m, site, op)
+            for m in messages
+            for site in ("derive_broker_dailies", "stitch_composite")
+            for op in ops
+        ]
+
+    with patch.object(_jw, "logger"), patch("services.job_worker.sentry_sdk"):
+        texts = asyncio.run(_all())
+    missing = [t for t in texts if t.startswith("MISSING: ")]
+    assert not missing, missing[:3]
