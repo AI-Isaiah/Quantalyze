@@ -49,6 +49,21 @@ vi.mock("@/lib/compute-state", async () => {
   );
   return { ...actual, deriveComputeState: vi.fn(actual.deriveComputeState) };
 });
+// Phase 167.2.1 (D-06): a PARTIAL mock. The builder and the cached wrapper's
+// callee stay real; the owner lane's reason-carrying builder and the
+// buildability probe are passthrough spies, so a case can prove on which lane,
+// and how often, the page asks each (167.2.1-REVIEW WR-03: the owner lane
+// builds once and never probes).
+vi.mock("@/lib/factsheet/fetch-and-build-payload", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/lib/factsheet/fetch-and-build-payload")
+  >("@/lib/factsheet/fetch-and-build-payload");
+  return {
+    ...actual,
+    fetchAndBuildPayloadWithReason: vi.fn(actual.fetchAndBuildPayloadWithReason),
+    probeFactsheetBuildable: vi.fn(actual.probeFactsheetBuildable),
+  };
+});
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
 vi.mock("@/lib/queries", () => ({
@@ -63,6 +78,11 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { deriveComputeState } from "@/lib/compute-state";
+import { withPublishedOnly } from "@/lib/visibility";
+import {
+  fetchAndBuildPayloadWithReason,
+  probeFactsheetBuildable,
+} from "@/lib/factsheet/fetch-and-build-payload";
 
 // --- Fixtures ---------------------------------------------------------------
 
@@ -138,6 +158,8 @@ const STATE = {
   publishedRow: null as unknown,
   ownerRow: null as unknown,
   adminRow: null as unknown,
+  /** The error the service-role `strategies` read answers with, if any. */
+  adminError: null as unknown,
   /** The queued answer of the request client's `rpc`. */
   rpcResult: { data: [] as unknown, error: null as unknown },
   /** When true the request client carries NO `rpc` member (a throw). */
@@ -148,6 +170,8 @@ const STATE = {
     rpcCalls: [] as Array<[string, unknown]>,
     /** Tables named by `.from()` on the request client, in call order. */
     requestTables: [] as string[],
+    /** Tables named by `.from()` on the service-role client, in call order. */
+    adminTables: [] as string[],
   },
 };
 
@@ -206,14 +230,20 @@ function mockRequestClient() {
 
 function mockAdmin(): SupabaseClient {
   const from = (table: string) => {
+    STATE.observed.adminTables.push(table);
     const chain = {
       select: () => chain,
       eq: () => chain,
       or: () => chain,
+      // Phase 167.2.1: the composite read (`csv_daily_returns`, ordered and
+      // limited) answers no rows. `strategy_analytics_series` has none either
+      // (its `maybeSingle` below answers null for every table but strategies).
+      order: () => chain,
+      limit: () => Promise.resolve({ data: [], error: null }),
       maybeSingle: () =>
         Promise.resolve(
           table === "strategies"
-            ? { data: STATE.adminRow, error: null }
+            ? { data: STATE.adminError ? null : STATE.adminRow, error: STATE.adminError }
             : { data: null, error: null },
         ),
     };
@@ -238,7 +268,46 @@ function givenOwnerPendingDraft(ownerRowExtra: Record<string, unknown> = {}) {
     strategy_analytics: { computed_at: "2026-09-01T00:00:00.000Z" },
     ...ownerRowExtra,
   };
-  STATE.adminRow = null;
+  // Lineage (Phase 167.2.1, D-05 and D-06): this default was `null`. The owner
+  // lane now asks the buildability probe on its null-payload path, and a probe
+  // that finds no row answers `not_visible`, which renders KCS12-UNREADABLE
+  // (D-05), so a null default would silently move SHARE-NOTE-A and
+  // SHARE-NOTE-B. An UNCOMPUTED row keeps the builder at null and makes the
+  // probe answer `not_computed`, which keeps today's arm-derived note. It is
+  // also the realistic shape of a pending draft.
+  STATE.adminRow = adminRowWith({ computation_status: "computing" });
+}
+
+/** The admin read's strategy row, with an embedded analytics row. */
+function adminRowWith(analytics: Record<string, unknown>) {
+  return {
+    id: STRATEGY_ID,
+    name: STRATEGY_NAME,
+    codename: null,
+    disclosure_tier: "exploratory",
+    status: "draft",
+    markets: ["BTC"],
+    strategy_types: ["options"],
+    description: null,
+    subtypes: [],
+    supported_exchanges: ["deribit"],
+    leverage_range: null,
+    aum: null,
+    max_capacity: null,
+    avg_daily_turnover: null,
+    start_date: null,
+    benchmark: null,
+    asset_class: "crypto",
+    returns_denominator_config: null,
+    strategy_analytics: {
+      daily_returns: null,
+      returns_series: null,
+      computed_at: "2026-09-01T00:00:00.000Z",
+      data_quality_flags: {},
+      metrics_json_by_basis: null,
+      ...analytics,
+    },
+  };
 }
 
 function givenJobs(rows: unknown[]) {
@@ -270,11 +339,13 @@ beforeEach(() => {
   STATE.publishedRow = null;
   STATE.ownerRow = null;
   STATE.adminRow = null;
+  STATE.adminError = null;
   STATE.rpcResult = { data: [], error: null };
   STATE.rpcMissing = false;
   STATE.memberCountResult = { count: 0, error: null };
   STATE.observed.rpcCalls = [];
   STATE.observed.requestTables = [];
+  STATE.observed.adminTables = [];
 
   getUserSpy.mockImplementation(async () => ({
     data: { user: STATE.sessionUser },
@@ -791,6 +862,23 @@ const MINT_UNREADABLE =
   "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
 const PUBLIC_SENTENCE =
   "The detailed factsheet for this strategy is not available yet.";
+// Phase 167.2.1 CONTEXT D-02, typed as literals. Reworded by 167.2.1-REVIEW
+// CR-01 and IN-02 (2026-09-26): the reason is stated from the stored results.
+const UNBUILDABLE_SHORT =
+  "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
+const UNBUILDABLE_COMPOSITE =
+  "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
+// 167.2.1-REVIEW-SFH H-2, typed as a literal: the owner build could not read
+// the row, so what a recipient sees is not known.
+const MINT_PROBE_UNREADABLE =
+  "We could not check what a private link to this strategy shows right now. Reload this page to check again.";
+const NEVER_LINE = "No computation is running for this strategy, and none is on record.";
+// 167.2.1-REVIEW-R2 WR-03, typed as literals: the jobs finished, the owner
+// build could not read the row. KCS09-FINISHED would claim a build outcome.
+const FINISHED_LINE =
+  "The last computation finished, but the factsheet could not be built from its results.";
+const FINISHED_UNREADABLE_LINE =
+  "The last computation finished. We could not read its results to build the factsheet.";
 const SHARE_NOTE_CLASS = "mt-2 text-fixed-12 text-text-muted";
 
 /** The OwnerUnpublishedPanel root: the parent of its visibility notice. */
@@ -865,6 +953,214 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     expect(STATE.observed.rpcCalls).toEqual([]);
     expect(STATE.observed.requestTables).not.toContain("strategy_keys");
     expect(vi.mocked(unstable_cache)).toHaveBeenCalledTimes(0);
+    // 167.2.1-REVIEW WR-03: the owner lane never probes; it builds once.
+    expect(
+      vi.mocked(probeFactsheetBuildable),
+      "the full owner render built a payload, so nothing is probed",
+    ).not.toHaveBeenCalled();
+    expect(vi.mocked(fetchAndBuildPayloadWithReason)).toHaveBeenCalledTimes(1);
+  });
+
+  // --- Phase 167.2.1 (D-02, D-05, D-06): the same note the /strategies list shows
+  it("S7-UNBUILDABLE-SHORT: a computed single-key draft with ONE dated return and a finished job -> KCS12-UNBUILDABLE-SHORT, as on the list", async () => {
+    givenOwnerPendingDraft();
+    STATE.adminRow = adminRowWith({
+      computation_status: "complete",
+      daily_returns: [{ date: "2025-08-01", value: 0.01 }],
+      returns_series: null,
+    });
+    givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+
+    const { container } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(UNBUILDABLE_SHORT);
+    expect(last.className).toBe(SHARE_NOTE_CLASS);
+    // 167.2.1-REVIEW WR-03: the note comes from the owner build's own reason.
+    // ONE resolve (one admin strategies read), no probe, never the cache.
+    expect(vi.mocked(fetchAndBuildPayloadWithReason)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fetchAndBuildPayloadWithReason).mock.calls[0][0]).toBe(STRATEGY_ID);
+    expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
+    expect(STATE.observed.adminTables.filter((t) => t === "strategies")).toHaveLength(1);
+    expect(vi.mocked(unstable_cache)).toHaveBeenCalledTimes(0);
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+  });
+
+  it("S7-UNBUILDABLE-COMPOSITE: a computed composite with no persisted headline and a finished job -> KCS12-UNBUILDABLE-COMPOSITE", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft();
+      STATE.memberCountResult = { count: 3, error: null };
+      STATE.adminRow = adminRowWith({
+        computation_status: "complete",
+        data_quality_flags: { composite: true },
+        metrics_json_by_basis: null,
+      });
+      givenJobs([chainJob("stitch_composite", "done")]);
+
+      const { container } = await renderOwnerPending();
+      const last = panelOf(container).lastElementChild as HTMLElement;
+
+      expect(last.textContent).toBe(UNBUILDABLE_COMPOSITE);
+      // 167.2.1-REVIEW WR-03: one resolve, so ONE composite csv read, not two.
+      expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
+      // 167.2.1-REVIEW-SFH H-1: the refusal the note sends to support is
+      // captured, once, at warning. 167.2.1-REVIEW-R2 IN-02: it names the row.
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
+        level: "warning",
+        tags: { stage: "factsheet-resolve-composite", caller: "build", gate: "headline", strategy_id: STRATEGY_ID },
+      });
+      expect(STATE.observed.adminTables.filter((t) => t === "strategies")).toHaveLength(1);
+      expect(STATE.observed.adminTables.filter((t) => t === "csv_daily_returns")).toHaveLength(1);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  // 167.2.1-REVIEW CR-01: the note sits under a JOB-derived state line. The two
+  // arms below are the ones where "its last computation succeeded" contradicted
+  // that line on the same page.
+  it("CR01-NEVER-STARTED: a computed single-key draft whose done jobs were purged -> the note does not claim a computation the state line says is not on record", async () => {
+    givenOwnerPendingDraft();
+    STATE.adminRow = adminRowWith({
+      computation_status: "complete",
+      daily_returns: [{ date: "2025-08-01", value: 0.01 }],
+      returns_series: null,
+    });
+    givenJobs([]);
+
+    const { container, stateLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(stateLine!.textContent).toBe(NEVER_LINE);
+    expect(last.textContent).toBe(UNBUILDABLE_SHORT);
+    expect(container.textContent).not.toMatch(/last computation succeeded/i);
+  });
+
+  it("S7-MALFORMED (SFH M-3): a computed single-key draft whose stored entries are malformed -> the cannot-build note, never 'fewer than 2 days'", async () => {
+    givenOwnerPendingDraft();
+    STATE.adminRow = adminRowWith({
+      computation_status: "complete",
+      daily_returns: [
+        { date: "2025-08-01", value: "0.01" },
+        { date: "2025-08-02", value: "0.02" },
+        { date: "2025-08-03", value: "-0.01" },
+      ],
+      returns_series: null,
+    });
+    givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+
+    const { container } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(UNBUILDABLE_COMPOSITE);
+    expect(container.textContent).not.toContain("fewer than 2 days");
+  });
+
+  it("CR01-FAILED: a computed composite whose latest job failed permanently -> the note does not claim the last computation succeeded", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft();
+      STATE.memberCountResult = { count: 3, error: null };
+      STATE.adminRow = adminRowWith({
+        computation_status: "complete",
+        data_quality_flags: { composite: true },
+        metrics_json_by_basis: null,
+      });
+      givenJobs(TRIGGER_ROWS);
+
+      const { container, stateLine } = await renderOwnerPending();
+      const last = panelOf(container).lastElementChild as HTMLElement;
+
+      expect(stateLine!.textContent).toBe(FAIL_PERMANENT);
+      expect(last.textContent).toBe(UNBUILDABLE_COMPOSITE);
+      expect(container.textContent).not.toMatch(/last computation succeeded/i);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("S7-BUILD-THROWS: the owner build throws -> the page's error handling owns it, and nothing renders a note as if it were buildable", async () => {
+    // 167.2.1-REVIEW WR-03 (lineage: this case was S7-PROBE-THROWS). The owner
+    // lane no longer runs a second resolve that could throw on its own, so the
+    // only throw left is the build's, which was always the error boundary's.
+    givenOwnerPendingDraft();
+    givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+    let adminCalls = 0;
+    vi.mocked(createAdminClient).mockImplementation(() => {
+      adminCalls += 1;
+      throw new Error("admin client unavailable");
+    });
+
+    await expect(
+      FactsheetV2Page({ params: Promise.resolve({ id: STRATEGY_ID }) }),
+    ).rejects.toThrow("admin client unavailable");
+    expect(adminCalls, "one build, and no second resolve").toBe(1);
+    expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
+  });
+
+  it("S7-OWNER-BUILD-NOT-VISIBLE: no admin row for the owner build -> KCS12-PROBE-UNREADABLE (D-05, SFH H-2), captured once with tags only", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft();
+      STATE.adminRow = null;
+      givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+
+      const { container, stateLine, remedyLine } = await renderOwnerPending();
+      const last = panelOf(container).lastElementChild as HTMLElement;
+
+      expect(last.textContent).toBe(MINT_PROBE_UNREADABLE);
+      // 167.2.1-REVIEW-R2 WR-03: the state line beside it makes no build claim.
+      expect(container.textContent).not.toContain(FINISHED_LINE);
+      expect(stateLine!.textContent).toBe(FINISHED_UNREADABLE_LINE);
+      expect(stateLine!.className).toBe("mt-6 text-fixed-13 text-text-secondary");
+      expect(remedyLine!.textContent).toBe(RETRY_READ);
+      const buildCaptures = vi
+        .mocked(captureToSentry)
+        .mock.calls.filter(
+          ([, ctx]) =>
+            (ctx as { tags?: { stage?: string } } | undefined)?.tags?.stage ===
+            "factsheet-owner-build",
+        );
+      expect(buildCaptures).toHaveLength(1);
+      expect(buildCaptures[0][1]).toEqual({
+        tags: { route: "factsheet/v2/page", stage: "factsheet-owner-build" },
+      });
+      expect(STATE.observed.adminTables.filter((t) => t === "strategies")).toHaveLength(1);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("S7-OWNER-BUILD-READ-ERROR: the owner build's admin read fails -> KCS12-PROBE-UNREADABLE (SFH H-2), captured ONCE by the resolve stage with its code (SFH M-2)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft();
+      STATE.adminError = { message: "synthetic outage", code: "57014" };
+      givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+
+      const { container, stateLine, remedyLine } = await renderOwnerPending();
+      const last = panelOf(container).lastElementChild as HTMLElement;
+
+      expect(last.textContent).toBe(MINT_PROBE_UNREADABLE);
+      // 167.2.1-REVIEW-R2 WR-03: the jobs finished, but nothing was built from
+      // the results, because the read failed. KCS09-FINISHED ("could not be
+      // built from its results") and its "have it checked" remedy are absent;
+      // the line says what is known, and the remedy is to read again.
+      expect(container.textContent).not.toContain(FINISHED_LINE);
+      expect(container.textContent).not.toContain(CONTACT_CHECK);
+      expect(stateLine!.textContent).toBe(FINISHED_UNREADABLE_LINE);
+      expect(stateLine!.className).toBe("mt-6 text-fixed-13 text-text-secondary");
+      expect(remedyLine!.textContent).toBe(RETRY_READ);
+      // One event, from the stage that saw the error, carrying the code.
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
+        tags: { stage: "factsheet-resolve", caller: "build", reason: "read_error", code: "57014", strategy_id: STRATEGY_ID },
+      });
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
 
@@ -915,6 +1211,15 @@ describe("KCS-10 (S8) — the public pending placeholder says one neutral senten
     // The public lane reads no owner state at all.
     expect(STATE.observed.rpcCalls).toEqual([]);
     expect(STATE.observed.requestTables).not.toContain("strategy_keys");
+    // Phase 167.2.1 (D-06, D-11): nor does it probe buildability, nor run the
+    // owner lane's reason-carrying build.
+    // 167.2.1-REVIEW-R2 WR-02 (2026-09-26, deliberate): the public cache fill
+    // now calls the reason-carrying builder too, so it can throw on a
+    // `read_error`. What this case forbids is the OWNER build, so it pins the
+    // one call to the published-only predicate, by identity.
+    expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
+    expect(vi.mocked(fetchAndBuildPayloadWithReason)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fetchAndBuildPayloadWithReason).mock.calls[0][1]).toBe(withPublishedOnly);
   });
 });
 

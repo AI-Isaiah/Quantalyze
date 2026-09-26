@@ -2496,3 +2496,98 @@ describe("[162 review / A-6] an unparseable response body is distinguishable fro
     expect(loggedText(errSpy)).not.toContain("was not JSON");
   });
 });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 164.6.5-07 / D-14 (task 2) — THE ENVELOPE SHOWS THE ID OF THE ATTEMPT THAT
+ * FAILED, NOT THE ID OF THE PAGE LOAD.
+ *
+ * MEASURED in production: two key-validation retries 45s and 55s apart in one
+ * open tab rendered the IDENTICAL correlation id, because `wizardFetch` used
+ * to memoize one id for the whole page load. Plan 07 task 1 made
+ * `wizardFetch` mint a FRESH id per call and exposed it via an optional
+ * capture callback; this task wires that captured id into the envelope,
+ * preferring it over the page-load id.
+ *
+ * ⚠️ ASSERT ON THE ID THE ENVELOPE ACTUALLY CARRIES, not a mock's call count —
+ * a call-count assertion goes green while the wrong value renders.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[164.6.5-07 / D-14] ConnectKeyStep — the envelope shows the failed attempt's own id", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("credential submit: the envelope's correlation_id equals the id sent on THAT request", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse({ code: "TOTALLY_MADE_UP" }, 500));
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await screen.findByTestId("error-envelope");
+
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    const sentId = new Headers(init.headers).get("X-Correlation-Id");
+    expect(sentId).toMatch(/^wizard:[0-9a-f-]{36}$/);
+    expect(screen.getByText(sentId!)).toBeInTheDocument();
+  });
+
+  it("two failed credential submits render TWO DIFFERENT ids — the defect this task closes", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({ code: "TOTALLY_MADE_UP" }, 500))
+      .mockResolvedValueOnce(jsonResponse({ code: "TOTALLY_MADE_UP" }, 500));
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await screen.findByTestId("error-envelope");
+    const firstInit = fetchSpy.mock.calls[0][1] as RequestInit;
+    const firstId = new Headers(firstInit.headers).get("X-Correlation-Id");
+    expect(screen.getByText(firstId!)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+    await screen.findByTestId("error-envelope");
+    const secondInit = fetchSpy.mock.calls[1][1] as RequestInit;
+    const secondId = new Headers(secondInit.headers).get("X-Correlation-Id");
+    expect(
+      secondId,
+      "the same id rendered across two distinct failed requests — support " +
+        "cannot tell which failure the id identifies",
+    ).not.toBe(firstId);
+    expect(screen.getByText(secondId!)).toBeInTheDocument();
+  });
+
+  it("reuse arm: the envelope's correlation_id equals the id sent on the reuse request, not the credential arm's", async () => {
+    const PRESELECT: PreselectedKey = {
+      id: "66666666-6666-6666-6666-666666666666",
+      exchange: "bybit",
+      exchangeLabel: "Bybit",
+      keyLabel: "Reuse test key",
+    };
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse({ code: "KEY_REUSE_UNAVAILABLE" }, 409));
+    render(
+      <ConnectKeyStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        preselectKey={PRESELECT}
+        onUseDifferentKey={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
+    await screen.findByTestId("error-envelope");
+
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    const sentId = new Headers(init.headers).get("X-Correlation-Id");
+    expect(sentId).toMatch(/^wizard:[0-9a-f-]{36}$/);
+    expect(screen.getByText(sentId!)).toBeInTheDocument();
+  });
+});

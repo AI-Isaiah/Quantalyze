@@ -445,14 +445,33 @@ describe("OWN-02 — the shared factsheet cache can only ever be filled by the p
     expect(callback).not.toContain("withPublishedOrOwner");
   });
 
-  it("the cached callback calls fetchAndBuildPayload with the published-only predicate spelled out, not a variable", () => {
+  it("the cached callback calls fetchAndBuildPayloadWithReason with the published-only predicate spelled out, not a variable", () => {
     const src = stripComments(readSource(PAGE));
     const callback = firstArgument(callArgs(src, "unstable_cache"));
     // A variable in this position means the predicate became caller-supplied —
     // the exact shape 148-02 removed from the signature. The literal is the
     // property; `toContain` on the identifier alone would not see the
     // difference.
-    expect(callback).toContain("fetchAndBuildPayload(id, withPublishedOnly)");
+    //
+    // 167.2.1-REVIEW-R2 WR-02 / SFH-R2 N-4 (2026-09-26): the pin moved,
+    // deliberately, from `fetchAndBuildPayload(id, withPublishedOnly)` to the
+    // reason-carrying builder, because the callback must THROW on a
+    // `read_error` so unstable_cache never stores a transient outage as the
+    // answer for a run. Reverting to the reason-less call fails this pin: the
+    // old text does not contain `fetchAndBuildPayloadWithReason(`. The literal
+    // predicate rule is unchanged.
+    expect(callback).toContain("fetchAndBuildPayloadWithReason(id, withPublishedOnly)");
+    expect(callback).not.toContain("fetchAndBuildPayload(id,");
+  });
+
+  it("the cached callback throws on a read_error instead of returning it as a cacheable null (167.2.1-REVIEW-R2 WR-02)", () => {
+    const src = stripComments(readSource(PAGE));
+    const callback = firstArgument(callArgs(src, "unstable_cache"));
+    // The behaviour is pinned in page.public-cache-key.test.tsx
+    // (READ-ERROR-NOT-CACHED); this is the structural half, so a callback that
+    // drops the guard is named here too.
+    expect(callback).toContain('"read_error"');
+    expect(callback).toContain("throw new FactsheetReadError");
   });
 
   it("the cached wrapper takes NO visibility parameter (the seam is type-level unrepresentable, formatting-independent)", () => {
