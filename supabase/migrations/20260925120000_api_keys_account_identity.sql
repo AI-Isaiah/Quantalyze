@@ -546,11 +546,25 @@ BEGIN
       -- Allocator-scoped, so enqueue_compute_job's own gate requires
       -- p_allocator_id = auth.uid(), and its in-flight dedup hands back the
       -- pending job locked above, so a burst of toggles is one job.
-      v_job := enqueue_compute_job(
-        p_strategy_id  := NULL,
-        p_kind         := 'derive_allocator_equity',
-        p_allocator_id := v_uid
-      );
+      -- _enqueue_compute_job_internal raises serialization_failure (40001)
+      -- when it loses the insert race to another transaction and the winning
+      -- job has already left the in-flight statuses. That is the same finished-
+      -- in-between shape as the second pass below, so it gets the same name,
+      -- 55006 HISTORY_RECOMPOSE_RACED (retry now), instead of reaching the
+      -- client as a raw 40001 its SQLSTATE map does not list. REASONED, NOT
+      -- MEASURED: the lost race needs a second backend.
+      BEGIN
+        v_job := enqueue_compute_job(
+          p_strategy_id  := NULL,
+          p_kind         := 'derive_allocator_equity',
+          p_allocator_id := v_uid
+        );
+      EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'HISTORY_RECOMPOSE_RACED'
+          USING ERRCODE = '55006',
+                DETAIL  = 'Another recompose of your equity history was queued and finished while this change was being saved. Try again; nothing was changed.',
+                HINT    = 'Retry now. The next attempt either queues a recompose that reads your change or reports the one that is running.';
+      END;
     END IF;
 
     IF v_job IS NULL THEN
@@ -625,7 +639,11 @@ COMMENT ON FUNCTION public.set_departed_key_history_inclusion(uuid, text) IS
   'A job enqueued and claimed by another transaction in between is refused '
   'as running; a job that also FINISHED in between read the old value, so '
   'the reuse or the enqueue runs once more and the fresh job reads the new '
-  'one; if that one has finished too, 55006 HISTORY_RECOMPOSE_RACED (retry). '
+  'one; if that one has finished too, 55006 HISTORY_RECOMPOSE_RACED (retry '
+  'now). The same 55006 HISTORY_RECOMPOSE_RACED, with a different DETAIL, '
+  'replaces the serialization_failure (40001) enqueue_compute_job raises when '
+  'it loses the insert race to a job that has already finished, so no raw '
+  '40001 reaches the client. '
   'A NULL job id raises XX000 HISTORY_RECOMPOSE_NOT_QUEUED, never success. '
   'Every pending, failed_retry, '
   'running or done_pending_children recompose row of the caller is locked '

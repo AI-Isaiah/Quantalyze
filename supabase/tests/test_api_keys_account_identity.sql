@@ -582,7 +582,7 @@ BEGIN
   --            20260925120000. The toggle would be stored and never shown;
   --            the RPC now refuses a NULL job id by name, so this arm sees
   --            that refusal on its call.
-  -- RED-UNDER-M: {"arm":"HIST-enqueues","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"      v_job := enqueue_compute_job(\n        p_strategy_id  := NULL,\n        p_kind         := 'derive_allocator_equity',\n        p_allocator_id := v_uid\n      );","replace":"      v_job := NULL;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"HIST-enqueues","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"        v_job := enqueue_compute_job(\n          p_strategy_id  := NULL,\n          p_kind         := 'derive_allocator_equity',\n          p_allocator_id := v_uid\n        );","replace":"        v_job := NULL;","occurrences":1}]}
   v_err := NULL;
   BEGIN
     v_ret := public.set_departed_key_history_inclusion(k_gone, 'exclude');

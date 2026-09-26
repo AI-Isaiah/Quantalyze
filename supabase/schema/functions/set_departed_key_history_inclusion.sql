@@ -220,11 +220,25 @@ BEGIN
       -- Allocator-scoped, so enqueue_compute_job's own gate requires
       -- p_allocator_id = auth.uid(), and its in-flight dedup hands back the
       -- pending job locked above, so a burst of toggles is one job.
-      v_job := enqueue_compute_job(
-        p_strategy_id  := NULL,
-        p_kind         := 'derive_allocator_equity',
-        p_allocator_id := v_uid
-      );
+      -- _enqueue_compute_job_internal raises serialization_failure (40001)
+      -- when it loses the insert race to another transaction and the winning
+      -- job has already left the in-flight statuses. That is the same finished-
+      -- in-between shape as the second pass below, so it gets the same name,
+      -- 55006 HISTORY_RECOMPOSE_RACED (retry now), instead of reaching the
+      -- client as a raw 40001 its SQLSTATE map does not list. REASONED, NOT
+      -- MEASURED: the lost race needs a second backend.
+      BEGIN
+        v_job := enqueue_compute_job(
+          p_strategy_id  := NULL,
+          p_kind         := 'derive_allocator_equity',
+          p_allocator_id := v_uid
+        );
+      EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'HISTORY_RECOMPOSE_RACED'
+          USING ERRCODE = '55006',
+                DETAIL  = 'Another recompose of your equity history was queued and finished while this change was being saved. Try again; nothing was changed.',
+                HINT    = 'Retry now. The next attempt either queues a recompose that reads your change or reports the one that is running.';
+      END;
     END IF;
 
     IF v_job IS NULL THEN
