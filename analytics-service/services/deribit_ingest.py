@@ -46,6 +46,7 @@ from services.deribit_txn import (
     LedgerValuationError,
     PNL_BASIS_MARK_TO_MARKET,
     PNL_BASIS_SMOOTHED_MTM,
+    ROW_SCOPE_KEY,
     _day_ccy_own_index,
     _option_activity_after_coverage,
     _pre_coverage_option_days,
@@ -1319,7 +1320,15 @@ async def _crawl_deribit_ledger(
             # Retain the RAW rows (flat) for the native-unit adapter's
             # txn_rows_to_native_daily — a per-(day,ccy) sum that is order- and
             # batch-independent, so flat concatenation across scopes is lossless.
-            raw_rows_all.extend(r for r in rows if isinstance(r, Mapping))
+            # WR-02 (Phase 168 review): each retained row is a COPY stamped with
+            # its scope label under ROW_SCOPE_KEY, so the assignment guard can
+            # keep its same-instrument census inside one subaccount (the USD twin
+            # above already checks one scope at a time). The stamp is not in the
+            # refusal renderer's whitelist (_SHAPE_FIELDS), so it never reaches
+            # a message.
+            raw_rows_all.extend(
+                {**r, ROW_SCOPE_KEY: scope.label} for r in rows if isinstance(r, Mapping)
+            )
             # Accumulate the honest DATED external flows (for the core's F_t term)
             # and the return-bearing row count (for the C2 equity-vs-activity floor).
             # The SAME `supplemental` settlement-index map built for

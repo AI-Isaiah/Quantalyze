@@ -969,6 +969,14 @@ _ASSIGNMENT_UNNAMED_PHRASE: str = (
     "assignment row names no instrument, so its same-instrument sibling "
     "census cannot be computed"
 )
+# WR-02 (Phase 168 review): the key under which ``_crawl_deribit_ledger`` stamps
+# each retained raw row with its scope (subaccount) label. The native twin reads
+# ONE flat batch spanning every scope, while the USD twin runs per (scope,
+# currency); without the stamp the guard below refused a cross-subaccount pair
+# (the short side's `assignment` in one subaccount, the long side's `delivery`
+# in another) that the USD twin passed — permanently, on every recompute. It is
+# not in ``_SHAPE_FIELDS``, so it never reaches a refusal message.
+ROW_SCOPE_KEY: str = "_scope"
 # WR-01 / SFH-01 (Phase 168 review): the non-option refusal's own phrase. The
 # census licence is one observation, an assignment on an expired OPTION, so an
 # assignment naming a perpetual, a dated future, a spot pair or an unclassifiable
@@ -997,9 +1005,13 @@ def assert_assignment_uncontested(
     batch holds the instrument's whole history. A crawl racing the expiry instant
     could see the assignment before a later-written sibling in one run; the next
     recompute sees both and this guard refuses loudly — the first run's sum was
-    correct for the rows that existed. The native twin's batch spans every scope,
-    so two subaccounts holding the same instrument can refuse as a false positive:
-    accepted (loud, never silent; not keyed on ``user_id`` without evidence).
+    correct for the rows that existed. The native twin's batch spans every scope;
+    ``_crawl_deribit_ledger`` stamps each row with its scope under
+    ``ROW_SCOPE_KEY`` and a sibling from a different scope is skipped, so the
+    census stays per subaccount on both twins (WR-02: before the stamp, a short
+    side's assignment in one subaccount beside a long side's delivery in another
+    refused permanently). A direct caller passing unstamped rows keeps the
+    stricter batch-wide check.
 
     The self-skip is by IDENTITY (``other is row``), not equality: two
     equal-but-distinct rows still contest each other. Non-Mapping entries are
@@ -1030,6 +1042,13 @@ def assert_assignment_uncontested(
         if other is row or not isinstance(other, Mapping):
             continue
         if _instrument_key(other.get("instrument_name")) != instrument:
+            continue
+        # WR-02: a sibling from a DIFFERENT subaccount is another account's
+        # expiry, not a contest. Only when BOTH rows carry the crawl's scope
+        # stamp; an unstamped direct caller keeps the stricter batch-wide check.
+        row_scope = row.get(ROW_SCOPE_KEY)
+        other_scope = other.get(ROW_SCOPE_KEY)
+        if row_scope is not None and other_scope is not None and row_scope != other_scope:
             continue
         other_type = str(other.get("type", "")).strip().lower()
         if other_type in _ASSIGNMENT_CONTESTING_TYPES:
@@ -2582,8 +2601,9 @@ def txn_rows_to_native_daily(
         # `assignment` is cash-bearing ONLY in the census shape (no same-instrument
         # delivery/settlement, a named instrument); any other shape refuses here,
         # before it can be summed or skipped. Checked on every assignment
-        # regardless of change. This batch spans every scope and currency, so it
-        # re-checks what the USD twin checked per (scope, currency).
+        # regardless of change. This batch spans every scope and currency; the
+        # crawl's ROW_SCOPE_KEY stamp keeps the guard's census inside each row's
+        # own subaccount (WR-02), matching the USD twin's per-scope check.
         if row_type == "assignment":
             assert_assignment_uncontested(row, rows)
         if _row_is_native_cash_bearing(row):

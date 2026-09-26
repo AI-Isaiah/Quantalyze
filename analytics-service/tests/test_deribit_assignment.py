@@ -929,3 +929,71 @@ def test_wr01_a_non_option_assignment_refuses_on_both_twins(
     assert _ASSIGNMENT_NON_OPTION_PHRASE in msg, f"{twin_name}/{kind}: {msg}"
     assert _NON_DERIVATIVE_WORDING not in msg, msg
     assert repr(ASSIGNED) not in msg.split("OBSERVED SHAPE:")[0], msg
+
+
+async def _crawl_two_scopes(
+    monkeypatch: Any, main_rows: list[dict[str, Any]], sub_rows: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    """Run the REAL crawl over two stub scopes (main + one subaccount), each with
+    its own BTC page. Returns the USD twin's records (it runs per scope, inside
+    the crawl) and the flat cross-scope batch the native twin reads."""
+    from services import deribit_ingest as di
+    from tests.test_deribit_ingest import _patch_pipeline
+
+    pages = {"main": main_rows, "sub_1": sub_rows}
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        return [dict(r) for r in pages[scope_label]] if currency == "BTC" else []
+
+    _patch_pipeline(
+        monkeypatch,
+        scopes=[di.Scope("main", None, True), di.Scope("sub_1", "101", False)],
+        currencies={"main": ["BTC"], "sub_1": ["BTC"]},
+        paginate=_paginate,
+    )
+    records, raw_rows, _indexable, _report = await di._crawl_deribit_ledger(object())
+    return records, list(raw_rows)
+
+
+async def test_wr02_a_cross_subaccount_pair_ingests_on_both_twins(
+    monkeypatch: Any,
+) -> None:
+    """WR-02: the short side of an in-the-money expiry is logged as `assignment`
+    and a long position on the same strike in a SIBLING subaccount as
+    `delivery`: the shape the census hypothesis itself predicts. Each is its
+    own account's expiry, so neither contests the other. The USD twin checks
+    one (scope, currency) at a time and passes; the native twin reads the flat
+    cross-scope batch and used to refuse it, permanently, on every recompute.
+    Both twins must now ingest it, and the native sum carries both rows once."""
+    records, raw_rows = await _crawl_two_scopes(
+        monkeypatch,
+        main_rows=_indexed(_census_rows()),
+        sub_rows=[_sibling("delivery", change=0.02)],
+    )
+    assert records, "the USD twin ran per scope and produced records"
+    native = txn_rows_to_native_daily(raw_rows)
+    assert native["BTC"][DAY_EXPIRY] == pytest.approx(ASSIGNED + 0.02)
+    assert native["BTC"][DAY_OPEN] == pytest.approx(PREMIUM)
+
+
+async def test_wr02_the_same_pair_in_one_subaccount_still_refuses_on_both_twins(
+    monkeypatch: Any,
+) -> None:
+    """WR-02 calibration: the scope stamp must not weaken the guard. The same
+    assignment + delivery pair crawled inside ONE subaccount refuses on the USD
+    twin inside the crawl, and the native twin refuses the stamped batch too
+    (the crawl never reaches it, so it is called on the same stamped rows)."""
+    pair = _indexed(_census_rows()) + [_sibling("delivery", change=0.02)]
+    with pytest.raises(LedgerValuationError) as exc:
+        await _crawl_two_scopes(monkeypatch, main_rows=pair, sub_rows=[])
+    assert _ASSIGNMENT_CONTESTED_PHRASE in str(exc.value)
+
+    stamped = [dict(r, _scope="main") for r in pair]
+    with pytest.raises(LedgerValuationError) as exc:
+        txn_rows_to_native_daily(stamped)
+    assert _ASSIGNMENT_CONTESTED_PHRASE in str(exc.value)
+    with pytest.raises(LedgerValuationError) as exc:
+        txn_rows_to_daily_records(stamped)
+    assert _ASSIGNMENT_CONTESTED_PHRASE in str(exc.value)
