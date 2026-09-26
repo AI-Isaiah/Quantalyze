@@ -2748,6 +2748,10 @@ class MarkerStateNotLoggable(Exception):
 # operator reads, and the curated cause of a stamp is still on the ERROR line.
 # ⚠️ ``ValueError`` is deliberately absent: ``json.JSONDecodeError`` subclasses
 # it, and a malformed PostgREST body is an infrastructure answer, not a bug.
+# ⚠️ The split is a heuristic (round 5, SFH-R5-06): a client library parsing an
+# unexpected gateway body can raise ``KeyError`` / ``TypeError`` /
+# ``IndexError`` too, and that infrastructure answer is then labelled a
+# programming error. Only the label moves; the budget and the sentence do not.
 _READ_PROGRAMMING_ERRORS: tuple[type[BaseException], ...] = (
     AssertionError,
     AttributeError,
