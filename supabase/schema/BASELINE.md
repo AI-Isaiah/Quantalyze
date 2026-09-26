@@ -481,7 +481,10 @@ in a connection string or an `OPTIONS` list; only the count and line numbers are
 line); a gitleaks finding over the dump (explicit `.gitleaks.toml`, redacted, inline allow
 comments ignored, a missing or empty dump refused rather than read as clean); a NUL byte, a
 `SET client_encoding` count other than one, or a home-directory path; zero tables or any data
-statement; a marker not taken from the tree of the applied merge; an artifact whose merge is not an ancestor
+statement; a dump that lost a `CREATE EXTENSION` or `CREATE SCHEMA` name the committed dump carries;
+a run attempt other than the first, or a `main` whose migration listing differs from the merge's (a
+re-run would pair today's PROD with the old merge's marker); a marker not taken from the tree of the
+applied merge; an artifact whose merge is not an ancestor
 of `main`, or whose marker omits a migration `main`'s marker carries; a red currency, content-drift
 or staleness gate on the composed tree; the skip trailer in the commit message or the PR text;
 and a commit on the bot branch that the bot did not author, while an open pull request has that
