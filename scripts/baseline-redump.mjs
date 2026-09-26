@@ -42,11 +42,14 @@
  *          --run-id <digits> --cli-version <x.y.z> --out <dir>
  *     node scripts/baseline-redump.mjs --compose --in <dir> --out <dir>
  *     node scripts/baseline-redump.mjs --check-bot-branch --remote <name>
+ *     node scripts/baseline-redump.mjs --open-or-edit-pr --title-file <f> --body-file <f>
  *
  *   --check-bot-branch  (write-token job, a step holding NO token) refuse to let the
  *                 force-push discard a commit on the bot branch not authored by the
  *                 bot, naming the pull request it sits on (D-24), and emit the
  *                 observed tip as the push's lease (`lease=`, empty when absent).
+ *   --open-or-edit-pr  (the push step, GH_TOKEN set) create the one bot PR or edit
+ *                 it; refuse more than one; never merge (D-11, D-13). `pr_number=`.
  */
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -1073,6 +1076,106 @@ export function checkBotBranch({ repoRoot, remote, emit, lsRemote = lsRemoteBotR
       `are not authored by ${BOT_NAME} (${judged.foreign.slice(0, MAX_LINES_PRINTED).join(", ")}). ${where} ` +
       "then re-dispatch supabase-migrate.yml on main",
   );
+}
+
+// ── the one pull request: create or edit, never merge (D-11, D-13, D-14) ──────
+
+const PR_URL_RE = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/([0-9]+)$/;
+
+/**
+ * The `gh` argv for the one bot PR: `pr create` when none is open, `pr edit <n>` when
+ * one is. These two subcommands are the ONLY ones this function can return (D-13:
+ * no merge, no auto-merge, no review or approval; the self-test asserts it). The
+ * title and body file are bound with `--flag=value`, so neither can be read as a flag.
+ */
+export function buildPrArgv({ existing, title, bodyFile, repo }) {
+  const common = ["--repo", repo, `--title=${title}`, `--body-file=${bodyFile}`];
+  if (existing === null) return ["pr", "create", "--base", "main", "--head", BOT_BRANCH, ...common];
+  if (!Number.isInteger(existing) || existing <= 0) throw new Error("the open pull request's number is not a positive integer");
+  return ["pr", "edit", String(existing), ...common];
+}
+
+/** A non-empty regular file's text; refused by FLAG name, before any gh call. */
+function readArgFile(path, flag) {
+  let st;
+  try {
+    st = statSync(path);
+  } catch {
+    throw new Error(`${flag} does not exist; refusing before any gh call`);
+  }
+  if (!st.isFile()) throw new Error(`${flag} is not a regular file; refusing before any gh call`);
+  const text = readFileSync(path, "utf8");
+  if (text.trim() === "") throw new Error(`${flag} is empty; refusing before any gh call`);
+  return text;
+}
+
+/** The real gh runner: argv only, never a shell. Its stderr is passed through only on a failure. */
+function realGh(argv) {
+  const r = spawnSync("gh", argv, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, env: process.env });
+  if (r.status !== 0 && r.stderr) process.stderr.write(r.stderr.slice(0, 2000));
+  return { status: r.error ? -1 : r.status, stdout: r.stdout ?? "" };
+}
+
+/**
+ * --open-or-edit-pr. Creates the bot PR when none is open, edits it when exactly one
+ * is, refuses when more than one is (D-11). The skip-token judge re-runs over the
+ * title and body before gh is called at all (D-14). It needs the job token in
+ * GH_TOKEN and the repository in GITHUB_REPOSITORY, and never falls back to a local
+ * gh login or DEFAULT_REPO: a local run must not be able to open a real PR.
+ */
+export function openOrEditPr({ titleFile, bodyFile, repo, token, gh = realGh, emit }) {
+  const title = readArgFile(titleFile, "--title-file").replace(/\r?\n$/, "");
+  const body = readArgFile(bodyFile, "--body-file");
+  if (/[\r\n]/.test(title) || title.length > 256) throw new Error("--title-file must hold ONE line of at most 256 characters");
+  const hits = [
+    ["the PR title", title],
+    ["the PR body", body],
+  ].flatMap(([where, text]) => judgeSkipTokens(text).map((cls) => `${where} carries skip-token class ${cls} of 6`));
+  if (hits.length > 0) {
+    for (const h of hits) console.error(`::error::baseline-redump: skip-token: ${h}`);
+    throw new Error(`refusing to open or edit the PR: ${hits.join("; ")}; gh was not called`);
+  }
+  if (typeof token !== "string" || token === "") {
+    throw new Error("GH_TOKEN is not set; --open-or-edit-pr runs only with the job token, never a local gh login");
+  }
+  if (!REPO_SLUG_RE.test(String(repo ?? ""))) throw new Error("GITHUB_REPOSITORY is not <owner>/<name>; refusing to guess the repository");
+
+  const list = gh(["pr", "list", "--repo", repo, "--head", BOT_BRANCH, "--base", "main", "--state", "open", "--json", "number"]);
+  if (list.status !== 0) throw new Error(`MEASURE_FAIL: gh pr list exit ${list.status}; the open PR count was not measured, so nothing is created or edited`);
+  let numbers;
+  try {
+    const parsed = JSON.parse(list.stdout);
+    if (!Array.isArray(parsed) || !parsed.every((p) => p && Number.isInteger(p.number) && p.number > 0)) throw new Error("shape");
+    numbers = parsed.map((p) => p.number).sort((a, b) => a - b);
+  } catch {
+    throw new Error("MEASURE_FAIL: gh pr list did not answer with an array of PR numbers; nothing is created or edited");
+  }
+  if (numbers.length > 1) {
+    throw new Error(
+      `${numbers.length} open pull requests have ${BOT_BRANCH} as their head (${numbers.map((n) => `#${n}`).join(", ")}); ` +
+        "refusing to pick one. Close all but one, then re-dispatch supabase-migrate.yml on main",
+    );
+  }
+  const existing = numbers.length === 1 ? numbers[0] : null;
+  const verb = existing === null ? "create" : "edit";
+  const r = gh(buildPrArgv({ existing, title, bodyFile, repo }));
+  if (r.status !== 0) throw new Error(`MEASURE_FAIL: gh pr ${verb} exit ${r.status}; no pr_number is emitted`);
+  const url = String(r.stdout)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => PR_URL_RE.test(l))
+    .pop();
+  const printed = url ? Number(PR_URL_RE.exec(url)[1]) : null;
+  if (existing === null && printed === null) {
+    throw new Error("MEASURE_FAIL: gh pr create exited 0 but printed no pull request URL; check the bot branch's PRs by hand");
+  }
+  if (existing !== null && printed !== null && printed !== existing) {
+    throw new Error(`MEASURE_FAIL: gh pr edit #${existing} printed the URL of a different pull request (#${printed})`);
+  }
+  const number = existing ?? printed;
+  console.log(`baseline-redump pr: ${verb === "create" ? "created" : "edited"} ${url ?? `https://github.com/${repo}/pull/${number}`}`);
+  emit("pr_number", String(number));
+  return { number, created: existing === null };
 }
 
 // ── modes ─────────────────────────────────────────────────────────────────────
@@ -2907,6 +3010,18 @@ function main(argv) {
       checkBotBranch({ repoRoot: cwdRepoRoot(), remote: f["--remote"], emit: emitToGithubOutput });
       return 0;
     }
+    if (argv[0] === "--open-or-edit-pr") {
+      const f = parseFlags(argv.slice(1), ["--title-file", "--body-file"]);
+      openOrEditPr({
+        titleFile: resolve(f["--title-file"]),
+        bodyFile: resolve(f["--body-file"]),
+        repo: process.env.GITHUB_REPOSITORY,
+        token: process.env.GH_TOKEN,
+        gh: realGh,
+        emit: emitToGithubOutput,
+      });
+      return 0;
+    }
     if (argv[0] === "--compose") {
       const f = parseFlags(argv.slice(1), ["--in", "--out"]);
       compose({
@@ -2923,7 +3038,8 @@ function main(argv) {
     // ⛔ A typo'd flag must not silently fall through to a green run.
     console.error(
       `::error::unknown argument(s): ${argv.join(" ") || "(none)"} — this script takes --self-test [--with-gitleaks], ` +
-        `--gate-dump --dump --merge --run-id --cli-version --out, --compose --in --out, or --check-bot-branch --remote`,
+        `--gate-dump --dump --merge --run-id --cli-version --out, --compose --in --out, --check-bot-branch --remote, ` +
+        `or --open-or-edit-pr --title-file --body-file`,
     );
     return 1;
   } catch (e) {
