@@ -8572,7 +8572,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     if degraded_members:
         member_warned = True
 
-    def _read_existing_flags() -> dict[str, Any]:
+    def _read_existing_flags() -> Any:
         res = (
             supabase.table("strategy_analytics")
             .select("data_quality_flags")
@@ -8581,9 +8581,20 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             .execute()
         )
         row = getattr(res, "data", None) or {}
-        return dict(row.get("data_quality_flags") or {})
+        return row.get("data_quality_flags")
 
-    existing_flags = await db_execute(_read_existing_flags)
+    # R6-05 (round 6): the success path reads the same ``jsonb`` column as the
+    # failed stamp (R6-02), and ``dict()`` on a non-object value raised here at
+    # persist on EVERY re-stitch, so the job retried and ended ``failed_final``
+    # with no curated stamp. The same guard now drops the value loudly, and
+    # this write replaces it with the composite markers.
+    existing_flags = _flags_object_or_dropped(
+        await db_execute(_read_existing_flags),
+        site="stitch_composite",
+        strategy_id=strategy_id,
+        job_id=job.get("id"),
+        consequence="the composite persist writes its markers without it.",
+    )
     # MERGE (read-modify-write) — preserve every existing flag (e.g. a prior derive's
     # benchmark_unavailable), add the composite coverage-mask fields.
     merged_flags: dict[str, Any] = dict(existing_flags)

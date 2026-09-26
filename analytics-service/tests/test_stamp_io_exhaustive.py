@@ -845,6 +845,65 @@ async def test_a_non_object_flags_value_is_stamped_once_not_restamped_by_f5() ->
 
 
 @pytest.mark.asyncio
+async def test_a_non_object_flags_value_on_the_composite_success_path_is_dropped_loudly() -> None:
+    """R6-05 (round 6): the composite SUCCESS path reads the same ``jsonb``
+    column at persist (``_read_existing_flags``). ``dict()`` on a non-object
+    value raised there on every re-stitch, so the job retried and ended
+    ``failed_final`` with no curated stamp, and only a failed stamp ever healed
+    the value. Now the same guard as R6-02 drops it: ONE ERROR line naming the
+    job, ONE tagged capture, and the persist lands with the composite markers.
+
+    Neuter to redden: restore ``dict(row.get("data_quality_flags") or {})`` in
+    ``_read_existing_flags`` (the job fails), or log the drop at WARNING (no
+    ERROR line)."""
+    from tests.test_stitch_composite_job import _headline_row, _member, _returns
+
+    fake = _FakeSupabase(
+        members=[_member(1, "2024-01-01", "2024-02-01"), _member(2, "2024-02-01", None)],
+    )
+    served: list[str] = []
+
+    async def _execute_with_a_non_object_flags_value(fn: Any) -> Any:
+        # The fake serves a dict copy of its flags, so the malformed jsonb value
+        # is put on the success path's flags read here, by the reader's name.
+        result = fn()
+        if getattr(fn, "__name__", "") == "_read_existing_flags":
+            served.append("not-an-object")
+            return "not-an-object"
+        return result
+
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    log = MagicMock()
+    sentry = MagicMock()
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )), patch.object(_jw, "db_execute", _execute_with_a_non_object_flags_value), \
+         patch("services.job_worker.logger", log), \
+         patch("services.job_worker.sentry_sdk", sentry):
+        result = await _jw.run_stitch_composite_job(
+            {"id": _JOB_ID, "kind": "stitch_composite", "strategy_id": _COMPOSITE_STRATEGY_ID}
+        )
+    assert served == ["not-an-object"], "the success-path flags read never ran"
+    assert result.outcome == DispatchOutcome.DONE, result
+    headline = _headline_row(fake)
+    assert headline is not None, fake.upserts
+    flags = headline["data_quality_flags"]
+    assert flags.get("csv_source") is True and flags.get("composite") is True, flags
+    assert "per_key" in flags, flags
+    flag_lines = [
+        line for line in _rendered_errors(log) if "non-object data_quality_flags" in line
+    ]
+    assert len(flag_lines) == 1, log.error.call_args_list
+    assert _JOB_ID in flag_lines[0] and "'not-an-object'" in flag_lines[0], flag_lines
+    assert log.error.call_count == 1, log.error.call_args_list
+    assert sentry.capture_message.call_count == 1, sentry.capture_message.call_args_list
+    sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+        "compute_job_id", _JOB_ID
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [RuntimeError, TypeError], ids=["database", "programming"])
 async def test_the_composite_reread_failure_line_carries_the_probe_fragment(
     failure: Callable[[str], BaseException],
