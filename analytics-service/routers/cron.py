@@ -6,10 +6,12 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+import pandas as pd
 import sentry_sdk
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from services.benchmark import get_benchmark_returns
 from services.db import get_supabase, rows
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions, get_and_clear_last_dq_flags, EXCHANGE_CLASSES
@@ -2312,3 +2314,58 @@ async def prober_cadence_alert(alert: ProberCadenceAlert) -> dict[str, Any]:
     """
     _escalate_prober_cadence_gap(alert)
     return {"acknowledged": True}
+
+
+@router.post("/benchmark-refresh")
+async def benchmark_refresh() -> dict[str, Any]:
+    """Refresh the cached BTC benchmark through the ONE existing fetcher.
+
+    Phase 169.2 / plan 01 (SC3, D-08). Called daily by the Vercel cron route
+    ``/api/cron/refresh-benchmark`` (plan 169.2-02) through the analytics
+    client. Before it, the only writer of ``benchmark_prices`` was a lazy
+    refetch during an analytics compute, so nothing kept the benchmark current
+    on a schedule. This handler adds no fetch logic of its own: it awaits
+    ``services.benchmark.get_benchmark_returns("BTC")`` with that function's
+    default window, which reads the cache first and refetches and upserts only
+    on a miss.
+
+    Lives under ``/api`` (not ``/internal``) so the global ``X-Service-Key``
+    middleware guards it, exactly like ``/api/cron-sync`` (CONTEXT D-08).
+
+    Answers 200 with ``{symbol, through, stale, points}`` ONLY for a non-empty,
+    non-stale series. Every other outcome (no series, an empty or stale series,
+    an exception) is HTTP 500, because the cron runner only alarms on a non-2xx
+    (the same reason ``cron_sync`` raises 500 above).
+
+    The failure status is 500 and never 503, even though a failed upstream
+    price is arguably a dependency outage (W2): the TypeScript seam records a
+    breaker failure for a 503 only, and that breaker is shared by every
+    analytics call, so a stale benchmark must not be able to trip it.
+    """
+    try:
+        series, is_stale = await get_benchmark_returns("BTC")
+    except Exception as exc:  # noqa: BLE001 - any failure must page, as a 500
+        # Log the exception TYPE only: an upstream message can carry URLs,
+        # headers or response fragments.
+        logger.error("benchmark_refresh: refresh raised %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Benchmark refresh failed: {type(exc).__name__}",
+        ) from None
+
+    if series is None or series.empty:
+        logger.error("benchmark_refresh: refresh returned no BTC series")
+        raise HTTPException(
+            status_code=500,
+            detail="Benchmark refresh failed: no BTC series",
+        )
+
+    through = pd.Timestamp(series.index[-1]).date().isoformat()
+    if is_stale:
+        logger.error("benchmark_refresh: BTC series is stale (through %s)", through)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Benchmark refresh stale: BTC prices through {through}",
+        )
+
+    return {"symbol": "BTC", "through": through, "stale": False, "points": int(len(series))}
