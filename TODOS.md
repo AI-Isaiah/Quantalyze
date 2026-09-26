@@ -1362,6 +1362,25 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
+      same (kind, allocator) makes every claim entry point raise `23505` (booked 2026-09-26, found
+      on the pg-lane by the Phase 167.1.2 PR B fixer).**
+      **Repro, measured 2026-09-26.** Seed a `failed_retry` `derive_allocator_equity` row with
+      `next_attempt_at` in the past and a `pending` row for the same allocator. Then
+      `claim_compute_jobs_with_priority` (6-arg and 2-arg) and `claim_compute_jobs` all raise
+      `23505` on `compute_jobs_one_inflight_per_kind_allocator`.
+      **Why.** The claim's C39 guard skips a candidate only for a `running` or
+      `done_pending_children` sibling, not a `pending` one. `_enqueue_compute_job_internal`'s dedup
+      and the unique index cover `pending`, `running` and `done_pending_children`, not
+      `failed_retry`. So any enqueue made while a retry is outstanding creates the pairing. This is
+      the 2026-04-28 worker-spin class.
+      **Latent, not observed live:** Sentry showed 0 matching issues over 90 days and 0 matching
+      logs over 30 days. 167.1.2 PR B's owner RPC is being fixed so that it never creates the
+      pairing; that closes one caller, not the class.
+      ✅ **Destination: Phase 164.9.3 CLAIMPAIR** — routed there 2026-09-26 via
+      `/gsd-phase --insert` (orchestrator decision). The ROADMAP section holds the success
+      criteria; this entry is the evidence.
+
 - [ ] **`[STRATTABLE-DESC-01]` The strategy list shows only the NAME, so two strategies
       with the same name are indistinguishable — the `description` that disambiguates them is
       already fetched and simply not rendered (founder-reported 2026-09-11 from the /browse

@@ -2956,6 +2956,35 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.9.2 to break down)
 
+### Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim (INSERTED)
+
+**Goal:** A due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim.
+**Requirements**: TODOS `[164.9.3-CLAIM-PAIR-23505]` (owned here)
+**Depends on:** Phase 164.9.1
+**Plans:** 0 plans
+
+⭐ **Inserted 2026-09-26 by orchestrator decision** (routed from the Phase 167.1.2 PR B review). It is a separate topic from 164.9.1 JOBRPCTRUTH and 164.9.2 REFDATAUPDATES.
+
+**Evidence, measured 2026-09-26 on the pg-lane by the 167.1.2 PR B fixer.**
+- **Repro:** seed a `failed_retry` `derive_allocator_equity` row whose `next_attempt_at` is in the past, plus a `pending` row for the same allocator. All three claim entry points then raise `23505` on `compute_jobs_one_inflight_per_kind_allocator`:
+  - `claim_compute_jobs_with_priority`, 6-arg overload;
+  - `claim_compute_jobs_with_priority`, 2-arg overload;
+  - `claim_compute_jobs`.
+- **The claim guard:** C39 skips a candidate only when a `running` or `done_pending_children` sibling exists, not when a `pending` one does.
+- **The enqueue side:** `_enqueue_compute_job_internal`'s dedup and that unique index both cover `pending`, `running` and `done_pending_children`, but not `failed_retry`. So any enqueue made while a retry is outstanding creates the pairing.
+- **Class:** this is the 2026-04-28 worker-spin class.
+- **Latent, not observed live.** Sentry shows 0 matching issues over 90 days and 0 matching logs over 30 days.
+- **Not fixed by 167.1.2.** PR B's new owner RPC is being fixed so that it never creates the pairing (it reuses the failed_retry job). That closes one caller, not the class. The root fix belongs here.
+
+## Success Criteria
+1. A red-first lane test reproduces the `23505` on the pre-fix tree and goes green after the fix.
+2. The claim never raises on that pairing. Either the enqueue refuses the pending twin or folds it into the `failed_retry` job, or the claim skips it. The planner decides which, with evidence.
+3. The fix ships as a migration, reviewed before merge by the three migration reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter), because merging a migration auto-applies it to PROD.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.9.3 to break down)
+
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
 ⭐ **Founder answers, 2026-09-24:** D-15, D-16 and D-17 are APPROVED. OPEN-2: after merge, run plan 10's read-only census, then queue a recompute of the affected PROD rows.
