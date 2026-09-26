@@ -7321,7 +7321,23 @@ is closed there. Two adjacent findings were surfaced by the audit and are booked
    **Fix shape:** make the mock's `maybeSingle`/embed resolution project to the columns named in the
    recorded select string, mirroring the returns-route harness.
 
-### Phase 148 (OWN) — factsheet v2 payload cache is id-only-keyed (added 2026-08-05)
+### Phase 148 (OWN) — factsheet v2 payload cache is id-only-keyed (added 2026-08-05) — ✅ CLOSED 2026-09-26 by Phase 167.2.1 FACTSHEETBUILDABLE
+
+✅ **CLOSED 2026-09-26 by Phase 167.2.1 FACTSHEETBUILDABLE, commit `bea5fd373`
+(167.2.1-REVIEW WR-02, round-1 fixer B).** The fix is the shape this entry prescribed:
+`buildFactsheetPayloadCached` in `src/app/factsheet/[id]/v2/page.tsx` now passes `computed_at`
+as a real `keyParts` member, `["factsheet-v2-payload-v6", id, computedAt]`, so a fresh analytics
+run gets a fresh cache entry instead of draining on the 3600 s TTL. The `cacheKey`-string
+mechanism is gone. `src/app/factsheet/[id]/v2/page.public-cache-key.test.tsx` pins the key.
+Phase 167.2.1 needed it because its own present-tense share notes were false while the public
+page served a payload older than the probe's answer (its D-11 revision).
+⚠️ **What the closure does NOT cover:** a `null` cached from a transient admin read error under
+the CURRENT `computed_at` (167.2.1-REVIEW-R2 WR-02). That residual is handled, or not, by the
+167.2.1 round-2 fix and is recorded in the phase's own artifacts, not here.
+⛔ **The load-bearing corollary at the end of this entry still holds**, with "id-only" read as
+"carries no viewer": the key is the id and `computed_at`, neither of which is about the viewer,
+so lane separation must still never go through this wrapper. The original entry stays below as
+lineage.
 
 **`DEF-148-A` — a fresh `strategy_analytics.computed_at` does NOT bust the factsheet v2
 payload cache, so the factsheet can serve metrics up to 3600s stale.** The page's header
