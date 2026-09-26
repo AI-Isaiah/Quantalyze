@@ -752,6 +752,55 @@ export function judgeMeasured(text) {
   return defects.length > 0 ? { measured: null, defects } : { measured: m, defects };
 }
 
+/** A staged path is printed only in a safe charset; anything else is named generically. */
+const showPath = (p) => (/^[A-Za-z0-9._/-]{1,200}$/.test(String(p)) ? String(p) : "an unprintable path");
+
+/**
+ * D-17: the staged list must be exactly `STAGED_PATHS`, in any order. Returns a
+ * list of `{kind, detail}`: `staged-duplicate`, `staged-extra` (for example
+ * `supabase/.temp/project-ref`, which `supabase link` writes on the runner) and
+ * `staged-missing`.
+ */
+export function judgeStagedSet(paths) {
+  const defects = [];
+  const seen = new Set();
+  for (const p of paths) {
+    if (seen.has(p)) defects.push({ kind: "staged-duplicate", detail: `'${showPath(p)}' is listed more than once` });
+    seen.add(p);
+  }
+  for (const p of seen) {
+    if (!STAGED_PATHS.includes(p)) defects.push({ kind: "staged-extra", detail: `'${showPath(p)}' is staged but is not one of the six paths` });
+  }
+  for (const p of STAGED_PATHS) {
+    if (!seen.has(p)) defects.push({ kind: "staged-missing", detail: `'${p}' is one of the six paths but is not staged` });
+  }
+  return defects;
+}
+
+/**
+ * D-14: the six CI skip tokens of CLAUDE.md "CI gate integrity" §1, which GitHub
+ * honours ANYWHERE in a commit message and which a squash merge carries onto
+ * `main`. Each is ASSEMBLED FROM FRAGMENTS so this file spells none of them.
+ * Case-insensitive, and `\s*` around the trailer's colon (RESEARCH F11): stricter
+ * than GitHub, which is the safe direction. Classes 1 to 5 are the bracketed
+ * tokens, class 6 the trailer; a refusal reports the class index, never the text.
+ */
+const SKIP_TOKEN_CLASSES = [
+  ["skip", "ci"],
+  ["ci", "skip"],
+  ["no", "ci"],
+  ["skip", "actions"],
+  ["actions", "skip"],
+]
+  .map(([a, b]) => new RegExp(`\\[${a} ${b}\\]`, "i"))
+  .concat([new RegExp(`${["skip", "checks"].join("-")}\\s*:\\s*true`, "i")]);
+
+/** The 1-based class indices of every skip token in `text`; empty when clean. Plan 08 re-runs this before `gh`. */
+export function judgeSkipTokens(text) {
+  const t = String(text);
+  return SKIP_TOKEN_CLASSES.flatMap((re, i) => (re.test(t) ? [i + 1] : []));
+}
+
 // ── I/O helpers ───────────────────────────────────────────────────────────────
 
 function git(repoRoot, args, opts = {}) {
@@ -954,13 +1003,13 @@ function runGate(runner, repoRoot, cmd, args) {
 }
 
 /**
- * One `::error::` per writer or version-gate defect, naming its kind and detail
- * (counts, versions and row names only), then a refusal. Called before anything
- * is written to the four composed files and before anything is staged.
+ * One `::error::` per writer, version-gate, measured or staged-set defect, naming
+ * its kind and detail (counts, versions, keys, paths and row names only), then a
+ * refusal. `after` states what the refusal left undone at its call site.
  */
-function refuseWriterDefects(defects) {
+function refuseWriterDefects(defects, after = "nothing was staged") {
   for (const d of defects) console.error(`::error::baseline-redump: ${d.kind}: ${d.detail}`);
-  throw new Error(`refusing to compose: ${defects.length} defect(s) (${defects.map((d) => d.kind).join(", ")}); nothing was staged`);
+  throw new Error(`refusing to compose: ${defects.length} defect(s) (${defects.map((d) => d.kind).join(", ")}); ${after}`);
 }
 
 /** The verdict line of a passing judge; anything else refuses, MEASURE_FAIL named as such. */
@@ -1110,14 +1159,28 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
   // `supabase link` writes supabase/.temp/* on the runner; that is never staged.
   git(repoRoot, ["add", "--", ...STAGED_PATHS]);
   const staged = git(repoRoot, ["diff", "--cached", "--name-only"]).split("\n").filter(Boolean).sort();
-  if (staged.join("\n") !== [...STAGED_PATHS].sort().join("\n")) {
-    throw new Error(`the staged set is not exactly the six paths (staged ${staged.length}); refusing to commit`);
+  const stagedDefects = judgeStagedSet(staged);
+  if (stagedDefects.length > 0) refuseWriterDefects(stagedDefects, "nothing was committed");
+
+  // D-14: the message, title and body are judged BEFORE the commit. The body's
+  // head sha exists only after the commit, so it is judged with a 40-zero
+  // placeholder; the real value is `git rev-parse` hex and cannot carry a token.
+  const message = composeCommitMessage(m);
+  const title = composePrTitle(m);
+  const tokenHits = [
+    ["the commit message", message],
+    ["the PR title", title],
+    ["the PR body", composePrBody({ ...m, repo, headSha: "0".repeat(40) })],
+  ].flatMap(([where, text]) => judgeSkipTokens(text).map((cls) => `${where} carries skip-token class ${cls} of 6`));
+  if (tokenHits.length > 0) {
+    for (const h of tokenHits) console.error(`::error::baseline-redump: skip-token: ${h}`);
+    throw new Error(`refusing to commit: ${tokenHits.join("; ")}; nothing was committed`);
   }
 
   const tmp = mkdtempSync(join(tmpdir(), "baseline-redump-msg-"));
   try {
     const msgFile = join(tmp, "commit-message.txt");
-    writeFileSync(msgFile, composeCommitMessage(m));
+    writeFileSync(msgFile, message);
     const env = {
       ...process.env,
       GIT_AUTHOR_NAME: BOT_NAME,
@@ -1135,7 +1198,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
   }
 
   mkdirSync(out, { recursive: true });
-  writeFileSync(join(out, "pr-title.txt"), composePrTitle(m) + "\n");
+  writeFileSync(join(out, "pr-title.txt"), title + "\n");
   // The head sha exists only now, after the bot commit: it is the sha the PR's runs bind to.
   writeFileSync(join(out, "pr-body.md"), composePrBody({ ...m, repo, headSha: git(repoRoot, ["rev-parse", "HEAD"]).trim() }));
   console.log(
