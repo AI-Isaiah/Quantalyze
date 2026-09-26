@@ -1296,7 +1296,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6.8 inserted after Phase 164.6.6: OUTAGEALERT, split from 164.6.6 criterion 3 by founder decision 2026-09-26 (one topic per phase); owns MT5-PROBER-WEDGE-CALIBRATION-01 (routed by PR #863)
 - Phase 170 edited: edited fields: title (PAGECOPY → LAYOUT), goal, success_criteria (criteria 2, 3, 4, 6 split out to 170.1 COPY, founder decision 2026-09-26: one topic per phase)
 - Phase 170.1 inserted after Phase 170: COPY, split from 170 criteria 2, 3, 4, 6 (plus its own copy of criterion 7) by founder decision 2026-09-26 (one topic per phase)
-- Phase 165 edited: split into PYDEPS/JSDEPS considered and declined 2026-09-26: the verified landing order is actions → pip → npm, so the two halves would interleave; reasoning recorded in the section
+- Phase 165 edited: title (DEPS → ACTIONSDEPS), goal, success_criteria: three-way split by ecosystem in the verified order, founder decision 2026-09-26 (one topic per phase); replaces the declined PYDEPS/JSDEPS split
+- Phase 165.1 inserted after Phase 165: PIPDEPS, the pandas prerequisite commit + #685 (now #755), split from 165 by founder decision 2026-09-26
+- Phase 165.2 inserted after Phase 165.1: NPMDEPS, #686 (now #836), #645, #646, #614 and #606 closures, [165-NIGHTLY-AUDIT-RED], zero-open close criterion, split from 165 by founder decision 2026-09-26
+- Phase 164.6.8 edited: owns MT5-SWITCH-WEDGE-CAUSE-01 (moved from 164.6.6, same next-wedge capture as the calibration item); #863-side re-homing deferred until #863 merges
 
 ### Decisions
 
