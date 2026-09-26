@@ -1354,8 +1354,10 @@ true for 146 and half of 142–145, and **false for 141**.
         `RefreshMarkerRereadUnavailable` and retries. The move to `failed_retry` runs
         `mark_compute_job_failed`, whose bridge `sync_strategy_analytics_status` branch (a) keeps
         `complete_with_warnings` but rewrites a plain `complete` row to `computing`. On attempt 2
-        `_read_entry_publish_state` reads `computing`, so no protection is granted and a recurring
-        failure takes the loud, un-publishing path.
+        `_read_entry_publish_state` (single-key) or `_read_existing_failed_row` inside
+        `_stamp_failed` (composite) reads `computing`, so no protection is granted and a recurring
+        failure takes the loud, un-publishing path. Both readers carry the same exposure (named
+        for both 2026-09-26, round-3 review IN-04).
       - **Why not fixed in 164.6.7.** Keeping the attempt-1 publish state in job metadata cannot
         close it: branch (a) has already rewritten the row before attempt 2 reads anything, and on
         the final attempt the bridge decides in SQL with no Python running. The root fix is a

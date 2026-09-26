@@ -966,6 +966,29 @@ here, but this precondition sits here because this is where a reader would go to
      database. Second, re-crawling on a transient already has a precedent in this worker:
      `run_stitch_composite_job` returns transient after two complete crawls when its smoothed
      pass diverges.
+     **End state when every chain-edge retry fails (round-3 review SFH-R3-04).** The row is
+     MIXED-GENERATION, not untouched. Before the chain edge, hop 1 has already written
+     `_prestamp_dq_flags` (`data_quality_flags` replaced wholesale, `series_completeness`,
+     `metrics_json_by_basis`) and persisted or healed the MTM series. Hop 2 never runs, so the
+     headline `metrics_json` is still the previous hop 2's. On a `complete_with_warnings` /
+     warned row, branch (b-prime) keeps the row published (a plain `complete` row is
+     un-published instead, see the overclaim bullet below), so the factsheet shows hop 1's flags, verdict and by-basis values next to the
+     previous hop 2's headline metrics. This is the same class as a protected hop-2 failure,
+     which D-15 already accepts. The upserts make the retry safe; they do not make the terminal
+     row consistent.
+   - **Extended (round 3, SFH-R3-01 / WR-03): D-09 now covers the composite stamp's own status
+     read.** `_stamp_failed` reads `strategy_analytics` (`_read_existing_failed_row`) before it
+     decides anything, for every composite terminal stamp, marked or not, a user's own stitch
+     included. If that read still fails after `db_read_with_retry`, the handler's curated cause
+     is logged at ERROR beside the read's failure kind, nothing is written, and the job fails
+     TRANSIENT with the cause in `last_error`. Before this, the read's exception left the
+     handler as itself: `last_error` named only the read, the cause was logged nowhere, and the
+     job was filed `unknown`.
+   - **Log level (round 3, WR-01).** When D-15 does protect a row (the live re-read answers
+     `PRESENT`), that outcome is logged at WARNING only and produces no Sentry event. The cause
+     goes out at ERROR on the failure arms (`READ_ERROR`, a failed stamp status read) and on the
+     loud stamp over a live row after a definitive not-marked answer. Round 2 logged it at ERROR
+     before every re-read, which paged once per protected strategy per refresh tick.
    - **Extended: D-09 now covers the entry publish-state read.** `_read_entry_publish_state` at
      the top of `run_derive_broker_dailies_job` reads through `db_read_with_retry`. If a marked
      refresh's read still fails, the job fails TRANSIENT (`RefreshMarkerRereadUnavailable`)
@@ -1014,6 +1037,39 @@ here, but this precondition sits here because this is where a reader would go to
      one job produces **at most 9 events**. A database outage multiplies that by the number of
      marked refreshes in flight. Global Sentry config is deliberately unchanged in this phase. If
      the deployed commit adds an ERROR line on this path, re-count the bound.
+     ⛔ **CORRECTED 2026-09-26 (round-3 review WR-02 / SFH-R3-03), the bullet above kept as
+     lineage.** Its count was stale when it landed: the round-2 pre-read cause line made a
+     stamp-site read failure 4 events (12 per job), and every D-15 suppression 1. Round 3
+     removed that line (WR-01), so the table below is re-counted from the code, by symbol, at
+     the round-3 fix commit. An event is one `logger.error` (the default `LoggingIntegration`
+     turns it into a Sentry event) or one `capture_exception`. A `logger.warning` is a
+     breadcrumb and counts 0. Every capture now carries a `compute_job_id` tag
+     (`_capture_read_failure`).
+
+     | path, per attempt | ERROR lines | captures | events | attempt ends |
+     |---|---|---|---|---|
+     | D-15 protects (`PRESENT`), either stamp | 0 (D-15 line is WARNING) | 0 | **0** | permanent, terminal |
+     | marker re-read `READ_ERROR` at either stamp | 2: `_refresh_marker_live_state`, `_log_marker_not_confirmed` (`READ_ERROR` arm, carries the cause) | 1 | **3** | transient |
+     | composite stamp status read fails (`_read_existing_failed_row`) | 1 (carries the cause) | 1 | **2** | transient |
+     | chain edge `READ_ERROR` | 2: helper, `_log_marker_not_confirmed` | 1 | **3** | transient |
+     | entry publish-state read fails | 1 | 1 | **2** | transient |
+     | entry read raises a programming error (`_READ_PROGRAMMING_ERRORS`) | 1 | 1 | **2** | `unknown` |
+     | marked row, `RETRACTED` / `OTHER_SOURCE` → loud stamp | 1 (the "no longer protects it" line; the state line is WARNING) | 0 | **1** | permanent, terminal |
+     | marked row, `NO_ID` / `NO_ROW` → loud stamp | 2 (breach line + "no longer protects it") | 0 | **2** | permanent, terminal |
+     | tail mirror `READ_ERROR` (after hop 2 is enqueued) | 2: helper, `_log_marker_not_confirmed` | 1 | **3** | job DONE |
+
+     **Derivation of the bound.** Every read failure except the tail mirror's raises, so it ends
+     the attempt, and no attempt reaches two of the rows above: the entry read precedes the
+     crawl, the chain edge precedes the tail mirror, and the composite status read precedes its
+     marker re-read. The tail mirror runs only on an attempt that reached the chain edge
+     cleanly. So one attempt produces **at most 3 events**, and with the default `max_attempts`
+     of 3 one job produces **at most 9** (for example two chain-edge `READ_ERROR`s, then a DONE
+     attempt whose tail mirror read fails). A database outage multiplies that by the number of
+     marked refreshes in flight. **A protected failure produces none.** Scope: these are the
+     lines in this phase's read and stamp code. The handler arm that calls a stamp may log its
+     own failure before it does, and the worker loop logs every failed job at WARNING (`Job %s
+     failed`); both predate this phase and are the same on every row. If the deployed commit adds
+     an ERROR line or a capture on any of these paths, re-count.
    📜 *Lineage, superseded 2026-09-25:* "⛔ **BLOCKING.** No schedule naming
    `public.enqueue_ledger_composite_refresh()` may be registered until `run_stitch_composite_job`
    in `analytics-service/services/job_worker.py` re-reads the LIVE `compute_jobs` row's
