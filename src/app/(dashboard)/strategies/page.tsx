@@ -35,7 +35,10 @@ import {
 } from "@/lib/status-surface-copy";
 // Phase 167.2.1 (D-04, D-08): the builder's own resolve stage, so the list and
 // the share page decide "can this factsheet build?" from the same code.
-import { probeFactsheetBuildable } from "@/lib/factsheet/fetch-and-build-payload";
+import {
+  FactsheetProbeTimeoutError,
+  probeFactsheetBuildable,
+} from "@/lib/factsheet/fetch-and-build-payload";
 import { withPublishedOrOwner } from "@/lib/visibility";
 import { PendingIntros } from "@/components/strategy/PendingIntros";
 import Link from "next/link";
@@ -232,8 +235,11 @@ function concurrencyLimiter(limit: number) {
  * navigation. The page sends ONE event carrying the counts instead.
  * `not_visible`, `not_computed` and `too_few_points` are not counted: the
  * first two are races logged at warn, the last is an honest data fact.
+ * `timeout` (SFH-R2 N-3) is a probe that missed its deadline
+ * (`FactsheetProbeTimeoutError`): an outage signal, counted here and never
+ * grouped with the code throws.
  */
-const COUNTED_PROBE_REASONS = ["read_error", "composite_unbuildable", "malformed_series"] as const;
+const COUNTED_PROBE_REASONS = ["read_error", "composite_unbuildable", "malformed_series", "timeout"] as const;
 type CountedProbeReason = (typeof COUNTED_PROBE_REASONS)[number];
 
 interface ProbeOutcomeTally {
@@ -248,7 +254,7 @@ interface ProbeOutcomeTally {
 
 function newProbeOutcomeTally(): ProbeOutcomeTally {
   return {
-    counts: { read_error: 0, composite_unbuildable: 0, malformed_series: 0 },
+    counts: { read_error: 0, composite_unbuildable: 0, malformed_series: 0, timeout: 0 },
     readErrorCodes: new Map(),
     gates: new Map(),
     sources: new Map(),
@@ -284,9 +290,11 @@ function captureProbeOutcomes(tally: ProbeOutcomeTally): void {
   for (const reason of COUNTED_PROBE_REASONS) tags[reason] = String(tally.counts[reason]);
   if (tally.readErrorCodes.size > 0) tags.read_error_codes = formatCounts(tally.readErrorCodes);
   // A composite refusal alone is a warning, as the build's own capture is. An
-  // outage or a writer defect is an error.
+  // outage (a read error, a timeout) or a writer defect is an error.
   const level =
-    tally.counts.read_error > 0 || tally.counts.malformed_series > 0 ? "error" : "warning";
+    tally.counts.read_error > 0 || tally.counts.malformed_series > 0 || tally.counts.timeout > 0
+      ? "error"
+      : "warning";
   captureToSentry(
     new Error("factsheet probe: computed rows could not be confirmed buildable on one page load"),
     {
@@ -566,6 +574,17 @@ export default async function StrategiesPage() {
               probeFactsheetBuildable(s.id, (q) => withPublishedOrOwner(q, user.id)),
             );
           } catch (err) {
+            if (err instanceof FactsheetProbeTimeoutError) {
+              // 167.2.1-REVIEW-SFH-R2 N-3: no answer within the probe's
+              // deadline. Its own reason in the page's one event, and the
+              // same "could not check" line as any failed check.
+              console.error("[strategies/page] factsheet probe timed out", {
+                id: s.id,
+                deadlineMs: err.deadlineMs,
+              });
+              probeOutcomes.counts.timeout += 1;
+              return [s.id, probeUnreadableShareNote(mode)] as const;
+            }
             // D-05: a probe that throws is never read as "buildable".
             // 167.2.1-REVIEW-SFH H-2: nor as "not available". Every failed
             // check (this throw, and the read_error and not_visible arms

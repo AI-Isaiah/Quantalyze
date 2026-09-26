@@ -147,6 +147,12 @@ const state = vi.hoisted(() => ({
    * throws (a different cause per row, unlike `adminThrow`).
    */
   adminReadThrows: {} as Record<string, Error>,
+  /**
+   * 167.2.1-REVIEW-SFH-R2 N-3 — ids whose strategies read never answers until
+   * its AbortSignal fires, and the ids whose read was aborted.
+   */
+  adminReadHangs: [] as string[],
+  adminAborted: [] as string[],
   /** Every `from(table)` the admin client was asked for. */
   adminTables: [] as string[],
   /** The id of every strategies read the admin client answered. */
@@ -213,7 +219,12 @@ vi.mock("@/lib/supabase/admin", () => ({
       from: (table: string) => {
         state.adminTables.push(table);
         let id = "";
+        let signal: AbortSignal | undefined;
         const b: Record<string, unknown> = {};
+        b.abortSignal = (s: AbortSignal) => {
+          signal = s;
+          return b;
+        };
         const self = () => b;
         b.select = self;
         b.order = self;
@@ -230,6 +241,15 @@ vi.mock("@/lib/supabase/admin", () => ({
           if (table !== "strategies") return { data: null, error: null };
           state.adminStrategyReads.push(id);
           if (state.adminReadThrows[id]) throw state.adminReadThrows[id];
+          if (state.adminReadHangs.includes(id)) {
+            // As supabase-js does: an aborted request RESOLVES with an error.
+            return new Promise((resolve) => {
+              signal?.addEventListener("abort", () => {
+                state.adminAborted.push(id);
+                resolve({ data: null, error: { message: "AbortError: The user aborted a request.", code: "" } });
+              });
+            });
+          }
           state.adminInFlight += 1;
           state.adminMaxInFlight = Math.max(state.adminMaxInFlight, state.adminInFlight);
           if (state.adminReadDelayMs > 0) {
@@ -387,6 +407,8 @@ beforeEach(() => {
   state.adminRows = {};
   state.adminThrow = false;
   state.adminReadThrows = {};
+  state.adminReadHangs = [];
+  state.adminAborted = [];
   state.adminTables = [];
   state.adminStrategyReads = [];
   state.adminOrFilters = [];
@@ -790,6 +812,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
         read_error: "1",
         composite_unbuildable: "0",
         malformed_series: "0",
+        timeout: "0",
         read_error_codes: "none:1",
       },
       extra: { gates: {}, malformedSources: {} },
@@ -968,6 +991,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
         read_error: "6",
         composite_unbuildable: "2",
         malformed_series: "0",
+        timeout: "0",
         read_error_codes: "57014:4,none:2",
       },
       extra: { gates: { "composite_unbuildable:headline": 2 }, malformedSources: {} },
@@ -996,6 +1020,46 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       level: "warning",
       tags: { ...OUTCOME_TAGS, composite_unbuildable: "1", read_error: "0" },
     });
+  });
+
+  it("N3-PROBE-DEADLINE (167.2.1-REVIEW-SFH-R2 N-3): a probe whose read hangs answers 'could not check' at its deadline, aborts the read, and is counted as a timeout in the page's one event", async () => {
+    // With no deadline, one hung read held its limiter slot and the whole
+    // page load forever, and the post-fan-out capture never ran.
+    const { FACTSHEET_PROBE_DEADLINE_MS } = await import("@/lib/factsheet/fetch-and-build-payload");
+    state.strategies = [
+      row("s-hung", { status: "draft", strategy_analytics: { computation_status: "complete" } }),
+      row("s-fine", { status: "draft", strategy_analytics: { computation_status: "complete" } }),
+    ];
+    state.adminReadHangs = ["s-hung"];
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      const pending = renderPage();
+      await vi.advanceTimersByTimeAsync(FACTSHEET_PROBE_DEADLINE_MS - 1);
+      // Just before the deadline the hung read is still open.
+      expect(state.adminAborted).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      const container = await pending;
+
+      expect(noteOf(container, "Strategy s-hung")).toBe(PROBE_UNREADABLE);
+      // The other row is unaffected: buildable, no note.
+      expect(noteOf(container, "Strategy s-fine")).toBeNull();
+      // The deadline reached the query as an AbortSignal.
+      expect(state.adminAborted).toEqual(["s-hung"]);
+      expect(consoleError).toHaveBeenCalledWith(
+        "[strategies/page] factsheet probe timed out",
+        expect.objectContaining({ id: "s-hung", deadlineMs: FACTSHEET_PROBE_DEADLINE_MS }),
+      );
+      // Its own reason in the ONE outcomes event, never a throw group.
+      expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+      expect(captureToSentryMock.mock.calls[0][1]).toMatchObject({
+        level: "error",
+        tags: { ...OUTCOME_TAGS, counted_rows: "1", timeout: "1", read_error: "0" },
+      });
+    } finally {
+      vi.useRealTimers();
+      consoleWarn.mockRestore();
+    }
   });
 
   it("PROBE-NOT-COMPUTED (D-05, SFH M-5): the embed says complete but the builder's read says failed, so the row takes the uncomputed path, logged at warn", async () => {

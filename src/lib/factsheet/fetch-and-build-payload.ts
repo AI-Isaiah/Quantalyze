@@ -251,20 +251,33 @@ async function resolveFactsheetInputs(
   id: string,
   visibility: StrategyVisibility,
   caller: ResolveCaller,
+  // 167.2.1-REVIEW-SFH-R2 N-3: the probe's deadline aborts the admin read
+  // through this signal. A build passes none, so its query is unchanged.
+  signal?: AbortSignal,
 ) {
-  const { data: strategy, error } = await visibility(
-    supabase
-      .from("strategies")
-      .select(
-        `id, name, codename, disclosure_tier, status, markets, strategy_types,
+  const strategyQuery = supabase
+    .from("strategies")
+    .select(
+      `id, name, codename, disclosure_tier, status, markets, strategy_types,
        description, subtypes, supported_exchanges, leverage_range, aum,
        max_capacity, avg_daily_turnover, start_date, benchmark, asset_class,
        returns_denominator_config,
        strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status )`,
-      )
-      .eq("id", id),
+    )
+    .eq("id", id);
+  const { data: strategy, error } = await visibility(
+    signal ? strategyQuery.abortSignal(signal) : strategyQuery,
   )
     .maybeSingle();
+  if (error && signal?.aborted) {
+    // The probe already answered with its timeout; this read was cancelled by
+    // that deadline, so it is not a second, separate outage.
+    console.warn(`[factsheet] resolve(${caller}) — admin strategy read aborted at the probe deadline`, {
+      id,
+      caller,
+    });
+    return notBuildable("read_error", { code: "aborted" });
+  }
   if (error) {
     // 167.2.1-REVIEW-SFH M-2: a failed admin read is an outage, not a data
     // fact. `console.*` does not reach Sentry in this repo (no console
@@ -650,6 +663,42 @@ async function buildFromResolved(
 }
 
 /**
+ * 167.2.1-REVIEW-SFH-R2 N-3 — how long one buildability probe may take before
+ * it answers "could not check". Chosen from repo evidence:
+ * - The probe is one admin read of the strategy row, plus a csv read for a
+ *   composite. On real rows, the live-DB lane measured it at 14 to 20 ms
+ *   (`167.2.1-01-SUMMARY.md`, PROBE-SINGLE / -COMPOSITE / -CONTROL). 5 s
+ *   leaves more than two orders of magnitude for a cold pool or a large
+ *   composite, so it fires only on a real stall.
+ * - The repo's other status probe with a deadline uses the same bound, for
+ *   the same reason: `MOUNT_PROBE_TIMEOUT_MS` in the wizard's
+ *   `SyncPreviewStep` ("a healthy read answers well inside a second; 5 s
+ *   leaves room for a cold route"). The
+ *   render-path side fetch in `scenario-share/[token]/page.tsx`
+ *   (`BENCHMARK_FETCH_TIMEOUT_MS`) is tighter at 2.5 s, but it guards an
+ *   optional overlay, not the row's own answer.
+ * - /strategies runs the probes `PROBE_CONCURRENCY` at a time, so the stall
+ *   one page load can suffer is bounded by ceil(computed rows / 4) x 5 s,
+ *   not by the platform's function timeout, which would kill the request
+ *   before the page's one Sentry event is sent.
+ */
+export const FACTSHEET_PROBE_DEADLINE_MS = 5_000;
+
+/**
+ * 167.2.1-REVIEW-SFH-R2 N-3 — a probe that did not answer within its
+ * deadline. Named, so a caller counts it as its own outcome and never mistakes
+ * it for a code defect.
+ */
+export class FactsheetProbeTimeoutError extends Error {
+  readonly deadlineMs: number;
+  constructor(deadlineMs: number) {
+    super(`factsheet probe: no answer within ${deadlineMs} ms`);
+    this.name = "FactsheetProbeTimeoutError";
+    this.deadlineMs = deadlineMs;
+  }
+}
+
+/**
  * Phase 167.2.1 (D-04, D-09) — can this strategy's factsheet build, answered by
  * the builder's own code without building it. It creates the same service-role
  * client and runs the SAME resolve stage `fetchAndBuildPayload` runs, and
@@ -675,7 +724,12 @@ async function buildFromResolved(
  *
  * `visibility` is REQUIRED for the reason `StrategyVisibility` gives: on the
  * service role the predicate is the only row gate. The probe does not catch a
- * throw; the caller maps a throw to "unreadable" (D-05).
+ * throw; the caller maps a throw to "unreadable" (D-05). A probe past its
+ * deadline rejects with `FactsheetProbeTimeoutError` (SFH-R2 N-3). The
+ * deadline aborts the strategies read. It cannot abort a composite's
+ * `csv_daily_returns` read, which `readCompositeFactsheet` issues without a
+ * signal, so that read may finish in the background after the probe has
+ * answered.
  *
  * ⛔ Never route this probe through the cached wrapper
  * `buildFactsheetPayloadCached` (D-11): its key carries no viewer, so it would
@@ -684,13 +738,33 @@ async function buildFromResolved(
 export async function probeFactsheetBuildable(
   id: string,
   visibility: StrategyVisibility,
+  deadlineMs: number = FACTSHEET_PROBE_DEADLINE_MS,
 ): Promise<FactsheetBuildability> {
-  const supabase = createAdminClient();
-  const resolved = await resolveFactsheetInputs(supabase, id, visibility, "probe");
-  if (!resolved.ok) {
-    // WR-01: the reason and its detail, never captured here (see ResolveCaller).
-    const { ok: _ok, ...refusal } = resolved;
-    return { buildable: false, ...refusal };
+  // 167.2.1-REVIEW-SFH-R2 N-3: the probe answers within `deadlineMs` or
+  // rejects with a `FactsheetProbeTimeoutError`, and the deadline aborts the
+  // admin strategies read so the abandoned request stops.
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new FactsheetProbeTimeoutError(deadlineMs));
+    }, deadlineMs);
+  });
+  const answer = (async (): Promise<FactsheetBuildability> => {
+    const supabase = createAdminClient();
+    const resolved = await resolveFactsheetInputs(supabase, id, visibility, "probe", controller.signal);
+    if (!resolved.ok) {
+      // WR-01: the reason and its detail, never captured here (see ResolveCaller).
+      const { ok: _ok, ...refusal } = resolved;
+      return { buildable: false, ...refusal };
+    }
+    return { buildable: true };
+  })();
+  try {
+    // `Promise.race` subscribes to both, so the loser's rejection is handled.
+    return await Promise.race([answer, deadline]);
+  } finally {
+    clearTimeout(timer);
   }
-  return { buildable: true };
 }

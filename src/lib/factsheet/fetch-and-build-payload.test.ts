@@ -31,6 +31,10 @@ const fake = vi.hoisted(() => ({
   csvError: null as unknown,
   tablesSeen: [] as string[],
   orFilters: [] as string[],
+  /** 167.2.1-REVIEW-SFH-R2 N-3: every AbortSignal a query was given. */
+  signals: [] as AbortSignal[],
+  /** N-3: the strategies read never answers until its signal aborts. */
+  strategyHangs: false,
 }));
 
 vi.mock("@/lib/supabase/admin", () => {
@@ -45,7 +49,21 @@ vi.mock("@/lib/supabase/admin", () => {
       fake.orFilters.push(filter);
       return b;
     };
+    let signal: AbortSignal | undefined;
+    b.abortSignal = (s: AbortSignal) => {
+      signal = s;
+      fake.signals.push(s);
+      return b;
+    };
     b.maybeSingle = async () => {
+      if (table === "strategies" && fake.strategyHangs) {
+        // As supabase-js does: an aborted request RESOLVES with an error.
+        return new Promise((resolve) =>
+          signal?.addEventListener("abort", () =>
+            resolve({ data: null, error: { message: "AbortError", code: "" } }),
+          ),
+        );
+      }
       if (table === "strategies") return fake.strategyResult;
       // strategy_analytics_series and anything else: no row.
       return { data: null, error: null };
@@ -74,6 +92,8 @@ vi.mock("./build-payload", async (importOriginal) => {
 });
 
 import {
+  FACTSHEET_PROBE_DEADLINE_MS,
+  FactsheetProbeTimeoutError,
   fetchAndBuildPayload,
   fetchAndBuildPayloadWithReason,
   probeFactsheetBuildable,
@@ -150,6 +170,8 @@ beforeEach(() => {
   fake.csvError = null;
   fake.tablesSeen = [];
   fake.orFilters = [];
+  fake.signals = [];
+  fake.strategyHangs = false;
   vi.mocked(captureToSentry).mockClear();
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -485,6 +507,47 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
       await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
       expect(vi.mocked(captureToSentry), f.name).not.toHaveBeenCalled();
     }
+  });
+
+  it("SFH-R2 N-3 PROBE DEADLINE: a hung read rejects with FactsheetProbeTimeoutError at the deadline and is aborted; a build passes no signal", async () => {
+    seed(single({ daily_returns: thirty }));
+    fake.strategyHangs = true;
+    vi.useFakeTimers();
+    try {
+      const probe = probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
+      const outcome = probe.then(
+        (v) => ({ ok: true as const, v }),
+        (e: unknown) => ({ ok: false as const, e }),
+      );
+      await vi.advanceTimersByTimeAsync(FACTSHEET_PROBE_DEADLINE_MS - 1);
+      expect(fake.signals).toHaveLength(1);
+      expect(fake.signals[0].aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const settled = await outcome;
+      expect(settled.ok).toBe(false);
+      const err = (settled as { e: unknown }).e;
+      expect(err).toBeInstanceOf(FactsheetProbeTimeoutError);
+      expect((err as Error).name).toBe("FactsheetProbeTimeoutError");
+      expect((err as FactsheetProbeTimeoutError).deadlineMs).toBe(FACTSHEET_PROBE_DEADLINE_MS);
+      // The deadline aborted the query it was given.
+      expect(fake.signals[0].aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    // The aborted read is a consequence of the deadline, not a second outage.
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+
+    // A probe that answers in time clears its timer and resolves normally.
+    fake.strategyHangs = false;
+    fake.signals = [];
+    expect(await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility)).toEqual({ buildable: true });
+    expect(fake.signals).toHaveLength(1);
+    expect(fake.signals[0].aborted).toBe(false);
+
+    // A build is not a probe: its query carries no signal.
+    fake.signals = [];
+    expect(await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility)).not.toBeNull();
+    expect(fake.signals).toEqual([]);
   });
 
   it("NO-NULL-AFTER-RESOLVE: every fixture the probe calls buildable builds a payload", async () => {
