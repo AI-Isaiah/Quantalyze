@@ -112,11 +112,11 @@ def _summary(*, day: str, rpl: float, upl: float, change: float = 0.0) -> dict[s
 
 
 def test_smoothed_option_row_contributes_full_change() -> None:
-    """Under smoothed_mtm an option trade/delivery row books its FULL native
-    `change` on its settlement day (the redistribution happens in the adapter's
-    ΔMTM channel, Task 4) — identical to cash_settlement's cash channel, NOT the
-    coverage-gated −commission arm of mark_to_market. A summary row is present but
-    must not reshape the option cash leg."""
+    """Under smoothed_mtm an option trade/delivery/assignment row books its FULL
+    native `change` on its settlement day (the redistribution happens in the
+    adapter's ΔMTM channel, Task 4) — identical to cash_settlement's cash channel,
+    NOT the coverage-gated −commission arm of mark_to_market. A summary row is
+    present but must not reshape the option cash leg."""
     rows = [
         _opt_trade(day="2025-07-13", change=0.05, commission=0.01, id=1),
         _summary(day="2025-07-14", rpl=0.03, upl=-0.01),
@@ -865,7 +865,8 @@ def test_smoothed_requires_full_history_crawl(monkeypatch: Any) -> None:
     FULL history. A ``since_ms``-cropped crawl would replay from the first
     in-window row — earlier held days silently unmarked and the first in-window
     day absorbing a book jump — and the activity gate (any option-evidence row)
-    can disagree with the replay (trade/delivery rows only) on a cropped slice.
+    can disagree with the replay (trade/delivery/assignment rows only, the
+    ``_OPTION_BOOK_EVENT_TYPES``) on a cropped slice.
     Fail loud BEFORE crawling; the other bases keep accepting ``since_ms``."""
     with pytest.raises(LedgerValuationError) as exc:
         _run_options_ledger(
