@@ -139,15 +139,24 @@ BEGIN
   -- would raise 23505 every time and refuse a toggle that can succeed: without
   -- the flip, the enqueue's dedup hands that in-flight row back and the toggle
   -- takes effect on it. The failed_retry row is then left where it is (a
-  -- pairing this RPC did not create).
+  -- pairing this RPC did not create). The narrowing covers 'running' too. Step
+  -- 2 refused every running row visible to it, so a running row seen here was
+  -- claimed after step 2. Flipping beside it would collide on the same index,
+  -- and the 23505 handler would answer "retry now" for a job that is RUNNING.
+  -- Skipping the flip instead lets the enqueue's dedup hand that running row
+  -- back, and step 3 refuses it with the running DETAIL (wait for it to end).
   -- The flip's WHERE repeats status = 'failed_retry'. A failed_retry row that
   -- appeared after step 1 is not locked by it, and if a claimer takes that row
   -- first, the repeated predicate fails on the re-read, nothing is written, and
   -- the enqueue below hands back the running row for step 3 to refuse; a flip
   -- keyed on the id alone would put a running job back to pending.
-  -- The 23505 handler covers the one sibling the NOT EXISTS cannot see: a
-  -- pending row another transaction inserts after that lookup, which the flip's
-  -- unique check waits on and then collides with once it commits.
+  -- The 23505 handler covers the one sibling the NOT EXISTS cannot see: an
+  -- in-flight row another transaction inserts after that lookup, which the
+  -- flip's unique check waits on and then collides with once it commits. That
+  -- row may be pending or already claimed, so its refusal has its own name,
+  -- HISTORY_RECOMPOSE_REQUEUED (retry now: the retry either folds into it or
+  -- meets the running refusal), distinct from HISTORY_RECOMPOSE_IN_PROGRESS
+  -- (a job is running: wait for it to end).
   --
   -- Step 3. Lock and re-check the job the reuse or the enqueue returned.
   -- Step 1 cannot see a job that another transaction enqueued, and a worker
@@ -187,7 +196,7 @@ BEGIN
                FROM public.compute_jobs o
               WHERE o.allocator_id = v_uid
                 AND o.kind = 'derive_allocator_equity'
-                AND o.status IN ('pending', 'done_pending_children'))
+                AND o.status IN ('pending', 'running', 'done_pending_children'))
      ORDER BY cj.next_attempt_at, cj.id
      LIMIT 1;
 
@@ -200,10 +209,10 @@ BEGIN
            AND status = 'failed_retry'
         RETURNING id INTO v_job;
       EXCEPTION WHEN unique_violation THEN
-        RAISE EXCEPTION 'HISTORY_RECOMPOSE_IN_PROGRESS'
+        RAISE EXCEPTION 'HISTORY_RECOMPOSE_REQUEUED'
           USING ERRCODE = '55006',
-                DETAIL  = 'Another recompose of your equity history was queued while this change was being saved. Try again; nothing was changed.',
-                HINT    = 'A retry folds your change into the recompose that is now queued.';
+                DETAIL  = 'Another recompose of your equity history was queued or started while this change was being saved. Try again; nothing was changed.',
+                HINT    = 'Retry now. A retry folds your change into the queued recompose, or reports the one that has started.';
       END;
     END IF;
 
