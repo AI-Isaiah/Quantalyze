@@ -3158,3 +3158,161 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     expect(wizardErrorCalls()).toEqual([]);
   });
 });
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 164.6.5-07 / D-14 (task 2/3) — EACH ENVELOPE SHOWS THE ID OF THE REQUEST
+ * THAT PRODUCED IT, NOT THE PAGE-LOAD ID.
+ *
+ * MultiKeyConnectStep builds envelopes at SEVERAL sites, driven by DIFFERENT
+ * requests: each panel's own add-key validate, the step-level Continue
+ * (set-members), and the mount-time rehydration (composite/members GET). A
+ * single component-wide id would recreate the defect one level down — one
+ * value covering several distinct failures. Each site is tested against the
+ * id its OWN request sent, never a shared/page-load fallback.
+ *
+ * ⚠️ ASSERT ON THE ID THE ENVELOPE ACTUALLY CARRIES, not a mock's call count.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[164.6.5-07 / D-14] MultiKeyConnectStep — each envelope shows its OWN request's id", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+  });
+
+  it("panel validate: the panel's envelope carries the id sent on THAT panel's add-key request", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        if (String(input).includes("composite/add-key")) {
+          return jsonResponse({ code: "TOTALLY_MADE_UP" }, 500);
+        }
+        return jsonResponse({}, 200);
+      });
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+
+    const panel0 = screen.getByTestId("key-panel-0");
+    fireEvent.change(within(panel0).getByTestId("key-0-api-key"), {
+      target: { value: "AK_0" },
+    });
+    fireEvent.change(within(panel0).getByTestId("key-0-api-secret"), {
+      target: { value: "SECRET_0" },
+    });
+    fireEvent.change(within(panel0).getByTestId("key-0-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    fireEvent.click(within(panel0).getByTestId("key-0-validate"));
+
+    const envelope = await within(panel0).findByTestId("error-envelope");
+    const call = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("composite/add-key"),
+    )!;
+    const sentId = new Headers((call[1] as RequestInit).headers).get(
+      "X-Correlation-Id",
+    );
+    expect(sentId).toMatch(/^wizard:[0-9a-f-]{36}$/);
+    expect(within(envelope).getByText(sentId!)).toBeInTheDocument();
+  });
+
+  it("continue: the step-level envelope carries the id sent on the set-members request, not a panel's add-key id", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("composite/add-key")) {
+          return jsonResponse(
+            { ok: true, strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID },
+            200,
+          );
+        }
+        if (url.includes("composite/set-members")) {
+          return jsonResponse({ code: "UNKNOWN" }, 500);
+        }
+        return jsonResponse({}, 200);
+      });
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+
+    async function validatePanel(idx: number, start: string, end: string) {
+      const panel = screen.getByTestId(`key-panel-${idx}`);
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-api-key`), {
+        target: { value: `AK_${idx}` },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-api-secret`), {
+        target: { value: `SECRET_${idx}` },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-window-start`), {
+        target: { value: start },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-window-end`), {
+        target: { value: end },
+      });
+      fireEvent.click(within(panel).getByTestId(`key-${idx}-validate`));
+      await waitFor(() =>
+        expect(screen.getByTestId(`key-${idx}-summary`)).toBeInTheDocument(),
+      );
+    }
+    await validatePanel(0, "2024-01-01", "2024-06-01");
+    await validatePanel(1, "2024-06-01", "2024-09-01");
+
+    fireEvent.click(screen.getByTestId("multi-continue"));
+    const envelope = await screen.findByTestId("error-envelope");
+
+    const setMembersCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("composite/set-members"),
+    )!;
+    const sentId = new Headers(
+      (setMembersCall[1] as RequestInit).headers,
+    ).get("X-Correlation-Id");
+    expect(sentId).toMatch(/^wizard:[0-9a-f-]{36}$/);
+    expect(within(envelope).getByText(sentId!)).toBeInTheDocument();
+
+    // NEGATIVE half: the two add-key calls sent their OWN (different) ids —
+    // the continue envelope must show NEITHER of them.
+    const addKeyCalls = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("composite/add-key"),
+    );
+    for (const c of addKeyCalls) {
+      const addKeyId = new Headers((c[1] as RequestInit).headers).get(
+        "X-Correlation-Id",
+      );
+      expect(addKeyId).not.toBe(sentId);
+    }
+  });
+
+  it("rehydration: the WIZARD_KEYS_LOAD_FAILED envelope carries the id sent on the composite/members GET", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        if (String(input).includes("composite/members")) {
+          return jsonResponse({}, 500);
+        }
+        return jsonResponse({}, 200);
+      });
+
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    const err = await screen.findByTestId("rehydrate-error");
+    const envelope = within(err).getByTestId("error-envelope");
+
+    const membersCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("composite/members"),
+    )!;
+    const sentId = new Headers((membersCall[1] as RequestInit).headers).get(
+      "X-Correlation-Id",
+    );
+    expect(sentId).toMatch(/^wizard:[0-9a-f-]{36}$/);
+    expect(within(envelope).getByText(sentId!)).toBeInTheDocument();
+  });
+});

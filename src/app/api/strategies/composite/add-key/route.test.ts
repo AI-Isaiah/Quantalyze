@@ -1429,6 +1429,40 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/composite/add-key — Sen
     expect(options.extra?.exchange).toBe("okx");
     expect(err).toBeInstanceOf(Error);
   });
+  /**
+   * 164.6.5 review round 1 / WR-06 + SFH-08. A wedged gateway terminal is the
+   * SHARED terminal every MT5 client validates against, and its card tells the
+   * user "tell us" — so it must reach an operator. Before this row the
+   * recognised verdict was outside `OUR_DEFECT_KEY_ERROR_CODES` and this route
+   * paged nobody, the same silence WR-02 above removed for `INTERNAL`.
+   * The mock carries what the seam throws: the wire code on `seamCode`.
+   */
+  it("[164.6.5 WR-06] a wedged MT5 terminal renders KEY_MT5_TERMINAL_UNRESPONSIVE/500 AND IS captured — it is our terminal", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error("The MetaTrader terminal we use to check this key is not answering."),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 500,
+          seamCode: "MT5_TERMINAL_UNRESPONSIVE",
+          dependency: "mt5-gateway",
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_MT5_TERMINAL_UNRESPONSIVE");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+
+    const { options } = await nextCapture();
+    expect(options.tags?.surface).toBe("strategies-composite-add-key");
+    expect(options.tags?.step).toBe("unclassified-key-error");
+  });
 });
 
 /**
