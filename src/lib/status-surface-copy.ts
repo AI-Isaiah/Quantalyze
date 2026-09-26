@@ -22,6 +22,9 @@
 
 import { EXCHANGE_DISPLAY } from "./closed-sets";
 import type { ComputeState, RecipientArm } from "./compute-state";
+// Type-only (Phase 167.2.1): erased at build, so this copy module pulls in
+// none of the builder's server-side imports.
+import type { NotBuildableReason } from "./factsheet/fetch-and-build-payload";
 import type { ShareAffordanceMode } from "./share-affordance";
 import type { StrategyShape } from "./strategy-shape";
 import { STALL_THRESHOLD_MS } from "./sync-progress";
@@ -53,6 +56,7 @@ type StateLineKey =
   | "failed_unknown"
   | "failed_other"
   | "finished"
+  | "finished_build_unreadable"
   | "never_started"
   | "unreadable";
 
@@ -126,6 +130,16 @@ const STATE_LINES = {
     tone: "amber",
     text: "The last computation finished, but the factsheet could not be built from its results.",
   },
+  // 167.2.1-REVIEW-R2 WR-03 — the jobs finished, but the owner build could not
+  // READ the row (`read_error`, or `not_visible` under the owner predicate), so
+  // nothing was built from the results and KCS09-FINISHED's "could not be
+  // built from its results" would be false. States only what is known, beside
+  // KCS12-PROBE-UNREADABLE's "We could not check …".
+  finished_build_unreadable: {
+    id: "KCS09-FINISHED-UNREADABLE",
+    tone: "muted",
+    text: "The last computation finished. We could not read its results to build the factsheet.",
+  },
   never_started: {
     id: "KCS09-NEVER",
     tone: "muted",
@@ -141,7 +155,20 @@ const STATE_LINES = {
   { id: string; tone: StateLineTone; text: string }
 >;
 
-function stateLineKeyOf(state: ComputeState): StateLineKey {
+/**
+ * 167.2.1-REVIEW-R2 WR-03 — what the owner page knows about its own build,
+ * beside the compute-job state. `buildUnreadable` is true when the owner
+ * build's admin read failed or found no row, so the page never learned
+ * whether the stored results can build. Only KCS09-FINISHED claims a build
+ * outcome, so it is the only line this changes; every other line is about the
+ * jobs alone and stays true.
+ */
+export type OwnerBuildFacts = { buildUnreadable: boolean };
+
+function stateLineKeyOf(
+  state: ComputeState,
+  build?: OwnerBuildFacts,
+): StateLineKey {
   switch (state.state) {
     case "queued":
       return "queued";
@@ -168,7 +195,7 @@ function stateLineKeyOf(state: ComputeState): StateLineKey {
           return "failed_other";
       }
     case "finished":
-      return "finished";
+      return build?.buildUnreadable ? "finished_build_unreadable" : "finished";
     case "never_started":
       return "never_started";
     case "unreadable":
@@ -177,12 +204,15 @@ function stateLineKeyOf(state: ComputeState): StateLineKey {
 }
 
 /** The owner's state line and its tone (UI-SPEC § KCS-09, § Color). */
-export function ownerStateLine(state: ComputeState): {
+export function ownerStateLine(
+  state: ComputeState,
+  build?: OwnerBuildFacts,
+): {
   id: string;
   text: string;
   tone: StateLineTone;
 } {
-  const key = stateLineKeyOf(state);
+  const key = stateLineKeyOf(state, build);
   const line = STATE_LINES[key];
   if (key === "running_member" && state.state === "running" && state.memberOf) {
     const text = RUN_MEMBER_TEMPLATE.replace(
@@ -255,6 +285,9 @@ const REMEDY_RULES = {
   failed_unknown: "shape",
   failed_other: "shape",
   finished: "contact_check",
+  // A read failure is not a data fault: "have it checked" would send the owner
+  // to support for an outage. The one remedy is to read again.
+  finished_build_unreadable: "retry_read",
   never_started: "shape",
   unreadable: "retry_read",
 } as const satisfies Record<StateLineKey, RemedyRule>;
@@ -301,8 +334,9 @@ export function ownerRemedy(
   state: ComputeState,
   shape: StrategyShape | "unknown",
   strategyId: string,
+  build?: OwnerBuildFacts,
 ): OwnerRemedy {
-  switch (REMEDY_RULES[stateLineKeyOf(state)]) {
+  switch (REMEDY_RULES[stateLineKeyOf(state, build)]) {
     case "reload":
       return { ...RELOAD_REMEDY };
     case "contact_permanent":
@@ -336,12 +370,150 @@ const PUBLIC_URL_NOTE =
  * What a recipient of this strategy's link sees right now (KCS12-MINT-A,
  * KCS12-MINT-B, KCS12-UNREADABLE for a private link; KCS12-PUBLIC for a
  * published strategy's public URL, whatever the arm).
+ *
+ * Phase 167.2.1 (D-02) adds four rows to this family for a row that is
+ * computed but whose factsheet cannot build: KCS12-UNBUILDABLE-SHORT,
+ * KCS12-UNBUILDABLE-COMPOSITE, KCS12-PUBLIC-UNBUILDABLE-SHORT and
+ * KCS12-PUBLIC-UNBUILDABLE-COMPOSITE. They are chosen by
+ * `recipientShareNoteFor`; this function never returns them. 167.2.1-REVIEW-SFH
+ * H-2 adds KCS12-UNBUILDABLE-UNREADABLE-SHORT and -COMPOSITE (also chosen by
+ * `recipientShareNoteFor`), and KCS12-PROBE-UNREADABLE and
+ * KCS12-PUBLIC-PROBE-UNREADABLE (`probeUnreadableShareNote`).
  */
 export function recipientShareNote(
   mode: ShareAffordanceMode,
   arm: RecipientArm,
 ): string {
   return mode === "public-url" ? PUBLIC_URL_NOTE : MINT_TOKEN_NOTES[arm];
+}
+
+/**
+ * Phase 167.2.1 (D-02) — why a computed row's factsheet cannot build, in the
+ * two kinds the copy distinguishes: a single-key series too short to build
+ * (`too_short`), or stored results we cannot build from (`cannot_build`): a
+ * composite, or since 167.2.1-REVIEW-SFH M-3 a single-key series whose stored
+ * entries are malformed.
+ */
+export type UnbuildableNoteKind = "too_short" | "cannot_build";
+
+/**
+ * The note kind for a probe reason, or null when the reason is not a
+ * build-time refusal of a computed row (`read_error`, `not_visible` and
+ * `not_computed` are decided by the caller, D-05).
+ *
+ * 167.2.1-REVIEW-SFH L-1: every reason is listed and the switch ends in a
+ * `never` check, so a new `NotBuildableReason` is a compile error here instead
+ * of silently answering "no kind" (which renders uncomputed copy for a
+ * computed row).
+ */
+export function unbuildableNoteKindOf(
+  reason: NotBuildableReason,
+): UnbuildableNoteKind | null {
+  switch (reason) {
+    case "too_few_points":
+      return "too_short";
+    case "composite_unbuildable":
+    case "malformed_series":
+      return "cannot_build";
+    case "read_error":
+    case "not_visible":
+    case "not_computed":
+      return null;
+    default: {
+      const unhandled: never = reason;
+      throw new Error(`unbuildableNoteKindOf: unhandled reason ${String(unhandled)}`);
+    }
+  }
+}
+
+// The "2" is MIN_FACTSHEET_SERIES_POINTS; status-surface-copy.test.ts pins the
+// sentences to that constant, so the copy cannot drift from the gate. "yet" is
+// dropped on purpose: waiting does not change this row (D-02).
+//
+// 167.2.1-REVIEW CR-01: the reason is stated from what the probe measured, the
+// STORED RESULTS, and never from "the last computation". The owner page prints
+// this note under a state line derived from compute JOBS, and those can read
+// "none is on record" (done jobs are purged after 30 days) or "stopped on a
+// problem" while the analytics row still reads complete. A sentence about the
+// stored results is true beside every one of those lines.
+// 167.2.1-REVIEW IN-02: active voice, and the address is SUPPORT_EMAIL.
+// 167.2.1-REVIEW-SFH-R2 N-5: the SHORT line is about the stored results the
+// builder READS ("we build its factsheet from"), not all of them. A short but
+// valid `daily_returns` beside a long `returns_series` is too short: the
+// builder reads `daily_returns` and never falls back, so "its stored results
+// hold fewer than 2 days" was false about that row's other column.
+const MINT_UNBUILDABLE_NOTES = {
+  too_short:
+    "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.",
+  cannot_build: `Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact ${SUPPORT_EMAIL} to have them checked.`,
+} as const satisfies Record<UnbuildableNoteKind, string>;
+
+const PUBLIC_UNBUILDABLE_NOTES = {
+  too_short:
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.",
+  cannot_build: `Right now, this strategy's factsheet link shows that the factsheet is not available. We cannot build a factsheet from its stored results. Contact ${SUPPORT_EMAIL} to have them checked.`,
+} as const satisfies Record<UnbuildableNoteKind, string>;
+
+// 167.2.1-REVIEW-SFH H-2 — a private link to an unbuildable row whose job
+// read failed. The recipient's card is not known (being prepared, or not
+// available), but that it is a placeholder IS: the row cannot build. So the
+// line claims the placeholder and states the stored-results reason, and never
+// KCS12-UNREADABLE's tail "They appear there once a computation succeeds",
+// which is false for a row whose computation already succeeded.
+const MINT_UNBUILDABLE_UNREADABLE_NOTES = {
+  too_short:
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.",
+  cannot_build: `Right now, a private link to this strategy shows a placeholder page instead of the numbers. We cannot build a factsheet from its stored results. Contact ${SUPPORT_EMAIL} to have them checked.`,
+} as const satisfies Record<UnbuildableNoteKind, string>;
+
+// 167.2.1-REVIEW-SFH H-2 — the buildability check itself failed (the probe
+// threw, or its admin read errored or found no row), so what a recipient sees
+// is NOT KNOWN. KCS12-PUBLIC ("… not available yet …") and KCS12-UNREADABLE
+// ("… shows a placeholder page …") both assert a recipient view the page could
+// not check, and on a published computed row the public factsheet most likely
+// renders fine. These lines claim only the failed check, in the voice of
+// KCS-KEYSTATUS-UNREADABLE, and name the one remedy the owner has.
+const PROBE_UNREADABLE_NOTES = {
+  "mint-token":
+    "We could not check what a private link to this strategy shows right now. Reload this page to check again.",
+  "public-url":
+    "We could not check what this strategy's factsheet link shows right now. Reload this page to check again.",
+} as const satisfies Record<ShareAffordanceMode, string>;
+
+/**
+ * 167.2.1-REVIEW-SFH H-2 — KCS12-PROBE-UNREADABLE and
+ * KCS12-PUBLIC-PROBE-UNREADABLE: the note for a computed row whose
+ * buildability could not be checked. Deliberately NOT a `RecipientArm`: an
+ * arm is what the recipient sees, and here that is exactly what is unknown.
+ * `recipientShareNote` cannot express it (it ignores the arm for a public
+ * URL, 167.2 IN-04), which is why this is its own function.
+ */
+export function probeUnreadableShareNote(mode: ShareAffordanceMode): string {
+  return PROBE_UNREADABLE_NOTES[mode];
+}
+
+/**
+ * Phase 167.2.1 (D-02) — the selection rule. With no unbuildable kind this is
+ * `recipientShareNote(mode, arm)`. For an unbuildable row, a public URL takes
+ * its PUBLIC-UNBUILDABLE line whatever the arm (167.2 IN-04: no RPC); a
+ * private link takes its UNBUILDABLE line only on arm `not_available`, which is
+ * exactly when the share page shows its "not available" card. Arm
+ * `in_progress` keeps KCS12-MINT-A (a recompute is running and the recipient
+ * sees "being prepared"). Arm `unreadable` takes
+ * KCS12-UNBUILDABLE-UNREADABLE-SHORT or -COMPOSITE (167.2.1-REVIEW-SFH H-2):
+ * the card is unknown, the placeholder and its reason are not, and
+ * KCS12-UNREADABLE's "once a computation succeeds" is false for this row.
+ */
+export function recipientShareNoteFor(
+  mode: ShareAffordanceMode,
+  arm: RecipientArm,
+  kind: UnbuildableNoteKind | null,
+): string {
+  if (kind === null) return recipientShareNote(mode, arm);
+  if (mode === "public-url") return PUBLIC_UNBUILDABLE_NOTES[kind];
+  if (arm === "not_available") return MINT_UNBUILDABLE_NOTES[kind];
+  if (arm === "unreadable") return MINT_UNBUILDABLE_UNREADABLE_NOTES[kind];
+  return recipientShareNote(mode, arm);
 }
 
 // ── S9 — KCS-11 share page arms ───────────────────────────────────────────

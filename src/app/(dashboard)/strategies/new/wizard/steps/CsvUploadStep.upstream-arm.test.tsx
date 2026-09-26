@@ -157,6 +157,46 @@ describe("[140.5-05] CsvUploadStep — branch 3: the §4a founder copy", () => {
     expect(screen.queryByTestId("wizard-csv-error")).not.toBeInTheDocument();
   });
 
+  // 164.6.5-07 / D-14 (task 3) — CLOSE THE CLASS. Same shape as
+  // CsvSubmitStep's sibling test: the test above proves SOME wizard id
+  // renders; this proves it is the id THIS request actually sent, not the
+  // stable page-load id.
+  it("[164.6.5-07 / D-14] with no upstream id, the envelope shows the id THIS request sent", async () => {
+    fetchSpy.mockResolvedValue(jsonResponse({ error: "Unauthorized" }, 401));
+    mountAndSubmit();
+
+    const panel = await screen.findByTestId("error-envelope");
+    const sentId = new Headers(
+      (fetchSpy.mock.calls[0][1] as RequestInit).headers,
+    ).get("X-Correlation-Id");
+    expect(sentId).toMatch(/^wizard:[0-9a-f-]{36}$/);
+    expect(panel.textContent).toContain(sentId);
+  });
+
+  it("[164.6.5-07 / D-14] two failed uploads with no upstream id render TWO DIFFERENT ids", async () => {
+    fetchSpy
+      .mockResolvedValueOnce(jsonResponse({ error: "Unauthorized" }, 401))
+      .mockResolvedValueOnce(jsonResponse({ error: "Unauthorized again" }, 401));
+    mountAndSubmit();
+    const firstPanel = await screen.findByTestId("error-envelope");
+    const firstId = new Headers(
+      (fetchSpy.mock.calls[0][1] as RequestInit).headers,
+    ).get("X-Correlation-Id");
+    expect(firstPanel.textContent).toContain(firstId);
+
+    fireEvent.click(screen.getByTestId("wizard-csv-validate-submit"));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+    const secondPanel = await screen.findByTestId("error-envelope");
+    const secondId = new Headers(
+      (fetchSpy.mock.calls[1][1] as RequestInit).headers,
+    ).get("X-Correlation-Id");
+    expect(
+      secondId,
+      "the same id rendered across two distinct failed requests",
+    ).not.toBe(firstId);
+    expect(secondPanel.textContent).toContain(secondId);
+  });
+
   it("a FastAPI 403 `{detail: 'Forbidden'}` reaches the SAME sentence (one message, every status)", async () => {
     // §4a's founder decision, in its own words: the user cannot act differently
     // on a 403 than on a 404. A per-status roster was explicitly rejected.
