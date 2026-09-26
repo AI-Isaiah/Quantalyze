@@ -36,8 +36,9 @@
 --   1. api_keys.account_shared_with_api_key_id + account_share_kind (D-11): the
 --      MARKER a service-role identity stamper (plan 04) writes when a second
 --      live key reads an exchange account another live key of the same owner
---      already holds. Both-or-neither, never self-referencing, the holder must
---      belong to the same owner. Nothing is ever auto-disconnected or deleted
+--      already holds. Both-or-neither, never self-referencing, and when it is
+--      written the holder must exist, belong to the same owner, be live and not
+--      itself be marked (no chains, no cycles). Nothing is ever auto-disconnected or deleted
 --      (D-01): the marker is shown on the key card beside the owner's own
 --      Disconnect and Delete controls.
 --   2. api_keys.history_inclusion (D-05, D-09): the owner's include/exclude
@@ -75,9 +76,11 @@
 -- defines it, 20260422101911_api_keys_disconnected_at.sql, and its body is
 -- byte-identical to supabase/schema/baseline.sql's and to the committed
 -- snapshot supabase/schema/functions/reconnect_allocator_api_key.sql. The
--- edits are: the ownership SELECT also reads exchange and venue_account_id, and
--- one refusal block sits between the idempotency check and the UPDATE. Every
--- other line is the snapshot's.
+-- edits are: the ownership SELECT also reads exchange and venue_account_id,
+-- one refusal block sits between the idempotency check and the UPDATE, and the
+-- UPDATE also resets history_inclusion to NULL (a choice made for a PAST
+-- departure must not silently apply to a later one). Every other line is the
+-- snapshot's.
 --
 -- The hash below is the `live` column (fifth TSV field) of
 --   node scripts/sql-body-normalize.mjs --diff-bodies \
@@ -135,8 +138,11 @@ COMMENT ON COLUMN public.api_keys.account_shared_with_api_key_id IS
   'exchange account this key reads, or NULL. Written only by the service-role '
   'identity stamper; no client INSERT or UPDATE path exists. Always set '
   'together with account_share_kind (api_keys_account_share_both_or_neither), '
-  'never this row itself (api_keys_account_share_not_self), and the holder must '
-  'belong to the same user_id (trigger api_keys_account_share_same_owner). '
+  'never this row itself (api_keys_account_share_not_self), and, when written, '
+  'the holder must exist, belong to the same user_id, be live (disconnected_at '
+  'NULL) and be unmarked itself, and this row must not be anyone''s holder '
+  '(trigger api_keys_account_share_same_owner). A holder that is disconnected '
+  'LATER keeps this value until the stamper re-evaluates it. '
   'ON DELETE SET NULL: hard-deleting the holder clears this column AND '
   'account_share_kind together, so the delete never aborts. Nothing is ever '
   'auto-disconnected or deleted because of this marker (D-01): the owner '
@@ -158,21 +164,27 @@ CREATE FUNCTION public.enforce_api_keys_account_share_same_owner()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'public', 'pg_temp'
+SET search_path TO public, pg_catalog
 AS $$
 DECLARE
-  v_holder_owner uuid;
+  v_holder_owner  uuid;
+  v_holder_disc   timestamptz;
+  v_holder_holder uuid;
 BEGIN
   -- (1) NULL holder: no lookup, never a refusal. Every ordinary key INSERT, the
   -- stamper's marker-clearing UPDATE and the FK's ON DELETE SET NULL action
   -- take this branch.
   IF NEW.account_shared_with_api_key_id IS NULL THEN
     IF TG_OP = 'UPDATE' THEN
-      IF OLD.account_shared_with_api_key_id IS NOT NULL THEN
-        -- The holder is being cleared (by the stamper, or by the FK action
-        -- after the holder was hard-deleted). Clear the kind in the same row
-        -- write, or api_keys_account_share_both_or_neither aborts the
-        -- statement, and with it the owner's delete of the holder key.
+      IF OLD.account_shared_with_api_key_id IS NOT NULL
+         AND NEW.account_share_kind IS NOT DISTINCT FROM OLD.account_share_kind THEN
+        -- The holder is being cleared and the writer left the kind alone (the
+        -- FK action after the holder was hard-deleted names ONLY the holder
+        -- column). Clear the kind in the same row write, or
+        -- api_keys_account_share_both_or_neither aborts the statement, and
+        -- with it the owner's delete of the holder key. A writer that sets the
+        -- holder to NULL AND writes a DIFFERENT non-NULL kind is contradicting
+        -- itself; its kind is kept, so the CHECK refuses it by name.
         NEW.account_share_kind := NULL;
       END IF;
     END IF;
@@ -181,17 +193,55 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  -- (2) a holder is named: it must exist and belong to this row's owner.
-  -- SECURITY DEFINER so the lookup reads the holder row whatever the caller's
-  -- RLS view is; the only thing it returns is a refusal.
-  SELECT user_id INTO v_holder_owner
+  -- (2) a holder is named. SECURITY DEFINER so the lookup reads the holder row
+  -- whatever the caller's RLS view is; the only thing it returns is a refusal.
+  -- FOR SHARE serialises this write against a concurrent write that marks the
+  -- holder itself, so two racing writers cannot build a chain between them.
+  SELECT user_id, disconnected_at, account_shared_with_api_key_id
+    INTO v_holder_owner, v_holder_disc, v_holder_holder
     FROM public.api_keys
-   WHERE id = NEW.account_shared_with_api_key_id;
+   WHERE id = NEW.account_shared_with_api_key_id
+     FOR SHARE;
 
-  IF v_holder_owner IS NULL OR v_holder_owner IS DISTINCT FROM NEW.user_id THEN
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_NOT_FOUND'
+      USING ERRCODE = '23503',
+            DETAIL  = 'api_keys.account_shared_with_api_key_id names no api_keys row.';
+  END IF;
+
+  IF v_holder_owner IS DISTINCT FROM NEW.user_id THEN
     RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER'
       USING ERRCODE = '42501',
             DETAIL  = 'api_keys.account_shared_with_api_key_id must name a key of the same user_id.';
+  END IF;
+
+  -- The holder must be LIVE in the sense api_keys_user_exchange_venue_account_uniq
+  -- uses: disconnected_at IS NULL. A revoked key is still live here, exactly as
+  -- it is for that index (it is recovered in place by a reconnect).
+  IF v_holder_disc IS NOT NULL THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_NOT_LIVE'
+      USING ERRCODE = '55000',
+            DETAIL  = 'api_keys.account_shared_with_api_key_id must name a key whose disconnected_at is NULL.';
+  END IF;
+
+  -- No chains and no cycles: the book counts a marked account once, through
+  -- its holder, so a holder that is itself marked would leave the account
+  -- counted by nobody (a 2-cycle) or resolved through a key that is not
+  -- counted (a chain). Both directions are refused.
+  IF v_holder_holder IS NOT NULL THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_IS_MARKED'
+      USING ERRCODE = '23000',
+            DETAIL  = 'The named holder is itself marked as sharing another key''s account; name that key instead.';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+      FROM public.api_keys d
+     WHERE d.account_shared_with_api_key_id = NEW.id
+  ) THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_KEY_IS_A_HOLDER'
+      USING ERRCODE = '23000',
+            DETAIL  = 'Another key already names this key as its holder, so this key cannot itself be marked.';
   END IF;
 
   RETURN NEW;
@@ -205,11 +255,21 @@ COMMENT ON FUNCTION public.enforce_api_keys_account_share_same_owner() IS
   'Phase 167.1.2 D-11. BEFORE INSERT OR UPDATE OF account_shared_with_api_key_id '
   'on api_keys. A NULL holder short-circuits with no lookup (so no ordinary '
   'insert pays for it or can be refused by it), and on an UPDATE that clears a '
-  'holder it clears account_share_kind too, so the FK''s ON DELETE SET NULL '
-  'action never trips api_keys_account_share_both_or_neither. A non-NULL holder '
-  'must exist and share the row''s user_id, else 42501 '
-  'ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER. Enforced in the database, not only in '
-  'the stamper, so no writer can point a key at another tenant''s key.';
+  'holder while leaving the kind as it was, it clears account_share_kind too, '
+  'so the FK''s ON DELETE SET NULL action never trips '
+  'api_keys_account_share_both_or_neither (a write that clears the holder but '
+  'sets a different kind keeps that kind and is refused by the CHECK). A '
+  'non-NULL holder is refused: 23503 ACCOUNT_SHARE_HOLDER_NOT_FOUND when no '
+  'such row exists; 42501 ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER when it belongs '
+  'to another user_id; 55000 ACCOUNT_SHARE_HOLDER_NOT_LIVE when its '
+  'disconnected_at is set; 23000 ACCOUNT_SHARE_HOLDER_IS_MARKED when the holder '
+  'is itself marked, and 23000 ACCOUNT_SHARE_KEY_IS_A_HOLDER when another key '
+  'already names this row as its holder (no chains, no cycles). Enforced in '
+  'the database AT THE MOMENT THE MARKER IS WRITTEN, not only in the stamper, '
+  'so no writer can point a key at another tenant''s key, at a departed key, '
+  'or into a chain. A holder that departs LATER keeps its dependents'' markers '
+  'until the stamper re-evaluates them; this trigger does not fire on a '
+  'disconnect.';
 
 CREATE TRIGGER api_keys_account_share_same_owner
 BEFORE INSERT OR UPDATE OF account_shared_with_api_key_id
@@ -242,7 +302,9 @@ COMMENT ON COLUMN public.api_keys.history_inclusion IS
   '''include'' / ''exclude'' = the owner''s explicit choice; ''include'' '
   'overrides only the unknown-identity default and never re-opens days on '
   'which another counted key holds the same known account. Written only by '
-  'set_departed_key_history_inclusion.';
+  'set_departed_key_history_inclusion, and RESET to NULL by '
+  'reconnect_allocator_api_key: a choice made for one departure never carries '
+  'over to a later one.';
 
 -- ─────── 3. the owner RPC for (2). Shape mirrors disconnect_allocator_api_key.
 CREATE FUNCTION public.set_departed_key_history_inclusion(
@@ -252,7 +314,7 @@ CREATE FUNCTION public.set_departed_key_history_inclusion(
 RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'public', 'pg_temp'
+SET search_path TO public, pg_catalog
 AS $$
 DECLARE
   v_uid          uuid := auth.uid();
@@ -260,16 +322,20 @@ DECLARE
   v_disconnected timestamptz;
   v_sync_status  text;
   v_previous     text;
+  v_job          uuid;
+  v_job_status   text;
 BEGIN
   IF v_uid IS NULL THEN
     RAISE EXCEPTION 'not_authenticated'
       USING ERRCODE = '42501';
   END IF;
 
+  -- Scoped to the caller, so another user's row is never even locked.
   SELECT user_id, disconnected_at, sync_status, history_inclusion
     INTO v_owner, v_disconnected, v_sync_status, v_previous
     FROM api_keys
    WHERE id = p_api_key_id
+     AND user_id = v_uid
      FOR UPDATE;
 
   IF v_owner IS NULL OR v_owner <> v_uid THEN
@@ -288,8 +354,38 @@ BEGIN
   -- Only a departed key has an end day, so only a departed key has a choice.
   IF v_disconnected IS NULL AND v_sync_status IS DISTINCT FROM 'revoked' THEN
     RAISE EXCEPTION 'KEY_NOT_DEPARTED'
-      USING ERRCODE = '22023',
+      USING ERRCODE = '55000',
             DETAIL  = 'Only a disconnected or revoked key''s history can be included or excluded; a live key always counts.';
+  END IF;
+
+  -- A recompose that is already RUNNING has read (or may have read) the old
+  -- value, and enqueue_compute_job would fold this request into it: its
+  -- in-flight dedup AND the partial unique index
+  -- compute_jobs_one_inflight_per_kind_allocator both cover pending, running
+  -- and done_pending_children, so no second job for (allocator, kind) can be
+  -- queued behind a running one. MEASURED 2026-09-26 over the 9-arg
+  -- enqueue_compute_job (20260515210300) and the 10-arg
+  -- _enqueue_compute_job_internal (20260924230827): p_idempotency_key is not
+  -- part of the dedup, p_run_at only sets next_attempt_at, and a fan-in child
+  -- (p_parent_job_ids) starts done_pending_children, which the same index
+  -- covers. So the only way to never report success over a stale curve,
+  -- without changing that contract for every other caller, is to refuse by
+  -- name and let the owner retry once the running compose ends. Nothing is
+  -- written. A PENDING job is locked FOR UPDATE here instead: the claim path
+  -- takes rows FOR UPDATE SKIP LOCKED, so no worker can claim it before this
+  -- transaction commits the new value, and when it runs it reads that value.
+  -- The same partial unique index guarantees at most one such row.
+  SELECT id, status INTO v_job, v_job_status
+    FROM compute_jobs
+   WHERE allocator_id = v_uid
+     AND kind = 'derive_allocator_equity'
+     AND status IN ('pending', 'running', 'done_pending_children')
+     FOR UPDATE;
+
+  IF v_job_status = 'running' THEN
+    RAISE EXCEPTION 'HISTORY_RECOMPOSE_IN_PROGRESS'
+      USING ERRCODE = '55006',
+            DETAIL  = 'Your equity history is being recomputed right now. Try again when it finishes; nothing was changed.';
   END IF;
 
   UPDATE api_keys
@@ -299,12 +395,14 @@ BEGIN
 
   -- Recompose the caller's curve. Allocator-scoped, so enqueue_compute_job's
   -- own gate requires p_allocator_id = auth.uid(), and its in-flight dedup
-  -- makes a burst of toggles one job.
-  PERFORM enqueue_compute_job(
+  -- hands back the pending job locked above, so a burst of toggles is one job.
+  v_job := enqueue_compute_job(
     p_strategy_id  := NULL,
     p_kind         := 'derive_allocator_equity',
     p_allocator_id := v_uid
   );
+
+  RAISE NOTICE 'set_departed_key_history_inclusion: recompose job % queued for the caller', v_job;
 
   RETURN v_previous IS DISTINCT FROM p_inclusion;
 END;
@@ -320,11 +418,16 @@ COMMENT ON FUNCTION public.set_departed_key_history_inclusion(uuid, text) IS
   'toggled on or off, to be included or excluded. They would be included only '
   'till the day that the key was deleted." Writes api_keys.history_inclusion '
   'for the CALLER''s departed key (disconnected or revoked) and enqueues '
-  'derive_allocator_equity for the caller. 42501 when unauthenticated or not '
-  'the owner; 22023 KEY_NOT_DEPARTED on a live, non-revoked key; 22023 '
-  'HISTORY_INCLUSION_INVALID on a value other than include / exclude / NULL '
-  '(NULL resets to the default rule). Returns true iff the stored value '
-  'changed; the recompose is requested either way. EXECUTE: authenticated only.';
+  'derive_allocator_equity for the caller (the job id is RAISEd as a NOTICE). '
+  'Clients map by SQLSTATE: 42501 when unauthenticated or not the owner; '
+  '22023 HISTORY_INCLUSION_INVALID on a value other than include / exclude / '
+  'NULL (NULL resets to the default rule); 55000 KEY_NOT_DEPARTED on a live, '
+  'non-revoked key; 55006 HISTORY_RECOMPOSE_IN_PROGRESS when a recompose for '
+  'the caller is already RUNNING, because it may have read the old value and '
+  'no second job can queue behind it (retry once it ends; nothing is written). '
+  'A PENDING recompose is locked until commit so it reads the new value. '
+  'Returns true iff the stored value changed; the recompose is requested '
+  'either way. EXECUTE: authenticated only.';
 
 -- ───── 4. reconnect_allocator_api_key — re-based on 20260422101911, +1 refusal
 CREATE OR REPLACE FUNCTION public.reconnect_allocator_api_key(
@@ -382,7 +485,8 @@ BEGIN
   UPDATE api_keys
     SET disconnected_at = NULL,
         sync_error      = NULL,
-        sync_status     = 'idle'
+        sync_status     = 'idle',
+        history_inclusion = NULL
     WHERE id = p_api_key_id
       AND user_id = v_uid
       AND disconnected_at IS NOT NULL;
@@ -392,7 +496,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.reconnect_allocator_api_key IS
-  'Migration 075: reverse of disconnect_allocator_api_key. Clears disconnected_at + resets sync_error and sync_status=idle so the next cron tick picks the key up fresh. Returns false if the key was not disconnected. Phase 167.1.2: refuses with SQLSTATE 23505 and message KEY_VENUE_ALREADY_CONNECTED, leaving the key disconnected, when a LIVE key of the same user, exchange and venue_account_id exists; a race that reaches api_keys_user_exchange_venue_account_uniq raises the same SQLSTATE.';
+  'Migration 075: reverse of disconnect_allocator_api_key. Clears disconnected_at + resets sync_error and sync_status=idle so the next cron tick picks the key up fresh. Returns false if the key was not disconnected. Phase 167.1.2: refuses with SQLSTATE 23505 and message KEY_VENUE_ALREADY_CONNECTED, leaving the key disconnected, when a LIVE key of the same user, exchange and venue_account_id exists; a race that reaches api_keys_user_exchange_venue_account_uniq raises the same SQLSTATE. A successful reconnect also resets history_inclusion to NULL, so an include/exclude choice made for a past departure never applies to a later one.';
 
 REVOKE ALL ON FUNCTION public.reconnect_allocator_api_key(uuid)
   FROM PUBLIC, anon;
@@ -566,7 +670,51 @@ BEGIN
     RAISE EXCEPTION 'Migration 20260925120000 failed: anon unexpectedly holds EXECUTE on set_departed_key_history_inclusion';
   END IF;
 
-  RAISE NOTICE 'Migration 20260925120000: marker columns, history_inclusion, same-owner trigger, owner RPC, reconnect refusal and column grants in place.';
+  -- The trigger must be BEFORE, ROW, INSERT OR UPDATE (no DELETE, no
+  -- TRUNCATE): tgtype 1 (ROW) + 2 (BEFORE) + 4 (INSERT) + 16 (UPDATE) = 23, and
+  -- its UPDATE OF list must be exactly the holder column (int2vector is compared
+  -- through its text form: a direct cast keeps its zero lower bound, and an
+  -- array with a different lower bound never equals ARRAY[...]). A trigger that fired
+  -- on every UPDATE would put the holder lookup on every worker write.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger t
+     WHERE t.tgrelid = 'public.api_keys'::regclass
+       AND t.tgname = 'api_keys_account_share_same_owner'
+       AND t.tgtype = 23
+       AND string_to_array(t.tgattr::text, ' ')::int2[] = ARRAY[(
+         SELECT a.attnum FROM pg_attribute a
+          WHERE a.attrelid = 'public.api_keys'::regclass
+            AND a.attname = 'account_shared_with_api_key_id'
+       )]::int2[]
+       AND t.tgfoid = 'public.enforce_api_keys_account_share_same_owner()'::regprocedure
+  ) THEN
+    RAISE EXCEPTION 'Migration 20260925120000 failed: api_keys_account_share_same_owner is not BEFORE INSERT OR UPDATE OF account_shared_with_api_key_id FOR EACH ROW on the enforce function';
+  END IF;
+
+  -- The partial holder index the FK's SET NULL action looks rows up through.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_index i
+     WHERE i.indrelid = 'public.api_keys'::regclass
+       AND i.indexrelid = to_regclass('public.api_keys_account_shared_with_idx')
+       AND i.indpred IS NOT NULL
+       AND string_to_array(i.indkey::text, ' ')::int2[] = ARRAY[(
+         SELECT a.attnum FROM pg_attribute a
+          WHERE a.attrelid = 'public.api_keys'::regclass
+            AND a.attname = 'account_shared_with_api_key_id'
+       )]::int2[]
+  ) THEN
+    RAISE EXCEPTION 'Migration 20260925120000 failed: the partial holder index api_keys_account_shared_with_idx is missing or not on account_shared_with_api_key_id';
+  END IF;
+
+  -- The reconnect body carries the named refusal. (Its history_inclusion reset
+  -- is a behaviour, gated by arm RECON-hist in the test file, not here.)
+  IF position('KEY_VENUE_ALREADY_CONNECTED' IN (
+       SELECT prosrc FROM pg_proc WHERE oid = 'public.reconnect_allocator_api_key(uuid)'::regprocedure
+     )) = 0 THEN
+    RAISE EXCEPTION 'Migration 20260925120000 failed: reconnect_allocator_api_key lacks the KEY_VENUE_ALREADY_CONNECTED refusal';
+  END IF;
+
+  RAISE NOTICE 'Migration 20260925120000: marker columns and constraints, the same-owner trigger (BEFORE INSERT OR UPDATE OF the holder column) and the partial holder index, history_inclusion, the owner RPC, the reconnect refusal, and column grants in place.';
 END
 $verify$;
 

@@ -8,21 +8,27 @@ CREATE FUNCTION public.enforce_api_keys_account_share_same_owner()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'public', 'pg_temp'
+SET search_path TO public, pg_catalog
 AS $$
 DECLARE
-  v_holder_owner uuid;
+  v_holder_owner  uuid;
+  v_holder_disc   timestamptz;
+  v_holder_holder uuid;
 BEGIN
   -- (1) NULL holder: no lookup, never a refusal. Every ordinary key INSERT, the
   -- stamper's marker-clearing UPDATE and the FK's ON DELETE SET NULL action
   -- take this branch.
   IF NEW.account_shared_with_api_key_id IS NULL THEN
     IF TG_OP = 'UPDATE' THEN
-      IF OLD.account_shared_with_api_key_id IS NOT NULL THEN
-        -- The holder is being cleared (by the stamper, or by the FK action
-        -- after the holder was hard-deleted). Clear the kind in the same row
-        -- write, or api_keys_account_share_both_or_neither aborts the
-        -- statement, and with it the owner's delete of the holder key.
+      IF OLD.account_shared_with_api_key_id IS NOT NULL
+         AND NEW.account_share_kind IS NOT DISTINCT FROM OLD.account_share_kind THEN
+        -- The holder is being cleared and the writer left the kind alone (the
+        -- FK action after the holder was hard-deleted names ONLY the holder
+        -- column). Clear the kind in the same row write, or
+        -- api_keys_account_share_both_or_neither aborts the statement, and
+        -- with it the owner's delete of the holder key. A writer that sets the
+        -- holder to NULL AND writes a DIFFERENT non-NULL kind is contradicting
+        -- itself; its kind is kept, so the CHECK refuses it by name.
         NEW.account_share_kind := NULL;
       END IF;
     END IF;
@@ -31,17 +37,55 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  -- (2) a holder is named: it must exist and belong to this row's owner.
-  -- SECURITY DEFINER so the lookup reads the holder row whatever the caller's
-  -- RLS view is; the only thing it returns is a refusal.
-  SELECT user_id INTO v_holder_owner
+  -- (2) a holder is named. SECURITY DEFINER so the lookup reads the holder row
+  -- whatever the caller's RLS view is; the only thing it returns is a refusal.
+  -- FOR SHARE serialises this write against a concurrent write that marks the
+  -- holder itself, so two racing writers cannot build a chain between them.
+  SELECT user_id, disconnected_at, account_shared_with_api_key_id
+    INTO v_holder_owner, v_holder_disc, v_holder_holder
     FROM public.api_keys
-   WHERE id = NEW.account_shared_with_api_key_id;
+   WHERE id = NEW.account_shared_with_api_key_id
+     FOR SHARE;
 
-  IF v_holder_owner IS NULL OR v_holder_owner IS DISTINCT FROM NEW.user_id THEN
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_NOT_FOUND'
+      USING ERRCODE = '23503',
+            DETAIL  = 'api_keys.account_shared_with_api_key_id names no api_keys row.';
+  END IF;
+
+  IF v_holder_owner IS DISTINCT FROM NEW.user_id THEN
     RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER'
       USING ERRCODE = '42501',
             DETAIL  = 'api_keys.account_shared_with_api_key_id must name a key of the same user_id.';
+  END IF;
+
+  -- The holder must be LIVE in the sense api_keys_user_exchange_venue_account_uniq
+  -- uses: disconnected_at IS NULL. A revoked key is still live here, exactly as
+  -- it is for that index (it is recovered in place by a reconnect).
+  IF v_holder_disc IS NOT NULL THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_NOT_LIVE'
+      USING ERRCODE = '55000',
+            DETAIL  = 'api_keys.account_shared_with_api_key_id must name a key whose disconnected_at is NULL.';
+  END IF;
+
+  -- No chains and no cycles: the book counts a marked account once, through
+  -- its holder, so a holder that is itself marked would leave the account
+  -- counted by nobody (a 2-cycle) or resolved through a key that is not
+  -- counted (a chain). Both directions are refused.
+  IF v_holder_holder IS NOT NULL THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_IS_MARKED'
+      USING ERRCODE = '23000',
+            DETAIL  = 'The named holder is itself marked as sharing another key''s account; name that key instead.';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+      FROM public.api_keys d
+     WHERE d.account_shared_with_api_key_id = NEW.id
+  ) THEN
+    RAISE EXCEPTION 'ACCOUNT_SHARE_KEY_IS_A_HOLDER'
+      USING ERRCODE = '23000',
+            DETAIL  = 'Another key already names this key as its holder, so this key cannot itself be marked.';
   END IF;
 
   RETURN NEW;

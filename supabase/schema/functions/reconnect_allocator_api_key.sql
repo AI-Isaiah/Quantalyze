@@ -59,7 +59,8 @@ BEGIN
   UPDATE api_keys
     SET disconnected_at = NULL,
         sync_error      = NULL,
-        sync_status     = 'idle'
+        sync_status     = 'idle',
+        history_inclusion = NULL
     WHERE id = p_api_key_id
       AND user_id = v_uid
       AND disconnected_at IS NOT NULL;

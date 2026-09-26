@@ -7,10 +7,15 @@
 --     D-11) the service-role identity stamper writes, both-or-neither, never
 --     self-referencing, same owner only, and never an obstacle to deleting a
 --     key;
+--   * the marker's holder must exist, share the owner, be live and not be
+--     marked itself, and a key that holds another cannot be marked (no chains,
+--     no cycles);
 --   * a departed-key history flag (history_inclusion) and its owner RPC
---     set_departed_key_history_inclusion (D-05, D-09);
+--     set_departed_key_history_inclusion (D-05, D-09), which refuses while the
+--     caller's recompose is running rather than fold into it;
 --   * a NAMED refusal in reconnect_allocator_api_key when a live sibling already
---     holds the same (user, exchange, venue_account_id) (Pitfall 5).
+--     holds the same (user, exchange, venue_account_id) (Pitfall 5), and a
+--     reset of history_inclusion on every successful reconnect.
 --
 -- pgTAP is not set up in this project, so every assertion RAISEs
 -- `TEST FAILED (<arm>)` on failure and a clean run prints NOTICEs only.
@@ -24,6 +29,10 @@
 --   * ACCT-e (a same-owner holder is ACCEPTED) runs before the refusal arms:
 --     its mutation refuses every named holder, which would otherwise surface
 --     first as a wrong SQLSTATE in ACCT-a;
+--   * ACCT-d (the trigger dropped) runs before ACCT-l/m/n/o, whose refusals the
+--     same trigger raises, so dropping it reddens ACCT-d first;
+--   * RECON-tenant runs before the other-exchange key is inserted, so its
+--     sibling mutation cannot trip on that key first;
 --   * every action whose success an arm asserts is captured, never left to
 --     abort the file, so a mutation that breaks it reddens THAT arm by name
 --     instead of producing an error with no identity.
@@ -53,14 +62,19 @@ DECLARE
   k_h        uuid := gen_random_uuid();   -- user A, live holder
   k_d        uuid := gen_random_uuid();   -- user A, live dependent (the marked key)
   k_x        uuid := gen_random_uuid();   -- user B, live
+  k_c        uuid := gen_random_uuid();   -- user A, live, unmarked, holds nobody
+  k_gone     uuid := gen_random_uuid();   -- user A, soft-disconnected
   k_s1       uuid := gen_random_uuid();   -- user A, sanitiser-shape holder
   k_s2       uuid := gen_random_uuid();   -- user A, sanitiser-shape dependent
+  k_s3       uuid := gen_random_uuid();   -- user A, sanitiser-shape dependent
   v_err      text;
   v_msg      text;
   v_con      text;
   v_holder   uuid;
   v_kind     text;
   v_count    int;
+  v_msg2     text;
+  v_err2     text;
 BEGIN
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid_a, '00000000-0000-0000-0000-000000000000', 'test-acct-identity-a-' || v_run || '@quantalyze.test', now(), now()),
@@ -73,19 +87,19 @@ BEGIN
   -- ----- ACCT-h: an ordinary key INSERT (NULL holder, NULL kind) is ADMITTED
   -- The same-owner trigger's NULL-holder branch must short-circuit before any
   -- lookup. Without it, every key insert in the product (the connect route,
-  -- the wizard RPCs) is refused 42501 — no one can connect a key at all.
+  -- the wizard RPCs) is refused — no one can connect a key at all.
   -- RED-UNDER: narrow the trigger's NULL-holder short-circuit to UPDATE only in
   --            migration 20260925120000, so an INSERT with a NULL holder falls
   --            through to the holder lookup, finds no row, and is refused.
   -- RED-UNDER-M: {"arm":"ACCT-h","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF NEW.account_shared_with_api_key_id IS NULL THEN","replace":"  IF NEW.account_shared_with_api_key_id IS NULL AND TG_OP = 'UPDATE' THEN","occurrences":1}]}
   v_err := NULL;
   BEGIN
-    INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active)
-    VALUES (k_h,  uid_a, 'okx', 'acct holder',     'enc', true),
-           (k_d,  uid_a, 'okx', 'acct dependent',  'enc', true),
-           (k_x,  uid_b, 'okx', 'acct other user', 'enc', true),
-           (k_s1, uid_a, 'okx', 'acct sanitiser holder',    'enc', true),
-           (k_s2, uid_a, 'okx', 'acct sanitiser dependent', 'enc', true);
+    INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, disconnected_at)
+    VALUES (k_h,    uid_a, 'okx', 'acct holder',       'enc', true, NULL),
+           (k_d,    uid_a, 'okx', 'acct dependent',    'enc', true, NULL),
+           (k_x,    uid_b, 'okx', 'acct other user',   'enc', true, NULL),
+           (k_c,    uid_a, 'okx', 'acct unmarked',     'enc', true, NULL),
+           (k_gone, uid_a, 'okx', 'acct disconnected', 'enc', true, now());
   EXCEPTION WHEN OTHERS THEN
     v_err := SQLSTATE;
     v_msg := SQLERRM;
@@ -99,7 +113,7 @@ BEGIN
   -- RED-UNDER: make the trigger refuse EVERY named holder (its owner condition
   --            replaced by TRUE) in migration 20260925120000. The stamper could
   --            then never record a duplicate at all.
-  -- RED-UNDER-M: {"arm":"ACCT-e","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_holder_owner IS NULL OR v_holder_owner IS DISTINCT FROM NEW.user_id THEN","replace":"  IF TRUE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"ACCT-e","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_holder_owner IS DISTINCT FROM NEW.user_id THEN","replace":"  IF TRUE THEN","occurrences":1}]}
   v_err := NULL;
   BEGIN
     UPDATE api_keys
@@ -120,7 +134,7 @@ BEGIN
   -- both take the NULL-holder branch on UPDATE.
   -- RED-UNDER: narrow the trigger's NULL-holder short-circuit to INSERT only in
   --            migration 20260925120000, so a clearing UPDATE falls through to
-  --            the holder lookup and is refused 42501.
+  --            the holder lookup and is refused.
   -- RED-UNDER-M: {"arm":"ACCT-i","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF NEW.account_shared_with_api_key_id IS NULL THEN","replace":"  IF NEW.account_shared_with_api_key_id IS NULL AND TG_OP = 'INSERT' THEN","occurrences":1}]}
   v_err := NULL;
   BEGIN
@@ -197,17 +211,133 @@ BEGIN
   -- RED-UNDER: drop the api_keys_account_share_same_owner trigger on the LIVE
   --            database. The constraints all still pass, so only this arm sees it.
   -- RED-UNDER-M: {"arm":"ACCT-d","apply":[{"kind":"sql","stmt":"DROP TRIGGER api_keys_account_share_same_owner ON public.api_keys"}]}
-  v_err := NULL;
+  v_err := NULL; v_msg := NULL;
   BEGIN
     UPDATE api_keys
        SET account_shared_with_api_key_id = k_h, account_share_kind = 'duplicate'
      WHERE id = k_x;
   EXCEPTION WHEN OTHERS THEN
-    v_err := SQLSTATE;
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
   END;
   SELECT account_shared_with_api_key_id INTO v_holder FROM api_keys WHERE id = k_x;
-  IF v_err IS DISTINCT FROM '42501' OR v_holder IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (ACCT-d): user B''s key was marked as sharing an account with user A''s key (SQLSTATE %, stored holder %). A cross-tenant holder must be refused 42501, or one tenant''s book is silently shaped by another''s key.', v_err, v_holder;
+  IF v_err IS DISTINCT FROM '42501' OR v_msg IS DISTINCT FROM 'ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER' OR v_holder IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (ACCT-d): user B''s key was marked as sharing an account with user A''s key (SQLSTATE %, message %, stored holder %). A cross-tenant holder must be refused 42501 ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER, or one tenant''s book is silently shaped by another''s key.', v_err, v_msg, v_holder;
+  END IF;
+
+  -- Setup for the chain arms below: k_d is marked, k_h holds it. Every arm
+  -- that follows needs a real, admitted marker to chain from or to.
+  UPDATE api_keys
+     SET account_shared_with_api_key_id = k_h, account_share_kind = 'duplicate'
+   WHERE id = k_d;
+
+  -- ----- ACCT-l: a holder id with NO api_keys row is REFUSED 23503 by name ----
+  -- A missing holder is not a tenant question; a client that maps 42501 to
+  -- "not yours" must not be told that about a key that does not exist.
+  -- RED-UNDER: disable the trigger's not-found branch (IF FALSE) in migration
+  --            20260925120000. The missing holder then falls to the owner test
+  --            and is refused 42501 ACCOUNT_SHARE_HOLDER_NOT_SAME_OWNER.
+  -- RED-UNDER-M: {"arm":"ACCT-l","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF NOT FOUND THEN\n    RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_NOT_FOUND'","replace":"  IF FALSE THEN\n    RAISE EXCEPTION 'ACCOUNT_SHARE_HOLDER_NOT_FOUND'","occurrences":1}]}
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    UPDATE api_keys
+       SET account_shared_with_api_key_id = gen_random_uuid(), account_share_kind = 'duplicate'
+     WHERE id = k_c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  IF v_err IS DISTINCT FROM '23503' OR v_msg IS DISTINCT FROM 'ACCOUNT_SHARE_HOLDER_NOT_FOUND' THEN
+    RAISE EXCEPTION 'TEST FAILED (ACCT-l): a holder id naming no api_keys row was not refused with 23503 ACCOUNT_SHARE_HOLDER_NOT_FOUND (SQLSTATE %, message %).', v_err, v_msg;
+  END IF;
+
+  -- ----- ACCT-m: a holder that is ITSELF marked is REFUSED (chain, 2-cycle) ---
+  -- The book counts a marked account once, through its holder. A chain would
+  -- resolve an account through a key that is not counted, and a 2-cycle would
+  -- leave the account counted by nobody.
+  -- RED-UNDER: disable the holder-is-marked test (IF FALSE) in migration
+  --            20260925120000. k_c -> k_d -> k_h is then stored.
+  -- RED-UNDER-M: {"arm":"ACCT-m","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_holder_holder IS NOT NULL THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    UPDATE api_keys
+       SET account_shared_with_api_key_id = k_d, account_share_kind = 'duplicate'
+     WHERE id = k_c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  -- the 2-cycle: k_h (which holds k_d) names k_d, which already names k_h.
+  v_err2 := NULL; v_msg2 := NULL;
+  BEGIN
+    UPDATE api_keys
+       SET account_shared_with_api_key_id = k_d, account_share_kind = 'duplicate'
+     WHERE id = k_h;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err2 = RETURNED_SQLSTATE, v_msg2 = MESSAGE_TEXT;
+  END;
+  SELECT count(*) INTO v_count
+    FROM api_keys WHERE id IN (k_c, k_h) AND account_shared_with_api_key_id IS NOT NULL;
+  IF v_err IS DISTINCT FROM '23000' OR v_msg IS DISTINCT FROM 'ACCOUNT_SHARE_HOLDER_IS_MARKED'
+     OR v_err2 IS DISTINCT FROM '23000' OR v_msg2 IS DISTINCT FROM 'ACCOUNT_SHARE_HOLDER_IS_MARKED'
+     OR v_count <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (ACCT-m): naming a MARKED key as holder was not refused with 23000 ACCOUNT_SHARE_HOLDER_IS_MARKED (chain: SQLSTATE %, %; 2-cycle: SQLSTATE %, %; marked rows written %).', v_err, v_msg, v_err2, v_msg2, v_count;
+  END IF;
+
+  -- ----- ACCT-n: a key that already HOLDS another cannot itself be marked -----
+  -- The other direction of the same chain: k_d -> k_h -> k_c.
+  -- RED-UNDER: disable the key-is-a-holder test (IF FALSE AND EXISTS) in
+  --            migration 20260925120000.
+  -- RED-UNDER-M: {"arm":"ACCT-n","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF EXISTS (\n    SELECT 1\n      FROM public.api_keys d","replace":"  IF FALSE AND EXISTS (\n    SELECT 1\n      FROM public.api_keys d","occurrences":1}]}
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    UPDATE api_keys
+       SET account_shared_with_api_key_id = k_c, account_share_kind = 'duplicate'
+     WHERE id = k_h;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  SELECT account_shared_with_api_key_id INTO v_holder FROM api_keys WHERE id = k_h;
+  IF v_err IS DISTINCT FROM '23000' OR v_msg IS DISTINCT FROM 'ACCOUNT_SHARE_KEY_IS_A_HOLDER' OR v_holder IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (ACCT-n): a key another key names as holder was itself marked, or not refused with 23000 ACCOUNT_SHARE_KEY_IS_A_HOLDER (SQLSTATE %, message %, stored holder %).', v_err, v_msg, v_holder;
+  END IF;
+
+  -- ----- ACCT-o: a DEPARTED (disconnected) holder is REFUSED 55000 ------------
+  -- The column says the holder is the LIVE key on that account; a departed key
+  -- is counted only up to its end day, so it cannot stand in for a live one.
+  -- RED-UNDER: disable the holder-is-live test (IF FALSE) in migration
+  --            20260925120000.
+  -- RED-UNDER-M: {"arm":"ACCT-o","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_holder_disc IS NOT NULL THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  v_err := NULL; v_msg := NULL;
+  BEGIN
+    UPDATE api_keys
+       SET account_shared_with_api_key_id = k_gone, account_share_kind = 'duplicate'
+     WHERE id = k_c;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  SELECT account_shared_with_api_key_id INTO v_holder FROM api_keys WHERE id = k_c;
+  IF v_err IS DISTINCT FROM '55000' OR v_msg IS DISTINCT FROM 'ACCOUNT_SHARE_HOLDER_NOT_LIVE' OR v_holder IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (ACCT-o): a disconnected key was accepted as holder, or not refused with 55000 ACCOUNT_SHARE_HOLDER_NOT_LIVE (SQLSTATE %, message %, stored holder %).', v_err, v_msg, v_holder;
+  END IF;
+
+  -- ----- ACCT-p: clearing the holder while writing a DIFFERENT kind is REFUSED
+  -- Only a write that leaves the kind alone (the FK action) has its kind
+  -- cleared for it; a contradictory write must reach the CHECK, not be tidied.
+  -- RED-UNDER: drop the kind-unchanged conjunct from the NULL-holder branch in
+  --            migration 20260925120000, so every holder clear also clears the
+  --            kind and the contradictory write is silently admitted.
+  -- RED-UNDER-M: {"arm":"ACCT-p","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"      IF OLD.account_shared_with_api_key_id IS NOT NULL\n         AND NEW.account_share_kind IS NOT DISTINCT FROM OLD.account_share_kind THEN","replace":"      IF OLD.account_shared_with_api_key_id IS NOT NULL THEN","occurrences":1}]}
+  v_err := NULL; v_con := NULL;
+  BEGIN
+    UPDATE api_keys
+       SET account_shared_with_api_key_id = NULL, account_share_kind = 'composite_member'
+     WHERE id = k_d;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_con = CONSTRAINT_NAME;
+  END;
+  SELECT account_shared_with_api_key_id, account_share_kind INTO v_holder, v_kind
+    FROM api_keys WHERE id = k_d;
+  IF v_err IS DISTINCT FROM '23514' OR v_con IS DISTINCT FROM 'api_keys_account_share_both_or_neither'
+     OR v_holder IS DISTINCT FROM k_h OR v_kind IS DISTINCT FROM 'duplicate' THEN
+    RAISE EXCEPTION 'TEST FAILED (ACCT-p): holder := NULL with kind := ''composite_member'' was not refused by api_keys_account_share_both_or_neither (SQLSTATE %, constraint %; stored holder %, kind %).', v_err, v_con, v_holder, v_kind;
   END IF;
 
   -- ----- ACCT-j: the owner can HARD-DELETE a HOLDER key -----------------------
@@ -245,16 +375,26 @@ BEGIN
   --            that clears dependents' markers by updating sibling rows. The
   --            one-statement delete then fails with 27000.
   -- RED-UNDER-M: {"arm":"ACCT-s","apply":[{"kind":"sql","stmt":"CREATE FUNCTION public._acct_rejected_sibling_clear() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN UPDATE public.api_keys SET account_shared_with_api_key_id = NULL, account_share_kind = NULL WHERE account_shared_with_api_key_id = OLD.id; RETURN OLD; END $f$; CREATE TRIGGER api_keys_acct_rejected_sibling_clear BEFORE DELETE ON public.api_keys FOR EACH ROW EXECUTE FUNCTION public._acct_rejected_sibling_clear()"}]}
-  -- The two keys name EACH OTHER. Whichever row the DELETE reaches first, the
-  -- other is still undeleted, so the rejected design's sibling UPDATE always
-  -- lands on a row the same statement deletes next. Deterministic, whatever
-  -- order the executor visits the rows in.
-  UPDATE api_keys
-     SET account_shared_with_api_key_id = k_s1, account_share_kind = 'duplicate'
-   WHERE id = k_s2;
-  UPDATE api_keys
-     SET account_shared_with_api_key_id = k_s2, account_share_kind = 'duplicate'
-   WHERE id = k_s1;
+  -- The rejected design only fails when the DELETE reaches the holder BEFORE a
+  -- dependent (its sibling UPDATE then lands on a row the same statement
+  -- deletes next). A cycle made that order-proof, but the trigger now refuses
+  -- cycles, so the order is fixed instead: the holder is inserted FIRST, in its
+  -- own statement, and its two dependents after it, already marked, so none of
+  -- the three rows is ever updated and moved. Every plan for a user_id filter
+  -- (seq scan, bitmap scan, or a btree whose equal keys are kept in heap order)
+  -- visits rows in ctid order, and the precondition below checks that order
+  -- rather than trusting it, so a layout that would make this arm vacuous
+  -- fails loudly instead.
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (k_s1, uid_a, 'okx', 'acct sanitiser holder', 'enc', true);
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active,
+                        account_shared_with_api_key_id, account_share_kind)
+  VALUES (k_s2, uid_a, 'okx', 'acct sanitiser dependent 1', 'enc', true, k_s1, 'duplicate'),
+         (k_s3, uid_a, 'okx', 'acct sanitiser dependent 2', 'enc', true, k_s1, 'duplicate');
+  IF NOT ((SELECT ctid FROM api_keys WHERE id = k_s1) < (SELECT ctid FROM api_keys WHERE id = k_s2)
+      AND (SELECT ctid FROM api_keys WHERE id = k_s1) < (SELECT ctid FROM api_keys WHERE id = k_s3)) THEN
+    RAISE EXCEPTION 'TEST FAILED (ACCT-s): precondition — the sanitiser-shape holder does not sit before both dependents in heap order, so this arm could not tell the rejected design from the shipped one.';
+  END IF;
   v_err := NULL;
   BEGIN
     DELETE FROM api_keys WHERE user_id = uid_a;
@@ -263,10 +403,10 @@ BEGIN
   END;
   SELECT count(*) INTO v_count FROM api_keys WHERE user_id = uid_a;
   IF v_err IS NOT NULL OR v_count <> 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (ACCT-s): one DELETE removing a holder and its dependent together failed (SQLSTATE %, %; % row(s) left). The account sanitiser deletes every key of a user in one statement, so a user with a marked key could not be deleted.', v_err, v_msg, v_count;
+    RAISE EXCEPTION 'TEST FAILED (ACCT-s): one DELETE removing a holder and its dependents together failed (SQLSTATE %, %; % row(s) left). The account sanitiser deletes every key of a user in one statement, so a user with a marked key could not be deleted.', v_err, v_msg, v_count;
   END IF;
 
-  RAISE NOTICE 'PASS (ACCT behavioural): ordinary insert admitted; same-owner mark and clear admitted; bad kind, half marker, self-reference refused 23514; cross-tenant holder refused 42501; a holder key hard-deleted through delete_allocator_api_key clears the dependent''s holder and kind; one-statement delete of holder + dependent succeeds.';
+  RAISE NOTICE 'PASS (ACCT behavioural): ordinary insert admitted; same-owner mark and clear admitted; bad kind, half marker, self-reference refused 23514; cross-tenant holder refused 42501; missing holder refused 23503; marked holder (chain and 2-cycle) and a key that already holds another refused 23000; departed holder refused 55000; a contradictory holder clear refused 23514; a holder key hard-deleted through delete_allocator_api_key clears the dependent''s holder and kind; one-statement delete of a holder and its dependents succeeds.';
 
   -- ----- cleanup: explicit, rather than relying on the profiles cascade -------
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
@@ -394,7 +534,7 @@ BEGIN
   -- call (the allocator-scoped in-flight dedup).
   -- RED-UNDER: delete the enqueue_compute_job call from the RPC in migration
   --            20260925120000. The toggle would be stored and never shown.
-  -- RED-UNDER-M: {"arm":"HIST-enqueues","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  PERFORM enqueue_compute_job(\n    p_strategy_id  := NULL,\n    p_kind         := 'derive_allocator_equity',\n    p_allocator_id := v_uid\n  );","replace":"  NULL;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"HIST-enqueues","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  v_job := enqueue_compute_job(\n    p_strategy_id  := NULL,\n    p_kind         := 'derive_allocator_equity',\n    p_allocator_id := v_uid\n  );","replace":"  v_job := NULL;","occurrences":1}]}
   v_err := NULL;
   BEGIN
     v_ret := public.set_departed_key_history_inclusion(k_gone, 'exclude');
@@ -443,6 +583,8 @@ BEGIN
   END IF;
 
   -- ----- HIST-live: a LIVE, non-revoked key is REFUSED by name, nothing written
+  -- 55000 (object_not_in_prerequisite_state), DISTINCT from the 22023 of
+  -- HIST-value, so the client maps the two refusals by code.
   -- RED-UNDER: disable the departed test in migration 20260925120000 (IF FALSE).
   -- RED-UNDER-M: {"arm":"HIST-live","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_disconnected IS NULL AND v_sync_status IS DISTINCT FROM 'revoked' THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   v_err := NULL; v_msg := NULL;
@@ -452,8 +594,8 @@ BEGIN
     GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
   END;
   SELECT history_inclusion INTO v_val FROM api_keys WHERE id = k_live;
-  IF v_err IS DISTINCT FROM '22023' OR v_msg IS DISTINCT FROM 'KEY_NOT_DEPARTED' OR v_val IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (HIST-live): a LIVE key was not refused with 22023 KEY_NOT_DEPARTED, or a value was written (SQLSTATE %, message %, stored %). A live key always counts.', v_err, v_msg, v_val;
+  IF v_err IS DISTINCT FROM '55000' OR v_msg IS DISTINCT FROM 'KEY_NOT_DEPARTED' OR v_val IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (HIST-live): a LIVE key was not refused with 55000 KEY_NOT_DEPARTED, or a value was written (SQLSTATE %, message %, stored %). A live key always counts.', v_err, v_msg, v_val;
   END IF;
 
   -- ----- HIST-value: a value outside include / exclude / NULL is REFUSED 22023 -
@@ -472,10 +614,11 @@ BEGIN
   END IF;
 
   -- ----- HIST-owner: another user's key is REFUSED 42501, nothing written -----
-  -- T-167.1.2-04.
-  -- RED-UNDER: drop the `v_owner <> v_uid` leg of the RPC's ownership test in
-  --            migration 20260925120000.
-  -- RED-UNDER-M: {"arm":"HIST-owner","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_owner IS NULL OR v_owner <> v_uid THEN\n    RAISE EXCEPTION 'set_departed_key_history_inclusion: caller","replace":"  IF v_owner IS NULL THEN\n    RAISE EXCEPTION 'set_departed_key_history_inclusion: caller","occurrences":1}]}
+  -- T-167.1.2-04. Two layers: the row lookup is scoped to the caller (so a
+  -- foreign row is never even locked) AND the owner test refuses a mismatch.
+  -- RED-UNDER: remove BOTH layers in migration 20260925120000 — the lookup's
+  --            `AND user_id = v_uid` scope and the `v_owner <> v_uid` leg.
+  -- RED-UNDER-M: {"arm":"HIST-owner","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"   WHERE id = p_api_key_id\n     AND user_id = v_uid\n     FOR UPDATE;","replace":"   WHERE id = p_api_key_id\n     FOR UPDATE;","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_owner IS NULL OR v_owner <> v_uid THEN\n    RAISE EXCEPTION 'set_departed_key_history_inclusion: caller","replace":"  IF v_owner IS NULL THEN\n    RAISE EXCEPTION 'set_departed_key_history_inclusion: caller","occurrences":1}]}
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
   v_err := NULL;
@@ -493,7 +636,39 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (HIST-owner): user B''s call on user A''s key was not refused 42501, or it wrote or enqueued (SQLSTATE %, stored %, B''s jobs %).', v_err, v_val, v_jobs;
   END IF;
 
-  RAISE NOTICE 'PASS (HIST behavioural): bad value refused by CHECK; exclude stored on a disconnected key with exactly one recompose job; NULL resets; revoked key accepted; live key refused 22023 KEY_NOT_DEPARTED; bad value refused 22023; cross-tenant refused 42501 with nothing written.';
+  -- ----- HIST-running: a toggle while the recompose is RUNNING is REFUSED ----
+  -- A running derive_allocator_equity job may already have read the old value,
+  -- and no second job can queue behind it (the in-flight dedup and the partial
+  -- unique index both cover running). Folding the toggle into it would return
+  -- success over a stale curve, so the RPC refuses by name, writes nothing and
+  -- queues nothing; the owner retries once it ends.
+  -- RED-UNDER: disable the running refusal (IF FALSE) in migration
+  --            20260925120000. The toggle is then stored and silently folded
+  --            into the job that already read the old value.
+  -- RED-UNDER-M: {"arm":"HIST-running","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_job_status = 'running' THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  -- A worker claims the caller's pending recompose (the claim's own transition).
+  UPDATE compute_jobs
+     SET status = 'running', claimed_at = now(), claimed_by = 'acct-identity-test'
+   WHERE allocator_id = uid_a AND kind = 'derive_allocator_equity' AND status = 'pending';
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
+  v_err := NULL; v_msg := NULL; v_ret := NULL;
+  BEGIN
+    v_ret := public.set_departed_key_history_inclusion(k_gone, 'include');
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  PERFORM set_config('request.jwt.claims', '', true);
+  SELECT history_inclusion INTO v_val FROM api_keys WHERE id = k_gone;
+  SELECT count(*) INTO v_jobs
+    FROM compute_jobs
+   WHERE allocator_id = uid_a AND kind = 'derive_allocator_equity';
+  IF v_err IS DISTINCT FROM '55006' OR v_msg IS DISTINCT FROM 'HISTORY_RECOMPOSE_IN_PROGRESS'
+     OR v_val IS NOT NULL OR v_jobs <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (HIST-running): a toggle while the caller''s recompose is RUNNING was not refused with 55006 HISTORY_RECOMPOSE_IN_PROGRESS, or it wrote or queued (SQLSTATE %, message %, returned %, stored %, jobs %). The running job already read the old value, so success here is a stale curve.', v_err, v_msg, v_ret, v_val, v_jobs;
+  END IF;
+
+  RAISE NOTICE 'PASS (HIST behavioural): bad value refused by CHECK; exclude stored on a disconnected key with exactly one recompose job; NULL resets; revoked key accepted; live key refused 55000 KEY_NOT_DEPARTED; bad value refused 22023; cross-tenant refused 42501 with nothing written; a toggle while the recompose runs refused 55006 with nothing written or queued.';
 
   DELETE FROM compute_jobs WHERE allocator_id IN (uid_a, uid_b);
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
@@ -505,8 +680,11 @@ DO $recon$
 DECLARE
   v_run      text := replace(gen_random_uuid()::text, '-', '');
   uid_a      uuid := gen_random_uuid();
+  uid_b      uuid := gen_random_uuid();   -- another tenant
   k_old      uuid := gen_random_uuid();   -- disconnected, account V
   k_new      uuid := gen_random_uuid();   -- live, same account V
+  k_b        uuid := gen_random_uuid();   -- user B, live, okx, same account id V
+  k_other    uuid := gen_random_uuid();   -- user A, live, bybit, same account id V
   c_acct     CONSTANT text := 'acct-identity-v1';
   v_err      text;
   v_msg      text;
@@ -514,15 +692,19 @@ DECLARE
   v_disc     timestamptz;
   v_status   text;
   v_sync_err text;
+  v_hist     text;
 BEGIN
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
-  VALUES (uid_a, '00000000-0000-0000-0000-000000000000', 'test-acct-identity-r-' || v_run || '@quantalyze.test', now(), now());
+  VALUES (uid_a, '00000000-0000-0000-0000-000000000000', 'test-acct-identity-r-' || v_run || '@quantalyze.test', now(), now()),
+         (uid_b, '00000000-0000-0000-0000-000000000000', 'test-acct-identity-rb-' || v_run || '@quantalyze.test', now(), now());
   INSERT INTO profiles (id, display_name, email)
-  VALUES (uid_a, 'recon A', 'test-acct-identity-r-' || v_run || '@quantalyze.test')
+  VALUES (uid_a, 'recon A', 'test-acct-identity-r-' || v_run || '@quantalyze.test'),
+         (uid_b, 'recon B', 'test-acct-identity-rb-' || v_run || '@quantalyze.test')
   ON CONFLICT (id) DO NOTHING;
-  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, disconnected_at, sync_status)
-  VALUES (k_old, uid_a, 'okx', 'recon old', 'enc', true, c_acct, now(), 'idle'),
-         (k_new, uid_a, 'okx', 'recon new', 'enc', true, c_acct, NULL,  'idle');
+  -- k_old carries an owner's 'exclude' from its PAST departure (RECON-hist).
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, disconnected_at, sync_status, history_inclusion)
+  VALUES (k_old, uid_a, 'okx', 'recon old', 'enc', true, c_acct, now(), 'idle', 'exclude'),
+         (k_new, uid_a, 'okx', 'recon new', 'enc', true, c_acct, NULL,  'idle', NULL);
 
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
@@ -568,10 +750,60 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (RECON-ok): with no LIVE twin, reconnect did not return true and reset the key (SQLSTATE %, %; returned %, disconnected_at %, sync_status %, sync_error %).', v_err, v_msg, v_ret, v_disc, v_status, v_sync_err;
   END IF;
 
+  -- ----- RECON-hist: a reconnect RESETS the departed-history choice to NULL ---
+  -- An include/exclude chosen for a PAST departure must not silently apply to
+  -- the next one: once the key is live again the choice has nothing to govern,
+  -- and a later disconnect starts from the default rule.
+  -- RED-UNDER: drop `history_inclusion = NULL` from the reconnect UPDATE in
+  --            migration 20260925120000.
+  -- RED-UNDER-M: {"arm":"RECON-hist","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"        sync_status     = 'idle',\n        history_inclusion = NULL","replace":"        sync_status     = 'idle'","occurrences":1}]}
+  SELECT history_inclusion INTO v_hist FROM api_keys WHERE id = k_old;
+  IF v_hist IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (RECON-hist): after a reconnect the key still carries history_inclusion = % from its past departure; a later disconnect would silently inherit that choice.', v_hist;
+  END IF;
+
+  -- ----- RECON-tenant: ANOTHER user's live key on the same account id is NOT a twin
+  -- api_keys_user_exchange_venue_account_uniq leads with user_id; the refusal
+  -- must track it, or one tenant's key blocks another tenant's reconnect.
+  -- RED-UNDER: drop the `s.user_id = v_uid` conjunct from the refusal's
+  --            sibling test in migration 20260925120000.
+  -- RED-UNDER-M: {"arm":"RECON-tenant","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"     WHERE s.user_id = v_uid\n       AND s.exchange = v_exchange","replace":"     WHERE s.exchange = v_exchange","occurrences":1}]}
+  UPDATE api_keys SET disconnected_at = now() WHERE id = k_old;
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, disconnected_at, sync_status)
+  VALUES (k_b, uid_b, 'okx', 'recon other tenant', 'enc', true, c_acct, NULL, 'idle');
+  v_err := NULL; v_msg := NULL; v_ret := NULL;
+  BEGIN
+    v_ret := public.reconnect_allocator_api_key(k_old);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  SELECT disconnected_at INTO v_disc FROM api_keys WHERE id = k_old;
+  IF v_err IS NOT NULL OR v_ret IS NOT TRUE OR v_disc IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (RECON-tenant): another user''s live key on the same exchange and account id blocked this user''s reconnect (SQLSTATE %, message %; returned %, disconnected_at %).', v_err, v_msg, v_ret, v_disc;
+  END IF;
+
+  -- ----- RECON-other-exchange: the same account id on ANOTHER exchange is NOT a twin
+  -- RED-UNDER: drop the `s.exchange = v_exchange` conjunct from the refusal's
+  --            sibling test in migration 20260925120000.
+  -- RED-UNDER-M: {"arm":"RECON-other-exchange","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"       AND s.exchange = v_exchange\n","replace":"\n","occurrences":1}]}
+  UPDATE api_keys SET disconnected_at = now() WHERE id = k_old;
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, disconnected_at, sync_status)
+  VALUES (k_other, uid_a, 'bybit', 'recon other exchange', 'enc', true, c_acct, NULL, 'idle');
+  v_err := NULL; v_msg := NULL; v_ret := NULL;
+  BEGIN
+    v_ret := public.reconnect_allocator_api_key(k_old);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  SELECT disconnected_at INTO v_disc FROM api_keys WHERE id = k_old;
+  IF v_err IS NOT NULL OR v_ret IS NOT TRUE OR v_disc IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (RECON-other-exchange): a live key of this user on ANOTHER exchange with the same account id blocked the reconnect (SQLSTATE %, message %; returned %, disconnected_at %).', v_err, v_msg, v_ret, v_disc;
+  END IF;
+
   PERFORM set_config('request.jwt.claims', '', true);
 
-  RAISE NOTICE 'PASS (RECON behavioural): reconnect into an occupied slot refused 23505 KEY_VENUE_ALREADY_CONNECTED and the key stays disconnected; with only a disconnected sibling the reconnect returns true and resets the key.';
+  RAISE NOTICE 'PASS (RECON behavioural): reconnect into an occupied slot refused 23505 KEY_VENUE_ALREADY_CONNECTED and the key stays disconnected; with only a disconnected sibling the reconnect returns true, resets the key and clears its history_inclusion; another tenant''s key and another exchange''s key on the same account id do not block it.';
 
-  DELETE FROM api_keys WHERE user_id = uid_a;
-  DELETE FROM auth.users WHERE id = uid_a;
+  DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
+  DELETE FROM auth.users WHERE id IN (uid_a, uid_b);
 END $recon$;

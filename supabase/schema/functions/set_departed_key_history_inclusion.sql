@@ -11,7 +11,7 @@ CREATE FUNCTION public.set_departed_key_history_inclusion(
 RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'public', 'pg_temp'
+SET search_path TO public, pg_catalog
 AS $$
 DECLARE
   v_uid          uuid := auth.uid();
@@ -19,16 +19,20 @@ DECLARE
   v_disconnected timestamptz;
   v_sync_status  text;
   v_previous     text;
+  v_job          uuid;
+  v_job_status   text;
 BEGIN
   IF v_uid IS NULL THEN
     RAISE EXCEPTION 'not_authenticated'
       USING ERRCODE = '42501';
   END IF;
 
+  -- Scoped to the caller, so another user's row is never even locked.
   SELECT user_id, disconnected_at, sync_status, history_inclusion
     INTO v_owner, v_disconnected, v_sync_status, v_previous
     FROM api_keys
    WHERE id = p_api_key_id
+     AND user_id = v_uid
      FOR UPDATE;
 
   IF v_owner IS NULL OR v_owner <> v_uid THEN
@@ -47,8 +51,38 @@ BEGIN
   -- Only a departed key has an end day, so only a departed key has a choice.
   IF v_disconnected IS NULL AND v_sync_status IS DISTINCT FROM 'revoked' THEN
     RAISE EXCEPTION 'KEY_NOT_DEPARTED'
-      USING ERRCODE = '22023',
+      USING ERRCODE = '55000',
             DETAIL  = 'Only a disconnected or revoked key''s history can be included or excluded; a live key always counts.';
+  END IF;
+
+  -- A recompose that is already RUNNING has read (or may have read) the old
+  -- value, and enqueue_compute_job would fold this request into it: its
+  -- in-flight dedup AND the partial unique index
+  -- compute_jobs_one_inflight_per_kind_allocator both cover pending, running
+  -- and done_pending_children, so no second job for (allocator, kind) can be
+  -- queued behind a running one. MEASURED 2026-09-26 over the 9-arg
+  -- enqueue_compute_job (20260515210300) and the 10-arg
+  -- _enqueue_compute_job_internal (20260924230827): p_idempotency_key is not
+  -- part of the dedup, p_run_at only sets next_attempt_at, and a fan-in child
+  -- (p_parent_job_ids) starts done_pending_children, which the same index
+  -- covers. So the only way to never report success over a stale curve,
+  -- without changing that contract for every other caller, is to refuse by
+  -- name and let the owner retry once the running compose ends. Nothing is
+  -- written. A PENDING job is locked FOR UPDATE here instead: the claim path
+  -- takes rows FOR UPDATE SKIP LOCKED, so no worker can claim it before this
+  -- transaction commits the new value, and when it runs it reads that value.
+  -- The same partial unique index guarantees at most one such row.
+  SELECT id, status INTO v_job, v_job_status
+    FROM compute_jobs
+   WHERE allocator_id = v_uid
+     AND kind = 'derive_allocator_equity'
+     AND status IN ('pending', 'running', 'done_pending_children')
+     FOR UPDATE;
+
+  IF v_job_status = 'running' THEN
+    RAISE EXCEPTION 'HISTORY_RECOMPOSE_IN_PROGRESS'
+      USING ERRCODE = '55006',
+            DETAIL  = 'Your equity history is being recomputed right now. Try again when it finishes; nothing was changed.';
   END IF;
 
   UPDATE api_keys
@@ -58,12 +92,14 @@ BEGIN
 
   -- Recompose the caller's curve. Allocator-scoped, so enqueue_compute_job's
   -- own gate requires p_allocator_id = auth.uid(), and its in-flight dedup
-  -- makes a burst of toggles one job.
-  PERFORM enqueue_compute_job(
+  -- hands back the pending job locked above, so a burst of toggles is one job.
+  v_job := enqueue_compute_job(
     p_strategy_id  := NULL,
     p_kind         := 'derive_allocator_equity',
     p_allocator_id := v_uid
   );
+
+  RAISE NOTICE 'set_departed_key_history_inclusion: recompose job % queued for the caller', v_job;
 
   RETURN v_previous IS DISTINCT FROM p_inclusion;
 END;
