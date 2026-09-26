@@ -2138,9 +2138,7 @@ Plans:
 4. Arm failures print `TEST FAILED (X):`, not `ARM x FAILED` which the runner's identity regex cannot see. An arm no production mutation can redden is labelled an INVARIANT rather than counted.
 5. ⛔ Production DDL: merging `supabase/migrations/**` to `main` AUTO-APPLIES to PROD, so three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before any apply, and the apply is a founder gate.
 
-⭐ **ROUTED HERE 2026-09-25 (Phase 164.6.7 round-1 review WR-04):** `TODOS.md` `[164.6.7-COMPOSITE-REREAD-RESIDUE]`, a data-integrity residue in the same bridge fan-in: a marker retraction committing between the Python live re-read and `mark_compute_job_failed` still yields an error-only write followed by a loud `sync_strategy_analytics_status`, leaving `computation_warned` set. Fix shape per that entry (branch (b) clears `computation_warned`, or the protect/loud decision moves inside the bridge's transaction). It is ⛔ BLOCKING item 7 of the runbook precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in `docs/runbooks/ledger-refresh-go-live.md`, so the composite schedule waits on this phase unless the founder accepts the window there with a date.
-
-⭐ **ROUTED HERE 2026-09-26 (Phase 164.6.7 round-2 review WR-01 / SFH-R2-03):** `TODOS.md` `[164.6.7-RETRY-PLAIN-COMPLETE]`. The bridge's non-terminal branch rewrites a plain `complete` row to `computing` on `failed_retry`, so the 164.6.7 transient retry protects only `complete_with_warnings` or warned rows. Fix shape: the non-terminal branch keeps a healthy publish state for a job carrying a refresh marker. Latent today (dated reading: 0 plain `complete` rows in the live ledger cohort).
+⭐ **RE-ROUTED 2026-09-26 (164.5.2 planning, founder rule "one logical topic per phase, one reviewable PR"):** the two routing lines copied here from Phase 164.6.7 — `[164.6.7-COMPOSITE-REREAD-RESIDUE]` and `[164.6.7-RETRY-PLAIN-COMPLETE]` — MOVED to **Phase 164.5.2.1 BRIDGERESIDUE**, verbatim. They change `sync_strategy_analytics_status`, which this phase does not edit: this phase adds the lock to the two mark RPCs only. See `164.5.2-CONTEXT.md` D-22 for the reasons.
 
 **Requirements**: TODOS entries `161.1-D1`, DEC-4
 **Depends on:** Phase 164.4.1 (pg-lane with pg_cron). ⚠️ NOT Phase 164.5 — the plan is file-disjoint from it and was lifted whole.
@@ -2150,6 +2148,26 @@ Plans:
 Plans:
 
 - [ ] 164.5.2-01 — the advisory lock in both mark RPCs + the concurrency gate (lifted from 164.5-08)
+
+### Phase 164.5.2.1: BRIDGERESIDUE — the two 164.6.7 bridge residues in sync_strategy_analytics_status (INSERTED)
+
+**Goal:** Close the two data-integrity residues Phase 164.6.7 routed to the bridge, both in `sync_strategy_analytics_status`, in ONE migration re-based on that function's LATEST definition: (1) `[164.6.7-COMPOSITE-REREAD-RESIDUE]` — a marker retraction landing between the Python live re-read and `mark_compute_job_failed` must not leave `computation_warned` set over a failed run; (2) `[164.6.7-RETRY-PLAIN-COMPLETE]` — branch (a) must keep a healthy publish state (plain `complete` as well as `complete_with_warnings`) for a strategy whose in-flight job carries an in-scope refresh marker, instead of rewriting it to `computing`.
+
+⛔ **SPLIT OUT of Phase 164.5.2 on 2026-09-26 during its planning**, under the founder rule "one logical topic per phase, one reviewable PR". The lock (164.5.2) edits the two mark RPCs; these residues edit the bridge those RPCs call. Different function, different gate, different review surface. Research for both was done in 164.5.2 (`164.5.2-RESEARCH.md` Q6, Q7, Q8, assumptions A2 and A4), and it measured that both residues close in SQL alone.
+
+⭐ **ROUTED HERE 2026-09-25 (Phase 164.6.7 round-1 review WR-04):** `TODOS.md` `[164.6.7-COMPOSITE-REREAD-RESIDUE]`, a data-integrity residue in the same bridge fan-in: a marker retraction committing between the Python live re-read and `mark_compute_job_failed` still yields an error-only write followed by a loud `sync_strategy_analytics_status`, leaving `computation_warned` set. Fix shape per that entry (branch (b) clears `computation_warned`, or the protect/loud decision moves inside the bridge's transaction). It is ⛔ BLOCKING item 7 of the runbook precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in `docs/runbooks/ledger-refresh-go-live.md`, so the composite schedule waits on this phase unless the founder accepts the window there with a date.
+
+⭐ **ROUTED HERE 2026-09-26 (Phase 164.6.7 round-2 review WR-01 / SFH-R2-03):** `TODOS.md` `[164.6.7-RETRY-PLAIN-COMPLETE]`. The bridge's non-terminal branch rewrites a plain `complete` row to `computing` on `failed_retry`, so the 164.6.7 transient retry protects only `complete_with_warnings` or warned rows. Fix shape: the non-terminal branch keeps a healthy publish state for a job carrying a refresh marker. Latent today (dated reading: 0 plain `complete` rows in the live ledger cohort).
+
+⭐ **ROUTED HERE 2026-09-26 (164.5.2 research, Open Question 1):** the per-strategy lock 164.5.2 adds sits in the two mark RPCs, so the bridge's OTHER callers stay unserialized: the Python DEFERRED direct call to `sync_strategy_analytics_status`, and the non-mark writers (claims, `reset_stalled_compute_jobs`, the orphan terminalizer, the marker retraction). A lock inside the bridge itself would cover every caller (transaction advisory locks re-enter within a session, so the mark RPCs can keep theirs). Decide it here, because this phase owns the bridge body.
+
+**Requirements**: TODOS entries `[164.6.7-COMPOSITE-REREAD-RESIDUE]`, `[164.6.7-RETRY-PLAIN-COMPLETE]` (both booked on `feat/164.6.7`; they reach `main` when Phase 164.6.7 lands)
+**Depends on:** Phase 164.5.2 (migration ordering and the shared gate census), Phase 164.6.7 (its TODOS entries and its Python ends of both residues)
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.5.2.1 to break down)
 
 ### Phase 164.5.3: MT5CREDS — show the MT5 account number on the key card and add a credential-update path (INSERTED)
 
