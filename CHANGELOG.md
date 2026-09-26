@@ -110,6 +110,7 @@ Delete-confirm read path and a changed public factsheet cache key. There is no m
   the share page and Phase 148 cache-isolation tests re-pinned to the new key shape.
 - **Route and client tests for criterion 5**: RLS-REGRESSION, MEMBERS-NOT-ARRAY-500,
   R2-WR02-VIA-ROUTE, R2-WR02-UNREADABLE, UNCHECKED-TIMEOUT.
+- The Phase 147 series-resolution guard now accepts either exported builder on the v2 page. The page calls `fetchAndBuildPayloadWithReason`, which runs the same `resolveAndBuild` as `fetchAndBuildPayload`, and the old literal match failed CI shard 1 once the page moved.
 
 ### Notes
 
