@@ -3188,6 +3188,8 @@ Plans:
 
 ### Phase 169: PAGETRUTH — every number agrees across pages and with its own record length
 
+⭐ **ROUTED HERE 2026-09-26 (Phase 167.2.1 CONTEXT D-07, verifier warning):** a composite whose `csv_daily_returns` read fails transiently is cached as a null payload on the public factsheet until the `unstable_cache` TTL, because `readCompositeFactsheet` cannot tell a read error from an empty composite. 167.2.1 fixed the single-key half (WR-02, `FactsheetReadError`). The composite half needs a distinguishable read error from `readCompositeFactsheet` and a throw in the public cache callback, with a red-first test. After the 2026-09-26 split of Phase 169 it belongs to the factsheet-truth phase.
+
 **Goal:** Every number a page shows agrees with the same number on every other page and with the length of the record it describes. Each contradiction below is traced to ONE source of truth and fixed there, not patched per page.
 **Founder decision, 2026-09-25 (AskUserQuestion):** the session QA sweep and the 2026-09-24 layout notes book as TWO phases; this numbers phase ships FIRST, Phase 170 PAGECOPY second. Phase 167.1.2 ACCOUNTTRUTH already owns the Allocations equity curve, Sharpe beside a negative return, the Scenario zero weights/UUID/$0 total, and the holdings total; they are EXCLUDED here.
 **Evidence:** the 2026-09-25 in-depth QA sweep of every page in the logged-in account (14 data-integrity findings) and the 2026-09-24 visual UAT. Counts only here; the reports hold no identifiers and are not tracked.
