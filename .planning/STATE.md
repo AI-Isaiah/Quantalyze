@@ -1173,6 +1173,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.6 P03 | ~20 min | 3 tasks | 1 created, 5 modified |
 | Phase 164.6 P04 | ~26 min | 2 tasks | 6 modified |
 | Phase 164.6 P05 | ~9 min | 2 tasks | 2 modified |
+| Phase 164.6.5 P08 | ~40 min | 2 tasks | 11 modified |
 
 ## Accumulated Context
 
