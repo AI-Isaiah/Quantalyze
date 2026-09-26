@@ -88,8 +88,13 @@ const SPEC_SUFFIX = /\.test\.tsx?$/;
  * the corpus and fails when this number has been allowed to drift behind it.
  * That is the repo's two-layer floor idiom: the runner gates the lower bound,
  * the vitest ratchet gates the staleness.
+ *
+ * RAISED 46 -> 47 on 2026-09-25 (Phase 167.2.1 plan 01): the corpus MEASURED 50
+ * after `src/__tests__/factsheet-buildable-live-db.test.ts` joined it, and the
+ * contract test's stale-low arm went RED at 4 files of headroom. Pinned 3 under
+ * the measured corpus, the same distance as the 2026-09-21 pin.
  */
-export const CORPUS_FLOOR = 46;
+export const CORPUS_FLOOR = 47;
 
 /**
  * Every test file under `root` whose source references the live-DB gate symbol,

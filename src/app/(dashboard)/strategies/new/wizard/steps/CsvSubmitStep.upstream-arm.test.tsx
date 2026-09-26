@@ -329,6 +329,47 @@ describe("[140.5-05] CsvSubmitStep — branches 2 and 3 on the SECOND client", (
       expect(screen.queryByTestId("error-envelope-wait")).not.toBeInTheDocument(),
     );
   });
+
+  // 164.6.5-07 / D-14 (task 3) — CLOSE THE CLASS. Branches 2/3's fallback,
+  // when the wire names no id of its own, used to be the page-load id — the
+  // same defect as SubmitStep/ConnectKeyStep. `requestCorrelationId` now
+  // sits BEFORE that fallback (the neighbouring test above already proves
+  // SOME wizard id renders; this proves it is the SENT one).
+  it("[164.6.5-07 / D-14] with no upstream id, the envelope shows the id THIS request sent", async () => {
+    fetchSpy.mockResolvedValue(jsonResponse({ error: "Unauthorized" }, 401));
+    mountAndSubmit();
+
+    const panel = await screen.findByTestId("error-envelope");
+    const sentId = new Headers(
+      (fetchSpy.mock.calls[0][1] as RequestInit).headers,
+    ).get("X-Correlation-Id");
+    expect(sentId).toMatch(/^wizard:[0-9a-f-]{36}$/);
+    expect(panel.textContent).toContain(sentId);
+  });
+
+  it("[164.6.5-07 / D-14] two failed submits with no upstream id render TWO DIFFERENT ids", async () => {
+    fetchSpy
+      .mockResolvedValueOnce(jsonResponse({ error: "Unauthorized" }, 401))
+      .mockResolvedValueOnce(jsonResponse({ error: "Unauthorized again" }, 401));
+    mountAndSubmit();
+    const firstPanel = await screen.findByTestId("error-envelope");
+    const firstId = new Headers(
+      (fetchSpy.mock.calls[0][1] as RequestInit).headers,
+    ).get("X-Correlation-Id");
+    expect(firstPanel.textContent).toContain(firstId);
+
+    fireEvent.click(screen.getByTestId("wizard-csv-submit-cta"));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+    const secondPanel = await screen.findByTestId("error-envelope");
+    const secondId = new Headers(
+      (fetchSpy.mock.calls[1][1] as RequestInit).headers,
+    ).get("X-Correlation-Id");
+    expect(
+      secondId,
+      "the same id rendered across two distinct failed requests",
+    ).not.toBe(firstId);
+    expect(secondPanel.textContent).toContain(secondId);
+  });
 });
 
 describe("[140.5-05] ⛔ NEGATIVE CONTROLS — csv-finalize's own vocabulary keeps its copy", () => {

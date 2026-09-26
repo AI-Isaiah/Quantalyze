@@ -262,6 +262,108 @@ describe("[164 SHARE-01] Sentry never receives a share token", () => {
 });
 
 /**
+ * 164.6.5 review round 1 / WR-07. Plan 07 made the wizard's `X-Correlation-Id`
+ * per-REQUEST and moved the stable per-page-load id onto its own
+ * `X-Wizard-Page-Load-Id` header "so nothing loses the page-load join" — and
+ * then no server code read that header. This hook is the one server sink that
+ * sees every request's headers, so the page-load id rides here as its own tag,
+ * beside the per-request `correlation_id`, and two failures from one open tab
+ * can be grouped again.
+ */
+describe("[164.6.5 WR-07] onRequestError carries the wizard page-load id", () => {
+  const saved: Record<string, string | undefined> = {};
+  beforeEach(() => {
+    saved.SENTRY_DSN = process.env.SENTRY_DSN;
+    process.env.SENTRY_DSN = "https://publickey@o0.ingest.sentry.io/1";
+    vi.clearAllMocks();
+  });
+  afterEach(() => {
+    if (saved.SENTRY_DSN === undefined) delete process.env.SENTRY_DSN;
+    else process.env.SENTRY_DSN = saved.SENTRY_DSN;
+  });
+
+  const CONTEXT = {
+    routerKind: "App Router",
+    routePath: "/api/strategies/create-with-key",
+    routeType: "route",
+    renderSource: "react-server-components",
+  };
+
+  // Next's DOCUMENTED type for `request.headers` (instrumentation.md,
+  // `onRequestError`): `{ [key: string]: string | string[] }`. The helper takes
+  // that type, not the narrower one, so an array value is expressible here.
+  async function tagsFor(headers: { [key: string]: string | string[] }) {
+    await onRequestError(
+      { digest: "d1" },
+      { path: "/api/strategies/create-with-key", method: "POST", headers },
+      CONTEXT,
+    );
+    expect(sentryCaptureExceptionMock).toHaveBeenCalledTimes(1);
+    return (
+      sentryCaptureExceptionMock.mock.calls[0][1] as {
+        tags: Record<string, string | null>;
+      }
+    ).tags;
+  }
+
+  it("a well-formed page-load id becomes its own tag, beside the per-request id", async () => {
+    const tags = await tagsFor({
+      "x-correlation-id": "wizard:11111111-1111-4111-8111-111111111111",
+      "x-wizard-page-load-id": "wizard:22222222-2222-4222-8222-222222222222",
+    });
+    expect(tags.wizard_page_load_id).toBe(
+      "wizard:22222222-2222-4222-8222-222222222222",
+    );
+    expect(tags.correlation_id).toBe(
+      "wizard:11111111-1111-4111-8111-111111111111",
+    );
+  });
+
+  /**
+   * ⛔ CORRECTED 2026-09-25 (164.6.5 review round 2 / R2-SFH-11). This case
+   * used to assert `null` for absent, empty AND malformed alike, so Sentry
+   * could not tell "the client sent no header" (an old bundle) from "the
+   * client sent a bad one" (a bug). Absent stays `null`; a present header that
+   * fails the shape check is the fixed sentinel `<malformed>`. The sentinel's
+   * angle brackets are outside the shape allowlist, so no client can send a
+   * value that reads as it, and the client's own value is still never echoed.
+   */
+  it("an absent page-load id is null; an empty or malformed one is the fixed <malformed> sentinel, never echoed", async () => {
+    expect((await tagsFor({})).wizard_page_load_id).toBeNull();
+    vi.clearAllMocks();
+    expect(
+      (await tagsFor({ "x-wizard-page-load-id": "" })).wizard_page_load_id,
+    ).toBe("<malformed>");
+    vi.clearAllMocks();
+    // Client-supplied, so CR/LF or whitespace must never reach a tag.
+    const crlf = (await tagsFor({ "x-wizard-page-load-id": "wizard:a\r\nx: y" }))
+      .wizard_page_load_id;
+    expect(crlf).toBe("<malformed>");
+    expect(crlf).not.toContain("wizard:a");
+  });
+
+  /**
+   * 164.6.5 review round 2 / IN-03. Next documents `request.headers` values as
+   * `string | string[]`. The hook used to declare `Record<string, string>` and
+   * call `.trim()` on the value, so an array would have thrown INSIDE the error
+   * hook and lost that capture. Node joins duplicate custom headers into one
+   * string today, which is why this never fired; the narrowed type hid it.
+   */
+  it("an ARRAY-valued header does not throw inside the hook: the capture still happens, page-load id is <malformed>, correlation id is null", async () => {
+    const tags = await tagsFor({
+      "x-correlation-id": ["wizard:a", "wizard:b"],
+      "x-wizard-page-load-id": [
+        "wizard:22222222-2222-4222-8222-222222222222",
+        "wizard:33333333-3333-4333-8333-333333333333",
+      ],
+    });
+    expect(tags.wizard_page_load_id).toBe("<malformed>");
+    // A tag value must be a primitive; an array is not a correlation id.
+    expect(tags.correlation_id).toBeNull();
+  });
+});
+
+/**
  * Phase 164 / D-02 second half — the secret's boot-time VISIBILITY.
  *
  * The module-load throw in `src/lib/strategy-share-token.ts` is the hard stop;
