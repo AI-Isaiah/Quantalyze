@@ -3011,6 +3011,7 @@ Plans:
 3. **Exact-zero guards close.** They exist today in `portfolio_optimizer.py`, `csv_validator.py`, `allocated_capital.py`, `equity_reconstruction.py` and `optimizer.py`. They move to the relative dispersion floor (`_dispersion_is_residue` semantics), and each gets a red test built from a compounding-NAV constant yield.
    ⭐ **2026-09-25 (166.1-CONTEXT D-02):** criterion 3 now also covers the unguarded correlation sites outside `metrics.py` (same root cause: a ratio over a residue standard deviation), and `portfolio_risk.compute_risk_decomposition` (D-05).
    ⭐ **2026-09-25 (plan-check revision, 166.1-CONTEXT D-15, orchestrator decision under the founder rule "close the whole class, not point-fixes"):** criterion 3 also covers the TS sites that compute a Sharpe, correlation, beta or related ratio from daily returns behind a `> 0` / `!== 0` guard or a relative-only floor (RESEARCH A5, T1-T20). The earlier premise that TS only reads stored values was false. **D-16:** the `analytics_runner` SQN block is site S8 (measured SQN -4.03e16 on 21 identical losses).
+   ⭐ **2026-09-25 (FOUNDER DIRECTION, 166.1-CONTEXT D-17, verbatim: "Why don't you calculate Sharpe once and the 20 places all read it from there?"):** the TS half is re-planned around computing each ratio ONCE. Every TS site is classified Tier 1 (a persisted value exists for the same series: delete and read it), Tier 2 (the series exists only in TS: call ONE shared module, `src/lib/return-stats.ts`, and remove the local formula) or Dead (no production caller: delete). The factsheet's single-key headline and the OG card's PERSISTED Sharpe read are Phase 169 plan 04's and are excluded here; the Sharpe the OG card still computes is 166.1-06's (D-19, matching 169 D-25). A source-scan gate pins the rule.
 
 Plans:
 
@@ -3018,17 +3019,17 @@ Plans:
 
 - [ ] 166.1-01-PLAN.md — the floor moves to `services/dispersion.py`; Python variance sites S1-S8 (incl. SQN, D-16) on it, red tests and drills
 - [ ] 166.1-02-PLAN.md — founder-gated PROD recompute: Q1-Q5 read-only pack, tracer then one-at-a-time enqueues, blocking rendered check per published row (independent of the code plans)
-- [ ] 166.1-04-PLAN.md — the TS floor `src/lib/dispersion-floor.ts` pinned to Python; T1-T5 (/compare, sampleBasisRatios, computeScenario, diversificationRatio) (D-15)
+- [ ] 166.1-04-PLAN.md — ONE TS module `src/lib/return-stats.ts` (floor pinned to Python, dispersion, Sharpe, Pearson, beta); T1-T5 (/compare, sampleBasisRatios, computeScenario, diversificationRatio) call it (D-15, D-17)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
 - [ ] 166.1-03-PLAN.md — Python correlation sites C1-C8 on two shared helpers (D-02)
-- [ ] 166.1-05-PLAN.md — TS T6-T12: correlation helpers, portfolio-stats, the scenario benchmark and stress floors (D-15)
-- [ ] 166.1-06-PLAN.md — TS T13-T20: every ratio in `src/lib/factsheet/` (D-15)
+- [ ] 166.1-05-PLAN.md — TS T6-T12 on `return-stats`: one Pearson (`correlation-math.ts` deleted), the widget, portfolio-stats, the scenario benchmark and stress; dead `rollingCorrelation` / `computeRollingMetric` deleted (D-15, D-17)
+- [ ] 166.1-06-PLAN.md — TS T13-T20 on `return-stats`: the factsheet builder's ratios and the OG card's computed Sharpe (T14's persisted read is Phase 169's), T18 fixed at its source (D-15, D-17, D-19)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 166.1-07-PLAN.md — whole-phase gate sweep and the single release commit (VERSION, package.json, CHANGELOG)
+- [ ] 166.1-07-PLAN.md — the compute-once source-scan gate (D-17), whole-phase gate sweep and the single release commit (VERSION, package.json, CHANGELOG)
 
 ### Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error
 
