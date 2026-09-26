@@ -1,5 +1,151 @@
 # Changelog
 
+## [0.97.0.0] - 2026-09-26 — COMPUTEONCE: each TypeScript Sharpe, correlation and beta is computed once, in one floored module, and every page reads it
+
+⭐ **What changed for whoever reads this next.** Phase 166.2 is the TypeScript half of the
+dispersion-residue fix. About twenty TS sites each carried their own copy of a Sharpe, correlation
+or beta formula behind a `> 0` guard. On a compounding-NAV constant yield the standard deviation
+is about 1e-16, never exactly 0, so every copy passed its guard and printed a Sharpe in the
+trillions or a correlation computed from rounding noise. The founder's direction (D-17, verbatim:
+"Why don't you calculate Sharpe once and the 20 places all read it from there?") replaced the
+twenty copies with ONE module, `src/lib/return-stats.ts`, and every site now calls it.
+
+⚠️ **This is a minor bump because values a user can see change, on purpose.** For a series with no
+real dispersion, the Sharpe, correlation, beta, information ratio and related cells on `/compare`,
+in the scenario composer and its benchmark and stress panels, on the Risk tab, on the factsheet and
+on the OG card now show the value an exactly constant series already shows at that site (null, 0 or
+NaN, whichever that site used), instead of a residue number. Series with real dispersion are
+unchanged: every shared function keeps the arithmetic order the factsheet already used, and the
+factsheet snapshot did not move.
+
+⛔ **This entry claims the TypeScript half only.** Since the 2026-09-26 split (D-23), the Python
+floor sites ship as Phase 166.1 and the PROD recompute of rows computed before Phase 166 ships as
+Phase 166.3. Neither is in this release. This release carries no migration and no
+`analytics-service/` or `supabase/` path.
+
+### Added
+
+- **`src/lib/return-stats.ts`, the one TypeScript home of dispersion, Sharpe, Pearson and beta**
+  (plan 01, `ff613e350`). It holds Phase 166's floor (`DISPERSION_RESIDUE_REL`, `residueFloor`,
+  `dispersionIsResidue`, `dispersionIsReal`, the Python rule verbatim) and the four ratio functions
+  `dispersion`, `sharpe`, `pearson` and `beta`. `dispersion` returns an sd of exactly 0 when the
+  dispersion is residue, so "no dispersion" answers what an exact constant answers, stated once.
+  It builds on the existing `mean` and `stdDev` in `src/lib/portfolio-math-utils.ts`, so there is
+  one mean and one sd, not a third copy. `/compare`'s holding Sharpe (T1) is its first reader.
+
+### Fixed
+
+- **T2-T5: the composer and the what-if blend** (plan 01, `c2cddfb4a`). `sampleBasisRatios`,
+  `computeScenario`'s Sharpe and correlation matrix, and `diversificationRatio` compute through the
+  shared module.
+- **T6, T7: one TS Pearson** (plan 02, `ac1946d31`, `90476b60b`). `/compare`'s correlation matrix
+  and the Risk tab's `CorrelationMatrix` widget both call the shared `pearson`; the widget's local
+  copy is gone.
+- **T8-T12: portfolio stats and the scenario libraries** (plan 03, `dc0e63d19`, `839fff99b`).
+  `computeAlphaBeta`'s beta and `computeRiskDecomposition` use the shared functions, and
+  `scenario-benchmark.ts` and `scenario-stress.ts` replace their hand-written relative floors with
+  the shared predicate and the shared `pearson`.
+- **T13-T15, T18: the factsheet headline** (plan 04, `8b0577585`, `22bfcdca0`). `compute`'s Sharpe,
+  skewness, kurtosis and `ann_vol`, `bootstrapCI`'s resampled Sharpe, and the Sharpe arm of
+  `computeOgHeadline` that still computes go through the shared module. T18 is fixed at its
+  source: `compute`'s snapped `ann_vol` is 0 on residue, so `comparator-block.ts`'s existing
+  `ann_vol > 0` guard is right with no edit to that file.
+- **T16, T17, T19, T20: the factsheet's joint, rolling and correlation sites** (plan 05,
+  `7b8053e98`, `32ceb7236`). `jointMetrics`' beta, correlation and information ratio (now
+  `sharpe` over the active series), `rollingBeta`, `rollingSharpe`, `build-payload.ts`'s
+  `pearsonCorr` body and `buildAllocatorMetrics`' correlation all call the shared module, and
+  their local `mean` / `pstdev` helpers are gone.
+
+### Changed
+
+- **What a user sees for a constant-yield series.** The TS-computed Sharpe, correlation, beta,
+  information-ratio and ratio cells listed above now read as absent (or 0, where that site already
+  showed 0 for an exact constant) instead of a residue value, on `/compare`, the scenario composer
+  and benchmark panel, the Risk tab, the factsheet and the OG card's computed Sharpe
+  (`ff613e350`, `c2cddfb4a`, `ac1946d31`, `90476b60b`, `839fff99b`, `8b0577585`, `22bfcdca0`,
+  `7b8053e98`, `32ceb7236`).
+- **Two `og-metrics.test.ts` assertions now say the constant series has no Sharpe** (plan 04,
+  `22bfcdca0`). Both `expect(Number.isFinite(sharpe))` side assertions became
+  `expect(Number.isNaN(sharpe))`, each with a one-line D-07 comment, and nothing else in that
+  file changed. They were in "CAGR hidden (NaN) for a dense sub-year series" (300 days at 0.001, sd
+  about 6.5e-19, a Sharpe of about 2.9e16) and "single / duplicate / unsorted dates never produce
+  Infinity" (40 days at 0.002). The finite value they asserted was the defect itself. **The inputs
+  are unchanged**, because those tests are about sub-year CAGR hiding and date handling, and both
+  still test that. The owner of the D-07 fix owns the assertions that pinned the defect (the D-19
+  amendment, below).
+
+### Removed
+
+- **`src/lib/correlation-math.ts` and its test** (plan 02, `ac1946d31`). `pearson` moved into
+  `return-stats.ts`; `rollingCorrelation` had no production caller, since `CorrelationWithBenchmark`
+  already reads the persisted rolling correlation.
+- **`computeRollingMetric`**, dead (0 production callers), deleted with its describe block
+  (plan 03, `dc0e63d19`).
+- **Every private copy of the Sharpe, Pearson, beta, mean and pstdev formulas** the sites carried
+  (plans 01-05, the commits under Fixed), and two comments that still named the retired
+  correlation module and `rollingCorrelation` (plan 06, `eef6a8319`).
+
+### Root cause
+
+- **A standard deviation derived from a compounding NAV is about 1e-16, never exactly 0**, so a
+  `> 0` guard never catches "no dispersion". Phase 166 fixed the Python side with a relative floor;
+  the TS side had twenty private copies of the same ratio formula, each with the same guard. That
+  is why D-17 computes each figure once: a floor pasted into twenty copies still leaves twenty
+  formulas to drift.
+- **The full suite, not a plan's own verify list, is where an unclassified env read shows up**
+  (`4c50d206b`). Plan 06's gate reads `QZ_166_2_06_SCAN_ROOT` to point its merge-base scan at an
+  archived tree. Plan 06 ran its own verify commands, and this release's full-suite sweep caught
+  that the env-manifest contract test did not classify the read. It is now in `TEST_ONLY_KEYS`
+  with a dated comment; the gate's rule, that every literal `process.env` read in `src/` is
+  classified, is unchanged, and `.env.example` is untouched because this is test wiring.
+
+### Tests
+
+- **A red test first for every site, on a compounding-NAV constant yield** (`1b518ebf6`,
+  `e4ee8e31c`, `02b522b47`, `22478ef83`, and the site and residue test files landed with
+  `ff613e350`, `ac1946d31`, `dc0e63d19`, `8b0577585`, `22bfcdca0`, `7b8053e98`). The deleted
+  module's `pearson` cases carry over as `src/lib/return-stats.pearson-contract.test.ts`. Each
+  site test asserts the D-07 invariant: the constant yield produces exactly what an all-zero
+  series of the same length produces at that site, with a cent-rounded NAV as the control on the
+  other side of the floor, so widening the floor goes red. The shared fixture is
+  `src/__tests__/fixtures/dispersion-nav.ts`.
+- **A cross-language pin** in `src/lib/return-stats.test.ts`: exactly one numeric-literal
+  definition of `DISPERSION_RESIDUE_REL` exists across the Python service's `dispersion.py` and
+  `metrics.py`, and it equals the TS constant (`ff613e350`).
+- **The compute-once gate** (plan 06, `35704c641`),
+  `src/lib/return-stats.single-source.test.ts`: every Tier-2 site file imports
+  `@/lib/return-stats`, the retired local formulas and dead functions are absent from live code, a
+  whole-tree shape matcher finds any Sharpe, Pearson or beta shape outside the module against a
+  count-pinned allowlist, and liveness fixtures prove the matcher fires. A second copy of a formula
+  now fails CI instead of waiting for a reviewer.
+- **The env-key registration above** (`4c50d206b`).
+
+### Notes
+
+- **One TS home, pinned to the Python constant.** `src/lib/return-stats.ts` is where a new TS
+  Sharpe, correlation or beta goes.
+- **The D-17 / D-19 split with Phase 169 PAGETRUTH.** T14 has two arms. Its persisted read (the
+  rankable strategy's stored Sharpe) is Phase 169 plan 04's; its computed arm is this phase's.
+  Phase 169 plan 14's zoom-window KPIs go through `compute()` and `jointMetrics` and inherit the
+  floored versions with no further edit here. `comparator-block.ts` needs no edit (T18 is fixed at
+  its source), so 169's list can drop it. Recorded for the orchestrator and not acted on here: the
+  strategy arm's factsheet skewness and kurtosis could read the persisted values, and its rolling
+  Sharpe could read the persisted rolling metrics (a different day basis); both readers are on
+  169-owned paths, so that is 169's call. Phase 169's plan files were not edited from this branch.
+- **The D-19 amendment** (`c19e0f9e4`): because phases still in planning (169 included) may not
+  start execution, 166.2 plan 04 owns the two `og-metrics.test.ts` assertions that pinned the D-07
+  defect, rather than waiting on 169 plan 04 indefinitely. Not taken: keeping `s > 0`, mapping null
+  to a finite number, or widening a floor.
+- **The 2026-09-26 split**: the Python floor sites ship as Phase 166.1 and the PROD recompute as
+  Phase 166.3; this entry claims neither.
+- **No migration.**
+- **`origin/main` was merged into this branch at `ea4167a3f`** before the release sweep; the
+  other phases' work it brings is covered by their own entries.
+- **Planning records**: execution start, per-plan SUMMARYs, tracking updates, the T7 residue-cell
+  measurement, and a dated note on plan 06's SUMMARY naming the env-key gap (`f2ad38a02`,
+  `78d521b94`, `df75f6a77`, `0b1028968`, `bcd5b2d42`, `dc9f3a174`, `2e1070bd2`, `ba6cd782c`,
+  `160e13a05`, `ea5db9cae`, `520b34a93`, `20784b5a7`, `e9a19682d`).
+
 ## [0.96.0.0] - 2026-09-26 — MT5VALIDATEWEDGE: the gateway can restart a wedged MT5 terminal on its own (not yet seen live), and the wizard stops promising a retry that cannot work
 
 _PR #866 (167.2.1 FACTSHEETBUILDABLE) landed first as 0.95.0.0, so this entry, first written as 0.94.0.0, re-bumped to 0.96.0.0._
