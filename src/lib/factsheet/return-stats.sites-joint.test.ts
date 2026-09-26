@@ -156,6 +156,39 @@ describe("T16 jointMetrics on return-stats (D-07, D-17)", () => {
     });
   }
 
+  // HI-01 (review round 2): the STRATEGY leg's residue. A constant-yield
+  // strategy against a dispersing bench (the factsheet's default BTC panel) gave
+  // a residue beta of about ±1e-15 and a Treynor of ±1e10..1e15, where an
+  // all-zero strategy gives beta 0 and Treynor NaN ("—"). Only the fields that
+  // rest on the strategy's dispersion are compared with the all-zero strategy:
+  // alpha is the strategy's own mean return once beta is 0 (m * P, a real
+  // number), and the captures, tracking error and information ratio read the
+  // strategy's level, which a constant yield shifts by its yield.
+  const zeroStratOnBench = jointMetrics(zeros(N), BENCH, 0, PPY);
+
+  it("T16 the all-zero strategy on a dispersing bench has beta exactly +0, Treynor, corr and r2 NaN (control)", () => {
+    expect(Object.is(zeroStratOnBench.beta, 0)).toBe(true);
+    for (const k of ["treynor", "corr", "r2"] as const) {
+      expect(Number.isNaN(zeroStratOnBench[k]), k).toBe(true);
+    }
+  });
+
+  for (const id of YIELD_IDS) {
+    const y = CONSTANT_YIELDS[id];
+
+    it(`T16 a constant-yield STRATEGY on a dispersing bench equals the all-zero strategy on beta, Treynor, corr and r2 (${id})`, () => {
+      const strat = navConstantYield(y, N);
+      const got = jointMetrics(strat, BENCH, 0, PPY);
+      for (const k of ["beta", "treynor", "corr", "r2"] as const) {
+        expect(Object.is(got[k], zeroStratOnBench[k]), `${k}=${got[k]}`).toBe(true);
+      }
+      // With beta 0, alpha is the strategy's own annualised mean, not a residue.
+      let sum = 0;
+      for (const r of strat) sum += r;
+      expect(got.alpha).toBe((sum / N) * PPY);
+    });
+  }
+
   it("T16 cent-rounded 1% APY bench keeps a finite, non-zero beta and corr (floor control)", () => {
     const got = jointMetrics(STRAT, CENT_1PCT, 0, PPY);
     expect(Number.isFinite(got.beta) && got.beta !== 0).toBe(true);
@@ -240,6 +273,18 @@ describe("T17 rollingBeta and rollingSharpe on return-stats (D-07, D-17)", () =>
       expect(rollingSharpe(navConstantYield(y, N), WINDOW, PPY)).toEqual(sharpeOnZeros);
     });
   }
+
+  // HI-01 (review round 2): a constant-yield STRATEGY window has beta exactly
+  // 0, the all-zero strategy's value, never a residue of about ±1e-15.
+  it("T17 rollingBeta of a constant-yield strategy equals the all-zero strategy, element by element", () => {
+    const control = rollingBeta(zeros(N), BENCH, WINDOW);
+    expect(control[N - 1]).toBe(0);
+    for (const id of YIELD_IDS) {
+      const got = rollingBeta(navConstantYield(CONSTANT_YIELDS[id], N), BENCH, WINDOW);
+      const bad = got.findIndex((v, i) => !Object.is(v, control[i]));
+      expect(bad, `${id}: index ${bad} = ${got[bad]}`).toBe(-1);
+    }
+  });
 
   it("T17 cent-rounded 1% APY keeps a finite, non-zero rolling beta and Sharpe (floor control)", () => {
     const b = rollingBeta(STRAT, CENT_1PCT, WINDOW);

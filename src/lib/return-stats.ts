@@ -159,6 +159,12 @@ export function pearson(a: number[], b: number[]): number | null {
  * Before Phase 166.2's review round 1 (SFH-M5) only `x` was guarded, through
  * its variance, so a NaN in `y` came back as NaN, not null, and passed every
  * caller's null check.
+ *
+ * Exactly 0 when `y`'s population dispersion is 0 or residue (review round 2,
+ * HI-01). A flat `y` has no market exposure, so its beta exists and is 0, the
+ * value an all-zero `y` already gives. Without this guard a compounding
+ * constant yield's residue deviations gave a covariance of about 1e-16 and a
+ * beta of about ±1e-15, and every ratio built on beta (Treynor) divided by it.
  */
 export function beta(y: number[], x: number[]): number | null {
   if (y.length !== x.length) {
@@ -169,6 +175,7 @@ export function beta(y: number[], x: number[]): number | null {
   if (y.some((v) => !Number.isFinite(v)) || x.some((v) => !Number.isFinite(v))) return null;
   const dx = dispersion(x, 0);
   if (dx.sd === 0) return null;
+  if (dispersion(y, 0).sd === 0) return 0;
   const mx = dx.mean;
   const my = mean(y);
   let cov = 0;
