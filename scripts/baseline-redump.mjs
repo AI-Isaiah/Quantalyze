@@ -1058,28 +1058,40 @@ function anonMainMigrationListing({ repoRoot, remote }) {
 }
 
 /**
- * SFH-01 / WR-02: the merge's migration set against current `main`'s. The marker is
- * built from the merge tree while the dump is taken from PROD NOW, so the two agree
- * only while `main` carries exactly the merge's migrations. Returns the defect text,
- * or null. Counts only: `main`'s basenames were never put through the strict rule.
+ * SFH-01 / WR-02 / D-31: the merge's migration set against current `main`'s. The
+ * marker is built from the merge tree while the dump is taken from PROD NOW, so the
+ * two agree only while `main` carries exactly the merge's migrations. Returns
+ * `{ verdict, text }`: "equal" (text null), "behind" (main LACKS a migration the
+ * merge carries, a refusal; it wins when both directions differ), or "ahead" (main
+ * carries a migration the merge lacks). D-31: "ahead" is a skip, not a refusal. The
+ * concurrency group holds the later merge's apply until this run ends, so PROD has
+ * not applied it yet and this dump is correct but about to be superseded; that
+ * later run re-dumps. Counts only: `main`'s basenames were never put through the
+ * strict rule.
  */
 export function judgeMainListing(mergeListing, mainListing) {
   const merge = new Set(mergeListing);
   const main = new Set(mainListing);
   const mainOnly = [...main].filter((b) => !merge.has(b)).length;
   const mergeOnly = [...merge].filter((b) => !main.has(b)).length;
-  if (mainOnly === 0 && mergeOnly === 0) return null;
-  if (mainOnly > 0) {
-    return (
-      `main carries ${mainOnly} migration(s) this merge does not: a later migration merge landed after this run's apply. ` +
-      "PROD may already hold them, so a marker built from this merge could disagree with the dump, and nothing is written. " +
-      "The later merge's own apply run re-dumps; if none is queued, dispatch a fresh run: gh workflow run supabase-migrate.yml --ref main"
-    );
+  if (mergeOnly > 0) {
+    return {
+      verdict: "behind",
+      text:
+        `main lacks ${mergeOnly} migration(s) this merge carries: main no longer holds what PROD was given, so no marker from this merge ` +
+        "is safe to write. Find out how main lost them before re-dispatching supabase-migrate.yml on main",
+    };
   }
-  return (
-    `main lacks ${mergeOnly} migration(s) this merge carries: main no longer holds what PROD was given, so no marker from this merge ` +
-    "is safe to write. Find out how main lost them before re-dispatching supabase-migrate.yml on main"
-  );
+  if (mainOnly > 0) {
+    return {
+      verdict: "ahead",
+      text:
+        `main carries ${mainOnly} migration(s) this merge does not: a later migration merge landed after this run's apply, ` +
+        "so this dump would be superseded and nothing is proposed (D-31). The later merge's own apply run re-dumps; " +
+        "if none is queued, dispatch a fresh run: gh workflow run supabase-migrate.yml --ref main",
+    };
+  }
+  return { verdict: "equal", text: null };
 }
 
 /**
@@ -1437,10 +1449,17 @@ export function gateDump({
         `${MIGRATION_BASENAME_STRICT_RE}; refusing to write them anywhere`,
     );
   }
-  // SFH-01: refuse unless current main carries exactly the merge's migrations.
-  const mainDefect = judgeMainListing(listed, mainListing({ repoRoot, remote }));
-  console.log(`baseline-redump main-listing: ${mainDefect === null ? "equal to the merge's" : "differs from the merge's"}`);
-  if (mainDefect !== null) throw new Error(mainDefect);
+  // SFH-01: refuse when main LACKS one of the merge's migrations. D-31: when main
+  // is AHEAD, skip as the D-10 no-op does (changed=false, no out dir), so
+  // `redump-pr` skips and a superseded dump never turns main red.
+  const mainJudged = judgeMainListing(listed, mainListing({ repoRoot, remote }));
+  console.log(`baseline-redump main-listing: ${mainJudged.verdict === "equal" ? "equal to the merge's" : "differs from the merge's"}`);
+  if (mainJudged.verdict === "behind") throw new Error(mainJudged.text);
+  if (mainJudged.verdict === "ahead") {
+    console.log(`::notice::baseline-redump: ${mainJudged.text}`);
+    emit("changed", "false");
+    return { changed: false, measured: null };
+  }
 
   const committedMarker = committedBytes(repoRoot, merge, MARKER_REL).toString("utf8");
   const committedDumpSha = sha256(committedDumpBytes);
@@ -2946,11 +2965,22 @@ function selfTest({ withGitleaks = false } = {}) {
       );
     }
     g(["push", "-q", mainBare, `${head3}:refs/heads/main`]);
-    const ahead = realMain();
+    // D-31: a CHANGED dump, so a gate that fell through past the main-ahead skip
+    // would write an out dir and emit changed=true, and this arm would go red.
+    const aheadOut = join(dir, `main-ahead-out-${randomBytes(4).toString("hex")}`);
+    outputs.length = 0;
+    const ahead = capture(() =>
+      gateDump({
+        repoRoot: atHead2, dump: dumpPath, merge: head2, runId: "1", runAttempt: "1", cliVersion: "2.98.2", out: aheadOut, emit,
+        gitleaks: cleanGl(),
+      }),
+    );
     ok(
-      ahead.threw !== null && ahead.threw.message.startsWith("main carries 1 migration(s) this merge does not") &&
-        ahead.text.includes("baseline-redump main-listing: differs from the merge's") && !ahead.text.includes(M3) && ahead.wroteNothing,
-      "a merge whose main (fetched anonymously) carries one more migration refuses by count, never echoing the name, and writes nothing (SFH-01)",
+      ahead.threw === null &&
+        /^::notice::baseline-redump: main carries 1 migration\(s\) this merge does not: .*nothing is proposed \(D-31\)/m.test(ahead.text) &&
+        ahead.text.includes("baseline-redump main-listing: differs from the merge's") && !ahead.text.includes(M3) &&
+        outputs.join(",") === "changed=false" && !existsSync(aheadOut),
+      "a CHANGED dump whose main (fetched anonymously) carries one more migration is skipped: a ::notice:: by count, never the name, changed=false, no out dir (D-31)",
     );
     g(["push", "-q", "--force", mainBare, `${head2}:refs/heads/main`]);
     const equal = realMain();
