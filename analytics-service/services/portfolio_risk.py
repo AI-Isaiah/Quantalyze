@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from typing import Any, Optional
-from services.dispersion import dispersion_is_residue
+from services.dispersion import dispersion_is_real, dispersion_is_residue
 from services.metrics import _safe_float
 
 # Rolling correlation is O(n²) in strategy count; skip beyond this threshold.
@@ -17,7 +17,16 @@ def compute_correlation_matrix(strategy_returns: dict[str, pd.Series]) -> dict[s
     df = pd.DataFrame(strategy_returns).dropna()
     if len(df) < 10:
         return {sid: {sid2: None for sid2 in ids} for sid in ids}
-    corr = df.corr().to_dict()
+    corr_df = df.corr()
+    # Phase 166.1 (C1, D-02): a leg whose dispersion is residue defines no
+    # correlation. pandas gives an all-zero leg NaN on its row, column and
+    # diagonal (read as None below), but a compounding constant yield a noise
+    # correlation and a 1.0 diagonal. Mask the residue leg the same way.
+    flat = [c for c in df.columns if not dispersion_is_real(float(df[c].std()), float(df[c].mean()))]
+    if flat:
+        corr_df.loc[flat, :] = np.nan
+        corr_df.loc[:, flat] = np.nan
+    corr = corr_df.to_dict()
     return {k1: {k2: _safe_float(v) for k2, v in row.items()} for k1, row in corr.items()}
 
 

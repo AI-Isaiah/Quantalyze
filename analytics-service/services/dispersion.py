@@ -4,10 +4,16 @@ Phase 166.1 (D-03) moved the constant and the three functions below out of
 ``services/metrics.py`` verbatim, so every ratio-over-standard-deviation site in
 analytics-service reads ONE floor instead of testing ``== 0`` on its own.
 
-This module is a dependency-light leaf: numpy only, and no ``services`` import,
-so ``optimizer.py`` (declared PURE), ``csv_validator.py`` and
-``allocated_capital.py`` can use the floor without pulling quantstats and scipy
-in through ``services.metrics``.
+This module is a dependency-light leaf: numpy and pandas only, and no
+``services`` import, so ``optimizer.py`` (declared PURE), ``csv_validator.py``
+and ``allocated_capital.py`` can use the floor without pulling quantstats and
+scipy in through ``services.metrics``.
+
+Phase 166.1 plan 03 (D-02) adds the two correlation helpers at the bottom,
+``pairwise_correlation_or_none`` and ``dispersing_corrwith``. A Pearson
+correlation divides by BOTH legs' standard deviation, so it belongs to the same
+class: pandas returns a residue correlation (measured 1.0 between two strategies
+with the same compounding constant yield) instead of NaN.
 
 ``services/metrics.py`` re-binds the three FUNCTIONS under their old private
 names (``_residue_floor``, ``_dispersion_is_residue``, ``_dispersion_is_real``)
@@ -23,9 +29,10 @@ So a neuter drill of the floor edits THIS file's source, and restores it from a
 byte backup.
 """
 
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
+import pandas as pd
 
 #: A standard deviation at or below ``DISPERSION_RESIDUE_REL * max(1, |mean|)``
 #: is float residue, not dispersion (``residue_floor``). Two residue scales exist
@@ -86,3 +93,52 @@ def dispersion_is_real(sd: float, mean: float) -> bool:
     NaN ``sd`` (one row, or none), never "varies" (SFH R2-LOW-2).
     """
     return bool(sd > residue_floor(mean))
+
+
+def _leg_disperses(leg: pd.Series) -> bool:
+    """``dispersion_is_real`` over a leg's own std and mean (False on NaN)."""
+    return dispersion_is_real(float(leg.std()), float(leg.mean()))
+
+
+def pairwise_correlation_or_none(a: pd.Series, b: pd.Series) -> Optional[float]:
+    """Pearson correlation of ``a`` and ``b``, or None when either leg does not disperse.
+
+    Phase 166.1 (D-02). The legs are aligned by index and every row where either
+    is missing is dropped, which is the rule ``Series.corr`` applies. The
+    dispersion test runs on THOSE rows, so it judges exactly the numbers the
+    correlation divides by. A leg whose dispersion is residue (or zero, or NaN
+    because fewer than two rows overlap) defines no correlation: None, the same
+    answer an all-zero leg gets from pandas today (NaN). A non-finite result is
+    also None.
+    """
+    pair = pd.concat([a, b], axis=1, join="inner").dropna()
+    x, y = pair.iloc[:, 0], pair.iloc[:, 1]
+    if not (_leg_disperses(x) and _leg_disperses(y)):
+        return None
+    r = float(x.corr(y))
+    return r if np.isfinite(r) else None
+
+
+def dispersing_corrwith(frame: pd.DataFrame, target: pd.Series) -> pd.Series:
+    """``frame.corrwith(target)`` restricted to columns whose correlation is defined.
+
+    Phase 166.1 (D-02), the ``corrwith`` form of ``pairwise_correlation_or_none``
+    with the same rule: per column, the rows where both the column and
+    ``target`` are present, and both legs must disperse on those rows. A column
+    that fails is DROPPED (not NaN), so a caller's ``idxmax`` never sees it.
+    When ``target`` itself does not disperse, every column fails the same rule
+    and the result is an EMPTY float Series: no candidate can correlate with a
+    leg that does not move. Measured before this helper: two strategies with the
+    same compounding constant yield ``corrwith`` each other at 1.0, above the
+    0.95 match threshold.
+    """
+    common = frame.index.intersection(target.index)
+    frame, target = frame.loc[common], target.loc[common]
+    kept = []
+    for col in frame.columns:
+        pair = pd.concat([frame[col], target], axis=1).dropna()
+        if _leg_disperses(pair.iloc[:, 0]) and _leg_disperses(pair.iloc[:, 1]):
+            kept.append(col)
+    if not kept:
+        return pd.Series(dtype=float)
+    return frame[kept].corrwith(target).astype(float)
