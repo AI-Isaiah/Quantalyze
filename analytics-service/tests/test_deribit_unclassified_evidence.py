@@ -121,6 +121,35 @@ def test_identifiers_are_REDACTED_by_whitelist() -> None:
         assert leaked not in out, f"{leaked!r} leaked into a customer-visible message"
 
 
+def test_the_census_reports_a_same_instrument_assignment() -> None:
+    """SIBLING-REPORTS-ASSIGNMENT (Phase 168, D-04). The next unknown-type
+    refusal is likely an option `exercise` or `expiry` (Deribit's transaction-log
+    docs list both beside `assignment`). Whether an `assignment` co-occurred on
+    the same instrument is the first thing its classification will need, so the
+    census must report it — and must FLIP, or it measures nothing."""
+    beside = describe_unclassified_row(UNKNOWN_ROW, [UNKNOWN_ROW, ASSIGNMENT_ROW])
+    alone = describe_unclassified_row(UNKNOWN_ROW, [UNKNOWN_ROW])
+    assert "assignment=1" in beside, beside
+    assert "assignment=0" in alone, alone
+
+
+def test_the_shape_reports_commission_and_position() -> None:
+    """SHAPE-REPORTS-FEE-AND-POSITION (Phase 168, CONTEXT discretion). Whether an
+    option expiry row carries `commission` and `position` decides whether the
+    mark_to_market fee arm and the smoothed replay can read it, so the refusal
+    renders both. They are sizes and fees, not identifiers. A row without them
+    renders their absence (the field is simply not listed) and never raises."""
+    carrying = dict(UNKNOWN_ROW, commission=0.0003, position=-1.0)
+    out = describe_unclassified_row(carrying, [carrying])
+    assert "commission=0.0003" in out, out
+    assert "position=-1.0" in out, out
+
+    bare = describe_unclassified_row(UNKNOWN_ROW, [UNKNOWN_ROW])
+    assert bare.startswith("OBSERVED SHAPE: type='mystery_new_type'"), bare
+    assert "commission=" not in bare, bare
+    assert "position=" not in bare, bare
+
+
 def test_a_zero_change_unknown_type_still_passes_silently() -> None:
     """UNCHANGED BEHAVIOUR, pinned so this fix cannot widen the refusal. Only a
     NONZERO change was ever loud; a zero-change occurrence is harmlessly ignored,
