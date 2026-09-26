@@ -19,9 +19,10 @@
  * cached wrapper `buildFactsheetPayloadCached` deliberately did NOT move; it
  * stays private to `v2/page.tsx`, where the lane decision that makes it safe
  * also lives, and this module imports that page nowhere. The effective
- * `unstable_cache` key on that route is id-ONLY, so any viewer-dependent
- * payload routed through the wrapper would be served to every later reader of
- * that id — anonymous ones included — for the full TTL. A lane needing a
+ * `unstable_cache` key on that route carries no viewer (the id and
+ * `computed_at` only), so any viewer-dependent payload routed through the
+ * wrapper would be served to every later reader of that id — anonymous ones
+ * included — for the full TTL. A lane needing a
  * viewer-dependent payload calls `fetchAndBuildPayload` DIRECTLY, exactly as
  * the owner lane does.
  *
@@ -380,26 +381,25 @@ async function resolveFactsheetInputs(
  * outer gate. If a future RLS predicate adds per-user filtering on those
  * columns, this comment is the warning sign.
  *
- * CACHE KEY REALITY (corrected phase 148 — the previous claim here was false).
- * The `cacheKey` string the page passes in is split at "::" and everything
- * after the id is DISCARDED (`buildFactsheetPayloadCached`, which stays in
- * `src/app/factsheet/[id]/v2/page.tsx`). The
- * effective unstable_cache key is id-ONLY: Next derives it from the callback's
- * source text plus the keyParts ["factsheet-v2-payload-v6", id] and an empty
- * args array. So a fresh `strategy_analytics.computed_at` does NOT bust this
- * cache — entries live the full revalidate=3600s, or until the admin publish
- * flow calls revalidateTag(`factsheet-v2:${id}`). Tag-based revalidation is
- * what actually handles publish/unpublish flips. (The resulting staleness
- * window is a known, logged item — see TODOS.md, phase 148 — deliberately not
- * fixed here.)
+ * CACHE KEY REALITY (corrected phase 148; corrected again 167.2.1-REVIEW
+ * WR-02). Next derives the unstable_cache key from the callback's source text,
+ * the keyParts and the call's args. Until 167.2.1 the page passed a
+ * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
+ * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
+ * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v6", id,
+ * computedAt]: every successful analytics run (the finalizer stamps
+ * `computed_at = now()`) gets a fresh entry, a `null` included. Entries still
+ * live up to revalidate=3600s within one run, and the admin publish flow's
+ * revalidateTag(`factsheet-v2:${id}`) still handles publish/unpublish flips.
  *
  * ⛔ Corollary: viewer/lane separation can NEVER be expressed through the
- * cacheKey string. Appending a suffix yields the SAME entry, so any
- * viewer-dependent payload built through the cached wrapper would be served to
- * every subsequent reader — including anonymous ones — for the full TTL. A
- * viewer-dependent payload must bypass the cached wrapper entirely, which is
- * why the wrapper in `v2/page.tsx` hard-codes its predicate instead of
- * accepting one.
+ * cache key. Nothing in it is about the viewer (`computed_at` is a property of
+ * the row), so any viewer-dependent payload built through the cached wrapper
+ * would be served to every subsequent reader of that id and run — including
+ * anonymous ones — for the full TTL. A viewer-dependent payload must bypass
+ * the cached wrapper entirely, which is why the wrapper in `v2/page.tsx`
+ * hard-codes its predicate instead of accepting one.
  */
 export async function fetchAndBuildPayload(
   id: string,
@@ -491,10 +491,11 @@ async function buildFromResolved(
     // MTM-01 (Phase 102): a single-key OPTIONS strategy also persists its MTM
     // basis (`metrics_json_by_basis.mark_to_market`) + an honest degrade reason.
     // The F-4 `computation_status`-DONE gate was documented as riding a
-    // computed_at-bearing cache key; it does NOT — the effective key is id-only
-    // and a re-derive does not bust it (see the corrected header comment above).
-    // The gate is still correct, it just drains on the TTL / publish tag rather
-    // than on a fresh computed_at. Status is public-safe on a published row
+    // computed_at-bearing cache key; until 167.2.1-REVIEW WR-02 it did not (the
+    // effective key was id-only). It does now: `computed_at` is a keyParts
+    // member (see the header comment above), so a run that stamps a fresh
+    // computed_at gets a fresh build; a status change within one run still
+    // drains on the TTL / publish tag. Status is public-safe on a published row
     // (unchanged RLS boundary — the outer
     // request-scoped signature probe stays the auth gate). The assembly returns
     // `{}` for every non-options single-key strategy → byte-identical.
@@ -599,9 +600,9 @@ async function buildFromResolved(
  * service role the predicate is the only row gate. The probe does not catch a
  * throw; the caller maps a throw to "unreadable" (D-05).
  *
- * ⛔ Never route this probe through the id-keyed cached wrapper
- * `buildFactsheetPayloadCached` (D-11): an id-only cache key would serve one
- * viewer's answer to every later reader of that id.
+ * ⛔ Never route this probe through the cached wrapper
+ * `buildFactsheetPayloadCached` (D-11): its key carries no viewer, so it would
+ * serve one viewer's answer to every later reader of that id.
  */
 export async function probeFactsheetBuildable(
   id: string,

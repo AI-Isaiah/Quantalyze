@@ -78,9 +78,24 @@ const STATE_LINE_TONE_CLASS = {
 export const dynamic = "force-dynamic";
 
 function buildFactsheetPayloadCached(
-  cacheKey: string,
+  id: string,
+  computedAt: string,
 ): Promise<FactsheetPayload | null> {
-  const [id] = cacheKey.split("::");
+  // 167.2.1-REVIEW WR-02 (closes DEF-148-A): the key is the shape version, the
+  // id AND `computed_at`, as real `keyParts` members. Before, the page passed
+  // `${id}::${computedAt}` and this wrapper split the suffix off, so the
+  // effective key was the id only, and an entry (a `null` included, which
+  // unstable_cache stores unconditionally) outlived the analytics run it was
+  // built from for the full TTL. /strategies decides its "right now" share
+  // notes with a FRESH probe, so for up to an hour it could say "no note" while
+  // this lane served a cached placeholder, or "not available" while it served
+  // a cached payload. The analytics finalizer stamps `computed_at = now()` on
+  // every successful run, so each compute that can change what the builder
+  // answers now moves the key. Nothing else can revalidate on a compute: the
+  // writer is the Python worker, which cannot reach Next's cache.
+  // `computed_at` is a property of the ROW, never of the viewer, so the key
+  // stays viewer-independent (the corollary below still holds).
+  //
   // Per-id `factsheet-v2:${id}` tag lets admin status flips invalidate ONE
   // strategy's payload rather than busting every factsheet at once. The
   // global `factsheet-v2` tag is retained so a schema-level migration can
@@ -88,8 +103,8 @@ function buildFactsheetPayloadCached(
   //
   // ⛔ This wrapper takes NO visibility parameter, and the predicate below is a
   // LITERAL, never a variable. Whatever this callback builds is shared with
-  // every subsequent reader of the same id for the full TTL (the key is
-  // id-only — see the CACHE KEY REALITY note in
+  // every subsequent reader of the same id and run for the full TTL (the key
+  // carries nothing about the viewer — see the CACHE KEY REALITY note in
   // `@/lib/factsheet/fetch-and-build-payload`), so a viewer-dependent predicate here
   // would be a disclosure bug. Keeping the parameter off the signature makes
   // that unrepresentable: a caller cannot pass one, and the literal cannot be
@@ -110,7 +125,9 @@ function buildFactsheetPayloadCached(
     // dataQuality). Because they are optional-absent, a stale v3 entry
     // deserialized as v4 degrades gracefully (missing marker/basis fields → no
     // toggle / no markers during the TTL drain, never a crash) — the bump is
-    // belt-and-suspenders. `computedAt` in the key busts on any re-stitch.
+    // belt-and-suspenders. (Its claim that `computedAt` in the key busted on
+    // a re-stitch was false until 167.2.1-REVIEW WR-02 made it a keyParts
+    // member below.)
     // Bumped v4→v5 (Phase 90.5): payload carries optional periodsPerYear for the
     // client leverage recompute; stale v4 entries lack it -> leverage control
     // hidden (fail-closed) during the TTL drain, never a crash.
@@ -120,7 +137,7 @@ function buildFactsheetPayloadCached(
     // wrongly SUPPRESSED (for cash too) during the 1h TTL drain. Busting the shape
     // version forces a fresh build carrying `bootstrapCI.n` rather than silently
     // hiding the caveat.
-    ["factsheet-v2-payload-v6", id],
+    ["factsheet-v2-payload-v6", id, computedAt],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
@@ -215,9 +232,9 @@ export default async function FactsheetV2Page({
   // TWO-LANE SELECTION (phase 148 / OWN-02). Lane A is the published/cached
   // lane above and is byte-unchanged. Lane B exists ONLY on a Lane A miss: an
   // authenticated owner may read their OWN unpublished strategy, built directly
-  // (never through the shared cache — see the header comment: the cache key is
-  // id-only, so an owner-built entry would be served to anonymous readers for
-  // the full TTL).
+  // (never through the shared cache — see the header comment: the cache key
+  // carries no viewer, only the id and `computed_at`, so an owner-built entry
+  // would be served to anonymous readers for the full TTL).
   //
   // ⛔ LANE ORDER IS LOAD-BEARING. The published probe runs FIRST and the
   // session probe only on its miss, so a public (even authed) view pays ZERO
@@ -409,8 +426,9 @@ export default async function FactsheetV2Page({
 
   // ⛔ The owner arm calls the builder DIRECTLY: no cache read, no cache write.
   // It cannot route through `buildFactsheetPayloadCached` — the effective
-  // unstable_cache key is id-ONLY (header comment), so an owner-built payload
-  // would be served to every subsequent reader of this id, anonymous ones
+  // unstable_cache key carries no viewer (the id and `computed_at` only, header
+  // comment), so an owner-built payload would be served to every subsequent
+  // reader of this id and run, anonymous ones
   // included, for the full 3600s TTL. The same applies to a `null`: unstable_cache
   // stores it unconditionally, so a draft that fails to build must not reach the
   // wrapper either. The lambda closes over `ownerUid` (the session id captured in
@@ -426,7 +444,7 @@ export default async function FactsheetV2Page({
       : null;
   const payload = ownerBuild
     ? ownerBuild.payload
-    : await buildFactsheetPayloadCached(`${id}::${computedAt}`);
+    : await buildFactsheetPayloadCached(id, computedAt);
   if (!payload) {
     console.warn("[factsheet/v2/page] payload pending -> rendering fallback", {
       id,
