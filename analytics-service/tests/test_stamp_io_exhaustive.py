@@ -771,10 +771,15 @@ async def test_a_non_object_flags_value_is_stamped_once_not_restamped_by_f5() ->
     and before any write. At the degenerate-length MTM stamp that raise sits
     inside the MTM ``try``, whose F-5 ``except ValueError`` called
     ``_stamp_failed`` AGAIN under the chain-break cause. Now the value is
-    dropped with a WARNING and the FIRST stamp lands, once, under its own cause.
+    dropped and the FIRST stamp lands, once, under its own cause.
+
+    R6-02 (round 6): the stamp's write destroys the dropped value, so the drop
+    is the only trace of the broken writer. It is logged at ERROR naming the
+    job, with one tagged capture, not at WARNING (a breadcrumb).
 
     Neuter to redden: restore ``dict(existing_row.get("data_quality_flags") or
-    {})`` in the composite ``_stamp_failed``. No stamp lands."""
+    {})`` in the composite ``_stamp_failed`` (no stamp lands), or log the drop
+    at WARNING again (no ERROR line, no capture)."""
     import pandas as pd
 
     from tests.test_stitch_composite_job import _member, _returns
@@ -803,13 +808,14 @@ async def test_a_non_object_flags_value_is_stamped_once_not_restamped_by_f5() ->
         dtype="float64",
     )
     log = MagicMock()
+    sentry = MagicMock()
     with _apply(_deribit_patches(
         fake,
         combine_returns=[(cash_m1, {}), (cash_m2, {}), (mtm_m1, {}), (mtm_m2, {})],
         has_option_activity=False,
     )), patch("services.job_worker.logger", log), \
          patch.object(_jw, "db_read_with_retry", _read_with_a_non_object_flags_value), \
-         patch("services.job_worker.sentry_sdk"):
+         patch("services.job_worker.sentry_sdk", sentry):
         result = await _jw.dispatch(
             {"id": _JOB_ID, "kind": "stitch_composite", "strategy_id": _COMPOSITE_STRATEGY_ID}
         )
@@ -823,10 +829,19 @@ async def test_a_non_object_flags_value_is_stamped_once_not_restamped_by_f5() ->
     assert len(stamps) == 1, (result, stamps)
     assert stamps[0]["data_quality_flags"] == {"csv_source": True, "composite": True}
     assert result.error_kind == "permanent", result
-    assert any(
-        c.args and "non-object data_quality_flags" in str(c.args[0])
-        for c in log.warning.call_args_list
-    ), log.warning.call_args_list
+    flag_lines = [
+        line for line in _rendered_errors(log) if "non-object data_quality_flags" in line
+    ]
+    assert len(flag_lines) == 1, log.error.call_args_list
+    assert _JOB_ID in flag_lines[0] and "'not-an-object'" in flag_lines[0], flag_lines
+    # Pins this path's row of the runbook's alert-volume table: the drop is the
+    # ONLY ERROR on an unmarked composite stamp that lands, plus one capture.
+    assert log.error.call_count == 1, log.error.call_args_list
+    assert sentry.capture_message.call_count == 1, sentry.capture_message.call_args_list
+    assert sentry.capture_exception.call_count == 0
+    sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+        "compute_job_id", _JOB_ID
+    )
 
 
 @pytest.mark.asyncio

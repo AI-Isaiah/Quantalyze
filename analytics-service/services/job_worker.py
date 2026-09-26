@@ -2791,6 +2791,41 @@ def _capture_read_failure(exc: BaseException, *, job_id: Any) -> None:
         sentry_sdk.capture_exception(exc)
 
 
+def _flags_object_or_dropped(
+    raw: Any, *, site: str, strategy_id: Any, job_id: Any, consequence: str
+) -> dict[str, Any]:
+    """``strategy_analytics.data_quality_flags`` as a dict to merge into.
+
+    The column is ``jsonb``, so a non-object value is storable, and ``dict()``
+    on it raises. ``None`` (no row, or no flags) is ``{}``. Any other non-object
+    value is dropped: ONE ERROR line naming the job, the value's type and a
+    bounded, scrubbed ``repr``, and ONE capture tagged with the job. Such a value
+    means some writer elsewhere is broken, and the caller's write then replaces
+    it, so this line is the only trace of it (round 6, R6-02 / R6-05; round 5
+    logged it at WARNING, which is a breadcrumb that reaches no one, and without
+    the job). ``consequence`` is the caller's own sentence about what it writes
+    instead."""
+    if isinstance(raw, dict):
+        return dict(raw)
+    if raw is None:
+        return {}
+    from services.redact import scrub_freeform_string
+
+    kind = type(raw).__name__
+    logger.error(
+        "%s: strategy %s on compute_job %s has a non-object data_quality_flags "
+        "(%s: %s). It is dropped; %s",
+        site, strategy_id, job_id, kind,
+        str(scrub_freeform_string(repr(raw)))[:120], consequence,
+    )
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("compute_job_id", str(job_id))
+        sentry_sdk.capture_message(
+            f"{site}: non-object data_quality_flags ({kind}) dropped", level="error"
+        )
+    return {}
+
+
 async def _refresh_marker_still_on_row(
     supabase: Any, job_id: Any, expected: str
 ) -> MarkerLiveState:
@@ -6885,17 +6920,16 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # and BEFORE any write: a ``ValueError`` from inside the composite MTM
         # ``try`` was caught by F-5's ``except ValueError`` and stamped a second
         # time under the chain-break cause. So only an object is merged; any
-        # other value is dropped with a WARNING and the stamp lands once.
-        _raw_flags = existing_row.get("data_quality_flags")
-        existing_flags: dict[str, Any] = (
-            dict(_raw_flags) if isinstance(_raw_flags, dict) else {}
+        # other value is dropped and the stamp lands once. Round 6 (R6-02): the
+        # drop is logged at ERROR with the job and captured once, not at
+        # WARNING, because the stamp's write destroys the value.
+        existing_flags: dict[str, Any] = _flags_object_or_dropped(
+            existing_row.get("data_quality_flags"),
+            site="stitch_composite",
+            strategy_id=strategy_id,
+            job_id=job.get("id"),
+            consequence="the failed stamp writes the composite markers without it.",
         )
-        if _raw_flags is not None and not isinstance(_raw_flags, dict):
-            logger.warning(
-                "stitch_composite: strategy %s has a non-object data_quality_flags "
-                "(%s); the failed stamp writes the composite markers without it.",
-                strategy_id, type(_raw_flags).__name__,
-            )
         _existing_status = existing_row.get("computation_status")
         existing_status: str | None = (
             _existing_status if isinstance(_existing_status, str) else None
