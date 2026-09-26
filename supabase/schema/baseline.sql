@@ -380,6 +380,10 @@ DECLARE
   v_existing_id UUID;
   v_new_id UUID;
   v_target_count INT;
+  v_initial_status TEXT;
+  v_parents_found  INT;
+  v_parents_failed INT;
+  v_parents_open   INT;
 BEGIN
   -- 4-way XOR guard (CHECK mirrors this; the function raises earlier with a
   -- clearer error message — defense in depth).
@@ -405,6 +409,70 @@ BEGIN
   IF p_kind = 'compute_analytics' THEN
     RAISE EXCEPTION '_enqueue_compute_job_internal: kind compute_analytics is retired (Phase 106) — no enqueue path remains'
       USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Phase 164.9.1 (mig 109 P12 intent, mirrored from the 7-param overload in
+  -- 20260716090000): rows with parents start as done_pending_children so the
+  -- fan-in advance in mark_compute_job_done holds them until a parent
+  -- completes. Leaf rows (no parents) start as pending.
+  --
+  -- Round-1 review (silent-failure-hunter HIGH-2): the fan-in advance releases
+  -- a child only when a parent is marked done AND every listed parent is
+  -- 'done'. A child whose parents cannot all reach 'done' through a later
+  -- mark-done would sit in done_pending_children forever, holding its
+  -- (target, kind) in-flight slot, and every later enqueue for that target
+  -- and kind would be handed its id. So the parents are READ here:
+  --   * a NULL element, or an id with no row   -> refused, loudly;
+  --   * a parent that already ended failed_final -> refused, loudly;
+  --   * every parent already 'done'           -> no mark-done will ever
+  --     release the child, and nothing needs to hold it: it starts pending;
+  --   * otherwise a parent is still open       -> done_pending_children.
+  -- The parents are locked FOR SHARE, in id order, BEFORE they are counted.
+  -- mark_compute_job_done flips its parent with an UPDATE, which waits on
+  -- that lock, and runs its fan-in advance as a LATER statement, which sees
+  -- this child once this transaction commits. Without the lock a parent could
+  -- commit 'done' between this read and the INSERT below, and its fan-in
+  -- advance would miss a child it never saw.
+  IF p_parent_job_ids IS NOT NULL
+     AND array_length(p_parent_job_ids, 1) IS NOT NULL
+     AND array_length(p_parent_job_ids, 1) > 0 THEN
+    IF array_position(p_parent_job_ids, NULL) IS NOT NULL THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: p_parent_job_ids contains a NULL element; a fan-in child must name real parent jobs'
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    PERFORM 1
+       FROM compute_jobs pj
+      WHERE pj.id = ANY(p_parent_job_ids)
+      ORDER BY pj.id
+      FOR SHARE;
+
+    SELECT count(*),
+           count(*) FILTER (WHERE pj.status = 'failed_final'),
+           count(*) FILTER (WHERE pj.status <> 'done')
+      INTO v_parents_found, v_parents_failed, v_parents_open
+      FROM compute_jobs pj
+     WHERE pj.id = ANY(p_parent_job_ids);
+
+    IF v_parents_found <> cardinality(ARRAY(SELECT DISTINCT unnest(p_parent_job_ids))) THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: p_parent_job_ids names % parent job(s) with no compute_jobs row; a child of a missing parent could never be released by the fan-in advance',
+        cardinality(ARRAY(SELECT DISTINCT unnest(p_parent_job_ids))) - v_parents_found
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_parents_failed > 0 THEN
+      RAISE EXCEPTION '_enqueue_compute_job_internal: % parent job(s) in p_parent_job_ids already ended failed_final; a child of a failed parent could never be released by the fan-in advance',
+        v_parents_failed
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_parents_open > 0 THEN
+      v_initial_status := 'done_pending_children';
+    ELSE
+      v_initial_status := 'pending';
+    END IF;
+  ELSE
+    v_initial_status := 'pending';
   END IF;
 
   -- Optimistic look-up per target type.
@@ -446,13 +514,13 @@ BEGIN
   INSERT INTO compute_jobs (
     strategy_id, portfolio_id, allocator_id, api_key_id,
     kind, parent_job_ids, idempotency_key, exchange, metadata,
-    next_attempt_at
+    next_attempt_at, status
   )
   VALUES (
     p_strategy_id, p_portfolio_id, p_allocator_id, p_api_key_id,
     p_kind, COALESCE(p_parent_job_ids, '{}'::uuid[]), p_idempotency_key,
     p_exchange, p_metadata,
-    COALESCE(p_run_at, now())
+    COALESCE(p_run_at, now()), v_initial_status
   )
   ON CONFLICT DO NOTHING
   RETURNING id INTO v_new_id;
@@ -549,7 +617,7 @@ $_$;
 ALTER FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) IS 'Private shared implementation of the idempotent enqueue pattern. Handles all four target scopes (strategy / portfolio / allocator / api_key) via 4-way XOR on the four id parameters. Extended in migration 066 for api_key scope + scheduled run_at. ACL re-asserted by migration 118. Rejects the retired compute_analytics kind with invalid_parameter_value (Phase 106 D3). Race-loser re-read uses a plain SELECT INTO on all four arms; if the winner already advanced past the in-flight statuses, raises serialization_failure so the caller can retry vs. surfacing a 500 (Phase 163 OPS-08, parity with the 7-param overload''s mig 109 P3 fix).';
+COMMENT ON FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) IS 'Private shared implementation of the idempotent enqueue pattern. Handles all four target scopes (strategy / portfolio / allocator / api_key) via 4-way XOR on the four id parameters. Extended in migration 066 for api_key scope + scheduled run_at. ACL re-asserted by migration 118. Rejects the retired compute_analytics kind with invalid_parameter_value (Phase 106 D3). Race-loser re-read uses a plain SELECT INTO on all four arms; if the winner already advanced past the in-flight statuses, raises serialization_failure so the caller can retry vs. surfacing a 500 (Phase 163 OPS-08, parity with the 7-param overload''s mig 109 P3 fix). Computes the initial status and INSERTs it explicitly: done_pending_children while at least one listed parent is not yet done; a child whose parents are all done starts pending, as does a child with no parents (Phase 164.9.1). With parents, it locks and reads them first: a NULL element, a missing parent or a failed_final parent is refused with invalid_parameter_value, so no enqueue creates a child that no mark-done can release.';
 
 
 
@@ -7570,6 +7638,7 @@ CREATE OR REPLACE FUNCTION "public"."request_allocator_holdings_sync"("p_api_key
 DECLARE
   v_uid                UUID := auth.uid();
   v_owner              UUID;
+  v_disconnected       TIMESTAMPTZ;
   v_job_id             UUID;
   v_next_attempt       TIMESTAMPTZ;
   v_prior_reconstruct  BOOLEAN;
@@ -7579,7 +7648,7 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  SELECT user_id INTO v_owner
+  SELECT user_id, disconnected_at INTO v_owner, v_disconnected
     FROM api_keys
     WHERE id = p_api_key_id;
   IF v_owner IS NULL OR v_owner <> v_uid THEN
@@ -7587,28 +7656,43 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  -- Existing poll enqueue (preserve semantics exactly — Phase 06 / D-14).
-  BEGIN
-    v_job_id := enqueue_compute_job(
-      p_strategy_id := NULL,
-      p_kind        := 'poll_allocator_positions',
-      p_api_key_id  := p_api_key_id
-    );
-  EXCEPTION WHEN unique_violation THEN
-    -- f8: surface next_attempt_at so the UI can render deferred-cooldown
-    -- state on a per-exchange rate-limit contagion event.
-    SELECT next_attempt_at INTO v_next_attempt
-      FROM compute_jobs
-      WHERE api_key_id = p_api_key_id
-        AND kind = 'poll_allocator_positions'
-        AND status IN ('pending','running','done_pending_children')
-      ORDER BY next_attempt_at DESC
-      LIMIT 1;
+  -- Migration 075: reject sync on soft-disconnected keys. Checked after
+  -- ownership, so a non-owner never learns the key's state, and before the
+  -- in-flight look-up, so a disconnected key is never reported as queued.
+  IF v_disconnected IS NOT NULL THEN
+    RAISE EXCEPTION 'api_key_disconnected'
+      USING ERRCODE = 'P0001';
+  END IF;
+
+  -- Migration 067: look for a live poll job BEFORE enqueuing. The enqueue
+  -- helper answers a duplicate by returning the existing id, and raises
+  -- nothing, so this look-up is the only way the caller can learn that its
+  -- request collapsed onto a job that was already queued.
+  SELECT next_attempt_at INTO v_next_attempt
+    FROM compute_jobs
+    WHERE api_key_id = p_api_key_id
+      AND kind = 'poll_allocator_positions'
+      AND status IN ('pending', 'running', 'done_pending_children')
+    ORDER BY next_attempt_at DESC
+    LIMIT 1;
+
+  IF v_next_attempt IS NOT NULL THEN
+    -- f8: surface queued state to the UI, which renders the exchange-cooldown
+    -- helper from next_attempt_at.
     RETURN jsonb_build_object(
       'already_inflight', true,
       'next_attempt_at', v_next_attempt
     );
-  END;
+  END IF;
+
+  -- No live job, so enqueue a fresh one. Two concurrent calls that both got
+  -- past the look-up collapse onto one row inside the enqueue helper, and the
+  -- loser receives the winner's id (the accepted race, see the file header).
+  v_job_id := enqueue_compute_job(
+    p_strategy_id := NULL,
+    p_kind        := 'poll_allocator_positions',
+    p_api_key_id  := p_api_key_id
+  );
 
   -- Per-api_key reconstruction gate (replaces migration 070's allocator-
   -- scoped snapshot-count check). Skip enqueue ONLY if THIS key has
@@ -7642,7 +7726,7 @@ $$;
 ALTER FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid") IS 'Authenticated wrapper. Enqueues poll_allocator_positions; for any api_key with no prior reconstruct_allocator_history job (done or in-flight) also enqueues that. Phase 07 / Migration 076 — replaces 070''s allocator-scoped snapshot-count gate which prevented adding a second exchange.';
+COMMENT ON FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid") IS 'Authenticated wrapper for a holdings sync request. Returns {already_inflight: true, next_attempt_at} when a poll_allocator_positions job for the key is already pending, running or done_pending_children; otherwise enqueues one and returns {ok: true, job_id}, and for an api_key with no prior reconstruct_allocator_history job (done or in-flight) also enqueues that. Raises 42501 for an unauthenticated caller or a key the caller does not own, and P0001 api_key_disconnected for a soft-disconnected key. Phase 164.9.1: restores migration 067''s in-flight look-up and migration 075''s disconnected-key refusal on migration 076''s per-api_key reconstruct gate.';
 
 
 
@@ -10320,7 +10404,7 @@ CREATE TABLE IF NOT EXISTS "public"."bridge_outcomes" (
 ALTER TABLE "public"."bridge_outcomes" OWNER TO "postgres";
 
 
-COMMENT ON TABLE "public"."bridge_outcomes" IS 'Allocator self-reported post-intro outcome for a Bridge-recommended strategy. One row per (allocator_id, strategy_id) enforced by unique index. Outcomes are editable by owner (D-17) and append-only from an audit perspective (no DELETE policy — corrective edits via UPSERT). Scope: D-08 through D-19, OUTCOME-01 through OUTCOME-08.';
+COMMENT ON TABLE "public"."bridge_outcomes" IS 'Allocator self-reported post-intro outcome for a Bridge-recommended strategy, or for a voluntary scenario decision (Phase 10). Uniqueness is two-part. (i) bridge_outcomes_allocator_match_decision_unique, UNIQUE (allocator_id, match_decision_id): one outcome per decision (migration 081). (ii) bridge_outcomes_legacy_per_strategy_holding_when_md_null, a partial UNIQUE on (allocator_id, strategy_id, COALESCE(original_holding_ref, '''')) WHERE match_decision_id IS NULL (migration 083), for rows whose decision was nulled out. The sync trigger writes NULL to original_holding_ref for every such row it touches, so that index is in effect one outcome per (allocator, strategy) among them. Two outcomes for the same (allocator, strategy) under two different decisions are allowed by design. Outcomes are editable by owner (D-17) and append-only from an audit perspective (no DELETE policy; corrective edits via UPSERT). Scope: D-08 through D-19, OUTCOME-01 through OUTCOME-08.';
 
 
 
@@ -10384,7 +10468,7 @@ COMMENT ON COLUMN "public"."bridge_outcomes"."needs_recompute" IS 'Flag set TRUE
 
 
 
-COMMENT ON COLUMN "public"."bridge_outcomes"."original_holding_ref" IS 'Phase 09 / finding f4. Denormalized mirror of match_decisions.original_holding_ref populated by bridge_outcomes_sync_holding_ref_trigger on INSERT/UPDATE OF match_decision_id. Enables the widened bridge_outcomes_unique_per_strategy_holding index. NULL for strategy-sourced rows (original_strategy_id path). NULL when match_decision_id IS NULL (legacy rows without a linked decision).';
+COMMENT ON COLUMN "public"."bridge_outcomes"."original_holding_ref" IS 'Phase 09 / finding f4. Denormalized mirror of match_decisions.original_holding_ref, populated by bridge_outcomes_sync_holding_ref_trigger on INSERT/UPDATE OF match_decision_id. NULL for strategy-sourced rows (original_strategy_id path). NULL when match_decision_id IS NULL (the trigger writes NULL for those rows). The md-NULL partial index bridge_outcomes_legacy_per_strategy_holding_when_md_null (migration 083) keys on COALESCE(original_holding_ref, ''''), but because the trigger nulls this column for md-NULL rows, that index is in effect per (allocator, strategy); a non-empty holding reaches it only through a direct UPDATE of this column that leaves match_decision_id unchanged. Rows with a decision are keyed by bridge_outcomes_allocator_match_decision_unique (migration 081), which does not read this column.';
 
 
 
