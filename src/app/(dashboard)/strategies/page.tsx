@@ -381,7 +381,9 @@ export default async function StrategiesPage() {
   // Lineage: 167.2-REVIEW WR-02 (a computed row whose series cannot build read
   // as "has a factsheet" here) is closed by 167.2.1 D-04 and D-08. A computed
   // row is now asked `probeFactsheetBuildable`, the builder's own resolve
-  // stage, so the list and the share page decide from the builder's own code.
+  // stage, so the list and the share page decide from the builder's own code
+  // whether the factsheet has a null exit. They do not decide whether it
+  // renders: a builder throw is outside that answer (IN-03, below).
   //
   // The recipient arm, and the note an uncomputed row has always shown. One
   // function, so the uncomputed path and the probe's fallbacks read the arm
@@ -461,6 +463,11 @@ export default async function StrategiesPage() {
             probeThrows.push(err);
             return [s.id, probeUnreadableShareNote(mode)] as const;
           }
+          // 167.2.1-REVIEW IN-03: "buildable" means "no null exit", not
+          // "renders". A builder throw at the recipient's request (the basis
+          // reads, the build itself) is outside the probe's domain, so it is
+          // outside this note's domain too: such a row shows no note here and
+          // its recipient gets the error boundary.
           if (probe.buildable) return [s.id, null] as const;
           if (probe.reason === "read_error") {
             // D-05: the probe could not read the row, so what the recipient
