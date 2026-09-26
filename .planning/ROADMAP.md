@@ -3740,6 +3740,8 @@ Plans:
 
 **⚠️ REBASE NOTE 2026-09-26 (from 166.2 D-29):** 166.2 edited `src/app/factsheet/[id]/v2/types.ts` and `fetch-and-build-payload.ts` (NaN/null statistic fields, the optional `n_valid`, the v7 payload cache key). 169's plans must re-read both at HEAD before editing.
 
+**⭐ ROUTED IN 2026-09-27 (founder, UAT 2026-09-27):** /allocations Open Positions shows entry/mark prices under $1 as $0, and unrealized P&L as −$0 / +$0 (price formatter rounds to whole dollars). Success: a sub-dollar price and a sub-dollar P&L render with their real precision, and a zero-rounded value never shows a sign.
+
 ### Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers (INSERTED)
 
 **Goal:** Four self-contained page fixes: the `/admin` compute-jobs list loads and a failed load says so; `/recommendations` states the mandate truthfully and never recommends a viewer's own strategy; `/profile` Exchanges counts only live keys and never repeats a balance; `/recommendations` and `/allocations` use one mandate rule.
@@ -3806,6 +3808,8 @@ Plans:
 ---
 
 **⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy copy check of 167.2.1):** for a strategy whose last computation finished but whose factsheet cannot be built, the /strategies note and the owner factsheet's banner say the numbers "appear there once a computation succeeds" (wait), while the factsheet body says the computation finished and to contact support (act). Success: the list note, the owner banner and the body give the owner the same instruction for this state.
+
+**⭐ ROUTED IN 2026-09-27 (founder, from the Phase 167.2 copy read-through, UAT 2026-09-27):** the 167.2 locked strings pass with these notes, owned here. (1) Two unbounded timing phrases: "Try again in a moment" in `PANEL_STOP_COPY.chain_unreadable` (`src/components/strategy/key-card-copy.ts`) and "Try again later" in `SHARE_CARD_COPY.in_progress` (`src/lib/status-surface-copy.ts`). (2) "Large accounts can take longer" in `SYNC_SLOW_NOTE` (`key-card-copy.ts`). (3) Six passive "could not be …" strings across `key-card-copy.ts` and `status-surface-copy.ts` (measured 2026-09-27: "could not be read" ×2, "could not be re-read", "could not be built", "could not be loaded", "could not be checked"). Success: each is rewritten in active voice with no timing promise the code cannot defend, per DESIGN.md Voice.
 
 ### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 
