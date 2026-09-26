@@ -24,8 +24,10 @@ branch instead of the residue branch.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -41,6 +43,7 @@ from services.dispersion import (
 from services.match_engine import _compute_corr_with_portfolio
 from services.portfolio_optimizer import _avg_corr, find_improvement_candidates
 from services.portfolio_risk import compute_correlation_matrix, compute_rolling_correlation
+from services.strategy_matching import find_matched_strategy
 from tests.dispersion_fixtures import CONSTANT_YIELDS, apy, nav_constant_yield
 
 _YIELD_IDS = list(CONSTANT_YIELDS)
@@ -353,3 +356,194 @@ def test_c6_a_noisy_portfolio_keeps_its_benchmark_correlation() -> None:
     btc = _noise(idx, seed=62, scale=0.03)
     corr = _c6_correlation(0.3 * btc + _noise(idx, seed=63), btc)
     assert isinstance(corr, float) and math.isfinite(corr) and corr > 0.3
+
+
+# ---------------------------------------------------------------------------
+# C7 - the corrwith matching block inside routers/portfolio.py verify_strategy
+# ---------------------------------------------------------------------------
+#
+# C7 has no pure seam (it sits inside the verify-strategy endpoint, after a
+# venue fetch), so its semantics are tested through dispersing_corrwith exactly
+# as the block uses it (corrwith, then dropna, then idxmax over the threshold),
+# and the block is pinned to call it.
+
+
+def _c7_block(target: pd.Series, existing: dict[str, pd.Series]) -> str | None:
+    """The verify_strategy matching block's decision, fed by the helper."""
+    from routers.portfolio import _MATCH_CORRELATION_THRESHOLD
+
+    aligned = pd.concat([target.rename("_target"), pd.DataFrame(existing)], axis=1).dropna()
+    corrs_clean = dispersing_corrwith(aligned.drop(columns=["_target"]), aligned["_target"]).dropna()
+    if corrs_clean.empty:
+        return None
+    best = corrs_clean.idxmax()
+    return str(best) if corrs_clean[best] > _MATCH_CORRELATION_THRESHOLD else None
+
+
+def _verify_strategy_source() -> str:
+    import ast
+    import pathlib
+
+    from routers import portfolio as portfolio_mod
+
+    text = pathlib.Path(portfolio_mod.__file__).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "verify_strategy":
+            return ast.get_source_segment(text, node) or ""
+    raise LookupError("verify_strategy not found in routers/portfolio.py")
+
+
+def _code_lines(src: str) -> str:
+    return "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+
+
+def test_c7_verify_strategy_matches_through_dispersing_corrwith() -> None:
+    code = _code_lines(_verify_strategy_source())
+    assert "dispersing_corrwith(" in code, "C7 must use the dispersion-aware corrwith"
+    assert ".corrwith(" not in code, "a raw pandas corrwith would match residue legs again"
+    assert "corrs_clean = corrs.dropna()" in code and "_MATCH_CORRELATION_THRESHOLD" in code
+
+
+@pytest.mark.parametrize("yield_id", _YIELD_IDS)
+def test_c7_two_strategies_with_the_same_constant_yield_do_not_match(yield_id: str) -> None:
+    target = _residue_leg(yield_id)
+    twin = _residue_leg(yield_id, start=5_000.0)
+    assert _c7_block(target, {"twin": twin}) is None
+    zero = _zeros_like(target)
+    assert _c7_block(zero, {"twin": _zeros_like(twin)}) is None, "D-07 reference: no_match"
+
+
+def test_c7_a_near_identical_noisy_candidate_still_matches() -> None:
+    idx = nav_constant_yield(1e-4).index
+    target = _noise(idx, seed=71)
+    near = target + _noise(idx, seed=72, scale=0.0005)
+    assert _c7_block(target, {"near": near, "other": _noise(idx, seed=73)}) == "near"
+
+
+# ---------------------------------------------------------------------------
+# C8 - services/strategy_matching.find_matched_strategy
+# ---------------------------------------------------------------------------
+
+
+class _Query:
+    """``table(...).select(...).eq/in_(...).limit(...).execute()`` over fixed rows."""
+
+    def __init__(self, data: list[dict[str, object]]) -> None:
+        self._data = data
+
+    def select(self, *_a: object, **_k: object) -> "_Query":
+        return self
+
+    def eq(self, *_a: object, **_k: object) -> "_Query":
+        return self
+
+    def in_(self, *_a: object, **_k: object) -> "_Query":
+        return self
+
+    def limit(self, *_a: object, **_k: object) -> "_Query":
+        return self
+
+    def execute(self) -> SimpleNamespace:
+        return SimpleNamespace(data=self._data)
+
+
+class _StubClient:
+    def __init__(self, candidates: dict[str, pd.Series]) -> None:
+        self._published = [{"id": sid} for sid in candidates]
+        self._analytics = [
+            {
+                "strategy_id": sid,
+                "returns_series": [
+                    {"date": d.strftime("%Y-%m-%d"), "value": float(v)} for d, v in s.items()
+                ],
+            }
+            for sid, s in candidates.items()
+        ]
+
+    def table(self, name: str) -> _Query:
+        return _Query(self._published if name == "strategies" else self._analytics)
+
+
+def _c8(target: pd.Series, candidates: dict[str, pd.Series], caplog: pytest.LogCaptureFixture) -> str | None:
+    caplog.clear()
+    caplog.set_level(logging.DEBUG, logger="quantalyze.analytics")
+    target = target.copy()
+    target.index = pd.DatetimeIndex(target.index.strftime("%Y-%m-%d"))
+    return find_matched_strategy(target, _StubClient(candidates))
+
+
+def _matching_failed_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "matching failed" in r.getMessage()]
+
+
+@pytest.mark.parametrize("yield_id", _YIELD_IDS)
+def test_c8_two_strategies_with_the_same_constant_yield_do_not_match(
+    yield_id: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    target = _residue_leg(yield_id)
+    twin = _residue_leg(yield_id, start=5_000.0)
+    assert _c8(target, {"twin": twin}, caplog) is None
+    assert _matching_failed_lines(caplog) == []
+
+
+@pytest.mark.parametrize("yield_id", _YIELD_IDS)
+def test_c8_constant_yield_answer_equals_the_all_zero_answer(
+    yield_id: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """D-07: an all-zero target and candidate give no match (None) today, and a
+    constant-yield pair must give the same answer."""
+    target = _residue_leg(yield_id)
+    twin = _residue_leg(yield_id, start=5_000.0)
+    with_zero = _c8(_zeros_like(target), {"twin": _zeros_like(twin)}, caplog)
+    assert with_zero is None
+    assert _c8(target, {"twin": twin}, caplog) == with_zero
+
+
+def test_c8_no_dispersing_candidate_is_an_explicit_none_not_a_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every candidate flat (an all-zero one and a constant yield): None through
+    the explicit empty-result branch. Before the fix, idxmax over an all-NaN
+    Series raised into the broad except and logged "matching failed", so a
+    warning that should mean a real failure also fired on ordinary data."""
+    idx = nav_constant_yield(1e-4).index
+    target = _noise(idx, seed=81)
+    zero = pd.Series(0.0, index=idx)
+    for candidates in (
+        {"zero": zero},
+        {"yield": _residue_leg("daily_1e-4")},
+        {"zero": zero, "yield": _residue_leg("daily_1e-4")},
+    ):
+        assert _c8(target, candidates, caplog) is None
+        assert _matching_failed_lines(caplog) == [], sorted(candidates)
+
+
+def test_c8_a_flat_target_is_an_explicit_none_not_a_failure(caplog: pytest.LogCaptureFixture) -> None:
+    idx = nav_constant_yield(1e-4).index
+    candidates = {"noisy": _noise(idx, seed=82)}
+    assert _c8(pd.Series(0.0, index=idx), candidates, caplog) is None
+    assert _matching_failed_lines(caplog) == []
+    assert _c8(_residue_leg("daily_1e-4"), candidates, caplog) is None
+    assert _matching_failed_lines(caplog) == []
+
+
+def test_c8_a_near_identical_noisy_candidate_still_matches(caplog: pytest.LogCaptureFixture) -> None:
+    idx = nav_constant_yield(1e-4).index
+    target = _noise(idx, seed=83)
+    near = target + _noise(idx, seed=84, scale=0.0005)
+    candidates = {"near": near, "other": _noise(idx, seed=85), "yield": _residue_leg("daily_1e-4")}
+    assert _c8(target, candidates, caplog) == "near"
+
+
+def test_c8_a_real_failure_still_logs_matching_failed(caplog: pytest.LogCaptureFixture) -> None:
+    """The broad except stays for real failures: the warning keeps its meaning."""
+
+    class _Broken:
+        def table(self, name: str) -> _Query:
+            raise RuntimeError("boom")
+
+    caplog.clear()
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics")
+    idx = nav_constant_yield(1e-4).index
+    assert find_matched_strategy(_noise(idx, seed=86), _Broken()) is None
+    assert len(_matching_failed_lines(caplog)) == 1
