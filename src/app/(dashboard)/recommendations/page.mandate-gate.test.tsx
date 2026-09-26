@@ -21,7 +21,7 @@
  * predicate it reads.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import React from "react";
 
 vi.mock("server-only", () => ({}));
@@ -52,6 +52,8 @@ const seeded = vi.hoisted(() => ({
   batchMeta: [] as unknown[],
   statusRows: [] as unknown[],
   statusError: null as unknown,
+  analyticsSelect: [] as string[],
+  analyticsIn: [] as Array<{ column: string; ids: unknown }>,
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -64,9 +66,15 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     from: (table: string) => {
       const chain: Record<string, unknown> = {};
-      chain.select = () => chain;
+      chain.select = (cols: string) => {
+        if (table === "strategy_analytics") seeded.analyticsSelect.push(cols);
+        return chain;
+      };
       chain.eq = () => chain;
-      chain.in = () => chain;
+      chain.in = (column: string, ids: unknown) => {
+        if (table === "strategy_analytics") seeded.analyticsIn.push({ column, ids });
+        return chain;
+      };
       chain.maybeSingle = () =>
         Promise.resolve(
           table === "investor_attestations"
@@ -119,8 +127,22 @@ function rec(i: 0 | 1 | 2) {
     cagr: 0.1,
     sharpe: 1.1,
     max_drawdown: -0.2,
-    analytics_computed_at: new Date().toISOString(),
+    analytics_computed_at: hoursAgo(1),
   };
+}
+
+/** Relative to the real clock: SyncBadge reads Date.now() with no injection. */
+function hoursAgo(h: number): string {
+  return new Date(Date.now() - h * 3_600_000).toISOString();
+}
+function dateDaysAgo(d: number): string {
+  return new Date(Date.now() - d * 86_400_000).toISOString().slice(0, 10);
+}
+
+function cardFor(name: string): HTMLElement {
+  const li = screen.getByText(name).closest("li");
+  expect(li, `no card rendered for ${name}`).not.toBeNull();
+  return li as HTMLElement;
 }
 
 async function renderPage() {
@@ -138,8 +160,12 @@ beforeEach(() => {
   seeded.statusRows = IDS.map((id) => ({
     strategy_id: id,
     computation_status: "complete",
+    computed_at: hoursAgo(1),
+    series_end: dateDaysAgo(1),
   }));
   seeded.statusError = null;
+  seeded.analyticsSelect = [];
+  seeded.analyticsIn = [];
 });
 
 describe("SC8 · /recommendations — one mandate branch drives the header and the list", () => {
@@ -193,5 +219,57 @@ describe("SC8 · /recommendations — one mandate branch drives the header and t
     expect(screen.queryByText("Your first batch is computing")).toBeNull();
     expect(screen.queryByText("No candidates match today")).toBeNull();
     expect(container.textContent ?? "").not.toMatch(/fit your mandate/i);
+  });
+});
+
+describe("SC8 · /recommendations — every recommended record states where its track record ends", () => {
+  it("AGE1: a series that ended 200 days ago renders the track-record-ended state, not a fresh sync", async () => {
+    seeded.statusRows = [
+      {
+        strategy_id: IDS[0],
+        computation_status: "complete",
+        computed_at: hoursAgo(1),
+        series_end: dateDaysAgo(200),
+      },
+    ];
+    await renderPage();
+    const card = within(cardFor(NAMES[0]));
+
+    expect(
+      card.queryByText(/^Track record ends 200d ago$/),
+      "a record that ended 200 days ago read as current",
+    ).not.toBeNull();
+    expect(card.queryByText(/^Synced /)).toBeNull();
+  });
+
+  it("AGE2: a series that ended yesterday renders the fresh sync state", async () => {
+    await renderPage();
+    const card = within(cardFor(NAMES[1]));
+
+    expect(card.queryByText(/^Synced 1h ago$/)).not.toBeNull();
+    expect(card.queryByText(/Track record ends/)).toBeNull();
+  });
+
+  it("AGE3: a failed status read renders no age claim at all (fail-closed)", async () => {
+    seeded.statusError = { message: "boom" };
+    seeded.statusRows = [];
+    await renderPage();
+
+    for (const name of NAMES) {
+      const card = within(cardFor(name));
+      expect(card.queryByText(/^Synced /)).toBeNull();
+      expect(card.queryByText(/Track record ends/)).toBeNull();
+    }
+  });
+
+  it("AGE4: the status read stays bounded to the RPC's own ids and projects one date, never the series", async () => {
+    await renderPage();
+
+    expect(seeded.analyticsIn).toEqual([{ column: "strategy_id", ids: [...IDS] }]);
+    expect(seeded.analyticsSelect).toHaveLength(1);
+    const cols = seeded.analyticsSelect[0];
+    expect(cols).toContain("series_end:returns_series->-1->>date");
+    // The whole returns_series blob is never projected; only the arrow alias.
+    expect(cols.replace("returns_series->-1->>date", "")).not.toContain("returns_series");
   });
 });
