@@ -23,6 +23,14 @@ name: Supabase Migrate
 #   0. `dispatch-ref-guard` refuses a `workflow_dispatch` from any ref but
 #      `main` (B3), because `apply-test` writes to a database other people's
 #      CI uses and must apply only what is already merged.
+#   5. `redump-dump` re-dumps the PROD catalogue after a SUCCEEDED `apply` on
+#      main, runs every gate over the dump (secret scan, gitleaks, integrity,
+#      shape, carried-migrations marker), and uploads a 1-day artifact only
+#      when the dump changed (Phase 164.9.5).
+#   6. `redump-pr` composes that dump onto current main and opens or edits the
+#      ONE bot PR on `automation/baseline-redump`. It never merges it: a human
+#      reviews and merges every re-dump (Phase 164.9.5).
+#      Both jobs sit ABOVE `apply` in this file; run order comes from `needs:`.
 #
 # Backdated-migration policy is enforced at PR-time, NOT here. See
 # `.github/workflows/migration-policy.yml` — that workflow runs on
@@ -152,7 +160,12 @@ concurrency:
 # C-0293(a) fix: workflow only needs to checkout the tree and run the
 # supabase CLI against a remote DB via its access token. No GitHub API
 # writes (no issue/PR/release creation), so `contents: read` is the
-# entire surface. The actual DB-mutation power comes from the
+# entire surface.
+# ⛔ CORRECTED 2026-09-26 (Phase 164.9.5): no longer true for the whole file. The
+# workflow DEFAULT stays `contents: read`, and exactly one job, `redump-pr`, is
+# uplifted to `contents: write` + `pull-requests: write`; `redump-dump` adds only
+# `packages: read`. The sentence above is kept as lineage.
+# The actual DB-mutation power comes from the
 # SUPABASE_ACCESS_TOKEN secret + the workflow_dispatch-only trigger +
 # the PR-time backdated-migration policy enforced by
 # `.github/workflows/migration-policy.yml` — all orthogonal to
@@ -1232,6 +1245,232 @@ jobs:
             echo "::error::Two remedies, both fine: configure the three PROD values and re-dispatch, or restore TEST from the baseline (.github/workflows/test-restore-from-baseline.yml). Do NOT silence this job — the asymmetry it names is real for as long as it holds."
             exit 1
           fi
+
+  # ── PHASE 164.9.5: RE-DUMP THE PROD CATALOGUE AFTER A SUCCEEDED PROD APPLY ──
+  # This job re-dumps the PROD catalogue after `apply` succeeded on main (D-01 as
+  # amended by D-21), so the committed `supabase/schema/baseline.sql` stops going
+  # stale behind every merged migration. On a push run `github.sha` IS the merge
+  # whose PROD apply just finished, which is the MERGE the carried-migrations
+  # marker must be taken from, and the file's `concurrency:` group already
+  # serialises apply runs, so no second merge can interleave between this merge's
+  # apply and its dump.
+  #
+  # ⛔ THE PROD CREDENTIAL AND THE WRITE TOKEN NEVER SHARE A JOB (D-21). This job
+  # holds the PROD credential and a READ-ONLY job token: the workflow's
+  # `contents: read` plus `packages: read` for the ghcr.io login, nothing more,
+  # which is exactly what the ghcr contract demands of any job that pulls an image
+  # ("the workflow's permissions plus packages: read, nothing more"). `redump-pr`
+  # below holds the write token and no PROD credential.
+  #
+  # ⚠️ `environment: Production` is here for the audit trail, and it is NOT a stop.
+  # CORRECTED 2026-09-23 (Phase 164.4.2, CLAUDE.md): the founder removed the
+  # environment's required reviewer, so it has NO required reviewer today, and
+  # nothing in this phase re-adds one. The 2026-09-08/09 paragraphs above that
+  # describe a reviewer gate are lineage from before that removal.
+  #
+  # ⛔ A RED HERE IS DELIBERATE (RESEARCH Open Question 2). Every refusal this job
+  # raises (secret-shaped text, a gitleaks finding, a truncated dump, a shape or
+  # marker defect) is one a human must see before a dump can reach a public PR.
+  # The cost is accepted: a red run may hold the Railway deploy that waits on
+  # this workflow's checks (assumption A7).
+  redump-dump:
+    needs: [apply]
+    if: needs.apply.result == 'success' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: Production
+    # A job-level block REPLACES the workflow-level one, so the workflow's
+    # `contents: read` is restated here and only `packages: read` is added.
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      changed: ${{ steps.gate.outputs.changed }}
+    steps:
+      # The default fetch depth is enough: the script reads `git ls-tree` of
+      # HEAD, and on this run HEAD is the merge commit.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      # Copied from migration-drift-check.yml's assert step (Phase 164.3 / D-17):
+      # an unconfigured PROD credential is a HARD FAILURE, never a skip that
+      # reports green having dumped nothing.
+      - name: Assert the PROD values are configured (a skip is not a pass)
+        env:
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${SUPABASE_PROJECT_REF:-}" ] || missing="${missing} vars.SUPABASE_PROJECT_REF"
+          [ -n "${SUPABASE_ACCESS_TOKEN:-}" ] || missing="${missing} secrets.SUPABASE_ACCESS_TOKEN"
+          [ -n "${SUPABASE_DB_PASSWORD:-}" ] || missing="${missing} secrets.SUPABASE_DB_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::the baseline re-dump cannot run - not configured:${missing}"
+            echo "::error::This is a HARD FAILURE, not a skip. The PROD apply above just"
+            echo "::error::succeeded, so the committed baseline is now behind PROD; a green"
+            echo "::error::job here would say it was re-dumped when nothing was."
+            exit 1
+          fi
+          echo "::notice::Re-dump credentials present."
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+      # D-26: the release tarball is verified against the sha256 hard-coded
+      # below before anything is extracted from it. The release's checksums file
+      # is NEVER fetched at runtime: a hash downloaded beside the binary it
+      # vouches for proves nothing. The version must equal ci.yml's secret-scan
+      # `GITLEAKS_VERSION` and the script's exported `GITLEAKS_VERSION`.
+      - name: Install gitleaks (sha256-pinned release binary)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          tarball="${RUNNER_TEMP}/gitleaks.tar.gz"
+          curl -fsSL -o "${tarball}" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          printf '%s  %s\n' "${GITLEAKS_SHA256}" "${tarball}" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/gitleaks-bin"
+          tar -xzf "${tarball}" -C "${RUNNER_TEMP}/gitleaks-bin" gitleaks
+          echo "${RUNNER_TEMP}/gitleaks-bin" >> "${GITHUB_PATH}"
+      - name: baseline-redump self-test (with gitleaks)
+        run: node scripts/baseline-redump.mjs --self-test --with-gitleaks
+      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+        with:
+          # The same pin as `apply` (D-04): the dump is taken by the CLI version
+          # the PROD apply ran, and the version is recorded in BASELINE.md.
+          version: 2.98.2
+      - name: Log in to ghcr.io before the CLI pulls its images
+        # `supabase db dump` below pulls the supabase/postgres image, the same pull
+        # VAC-04 makes (run 36229959793 pulled the remote's postgres image).
+        # Same step and same reasons as migration-drift-check.yml's `check` login: the
+        # CLI pulls from ghcr.io (setup-cli sets SUPABASE_INTERNAL_IMAGE_REGISTRY),
+        # anonymous GHCR pulls from shared runners are throttled, and the CLI reads
+        # credentials from the docker config this writes. A failed login FAILS THE
+        # JOB - it never degrades into the anonymous pull. Pinned by
+        # `src/__tests__/contracts/ghcr-login-before-image-pull.contract.test.ts`.
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+      # D-03 / D-04: exactly the credential set `apply` uses, in this step's `env:`
+      # only. The dump goes to $RUNNER_TEMP, NEVER to the tracked path (RESEARCH
+      # F3): a failed dump truncates its target, and a half-written tracked file
+      # must never exist. No `--schema` flag: this is the BASELINE.md recipe.
+      # ⛔ Never `cat` the dump or print any part of it. GitHub echoes a step's
+      # `env:` names in the log with secret values masked; that is pre-existing
+      # platform behaviour, and nothing this job prints ever adds to it.
+      - name: Dump the PROD catalogue (read-only)
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/redump"
+          supabase link --project-ref "$SUPABASE_PROJECT_REF"
+          supabase db dump --linked -f "${RUNNER_TEMP}/redump/baseline.sql"
+      # No Supabase secret in this step. Every value reaches the script through the
+      # runner's own environment, never through an expression in the run body. A
+      # no-op (the dump did not change) is decided and reported by the script.
+      - name: Gate the dump (scan, gitleaks, integrity, shape, marker)
+        id: gate
+        run: |
+          set -euo pipefail
+          CLI_VERSION="$(supabase --version)"
+          node scripts/baseline-redump.mjs --gate-dump --dump "${RUNNER_TEMP}/redump/baseline.sql" --merge "${GITHUB_SHA}" --run-id "${GITHUB_RUN_ID}" --cli-version "${CLI_VERSION}" --out "${RUNNER_TEMP}/redump-artifact"
+      # The default success() condition is what makes this upload reachable only
+      # after every gate above passed (D-21), so it carries no always(). The
+      # artifact is kept for one day: this repo is public, and the dump is only
+      # needed until `redump-pr` below has read it.
+      - name: Upload the gated dump (1 day)
+        if: steps.gate.outputs.changed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: baseline-redump
+          path: ${{ runner.temp }}/redump-artifact
+          retention-days: 1
+          if-no-files-found: error
+
+  # ── PHASE 164.9.5: PUT THE GATED RE-DUMP IN FRONT OF A HUMAN, AS ONE BOT PR ──
+  # This job holds the WRITE token and NO PROD credential (D-21): the dump reaches
+  # it only as the artifact `redump-dump` uploaded after every gate passed. It
+  # runs no third-party code beyond the SHA-pinned checkout, setup-node and
+  # download-artifact: no npm install and no secret scanner binary (RESEARCH
+  # F10). The scanning already happened in `redump-dump`.
+  #
+  # ⚠️ A PR opened or updated with the job token gets its `pull_request` runs in
+  # an APPROVAL-REQUIRED state (GitHub, 2026-06-11; D-23). A human clicks
+  # "Approve workflows to run" on the PR, then reads each head-SHA run's
+  # CONCLUSION. The PR body says so.
+  #
+  # ⛔ The PR is NEVER merged by automation (D-13): nothing in this file merges,
+  # enables auto-merge on, or approves it. A human reviews and merges every
+  # re-dump.
+  #
+  # ⛔ ACCEPTED RISK (D-25): branch protection is off, so `contents: write` could
+  # reach main. That residual is accepted until a ruleset exists, and it is
+  # bounded by the ONE hard-coded refspec below, which plan 09's wiring test pins
+  # as the only push in this file.
+  redump-pr:
+    needs: [redump-dump]
+    if: needs.redump-dump.result == 'success' && needs.redump-dump.outputs.changed == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Uplifted for this job only (D-05 as amended by D-21): push the bot branch
+    # and open or edit its PR. No actions: write (D-12).
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Compose judges CURRENT main, not the merge the dump was taken after
+      # (D-15, RESEARCH F6), and the bot-branch check needs origin/main (D-24),
+      # hence the full history. The job token is NOT persisted into .git/config:
+      # the push step below authenticates explicitly, for that step only.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: baseline-redump
+          path: ${{ runner.temp }}/redump-in
+      - name: baseline-redump self-test
+        run: node scripts/baseline-redump.mjs --self-test
+      - name: Compose the re-dump onto current main
+        id: compose
+        run: node scripts/baseline-redump.mjs --compose --in "${RUNNER_TEMP}/redump-in" --out "${RUNNER_TEMP}/redump-pr"
+      # D-24: a commit on the bot branch by anyone but the bot is a human edit,
+      # and it is refused loudly rather than force-pushed away. The public repo
+      # is fetched anonymously, so this step carries no token.
+      - name: Refuse to overwrite a human commit on the bot branch
+        id: botbranch
+        if: steps.compose.outputs.committed == 'true'
+        run: node scripts/baseline-redump.mjs --check-bot-branch --remote origin
+      # The ONLY place the job token is exposed (D-05). One push, to the one
+      # hard-coded bot ref (D-25), with a lease on the sha the step above observed.
+      # The credential helper is cleared and then delegated to `gh auth
+      # git-credential` for this invocation only (RESEARCH F10, assumption A3).
+      # If the first real run's push is refused, the remedy is F10's fallback
+      # (assumption A4): an `http.https://github.com/.extraheader` basic-auth
+      # header built from the same token, masked first, scoped to the same
+      # single push.
+      - name: Push the bot branch and open or edit its PR
+        if: steps.compose.outputs.committed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LEASE: ${{ steps.botbranch.outputs.lease }}
+        run: |
+          set -euo pipefail
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push --force-with-lease="refs/heads/automation/baseline-redump:${LEASE}" origin HEAD:refs/heads/automation/baseline-redump
+          node scripts/baseline-redump.mjs --open-or-edit-pr --title-file "${RUNNER_TEMP}/redump-pr/pr-title.txt" --body-file "${RUNNER_TEMP}/redump-pr/pr-body.md"
 
   apply:
     # Area 1 Q2, LOCKED: a TEST apply that FAILED or was SKIPPED blocks the PROD
