@@ -207,6 +207,155 @@ consumers of its own Python outputs, and nothing else under `src/` (the rest is 
     (806)` tests;
   - `tsc --noEmit` and eslint on the 16 changed TypeScript files: both clean.
 
+## [0.97.0.0] - 2026-09-26 — DRBOPTIONS: a Deribit options account with an `assignment` row can be ingested, and every shape the census did not see still refuses
+
+⭐ **What changed for whoever reads this next.** On 2026-09-23 a Deribit options account inside a
+multi-account composite failed its first reconstruction. Its transaction log held an `assignment`
+row, a type the ingester had never classified, so the unknown-type refusal stopped the whole stitch
+job. Phase 168 classifies `assignment` as cash-bearing, but ONLY in the one shape a captured census
+licenses: a named option instrument with no same-instrument `delivery`, `settlement` or second
+`assignment` row in the batch. Every other shape still refuses loudly. It neither sums nor skips
+the row. The census is recorded as counts only in
+`analytics-service/docs/evidence/drb-assignment-census-2026-09.json`.
+
+⚠️ **This is a minor bump because ingestion behaviour changes on purpose.** A row type that used to
+fail the job is now summed into realized cash on both twins (the USD daily records and the native
+ledger). There is a new mark-to-market degrade reason and new factsheet copy. The smoothed replay
+now closes an option at its `expiry` row. Precedent: MT5VALIDATEWEDGE (0.96.0.0) and JOBRPCTRUTH
+(0.93.0.0) each took a minor bump for a behaviour change. This release carries no migration and
+touches no `supabase/` path.
+
+⛔ **Merging this deploys new ingestion to production.** Railway redeploys the analytics service
+once `main`'s CI is green. The phase is NOT complete: verification is `human_needed` at 12/13. The
+one open item is the founder's post-deploy retry (plan 168-03), described under Notes.
+
+### Added
+- **`assignment` is cash-bearing, in the census shape only** (plan 01). It joins
+  `CASH_BEARING_TYPES`, cited to the new evidence file. The file records one row: census delivery 0,
+  settlement 0, trade 1, n 1. The reading that `assignment` is Deribit's newer label for the short
+  in-the-money expiry once logged as `delivery` is marked an ASSUMPTION, not a measurement. No
+  change magnitude is cited anywhere.
+- **`assert_assignment_uncontested`, called in both twins at the correction-gate position** (plan
+  01, then widened in review). It refuses with `LedgerValuationError` in four cases: a
+  same-instrument `delivery`/`settlement`/second `assignment`, an assignment naming no instrument,
+  one naming a non-option instrument, or one naming an instrument that is not a string. Each refusal
+  uses a unique module constant (`_ASSIGNMENT_CONTESTED_PHRASE`, `_ASSIGNMENT_UNNAMED_PHRASE` and
+  `_ASSIGNMENT_NON_OPTION_PHRASE`), and the tests import those constants. It fires on every
+  assignment whatever its `change`, because a size rule would be a magnitude rule. Its verdict does
+  not depend on row order.
+- **A windowed crawl refuses an assignment** (plan 01). `_crawl_deribit_ledger` raises
+  "assignment classification requires a full-history crawl" when a `since_ms` batch holds one. It
+  runs right after pagination, before the settlement-index fetch and before the USD twin. It is
+  inert on every production path, because all of them crawl with `since_ms=None`.
+- **One option-book vocabulary** (plan 01). `_OPTION_EXPIRY_TYPES` (`delivery`, `assignment`) and
+  `_OPTION_BOOK_EVENT_TYPES` (those plus `trade`) replace six literal trade/delivery sites: coverage
+  days, trailing-edge activity, the smoothed cross-check, the option-book replay, the native option
+  arm and its non-derivative guard. An import-time assert keeps the book a subset of
+  `CASH_BEARING_TYPES`. `assignment` is NOT in `_NATIVE_OPTIONS_SUMMARY_TYPES`, and `exercise` and
+  `expiry` are NOT cash-bearing.
+- **The refusal evidence reports more** (plan 02). `_SIBLING_TYPES` gains `assignment`, so the next
+  unknown-type refusal shows whether an assignment co-occurred on the instrument. `_SHAPE_FIELDS`
+  gains `commission` and `position`, a fee and a signed size, neither of them an identifier.
+- **A named degrade reason for a missing option fee or position** (SFH-04, round 1).
+  `OptionRowFieldMissingError` subclasses `LedgerValuationError`, so every existing handler still
+  catches it. The job worker's mark-to-market degrade stamps it `mtm_option_row_field_missing`
+  (`MTM_REASON_OPTION_ROW_FIELD`, owned by `stitch_composite.py`), instead of the summary-coverage
+  reason that named the wrong cause. The cash headline still ships. The factsheet's
+  `mtmDisabledReasonCopy` renders it in the steady tone.
+
+### Changed
+- **The smoothed replay closes an option at its `expiry` row** (D-09, founder decision D6,
+  2026-09-26). Deribit logs an out-of-the-money expiry as a zero-cash `expiry` row, the only entry
+  for that expiration. The replay ignored it, so an OTM short stayed open past its life. Any later
+  option activity then raised the daily-MTM hole, and the smoothed basis was lost for the whole
+  account. A zero-cash `expiry` now sets the position to 0 on its day
+  (`_OPTION_BOOK_CLOSE_TYPES`). An `expiry` carrying nonzero cash or a nonzero position refuses. An
+  `exercise` row on an option refuses too, because its shape is unmeasured. Recorded as scope
+  amendment D-09 in the phase CONTEXT and in the ROADMAP.
+- **The acceptance eligibility check reads the book vocabulary** (plan 02).
+  `check_perp_only_eligibility` counts option rows by membership in `_OPTION_BOOK_EVENT_TYPES`. A key
+  whose only option-book event is an assignment is therefore not accepted as a byte-identity
+  control.
+- **Every prose description of the option book names `assignment`** (plan 02). This covers the
+  `deribit_txn.py` docstrings and comments, the WR-05 comment in `build_deribit_native_ledger`, the
+  design doc's INCLUDE list with its census licence and the D-02 refusal, and the test prose. A
+  dated CORRECTED note sits on the 2026-09-12 design-doc block. Deribit's transaction-log docs do
+  list `expiry`, `assignment` and `exercise`. The old block stays as lineage.
+
+### Fixed
+- **WR-01 / SFH-01** (round 1): the assignment guard refuses any non-option instrument on both
+  twins.
+- **WR-02** (round 1): the census stays inside one subaccount on the native twin. Each retained raw
+  row is a copy stamped with its scope under `ROW_SCOPE_KEY`, and a sibling from another scope is
+  skipped. The stamp is not in `_SHAPE_FIELDS`, so it never reaches a message.
+- **SFH-02**: a second same-instrument assignment contests the first. The self-skip is by identity,
+  so two equal-but-distinct rows still contest each other.
+- **SFH-03**: the contested refusal names the contesting row by id and type.
+- **SFH-05**: sibling matching normalises `instrument_name` (stripped, upper-cased) and refuses a
+  non-string name.
+- **SFH-06**: one non-Mapping row no longer blanks the refusal census. It used to raise
+  `AttributeError`, and the renderer's broad except swallowed the whole shape.
+
+### Tests
+- `analytics-service/tests/test_deribit_assignment.py` is new. It covers the census shape end to
+  end through `build_deribit_native_ledger`, summed once on both twins with the balance identity
+  closed. It also covers each refusal class, order independence, the zero-change guard, the
+  windowed refusal before the USD twin, per-site pins with one-site-revert RED runs, the
+  `combine_native_ledger` MTM run and the assigned-short smoothed run ending flat.
+- The evidence-file leak test (IN-02) now catches an ISO-dated or lower-cased expiry. It was seen RED
+  under two neuters on a byte backup, each restored and compared.
+- `basis-context.test.tsx` pins the new reason copy. The acceptance, txn, unclassified-evidence,
+  single-key MTM and smoothed-core suites are updated for the vocabulary.
+
+### Notes
+- **Planning and review record**: phase context, research, pattern map and validation strategy.
+  Three plans passed plan-check after two revision rounds. Two code-review rounds and two
+  silent-failure rounds ran, with a fix report for each round (the round-1 report carries the
+  plan-anchor reading and founder decision D6). The verification is `human_needed` 12/13, and the
+  security verification is SECURED 13/13. STATE.md records the phase as planned, written by hand.
+- **The founder's post-deploy retry is still owed** (plan 168-03). Once the analytics service runs
+  the merge commit, retry the Deribit options strategy whose stitch job failed on 2026-09-23. Report
+  counts only. Expected: the job completes, no assignment refusal appears, and the return-point
+  count is nonzero. Any other refusal class gets its own phase.
+- ⚠️ **`SMOOTHED_MTM_ENABLED` caveat.** The smoothed pass, and with it the D-09 expiry close, runs
+  only when that flag is on. Its production value was not measured, so the retry may not exercise
+  D-09 at all.
+- **Known limits, recorded and not fixed:**
+  - **WR-01 (round 2): a malformed expiry timestamp fails the job.** An `expiry` row whose timestamp
+    cannot be parsed makes `replay_option_positions` raise a bare `ValueError`, not
+    `LedgerValuationError`. It escapes the smoothed pass's structural catch, is retried as
+    transient and ends `failed_final`, so the healthy cash headline does not ship. The verifier
+    reproduced it. It is reachable only with `SMOOTHED_MTM_ENABLED` on and an undatable expiry row
+    from the venue.
+  - **LR-01**: a whitespace-padded assignment instrument name passes the guard as an option but is
+    unknown elsewhere, so the twins can still disagree.
+  - **LR-02 / SFH-R2-02**: the smoothed replay keys the option book on the raw `instrument_name`. A
+    case or padding variant splits one position, and a variant-named expiry closes a phantom
+    instrument.
+  - **LR-03 / SFH-R2-03**: a non-numeric option commission is still stamped with the
+    summary-coverage reason. Only an absent one gets `mtm_option_row_field_missing`.
+  - **SFH-R2-01**: a case-variant or padded exercise type skips the D-09 refusal, and a
+    case-variant expiry does not close.
+  - **SFH-R2-04**: no test pins the mixed stamped/unstamped rule, which keeps the stricter
+    batch-wide check.
+  - **IN-01**: the WR-02 scope stamp is inert in production today, because each crawl covers one
+    scope.
+  - **IN-05**: the new factsheet copy says "fee or position", but only a missing fee can stamp that
+    reason today.
+  - The census is n=1. It shows what Deribit emitted when it emitted no sibling. It cannot show that
+    Deribit never emits both.
+
+## [0.96.0.1] - 2026-09-26 — the unstarted phases split into one-topic phases, and the backlog re-routed to them
+
+### Notes
+- Roadmap and backlog only; no code, workflow or migration changes. Five commits, five themes:
+  - **The unstarted phases are split by topic.** 164.6.6 is narrowed, and 164.6.8 OUTAGEALERT is new. 170 splits into 170 LAYOUT and 170.1 COPY. 165 splits three ways by ecosystem into 165 ACTIONSDEPS, 165.1 PIPDEPS and 165.2 NPMDEPS.
+  - **Three new phases are booked.** 164.9.3 CLAIMPAIR takes the claim-time 23505 pairing, booked as `[164.9.3-CLAIM-PAIR-23505]`. 164.9.4 CIOFFMUTEX takes `python` and `e2e-seeded` off the shared-TEST mutex, which a measured CI run spent 36 of 50 minutes waiting on. 164.9.5 AUTOREDUMP re-dumps the committed baseline after each PROD migration apply.
+  - **The MT5 wedge items move to 164.6.8.** `MT5-SWITCH-WEDGE-CAUSE-01` and `MT5-PROBER-WEDGE-CALIBRATION-01` now name it as owner. This was applied after Phase 164.6.5 merged.
+  - **Four items leave 164.5.2 by founder decision.** The claim wedge (a `failed_retry` job plus a `pending` job make every claim raise 23505) goes to 164.9.3. The three fan-in graph bugs (a child stranded when its parent fails, a 23505 when a `match_decisions` delete cascades, a 40P01 deadlock in a diamond) go to the newly booked 164.9.3.1 FANINGRAPH, recorded as `[164.9.3.1-FANIN-GRAPH-RESIDUALS]`.
+  - **The 164.9.2 SC-4 restore is recorded, and `[164.9-CRIT8-RESTORE-DISPATCH-RECORD]` is closed.** The preflight run printed a 41/41 self-test. The first restore attempt was refused by the activity gate, and nothing was written. The second restore committed `tables=63 policies=155 functions=121 ledger_rows=277 survivors=2/2`.
+- **Known limit:** every booked phase above is unstarted and stays frozen until the founder lifts the new-phase freeze.
+
 ## [0.96.0.0] - 2026-09-26 — MT5VALIDATEWEDGE: the gateway can restart a wedged MT5 terminal on its own (not yet seen live), and the wizard stops promising a retry that cannot work
 
 _PR #866 (167.2.1 FACTSHEETBUILDABLE) landed first as 0.95.0.0, so this entry, first written as 0.94.0.0, re-bumped to 0.96.0.0._

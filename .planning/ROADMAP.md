@@ -2141,6 +2141,7 @@ Plans:
 **Requirements**: TODOS entries `161.1-D1`, DEC-4
 **Depends on:** Phase 164.4.1 (pg-lane with pg_cron). ⚠️ NOT Phase 164.5 — the plan is file-disjoint from it and was lifted whole.
 **Routed here 2026-09-25 (from 164.9.1 review round 1), both latent or loud, both on the terminal-mark / bridge surface this phase owns:** (1) a fan-in child whose parent is still open at enqueue and later ends `failed_final` stays in `done_pending_children` forever (no caller passes parents today); (2) a second `match_decisions` delete can raise 23505 through the ON DELETE SET NULL cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null` (pre-existing, fails loudly, the admin decisions route issues these deletes). (3) the fan-in parent lock `FOR SHARE ... ORDER BY id` can deadlock (40P01) against `mark_compute_job_done` in a diamond (a child whose parents include another waiting child); latent, recorded in M1's header — whoever passes parents must treat 40P01 as retryable on both the enqueue and the worker's mark path. (4) **Routed 2026-09-25 from the 164.9.1 pre-push silent-failure-hunter (MEDIUM, pre-existing, NOT introduced by 164.9.1): one `failed_retry` + `pending` pair on the same `(kind, api_key_id)` wedges the WHOLE claim.** `claim_compute_jobs` and `claim_compute_jobs_with_priority` rank `pending` and `failed_retry` candidates together, and their C39 / NEW-C39-01 `NOT EXISTS` guard excludes a partition only when it already holds a `running` or `done_pending_children` row — never a `pending` one. The enqueue look-up (`_enqueue_compute_job_internal`) treats only `pending`/`running`/`done_pending_children` as in-flight, so it inserts a fresh `pending` beside a `failed_retry`. When the `failed_retry` wins `rn_k` (earlier `next_attempt_at`, or the `pending` is not yet due), the batch `UPDATE ... SET status = 'running'` puts two rows into `compute_jobs_one_inflight_per_kind_api_key` and raises 23505 — and because it is ONE statement, no job of ANY kind is claimed until the pair clears. Loud, not silent: every claim call errors. The same guard shape exists for the portfolio, strategy and allocator partitions against their sibling indexes; audit all four. **Suggested fixes (not decided):** (a) add `'pending'` to each guard's `x.status` list with `x.id <> ranked.id`, in BOTH claim RPCs — a `pending` candidate can have no `pending` sibling under the index, so this only removes the colliding `failed_retry`; (b) and/or make the enqueue look-up fold into, or supersede, an existing `failed_retry` for the partition instead of inserting beside it; (c) whichever is chosen, a `RED-UNDER`-annotated SQL gate on the lane must pin it. **Measured repro, local-stack lane only (`scripts/local-stack/run.sh up`, loopback DSN from its `.stack-env`, then `down`):** in one transaction that ends in `ROLLBACK`, with `SET LOCAL session_replication_role = replica` so a synthetic `api_key_id` needs no FK rows, insert two `poll_allocator_positions` rows sharing one `api_key_id` — a `failed_retry` with `next_attempt_at = now() - 10 min` and a `pending` with `next_attempt_at = now() + 10 min` — reset the role to `origin`, then call `claim_compute_jobs(10, 'repro-worker')` (and, after a savepoint rollback, `claim_compute_jobs_with_priority(10, 'repro-worker', NULL::boolean, NULL::text[], NULL::text[])`; the two-arg call is ambiguous across its overloads). Both raised `duplicate key value violates unique constraint "compute_jobs_one_inflight_per_kind_api_key"` on 2026-09-25 at the 164.9.1 release head.
+⛔ **RE-ROUTED 2026-09-26 by founder decision (AskUserQuestion, "Re-route, don't start") — this phase owns NONE of the four items above any more.** The paragraph above is kept as lineage. Item (4), the claim wedge, went to Phase 164.9.3 CLAIMPAIR, which already owns C39 and the same 23505 class. Items (1) stranded fan-in child, (2) `match_decisions` delete 23505 and (3) 40P01 diamond deadlock went to the new Phase 164.9.3.1 FANINGRAPH, booked but NOT started under the new-phase freeze. This phase's scope is back to `161.1-D1` and DEC-4 only.
 **Plans:** 1 plan (lifted from Phase 164.5 plan 08, unmodified)
 
 Plans:
@@ -2389,6 +2390,7 @@ already_authorized` in 33 ms. **Outage 11:02:38Z → 12:41:46Z = 1h39m.**
    classification `MT5-WEDGE-OBS-01` was closed on, has **never once fired in production**.
    ⛔ REQUIRED HERE, not deferred: without it this phase cannot honestly prove criterion 1 held.
    ⭐ **Founder ruling 2026-09-26 (AskUserQuestion, "Ratify: move to 164.6.6"):** the calibration half is routed to Phase 164.6.6 as `MT5-PROBER-WEDGE-CALIBRATION-01`; the sentence above is kept as lineage. D-16/D-17 founder-confirmed the same day (CONTEXT D-19).
+   ⛔ **CORRECTED 2026-09-26 (founder split, one topic per phase):** the calibration half is now owned by Phase 164.6.8 OUTAGEALERT, not 164.6.6; `MT5-SWITCH-WEDGE-CAUSE-01` moved with it. The ruling above is kept as lineage.
    Calibrate against a REAL wedge, not only a fixture.
 5. The wizard stops telling the user to retry when retry cannot work. Shipped copy claims a
    *"temporary exchange issue or a network blip"* and says *"Try again in a moment"* — measured
@@ -2472,10 +2474,10 @@ below was reworded to read as met.
 
 | req | criterion | outcome | routed residual (owner · trigger) |
 |---|---|---|---|
-| C1 | root cause of the switch wedge found and named | **OPEN** (D-03 success path: recorded open, never claimed) | `TODOS.md` `MT5-SWITCH-WEDGE-CAUSE-01` · Phase 164.6.6 · the next `-10005` with Journal silence after `disconnected`, read BEFORE any restart |
+| C1 | root cause of the switch wedge found and named | **OPEN** (D-03 success path: recorded open, never claimed) | `TODOS.md` `MT5-SWITCH-WEDGE-CAUSE-01` · Phase 164.6.8 (moved from 164.6.6 on 2026-09-26) · the next `-10005` with Journal silence after `disconnected`, read BEFORE any restart |
 | C2 | the terminal restarts without a human, auto-login preserved | **OPEN, live half.** Shipped: `Mt5Client.recycle_terminal_process`, driven by the credential-free IPC detector. Never run live over the bridge. | `.planning/WINDOWS.md` entry 68 (widened 2026-09-26 to name the first live `Mt5Client.session_snapshot` read as well as the terminate step) · founder, post-deploy · the first live recycle |
 | C3 | the heal ACTS on `ipc_fault` | **MET** (offline behaviour tests; its live run is C2's residual) | none |
-| C4 | the prober's MT5 arm actually measures the terminal, calibrated against a REAL wedge | **OPEN, calibration half.** D-10 (measuring) is answered: scheduled `prod-prober` run 36134914962 (head `01dcf1cc`) onward reads the terminal. D-11 (real-wedge calibration) was not done. | `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01` (D-11) · Phase 164.6.6 · the next live `-10005`, captured before the heal recycles it |
+| C4 | the prober's MT5 arm actually measures the terminal, calibrated against a REAL wedge | **OPEN, calibration half.** D-10 (measuring) is answered: scheduled `prod-prober` run 36134914962 (head `01dcf1cc`) onward reads the terminal. D-11 (real-wedge calibration) was not done. | `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01` (D-11) · Phase 164.6.8 (moved from 164.6.6 on 2026-09-26) · the next live `-10005`, captured before the heal recycles it |
 | C5 | the wizard stops promising a retry that cannot work | **MET** | none. ⚠️ D-16/D-17 (the merge with Phase 167) await founder confirmation: under D-16 the first, wedge-causing validate still answers `SIGN_IN_FAILED` |
 | C6 | `correlation_id` per request | **MET** | none |
 | C7 | the algo-trading settings landmine is PINNED, not ticked | **MET** | none |
@@ -2525,12 +2527,19 @@ so a `-10005` at the sign-in step stays `SIGN_IN_FAILED`. Other IPC faults move 
 ### Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session (INSERTED)
 
 **Goal:** A client's key validation cannot evict, disturb or expose another client's broker session
-on the shared terminal — and a shared-terminal outage reaches a human without one clicking a button.
+on the shared terminal.
 **Requirements**: TBD
 **Depends on:** Phase 164.6.5 (availability first: this phase changes the terminal's ownership model,
 which is only safe once validation stops wedging it)
-**Owns (2026-09-26, from 164.6.5 plan 08):** `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01` — Phase 164.6.5 D-11, OPEN: the prod-prober's `-10005` classification (`mt5-ipc-timeout`) has never been calibrated against a REAL wedge; its fixture was constructed, not captured. Trigger: the next live `-10005`, captured BEFORE the heal recycles the terminal (a founder-supervised induced wedge also qualifies). Gate: a scrubbed real-wedge transcript committed under `scripts/prod-prober/fixtures/mt5/`, registered for the kind it actually produced, self-test and wiring suite green. ⛔ A hand-written fixture is not a close. ⚠️ 164.6.5's own heal can recycle a wedge before a scheduled prober run reads it.
-**Owns (2026-09-25, from 164.6.5 plan 01):** `TODOS.md` `MT5-SWITCH-WEDGE-CAUSE-01` — why some account switches on the shared terminal wedge it (`-10005`, Journal silent after `disconnected`) and others do not. Verdicts so far: same-vs-different account REJECTED, terminal self-update and same-vs-different broker server UNDECIDED. Closes only on evidence captured at the next wedge BEFORE any restart; a restart clearing the symptom is not a close.
+**Split 2026-09-26 by founder decision: one topic per phase.** Sibling: Phase 164.6.8 OUTAGEALERT
+took the goal's outage clause ("and a shared-terminal outage reaches a human without one clicking
+a button") and the former criterion 3 verbatim. This phase keeps the former criteria 1, 2 and 4;
+the former 4 is renumbered 3 below, text unchanged.
+**Owns — MOVED 2026-09-26 to Phase 164.6.8 OUTAGEALERT (after PR #863 merged):** PR #863 routed
+`MT5-PROBER-WEDGE-CALIBRATION-01` (dated 2026-09-26, from 164.6.5 plan 08) and `MT5-SWITCH-WEDGE-CAUSE-01`
+(dated 2026-09-25, from 164.6.5 plan 01) here. Both close only on the next live wedge captured before
+any restart or heal, which is 164.6.8's evidence, so both `**Owns**` lines now live under Phase
+164.6.8, carried verbatim. This phase owns neither.
 **Plans:** 0 plans
 
 ⛔ **SAME INCIDENT AS 164.6.5, DIFFERENT DEFECT.** 164.6.5 makes validation stop breaking the
@@ -2549,7 +2558,48 @@ independently shippable; this is the architecture.
    Navigator tree holds registered accounts across SEVERAL broker servers — one per client who has
    ever validated. Anyone with VNC access to the gateway container can read the full list of client
    account numbers and their brokers. ⛔ This does NOT go away by fixing the wedge.
-3. **A shared-terminal outage reaches a human.** Measured across the 1h39m total outage: `/health`
+3. ⚠️ **A founder decision, not to be taken silently:** per-validation isolation (ephemeral or
+   pooled terminals) vs serialize-and-restore on one terminal. Both have real cost; record the
+   reasoning wherever this repo tracks decisions.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.6.6 to break down)
+
+### Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button (INSERTED)
+
+**Goal:** A shared-terminal outage reaches a human without one clicking a button.
+**Requirements**: TBD
+**Depends on:** Phase 164.6.5 (the salience work sits on 164.6.5's terminal-measuring prober arm, and
+a real-wedge capture has to beat 164.6.5's own heal, which can recycle a wedge before a scheduled
+prober run reads it). It does NOT depend on Phase 164.6.6: alerting on an outage does not need the
+terminal's ownership model changed.
+**Split 2026-09-26 by founder decision: one topic per phase.** Sibling: Phase 164.6.6
+MT5TERMINALISOLATION, whose former criterion 3 moved here verbatim as criterion 1 below, with the
+outage clause of its goal.
+**Owns (routed 2026-09-26, founder decision):** `MT5-PROBER-WEDGE-CALIBRATION-01` — Phase 164.6.5
+D-11, the calibration half of 164.6.5 criterion 4: the prod-prober's `-10005` classification
+(`mt5-ipc-timeout`) has never been calibrated against a REAL wedge; its fixture was constructed, not
+captured.
+**Owns (moved 2026-09-26 from Phase 164.6.6, orchestrator decision):** `MT5-SWITCH-WEDGE-CAUSE-01` —
+why some account switches on the shared terminal wedge it (`-10005`, Journal silent after
+`disconnected`) and others do not. It moved with the calibration item because both close only on the
+same evidence: the next live wedge, captured BEFORE any restart or heal recycles the terminal.
+⚠️ **Neither item is on `main` at the time of this split.** Their `TODOS.md` entries, the 164.6.5
+founder-ruling note and the two `**Owns**` lines under Phase 164.6.6 all arrive with PR #863
+(164.6.5, open), which routes BOTH items to 164.6.6. The re-homing is deferred until #863 merges:
+then both `**Owns**` lines move here, both `TODOS.md` `Owner:` lines point at Phase 164.6.8, and the
+164.6.5 routing sentence is corrected.
+⭐ **DONE 2026-09-26, after PR #863 merged (`ea4167a3f`).** The paragraph above is kept as lineage. Both
+`TODOS.md` `Owner:` lines now name Phase 164.6.8, the 164.6.5 routing sentence and its C1/C4 outcome rows
+name 164.6.8, and the two `**Owns**` lines #863 wrote under Phase 164.6.6 are carried here verbatim:
+- *(as #863 wrote it, 2026-09-26, from 164.6.5 plan 08)* `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01` — Phase 164.6.5 D-11, OPEN: the prod-prober's `-10005` classification (`mt5-ipc-timeout`) has never been calibrated against a REAL wedge; its fixture was constructed, not captured. Trigger: the next live `-10005`, captured BEFORE the heal recycles the terminal (a founder-supervised induced wedge also qualifies). Gate: a scrubbed real-wedge transcript committed under `scripts/prod-prober/fixtures/mt5/`, registered for the kind it actually produced, self-test and wiring suite green. ⛔ A hand-written fixture is not a close. ⚠️ 164.6.5's own heal can recycle a wedge before a scheduled prober run reads it.
+- *(as #863 wrote it, 2026-09-25, from 164.6.5 plan 01)* `TODOS.md` `MT5-SWITCH-WEDGE-CAUSE-01` — why some account switches on the shared terminal wedge it (`-10005`, Journal silent after `disconnected`) and others do not. Verdicts so far: same-vs-different account REJECTED, terminal self-update and same-vs-different broker server UNDECIDED. Closes only on evidence captured at the next wedge BEFORE any restart; a restart clearing the symptom is not a close.
+**Plans:** 0 plans
+
+**Success criteria (to be derived properly at planning):**
+
+1. **A shared-terminal outage reaches a human.** Measured across the 1h39m total outage: `/health`
    returned `"status":"ok"` throughout; the escalation at `consecutive_not_measured=6` flipped log
    level INFO→WARNING and set `blind=True`, which NOTHING outside its own module reads; the
    prod-prober run concluded `success` BY DESIGN (status-class defects exit 0 so Railway's
@@ -2559,13 +2609,10 @@ independently shippable; this is the architecture.
    view reads green. ⛔ Do NOT reopen `MT5-WEDGE-OBS-01`; cross-link instead.
    ⭐ **The way this incident was actually found was a founder clicking a button.** That is the
    finding this criterion exists to answer.
-4. ⚠️ **A founder decision, not to be taken silently:** per-validation isolation (ephemeral or
-   pooled terminals) vs serialize-and-restore on one terminal. Both have real cost; record the
-   reasoning wherever this repo tracks decisions.
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.6.6 to break down)
+- [ ] TBD (run /gsd-plan-phase 164.6.8 to break down)
 
 ### Phase 164.6.1: MYPYSTRICT — the strict gate claims to cover all running-service code and does not cover the module that IS the service (INSERTED)
 
@@ -2777,6 +2824,7 @@ Plans:
 
    ⚠️ **STATUS: PENDING, NOT DISCHARGED — criterion 8 stays OPEN until that entry closes.** Plan 11 PREPARED the dispatch (preflight first, then the committing mode; the confirm token derived at dispatch time from the tracked baseline record at the dispatched ref, never copied out of a planning document; the exact strings to read) and deliberately did NOT run it: a committing restore drops and rebuilds the `public` schema of a database other people's CI uses, and that is a human act. The prepared recipe and its refusals live in `164.9-11-SUMMARY.md`.
    ⛔ **WHAT A GREEN RUN ID WILL NOT CLAIM — written now so a later reader cannot read it in.** The extension guard runs AFTER its transaction commits, so in `mode=restore` it LABELS an outcome and never PREVENTS one; no dispatch changes that. ⚠️ And MEASURED by plan 11 while preparing the recipe: **`check_extension_guard` is not reached in `mode=preflight` at all** — the preflight branch returns at its byte-for-byte rollback comparison, which covers the extension class incidentally and never names the guard. So a green preflight does NOT evidence that guard; only the committing run does. A run recorded as a discharge whose log does not show the guard would be a green that is not measuring what it claims — the family this whole phase exists to remove.
+   ✅ **DISCHARGED 2026-09-26 by Phase 164.9.2 criterion 4 — criterion 8 is MET.** The PENDING status above is kept as lineage. Preflight run `36235362126` at `06cbe2030`: **success**, restore self-test 41/41 arms, marker names TEST; restore attempt run `36237060668`: **refused by the activity gate** (2 non-idle sessions besides the holder); nothing was written; restore run `36242946174` at `ea4167a3f`: **success**, marker names TEST, activity gate quiet (holder only, idle x16), printing `restore: tables=63 policies=155 functions=121 ledger_rows=277 survivors=2/2 filtered=1 mode=restore`. Both committing dispatches were made by the founder with the confirm token. The committing run reached the summary line, which `restore_mode` prints only after `check_extension_guard` and the ownership comparison pass. That is the "reached the point past it" reading this block requires, since both guards are silent when clean.
 9. Every assertion this phase adds or changes is proven able to fail: neutered, observed RED, restored from a **byte backup** — ⛔ never `git checkout --`, which silently destroys concurrent uncommitted work.
 10. ⛔ Nothing here is closed by widening an exemption, relaxing a floor, or asserting a smaller scope. Where narrowing IS the honest answer, it is dated and reasoned in-code.
 
@@ -3013,12 +3061,140 @@ Plans:
 2. Replayed statements interleave in migration filename order, inside the same transaction as the INSERTs.
 3. ⛔ The wrong-state check and its `verified` default stay exactly as they are: no waiver, no relaxed default, no widened allowlist.
 4. A green `mode=preflight` run, then a green `mode=restore` run on shared TEST, both recorded by run id. That closes Phase 164.9 criterion 8.
+   ⭐ **RECORDED 2026-09-26 — criterion 4 MET on shared TEST.** Both committing dispatches were made by the founder with the confirm token.
+   - preflight run `36235362126` at `06cbe2030`: **success**, restore self-test 41/41 arms, marker names TEST.
+   - restore attempt run `36237060668`: **refused by the activity gate** (2 non-idle sessions besides the holder); nothing was written.
+   - restore run `36242946174` at `ea4167a3f`: **success**, marker names TEST, activity gate quiet (holder only, idle x16). It printed the C5 replay (6 UPDATE statements replayed in migration filename order inside the transaction), a post-census equal to the dump's expected shape, and `restore: tables=63 policies=155 functions=121 ledger_rows=277 survivors=2/2 filtered=1 mode=restore`.
+   The summary line is printed only after `check_extension_guard` and the ownership-list comparison pass (`restore_mode` in `scripts/restore-test-from-baseline.sh`), and the value-pinning leg runs inside the transaction that committed. Phase 164.9 criterion 8 and `TODOS.md` `[164.9-CRIT8-RESTORE-DISPATCH-RECORD]` are closed by this record.
 
 **Rejected:** hand-seeding the value after the replay (hand-seeding shared TEST is forbidden); editing the applied teaser migration (PROD's ledger stores the SQL that ran).
 
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.9.2 to break down)
+
+### Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim (INSERTED)
+
+**Goal:** A due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim.
+**Requirements**: TODOS `[164.9.3-CLAIM-PAIR-23505]` (owned here)
+**Depends on:** Phase 164.9.1
+**Plans:** 0 plans
+
+⭐ **Inserted 2026-09-26 by orchestrator decision** (routed from the Phase 167.1.2 PR B review). It is a separate topic from 164.9.1 JOBRPCTRUTH and 164.9.2 REFDATAUPDATES.
+
+**Evidence, measured 2026-09-26 on the pg-lane by the 167.1.2 PR B fixer.**
+- **Repro:** seed a `failed_retry` `derive_allocator_equity` row whose `next_attempt_at` is in the past, plus a `pending` row for the same allocator. All three claim entry points then raise `23505` on `compute_jobs_one_inflight_per_kind_allocator`:
+  - `claim_compute_jobs_with_priority`, 6-arg overload;
+  - `claim_compute_jobs_with_priority`, 2-arg overload;
+  - `claim_compute_jobs`.
+- **The claim guard:** C39 skips a candidate only when a `running` or `done_pending_children` sibling exists, not when a `pending` one does.
+- **The enqueue side:** `_enqueue_compute_job_internal`'s dedup and that unique index both cover `pending`, `running` and `done_pending_children`, but not `failed_retry`. So any enqueue made while a retry is outstanding creates the pairing.
+- **Class:** this is the 2026-04-28 worker-spin class.
+- **Latent, not observed live.** Sentry shows 0 matching issues over 90 days and 0 matching logs over 30 days.
+- **Not fixed by 167.1.2.** PR B's new owner RPC is being fixed so that it never creates the pairing (it reuses the failed_retry job). That closes one caller, not the class. The root fix belongs here.
+
+## Success Criteria
+1. A red-first lane test reproduces the `23505` on the pre-fix tree and goes green after the fix.
+2. The claim never raises on that pairing. Either the enqueue refuses the pending twin or folds it into the `failed_retry` job, or the claim skips it. The planner decides which, with evidence.
+3. The fix ships as a migration, reviewed before merge by the three migration reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter), because merging a migration auto-applies it to PROD.
+4. *(added 2026-09-26 with the scope merge below)* The fix covers every partition the claim guard protects, not only the allocator one: `api_key_id`, portfolio, strategy and allocator, each against its sibling `compute_jobs_one_inflight_per_kind_*` index, in BOTH claim RPCs. Each partition gets its own red-first lane arm.
+
+⭐ **SCOPE MERGED 2026-09-26 by founder decision (AskUserQuestion, "Re-route, don't start"):** item (4) of Phase 164.5.2's routed list moves here. It is the same defect on a different partition, found independently on 2026-09-25 by the 164.9.1 pre-push silent-failure-hunter.
+- **The pairing:** one `failed_retry` plus one `pending` job for the same `(kind, api_key_id)`. A `poll_allocator_positions` `failed_retry` with `next_attempt_at` 10 minutes in the past, beside a `pending` twin due 10 minutes in the future.
+- **The result:** `claim_compute_jobs` and `claim_compute_jobs_with_priority` both raise 23505 on `compute_jobs_one_inflight_per_kind_api_key`. The batch `UPDATE ... SET status = 'running'` is ONE statement, so no job of ANY kind is claimed until the pair clears. Loud, not silent.
+- **Measured:** 2026-09-25 on the local-stack lane at the 164.9.1 release head, in one transaction ending in `ROLLBACK`. The full repro recipe is kept verbatim as lineage in Phase 164.5.2's section and in `TODOS.md` `[164.9.3-CLAIM-PAIR-23505]`.
+- **Fix options recorded there, not decided:** (a) add `'pending'` to each guard's `x.status` list with `x.id <> ranked.id`; (b) fold the enqueue into, or supersede, the outstanding `failed_retry`. Criterion 2 above already leaves that choice to the planner.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.9.3 to break down)
+
+### Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock (INSERTED)
+
+**Goal:** The compute-job fan-in graph and the bridge's decision cascade never strand a job, raise a spurious 23505, or deadlock: a fan-in child whose parent fails reaches a terminal state, a `match_decisions` delete cascades without a unique violation, and a fan-in diamond cannot deadlock on the parent lock.
+**Requirements**: TODOS `[164.9.3.1-FANIN-GRAPH-RESIDUALS]` (owned here)
+**Depends on:** Phase 164.9.3 (the same compute-job RPC surface; CLAIMPAIR's migration re-bases `_enqueue_compute_job_internal` and the claim RPCs first, and this phase re-bases on it)
+**Plans:** 0 plans
+
+⛔ **BOOKED 2026-09-26 UNDER THE NEW-PHASE FREEZE — NOT STARTED.** Founder decision (AskUserQuestion, "Re-route, don't start"): items (1), (2) and (3) of Phase 164.5.2's routed list leave 164.5.2 and land here. This phase gets no discuss, plan or execute step until the founder lifts the freeze for it.
+
+**Evidence.** Routed on 2026-09-25 from the Phase 164.9.1 review round 1. Items (1) and (3) are recorded in the header of M1, `20260924230827_fanin_initial_status_10param.sql`. All three are latent or loud, none silent:
+- (1) and (3) are latent because no caller passes `parent_job_ids` today.
+- (2) is pre-existing and fails loudly. The admin decisions route issues these deletes.
+
+## Success Criteria
+
+1. **The stranded child.** A fan-in child whose parent is still open at enqueue and later ends `failed_final` no longer stays in `done_pending_children` forever. It reaches a terminal state that names the failed parent. A red-first lane test reproduces the strand on the pre-fix tree and goes green after the fix.
+2. **The cascade 23505.** A second `match_decisions` delete no longer raises 23505 through the `ON DELETE SET NULL` cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null`. A red-first lane test reproduces it on the pre-fix tree. ⛔ Dropping or narrowing the index to silence the error is not a fix unless the planner shows the invariant it enforces no longer holds.
+3. **The diamond deadlock.** A diamond, meaning a child whose parents include another waiting child, cannot deadlock (40P01) between the fan-in parent lock `FOR SHARE ... ORDER BY id` and `mark_compute_job_done`. The alternative, if the planner shows the deadlock is inherent, is that every caller passing parents retries 40P01 on both the enqueue and the worker's mark path. Proven with two genuinely separate sessions; ⛔ a single-client `Promise.all` cannot race.
+
+⛔ **Constraints:** every fix here is a migration, so the three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) review it before merge, because a merge auto-applies to PROD. Re-base each `CREATE OR REPLACE` on the LATEST definition, found by a grep of all `supabase/migrations/**`.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.9.3.1 to break down)
+
+### Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner (INSERTED)
+
+**Goal:** `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner.
+**Requirements**: TODOS `[164.9.4-CI-MUTEX-QUEUE]` (owned here)
+**Depends on:** Phase 164.9.1
+**Plans:** 0 plans
+
+⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
+
+**Evidence, measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).**
+
+| Job | Total | Waiting on the mutex | Actual work |
+|---|---|---|---|
+| `python` | 50 min | 36 min in "Acquire shared-test-db mutex" | 13 min of pytest |
+| `e2e-seeded` | 36 min | 28 min | 5 min of specs |
+| every other job | 12 min or less | — | — |
+
+The wait grows with the number of open PRs, because every one of them contends for the same key.
+
+**Precedents:**
+- Phase 164.4.2 moved `sql-tests` to `scripts/local-stack/run.sh`.
+- Phase 164.4.2.1 took `test-db-drift` off the key.
+
+## Success Criteria
+1. Neither job acquires advisory key `61616158`.
+2. Each job boots its own local-stack or pg-lane database, behind a loopback-DSN guard.
+3. Coverage and test counts do not drop: no skipped test, and no lowered `--cov-fail-under`.
+4. A measured CI run records the new wall clock.
+5. Any test that genuinely needs shared TEST is named, stays on the key, and states why.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.9.4 to break down)
+
+### Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically (INSERTED)
+
+**Goal:** After a migration applies to PROD, the committed baseline is re-dumped and proposed automatically, so main never sits red on baseline-content-drift waiting for a manual dump.
+**Requirements**: TODOS `[164.9.5-MANUAL-BASELINE-REDUMP]` (owned here)
+**Depends on:** Phase 164.9.1
+**Plans:** 0 plans
+
+⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
+
+**Evidence, 2026-09-26.**
+- **The manual step:** PR #864 needed a founder-run `supabase db dump --linked`.
+- **The cost:** main was red on `sql-gate-lint` from the Phase 164.9.1 PROD apply (run `36221903717`) until that dump landed, and Railway skips deploys while main is red.
+- **The procedure being automated:** `supabase/schema/BASELINE.md`, section "## Regenerating".
+
+⛔ **Security-sensitive workflow.** It reads PROD's schema with a repository secret and opens PRs on a PUBLIC repo. The plans must include a security review (`/gsd-secure-phase` or equivalent) before merge.
+
+## Success Criteria
+1. **Trigger and dump:** a workflow runs after `supabase-migrate.yml`'s PROD `apply` job succeeds, and takes a read-only schema dump with the existing repository secret. No agent enters a new credential.
+2. **Scan and refuse:** it runs the five-class secret scan and gitleaks, and refuses to open a PR on any hit.
+3. **Carried-migrations marker:** it regenerates `supabase/schema/baseline-carried-migrations.txt` from the tree of the merge that was applied.
+4. **Currency checks:** it runs `scripts/local-stack/run.sh --check-currency` and baseline-content-drift.
+5. **The PR:** it opens a PR carrying the VERSION bump, the CHANGELOG entry and the BASELINE.md provenance. It never auto-merges.
+6. **Credential handling:** the dump credential is never echoed, the workflow has least-privilege `permissions:`, and it is ref-guarded to `main`.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.9.5 to break down)
 
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
@@ -3382,11 +3558,19 @@ Plans:
 
 **Requirements**: TODOS entry `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` — read it before planning; it carries the dated measurements and the forbidden remedies. Do not re-derive them. ⭐ **THE WAITING DEPENDENCY IS MET — MEASURED 2026-09-23 (founder-approved edit), read-only from the production analytics log.** A three-account Deribit composite created 2026-09-23 failed its first stitch job (`run_stitch_composite_job`) permanently at 06:50 UTC on exactly this refusal: one `assignment` row, currency BTC, change `-1.5e-5`, instrument a BTC put expiring 28 Aug 2026, side `close buy`. The refusal's own same-instrument census for that batch read **`delivery=0 settlement=0 trade=1`**. For this occurrence that answers the deciding question: Deribit emitted NO separate `delivery` or `settlement` row for the assigned instrument, so there is no second cash row the `assignment` change could be double-counted against. ⚠️ One occurrence, one instrument — the plan decides whether n=1 is enough to classify, and must say so. **Consequence:** the strategy's analytics were stamped terminal (composite member reconstruction failed structurally), and its owner factsheet and share link still read "still computing" (that copy defect is Phase 167.2's). Phase 159 UAT #2 (render a composite on the public factsheet) now has a real composite waiting on THIS phase.
 **Depends on:** PR #783 merged (the evidence channel), and ONE observed occurrence carrying the census. ⚠️ The second is a WAITING dependency, not a code one — nothing in the repo produces it; a deribit options account must hit the refusal again.
-**Plans:** 0 plans
+⭐ **SCOPE AMENDMENT 2026-09-26 — founder decision D6 (AskUserQuestion: "Fix inside 168"), recorded as D-09 in `168-CONTEXT.md`.** The round-1 review's INFO-3 measured that the smoothed option-book replay ignored Deribit's `type=expiry`, so an out-of-the-money short stayed open past expiry and any later option activity raised the daily-MTM hole, losing the smoothed basis for the account. It is fixed inside this phase, not split: the replay closes an option at a zero-cash `expiry` row and refuses an `expiry` carrying cash or a nonzero position, and any `exercise` row (unmeasured shapes). Neither type becomes cash-bearing, so both twins are unchanged. The same decision gives the new `mtm_option_row_field_missing` degrade reason its own factsheet copy. This overrides the phase-size rule for this one item.
+**Plans:** 3 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 168 to break down)
+**Wave 1**
+- [x] 168-01-PLAN.md — `assignment` classified cash-bearing on both twins in the census shape; co-occurring `delivery`/`settlement` and unnamed-instrument shapes refuse; windowed-crawl backstop; one option-book event constant across the six literal sites in the same commit; evidence file (counts only); evidence tests re-pointed
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 168-02-PLAN.md — per-site pins for every option-book reader (incl. mark_to_market and smoothed_mtm end to end, and the acceptance script's eligibility check), refusal whitelist gains `commission`/`position`, prose sweep, full suite
+
+**Wave 3** *(post-land; founder-owned, non-autonomous)*
+- [ ] 168-03-PLAN.md — after deploy the founder retries the options strategy that failed on 2026-09-23 and reports terminal status, return-point count and any refusal class, by type only. ⭐ D-09 note (2026-09-26): the retry also exercises the expiry close, but ONLY when the smoothed pass runs, which is gated on `SMOOTHED_MTM_ENABLED` (production value not measured here); a D-09 refusal reports as an `expiry`-shape or `exercise` class
 
 ### Phase 169: PAGETRUTH — every number agrees across pages and with its own record length
 
@@ -3417,23 +3601,20 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 169 to break down)
 
-### Phase 170: PAGECOPY — layout and copy read clean on every page
+### Phase 170: LAYOUT — page layout reads clean and holds on every page
 
-**Goal:** Pages read as a finished product: no stacked look-alike panels, no raw ids or internal labels, no test text, no typos, and the layout holds at 320 px and 200% zoom.
+**Goal:** Pages read as a finished product: no stacked look-alike panels, and the layout holds at 320 px and 200% zoom.
 **Founder decision, 2026-09-25 (AskUserQuestion):** the second of the two QA phases; ships after Phase 169 PAGETRUTH.
 **Evidence:** the founder's 2026-09-24 layout notes ("too many similar layers stacked", the "get private link" control too dominant and overlapping) and the 2026-09-25 QA sweep (4 user-facing broken, 14 cosmetic findings). Counts only here.
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 169
+**Split 2026-09-26 by founder decision: one topic per phase.** Sibling: Phase 170.1 COPY. This phase was 170 PAGECOPY and keeps the former criteria 1 and 5 (renumbered 1 and 2 below) plus its own copy of the former criterion 7 (now 3), text unchanged. The former criteria 2, 3, 4 and 6 and the goal's copy clauses ("no raw ids or internal labels, no test text, no typos") moved to 170.1 verbatim. The phase directory keeps its original `170-pagecopy` slug.
 
 ## Success Criteria
 
 1. Factsheet and Allocations panels no longer stack as near-identical layers; the private-link control is secondary and never overlaps content.
-2. No page shows a short id where a name exists, or a raw internal value as a label (strategy type, allocator type, event kinds, roles).
-3. No production page carries QA, test or internal-phase text, including strategy descriptions and the placeholder Referral page.
-4. The recorded typos are fixed and pages that share a title are distinguished.
-5. `/security` and the legal pages show the signed-in header when signed in; the floating tweaks control never covers the bottom navigation; `/compare` does not point to controls that do not exist; `/admin/match` on mobile is read-only in fact, not only in words; no page scrolls horizontally at 320 px.
-6. The wizard's post-Submit copy says "submitted" on success, not "already submitted".
-7. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
+2. `/security` and the legal pages show the signed-in header when signed in; the floating tweaks control never covers the bottom navigation; `/compare` does not point to controls that do not exist; `/admin/match` on mobile is read-only in fact, not only in words; no page scrolls horizontally at 320 px.
+3. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
 
 **Plans:** 0 plans
 
@@ -3441,26 +3622,88 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 170 to break down)
 
+### Phase 170.1: COPY — page copy reads clean on every page (INSERTED)
+
+**Goal:** Pages read as a finished product: no raw ids or internal labels, no test text, no typos.
+**Founder decision, 2026-09-25 (AskUserQuestion):** the second of the two QA phases; ships after Phase 169 PAGETRUTH.
+**Evidence:** the 2026-09-25 QA sweep (4 user-facing broken, 14 cosmetic findings). Counts only here.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 169
+**Split 2026-09-26 by founder decision: one topic per phase.** Sibling: Phase 170 LAYOUT (formerly 170 PAGECOPY). The former 170 criteria 2, 3, 4 and 6 moved here verbatim (renumbered 1–4 below) with the goal's copy clauses, and this phase carries its own copy of the former criterion 7 (now 5). It does not depend on Phase 170: the two touch different concerns and either may ship first after Phase 169.
+
+## Success Criteria
+
+1. No page shows a short id where a name exists, or a raw internal value as a label (strategy type, allocator type, event kinds, roles).
+2. No production page carries QA, test or internal-phase text, including strategy descriptions and the placeholder Referral page.
+3. The recorded typos are fixed and pages that share a title are distinguished.
+4. The wizard's post-Submit copy says "submitted" on success, not "already submitted".
+5. Each page is re-checked at 320 px and 200% zoom in the logged-in browser after deploy.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 170.1 to break down)
+
 ---
 
-### Phase 165: DEPS — The 9-PR dependabot campaign
+### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 
-**Goal**: All 9 open dependabot PRs are RESOLVED — landed or deliberately closed — in the research-verified order with the full suite green between each, and production pandas is never downgraded
+**Goal**: The four GitHub Actions dependabot PRs (#643, #627, #626, #612) are RESOLVED — landed or deliberately closed — one at a time in the research-verified order with the full suite green between each, so CI's own behaviour is settled before any library bump is judged by it
 **Depends on**: Phase 158 (⛔ HARD: OPS-01 — nine CI runs against the unfixed group guarantees a silently-skipped Railway deploy, and #685 is 100% `analytics-service/`). LAST phase of the milestone — dependency churn lands after the correctness work, never before
-**Requirements**: DEPS-01
+**Requirements**: DEPS-01 (shared by 165, 165.1 and 165.2; satisfied when 165.2 closes)
 **Ordering (2026-09-05):** runs AFTER Phase 166 — dependency churn lands LAST in the milestone. Carried decision: when v1.21 is created and 165 is still open, it moves there.
+**Split 2026-09-26 by founder decision: one topic per phase.** Phase 165 DEPS ("The 9-PR dependabot campaign") became three phases, one per ecosystem, in criterion 2's verified order — 165 ACTIONSDEPS (#643, #627, #626, #612) → 165.1 PIPDEPS (the pandas prerequisite commit + #685, now #755) → 165.2 NPMDEPS (#686, now #836; #645; #646; #614's closure; the #606 issue; `[165-NIGHTLY-AUDIT-RED]`). A two-way Python/JS split was rejected because the actions PRs sit BEFORE the pip PR in that order, and `.planning/research/STACK.md`'s ordering rationale makes actions-first load-bearing (they "change *how CI runs*, and you want that settled before you start trusting CI's verdict on library bumps"). Old criteria → new homes: 1 → 165.1; 2 → all three, verbatim (each phase lands its own slice of the order); 3 → 165.2; 4 → 165.2 (the campaign's close criterion); 5 → 165.2. 165 and 165.1 each carry a new criterion, added at the split, that their own PRs are landed or closed. The former goal was: "All 9 open dependabot PRs are RESOLVED — landed or deliberately closed — in the research-verified order with the full suite green between each, and production pandas is never downgraded".
+**Measured 2026-09-26, recorded here rather than rewritten into the criteria below (their text is kept verbatim):** #685 (pip group) and #686 (npm group) were CLOSED on 2026-08-24 and replaced by the open group PRs #755 (pip) and #836 (npm); #606 is an ISSUE (the 2026-07-10 nightly npm-audit report), not a PR. Ecosystems read from `gh pr view <n> --json files`: #643, #627, #626, #612 touch only `.github/workflows/*`; #685 only `analytics-service/requirements{.in,.txt,-dev.txt}`; #686, #645, #646, #614 only `package.json` + `package-lock.json`.
 **Success Criteria** (what must be TRUE):
 
-  1. A prerequisite commit on `main` (not a PR) fixes `requirements.in` `pandas==2.2.3` → `3.0.3` with its comment corrected and `requirements.txt` untouched, BEFORE #685 is touched at all; #685 then lands rebased with pandas OUT of its diff and `make lock` re-run — production pandas stays 3.0.3. ⚠️ A green pytest is NOT proof of safety here; the pin itself is the assertion.
-  2. PRs land ONE at a time in the verified order — #643 → (#627, #626) → #612 ALONE (validated on `migration-drift-check.yml` first, `supabase --version` == 2.98.2 confirmed in the plan-job log; it rides the PROD auto-migrate workflows) → #685 → #686 (rebased + `npm install`, ⚠️ never bisected — its nine reds are ONE mis-materialised lockfile) → #645 @ 7.0.1 → #646 @ jsdom 30.0.1 not 30.0.0 (⚠️ jsdom 30's `engines` excludes local Node 25; decide CI-Node-22-as-authority vs `PATH=/opt/homebrew/opt/node@22/bin` explicitly, don't discover it as a flake) — full local suite between each, every merge asserted `conclusion == "success"`, never "not failure" (with no branch protection, a grey run merges).
-  3. #614 (TypeScript 7) and #606 are CLOSED with reasons written on the PRs (the `exports`-map read + the typescript-eslint `<6.1.0` peer range; #606's stale claims) so the next Dependabot reopen is pre-answered; the `fast-uri` override is bumped `^3.1.4` → `^3.1.5`; NO audit-allowlist file is added.
-  4. Zero dependabot PRs remain open at phase close, and no Railway deploy was silently skipped across the campaign (the Phase-158 watcher observed quiet or loud, never grey).
-
-  5. `[165-NIGHTLY-AUDIT-RED]` — the `npm-audit` advisory set that has held `nightly.yml` RED on `main` for FIVE consecutive days is resolved, and the nightly is green on that job. MEASURED 2026-09-13 from run `34758789452` (head `f10b0e23`): `10 vulnerabilities (3 moderate, 6 high, 1 critical)`, with failures also in `preflight`. ⛔ **The critical is `next` itself and it must be named, not folded into a count:** `next 9.5.6-canary.0 - 10.0.7 || 14.3.0-canary.0 - 15.5.23 || 15.6.0-canary.0 - 16.3.2` — GHSA-p293-qw3h-jr36 (unauthenticated RCE on windows-hosted servers) and GHSA-2xp9-vwfh-vxw4 (unauthenticated RCE in the Image Optimization API when AVIF files are used). This repo runs `next@16.2.11`, which is INSIDE that range. ⚠️ **Exposure was assessed, and the assessment is why this sits here rather than pre-empting the milestone (founder decision, 2026-09-13):** the Windows arm is N/A (prod is Vercel/Linux); the AVIF arm needs AVIF in `images.formats`, and `next.config.ts` has no `images` block at all, so the default (webp) applies and AVIF is not opted into; there are no `remotePatterns`, so only same-origin images optimize; and no component imports `next/image` (the only repo hits are `src/proxy.ts` and its test, which EXCLUDE `_next/image` from the auth matcher at `proxy.ts:184`). ⛔ **But the optimizer endpoint IS live and unauthenticated** — measured on prod: `GET /_next/image?url=%2Ffavicon.ico&w=64&q=75` → `200`, and it returned `image/x-icon` even under `Accept: image/avif`, consistent with AVIF being off. So the finding is: vulnerable VERSION, no demonstrated path, `npm audit fix` available. The other named highs are `brace-expansion` (GHSA-rgw5-rvv9-x895), `browserslist` (GHSA-c83g-rgw3-j3cx, GHSA-73wf-gq98-2v4g), `fast-uri`, `ip-address` and `nanoid`. ⚠️ `fast-uri` already carries a repo override (criterion 3 bumps it `^3.1.4` → `^3.1.5`) — re-measure before assuming that closes it. ⛔ Closing this by adding an audit-allowlist file is FORBIDDEN by criterion 3 and stays forbidden here.
+  1. PRs land ONE at a time in the verified order — #643 → (#627, #626) → #612 ALONE (validated on `migration-drift-check.yml` first, `supabase --version` == 2.98.2 confirmed in the plan-job log; it rides the PROD auto-migrate workflows) → #685 → #686 (rebased + `npm install`, ⚠️ never bisected — its nine reds are ONE mis-materialised lockfile) → #645 @ 7.0.1 → #646 @ jsdom 30.0.1 not 30.0.0 (⚠️ jsdom 30's `engines` excludes local Node 25; decide CI-Node-22-as-authority vs `PATH=/opt/homebrew/opt/node@22/bin` explicitly, don't discover it as a flake) — full local suite between each, every merge asserted `conclusion == "success"`, never "not failure" (with no branch protection, a grey run merges).
+     *(Slice owned by this phase: #643 → (#627, #626) → #612 ALONE. The whole order is kept verbatim so each phase lands against it.)*
+  2. *(added 2026-09-26 at the split)* This phase's own PRs — #643, #627, #626, #612 — are each landed or closed with a reason at phase close, and no Railway deploy was silently skipped across them (the Phase-158 watcher observed quiet or loud, never grey). Zero-open-dependabot-PRs is the campaign's close criterion and lives in Phase 165.2.
 
 **Plans**: TBD
 
 **Research note:** STACK.md is effectively the plan — every verdict registry- or log-measured. ⚠️ The whole campaign is predicted, not executed: no PR was rebased, no lock regenerated, no suite run. Run `mypy --strict` before shipping any `analytics-service/` change (the GSD flow runs pytest only). If #686 stays red after a clean `npm ci`, `knip` (6.25 → 6.32, seven minors, changelogs unread) is the prime suspect and its findings may be LEGITIMATE, not regressions. Update each action's SHA AND its version comment together (C-0293).
+
+### Phase 165.1: PIPDEPS — the pip dependabot work lands with production pandas never downgraded (INSERTED)
+
+**Goal**: The pandas prerequisite commit lands on `main`, then the pip dependabot group (#685, now superseded by #755) is RESOLVED in the verified order with the full suite green, and production pandas is never downgraded
+**Depends on**: Phase 165 (criterion 2's verified order puts every GitHub Actions PR before the pip group)
+**Requirements**: DEPS-01 (shared by 165, 165.1 and 165.2; satisfied when 165.2 closes)
+**Ordering:** stays LAST in the milestone with Phase 165 and Phase 165.2.
+**Split 2026-09-26 by founder decision: one topic per phase.** Phase 165 DEPS ("The 9-PR dependabot campaign") became three phases, one per ecosystem, in criterion 2's verified order — 165 ACTIONSDEPS (#643, #627, #626, #612) → 165.1 PIPDEPS (the pandas prerequisite commit + #685, now #755) → 165.2 NPMDEPS (#686, now #836; #645; #646; #614's closure; the #606 issue; `[165-NIGHTLY-AUDIT-RED]`). A two-way Python/JS split was rejected because the actions PRs sit BEFORE the pip PR in that order, and `.planning/research/STACK.md`'s ordering rationale makes actions-first load-bearing (they "change *how CI runs*, and you want that settled before you start trusting CI's verdict on library bumps"). Old criteria → new homes: 1 → 165.1; 2 → all three, verbatim (each phase lands its own slice of the order); 3 → 165.2; 4 → 165.2 (the campaign's close criterion); 5 → 165.2. 165 and 165.1 each carry a new criterion, added at the split, that their own PRs are landed or closed. The former goal was: "All 9 open dependabot PRs are RESOLVED — landed or deliberately closed — in the research-verified order with the full suite green between each, and production pandas is never downgraded".
+**Measured 2026-09-26, recorded here rather than rewritten into the criteria below (their text is kept verbatim):** #685 (pip group) and #686 (npm group) were CLOSED on 2026-08-24 and replaced by the open group PRs #755 (pip) and #836 (npm); #606 is an ISSUE (the 2026-07-10 nightly npm-audit report), not a PR. Ecosystems read from `gh pr view <n> --json files`: #643, #627, #626, #612 touch only `.github/workflows/*`; #685 only `analytics-service/requirements{.in,.txt,-dev.txt}`; #686, #645, #646, #614 only `package.json` + `package-lock.json`.
+**Success Criteria** (what must be TRUE):
+
+  1. A prerequisite commit on `main` (not a PR) fixes `requirements.in` `pandas==2.2.3` → `3.0.3` with its comment corrected and `requirements.txt` untouched, BEFORE #685 is touched at all; #685 then lands rebased with pandas OUT of its diff and `make lock` re-run — production pandas stays 3.0.3. ⚠️ A green pytest is NOT proof of safety here; the pin itself is the assertion.
+  2. PRs land ONE at a time in the verified order — #643 → (#627, #626) → #612 ALONE (validated on `migration-drift-check.yml` first, `supabase --version` == 2.98.2 confirmed in the plan-job log; it rides the PROD auto-migrate workflows) → #685 → #686 (rebased + `npm install`, ⚠️ never bisected — its nine reds are ONE mis-materialised lockfile) → #645 @ 7.0.1 → #646 @ jsdom 30.0.1 not 30.0.0 (⚠️ jsdom 30's `engines` excludes local Node 25; decide CI-Node-22-as-authority vs `PATH=/opt/homebrew/opt/node@22/bin` explicitly, don't discover it as a flake) — full local suite between each, every merge asserted `conclusion == "success"`, never "not failure" (with no branch protection, a grey run merges).
+     *(Slice owned by this phase: #685 (now #755). The whole order is kept verbatim so each phase lands against it.)*
+  3. *(added 2026-09-26 at the split)* This phase's own PRs — the pandas prerequisite commit and #685 (now #755) — are each landed or closed with a reason at phase close, and no Railway deploy was silently skipped across them (the Phase-158 watcher observed quiet or loud, never grey). Zero-open-dependabot-PRs is the campaign's close criterion and lives in Phase 165.2.
+
+**Plans**: TBD
+
+**Research note:** see Phase 165's research note (it is STACK.md-wide). The `mypy --strict` rule there applies to this phase's `analytics-service/` change.
+
+### Phase 165.2: NPMDEPS — the npm dependabot work lands and the nightly audit goes green (INSERTED)
+
+**Goal**: The npm dependabot PRs (#686, now superseded by #836; #645; #646) are RESOLVED in the verified order with the full suite green between each, #614 and the #606 issue are closed with reasons, the nightly audit is green, and zero dependabot PRs remain open
+**Depends on**: Phase 165.1 (criterion 2's verified order puts the pip group before the npm PRs)
+**Requirements**: DEPS-01 (shared by 165, 165.1 and 165.2; satisfied when 165.2 closes)
+**Ordering:** the LAST phase of the milestone; it closes the dependabot campaign.
+**Split 2026-09-26 by founder decision: one topic per phase.** Phase 165 DEPS ("The 9-PR dependabot campaign") became three phases, one per ecosystem, in criterion 2's verified order — 165 ACTIONSDEPS (#643, #627, #626, #612) → 165.1 PIPDEPS (the pandas prerequisite commit + #685, now #755) → 165.2 NPMDEPS (#686, now #836; #645; #646; #614's closure; the #606 issue; `[165-NIGHTLY-AUDIT-RED]`). A two-way Python/JS split was rejected because the actions PRs sit BEFORE the pip PR in that order, and `.planning/research/STACK.md`'s ordering rationale makes actions-first load-bearing (they "change *how CI runs*, and you want that settled before you start trusting CI's verdict on library bumps"). Old criteria → new homes: 1 → 165.1; 2 → all three, verbatim (each phase lands its own slice of the order); 3 → 165.2; 4 → 165.2 (the campaign's close criterion); 5 → 165.2. 165 and 165.1 each carry a new criterion, added at the split, that their own PRs are landed or closed. The former goal was: "All 9 open dependabot PRs are RESOLVED — landed or deliberately closed — in the research-verified order with the full suite green between each, and production pandas is never downgraded".
+**Measured 2026-09-26, recorded here rather than rewritten into the criteria below (their text is kept verbatim):** #685 (pip group) and #686 (npm group) were CLOSED on 2026-08-24 and replaced by the open group PRs #755 (pip) and #836 (npm); #606 is an ISSUE (the 2026-07-10 nightly npm-audit report), not a PR. Ecosystems read from `gh pr view <n> --json files`: #643, #627, #626, #612 touch only `.github/workflows/*`; #685 only `analytics-service/requirements{.in,.txt,-dev.txt}`; #686, #645, #646, #614 only `package.json` + `package-lock.json`.
+**Success Criteria** (what must be TRUE):
+
+  1. PRs land ONE at a time in the verified order — #643 → (#627, #626) → #612 ALONE (validated on `migration-drift-check.yml` first, `supabase --version` == 2.98.2 confirmed in the plan-job log; it rides the PROD auto-migrate workflows) → #685 → #686 (rebased + `npm install`, ⚠️ never bisected — its nine reds are ONE mis-materialised lockfile) → #645 @ 7.0.1 → #646 @ jsdom 30.0.1 not 30.0.0 (⚠️ jsdom 30's `engines` excludes local Node 25; decide CI-Node-22-as-authority vs `PATH=/opt/homebrew/opt/node@22/bin` explicitly, don't discover it as a flake) — full local suite between each, every merge asserted `conclusion == "success"`, never "not failure" (with no branch protection, a grey run merges).
+     *(Slice owned by this phase: #686 (now #836) → #645 → #646. The whole order is kept verbatim so each phase lands against it.)*
+  2. #614 (TypeScript 7) and #606 are CLOSED with reasons written on the PRs (the `exports`-map read + the typescript-eslint `<6.1.0` peer range; #606's stale claims) so the next Dependabot reopen is pre-answered; the `fast-uri` override is bumped `^3.1.4` → `^3.1.5`; NO audit-allowlist file is added.
+  3. Zero dependabot PRs remain open at phase close, and no Railway deploy was silently skipped across the campaign (the Phase-158 watcher observed quiet or loud, never grey).
+
+  4. `[165-NIGHTLY-AUDIT-RED]` — the `npm-audit` advisory set that has held `nightly.yml` RED on `main` for FIVE consecutive days is resolved, and the nightly is green on that job. MEASURED 2026-09-13 from run `34758789452` (head `f10b0e23`): `10 vulnerabilities (3 moderate, 6 high, 1 critical)`, with failures also in `preflight`. ⛔ **The critical is `next` itself and it must be named, not folded into a count:** `next 9.5.6-canary.0 - 10.0.7 || 14.3.0-canary.0 - 15.5.23 || 15.6.0-canary.0 - 16.3.2` — GHSA-p293-qw3h-jr36 (unauthenticated RCE on windows-hosted servers) and GHSA-2xp9-vwfh-vxw4 (unauthenticated RCE in the Image Optimization API when AVIF files are used). This repo runs `next@16.2.11`, which is INSIDE that range. ⚠️ **Exposure was assessed, and the assessment is why this sits here rather than pre-empting the milestone (founder decision, 2026-09-13):** the Windows arm is N/A (prod is Vercel/Linux); the AVIF arm needs AVIF in `images.formats`, and `next.config.ts` has no `images` block at all, so the default (webp) applies and AVIF is not opted into; there are no `remotePatterns`, so only same-origin images optimize; and no component imports `next/image` (the only repo hits are `src/proxy.ts` and its test, which EXCLUDE `_next/image` from the auth matcher at `proxy.ts:184`). ⛔ **But the optimizer endpoint IS live and unauthenticated** — measured on prod: `GET /_next/image?url=%2Ffavicon.ico&w=64&q=75` → `200`, and it returned `image/x-icon` even under `Accept: image/avif`, consistent with AVIF being off. So the finding is: vulnerable VERSION, no demonstrated path, `npm audit fix` available. The other named highs are `brace-expansion` (GHSA-rgw5-rvv9-x895), `browserslist` (GHSA-c83g-rgw3-j3cx, GHSA-73wf-gq98-2v4g), `fast-uri`, `ip-address` and `nanoid`. ⚠️ `fast-uri` already carries a repo override (criterion 3 bumps it `^3.1.4` → `^3.1.5`) — re-measure before assuming that closes it. ⛔ Closing this by adding an audit-allowlist file is FORBIDDEN by criterion 3 and stays forbidden here.
+
+**Plans**: TBD
+
+**Research note:** see Phase 165's research note (it is STACK.md-wide). The `knip` suspicion there applies to this phase's npm group.
 
 ### v1.20 Progress
 
@@ -3507,7 +3750,7 @@ The three without one are named in their rows; none is unfinished work.
 | 164.10 BODYDRIFT (PROD runs an EARLIER revision of three function bodies) | 0/? | Queued (created 2026-09-11) | - |
 | 166. QSTATS-TRUTH | 0/? | Queued (re-ordered ahead of 165, 2026-09-05) | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 0/? | Queued | - |
-| 168. DRBOPTIONS (a Deribit options account ingests end to end) | 0/? | Queued — Alpha Centauri is blocked by a `native_nav` inception reconciliation breach (`breach_ratio=436`), NOT by `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` | - |
+| 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | In progress (plans 01 and 02 done 2026-09-26; plan 03 is the founder post-deploy checkpoint) — Alpha Centauri is blocked by a `native_nav` inception reconciliation breach (`breach_ratio=436`), NOT by `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` | - |
 | 165. DEPS dependabot campaign | 0/? | Queued LAST (after 166 — dependency churn lands last) | - |
 
 ### Requirement Coverage (v1.20)
