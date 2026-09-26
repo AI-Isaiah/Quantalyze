@@ -2384,6 +2384,7 @@ already_authorized` in 33 ms. **Outage 11:02:38Z → 12:41:46Z = 1h39m.**
    same container worked fine with a WORKSPACE-scoped token — so `mt5-ipc-timeout`, the
    classification `MT5-WEDGE-OBS-01` was closed on, has **never once fired in production**.
    ⛔ REQUIRED HERE, not deferred: without it this phase cannot honestly prove criterion 1 held.
+   ⭐ **Founder ruling 2026-09-26 (AskUserQuestion, "Ratify: move to 164.6.6"):** the calibration half is routed to Phase 164.6.6 as `MT5-PROBER-WEDGE-CALIBRATION-01`; the sentence above is kept as lineage. D-16/D-17 founder-confirmed the same day (CONTEXT D-19).
    Calibrate against a REAL wedge, not only a fixture.
 5. The wizard stops telling the user to retry when retry cannot work. Shipped copy claims a
    *"temporary exchange issue or a network blip"* and says *"Try again in a moment"* — measured

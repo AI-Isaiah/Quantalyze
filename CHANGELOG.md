@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.94.0.0] - 2026-09-26 — MT5VALIDATEWEDGE: a wedged MT5 terminal heals without a human, and the wizard stops promising a retry that cannot work
+## [0.94.0.0] - 2026-09-26 — MT5VALIDATEWEDGE: the gateway can restart a wedged MT5 terminal on its own (not yet seen live), and the wizard stops promising a retry that cannot work
 
 ⭐ **What changed for whoever reads this next.** Phase 164.6.5 answers a production incident from
 2026-09-21. One shared MetaTrader terminal serves every client's MT5 key check. A key check
