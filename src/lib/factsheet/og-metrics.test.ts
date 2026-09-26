@@ -52,7 +52,8 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
     // even though there are plenty of observations for Sharpe.
     const rows = consecutive(300, 0.001);
     const { sharpe, cagr } = computeOgHeadline(rows, "crypto");
-    expect(Number.isFinite(sharpe)).toBe(true); // Sharpe still shown
+    // A constant series has no dispersion, so no Sharpe (D-07).
+    expect(Number.isNaN(sharpe)).toBe(true);
     expect(Number.isNaN(cagr)).toBe(true); // CAGR hidden — sub-calendar-year
   });
 
@@ -91,7 +92,8 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
       value: 0.002,
     }));
     const r1 = computeOgHeadline(same, "crypto");
-    expect(Number.isFinite(r1.sharpe)).toBe(true);
+    // A constant series has no dispersion, so no Sharpe (D-07).
+    expect(Number.isNaN(r1.sharpe)).toBe(true);
     expect(r1.cagr === Infinity || r1.cagr === -Infinity).toBe(false);
     expect(Number.isNaN(r1.cagr)).toBe(true);
 
