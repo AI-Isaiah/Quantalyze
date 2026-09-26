@@ -1,5 +1,179 @@
 # Changelog
 
+## [0.93.0.1] - 2026-09-26 — REFDATAUPDATES: the shared-TEST restore also replays the literal UPDATEs a migration made to the reference rows it just rebuilt
+
+⭐ **What changed for whoever reads this next.** Phase 164.9.2 closes
+`[164.8.1-REPLAY-INSERT-ONLY-SCOPE]`. Until now, a restore of shared TEST rebuilt its reference
+rows from the migrations' literal `INSERT`s only, so a row that a LATER migration had changed with
+an `UPDATE` came back in its seed state while the ledger said that migration ran. A new criterion,
+**C5**, replays a migration's literal top-level `UPDATE` of a `public` table the replay has just
+filled, in migration filename order, inside the same transaction as the INSERTs. A non-literal
+write is DECLINED by name and never replayed, and each declined write is named in the restore log.
+The wrong-state check and its `verified` default are byte-unchanged: nothing was waived, relaxed or
+widened to make the restore pass.
+
+⚠️ **A build-segment bump because nothing a user of the product can see changes.** Everything here
+is restore tooling, its self-tests and two CI steps; no route, page, RPC or migration moves.
+⚠️ PR #861 (DRIFTOFFMUTEX) is open and ALSO carries 0.93.0.1. Whichever of the two lands second
+re-bumps over the first.
+
+✅ **No migration.** Merging this applies nothing to TEST or PROD. It changes only what the NEXT
+dispatch of `test-restore-from-baseline.yml` does.
+
+### Added
+
+- **C5, a separately pinned class for top-level UPDATEs on a replayed public table**
+  (`9d5fc8ef7`, `337f8e0ea`). An allowlist line's third field now spells its class: `<n>`
+  (INSERT, unchanged), `update:<n>` or `decline:<n>`. A C5 line is public-only (an `auth.users`
+  target is refused by name) and a duplicate is refused. The extractor emits every block sorted by
+  (basename, byte offset), so an UPDATE lands after the INSERT it modifies. An UPDATE block carries
+  only a `-- refdata-update:` trailer and never feeds `refdata-expect`, so the INSERT half of the
+  emission is byte-identical to the pre-phase one. `--audit` walks every migration against every
+  table an INSERT line fills: a literal UPDATE needs an `update:` line, a non-literal one a
+  `decline:` line, and a DELETE, TRUNCATE, MERGE, COPY or CTE-prefixed write is refused by name. A
+  new census line follows the unchanged INSERT line. At this commit it reads
+  `audit C5 OK: 6 update statement(s) over 4 file(s) and 2 table(s) replayed; 6 declined over 5 file(s); 0 unaccounted.`
+- **The restore notes the C5 replay and refuses a C5 allowlist with no INSERT entry**
+  (`229cc9d24`). `build_transaction` counts the update trailers and prints its own note beside the
+  byte-identical INSERT note. `REFDATA_ENTRY_N` counts INSERT-class lines only, so C5 lines neither
+  inflate the count nor satisfy the zero-entries refusal. The explanatory clause of the
+  `v_wrong_state` RAISE gets a dated correction. Its prefix, argument, predicate, the four
+  `REFDATA_WRONGSTATE_*` seams and their defaults are byte-unchanged.
+- **Both workflows refuse a missing C5 census line** (`465d56168`, `1ed444bd5`, D-03). The audit
+  census step of `test-restore-from-baseline.yml` and of `ci.yml`'s `sql-gate-lint` greps the C5
+  line, pinned to `0 unaccounted`, and a missing line is a named `MEASURE_FAIL`.
+- **A successful restore log names every declined C5 write** (`1ffb228fe`). The extractor emits
+  one `-- refdata-decline:` comment per declined write (file, line and table, never statement
+  text), and the restore notes each one. Before this, a green log never said a write was left out.
+
+### Changed
+
+- **The replay bracket lists `pg_catalog` first** (`6498c10c5`, WR-03). The bracket's
+  `search_path` was `public, pg_catalog`, and an explicitly listed `pg_catalog` is searched where
+  it is listed, so a `public.now()` or an exact-match `public.=` beat the built-in inside the
+  transaction that commits on shared TEST. It now reads `pg_catalog, public`, PROD's effective
+  order. Arm 35 plants both shadows and shows the old order reaching them.
+- **C5's literal check is an allowlist of tokens, not a list of banned words** (`0d1adc12a`,
+  CR-01). The first version admitted a quoted-identifier call, a schema-qualified `now()`,
+  `IN (TABLE t)` and `current_user` as literal, and `--audit` then advised the `update:` line that
+  would run them. Every token outside a string literal must now be on a permitted set; a call only
+  from `C5_ALLOWED_CALLS`, a cast only to a readable type, and a backslash or lone colon (which psql
+  acts on at replay) is refused.
+- **Literal shapes are no longer steered into `decline:`** (`e0da7509e`, `13dbb7d7d`). `IS [NOT]
+  DISTINCT FROM`, `= ANY(ARRAY[...])`, a multi-column `SET (a, b) = (...)`, `ROW(...)`,
+  `COALESCE(...)`, a parenthesised `WHERE` and a `timestamp with time zone` cast used to read as
+  non-literal, which is the path D-02 forbids: a replayable effect hidden behind a decline. Round
+  2 replaces `IS [NOT] DISTINCT FROM` with a padded `=` instead of blanking it, so a parenthesised
+  right operand is no longer refused as a call.
+- **The audit sees DO-body writes, upserts, COPY and CRLF heads** (`436da37a9`). A DO body executes
+  when its migration applies, and its writes on a replayed table used to fall into the
+  function-body bucket in silence. An unlisted `INSERT ... ON CONFLICT DO UPDATE` was skipped as a
+  backfill. Every head regex missed a CRLF migration. The first audit that could see DO bodies
+  found four writes the round-1 reviewers had counted as zero; each has a `decline:` line whose
+  reason says why it reaches no row the replay wrote. The emitted SQL is byte-identical.
+- **A DO body no longer launders a write into a decline** (`1fb24c36c`, round 2 WR-01). Each
+  DO-body write now carries its own verdict. A literal UPDATE, and any TRUNCATE, MERGE or COPY, is
+  a hard refusal that names the remedy for an unapplied and an applied migration. A non-literal
+  UPDATE stays declinable by a reasoned line. A DELETE or an upsert is declinable only when
+  `freshKeyProof` proves it is keyed by a `gen_random_uuid()` the block declares once and never
+  reassigns.
+- **A top-level upsert and its DO-body twin follow one rule** (`8daf20899`, round 2 WR-02). An
+  upsert on a replayed table is declinable under the same proof and refused otherwise, with the
+  remedy named. The INSERT-loop refusal that no line could clear is gone.
+- **`set(` is a call everywhere except the UPDATE head** (`d42c3b71e`, round 2 CR-01). `SET` is an
+  unreserved keyword and a legal function name, and admitting it everywhere let `SET x = set(1)`
+  classify literal.
+- **C5 refuses `DEFAULT`, and C2 and C5 refuse a cast to a non-built-in type** (`4f1fb3875`, round
+  2 IN-05). A column default and a domain CHECK can read session state that the statement text does
+  not show. C2 now reads the type after `::` instead of skipping one word. C2 keeps `DEFAULT`, with
+  the reason recorded in the allowlist.
+- **C2's literal check refuses a psql backslash or a lone colon** (`9811b54a1`). The INSERT side
+  scanned identifiers only, so a bare psql meta-command or a quoted psql variable classified
+  literal and would have been replayed through `psql -f`. The emission and `--audit` over the real
+  corpus are byte-identical.
+- **A SQL-standard `BEGIN ATOMIC` body is refused as unlexable** (`f598e0739`, round 2 IN-02). It is
+  not dollar-quoted, so its later statements lexed as top-level spans and the audit advised
+  replaying an UPDATE the migration only defined. The `C5 scope:` line now names every shape the
+  audit does not trace (a function called at top level, dynamic SQL, a plain INSERT in a DO body,
+  CALL, a writer PERFORMed from a DO body, EXPLAIN ANALYZE, PREPARE / EXECUTE).
+
+### Fixed
+
+- **`ci.yml`'s `sql-gate-lint` captures fail by name under `bash -e`** (`1ed444bd5`, `78f9871c4`).
+  The runner uses `bash -e`, so the unbounded `status` / `census` / `ok_line` / `floor` captures in
+  the audit census, extractor self-test and data-dependence census steps aborted the step before
+  their own `MEASURE_FAIL` printed: red, but unnamed. Each capture is bounded with an rc>1 branch.
+  A dated comment corrects the false "WITHOUT -e" paragraph, which stays as lineage.
+- **The C5 census's `unaccounted` count is computed** (`34af4676d`). It was a hardcoded
+  `0 unaccounted.` printed only on success, so the workflows' `0 unaccounted` term could never fail.
+- **The audit's FAILED line names the class that failed** (`00c955046`, round 2 IN-01). An INSERT
+  pin drift used to read `audit C5 FAILED: 0 unaccounted`, and a C5 line on a table no INSERT fills
+  was never tallied.
+- **A stray non-literal UPDATE beside an `update:` line names its remedy** (`ec291346a`): a
+  `decline:` line for the same pair is legal and required.
+- **The restore compares the C5 trailers with the allowlist's pins, twice** (`b17fe0fbe`,
+  `6498c10c5` R2-06). The update and decline trailers are checked against the `update:` /
+  `decline:` sums before any read of the database, and again on the extractor's second run that
+  `build_transaction` executes. Before, a drifted extractor logged "0 C5 update statement(s)
+  replayed" and carried on.
+
+### Tests
+
+- **Extractor self-test at 67 kinds, red+green each**; `SELF_TEST_KINDS_FLOOR` and
+  `REQUIRED_KINDS` moved together at every step, each raise after the floor vitest was observed
+  RED (`d3cbb00f0`, `b382f1589` 19 → 39, then the review rounds up to 67). Every new guard was
+  neutered in place, observed RED and restored by `cp` + `cmp`.
+- **Restore self-test at 41/41 arms.** A replayed C5 UPDATE lands after its INSERT inside the
+  transaction, GREEN and RED (`32ef481f9`); arm 24 gains trailer-drift legs (`b17fe0fbe`); arms 35
+  and 36 cover the bracket and the second-run pins (`6498c10c5`). The merge of main
+  (`07ba72750`, Phase 164.9.1) kept main's arms 33-37 and moved this branch's to 38-41, with a dated
+  RENUMBERED note beside `EXPECTED_ARMS`.
+- **`matchOtherDml`'s TRUNCATE, MERGE and CTE-DELETE heads each get a leg** (`c6039673d`).
+- **Vitest pins** (`cad3d8046`): `ENTRY_COUNT` stays 22 and counts INSERT lines only; a separate
+  `C5_ENTRY_COUNT` pins the update and decline lines; a lasting pin checks that the real extractor
+  over the real allowlist never lets an UPDATE move `refdata-expect`. The wiring harness executes
+  both workflows' copies of the census and self-test steps, GREEN and RED, each bound-dependent arm
+  with its unbind calibration (`465d56168`, `1ed444bd5`, `78f9871c4`).
+
+### Notes
+
+- **Comment and reason corrections, no behaviour change:** C5's safety premise covers statement
+  text, not triggers, with today's census of the seven BEFORE triggers on the two replayed tables
+  (`875875904`); arm 33 does not catch removal of the sort, and the self-test's ORDER leg does
+  (`9d5b55f79`); two decline reasons now argue their case correctly (`9cb35ee1a`); the `auth.users`
+  DO-body write count is 8, not 9 (`2d12341f5`); the `C5_ALLOWED_CALLS` comment states the bracket
+  as it now is (`d6f20ccfe`).
+- **`[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` is closed in `TODOS.md`** (`e4165c13e`), with a dated note
+  that C5 is a new criterion rather than a relaxation of C2. Its original text stays as lineage.
+- **Planning record:** research, plans and plan-check (`1a55e566a`, `42f414f6a`, `614deacbc`,
+  `6dece5623`); plan summaries (`4e3c8407d`, `2907467c8`, `f9b095fbd`, `305299b0d`, `838312df3`,
+  `e4a11398c`); two review rounds of code review and silent-failure review, with fix reports
+  (`a146b7ad0`, `b9d9ce960`, `d29198277`, `3ea6689fd`, `39d741755`, `cbc5c0fec`, `b24ee7cd6`);
+  security verification, 0 open threats (`36766298c`); phase verification (`ca23d10d0`,
+  `26ac3aa52`).
+
+### Known limits
+
+- ⛔ **Success criterion 4 is post-merge and currently BLOCKED on a baseline re-dump.** It needs a
+  green `mode=preflight` and then a green `mode=restore` of `test-restore-from-baseline.yml` on
+  shared TEST, from `main`. `node scripts/check-baseline-currency.mjs` in default mode, the one the
+  restore path uses, exits 1 (`baseline-stale`, `defects=1`), because the three migrations #860
+  brought postdate `supabase/schema/baseline.sql`. The preflight will refuse until the dump is
+  regenerated from PROD with its carried-migrations marker in the same commit. When it runs, the
+  preflight must print `self-test OK (41/41 arms` (the plan text's 34/34 is stale), and both run
+  ids go under `[164.9-CRIT8-RESTORE-DISPATCH-RECORD]`. A 42501 on that run is read from the
+  `profiles_lock_privileged_cols` trigger (`prevent_profile_privileged_change`) and recorded as a
+  role finding, never dispatched around; which role the shared-TEST session runs as is unmeasured.
+- ⚠️ **An accepted deviation: `freshKeyProof`.** The round-2 finding asked for every DO-body DELETE
+  and upsert to be refused outright. That would keep `--audit` permanently red on three APPLIED
+  migrations that cannot be edited, all of which pass the proof. The orchestrator accepted the
+  proof at verification; the founder may still take the literal rule, which would need a decision
+  on those three migrations.
+- ⚠️ **The local-stack lane has no cross-worktree lock.** Two worktrees derive the same docker
+  project id from the tracked `supabase/config.toml`, and `supabase start` treats an
+  already-running stack of that project as success, so two lanes booted at once share one stack.
+  Plan 05's rehearsal confirmed it started its own stack.
+
 ## [0.93.0.0] - 2026-09-25 — JOBRPCTRUTH: the compute-job RPC surface does what its own migrations say
 
 ⭐ **What changed for whoever reads this next.** Phase 164.9.1 fixes three places where a
