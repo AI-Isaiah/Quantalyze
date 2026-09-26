@@ -2315,7 +2315,7 @@ IPC liveness + auto-login-preserving restart), 164.6.5-C3 (the heal ACTS on `ipc
 retry that cannot work), 164.6.5-C6 (`correlation_id` per request), 164.6.5-C7 (the algo-trading
 settings landmine is PINNED, not ticked)
 **Depends on:** Phase 164.6 (nothing blocking; the fault is live in PROD today)
-**Plans:** 2/8 plans executed
+**Plans:** 7/8 plans executed
 
 ⛔ **BOOKED FROM A LIVE PRODUCTION INCIDENT, measured end-to-end 2026-09-21 by the founder and the
 orchestrator together.** Everything below is a reading, not an inference. Founder's words:
@@ -2460,22 +2460,48 @@ measured 2026-09-22, that the box is UNCHECKED. Both cannot be true of the same 
 reconciles them against a live reading and corrects whichever side is stale — it does NOT average
 them.
 
+⭐ **OUTCOME, PER CRITERION — recorded 2026-09-26 by plan 08 from the plan SUMMARYs and
+`164.6.5-VERIFICATION.md` (`gaps_found`, 5/7), not from intent.** MET means the criterion's own
+wording holds. OPEN means it does not yet, and names who closes it and when. ⛔ No criterion
+below was reworded to read as met.
+
+| req | criterion | outcome | routed residual (owner · trigger) |
+|---|---|---|---|
+| C1 | root cause of the switch wedge found and named | **OPEN** (D-03 success path: recorded open, never claimed) | `TODOS.md` `MT5-SWITCH-WEDGE-CAUSE-01` · Phase 164.6.6 · the next `-10005` with Journal silence after `disconnected`, read BEFORE any restart |
+| C2 | the terminal restarts without a human, auto-login preserved | **OPEN, live half.** Shipped: `Mt5Client.recycle_terminal_process`, driven by the credential-free IPC detector. Never run live over the bridge. | `.planning/WINDOWS.md` entry 68 (widened 2026-09-26 to name the first live `Mt5Client.session_snapshot` read as well as the terminate step) · founder, post-deploy · the first live recycle |
+| C3 | the heal ACTS on `ipc_fault` | **MET** (offline behaviour tests; its live run is C2's residual) | none |
+| C4 | the prober's MT5 arm actually measures the terminal, calibrated against a REAL wedge | **OPEN, calibration half.** D-10 (measuring) is answered: scheduled `prod-prober` run 36134914962 (head `01dcf1cc`) onward reads the terminal. D-11 (real-wedge calibration) was not done. | `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01` (D-11) · Phase 164.6.6 · the next live `-10005`, captured before the heal recycles it |
+| C5 | the wizard stops promising a retry that cannot work | **MET** | none. ⚠️ D-16/D-17 (the merge with Phase 167) await founder confirmation: under D-16 the first, wedge-causing validate still answers `SIGN_IN_FAILED` |
+| C6 | `correlation_id` per request | **MET** | none |
+| C7 | the algo-trading settings landmine is PINNED, not ticked | **MET** | none |
+| inherited 7 | (Phase 161) a live `undetermined` MT5 verdict names the right option | **OPEN** | founder UAT · the next live MT5 validate that lands `undetermined`; there is still no durable sink, so the reading must be captured as it happens |
+| inherited 8 | (Phase 164.5.3) the end-to-end live MT5 credential update | **OPEN** | founder UAT · the next MT5 key the worker marks `revoked` or `error`; founder-only, no agent enters a real credential |
+
+⚠️ **Also open and named, outside the criteria:** a Sentry alert rule for the hourly ERROR
+re-raise and the capped-recycle ERROR (review finding R2-SFH-05), and a copy read-through of
+`KEY_MT5_TERMINAL_UNRESPONSIVE` on the connect step and the rotate dialog.
+
+⛔ **THE SCOPE FENCE, restated so it survives the close.** This phase did NOT fix the eviction:
+that is Phase 164.6.6. "MT5 is back" must not read as "the finding is closed". The outage was
+the symptom; the shared mutable terminal is the defect. ⛔ `[MT5-VERDICT-SINK-01]` stays deferred
+and named under its own owner (Phase 164.6 criterion 12). This phase did not absorb it.
+
 Plans:
 
-- [ ] 164.6.5-01-PLAN.md — C1: the asymmetry, named or honestly open; the runbook's `-10005`
+- [x] 164.6.5-01-PLAN.md — C1: the asymmetry, named or honestly open; the runbook's `-10005`
       differential procedure; `MT5-WEDGE-OBS-01` refined (⛔ not reopened). Owns `TODOS.md` and
       `docs/runbooks/mt5-go-live.md` for the whole phase. [wave 1, has checkpoints]
-- [ ] 164.6.5-02-PLAN.md — ⭐ THE TRACER. C2: the D-05 ratification gate, the live A1 spike, and the
+- [x] 164.6.5-02-PLAN.md — ⭐ THE TRACER. C2: the D-05 ratification gate, the live A1 spike, and the
       narrow credential-free recycle verb on `Mt5Client`. [wave 1, has checkpoints]
-- [ ] 164.6.5-03-PLAN.md — C4: the `-10005` remedy stops asserting one cause; a CI gate ties the
+- [x] 164.6.5-03-PLAN.md — C4: the `-10005` remedy stops asserting one cause; a CI gate ties the
       arm's declared environment to the workflow's supplied environment; live proof + real-wedge
       calibration. [wave 1, has checkpoints]
 - [x] 164.6.5-04-PLAN.md — C5: mint a distinct MT5 wire code and wizard code, honest
       non-recoverable copy, and the arrival/roster gates that keep both vocabularies agreeing.
       ⛔ `KEY_NETWORK_TIMEOUT` is neither deleted nor widened. [wave 1]
-- [ ] 164.6.5-05-PLAN.md — C3: the heal ESCALATES on `ipc_fault` — five readings, ONE recovery
+- [x] 164.6.5-05-PLAN.md — C3: the heal ESCALATES on `ipc_fault` — five readings, ONE recovery
       attempt — inside the module's one lease, structurally unable to raise. [wave 2, depends 02]
-- [ ] 164.6.5-06-PLAN.md — C7: reconcile the five-place recorded belief against a live reading, and
+- [x] 164.6.5-06-PLAN.md — C7: reconcile the five-place recorded belief against a live reading, and
       make the observable consequence fail LOUDLY. ⛔ Never ticks the box. [wave 2, depends 04,
       has checkpoints]
 - [x] 164.6.5-07-PLAN.md — C6: a per-request correlation id on the wire and on the screen, the
@@ -2498,6 +2524,7 @@ on the shared terminal — and a shared-terminal outage reaches a human without 
 **Requirements**: TBD
 **Depends on:** Phase 164.6.5 (availability first: this phase changes the terminal's ownership model,
 which is only safe once validation stops wedging it)
+**Owns (2026-09-26, from 164.6.5 plan 08):** `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01` — Phase 164.6.5 D-11, OPEN: the prod-prober's `-10005` classification (`mt5-ipc-timeout`) has never been calibrated against a REAL wedge; its fixture was constructed, not captured. Trigger: the next live `-10005`, captured BEFORE the heal recycles the terminal (a founder-supervised induced wedge also qualifies). Gate: a scrubbed real-wedge transcript committed under `scripts/prod-prober/fixtures/mt5/`, registered for the kind it actually produced, self-test and wiring suite green. ⛔ A hand-written fixture is not a close. ⚠️ 164.6.5's own heal can recycle a wedge before a scheduled prober run reads it.
 **Owns (2026-09-25, from 164.6.5 plan 01):** `TODOS.md` `MT5-SWITCH-WEDGE-CAUSE-01` — why some account switches on the shared terminal wedge it (`-10005`, Journal silent after `disconnected`) and others do not. Verdicts so far: same-vs-different account REJECTED, terminal self-update and same-vs-different broker server UNDECIDED. Closes only on evidence captured at the next wedge BEFORE any restart; a restart clearing the symptom is not a close.
 **Plans:** 0 plans
 

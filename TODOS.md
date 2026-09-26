@@ -4976,6 +4976,41 @@ from 2026-09-21 12:52:04 with no reconnect line until the 2026-09-25 restarts. R
 the second wedge was not recovered for about four days.
 
 
+### MT5-PROBER-WEDGE-CALIBRATION-01 — the prod-prober's `-10005` classification has never been calibrated against a REAL wedge (booked 2026-09-26, Phase 164.6.5 D-11)
+
+**Why it is open.** Phase 164.6.5 criterion 4 required the prober's MT5 arm to actually measure
+the terminal AND to be calibrated against a real wedge, "not only a fixture". The two halves
+came apart:
+
+- **D-10, measuring: ANSWERED in production.** Scheduled `prod-prober` run 36134914962
+  (2026-09-25T12:26Z, head `01dcf1cc`) is the first to print a terminal-measuring mt5 line,
+  `mt5: initialize=true last_error=1 connected=true trade_allowed=true`. Every scheduled run
+  since reads the same, through run 36212376262 (2026-09-26T02:39Z, head `ecf1ef4e`). The last
+  run before it, 36104820751 (2026-09-25T06:52Z), still read `mt5-ssh-transport`. Recorded in
+  the 164.6.5 plan 03 SUMMARY.
+- **D-11, calibrated against a real wedge: NOT DONE.** `mt5-ipc-timeout` has never fired in
+  production. Its red fixture, `scripts/prod-prober/fixtures/mt5/10005.txt`, was constructed, not
+  captured from a wedge, and is unchanged since Phase 164.8.3. So the arm's `-10005` branch is proven only against the shape
+  we believe a wedge prints, never against one.
+
+**Owner:** Phase 164.6.6 (MT5TERMINALISOLATION). It already owns `MT5-SWITCH-WEDGE-CAUSE-01`
+directly above, whose close needs the same next-wedge capture.
+**Trigger:** the next live `-10005` (Journal silent after `disconnected`), captured BEFORE the
+heal recycles the terminal. A founder-supervised induced wedge also qualifies.
+**Gate (what closes it):** a real-wedge transcript, scrubbed of every account-shaped digit run,
+broker server name, machine path and credential, committed under
+`scripts/prod-prober/fixtures/mt5/` and registered in the runner's fixture table for the kind
+it ACTUALLY produced. Then `node scripts/prod-prober/run.mjs --self-test` exits 0 and
+`npx vitest run src/__tests__/prod-prober-wiring.test.ts` passes. If the real transcript
+classifies as something other than `mt5-ipc-timeout`, that is a finding about the arm, not a
+reason to re-shape the transcript.
+⛔ **Not a close:** a hand-written or edited fixture, a renamed existing fixture, or a green
+self-test on the fixtures that exist today.
+⚠️ **Phase 164.6.5's own heal makes the trigger harder to meet.** The session monitor now
+recycles the terminal on `ipc_fault` (plan 05), so a wedge can heal before a scheduled prober
+run reads it. Capturing one may need a deliberate, founder-supervised window rather than
+waiting.
+
 ### ⛔ DRIFT-02 — a surgical in-place patch means the REPO no longer holds the true function body (booked 2026-08-27)
 
 ⭐ Caught by the pre-merge PROD diff, which is the ONLY thing that could have caught it.
