@@ -20,7 +20,8 @@ import {
 // that makes the cached wrapper safe lives in this file, and only here.
 import {
   fetchAndBuildPayload,
-  probeFactsheetBuildable,
+  fetchAndBuildPayloadWithReason,
+  type NotBuildableReason,
 } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
 import {
@@ -413,10 +414,18 @@ export default async function FactsheetV2Page({
   // stores it unconditionally, so a draft that fails to build must not reach the
   // wrapper either. The lambda closes over `ownerUid` (the session id captured in
   // the miss branch above), never over `user`, which is out of scope here.
-  const payload =
+  //
+  // 167.2.1-REVIEW WR-03: the owner arm takes the build's own reason with its
+  // payload (`fetchAndBuildPayloadWithReason`, the SAME resolve-and-build), so
+  // its S7 share note below needs no second resolve and cannot disagree with
+  // the payload.
+  const ownerBuild =
     lane === "owner"
-      ? await fetchAndBuildPayload(id, (q) => withPublishedOrOwner(q, ownerUid!))
-      : await buildFactsheetPayloadCached(`${id}::${computedAt}`);
+      ? await fetchAndBuildPayloadWithReason(id, (q) => withPublishedOrOwner(q, ownerUid!))
+      : null;
+  const payload = ownerBuild
+    ? ownerBuild.payload
+    : await buildFactsheetPayloadCached(`${id}::${computedAt}`);
   if (!payload) {
     console.warn("[factsheet/v2/page] payload pending -> rendering fallback", {
       id,
@@ -464,13 +473,16 @@ export default async function FactsheetV2Page({
           })
         : null;
     // Phase 167.2.1 (D-05, D-06) — the S7 share note is derived the way the
-    // /strategies list derives it: the builder's own resolve stage is asked why
+    // /strategies list derives it: the builder's own resolve stage says why
     // this payload is null, and the same selection rule and error mapping pick
-    // the note. The probe runs ONLY here, on the owner lane after the builder
-    // has already answered null; its answer is lane-local like `ownerStatus`
-    // and never reaches the payload or the cached wrapper.
+    // the note. 167.2.1-REVIEW WR-03: that reason is the one the build above
+    // already produced, so nothing is resolved twice (IN-04, the two sequential
+    // reads, goes with it). It is lane-local like `ownerStatus` and never
+    // reaches the payload or the cached wrapper.
     const ownerBuildability =
-      lane === "owner" ? await readOwnerBuildability(id, ownerUid!) : null;
+      ownerBuild && ownerBuild.reason !== null
+        ? ownerBuildabilityOf(id, ownerBuild.reason)
+        : null;
     const ownerLine = ownerStatus && ownerStateLine(ownerStatus.state);
     const ownerRemedyLine =
       ownerStatus &&
@@ -771,43 +783,32 @@ async function readOwnerPendingStatus(
  * Phase 167.2.1 (D-05, D-06) — why the owner lane's payload is null, in the
  * two facts the S7 share note needs: an unbuildable note kind, and whether the
  * answer is unreadable. Called only from the owner `!payload` branch above, so
- * the public lane and the full owner render never probe.
+ * the public lane and the full owner render never ask.
  *
- * The probe runs under the SAME owner predicate as the builder call (D-06).
- * `too_few_points` and `composite_unbuildable` give their D-02 kind.
- * `not_computed` keeps today's arm-derived note, and so does `buildable: true`,
- * which on this null path can only be a race (every null exit of the builder
- * is a failed resolve). A throw, `read_error` or `not_visible` is unreadable,
- * exactly as on /strategies (D-05): never read as a buildable factsheet, logged
- * with the id, and captured with tags only.
+ * 167.2.1-REVIEW WR-03: the reason is the one the owner build itself produced
+ * (`fetchAndBuildPayloadWithReason`), not a second resolve, so the old race
+ * arms (`buildable: true` on a null payload, SFH M-5) cannot occur.
+ * `too_few_points` and `composite_unbuildable` give their D-02 kind;
+ * `not_computed` keeps today's arm-derived note. `read_error` and
+ * `not_visible` are unreadable, exactly as on /strategies (D-05), logged with
+ * the id and captured with tags only: this lane passed the owner signature
+ * gate, so an admin read that fails or finds no row under the same predicate
+ * is an outage, a race or a predicate mismatch. A builder THROW is outside
+ * this function's domain: the page's error handling owns it.
  */
-async function readOwnerBuildability(
+function ownerBuildabilityOf(
   id: string,
-  ownerUid: string,
-): Promise<{ unreadable: boolean; kind: UnbuildableNoteKind | null }> {
-  let probe: Awaited<ReturnType<typeof probeFactsheetBuildable>>;
-  try {
-    probe = await probeFactsheetBuildable(id, (q) => withPublishedOrOwner(q, ownerUid));
-  } catch (err) {
-    console.error("[factsheet/v2/page] factsheet probe failed", {
+  reason: NotBuildableReason,
+): { unreadable: boolean; kind: UnbuildableNoteKind | null } {
+  if (reason === "read_error" || reason === "not_visible") {
+    console.error("[factsheet/v2/page] owner build could not read the row", {
       id,
-      message: err instanceof Error ? err.message : String(err),
+      reason,
     });
-    captureToSentry(err instanceof Error ? err : new Error(String(err)), {
-      tags: { route: "factsheet/v2/page", stage: "factsheet-probe" },
+    captureToSentry(new Error(`factsheet owner build answered ${reason}`), {
+      tags: { route: "factsheet/v2/page", stage: "factsheet-owner-build" },
     });
     return { unreadable: true, kind: null };
   }
-  if (probe.buildable) return { unreadable: false, kind: null };
-  if (probe.reason === "read_error" || probe.reason === "not_visible") {
-    console.error("[factsheet/v2/page] factsheet probe could not read the row", {
-      id,
-      reason: probe.reason,
-    });
-    captureToSentry(new Error(`factsheet probe answered ${probe.reason}`), {
-      tags: { route: "factsheet/v2/page", stage: "factsheet-probe" },
-    });
-    return { unreadable: true, kind: null };
-  }
-  return { unreadable: false, kind: unbuildableNoteKindOf(probe.reason) };
+  return { unreadable: false, kind: unbuildableNoteKindOf(reason) };
 }

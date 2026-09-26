@@ -71,7 +71,11 @@ vi.mock("./build-payload", async (importOriginal) => {
   return { ...actual, buildFactsheetPayload: vi.fn(actual.buildFactsheetPayload) };
 });
 
-import { fetchAndBuildPayload, probeFactsheetBuildable } from "./fetch-and-build-payload";
+import {
+  fetchAndBuildPayload,
+  fetchAndBuildPayloadWithReason,
+  probeFactsheetBuildable,
+} from "./fetch-and-build-payload";
 import type { NotBuildableReason } from "./fetch-and-build-payload";
 import { buildFactsheetPayload } from "./build-payload";
 import { withPublishedOrOwner } from "@/lib/visibility";
@@ -291,6 +295,18 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
     });
   }
 
+  it("WR-03 WITH-REASON: the reason-carrying build answers the probe's reason from ONE resolve, on every fixture", async () => {
+    for (const f of PARITY) {
+      seed(f.row, f.csv ?? [], f.error ?? null);
+      fake.tablesSeen = [];
+      const built = await fetchAndBuildPayloadWithReason(STRATEGY_ID, ownerVisibility);
+      // One resolve: the strategies row is read exactly once.
+      expect(fake.tablesSeen.filter((t) => t === "strategies"), f.name).toHaveLength(1);
+      expect(built.reason, f.name).toBe(f.reason);
+      expect(built.payload === null, f.name).toBe(f.reason !== null);
+    }
+  });
+
   it("NO-NULL-AFTER-RESOLVE: every fixture the probe calls buildable builds a payload", async () => {
     let okResolves = 0;
     for (const f of PARITY) {
@@ -361,6 +377,20 @@ const readLib = (file: string) =>
   stripComments(readFileSync(join(__dirname, file), "utf8"));
 
 describe("167.2.1 WR-04 — NO-NULL-AFTER-RESOLVE holds by construction", () => {
+  it("the one resolve-and-build answers no payload only on a failed resolve", () => {
+    const src = readLib("fetch-and-build-payload.ts");
+    const { body } = implementationOf(src, "resolveAndBuild");
+    expect(body.match(/payload: null/g) ?? []).toHaveLength(1);
+    expect(body).toMatch(/if \(!resolved\.ok\) return \{ payload: null, reason: resolved\.reason/);
+    expect(body.match(RETURN_NULL) ?? []).toEqual([]);
+    // Both exported builders go through it, and add no null exit of their own.
+    for (const name of ["fetchAndBuildPayload", "fetchAndBuildPayloadWithReason"]) {
+      const exported = implementationOf(src, name);
+      expect(exported.body, name).toContain("resolveAndBuild(id, visibility)");
+      expect(exported.body.match(RETURN_NULL) ?? [], name).toEqual([]);
+    }
+  });
+
   it("the build past the resolve stage declares a non-null payload and has no null exit", () => {
     const { returnType, body } = implementationOf(readLib("fetch-and-build-payload.ts"), "buildFromResolved");
     expect(returnType).toBe(": Promise<FactsheetPayload>");

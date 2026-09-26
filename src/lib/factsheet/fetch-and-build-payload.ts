@@ -288,11 +288,49 @@ export async function fetchAndBuildPayload(
   id: string,
   visibility: StrategyVisibility,
 ): Promise<FactsheetPayload | null> {
+  return (await resolveAndBuild(id, visibility)).payload;
+}
+
+/**
+ * 167.2.1-REVIEW WR-03 — one build, and WHY it produced no payload. A payload
+ * carries no reason; no payload carries the resolve stage's reason.
+ */
+export type FactsheetBuildResult =
+  | { payload: FactsheetPayload; reason: null }
+  | { payload: null; reason: NotBuildableReason };
+
+/**
+ * 167.2.1-REVIEW WR-03 — `fetchAndBuildPayload` plus the reason its payload is
+ * null, from the SAME resolve that decided it. For the owner lane of the v2
+ * factsheet, whose S7 share note needs that reason: it used to build, discard
+ * the reason, and run the whole resolve (the composite read included) a second
+ * time through the probe, and the two runs could disagree. One resolve makes
+ * the note and the payload the same answer by construction.
+ *
+ * `visibility` is REQUIRED for the reason `StrategyVisibility` gives. ⛔ The
+ * same cache rule as `fetchAndBuildPayload`: never route it through the
+ * id-keyed cached wrapper.
+ */
+export async function fetchAndBuildPayloadWithReason(
+  id: string,
+  visibility: StrategyVisibility,
+): Promise<FactsheetBuildResult> {
+  return resolveAndBuild(id, visibility);
+}
+
+/**
+ * The one resolve-and-build both exported builders run. Phase 167.2.1 (D-04):
+ * every null exit lives in the shared resolve stage; past it the build is
+ * typed non-null (WR-04).
+ */
+async function resolveAndBuild(
+  id: string,
+  visibility: StrategyVisibility,
+): Promise<FactsheetBuildResult> {
   const supabase = createAdminClient();
-  // Phase 167.2.1 (D-04): every null exit lives in the shared resolve stage.
   const resolved = await resolveFactsheetInputs(supabase, id, visibility);
-  if (!resolved.ok) return null;
-  return buildFromResolved(supabase, id, resolved);
+  if (!resolved.ok) return { payload: null, reason: resolved.reason };
+  return { payload: await buildFromResolved(supabase, id, resolved), reason: null };
 }
 
 /** A resolve that succeeded: the inputs the build runs on. */

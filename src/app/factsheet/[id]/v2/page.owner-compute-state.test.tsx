@@ -50,14 +50,17 @@ vi.mock("@/lib/compute-state", async () => {
   return { ...actual, deriveComputeState: vi.fn(actual.deriveComputeState) };
 });
 // Phase 167.2.1 (D-06): a PARTIAL mock. The builder and the cached wrapper's
-// callee stay real; only the buildability probe is a passthrough spy, so a
-// case can prove on which lane, and how often, the page asks it.
+// callee stay real; the owner lane's reason-carrying builder and the
+// buildability probe are passthrough spies, so a case can prove on which lane,
+// and how often, the page asks each (167.2.1-REVIEW WR-03: the owner lane
+// builds once and never probes).
 vi.mock("@/lib/factsheet/fetch-and-build-payload", async () => {
   const actual = await vi.importActual<
     typeof import("@/lib/factsheet/fetch-and-build-payload")
   >("@/lib/factsheet/fetch-and-build-payload");
   return {
     ...actual,
+    fetchAndBuildPayloadWithReason: vi.fn(actual.fetchAndBuildPayloadWithReason),
     probeFactsheetBuildable: vi.fn(actual.probeFactsheetBuildable),
   };
 });
@@ -75,7 +78,10 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { deriveComputeState } from "@/lib/compute-state";
-import { probeFactsheetBuildable } from "@/lib/factsheet/fetch-and-build-payload";
+import {
+  fetchAndBuildPayloadWithReason,
+  probeFactsheetBuildable,
+} from "@/lib/factsheet/fetch-and-build-payload";
 
 // --- Fixtures ---------------------------------------------------------------
 
@@ -161,6 +167,8 @@ const STATE = {
     rpcCalls: [] as Array<[string, unknown]>,
     /** Tables named by `.from()` on the request client, in call order. */
     requestTables: [] as string[],
+    /** Tables named by `.from()` on the service-role client, in call order. */
+    adminTables: [] as string[],
   },
 };
 
@@ -219,6 +227,7 @@ function mockRequestClient() {
 
 function mockAdmin(): SupabaseClient {
   const from = (table: string) => {
+    STATE.observed.adminTables.push(table);
     const chain = {
       select: () => chain,
       eq: () => chain,
@@ -332,6 +341,7 @@ beforeEach(() => {
   STATE.memberCountResult = { count: 0, error: null };
   STATE.observed.rpcCalls = [];
   STATE.observed.requestTables = [];
+  STATE.observed.adminTables = [];
 
   getUserSpy.mockImplementation(async () => ({
     data: { user: STATE.sessionUser },
@@ -929,11 +939,12 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     expect(STATE.observed.rpcCalls).toEqual([]);
     expect(STATE.observed.requestTables).not.toContain("strategy_keys");
     expect(vi.mocked(unstable_cache)).toHaveBeenCalledTimes(0);
-    // Phase 167.2.1 (D-06): the probe runs only on the owner NULL-payload path.
+    // 167.2.1-REVIEW WR-03: the owner lane never probes; it builds once.
     expect(
       vi.mocked(probeFactsheetBuildable),
       "the full owner render built a payload, so nothing is probed",
     ).not.toHaveBeenCalled();
+    expect(vi.mocked(fetchAndBuildPayloadWithReason)).toHaveBeenCalledTimes(1);
   });
 
   // --- Phase 167.2.1 (D-02, D-05, D-06): the same note the /strategies list shows
@@ -951,9 +962,12 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
 
     expect(last.textContent).toBe(UNBUILDABLE_SHORT);
     expect(last.className).toBe(SHARE_NOTE_CLASS);
-    expect(vi.mocked(probeFactsheetBuildable)).toHaveBeenCalledTimes(1);
-    // The probe runs under the builder's owner predicate, never the cache.
-    expect(vi.mocked(probeFactsheetBuildable).mock.calls[0][0]).toBe(STRATEGY_ID);
+    // 167.2.1-REVIEW WR-03: the note comes from the owner build's own reason.
+    // ONE resolve (one admin strategies read), no probe, never the cache.
+    expect(vi.mocked(fetchAndBuildPayloadWithReason)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fetchAndBuildPayloadWithReason).mock.calls[0][0]).toBe(STRATEGY_ID);
+    expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
+    expect(STATE.observed.adminTables.filter((t) => t === "strategies")).toHaveLength(1);
     expect(vi.mocked(unstable_cache)).toHaveBeenCalledTimes(0);
     expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
   });
@@ -974,7 +988,10 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
       const last = panelOf(container).lastElementChild as HTMLElement;
 
       expect(last.textContent).toBe(UNBUILDABLE_COMPOSITE);
-      expect(vi.mocked(probeFactsheetBuildable)).toHaveBeenCalledTimes(1);
+      // 167.2.1-REVIEW WR-03: one resolve, so ONE composite csv read, not two.
+      expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
+      expect(STATE.observed.adminTables.filter((t) => t === "strategies")).toHaveLength(1);
+      expect(STATE.observed.adminTables.filter((t) => t === "csv_daily_returns")).toHaveLength(1);
     } finally {
       errSpy.mockRestore();
     }
@@ -1023,47 +1040,26 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     }
   });
 
-  it("S7-PROBE-THROWS: the probe throws -> KCS12-UNREADABLE (D-05), never MINT-B, logged and captured once with tags only", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      givenOwnerPendingDraft();
-      givenJobs([chainJob("compute_analytics_from_csv", "done")]);
-      // On the owner null path the builder creates the admin client first and
-      // the probe second; only the probe's creation throws.
-      let adminCalls = 0;
-      vi.mocked(createAdminClient).mockImplementation(() => {
-        adminCalls += 1;
-        if (adminCalls === 2) throw new Error("admin client unavailable");
-        return mockAdmin() as never;
-      });
+  it("S7-BUILD-THROWS: the owner build throws -> the page's error handling owns it, and nothing renders a note as if it were buildable", async () => {
+    // 167.2.1-REVIEW WR-03 (lineage: this case was S7-PROBE-THROWS). The owner
+    // lane no longer runs a second resolve that could throw on its own, so the
+    // only throw left is the build's, which was always the error boundary's.
+    givenOwnerPendingDraft();
+    givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+    let adminCalls = 0;
+    vi.mocked(createAdminClient).mockImplementation(() => {
+      adminCalls += 1;
+      throw new Error("admin client unavailable");
+    });
 
-      const { container } = await renderOwnerPending();
-      const last = panelOf(container).lastElementChild as HTMLElement;
-
-      expect(adminCalls, "the builder's call, then the probe's").toBe(2);
-      expect(last.textContent).toBe(MINT_UNREADABLE);
-      expect(last.textContent).not.toBe(MINT_B);
-      expect(errSpy).toHaveBeenCalledWith(
-        "[factsheet/v2/page] factsheet probe failed",
-        expect.objectContaining({ id: STRATEGY_ID }),
-      );
-      const probeCaptures = vi
-        .mocked(captureToSentry)
-        .mock.calls.filter(
-          ([, ctx]) =>
-            (ctx as { tags?: { stage?: string } } | undefined)?.tags?.stage ===
-            "factsheet-probe",
-        );
-      expect(probeCaptures).toHaveLength(1);
-      expect(probeCaptures[0][1]).toEqual({
-        tags: { route: "factsheet/v2/page", stage: "factsheet-probe" },
-      });
-    } finally {
-      errSpy.mockRestore();
-    }
+    await expect(
+      FactsheetV2Page({ params: Promise.resolve({ id: STRATEGY_ID }) }),
+    ).rejects.toThrow("admin client unavailable");
+    expect(adminCalls, "one build, and no second resolve").toBe(1);
+    expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
   });
 
-  it("S7-PROBE-NOT-VISIBLE: no admin row for the builder or the probe -> KCS12-UNREADABLE (D-05), captured once with tags only", async () => {
+  it("S7-OWNER-BUILD-NOT-VISIBLE: no admin row for the owner build -> KCS12-UNREADABLE (D-05), captured once with tags only", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       givenOwnerPendingDraft();
@@ -1074,17 +1070,18 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
       const last = panelOf(container).lastElementChild as HTMLElement;
 
       expect(last.textContent).toBe(MINT_UNREADABLE);
-      const probeCaptures = vi
+      const buildCaptures = vi
         .mocked(captureToSentry)
         .mock.calls.filter(
           ([, ctx]) =>
             (ctx as { tags?: { stage?: string } } | undefined)?.tags?.stage ===
-            "factsheet-probe",
+            "factsheet-owner-build",
         );
-      expect(probeCaptures).toHaveLength(1);
-      expect(probeCaptures[0][1]).toEqual({
-        tags: { route: "factsheet/v2/page", stage: "factsheet-probe" },
+      expect(buildCaptures).toHaveLength(1);
+      expect(buildCaptures[0][1]).toEqual({
+        tags: { route: "factsheet/v2/page", stage: "factsheet-owner-build" },
       });
+      expect(STATE.observed.adminTables.filter((t) => t === "strategies")).toHaveLength(1);
     } finally {
       errSpy.mockRestore();
     }
@@ -1138,8 +1135,10 @@ describe("KCS-10 (S8) — the public pending placeholder says one neutral senten
     // The public lane reads no owner state at all.
     expect(STATE.observed.rpcCalls).toEqual([]);
     expect(STATE.observed.requestTables).not.toContain("strategy_keys");
-    // Phase 167.2.1 (D-06, D-11): nor does it probe buildability.
+    // Phase 167.2.1 (D-06, D-11): nor does it probe buildability, nor run the
+    // owner lane's reason-carrying build.
     expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
+    expect(vi.mocked(fetchAndBuildPayloadWithReason)).not.toHaveBeenCalled();
   });
 });
 
