@@ -2182,6 +2182,8 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.5.2.1 to break down)
 
+**⭐ ROUTED IN 2026-09-26 (founder; found by the 164.5.2 round-1 review IN-01 and the migration reviewer):** the deployed comment in `sync_strategy_analytics_status` (latest definition `20260906120000`, also in the baseline) still says neither mark RPC takes a per-strategy lock. Since 164.5.2 that is false for mark against mark. Correct it when this phase re-bases the function.
+
 ### Phase 164.5.3: MT5CREDS — show the MT5 account number on the key card and add a credential-update path (INSERTED)
 
 **Goal:** A founder (and a first-time client) can tell which MT5 account a key card belongs to, and can correct a wrong password without deleting the key. Two measured gaps (2026-09-16): `src/app/api/` has ONLY create routes — no update/rotate path — so a wrong password is fixable only by Delete + Add Key; and the MT5 login lands in `api_key`, whose SELECT migration `20260410225608_api_keys_column_revoke.sql` revokes from `authenticated`, so `API_KEY_USER_COLUMNS` (`src/lib/constants.ts:171`) cannot expose it and the card shows only `label` — sourced from the OPTIONAL "Key nickname" field (`ConnectKeyStep.tsx:1188`, fallback `"mt5 key"`). Several MT5 accounts therefore render indistinguishably. ⭐ The MT5 login is NOT a secret (the password is): expose it via a READABLE display column rather than by decrypting the existing one, and add a card action that re-encrypts `api_secret` ONLY, leaving the row and its sync history intact.
