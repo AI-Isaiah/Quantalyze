@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { normalizeDailyReturns, compound } from "@/lib/portfolio-math-utils";
 import { computeAlphaBeta } from "@/lib/portfolio-stats";
+import { dispersion } from "@/lib/return-stats";
 import { annualizationPeriods } from "@/lib/closed-sets";
 import {
   BarChart,
@@ -102,8 +103,16 @@ function AlphaBetaDecompositionInner({ data }: { data: RiskWidgetData } & BaseWi
     // equal-weight benchmark has no dispersion, or a return is non-finite) is an
     // absence. There is no decomposition to draw, and alpha is built on beta, so
     // both read "—" rather than a beta of 0 that would label the whole return
-    // "alpha".
-    if (alpha === null || beta === null) return { undefinedBeta: true as const };
+    // "alpha". The muted line names the benchmark only when that IS the cause
+    // (every benchmark return finite and none dispersing, on the same floor
+    // `beta` uses); any other cause, such as a return that overflows to a
+    // non-finite value, gets neutral wording rather than a wrong reason.
+    if (alpha === null || beta === null) {
+      const benchmarkFlat =
+        benchmarkReturns.every((v) => Number.isFinite(v)) &&
+        dispersion(benchmarkReturns, 0).sd === 0;
+      return { undefinedBeta: true as const, benchmarkFlat };
+    }
     const totalReturn = compound(portfolioReturns);
     const benchmarkReturn = compound(benchmarkReturns);
     const betaContribution = beta * benchmarkReturn;
@@ -153,7 +162,9 @@ function AlphaBetaDecompositionInner({ data }: { data: RiskWidgetData } & BaseWi
           <span className="text-xs text-text-muted">annualized</span>
         </div>
         <p className="px-3 text-xs text-text-muted">
-          Alpha and beta cannot be measured: the benchmark has no dispersion over this window.
+          {result.benchmarkFlat
+            ? "Alpha and beta cannot be measured: the benchmark has no dispersion over this window."
+            : "Alpha and beta cannot be measured over this window."}
         </p>
       </div>
     );

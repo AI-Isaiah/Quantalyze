@@ -138,6 +138,39 @@ describe("AlphaBetaDecomposition", () => {
     expect(screen.getByText(/the benchmark has no dispersion/)).toBeTruthy();
   });
 
+  // Phase 166.2 review round 2 (IN-02 / SFH-R2 LOW-2): the muted line names the
+  // benchmark's dispersion only when that is the cause. Here the benchmark
+  // DISPERSES, but one day's equal-weight sum overflows to Infinity (two finite
+  // 1e308 returns), so beta is undefined for a different reason. Blaming "no
+  // dispersion" would send the reader after the wrong fault.
+  it("uses neutral wording when beta is undefined for a reason other than a flat benchmark", () => {
+    const overflowStrategy = (id: string, name: string, weight: number) => {
+      const s = mockStrategy(id, name, weight);
+      return {
+        ...s,
+        strategy: {
+          ...s.strategy,
+          strategy_analytics: {
+            ...s.strategy.strategy_analytics,
+            daily_returns: dailyReturns.map((d, i) => (i === 30 ? { ...d, value: 1e308 } : d)),
+          },
+        },
+      };
+    };
+    render(
+      <AlphaBetaDecomposition
+        {...widgetProps}
+        data={{
+          ...mockData,
+          strategies: [overflowStrategy("s1", "A", 0.5), overflowStrategy("s2", "B", 0.5)],
+        }}
+      />,
+    );
+    expect(screen.getByTestId("alpha-value").textContent).toBe("—");
+    expect(screen.getByText("Alpha and beta cannot be measured over this window.")).toBeTruthy();
+    expect(screen.queryByText(/no dispersion/)).toBeNull();
+  });
+
   it("control: a dispersing benchmark renders a signed percentage alpha, not a dash", () => {
     render(<AlphaBetaDecomposition {...widgetProps} />);
     expect(screen.queryByTestId("alpha-value")).toBeNull();
