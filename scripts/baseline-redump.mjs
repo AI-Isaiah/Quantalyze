@@ -32,7 +32,7 @@
  * so this writer and CI's co-edit gate read the provenance row with ONE regex.
  * `scripts/check-version-bump.mjs` is NOT imported: it calls
  * `process.exit(main())` at module scope. Its three defects are MIRRORED in
- * `versionDefects()` below instead.
+ * `judgeVersionBump()` below instead.
  *
  * The frozen CLI (plan 04 wires exactly these; later plans add behaviour behind
  * them without renaming anything):
@@ -93,6 +93,13 @@ export const STAGED_PATHS = [
   "supabase/schema/baseline-carried-migrations.txt",
   "supabase/schema/baseline.sql",
 ];
+/**
+ * The repository the PR body's SHA-bound `gh api` command names. `redump-pr` reads
+ * `GITHUB_REPOSITORY`, which Actions always sets; a local run outside Actions
+ * (the plan-03 scratch-clone verify) has none and falls back to this.
+ */
+export const DEFAULT_REPO = "AI-Isaiah/Quantalyze";
+const REPO_SLUG_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 /** Must equal `ci.yml`'s `secret-scan` job `GITLEAKS_VERSION:` (D-26; plan 09 pins the equality). */
 export const GITLEAKS_VERSION = "8.30.1";
 
@@ -292,52 +299,79 @@ export function markerBasenames(markerText) {
     .filter((l) => l !== "" && !l.startsWith("#") && !l.startsWith("baseline-sha256:"));
 }
 
+/*
+ * ── The writers (D-15, D-16) ──
+ * Each returns `{text, defects}`: `defects` is a list of `{kind, detail}` whose
+ * details carry counts, versions and row names only, and `text` is null whenever
+ * a defect is present. A regex replace that matched nothing is the defect class
+ * these exist to refuse: a writer that silently produced no edit would hand CI
+ * a tree it rejects, or a BASELINE.md whose provenance row was never moved.
+ */
+const refused = (kind, detail) => ({ text: null, defects: [{ kind, detail }] });
+const written = (text) => ({ text, defects: [] });
+
 /** 4th-digit bump (D-15). Any other shape is refused, never guessed. */
 export function nextVersion(v) {
   const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(String(v));
-  if (!m) throw new Error(`VERSION '${String(v).slice(0, 40)}' is not a 4-digit X.Y.Z.B string`);
-  return `${m[1]}.${m[2]}.${m[3]}.${Number(m[4]) + 1}`;
+  if (!m) return refused("version-shape", `VERSION '${String(v).slice(0, 40).replace(/\n/g, "\\n")}' is not a 4-digit X.Y.Z.B string`);
+  return written(`${m[1]}.${m[2]}.${m[3]}.${Number(m[4]) + 1}`);
 }
 
 /**
  * A single regex replace of `"version": "<old>"`. It never re-serialises the file
- * (that would reformat it), and it re-parses the result to confirm the version
- * reads back as `newV`. Never `npm version`, which rewrites the lockfile.
+ * (that would reformat it), and it re-parses the result to confirm the TOP-LEVEL
+ * version reads back as `newV`. Never `npm version`, which rewrites the lockfile.
  */
 export function bumpPackageJson(text, oldV, newV) {
   const esc = oldV.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`"version": "${esc}"`, "g");
   const hits = (text.match(re) ?? []).length;
-  if (hits !== 1) throw new Error(`package.json carries ${hits} '"version": "${oldV}"' occurrence(s); exactly 1 is required`);
+  if (hits !== 1) {
+    return refused("package-version-count", `package.json carries ${hits} '"version": "${oldV}"' occurrence(s); exactly 1 is required`);
+  }
   const out = text.replace(re, `"version": "${newV}"`);
-  const back = JSON.parse(out).version;
-  if (back !== newV) throw new Error(`package.json version reads back as '${back}', not '${newV}'`);
-  return out;
+  let back;
+  try {
+    back = JSON.parse(out).version;
+  } catch {
+    return refused("package-json-unparseable", "package.json is not JSON after the version replace");
+  }
+  if (back !== newV) return refused("package-version-readback", `package.json's top-level version reads back as '${back}', not '${newV}'`);
+  return written(out);
 }
 
-/** Insert the entry before the first `\n## [` after the `# Changelog` title. */
+/**
+ * Insert the entry before the first `\n## [` after the `# Changelog` title, and
+ * confirm afterwards that the new heading IS the first `## [` — the heading
+ * `check-version-bump.mjs` and the release notes read.
+ */
 export function insertChangelogEntry(text, entry) {
-  if (!text.startsWith("# Changelog")) throw new Error("CHANGELOG.md does not start with the '# Changelog' title");
+  if (!text.startsWith("# Changelog")) return refused("changelog-no-title", "CHANGELOG.md does not start with the '# Changelog' title");
   const at = text.indexOf("\n## [");
-  if (at === -1) throw new Error("CHANGELOG.md carries no '## [' entry heading to insert before");
-  const heading = entry.split("\n")[0];
-  const version = /^## \[([^\]]+)\]/.exec(heading)?.[1];
-  if (!version) throw new Error("the composed entry does not start with a '## [X.Y.Z.B]' heading");
-  if (text.includes(`\n## [${version}]`)) throw new Error(`CHANGELOG.md already carries a '## [${version}]' heading`);
-  return text.slice(0, at + 1) + entry.replace(/\n*$/, "\n\n") + text.slice(at + 1);
+  if (at === -1) return refused("changelog-no-entry-heading", "CHANGELOG.md carries no '## [' entry heading to insert before");
+  const version = /^## \[([^\]]+)\]/.exec(entry.split("\n")[0])?.[1];
+  if (!version) return refused("changelog-entry-heading", "the composed entry does not start with a '## [X.Y.Z.B]' heading");
+  if (text.includes(`\n## [${version}]`)) {
+    return refused("changelog-duplicate-heading", `CHANGELOG.md already carries a '## [${version}]' heading`);
+  }
+  const out = text.slice(0, at + 1) + entry.replace(/\n*$/, "\n\n") + text.slice(at + 1);
+  const first = /\n## \[([^\]]+)\]/.exec(out)?.[1];
+  if (first !== version) return refused("changelog-not-first", `the first '## [' heading after insertion is '${first}', not '${version}'`);
+  return written(out);
 }
 
 /**
  * The `[start, end)` line range of the `## Provenance` capture table: from the
  * line after the `## Provenance` heading to the first following heading at ANY
- * level (`^#{1,6} `). ⚠️ The first `### Regenerated` heading sits INSIDE
- * `## Provenance`, and the file carries four `| Shape |` and five `| sha256 |`
- * rows file-wide (measured at plan time) — stopping at the next `## ` would sweep
- * in every regenerated section's rows.
+ * level (`^#{1,6} `), or null when there is no `## Provenance` heading.
+ * ⚠️ The first `### Regenerated` heading sits INSIDE `## Provenance`, and the
+ * file carries four `| Shape |` and five `| sha256 |` rows file-wide (measured at
+ * plan time) — stopping at the next `## ` would sweep in every regenerated
+ * section's rows.
  */
 export function provenanceSpan(lines) {
   const head = lines.findIndex((l) => /^## Provenance\s*$/.test(l));
-  if (head === -1) throw new Error("BASELINE.md carries no '## Provenance' heading");
+  if (head === -1) return null;
   let end = lines.length;
   for (let i = head + 1; i < lines.length; i++) {
     if (/^#{1,6} /.test(lines[i])) {
@@ -348,33 +382,76 @@ export function provenanceSpan(lines) {
   return [head + 1, end];
 }
 
+const REGENERATED_HEADING_RE = /^### Regenerated /;
+
 /**
  * Replace the four capture rows (`Taken`, `Supabase CLI`, `sha256` — the ONLY
- * full-64-hex row, `Shape`) inside `provenanceSpan` ONLY (D-16). A line outside
- * the span is never read for a match and never written. A row that is not found
- * exactly once in the span is refused: the writer does not guess which row is
- * the capture table's.
+ * full-64-hex row, `Shape`) inside `provenanceSpan` ONLY (D-16), then insert
+ * `values.section` (composeRegeneratedSection) immediately above the FIRST
+ * `### Regenerated` heading, which must be the heading that ends the span.
+ *
+ * ⛔ The count is exactly-once INSIDE the span, never file-wide. File-wide the
+ * real file carries four `| Shape |` and five `| sha256 |` rows, and every bot
+ * run adds one more of each under its own `### Regenerated`: a file-wide count
+ * would pass a first run and refuse every run after it. A line outside the span
+ * is never read for a match and never written.
+ *
+ * Refuses, by name, on: no `## Provenance`; any capture row found 0 or 2+ times
+ * in the span; no `### Regenerated` heading; a span that does not end at it; and
+ * an output whose provenance does not read back as ONE full-sha row equal to
+ * `values.sha` with the span ending at the inserted heading (so the NEXT run's
+ * count is scoped too).
  */
 export function rewriteBaselineMd(text, values) {
   const lines = text.split("\n");
-  const [start, end] = provenanceSpan(lines);
+  const span = provenanceSpan(lines);
+  if (span === null) return refused("provenance-missing", "BASELINE.md carries no '## Provenance' heading");
+  const [start, end] = span;
   const rows = {
     Taken: `| Taken | ${values.date} |`,
     "Supabase CLI": `| Supabase CLI | ${values.cliVersion} (the \`redump-dump\` job, Supabase Migrate run \`${values.runId}\`) |`,
     sha256: `| sha256 | \`${values.sha}\` |`,
     Shape: `| Shape | ${shapeProse(values.shapes)} |`,
   };
+  const defects = [];
   for (const [key, row] of Object.entries(rows)) {
     const esc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const re = new RegExp(`^\\|\\s*${esc}\\s*\\|`);
     const hits = [];
     for (let i = start; i < end; i++) if (re.test(lines[i])) hits.push(i);
     if (hits.length !== 1) {
-      throw new Error(`the '## Provenance' capture table carries ${hits.length} '| ${key} |' row(s); exactly 1 is required`);
+      defects.push({
+        kind: "capture-row-count",
+        detail: `the '## Provenance' capture table carries ${hits.length} '| ${key} |' row(s); exactly 1 is required`,
+      });
+    } else {
+      lines[hits[0]] = row;
     }
-    lines[hits[0]] = row;
   }
-  return lines.join("\n");
+  const firstRegen = lines.findIndex((l, i) => i >= start && REGENERATED_HEADING_RE.test(l));
+  if (firstRegen === -1) {
+    defects.push({ kind: "regenerated-missing", detail: "BASELINE.md carries no '### Regenerated' heading under '## Provenance' to insert above" });
+  } else if (firstRegen !== end) {
+    defects.push({
+      kind: "regenerated-not-span-end",
+      detail: `the '## Provenance' span ends at line ${end + 1}, not at the first '### Regenerated' heading (line ${firstRegen + 1})`,
+    });
+  }
+  if (defects.length > 0) return { text: null, defects };
+
+  const section = String(values.section ?? "").replace(/\n*$/, "").split("\n");
+  const out = [...lines.slice(0, end), ...section, "", ...lines.slice(end)];
+  const outText = out.join("\n");
+  const outSpan = provenanceSpan(out);
+  if (outSpan === null || outSpan[1] !== end || !REGENERATED_HEADING_RE.test(out[end] ?? "")) {
+    return refused("section-not-span-end", "the inserted section does not start with a '### Regenerated' heading that ends the '## Provenance' span");
+  }
+  // A `g` regex: `match` resets `lastIndex`; `test`/`exec` would carry it over.
+  const shaRows = outText.match(RECORDED_SHA_RE_ALL) ?? [];
+  if (shaRows.length !== 1 || !shaRows[0].includes(values.sha)) {
+    return refused("sha-row-count", `the result carries ${shaRows.length} full-sha provenance row(s); exactly 1, equal to the new sha, is required`);
+  }
+  return written(outText);
 }
 
 function shapeProse(s) {
@@ -386,18 +463,135 @@ function shapeProse(s) {
 
 const short = (sha, n = 8) => String(sha).slice(0, n);
 
+/*
+ * ── The composers (D-14, D-16, D-23) ──
+ * Each takes the measured object `--compose` assembles (the run id, the merge,
+ * the old and new sha256 and shapes, the newly carried basenames, the captured
+ * gate lines) and nothing else: no composer reads a file or re-measures, so every
+ * figure it writes is one a gate or a hash produced. The templates are fixed and
+ * name none of the CI skip tokens, not even to deny one, and carry no
+ * credential-shaped literal.
+ */
+
+/** Old → new for every counted shape but data statements, which the section gives its own row. */
+function shapeDelta(o, n) {
+  return (
+    `tables ${o.tables} → ${n.tables}, policies ${o.policies} → ${n.policies}, ` +
+    `function statements ${o.function_statements} → ${n.function_statements}, ` +
+    `distinct function names ${o.distinct_functions} → ${n.distinct_functions}`
+  );
+}
+
+/** A measured statement, never an omission, when the marker diff added nothing. */
+const NONE_CARRIED = "none — the marker diff added no migration basename";
+
 /**
- * ONE fixed template (D-14: it names none of the CI skip tokens, not even to deny
- * one, and carries no credential-shaped literal). Plan 07 completes the entry
- * with every remaining D-16 value behind this same function name.
+ * The CHANGELOG entry (D-16), in this repo's vocabulary: `### Changed` for what
+ * the six paths now say, `### Notes` for provenance and the judgment left to the
+ * reviewer. The drift gate's `SCOPE —` line is never carried: only the two
+ * captured lines (`functions compared …`, `findings …`) reach it.
  */
 export function composeChangelogEntry(m) {
+  const carried = m.newlyCarried.length === 0 ? NONE_CARRIED : m.newlyCarried.map((b) => `\`${b}\``).join(", ");
   return [
     `## [${m.newVersion}] - ${m.date} — BASELINE: automated re-dump after the PROD apply of ${short(m.merge)}`,
     "",
     "### Changed",
     `- \`supabase/schema/baseline.sql\` re-dumped from PRODUCTION by Supabase Migrate run \`${m.runId}\`, ` +
       `after the PROD apply of merge \`${short(m.merge)}\`: sha256 \`${short(m.oldSha)}…\` → \`${short(m.newSha)}…\`.`,
+    `- Shape, old → new: ${shapeDelta(m.oldShapes, m.shapes)}, ` +
+      `data statements ${m.oldShapes.data_statements} → ${m.shapes.data_statements}.`,
+    `- Migrations the dump newly carries, from the marker diff: ${carried}.`,
+    `- \`supabase/schema/BASELINE.md\` gets the new \`## Provenance\` capture rows and a dated \`### Regenerated ${m.date}\` ` +
+      `section; \`baseline-carried-migrations.txt\` is regenerated from the merge tree; VERSION and package.json ` +
+      `${m.oldVersion} → ${m.newVersion}.`,
+    `- The gates on the composed tree, verbatim: \`${m.currencyLine}\`, \`${m.driftComparedLine}\`, \`${m.driftFindingsLine}\`.`,
+    "",
+    "### Notes",
+    `- The dump was taken read-only by the \`redump-dump\` job after the \`apply\` job of Supabase Migrate run ` +
+      `\`${m.runId}\` succeeded, and this entry was composed by the \`redump-pr\` job. Run \`${m.runId}\` is the provenance anchor.`,
+    '- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. ' +
+      "Every figure above is measured.",
+  ].join("\n");
+}
+
+/**
+ * The dated `### Regenerated` section `rewriteBaselineMd` inserts above the newest
+ * one (D-16), shaped like the hand-written ones minus their "what it adds" column,
+ * which is a human judgment. ⛔ sha256 stays in PREFIX form: a second full-64-hex
+ * row would make `check-baseline-staleness.mjs` read an ambiguous provenance
+ * table (IN-03).
+ */
+export function composeRegeneratedSection(m) {
+  const carried = m.newlyCarried.length === 0 ? [`- ${NONE_CARRIED}`] : m.newlyCarried.map((b) => `- \`${b}\``);
+  return [
+    `### Regenerated ${m.date} — automated re-dump after Supabase Migrate run ${m.runId}`,
+    "",
+    `Taken read-only by the \`redump-dump\` job of Supabase Migrate run \`${m.runId}\`, after that run's \`apply\` job ` +
+      `applied merge \`${short(m.merge)}\` to PRODUCTION, and composed onto \`main\` by the \`redump-pr\` job. Every value ` +
+      "below is measured.",
+    "",
+    "**Which migrations the new dump now carries** — from the marker diff:",
+    "",
+    ...carried,
+    "",
+    "**MEASURED:**",
+    "",
+    "| | |",
+    "|---|---|",
+    `| Taken | ${m.date} |`,
+    `| Supabase CLI | ${m.cliVersion} |`,
+    `| Shape | ${shapeDelta(m.oldShapes, m.shapes)} |`,
+    `| Data statements | ${m.oldShapes.data_statements} → ${m.shapes.data_statements} |`,
+    `| sha256 | \`${short(m.oldSha)}…\` → \`${short(m.newSha)}…\` |`,
+    `| Currency gate | \`${m.currencyLine}\` |`,
+    `| Body drift | \`${m.driftComparedLine}\`; \`${m.driftFindingsLine}\` |`,
+  ].join("\n");
+}
+
+/**
+ * The PR body (D-12 as amended by D-23, D-13, D-16). GitHub holds a
+ * `GITHUB_TOKEN` PR's `pull_request` runs for approval, and branch protection is
+ * off, so without these instructions the PR can be merged with no check ever
+ * run. `m.repo` and `m.headSha` are the repository and the bot commit's own sha.
+ */
+export function composePrBody(m) {
+  const carried = m.newlyCarried.length === 0 ? NONE_CARRIED : m.newlyCarried.map((b) => `\`${b}\``).join(", ");
+  return [
+    `Automated baseline re-dump after Supabase Migrate run \`${m.runId}\`, which applied merge \`${short(m.merge)}\` to ` +
+      `PRODUCTION. sha256 \`${short(m.oldSha)}…\` → \`${short(m.newSha)}…\`, VERSION \`${m.oldVersion}\` → \`${m.newVersion}\`.`,
+    "",
+    "This PR is never auto-merged. A human reviews it and merges it, or closes it.",
+    "",
+    "## Before you review: CI has not run yet",
+    "",
+    "1. GitHub creates the CI runs of a PR opened or updated by the workflow token in an approval-required state. " +
+      "Click **Approve workflows to run** in the merge box first.",
+    "2. Branch protection is off, so this PR can be merged with zero completed checks. A merge box with nothing red is not a verdict.",
+    "3. Read the conclusion of every run bound to the head sha, not only how many there are. " +
+      "A run waiting for approval is already listed:",
+    "",
+    "   ```",
+    `   gh api "repos/${m.repo}/actions/runs?head_sha=${m.headSha}" -q '.workflow_runs[] | [.name, .status, .conclusion] | @tsv'`,
+    "   ```",
+    "",
+    "   Every run must read `completed` with the conclusion `success`.",
+    "4. Fallback only, if the approve button does not appear: close and reopen the PR, then repeat steps 1 to 3.",
+    "",
+    "## What the bot did not write",
+    "",
+    `Newly carried migrations: ${carried}.`,
+    "",
+    `The bot writes measured values only. Add the "what it adds" column for each newly carried migration to the ` +
+      `\`### Regenerated ${m.date}\` section of \`supabase/schema/BASELINE.md\`, as a commit on this branch. A later ` +
+      "re-dump refuses to force-push over a commit that is not the bot's, and names this PR instead.",
+    "",
+    `## If \`main\` has moved, or VERSION \`${m.newVersion}\` collides`,
+    "",
+    `Do not rebase or hand-edit this branch. If \`main\` has moved since this PR was composed, or VERSION \`${m.newVersion}\` ` +
+      "collides with another PR's version, re-dispatch `supabase-migrate.yml` on `main` " +
+      "(`gh workflow run supabase-migrate.yml --ref main`). The bot recomposes onto the current `main` and updates this branch.",
+    "",
   ].join("\n");
 }
 
@@ -421,11 +615,15 @@ export function composeCommitMessage(m) {
 }
 
 /**
- * MIRROR of `scripts/check-version-bump.mjs` `judge()`'s three defects, so the bot
- * cannot compose a tree CI's `version-gate` would reject. Mirrored, not imported:
- * that module exits the process at import.
+ * MIRROR of `scripts/check-version-bump.mjs` `judge()` and its `DEFECTS`
+ * (`version-not-bumped`, `version-package-mismatch`, `changelog-missing-entry`),
+ * by name and meaning, so the bot cannot compose a tree CI's `version-gate` would
+ * reject (D-15). Mirrored, NOT imported: that module calls `process.exit(main())`
+ * at module scope, so importing it would end this process. `judge()`'s
+ * planning-only exemption is omitted because the bot's six paths are never under
+ * `.planning/`. Change one and you must change the other.
  */
-export function versionDefects({ baseVersion, headVersion, packageVersion, changelog }) {
+export function judgeVersionBump({ baseVersion, headVersion, packageVersion, changelog }) {
   const d = [];
   if (headVersion === baseVersion) d.push({ kind: "version-not-bumped", detail: `VERSION is still ${headVersion}` });
   if (headVersion !== packageVersion) {
@@ -638,6 +836,16 @@ function runGate(runner, repoRoot, cmd, args) {
   return r.stdout;
 }
 
+/**
+ * One `::error::` per writer or version-gate defect, naming its kind and detail
+ * (counts, versions and row names only), then a refusal. Called before anything
+ * is written to the four composed files and before anything is staged.
+ */
+function refuseWriterDefects(defects) {
+  for (const d of defects) console.error(`::error::baseline-redump: ${d.kind}: ${d.detail}`);
+  throw new Error(`refusing to compose: ${defects.length} defect(s) (${defects.map((d) => d.kind).join(", ")}); nothing was staged`);
+}
+
 /** The single stdout line starting with `prefix`; refused when absent or repeated. */
 function captureLine(stdout, prefix, gateName) {
   const hits = stdout.split("\n").filter((l) => l.startsWith(prefix));
@@ -649,7 +857,8 @@ function captureLine(stdout, prefix, gateName) {
  * --compose. Run from the repo root of a checkout of `main`. Returns
  * `{committed, staged, measured}`. Throws on any refusal.
  */
-export function compose({ repoRoot, inDir, out, runner, emit, date }) {
+export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAULT_REPO }) {
+  if (!REPO_SLUG_RE.test(repo)) throw new Error("the repository slug is not <owner>/<name>; refusing to compose a PR body around it");
   const measured = JSON.parse(readFileSync(join(inDir, "measured.json"), "utf8"));
   if (measured.schema !== 1) throw new Error(`measured.json schema is ${measured.schema}, expected 1`);
   if (!/^[0-9]+$/.test(String(measured.run_id))) throw new Error("measured.json run_id is not digits");
@@ -690,7 +899,9 @@ export function compose({ repoRoot, inDir, out, runner, emit, date }) {
   const driftComparedLine = captureLine(driftOut, "baseline-content-drift: functions compared", "the content-drift gate");
 
   const oldVersion = readFileSync(join(repoRoot, "VERSION"), "utf8").replace(/\n$/, "");
-  const newVersion = nextVersion(oldVersion);
+  const next = nextVersion(oldVersion);
+  if (next.defects.length > 0) refuseWriterDefects(next.defects);
+  const newVersion = next.text;
   const m = {
     ...measured,
     runId: String(measured.run_id),
@@ -702,36 +913,43 @@ export function compose({ repoRoot, inDir, out, runner, emit, date }) {
     shapes: measured.shapes,
     oldVersion,
     newVersion,
+    cliVersion: measured.cli_version,
     newlyCarried,
     currencyLine,
     driftFindingsLine,
     driftComparedLine,
   };
 
-  writeFileSync(join(repoRoot, "VERSION"), newVersion); // no trailing newline (RESEARCH F7)
+  // Every writer's text is computed FIRST and nothing is written until all of
+  // them, and the version-gate mirror, report no defect: a refusal leaves the
+  // four files exactly as `main` has them and the index empty.
   const pkgPath = join(repoRoot, "package.json");
-  writeFileSync(pkgPath, bumpPackageJson(readFileSync(pkgPath, "utf8"), oldVersion, newVersion));
   const clPath = join(repoRoot, "CHANGELOG.md");
-  const changelog = insertChangelogEntry(readFileSync(clPath, "utf8"), composeChangelogEntry(m));
-  writeFileSync(clPath, changelog);
   const mdPath = join(repoRoot, BASELINE_MD_REL);
-  writeFileSync(
-    mdPath,
-    rewriteBaselineMd(readFileSync(mdPath, "utf8"), {
-      date,
-      cliVersion: measured.cli_version,
-      runId: m.runId,
-      sha: m.newSha,
-      shapes: m.shapes,
-    }),
-  );
-  const vd = versionDefects({
-    baseVersion: oldVersion,
-    headVersion: readFileSync(join(repoRoot, "VERSION"), "utf8"),
-    packageVersion: JSON.parse(readFileSync(pkgPath, "utf8")).version,
-    changelog,
+  const pkg = bumpPackageJson(readFileSync(pkgPath, "utf8"), oldVersion, newVersion);
+  const cl = insertChangelogEntry(readFileSync(clPath, "utf8"), composeChangelogEntry(m));
+  const md = rewriteBaselineMd(readFileSync(mdPath, "utf8"), {
+    date,
+    cliVersion: m.cliVersion,
+    runId: m.runId,
+    sha: m.newSha,
+    shapes: m.shapes,
+    section: composeRegeneratedSection(m),
   });
-  if (vd.length > 0) throw new Error(`the composed tree would fail version-gate: ${vd.map((d) => d.kind).join(", ")}`);
+  const writerDefects = [...pkg.defects, ...cl.defects, ...md.defects];
+  if (writerDefects.length > 0) refuseWriterDefects(writerDefects);
+  const vd = judgeVersionBump({
+    baseVersion: oldVersion,
+    headVersion: newVersion,
+    packageVersion: JSON.parse(pkg.text).version,
+    changelog: cl.text,
+  });
+  if (vd.length > 0) refuseWriterDefects(vd);
+
+  writeFileSync(join(repoRoot, "VERSION"), newVersion); // no trailing newline (RESEARCH F7)
+  writeFileSync(pkgPath, pkg.text);
+  writeFileSync(clPath, cl.text);
+  writeFileSync(mdPath, md.text);
 
   runGate(runner, repoRoot, "node", ["scripts/check-baseline-staleness.mjs"]);
 
@@ -765,6 +983,8 @@ export function compose({ repoRoot, inDir, out, runner, emit, date }) {
 
   mkdirSync(out, { recursive: true });
   writeFileSync(join(out, "pr-title.txt"), composePrTitle(m) + "\n");
+  // The head sha exists only now, after the bot commit: it is the sha the PR's runs bind to.
+  writeFileSync(join(out, "pr-body.md"), composePrBody({ ...m, repo, headSha: git(repoRoot, ["rev-parse", "HEAD"]).trim() }));
   console.log(
     `baseline-redump compose: VERSION ${oldVersion} -> ${newVersion} sha256=${short(oldSha)}… -> ${short(m.newSha)}… ` +
       `newly-carried=${newlyCarried.length} staged=${staged.length}`,
@@ -780,7 +1000,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date }) {
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 71;
+export const EXPECTED_ASSERTIONS = 133;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -872,12 +1092,253 @@ function selfTest({ withGitleaks = false } = {}) {
     Boolean(docGrep) && docGrep[1] === SECRET_SCAN_PATTERN,
     "SECRET_SCAN_PATTERN is byte-equal to the grep -anE argument in BASELINE.md `## Regenerating`",
   );
-  ok(nextVersion("0.96.0.1") === "0.96.0.2" && nextVersion("1.2.3.9") === "1.2.3.10", "nextVersion bumps the 4th field");
-  ok(throws(() => nextVersion("0.96.0")) && throws(() => nextVersion("0.96.0.1\n")), "nextVersion refuses a non-4-digit shape");
+  /**
+   * The writer contract (D-15, D-16): `{text, defects}`, where a refusal is a named
+   * defect and never a silent no-op. A writer that throws, or returns a bare
+   * string, does not honour the contract, and `defects` comes back null so every
+   * arm below reads it as a FAIL rather than crashing the self-test.
+   */
+  const w = (fn) => {
+    try {
+      const r = fn();
+      return r && typeof r === "object" && Array.isArray(r.defects) ? r : { text: null, defects: null };
+    } catch {
+      return { text: null, defects: null };
+    }
+  };
+  const hasDefect = (r, kind, re = /./) => Array.isArray(r.defects) && r.defects.some((d) => d.kind === kind && re.test(d.detail));
+  const isClean = (r) => Array.isArray(r.defects) && r.defects.length === 0 && typeof r.text === "string";
+
+  console.log("=== SELF-TEST 1b/4: every writer produces exactly its edit or refuses by name");
+  const v1 = w(() => nextVersion("0.93.0.3"));
+  const v2 = w(() => nextVersion("1.2.3.9"));
+  ok(isClean(v1) && v1.text === "0.93.0.4" && isClean(v2) && v2.text === "1.2.3.10", "nextVersion bumps the 4th field, returning {text, defects}");
   ok(
-    throws(() => bumpPackageJson('{"version": "1.0.0.0", "x": {"version": "1.0.0.0"}}', "1.0.0.0", "1.0.0.1")),
-    "bumpPackageJson refuses an ambiguous (two-occurrence) version",
+    ["0.93.0", "0.93.0.3.1", "v0.93.0.3", "0.93.0.x", "0.96.0.1\n"].every((bad) => {
+      const r = w(() => nextVersion(bad));
+      return r.text === null && hasDefect(r, "version-shape");
+    }),
+    "nextVersion refuses 0.93.0, 0.93.0.3.1, v0.93.0.3, 0.93.0.x and a trailing newline as 'version-shape'",
   );
+  const twoPkg = w(() => bumpPackageJson('{"version": "1.0.0.0", "x": {"version": "1.0.0.0"}}', "1.0.0.0", "1.0.0.1"));
+  ok(twoPkg.text === null && hasDefect(twoPkg, "package-version-count", /\b2\b/), "bumpPackageJson refuses 2 '\"version\"' occurrences, naming the count");
+  const zeroPkg = w(() => bumpPackageJson('{"version": "9.9.9.9"}', "1.0.0.0", "1.0.0.1"));
+  ok(zeroPkg.text === null && hasDefect(zeroPkg, "package-version-count", /\b0\b/), "bumpPackageJson refuses 0 occurrences, naming the count");
+  const nestedPkg = w(() => bumpPackageJson('{"a": {"version": "1.0.0.0"}, "version": "9.9.9.9"}', "1.0.0.0", "1.0.0.1"));
+  ok(
+    nestedPkg.text === null && hasDefect(nestedPkg, "package-version-readback"),
+    "bumpPackageJson refuses when the one replaced occurrence is not the top-level version (the JSON read-back differs)",
+  );
+  const badJson = w(() => bumpPackageJson('{"version": "1.0.0.0",}', "1.0.0.0", "1.0.0.1"));
+  ok(badJson.text === null && hasDefect(badJson, "package-json-unparseable"), "bumpPackageJson refuses a result that is not JSON");
+
+  // `scripts/check-version-bump.mjs` exports DEFECTS, but importing it runs its main.
+  const jv = (args) => {
+    try {
+      return judgeVersionBump(args);
+    } catch {
+      return null;
+    }
+  };
+  const vbase = { baseVersion: "1.0.0.0", headVersion: "1.0.0.1", packageVersion: "1.0.0.1", changelog: "## [1.0.0.1] - x" };
+  const kinds = (d) => (Array.isArray(d) ? d.map((x) => x.kind).join(",") : "not-a-list");
+  ok(kinds(jv(vbase)) === "", "judgeVersionBump: a well-formed bump has no defect");
+  ok(
+    kinds(jv({ ...vbase, headVersion: "1.0.0.0", packageVersion: "1.0.0.0" })) === "version-not-bumped",
+    "judgeVersionBump: VERSION equal to the base is 'version-not-bumped' (check-version-bump.mjs DEFECTS[0])",
+  );
+  ok(
+    kinds(jv({ ...vbase, packageVersion: "1.0.0.0" })) === "version-package-mismatch",
+    "judgeVersionBump: VERSION and package.json differing is 'version-package-mismatch' (DEFECTS[1])",
+  );
+  ok(
+    kinds(jv({ ...vbase, changelog: "## [1.0.0.0] - old" })) === "changelog-missing-entry",
+    "judgeVersionBump: a moved VERSION with no CHANGELOG heading is 'changelog-missing-entry' (DEFECTS[2])",
+  );
+
+  const sampleMForWriters = {
+    oldVersion: "1.2.3.4", date: "2026-02-03", runId: "7", merge: "c".repeat(40), cliVersion: "2.98.2",
+    oldSha: "a".repeat(64), newSha: "b".repeat(64), newlyCarried: ["20260101000000_a.sql"],
+    oldShapes: { tables: 1, policies: 2, function_statements: 3, distinct_functions: 3, data_statements: 0 },
+    shapes: { tables: 1, policies: 2, function_statements: 3, distinct_functions: 3, data_statements: 0 },
+    currencyLine: "baseline-currency: carried=1 replay=0 marker-sha=match defects=0",
+    driftComparedLine: "baseline-content-drift: functions compared 3 — MATCH 3, DRIFT 0",
+    driftFindingsLine: "baseline-content-drift: findings 0",
+  };
+  const entryFor = (v) => composeChangelogEntry({ ...sampleMForWriters, newVersion: v });
+  const clFixture = "# Changelog\n\n## [1.2.3.4] - 2026-01-01 — prior\n\n### Notes\n- prior\n";
+  const ins = w(() => insertChangelogEntry(clFixture, entryFor("1.2.3.5")));
+  ok(
+    isClean(ins) && /\n## \[([^\]]+)\]/.exec(ins.text)?.[1] === "1.2.3.5" && ins.text.endsWith("## [1.2.3.4] - 2026-01-01 — prior\n\n### Notes\n- prior\n"),
+    "insertChangelogEntry puts the new heading FIRST and leaves the prior entry byte-unchanged",
+  );
+  const dupCl = w(() => insertChangelogEntry(clFixture, entryFor("1.2.3.4")));
+  ok(dupCl.text === null && hasDefect(dupCl, "changelog-duplicate-heading", /1\.2\.3\.4/), "insertChangelogEntry refuses a '## [<new>]' heading that already exists");
+  const noTitle = w(() => insertChangelogEntry(clFixture.replace("# Changelog", "# Log"), entryFor("1.2.3.5")));
+  ok(noTitle.text === null && hasDefect(noTitle, "changelog-no-title"), "insertChangelogEntry refuses a file without the '# Changelog' title");
+  const noEntry = w(() => insertChangelogEntry("# Changelog\n\nnothing yet\n", entryFor("1.2.3.5")));
+  ok(noEntry.text === null && hasDefect(noEntry, "changelog-no-entry-heading"), "insertChangelogEntry refuses a file with no '\\n## [' heading");
+
+  // The scoping fixture (T-164.9.5-33): the capture table, then a NESTED
+  // `### Regenerated` and a later `## ` section that carry EXTRA `| Shape |` and
+  // prefix-form `| sha256 |` rows. File-wide that is 3 Shape and 3 sha256 rows.
+  const fxSha = "1".repeat(64);
+  const fxNewSha = "2".repeat(64);
+  const fxExtra = ["| Shape | 9 tables — historical |", "| sha256 | `aaaaaaaa…` → `bbbbbbbb…` |"];
+  const fxLater = ["| Shape | 8 tables — a later section |", "| sha256 | `cccccccc…` → `dddddddd…` |"];
+  const mdFixture = [
+    "# fixture", "", "## Provenance", "", "| | |", "|---|---|", "| Taken | 2026-01-01 |", "| Source | fixture |",
+    "| Supabase CLI | 0.0.1 |", `| sha256 | \`${fxSha}\` |`, "| Shape | 0 tables |", "", "Prose under the table.", "",
+    "### Regenerated 2026-01-01 — historical", "", "| | |", "|---|---|", ...fxExtra, "",
+    "## Later", "", ...fxLater, "",
+  ].join("\n");
+  const fxSection = "### Regenerated 2026-02-03 — automated re-dump after Supabase Migrate run 7\n\nFixture provenance sentence.\n";
+  const fxValues = {
+    date: "2026-02-03", cliVersion: "2.98.2", runId: "7", sha: fxNewSha,
+    shapes: { tables: 5, policies: 6, function_statements: 7, distinct_functions: 7, data_statements: 0 }, section: fxSection,
+  };
+  const scoped = w(() => rewriteBaselineMd(mdFixture, fxValues));
+  const scopedLines = isClean(scoped) ? scoped.text.split("\n") : [];
+  const newHead = scopedLines.indexOf("### Regenerated 2026-02-03 — automated re-dump after Supabase Migrate run 7");
+  ok(
+    isClean(scoped) && [...fxExtra, ...fxLater].every((l) => scopedLines.includes(l)) &&
+      newHead !== -1 && newHead < scopedLines.indexOf("### Regenerated 2026-01-01 — historical") &&
+      provenanceSpan(scopedLines)[1] === newHead &&
+      scoped.text.includes(`| sha256 | \`${fxNewSha}\` |`) && !scoped.text.includes(`\`${fxSha}\``),
+    "rewriteBaselineMd rewrites the capture rows only, leaves the nested and later EXTRA rows byte-unchanged, and inserts the section as the new end of the span",
+  );
+  const dupShape = w(() => rewriteBaselineMd(mdFixture.replace("| Shape | 0 tables |", "| Shape | 0 tables |\n| Shape | 0 tables again |"), fxValues));
+  ok(
+    dupShape.text === null && hasDefect(dupShape, "capture-row-count", /carries 2 .\| Shape \|. row/),
+    "rewriteBaselineMd refuses a DUPLICATE '| Shape |' row inside the table, naming the row and the count 2 (calibration)",
+  );
+  const noTaken = w(() => rewriteBaselineMd(mdFixture.replace("| Taken | 2026-01-01 |\n", ""), fxValues));
+  ok(noTaken.text === null && hasDefect(noTaken, "capture-row-count", /carries 0 .\| Taken \|. row/), "rewriteBaselineMd refuses a capture row that matches 0 times, naming the row and the count 0");
+  const noProv = w(() => rewriteBaselineMd(mdFixture.replace("## Provenance", "## Origin"), fxValues));
+  ok(noProv.text === null && hasDefect(noProv, "provenance-missing"), "rewriteBaselineMd refuses a file with no '## Provenance' heading");
+  const noRegen = w(() => rewriteBaselineMd(mdFixture.replace("### Regenerated 2026-01-01 — historical", "### Earlier capture"), fxValues));
+  ok(noRegen.text === null && hasDefect(noRegen, "regenerated-missing"), "rewriteBaselineMd refuses a file with no '### Regenerated' heading to insert above");
+
+  // The REAL committed files, read-only (nothing below writes to REPO_ROOT). These
+  // run wherever the self-test runs, so a hand edit that breaks the span is caught.
+  const realMd = readFileSync(join(REPO_ROOT, BASELINE_MD_REL), "utf8");
+  const realSynth = { ...fxValues, sha: "3".repeat(64) };
+  const realRw = w(() => rewriteBaselineMd(realMd, realSynth));
+  const realShaRows = isClean(realRw) ? realRw.text.match(RECORDED_SHA_RE_ALL) ?? [] : [];
+  const captureRowRe = /^\|\s*(Taken|Supabase CLI|sha256|Shape)\s*\|/;
+  const realSpan = provenanceSpan(realMd.split("\n")) ?? [0, 0];
+  const keptInOrder = (() => {
+    if (!isClean(realRw)) return false;
+    const outLines = realRw.text.split("\n");
+    let j = 0;
+    return realMd.split("\n").every((line, i) => {
+      if (i >= realSpan[0] && i < realSpan[1] && captureRowRe.test(line)) return true; // one of the four rewritten rows
+      while (j < outLines.length && outLines[j] !== line) j += 1;
+      if (j === outLines.length) return false;
+      j += 1;
+      return true;
+    });
+  })();
+  ok(
+    isClean(realRw) && realShaRows.length === 1 && realShaRows[0].includes(realSynth.sha) && keptInOrder,
+    "[real BASELINE.md, read-only] no defect, exactly ONE RECORDED_SHA_RE_ALL row and it is the new sha, every other original line kept in order",
+  );
+  const realVersion = readFileSync(join(REPO_ROOT, "VERSION"), "utf8");
+  const realNext = w(() => nextVersion(realVersion));
+  const realCl = readFileSync(join(REPO_ROOT, "CHANGELOG.md"), "utf8");
+  const realIns = isClean(realNext) && !realCl.includes(`\n## [${realNext.text}]`) ? w(() => insertChangelogEntry(realCl, entryFor(realNext.text))) : { defects: null };
+  ok(
+    isClean(realIns) && /\n## \[([^\]]+)\]/.exec(realIns.text)?.[1] === realNext.text,
+    "[real CHANGELOG.md, read-only] the next version is absent, and inserting its entry has no defect and puts it first",
+  );
+  const realPkg = isClean(realNext)
+    ? w(() => bumpPackageJson(readFileSync(join(REPO_ROOT, "package.json"), "utf8"), realVersion, realNext.text))
+    : { defects: null };
+  ok(
+    isClean(realPkg) && JSON.parse(realPkg.text).version === realNext.text,
+    "[real package.json + VERSION, read-only] the bump has no defect and reads back as the next version",
+  );
+
+  console.log("=== SELF-TEST 1c/4: every D-16 value in the entry and the section, every D-23 instruction in the PR body");
+  /** A composer that is missing or throws renders as "", so its presence arms read FAIL instead of crashing the run. */
+  const safe = (fn) => {
+    try {
+      return String(fn());
+    } catch {
+      return "";
+    }
+  };
+  // Every value distinctive, so a presence arm can only be satisfied by ITS value.
+  const M = {
+    newVersion: "4.5.6.8", oldVersion: "4.5.6.7", date: "2026-03-04", runId: "987654321",
+    merge: "0a1b2c3d" + "4".repeat(32), cliVersion: "2.98.2",
+    oldSha: "a1b2c3d4" + "5".repeat(56), newSha: "e6f7a8b9" + "6".repeat(56),
+    oldShapes: { tables: 61, policies: 151, function_statements: 117, distinct_functions: 113, data_statements: 2 },
+    shapes: { tables: 62, policies: 153, function_statements: 119, distinct_functions: 115, data_statements: 0 },
+    newlyCarried: ["20260301000000_first_fixture.sql", "20260302000000_second_fixture.sql"],
+    currencyLine: "baseline-currency: carried=279 replay=0 marker-sha=match defects=0",
+    driftComparedLine:
+      "baseline-content-drift: functions compared 119 — MATCH 116, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0",
+    driftFindingsLine: "baseline-content-drift: findings 0",
+    repo: "fixture-owner/fixture-repo", headSha: "f00dfeed" + "7".repeat(32),
+  };
+  const M0 = { ...M, newlyCarried: [] };
+  const entry = safe(() => composeChangelogEntry(M));
+  const section = safe(() => composeRegeneratedSection(M));
+  const shared = [
+    ["the applying run id", "987654321"],
+    ["the merge short sha", "`0a1b2c3d`"],
+    ["the old sha256 prefix", "`a1b2c3d4…`"],
+    ["the new sha256 prefix", "`e6f7a8b9…`"],
+    ["tables old and new", "tables 61 → 62"],
+    ["policies old and new", "policies 151 → 153"],
+    ["function statements old and new", "function statements 117 → 119"],
+    ["distinct function names old and new", "distinct function names 113 → 115"],
+    ["newly carried basename 1", "`20260301000000_first_fixture.sql`"],
+    ["newly carried basename 2", "`20260302000000_second_fixture.sql`"],
+    ["the baseline-currency line, verbatim", `\`${M.currencyLine}\``],
+    ["the functions-compared drift line, verbatim", `\`${M.driftComparedLine}\``],
+    ["the findings drift line, verbatim", `\`${M.driftFindingsLine}\``],
+  ];
+  const perTarget = {
+    "CHANGELOG entry": [entry, [...shared, ["data statements old and new", "data statements 2 → 0"]]],
+    "regenerated section": [section, [...shared, ["data statements old and new", "| Data statements | 2 → 0 |"]]],
+  };
+  for (const [target, [text, needles]] of Object.entries(perTarget)) {
+    for (const [label, needle] of needles) ok(text.includes(needle), `D-16 presence (${target}): ${label}`);
+  }
+  const noneNeedle = "none — the marker diff added no migration basename";
+  ok(safe(() => composeChangelogEntry(M0)).includes(noneNeedle), "D-16 presence (CHANGELOG entry): no newly carried migration is a measured 'none', not an omission");
+  ok(safe(() => composeRegeneratedSection(M0)).includes(noneNeedle), "D-16 presence (regenerated section): no newly carried migration is a measured 'none', not an omission");
+  const entryLines = entry.split("\n");
+  ok(
+    /^## \[4\.5\.6\.8\] - 2026-03-04 — \S/.test(entryLines[0]) &&
+      entryLines.filter((l) => l.startsWith("#")).slice(1).join("|") === "### Changed|### Notes",
+    "the entry's heading is '## [<new>] - <date> — …' and its sections are ### Changed then ### Notes",
+  );
+  ok(
+    section.startsWith(`### Regenerated 2026-03-04 — automated re-dump after Supabase Migrate run 987654321\n`) &&
+      !/what it adds/i.test(section) && !/[0-9a-f]{64}/.test(section) && section.includes("| sha256 | `a1b2c3d4…` → `e6f7a8b9…` |"),
+    "the section heading ends with the run id, it has no 'what it adds' column, zero full-64-hex values, and a prefix-form sha256 row",
+  );
+  const body = safe(() => composePrBody(M));
+  const prArms = [
+    ["the 'Approve workflows to run' instruction", body.includes("**Approve workflows to run**")],
+    ["reading each run's conclusion", /\bconclusion\b/i.test(body)],
+    ["branch protection is off, so a zero-check merge is possible", /branch protection is off/i.test(body) && /zero completed checks/i.test(body)],
+    [
+      "the SHA-bound gh api command with the real repo and head sha",
+      body.includes(`gh api "repos/fixture-owner/fixture-repo/actions/runs?head_sha=${M.headSha}"`),
+    ],
+    ["the invitation to add the 'what it adds' column", /add the "what it adds" column/i.test(body)],
+    [
+      "re-dispatching supabase-migrate.yml on main when main moved or VERSION collides",
+      body.includes("re-dispatch `supabase-migrate.yml` on `main`") && /`main` has moved/.test(body) && /VERSION `4\.5\.6\.8` collides/.test(body),
+    ],
+    ["close-and-reopen named only as a fallback", /fallback only[^\n]*close and reopen/i.test(body)],
+    ["the PR is never auto-merged", /never auto-merged/i.test(body)],
+  ];
+  for (const [label, cond] of prArms) ok(cond, `D-23 presence (PR body): ${label}`);
   const shapesFixture = [
     'CREATE TABLE IF NOT EXISTS "public"."a" (',
     '  x int); CREATE TABLE "not"."anchored" (',
@@ -905,14 +1366,12 @@ function selfTest({ withGitleaks = false } = {}) {
   );
   ok(STAGED_PATHS.join(",") === [...STAGED_PATHS].sort().join(",") && STAGED_PATHS.length === 6, "STAGED_PATHS is the six paths, sorted");
   const guardRe = new RegExp(`\\[(${["skip", "ci"].join(" ")}|${["ci", "skip"].join(" ")}|${["no", "ci"].join(" ")}|${["skip", "actions"].join(" ")}|${["actions", "skip"].join(" ")})\\]|${["skip", "checks"].join("-")}\\s*:\\s*true`, "i");
-  const sampleM = {
-    newVersion: "1.2.3.5", oldVersion: "1.2.3.4", date: "2026-01-02", runId: "123", merge: "c".repeat(40),
-    oldSha: "a".repeat(64), newSha: "b".repeat(64), newlyCarried: ["20260101000000_a.sql"],
-    shapes: { tables: 1, policies: 2, function_statements: 3, distinct_functions: 3, data_statements: 0 },
-  };
   ok(
-    ![composeChangelogEntry(sampleM), composeCommitMessage(sampleM), composePrTitle(sampleM)].some((t) => guardRe.test(t)),
-    "the fixed templates carry no CI skip token (D-14)",
+    ![M, M0].some((x) =>
+      [safe(() => composeChangelogEntry(x)), composeCommitMessage(x), composePrTitle(x), safe(() => composeRegeneratedSection(x)), safe(() => composePrBody(x))]
+        .some((t) => guardRe.test(t)),
+    ),
+    "the fixed templates (entry, commit message, PR title, regenerated section, PR body) carry no CI skip token (D-14)",
   );
 
   ok(judgeGitleaksReport({ rc: 0, reportText: "[]" }).verdict === "clean", "judgeGitleaksReport: exit 0 with an empty array is the one clean");
@@ -1210,7 +1669,9 @@ function selfTest({ withGitleaks = false } = {}) {
     };
     let stagedBeforeCommit = null;
     outputs.length = 0;
-    const cp = compose({ repoRoot: repo, inDir: join(dir, "art"), out: join(dir, "pr"), runner: fakeRunner, emit, date: "2026-02-03" });
+    const cp = compose({
+      repoRoot: repo, inDir: join(dir, "art"), out: join(dir, "pr"), runner: fakeRunner, emit, date: "2026-02-03", repo: "fixture-owner/fixture-repo",
+    });
     stagedBeforeCommit = cp.staged;
     ok(cp.committed === true && outputs.join(",") === "committed=true", "compose emits committed=true");
     ok(stagedBeforeCommit.join(",") === STAGED_PATHS.join(","), "the cached set before commit equals STAGED_PATHS (D-17)");
@@ -1240,6 +1701,17 @@ function selfTest({ withGitleaks = false } = {}) {
       "the capture table's Taken and Shape rows carry the composed date and measured shapes",
     );
     ok(g(["log", "-1", "--format=%an|%ae|%cn|%ce"]).trim() === `${BOT_NAME}|${BOT_EMAIL}|${BOT_NAME}|${BOT_EMAIL}`, "author and committer are the bot");
+    const botHead = g(["rev-parse", "HEAD"]).trim();
+    const prBody = existsSync(join(dir, "pr/pr-body.md")) ? readFileSync(join(dir, "pr/pr-body.md"), "utf8") : "";
+    ok(
+      prBody.includes(`gh api "repos/fixture-owner/fixture-repo/actions/runs?head_sha=${botHead}"`) && !guardRe.test(prBody),
+      "--compose writes <out>/pr-body.md beside pr-title.txt, carrying the repo and the bot commit's own head sha, and no skip token",
+    );
+    const fakeCompared = "`baseline-content-drift: functions compared 1 — MATCH 1, DRIFT 0`";
+    ok(
+      cl.includes(fakeCompared) && md.includes(fakeCompared) && !cl.includes("SCOPE —") && !md.includes("SCOPE —"),
+      "the captured drift lines reach the entry and the section verbatim, and the SCOPE line the gate also printed reaches neither",
+    );
     ok(
       calls.join(" ; ") ===
         "bash scripts/local-stack/run.sh --check-currency ; node scripts/baseline-content-drift-check.mjs --self-test ; " +
@@ -1259,6 +1731,23 @@ function selfTest({ withGitleaks = false } = {}) {
       throws(() => compose({ repoRoot: repo, inDir: join(dir, "art2"), out: join(dir, "pr3"), runner: redRunner, emit, date: "2026-02-03" })) &&
         g(["rev-parse", "HEAD"]).trim() === head2,
       "a red child gate refuses and no commit is made",
+    );
+    // A writer defect inside --compose: a CHANGELOG that already carries the next
+    // version's heading. Run in a CLONE, because section 4b needs HEAD to stay head2.
+    const repo3 = join(dir, "repo3");
+    g(["clone", "-q", repo, repo3], { cwd: dir });
+    writeFileSync(join(repo3, "CHANGELOG.md"), readFileSync(join(repo3, "CHANGELOG.md"), "utf8").replace("\n## [", "\n## [1.2.3.6] - 2026-02-02 — a collision\n\n## ["));
+    g(["commit", "-q", "-am", "a colliding CHANGELOG heading"], { cwd: repo3 });
+    const head3pre = g(["rev-parse", "HEAD"], { cwd: repo3 }).trim();
+    const collided = capture(() =>
+      compose({ repoRoot: repo3, inDir: join(dir, "art2"), out: join(dir, "pr4"), runner: fakeRunner, emit, date: "2026-02-03" }),
+    );
+    ok(
+      collided.threw !== null && /^::error::.*changelog-duplicate-heading/m.test(collided.text) &&
+        g(["diff", "--cached", "--name-only"], { cwd: repo3 }).trim() === "" &&
+        g(["status", "--porcelain", "--", "VERSION", "package.json", "CHANGELOG.md", BASELINE_MD_REL], { cwd: repo3 }).trim() === "" &&
+        g(["rev-parse", "HEAD"], { cwd: repo3 }).trim() === head3pre && !existsSync(join(dir, "pr4")),
+      "a writer defect in --compose prints ::error:: with its kind and refuses before VERSION, package.json, CHANGELOG or BASELINE.md is written or anything is staged",
     );
 
     console.log("=== SELF-TEST 4b/4: the MERGE-tree marker, the argument validators and D-10 idempotency");
@@ -1460,6 +1949,7 @@ function main(argv) {
         runner: realRunner,
         emit: emitToGithubOutput,
         date: new Date().toISOString().slice(0, 10),
+        repo: process.env.GITHUB_REPOSITORY || DEFAULT_REPO,
       });
       return 0;
     }
