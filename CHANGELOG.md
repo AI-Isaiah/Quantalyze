@@ -1,5 +1,382 @@
 # Changelog
 
+## [0.93.0.1] - 2026-09-26 — DRIFTOFFMUTEX: `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work
+
+⭐ **What changed for whoever reads this next.** Phase 164.4.2.1 takes `ci.yml`'s `test-db-drift`
+job off the shared-TEST advisory key. That job runs VAC-08, which only READS shared TEST's
+migration ledger and function bodies, yet on a merge push it queued behind `python` and
+`e2e-seeded` for up to 20m31s to do 2-5 s of work (`164.4.2.1-MEASUREMENT.md` BEFORE). What orders
+VAC-08 after `supabase-migrate.yml`'s `apply-test` is the schema-apply wait, not the key, and that
+wait stays (the phase's decision D-02, Option A). The goal is that a merge push to `main` is no
+slower than before Phase 164.4.2.
+
+⚠️ **This is a build-segment bump because nothing a user or an API caller sees changes.** The diff is
+CI workflows, two CI scripts, tests, a runbook and ledger prose. There is no migration and no
+`analytics-service/` or app code. 0.93.0.0 is JOBRPCTRUTH, already on `main`.
+
+### Changed
+
+- **`test-db-drift` no longer takes, holds or judges the shared-TEST key** (`15d8bfd77`). Its
+  `Acquire`, `Release` and dead-holder `Verdict` steps are gone, and `grep -c 61616158` inside the
+  job is 0. It keeps the secret, the schema-apply wait before VAC-08 on merge pushes, the
+  `needs: python` edge, `timeout-minutes: 90` and its row in the `frontend` aggregator. No gate
+  was skipped and no timeout was raised. The job's comments stop naming an acquire it no longer
+  has (`244a1cde4`). The deleted `Verdict` step judged a holder this job no
+  longer has, so it is a removed mechanism, not a skipped gate.
+- **The holder set moved by measurement in the same commit** (`15d8bfd77`). The `ci.yml` jobs that
+  hold the key are now `python` (9 hits) and `e2e-seeded` (8), 17 in total, down from 29.
+  `mutex-dead-holder-verdict.test.ts` Test 2's floor went from 5 to 4 with a dated reason.
+- **Holder-set currency in the prose that names the holders** (`579ab9c33`, `3bfd6d12e`,
+  `92d3499d7`, `003dd466d`). `CLAUDE.md` and `docs/runbooks/shared-test-db-mutex.md` carry dated
+  addenda with re-measured counts, and the old sentences stay as lineage. The runbook's new
+  section 0 records why the wait, not the key, orders VAC-08. `TODOS.md`
+  `[164.4.2-REMAINING-KEY-HOLDERS]` now names `python` and `e2e-seeded` only. The
+  `analytics-deploy-verify.yml` issue text names what reds `test-db-drift` now.
+- **Two restore safety texts stop claiming the mutex keeps ALL other CI out** (`72d12cf9c`,
+  `a72f2d809`, `c946f78ab`, `848543db4`, `e9e46c1bc`). It keeps other CI WRITERS out; one
+  read-only reader, VAC-08, is no longer kept out and cannot harm a restore. The
+  `restore-test-from-baseline.sh` refusal text, the `test-restore-from-baseline.yml` NOT-ANNOUNCED
+  error and their comments now say so, with dated corrections.
+
+### Fixed
+
+- **A PR-run VAC-08 overlap with a TEST writer now reds with its real cause named** (`f180241cd`,
+  `2f5549f8b`, `51727e666`, `01c938583`). On a `pull_request` run the schema-apply wait does not
+  run, so VAC-08 has no ordering against a concurrent `apply-test` or a dispatched restore. The
+  `ci.yml` header, `CLAUDE.md`, the VAC-08 query-failure and `FRONTIER_EXEMPT_CEILING` messages and
+  the aggregator's red `test-db-drift` message now name that overlap as a possible cause.
+- **VAC-08's connects are bounded** (`b3e86e58e`). The VAC-08 step sets `PGCONNECT_TIMEOUT: "15"`.
+  A failed connect exits non-zero, so this can add a loud red and never a green. The script
+  header states what bounds each phase of a psql call, and that a network loss after connect is
+  bounded only by the job's `timeout-minutes` (`01c938583`, `9da73dc52`).
+- **The ordering wait names a missing psql up front** (`bf9901398`). `wait-for-test-schema-apply.sh`
+  exits 1 with `wait-outcome: psql-missing` instead of failing later and less clearly. Two new
+  self-test checks cover it (48 in total).
+- **The redundant conditional psql install in `test-db-drift`'s wait step is gone** (`b3e86e58e`).
+  The `Install psql client` step before it installs psql unconditionally.
+
+### Tests
+
+- **Pins that `test-db-drift` holds no key and that its ordering still holds** (`15d8bfd77`,
+  `b3e86e58e`, `db8c570ff`, `e2b81e0f4`). `critical-regressions.test.ts` pins the holder set, the
+  absence of any key in `test-db-drift`, the wait running before VAC-08 under its merge-push `if:`,
+  and that neither the wait nor VAC-08 can be disabled or masked by an `if:`. The verifier neutered
+  each pin (a lock line added, the wait's `if:` disabled, `if: false` on VAC-08, the timeout raised
+  to 120, the job dropped from `needs:`) and watched every one go RED.
+- **The holder detector cannot silently miss a holder** (`6806e1c9e`, `4c0ace777`). `measureHolders`
+  recognises a take by the act: any lock call whose argument is not provably another key counts.
+  It follows sourced, executed and node/python entry points, `npm run`, `cd` and
+  `working-directory`, and it throws on an invoked path it cannot resolve.
+
+### Notes
+
+- **Measurement before code** (`517f51f83`, `42dba0e48`, `844a39953`, `d04f580a2`, `c79e1e0c6`).
+  `164.4.2.1-MEASUREMENT.md` holds the BEFORE, the verdict rule and a prediction, committed at
+  `d04f580a2`, an ancestor of the `ci.yml` change. SC-3 is graded on the Goal reading (founder,
+  D-01): a non-degenerate run-total inside or below 16m18s–18m50s. The strict below-16m18s reading
+  is recorded per run as evidence for Phase 164.9.
+- **Two review rounds, each fixed and re-reviewed** (`c8f7e1379`, `31899f7a7`, `14d128b6a`,
+  `d1ba1793d`, `df88e0624`, `f82f85594`, `bae975b54`, `c98f1cb34`). Code review and silent-failure
+  review in both rounds, fixers split by topic.
+- **Plan completion, security and verification records** (`b579f0110`, `6cdf6134f`, `678f7e906`,
+  `249c3c4bd`, `77edbf9b2`). SECURITY is SECURED with 0 open threats. VERIFICATION is
+  `human_needed` 3/4, the missing one being SC-3 below. The founder ratified the PR-run ordering
+  loss as D-10 on 2026-09-26, recorded in CONTEXT and ROADMAP.
+
+- ⚠️ **SC-3, the five-run AFTER table, can be measured only after this merges** (D-05).
+  `164.4.2.1-MEASUREMENT.md`'s AFTER is PROTOCOL ONLY at this SHA, and the phase may not read
+  `passed` until it is filled and graded. **Owner: the session that lands this PR**, as the
+  post-merge re-verification of 164.4.2.1.
+- ⚠️ **Accepted: a PR-run VAC-08 has no ordering against a TEST writer** (D-10, accepted risk
+  AR-164.4.2.1-01). An overlap can red a PR, never turn real drift green. Re-run the check once
+  both writers are idle; runbook section 0 has the triage. Merge pushes keep the wait.
+- ⚠️ **One assumption is recorded, not measured:** that `supabase db push` commits each
+  migration's ledger row in the same transaction as the file (research A1). Neither ordering gives
+  a false green: a row committing late is exempted above the frontier within the ceiling, and a row
+  committing early reds the function-body half.
+- ⚠️ **The holder detector treats a node/python/TS entry point as a leaf.** It does not walk what
+  that entry point imports or spawns, so a future writer that takes the key only inside an imported
+  module would read as a non-holder. No such file exists today, and the limit is stated in the
+  detector's header comment.
+
+## [0.93.0.0] - 2026-09-25 — JOBRPCTRUTH: the compute-job RPC surface does what its own migrations say
+
+⭐ **What changed for whoever reads this next.** Phase 164.9.1 fixes three places where a
+compute-job or holdings-sync function in PRODUCTION had drifted from what the migrations that
+defined it say it does. Each drift came from a later re-base built on a stale copy of the
+function. (1) The ten-argument `_enqueue_compute_job_internal`, which every mode of the public
+`enqueue_compute_job` wrapper reaches, never wrote the fan-in initial status, so a child job with
+parents landed `pending` and could run before its parents finished. (2)
+`request_allocator_holdings_sync` had lost its in-flight look-up, so its "already queued" answer
+was unreachable, and it had lost the refusal of a disconnected key. (3) The `bridge_outcomes`
+catalogue comments named a unique index that migration 081 dropped. Separately, a restore of
+shared TEST now normalises the analytics service destination inside its own transaction, so a
+restore no longer re-arms that hazard.
+
+⚠️ **This is a minor bump because behaviour a caller can see changes, on purpose.** The holdings
+sync RPC now answers `{already_inflight, next_attempt_at}` when a poll job for the key is live, and
+a disconnected key gets HTTP 409 from `POST /api/allocator/holdings/sync` instead of a generic 500.
+Precedent: KEYCARDSYNC (0.88.0.0) and GATEHYGIENE (0.90.0.0) were fix phases on the same key-card
+and job surfaces, and each took a minor bump because visible behaviour changed. 0.92.0.0 belongs
+to PR #859, which lands before this one.
+
+⛔ **This release carries THREE migrations, and merging it applies them to shared TEST and then to
+PRODUCTION with no human stop.** They are `20260924230827_fanin_initial_status_10param`,
+`20260924233749_allocator_sync_restore_inflight_prefetch` and
+`20260925071300_bridge_outcomes_invariant_comments`. All three went through two review rounds by
+`migration-reviewer`, `rls-policy-auditor` and `silent-failure-hunter`. Each one's DO block reads
+catalogues only, so none of them can refuse on TEST's empty tables.
+
+### Fixed
+
+- **A job enqueued with parents now enters the fan-in state** (M1, `ee325bfee`). The ten-argument
+  enqueue computes the initial status and INSERTs it: `done_pending_children` when the parent list
+  has an element, `pending` otherwise. On the lane, a parented child is no longer claimable while
+  its parent runs, and the parent's mark-done releases it. Before the fix, the lane showed a child
+  claimed while its parent was still running (`163cb233c`). The body is migration
+  `20260826150000`'s ten-argument CREATE with three edits. COPY-CHECK arms pin every edit, and a
+  parity arm pins it against the seven-argument overload, which still carries migration 109's
+  branch.
+- **The ten-argument enqueue refuses a parent list that no mark-done could release** (review round
+  1, `74a125a64`). It locks the parents `FOR SHARE` in id order, refuses a NULL, missing or
+  `failed_final` parent with 22023, and starts a child `pending` when every parent is already
+  `done`. Strict parity with the seven-argument body would have left such a child in
+  `done_pending_children` forever, holding its target's in-flight slot. The two bodies now differ
+  on those three inputs only, and M1's header says so (the D-04 amendment, recorded in
+  `bce6c5171`).
+- **The holdings sync RPC reports a job that is already queued, and refuses a disconnected key
+  again** (M2, `dd1fb6d25`). Migration 067's in-flight look-up is back: a live poll job for the key
+  returns `{already_inflight: true, next_attempt_at}`. That answer used to come only from an
+  `EXCEPTION WHEN unique_violation` handler that could never fire, because the enqueue returns the
+  existing id instead of raising. Migration 075's refusal is back too (D-23): a soft-disconnected
+  key raises `P0001 api_key_disconnected` after the ownership check and before the look-up, so a
+  disconnected key never reports "queued". Review round 1 tightened the reconstruct-gate arm, and a
+  live arm now pins the order: a non-owner gets the same 42501 as for a missing key, never the
+  disconnected answer (`f72d9dd4c`).
+- **A disconnected key gets a 409 with a sentence the user can act on** (`250762420`). The route
+  maps exactly that error to HTTP 409, no-store, with "This API key is disconnected. Reconnect it
+  before syncing holdings." Before, it fell through to the generic 500, which invites a retry that
+  can never succeed. Any other `P0001` still reaches the logged 500. The branch writes one info line
+  that carries no user or key id (`eb4c5407e`).
+- **The allocator exchange card shows that 409, and holds a queued row across a refresh**
+  (`eb4c5407e`). A 409 from Sync now, Reconnect or Add key moves the row to Disconnected and shows
+  the route's sentence. Disconnected rows now carry the same live helper line as active rows, so the
+  existing "Reconnect failed — try again" message is finally visible too. After an "already queued"
+  answer, the card keeps the row syncing until the server moves it, `last_sync_at` changes, or two
+  minutes pass after `next_attempt_at`.
+- **Review round 2: three stale states in the exchange card** (`57f999b88`). A "click Sync now to
+  retry" message no longer follows a row into Disconnected, where there is no Sync now button. The
+  409 sentence no longer stays on a row that a reconnect made elsewhere has brought back. A remote
+  disconnect during a queued hold no longer pins the row as syncing until reload, because the
+  inferred reconnect latch is replaced by an explicit flag that `handleReconnect` sets and clears.
+- **The `bridge_outcomes` comments name the current uniqueness invariant** (M3, `0725da4e2`,
+  corrected in review by `f72d9dd4c`). They name `bridge_outcomes_allocator_match_decision_unique`
+  (081) and the md-NULL partial index (083), and neither names the index 081 dropped. Two
+  strategy-sourced outcomes for the same (allocator, strategy) under two different decisions are
+  allowed by design.
+
+### Changed
+
+- **A restore of shared TEST normalises the analytics service destination inside its own
+  transaction** (`8559c9e2d`, emitter `48f84c232`). `scripts/test-only-normalize-analytics-url.sh`
+  gains an `--emit-restore-sql` mode that prints one guarded fragment, built by the same function
+  the hand-run path uses. The fragment re-reads the database marker; refuses PROD, an absent
+  marker, a foreign marker and a missing row; rewrites the row to the script's own loopback sink;
+  and checks that exactly one row changed and reads back. It never prints the value.
+  `restore-test-from-baseline.sh` appends it after the reference-data gate and before the ledger
+  DDL, byte-identical in both modes: a restore commits it and a preflight rolls it back. The
+  runbook and arm D1's prose say so (`2a8bcbe10`).
+- **The restore refuses a failed or malformed fragment, and the emitter self-tests before every
+  live restore** (review round 1, `8a3053f1e`). A non-zero emitter exit, an empty fragment or a
+  fragment of the wrong shape aborts the restore. The emitter override is honoured only inside the
+  restore's own self-test. `test-restore-from-baseline.yml` gains a `Normalize script self-test`
+  step before `--run`.
+- **The live-DB execution ledger shrinks from 10 entries to 7** (`0e559db17`). The three arms this
+  phase fixed left the ledger and `K3_ARMS`, and `ENTRY_CEILING` follows the count down. On a clean
+  lane with all three migrations replayed, the gate reads the failing set as exactly the ledger.
+
+### Tests
+
+- **A harm probe for the fan-in defect, lane-RED by design before M1** (`163cb233c`). The dedupe
+  gate's mutation twins are re-pointed at M1's body, so they still bite on the body that is live
+  (`44bc7d93d`). Arm P12 was observed RED with M1's status neutered and GREEN restored.
+- **The normalisation fragment is pinned in place** (`bb0fd0b7f`). Static pins fail if the emitter
+  call or its concatenation leaves the slot between the gate and the ledger DDL, or if `$mode` is
+  read inside that window. Each pin has in-memory calibrations and was seen RED against a neutered
+  live script.
+- **The emitter's refusals are self-tested on throwaway clusters** (`d9730d004`), and the restore
+  self-test proves both the commit and the rollback (`8559c9e2d`). The restore self-test now runs
+  37 arms (`EXPECTED_ARMS`, read from the script).
+- **The XOR file asserts the current `bridge_outcomes` invariant, by SQLSTATE and by constraint
+  name** (`97d987661`). It replaces an arm that asserted migration 072's retired index.
+- **Review round 2 added seven exchange-card tests** (`57f999b88`). Each went RED with its guard
+  neutered.
+
+### Root cause
+
+- **Stale re-bases.** Migration 070 rebuilt the holdings sync RPC without 067's look-up, and 076
+  rebuilt it without 075's refusal. The ten-argument enqueue was cut without the seven-argument
+  body's status branch, while its own comment said it INSERTs the status. Each later migration
+  copied a definition that was not the latest one. All three fixes re-base on the latest definition
+  after a grep of every migration, and each migration's header records the lineage.
+
+### Notes
+
+- **Mechanism demonstrated, production harm latent** (D-02). The fan-in defect was shown by
+  execution on the lane. No production caller passes parents today, so no production row is known
+  to be affected.
+- **Known limits, recorded rather than fixed, routed to Phase 164.5.2 BRIDGELOCK.** (1) A parent
+  that is still open at enqueue and later ends `failed_final` still strands its child in
+  `done_pending_children`; latent, because no caller passes parents. (2) The parent lock can
+  deadlock (40P01) against the mark-done fan-in UPDATE on a diamond-shaped DAG, so whoever first
+  passes parents must treat 40P01 as retryable; latent, recorded in M1's header (`c06bad985`). (3)
+  A second `match_decisions` delete can raise 23505 through the cascade onto the md-NULL partial
+  index; pre-existing, and it fails loudly. (4) A `failed_retry` row and a `pending` row on the
+  same `(kind, api_key_id)` make `claim_compute_jobs` and `claim_compute_jobs_with_priority`
+  raise 23505 on `compute_jobs_one_inflight_per_kind_api_key`, which stops every claim until the
+  pair clears, because their C39 guard does not exclude a partition that holds a `pending` row.
+  Pre-existing, not introduced here, loud. It was reproduced on the local-stack lane by the
+  pre-push review and routed with its suggested fixes and repro recipe.
+- **Two pre-push wording fixes in the fan-in migration, no body change.** The note above the
+  ten-argument `CREATE` now counts four edits, not three. The function's catalog comment now
+  states the shipped rule: `done_pending_children` while any listed parent is still open, else
+  `pending`. The function body is byte-identical, so the PROD-body acknowledgement is unchanged.
+  The regenerated function snapshot differs only in that leading comment.
+- **Other accepted limits.** Two concurrent sync calls that both pass the look-up still collapse
+  onto one row, and the loser gets `{ok, job_id}` naming the winner's job (D-11, the race 067
+  already tolerated). A seven-argument call cannot resolve (42725), so
+  `enqueue_compute_portfolio_job` raises on every call; it has no caller and is not fixed here.
+- **The normalize self-test runs only in the dispatch restore job, not on PRs.** That job runs it
+  before every live restore, which is where it guards. A PR job would need PostgreSQL server
+  binaries and is not in this phase.
+- **One red row is pre-declared for this PR.** VAC-08 in `test-db-drift` reports one
+  `_enqueue_compute_job_internal/10 DRIFT` row whose TEST hash is the pre-change body's, because
+  TEST runs the old body until `apply-test` runs on merge. Any other red blocks the merge.
+- **The live restore on shared TEST is the founder's step after merge** (FC-3). It is blocked on
+  the founder-owned baseline re-dump and is not a completion gate of this phase.
+- **Backlog.** `[164.9-FANIN-STATUS-NEVER-SET]`, `[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]` and
+  `[164.9-TEST-ANALYTICS-URL-REARM]` are closed in `TODOS.md`.
+- **Planning record.** Context, research, patterns, the 14-plan set, the plan summaries, both
+  review rounds, the FC-2 re-sync onto main, the verification and the security record are under
+  `.planning/phases/164.9.1-*` (`d8702293c`, `d5d2d9c60`, `342188b10`, `f6191aa6f`, `d0057747d`,
+  `e1c4d2e90`, `f7f96c162`, `381798e02`, `dbe9f867d`, `40aa2643a`, `ec2336967`, `810659108`,
+  `0fec29911`, `c12842fad`, `80e07112b`, `411b56e9d`, `5e43d4d97`, `616b95aaf`, `c07e8a409`,
+  `a892e8560`).
+
+## [0.92.0.0] - 2026-09-25 — ACCOUNTTRUTH PR A: the allocation history is hidden while it is rebuilt
+
+⭐ **What changed for whoever reads this next.** Phase 167.1.2 (ACCOUNTTRUTH) rebuilds the
+allocator's account history. Until that lands, the history behind the allocator equity curve can
+count one exchange account twice when more than one key reads it, and it can read a day with no
+sync as zero. D-02 ("Hide it until correct") is the founder's call: a wrong number an allocator can
+act on is worse than an honest absence. This PR hides the equity curve, every factsheet ratio built
+from it (Sharpe among them), the Scenario composer's own-book comparison and, under D-13, the
+per-holding return, Sharpe, drawdown and vol on `/compare`. Each surface shows a short note that
+says what is hidden and why. Holdings and AUM are unchanged; they never read that history.
+
+⚠️ **This is a minor bump because what allocators see changes, on purpose.** No number is
+recomputed, no migration ships and no database row moves. The withholding happens at the producer
+and on the server, so the hidden values never reach the client payload.
+
+### Changed
+
+- **The allocator equity curve is withheld at its one producer** (`01d96ab5b`). `derivePhase07Fields`
+  in `src/lib/queries.ts` now returns `equityHistoryState: "rebuilding"` and an empty
+  `equityDailyPoints` for every allocator. The new `equityHistoryState` field on
+  `MyAllocationDashboardPayload` is the single switch that plan 11 flips.
+- **The Overview shows a "being rebuilt" panel in place of the curve and the factsheet**
+  (`01d96ab5b`). `EquityHistoryRebuilding` replaces both, and no factsheet payload is built while
+  the history is rebuilt, so no KPI is computed from it either. The baseline-unknown banner drops
+  its promise that "a full performance history builds up from here" while the history is hidden.
+- **The Scenario composer drops the own-book comparison and says so** (`d87b19aca` pinned it
+  first, `ca2f8d431`). The own-book series is empty while the history is rebuilt, so the own-book
+  delta is undefined. A one-line note explains the gap instead of leaving it silent. The live-book
+  KPIs are a separate field and stay (D-03).
+- **The raw snapshot levels are withheld with the curve** (`29e52dcf9`, review round 1 SFH-03).
+  `equitySnapshots` is `[]` in the client payload while the history is rebuilt. `snapshotCount` and
+  `minHistoryDepthMonths` are computed before the rows are withheld and stay populated. Nothing on
+  the client read the rows, so this stops a future reader from getting around D-02, and stops the
+  30-second refresh from re-sending the full history.
+- **D-13: `/compare` withholds per-holding return, Sharpe, max drawdown and vol** (`efba46454`,
+  review round 1 WR-05). These are level ratios over the same snapshot store, and a $-level ratio
+  also reads buying or selling more of a symbol as a gain or loss. `HOLDING_COMPARE_HISTORY_STATE`
+  in `holding-compare-adapter.ts` is `"rebuilding"`, so `fetchHoldingCompareItem` returns the item
+  with `analytics: null` and the numbers never leave the server. The analytics still decide
+  availability, so the "not available" rule is unchanged. `HoldingFactsheet` shows a note in place
+  of the four metrics.
+- **The `/allocations` loading skeleton draws the rebuilding panel, not a KPI strip and a chart**
+  (`b1fcba6c9`, review round 1 IN-04). A skeleton that promised numbers and then swapped to a
+  paragraph was a layout shift that implied figures that would not come.
+- **A brand-new book sees the warm-up note, not the rebuilding panel** (`5d1cc6304`, founder copy
+  call IN-01, 2026-09-25). A book with no snapshots and no derived curve has nothing for D-02 to
+  withhold, so the Overview shows the existing "Portfolio factsheet" warm-up note, now extracted as
+  `FactsheetWarmupNote`. The test is the exact negation of the composer's note gate, so the two
+  surfaces read the same book the same way. The curve slot stays unmounted either way.
+
+### Fixed
+
+- **Every equity-history gate fails closed** (`5aea287b3`, review round 1 WR-01). The Overview and
+  the composer show the curve only on an explicit `"ready"`. A missing field, `null`, `""` or any
+  state added later all read as rebuilding. `HoldingFactsheet` applies the same rule to
+  `historyState`.
+- **The rebuilding copy is true for every allocator who reads it** (`e49867349`, review round 1
+  WR-03 and SFH-05). The panel names the cause as a property of the history ("could", "when more
+  than one key reads it"). It does not refer to an "earlier chart" that a first connect never saw,
+  and it says holdings and AUM do not use that history rather than calling them current. The
+  composer's note shows only when there is an own-book history to withhold.
+- **The rebuilding panel is a labelled region with an `h2`** (`c50cb3fa9`, review round 1 WR-04).
+  An `h3` under the page `h1` failed axe's `heading-order` rule. A static panel mounted at first
+  render announces nothing as a live region, so it is a `section` labelled by its heading.
+- **The composer's note covers both sources of the own-book series** (`a41f1725d`, review round 2
+  WR-02). Gating on the legacy snapshot count alone hid the note from a book whose history comes
+  only from the derived curve. It now also checks `equityCurveSource === "derived"`.
+- **`/compare` surfaces a failed load instead of calling it "not available"** (`a588b3189`, review
+  round 2 SFH-R2-02). A failed holding read now throws `HoldingCompareLoadError`, and a failed
+  strategies read throws, both to the route's error boundary with a retry. Each logs the database
+  message server-side only. D-15 is unchanged: RLS hides an unowned row as zero rows, never as an
+  error, so a failure reveals nothing about ownership.
+
+### Tests
+
+- **New suites pin the hidden state and the copy.** `AllocationDashboardV2.rebuilding.test.tsx`,
+  `HoldingFactsheet.test.tsx` and the new composer cases pin the panel, the notes, the fail-closed
+  reading of every non-`"ready"` value, and the brand-new-book branch (`01d96ab5b`, `d87b19aca`,
+  `5aea287b3`, `e49867349`, `c50cb3fa9`, `a41f1725d`, `5d1cc6304`). The five `AllocationsTabs`
+  fixtures carry the new payload field.
+- **The derived-curve pins read the withheld series** (`5d112ae63`). The Phase 115.1 flip pins in
+  `queries.test.ts` would otherwise pass vacuously against an empty curve.
+- **The 115.1 derived-curve pins assert the extractor directly, so they can still fail**
+  (`6d7b77ca9`, review round 1 SFH-04). A later cleanup drops a constant assertion and stops the
+  producer comments promising a restore that plan 11 has not decided (`7f58e1ff8`, review round 1
+  IN-02 and IN-03).
+- **The own-book delta's two-return floor has its own `"ready"` case** (`1d629924d`, review round 1
+  WR-02), so hiding the series cannot silently take the floor's coverage with it.
+- **`/compare`'s `"ready"` branch stays under test** (`a588b3189`, review round 2 WR-01).
+  `fetchHoldingCompareItem` takes an internal `historyState` test seam, and
+  `reconstructAndAnalyze` is exported for unit tests, so the math and the pre-D-13 behaviour are
+  pinned while production uses the `"rebuilding"` default. `compare-holding-rls.test.ts` asserts
+  availability plus `historyState: "rebuilding"` and `analytics: null` (`efba46454`).
+- **The seeded 320px Overview e2e gate pins the rebuilding panel** (`fb24fb49d`, then `20ffb2803`
+  for review round 1 IN-01). It had been skipping unconditionally. It now checks that the panel is
+  visible and fits the 320px viewport on both edges, and that the equity-curve slot is NOT mounted,
+  so the 44px tap-rect measurement cannot be forgotten when the chart returns.
+- **`loading.test.tsx` pins the new skeleton shape** (`b1fcba6c9`).
+
+### Notes
+
+- **Known limit: the curve, Sharpe and the scenario comparison come back only in PR C.** Plan 11
+  of Phase 167.1.2 defines `"ready"` and flips `equityHistoryState` and
+  `HOLDING_COMPARE_HISTORY_STATE` with evidence. The `/compare` flip is a separate decision, because
+  the level-ratio defect is specific to that computation. Until then the producer never emits
+  `"ready"`.
+- **Known limit: the reused warm-up sentence promises panels "once at least two days of blended
+  equity history are available".** For a brand-new book under D-02 that is true only once PR C
+  flips the state. It was kept on the founder's copy call (IN-01).
+- **Known limit (accepted): a failed holding read fails the whole `/compare` page** to its error
+  boundary, not only the holding card.
+- **Merged `origin/main` into the branch** (`80d6627e2`) with no conflicts, to pick up the
+  verification-paperwork close for 164.6, 161, 164.5.3 and 164.4.2 (#856).
+
 ## [0.91.0.0] - 2026-09-24 — QSTATS-TRUTH: every quantstats-derived number reflects the returns it was given
 
 ⭐ **What changed for whoever reads this next.** Phase 166 (RANK-05) removes the quantstats 0.0.81

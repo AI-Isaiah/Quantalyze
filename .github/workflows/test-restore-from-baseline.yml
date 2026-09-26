@@ -777,6 +777,15 @@ jobs:
       - name: Restore script self-test
         run: bash scripts/restore-test-from-baseline.sh --self-test
 
+      # Phase 164.9.1 round-1 review (silent-failure-hunter M3). The restore below
+      # concatenates the analytics_service_url fragment that the normalize script
+      # emits, and only that script's OWN self-test exercises the fragment's
+      # in-transaction refusals (marker PROD, absent, foreign; no row) and the
+      # check that the value is never echoed. Run it here, on this runner's
+      # throwaway cluster, before the live restore. Pasted VERBATIM, as above.
+      - name: Normalize script self-test
+        run: bash scripts/test-only-normalize-analytics-url.sh --self-test
+
       # ── THE SHARED-TEST ADVISORY MUTEX, HELD ACROSS THE WHOLE ACT ──────────
       # CONTEXT safety rule 2. Acquired HERE, before the backup, and released only
       # after the post-verify, so backup → script → post-verify is one serialized
@@ -1112,6 +1121,21 @@ jobs:
       # mutex we are holding. There is no window. It also removes the credential
       # dependency that halted plan 04: CI already holds TEST_SUPABASE_DB_URL, and no
       # session-mode DSN has to exist on anyone's laptop.
+      # ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1 round-1 review, SFH-04): "There is no
+      # window" stopped being true for ONE job, and the paragraph above is kept as
+      # lineage. Since Phase 164.4.2.1, ci.yml's `test-db-drift` (VAC-08) holds no
+      # shared-TEST key, so the mutex we hold does not keep it out: it can open a
+      # session after this gate has measured "quiet". This is accepted because VAC-08
+      # only READS. It cannot write to TEST, so the restore's safety does not depend
+      # on keeping it out; an overlap can only red VAC-08 (a read of a state that
+      # really committed, or a loud failure), never harm the restore. Every WRITER
+      # still holds the mutex, and for writers there is still no window.
+      # ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1 round-2 review, IN-07): "an overlap
+      # can only red VAC-08" is kept as lineage and understates the outcome set. A
+      # read that lands before the restore's late TRUNCATE sees the pre-restore
+      # COMMITTED state and can PASS. The outcomes match the wait script's SFH-05
+      # note: an overlap cannot harm the restore, and VAC-08 either reads a state
+      # that really committed (and passes or fails on its merits) or fails loudly.
       #
       # ⚠️ THE PREDICATE IS INVERTED ON PURPOSE: everything EXCEPT plain `idle` counts
       # as busy. Enumerating the busy states is FAIL-OPEN, and that is MEASURED, not
@@ -1373,7 +1397,15 @@ jobs:
               echo "schema-apply-in-flight: NOT-ANNOUNCED — the flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) was already held after ${waited}s — a previous writer's session has not yet been reaped. The restore PROCEEDS, and unlike the could-not-announce outcome that is SAFE rather than tolerated: BUSY means the key IS held, so a reader's probe answers 'held' and orders itself behind this restore exactly as if we had taken the key ourselves. The gates that stand in front of this restore (the confirm token, the marker query, the activity gate, the held mutex) are unaffected."
               ;;
             *)
-              echo "::error::schema-apply-in-flight: NOT-ANNOUNCED — the flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) could not be announced within ${waited}s, and this restore therefore REFUSES TO PROCEED. Nothing has been written: this step runs before the backup and before every write, and the mutex is released on the way out. ⛔ THE FLAG IS NOT OPTIONAL FOR THIS WORKFLOW. It is the ONLY signal that sees a dispatched restore — this run produces no Actions run on the commit its readers are testing, so a concurrent sql-tests, python or e2e-seeded job that cannot see the flag concludes 'nothing to order against' and queues straight into the DROP SCHEMA below. (That is why supabase-migrate.yml may proceed unannounced and this may not: there the reader falls back to the Actions API.) Re-dispatch once the announcer can connect. psql's output is WITHHELD: this log is public."
+              # ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1 round-1 review, IN-03): this
+              # message used to name "a concurrent sql-tests, python or e2e-seeded job" as
+              # the readers that queue into the DROP SCHEMA; that wording is kept here as
+              # lineage. `sql-tests` left shared TEST in Phase 164.4.2. The readers that
+              # consult the flag and then QUEUE for the key are `python` and
+              # `e2e-seeded`. `test-db-drift` reads the flag without queueing (it holds
+              # no key since Phase 164.4.2.1), and on a pull_request run it does not
+              # consult the flag at all.
+              echo "::error::schema-apply-in-flight: NOT-ANNOUNCED — the flag (key ${SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY}) could not be announced within ${waited}s, and this restore therefore REFUSES TO PROCEED. Nothing has been written: this step runs before the backup and before every write, and the mutex is released on the way out. ⛔ THE FLAG IS NOT OPTIONAL FOR THIS WORKFLOW. It is the ONLY signal that sees a dispatched restore — this run produces no Actions run on the commit its readers are testing, so a concurrent python or e2e-seeded job that cannot see the flag concludes 'nothing to order against' and queues straight into the DROP SCHEMA below, and a merge-push test-db-drift (which holds no key) reads TEST during it. (That is why supabase-migrate.yml may proceed unannounced and this may not: there the reader falls back to the Actions API.) Re-dispatch once the announcer can connect. psql's output is WITHHELD: this log is public."
               exit 1
               ;;
           esac

@@ -934,6 +934,9 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         staleSelf: "node scripts/check-baseline-staleness.mjs --self-test",
         stale: "node scripts/check-baseline-staleness.mjs",
         scriptSelf: "bash scripts/restore-test-from-baseline.sh --self-test",
+        // Phase 164.9.1 round-1 review (M3): the emitter's own refusal arms.
+        normalizeSelf:
+          "bash scripts/test-only-normalize-analytics-url.sh --self-test",
         scriptRun:
           'bash scripts/restore-test-from-baseline.sh --run --mode "$MODE"',
       };
@@ -951,6 +954,20 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         liveCommandIndex(b, cmds.scriptSelf),
         "the restore script's --self-test must run BEFORE its --run",
       ).toBeLessThan(liveCommandIndex(b, cmds.scriptRun));
+      expect(
+        liveCommandIndex(b, cmds.normalizeSelf),
+        "the normalize script's --self-test must run BEFORE the restore that concatenates its fragment",
+      ).toBeLessThan(liveCommandIndex(b, cmds.scriptRun));
+      calibrate(
+        "the normalize script's --self-test is EXECUTED, not mentioned",
+        (s) =>
+          s.replace(
+            `run: ${cmds.normalizeSelf}`,
+            `run: echo skipped # ${cmds.normalizeSelf}`,
+          ),
+        (t) =>
+          liveCommandIndex(jobBlock(t, RESTORE_JOB), cmds.normalizeSelf) > -1,
+      );
       calibrate(
         "the restore script's --run is EXECUTED, not mentioned",
         (s) =>
@@ -4747,6 +4764,14 @@ describe("IN-07 — the confirm token and the staleness gate read the SAME row",
 // has already closed". Inside the workflow the probe runs within the advisory-lock
 // session already held by `Acquire shared-test-db mutex`, so a colliding run is
 // either visible to the query or still blocked on the mutex. There is no window.
+// ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1 round-2 review, WR-05): "There is no
+// window" stopped being true for ONE job, and the sentence above is kept as
+// lineage. Since Phase 164.4.2.1, ci.yml's `test-db-drift` (VAC-08) holds no
+// shared-TEST key, so the held mutex does not keep it out: it can open a session
+// after the gate has measured "quiet". That is accepted because VAC-08 only
+// READS and cannot harm the restore. Every WRITER still holds the mutex, and for
+// writers there is still no window. The workflow's own comment carries the same
+// correction (SFH-04).
 //
 // ⚠️ `idle in transaction` MUST count as active. A session holding an open
 // transaction holds locks and will write when it resumes; a gate blind to it is the

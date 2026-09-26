@@ -1309,11 +1309,26 @@ true for 146 and half of 142–145, and **false for 141**.
       rather than trusted at face value by a later reader.
       Owner: Phase 164.5.1 CRONREPOINT.
 
-- [ ] ⛔ **`[164.9-FANIN-STATUS-NEVER-SET]` a job enqueued through the PUBLIC wrapper with
+- [x] ⛔ **`[164.9-FANIN-STATUS-NEVER-SET]` a job enqueued through the PUBLIC wrapper with
       `parent_job_ids` NEVER enters the fan-in state in production — a confirmed production
       defect, data integrity (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 11, surfaced by
       the live-DB lane in the plan 08 fix round and VERIFIED INDEPENDENTLY by the orchestrator
       rather than merely reported).**
+      ✅ **CLOSED 2026-09-25 by Phase 164.9.1 JOBRPCTRUTH (v0.93.0.0), by a MIGRATION, as this
+      entry demanded.** `20260924230827_fanin_initial_status_10param` re-bases the TEN-arg
+      `_enqueue_compute_job_internal` on its latest definition (`20260826150000`, found by a grep
+      of every migration for both overloads) and INSERTs the computed status:
+      `done_pending_children` when the parent list has an element, `pending` otherwise. Review
+      round 1 added a `FOR SHARE` parent lock and a 22023 refusal of any parent list no mark-done
+      could release. The arm was NOT rewritten, deleted or skipped: it went GREEN against the new
+      body on the lane, and the harm probe was RED against the old one. Three reviewers, two
+      rounds, findings fixed before any apply. Evidence: `164.9.1-01-SUMMARY.md` (harm probe),
+      `164.9.1-02-SUMMARY.md` (M1), `164.9.1-03-SUMMARY.md` (P12 calibrated),
+      `164.9.1-11-SUMMARY.md` and `164.9.1-12-SUMMARY.md` (review rounds). ⚠️ The fix reaches
+      PRODUCTION when the PR merges (apply-test, then the PROD apply); the SHA-bound post-merge
+      check is the phase's FC-1. Residuals (a parent that later fails strands its child; a 40P01
+      diamond deadlock on the parent lock) are latent, recorded in M1's header and routed to
+      Phase 164.5.2 BRIDGELOCK.
       **THE MECHANISM, named by SYMBOL because line numbers drift
       (`[164.7-CITATION-DRIFT-01]`):** `enqueue_compute_job` routes all three of its modes to the
       **TEN-ARG** `_enqueue_compute_job_internal`, whose `INSERT` column list OMITS `status`, so
@@ -1788,8 +1803,24 @@ true for 146 and half of 142–145, and **false for 141**.
       `docs/runbooks/test-analytics-url.md`. Both traps above are restated in the runbook verbatim,
       because they are the two ways a green reading here means nothing.
 
-- [ ] **`[164.9-TEST-ANALYTICS-URL-REARM]` A RESTORE RE-ARMS the hazard above, by design, so
+- [x] **`[164.9-TEST-ANALYTICS-URL-REARM]` A RESTORE RE-ARMS the hazard above, by design, so
       closing it once does not close it (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 10).**
+      ✅ **CLOSED 2026-09-25 by Phase 164.9.1 JOBRPCTRUTH (v0.93.0.0) — the post-restore step this
+      entry named as "what would actually close it" now exists, inside the restore's OWN
+      transaction.** `scripts/restore-test-from-baseline.sh` `build_transaction` appends the
+      fragment that `scripts/test-only-normalize-analytics-url.sh --emit-restore-sql` prints, after
+      the reference-data replay and before the ledger DDL, byte-identical in both modes. The
+      fragment re-reads the marker, refuses PROD / absent / foreign markers and a missing row,
+      rewrites the row to the script's sink and checks ROW_COUNT = 1 and the read-back. The
+      allowlist was NOT edited (the reseed stays faithful) and no migration was used. A failed or
+      malformed fragment aborts the restore, and the workflow runs the emitter's self-test before
+      `--run`. Evidence: `164.9.1-04-SUMMARY.md` (emitter), `164.9.1-05-SUMMARY.md` (in-transaction
+      step, self-test arms), `164.9.1-06-SUMMARY.md` (position and byte-identity pins),
+      `164.9.1-10-SUMMARY.md` (runbook and arm D1 prose), `164.9.1-11-SUMMARY.md` (refusal hardening).
+      ⚠️ **The LIVE observation on shared TEST is FC-3: founder-owned, blocked on the founder's
+      baseline re-dump, and NOT a completion gate.** No agent dispatches the restore. Arm D1 still
+      reads the live row on every gate run, so a future re-arm is still reported by name.
+      `[164.9-BASELINE-PRIVILEGES-ABSENT]` is untouched by this closure.
       Owner: Phase 164.9 TESTISOLATION.
       ⭐ **RE-HOMED 2026-09-21 — THE `Owner:` LINE ABOVE IS SUPERSEDED, kept only as lineage.**
       Phase 164.9 TESTISOLATION is CLOSING and did not build the post-restore step, so leaving it
@@ -10132,9 +10163,23 @@ a tail residual section is the same disappearance this residue exists to prevent
       the re-homed `[164.9-TEST-ANALYTICS-URL-REARM]`. ⚠️ Until that phase exists the owner is
       THE FOUNDER, who inserts it.**
 
-- [ ] **`[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]` two lane failures that need a PRODUCTION change or
+- [x] **`[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]` two lane failures that need a PRODUCTION change or
       an INTENT decision — distinct from F1 and from each other (booked 2026-09-21, Phase 164.9
       TESTISOLATION plan 11, out of the plan 08 fix round).**
+      ✅ **CLOSED 2026-09-25 by Phase 164.9.1 JOBRPCTRUTH (v0.93.0.0), both halves, neither by
+      rewriting an assertion to match observed behaviour.** **(a)** by a MIGRATION:
+      `20260924233749_allocator_sync_restore_inflight_prefetch` re-bases
+      `request_allocator_holdings_sync` on 076 and restores 067's in-flight look-up, so the Queued
+      shape is returned again; the same migration restores 075's `api_key_disconnected` refusal
+      (D-23, the route maps it to 409). The Queued arms were RED before and GREEN after, each
+      calibrated. **(b)** by an INTENT decision written down (D-13): the CURRENT invariant is 081's
+      one-outcome-per-decision UNIQUE plus 083's md-NULL partial unique, so two outcomes under two
+      different decisions are allowed by design. `20260925071300_bridge_outcomes_invariant_comments`
+      puts that in the catalogue, and the XOR file now asserts the current invariant by SQLSTATE and
+      constraint name. The live-DB ledger shrank 10 → 7 for the arms this phase fixed. Evidence:
+      `164.9.1-07-SUMMARY.md`, `164.9.1-08-SUMMARY.md`, `164.9.1-09-SUMMARY.md`,
+      `164.9.1-10-SUMMARY.md`. ⚠️ Takes effect on PRODUCTION when the PR merges. The D-11
+      concurrent-prefetch race stays accepted, as 067 accepted it.
       **(a) AN UNREACHABLE BRANCH — needs an RPC change.**
       `request_allocator_holdings_sync` returns its `{already_inflight, next_attempt_at}` shape
       ONLY from an `EXCEPTION WHEN unique_violation` handler around `enqueue_compute_job`. But
@@ -10170,9 +10215,9 @@ evidence, so none earns a phase by that rule; each is fix-or-drop here, with an 
 and a date. The one exception to watch is `[164.4.2-PROD-SUPAUTILS-FUNCTION-DENIAL-CRASH]`: if
 its measurement confirms the crash on PROD, it moves to `## 🔴 FIX NOW` and gets a phase.
 
-- [ ] **`[164.4.2-REMAINING-KEY-HOLDERS]` `python`, `e2e-seeded` and now `test-db-drift` still hold
-      the shared-TEST advisory key `61616158`; whether they move off it is decided by the AFTER
-      numbers, not assumed (booked 2026-09-24, Phase 164.4.2 plan 10).**
+- [ ] **`[164.4.2-REMAINING-KEY-HOLDERS]` `python` and `e2e-seeded` still hold the shared-TEST
+      advisory key `61616158` (`test-db-drift` left 2026-09-25); whether they move off it is
+      decided by the AFTER numbers, not assumed (booked 2026-09-24, Phase 164.4.2 plan 10).**
       This phase moved ONE holder, `sql-tests`, as a tracer (CONTEXT DECISION B), and created one,
       `test-db-drift`, which keeps VAC-08 on shared TEST because VAC-08 measures shared TEST's
       drift. The key is ALSO taken outside `ci.yml` (`supabase-migrate.yml`,
@@ -10184,6 +10229,12 @@ its measurement confirms the crash on PROD, it moves to `## 🔴 FIX NOW` and ge
       numbers here and decide whether the next holder is worth moving.
       **Owner:** THE FOUNDER, reading the AFTER table (CONTEXT "Noted for later": the follow-on is
       "decided by the tracer's measured result, not assumed by it").
+      ⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1 DRIFTOFFMUTEX, round-1 review WR-03):** this
+      entry's title used to read "`python`, `e2e-seeded` and now `test-db-drift` still hold" the
+      key; that wording and the body above are kept as lineage. `test-db-drift` left the key
+      (the phase's decision D-02). The `ci.yml` holders are `python` and `e2e-seeded`. The AFTER
+      table for this move is `164.4.2.1-MEASUREMENT.md`. Whether the next holder moves is still
+      decided by those numbers.
 
 - [ ] **`[164.4.2-LANE-ONLY-REASON-STALE]` The one `-- LANE-ONLY:` marker in the gate corpus
       argues from shared TEST, but the job that reads it no longer runs there (booked 2026-09-24,
