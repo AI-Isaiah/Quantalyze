@@ -25,6 +25,7 @@ import pandas as pd
 import pytest
 
 from services.allocated_capital import _annualised_sharpe
+from services.analytics_runner import _compute_derived_trade_metrics
 from services.csv_validator import validate_csv
 from services.dispersion import residue_floor
 from services.equity_reconstruction import EquityCurveBuilder
@@ -288,3 +289,114 @@ def test_s7_risk_decomposition_of_real_risk_still_splits():
     cov = pd.DataFrame({"a": _noisy(index, 1665), "b": _noisy(index, 1666)}).cov().to_numpy()
     out = compute_risk_decomposition([0.5, 0.5], cov)
     assert sum(row["marginal_risk_pct"] for row in out) == pytest.approx(100.0)
+
+
+# ---------------------------------------------------------------------------
+# S8: analytics_runner._compute_derived_trade_metrics, the SQN block (D-16)
+#
+# SQN is mean(R) / std(R) * sqrt(min(N, 100)) over per-trade R-multiples,
+# R = realized_pnl / |avg_losing_trade|. A book of identical losses has no
+# dispersion, so it has no SQN. With a loss of 7.7 the float mean is not exact,
+# the R-multiples are not all exactly -1.0, and today's ``std_r > 0`` guard lets
+# the ~1e-16 residue through: SQN -4.03e16 (21 trades), -5.40e16 (37 trades).
+# A loss of 1.0 has an exact mean and gives None today: the D-07 reference.
+#
+# The function has no production caller since Phase 106 (D-21 W1), so this
+# corrects the formula for any future caller and moves no stored value.
+# ---------------------------------------------------------------------------
+
+_S8_OTHER_KEYS = (
+    "expectancy",
+    "risk_reward_ratio",
+    "weighted_risk_reward_ratio",
+    "profit_factor_long",
+    "profit_factor_short",
+)
+
+
+def _s8_losses(n: int, loss: float) -> list[float]:
+    return [-loss] * n
+
+
+def _s8_alternating_losses() -> list[float]:
+    """Real dispersion: 20 losses alternating 7.7 / 7.71, plus one 7.7."""
+    return [-7.7 if i % 2 == 0 else -7.71 for i in range(20)] + [-7.7]
+
+
+def _s8_positions(losses: list[float]) -> dict[str, object]:
+    """An all-loser book. ``avg_losing_trade`` is the float mean of the losses,
+    computed the way ``reconstruct_positions`` aggregates (sum / count)."""
+    return {
+        "win_rate": 0,
+        "avg_winning_trade": 0,
+        "avg_losing_trade": sum(losses) / len(losses),
+        "winners_count": 0,
+        "losers_count": len(losses),
+        "realized_pnl_per_trade": [{"realized_pnl": p, "side": "long"} for p in losses],
+    }
+
+
+def _s8_r_std_and_mean(losses: list[float]) -> tuple[float, float]:
+    """The R-multiple sample std and mean, as the SQN block forms them."""
+    risk_unit = abs(sum(losses) / len(losses))
+    r = [p / risk_unit for p in losses]
+    mean_r = sum(r) / len(r)
+    var_r = sum((x - mean_r) ** 2 for x in r) / (len(r) - 1)
+    return math.sqrt(var_r), mean_r
+
+
+def _s8_sqn(losses: list[float]) -> object:
+    return _compute_derived_trade_metrics({}, _s8_positions(losses))["sqn"]
+
+
+@pytest.mark.parametrize("n", [21, 37])
+def test_s8_sqn_identical_losses_of_7_7_is_undefined(n):
+    """Identical losses have no dispersion, so no SQN. Today: about -4.03e16 (21)
+    and -5.40e16 (37), from a float-residue std."""
+    losses = _s8_losses(n, 7.7)
+    std_r, mean_r = _s8_r_std_and_mean(losses)
+    # Precondition: the residue branch, not the exact-zero one the 1.0 control covers.
+    assert 0.0 < std_r <= residue_floor(mean_r)
+    assert _s8_sqn(losses) is None
+
+
+def test_s8_sqn_identical_losses_of_1_0_is_undefined_the_d07_reference():
+    """An exactly representable mean gives an exactly zero std: None today and after."""
+    losses = _s8_losses(21, 1.0)
+    std_r, _ = _s8_r_std_and_mean(losses)
+    assert std_r == 0.0
+    assert _s8_sqn(losses) is None
+
+
+def test_s8_sqn_residue_equals_the_exact_constant_answer():
+    """D-07: the residue book answers exactly what the exactly constant book answers."""
+    assert _s8_sqn(_s8_losses(21, 7.7)) == _s8_sqn(_s8_losses(21, 1.0))
+
+
+def test_s8_sqn_real_dispersion_is_finite():
+    """The other side of the floor: 7.7 / 7.71 is real dispersion, so SQN exists."""
+    losses = _s8_alternating_losses()
+    std_r, mean_r = _s8_r_std_and_mean(losses)
+    assert std_r > residue_floor(mean_r)
+    sqn = _s8_sqn(losses)
+    assert isinstance(sqn, float) and math.isfinite(sqn)
+
+
+def test_s8_sqn_floor_changes_no_other_key(monkeypatch):
+    """Only ``sqn`` moves. The unedited function is reproduced by patching the
+    floor seam back to the old ``std_r > 0`` guard (residue iff ``std_r <= 0``),
+    and every other key must match on all three inputs."""
+    inputs = [_s8_losses(21, 7.7), _s8_losses(21, 1.0), _s8_alternating_losses()]
+    edited = [_compute_derived_trade_metrics({}, _s8_positions(x)) for x in inputs]
+    monkeypatch.setattr(
+        "services.analytics_runner.dispersion_is_residue", lambda sd, mean: sd <= 0.0
+    )
+    unedited = [_compute_derived_trade_metrics({}, _s8_positions(x)) for x in inputs]
+    # The patch really reproduces the old function: the residue book's fabricated SQN.
+    sqn_old = unedited[0]["sqn"]
+    assert isinstance(sqn_old, float) and abs(sqn_old) > 1e15
+    for before, after in zip(unedited, edited):
+        assert set(before) == set(after)
+        assert {k: before[k] for k in _S8_OTHER_KEYS} == {k: after[k] for k in _S8_OTHER_KEYS}
+    # The real-dispersion SQN does not move either.
+    assert unedited[2]["sqn"] == edited[2]["sqn"]
