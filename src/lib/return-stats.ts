@@ -28,9 +28,18 @@
  * `dispersion` REPORTS A RESIDUE SD AS EXACTLY 0 (Phase 166.1 D-07): no
  * dispersion means the value an exactly constant series gives. Every ratio
  * built on it therefore answers a compounding constant yield exactly as it
- * answers an all-zero series, and each calling site maps `null` to the value it
- * already emits for an exact constant (null, 0 or NaN), so no renderer sees a
- * new shape.
+ * answers an all-zero series.
+ *
+ * A NULL RATIO IS AN ABSENCE, END TO END (founder decision D7, 2026-09-26,
+ * "Show — everywhere", amending D-07 for display). A statistic that does not
+ * exist stays empty through every caller (null, a NaN in a `number` field, or
+ * a missing cell) and renders "—" or a gap on every page, never 0.00 and never
+ * "unchanged". D-07 had each caller map null to the value it emitted for an
+ * exact constant, which was 0 at eight sites and made the factsheet say
+ * "Sharpe 0.00" where the OG card for the same series said "—". A caller must
+ * not turn null into a number. A NaN field reaches a renderer as NaN, or as
+ * null once a JSON cache has round-tripped it, so renderers test
+ * `Number.isFinite`, which is false for both.
  *
  * ARITHMETIC ORDER is the factsheet's, so adopting sites keep their numbers to
  * the last bit wherever their order already matched: the Sharpe is
@@ -92,8 +101,8 @@ export function dispersion(
  * the arithmetic order of `factsheet/compute.ts`. `rf` is annual (default 0).
  *
  * Null when there are fewer than 2 points, when any input is non-finite, or
- * when the dispersion is 0 or residue. Each caller maps null to the value it
- * emits today for an exactly constant input.
+ * when the dispersion is 0 or residue. A caller keeps the null as an absence
+ * (D7): it renders "—", never 0.
  */
 export function sharpe(
   xs: number[],
@@ -114,8 +123,8 @@ export function sharpe(
  * Null when correlation is UNDEFINED (audit 2026-05-07 G11.E.5 contract): fewer
  * than 2 points, or either leg's population dispersion is 0 or residue, or the
  * denominator is not positive (a NaN leg). "No correlation" and "correlation
- * cannot be measured" are different answers; callers that render 0 or NaN map
- * null themselves.
+ * cannot be measured" are different answers, so a caller keeps the null as an
+ * absence (D7) and never renders it as 0.
  */
 export function pearson(a: number[], b: number[]): number | null {
   const n = Math.min(a.length, b.length);
@@ -144,9 +153,12 @@ export function pearson(a: number[], b: number[]): number | null {
  * (ddof-invariant; the form of `factsheet/joint.ts`).
  *
  * The arrays must be the same length (a RangeError otherwise: callers align
- * or slice first). Null when there are fewer than 2 points, when `x`'s
- * population dispersion is 0 or residue, or when the variance is not positive
- * (a NaN leg).
+ * or slice first). Null when there are fewer than 2 points, when either leg
+ * holds a non-finite value, or when `x`'s population dispersion is 0 or
+ * residue. Both legs are checked for finiteness explicitly, as `sharpe` does.
+ * Before Phase 166.2's review round 1 (SFH-M5) only `x` was guarded, through
+ * its variance, so a NaN in `y` came back as NaN, not null, and passed every
+ * caller's null check.
  */
 export function beta(y: number[], x: number[]): number | null {
   if (y.length !== x.length) {
@@ -154,6 +166,7 @@ export function beta(y: number[], x: number[]): number | null {
   }
   const n = x.length;
   if (n < 2) return null;
+  if (y.some((v) => !Number.isFinite(v)) || x.some((v) => !Number.isFinite(v))) return null;
   const dx = dispersion(x, 0);
   if (dx.sd === 0) return null;
   const mx = dx.mean;

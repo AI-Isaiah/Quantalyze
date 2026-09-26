@@ -241,4 +241,13 @@ describe("beta", () => {
     expect(beta([0.01], [0.02])).toBeNull();
     expect(() => beta([0.01, 0.02], [0.01])).toThrow(RangeError);
   });
+
+  // SFH-M5 (Phase 166.2 review round 1): a non-finite value in EITHER leg is an
+  // absence. Before the explicit guard, a NaN in y passed the x-variance check and
+  // came back as NaN, which every caller's null check let through.
+  it("is null, not NaN, when either leg holds a non-finite value", () => {
+    expect(beta([0.01, NaN, 0.03], [0.01, 0.02, 0.03])).toBeNull();
+    expect(beta([0.01, 0.02, 0.03], [0.01, NaN, 0.03])).toBeNull();
+    expect(beta([0.01, Infinity, 0.03], [0.01, 0.02, 0.03])).toBeNull();
+  });
 });

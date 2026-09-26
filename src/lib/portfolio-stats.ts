@@ -369,8 +369,10 @@ export function computeBestWorstPeriods(
 
 // ── 9. computeAlphaBeta ─────────────────────────────────────────────
 export interface AlphaBetaResult {
-  alpha: number;
-  beta: number;
+  /** Null when beta is undefined (see below): alpha is built on beta. */
+  alpha: number | null;
+  /** Null when the benchmark has no dispersion, holds a non-finite value, or n < 2. */
+  beta: number | null;
 }
 
 /**
@@ -381,10 +383,17 @@ export interface AlphaBetaResult {
  * The beta is the ONE shared beta (Phase 166.1 D-17), not a local cov/var. That
  * module treats a benchmark whose dispersion is float residue as constant, so a
  * compounding-NAV constant-yield benchmark (sample sd about 1.3e-16, not 0)
- * reads beta 0 and alpha mean(r) * N, exactly what an all-zero benchmark gives
- * (D-07). A local `> 0` variance guard passed that residue and divided by it,
- * which reported betas of about 1e12. A shared null (constant or NaN benchmark)
- * is answered as 0, the value this function already returned for both.
+ * gets exactly what an all-zero benchmark gets (D-07). A local `> 0` variance
+ * guard passed that residue and divided by it, which reported betas of about
+ * 1e12.
+ *
+ * A null beta stays null, and so does alpha (founder decision D7, 2026-09-26:
+ * a statistic that does not exist renders "—", never 0). Beta is undefined for
+ * a constant benchmark, a benchmark or return series holding a non-finite value,
+ * and fewer than 2 aligned points. This function used to answer all three with
+ * beta 0 and alpha mean(r) * N, a number where the honest answer is an absence;
+ * `computeScenarioBenchmark` screened the constant case itself, but
+ * `AlphaBetaDecomposition` did not.
  *
  * `periodsPerYear` (N) is the annualization basis — 252 (traditional, default,
  * byte-identical to pre-#597) or 365 (crypto) per #597. Only alpha rides the
@@ -397,11 +406,12 @@ export function computeAlphaBeta(
   periodsPerYear = 252,
 ): AlphaBetaResult {
   const n = Math.min(returns.length, benchmark.length);
-  if (n < 2) return { alpha: 0, beta: 0 };
+  if (n < 2) return { alpha: null, beta: null };
 
   const r = returns.slice(0, n);
   const b = benchmark.slice(0, n);
-  const beta = sharedBeta(r, b) ?? 0;
+  const beta = sharedBeta(r, b);
+  if (beta === null) return { alpha: null, beta: null };
   const alpha = (mean(r) - beta * mean(b)) * periodsPerYear;
   return { alpha, beta };
 }

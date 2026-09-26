@@ -98,12 +98,19 @@ function AlphaBetaDecompositionInner({ data }: { data: RiskWidgetData } & BaseWi
       benchmarkReturns,
       annualizationPeriods("crypto"),
     );
+    // Founder decision D7 (2026-09-26): a beta that does not exist (the
+    // equal-weight benchmark has no dispersion, or a return is non-finite) is an
+    // absence. There is no decomposition to draw, and alpha is built on beta, so
+    // both read "—" rather than a beta of 0 that would label the whole return
+    // "alpha".
+    if (alpha === null || beta === null) return { undefinedBeta: true as const };
     const totalReturn = compound(portfolioReturns);
     const benchmarkReturn = compound(benchmarkReturns);
     const betaContribution = beta * benchmarkReturn;
     const residual = totalReturn - alpha - betaContribution;
 
     return {
+      undefinedBeta: false as const,
       alpha,
       beta,
       totalReturn,
@@ -124,6 +131,30 @@ function AlphaBetaDecompositionInner({ data }: { data: RiskWidgetData } & BaseWi
     return (
       <div className="flex h-full items-center justify-center text-sm text-text-muted">
         Insufficient data for alpha/beta decomposition.
+      </div>
+    );
+  }
+
+  if (result.undefinedBeta) {
+    // D7: "—" with no sign colour (DESIGN.md: a "—" never carries a semantic
+    // colour) and no chart, plus one muted line naming why.
+    return (
+      <div className="flex h-full flex-col">
+        <div className="mb-3 flex items-baseline gap-2 px-3 pt-2">
+          <span className="text-xs font-semibold uppercase tracking-wider text-text-muted">
+            Alpha
+          </span>
+          <span
+            className="text-2xl font-metric tabular-nums font-bold text-text-primary"
+            data-testid="alpha-value"
+          >
+            —
+          </span>
+          <span className="text-xs text-text-muted">annualized</span>
+        </div>
+        <p className="px-3 text-xs text-text-muted">
+          Alpha and beta cannot be measured: the benchmark has no dispersion over this window.
+        </p>
       </div>
     );
   }

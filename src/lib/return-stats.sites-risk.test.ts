@@ -83,20 +83,30 @@ const NOISY_B = noisy(N, 1.1, -0.0005);
 
 // ── T9: computeAlphaBeta's beta is the shared beta ─────────────────
 describe("T9 computeAlphaBeta: a constant-yield benchmark gives what an all-zero benchmark gives", () => {
-  it.each(YIELD_IDS)("%s: beta 0 and the all-zero benchmark's alpha", (id) => {
+  // D7 (founder, 2026-09-26): an undefined beta is an absence, so both beta and
+  // alpha are null, exactly as for an all-zero benchmark (D-07's equality holds;
+  // the value it holds at moved from 0 to null).
+  it.each(YIELD_IDS)("%s: beta and alpha null, as for an all-zero benchmark", (id) => {
     const bench = navConstantYield(CONSTANT_YIELDS[id], N);
     const onYield = computeAlphaBeta(NOISY_A, bench, 365);
     const onZero = computeAlphaBeta(NOISY_A, ZEROS, 365);
-    expect(Object.is(onYield.beta, onZero.beta)).toBe(true);
-    expect(onYield.beta).toBe(0);
-    expect(Object.is(onYield.alpha, onZero.alpha)).toBe(true);
+    expect(onYield).toEqual(onZero);
+    expect(onYield).toEqual({ alpha: null, beta: null });
+  });
+
+  it("a non-finite return or fewer than 2 points is an absence too, never beta 0", () => {
+    const withNaN = [...NOISY_A];
+    withNaN[3] = NaN;
+    expect(computeAlphaBeta(withNaN, NOISY_B, 365)).toEqual({ alpha: null, beta: null });
+    expect(computeAlphaBeta([0.01], [0.02], 365)).toEqual({ alpha: null, beta: null });
   });
 
   it("control: a cent-rounded 1% APY benchmark disperses, so its beta is a finite non-zero number", () => {
     const r = CENT_CONTROL.map((v, i) => v + 0.5 * NOISY_A[i]);
-    const { beta } = computeAlphaBeta(r, CENT_CONTROL, 365);
+    const { alpha, beta } = computeAlphaBeta(r, CENT_CONTROL, 365);
     expect(Number.isFinite(beta)).toBe(true);
     expect(beta).not.toBe(0);
+    expect(Number.isFinite(alpha)).toBe(true);
   });
 
   it("a noisy benchmark keeps today's beta and it is exactly the shared beta", () => {
