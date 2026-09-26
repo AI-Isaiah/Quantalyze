@@ -53,6 +53,7 @@ from services.allocated_capital import (
     metrics_day_basis,
     parse_returns_denominator_config,
 )
+from services.dispersion import dispersion_is_residue
 from services.equity.fallback import merge_dq_flags
 from services.position_reconstruction import _normalize_side
 from services.nav_twr import NAV_TWR_GUARD_KEYS
@@ -851,7 +852,8 @@ def _compute_derived_trade_metrics(
                 len(r_multiples) - 1
             )
             std_r = math.sqrt(var_r) if var_r > 0 else 0.0
-            if std_r > 0:
+            # Phase 166.1 D-16: residue std (21 identical 7.7 losses) gave SQN -4.03e16.
+            if not dispersion_is_residue(std_r, mean_r):
                 out["sqn"] = (mean_r / std_r) * math.sqrt(
                     min(len(r_multiples), SQN_TRADE_COUNT_CAP)
                 )
