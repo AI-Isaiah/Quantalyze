@@ -1,9 +1,7 @@
 ---
 phase: 168
-fixed_at: 2026-09-26T00:00:00Z
-review_path:
-  - .planning/phases/168-drboptions-a-deribit-options-account-can-be-ingested-end-to/168-REVIEW.md
-  - .planning/phases/168-drboptions-a-deribit-options-account-can-be-ingested-end-to/168-REVIEW-SFH.md
+fixed_at: 2026-09-26T13:51:02Z
+review_path: .planning/phases/168-drboptions-a-deribit-options-account-can-be-ingested-end-to/168-REVIEW.md
 iteration: 1
 findings_in_scope: 13
 fixed: 11
@@ -72,7 +70,10 @@ twins; settlement likewise).
 its own phrase constant `_ASSIGNMENT_NON_OPTION_PHRASE`. One site closes both twins and removes the twin
 disagreement. `test_site6_spot_named_assignment_refuses` became `test_site6_spot_named_delivery_refuses`:
 the shared guard now fires first for an assignment, so the test stays the pin for the pre-existing
-non-derivative arm on `delivery`. The assignment case is the new parametrised test.
+non-derivative arm on `delivery`. The assignment case is the new parametrised test. Plan anchors:
+`node scripts/verify-plan-anchors.mjs` on the pending `168-03-PLAN.md` reports `OK: 1 plan file(s), no
+stale claims.` The old test name and phrase survive only in completed plan, summary and research
+artifacts, which are historical records.
 **RED:** over TWINS × {perpetual, dated future, spot pair, bare coin}: 6 × `DID NOT RAISE
 LedgerValuationError` and 2 × the native twin's non-derivative wording in place of the new phrase.
 
