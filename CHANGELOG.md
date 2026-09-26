@@ -179,15 +179,20 @@ Review round 2 (`e42d1f551` silent-failure review, `7cc7e4eb9` code review):
   - **`.planning/WINDOWS.md` entry 68.** Two remote paths have never run live over the bridge:
     the recycle's TerminateProcess half and the first `Mt5Client.session_snapshot` read. The first
     live recycle closes it, and only if both are read.
-  - **D-16 and D-17 need founder confirmation.** Under D-16, the FIRST, wedge-causing validate
-    still answers `SIGN_IN_FAILED`. Only retries against an already-wedged terminal get the new
-    code.
+  - **D-16 and D-17 (founder-confirmed after release, see the D-19 bullet below).** Under
+    D-16, the FIRST, wedge-causing validate still answers `SIGN_IN_FAILED`. Only retries against
+    an already-wedged terminal get the new code.
   - **No Sentry alert rule exists yet** for the hourly ERROR re-raise and the capped-recycle ERROR
     (R2-SFH-05). The runbook says so (`754a02152`, `4e22f73f2`). Also booked: a copy read-through
     of the new code on the connect step and the rotate dialog.
   - Inherited criteria 7 (Phase 161's live `undetermined` verdict) and 8 (Phase 164.5.3's live
     credential update) stay open for the founder. `[MT5-VERDICT-SINK-01]` stays deferred under
     its own owner.
+- **Founder rulings after the release commit (D-19, 2026-09-26, `d7bcfd590`).** C4's calibration
+  half is routed to Phase 164.6.6 as `MT5-PROBER-WEDGE-CALIBRATION-01`, and D-16/D-17 are
+  confirmed as shipped; the headline no longer claims a live self-heal. The plan 08 close, the
+  security re-audit (43/43 closed) and the re-verification (`human_needed`) are `120c1e065`,
+  `d4e8db5fb` and `b17c16b34`.
 - **Process.** Context, research, patterns and plans: `337f2827f`, `42b296b8f`, `8288ad458`,
   `3925a55e5`, `65b7b986f`. Plan SUMMARYs and wave notes: `47bb479d5`, `64c318cdd`, `d671e1eb9`,
   `22e2fbb00`, `031891432`, `2e2033dad`, `20422b71f`, `29e010f1d`, `71a8b187f`. Worktree merges:
