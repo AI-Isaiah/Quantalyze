@@ -867,9 +867,13 @@ Plans:
 **Goal:** A merge push to `main` is no slower than before Phase 164.4.2. `test-db-drift` (VAC-08, read-only against shared TEST's migration ledger and function bodies) stops queueing behind `python` and `e2e-seeded` for the advisory key, without weakening VAC-08's verdict and without breaking the ordering against `supabase-migrate.yml`'s `apply-test`.
 **Requirements**: the Phase 164.4.2 speed goal, clauses (a) and (c) of `164.4.2-MEASUREMENT.md`.
 **Depends on:** Phase 164.4.2
-**Plans:** 0 plans
+**Plans:** 3 plans
 
 ⭐ **Founder decision, 2026-09-24 (AskUserQuestion): "Book the phase if it holds."** It held.
+
+⭐ **Founder decision, 2026-09-26 (AskUserQuestion): "Accept it."** On `pull_request` runs, VAC-08 in `test-db-drift` is no longer ordered against a concurrent `apply-test` or a dispatched restore (round-1 finding SFH-01 / WR-01; accepted risk AR-164.4.2.1-01 in SECURITY.md). An overlap can only produce a loud RED on a PR, never a false GREEN on real drift; merge pushes keep the schema-apply wait. Ratified as asked by the verifier's human item 2.
+
+⭐ **Founder decision, 2026-09-25 (AskUserQuestion, Q1): "Judge by the goal."** SC-3's clause (a) is graded as a non-degenerate run-total inside or below 16m18s–18m50s; the strict below-16m18s reading is recorded per run as evidence for Phase 164.9, not as this phase's pass/fail (`164.4.2.1-CONTEXT.md` D-01).
 
 **Evidence.** `164.4.2-MEASUREMENT.md` `## AFTER`, merge-push runs 1–5 (CI `35939061930`, `35943402509`, `35943407413`, `35957479474`, `35958026743`):
 - (a) critical path: FAIL. Non-degenerate run-totals were 18m26s, 32m32s and 32m30s, against a band of 16m18s–18m50s.
@@ -2136,6 +2140,7 @@ Plans:
 
 **Requirements**: TODOS entries `161.1-D1`, DEC-4
 **Depends on:** Phase 164.4.1 (pg-lane with pg_cron). ⚠️ NOT Phase 164.5 — the plan is file-disjoint from it and was lifted whole.
+**Routed here 2026-09-25 (from 164.9.1 review round 1), both latent or loud, both on the terminal-mark / bridge surface this phase owns:** (1) a fan-in child whose parent is still open at enqueue and later ends `failed_final` stays in `done_pending_children` forever (no caller passes parents today); (2) a second `match_decisions` delete can raise 23505 through the ON DELETE SET NULL cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null` (pre-existing, fails loudly, the admin decisions route issues these deletes). (3) the fan-in parent lock `FOR SHARE ... ORDER BY id` can deadlock (40P01) against `mark_compute_job_done` in a diamond (a child whose parents include another waiting child); latent, recorded in M1's header — whoever passes parents must treat 40P01 as retryable on both the enqueue and the worker's mark path. (4) **Routed 2026-09-25 from the 164.9.1 pre-push silent-failure-hunter (MEDIUM, pre-existing, NOT introduced by 164.9.1): one `failed_retry` + `pending` pair on the same `(kind, api_key_id)` wedges the WHOLE claim.** `claim_compute_jobs` and `claim_compute_jobs_with_priority` rank `pending` and `failed_retry` candidates together, and their C39 / NEW-C39-01 `NOT EXISTS` guard excludes a partition only when it already holds a `running` or `done_pending_children` row — never a `pending` one. The enqueue look-up (`_enqueue_compute_job_internal`) treats only `pending`/`running`/`done_pending_children` as in-flight, so it inserts a fresh `pending` beside a `failed_retry`. When the `failed_retry` wins `rn_k` (earlier `next_attempt_at`, or the `pending` is not yet due), the batch `UPDATE ... SET status = 'running'` puts two rows into `compute_jobs_one_inflight_per_kind_api_key` and raises 23505 — and because it is ONE statement, no job of ANY kind is claimed until the pair clears. Loud, not silent: every claim call errors. The same guard shape exists for the portfolio, strategy and allocator partitions against their sibling indexes; audit all four. **Suggested fixes (not decided):** (a) add `'pending'` to each guard's `x.status` list with `x.id <> ranked.id`, in BOTH claim RPCs — a `pending` candidate can have no `pending` sibling under the index, so this only removes the colliding `failed_retry`; (b) and/or make the enqueue look-up fold into, or supersede, an existing `failed_retry` for the partition instead of inserting beside it; (c) whichever is chosen, a `RED-UNDER`-annotated SQL gate on the lane must pin it. **Measured repro, local-stack lane only (`scripts/local-stack/run.sh up`, loopback DSN from its `.stack-env`, then `down`):** in one transaction that ends in `ROLLBACK`, with `SET LOCAL session_replication_role = replica` so a synthetic `api_key_id` needs no FK rows, insert two `poll_allocator_positions` rows sharing one `api_key_id` — a `failed_retry` with `next_attempt_at = now() - 10 min` and a `pending` with `next_attempt_at = now() + 10 min` — reset the role to `origin`, then call `claim_compute_jobs(10, 'repro-worker')` (and, after a savepoint rollback, `claim_compute_jobs_with_priority(10, 'repro-worker', NULL::boolean, NULL::text[], NULL::text[])`; the two-arg call is ambiguous across its overloads). Both raised `duplicate key value violates unique constraint "compute_jobs_one_inflight_per_kind_api_key"` on 2026-09-25 at the 164.9.1 release head.
 **Plans:** 1 plan (lifted from Phase 164.5 plan 08, unmodified)
 
 Plans:
@@ -2308,9 +2313,13 @@ Plans:
 
 **Goal:** A client can add an MT5 key, repeatedly, without taking MT5 validation down for
 everyone — and if the terminal does wedge, it recovers WITHOUT a human.
-**Requirements**: TBD
+**Requirements**: 164.6.5-C1 (root cause named or honestly open), 164.6.5-C2 (supervision +
+IPC liveness + auto-login-preserving restart), 164.6.5-C3 (the heal ACTS on `ipc_fault`),
+164.6.5-C4 (the prober actually measures the terminal), 164.6.5-C5 (the wizard stops promising a
+retry that cannot work), 164.6.5-C6 (`correlation_id` per request), 164.6.5-C7 (the algo-trading
+settings landmine is PINNED, not ticked)
 **Depends on:** Phase 164.6 (nothing blocking; the fault is live in PROD today)
-**Plans:** 0 plans
+**Plans:** 8/8 plans executed (verification `gaps_found`; the phase is NOT transitioned to complete)
 
 ⛔ **BOOKED FROM A LIVE PRODUCTION INCIDENT, measured end-to-end 2026-09-21 by the founder and the
 orchestrator together.** Everything below is a reading, not an inference. Founder's words:
@@ -2379,6 +2388,7 @@ already_authorized` in 33 ms. **Outage 11:02:38Z → 12:41:46Z = 1h39m.**
    same container worked fine with a WORKSPACE-scoped token — so `mt5-ipc-timeout`, the
    classification `MT5-WEDGE-OBS-01` was closed on, has **never once fired in production**.
    ⛔ REQUIRED HERE, not deferred: without it this phase cannot honestly prove criterion 1 held.
+   ⭐ **Founder ruling 2026-09-26 (AskUserQuestion, "Ratify: move to 164.6.6"):** the calibration half is routed to Phase 164.6.6 as `MT5-PROBER-WEDGE-CALIBRATION-01`; the sentence above is kept as lineage. D-16/D-17 founder-confirmed the same day (CONTEXT D-19).
    Calibrate against a REAL wedge, not only a fixture.
 5. The wizard stops telling the user to retry when retry cannot work. Shipped copy claims a
    *"temporary exchange issue or a network blip"* and says *"Try again in a moment"* — measured
@@ -2414,9 +2424,103 @@ nothing in the repo asserts it.
 ⛔ **THIS PHASE DOES NOT FIX THE EVICTION** — that is Phase 164.6.6. Do not let "MT5 is back" read
 as "the finding is closed": the outage was the symptom, the shared mutable terminal is the defect.
 
+⭐ **D-05 IS CLOSED BY THE PLANNER, with the reason it beat the other candidates (plan 02 task 1 is
+the founder's ratification gate).** The remedy is **external supervision over the rpyc channel the
+analytics-service already holds**: the liveness DECISION is taken by the credential-free IPC
+detector that already exists, and the ACTION is a process-level recycle of the Wine-hosted terminal
+inside the same container, under the same Wine prefix and the same named volume.
+⛔ **Wrapping the image was refused for a measured reason, not a cost one:** an s6 `longrun`
+supervises EXIT, and there was NO exit — the process ran and its UI answered a human for the whole
+1h39m. A bare longrun would have stayed quiet through the entire outage, so Option 1 only works if
+it ALSO builds Option 2's IPC detector, inside an image we would then own. ⛔ A Railway healthcheck
+was refused because the image exposes no HTTP surface and the rpyc bridge may never be exposed, so
+it cannot satisfy the IPC-probe fence at all.
+⚠️ **The cost is real and is booked here, not buried:** this makes a documented unauthenticated
+arbitrary-remote-code channel (Phase-134 `T-134-03`) a load-bearing production recovery path. It is
+paid for with ONE narrow verb over a COMMITTED, non-interpolated remote-source constant — the shape
+`_REMOTE_MATERIALIZE_SRC` already ships in the same file — plus a threat model and
+`/gsd-secure-phase`.
+
+⭐ **D-09 IS CLOSED AS "BROADEN THE REMEDY", NOT "SPLIT THE CLASSIFIER", for three measured
+reasons:** both `-10005` causes produce the identical `initialize()` code and the probe is
+read-only by hard constraint; the arm is pinned IMPORT-FREE by the mutation harness, so external
+correlation cannot live in it; and the runner requires every declared kind to carry a RED FIXTURE
+that fires it, so with no discriminator a new kind would need a fabricated fixture — the vacuous
+gate this milestone exists to remove.
+
+⭐ **D-12/D-13's STAGE IS THE INITIAL VALIDATE**, picked on evidence: the measured incident answered
+**HTTP 424**, and on this seam only the flat venue-transient shape raised inside
+`_validate_mt5_key_probe` emits a 424. The finalize-time scope arm answers 502 from the Next route
+and never reaches that seam.
+
+⭐ **D-14 IS CLOSED AS KEEP-ALONGSIDE, NOT REPLACE**, and the subject was corrected: the rendered id
+is `getWizardCorrelationId()` in `src/lib/wizard/wizard-correlation.ts` (a per-PAGE-LOAD memo), not
+the localStorage session id CONTEXT.md and PATTERNS.md pointed at. The page-load id keeps its name
+and its telemetry join; a fresh per-REQUEST id is what the server logs and what the user is shown.
+
+⛔ **A CONTRADICTION IN THE RECORD, FOUND AT PLANNING TIME AND OWNED BY PLAN 06.** Five places in
+this repo state the gateway re-clears *"Allow algorithmic trading"* on EVERY account change
+(founder-measured 2026-08-13), and one of them is USER-FACING copy. CONTEXT.md D-15 states,
+measured 2026-09-22, that the box is UNCHECKED. Both cannot be true of the same checkbox. ⛔ Plan 06
+reconciles them against a live reading and corrects whichever side is stale — it does NOT average
+them.
+
+⭐ **OUTCOME, PER CRITERION — recorded 2026-09-26 by plan 08 from the plan SUMMARYs and
+`164.6.5-VERIFICATION.md` (`gaps_found`, 5/7), not from intent.** MET means the criterion's own
+wording holds. OPEN means it does not yet, and names who closes it and when. ⛔ No criterion
+below was reworded to read as met.
+
+| req | criterion | outcome | routed residual (owner · trigger) |
+|---|---|---|---|
+| C1 | root cause of the switch wedge found and named | **OPEN** (D-03 success path: recorded open, never claimed) | `TODOS.md` `MT5-SWITCH-WEDGE-CAUSE-01` · Phase 164.6.6 · the next `-10005` with Journal silence after `disconnected`, read BEFORE any restart |
+| C2 | the terminal restarts without a human, auto-login preserved | **OPEN, live half.** Shipped: `Mt5Client.recycle_terminal_process`, driven by the credential-free IPC detector. Never run live over the bridge. | `.planning/WINDOWS.md` entry 68 (widened 2026-09-26 to name the first live `Mt5Client.session_snapshot` read as well as the terminate step) · founder, post-deploy · the first live recycle |
+| C3 | the heal ACTS on `ipc_fault` | **MET** (offline behaviour tests; its live run is C2's residual) | none |
+| C4 | the prober's MT5 arm actually measures the terminal, calibrated against a REAL wedge | **OPEN, calibration half.** D-10 (measuring) is answered: scheduled `prod-prober` run 36134914962 (head `01dcf1cc`) onward reads the terminal. D-11 (real-wedge calibration) was not done. | `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01` (D-11) · Phase 164.6.6 · the next live `-10005`, captured before the heal recycles it |
+| C5 | the wizard stops promising a retry that cannot work | **MET** | none. ⚠️ D-16/D-17 (the merge with Phase 167) await founder confirmation: under D-16 the first, wedge-causing validate still answers `SIGN_IN_FAILED` |
+| C6 | `correlation_id` per request | **MET** | none |
+| C7 | the algo-trading settings landmine is PINNED, not ticked | **MET** | none |
+| inherited 7 | (Phase 161) a live `undetermined` MT5 verdict names the right option | **OPEN** | founder UAT · the next live MT5 validate that lands `undetermined`; there is still no durable sink, so the reading must be captured as it happens |
+| inherited 8 | (Phase 164.5.3) the end-to-end live MT5 credential update | **OPEN** | founder UAT · the next MT5 key the worker marks `revoked` or `error`; founder-only, no agent enters a real credential |
+
+⚠️ **Also open and named, outside the criteria:** a Sentry alert rule for the hourly ERROR
+re-raise and the capped-recycle ERROR (review finding R2-SFH-05), and a copy read-through of
+`KEY_MT5_TERMINAL_UNRESPONSIVE` on the connect step and the rotate dialog.
+
+⛔ **THE SCOPE FENCE, restated so it survives the close.** This phase did NOT fix the eviction:
+that is Phase 164.6.6. "MT5 is back" must not read as "the finding is closed". The outage was
+the symptom; the shared mutable terminal is the defect. ⛔ `[MT5-VERDICT-SINK-01]` stays deferred
+and named under its own owner (Phase 164.6 criterion 12). This phase did not absorb it.
+
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.6.5 to break down)
+- [x] 164.6.5-01-PLAN.md — C1: the asymmetry, named or honestly open; the runbook's `-10005`
+      differential procedure; `MT5-WEDGE-OBS-01` refined (⛔ not reopened). Owns `TODOS.md` and
+      `docs/runbooks/mt5-go-live.md` for the whole phase. [wave 1, has checkpoints]
+- [x] 164.6.5-02-PLAN.md — ⭐ THE TRACER. C2: the D-05 ratification gate, the live A1 spike, and the
+      narrow credential-free recycle verb on `Mt5Client`. [wave 1, has checkpoints]
+- [x] 164.6.5-03-PLAN.md — C4: the `-10005` remedy stops asserting one cause; a CI gate ties the
+      arm's declared environment to the workflow's supplied environment; live proof + real-wedge
+      calibration. [wave 1, has checkpoints]
+- [x] 164.6.5-04-PLAN.md — C5: mint a distinct MT5 wire code and wizard code, honest
+      non-recoverable copy, and the arrival/roster gates that keep both vocabularies agreeing.
+      ⛔ `KEY_NETWORK_TIMEOUT` is neither deleted nor widened. [wave 1]
+- [x] 164.6.5-05-PLAN.md — C3: the heal ESCALATES on `ipc_fault` — five readings, ONE recovery
+      attempt — inside the module's one lease, structurally unable to raise. [wave 2, depends 02]
+- [x] 164.6.5-06-PLAN.md — C7: reconcile the five-place recorded belief against a live reading, and
+      make the observable consequence fail LOUDLY. ⛔ Never ticks the box. [wave 2, depends 04,
+      has checkpoints]
+- [x] 164.6.5-07-PLAN.md — C6: a per-request correlation id on the wire and on the screen, the
+      per-page-load id preserved beside it, closed as a class across every wizard envelope
+      surface. [wave 2, depends 04]
+- [x] 164.6.5-08-PLAN.md — close: per-criterion outcomes (MET or OPEN with a routed residual) in
+      both ledgers, then ONE release commit carrying the version bump and the CHANGELOG entry.
+      [wave 3, depends on all]
+
+⭐ **Merge with Phase 167, 2026-09-23 (D-16/D-17 in `164.6.5-CONTEXT.md`, orchestrator decisions
+awaiting founder confirmation):** 167's sign-in refusal check runs BEFORE this phase's IPC check,
+so a `-10005` at the sign-in step stays `SIGN_IN_FAILED`. Other IPC faults move from a retryable
+424 to the non-retryable `MT5_TERMINAL_UNRESPONSIVE` 500. `KEY_MT5_TERMINAL_UNRESPONSIVE` joins
+`DASHBOARD_DIALOG_ROUTE_CODES` (in scope).
 
 ### Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session (INSERTED)
 
@@ -2425,6 +2529,8 @@ on the shared terminal — and a shared-terminal outage reaches a human without 
 **Requirements**: TBD
 **Depends on:** Phase 164.6.5 (availability first: this phase changes the terminal's ownership model,
 which is only safe once validation stops wedging it)
+**Owns (2026-09-26, from 164.6.5 plan 08):** `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01` — Phase 164.6.5 D-11, OPEN: the prod-prober's `-10005` classification (`mt5-ipc-timeout`) has never been calibrated against a REAL wedge; its fixture was constructed, not captured. Trigger: the next live `-10005`, captured BEFORE the heal recycles the terminal (a founder-supervised induced wedge also qualifies). Gate: a scrubbed real-wedge transcript committed under `scripts/prod-prober/fixtures/mt5/`, registered for the kind it actually produced, self-test and wiring suite green. ⛔ A hand-written fixture is not a close. ⚠️ 164.6.5's own heal can recycle a wedge before a scheduled prober run reads it.
+**Owns (2026-09-25, from 164.6.5 plan 01):** `TODOS.md` `MT5-SWITCH-WEDGE-CAUSE-01` — why some account switches on the shared terminal wedge it (`-10005`, Journal silent after `disconnected`) and others do not. Verdicts so far: same-vs-different account REJECTED, terminal self-update and same-vs-different broker server UNDECIDED. Closes only on evidence captured at the next wedge BEFORE any restart; a restart clearing the symptom is not a close.
 **Plans:** 0 plans
 
 ⛔ **SAME INCIDENT AS 164.6.5, DIFFERENT DEFECT.** 164.6.5 makes validation stop breaking the
@@ -2868,18 +2974,35 @@ Phase 164.9 plan 10 normalised shared TEST's `analytics_service_url` row to a lo
 
 **Requirements**: `[164.9-FANIN-STATUS-NEVER-SET]` (`TODOS.md`, `## FIX NOW`), `[164.9-LIVEDB-RESIDUE-RPC-AND-INTENT]`, `[164.9-TEST-ANALYTICS-URL-REARM]`
 **Depends on:** Phase 164.9
-**Plans:** 0 plans
+⭐ **Founder decision 2026-09-24 (AskUserQuestion): D-23 "Restore it"** — migration 075's `api_key_disconnected` refusal (409) is restored. FC-3's blocker (the baseline re-dump) cleared with v0.90.0.1 (#855).
+**Amended 2026-09-25 (review round 1):** D-04 now departs from strict seven-arg parity: M1 refuses a NULL/missing/failed parent (22023) and starts a child `pending` when its parents are all done (164.9.1-CONTEXT D-04). The normalize self-test runs in the dispatch-only restore job, not on PRs — accepted: that job runs it before every live restore, which is where it guards. A ci.yml PR job for it needs PostgreSQL server binaries and is not in this phase.
+**Plans:** 14 plans (10 waves; planned 2026-09-24, plan-checker passed after 3 revision rounds, 1 info advisory open)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.1 to break down)
+⚠️ 164.4.2 pins (ledger counts, lane image, job names, mutex-key counts) are re-measured by whichever of 164.4.2 / 164.9.1 merges second; 164.4.2 is already on `main` as #842, so plan 01 re-measures them after bringing `main` in.
+
+- [ ] 164.9.1-01-PLAN.md — wave 1 — bring `main` (incl. 164.4.2) in, re-measure pins, record the pre-fix harm verdict on the local lane (criterion 1)
+- [ ] 164.9.1-02-PLAN.md — wave 2 — tracer: M1 (ten-arg `_enqueue_compute_job_internal` computes and inserts the initial status), P12 green by execution (criteria 2, 3)
+- [ ] 164.9.1-03-PLAN.md — wave 3 — P12 calibrated neuter -> RED -> restore; dedupe-gate twins re-pointed (criterion 6)
+- [ ] 164.9.1-04-PLAN.md — wave 2 — single-sourced analytics-URL normalisation emitter (REARM)
+- [ ] 164.9.1-05-PLAN.md — wave 3 — restore transaction concatenates the emitter output, identical in both modes (REARM)
+- [ ] 164.9.1-06-PLAN.md — wave 4 — restore static pins re-measured (REARM)
+- [ ] 164.9.1-07-PLAN.md — wave 4 — M2: `request_allocator_holdings_sync` regains 067's in-flight prefetch and 075's disconnected refusal (criterion 4)
+- [ ] 164.9.1-08-PLAN.md — wave 5 — sync route maps the disconnected refusal to 409 (D-23)
+- [ ] 164.9.1-09-PLAN.md — wave 5 — M3 catalog comments + XOR arm asserts the current bridge_outcomes invariant (criterion 5)
+- [ ] 164.9.1-10-PLAN.md — wave 6 — live-DB ledger shrinks by three, ceiling lowered in the same commit; whole-phase gate sweep
+- [ ] 164.9.1-11-PLAN.md — wave 7 — three-reviewer gate round 1 (orchestrator dispatches; not autonomous)
+- [ ] 164.9.1-12-PLAN.md — wave 8 — three-reviewer gate round 2 + gate re-run (not autonomous)
+- [ ] 164.9.1-13-PLAN.md — wave 9 — ⛔ FOUNDER CHECKPOINT FC-2 (merge order) + re-sync onto `main`
+- [ ] 164.9.1-14-PLAN.md — wave 10 — release record; ⛔ FOUNDER CHECKPOINTS FC-1 (merge = auto-apply TEST then PROD) and FC-3 (live restore dispatch, not a completion gate)
 
 ### Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD (INSERTED)
 
 **Goal:** A shared-TEST restore rebuilds its reference rows in the state PROD holds them. The reference-data replay also replays a migration's top-level `UPDATE` when it targets a `public` table the replay has just filled. Those tables are empty after `DROP SCHEMA public CASCADE`, so such an UPDATE can reach only rows the replay itself wrote, never anyone's live data.
 **Requirements**: TODOS `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` (owned here); unblocks Phase 164.9 criterion 8 (`[164.9-CRIT8-RESTORE-DISPATCH-RECORD]`).
 **Depends on:** Phase 164.9
-**Plans:** 0 plans
+**Plans:** 5 plans
 
 ⭐ **Founder decision, 2026-09-24 (AskUserQuestion): "Yes, new phase".**
 
@@ -3227,11 +3350,15 @@ Plans:
 **Success criteria:** (1) the mismatch is reproduced first (a computed row whose payload does not build) on the local lane, or the phase shrinks; (2) buildability is recorded where the owner lane can read it (e.g. a bridge-maintained column written by the compute path), or decided server-side for the list; (3) the list, the share note and the share page agree for that row, proven by a test observed RED against today's code; (4) any migration passes the three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before merge, because merge auto-applies to PROD. **Added 2026-09-24 (167.2 review R2-L4(b), data-integrity):** (5) the key-card Delete warning cannot be silenced by an RLS-filtered membership read — a `strategy_keys` read that comes back empty with no error because of a policy regression shows no composite warning, and the delete then cascades a composite's member away; the guard belongs server-side (a migration), so it lands here with WR-02.
 **Requirements**: TBD
 **Depends on:** Phase 167.2
-**Plans:** 0 plans
+**Note 2026-09-25 (planning, 167.2.1-CONTEXT.md D-01):** criterion 5's "(a migration)" is superseded. The guard is a server route, `GET /api/keys/[id]/memberships`, which checks ownership with an explicit equality and reads on the service role. It needs no migration, so criterion 4 is vacuous. The SECURITY DEFINER RPC in `167.2.1-RESEARCH.md` stays the recorded fallback. Reversible.
+**Plans:** 4 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 167.2.1 to break down)
+- [ ] 167.2.1-01-PLAN.md — BUILDPROBE: reproduce on the local lane, split resolve from build, export hasBuildableSeries + probeFactsheetBuildable with a parity table (wave 1)
+- [ ] 167.2.1-02-PLAN.md — MEMBERSGUARD: GET /api/keys/[id]/memberships on the service role after an explicit owner check; the key card fails closed to KCS-DELETE-UNCHECKED (wave 1)
+- [ ] 167.2.1-03-PLAN.md — LISTTRUTH: /strategies probes computed rows and shows the D-02 unbuildable note, RED first (wave 2)
+- [ ] 167.2.1-04-PLAN.md — OWNERNOTE: the owner factsheet's S7 note uses the same derivation, and the D-03 TODOS entry (wave 3)
 
 ### Phase 168: DRBOPTIONS — a Deribit options account ingests end to end
 
@@ -3259,11 +3386,14 @@ Plans:
 
 ### Phase 169: PAGETRUTH — every number agrees across pages and with its own record length
 
+⭐ **ROUTED HERE 2026-09-26 (Phase 167.2.1 CONTEXT D-07, verifier warning):** a composite whose `csv_daily_returns` read fails transiently is cached as a null payload on the public factsheet until the `unstable_cache` TTL, because `readCompositeFactsheet` cannot tell a read error from an empty composite. 167.2.1 fixed the single-key half (WR-02, `FactsheetReadError`). The composite half needs a distinguishable read error from `readCompositeFactsheet` and a throw in the public cache callback, with a red-first test. After the 2026-09-26 split of Phase 169 it belongs to the factsheet-truth phase.
+
 **Goal:** Every number a page shows agrees with the same number on every other page and with the length of the record it describes. Each contradiction below is traced to ONE source of truth and fixed there, not patched per page.
 **Founder decision, 2026-09-25 (AskUserQuestion):** the session QA sweep and the 2026-09-24 layout notes book as TWO phases; this numbers phase ships FIRST, Phase 170 PAGECOPY second. Phase 167.1.2 ACCOUNTTRUTH already owns the Allocations equity curve, Sharpe beside a negative return, the Scenario zero weights/UUID/$0 total, and the holdings total; they are EXCLUDED here.
 **Evidence:** the 2026-09-25 in-depth QA sweep of every page in the logged-in account (14 data-integrity findings) and the 2026-09-24 visual UAT. Counts only here; the reports hold no identifiers and are not tracked.
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** none in code. Plan after 167.1.2 plan 01 (HIDE) so the two do not edit the same Allocations widgets at once.
+**Routed in, 2026-09-25 (Phase 167.2.1 D-03):** the discovery detail page (`src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx`) assembles the factsheet builder a second time. It calls `resolveDailyReturnSeries`, `readCompositeFactsheet`, `readSingleKeyBasisOpts` and `buildFactsheetPayload` itself instead of `fetchAndBuildPayload`. That is a drift risk on a factsheet number surface, not a false claim today: it serves published rows only and falls back to the honest KCS-10 sentence. Phase 167.2.1 splits the builder into one shared resolve stage (its D-04); folding this page onto it belongs here, beside SC4. Backlog entry: `[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` in `TODOS.md`, written by Phase 167.2.1 plan 04.
 
 ## Success Criteria
 

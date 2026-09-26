@@ -39,11 +39,14 @@
 // ⛔ SL-1 — THIS MODULE HAS NO CACHE REACH, AND THAT IS THE STRUCTURAL ARGUMENT.
 // It imports `@/lib/factsheet/fetch-and-build-payload` and does NOT import
 // `factsheet/[id]/v2/page.tsx`, so `buildFactsheetPayloadCached` is not
-// reachable from here at all. That matters because the effective
-// `unstable_cache` key on the id route is id-ONLY: a viewer-dependent payload
-// routed through that wrapper would be served to every subsequent ANONYMOUS
-// visitor to `/factsheet/<id>` for the full 3600s TTL, silently, with the
-// poisoning request being the owner's own and therefore rendering correctly.
+// reachable from here at all. That matters because the `unstable_cache` key on
+// the id route carries no viewer: its `keyParts` are the id and the row's
+// `computed_at` only (`buildFactsheetPayloadCached`; 167.2.1-REVIEW WR-02 made
+// `computed_at` a real key member, and before that the key was the id alone).
+// A viewer-dependent payload routed through that wrapper would be served to
+// every subsequent ANONYMOUS visitor to `/factsheet/<id>` until `computed_at`
+// moves or the 3600s TTL runs out, silently, with the poisoning request being
+// the owner's own and therefore rendering correctly.
 // ⛔ Do not "reuse the cache for speed" here. Do not generalise the wrapper.
 
 import { redirect } from "next/navigation";

@@ -2072,6 +2072,8 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * why at length: an expectation built by reading the subject is an oracle
    * that cannot fail.
    *
+   * 94 -> 95 (164.6.5 / criterion 5): `KEY_MT5_TERMINAL_UNRESPONSIVE` added.
+   *
    * ⚠️ 94 → 95 (167-CREDTRUST / plan 01, D-05, D-07). ONE entry —
    * `KEY_SIGN_IN_FAILED`, the honest answer to the wire code the narrowed
    * MT5 `except Mt5ClientError` transient tail raises, which until now had
@@ -2090,6 +2092,18 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * 95 was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 95 to be
    * 94"), never counted off the table.
    *
+   * ⚠️ 95 → 96 (MERGE 2026-09-23, origin/main into
+   * feat/164.6.5-mt5validatewedge). BOTH additions above landed
+   * independently and each moved this pin 94 → 95 on its own branch:
+   * `KEY_MT5_TERMINAL_UNRESPONSIVE` (164.6.5) and `KEY_SIGN_IN_FAILED`
+   * (167). The merged table holds both, and the value was READ OFF
+   * THIS GUARD'S OWN FAILURE MESSAGE after the merge, never counted:
+   * "expected 96 to be 95". Destructive-scan reasoning re-run for the
+   * pair: `KEY_MT5_TERMINAL_UNRESPONSIVE` carries `["request_call"]`,
+   * `KEY_SIGN_IN_FAILED` carries `["request_call", "expand_log"]`;
+   * neither holds `start_fresh`, so both sit outside the scanned
+   * destructive population.
+   *
    * ⚠️ 95 → 96 (WIZRESYNC review round 2, SFH HIGH-1). ONE entry —
    * `SUBMITTED_ANALYTICS_NOT_QUEUED`, finalize-wizard's answer when the
    * promotion committed and the analytics dispatch after it failed.
@@ -2106,8 +2120,18 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    *     one that deletes the draft.
    * 96 was READ OFF THIS GUARD'S OWN FAILURE MESSAGE in CI run 36063849235
    * ("expected 96 to be 95"), never counted off the table.
+   *
+   * ⚠️ 96 → 97 (MERGE 2026-09-26, origin/main into
+   * feat/164.6.5-mt5validatewedge, plan 164.6.5-08). The two "95 → 96"
+   * notes above each moved this pin on their own line of history: the
+   * first counts `KEY_MT5_TERMINAL_UNRESPONSIVE` + `KEY_SIGN_IN_FAILED`,
+   * the second `KEY_SIGN_IN_FAILED` + `SUBMITTED_ANALYTICS_NOT_QUEUED`.
+   * The merged table holds all three additions, and the value was READ
+   * OFF THIS GUARD'S OWN FAILURE MESSAGE after the merge, never counted.
+   * Destructive-scan reasoning for the set is unchanged: none of the three
+   * carries `start_fresh`, so all sit outside the scanned population.
    */
-  const EXPECTED_TABLE_SIZE = 96;
+  const EXPECTED_TABLE_SIZE = 97;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2652,6 +2676,8 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * 164.5.3-02 left, and 94 was READ OFF THE TWIN GUARD'S FAILURE MESSAGE
    * ("expected 94 to be 93") rather than counted off the table.
    *
+   * 94 -> 95 (164.6.5 / criterion 5): `KEY_MT5_TERMINAL_UNRESPONSIVE` added.
+   *
    * ⚠️ 94 → 95 (167-CREDTRUST / plan 01, D-05, D-07), for `KEY_SIGN_IN_FAILED`.
    * THIS guard is the banned-claims honesty scan, so its question is a
    * different one from its twin's, and the entry was walked against all four
@@ -2669,6 +2695,16 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    *     this arm, so the copy does not assert it).
    * 95 was READ OFF THE TWIN GUARD'S FAILURE MESSAGE ("expected 95 to be
    * 94") rather than counted off the table.
+   *
+   * ⚠️ 95 → 96 (MERGE 2026-09-23, origin/main into
+   * feat/164.6.5-mt5validatewedge). BOTH additions above landed
+   * independently and each moved this pin 94 → 95 on its own branch:
+   * `KEY_MT5_TERMINAL_UNRESPONSIVE` (164.6.5) and `KEY_SIGN_IN_FAILED`
+   * (167). The merged table holds both, and the value was READ OFF
+   * THIS GUARD'S OWN FAILURE MESSAGE after the merge, never counted:
+   * "expected 96 to be 95" (the twin guard read the same). Each
+   * entry's own honesty walk is recorded in its branch's note above;
+   * the scan below runs over both.
    *
    * ⚠️ 95 → 96 (WIZRESYNC review round 2, SFH HIGH-1), for
    * `SUBMITTED_ANALYTICS_NOT_QUEUED`. THIS guard is the banned-claims honesty
@@ -2690,8 +2726,16 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    *     same code must meet the same precondition.
    * 96 was READ OFF THIS GUARD'S OWN FAILURE MESSAGE in CI run 36063849235
    * ("expected 96 to be 95") rather than counted off the table.
+   *
+   * ⚠️ 96 → 97 (MERGE 2026-09-26, origin/main into
+   * feat/164.6.5-mt5validatewedge, plan 164.6.5-08). The two "95 → 96"
+   * notes above were written on separate lines of history; the merged
+   * table holds `KEY_MT5_TERMINAL_UNRESPONSIVE`, `KEY_SIGN_IN_FAILED` and
+   * `SUBMITTED_ANALYTICS_NOT_QUEUED` together. The value was READ OFF THIS
+   * GUARD'S OWN FAILURE MESSAGE after the merge (the twin guard read the
+   * same). Each entry's honesty walk is recorded in its own note above.
    */
-  const EXPECTED_TABLE_SIZE = 96;
+  const EXPECTED_TABLE_SIZE = 97;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -4173,6 +4217,111 @@ describe("[153.6-06 / PARITY-05] the probe-failure pair renders opposite control
     const copy = formatKeyError("KEY_SCOPE_CHECK_UNREADABLE");
     expect(copy.actions).not.toContain("start_fresh");
     expect(copy.actions).not.toContain("try_another_key");
+  });
+});
+
+/**
+ * [164.6.5 / criterion 5] `KEY_MT5_TERMINAL_UNRESPONSIVE` — the wedged-terminal
+ * arm (D-12/D-13).
+ *
+ * ⭐ THE ORACLE IS `buildEnvelope`'s DERIVATION, never the `actions` array —
+ * same convention the PARITY-05 block above states and follows. The claim
+ * under test is "no Retry control renders", decided by `buildEnvelope` reading
+ * `actions` against `RECOVERABLE_ACTIONS`, never by reading the array back.
+ */
+describe("[164.6.5 / criterion 5] the wedged-terminal arm renders honest, non-retry copy", () => {
+  it("the new code derives NON-recoverable — no Retry control renders", () => {
+    const envelope = buildEnvelope("KEY_MT5_TERMINAL_UNRESPONSIVE", "corr-mt5-1");
+    expect(
+      envelope.recoverable,
+      "⛔ PROVEN-ABLE-TO-FAIL (2026-09-22): adding `clear_and_retry` to this " +
+        "code's `actions` in wizardErrors.ts and re-running this suite flips " +
+        "this assertion to FAIL (RED observed), restored via a `cmp`-verified " +
+        "byte backup — see the SUMMARY. A wedged terminal cannot be cleared by " +
+        "resubmitting the same form; a Retry control here would be exactly the " +
+        "'try again in a moment' lie the measured 2026-09-21 incident exists " +
+        "to remove.",
+    ).toBe(false);
+  });
+
+  it("the generic transport code (KEY_NETWORK_TIMEOUT) is byte-unchanged — D-12", () => {
+    // ⛔ D-12: this arm must NOT delete or widen the honest transport code.
+    // KEY_NETWORK_TIMEOUT stays correct for a genuine transport failure, where
+    // a retry really can succeed.
+    const envelope = buildEnvelope("KEY_NETWORK_TIMEOUT", "corr-mt5-2");
+    expect(envelope.recoverable).toBe(true);
+    const copy = formatKeyError("KEY_NETWORK_TIMEOUT");
+    expect(copy.title).toBe("We could not reach the exchange.");
+  });
+
+  it("the copy does not instruct a retry and does not promise an automatic recovery", () => {
+    // ⛔ D-13: the copy must not promise a self-heal that D-05 (a separate,
+    // concurrent plan) may not have shipped when this renders. Expressed as a
+    // property of what the copy DOES say — a bare grep for an absent phrase
+    // goes green the moment someone rewords it, so this also asserts the
+    // POSITIVE half: the copy must say a LATER attempt can succeed.
+    //
+    // ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1 / WR-05): the positive
+    // half used to be "the copy must say the draft is safe". That sentence is
+    // now gated to the connect step (the rotate-secret dialog has no draft), so
+    // it is asserted in the surface case below instead. The copy also used to
+    // claim PERMANENCE, which was false for -10004 (a redeploy clears it) and
+    // for the heal's own relaunch window; those phrases are now banned too.
+    const copy = formatKeyError("KEY_MT5_TERMINAL_UNRESPONSIVE");
+    const haystack = [copy.title, copy.cause, ...copy.fix]
+      .join("   ")
+      .toLowerCase();
+    for (const banned of [
+      "try again",
+      "in a moment",
+      "will recover",
+      "should recover",
+      "automatically",
+      "self-heal",
+    ]) {
+      expect(
+        haystack.includes(banned),
+        `The wedged-terminal copy says "${banned}" — a retry instruction or a ` +
+          `self-heal promise this arm exists to remove.`,
+      ).toBe(false);
+    }
+    for (const permanence of [
+      "will not clear",
+      "nothing you do",
+      "nothing you can do",
+    ]) {
+      expect(
+        haystack.includes(permanence),
+        `The wedged-terminal copy says "${permanence}" — a permanence claim ` +
+          `that is false for -10004 and for the heal's relaunch window (WR-05).`,
+      ).toBe(false);
+    }
+    // The POSITIVE half: not now, but not never.
+    expect(haystack).toContain("a later attempt can succeed");
+  });
+
+  it("the draft sentence renders on the connect step and nowhere that names no surface", () => {
+    // 164.6.5 review round 1 / WR-05 + CR-02. The same code reaches the
+    // rotate-secret dialog, which has no draft and names no surface.
+    const connect = formatKeyError("KEY_MT5_TERMINAL_UNRESPONSIVE", {
+      surface: "connect",
+    });
+    expect(connect.fix).toContain("Your draft is saved.");
+    const noSurface = formatKeyError("KEY_MT5_TERMINAL_UNRESPONSIVE");
+    expect(noSurface.fix.join(" ")).not.toMatch(/draft/i);
+    // Non-vacuity: the unconditional remedy still renders without a surface.
+    expect(noSurface.fix.length).toBe(2);
+  });
+
+  it("the classifier matches the MACHINE code, not message text", () => {
+    // Proven by giving the error a message that would classify differently
+    // under the substring cascade (it contains "timeout", which the cascade's
+    // KEY_NETWORK_TIMEOUT branch matches) — only the seamCode wins.
+    const result = classifyKeyValidationError({
+      seamCode: "MT5_TERMINAL_UNRESPONSIVE",
+      message: "connection timeout while validating",
+    });
+    expect(result).toEqual({ code: "KEY_MT5_TERMINAL_UNRESPONSIVE", status: 500 });
   });
 });
 

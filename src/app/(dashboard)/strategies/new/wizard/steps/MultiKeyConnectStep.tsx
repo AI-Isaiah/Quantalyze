@@ -342,6 +342,11 @@ const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
     "KEY_AUTH_FAILED",
     "KEY_MT5_MASTER_PASSWORD",
     "KEY_MT5_WRONG_SERVER",
+    // 164.6.5 / criterion 5 — same addition as `KNOWN_CREATE_WITH_KEY_CODES`
+    // (full reasoning there), taken together because both routes share the
+    // classifier that emits it. Admitted HERE IN THE SAME COMMIT the shared
+    // classifier starts returning it.
+    "KEY_MT5_TERMINAL_UNRESPONSIVE",
     "KEY_IP_ALLOWLIST",
     "KEY_NETWORK_TIMEOUT",
     "KEY_PROBE_FAILED",
@@ -473,6 +478,18 @@ interface PanelState {
    */
   retryAfterSeconds: number | null;
   /**
+   * 164.6.5-07 / D-14 — the id of THIS panel's most recent add-key attempt,
+   * captured off the wizardFetch call itself (task 1's `onCorrelationId`).
+   *
+   * PER-PANEL for the same reason `retryAfterSeconds` above is: each panel
+   * validates independently against `composite/add-key`, so panel 3's id
+   * says nothing about panel 1's. A step-level id would recreate the D-14
+   * defect one level down — one value covering several distinct failures.
+   *
+   * Cleared on every fresh validate attempt beside `errorCode` (TRAP-3).
+   */
+  requestCorrelationId: string | null;
+  /**
    * 153.4-05 / D-05 / WIZFORM-05 — when THIS panel's in-flight validate left the
    * browser, or `null` when none is.
    *
@@ -571,6 +588,7 @@ function newPanel(): PanelState {
     apiKeyId: null,
     errorCode: null,
     retryAfterSeconds: null,
+    requestCorrelationId: null,
     waitStartedAt: null,
     waitElapsedMs: 0,
     waitCancelled: false,
@@ -759,6 +777,9 @@ function toRehydratedPanel(member: {
     apiKeyId: member.api_key_id,
     errorCode: null,
     retryAfterSeconds: null,
+    // 164.6.5-07 / D-14 — same reasoning as the wait fields below: rehydrated
+    // means no request from this browser, so there is no id to capture.
+    requestCorrelationId: null,
     // 153.4-05 — a rehydrated panel arrives ALREADY `validated`: it made no
     // request from this browser, so it has no wait, and the card's gate (which
     // requires `status === "validating"`) can never fire for it.
@@ -798,7 +819,24 @@ export function MultiKeyConnectStep({
   const [continueRetryAfterSeconds, setContinueRetryAfterSeconds] = useState<
     number | null
   >(null);
+  /**
+   * 164.6.5-07 / D-14 — the id of THIS Continue attempt, captured off the
+   * `composite/set-members` wizardFetch call (task 1's `onCorrelationId`).
+   * STEP-LEVEL for the same reason `continueRetryAfterSeconds` above is: one
+   * request for the whole set. Cleared beside `continueError` (TRAP-3).
+   */
+  const [continueRequestCorrelationId, setContinueRequestCorrelationId] =
+    useState<string | null>(null);
   const [correlationId] = useState<string>(() => getWizardCorrelationId());
+  /**
+   * 164.6.5-07 / D-14 — the id of the mount-time rehydration GET
+   * (`composite/members`), captured the same way. A THIRD distinct request
+   * this step can render an envelope off, so it gets its OWN captured id
+   * rather than sharing either of the two above (see the per-panel and
+   * step-level docblocks for why a single shared id recreates the defect).
+   */
+  const [rehydrateRequestCorrelationId, setRehydrateRequestCorrelationId] =
+    useState<string | null>(null);
   // Phase 94.1 / F3 — rehydration lifecycle. "loading" while the WIZ-01
   // members GET is in flight, "error" when it fails (non-ok / throw /
   // unparseable body). Gates a loading placeholder + an actionable retry
@@ -863,8 +901,16 @@ export function MultiKeyConnectStep({
         // flight. Set inside the async IIFE (not synchronously in the effect
         // body) per react-hooks/set-state-in-effect.
         setRehydrateStatus("loading");
+        // 164.6.5-07 / D-14 — cleared with the status it belongs to, for the
+        // same TRAP-3 reason every other capture in this step is.
+        setRehydrateRequestCorrelationId(null);
         const res = await wizardFetch(
           `/api/strategies/composite/members?strategy_id=${draftStrategyId}`,
+          undefined,
+          {
+            // 164.6.5-07 / D-14 — capture the id THIS GET put on the wire.
+            onCorrelationId: setRehydrateRequestCorrelationId,
+          },
         );
         if (cancelled) return;
         if (!res.ok) {
@@ -1430,6 +1476,9 @@ export function MultiKeyConnectStep({
         status: "validating",
         errorCode: null,
         retryAfterSeconds: null,
+        // 164.6.5-07 / D-14 — cleared with the code it belongs to, for the
+        // same TRAP-3 reason as `retryAfterSeconds` above.
+        requestCorrelationId: null,
         // 153.4-05 — the wait starts: ONE `Date.now()` the step's interval then
         // measures against, the previous attempt's cancelled line retired, and
         // the venue FROZEN so every duration this panel goes on to state
@@ -1440,23 +1489,33 @@ export function MultiKeyConnectStep({
         waitExchange: p.exchange,
       });
       try {
-        const res = await wizardFetch("/api/strategies/composite/add-key", {
-          method: "POST",
-          // `wizardFetch` spreads `init` and overrides only `headers`, so the
-          // signal reaches `fetch` unchanged — no change to that module needed.
-          signal: controller.signal,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            exchange: p.exchange,
-            api_key: p.apiKey,
-            // sFOX is token-only: send api_secret "" (Phase-119 add-key carve-out
-            // normalizes empty→"" and accepts it for sfox).
-            api_secret: requiresSecret ? p.apiSecret : "",
-            passphrase: requiresPassphrase ? p.passphrase : null,
-            label: p.nickname.trim() || `${p.exchange} key`,
-            wizard_session_id: wizardSessionId,
-          }),
-        });
+        const res = await wizardFetch(
+          "/api/strategies/composite/add-key",
+          {
+            method: "POST",
+            // `wizardFetch` spreads `init` and overrides only `headers`, so the
+            // signal reaches `fetch` unchanged — no change to that module needed.
+            signal: controller.signal,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              exchange: p.exchange,
+              api_key: p.apiKey,
+              // sFOX is token-only: send api_secret "" (Phase-119 add-key carve-out
+              // normalizes empty→"" and accepts it for sfox).
+              api_secret: requiresSecret ? p.apiSecret : "",
+              passphrase: requiresPassphrase ? p.passphrase : null,
+              label: p.nickname.trim() || `${p.exchange} key`,
+              wizard_session_id: wizardSessionId,
+            }),
+          },
+          {
+            // 164.6.5-07 / D-14 — capture the id THIS panel's request put on
+            // the wire, keyed by `panelId` (identity, not `idx` — see the
+            // comment at the top of this function).
+            onCorrelationId: (id) =>
+              updatePanelById(panelId, { requestCorrelationId: id }),
+          },
+        );
         const data = (await res.json().catch(() => ({}))) as {
           ok?: boolean;
           strategy_id?: string;
@@ -1682,6 +1741,11 @@ export function MultiKeyConnectStep({
     };
   }, [onDirtyChange]);
 
+  // 164.6.5-07 / D-14 — DELIBERATELY STILL `correlationId`, not a captured
+  // request id. `summaryLines` comes from `computeValidation(panels)`, pure
+  // CLIENT-SIDE validation — there is no request behind this envelope at all,
+  // so there is no per-request id to prefer. Recorded per task 3's
+  // enumeration requirement: this site was examined and correctly left alone.
   const summaryEnvelope =
     summaryLines.length > 0
       ? {
@@ -1695,6 +1759,11 @@ export function MultiKeyConnectStep({
         }
       : null;
 
+  // 164.6.5-07 / D-14 — `continueRequestCorrelationId` (captured off the
+  // set-members request) wins whenever Continue actually ran; the page-load
+  // id remains the fallback only for the brief window before it has. BOTH
+  // arms below share the one step-level id, same as they already share one
+  // handler/state — see that state's docblock.
   const continueErrorEnvelope = continueError
     ? continueError === "MULTI_KEY_WINDOWS_INVALID"
       ? {
@@ -1711,9 +1780,13 @@ export function MultiKeyConnectStep({
           // recoverable so ErrorEnvelope renders Retry (showRetry = recoverable
           // && Boolean(onRetry)). Keep the table entry summary-only — do NOT
           // pollute wizardErrors.ts.
-          ...buildEnvelope(continueError, correlationId, {
-            retryAfterSeconds: continueRetryAfterSeconds ?? undefined,
-          }),
+          ...buildEnvelope(
+            continueError,
+            continueRequestCorrelationId ?? correlationId,
+            {
+              retryAfterSeconds: continueRetryAfterSeconds ?? undefined,
+            },
+          ),
           cause:
             "We couldn't save these key windows — the server rejected them, most likely a clock or timing mismatch between your browser and our servers. Review the dates and try again.",
           recoverable: true,
@@ -1723,9 +1796,13 @@ export function MultiKeyConnectStep({
         // (the windows-invalid arm spreads and overrides), so threading only
         // the arm an author happens to read first would leave the other silent.
         // `?? undefined` because ABSENCE IS NOT ZERO (140.3-10's rule).
-        buildEnvelope(continueError, correlationId, {
-          retryAfterSeconds: continueRetryAfterSeconds ?? undefined,
-        })
+        buildEnvelope(
+          continueError,
+          continueRequestCorrelationId ?? correlationId,
+          {
+            retryAfterSeconds: continueRetryAfterSeconds ?? undefined,
+          },
+        )
     : null;
 
   const handleContinue = useCallback(async () => {
@@ -1736,13 +1813,22 @@ export function MultiKeyConnectStep({
     // 140.5-03 — the wait dies with the code it belongs to, on every fresh
     // attempt (TRAP-3).
     setContinueRetryAfterSeconds(null);
+    // 164.6.5-07 / D-14 — same reset rule, same reason.
+    setContinueRequestCorrelationId(null);
     try {
       const keys = buildSetMembersKeys(current);
-      const res = await wizardFetch("/api/strategies/composite/set-members", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy_id: strategyId, keys }),
-      });
+      const res = await wizardFetch(
+        "/api/strategies/composite/set-members",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ strategy_id: strategyId, keys }),
+        },
+        {
+          // 164.6.5-07 / D-14 — capture the id THIS request put on the wire.
+          onCorrelationId: setContinueRequestCorrelationId,
+        },
+      );
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
         code?: string;
@@ -1840,7 +1926,12 @@ export function MultiKeyConnectStep({
         {rehydrateStatus === "error" && (
           <div className="mb-4" data-testid="rehydrate-error">
             <WizardErrorEnvelope
-              envelope={buildEnvelope("WIZARD_KEYS_LOAD_FAILED", correlationId)}
+              // 164.6.5-07 / D-14 — the id of THIS rehydration GET, falling
+              // back to the page-load id only if it somehow captured none.
+              envelope={buildEnvelope(
+                "WIZARD_KEYS_LOAD_FAILED",
+                rehydrateRequestCorrelationId ?? correlationId,
+              )}
               onRetry={() => {
                 setRehydrateStatus("loading");
                 setRetryTick((t) => t + 1);
@@ -2062,8 +2153,12 @@ function KeyPanel({
   // falling back to the selected card only when no attempt has been made.
   const attemptVenue = p.waitExchange ?? p.exchange;
 
+  // 164.6.5-07 / D-14 — THIS panel's own captured id wins, falling back to
+  // the page-load `correlationId` only for the brief window before this
+  // panel has made a request. Per-panel, not step-level — see
+  // `PanelState.requestCorrelationId`'s docblock.
   const errorEnvelope = p.errorCode
-    ? buildEnvelope(p.errorCode, correlationId, {
+    ? buildEnvelope(p.errorCode, p.requestCorrelationId ?? correlationId, {
         // 140.5-03 / SEAMPROSE-02 — THIS panel's advertised wait, not the
         // step's. `?? undefined` because ABSENCE IS NOT ZERO (140.3-10's rule):
         // `null` in the envelope slot renders as a `0`-second wait we were

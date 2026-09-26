@@ -230,6 +230,222 @@ Step 2 above is unchanged and still required. This subsection sits BESIDE it, no
   usable credential comes straight back with no usable credential. Only when the variables are
   absent, or the heal is observed not to fire, does Step 2's VNC route become necessary again.
 
+## Step 2b — ⛔ `-10005` differential diagnosis: two known causes, opposite remedies (Phase 164.6.5)
+
+Step 2a is about the heal that re-establishes a LOST session automatically. This section is
+narrower: an operator is looking at a terminal that answers `-10005` ("IPC timeout") right
+now and must decide which of two known causes they have, because the remedies are opposite.
+
+### The two causes
+
+**Cause A — the modal-login-dialog wedge (`MT5-WEDGE-OBS-01`).** PERSISTED state: a login
+dialog is sitting open in the terminal's own UI and is blocking the IPC path behind it. It
+lives with the Wine prefix on the gateway's named persistent volume, so a redeploy brings it
+straight back — the dialog is still there after the container restarts. Clearing it needs a
+human at the VNC console.
+
+**Cause B — the account-switch wedge, measured 2026-09-21.** PROCESS state, not persisted
+state: there was no dialog — the live VNC console was clean and the Alerts tab was empty —
+yet the running terminal answered `-10005` to every IPC call. A human clicked OK on the
+terminal's own Login dialog three separate ways and the terminal's own Journal wrote NOTHING
+for any of the three attempts. A PROCESS restart of `terminal64.exe`, under the same Wine
+prefix, same container and same volume, reached `authorized` in 2.0 s with no human involved
+— Step 2a above records the mechanism that restart relies on (the saved login persisting on
+`/config`).
+
+⛔ **The two causes have OPPOSITE remedies, and the shipped prober remedy string
+(`scripts/prod-prober/arms/mt5.mjs`'s `mt5-ipc-timeout` `REMEDIES` entry) described only
+Cause A until this phase** — it told the reader to clear a modal dialog via VNC and stated a
+redeploy does NOT fix the fault. Under Cause A that is correct. Under Cause B a process
+restart — no VNC, no dialog to clear — is what worked, in 2.0 s.
+
+### Evidence procedure — decide which cause you have
+
+Run this at the gateway before changing anything. It reaches for evidence, not a guess.
+
+1. **Open the terminal's own Journal tab.** A login attempt writes a Journal line EVEN WHEN
+   IT FAILS, so silence in the Journal following a `disconnected` line is itself the
+   reading, not an absence of information. Silence after a disconnect, with no failed-login
+   line ever appearing, is what was observed for Cause B on 2026-09-21.
+2. **Open the Alerts tab.** An empty Alerts tab during the outage is one of the two facts
+   that ruled out Cause A on 2026-09-21 — a modal-dialog wedge typically leaves a trace an
+   operator can see there.
+3. **Look at the live VNC console itself for a modal window.** If a login dialog, an error
+   popup, or any other modal is sitting open on top of the terminal, that is Cause A — clear
+   it and stop here.
+4. **Record the terminal's reported build number.** This does not by itself decide the
+   cause; the candidate-mechanism subsection below is what uses it.
+5. **⛔ Do not read `Config/terminal.ini` for any of the above.** `scripts/mt5-diag.sh`'s own
+   warning applies here too: MT5 only rewrites that file on a CLEAN terminal exit, so it can
+   report stale state while the running terminal disagrees. The Journal, the Alerts tab and
+   the live VNC console are the only live oracles. `scripts/mt5-diag.sh` is the only in-repo,
+   read-only diagnostic and is safe to run alongside this procedure — it never calls
+   `login()`.
+
+### The remedy that is correct under both causes
+
+Try the **PROCESS restart first**: kill and relaunch `terminal64.exe` under the same Wine
+prefix, container and volume — do NOT touch or reset the volume itself. This is cheap,
+unattended, was measured at 2.0 s on 2026-09-21, and it cannot make Cause A worse: if a modal
+dialog was the problem, the restart either clears it along with the process or leaves it
+exactly as it was, so trying the restart first never destroys Cause A's evidence. ⛔ CORRECTED
+2026-09-25 (Phase 164.6.5 round 2): under Cause B the restart DOES destroy the in-process
+readings, as the criterion-1 block above records — capture them first when time allows. **If `-10005`
+returns after the restart, THEN open the VNC console and clear the modal dialog** — that is
+the one step a process restart cannot do for you.
+
+### Candidate mechanisms for Cause B — what would confirm or reject each
+
+These were written as candidates. Each carries the ONE observation that would confirm it and
+the ONE that would reject it, and since 2026-09-25 each also carries its recorded verdict.
+
+- **(a) Terminal self-update.** `deploy/mt5-gateway/railway-gateway.md`'s digest-pin
+  paragraph records, in its own words, that the MetaTrader terminal binary self-updates from
+  the broker independently of the image and cannot be frozen — pinning the image digest pins
+  the Wine/RPyC base only. A terminal that self-updated between the clean switch and the
+  wedged one is a mechanism that predicts the asymmetry, because a binary changing mid-day
+  would behave differently before and after the change.
+  - **Confirms:** the terminal's reported build number differs between a reading taken
+    before the clean switch and one taken after the wedge began, OR the terminal's own
+    update log records a self-update landing in that window.
+  - **Rejects:** the build number is identical across that window and no self-update log
+    entry exists for it.
+  - **Verdict (2026-09-25): UNDECIDED.** The only build reading that exists is the one taken
+    on 2026-09-25, AFTER two terminal restarts: terminal build 6182, server build 5830. No
+    build reading from 2026-09-21 before 11:02 exists, and the capture recorded no
+    self-update line for the 04:08 → 11:02 window. One reading cannot show a change. See the
+    verdict subsection below for what would decide it.
+- **(b) Same-account re-auth vs. cross-account switch.** The session monitor re-establishes
+  the terminal's session against the house account on a fixed cadence and returns quickly
+  when nothing needs to change; a validate re-establishes the same session against a client
+  account, which is a genuine account change (`analytics-service/services/mt5_relogin.py`,
+  `analytics-service/routers/exchange.py`). If the clean switch was itself a re-auth to the
+  account already logged in, while the wedged switches were changes to a different account,
+  that difference is a mechanism that predicts the asymmetry.
+  - **Confirms:** the captured evidence shows the clean event was a re-auth to the SAME
+    (house) account already logged in, while the wedged events were switches to a DIFFERENT
+    (client) account.
+  - **Rejects:** the captured evidence shows the clean event was ALSO a switch to a
+    different account — i.e., a cross-account switch sometimes succeeds cleanly, which would
+    mean "which account" alone does not predict the asymmetry.
+  - **Verdict (2026-09-25): REJECTED, on the 2026-09-21 reading.** The Journal lines read
+    during the incident, recorded in `.planning/ROADMAP.md` § `### Phase 164.6.6` success
+    criterion 1, show the clean 04:08 event as `'<account A>': disconnected` at 04:08:06
+    followed by `'<account B>': authorized` at 04:08:07. That is a change to a DIFFERENT
+    account, and it completed in about one second. So a cross-account switch can succeed
+    cleanly, and "same account vs different account" does not predict the asymmetry. ⚠️ The
+    2026-09-25 capture could NOT re-read those 04:08 lines through VNC. This rejection rests
+    on the 2026-09-21 reading alone, and it has not been re-verified.
+- **(c) Same broker server vs a different broker server.** Surfaced by the 2026-09-25 capture:
+  at one point the terminal's window title named an account at a DIFFERENT broker from the
+  session the Journal was running. The shared terminal therefore switches across broker
+  servers, not only across accounts, which is the Phase 164.6.6 surface. A switch to an
+  account on another broker server has to drop one trade-server connection and open a
+  different one. A switch within one broker keeps the same server. If the clean 04:08 event
+  stayed on one broker server and the wedged 11:02 and 12:52 events changed server, that
+  difference would predict the asymmetry.
+  - **Confirms:** the broker server on each side of the 04:08 switch is the SAME, and on each
+    side of the 11:02 and 12:52 switches it DIFFERS.
+  - **Rejects:** the 04:08 switch also changed broker server, or a wedged switch stayed on one
+    server.
+  - **Verdict (2026-09-25): UNDECIDED.** The 2026-09-21 record redacts the server on both
+    sides of every switch, and the 04:08 lines were not reachable on 2026-09-25. ⚠️ The
+    founder's 2026-09-25 relaunch spike (plan 02 SUMMARY, run 2) came back authorized on a
+    different account at the SAME broker. That run was a relaunch, not an in-session
+    switch, so it neither confirms nor rejects (c).
+- **Any further candidate.** None beyond (a), (b) and (c) is supported by the repo's measured
+  record as of 2026-09-25. If a future investigation surfaces one, record it here with the
+  same confirms/rejects shape rather than as a bare guess.
+
+### Verdict — criterion 1 is EXPLICITLY OPEN (recorded 2026-09-25, Phase 164.6.5 plan 01)
+
+⛔ **The mechanism behind Cause B is NOT named.** No candidate above predicts the asymmetry
+on the evidence that exists. (b) is rejected, and (a) and (c) are undecided because the
+deciding readings were never taken or can no longer be taken. Per D-01 and D-03, criterion 1
+ships OPEN. It is not closed on a story, and it is not closed on a mitigation.
+
+**The D-03a verdict, in one sentence:** the terminal-self-update hypothesis is UNDECIDED,
+because no terminal build reading from 2026-09-21 before the 11:02 wedge exists and no
+terminal update record for the 04:08 → 11:02 window was found. The build read on 2026-09-25
+(6182, server 5830) was taken after two restarts and cannot show a change on its own.
+
+**What the 2026-09-25 capture established.** The founder read these at the VNC console; no
+agent touched the gateway.
+
+- **Build:** terminal build 6182, server build 5830.
+- **Journal:** the terminal was `disconnected` from 2026-09-21 12:52:04, with NO reconnect line
+  until the founder's two restarts on 2026-09-25. Taken at face value, the second wedge of
+  2026-09-21 (the ~12:52 validate) was never recovered until 2026-09-25. ⚠️ This plan records
+  that reading and does NOT reconcile it with any other record of that period.
+- **Log retention:** the 04:08 Journal lines were not reachable through VNC, and no terminal
+  log files exist for 2026-08-06 to 08-11 or for 2026-08-26 to 08-31.
+- **Experts options:** "Allow algo trading" CHECKED, and all four "disable …" options
+  UNCHECKED. This does not bear on criterion 1. It is recorded because Phase 164.6.5
+  criterion 7 pins those settings.
+- **Alerts tab:** NOT read on 2026-09-25 before the terminal was restarted, and that state is
+  gone now. The "Alerts tab empty" fact under Cause B above is the 2026-09-21 reading and was
+  not re-taken.
+- **Restart remedy:** REPRODUCED. Killing `terminal64.exe` and letting the bridge's next
+  `initialize()` relaunch it brought authorization back with no human action, twice (plan 02
+  SUMMARY). This is a MITIGATION finding under D-02, NOT a diagnosis: it says what clears
+  Cause B, not what causes it.
+- **Cause A (the modal dialog):** not observed on 2026-09-25.
+
+**What would close criterion 1.** Readings taken at the NEXT Cause B wedge, BEFORE anything
+restarts the terminal:
+
+1. the terminal build at the wedge, and the build at the last clean switch before it;
+2. the broker server on each side of the wedged switch and of the last clean switch;
+3. the Alerts tab and the Journal lines around the `disconnected`.
+
+⚠️ The automatic recycle this phase ships DESTROYS all three, because the wedge is process
+state. Unless the heal records them first, the next wedge heals without evidence. The routed
+residual is `MT5-SWITCH-WEDGE-CAUSE-01` in `TODOS.md`, cross-linked from `MT5-WEDGE-OBS-01`.
+
+⛔ **CORRECTED 2026-09-25 (164.6.5 review round 2, WR-05 / IN-05): the heal does NOT record
+all three, and "unless the heal records them first" must not read as covered.** The paragraph
+above is kept as lineage. It now agrees with the corrected `MT5-SWITCH-WEDGE-CAUSE-01` entry
+in `TODOS.md`. What the heal records before it recycles:
+
+- **(a) An in-process build and connection state, best effort.** Expect `not_captured` on a
+  true `-10005`, because the read crosses the same dead terminal IPC.
+- **(b) The bridge-side `file_versions` of each `terminal64.exe` image it ends.** This path has
+  never run against the live terminal. It equals the running build only if no self-update
+  replaced the file after launch.
+
+**Items 2 and 3 (the broker servers, and the Alerts and Journal state) are recorded by nothing
+automatic.** They need an operator reading taken BEFORE the heal's next monitor tick recycles
+the terminal (`MT5_SESSION_POLL_INTERVAL_S`, 600 s by default).
+
+⛔ **Public repo, no exceptions.** Refer to accounts only as "the house account" and "a
+client account" — never a number, never a broker server name, never a connection string or a
+local machine path. Timestamps, durations and MT5 error codes (like `-10005`) are safe and
+are kept above because they are the evidence.
+
+### ⚠️ The hourly ERROR re-raise reaches a human only through a Sentry ALERT RULE
+
+A `-10005` that persists past the recycle, and an IPC fault the recycle cannot reach, are
+re-raised at ERROR by the heal at most once an hour (`_escalate_ipc_fault` in
+`analytics-service/services/mt5_relogin.py`, lines beginning `mt5 session heal: ipc_fault`).
+Sentry's logging integration turns each ERROR into an event.
+
+⛔ **Each re-raise uses a fixed message template, so every hourly event lands on the SAME
+Sentry issue.** Two things follow:
+
+- A default "a new issue is created" alert fires on the FIRST event only. The re-raises after
+  it notify nobody.
+- If that issue was ever marked ignored or archived, the re-raises can notify nobody at all.
+
+So the hourly re-raise guarantees events, not a notification. Before relying on it:
+
+1. The analytics service's Sentry project must have an ISSUE ALERT rule that fires on event
+   frequency for these messages, not only on a new issue.
+2. The issue must not be ignored or archived.
+
+No alert rule lives in this repo. This paragraph does not say whether one exists. That is a
+read-only check of the live Sentry configuration (164.6.5 review round 2, R2-SFH-05), and its
+result belongs in the phase record, not here.
+
 ## Step 3 — CREDENTIAL ISOLATION + BROKER ALLOWLISTING (MT5GOLIVE-01)
 
 - The gateway holds ONLY the **one investor login** it syncs (v1 = one serial terminal).
