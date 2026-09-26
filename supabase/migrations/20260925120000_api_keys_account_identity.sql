@@ -157,6 +157,15 @@ COMMENT ON COLUMN public.api_keys.account_share_kind IS
   '''composite_member'' = the D-04 exemption: both keys are members of one '
   'composite strategy with disjoint declared windows (a key rotation inside a '
   'composite), so the pair is legitimate and is not a duplicate. '
+  'READER CONTRACT: a marked key is counted THROUGH its holder only while that '
+  'holder is working, i.e. its disconnected_at IS NULL AND its sync_status <> '
+  '''revoked''. Once the holder is disconnected or revoked, the marked key '
+  'counts on its own, as if unmarked. The marker is not cleared when the '
+  'holder departs (the same-owner trigger fires only when the holder column '
+  'is written, and admits a revoked holder), so a reader that resolved '
+  'through a departed holder would count the account up to that holder''s '
+  'end day only, or not at all if the owner excluded its history, while a '
+  'live key still reads the account. '
   'Nothing is ever auto-disconnected or deleted because of this value.';
 
 -- ─────────── 1b. the same-owner trigger, with the NULL-holder short-circuit
@@ -304,7 +313,13 @@ COMMENT ON COLUMN public.api_keys.history_inclusion IS
   'which another counted key holds the same known account. Written only by '
   'set_departed_key_history_inclusion, and RESET to NULL by '
   'reconnect_allocator_api_key: a choice made for one departure never carries '
-  'over to a later one.';
+  'over to a later one. That contract binds EVERY path that returns a departed '
+  'key to live, not only the reconnect RPC. A REVOKED key (disconnected_at '
+  'NULL) comes back through the rotate-secret route''s service-role update '
+  '(sync_status back to idle), which must reset this column to NULL in the '
+  'same write. Adding that reset to the route is owned by Phase 167.1.2 PR C; '
+  'until it lands, a choice made while a key was revoked carries over to its '
+  'next revocation.';
 
 -- ─────── 3. the owner RPC for (2). Shape mirrors disconnect_allocator_api_key.
 CREATE FUNCTION public.set_departed_key_history_inclusion(
