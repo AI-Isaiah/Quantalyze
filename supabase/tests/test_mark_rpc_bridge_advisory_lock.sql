@@ -64,6 +64,21 @@
 -- `IF FALSE AND …`, or the migration's own DO block would abort the apply):
 --   L1  done/done on one strategy: b waits on an ADVISORY lock.
 --       Twin: delete the lock statement in mark_compute_job_done.
+--   L2  failed/failed on one strategy: b waits on an ADVISORY lock.
+--       Twin: delete the lock statement in mark_compute_job_failed. The SAME
+--       RPC sits on both sides of every pair, so removing the lock from ONE
+--       RPC reddens exactly one of L1 / L2.
+--   L3  done/done: b's ungranted advisory row carries the namespace's masked
+--       OID as classid and objsubid 2 (the two-integer form). Twin: rewrite
+--       both locks to the single-key strategy hash that sync_trades and
+--       positions_atomic_rebuild take (L1 and L2 still see an advisory wait,
+--       objsubid 1, so they stay green and L3 is first).
+--   L4  while a holds a done mark on strategy S, a done mark on a DIFFERENT
+--       strategy S2 completes without waiting. Twin: replace the strategy key
+--       of both locks with a constant, so every mark in the namespace
+--       serializes (L3 still passes: namespace and form are intact).
+--   The file order L1, L2, L3, L4 is what makes each twin's FIRST failure its
+--   own arm: every twin leaves the arms above its own green.
 --
 -- ⭐ MACHINE-EXECUTABLE TWINS. Each prose RED-UNDER below carries an adjacent
 -- `RED-UNDER-M` object that scripts/mutation-runner executes on every push: it
@@ -116,7 +131,7 @@ BEGIN
   INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
   VALUES (uid, 'mt5', 'blk mt5', 'x', TRUE) RETURNING id INTO k;
 
-  FOREACH arm IN ARRAY ARRAY['L1'] LOOP
+  FOREACH arm IN ARRAY ARRAY['L1', 'L2', 'L3'] LOOP
     INSERT INTO strategies (user_id, api_key_id, name)
     VALUES (uid, k, 'blk ' || arm) RETURNING id INTO s;
 
@@ -130,6 +145,21 @@ BEGIN
     VALUES (s, 'stitch_composite', 'running', tok, 1, 3) RETURNING id INTO j;
     INSERT INTO bridge_lock_gate_seed VALUES (arm, 2, s, j, tok);
   END LOOP;
+
+  -- L4: two DIFFERENT strategies, one running job each.
+  INSERT INTO strategies (user_id, api_key_id, name)
+  VALUES (uid, k, 'blk L4 S') RETURNING id INTO s;
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
+  VALUES (s, 'derive_broker_dailies', 'running', tok, 1, 3) RETURNING id INTO j;
+  INSERT INTO bridge_lock_gate_seed VALUES ('L4', 1, s, j, tok);
+
+  INSERT INTO strategies (user_id, api_key_id, name)
+  VALUES (uid, k, 'blk L4 S2') RETURNING id INTO s;
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
+  VALUES (s, 'derive_broker_dailies', 'running', tok, 1, 3) RETURNING id INTO j;
+  INSERT INTO bridge_lock_gate_seed VALUES ('L4', 2, s, j, tok);
 END
 $$;
 
@@ -139,7 +169,7 @@ $$;
 --            ShareLock (a's strategy_analytics write), after its bridge reads.
 --            ⚠️ LAYERED: that migration's own lock anchor would abort the
 --            apply, so it is stood down in the same mutation.
--- RED-UNDER-M: {"arm":"L1","apply":[{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));","replace":"","occurrences":1,"nth":1},{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"IF NOT v_done_lock_anchored THEN","replace":"IF FALSE AND NOT v_done_lock_anchored THEN","occurrences":1}]}
+-- RED-UNDER-M: {"arm":"L1","apply":[{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));","replace":"","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"IF NOT v_done_lock_anchored THEN","replace":"IF FALSE AND NOT v_done_lock_anchored THEN","occurrences":1}]}
 DO $$
 DECLARE
   cs     TEXT := format('host=127.0.0.1 port=%s dbname=%s user=%s',
@@ -200,6 +230,219 @@ BEGIN
   SELECT status INTO st2 FROM compute_jobs WHERE id = j2;
   IF st1 IS DISTINCT FROM 'done' OR st2 IS DISTINCT FROM 'done' THEN
     RAISE EXCEPTION 'TEST FAILED (L1-SETUP): after a committed, the two marked jobs read % and %, not done and done, so the marks did not both complete and the lock observation above was not of two real terminal marks.', COALESCE(st1, 'NULL'), COALESCE(st2, 'NULL');
+  END IF;
+END
+$$;
+
+-- ===== ARM L2 — failed/failed on one strategy waits on the ADVISORY lock =====
+-- RED-UNDER: delete the lock statement from mark_compute_job_failed in
+--            20260926120000 (its SECOND occurrence in the file; the first is
+--            mark_compute_job_done's, which L1 owns). ⚠️ LAYERED: that
+--            migration's failed-lock anchor is stood down in the same mutation.
+-- RED-UNDER-M: {"arm":"L2","apply":[{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));","replace":"","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"IF NOT v_failed_lock_anchored THEN","replace":"IF FALSE AND NOT v_failed_lock_anchored THEN","occurrences":1}]}
+DO $$
+DECLARE
+  cs     TEXT := format('host=127.0.0.1 port=%s dbname=%s user=%s',
+                        current_setting('port'), current_database(), current_user);
+  v_ns   OID  := (hashtext('mark_compute_job_bridge')::bigint & 4294967295)::oid;
+  j1     UUID;
+  t1     UUID;
+  j2     UUID;
+  t2     UUID;
+  b_pid  INT;
+  n_vis  INT;
+  i      INT;
+  st1    TEXT;
+  st2    TEXT;
+BEGIN
+  SELECT job_id, claim_token INTO j1, t1 FROM bridge_lock_gate_seed WHERE arm = 'L2' AND slot = 1;
+  SELECT job_id, claim_token INTO j2, t2 FROM bridge_lock_gate_seed WHERE arm = 'L2' AND slot = 2;
+  IF j1 IS NULL OR j2 IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (L2-SETUP): the committed seed for arm L2 is missing, so no mark below would run and every assertion would read nothing.';
+  END IF;
+  IF to_regprocedure('public.mark_compute_job_failed(uuid, text, text, uuid)') IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (L2-SETUP): public.mark_compute_job_failed(uuid, text, text, uuid) does not resolve on this lane, so the apply list did not produce the function under test.';
+  END IF;
+
+  PERFORM dblink_connect('lg_a', cs);
+  PERFORM dblink_connect('lg_b', cs);
+
+  SELECT n INTO n_vis
+    FROM dblink('lg_b', format('SELECT count(*)::int FROM compute_jobs WHERE id IN (%L, %L) AND status = %L',
+                               j1, j2, 'running')) AS x(n int);
+  IF n_vis IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (L2-SETUP): backend b sees % of the 2 seeded running jobs, so the seed is not committed or not visible and b''s mark could not run.', COALESCE(n_vis, 0);
+  END IF;
+
+  PERFORM dblink_exec('lg_a', 'BEGIN');
+  PERFORM * FROM dblink('lg_a', format('SELECT mark_compute_job_failed(%L, %L, %L, %L)::text', j1, 'blk probe failure', 'transient', t1)) AS x(v text);
+  SELECT pid INTO b_pid FROM dblink('lg_b', 'SELECT pg_backend_pid()') AS x(pid int);
+  PERFORM dblink_send_query('lg_b', format('SELECT mark_compute_job_failed(%L, %L, %L, %L)::text', j2, 'blk probe failure', 'transient', t2));
+
+  FOR i IN 1..200 LOOP
+    EXIT WHEN EXISTS (SELECT 1 FROM pg_locks WHERE pid = b_pid AND NOT granted);
+    PERFORM pg_sleep(0.05);
+  END LOOP;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_locks WHERE pid = b_pid AND NOT granted) THEN
+    RAISE EXCEPTION 'TEST FAILED (L2-SETUP): backend b never waited on anything while a held an uncommitted mark on the same strategy, so the two marks did not overlap and nothing below could be observed.';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_locks WHERE pid = b_pid AND NOT granted AND locktype = 'advisory') THEN
+    RAISE EXCEPTION 'TEST FAILED (L2): a second mark_compute_job_failed on the same strategy is waiting, but NOT on an advisory lock. Two concurrent terminal failure marks on one strategy are not serialized before the bridge, so both bridge runs read compute_jobs at READ COMMITTED while the other is changing it, and the failure path is the one that decides whether the user sees failed or computing (161.1-D1).';
+  END IF;
+  PERFORM dblink_exec('lg_a', 'COMMIT');
+  PERFORM * FROM dblink_get_result('lg_b') AS x(v text);
+  PERFORM dblink_disconnect('lg_a');
+  PERFORM dblink_disconnect('lg_b');
+
+  SELECT status INTO st1 FROM compute_jobs WHERE id = j1;
+  SELECT status INTO st2 FROM compute_jobs WHERE id = j2;
+  IF st1 IS NULL OR st1 = 'running' OR st2 IS NULL OR st2 = 'running' THEN
+    RAISE EXCEPTION 'TEST FAILED (L2-SETUP): after a committed, the two marked jobs read % and %, still running or gone, so the marks did not both complete and the lock observation above was not of two real terminal marks.', COALESCE(st1, 'NULL'), COALESCE(st2, 'NULL');
+  END IF;
+END
+$$;
+
+-- ===== ARM L3 — the lock is two-integer and in its own namespace =====
+-- RED-UNDER: rewrite BOTH lock statements in 20260926120000 to the single-key
+--            strategy hash sync_trades takes. b still waits on an advisory
+--            lock (objsubid 1), so L1 and L2 stay green and L3 is first.
+--            ⚠️ LAYERED: both lock anchors are stood down in the same mutation.
+-- RED-UNDER-M: {"arm":"L3","apply":[{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));","replace":"PERFORM pg_advisory_xact_lock(hashtext(v_strategy_id::text));","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));","replace":"PERFORM pg_advisory_xact_lock(hashtext(v_strategy_id::text));","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"IF NOT v_done_lock_anchored THEN","replace":"IF FALSE AND NOT v_done_lock_anchored THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"IF NOT v_failed_lock_anchored THEN","replace":"IF FALSE AND NOT v_failed_lock_anchored THEN","occurrences":1}]}
+DO $$
+DECLARE
+  cs     TEXT := format('host=127.0.0.1 port=%s dbname=%s user=%s',
+                        current_setting('port'), current_database(), current_user);
+  v_ns   OID  := (hashtext('mark_compute_job_bridge')::bigint & 4294967295)::oid;
+  j1     UUID;
+  t1     UUID;
+  j2     UUID;
+  t2     UUID;
+  b_pid  INT;
+  n_vis  INT;
+  i      INT;
+  st1    TEXT;
+  st2    TEXT;
+BEGIN
+  SELECT job_id, claim_token INTO j1, t1 FROM bridge_lock_gate_seed WHERE arm = 'L3' AND slot = 1;
+  SELECT job_id, claim_token INTO j2, t2 FROM bridge_lock_gate_seed WHERE arm = 'L3' AND slot = 2;
+  IF j1 IS NULL OR j2 IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (L3-SETUP): the committed seed for arm L3 is missing, so no mark below would run and every assertion would read nothing.';
+  END IF;
+  IF to_regprocedure('public.mark_compute_job_done(uuid, uuid)') IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (L3-SETUP): public.mark_compute_job_done(uuid, uuid) does not resolve on this lane, so the apply list did not produce the function under test.';
+  END IF;
+
+  PERFORM dblink_connect('lg_a', cs);
+  PERFORM dblink_connect('lg_b', cs);
+
+  SELECT n INTO n_vis
+    FROM dblink('lg_b', format('SELECT count(*)::int FROM compute_jobs WHERE id IN (%L, %L) AND status = %L',
+                               j1, j2, 'running')) AS x(n int);
+  IF n_vis IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (L3-SETUP): backend b sees % of the 2 seeded running jobs, so the seed is not committed or not visible and b''s mark could not run.', COALESCE(n_vis, 0);
+  END IF;
+
+  PERFORM dblink_exec('lg_a', 'BEGIN');
+  PERFORM * FROM dblink('lg_a', format('SELECT mark_compute_job_done(%L, %L)::text', j1, t1)) AS x(v text);
+  SELECT pid INTO b_pid FROM dblink('lg_b', 'SELECT pg_backend_pid()') AS x(pid int);
+  PERFORM dblink_send_query('lg_b', format('SELECT mark_compute_job_done(%L, %L)::text', j2, t2));
+
+  FOR i IN 1..200 LOOP
+    EXIT WHEN EXISTS (SELECT 1 FROM pg_locks WHERE pid = b_pid AND NOT granted);
+    PERFORM pg_sleep(0.05);
+  END LOOP;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_locks WHERE pid = b_pid AND NOT granted) THEN
+    RAISE EXCEPTION 'TEST FAILED (L3-SETUP): backend b never waited on anything while a held an uncommitted mark on the same strategy, so the two marks did not overlap and nothing below could be observed.';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_locks
+                  WHERE pid = b_pid AND NOT granted AND locktype = 'advisory'
+                    AND classid = v_ns AND objsubid = 2) THEN
+    RAISE EXCEPTION 'TEST FAILED (L3): the second same-strategy done mark is not waiting on a TWO-INTEGER advisory lock in the mark_compute_job_bridge namespace (classid = the namespace''s masked OID, objsubid = 2). A single-key lock on the strategy hash shares its key space with sync_trades and positions_atomic_rebuild, so every terminal mark would queue behind a long trade sync on the same strategy and block it in turn.';
+  END IF;
+  PERFORM dblink_exec('lg_a', 'COMMIT');
+  PERFORM * FROM dblink_get_result('lg_b') AS x(v text);
+  PERFORM dblink_disconnect('lg_a');
+  PERFORM dblink_disconnect('lg_b');
+
+  SELECT status INTO st1 FROM compute_jobs WHERE id = j1;
+  SELECT status INTO st2 FROM compute_jobs WHERE id = j2;
+  IF st1 IS NULL OR st1 = 'running' OR st2 IS NULL OR st2 = 'running' THEN
+    RAISE EXCEPTION 'TEST FAILED (L3-SETUP): after a committed, the two marked jobs read % and %, still running or gone, so the marks did not both complete and the lock observation above was not of two real terminal marks.', COALESCE(st1, 'NULL'), COALESCE(st2, 'NULL');
+  END IF;
+END
+$$;
+
+-- ===== ARM L4 — a DIFFERENT strategy does not wait =====
+-- RED-UNDER: replace the strategy key of BOTH lock statements in
+--            20260926120000 with a constant, so every terminal mark takes the
+--            same lock. L1, L2 and L3 still pass (an advisory wait, in the
+--            namespace, two-integer); the S2 mark now blocks behind S.
+--            ⚠️ LAYERED: both lock anchors are stood down in the same mutation.
+-- RED-UNDER-M: {"arm":"L4","apply":[{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"hashtext(v_strategy_id::text))","replace":"0)","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"hashtext(v_strategy_id::text))","replace":"0)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"IF NOT v_done_lock_anchored THEN","replace":"IF FALSE AND NOT v_done_lock_anchored THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql","find":"IF NOT v_failed_lock_anchored THEN","replace":"IF FALSE AND NOT v_failed_lock_anchored THEN","occurrences":1}]}
+DO $$
+DECLARE
+  cs     TEXT := format('host=127.0.0.1 port=%s dbname=%s user=%s',
+                        current_setting('port'), current_database(), current_user);
+  j1     UUID;
+  t1     UUID;
+  j2     UUID;
+  t2     UUID;
+  s1     UUID;
+  s2     UUID;
+  b_pid  INT;
+  n_vis  INT;
+  i      INT;
+  busy   INT;
+  st1    TEXT;
+  st2    TEXT;
+BEGIN
+  SELECT job_id, claim_token, strategy_id INTO j1, t1, s1 FROM bridge_lock_gate_seed WHERE arm = 'L4' AND slot = 1;
+  SELECT job_id, claim_token, strategy_id INTO j2, t2, s2 FROM bridge_lock_gate_seed WHERE arm = 'L4' AND slot = 2;
+  IF j1 IS NULL OR j2 IS NULL OR s1 IS NOT DISTINCT FROM s2 THEN
+    RAISE EXCEPTION 'TEST FAILED (L4-SETUP): the committed L4 seed is missing or does not name two DIFFERENT strategies, so this arm could not show that an unrelated strategy is not blocked.';
+  END IF;
+
+  PERFORM dblink_connect('lg_a', cs);
+  PERFORM dblink_connect('lg_b', cs);
+
+  SELECT n INTO n_vis
+    FROM dblink('lg_b', format('SELECT count(*)::int FROM compute_jobs WHERE id IN (%L, %L) AND status = %L',
+                               j1, j2, 'running')) AS x(n int);
+  IF n_vis IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (L4-SETUP): backend b sees % of the 2 seeded running jobs, so the seed is not committed or not visible and b''s mark could not run.', COALESCE(n_vis, 0);
+  END IF;
+
+  PERFORM dblink_exec('lg_a', 'BEGIN');
+  PERFORM * FROM dblink('lg_a', format('SELECT mark_compute_job_done(%L, %L)::text', j1, t1)) AS x(v text);
+  SELECT pid INTO b_pid FROM dblink('lg_b', 'SELECT pg_backend_pid()') AS x(pid int);
+  PERFORM dblink_send_query('lg_b', format('SELECT mark_compute_job_done(%L, %L)::text', j2, t2));
+
+  -- Bounded: exits as soon as b finishes, or as soon as b is seen waiting.
+  FOR i IN 1..200 LOOP
+    busy := dblink_is_busy('lg_b');
+    EXIT WHEN busy = 0
+           OR EXISTS (SELECT 1 FROM pg_locks WHERE pid = b_pid AND NOT granted);
+    PERFORM pg_sleep(0.05);
+  END LOOP;
+
+  IF EXISTS (SELECT 1 FROM pg_locks WHERE pid = b_pid AND NOT granted) THEN
+    RAISE EXCEPTION 'TEST FAILED (L4): a done mark on a DIFFERENT strategy is waiting while another strategy''s mark is uncommitted. The lock is keyed too coarsely, so every terminal mark in the system serializes behind every other and one slow bridge stalls the whole job queue.';
+  END IF;
+  IF dblink_is_busy('lg_b') <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (L4-SETUP): the mark on the second strategy neither finished nor waited on a lock within the poll bound, so this arm observed nothing.';
+  END IF;
+
+  PERFORM * FROM dblink_get_result('lg_b') AS x(v text);
+  PERFORM dblink_exec('lg_a', 'COMMIT');
+  PERFORM dblink_disconnect('lg_a');
+  PERFORM dblink_disconnect('lg_b');
+
+  SELECT status INTO st1 FROM compute_jobs WHERE id = j1;
+  SELECT status INTO st2 FROM compute_jobs WHERE id = j2;
+  IF st1 IS DISTINCT FROM 'done' OR st2 IS DISTINCT FROM 'done' THEN
+    RAISE EXCEPTION 'TEST FAILED (L4-SETUP): after both marks, the jobs read % and %, not done and done, so the observation above was not of two real terminal marks.', COALESCE(st1, 'NULL'), COALESCE(st2, 'NULL');
   END IF;
 END
 $$;
