@@ -2198,16 +2198,53 @@ Plans:
 3. The new SQL gate carries `RED-UNDER` annotations the mutation runner PROVES bite, and both `FILES_FLOOR` and `ARMS_FLOOR` move. ⚠️ Read those constants BY SYMBOL from `scripts/mutation-runner/run.mjs` — CLAUDE.md's prose has already drifted from them once.
 4. Arm failures print `TEST FAILED (X):`, not `ARM x FAILED` which the runner's identity regex cannot see. An arm no production mutation can redden is labelled an INVARIANT rather than counted.
 5. ⛔ Production DDL: merging `supabase/migrations/**` to `main` AUTO-APPLIES to PROD, so three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) before any apply, and the apply is a founder gate.
+   ⛔ **CORRECTED 2026-09-26 (164.5.2 planning, `164.5.2-CONTEXT.md` D-18):** "the apply is a founder gate" is STALE. Since 2026-09-23 (CLAUDE.md, Phase 164.4.2) the `Production` environment has no human reviewer, so merging auto-applies to TEST and then PROD. The merge IS the apply: all three reviewers finish, and their findings are fixed, BEFORE merge. The original sentence is kept as lineage.
+
+⭐ **RE-ROUTED 2026-09-26 (164.5.2 planning, founder rule "one logical topic per phase, one reviewable PR"):** the two routing lines copied here from Phase 164.6.7 — `[164.6.7-COMPOSITE-REREAD-RESIDUE]` and `[164.6.7-RETRY-PLAIN-COMPLETE]` — MOVED to **Phase 164.5.2.1 BRIDGERESIDUE**, verbatim. They change `sync_strategy_analytics_status`, which this phase does not edit: this phase adds the lock to the two mark RPCs only. See `164.5.2-CONTEXT.md` D-22 for the reasons.
 
 **Requirements**: TODOS entries `161.1-D1`, DEC-4
 **Depends on:** Phase 164.4.1 (pg-lane with pg_cron). ⚠️ NOT Phase 164.5 — the plan is file-disjoint from it and was lifted whole.
 **Routed here 2026-09-25 (from 164.9.1 review round 1), both latent or loud, both on the terminal-mark / bridge surface this phase owns:** (1) a fan-in child whose parent is still open at enqueue and later ends `failed_final` stays in `done_pending_children` forever (no caller passes parents today); (2) a second `match_decisions` delete can raise 23505 through the ON DELETE SET NULL cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null` (pre-existing, fails loudly, the admin decisions route issues these deletes). (3) the fan-in parent lock `FOR SHARE ... ORDER BY id` can deadlock (40P01) against `mark_compute_job_done` in a diamond (a child whose parents include another waiting child); latent, recorded in M1's header — whoever passes parents must treat 40P01 as retryable on both the enqueue and the worker's mark path. (4) **Routed 2026-09-25 from the 164.9.1 pre-push silent-failure-hunter (MEDIUM, pre-existing, NOT introduced by 164.9.1): one `failed_retry` + `pending` pair on the same `(kind, api_key_id)` wedges the WHOLE claim.** `claim_compute_jobs` and `claim_compute_jobs_with_priority` rank `pending` and `failed_retry` candidates together, and their C39 / NEW-C39-01 `NOT EXISTS` guard excludes a partition only when it already holds a `running` or `done_pending_children` row — never a `pending` one. The enqueue look-up (`_enqueue_compute_job_internal`) treats only `pending`/`running`/`done_pending_children` as in-flight, so it inserts a fresh `pending` beside a `failed_retry`. When the `failed_retry` wins `rn_k` (earlier `next_attempt_at`, or the `pending` is not yet due), the batch `UPDATE ... SET status = 'running'` puts two rows into `compute_jobs_one_inflight_per_kind_api_key` and raises 23505 — and because it is ONE statement, no job of ANY kind is claimed until the pair clears. Loud, not silent: every claim call errors. The same guard shape exists for the portfolio, strategy and allocator partitions against their sibling indexes; audit all four. **Suggested fixes (not decided):** (a) add `'pending'` to each guard's `x.status` list with `x.id <> ranked.id`, in BOTH claim RPCs — a `pending` candidate can have no `pending` sibling under the index, so this only removes the colliding `failed_retry`; (b) and/or make the enqueue look-up fold into, or supersede, an existing `failed_retry` for the partition instead of inserting beside it; (c) whichever is chosen, a `RED-UNDER`-annotated SQL gate on the lane must pin it. **Measured repro, local-stack lane only (`scripts/local-stack/run.sh up`, loopback DSN from its `.stack-env`, then `down`):** in one transaction that ends in `ROLLBACK`, with `SET LOCAL session_replication_role = replica` so a synthetic `api_key_id` needs no FK rows, insert two `poll_allocator_positions` rows sharing one `api_key_id` — a `failed_retry` with `next_attempt_at = now() - 10 min` and a `pending` with `next_attempt_at = now() + 10 min` — reset the role to `origin`, then call `claim_compute_jobs(10, 'repro-worker')` (and, after a savepoint rollback, `claim_compute_jobs_with_priority(10, 'repro-worker', NULL::boolean, NULL::text[], NULL::text[])`; the two-arg call is ambiguous across its overloads). Both raised `duplicate key value violates unique constraint "compute_jobs_one_inflight_per_kind_api_key"` on 2026-09-25 at the 164.9.1 release head.
 ⛔ **RE-ROUTED 2026-09-26 by founder decision (AskUserQuestion, "Re-route, don't start") — this phase owns NONE of the four items above any more.** The paragraph above is kept as lineage. Item (4), the claim wedge, went to Phase 164.9.3 CLAIMPAIR, which already owns C39 and the same 23505 class. Items (1) stranded fan-in child, (2) `match_decisions` delete 23505 and (3) 40P01 diamond deadlock went to the new Phase 164.9.3.1 FANINGRAPH, booked but NOT started under the new-phase freeze. This phase's scope is back to `161.1-D1` and DEC-4 only.
-**Plans:** 1 plan (lifted from Phase 164.5 plan 08, unmodified)
+**Plans:** 3 plans (re-planned 2026-09-26; the lifted 164.5-08 plan was a source only, CONTEXT D-20)
 
 Plans:
 
-- [ ] 164.5.2-01 — the advisory lock in both mark RPCs + the concurrency gate (lifted from 164.5-08)
+**Wave 1**
+
+- [ ] 164.5.2-01-PLAN.md — wave 1: the two-key lock in both mark RPCs (one migration) + the LANE-ONLY dblink two-backend gate (arms L1-L4), observed RED then GREEN
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 164.5.2-02-PLAN.md — wave 2: regenerated function snapshots, the two earned VAC-04 acks, the CI `sql-mutation` dblink probe
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 164.5.2-03-PLAN.md — wave 3: mutation-runner floors and census pins from one measured run; DEC-4 / `161.1-D1` closeout in TODOS.md
+
+### Phase 164.5.2.1: BRIDGERESIDUE — the two 164.6.7 bridge residues in sync_strategy_analytics_status (INSERTED)
+
+**Goal:** Close the two data-integrity residues Phase 164.6.7 routed to the bridge, both in `sync_strategy_analytics_status`, in ONE migration re-based on that function's LATEST definition: (1) `[164.6.7-COMPOSITE-REREAD-RESIDUE]` — a marker retraction landing between the Python live re-read and `mark_compute_job_failed` must not leave `computation_warned` set over a failed run; (2) `[164.6.7-RETRY-PLAIN-COMPLETE]` — branch (a) must keep a healthy publish state (plain `complete` as well as `complete_with_warnings`) for a strategy whose in-flight job carries an in-scope refresh marker, instead of rewriting it to `computing`.
+
+⛔ **SPLIT OUT of Phase 164.5.2 on 2026-09-26 during its planning**, under the founder rule "one logical topic per phase, one reviewable PR". The lock (164.5.2) edits the two mark RPCs; these residues edit the bridge those RPCs call. Different function, different gate, different review surface. Research for both was done in 164.5.2 (`164.5.2-RESEARCH.md` Q6, Q7, Q8, assumptions A2 and A4), and it measured that both residues close in SQL alone.
+
+⭐ **ROUTED HERE 2026-09-25 (Phase 164.6.7 round-1 review WR-04):** `TODOS.md` `[164.6.7-COMPOSITE-REREAD-RESIDUE]`, a data-integrity residue in the same bridge fan-in: a marker retraction committing between the Python live re-read and `mark_compute_job_failed` still yields an error-only write followed by a loud `sync_strategy_analytics_status`, leaving `computation_warned` set. Fix shape per that entry (branch (b) clears `computation_warned`, or the protect/loud decision moves inside the bridge's transaction). It is ⛔ BLOCKING item 7 of the runbook precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in `docs/runbooks/ledger-refresh-go-live.md`, so the composite schedule waits on this phase unless the founder accepts the window there with a date.
+
+⭐ **ROUTED HERE 2026-09-26 (Phase 164.6.7 round-2 review WR-01 / SFH-R2-03):** `TODOS.md` `[164.6.7-RETRY-PLAIN-COMPLETE]`. The bridge's non-terminal branch rewrites a plain `complete` row to `computing` on `failed_retry`, so the 164.6.7 transient retry protects only `complete_with_warnings` or warned rows. Fix shape: the non-terminal branch keeps a healthy publish state for a job carrying a refresh marker. Latent today (dated reading: 0 plain `complete` rows in the live ledger cohort).
+
+⭐ **ROUTED HERE 2026-09-26 (164.5.2 research, Open Question 1):** the per-strategy lock 164.5.2 adds sits in the two mark RPCs, so the bridge's OTHER callers stay unserialized: the Python DEFERRED direct call to `sync_strategy_analytics_status`, and the non-mark writers (claims, `reset_stalled_compute_jobs`, the orphan terminalizer, the marker retraction). A lock inside the bridge itself would cover every caller (transaction advisory locks re-enter within a session, so the mark RPCs can keep theirs). Decide it here, because this phase owns the bridge body.
+
+⭐ **ROUTED HERE 2026-09-26 (164.5.2 research, Open Question 3; test-only):** `analytics-service/tests/test_ledger_refresh_kind_scope_drift.py` pins the kind-scope list against `20260825150000`, not against the LIVE bridge definition. Move its pin to the newest bridge definition this phase creates, so the drift gate reads the body that actually ships.
+
+**Requirements**: TODOS entries `[164.6.7-COMPOSITE-REREAD-RESIDUE]`, `[164.6.7-RETRY-PLAIN-COMPLETE]` (both booked on `feat/164.6.7`; they reach `main` when Phase 164.6.7 lands)
+**Depends on:** Phase 164.5.2 (migration ordering and the shared gate census), Phase 164.6.7 (its TODOS entries and its Python ends of both residues)
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.5.2.1 to break down)
+
+**⭐ ROUTED IN 2026-09-26 (founder; found by the 164.5.2 round-1 review IN-01 and the migration reviewer):** the deployed comment in `sync_strategy_analytics_status` (latest definition `20260906120000`, also in the baseline) still says neither mark RPC takes a per-strategy lock. Since 164.5.2 that is false for mark against mark. Correct it when this phase re-bases the function.
 
 ### Phase 164.5.3: MT5CREDS — show the MT5 account number on the key card and add a credential-update path (INSERTED)
 

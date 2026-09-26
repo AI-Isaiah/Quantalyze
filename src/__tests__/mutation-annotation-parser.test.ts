@@ -990,6 +990,12 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // and `stepsSeen` 460 -> 464. FOUR new arms: W/deadlock in EACH ledger
     // gate, and ANON 2 and USER 2 in test_cron_runs_rls.sql. Each carries ONE
     // `edit` step with a `find`, so both pins move by four.
+    // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): `armsSeen` 449 -> 453
+    // and `stepsSeen` 464 -> 476. FOUR new arms, L1-L4, all in the NEW gate
+    // supabase/tests/test_mark_rpc_bridge_advisory_lock.sql; their layered twins
+    // carry twelve `find`-bearing steps between them, so the two pins move by
+    // different amounts. MEASURED: this file's own run read `expected 453 to be
+    // 449`, then, re-run after `armsSeen` moved, `expected 476 to be 464`.
     // ⭐ CURRENCY 2026-09-25 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): `armsSeen`
     // 449 -> 474 and `stepsSeen` 464 -> 477. TWENTY-FIVE new arms (the 24 of the
     // new test_api_keys_account_identity.sql and 6f CCXT in
@@ -1023,8 +1029,13 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round-4 fixes), HIST-requeued:
     // `armsSeen` 486 -> 487 and `stepsSeen` 491 -> 492 (one new arm with one `edit`
     // step). MEASURED: this file's run read `expected 487 to be 486` at the pre-move pin.
-    expect(armsSeen).toBe(487);
-    expect(stepsSeen).toBe(492);
+    // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): `armsSeen` 491 and
+    // `stepsSeen` 504, the UNION of the two lineages above. Over the common base
+    // (449 / 464) this branch added 4 arms / 12 steps (L1-L4) and origin/main added
+    // 38 arms / 28 steps (test_api_keys_account_identity.sql and 6f CCXT); the two
+    // sides touch disjoint gate files. MEASURED on the merged tree by this file's own run.
+    expect(armsSeen).toBe(491);
+    expect(stepsSeen).toBe(504);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1901,6 +1912,10 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // RUN SEPARATELY: `expected 460 to be 443` at the pre-move pin.
     // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 2): 460 -> 464,
     // moving WITH `stepsSeen`: four new `edit` steps, one needle each.
+    // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): 464 -> 476,
+    // moving WITH `stepsSeen`: twelve new `find`-bearing steps in the new gate
+    // test_mark_rpc_bridge_advisory_lock.sql. RUN SEPARATELY: `expected 476 to
+    // be 464` at the pre-move pin.
     // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 464 -> 477,
     // moving WITH `stepsSeen`: thirteen new `edit` steps with a `find` (the
     // twins of test_api_keys_account_identity.sql listed at `stepsSeen`), one
@@ -1920,7 +1935,9 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // one new `edit` step, one needle. RUN SEPARATELY: `expected 491 to be 490`.
     // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B review round-4 fixes), HIST-requeued:
     // 491 -> 492, one new `edit` step, one needle. MEASURED: `expected 492 to be 491`.
-    expect(needles.length).toBe(492);
+    // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 504, moving WITH
+    // `stepsSeen`: 464 + 12 (this branch) + 28 (origin/main), one needle each.
+    expect(needles.length).toBe(504);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2481,11 +2498,18 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 76 -> 77. The one
     // added is supabase/tests/test_cron_runs_rls.sql, a NEW file (the cron_runs
     // row-security gate, three arms), so the denominator moves with it.
+    // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): 77 -> 78. The one
+    // added is supabase/tests/test_mark_rpc_bridge_advisory_lock.sql, a NEW file
+    // (the LANE-ONLY two-backend bridge-lock gate, four arms). MEASURED: this
+    // file's own run read `expected 78 to be 77`.
     // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 77 -> 78. The
     // one added is supabase/tests/test_api_keys_account_identity.sql, a NEW file
     // (the gate for migration 20260925120000, 24 arms). RUN SEPARATELY:
     // `expected 78 to be 77` at the pre-move pin.
-    expect(corpus.filesTotal).toBe(78);
+    // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 78 -> 79. BOTH new
+    // files are in the corpus (test_mark_rpc_bridge_advisory_lock.sql and
+    // test_api_keys_account_identity.sql), so 77 + 1 + 1 = 79.
+    expect(corpus.filesTotal).toBe(79);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2528,10 +2552,17 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // denominator and the by-name list below. The one added is
     // supabase/tests/test_cron_runs_rls.sql. MEASURED over `scanCorpus`:
     // `filesTotal 77`, `filesAnnotated 50`.
+    // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): 50 -> 51, with the
+    // denominator and the by-name list below. The one added is
+    // supabase/tests/test_mark_rpc_bridge_advisory_lock.sql. MEASURED off the
+    // full lane run: `coverage: files 51/78`.
     // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 50 -> 51, with
     // the denominator and the by-name list below. The one added is
     // supabase/tests/test_api_keys_account_identity.sql.
-    expect(corpus.filesAnnotated).toBe(51);
+    // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 51 -> 52, with the
+    // denominator and the by-name list below, which carries BOTH new files.
+    // MEASURED off the full lane run on the merged tree: `coverage: files 52/79`.
+    expect(corpus.filesAnnotated).toBe(52);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2579,6 +2610,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_ledger_refresh_composite_arm.sql",
       "test_ledger_refresh_fanout.sql",
       "test_ledger_refresh_staleness.sql",
+      // ⭐ ADDED 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03) — the FIFTY-FIRST
+      // annotated file: the LANE-ONLY two-backend gate proving a second
+      // same-strategy terminal mark waits on the per-strategy bridge lock.
+      "test_mark_rpc_bridge_advisory_lock.sql",
       "test_metrics_by_basis_write.sql",
       // ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 01): the
       // FORTY-SEVENTH annotated file. Two arms (G1, S1) proving
@@ -2996,12 +3031,19 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // 49 -> 50. One ADDED gate file (supabase/tests/test_cron_runs_rls.sql),
     // both halves together. MEASURED off the full lane run: annotated 50 +
     // pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 77.
+    // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): 77 -> 78 and
+    // 50 -> 51. One ADDED gate file (supabase/tests/test_mark_rpc_bridge_advisory_lock.sql),
+    // both halves together. MEASURED off the full lane run: annotated 51 +
+    // pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 78.
     // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 77 -> 78 and
     // 50 -> 51. One ADDED gate file
     // (supabase/tests/test_api_keys_account_identity.sql), both halves
     // together. MEASURED off the full lane run: annotated 51 + pending 0 +
     // unreachable 27 + inert 0 + lane-blocked 0 = 78.
-    expect(corpus.filesTotal).toBe(78);
+    // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 78 -> 79 and 51 -> 52.
+    // BOTH added gate files. MEASURED off the full lane run on the merged tree:
+    // annotated 52 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 79.
+    expect(corpus.filesTotal).toBe(79);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3011,8 +3053,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // `lane-blocked-gate.sql` and NOT its comment-only sibling), and the
     // set-for-set PARTITION check below is the second independent guard.
     // ⭐ 49 -> 50 (Phase 164.6 review fix round 1, test_cron_runs_rls.sql).
+    // ⭐ 50 -> 51 (Phase 164.5.2 BRIDGELOCK plan 03, test_mark_rpc_bridge_advisory_lock.sql).
     // ⭐ 50 -> 51 (Phase 167.1.2 plan 03, test_api_keys_account_identity.sql).
-    expect(corpus.annotatedFiles).toHaveLength(51);
+    // ⭐ 51 -> 52 (merge of origin/main into Phase 164.5.2: both new files).
+    expect(corpus.annotatedFiles).toHaveLength(52);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

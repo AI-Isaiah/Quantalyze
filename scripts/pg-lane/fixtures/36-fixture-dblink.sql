@@ -1,0 +1,32 @@
+-- Additive lane-only fixture: the `dblink` contrib extension. Phase 164.5.2
+-- BRIDGELOCK plan 01.
+--
+-- WHY IT IS NEEDED. supabase/tests/test_mark_rpc_bridge_advisory_lock.sql
+-- proves that a second terminal mark on one strategy WAITS on the per-strategy
+-- advisory lock of 20260926120000_mark_compute_job_bridge_advisory_lock.sql.
+-- A lock wait needs two genuinely separate transactions: one backend (session
+-- `a`) holds an uncommitted mark, a second (session `b`) runs its own mark and
+-- blocks, and a third (the gate's own psql session) reads `pg_locks` to see
+-- WHICH lock `b` is waiting on. `run.sh --gate` runs the gate as ONE psql
+-- session, so the second and third backends come from `dblink` connections the
+-- gate opens back into the same throwaway cluster (trust auth, loopback only).
+-- A single-client `Promise.all`, or anything inside one backend, cannot race.
+--
+-- WHAT IT IS. `dblink` is PostgreSQL contrib: it ships with the server in the
+-- same sharedir as every other contrib extension, so this is a
+-- `CREATE EXTENSION`, not a package install. The gate itself also opens with
+-- `CREATE EXTENSION IF NOT EXISTS dblink`, so a lane whose server lacks the
+-- contrib files fails naming the extension, never as an unnamed error.
+--
+-- ⛔ NEVER APPLIED TO TEST OR PROD. `dblink` is not in the schema of record
+-- (not in supabase/schema/baseline.sql, created by no migration), and a
+-- server-side connector has no business on a shared or production database.
+-- This file exists only inside `scripts/pg-lane/run.sh`'s throwaway cluster,
+-- is reached only by gates that name it in their own RED-UNDER-SETUP, and is
+-- destroyed with the cluster by the lane's EXIT trap in every outcome (the
+-- 32-fixture-vault-stand-in.sql statement of the same contract).
+--
+-- Never a second base: 01-fixture-core.sql remains the only destructive
+-- fixture. This file creates one extension; it removes nothing.
+
+CREATE EXTENSION IF NOT EXISTS dblink;
