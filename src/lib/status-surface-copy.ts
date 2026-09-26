@@ -56,6 +56,7 @@ type StateLineKey =
   | "failed_unknown"
   | "failed_other"
   | "finished"
+  | "finished_build_unreadable"
   | "never_started"
   | "unreadable";
 
@@ -129,6 +130,16 @@ const STATE_LINES = {
     tone: "amber",
     text: "The last computation finished, but the factsheet could not be built from its results.",
   },
+  // 167.2.1-REVIEW-R2 WR-03 — the jobs finished, but the owner build could not
+  // READ the row (`read_error`, or `not_visible` under the owner predicate), so
+  // nothing was built from the results and KCS09-FINISHED's "could not be
+  // built from its results" would be false. States only what is known, beside
+  // KCS12-PROBE-UNREADABLE's "We could not check …".
+  finished_build_unreadable: {
+    id: "KCS09-FINISHED-UNREADABLE",
+    tone: "muted",
+    text: "The last computation finished. We could not read its results to build the factsheet.",
+  },
   never_started: {
     id: "KCS09-NEVER",
     tone: "muted",
@@ -144,7 +155,20 @@ const STATE_LINES = {
   { id: string; tone: StateLineTone; text: string }
 >;
 
-function stateLineKeyOf(state: ComputeState): StateLineKey {
+/**
+ * 167.2.1-REVIEW-R2 WR-03 — what the owner page knows about its own build,
+ * beside the compute-job state. `buildUnreadable` is true when the owner
+ * build's admin read failed or found no row, so the page never learned
+ * whether the stored results can build. Only KCS09-FINISHED claims a build
+ * outcome, so it is the only line this changes; every other line is about the
+ * jobs alone and stays true.
+ */
+export type OwnerBuildFacts = { buildUnreadable: boolean };
+
+function stateLineKeyOf(
+  state: ComputeState,
+  build?: OwnerBuildFacts,
+): StateLineKey {
   switch (state.state) {
     case "queued":
       return "queued";
@@ -171,7 +195,7 @@ function stateLineKeyOf(state: ComputeState): StateLineKey {
           return "failed_other";
       }
     case "finished":
-      return "finished";
+      return build?.buildUnreadable ? "finished_build_unreadable" : "finished";
     case "never_started":
       return "never_started";
     case "unreadable":
@@ -180,12 +204,15 @@ function stateLineKeyOf(state: ComputeState): StateLineKey {
 }
 
 /** The owner's state line and its tone (UI-SPEC § KCS-09, § Color). */
-export function ownerStateLine(state: ComputeState): {
+export function ownerStateLine(
+  state: ComputeState,
+  build?: OwnerBuildFacts,
+): {
   id: string;
   text: string;
   tone: StateLineTone;
 } {
-  const key = stateLineKeyOf(state);
+  const key = stateLineKeyOf(state, build);
   const line = STATE_LINES[key];
   if (key === "running_member" && state.state === "running" && state.memberOf) {
     const text = RUN_MEMBER_TEMPLATE.replace(
@@ -258,6 +285,9 @@ const REMEDY_RULES = {
   failed_unknown: "shape",
   failed_other: "shape",
   finished: "contact_check",
+  // A read failure is not a data fault: "have it checked" would send the owner
+  // to support for an outage. The one remedy is to read again.
+  finished_build_unreadable: "retry_read",
   never_started: "shape",
   unreadable: "retry_read",
 } as const satisfies Record<StateLineKey, RemedyRule>;
@@ -304,8 +334,9 @@ export function ownerRemedy(
   state: ComputeState,
   shape: StrategyShape | "unknown",
   strategyId: string,
+  build?: OwnerBuildFacts,
 ): OwnerRemedy {
-  switch (REMEDY_RULES[stateLineKeyOf(state)]) {
+  switch (REMEDY_RULES[stateLineKeyOf(state, build)]) {
     case "reload":
       return { ...RELOAD_REMEDY };
     case "contact_permanent":

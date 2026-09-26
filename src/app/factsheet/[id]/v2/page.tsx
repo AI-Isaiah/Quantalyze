@@ -551,10 +551,20 @@ export default async function FactsheetV2Page({
       ownerBuild && ownerBuild.reason !== null
         ? ownerBuildabilityOf(id, ownerBuild.reason)
         : null;
-    const ownerLine = ownerStatus && ownerStateLine(ownerStatus.state);
+    // 167.2.1-REVIEW-R2 WR-03: the state line is about the compute JOBS, the
+    // share note about the owner BUILD. When the build could not read the row,
+    // KCS09-FINISHED ("could not be built from its results") would claim a
+    // build outcome the page never learned, beside a note that says it could
+    // not check. The build's facts go to the copy module so that line becomes
+    // KCS09-FINISHED-UNREADABLE with the read-again remedy.
+    const ownerBuildFacts = {
+      buildUnreadable: ownerBuildability?.unreadable === true,
+    };
+    const ownerLine =
+      ownerStatus && ownerStateLine(ownerStatus.state, ownerBuildFacts);
     const ownerRemedyLine =
       ownerStatus &&
-      ownerRemedy(ownerStatus.state, ownerStatus.shape, signature.id);
+      ownerRemedy(ownerStatus.state, ownerStatus.shape, signature.id, ownerBuildFacts);
     return (
       <article className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12">
         {/* WR-02: the owner lane's placeholder must carry the visibility

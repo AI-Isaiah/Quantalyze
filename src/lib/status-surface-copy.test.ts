@@ -113,6 +113,45 @@ describe("S6 — KCS-09 fixed remedies", () => {
   });
 });
 
+describe("S6 — KCS09-FINISHED-UNREADABLE (167.2.1-REVIEW-R2 WR-03)", () => {
+  // The jobs finished, but the owner build could not read the row. Typed out,
+  // never imported.
+  const unreadable = { buildUnreadable: true };
+
+  it("KCS09-FINISHED-UNREADABLE: text and tone, and never KCS09-FINISHED's build claim", () => {
+    expect(ownerStateLine({ state: "finished" }, unreadable)).toEqual({
+      id: "KCS09-FINISHED-UNREADABLE",
+      text: "The last computation finished. We could not read its results to build the factsheet.",
+      tone: "muted",
+    });
+    expect(ownerStateLine({ state: "finished" }, unreadable).text).not.toContain(
+      "could not be built",
+    );
+  });
+
+  it("its remedy is to read again, never 'have it checked', for every shape", () => {
+    for (const shape of ["single", "unlinked", "composite", "csv", "unknown"] as const) {
+      const r = ownerRemedy({ state: "finished" }, shape, SID, unreadable);
+      expect(r.id).toBe("KCS09-UNREADABLE");
+      expect(rendered(r)).toBe("Reload this page to try again.");
+    }
+  });
+
+  it("a readable build keeps KCS09-FINISHED, and no other state line changes when the build is unreadable", () => {
+    expect(ownerStateLine({ state: "finished" }, { buildUnreadable: false }).id).toBe("KCS09-FINISHED");
+    const others: ComputeState[] = [
+      { state: "queued" },
+      { state: "failed", errorKind: "permanent" },
+      { state: "never_started" },
+      { state: "unreadable" },
+    ];
+    for (const s of others) {
+      expect(ownerStateLine(s, unreadable)).toEqual(ownerStateLine(s));
+      expect(ownerRemedy(s, "single", SID, unreadable)).toEqual(ownerRemedy(s, "single", SID));
+    }
+  });
+});
+
 describe("S6 — KCS-21 shape remedies", () => {
   const shapeStates: ComputeState[] = [
     { state: "stalled" },

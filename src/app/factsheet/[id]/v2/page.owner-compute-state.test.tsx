@@ -873,6 +873,12 @@ const UNBUILDABLE_COMPOSITE =
 const MINT_PROBE_UNREADABLE =
   "We could not check what a private link to this strategy shows right now. Reload this page to check again.";
 const NEVER_LINE = "No computation is running for this strategy, and none is on record.";
+// 167.2.1-REVIEW-R2 WR-03, typed as literals: the jobs finished, the owner
+// build could not read the row. KCS09-FINISHED would claim a build outcome.
+const FINISHED_LINE =
+  "The last computation finished, but the factsheet could not be built from its results.";
+const FINISHED_UNREADABLE_LINE =
+  "The last computation finished. We could not read its results to build the factsheet.";
 const SHARE_NOTE_CLASS = "mt-2 text-fixed-12 text-text-muted";
 
 /** The OwnerUnpublishedPanel root: the parent of its visibility notice. */
@@ -1101,10 +1107,15 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
       STATE.adminRow = null;
       givenJobs([chainJob("compute_analytics_from_csv", "done")]);
 
-      const { container } = await renderOwnerPending();
+      const { container, stateLine, remedyLine } = await renderOwnerPending();
       const last = panelOf(container).lastElementChild as HTMLElement;
 
       expect(last.textContent).toBe(MINT_PROBE_UNREADABLE);
+      // 167.2.1-REVIEW-R2 WR-03: the state line beside it makes no build claim.
+      expect(container.textContent).not.toContain(FINISHED_LINE);
+      expect(stateLine!.textContent).toBe(FINISHED_UNREADABLE_LINE);
+      expect(stateLine!.className).toBe("mt-6 text-fixed-13 text-text-secondary");
+      expect(remedyLine!.textContent).toBe(RETRY_READ);
       const buildCaptures = vi
         .mocked(captureToSentry)
         .mock.calls.filter(
@@ -1129,10 +1140,19 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
       STATE.adminError = { message: "synthetic outage", code: "57014" };
       givenJobs([chainJob("compute_analytics_from_csv", "done")]);
 
-      const { container } = await renderOwnerPending();
+      const { container, stateLine, remedyLine } = await renderOwnerPending();
       const last = panelOf(container).lastElementChild as HTMLElement;
 
       expect(last.textContent).toBe(MINT_PROBE_UNREADABLE);
+      // 167.2.1-REVIEW-R2 WR-03: the jobs finished, but nothing was built from
+      // the results, because the read failed. KCS09-FINISHED ("could not be
+      // built from its results") and its "have it checked" remedy are absent;
+      // the line says what is known, and the remedy is to read again.
+      expect(container.textContent).not.toContain(FINISHED_LINE);
+      expect(container.textContent).not.toContain(CONTACT_CHECK);
+      expect(stateLine!.textContent).toBe(FINISHED_UNREADABLE_LINE);
+      expect(stateLine!.className).toBe("mt-6 text-fixed-13 text-text-secondary");
+      expect(remedyLine!.textContent).toBe(RETRY_READ);
       // One event, from the stage that saw the error, carrying the code.
       expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
