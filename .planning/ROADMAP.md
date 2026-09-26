@@ -3226,6 +3226,8 @@ Plans:
 
 **⭐ D-30 (founder, 2026-09-26, "I'll enable the setting"):** the bot PR is opened with the workflow token, and the founder turns on the repository's "Allow GitHub Actions to create and approve pull requests" (measured OFF by the round-1 review, CR-01). The accepted side effect is that workflows with `pull-requests: write` can approve PRs. The setting being ON is a human-verification item. Recorded in `164.9.5-CONTEXT.md` D-30.
 
+**⭐ D-31 (founder, 2026-09-26, "Notice + skip"):** when `main` already carries a migration the applied merge lacks, `gateDump` no longer refuses. It prints a `::notice::` with the count, emits `changed=false` and writes nothing, so `redump-dump` ends green, the baseline is left alone and `redump-pr` skips. The concurrency group means PROD has not applied the newer migration yet, so the dump is correct but superseded, and that migration's own run re-dumps. This avoids a false red on `main` that would make Railway skip the analytics deploy. A `main` that LACKS a merge migration still refuses; a re-run attempt and a failed fetch of `main` still refuse. Recorded in `164.9.5-CONTEXT.md` D-31.
+
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
 ⭐ **Founder answers, 2026-09-24:** D-15, D-16 and D-17 are APPROVED. OPEN-2: after merge, run plan 10's read-only census, then queue a recompute of the affected PROD rows.

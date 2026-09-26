@@ -482,8 +482,8 @@ line); a gitleaks finding over the dump (explicit `.gitleaks.toml`, redacted, in
 comments ignored, a missing or empty dump refused rather than read as clean); a NUL byte, a
 `SET client_encoding` count other than one, or a home-directory path; zero tables or any data
 statement; a dump that lost a `CREATE EXTENSION` or `CREATE SCHEMA` name the committed dump carries;
-a run attempt other than the first, or a `main` whose migration listing differs from the merge's (a
-re-run would pair today's PROD with the old merge's marker); a marker not taken from the tree of the
+a run attempt other than the first, or a `main` that lacks a migration the merge carries (either
+would pair PROD with a marker that disagrees with it); a marker not taken from the tree of the
 applied merge; an artifact whose merge is not an ancestor
 of `main`, or whose marker omits a migration `main`'s marker carries; a red currency, content-drift
 or staleness gate on the composed tree; the skip trailer in the commit message or the PR text;
@@ -495,6 +495,9 @@ to add it. ⛔ **It never merges.** Its CI runs wait for a human to click
 **Approve workflows to run**, and because branch protection is off, a merge with zero completed
 checks is possible: read each head-SHA run's conclusion before merging. When the dump and marker
 are byte-identical to the committed pair, it opens nothing and prints a `::notice::` instead.
+It does the same, and leaves the baseline alone, when `main` already carries a migration the
+applied merge lacks (D-31): PROD has not applied that later migration yet, so this dump would be
+superseded, and that migration's own apply run re-dumps.
 The manual procedure above REMAINS the fallback, for a refusal that needs a human reading of the
 dump, or when the automation is unavailable.
 
