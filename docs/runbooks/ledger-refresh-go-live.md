@@ -1148,7 +1148,7 @@ here, but this precondition sits here because this is where a reader would go to
      case is **5 events in one attempt**: breach line, the provenance line, the landed "no longer
      protects it" line, then the heal's ERROR and capture. It needs a marker refusal on the loud
      write AND a heal failure. A heal programming error retries it, so the per-job ceiling in
-     that case is 15. A failed re-issue instead (breach line, provenance line, `_stamp_io`'s
+     that case is 15 (round 5; superseded by the round-6 derivation below). A failed re-issue instead (breach line, provenance line, `_stamp_io`'s
      ERROR, its capture) is still 4.
      Each row's count is pinned by the named test with an exact `log.error.call_count` (and,
      where a capture is expected, `capture_exception.call_count`). No row is counted from the
