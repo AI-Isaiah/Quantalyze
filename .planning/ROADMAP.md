@@ -3173,7 +3173,7 @@ Plans:
 **Goal:** After a migration applies to PROD, the committed baseline is re-dumped and proposed automatically, so main never sits red on baseline-content-drift waiting for a manual dump.
 **Requirements**: TODOS `[164.9.5-MANUAL-BASELINE-REDUMP]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 3/9 plans executed
+**Plans:** 5/9 plans executed
 
 ⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
 
@@ -3205,8 +3205,8 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 164.9.5-07-PLAN.md — wave 3: writer refusals, the `## Provenance`-scoped BASELINE.md writer on the real file, the D-16 CHANGELOG and `### Regenerated` composers and the D-23 PR body
-- [ ] 164.9.5-09-PLAN.md — wave 3: the calibrated wiring test for both jobs
+- [x] 164.9.5-07-PLAN.md — wave 3: writer refusals, the `## Provenance`-scoped BASELINE.md writer on the real file, the D-16 CHANGELOG and `### Regenerated` composers and the D-23 PR body
+- [x] 164.9.5-09-PLAN.md — wave 3: the calibrated wiring test for both jobs
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
