@@ -2985,6 +2985,68 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.9.3 to break down)
 
+### Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner (INSERTED)
+
+**Goal:** `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner.
+**Requirements**: TODOS `[164.9.4-CI-MUTEX-QUEUE]` (owned here)
+**Depends on:** Phase 164.9.1
+**Plans:** 0 plans
+
+⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
+
+**Evidence, measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).**
+
+| Job | Total | Waiting on the mutex | Actual work |
+|---|---|---|---|
+| `python` | 50 min | 36 min in "Acquire shared-test-db mutex" | 13 min of pytest |
+| `e2e-seeded` | 36 min | 28 min | 5 min of specs |
+| every other job | 12 min or less | — | — |
+
+The wait grows with the number of open PRs, because every one of them contends for the same key.
+
+**Precedents:**
+- Phase 164.4.2 moved `sql-tests` to `scripts/local-stack/run.sh`.
+- Phase 164.4.2.1 took `test-db-drift` off the key.
+
+## Success Criteria
+1. Neither job acquires advisory key `61616158`.
+2. Each job boots its own local-stack or pg-lane database, behind a loopback-DSN guard.
+3. Coverage and test counts do not drop: no skipped test, and no lowered `--cov-fail-under`.
+4. A measured CI run records the new wall clock.
+5. Any test that genuinely needs shared TEST is named, stays on the key, and states why.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.9.4 to break down)
+
+### Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically (INSERTED)
+
+**Goal:** After a migration applies to PROD, the committed baseline is re-dumped and proposed automatically, so main never sits red on baseline-content-drift waiting for a manual dump.
+**Requirements**: TODOS `[164.9.5-MANUAL-BASELINE-REDUMP]` (owned here)
+**Depends on:** Phase 164.9.1
+**Plans:** 0 plans
+
+⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
+
+**Evidence, 2026-09-26.**
+- **The manual step:** PR #864 needed a founder-run `supabase db dump --linked`.
+- **The cost:** main was red on `sql-gate-lint` from the Phase 164.9.1 PROD apply (run `36221903717`) until that dump landed, and Railway skips deploys while main is red.
+- **The procedure being automated:** `supabase/schema/BASELINE.md`, section "## Regenerating".
+
+⛔ **Security-sensitive workflow.** It reads PROD's schema with a repository secret and opens PRs on a PUBLIC repo. The plans must include a security review (`/gsd-secure-phase` or equivalent) before merge.
+
+## Success Criteria
+1. **Trigger and dump:** a workflow runs after `supabase-migrate.yml`'s PROD `apply` job succeeds, and takes a read-only schema dump with the existing repository secret. No agent enters a new credential.
+2. **Scan and refuse:** it runs the five-class secret scan and gitleaks, and refuses to open a PR on any hit.
+3. **Carried-migrations marker:** it regenerates `supabase/schema/baseline-carried-migrations.txt` from the tree of the merge that was applied.
+4. **Currency checks:** it runs `scripts/local-stack/run.sh --check-currency` and baseline-content-drift.
+5. **The PR:** it opens a PR carrying the VERSION bump, the CHANGELOG entry and the BASELINE.md provenance. It never auto-merges.
+6. **Credential handling:** the dump credential is never echoed, the workflow has least-privilege `permissions:`, and it is ref-guarded to `main`.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.9.5 to break down)
+
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
 ⭐ **Founder answers, 2026-09-24:** D-15, D-16 and D-17 are APPROVED. OPEN-2: after merge, run plan 10's read-only census, then queue a recompute of the affected PROD rows.

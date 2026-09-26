@@ -1301,6 +1301,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 165.2 inserted after Phase 165.1: NPMDEPS, #686 (now #836), #645, #646, #614 and #606 closures, [165-NIGHTLY-AUDIT-RED], zero-open close criterion, split from 165 by founder decision 2026-09-26
 - Phase 164.6.8 edited: owns MT5-SWITCH-WEDGE-CAUSE-01 (moved from 164.6.6, same next-wedge capture as the calibration item); #863-side re-homing deferred until #863 merges
 - Phase 164.9.3 inserted after Phase 164.9.2: CLAIMPAIR, a due failed_retry job plus a pending twin of the same (kind, allocator) raises 23505 in every claim entry point (latent; measured on the pg-lane 2026-09-26); owns [164.9.3-CLAIM-PAIR-23505]; orchestrator decision
+- Phase 164.9.4 inserted after Phase 164.9.3: CIOFFMUTEX, python and e2e-seeded off the shared-TEST advisory lock (36 and 28 min of mutex wait on run 36229959820); owns [164.9.4-CI-MUTEX-QUEUE]; founder decision
+- Phase 164.9.5 inserted after Phase 164.9.4: AUTOREDUMP, the baseline is re-dumped and proposed automatically after a PROD migration apply; security-sensitive workflow; owns [164.9.5-MANUAL-BASELINE-REDUMP]; founder decision
 
 ### Decisions
 

@@ -1362,6 +1362,29 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
+      queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
+      **Measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).** `python` took
+      50 min: 36 min in "Acquire shared-test-db mutex" and 13 min in pytest. `e2e-seeded` took
+      36 min: 28 min on the mutex and 5 min on specs. Every other job took 12 min or less. The wait
+      grows with the number of open PRs. Precedents: 164.4.2 (`sql-tests` to the local stack) and
+      164.4.2.1 (`test-db-drift` off the key).
+      ✅ **Destination: Phase 164.9.4 CIOFFMUTEX** — routed there 2026-09-26 via
+      `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
+      evidence.
+
+- [ ] **`[164.9.5-MANUAL-BASELINE-REDUMP]` Every PROD migration apply leaves `main` red on
+      baseline-content-drift until someone runs a manual schema dump (booked 2026-09-26, founder
+      decision).**
+      **Measured 2026-09-26.** PR #864 needed a founder-run `supabase db dump --linked`. `main` was
+      red on `sql-gate-lint` from the Phase 164.9.1 apply (run `36221903717`) until that dump
+      landed, and Railway skips deploys while `main` is red. The manual procedure is
+      `supabase/schema/BASELINE.md` "## Regenerating". ⛔ The automation is security-sensitive: it
+      reads PROD's schema with a repository secret and opens PRs on a public repo.
+      ✅ **Destination: Phase 164.9.5 AUTOREDUMP** — routed there 2026-09-26 via
+      `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
+      evidence.
+
 - [ ] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
       same (kind, allocator) makes every claim entry point raise `23505` (booked 2026-09-26, found
       on the pg-lane by the Phase 167.1.2 PR B fixer).**
