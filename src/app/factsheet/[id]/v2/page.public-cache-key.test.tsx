@@ -34,6 +34,8 @@
  * All ids, names and figures are synthetic.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render } from "@testing-library/react";
+import type { ReactElement } from "react";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 vi.mock("server-only", () => ({}));
@@ -53,6 +55,8 @@ vi.mock("next/cache", () => ({
       cacheKeys.push(keyParts);
       const key = JSON.stringify([keyParts, args]);
       if (cacheStore.has(key)) return cacheStore.get(key);
+      // A throw propagates before the store, as Next's miss path does
+      // (`unstable_cache` awaits the callback before `cacheNewResult`).
       const value = await fn(...args);
       cacheStore.set(key, value); // a null is stored too, as Next stores it
       return value;
@@ -72,6 +76,7 @@ import FactsheetV2Page from "./page";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { readPublicVerificationSignals } from "@/lib/queries";
+import { captureToSentry } from "@/lib/sentry-capture";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 
 const STRATEGY_ID = "51a10001-0000-4000-8000-0000000000d2";
@@ -113,14 +118,14 @@ function adminRow(analytics: { computed_at: string; computation_status: string; 
 
 let adminReads = 0;
 
-function mockAdmin(strategy: unknown): SupabaseClient {
+function mockAdmin(strategy: unknown, error: unknown = null): SupabaseClient {
   const from = () => {
     const chain = {
       select: () => chain,
       eq: () => chain,
       maybeSingle: () => {
         adminReads += 1;
-        return Promise.resolve({ data: strategy, error: null });
+        return Promise.resolve(error ? { data: null, error } : { data: strategy, error: null });
       },
     };
     return chain;
@@ -163,9 +168,12 @@ function findPayload(node: unknown): FactsheetPayload | null {
 }
 
 /** One public request: the row as the signature probe and the builder see it now. */
-async function request(analytics: { computed_at: string; computation_status: string; daily_returns: unknown }) {
+async function request(
+  analytics: { computed_at: string; computation_status: string; daily_returns: unknown },
+  adminError: unknown = null,
+) {
   vi.mocked(createClient).mockResolvedValue(mockRequestClient(analytics.computed_at) as never);
-  vi.mocked(createAdminClient).mockReturnValue(mockAdmin(adminRow(analytics)));
+  vi.mocked(createAdminClient).mockReturnValue(mockAdmin(adminRow(analytics), adminError));
   return FactsheetV2Page({ params: Promise.resolve({ id: STRATEGY_ID }) });
 }
 
@@ -216,6 +224,42 @@ describe("WR-02 — the public factsheet cache is keyed by the analytics run it 
     expect(findPayload(first)).not.toBeNull();
     expect(findPayload(second)).not.toBeNull();
     expect(adminReads, "the second request was served from the cache").toBe(1);
+  });
+
+  it("READ-ERROR-NOT-CACHED (167.2.1-REVIEW-R2 WR-02): a transient admin read error renders the placeholder and is not stored for the run", async () => {
+    // THE DEFECT. The callback returned the builder's `null` for a
+    // `read_error`, and unstable_cache stored it under this `computed_at`, so
+    // one PostgREST blip served the placeholder for the TTL while
+    // /strategies' fresh probe said the link works.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const run = { computed_at: T0, computation_status: "complete", daily_returns: CASH_DAILY };
+      vi.mocked(captureToSentry).mockClear();
+
+      // Request 1: the admin read fails. The page must not 500: it renders the
+      // public placeholder sentence, uncached.
+      const failed = await request(run, { message: "synthetic outage", code: "57014" });
+      expect(findPayload(failed)).toBeNull();
+      const { container } = render(failed as ReactElement);
+      expect(container.querySelector("article p:last-child")?.textContent).toBe(
+        "The detailed factsheet for this strategy is not available yet.",
+      );
+      // Captured once, by the resolve stage that saw it; the page adds none.
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toMatchObject({
+        tags: { stage: "factsheet-resolve", reason: "read_error", code: "57014" },
+      });
+
+      // Request 2: same run, the read recovers. It must BUILD, not replay the
+      // outage from the cache.
+      const recovered = await request(run);
+      expect(findPayload(recovered), "the read error was cached for the run").not.toBeNull();
+      expect(adminReads, "both requests reached the builder").toBe(2);
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
   });
 
   it("KEY SHAPE: the key is the shape version, the id and computed_at, and nothing viewer-dependent", async () => {

@@ -19,7 +19,6 @@ import {
 // ⛔ `buildFactsheetPayloadCached` deliberately did NOT move: the lane decision
 // that makes the cached wrapper safe lives in this file, and only here.
 import {
-  fetchAndBuildPayload,
   fetchAndBuildPayloadWithReason,
   type NotBuildableReason,
 } from "@/lib/factsheet/fetch-and-build-payload";
@@ -77,6 +76,19 @@ const STATE_LINE_TONE_CLASS = {
 // pin, which carries the same reasoning for the disclosure-tier redaction.
 export const dynamic = "force-dynamic";
 
+/**
+ * 167.2.1-REVIEW-R2 WR-02 / SFH-R2 N-4 — the public build's admin read failed
+ * (`read_error`). Thrown from inside the `unstable_cache` callback so a
+ * transient outage is never stored as the answer for this analytics run.
+ * Module-private: the page catches it and renders the placeholder, uncached.
+ */
+class FactsheetReadError extends Error {
+  constructor() {
+    super("public factsheet build: the admin read failed");
+    this.name = "FactsheetReadError";
+  }
+}
+
 function buildFactsheetPayloadCached(
   id: string,
   computedAt: string,
@@ -109,8 +121,27 @@ function buildFactsheetPayloadCached(
   // would be a disclosure bug. Keeping the parameter off the signature makes
   // that unrepresentable: a caller cannot pass one, and the literal cannot be
   // reached by a caller at all.
+  //
+  // 167.2.1-REVIEW-R2 WR-02 / SFH-R2 N-4: a `read_error` THROWS instead of
+  // returning null. Measured in the bundled Next (16.2.11,
+  // `next/dist/server/web/spec-extension/unstable-cache.js`, `unstable_cache`):
+  // on a miss the callback is awaited BEFORE `cacheNewResult`, so a throw
+  // propagates and nothing is stored; on a stale entry the background
+  // revalidation's `.catch` returns the cached value and does not call
+  // `cacheNewResult`, so the last good entry survives. A one-request read blip
+  // therefore can no longer pin a placeholder under this `computed_at` for the
+  // TTL while /strategies' fresh probe shows no note. Every OTHER reason is a
+  // fact about the stored row and is cached as `null`, as before.
+  // ⚠️ Accepted residual under D-07, owned by Phase 169 plan 04: a composite's
+  // failed `csv_daily_returns` read still arrives as `composite_unbuildable`
+  // (`readCompositeFactsheet` folds the error into an empty series), so that
+  // outage cannot be told apart here and its `null` is still cached.
   return unstable_cache(
-    async () => fetchAndBuildPayload(id, withPublishedOnly),
+    async () => {
+      const built = await fetchAndBuildPayloadWithReason(id, withPublishedOnly);
+      if (built.reason === "read_error") throw new FactsheetReadError();
+      return built.payload;
+    },
     // Cache key carries a shape-version suffix. Bump it (e.g. -v2 → -v3)
     // whenever FactsheetPayload adds non-optional fields, so unstable_cache
     // entries from the previous shape don't crash readers expecting the new
@@ -442,13 +473,31 @@ export default async function FactsheetV2Page({
     lane === "owner"
       ? await fetchAndBuildPayloadWithReason(id, (q) => withPublishedOrOwner(q, ownerUid!))
       : null;
-  const payload = ownerBuild
-    ? ownerBuild.payload
-    : await buildFactsheetPayloadCached(id, computedAt);
+  // 167.2.1-REVIEW-R2 WR-02: a public build whose admin read failed throws
+  // `FactsheetReadError` out of the cache (uncached, see the wrapper). It
+  // renders the same public placeholder as any null payload: KCS10's one
+  // sentence is true in every state, an outage included, and it is not a 500.
+  // The resolve stage has already captured the read error once, with its code,
+  // so it is not captured again here. Any other throw stays the error
+  // boundary's.
+  let publicReadFailed = false;
+  let payload: FactsheetPayload | null;
+  if (ownerBuild) {
+    payload = ownerBuild.payload;
+  } else {
+    try {
+      payload = await buildFactsheetPayloadCached(id, computedAt);
+    } catch (err) {
+      if (!(err instanceof FactsheetReadError)) throw err;
+      publicReadFailed = true;
+      payload = null;
+    }
+  }
   if (!payload) {
     console.warn("[factsheet/v2/page] payload pending -> rendering fallback", {
       id,
       computedAt,
+      publicReadFailed,
       hint: "buildFactsheetPayload returned null — check (a) admin client visibility on strategies row, (b) strategy_analytics.daily_returns shape, (c) series clipped to BENCH_START/BENCH_END (2023-04-26 onward) has at least 2 points",
     });
     // The strategy passed the signature gate (published, or the viewer's own

@@ -78,6 +78,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { deriveComputeState } from "@/lib/compute-state";
+import { withPublishedOnly } from "@/lib/visibility";
 import {
   fetchAndBuildPayloadWithReason,
   probeFactsheetBuildable,
@@ -1192,8 +1193,13 @@ describe("KCS-10 (S8) — the public pending placeholder says one neutral senten
     expect(STATE.observed.requestTables).not.toContain("strategy_keys");
     // Phase 167.2.1 (D-06, D-11): nor does it probe buildability, nor run the
     // owner lane's reason-carrying build.
+    // 167.2.1-REVIEW-R2 WR-02 (2026-09-26, deliberate): the public cache fill
+    // now calls the reason-carrying builder too, so it can throw on a
+    // `read_error`. What this case forbids is the OWNER build, so it pins the
+    // one call to the published-only predicate, by identity.
     expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
-    expect(vi.mocked(fetchAndBuildPayloadWithReason)).not.toHaveBeenCalled();
+    expect(vi.mocked(fetchAndBuildPayloadWithReason)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fetchAndBuildPayloadWithReason).mock.calls[0][1]).toBe(withPublishedOnly);
   });
 });
 
