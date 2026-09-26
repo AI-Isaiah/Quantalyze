@@ -152,6 +152,36 @@ Delete-confirm read path and a changed public factsheet cache key. There is no m
 - ⚠️ **D-09 merge order:** if Phase 169 merges first, this phase re-runs the parity table and the
   SC1 lane reproduction after its rebase.
 
+## [0.93.0.2] - 2026-09-26 — the committed baseline catches up with the Phase 164.9.1 apply
+
+Same shape as v0.90.0.1: a read-only re-dump taken after migrations reached PRODUCTION, so the
+local-stack lane loads a dump that already carries them, and `main`'s red `sql-gate-lint` clears.
+
+### Changed
+- **`supabase/schema/baseline.sql` regenerated from PROD**, read-only `supabase db dump --linked`
+  taken by the founder AFTER Supabase Migrate run `36221903723` applied Phase 164.9.1's three
+  migrations on merge commit `96219c04a`. sha256 `b473ab7e…` → `22cce9c0…`, recorded in
+  `BASELINE.md` with a dated section of what was measured. Shape unchanged: 63 tables,
+  155 policies, 123 function statements, **0** data statements.
+- **`supabase/schema/baseline-carried-migrations.txt` regenerated in the same commit** (DECISION F)
+  from the tree of `96219c04a`: three migrations added, sha line rebound.
+  `baseline-currency: carried=277 replay=0 marker-sha=match defects=0`.
+
+### Fixed
+- **`main` CI is green again on `sql-gate-lint`.** Its `baseline-content-drift` step had read
+  DRIFT 5 with findings since the 164.9.1 apply (`_enqueue_compute_job_internal/10`,
+  `request_allocator_holdings_sync/1`, …), because the committed dump predated the bodies PROD
+  now runs. It now reads compared 123, MATCH 120, DRIFT 3 (the three allowlisted `[DRIFT-06]`
+  rows), findings **0**. Railway skips an analytics deploy while `main` is red, so this also
+  unblocks the next analytics-service deploy.
+
+### Notes
+- **Secret-scanned before commit** with all five classes from `BASELINE.md`'s own command: **0**
+  matches; gitleaks over the file: no leaks; no home path or local username; one
+  `SET client_encoding`, no NUL bytes.
+- Gates re-run on the new dump: `dump-sql-functions.ts --check` current (121 names, 0 ratcheted
+  disagreements); `baseline-content-drift --self-test` OK.
+
 ## [0.93.0.1] - 2026-09-26 — DRIFTOFFMUTEX: `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work
 
 ⭐ **What changed for whoever reads this next.** Phase 164.4.2.1 takes `ci.yml`'s `test-db-drift`
