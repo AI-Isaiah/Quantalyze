@@ -1,0 +1,22 @@
+-- Stand-in for `compute_jobs.claim_token`, which set_departed_key_history_inclusion
+-- (migration 20260925120000) writes when it puts a failed_retry recompose back
+-- to pending: it NULLs claimed_at, claimed_by and claim_token, the claim state
+-- reset_stalled_compute_jobs writes for a reclaimed job. No fixture in
+-- test_api_keys_account_identity.sql's apply list carries the column, so the
+-- reuse would abort with 42703 on the lane. Apply AFTER a compute_jobs base
+-- (20260411144407_compute_jobs_queue.sql). Never a second base.
+--
+-- WHY THIS AND NOT THE REAL MIGRATION. The column's sole source is
+-- 20260515114555_compute_jobs_claim_token_fencing.sql (STEP 1). That file also
+-- re-bases claim_compute_jobs, claim_compute_jobs_with_priority,
+-- mark_compute_job_done, mark_compute_job_failed and reset_stalled_compute_jobs,
+-- none of which this gate exercises, and its bare COMMENT ON FUNCTION
+-- claim_compute_jobs_with_priority aborts with 42725 wherever two overloads
+-- of that function exist (see 29-fixture-compute-jobs-priority.sql). The gate
+-- needs the column to exist and nothing else.
+--
+-- STAND-IN, NOT THE SCHEMA. The type (UUID, nullable, no default) is
+-- production's, from 20260515114555 STEP 1. Nothing else about the column is
+-- reproduced.
+ALTER TABLE public.compute_jobs
+  ADD COLUMN IF NOT EXISTS claim_token UUID;
