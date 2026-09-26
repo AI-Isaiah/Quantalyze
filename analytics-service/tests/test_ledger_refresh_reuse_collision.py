@@ -645,10 +645,14 @@ class TestMarkerReReadProgrammingErrorsPropagate:
     A bug in the read (a renamed client method, a bad call shape) is logged at
     ERROR, captured once with the job tag, and re-raised UNCHANGED, so the job
     is filed ``unknown`` rather than ``READ_ERROR``'s "the database was busy".
+    ⛔ Round 5 (R5 IN-02 / LOW-2): the TAIL MIRROR is the exception. It logs and
+    captures the same way but answers ``READ_ERROR`` and the job is DONE,
+    because it runs after the hop-2 enqueue (see ``raise_programming_errors``).
 
     Neuter to redden: delete the ``isinstance(exc, _READ_PROGRAMMING_ERRORS)``
     branch in ``_refresh_marker_live_state``. The chain-edge case then files
-    ``transient`` and the tail-mirror case ``DONE``; both go RED on the kind."""
+    ``transient`` (RED on the kind) and the tail-mirror case loses its
+    programming-error line (RED on the first ERROR's text)."""
 
     @staticmethod
     def _ctx(job_read_answers: list[Any]) -> tuple[MagicMock, dict[str, Any]]:
@@ -717,10 +721,17 @@ class TestMarkerReReadProgrammingErrorsPropagate:
         )
 
     @pytest.mark.asyncio
-    async def test_at_the_tail_mirror_it_is_unknown_after_the_one_enqueue(self) -> None:
-        """The tail mirror runs AFTER its enqueue, so the enqueue has happened
-        once; the retry re-runs the derive and the enqueue dedup serves the
-        in-flight hop 2 (``_Queue`` above models that dedup)."""
+    async def test_at_the_tail_mirror_it_is_logged_and_the_job_is_done(self) -> None:
+        """Round 5 (R5 IN-02 / LOW-2): the tail mirror runs AFTER the hop-2
+        enqueue on a job whose work already landed. A programming error in its
+        re-read is logged at ERROR and captured once, then answered
+        ``READ_ERROR``, and the job is DONE. Filing it ``unknown`` (round 4)
+        re-crawled the venue on every retry, and a derive that ended
+        ``failed_final`` is one the status bridge reads as a live failure over
+        the row hop 2 just published.
+
+        Neuter to redden: pass ``raise_programming_errors=True`` from
+        ``_refresh_marker_still_on_row``. The job is filed ``unknown``."""
         ctx, capture = self._ctx(
             [
                 MagicMock(data={"metadata": {"source": _MARKER}}),
@@ -728,11 +739,14 @@ class TestMarkerReReadProgrammingErrorsPropagate:
             ]
         )
         result, log, sentry = await self._dispatch(ctx)
-        assert result.error_kind == "unknown", result
-        assert "simulated bad call shape" in (result.error_message or "")
+        assert result.outcome == DispatchOutcome.DONE, result
         enqueues = [p for (n, p) in capture["rpc_calls"] if n == "enqueue_compute_job"]
         assert len(enqueues) == 1, enqueues
-        assert log.error.call_count == 1, log.error.call_args_list
+        # The helper's programming-error line, then the READ_ERROR line.
+        assert log.error.call_count == 2, log.error.call_args_list
+        first = log.error.call_args_list[0].args
+        assert "programming error" in str(first[0]), first
+        assert "simulated bad call shape" in str(first), first
         assert sentry.capture_exception.call_count == 1
 
     @pytest.mark.asyncio

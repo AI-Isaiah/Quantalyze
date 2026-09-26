@@ -2735,7 +2735,12 @@ class MarkerStateNotLoggable(Exception):
 # look" signal. The sites are the entry publish-state read, ``_stamp_io`` (every
 # read and write inside both terminal stamp closures), the single-key series
 # heal after a landed loud stamp (round 5, SFH-R5-03) and
-# ``_refresh_marker_live_state`` (the chain edge and the tail mirror).
+# ``_refresh_marker_live_state`` at the chain edge. ⛔ ONE deliberate exception,
+# the single-key TAIL MIRROR (round 5, R5 IN-02 / LOW-2): it logs and captures
+# the same way but answers ``READ_ERROR`` and the job finishes DONE, because it
+# runs after the hop-2 enqueue on a job whose work already landed. See
+# ``_refresh_marker_live_state``. The heal re-raises although its stamp has also
+# landed, because that job is failing anyway; the tail mirror's job succeeded.
 # Labelling them TRANSIENT would hide a code defect behind "the database was
 # busy" until the retry budget ran out. ``transient`` and ``unknown`` retry on
 # the same budget (``mark_compute_job_failed``) and render the same user
@@ -2781,13 +2786,21 @@ async def _refresh_marker_still_on_row(
     ``expected``. Only ``PRESENT`` keeps a protection. See the block comment above
     for why a live re-read and not the claim-time snapshot, and for why the answer
     is a state. A caller that must NAME a failed read uses
-    ``_refresh_marker_live_state``."""
-    state, _failure = await _refresh_marker_live_state(supabase, job_id, expected)
+    ``_refresh_marker_live_state``.
+
+    LOG-ONLY, and it never raises for a failed read: every failure, a
+    ``_READ_PROGRAMMING_ERRORS`` member included, is logged at ERROR, captured
+    once and answered ``READ_ERROR``. Its one handler caller is the single-key
+    TAIL MIRROR, which runs after the hop-2 enqueue (round 5, R5 IN-02 / LOW-2:
+    see ``raise_programming_errors`` on ``_refresh_marker_live_state``)."""
+    state, _failure = await _refresh_marker_live_state(
+        supabase, job_id, expected, raise_programming_errors=False
+    )
     return state
 
 
 async def _refresh_marker_live_state(
-    supabase: Any, job_id: Any, expected: str
+    supabase: Any, job_id: Any, expected: str, *, raise_programming_errors: bool
 ) -> tuple[MarkerLiveState, str | None]:
     """``_refresh_marker_still_on_row`` plus, for ``READ_ERROR`` only, the
     failed read's ``_read_failure_text``. The chain edge carries that text into
@@ -2795,23 +2808,40 @@ async def _refresh_marker_live_state(
 
     Used by the single-key CHAIN EDGE and TAIL MIRROR only. The two terminal
     stamp closures call ``_read_refresh_marker_state`` through ``_stamp_io``
-    instead, so they never see ``READ_ERROR`` (round 4)."""
+    instead, so they never see ``READ_ERROR`` (round 4).
+
+    ``raise_programming_errors`` (keyword-only, no default, so every caller
+    chooses): ``True`` at the CHAIN EDGE, where a ``_READ_PROGRAMMING_ERRORS``
+    member is logged, captured and re-raised unchanged (``unknown``, SFH-R4-02)
+    before anything is enqueued. ``False`` at the TAIL MIRROR (round 5, R5
+    IN-02 / LOW-2): the member is logged and captured the same way, then
+    answered ``READ_ERROR`` and the job finishes DONE. Failing a job whose work
+    already landed and whose hop 2 is already enqueued changes nothing about hop
+    2 and costs a lot: each retry re-crawls the venue and re-writes the hop-1
+    rows, and a derive that ends ``failed_final`` is one
+    ``sync_strategy_analytics_status`` reads as a live failure, so it can write
+    the generic derive copy over a row hop 2 just published. The capture
+    already carries the "needs a human look" signal."""
     try:
         return await _read_refresh_marker_state(supabase, job_id, expected), None
     except Exception as exc:  # noqa: BLE001 — every failure is reported, then answered
         if isinstance(exc, _READ_PROGRAMMING_ERRORS):
-            # SFH-R4-02: a bug in this read, not a database answer. Reported,
-            # then re-raised unchanged (filed ``unknown``), as at every site
-            # listed above ``_READ_PROGRAMMING_ERRORS``. ⚠️ At the TAIL MIRROR
-            # this runs after the hop-2 enqueue, so the retry re-runs the derive
-            # and re-enqueues, and the enqueue dedup serves the in-flight hop 2.
+            # SFH-R4-02: a bug in this read, not a database answer. Reported
+            # like every site listed above ``_READ_PROGRAMMING_ERRORS``. At the
+            # chain edge it is then re-raised unchanged (filed ``unknown``); at
+            # the tail mirror it is answered ``READ_ERROR`` (see the docstring).
             logger.error(
                 "ledger-refresh: re-reading the refresh marker on compute_job %s "
-                "raised a programming error (%s). The error propagates unchanged.",
+                "raised a programming error (%s). %s",
                 job_id, _read_failure_text(exc),
+                "The error propagates unchanged."
+                if raise_programming_errors
+                else "Answering READ_ERROR: the tail mirror only logs.",
             )
             _capture_read_failure(exc, job_id=job_id)
-            raise
+            if raise_programming_errors:
+                raise
+            return MarkerLiveState.READ_ERROR, _read_failure_text(exc)
         logger.error(
             "ledger-refresh: could not re-read the refresh marker on compute_job "
             "%s (%s) — its live state is UNKNOWN. The caller decides: the "
@@ -6432,7 +6462,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # SFH-R3-02: the sibling that also hands back the failed read's
         # ``ExceptionClass: message``, so ``last_error`` says what failed.
         _live_state_out, _read_failure_out = await _refresh_marker_live_state(
-            ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
+            ctx.supabase,
+            job.get("id"),
+            LEDGER_REFRESH_SINGLE_KEY_SOURCE,
+            raise_programming_errors=True,
         )
         if _live_state_out is MarkerLiveState.READ_ERROR:
             _log_marker_not_confirmed(
