@@ -1,7 +1,9 @@
 /**
- * Site tests T16 and T17 for Phase 166.2 plan 05: the factsheet builder's
- * benchmark and rolling figures (`jointMetrics`' beta, correlation, tracking
- * error and information ratio; `rollingBeta`; `rollingSharpe`) must answer a
+ * Site tests T16, T17, T19 and T20 for Phase 166.2 plan 05: the factsheet
+ * builder's benchmark, rolling and correlation figures (`jointMetrics`' beta,
+ * correlation, tracking error and information ratio; `rollingBeta`;
+ * `rollingSharpe`; the benchmark correlations and correlation matrix of
+ * `buildFactsheetPayload`; `buildAllocatorMetrics`' correlation) must answer a
  * compounding-NAV constant yield EXACTLY as they answer an all-zero series of
  * the same length (Phase 166.1 D-07), because those sites now compute through
  * `src/lib/return-stats.ts` (D-17).
@@ -23,6 +25,9 @@
 import { describe, it, expect } from "vitest";
 import { jointMetrics } from "./joint";
 import { rollingBeta, rollingSharpe, rollingSortino, rollingVol } from "./rolling";
+import { buildFactsheetPayload } from "./build-payload";
+import { buildAllocatorMetrics } from "./allocator";
+import type { DailyReturn } from "./types";
 import { CONSTANT_YIELDS, apyToDaily, navConstantYield } from "@/__tests__/fixtures/dispersion-nav";
 
 const N = 366;
@@ -218,6 +223,99 @@ describe("T17 rollingBeta and rollingSharpe on return-stats (D-07, D-17)", () =>
       for (const x of w) if (x < 0) downSq += x * x;
       const dd = Math.sqrt(downSq / WINDOW) * sqrtN;
       expect(sortino[i]).toBe((m * PPY) / dd);
+    }
+  });
+});
+
+/** A daily-return series on consecutive calendar days inside the benchmark fixtures' range. */
+function dated(values: number[]): DailyReturn[] {
+  const t0 = Date.parse("2024-01-01T00:00:00Z");
+  return values.map((value, i) => ({
+    date: new Date(t0 + i * 86_400_000).toISOString().slice(0, 10),
+    value,
+  }));
+}
+
+const PAYLOAD_STRATEGY = {
+  id: "s-166-2-05",
+  name: "Constant Yield Fixture",
+  types: ["quant"],
+  markets: ["crypto"],
+  computedAt: "2025-01-02T00:00:00Z",
+  trustTier: null,
+  assetClass: "crypto",
+};
+
+/** The benchmark correlations and the strategy's row of the matrix, as the payload reports them. */
+function payloadCorrelations(values: number[]): number[] {
+  const p = buildFactsheetPayload(PAYLOAD_STRATEGY, dated(values));
+  if (!p) throw new Error("buildFactsheetPayload returned null");
+  const matrix = p.correlationMatrix.matrix;
+  return [
+    ...p.correlations.map((r) => r.rho),
+    ...matrix[0].slice(1),
+    ...matrix.slice(1).map((row) => row[0]),
+  ];
+}
+
+describe("T19 buildFactsheetPayload correlations on return-stats (D-07, D-17)", () => {
+  const onZeros = payloadCorrelations(zeros(N));
+
+  it("T19 an all-zero strategy reports NaN for every benchmark correlation (the degenerate value)", () => {
+    expect(onZeros.length).toBe(15);
+    expect(onZeros.every((x) => Object.is(x, NaN))).toBe(true);
+  });
+
+  for (const id of YIELD_IDS) {
+    it(`T19 benchmark correlations and matrix cells of a constant-yield strategy equal the all-zero strategy (${id})`, () => {
+      const got = payloadCorrelations(navConstantYield(CONSTANT_YIELDS[id], N));
+      expect(got.length).toBe(onZeros.length);
+      got.forEach((x, i) => expect(Object.is(x, onZeros[i])).toBe(true));
+    });
+  }
+
+  it("T19 cent-rounded 1% APY strategy keeps finite correlations (floor control)", () => {
+    const got = payloadCorrelations(CENT_1PCT);
+    expect(got.every((x) => Number.isFinite(x))).toBe(true);
+  });
+});
+
+describe("T20 buildAllocatorMetrics correlation on return-stats (D-07, D-17)", () => {
+  const onZeroLeg = buildAllocatorMetrics(BENCH, zeros(N));
+  const zeroPortfolio = buildAllocatorMetrics(zeros(N), STRAT);
+
+  for (const id of YIELD_IDS) {
+    const y = CONSTANT_YIELDS[id];
+
+    it(`T20 a constant-yield strategy leg gives the all-zero leg's correlation, sleeve and blend vol (${id})`, () => {
+      const got = buildAllocatorMetrics(BENCH, navConstantYield(y, N));
+      expect(Object.is(got.corr, onZeroLeg.corr)).toBe(true);
+      expect(Object.is(got.sleeve_pct, onZeroLeg.sleeve_pct)).toBe(true);
+      expect(Object.is(got.blend_vol, onZeroLeg.blend_vol)).toBe(true);
+    });
+
+    it(`T20 a constant-yield portfolio gives the all-zero portfolio's ann_vol and correlation (${id})`, () => {
+      const got = buildAllocatorMetrics(navConstantYield(y, N), STRAT);
+      expect(Object.is(got.ann_vol, zeroPortfolio.ann_vol)).toBe(true);
+      expect(Object.is(got.corr, zeroPortfolio.corr)).toBe(true);
+    });
+  }
+
+  it("T20 cent-rounded 1% APY leg keeps a finite, non-zero correlation (floor control)", () => {
+    const got = buildAllocatorMetrics(BENCH, CENT_1PCT);
+    expect(Number.isFinite(got.corr) && got.corr !== 0).toBe(true);
+  });
+
+  it("T20 a noisy pair keeps its correlation and vols to 12 significant digits", () => {
+    for (const ppy of [252, 365]) {
+      const got = buildAllocatorMetrics(BENCH, STRAT, ppy);
+      const a = windowStats(BENCH);
+      const b = windowStats(STRAT);
+      let cov = 0;
+      for (let i = 0; i < N; i++) cov += (BENCH[i] - a.m) * (STRAT[i] - b.m);
+      cov /= N;
+      expect(sig12(got.corr)).toBe(sig12(cov / (a.sd * b.sd)));
+      expect(got.ann_vol).toBe(a.sd * Math.sqrt(ppy));
     }
   });
 });
