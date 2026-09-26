@@ -75,13 +75,74 @@ phases below carry the corrections, not the bullets.
 ### Phases (v1.20)
 
 - [x] **Phase 158: OPS-CI — A merge means a deploy** - External FIFO mutex + `cancelled`-conclusion watcher close the shared-test-db eviction (#616); `sql-tests` gated by an aggregator; orphaned e2e specs run; TEST stale-`pending` drained; MultiKeyConnectStep flake root-caused (completed 2026-08-21)
-- [ ] **Phase 159: RANK — Public-ranking integrity** - Failed/stale-computation KPIs out of published percentiles on BOTH engines; anon `(*)` splats become explicit projections; quantstats sign-flip + blend-annualization default closed; FILL-arm CAS; uid shape validated
-- [ ] **Phase 160: PROVENANCE — The server's venue is the venue that annualizes** - `api_keys.exchange` server-authoritative at every INSERT; the `asset_class` √365/√252 stamp derives from the attested venue WITH the null-attestation guard; B-M1 PROD census first
+- [x] **Phase 159: RANK — Public-ranking integrity** - Failed/stale-computation KPIs out of published percentiles on BOTH engines; anon `(*)` splats become explicit projections; quantstats sign-flip + blend-annualization default closed; FILL-arm CAS; uid shape validated
+- [x] **Phase 160: PROVENANCE — The server's venue is the venue that annualizes** - `api_keys.exchange` server-authoritative at every INSERT; the `asset_class` √365/√252 stamp derives from the attested venue WITH the null-attestation guard; B-M1 PROD census first
 - [ ] **Phase 161: WIZERR — Honest error surfaces** - The recorded WIZFORM-02 class residue: thirteen surfaces stop rendering `UNKNOWN`, false sentences, or unwinnable "try again"
-- [ ] **Phase 162: HONEST — What the user sees is true** - No raw Python exceptions as copy, no FRESH badge on a dead series, real equity curves, metrics on drawer rows, the clicked key preselected
+- [x] **Phase 161.1: LEDGER-REFRESH — Recurring strategy refresh for ledger-backed venues, shipped dormant behind a founder-gated schedule** (INSERTED)
+- [x] **Phase 162: HONEST — What the user sees is true** - No raw Python exceptions as copy, no FRESH badge on a dead series, real equity curves, metrics on drawer rows, the clicked key preselected
 - [x] **Phase 163: HARDEN — Fail safe, closed, and loud** - structlog redaction closed at BOTH failure modes, post-commit `createAdminClient` 500 class, flag-monitor honesty, deterministic worker plumbing, password policy, `.planning` username scrub, RPC audit gate, `bridgeComputeLimiter`
-- [ ] **Phase 164: SHARE — Copy Link always works, and never discloses** - Revocable share-token lane on the factsheet; the id-keyed public cache is NEVER poisoned (ordered adversarial acceptance); revoke; the affordance class honest at all three sites
+- [x] **Phase 164: SHARE — Copy Link always works, and never discloses** - Revocable share-token lane on the factsheet; the id-keyed public cache is NEVER poisoned (ordered adversarial acceptance); revoke; the affordance class honest at all three sites
+- [x] **Phase 164.1: PROD-OBSERVABILITY — one periodic prober, four targets: the analytics service-key mismatch (PYAPI-06), the async cron HTTP result (CRON-OBS-01), PROD cron-job drift (CRON-DRIFT-01) and the MT5 round-trip (MT5-WEDGE-OBS-01) — every silent production failure in scope becomes loud** (INSERTED)
+- [x] **Phase 164.1.1: PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it** (INSERTED)
+- [x] **Phase 164.1.1.1: LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only fixture, and the exclusion must be impossible to grow silently. MEASURED DEFECT shipped in PR #815 and RED ON MAIN (run 35347643700, merge eec8a659): supabase/tests/test_prod_prober_cadence.sql fails under sql-tests with ERROR relation net._lane_posts does not exist at :645. That table is the pg-net stand-in from scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql, whose own header says NEVER APPLIED TO TEST OR PROD — it exists only inside the throwaway pg-lane cluster. But sql-tests globs supabase/tests/test_*.sql unconditionally, so the gate passes on the lane (sql-mutation SUCCESS, mutation-covered there) and CANNOT pass on shared TEST, permanently. NOT hygiene: sql-tests is BLOCKING in the frontend aggregator and ci.yml:2205 records that Railway SKIPS the analytics-service deploy while main CI is red, so this red is what prevents POST /api/prober-cadence-alert (shipped in #815) from reaching production. SAFETY, and it forbids the lazy fix: shared TEST carries the REAL pg_net, so a gate that worked there would make genuine outbound HTTP from shared infrastructure every run — it must be EXCLUDED from that lane, never accommodated into it. LOCKED: do NOT weaken WR-03. sql-tests is built on A PRINTED SKIP IS NOT A PASS and fails the step on a whole-file RAISE NOTICE SKIP bail-out, so the fix must be a FILE-LEVEL EXCLUSION (never executed by this job, coverage asserted by sql-mutation instead), NOT an in-file skip, and that distinction must be argued in the artifact rather than assumed. SCOPE: (1) a machine-readable LANE-ONLY declaration in the gate file naming the fixture it requires; (2) the sql-tests loop honouring it and PRINTING every exclusion on every run, since a silent exclusion is the same defect class as a gate reporting PASS having measured nothing; (3) the excluded SET pinned as SITES NOT A COUNT per the B3 convention in drift-check-scripts.test.ts, re-derived from the corpus by a contract test so a one-for-one swap or a new exclusion cannot land unseen; (4) evidence the excluded file is still mutation-covered. Check whether any OTHER gate references a scripts/pg-lane/fixtures/** object — the vault stand-in vault.decrypted_secrets is the near-miss: it EXISTS on both sides (stand-in table on the lane, real view on TEST) so it is explicitly NOT this class and must not be swept in.** (INSERTED)
+- [x] **Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user** (INSERTED)
+- [x] **Phase 164.2.1: SESSIONID-FENCE — the stale wizardSessionId root cause: a preselect for key B must never inherit an abandoned draft's idempotency token from key A** (INSERTED)
+- [x] **Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team** (INSERTED)
+- [x] **Phase 164.3.1: SOUND-PRIMITIVES — all FOUR cycling primitives closed by construction: neuter scan, mutation identity, VAC-04, self-referential oracle** (INSERTED)
+- [x] **Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites** (INSERTED)
+- [x] **Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral** (INSERTED)
+- [ ] **Phase 164.4.2: SUBSETSPLIT — `sql-mutation` runs only the CHANGED gate files on a PR, with a scheduled full-corpus run that still enforces the floors, because `timeout-minutes` has taken its ONE allowed raise and 20 is a declared CEILING. Owner of TODOS `[REDUNDER-SUBSET-SPLIT]`, booked 2026-09-05 by Phase 164.4.1 and unowned since. NOT hygiene: when `sql-mutation` times out the job dies and EVERY SQL gate stops being enforced — those gates pin RLS, tenant isolation and ledger correctness, so the failure mode is the controls silently stop firing, which is this milestone whole subject. MEASURED TREND moving the wrong way: run 33961609382 @ 1aa8bb70 = 363 arms / 451 legs / 567 s (9.45 min); run 33973362161 @ ab0d5644 = 361 arms / 449 legs / 646 s (10.8 min) — FEWER legs, SLOWER run, ~80 s of pure runner variance. Phase 164.1.1 then added arms twice more: plan 01 measured 491 legs / ~975 s and plan 02 measured 496 legs / ~1020 s locally, both flagged in ci.yml as closer to the ceiling than any prior reading. SCOPE: (1) a runner subset mode (--changed against a base ref) in scripts/mutation-runner/run.mjs; (2) the .github/workflows/ci.yml wiring that selects it on PRs; (3) a scheduled full-corpus job that still enforces FILES_FLOOR/ARMS_FLOOR, since the subset cannot. LOCKED (164.4-CONTEXT.md): 20 minutes is the CEILING — if a MEASURED ubuntu run reaches it, the answer is this phase, NEVER a third timeout-minutes value. The split MUST BE PRINTED on every run, never silent: a subset that does not say it is a subset is the same defect class as a gate reporting PASS having measured nothing.** (INSERTED) — verification: human_needed
+- [ ] **Phase 164.4.2.1: DRIFTOFFMUTEX — `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work, so a merge push's critical path falls back inside its BEFORE band** (INSERTED) — verification: human_needed
+- [x] **Phase 164.5: BASELINE-SNAPSHOT — the committed PROD schema baseline becomes the local stack's source and a gate, and the one production object no migration owns is dispositioned under review** (INSERTED)
+- [x] **Phase 164.5.1: CRONREPOINT — the live `match_engine_cron` row is repointed at the mechanism the repo actually describes, and the migration-vs-runbook rule is settled first** (INSERTED)
+- [ ] **Phase 164.5.1.1: FANOUTCOHORT — the ledger-refresh fan-out admits the `private` status, so it stops enqueuing nothing for every strategy that exists** (INSERTED) — verification: gaps_found
+- [x] **Phase 164.5.1.2: FANOUTSIBLINGS — the daily position poll never runs for a single real strategy, and the sync constant lets the cursor lie: measure, then decide** (INSERTED)
+- [x] **Phase 164.5.1.3: SYNCADMIT — admit the owner-only status to the trade-sync constant, or prove it must not be: 5 of 5 private keys are never synced and their trades are never stored** (INSERTED)
+- [x] **Phase 164.5.1.4: SYNCCURSOR — the sync cursor is per-KEY while stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies trade window** (INSERTED)
+- [ ] **Phase 164.5.2: BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required** (INSERTED) — not yet verified
+- [ ] **Phase 164.5.3: MT5CREDS — show the MT5 account number on the key card and add a credential-update path** (INSERTED) — verification: human_needed
+- [x] **Phase 164.5.4: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently** (INSERTED)
+- [x] **Phase 164.6: GATE-HYGIENE — every gate-hygiene item that left 164.1: the OPS-08 residue, the composite-stamp twin, the reviewer execution-status rule, the RED-UNDER convention's discoverability and the audit allowlist** (INSERTED)
+- [x] **Phase 164.6.1: MYPYSTRICT — the strict gate claims to cover all running-service code and does not cover the module that IS the service** (INSERTED)
+- [ ] **Phase 164.6.2: MT5RELOGIN — the MT5 gateway re-establishes its broker session without a human** (INSERTED) — verification: human_needed
+- [x] **Phase 164.6.3: CIDOCSPATH — a docs-only PR stops running the code gates, and a code PR is proven to still run every one of them** (INSERTED)
+- [x] **Phase 164.6.4: MT5KEEPALIVE — nothing TRIGGERS a recovery, so the terminal sits dark for hours while recovery itself takes minutes** (INSERTED)
+- [ ] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verification: human_needed
+- [ ] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — not yet verified
+- [ ] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — not yet verified
+- [ ] **Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button** (INSERTED) — not yet verified
+- [x] **Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here** (INSERTED)
+- [x] **Phase 164.8: TESTPREPROD — TEST becomes a real pre-prod: every migration is proven on a real Postgres before it reaches a customer** (INSERTED)
+- [x] **Phase 164.8.1: REFDATA — a schema-only restore destroys migration-seeded reference data while the ledger swears those migrations applied** (INSERTED)
+- [x] **Phase 164.8.2: GATEHARDENING — the five code-review warnings Phase 164.8 shipped: the VAC-08 frontier exemption gets a ceiling, the ledger drift-check gets an arms ratchet, the reverted-grep stops being NUL-blind, the destructive restore's artifact stops carrying unredacted policy text, and the softening-token scan reaches the workflow that can drop a schema** (INSERTED)
+- [x] **Phase 164.8.3: PROBERAUTH — the prod-prober names MT5 `-6` as what it is (the terminal has no authorized account) instead of collapsing it into the catch-all `mt5-terminal-error` whose remedy sends the operator to an error table** (INSERTED)
+- [x] **Phase 164.8.4: GATERESIDUE — every deferral Phase 164.8.2's four review rounds produced: the shared-TEST credential channels that still reach a public log, the artifact that publishes the file it refuses over, and the gate-integrity leftovers each below the bar that blocked the ship** (INSERTED)
+- [x] **Phase 164.8.5: PROBERPARSE — the prod-prober hygiene rules stop being dodgeable and its parser stops dropping rows silently: the ||-split service key and the dollar-quoted literal both go RED, an unreadable oracle no longer disables the live credential scan, a malformed cron.job record becomes a measure-fail instead of a continue, and the app-GUC linter successor check stops accepting any readable file** (INSERTED)
+- [x] **Phase 164.8.6: VAULTTICKFIX — the forward migration Phase 164.7 earned: the verification check that cannot fail is re-run correctly, the Vault read becomes single-row-safe, the whitespace-key guard learns btrim, and the SECURITY DEFINER grant set is asserted whole instead of two names deep** (INSERTED)
+- [x] **Phase 164.9: TESTISOLATION — a run's assertions against the shared TEST project stop being unreliable: per-run isolation replaces global truth** (INSERTED)
+- [ ] **Phase 164.9.1: JOBRPCTRUTH — the compute-job RPC surface does what its own comments say** (INSERTED) — verification: human_needed
+- [ ] **Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD** (INSERTED) — verification: human_needed
+- [ ] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — not yet verified
+- [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
+- [ ] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — not yet verified
+- [ ] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — not yet verified
 - [ ] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons
+- [ ] **Phase 165.1: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — not yet verified
+- [ ] **Phase 165.2: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — not yet verified
+- [ ] **Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given** — verification: human_needed
+- [ ] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — not yet verified
+- [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
+- [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
+- [ ] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed
+- [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
+- [ ] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — not yet verified
+- [ ] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed
+- [ ] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed
+- [ ] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: human_needed
+- [ ] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified
+- [ ] **Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers** (INSERTED) — not yet verified (plan 01 shipped in #868)
+- [ ] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — not yet verified
+- [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -3171,6 +3232,8 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.9.3.1 to break down)
 
+**⭐ ROUTED IN 2026-09-26 (founder, "164.9.3.1 FANINGRAPH"; found by the 164.5.2 round-1 code review, WR-02, pre-existing):** a fan-in lost release. When two parents of one `done_pending_children` child mark done at the same time, the fan-in UPDATE in `mark_compute_job_done` (carried unchanged from `20260603120000`) lets each parent see the other as still running, so neither releases the child, and no sweep recovers it. This is the concurrent-parents twin of this phase's parent-fails strand. The 164.5.2 advisory lock is taken after the fan-in by design and does not change this. Success: two parents marking done concurrently always release the child exactly once, proven by a two-backend lane arm that fails on today's body.
+
 ### Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner (INSERTED)
 
 **Goal:** `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner.
@@ -3437,6 +3500,25 @@ Plans:
 
 - [ ] 166.3-01-PLAN.md — founder-gated PROD recompute: Q1-Q6 read-only pack (Q6: stored residue SQN, D-21 W1), tracer then one-at-a-time enqueues with the kind derived from the class (D-21 W2), blocking rendered check per published row (independent of the code plans)
 
+### Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine (INSERTED)
+
+**Goal:** Every "drawdown improvement" number means shallower-is-positive, and ranking rewards a shallower drawdown, never a deeper one.
+**Depends on:** Phase 166.1
+**Plans:** 0 plans
+**Status:** booked 2026-09-26 under the new-phase freeze — NOT started.
+
+**Origin:** the 166.1 round-2 code review (outside its diff; the same code is at the phase base, so it predates 166.1). Measured there: a book whose max drawdown improved from -0.464 to -0.236 shows `dd_delta -0.228` under a hint reading "Positive = shallower", and a constant-yield book whose drawdown got worse shows `dd_improvement +0.0087`, rendered as "improve drawdown by 0.87%". The match score therefore rewards a deeper drawdown. The bridge already carries the correct sign (H-1065).
+
+**Sites:** `simulate_add_candidate` `dd_delta`; `find_improvement_candidates` `dd_improvement`; `match_engine._compute_portfolio_fit_components` `dd_improvement`.
+
+**Success Criteria:**
+  1. All three sites report a shallower drawdown as a positive improvement, matching the bridge's convention, with a test per site that fails on the old sign.
+  2. The match score's drawdown component rewards the shallower book; a ranking test proves the order flips back.
+  3. Every renderer of these fields reads the corrected sign and its copy ("Positive = shallower", "improve drawdown by") stays true.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 166.1.1 to break down)
+
 ### Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error
 
 **Goal:** A customer whose venue credentials stopped working is TOLD — in the product, on the surface where they notice the symptom — that the credential is the reason their factsheet stopped updating, and is nudged to reconnect. Key rotation is a NORMAL, recurring customer action, not an incident: the system must treat "your key no longer works" as an expected state it reports plainly, rather than a silent stall the customer discovers weeks later.
@@ -3646,6 +3728,8 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 169 to break down)
 
+**⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found by the 166.1 round-2 silent-failure review, pre-existing, outside that diff):** risk attribution renders a share in percent twice. The producer sends `marginal_risk_pct` and `weight_pct` already in percent (the `complete.json` fixture carries 28.0 and 40.0), and `RiskAttribution` passes them to `formatPercent`, which multiplies by 100 again, so a 28% share renders as "+2800.00%". `RiskAttribution.test.tsx` feeds fractions the producer never sends, so the test suite encodes the wrong unit. Success: the page shows the producer's number once, and a test built from the producer's real shape fails on the double scale. ⚠️ Added after 169's plans were checked; the plan set must take this item before execution.
+
 **⚠️ REBASE NOTE 2026-09-26 (from 166.2 D-29):** 166.2 edited `src/app/factsheet/[id]/v2/types.ts` and `fetch-and-build-payload.ts` (NaN/null statistic fields, the optional `n_valid`, the v7 payload cache key). 169's plans must re-read both at HEAD before editing.
 
 ### Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers (INSERTED)
@@ -3685,6 +3769,9 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 170 to break down)
 
+**⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy 320px check of 167.2.1, measured in the logged-in browser):** on /strategies at 320px the "Get private link" button overlaps the strategy name in the row header and cuts it to two letters. At 640px (200% zoom) the row is clean. Success: at 320px the name, the button, the status pill and the date never overlap, and the name is readable or ellipsised.
+Same pass, same width: on /allocations the floating "Tweaks" button overlaps the bottom navigation's "Strategies" and "Profile" labels. Success: no floating control covers the bottom navigation at 320px. Evidence: `.planning/uat/2026-09-26-browser-pass.md`.
+
 ### Phase 170.1: COPY — page copy reads clean on every page (INSERTED)
 
 **Goal:** Pages read as a finished product: no raw ids or internal labels, no test text, no typos.
@@ -3709,6 +3796,8 @@ Plans:
 - [ ] TBD (run /gsd-plan-phase 170.1 to break down)
 
 ---
+
+**⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy copy check of 167.2.1):** for a strategy whose last computation finished but whose factsheet cannot be built, the /strategies note and the owner factsheet's banner say the numbers "appear there once a computation succeeds" (wait), while the factsheet body says the computation finished and to contact support (act). Success: the list note, the owner banner and the body give the owner the same instruction for this state.
 
 ### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 
