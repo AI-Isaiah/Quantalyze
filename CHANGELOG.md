@@ -6,18 +6,24 @@
 `services/metrics.py`: a standard deviation at or below `1e-12 * max(1, |mean|)` is float residue,
 not dispersion. Phase 166.1 is the Python half of carrying that floor to every other place the
 analytics service divides by a standard deviation or takes a correlation. Before this release,
-eight variance sites and eight correlation sites outside `metrics.py` still tested `== 0` or
-`> 0`, or did not test at all. So a constant yield taken from a compounding NAV (standard
+seven of the eight variance sites and all eight correlation sites outside `metrics.py` still
+tested `== 0` or `> 0`, or did not test at all. The eighth variance site, S6, already used an
+absolute 1e-12, which is correct for `|mean| <= 1`, and is re-pointed to the shared floor as a pin
+(D-06). So a constant yield taken from a compounding NAV (standard
 deviation about 1e-16, never exactly 0) could give an optimizer Sharpe of 1.28e13, a CSV error
 reading "Daily Sharpe 2296215230173376.50", a 48.6% / 51.4% split of zero risk, and a 1.0
 correlation that made two same-yield strategies "match" each other. Each site now gives exactly
-what an all-zero series already gives there (D-07).
+what an all-zero series already gives there (D-07). ⭐ **Founder decision D7 (2026-09-26), taken
+in the round-1 review:** where that all-zero output was itself a 0 or "unchanged" one layer out,
+the statistic now stays empty end to end and renders "—" (see Changed).
 
 ⚠️ **This is a minor bump because values users see change, on purpose.** Optimizer suggestions,
 the risk decomposition, correlation cells and match status can all change for a constant-yield
 strategy. And an upload that passed before can now be refused (D-24, below). Precedent:
 MT5VALIDATEWEDGE (0.96.0.0) and JOBRPCTRUTH (0.93.0.0) each took a minor bump for a visible
-behaviour change. This release carries **no migration** (D-13) and **no TypeScript change**.
+behaviour change. This release carries **no migration** (D-13). ⛔ **CORRECTED in the round-1
+review fix:** it said "no TypeScript change". Under D7 it now changes the direct TypeScript
+consumers of its own Python outputs, and nothing else under `src/` (the rest is Phase 166.2's).
 
 ### Root cause
 
@@ -41,23 +47,27 @@ behaviour change. This release carries **no migration** (D-13) and **no TypeScri
   - S1 `portfolio_optimizer._compute_sharpe` returns None on residue;
   - S2 the M-0701 exclusion in `find_improvement_candidates` tests residue on the candidate;
   - S3 `csv_validator._check_sharpe_sentinel` keeps its verdict and drops the fabricated number
-    (D-04), and with D-24 now judges every constant positive series the same way (see Changed);
+    (D-04), and with D-24 now judges every constant positive series the same way, under its own
+    rule key since the round-1 review (see Changed);
   - S4 `allocated_capital._annualised_sharpe` returns NaN on residue;
   - S5 `EquityCurveBuilder.compute_sharpe` returns None on residue;
   - S6 the constant-column gate in `optimizer.optimize_weights` uses `residue_floor` elementwise.
     This is an honest pin, not a fix: the behaviour is identical for `|mean| <= 1` (D-06);
   - S7 `portfolio_risk.compute_risk_decomposition` sends a residue portfolio volatility to its
-    existing zero branch (D-05);
+    existing zero branch (D-05), which since the round-1 review reports the undefined shares as
+    None (see Changed);
   - S8 the SQN block in `analytics_runner._compute_derived_trade_metrics` publishes a value only
     over real R-multiple dispersion (D-16). Identical losses of 7.7 gave -4.03e16 and now give
-    None, the answer identical losses of 1.0 always gave.
+    None, the answer identical losses of 1.0 always gave. The `std_r > 0` divide guard stays in
+    front of the floor, which has a NaN hole of its own (round-1 IN-01, `a3fd59304`).
 - **The correlation sites C1-C8 read the floor** (plan 03, `64af22b25`, `89cc5f0b2`,
   `d44fb8598`), through two new helpers in `services/dispersion.py`,
   `pairwise_correlation_or_none` and `dispersing_corrwith` (D-02):
   - C1 `compute_correlation_matrix` masks a non-dispersing leg's row, column and diagonal;
   - C2 `compute_rolling_correlation` applies the `both_move` mask before `dropna`;
-  - C3 `corr_with_portfolio` in `find_improvement_candidates` and C4 `_avg_corr` answer None over
-    a residue leg;
+  - C3 `corr_with_portfolio` in `find_improvement_candidates` answers None over a residue leg, and
+    its dead `else 0` arm is gone (round-1 IN-02, `d9341680f`). C4 `_avg_corr` skips a residue
+    leg's pairs; see Changed for the one average rule;
   - C5 `match_engine._compute_corr_with_portfolio` and C6 the BTC `benchmark_comparison` block in
     `routers/portfolio.py` use `pairwise_correlation_or_none`;
   - C7 the `verify_strategy` matching block and C8 `strategy_matching.find_matched_strategy` (the
@@ -76,9 +86,43 @@ behaviour change. This release carries **no migration** (D-13) and **no TypeScri
   exactly 0 and skipped the sentinel, so it was ACCEPTED, while a longer one left float residue
   and was REJECTED. A flat series carries no real returns data, so its length no longer decides.
   ⚠️ **An upload that used to pass can now be refused.** Exact 0 and residue get one message,
-  which names no number (D-04). The rule name `daily_sharpe_sentinel` and its label are
-  unchanged. A constant ZERO series keeps its verdict (accepted), and a series that really varies
-  is judged by the Sharpe over its standard deviation exactly as before.
+  which names no number (D-04). A constant ZERO series keeps its verdict (accepted), and a series
+  that really varies is judged by the Sharpe over its standard deviation exactly as before.
+  ⛔ **CORRECTED in the round-1 review fix:** this bullet said the rule name and its label were
+  unchanged. See the next bullet.
+- **A constant-returns rejection has its own rule and reads as a file-level failure** (round-1
+  WR-01 / SFH MEDIUM-3, amends D-04, `95c577929`). It shared `daily_sharpe_sentinel`, so a 2-row
+  constant upload read "1 row failed validation" and "Rule violated: Daily Sharpe > 10 looks
+  unrealistic. Expand below for the row-level breakdown." No row failed, no Sharpe was measured,
+  and there is no row-level breakdown. The rule is now `daily_returns_constant`, labelled "Daily
+  returns never change". The wizard's error panel counts only real rows (`row >= 1`). With none,
+  it says "Your file failed validation" and gives a cause sentence with no row pointer. The
+  Sharpe-number rule keeps its key and label.
+- ⭐ **A statistic that does not exist now shows "—" everywhere, never 0 or "unchanged"** (founder
+  decision D7, 2026-09-26). A constant-yield series and an all-zero series read the same:
+  - **"What we'd do" optimizer card** (round-1 SFH HIGH-1, `a7616d7e8`). A constant-yield book
+    gave `corr_with_portfolio` None, the adapter's `?? 0` turned it into 0, and the card said
+    "reduce average correlation toward 0.00". The adapter now carries null, and the card drops the
+    sentence. `sharpe_lift` over a book with no Sharpe is now None rather than 0.0. It hides only
+    the Sharpe sentence, not the card, and the score still ranks on an explicit 0.
+  - **Portfolio impact simulator and replacement cards** (round-1 SFH HIGH-2 / WR-02,
+    `c30c5d99d`, `b9a542407`). Both `_delta` helpers coerced a None side to 0.0, which read
+    "Correlation unchanged" or a green "+0.00 Sharpe". A delta with either side missing is now
+    None. The simulator shows "—" and "not computable", and ReplacementCard shows a colorless
+    "— Sharpe". The bridge schema and type accept null. The bridge composite still ranks every
+    candidate, with an explicit 0 for a missing axis.
+  - **Risk attribution** (round-1 SFH MEDIUM-2, `e61e9152a`). A portfolio that carries no risk
+    reported every share as 0, which read "+0.00%" and "Balanced". The share and the assessment
+    are now "—", and the row is left out of the stacked bar.
+- **One rule for "average pairwise correlation", with the pair count stated** (round-1 WR-03 /
+  SFH MEDIUM-1, `ae8619c8f`). The risk panel averaged the defined pairs, while the scorers'
+  `_avg_corr` went None for the whole book when any one leg was flat. So one constant-yield sleeve
+  dropped the diversification axis from every optimizer, match, simulator and replacement score.
+  Both now skip the undefined pairs and average the rest, through
+  `dispersion.average_pairwise_correlation`. The portfolio row's `data_quality` records
+  `avg_pairwise_correlation_pairs_used` and `avg_pairwise_correlation_pairs_total` beside the KPI.
+  A scorer whose added or swapped leg is flat reports its correlation delta as None, never as the
+  0.0 that two averages over the same pairs would give.
 
 ### Tests
 
@@ -96,6 +140,21 @@ behaviour change. This release carries **no migration** (D-13) and **no TypeScri
   gate turns the short lengths red, and a `>= 0` positive test turns the zero control red. The
   pinned 5-row constant fixture now asserts REJECTED, and the fixtures that relied on a constant
   CSV being accepted moved to varied series.
+- **The round-1 review fixes** each carry a test first seen RED under a neuter, restored from a
+  byte backup and compared with `cmp`:
+  - Python: the flat-book Sharpe lift and the narrative; ten simulator and bridge flat-leg deltas;
+    the one average rule and its 1-of-3 pair count, end to end through the router; the
+    match_engine flat candidate; S7's None shares; the `daily_returns_constant` key; S8's divide
+    guard.
+  - TypeScript: the adapter, the optimizer card, the bridge schema and card, the simulator
+    panel's null chips, a new `RiskAttribution.test.tsx`, and the CSV panel's file-level headline.
+  - Four older tests pinned a behaviour D7 reverses (a `_delta` of 0.0, zero-vol shares of 0, and
+    the all-or-nothing C4 average), and each now pins the new rule (`b9a542407`, `e61e9152a`,
+    `ae8619c8f`).
+  - C7 now runs through the real `verify_strategy` rather than a hand copy of its block (IN-04 /
+    SFH LOW-2, `6bb5108ba`).
+  - Every S-site constant-yield test asserts its residue precondition (SFH LOW-3, `b70ed1e0c`).
+  - The C6 helper restores the module's compute semaphore (IN-06, `8b03ce40c`).
 
 ### Notes
 
@@ -103,6 +162,15 @@ behaviour change. This release carries **no migration** (D-13) and **no TypeScri
   boundary on purpose (D-04 verdict preservation); the founder's D-24 replaced that reason.
 - **D-11:** `strategy_verifications.metrics_snapshot` rows are point-in-time records and are not
   recomputed.
+- ⚠️ **Accepted loss (round-1 IN-05): two exactly identical constant-yield series can no longer
+  match each other** at the `verify_strategy` block (C7) or `find_matched_strategy` (C8). Before
+  this release they correlated at 1.0 because they were the same bytes. Matching is best-effort
+  enrichment, and a flat leg has no correlation (D-02, D7), so no equality fallback was added.
+- **Round-1 review (2026-09-26).** Two reports: `166.1-REVIEW.md` (3 Warnings, 6 Info,
+  `dc815328e`) and `166.1-REVIEW-SFH.md` (2 HIGH, 3 MEDIUM, 3 LOW, 2 INFO, `29152a912`). The fixes are the commits cited above,
+  plus the decision record `d4f5df0fd` (CONTEXT and ROADMAP). The per-finding outcomes are in
+  `166.1-REVIEW-FIX.md`. The two review reports and the fix report are planning commits and change
+  no shipped file.
 - ⚠️ **STORED `portfolio_analytics` values computed before this release keep any residue value
   until that portfolio's next analytics compute.** That is the correlation matrix, the risk
   decomposition and the average pairwise correlation. The recompute touches `strategy_analytics`
@@ -128,6 +196,16 @@ behaviour change. This release carries **no migration** (D-13) and **no TypeScri
   violation(s)`; strict mypy `Success: no issues found in 101 source files`; ruff with no new
   finding over the phase's Python files; `verify-plan-anchors --pending` `OK: 12 plan file(s), no
   stale claims.`
+- **Gates after the round-1 review fixes, at `d4f5df0fd`, all run in the phase worktree:**
+  - the full analytics-service suite: `6760 passed, 90 skipped`;
+  - `qstats-gate census: 13 quantstats node(s) in services/metrics.py, 11 mirror(s), 0
+    violation(s)`;
+  - strict mypy over `services/ routers/ models/`: `Success: no issues found in 97 source files`;
+  - ruff over the 15 changed Python files: the same 6 findings before and after, so no new
+    finding;
+  - vitest over every test file that reads a changed field: `25 passed (25)` files, `806 passed
+    (806)` tests;
+  - `tsc --noEmit` and eslint on the 16 changed TypeScript files: both clean.
 
 ## [0.96.0.0] - 2026-09-26 — MT5VALIDATEWEDGE: the gateway can restart a wedged MT5 terminal on its own (not yet seen live), and the wizard stops promising a retry that cannot work
 
