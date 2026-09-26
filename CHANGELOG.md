@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.93.0.1] - 2026-09-26 — REFDATAUPDATES: the shared-TEST restore also replays the literal UPDATEs a migration made to the reference rows it just rebuilt
+## [0.93.0.2] - 2026-09-26 — REFDATAUPDATES: the shared-TEST restore also replays the literal UPDATEs a migration made to the reference rows it just rebuilt
 
 ⭐ **What changed for whoever reads this next.** Phase 164.9.2 closes
 `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]`. Until now, a restore of shared TEST rebuilt its reference
@@ -14,8 +14,8 @@ widened to make the restore pass.
 
 ⚠️ **A build-segment bump because nothing a user of the product can see changes.** Everything here
 is restore tooling, its self-tests and two CI steps; no route, page, RPC or migration moves.
-⚠️ PR #861 (DRIFTOFFMUTEX) is open and ALSO carries 0.93.0.1. Whichever of the two lands second
-re-bumps over the first.
+⚠️ PR #861 (DRIFTOFFMUTEX) landed first as 0.93.0.1, so this entry re-bumped to 0.93.0.2 when
+origin/main was merged in.
 
 ✅ **No migration.** Merging this applies nothing to TEST or PROD. It changes only what the NEXT
 dispatch of `test-restore-from-baseline.yml` does.
@@ -173,6 +173,105 @@ dispatch of `test-restore-from-baseline.yml` does.
   project id from the tracked `supabase/config.toml`, and `supabase start` treats an
   already-running stack of that project as success, so two lanes booted at once share one stack.
   Plan 05's rehearsal confirmed it started its own stack.
+
+## [0.93.0.1] - 2026-09-26 — DRIFTOFFMUTEX: `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work
+
+⭐ **What changed for whoever reads this next.** Phase 164.4.2.1 takes `ci.yml`'s `test-db-drift`
+job off the shared-TEST advisory key. That job runs VAC-08, which only READS shared TEST's
+migration ledger and function bodies, yet on a merge push it queued behind `python` and
+`e2e-seeded` for up to 20m31s to do 2-5 s of work (`164.4.2.1-MEASUREMENT.md` BEFORE). What orders
+VAC-08 after `supabase-migrate.yml`'s `apply-test` is the schema-apply wait, not the key, and that
+wait stays (the phase's decision D-02, Option A). The goal is that a merge push to `main` is no
+slower than before Phase 164.4.2.
+
+⚠️ **This is a build-segment bump because nothing a user or an API caller sees changes.** The diff is
+CI workflows, two CI scripts, tests, a runbook and ledger prose. There is no migration and no
+`analytics-service/` or app code. 0.93.0.0 is JOBRPCTRUTH, already on `main`.
+
+### Changed
+
+- **`test-db-drift` no longer takes, holds or judges the shared-TEST key** (`15d8bfd77`). Its
+  `Acquire`, `Release` and dead-holder `Verdict` steps are gone, and `grep -c 61616158` inside the
+  job is 0. It keeps the secret, the schema-apply wait before VAC-08 on merge pushes, the
+  `needs: python` edge, `timeout-minutes: 90` and its row in the `frontend` aggregator. No gate
+  was skipped and no timeout was raised. The job's comments stop naming an acquire it no longer
+  has (`244a1cde4`). The deleted `Verdict` step judged a holder this job no
+  longer has, so it is a removed mechanism, not a skipped gate.
+- **The holder set moved by measurement in the same commit** (`15d8bfd77`). The `ci.yml` jobs that
+  hold the key are now `python` (9 hits) and `e2e-seeded` (8), 17 in total, down from 29.
+  `mutex-dead-holder-verdict.test.ts` Test 2's floor went from 5 to 4 with a dated reason.
+- **Holder-set currency in the prose that names the holders** (`579ab9c33`, `3bfd6d12e`,
+  `92d3499d7`, `003dd466d`). `CLAUDE.md` and `docs/runbooks/shared-test-db-mutex.md` carry dated
+  addenda with re-measured counts, and the old sentences stay as lineage. The runbook's new
+  section 0 records why the wait, not the key, orders VAC-08. `TODOS.md`
+  `[164.4.2-REMAINING-KEY-HOLDERS]` now names `python` and `e2e-seeded` only. The
+  `analytics-deploy-verify.yml` issue text names what reds `test-db-drift` now.
+- **Two restore safety texts stop claiming the mutex keeps ALL other CI out** (`72d12cf9c`,
+  `a72f2d809`, `c946f78ab`, `848543db4`, `e9e46c1bc`). It keeps other CI WRITERS out; one
+  read-only reader, VAC-08, is no longer kept out and cannot harm a restore. The
+  `restore-test-from-baseline.sh` refusal text, the `test-restore-from-baseline.yml` NOT-ANNOUNCED
+  error and their comments now say so, with dated corrections.
+
+### Fixed
+
+- **A PR-run VAC-08 overlap with a TEST writer now reds with its real cause named** (`f180241cd`,
+  `2f5549f8b`, `51727e666`, `01c938583`). On a `pull_request` run the schema-apply wait does not
+  run, so VAC-08 has no ordering against a concurrent `apply-test` or a dispatched restore. The
+  `ci.yml` header, `CLAUDE.md`, the VAC-08 query-failure and `FRONTIER_EXEMPT_CEILING` messages and
+  the aggregator's red `test-db-drift` message now name that overlap as a possible cause.
+- **VAC-08's connects are bounded** (`b3e86e58e`). The VAC-08 step sets `PGCONNECT_TIMEOUT: "15"`.
+  A failed connect exits non-zero, so this can add a loud red and never a green. The script
+  header states what bounds each phase of a psql call, and that a network loss after connect is
+  bounded only by the job's `timeout-minutes` (`01c938583`, `9da73dc52`).
+- **The ordering wait names a missing psql up front** (`bf9901398`). `wait-for-test-schema-apply.sh`
+  exits 1 with `wait-outcome: psql-missing` instead of failing later and less clearly. Two new
+  self-test checks cover it (48 in total).
+- **The redundant conditional psql install in `test-db-drift`'s wait step is gone** (`b3e86e58e`).
+  The `Install psql client` step before it installs psql unconditionally.
+
+### Tests
+
+- **Pins that `test-db-drift` holds no key and that its ordering still holds** (`15d8bfd77`,
+  `b3e86e58e`, `db8c570ff`, `e2b81e0f4`). `critical-regressions.test.ts` pins the holder set, the
+  absence of any key in `test-db-drift`, the wait running before VAC-08 under its merge-push `if:`,
+  and that neither the wait nor VAC-08 can be disabled or masked by an `if:`. The verifier neutered
+  each pin (a lock line added, the wait's `if:` disabled, `if: false` on VAC-08, the timeout raised
+  to 120, the job dropped from `needs:`) and watched every one go RED.
+- **The holder detector cannot silently miss a holder** (`6806e1c9e`, `4c0ace777`). `measureHolders`
+  recognises a take by the act: any lock call whose argument is not provably another key counts.
+  It follows sourced, executed and node/python entry points, `npm run`, `cd` and
+  `working-directory`, and it throws on an invoked path it cannot resolve.
+
+### Notes
+
+- **Measurement before code** (`517f51f83`, `42dba0e48`, `844a39953`, `d04f580a2`, `c79e1e0c6`).
+  `164.4.2.1-MEASUREMENT.md` holds the BEFORE, the verdict rule and a prediction, committed at
+  `d04f580a2`, an ancestor of the `ci.yml` change. SC-3 is graded on the Goal reading (founder,
+  D-01): a non-degenerate run-total inside or below 16m18s–18m50s. The strict below-16m18s reading
+  is recorded per run as evidence for Phase 164.9.
+- **Two review rounds, each fixed and re-reviewed** (`c8f7e1379`, `31899f7a7`, `14d128b6a`,
+  `d1ba1793d`, `df88e0624`, `f82f85594`, `bae975b54`, `c98f1cb34`). Code review and silent-failure
+  review in both rounds, fixers split by topic.
+- **Plan completion, security and verification records** (`b579f0110`, `6cdf6134f`, `678f7e906`,
+  `249c3c4bd`, `77edbf9b2`). SECURITY is SECURED with 0 open threats. VERIFICATION is
+  `human_needed` 3/4, the missing one being SC-3 below. The founder ratified the PR-run ordering
+  loss as D-10 on 2026-09-26, recorded in CONTEXT and ROADMAP.
+
+- ⚠️ **SC-3, the five-run AFTER table, can be measured only after this merges** (D-05).
+  `164.4.2.1-MEASUREMENT.md`'s AFTER is PROTOCOL ONLY at this SHA, and the phase may not read
+  `passed` until it is filled and graded. **Owner: the session that lands this PR**, as the
+  post-merge re-verification of 164.4.2.1.
+- ⚠️ **Accepted: a PR-run VAC-08 has no ordering against a TEST writer** (D-10, accepted risk
+  AR-164.4.2.1-01). An overlap can red a PR, never turn real drift green. Re-run the check once
+  both writers are idle; runbook section 0 has the triage. Merge pushes keep the wait.
+- ⚠️ **One assumption is recorded, not measured:** that `supabase db push` commits each
+  migration's ledger row in the same transaction as the file (research A1). Neither ordering gives
+  a false green: a row committing late is exempted above the frontier within the ceiling, and a row
+  committing early reds the function-body half.
+- ⚠️ **The holder detector treats a node/python/TS entry point as a leaf.** It does not walk what
+  that entry point imports or spawns, so a future writer that takes the key only inside an imported
+  module would read as a non-holder. No such file exists today, and the limit is stated in the
+  detector's header comment.
 
 ## [0.93.0.0] - 2026-09-25 — JOBRPCTRUTH: the compute-job RPC surface does what its own migrations say
 

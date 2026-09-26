@@ -138,8 +138,17 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
   // Test 2: anti-vacuity floor. A corpus that shrank to zero release sites
   // would satisfy Test 1 trivially (0 == 0); this floor makes sure the
   // corpus this gate polices is not empty.
+  // 2026-09-25, Phase 164.4.2.1 D-07: the floor went 5 -> 4 because a holder
+  // LEFT — `test-db-drift` no longer takes the shared-test-db key, so its
+  // release step and dead-holder annotation went with it. The floor follows
+  // the measured corpus; this is not a relaxation.
+  // Measured per file, 2026-09-25, by `grep -c` on the annotation text:
+  // ci.yml 2 (`python`, `e2e-seeded`), supabase-migrate.yml 1,
+  // test-restore-from-baseline.yml 1 — total 4, so the floor has ZERO slack
+  // and losing any single witness fails this test. Re-measure the same way
+  // before the next move, never restate it by arithmetic.
   // ─────────────────────────────────────────────────────────────────────
-  it("Test 2: at least 5 dead-holder annotations exist across the three files (anti-vacuity floor)", () => {
+  it("Test 2: at least 4 dead-holder annotations exist across the three files (anti-vacuity floor)", () => {
     let total = 0;
     for (const rel of TARGET_FILES) {
       const src = readText(rel);
@@ -148,9 +157,9 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
     }
     expect(
       total,
-      `aggregate dead-holder annotation count across the three files is ${total} — expected at least 5. ` +
+      `aggregate dead-holder annotation count across the three files is ${total} — expected at least 4. ` +
         `A corpus that shrank to zero would make Test 1 pass vacuously.`,
-    ).toBeGreaterThanOrEqual(5);
+    ).toBeGreaterThanOrEqual(4);
   });
 
   // ─────────────────────────────────────────────────────────────────────

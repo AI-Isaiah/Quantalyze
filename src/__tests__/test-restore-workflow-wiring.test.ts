@@ -4764,6 +4764,14 @@ describe("IN-07 — the confirm token and the staleness gate read the SAME row",
 // has already closed". Inside the workflow the probe runs within the advisory-lock
 // session already held by `Acquire shared-test-db mutex`, so a colliding run is
 // either visible to the query or still blocked on the mutex. There is no window.
+// ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1 round-2 review, WR-05): "There is no
+// window" stopped being true for ONE job, and the sentence above is kept as
+// lineage. Since Phase 164.4.2.1, ci.yml's `test-db-drift` (VAC-08) holds no
+// shared-TEST key, so the held mutex does not keep it out: it can open a session
+// after the gate has measured "quiet". That is accepted because VAC-08 only
+// READS and cannot harm the restore. Every WRITER still holds the mutex, and for
+// writers there is still no window. The workflow's own comment carries the same
+// correction (SFH-04).
 //
 // ⚠️ `idle in transaction` MUST count as active. A session holding an open
 // transaction holds locks and will write when it resumes; a gate blind to it is the
