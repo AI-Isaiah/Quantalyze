@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.93.0.2] - 2026-09-26 — REFDATAUPDATES: the shared-TEST restore also replays the literal UPDATEs a migration made to the reference rows it just rebuilt
+## [0.93.0.3] - 2026-09-26 — REFDATAUPDATES: the shared-TEST restore also replays the literal UPDATEs a migration made to the reference rows it just rebuilt
 
 ⭐ **What changed for whoever reads this next.** Phase 164.9.2 closes
 `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]`. Until now, a restore of shared TEST rebuilt its reference
@@ -14,8 +14,8 @@ widened to make the restore pass.
 
 ⚠️ **A build-segment bump because nothing a user of the product can see changes.** Everything here
 is restore tooling, its self-tests and two CI steps; no route, page, RPC or migration moves.
-⚠️ PR #861 (DRIFTOFFMUTEX) landed first as 0.93.0.1, so this entry re-bumped to 0.93.0.2 when
-origin/main was merged in.
+⚠️ PR #861 (DRIFTOFFMUTEX) landed first as 0.93.0.1 and PR #864 (the baseline re-dump) as 0.93.0.2,
+so this entry re-bumped to 0.93.0.3 when origin/main was merged in.
 
 ✅ **No migration.** Merging this applies nothing to TEST or PROD. It changes only what the NEXT
 dispatch of `test-restore-from-baseline.yml` does.
@@ -173,6 +173,36 @@ dispatch of `test-restore-from-baseline.yml` does.
   project id from the tracked `supabase/config.toml`, and `supabase start` treats an
   already-running stack of that project as success, so two lanes booted at once share one stack.
   Plan 05's rehearsal confirmed it started its own stack.
+
+## [0.93.0.2] - 2026-09-26 — the committed baseline catches up with the Phase 164.9.1 apply
+
+Same shape as v0.90.0.1: a read-only re-dump taken after migrations reached PRODUCTION, so the
+local-stack lane loads a dump that already carries them, and `main`'s red `sql-gate-lint` clears.
+
+### Changed
+- **`supabase/schema/baseline.sql` regenerated from PROD**, read-only `supabase db dump --linked`
+  taken by the founder AFTER Supabase Migrate run `36221903723` applied Phase 164.9.1's three
+  migrations on merge commit `96219c04a`. sha256 `b473ab7e…` → `22cce9c0…`, recorded in
+  `BASELINE.md` with a dated section of what was measured. Shape unchanged: 63 tables,
+  155 policies, 123 function statements, **0** data statements.
+- **`supabase/schema/baseline-carried-migrations.txt` regenerated in the same commit** (DECISION F)
+  from the tree of `96219c04a`: three migrations added, sha line rebound.
+  `baseline-currency: carried=277 replay=0 marker-sha=match defects=0`.
+
+### Fixed
+- **`main` CI is green again on `sql-gate-lint`.** Its `baseline-content-drift` step had read
+  DRIFT 5 with findings since the 164.9.1 apply (`_enqueue_compute_job_internal/10`,
+  `request_allocator_holdings_sync/1`, …), because the committed dump predated the bodies PROD
+  now runs. It now reads compared 123, MATCH 120, DRIFT 3 (the three allowlisted `[DRIFT-06]`
+  rows), findings **0**. Railway skips an analytics deploy while `main` is red, so this also
+  unblocks the next analytics-service deploy.
+
+### Notes
+- **Secret-scanned before commit** with all five classes from `BASELINE.md`'s own command: **0**
+  matches; gitleaks over the file: no leaks; no home path or local username; one
+  `SET client_encoding`, no NUL bytes.
+- Gates re-run on the new dump: `dump-sql-functions.ts --check` current (121 names, 0 ratcheted
+  disagreements); `baseline-content-drift --self-test` OK.
 
 ## [0.93.0.1] - 2026-09-26 — DRIFTOFFMUTEX: `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work
 
