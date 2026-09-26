@@ -768,3 +768,33 @@ async def test_a_non_object_flags_value_is_stamped_once_not_restamped_by_f5() ->
         c.args and "non-object data_quality_flags" in str(c.args[0])
         for c in log.warning.call_args_list
     ), log.warning.call_args_list
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError, TypeError], ids=["database", "programming"])
+async def test_the_composite_reread_failure_line_carries_the_probe_fragment(
+    failure: Callable[[str], BaseException],
+) -> None:
+    """R5 IN-03: the lane probe (``scripts/probe_composite_claimtime.py``)
+    tells a failed composite marker re-read from a retraction by scanning the
+    handler log for ``_REREAD_FAILURE_FRAGMENT``. Since round 4 the composite
+    stamp emits it only by composition, ``_stamp_io``'s "could not %s" with
+    ``op=_STAMP_OP_MARKER_READ``, so the probe's own source guard watches a
+    different line. This renders the line the composite stamp actually logs and
+    asserts the fragment is in it as ONE contiguous string.
+
+    Neuter to redden: reword ``_STAMP_OP_MARKER_READ`` or ``_stamp_io``'s
+    "could not %s" format."""
+    import scripts.probe_composite_claimtime as probe
+
+    scenario = next(
+        s for s in _SCENARIOS if s.closure == "composite" and s.name == "protected"
+    )
+    calls = _discovered(scenario)
+    reread_at = next(i for i, c in enumerate(calls) if c.target == "compute_jobs")
+    outcome = await _drive(scenario, _Recorder(fail_at=reread_at, failure=failure))
+    cause_lines = [
+        line for line in _rendered_errors(outcome.log) if _COMPOSITE_CAUSE in line
+    ]
+    assert len(cause_lines) == 1, outcome.log.error.call_args_list
+    assert probe._REREAD_FAILURE_FRAGMENT in cause_lines[0], cause_lines
