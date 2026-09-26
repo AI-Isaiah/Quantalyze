@@ -2733,14 +2733,22 @@ class MarkerStateNotLoggable(Exception):
 # ERROR, one tagged capture, then re-raise UNCHANGED, so ``classify_exception``
 # files them under ``unknown`` with their own text, which is the "needs a human
 # look" signal. The sites are the entry publish-state read, ``_stamp_io`` (every
-# read and write inside both terminal stamp closures), the single-key series
-# heal after a landed loud stamp (round 5, SFH-R5-03) and
-# ``_refresh_marker_live_state`` at the chain edge. ⛔ ONE deliberate exception,
-# the single-key TAIL MIRROR (round 5, R5 IN-02 / LOW-2): it logs and captures
-# the same way but answers ``READ_ERROR`` and the job finishes DONE, because it
-# runs after the hop-2 enqueue on a job whose work already landed. See
-# ``_refresh_marker_live_state``. The heal re-raises although its stamp has also
-# landed, because that job is failing anyway; the tail mirror's job succeeded.
+# read and write inside both terminal stamp closures) and
+# ``_refresh_marker_live_state`` at the chain edge. ⛔ TWO deliberate
+# exceptions log and capture the same way but do NOT raise, because each runs
+# after the job's outcome has already landed:
+# - the single-key TAIL MIRROR (round 5, R5 IN-02 / LOW-2) answers
+#   ``READ_ERROR`` and the job finishes DONE: it runs after the hop-2 enqueue on
+#   a job whose work already landed. See ``_refresh_marker_live_state``.
+# - the single-key SERIES HEAL (round 6, R6-01) runs after the loud stamp has
+#   landed, and the job stays ``permanent``. A raise there filed the job
+#   ``unknown`` and retried it, and ``mark_compute_job_failed`` moved it to
+#   ``failed_retry``, which ``sync_strategy_analytics_status`` branch (a) counts
+#   as non-terminal: it wrote ``computing`` and NULLed the landed stamp's
+#   cause for the whole backoff window, and a retry that took another path lost
+#   the cause for good. Ending ``permanent`` lets branch (b) keep the writer's
+#   cause. Round 5 re-raised here on the premise that "that job is failing
+#   anyway"; the attempt was, but the row stopped saying so.
 # Labelling them TRANSIENT would hide a code defect behind "the database was
 # busy" until the retry budget ran out. ``transient`` and ``unknown`` retry on
 # the same budget (``mark_compute_job_failed``) and render the same user
@@ -2939,10 +2947,11 @@ async def _stamp_io(
     ⚠️ Not wrapped, deliberately: the single-key series heal
     (``_heal_delete_basis_series``). It runs only AFTER the loud stamp has
     landed with the cause in ``computation_error``, so its failure loses no
-    cause. It logs at ERROR with the scrubbed failure, makes one capture, and
-    the job stays permanent (round 5, SFH-R5-03). A transient raise there would
-    retry a job whose stamp already landed. A programming error in it is
-    re-raised unchanged (``unknown``)."""
+    cause. It logs at ERROR with the scrubbed failure and the cause, makes one
+    capture, and the job stays permanent (round 5, SFH-R5-03). Any raise there
+    would retry a job whose stamp already landed, so a programming error is not
+    re-raised either (round 6, R6-01): ``transient`` and ``unknown`` retry the
+    same way."""
     try:
         return await call()
     except asyncio.CancelledError:
@@ -3374,9 +3383,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # authoritative-NULL terminal write — mirroring the MTM heal idiom. This is
         # DEFENSE-IN-DEPTH; the Plan-02 read gate is the primary guarantee. A heal
         # failure must NEVER mask the terminal stamp that invoked it — report it at
-        # ERROR, and raise only a programming error (round 5, see below).
+        # ERROR and never raise (rounds 5 and 6, see below).
         # Strategy-mode only (key-mode owns no per-strategy series row).
-        async def _heal_delete_basis_series() -> None:
+        async def _heal_delete_basis_series(*, cause: str) -> None:
             if is_key_mode:
                 return
             from services.basis_series import persist_basis_series
@@ -3395,24 +3404,28 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # re-crawl a job whose stamp already landed. It is still logged at
             # ERROR with the scrubbed failure and captured once, because a heal
             # that never succeeds leaves stale series rows behind and a WARNING
-            # reached no one. A ``_READ_PROGRAMMING_ERRORS`` member is a bug in
-            # this code and is re-raised unchanged (``unknown``), as at every
-            # site listed above ``_READ_PROGRAMMING_ERRORS``.
+            # reached no one.
+            # ⛔ R6-01 (round 6): a ``_READ_PROGRAMMING_ERRORS`` member is NOT
+            # re-raised either. It was in round 5, and the ``unknown`` retry
+            # un-published the stamp that had just landed (see the block
+            # comment above ``_READ_PROGRAMMING_ERRORS``). It is labelled on the
+            # ERROR line instead, and the line carries the stamp's ``cause``,
+            # because the capture and ``last_error`` do not.
             try:
                 await db_execute(_delete_both)
-            except Exception as _heal_exc:  # noqa: BLE001 — reported; bugs re-raised
-                _programming = isinstance(_heal_exc, _READ_PROGRAMMING_ERRORS)
+            except Exception as _heal_exc:  # noqa: BLE001 — reported, never raised
                 logger.error(
                     "derive_broker_dailies: series heal-delete failed for strategy "
-                    "%s on compute_job %s (terminal stamp already applied): %s. %s",
+                    "%s on compute_job %s (terminal stamp already applied, the job "
+                    "stays permanent): %s%s. The stale series rows stay until a "
+                    "derive succeeds. The stamp's cause: %s",
                     strategy_id, job.get("id"), _read_failure_text(_heal_exc),
-                    "A programming error; it propagates unchanged."
-                    if _programming
-                    else "The stale series rows stay until a derive succeeds.",
+                    ", a programming error"
+                    if isinstance(_heal_exc, _READ_PROGRAMMING_ERRORS)
+                    else "",
+                    cause,
                 )
                 _capture_read_failure(_heal_exc, job_id=job.get("id"))
-                if _programming:
-                    raise
 
         # P72 — fail-loud analytics stamp, now VENUE-NEUTRAL (hoisted out of the deribit
         # arm + renamed; the arm keeps calling this SAME helper for its other permanent
@@ -3742,7 +3755,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # dropped the heal from the deribit arm, which is CR-02 with the sign
             # flipped.
             if heal_series:
-                await _heal_delete_basis_series()
+                await _heal_delete_basis_series(cause=_cause)
 
         # Per-strategy returns-denominator override (Zavara-only allocated capital).
         # ABSENT on every normal strategy (and in key-mode) → None → the unchanged NAV

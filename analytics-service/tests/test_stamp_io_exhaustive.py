@@ -50,9 +50,11 @@ heal. It is identified by its own property, not by name: it is closure I/O
 issued AFTER the closure's ``strategy_analytics`` write has landed. Its failure
 loses no cause (``computation_error`` already carries it), so the job stays
 ``permanent``. Since round 5 (SFH-R5-03) it logs at ERROR with the scrubbed
-failure and makes one capture, and a programming error in it is re-raised
-(``unknown``). ``_stamp_io``'s docstring records why it is not wrapped. The two
-post-stamp tests pin that disposition for every such call.
+failure and makes one capture. Since round 6 (R6-01) a programming error in it
+is NOT re-raised: the ``unknown`` retry un-published the landed stamp. It stays
+``permanent`` too, and the ERROR line carries the stamp's cause.
+``_stamp_io``'s docstring records why it is not wrapped. The two post-stamp
+tests pin that disposition for every such call.
 
 Neuter to redden: make ``_stamp_io`` return ``await call()`` with no ``try``.
 Every failing-call case goes RED on (a) (``unknown``). Measured 2026-09-26,
@@ -620,6 +622,8 @@ async def test_a_failing_post_stamp_call_keeps_the_landed_stamp(
     assert len(heal_lines) == 1, outcome.log.error.call_args_list
     assert "RuntimeError: simulated failure of stamp call" in heal_lines[0], heal_lines
     assert _JOB_ID in heal_lines[0], heal_lines
+    assert cause in heal_lines[0], heal_lines
+    assert "programming error" not in heal_lines[0], heal_lines
     # The heal adds ONE ERROR to the landed loud stamp's own row (the "no
     # longer protects it" line when protection was lost, plus the breach line).
     assert outcome.log.error.call_count == 1 + int(scenario.lost_protection) + int(
@@ -632,25 +636,41 @@ async def test_a_failing_post_stamp_call_keeps_the_landed_stamp(
 
 
 @pytest.mark.asyncio
-async def test_a_programming_error_in_a_post_stamp_call_is_unknown(
+async def test_a_programming_error_in_a_post_stamp_call_keeps_the_landed_stamp(
     scenario: _Scenario, post_stamp_case: int
 ) -> None:
-    """SFH-R5-03: a ``_READ_PROGRAMMING_ERRORS`` member in the heal is a bug in
-    this code, so it is re-raised unchanged (``unknown``) per the policy above
-    ``_READ_PROGRAMMING_ERRORS``, after the same ERROR line and ONE capture.
-    The stamp has already landed and stays.
+    """R6-01 (round 6): a ``_READ_PROGRAMMING_ERRORS`` member in the heal is
+    NOT re-raised. Round 5 re-raised it, the job was filed ``unknown`` and
+    retried, and while it sat in ``failed_retry`` the status bridge's branch (a)
+    wrote ``computing`` over the stamp that had just landed and NULLed its
+    cause. Now the job ends ``permanent`` (branch (b) keeps the writer's cause),
+    the stamp stays published, and the ONE heal ERROR line labels the
+    programming error and carries the stamp's cause, with ONE capture. This
+    pins the heal-programming-error row of the runbook's alert-volume table.
 
-    Neuter to redden: drop the heal's ``raise`` (the job ends ``permanent``)."""
+    Neuter to redden: re-raise a programming error in the heal's ``except``
+    (the job is filed ``unknown``), or drop ``cause`` from its ERROR line."""
     recorder = _Recorder(fail_at=post_stamp_case, failure=TypeError)
     outcome = await _drive(scenario, recorder)
-    assert outcome.result.error_kind == "unknown", outcome.result
-    assert "simulated failure of stamp call" in (outcome.result.error_message or "")
+    cause = _cause_of(scenario)
+    assert outcome.result.error_kind == "permanent", outcome.result
     assert len(outcome.analytics_writes) == 1
+    assert cause in (outcome.analytics_writes[0].get("computation_error") or "")
     heal_lines = [
         line for line in _rendered_errors(outcome.log) if "heal-delete failed" in line
     ]
-    assert len(heal_lines) == 1 and "programming error" in heal_lines[0], heal_lines
+    assert len(heal_lines) == 1, outcome.log.error.call_args_list
+    assert "programming error" in heal_lines[0], heal_lines
+    assert "TypeError: simulated failure of stamp call" in heal_lines[0], heal_lines
+    assert _JOB_ID in heal_lines[0], heal_lines
+    assert cause in heal_lines[0], heal_lines
+    assert outcome.log.error.call_count == 1 + int(scenario.lost_protection) + int(
+        scenario.breach_line
+    ), outcome.log.error.call_args_list
     assert outcome.sentry.capture_exception.call_count == 1
+    outcome.sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+        "compute_job_id", _JOB_ID
+    )
 
 
 def test_the_post_stamp_set_is_the_heal_and_only_on_the_single_key_loud_path() -> None:
@@ -1123,7 +1143,7 @@ def test_every_io_call_in_a_stamp_closure_is_inside_stamp_io(closure: str) -> No
     # status read), each through at least one I/O name.
     assert seen_covered >= (3 if closure == "single-key" else 4), seen_covered
     if closure == "single-key":
-        assert "_heal_delete_basis_series()" in region, (
+        assert "_heal_delete_basis_series(" in region, (
             "the named exemption no longer appears in the closure; drop it from "
             "_EXEMPT_CALLS rather than let it exempt nothing"
         )
