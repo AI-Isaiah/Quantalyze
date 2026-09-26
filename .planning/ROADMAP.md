@@ -3191,7 +3191,7 @@ Plans:
 **Evidence:** the 2026-09-25 in-depth QA sweep of every page in the logged-in account (14 data-integrity findings) and the 2026-09-24 visual UAT. Counts only here; the reports hold no identifiers and are not tracked.
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** none in code. Plan after 167.1.2 plan 01 (HIDE) so the two do not edit the same Allocations widgets at once.
-**Depends on (2026-09-26 split, D-37):** Phase 169.2 (plan 169-02 reads plan 169.2-01's BTC reader). 167.1.2 PR C on `origin/main` (plan 169-05's order gate). Phase 167.2.1 on `origin/main` (plan 169-07's order gate, D-41; merged 2026-09-26 as PR #866, so D-42's second timing holds). Phase 166.2 on `origin/main` (plan 169-01 builds its OG-card edit on 166.2's shared-Sharpe `og-metrics.ts` and keeps its NaN-Sharpe side cases, D-43). The phase branch takes these in through two syncs (D-42 as amended 2026-09-26). The first is the phase-entry merge of `origin/main` before wave 1, which brings in Phase 169.2: 169.2 must be on `origin/main` AND merged into the phase branch before any wave-1 code commit, which 169-01's and 169-04's Task 1 gates prove (`PAGETRUTH_W1_ENTRY_SYNC_OK`). The second is plan 169-08's wave-4 rebase, which brings 167.1.2 PR C and, unless the entry merge already did, 167.2.1. Consequence: plans 169-01 to 169-04, which shipped in PR 1 independently of 167.1.2 before the split, now wait for PR C with 169-05.
+**Depends on (2026-09-26 split, D-37):** Phase 169.2 (plan 169-02 reads plan 169.2-01's BTC reader). 167.1.2 PR C on `origin/main` (plan 169-05's order gate). Phase 167.2.1 on `origin/main` (plan 169-07's order gate, D-41; merged 2026-09-26 as PR #866, so D-42's second timing holds). ~~Phase 166.2 on `origin/main` (plan 169-01 builds its OG-card edit on 166.2's shared-Sharpe `og-metrics.ts` and keeps its NaN-Sharpe side cases, D-43).~~ **Removed 2026-09-26 (founder decision, 169 D-44):** the OG-card edit moved to Phase 169.4.1 OGSHARPE, which depends on 166.2; Phase 169 no longer depends on 166.2. The phase branch takes these in through two syncs (D-42 as amended 2026-09-26). The first is the phase-entry merge of `origin/main` before wave 1, which brings in Phase 169.2: 169.2 must be on `origin/main` AND merged into the phase branch before any wave-1 code commit, which 169-01's and 169-04's Task 1 gates prove (`PAGETRUTH_W1_ENTRY_SYNC_OK`). The second is plan 169-08's wave-4 rebase, which brings 167.1.2 PR C and, unless the entry merge already did, 167.2.1. Consequence: plans 169-01 to 169-04, which shipped in PR 1 independently of 167.1.2 before the split, now wait for PR C with 169-05.
 
 ## Success Criteria
 
@@ -3203,7 +3203,7 @@ Plans:
 
 *(Criteria 1, 2, 7, 8 and 10 moved on 2026-09-26 to Phases 169.3, 169.4 and 169.1, verbatim with their numbers; criteria 3, 4 and 9 are also served by other phases of the split.)*
 
-**Plans:** 8 plans in 6 waves, one PR (split 2026-09-26, D-37; 169-07 added the same day, D-41; 169-08 added the same day, D-42): W1 169-01 KPISOURCE, 169-04 CHIP+WINDOWS; W2 169-02 BENCHTRUTH-CORE; W3 169-03 BENCHTRUTH-PAGE; W4 169-08 REBASE (inline on the phase branch; W1 plans open with the phase-entry gate, D-42 as amended); W5 169-05 RECORDLENGTH+3Y/5Y, 169-07 COMPOSITEREADERR; W6 169-06 integration run + post-deploy browser re-check. Decisions D-01…D-37, D-41 and D-42 in `169-CONTEXT.md` (D-38 to D-40 are 169.1's); no migration.
+**Plans:** 8 plans in 6 waves, one PR (split 2026-09-26, D-37; 169-07 added the same day, D-41; 169-08 added the same day, D-42): W1 169-01 KPISOURCE, 169-04 CHIP+WINDOWS; W2 169-02 BENCHTRUTH-CORE; W3 169-03 BENCHTRUTH-PAGE; W4 169-08 REBASE (inline on the phase branch; W1 plans open with the phase-entry gate, D-42 as amended); W5 169-05 RECORDLENGTH+3Y/5Y, 169-07 COMPOSITEREADERR; W6 169-06 integration run + post-deploy browser re-check. Decisions D-01…D-37 and D-41 to D-44 in `169-CONTEXT.md` (D-38 to D-40 are 169.1's; D-43 retired by D-44, 2026-09-26); no migration.
 **Lineage, the plan line before the 2026-09-26 split:** 21 plans in 10 waves, 2 PRs (planned 2026-09-25, revised the same day after the plan-checker pass, after the round-3 re-check, and on the D-23 amendment; revised 2026-09-26 after the final plan-check, the founder's decision to fix the D-27 compounding limit, the orchestrator's decisions D-28 to D-31, and the plan-check revision D-32 to D-36): W1 01 ADMINJOBS, 02 BENCHFEED, 02b BENCHCRON, 03 RECS, 04 KPISOURCE, 06 CHIP+WINDOWS; W2 05a BENCHTRUTH-CORE; W3 05b BENCHTRUTH-PAGE + the PR 1 post-deploy browser checkpoint (PR 1 = W1–W3); W4 07 RECORDLENGTH+3Y/5Y, 08 RISKTAB, 09 EXCHANGES, 10 MANDATERULE, 11 ALLOCBENCH (each gated on 167.1.2 PR C and 169 PR 1 merged); W5 13 DISCOVERYONEPATH (gated on Phase 167.2.1 merged), 14 ZOOMKPIS (added 2026-09-26, D-27); W6 14b ZOOMKPIS-COMPOUNDING (added 2026-09-26, D-27 as amended; the day basis folded in, D-28, D-30); W7 14c SINGLEKEY-METHOD, 14d ARITHMETIC-BUCKETS (added 2026-09-26, D-31); W8 14e DAYBASIS-DENSITY (added 2026-09-26, D-32, D-33); W9 14f HEADLINE-NEIGHBOURS (added 2026-09-26, D-34); W10 12 the PR 2 integration run + post-deploy browser checkpoint (PR 2 = W4–W10). Decisions D-01…D-36 in `169-CONTEXT.md`; no migration.
 **Founder principle, 2026-09-25 (169 D-25):** "calculate Sharpe once; every page reads it." Any CAGR, Sharpe or record-length figure a page shows comes from the stored metric or ONE shared function, never a local re-computation. 169's plans were audited against it the same day; the two gaps found are planned (plan 04 step 5: the leverage toggle keeps the persisted cash Sharpe/Sortino; plan 13: the discovery detail page's second builder assembly).
 
@@ -3211,7 +3211,7 @@ Plans:
 
 Plans:
 
-- [ ] 169-01-PLAN.md — factsheet headline and OG card read the persisted scalars; cash leverage re-pin (SC4) (was 169-04)
+- [ ] 169-01-PLAN.md — factsheet headline reads the persisted scalars; cash leverage re-pin (SC4) (was 169-04; its OG-card task moved to 169.4.1-01 on 2026-09-26, D-44)
 - [ ] 169-02-PLAN.md — coverage-aware comparator numbers, DB-fed BTC, cache key v7 (SC3) (was 169-05a)
 - [ ] 169-03-PLAN.md — payload-carried BTC prices, chart gap, dated caption (SC3, SC9) (was 169-05b; its PR 1 browser checkpoint moved to 169-06 at the split, D-37)
 - [ ] 169-04-PLAN.md — freshness chip date line and calendar return windows (SC5, SC6) (was 169-06)
@@ -3331,6 +3331,27 @@ Plans:
 - [ ] 169.4-01-PLAN.md — Allocations Risk tab on the book series (SC2) (was 169-08)
 - [ ] 169.4-02-PLAN.md — allocator BTC feed and alpha/beta vs BTC (SC2, SC3) (was 169-11)
 - [ ] 169.4-03-PLAN.md — integration run + post-deploy browser re-check (SC9; this phase's items from old 12, verbatim)
+
+### Phase 169.4.1: OGSHARPE — the OG share card's Sharpe reads the one shared sharpe() (166.2) (INSERTED)
+
+**Goal:** The OG share card for a strategy shows the same CAGR and Sharpe as its factsheet and every list: for a rankable analytics row it reads the persisted values under its own display policy (Sharpe needs 30 observations, CAGR hidden under 0.95 calendar years or non-positive growth, NaN hides), and for any other row it computes Sharpe only through the one shared `sharpe(..., {ddof: 0})` Phase 166.2 put in `computeOgHeadline`, never a local re-computation.
+**Split, 2026-09-26 (founder decision, AskUserQuestion "Split OG-card to 169.5", option A; 169 D-44):** the OG-card task of plan 169-01 (old 169 plan 04 Task 4) and 169 D-43 moved here after Phase 169's plan-check round 3 found that 166.2 was not on `origin/main` and no gate held Phase 169's wave-1 code behind it. Registered through `/gsd-phase --insert 169.4`; gsd-tools numbered it 169.4.1 (not 169.5) and the number is kept. **Execution order:** after Phase 169 and after Phase 166.2 has merged; it is independent of 169.4 and 169.1.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 166.2 (the shared `sharpe(` arm of `computeOgHeadline`), Phase 169 (the persisted-headline contract, 169-01 and 169 D-10). Both are proven on `origin/main` by plan 169.4.1-01's Task 1 gate before any code commit (D-44).
+
+## Success Criteria
+
+4. A strategy's CAGR and Sharpe are identical on discovery, recommendations, my-strategies and its factsheet (one computation, one stored value), or a surface that must differ says why.
+9. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy.
+
+*(Copied from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37 and D-44; the OG card is one of SC4's surfaces.)*
+
+**Plans:** 2 plans in 2 waves, one PR (split 2026-09-26, D-44): W1 169.4.1-01 OGSHARPE; W2 169.4.1-02 integration run + post-deploy browser re-check. Decisions carried in `169.4.1-CONTEXT.md`; no migration.
+
+Plans:
+
+- [ ] 169.4.1-01-PLAN.md — the OG card reads the persisted CAGR and Sharpe, on top of 166.2's shared `sharpe(` (SC4, SC9) (was 169-01 Task 4)
+- [ ] 169.4.1-02-PLAN.md — integration run + post-deploy browser re-check (SC9)
 
 ### Phase 170: PAGECOPY — layout and copy read clean on every page
 

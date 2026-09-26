@@ -1294,6 +1294,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.1.2 ACCOUNTTRUTH inserted after Phase 167.1.1 on 2026-09-24 (hand-inserted; founder UAT on the allocator book; founder decisions "Refuse a second key" and "Hide it until correct", AskUserQuestion)
 - Phases 169.1 ZOOMKPIS, 169.2 BENCHFRESH, 169.3 SMALLFIXES and 169.4 ALLOCTRUTH inserted after Phase 169 on 2026-09-26 (via `/gsd-phase --insert`; founder decision 2026-09-26: one logical topic per phase, one reviewable PR each). Phase 169 PAGETRUTH narrowed to 169 FACTSHEETTRUTH (`/gsd-phase --edit`). The already-checked plans were moved by hand, not re-planned (169 D-37). Execution order is 169.2 and 169.3, then 169, then 169.4, then 169.1, NOT the numeric order: 169 needs 169.2 (and 167.1.2 PR C and 167.2.1), 169.4 needs 169 and 169.2, and 169.1 needs 169 and 169.4.
 - Phase 169 edited: edited fields: title, goal, depends_on, success_criteria, plans (narrowed to FACTSHEETTRUTH at the 2026-09-26 split, 169 D-37)
+- Phase 169.4.1 OGSHARPE inserted after Phase 169.4 on 2026-09-26 (via `/gsd-phase --insert`; gsd-tools numbered it 169.4.1). Split from Phase 169 (founder decision 2026-09-26, Option A after 169 plan-check round 3): the OG share card's Sharpe edit, which needs Phase 166.2, moved out of 169-01 so Phase 169 no longer waits on 166.2. Depends on 166.2 and 169.
 
 ### Decisions
 

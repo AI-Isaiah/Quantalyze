@@ -156,6 +156,8 @@ call the research left to the plan.
 - **Reason:** discovery, recommendations and my-strategies already read the persisted value; the
   overlay's own documented rationale is exactly SC4.
 - **Reversibility:** reversible.
+- **Note 2026-09-26 (D-44):** the OG card's half of this decision is owned by Phase 169.4.1 OGSHARPE
+  (plan 169.4.1-01); Phase 169 plan 169-01 owns the factsheet half.
 
 ### D-11: One calendar coverage rule for every return window (planner, applying D-02, 2026-09-25)
 - A window with cutoff date C (MTD: last day of the previous month; YTD: 31 Dec of the previous year;
@@ -415,6 +417,8 @@ call the research left to the plan.
   `types.ts`, `build-payload.ts` and snapshot in a third sequential plan and add a wave to PR 1 for
   no reduction in any single task's context.
 - **Reversibility:** reversible (packaging only).
+- **Note 2026-09-26 (plan-check round 3 INFO):** plan 169-02 (old 05a) now lists 14 files; the 14th,
+  `page.public-cache-key.test.tsx`, is touched only on its Task 3 three-part arm (D-42). The count above is lineage.
 
 ### D-25: Founder principle, 2026-09-25: "calculate Sharpe once; every page reads it" (founder direction, recorded by the orchestrator)
 - **The rule:** any CAGR, Sharpe or record-length figure a page shows comes from the STORED metric or
@@ -1050,6 +1054,36 @@ call the research left to the plan.
   them. 169-01's og task STOPs if 166.2 is not in the branch. Phase 169's ROADMAP `Depends on` line
   names 166.2. D-25's 166.1 merge-order step (169-06 step 0b) is unchanged; it still applies to 166.1.
 - **Reversibility:** n/a (ordering).
+- **RETIRED 2026-09-26 by D-44, the text above kept as lineage.** Plan 169-01 no longer edits
+  `og-metrics.ts`, `og-metrics.test.ts` or the OG route: that task moved to Phase 169.4.1 OGSHARPE (plan
+  169.4.1-01; its CONTEXT carries this decision verbatim, see
+  `.planning/phases/169.4.1-ogsharpe-the-og-share-card-s-sharpe-reads-the-one-shared-sha/169.4.1-CONTEXT.md`).
+  Phase 169's ROADMAP `Depends on` no longer names 166.2.
+
+### D-44: The OG card's half of D-10 splits out to Phase 169.4.1 OGSHARPE (FOUNDER DECISION, 2026-09-26)
+- **The blocker (plan-check round 3, 2026-09-26).** Phase 166.2 was not on `origin/main` (measured:
+  `og-metrics.ts` there has no `sharpe(` call), neither of D-42's two syncs was said to carry it, and no
+  automated gate checked it. The wave-1 entry gate could pass without 166.2, 169-01's code tasks would
+  commit, and its OG task would then STOP with no recovery D-42 allows (a third sync is forbidden, and
+  169-08 needs 169-01's SUMMARY).
+- **Decision (founder, AskUserQuestion, "Split OG-card to 169.5"; option A).** The OG task (old 169-01
+  Task 4: `og-metrics.ts`, `og-metrics.test.ts`, `src/app/api/og/factsheet/[id]/route.tsx`) and D-43 move
+  to a new topic-split phase registered through `/gsd-phase --insert 169.4`. gsd-tools numbered it
+  **169.4.1**, not 169.5, and that number is kept. Its plan 169.4.1-01 opens with a wave-1 Task 1 gate
+  that fails before any code commit unless `git grep -q 'sharpe(' origin/main -- src/lib/factsheet/og-metrics.ts`
+  holds (166.2 merged) and Phase 169 is on `origin/main`. Its ROADMAP section says Depends on: 166.2, 169.
+  Plan 169.4.1-02 is its integration run and post-deploy browser re-check (the D-37 per-phase pattern).
+- **What stays in Phase 169.** 169-01 keeps D-10's factsheet half (the persisted headline through
+  `readSingleKeyBasisOpts`, both callers, the cash leverage re-pin) and drops to three tasks. Phase 169
+  no longer depends on 166.2. D-42's two syncs are unchanged; neither needs to carry 166.2.
+- **D-25's 166.1 merge-order step (169-06 step 0b).** Its `computeOgHeadline` reconciliation (b) no
+  longer applies to Phase 169, which does not edit `og-metrics.ts`; it moves with the OG task to
+  169.4.1-02. The `compute.ts` half of step 0b stays in 169-06.
+- **SC4 coverage.** SC4 stays served by 169-01 (factsheet headline) and by 169.4.1 (the OG card); the
+  criterion is copied verbatim to 169.4.1 (D-37's rule for a criterion several phases serve).
+- **Execution order.** 169.4.1 runs after 169 and after 166.2 has merged; it touches no file another
+  169.x phase edits.
+- **Reversibility:** reversible (packaging and ordering only).
 
 ### Claude's Discretion
 - Test file names, helper names not fixed above, and the exact caption wording within DESIGN.md's
