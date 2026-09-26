@@ -181,14 +181,28 @@ function normalizeDailyReturns(rows: DailyReturn[]): DailyReturn[] {
  */
 export const MIN_FACTSHEET_SERIES_POINTS = 2;
 
+declare const buildableSeriesBrand: unique symbol;
+
+/**
+ * 167.2.1-REVIEW WR-04 — a daily-return series {@link hasBuildableSeries} has
+ * vouched for. The brand has no runtime form; the ONLY way to obtain the type
+ * is to pass that predicate, so a value of this type is a series the builder's
+ * two null exits cannot refuse.
+ */
+export type BuildableSeries = DailyReturn[] & { readonly [buildableSeriesBrand]: true };
+
 /**
  * Phase 167.2.1 (D-04) — can this daily-return series build a factsheet? True
  * when {@link normalizeDailyReturns} (sort, drop malformed rows, dedupe by date)
  * leaves at least {@link MIN_FACTSHEET_SERIES_POINTS} rows. `buildFactsheetPayload`
  * calls THIS predicate at its point-count gate, and the buildability probe calls
  * it too, so the two cannot answer differently for the same series.
+ *
+ * 167.2.1-REVIEW WR-04: a type guard, so a series that passed it is a
+ * {@link BuildableSeries}, and `buildFactsheetPayload` called with one is typed
+ * to return a payload, never null.
  */
-export function hasBuildableSeries(rows: DailyReturn[]): boolean {
+export function hasBuildableSeries(rows: DailyReturn[]): rows is BuildableSeries {
   return normalizeDailyReturns(rows).length >= MIN_FACTSHEET_SERIES_POINTS;
 }
 
@@ -331,17 +345,8 @@ export function deriveSeriesBundle(
   };
 }
 
-/**
- * Build the full FactsheetPayload from a strategy's daily-return rows.
- *
- * Behavior:
- *   1. Sort + dedupe the strategy series by date.
- *   2. Clip to the benchmark coverage window (so BTC/SPX always have data).
- *   3. Compute strategy headline metrics.
- *   4. Build a comparator block for each of BTC / SPX (and the "none" stub).
- */
-export function buildFactsheetPayload(
-  strategy: {
+/** The strategy identity and metadata `buildFactsheetPayload` renders. */
+type FactsheetStrategyInput = {
     id: string;
     name: string;
     types: string[];
@@ -368,13 +373,43 @@ export function buildFactsheetPayload(
     avgDailyTurnover?: number | null;
     startDate?: string | null;
     benchmark?: string | null;
-  },
+};
+
+/**
+ * Build the full FactsheetPayload from a strategy's daily-return rows.
+ *
+ * Behavior:
+ *   1. Sort + dedupe the strategy series by date.
+ *   2. Clip to the benchmark coverage window (so BTC/SPX always have data).
+ *   3. Compute strategy headline metrics.
+ *   4. Build a comparator block for each of BTC / SPX (and the "none" stub).
+ *
+ * 167.2.1-REVIEW WR-04 — NO NULL AFTER THE GATES, BY CONSTRUCTION. This
+ * function holds exactly two null exits, the empty-series gate and the
+ * `hasBuildableSeries` gate, and then hands a {@link BuildableSeries} to
+ * `buildFromBuildableSeries`, whose declared return type is `FactsheetPayload`:
+ * a new `return null` in the build body does not compile. Called with a
+ * `BuildableSeries` (the overload below) this function is typed non-null, which
+ * is what lets `fetchAndBuildPayload` answer a payload for every resolve that
+ * succeeds. `fetch-and-build-payload.test.ts` pins that no third null exit is
+ * added here (NO-NULL-AFTER-RESOLVE, source half).
+ */
+export function buildFactsheetPayload(
+  strategy: FactsheetStrategyInput,
+  dailyReturns: BuildableSeries,
+  opts?: BuildFactsheetOpts,
+): FactsheetPayload;
+export function buildFactsheetPayload(
+  strategy: FactsheetStrategyInput,
+  dailyReturns: DailyReturn[],
+  opts?: BuildFactsheetOpts,
+): FactsheetPayload | null;
+export function buildFactsheetPayload(
+  strategy: FactsheetStrategyInput,
   dailyReturns: DailyReturn[],
   opts?: BuildFactsheetOpts,
 ): FactsheetPayload | null {
   if (!dailyReturns.length) return null;
-
-  const dedup = normalizeDailyReturns(dailyReturns);
 
   // The strategy series is the source of truth. Benchmark fixtures
   // (BTC/SPX/etc.) carry a fixed date range; `alignReturns` forward-fills
@@ -386,6 +421,7 @@ export function buildFactsheetPayload(
   // D-04 (Phase 167.2.1): the gate is the shared predicate, so it normalizes a
   // second time; O(n log n) on a few thousand rows, accepted for one gate.
   if (!hasBuildableSeries(dailyReturns)) {
+    const dedup = normalizeDailyReturns(dailyReturns);
     console.warn(
       "[buildFactsheetPayload] strategy series has fewer than 2 unique dated observations — returning null",
       {
@@ -397,7 +433,20 @@ export function buildFactsheetPayload(
     );
     return null;
   }
-  const clipped = dedup;
+  return buildFromBuildableSeries(strategy, dailyReturns, opts);
+}
+
+/**
+ * The build body of `buildFactsheetPayload`, past its two gates. Its return
+ * type is `FactsheetPayload` on purpose (167.2.1-REVIEW WR-04): it has no null
+ * exit, and the compiler refuses one.
+ */
+function buildFromBuildableSeries(
+  strategy: FactsheetStrategyInput,
+  dailyReturns: BuildableSeries,
+  opts?: BuildFactsheetOpts,
+): FactsheetPayload {
+  const clipped = normalizeDailyReturns(dailyReturns);
 
   const dates = clipped.map(d => d.date);
   const stratRet = clipped.map(d => d.value);

@@ -292,6 +292,28 @@ export async function fetchAndBuildPayload(
   // Phase 167.2.1 (D-04): every null exit lives in the shared resolve stage.
   const resolved = await resolveFactsheetInputs(supabase, id, visibility);
   if (!resolved.ok) return null;
+  return buildFromResolved(supabase, id, resolved);
+}
+
+/** A resolve that succeeded: the inputs the build runs on. */
+type ResolvedFactsheetInputs = Extract<
+  Awaited<ReturnType<typeof resolveFactsheetInputs>>,
+  { ok: true }
+>;
+
+/**
+ * 167.2.1-REVIEW WR-04 — the build, past the resolve stage. Its declared
+ * return type is `Promise<FactsheetPayload>`, never null: a `return null`
+ * added here does not compile, and `resolved.dailyReturns` is a
+ * `BuildableSeries`, for which `buildFactsheetPayload` is typed non-null. So
+ * every null exit of `fetchAndBuildPayload` is a failed resolve BY
+ * CONSTRUCTION, which is the invariant `probeFactsheetBuildable` rests on.
+ */
+async function buildFromResolved(
+  supabase: ReturnType<typeof createAdminClient>,
+  id: string,
+  resolved: ResolvedFactsheetInputs,
+): Promise<FactsheetPayload> {
   const { strategy, analytics, dqf, isComposite, dailyRaw, dailyReturns } = resolved;
 
   // Ingest source classifies daily_returns (CSV path) vs returns_series-only
@@ -405,10 +427,15 @@ export async function fetchAndBuildPayload(
  * for the same id, predicate and rows. DOMAIN: this holds for a builder that
  * does not throw. A throw in the basis reads or the build is not a null exit,
  * and the probe cannot see it; the page's own error handling owns that case.
- * `fetch-and-build-payload.test.ts` pins the invariant with the parity table
- * and NO-NULL-AFTER-RESOLVE. A rebase that adds a null exit to
- * `fetchAndBuildPayload` OUTSIDE the resolve stage breaks it: move that exit
- * into the stage, never special-case the probe (the D-09 post-rebase rule).
+ * WHAT HOLDS IT (167.2.1-REVIEW WR-04, corrected). The invariant is
+ * structural, not sampled: `buildFromResolved` and `buildFromBuildableSeries`
+ * declare a non-null return, and the resolved series is a `BuildableSeries`,
+ * so a `return null` added past the resolve stage FAILS TO COMPILE.
+ * `fetch-and-build-payload.test.ts` pins those declarations and the two gates
+ * of `buildFactsheetPayload` by source scan (a widened return type or a third
+ * gate is RED there), and samples the behaviour with the parity table. A
+ * rebase that needs a new null exit moves it INTO the resolve stage, never
+ * special-cases the probe (the D-09 post-rebase rule).
  *
  * `visibility` is REQUIRED for the reason `StrategyVisibility` gives: on the
  * service role the predicate is the only row gate. The probe does not catch a

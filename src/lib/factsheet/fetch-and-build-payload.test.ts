@@ -17,6 +17,8 @@
  * substring, and this unit file belongs to the ordinary shards.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 vi.mock("server-only", () => ({}));
 
@@ -302,5 +304,81 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
     // The loop must have exercised the ok branch, or it proves nothing.
     expect(okResolves).toBe(PARITY.filter((f) => f.reason === null).length);
     expect(okResolves).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 167.2.1-REVIEW WR-04 — NO-NULL-AFTER-RESOLVE, the STRUCTURAL half.
+//
+// The table above samples: a new null exit on a branch no fixture reaches
+// (an options/MTM basis arm, an asset_class branch, a gap_spans path) would
+// leave it green. The guarantee is therefore carried by the types:
+// `hasBuildableSeries` narrows to `BuildableSeries`, `buildFactsheetPayload`
+// is typed non-null for one, and the two build bodies past the gates declare a
+// non-null return, so a `return null` added there does not compile. This scan
+// pins the declarations that make that true, so a rebase cannot quietly widen
+// a return type back to `| null` or add a third gate in front of the build.
+// ---------------------------------------------------------------------------
+
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+}
+
+/** Return type text and body of the IMPLEMENTATION of `function name(` (overload signatures skipped). */
+function implementationOf(src: string, name: string): { returnType: string; body: string } {
+  const needle = `function ${name}(`;
+  let from = 0;
+  for (;;) {
+    const at = src.indexOf(needle, from);
+    if (at < 0) throw new Error(`no implementation of ${name}`);
+    let i = at + needle.length;
+    let depth = 1;
+    while (depth > 0) {
+      const c = src[i++];
+      if (c === "(") depth++;
+      else if (c === ")") depth--;
+    }
+    const brace = src.indexOf("{", i);
+    const semi = src.indexOf(";", i);
+    if (semi >= 0 && semi < brace) {
+      from = i;
+      continue; // an overload signature
+    }
+    const returnType = src.slice(i, brace).trim();
+    let j = brace + 1;
+    depth = 1;
+    while (depth > 0) {
+      const c = src[j++];
+      if (c === "{") depth++;
+      else if (c === "}") depth--;
+    }
+    return { returnType, body: src.slice(brace, j) };
+  }
+}
+
+const RETURN_NULL = /\breturn\s+null\b/g;
+const readLib = (file: string) =>
+  stripComments(readFileSync(join(__dirname, file), "utf8"));
+
+describe("167.2.1 WR-04 — NO-NULL-AFTER-RESOLVE holds by construction", () => {
+  it("the build past the resolve stage declares a non-null payload and has no null exit", () => {
+    const { returnType, body } = implementationOf(readLib("fetch-and-build-payload.ts"), "buildFromResolved");
+    expect(returnType).toBe(": Promise<FactsheetPayload>");
+    expect(body.match(RETURN_NULL) ?? []).toEqual([]);
+    expect(body).toContain("buildFactsheetPayload(");
+  });
+
+  it("buildFactsheetPayload keeps exactly its two gates, and its build body declares a non-null payload", () => {
+    const src = readLib("build-payload.ts");
+    const gate = implementationOf(src, "buildFactsheetPayload");
+    expect(gate.body.match(RETURN_NULL) ?? []).toHaveLength(2);
+    expect(gate.body).toContain("hasBuildableSeries(dailyReturns)");
+    expect(gate.body).toContain("return buildFromBuildableSeries(");
+    const build = implementationOf(src, "buildFromBuildableSeries");
+    expect(build.returnType).toBe(": FactsheetPayload");
+    expect(build.body.match(RETURN_NULL) ?? []).toEqual([]);
+    // The overload that makes a BuildableSeries build non-null is still there.
+    expect(src).toMatch(/dailyReturns: BuildableSeries,\s*opts\?: BuildFactsheetOpts,\s*\): FactsheetPayload;/);
+    expect(src).toMatch(/export function hasBuildableSeries\(rows: DailyReturn\[\]\): rows is BuildableSeries/);
   });
 });
