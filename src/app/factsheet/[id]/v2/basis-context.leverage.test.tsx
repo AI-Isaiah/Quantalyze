@@ -38,7 +38,12 @@ function makeReturns(seed: number): number[] {
 function makeDates(): string[] {
   // 48 consecutive weekdays-ish (calendar days are fine for this hook).
   const out: string[] = [];
-  const start = Date.UTC(2023, 0, 2);
+  // Inside the bundled BTC price history (it starts 2023-04-26), so the BTC
+  // comparator leg really moves. Before Phase 166.2's D7 fix this started
+  // 2023-01-02, BEFORE that history: the aligned BTC leg was all zeros, beta was
+  // 0 at both leverages and Test C's "β scales ×2" held as 0 = 2·0. Beta now
+  // reads NaN ("—") on a leg with no dispersion, which exposed it.
+  const start = Date.UTC(2024, 0, 2);
   for (let i = 0; i < N; i++) {
     const d = new Date(start + i * 86400000);
     out.push(d.toISOString().slice(0, 10));
@@ -181,6 +186,8 @@ describe("useBasisSeriesView — leverage layer (Phase 107 LEV-BB)", () => {
     const levJoint = result.current.view.comparators.btc.joint;
     expect(baseJoint).not.toBeNull();
     expect(levJoint).not.toBeNull();
+    // A real beta, so the scaling below cannot hold vacuously as 0 = 2·0.
+    expect(Number.isFinite(baseJoint!.beta) && baseJoint!.beta !== 0).toBe(true);
     expect(levJoint!.beta).toBeCloseTo(2 * baseJoint!.beta, 8);
     expect(levJoint!.alpha).toBeCloseTo(2 * baseJoint!.alpha, 8);
     expect(levJoint!.corr).toBeCloseTo(baseJoint!.corr, 8);

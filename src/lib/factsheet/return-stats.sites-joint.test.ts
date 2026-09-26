@@ -108,13 +108,43 @@ describe("T16 jointMetrics on return-stats (D-07, D-17)", () => {
   const onZeroBench = jointMetrics(STRAT, zeros(N), 0, PPY);
   const onZeroActive = jointMetrics(BENCH, BENCH, 0, PPY);
 
+  // D7 (founder, 2026-09-26): against a benchmark with no dispersion, every
+  // ratio that divides by it does not exist and reads NaN ("—"), never 0, as
+  // DistributionPanels shows "—" for the same pair. Tracking error is a
+  // dispersion, not a ratio, and stays a number.
+  it("T16 the all-zero bench has no beta, corr, r2, alpha, Treynor or capture ratio (NaN, not 0)", () => {
+    for (const k of ["beta", "corr", "r2", "alpha", "treynor", "up_capture", "down_capture"] as const) {
+      expect(Number.isNaN(onZeroBench[k]), k).toBe(true);
+    }
+    expect(Number.isFinite(onZeroBench.tracking_error)).toBe(true);
+  });
+
+  it("T16 a zero active return has no information ratio (NaN, not 0)", () => {
+    expect(Number.isNaN(onZeroActive.info_ratio)).toBe(true);
+  });
+
+  it("T16 a dispersing bench with no down days has no down capture (NaN), and a real up capture", () => {
+    const upOnly = BENCH.map((b) => Math.abs(b) + 0.001);
+    const got = jointMetrics(STRAT, upOnly, 0, PPY);
+    expect(Number.isNaN(got.down_capture)).toBe(true);
+    expect(Number.isFinite(got.up_capture)).toBe(true);
+  });
+
   for (const id of YIELD_IDS) {
     const y = CONSTANT_YIELDS[id];
 
-    it(`T16 beta and corr against a constant-yield bench equal the all-zero bench (${id})`, () => {
+    // SFH-M3: every field that divides by the BENCHMARK's dispersion, not only
+    // beta and corr. up_capture broke the D-07 equality (a constant-yield bench
+    // has only "up days", with a tiny real sum) and T16 did not look at it.
+    // tracking_error and info_ratio are excluded on purpose: they are the
+    // dispersion and Sharpe of the ACTIVE series, strategy minus bench, which a
+    // constant-yield bench shifts by its yield, so they are real numbers that
+    // differ from the all-zero bench's (the zero-ACTIVE case below pins them).
+    it(`T16 every bench-dispersion field against a constant-yield bench equals the all-zero bench (${id})`, () => {
       const got = jointMetrics(STRAT, navConstantYield(y, N), 0, PPY);
-      expect(Object.is(got.beta, onZeroBench.beta)).toBe(true);
-      expect(Object.is(got.corr, onZeroBench.corr)).toBe(true);
+      for (const k of ["alpha", "beta", "corr", "r2", "treynor", "up_capture", "down_capture"] as const) {
+        expect(Object.is(got[k], onZeroBench[k]), k).toBe(true);
+      }
     });
 
     it(`T16 info_ratio and tracking_error on a constant active return equal the zero-active case (${id})`, () => {

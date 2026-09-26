@@ -86,7 +86,10 @@ export type ComputeResult = {
 /** Compute result minus the heavy eq/dd arrays — used at server→client boundaries. */
 export type ComputeSummary = Omit<ComputeResult, "eq" | "dd">;
 
-/** Strategy-vs-comparator joint metrics (only meaningful when bench != null). */
+/** Strategy-vs-comparator joint metrics (only meaningful when bench != null).
+ *  A ratio that does not exist (beta, corr, r2, info_ratio, treynor, alpha, or a
+ *  capture ratio with no benchmark move to divide by) is NaN, or null after a
+ *  JSON cache round-trip, and renders "—" (founder decision D7, 2026-09-26). */
 export type JointMetrics = {
   alpha: number;
   beta: number;
