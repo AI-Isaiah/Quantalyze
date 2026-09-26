@@ -467,6 +467,17 @@ def _messages(mock_method: MagicMock) -> list[str]:
     return [str(c.args[0]) for c in mock_method.call_args_list if c.args]
 
 
+def _rendered(mock_method: MagicMock) -> list[str]:
+    """The lines a mocked logger method would have EMITTED (format string with
+    its arguments interpolated). ``_stamp_io`` passes the operation kind as an
+    argument, so a phrase that names the operation lives only here."""
+    return [
+        str(c.args[0]) % tuple(c.args[1:]) if len(c.args) > 1 else str(c.args[0])
+        for c in mock_method.call_args_list
+        if c.args
+    ]
+
+
 # The fragment of the ERROR line ``_stamp_failed`` emits when a DEFINITIVE
 # "not marked" answer sends a marked refresh to the LOUD stamp (round 3). It
 # records the CAUSE of the stamp, not the marker's state, so an assertion about
@@ -493,15 +504,16 @@ class TestTransientReReadFailureRetries:
     job fails TRANSIENT so the queue retries it. A DEFINITIVE answer (row present,
     marker gone) still takes the loud path — see the class above.
 
-    Neuter to redden: make the composite site treat the read-error state like a
-    retraction (fall through to the loud stamp). This test goes RED on the error
-    kind and on the stamp.
+    Neuter to redden (round 4, where the re-read goes through ``_stamp_io``):
+    make ``_stamp_io`` re-raise the call's exception unchanged. This test goes
+    RED on the error kind (``unknown``), then on the error and capture counts.
 
     WR-03 / SFH-R2-01 (round 2): the retry must carry the failure it postponed.
-    Neuter by dropping ``scrubbed`` from the ``RefreshMarkerRereadUnavailable``
-    text, or (round 3, where the cause moved from a pre-read line into the
-    ``READ_ERROR`` site line) by dropping ``_cause`` from that site's
-    ``consequence``; each goes RED on its own assertion."""
+    Neuter by dropping ``scrubbed`` from ``_stamp_io``'s ``StampIOUnavailable``
+    text, or ``cause`` from its ERROR line; each goes RED on its own assertion.
+    📜 Rounds 2-3 recorded these neuters against the site's ``READ_ERROR`` arm,
+    which round 4 removed. The exhaustive per-call pin is
+    ``tests/test_stamp_io_exhaustive.py``."""
 
     @pytest.mark.asyncio
     async def test_a_raising_reread_writes_nothing_and_fails_transient(self) -> None:
@@ -529,15 +541,20 @@ class TestTransientReReadFailureRetries:
             f"({payloads!r}). Nothing is known yet, so nothing is written; the "
             "retry decides."
         )
-        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
-        assert log.error.call_count == 2, log.error.call_args_list
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume
+        # table. Round 4: ONE ERROR, ``_stamp_io``'s, where round 3 logged two
+        # (the helper's line plus the site's ``READ_ERROR`` line).
+        assert log.error.call_count == 1, log.error.call_args_list
         assert sentry.capture_exception.call_count == 1, (
             "the re-read failure was not captured as an exception. The ERROR "
             "lines already reach Sentry as message events, but only this "
             "capture carries the failed read's traceback."
         )
-        assert any("could not re-read" in m for m in _messages(log.error)), (
-            f"no ERROR-level re-read line. errors seen: {_messages(log.error)!r}"
+        assert any(
+            "could not" in m and "re-read the refresh marker" in m
+            for m in _rendered(log.error)
+        ), (
+            f"no ERROR-level re-read line. errors seen: {_rendered(log.error)!r}"
         )
         assert not any("RETRACTED" in m for m in _messages(log.warning)), (
             "a read failure was logged as a RETRACTION. Nothing was retracted, and "
@@ -683,6 +700,10 @@ class TestEveryNotConfirmedStateNamesItsOwnCause:
             "a live row carrying a DIFFERENT source records no retraction; naming "
             f"one misattributes the cause. Lines: {everything!r}"
         )
+        # IN-01 (round 4): pins the OTHER_SOURCE half of the runbook's
+        # "RETRACTED / OTHER_SOURCE → loud stamp" alert-volume row. The one
+        # ERROR is the landed-stamp cause line; OTHER_SOURCE itself is WARNING.
+        assert log.error.call_count == 1, log.error.call_args_list
 
 
 class _Gateway504(Exception):
@@ -745,11 +766,12 @@ class TestAFailedStampReadKeepsTheCause:
     TRANSIENT with the cause in ``last_error``. Nothing is written either way:
     no stamp of either kind, nothing suppressed.
 
-    Neuter to redden: remove the ``try``/``except`` around the stamp read (the
-    read's exception leaves the closure as itself). Every case goes RED on the
-    error kind. Drop ``scrubbed`` from that arm's raise and every case goes RED
-    on ``last_error``; drop ``_cause`` from its ERROR line and every
-    parametrised case goes RED on the log assertion. Measured 2026-09-26."""
+    Neuter to redden: make ``_stamp_io`` re-raise the call's exception
+    unchanged (round 4: the stamp read's ``try``/``except`` became that one
+    wrapper). Every case goes RED on the error kind. Drop ``scrubbed`` from its
+    raise and every case goes RED on ``last_error``; drop ``cause`` from its
+    ERROR line and every parametrised case goes RED on the log assertion.
+    Measured 2026-09-26 against the round-3 arm."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

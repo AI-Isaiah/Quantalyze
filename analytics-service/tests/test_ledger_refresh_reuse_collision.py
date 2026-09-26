@@ -479,6 +479,24 @@ class TestUserResyncInheritsAMarkedRefresh:
         # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
         assert log.error.call_count == 1, log.error.call_args_list
 
+    @pytest.mark.asyncio
+    async def test_the_loud_stamp_over_another_source_logs_one_error(self) -> None:
+        """IN-01 (round 4): the OTHER_SOURCE half of the runbook's
+        "RETRACTED / OTHER_SOURCE → loud stamp" row, which only RETRACTED
+        pinned. OTHER_SOURCE is logged at WARNING; the one ERROR is the
+        landed-stamp cause line. Neuter: log OTHER_SOURCE at ERROR in
+        ``_log_marker_not_confirmed``; this goes RED on the count."""
+        with patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            _result, capture = await _drive_derive(
+                claimed_metadata={"source": _MARKER},
+                live_job_row={"metadata": {"source": "some-other-writer"}},
+            )
+        assert _terminal_stamp(capture).get("computation_status") == "failed"
+        assert log.error.call_count == 1, log.error.call_args_list
+        assert "no longer protects it" in str(log.error.call_args.args[0])
+        assert sentry.capture_exception.call_count == 0
+
 
 # ---------------------------------------------------------------------------
 # 2 — the chain edge, forward direction
@@ -619,6 +637,122 @@ class TestChainEdgeReadErrorFailsTransient:
         assert any(
             c.args and "FAILED" in str(c.args[0]) for c in log.error.call_args_list
         ), f"no READ_ERROR line at the chain edge: {log.error.call_args_list!r}"
+
+
+class TestMarkerReReadProgrammingErrorsPropagate:
+    """SFH-R4-02 (round 4): ``_refresh_marker_live_state`` now splits
+    ``_READ_PROGRAMMING_ERRORS`` off the way every other classifying site does.
+    A bug in the read (a renamed client method, a bad call shape) is logged at
+    ERROR, captured once with the job tag, and re-raised UNCHANGED, so the job
+    is filed ``unknown`` rather than ``READ_ERROR``'s "the database was busy".
+
+    Neuter to redden: delete the ``isinstance(exc, _READ_PROGRAMMING_ERRORS)``
+    branch in ``_refresh_marker_live_state``. The chain-edge case then files
+    ``transient`` and the tail-mirror case ``DONE``; both go RED on the kind."""
+
+    @staticmethod
+    def _ctx(job_read_answers: list[Any]) -> tuple[MagicMock, dict[str, Any]]:
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-1", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": _STRATEGY_ID, "user_id": "user-1"},
+        )
+        original = ctx.supabase.table.side_effect
+        answers = list(job_read_answers)
+
+        def _table(name: str) -> MagicMock:
+            tbl: MagicMock = original(name)
+
+            def _select(_columns: str, **_kw: object) -> MagicMock:
+                chain = MagicMock()
+                chain.eq.return_value = chain
+                chain.maybe_single.return_value = chain
+                if name == "compute_jobs":
+                    answer = answers.pop(0)
+                    if isinstance(answer, BaseException):
+                        chain.execute.side_effect = answer
+                    else:
+                        chain.execute.return_value = answer
+                else:
+                    chain.execute.return_value = MagicMock(
+                        data={"computation_status": "complete_with_warnings"}
+                    )
+                return chain
+
+            tbl.select.side_effect = _select
+            return tbl
+
+        ctx.supabase.table.side_effect = _table
+        return ctx, capture
+
+    async def _dispatch(self, ctx: MagicMock) -> tuple[Any, MagicMock, MagicMock]:
+        patches = _patches_with_combine(
+            ctx, key_mode=False, combine_mock=_success_combine()
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6], \
+             patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            result = await _jw.dispatch(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+        return result, log, sentry
+
+    @pytest.mark.asyncio
+    async def test_at_the_chain_edge_it_is_unknown_and_enqueues_nothing(self) -> None:
+        ctx, capture = self._ctx([AttributeError("simulated renamed client method")])
+        result, log, sentry = await self._dispatch(ctx)
+        assert result.error_kind == "unknown", result
+        assert "simulated renamed client method" in (result.error_message or "")
+        assert not [p for (n, p) in capture["rpc_calls"] if n == "enqueue_compute_job"]
+        assert log.error.call_count == 1, log.error.call_args_list
+        assert "programming error" in str(log.error.call_args.args[0])
+        assert sentry.capture_exception.call_count == 1
+        sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+            "compute_job_id", "job-1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_at_the_tail_mirror_it_is_unknown_after_the_one_enqueue(self) -> None:
+        """The tail mirror runs AFTER its enqueue, so the enqueue has happened
+        once; the retry re-runs the derive and the enqueue dedup serves the
+        in-flight hop 2 (``_Queue`` above models that dedup)."""
+        ctx, capture = self._ctx(
+            [
+                MagicMock(data={"metadata": {"source": _MARKER}}),
+                TypeError("simulated bad call shape"),
+            ]
+        )
+        result, log, sentry = await self._dispatch(ctx)
+        assert result.error_kind == "unknown", result
+        assert "simulated bad call shape" in (result.error_message or "")
+        enqueues = [p for (n, p) in capture["rpc_calls"] if n == "enqueue_compute_job"]
+        assert len(enqueues) == 1, enqueues
+        assert log.error.call_count == 1, log.error.call_args_list
+        assert sentry.capture_exception.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_tail_mirror_read_logs_and_the_job_is_done(self) -> None:
+        """Control, and the runbook's tail-mirror ``READ_ERROR`` row, which had
+        no driver before round 4: a DATABASE failure at the tail mirror is
+        still only logged (helper line + ``READ_ERROR`` line + one capture),
+        and the job is DONE."""
+        ctx, capture = self._ctx(
+            [
+                MagicMock(data={"metadata": {"source": _MARKER}}),
+                RuntimeError("simulated tail read failure"),
+            ]
+        )
+        result, log, sentry = await self._dispatch(ctx)
+        assert result.outcome == DispatchOutcome.DONE, result
+        assert len([p for (n, p) in capture["rpc_calls"] if n == "enqueue_compute_job"]) == 1
+        # Pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 2, log.error.call_args_list
+        assert sentry.capture_exception.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -803,19 +937,20 @@ class TestReReadFailsSafe:
     ``failed``, un-publishing a funded account on one gateway blip). D-09 was
     first decided for the composite site only; its amendment extended it here.
 
-    Neuter to redden: delete the ``READ_ERROR`` arm in
-    ``_stamp_strategy_analytics_failed`` (the read error falls through to the
-    loud stamp) and both parametrised cases go RED. Change the helper's
-    except-arm to return ``PRESENT`` (the suppression direction) and both go RED
-    too. Measured 2026-09-26: under either neuter the first assertion to fire is
-    the error kind, ``'permanent'`` where ``'transient'`` is required.
+    📜 Neuters recorded through round 3 named a ``READ_ERROR`` arm in
+    ``_stamp_strategy_analytics_failed``. Round 4 (SFH-R4-01) removed it: the
+    closure reads the marker through ``_stamp_io``, which raises
+    ``StampIOUnavailable`` on the failed read itself. Neuter to redden now: make
+    ``_stamp_io`` re-raise the call's exception unchanged (no ERROR, no capture,
+    no ``StampIOUnavailable``). Both cases go RED on the error kind (``unknown``
+    where ``transient`` is required). Drop ``scrubbed`` from its raise and both
+    go RED on ``last_error``; drop ``cause`` from its ERROR line and both go RED
+    on the log assertion. The exhaustive per-call version of this pin is
+    ``tests/test_stamp_io_exhaustive.py``.
 
     WR-03 / SFH-R2-01 (round 2): the transient result must still NAME the
     handler's real cause, because ``error_message`` becomes
-    ``compute_jobs.last_error``. Neuter by dropping ``scrubbed`` from the raise,
-    or (round 3, where the cause moved from a pre-read line into the
-    ``READ_ERROR`` site line) by dropping ``_cause`` from that site's
-    ``consequence``; both parametrised cases go RED on each."""
+    ``compute_jobs.last_error``."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -896,11 +1031,16 @@ class TestReReadFailsSafe:
             "error-only write suppresses a failure nobody decided to protect. "
             "The retry decides."
         )
-        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
-        assert log.error.call_count == 2, log.error.call_args_list
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume
+        # table. Round 4: ONE ERROR, ``_stamp_io``'s, where round 3 logged two
+        # (the helper's line plus the site's ``READ_ERROR`` line).
+        assert log.error.call_count == 1, log.error.call_args_list
         assert sentry.capture_exception.call_count == 1
         assert any(
-            c.args and "could not re-read" in str(c.args[0])
+            c.args
+            and "could not" in str(c.args[0])
+            and _jw._STAMP_OP_MARKER_READ in c.args
+            and "re-read the refresh marker" in _jw._STAMP_OP_MARKER_READ
             for c in log.error.call_args_list
         ), f"no ERROR-level re-read line: {log.error.call_args_list!r}"
         assert not any(
@@ -1039,7 +1179,7 @@ class TestLiveStateNamesItsReason:
         function. The call then returns normally after one ERROR line naming
         "no live row", and both assertions below fail."""
         with patch.object(_jw, "logger") as log:
-            with pytest.raises(ValueError, match="PRESENT"):
+            with pytest.raises(_jw.MarkerStateNotLoggable, match="PRESENT"):
                 _jw._log_marker_not_confirmed(
                     _jw.MarkerLiveState.PRESENT,
                     site="test-site",
@@ -1067,7 +1207,7 @@ class TestLiveStateNamesItsReason:
         logs "no live row" and returns, and both assertions fail."""
         future_state: Any = object()
         with patch.object(_jw, "logger") as log:
-            with pytest.raises(ValueError, match="no arm"):
+            with pytest.raises(_jw.MarkerStateNotLoggable, match="no arm"):
                 _jw._log_marker_not_confirmed(
                     future_state,
                     site="test-site",
@@ -1399,6 +1539,8 @@ class TestSingleKeySitesNameTheRealCause:
         assert any("no live" in str(c.args[0]) for c in log.error.call_args_list), (
             log.error.call_args_list
         )
+        # Round 4: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list
 
     @pytest.mark.asyncio
     async def test_mirror_does_not_call_a_missing_tail_row_a_dedup(self) -> None:
@@ -1468,6 +1610,8 @@ class TestSingleKeySitesNameTheRealCause:
         assert breach, log.error.call_args_list
         assert "enqueued job" in breach[0].args, breach[0]
         assert "claimed job" not in breach[0].args, breach[0]
+        # Round 4: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list
 
 
 def test_the_handler_and_the_resync_agree_on_one_marker_spelling() -> None:

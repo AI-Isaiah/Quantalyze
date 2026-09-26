@@ -1351,7 +1351,8 @@ true for 146 and half of 142–145, and **false for 141**.
       its row was `complete_with_warnings` or warned; a plain `complete` row is not protected across
       the retry (booked 2026-09-26, Phase 164.6.7 round-2 review WR-01 / SFH-R2-03).**
       - **What happens.** A marked refresh whose marker re-read fails now raises
-        `RefreshMarkerRereadUnavailable` and retries. The move to `failed_retry` runs
+        `RefreshMarkerRereadUnavailable` (entry read, chain edge) or, at a terminal stamp since
+        round 4, `StampIOUnavailable` through `_stamp_io`, and retries. The move to `failed_retry` runs
         `mark_compute_job_failed`, whose bridge `sync_strategy_analytics_status` branch (a) keeps
         `complete_with_warnings` but rewrites a plain `complete` row to `computing`. On attempt 2
         `_read_entry_publish_state` (single-key) or `_read_existing_failed_row` inside
@@ -1376,14 +1377,15 @@ true for 146 and half of 142–145, and **false for 141**.
       re-read and `mark_compute_job_failed` still leaves the pre-fix outcome, over a window of
       milliseconds (booked 2026-09-25, Phase 164.6.7 COMPOSITECLAIMSNAPSHOT, decision D-03).**
       - **What remains.** Phase 164.6.7 made the `_stamp_failed` closure of
-        `run_stitch_composite_job` re-read the live `compute_jobs` row through
-        `_refresh_marker_still_on_row` before it honours the `ledger-refresh-composite` marker. A
+        `run_stitch_composite_job` re-read the live `compute_jobs` row (since round 4 through
+        `_read_refresh_marker_state` inside `_stamp_io`) before it honours the
+        `ledger-refresh-composite` marker. A
         retraction committing AFTER that re-read and BEFORE `mark_compute_job_failed` PERFORMs the
         SQL bridge `sync_strategy_analytics_status` still yields an error-only Python write followed by a loud SQL status: the
         `computation_warned` residue (research H2), so a warned composite can read
         `complete_with_warnings` again at the next bridge call over a failed run.
       - **Both honour arms share it.** The single-key derive honour site in
-        `run_derive_broker_dailies_job`, which calls the same `_refresh_marker_still_on_row`,
+        `run_derive_broker_dailies_job`, which makes the same `_read_refresh_marker_state` read,
         carries the identical window. A fix is one change for both.
       - **Fix shape.** In `sync_strategy_analytics_status`, either branch (b) clears
         `computation_warned`, or the protect/loud decision moves inside the bridge's transaction.
