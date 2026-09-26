@@ -362,15 +362,16 @@ describe("SMTM-01 useBasisSeriesView + leverageEligibleFor — smoothed leverage
     expect(v.strategyMetrics.sortino).toBe(SMOOTHED_SCALARS.sortino);
   });
 
-  it("L=0 under smoothed yields honest derived zeros (persisted non-zero NOT pinned)", () => {
+  it("L=0 under smoothed yields the honest derived values (persisted non-zero NOT pinned)", () => {
     const payload = makeSmoothedPayload({ withBundle: true });
     const { result } = renderHook(() => useViewProbe(payload), { wrapper: bothWrapper });
     act(() => result.current.basis.setBasis("smoothed_mtm"));
     act(() => result.current.lev.setLeverage(0));
     const v = result.current.view;
-    // At L=0 the returns are all-zeros → honest derived Sharpe/Sortino 0, never the
-    // persisted 1.44/1.88 next to flat charts (the B-1 carve-out).
-    expect(v.strategyMetrics.sharpe).toBe(0);
+    // At L=0 the returns are all-zeros → no Sharpe (NaN, rendered "—": an all-zero
+    // series has no dispersion, founder decision D7) and a derived Sortino 0, never
+    // the persisted 1.44/1.88 next to flat charts (the B-1 carve-out).
+    expect(Number.isNaN(v.strategyMetrics.sharpe)).toBe(true);
     expect(v.strategyMetrics.sortino).toBe(0);
   });
 

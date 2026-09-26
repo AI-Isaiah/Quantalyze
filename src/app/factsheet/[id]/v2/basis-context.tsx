@@ -334,7 +334,8 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // B-1 (Phase 107 Fable red team): the invariance holds ONLY for L > 0. At L=0
     // (a reachable, intended state — input min="0", sanitizeLeverage keeps 0 valid)
     // the returns are all-zeros (r→0·r), so `mean·√P/sd` is 0/0 and the derive
-    // honestly yields sharpe=0 / sortino=0 / ann_vol=0 with flat charts. Pinning the
+    // honestly yields sharpe "—" (NaN, no dispersion; founder decision D7,
+    // 2026-09-26) / sortino=0 / ann_vol=0 with flat charts. Pinning the
     // persisted non-zero Sharpe/Sortino there would render e.g. "Sharpe 1.85" next to
     // "Cum 0.0% / Ann. Vol 0.0%" and flat charts — a fresh dishonesty. So apply the
     // pin only when L > 0; at L=0 let the honest derived zeros stand.

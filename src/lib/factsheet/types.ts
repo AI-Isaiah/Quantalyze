@@ -31,6 +31,8 @@ export type ComputeResult = {
   cum_ret: number;
   cagr: number;
   ann_vol: number;
+  /** NaN when the Sharpe does not exist (no dispersion, or a non-finite return);
+   *  null after a JSON cache round-trip. Renders "—" (D7). */
   sharpe: number;
   sortino: number;
   calmar: number;
@@ -174,6 +176,7 @@ export type StyleDriftPayload = {
 /** Peer percentile summary — demo cohort + MM's percentile in each dimension. */
 export type PeerPercentilePayload = {
   cohortSize: number;
+  /** NaN (null after a JSON round-trip) when the strategy has no Sharpe: no rank (D7). */
   sharpe: number;
   sortino: number;
   max_dd: number;

@@ -398,12 +398,29 @@ function BootHist({
   const plotW = W - PAD.left - PAD.right;
   const plotH = H - PAD.top - PAD.bottom;
   const degenerate = hist.bins.length === 0 || hist.hi === hist.lo;
+  // An absent value (NaN, or null after a JSON cache round-trip) is "—": the
+  // Sharpe of a series with no dispersion, or a Sharpe CI with too few
+  // resamples that have one (founder decision D7, 2026-09-26). `fmt` is only
+  // ever called on a finite number.
+  const show = (v: number | null) => (v != null && Number.isFinite(v) ? fmt(v) : "—");
+  const ciKnown = Number.isFinite(ci[0]) && Number.isFinite(ci[1]);
   const maxCount = degenerate ? 1 : Math.max(1, ...hist.bins);
   const barW = degenerate ? 0 : plotW / hist.bins.length;
   const span = hist.hi - hist.lo;
   const X = (v: number) => (span > 0 ? PAD.left + ((v - hist.lo) / span) * plotW : PAD.left + plotW / 2);
   const color = accent ? "var(--color-accent)" : "var(--color-text-muted)";
   if (degenerate) {
+    if (!Number.isFinite(point)) {
+      return (
+        <div>
+          <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
+            <span>{title}</span>
+            <span className="normal-case tracking-normal text-text-muted">—</span>
+          </div>
+          <div className="h-[36px]" aria-hidden="true" />
+        </div>
+      );
+    }
     return (
       <div>
         <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
@@ -421,21 +438,23 @@ function BootHist({
       <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
         <span>{title}</span>
         <span className="normal-case tracking-normal">
-          <span className="text-text-2">{fmt(ci[0])}</span> ·{" "}
-          <span className="text-text-primary font-semibold">{fmt(point)}</span> ·{" "}
-          <span className="text-text-2">{fmt(ci[1])}</span>
+          <span className="text-text-2">{show(ci[0])}</span> ·{" "}
+          <span className="text-text-primary font-semibold">{show(point)}</span> ·{" "}
+          <span className="text-text-2">{show(ci[1])}</span>
         </span>
       </div>
       <ResponsiveChartFrame width={W} height={H} role="img" aria-label={`${title} bootstrap distribution`}>
-        {/* CI shaded band */}
-        <rect
-          x={X(ci[0])}
-          y={PAD.top}
-          width={Math.max(0, X(ci[1]) - X(ci[0]))}
-          height={plotH}
-          fill={color}
-          fillOpacity={0.08}
-        />
+        {/* CI shaded band (omitted when the interval is absent) */}
+        {ciKnown && (
+          <rect
+            x={X(ci[0])}
+            y={PAD.top}
+            width={Math.max(0, X(ci[1]) - X(ci[0]))}
+            height={plotH}
+            fill={color}
+            fillOpacity={0.08}
+          />
+        )}
         {hist.bins.map((c, i) => {
           if (c === 0) return null;
           const h = (c / maxCount) * plotH;
@@ -451,15 +470,17 @@ function BootHist({
             />
           );
         })}
-        {/* Point estimate vertical line */}
-        <line
-          x1={X(point)}
-          x2={X(point)}
-          y1={PAD.top}
-          y2={PAD.top + plotH + 2}
-          stroke="var(--color-text-primary)"
-          strokeWidth={1.4}
-        />
+        {/* Point estimate vertical line (omitted when the point is absent) */}
+        {Number.isFinite(point) && (
+          <line
+            x1={X(point)}
+            x2={X(point)}
+            y1={PAD.top}
+            y2={PAD.top + plotH + 2}
+            stroke="var(--color-text-primary)"
+            strokeWidth={1.4}
+          />
+        )}
       </ResponsiveChartFrame>
     </div>
   );

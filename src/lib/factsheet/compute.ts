@@ -42,9 +42,13 @@ export function compute(
   const cumRet = eq[n - 1] - 1;
   const cagr = years > 0 && eq[n - 1] > 0 ? Math.pow(eq[n - 1], 1 / years) - 1 : 0;
   const annVol = s * Math.sqrt(periodsPerYear);
-  // The Sharpe is the shared one; null (no dispersion, or a non-finite
-  // return) is answered as 0, the value compute has always given there.
-  const sharpe = sharpeRatio(rets, { periodsPerYear, ddof: 0, rf }) ?? 0;
+  // The Sharpe is the shared one. A null (no dispersion, or a non-finite
+  // return) stays an absence: NaN, which every factsheet formatter renders as
+  // "—", as the OG card and the tearsheet do for the same series (founder
+  // decision D7, 2026-09-26, reversing D-07's "answer null as 0" for display).
+  // `ComputeResult.sharpe` stays a `number`; NaN (or the null a JSON cache turns
+  // it into) is the absent value, so a consumer tests `Number.isFinite`.
+  const sharpe = sharpeRatio(rets, { periodsPerYear, ddof: 0, rf }) ?? NaN;
 
   const neg = rets.filter(x => x < 0);
   const ddDev = neg.length > 0 ? Math.sqrt(neg.reduce((a, x) => a + x * x, 0) / n) * Math.sqrt(periodsPerYear) : 0;

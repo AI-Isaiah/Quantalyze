@@ -17,7 +17,7 @@ export type PeerCohortEntry = {
 
 export type PeerPercentileSummary = {
   cohort: PeerCohortEntry[];
-  sharpe: number; // 0..100 where higher is better
+  sharpe: number; // 0..100 where higher is better; NaN when the strategy has no Sharpe
   sortino: number;
   max_dd: number; // less negative = better → higher percentile
 };
@@ -106,7 +106,10 @@ export function computePeerPercentile(stratSharpe: number, stratSortino: number,
   const cohort = getPeerCohort();
   return {
     cohort,
-    sharpe: percentileRank(stratSharpe, cohort.map(p => p.sharpe)),
+    // A strategy with no Sharpe (NaN: no dispersion) has no rank. `percentileRank`
+    // would count no peer as `<= NaN` and report the 0th percentile, a fabricated
+    // worst-in-cohort; NaN renders "—" instead (founder decision D7, 2026-09-26).
+    sharpe: Number.isFinite(stratSharpe) ? percentileRank(stratSharpe, cohort.map(p => p.sharpe)) : NaN,
     sortino: percentileRank(stratSortino, cohort.map(p => p.sortino)),
     // For max_dd, less negative = better, so higher max_dd value → higher percentile.
     max_dd: percentileRank(stratMaxDd, cohort.map(p => p.max_dd)),

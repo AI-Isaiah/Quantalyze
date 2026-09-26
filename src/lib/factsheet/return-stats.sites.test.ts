@@ -23,7 +23,8 @@ import { describe, it, expect } from "vitest";
 import { compute, cumEq } from "./compute";
 import { buildComparatorBlock } from "./comparator-block";
 import { buildFactsheetPayload } from "./build-payload";
-import { bootstrapCI } from "./bootstrap";
+import { bootstrapCI, MIN_SHARPE_RESAMPLES } from "./bootstrap";
+import { computePeerPercentile } from "./peer-cohort";
 import { computeOgHeadline } from "./og-metrics";
 import { mean, stdDev } from "@/lib/portfolio-math-utils";
 import {
@@ -68,6 +69,9 @@ describe("T13 compute: headline Sharpe, skew, kurtosis and ann_vol through retur
     for (const rf of [0, 0.02]) {
       it(`T13 constant yield equals the all-zero series (ppy ${periodsPerYear}, rf ${rf})`, () => {
         const zero = compute(ZEROS, DATES, rf, periodsPerYear);
+        // D7 (founder, 2026-09-26): an all-zero series has no Sharpe, and the
+        // absence stays NaN ("—"), never 0.
+        expect(Number.isNaN(zero.sharpe)).toBe(true);
         for (const id of YIELD_IDS) {
           const got = compute(navConstantYield(CONSTANT_YIELDS[id], N), DATES, rf, periodsPerYear);
           for (const field of HEADLINE) {
@@ -97,15 +101,13 @@ describe("T13 compute: headline Sharpe, skew, kurtosis and ann_vol through retur
     expect(got.ann_vol).toBe(s * Math.sqrt(ppy));
   });
 
-  it("T13 non-finite input keeps today's sharpe", () => {
-    // Today: a NaN return makes the population sd NaN, `s > 0` is false and the
-    // Sharpe is 0. sharpe() answers null on a non-finite input and compute must
-    // keep answering that as 0 (D-17 I3), never as NaN or a number.
+  it("T13 non-finite input has no Sharpe: NaN, rendered '—' (D7), never 0", () => {
+    // sharpe() answers null on a non-finite input. D-17 I3 had compute answer that
+    // as 0, the value a NaN-sd `s > 0` guard gave; D7 (founder, 2026-09-26) keeps
+    // the absence instead.
     const xs = NOISY_A.slice();
     xs[100] = NaN;
-    const s = stdDev(xs, false);
-    const todays = s > 0 ? Number.NaN : 0;
-    expect(compute(xs, DATES, 0, 365).sharpe).toBe(todays);
+    expect(Number.isNaN(compute(xs, DATES, 0, 365).sharpe)).toBe(true);
   });
 });
 
@@ -161,6 +163,7 @@ describe("T13 end to end: the factsheet payload's headline Sharpe", () => {
 
   it("T13 payload headline Sharpe, skew, kurtosis and vol on a constant yield equal the all-zero payload's", () => {
     const zero = payloadOf(ZEROS).strategyMetrics;
+    expect(Number.isNaN(zero.sharpe)).toBe(true); // D7: an absence, never 0
     for (const id of ["daily_1e-4", "apy_5pct", "apy_100pct"]) {
       const got = payloadOf(navConstantYield(CONSTANT_YIELDS[id], N)).strategyMetrics;
       expect(got.sharpe, id).toBe(zero.sharpe);
@@ -171,17 +174,65 @@ describe("T13 end to end: the factsheet payload's headline Sharpe", () => {
   });
 });
 
+describe("peer percentile: a strategy with no Sharpe has no Sharpe rank (D7, SFH-H1)", () => {
+  it("a NaN Sharpe ranks as NaN, never the 0th percentile", () => {
+    const got = computePeerPercentile(Number.NaN, 1, -0.1);
+    expect(Number.isNaN(got.sharpe)).toBe(true);
+    // The other two dimensions still rank.
+    expect(Number.isFinite(got.sortino)).toBe(true);
+  });
+
+  it("control: a finite Sharpe keeps its rank", () => {
+    expect(Number.isFinite(computePeerPercentile(1, 1, -0.1).sharpe)).toBe(true);
+  });
+});
+
 describe("T15 bootstrapCI: the Sharpe point, interval and histogram through return-stats", () => {
   for (const periodsPerYear of [252, 365]) {
     it(`T15 constant yield's Sharpe fields equal the all-zero series' (ppy ${periodsPerYear})`, () => {
       // Same length and the default seed, so both runs draw the same blocks.
       const zero = bootstrapCI(ZEROS, 200, 5, 42, periodsPerYear).sharpe;
+      // D7: no resample of an all-zero series has a Sharpe, so the point and the
+      // interval are absent and the histogram is empty (no spike at 0).
+      expect(Number.isNaN(zero.point)).toBe(true);
+      expect(Number.isNaN(zero.lo)).toBe(true);
+      expect(Number.isNaN(zero.hi)).toBe(true);
+      expect(zero.hist.bins).toEqual([]);
       for (const id of YIELD_IDS) {
         const got = bootstrapCI(navConstantYield(CONSTANT_YIELDS[id], N), 200, 5, 42, periodsPerYear).sharpe;
         expect(got, id).toEqual(zero);
       }
     });
   }
+
+  // D7 (founder, 2026-09-26), SFH-H1/WR-04: a resample with no dispersion has
+  // no Sharpe and is left out of the distribution, never counted as 0. A sparse
+  // series (one active day in 200) draws such resamples: 40 blocks of 5 miss the
+  // active day about a third of the time.
+  it("T15 a sparse series' null resamples are dropped from the histogram, not counted as 0", () => {
+    const sparse = new Array(200).fill(0);
+    sparse[57] = 0.01;
+    const k = 500;
+    const got = bootstrapCI(sparse, k, 5, 42, 365).sharpe;
+    const counted = got.hist.bins.reduce((a, c) => a + c, 0);
+    expect(counted).toBeGreaterThan(0);
+    expect(counted).toBeLessThan(k);
+    expect(Number.isFinite(got.lo)).toBe(true);
+    expect(Number.isFinite(got.hi)).toBe(true);
+    // Every resample that has a Sharpe here is positive (one positive day and
+    // zeros), so a 0 in the interval could only be a fabricated null resample.
+    expect(got.lo).toBeGreaterThan(0);
+  });
+
+  it(`T15 the Sharpe CI is "—" (NaN) below ${MIN_SHARPE_RESAMPLES} resamples with a Sharpe, finite at it`, () => {
+    const below = bootstrapCI(NOISY_A, MIN_SHARPE_RESAMPLES - 1, 5, 42, 365).sharpe;
+    expect(Number.isNaN(below.lo)).toBe(true);
+    expect(Number.isNaN(below.hi)).toBe(true);
+    expect(Number.isFinite(below.point)).toBe(true);
+    const at = bootstrapCI(NOISY_A, MIN_SHARPE_RESAMPLES, 5, 42, 365).sharpe;
+    expect(Number.isFinite(at.lo)).toBe(true);
+    expect(Number.isFinite(at.hi)).toBe(true);
+  });
 
   it("T15 cent-rounded 1% APY control keeps a finite, non-zero Sharpe point", () => {
     const got = bootstrapCI(CENT_CONTROL, 200, 5, 42, 365).sharpe;

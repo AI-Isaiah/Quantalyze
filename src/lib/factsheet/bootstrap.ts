@@ -35,9 +35,21 @@ export type BootstrapCISummary = {
  * Deterministic Mulberry32 PRNG with a fixed seed so the same series
  * produces the same CI on every render.
  */
+/**
+ * The fewest resamples with a Sharpe that still make a 95% interval. At 40,
+ * `ci95`'s 2.5% and 97.5% order statistics (indices 1 and 39) each leave at
+ * least one resample outside the interval, so the bounds are not simply the
+ * smallest and largest draw. Below it the Sharpe CI renders "—".
+ */
+export const MIN_SHARPE_RESAMPLES = 40;
+
 export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, seed = 42, periodsPerYear = 252): BootstrapCISummary {
   const n = rets.length;
-  const sharpes: number[] = new Array(n_resamples);
+  // Only resamples that HAVE a Sharpe (founder decision D7, 2026-09-26). A
+  // resample with no dispersion (a sparse-trading series can draw all zeros)
+  // has no Sharpe; counting it as 0 put a fabricated spike at 0 in the
+  // histogram and pulled the interval toward it.
+  const sharpes: number[] = [];
   const sortinos: number[] = new Array(n_resamples);
   const maxDds: number[] = new Array(n_resamples);
   const rand = mulberry32(seed);
@@ -54,14 +66,18 @@ export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, s
       filled += take;
     }
     const stats = headlineStats(resampled, periodsPerYear);
-    sharpes[k] = stats.sharpe;
+    if (Number.isFinite(stats.sharpe)) sharpes.push(stats.sharpe);
     sortinos[k] = stats.sortino;
     maxDds[k] = stats.max_dd;
   }
 
   const point = headlineStats(rets, periodsPerYear);
   return {
-    sharpe: { point: point.sharpe, ...ci95(sharpes), hist: histogram(sharpes, 40) },
+    sharpe: {
+      point: point.sharpe,
+      ...(sharpes.length >= MIN_SHARPE_RESAMPLES ? ci95(sharpes) : { lo: NaN, hi: NaN }),
+      hist: histogram(sharpes, 40),
+    },
     sortino: { point: point.sortino, ...ci95(sortinos), hist: histogram(sortinos, 40) },
     max_dd: { point: point.max_dd, ...ci95(maxDds), hist: histogram(maxDds, 40) },
     n_resamples,
@@ -102,7 +118,7 @@ function histogram(xs: number[], bins: number): BootstrapHistogram {
 
 function headlineStats(rets: number[], periodsPerYear = 252): { sharpe: number; sortino: number; max_dd: number } {
   const n = rets.length;
-  if (n === 0) return { sharpe: 0, sortino: 0, max_dd: 0 };
+  if (n === 0) return { sharpe: NaN, sortino: 0, max_dd: 0 };
   let sum = 0;
   for (const r of rets) sum += r;
   const m = sum / n;
@@ -115,9 +131,9 @@ function headlineStats(rets: number[], periodsPerYear = 252): { sharpe: number; 
     }
   }
   // Population sd (divide by n), as the resamples always used. A residue sd
-  // (a compounding constant yield) is no dispersion, so the Sharpe is the 0 an
-  // exactly constant series gives (Phase 166.1 D-07); null is answered as 0.
-  const sharpe = sharpeRatio(rets, { periodsPerYear, ddof: 0 }) ?? 0;
+  // (a compounding constant yield) is no dispersion, exactly as for an all-zero
+  // series (D-07), and the missing Sharpe stays NaN, an absence (D7).
+  const sharpe = sharpeRatio(rets, { periodsPerYear, ddof: 0 }) ?? NaN;
   const downDev = hasNeg ? Math.sqrt(downSqSum / n) * Math.sqrt(periodsPerYear) : 0;
   const sortino = downDev > 0 ? (m * periodsPerYear) / downDev : 0;
   const eq = cumEq(rets);
