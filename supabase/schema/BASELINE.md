@@ -505,7 +505,17 @@ checks is possible: read each head-SHA run's conclusion before merging. When the
 are byte-identical to the committed pair, it opens nothing and prints a `::notice::` instead.
 It does the same, and leaves the baseline alone, when `main` already carries a migration the
 applied merge lacks (D-31): PROD has not applied that later migration yet, so this dump would be
-superseded, and that migration's own apply run re-dumps.
+superseded, and that migration's own apply run re-dumps. That verdict is taken BEFORE the
+`CREATE EXTENSION` completeness check, so a superseded re-run is skipped and never refused by it
+(R3-01); the secret, gitleaks, integrity and data-statement refusals still run first.
+**Recorded limits (D-33).** A dump truncated after its `CREATE EXTENSION` lines is NOT refused:
+those lines sit near the top of the file, and the tail-count floor that tried to catch a
+truncated dump was reverted by founder decision D-33 because it refused correct dumps (a
+`DROP COLUMN` removes column-level `GRANT` lines with no `REVOKE`). Such a dump reaches only the
+bot pull request, where the reviewer sees a large deletion; nothing merges without a human. And an
+extension dropped on PROD outside a migration (a dashboard or CLI change) makes the next dump
+one `CREATE EXTENSION` short, so the completeness check refuses it, and every later migration
+merge's re-dump refuses too, until a hand re-dump through `## Regenerating` commits a dump without it.
 The manual procedure above REMAINS the fallback, for a refusal that needs a human reading of the
 dump, or when the automation is unavailable.
 
