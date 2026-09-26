@@ -1,5 +1,169 @@
 # Changelog
 
+## [0.98.0.0] - 2026-09-26 — COMPOSITECLAIMSNAPSHOT: the composite run reads the live job marker, not its claim-time snapshot, and a failed marker read retries instead of un-publishing
+
+⭐ **What changed for whoever reads this next.** A `stitch_composite` run decided "protected
+background ledger refresh, or loud user-facing failure" from the `compute_jobs` metadata it was
+claimed with. The SQL bridge `sync_strategy_analytics_status` decides the same question from the
+LIVE row. A `ledger-refresh-composite` marker retracted after the claim therefore made the Python
+stamp write error-only while the SQL bridge wrote a loud status, for the same job. The composite
+`_stamp_failed` closure now re-reads the live job row before it honours the marker, and the two
+layers agree. This was shown on the local lane before the fix (three retracted arms,
+`layers_agree=false`) and after it (4/4 arms `layers_agree=true`), and the regression test goes
+RED when the fix is neutered.
+
+⚠️ **This is a minor bump because worker failure behaviour changes on purpose.** A marker re-read,
+an entry publish-state read, a chain-edge read or any database call inside a failure stamp that
+fails now writes nothing and fails the job TRANSIENT (it retries), where it used to fall through
+to the loud, un-publishing write. A non-object `data_quality_flags` value is now dropped with an
+ERROR. A failing series heal after a landed stamp is logged and captured instead of re-raised.
+Precedent: GATEHYGIENE (0.90.0.0) and MT5VALIDATEWEDGE (0.96.0.0) each took a minor bump for a
+visible behaviour change. #867 already claims 0.97.0.0, so this takes 0.98.0.0.
+
+⛔ **Merging this deploys the new failure handling to the analytics worker.** Railway redeploys
+once `main`'s CI is green. This release carries no migration and nothing under `supabase/`. The
+composite fan-out stays UNSCHEDULED: runbook items 6 and 7 of
+`[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in `docs/runbooks/ledger-refresh-go-live.md` are still
+BLOCKING.
+
+### Fixed
+
+- **The composite failure stamp re-reads the live job before it honours the refresh marker**
+  (plan 02, `9dbda9eb0`). Inside `run_stitch_composite_job`, `_stamp_failed` reads the live row
+  only when the snapshot would grant protection (`_honour_marker`: the composite marker on a
+  terminal-success row), so the read can only narrow. Only `MarkerLiveState.PRESENT` protects;
+  a marker gone from the live row takes the loud path the SQL bridge also takes. Since round 4
+  the read is `_read_refresh_marker_state(..., LEDGER_REFRESH_COMPOSITE_SOURCE)` through
+  `_stamp_io`.
+- **A failed marker re-read retries instead of un-publishing** (round 1 and 2: `2b7ec95ba`,
+  `57d9fc8d3`, `777c7e0bb`, `0d11629c5`, `e27eee2ea`, `f7ac84f7c`; CONTEXT D-09). The composite
+  stamp, the single-key `_stamp_strategy_analytics_failed`, `_read_entry_publish_state` (before
+  any crawl or write) and the REUSE-01 chain edge (before `_enqueue_csv_analytics`) now raise
+  `RefreshMarkerRereadUnavailable` on an unreadable marker, which `classify_exception` files
+  transient. A transient re-read keeps the failure cause it postponed (`777c7e0bb`), and the
+  retry-window comment and tail log subject were corrected (`f7ac84f7c`).
+- **The composite stamp's flags and status read retries a gateway 504** (`f7db9543c`), and the
+  not-confirmed logger refuses `PRESENT` (`0936ef6b0`, SFH-R2-06).
+- **A failed stamp read keeps its cause, and a protected row pages nobody** (round 3:
+  `59bafa62f`, `6d9b342e4`). Nothing is written, the job is transient, and the curated cause leads
+  `last_error`. The unconditional pre-read ERROR is gone: the protected path logs one WARNING, no
+  ERROR, no capture. The chain edge's exhausted end state is named, an unnamed marker state is
+  refused (`MarkerStateNotLoggable`, not a `ValueError`), and a programming error in the entry read
+  is reported.
+- **Every database call in both stamp closures goes through one wrapper, `_stamp_io`** (round 4,
+  `d5e610aa2`, SFH-R4-01). One ERROR with op and cause, one capture tagged `compute_job_id`, then
+  `StampIOUnavailable`. `RefreshMarkerRereadUnavailable` and `StampIOUnavailable` both derive
+  from `HandlerIOUnavailable`, which `classify_exception` maps to transient; neither is a
+  `ValueError`, so the F-5 re-stamp cannot catch them. The stamp-site `READ_ERROR` arms were
+  deleted.
+- **Round 5** (`d87e94fe6`, `7de4a1440`, `4a8bb5369`, `9a14a3b67`, `01d8afec2`). A deadline that
+  cancels a stamp call logs the cause and re-raises. A non-object flags value no longer re-stamps
+  through F-5. A failed series heal is logged at ERROR and captured. The tail mirror logs a
+  programming error, answers `READ_ERROR` and leaves the job DONE. A code comment now says the
+  `_READ_PROGRAMMING_ERRORS` split is a heuristic.
+- **Round 6** (`d2f0fa922`, `ec6988ea6`, `7fefc10b9`). `_heal_delete_basis_series` no longer
+  re-raises a programming error after a landed stamp: it logs one ERROR, captures once and
+  returns, so the job stays `permanent` and the bridge cannot write `computing` over the stamp.
+  `_flags_object_or_dropped` copies a dict, turns `None` into `{}`, and drops any other value with
+  one ERROR and one capture, on the composite failed stamp and on the composite success path.
+
+### Added
+
+- **A local-lane harm probe, `analytics-service/scripts/probe_composite_claimtime.py`** (plan 01:
+  `707e4a27e`, `813f16a60`; round 1: `d3904ab17`, `04ecd7df5`). It drives the real composite
+  handler, the real claim RPC and the real `mark_compute_job_failed` on the loopback stack, with
+  four arms, a next-bridge reading and `--expect pre-fix|post-fix` modes. A disproved premise exits
+  3. It refuses a non-loopback database before any service import and again on the connected
+  peer, prints statuses, booleans and counts only, and releases a foreign claim before it refuses.
+  It is a recorded local run (D-01), not a CI gate, and pytest does not collect it.
+
+### Tests
+
+- The retraction regression and its control and fail-safe arms (`01043b7f5`); under the neuter,
+  8 of 29 composite nondestructive tests go RED.
+- Exact ERROR-count pins for every row of the runbook alert-volume table (`31f24dbc6`).
+- The rendered composite re-read failure line carries the probe's fragment (`acc90d31e`); every
+  stamp cause survives `classify_exception`'s 500-character cut (`909ca5386`).
+- `test_stamp_io_exhaustive.py`: an `ast` scan of both stamp closures, with 4 more paths
+  (`bd4fcee22`), and an I/O name set derived by fixpoint instead of listed (`dd72ddc6c`).
+- Full suite at the verified code: `6537 passed, 90 skipped`, strict mypy clean. The 90 skips are
+  not passes.
+
+### Changed
+
+- **The runbook precondition is restated to match the tree** (plan 03: `8df5ed256`; round 1:
+  `1b298d48e`). Items 2, 4 and 5 of `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` are MET, item 4 keeps
+  its deploy-time check, and item 6 stays BLOCKING. The new item 7 is BLOCKING until
+  `[164.6.7-COMPOSITE-REREAD-RESIDUE]` closes.
+- **Runbook currency across the review rounds** (`39dc6a899`, `227cafdf4`, `f4964a5c5`,
+  `735fbb1d8`, `24cd35de6`, `153b4e735`, `c17d048ec`, `cafd19fc7`, `380ba6d5f`). The retry's
+  plain-`complete` limit is stated flatly. The alert-volume bound was re-derived for each round;
+  earlier figures are kept as superseded lineage. "The tail mirror never raises" is scoped to a
+  failed read. The deploy-time checks now name the round-4 symbols (`_stamp_io`,
+  `_read_refresh_marker_state`, `_STAMP_OP_MARKER_READ`, `StampIOUnavailable`); the older wording
+  is kept as lineage (verification W-3).
+- **Backlog** (`699c49ed2`). `161.1-D13` is closed with the original kept as lineage, and the
+  residual re-read window is booked.
+
+### Notes
+
+- **Planning, review and verification record** (`9d40cccae`, `a4ab649e5`, `7442905ff`,
+  `1b11d8008`, `c89178029`, `3e49e28e7`, `9d10d3848`, `4153499a0`, `ff050e2ab`, `62993fb0c`,
+  `62525b2a6`, `bb83647d1`, `df33beb30`, `333f359a7`, `905ac27fe`, `acdf7ed41`, `7a7f54a7e`,
+  `bd7a723e7`, `cffa2cdcd`, `d0e46241b`, `b662dd0b9`, `b5100446c`, `e93e489c5`, `5c6b97f6d`,
+  `11a828c93`, `5e7b57cb4`, `c84fbba78`, `c543884f7`, `ddb9c80d5`, `897a8441f`, `4a1741a39`,
+  `6980a9d69`, `8da4dca7e`, `120f61209`, `33d74c566`). Research, three plans and a plan-check
+  revision, seven code-review rounds with silent-failure reviews and fix reports (the last round
+  found no HIGH), the phase verification (`human_needed`, 21/21) and the security audit
+  (`threats_open: 0`).
+- `origin/main` was merged in at `8f33ddaff`. The one conflict, in `TODOS.md`'s
+  `## 🟡 FIX MID-TERM` section, was resolved by keeping both sides.
+- **Ship-time redaction.** The round-1 review file quoted three DSN-shaped fixture literals in
+  URL form. They are now written as `<user>:<pw>` placeholders, so the tracked planning file
+  carries no connection string. The meaning (a loopback host overridden by a non-loopback
+  `host=`, `hostaddr=` or `service=` parameter) is unchanged.
+- **Verification status is `human_needed`, not `passed`.** The phase is shipped for review and is
+  not marked complete.
+
+### Known limits (recorded, not fixed)
+
+- **`[164.6.7-COMPOSITE-REREAD-RESIDUE]`.** A retraction that commits between the Python live
+  re-read and `mark_compute_job_failed` still leaves the pre-fix outcome (the `computation_warned`
+  residue). The single-key honour site has the same window. Its length is unmeasured. Routed to
+  Phase 164.5.2. Runbook item 7 blocks composite scheduling on it.
+- **`[164.6.7-RETRY-PLAIN-COMPLETE]`.** The transient retry protects a `complete_with_warnings` or
+  warned row, but not a plain `complete` one: the bridge's non-terminal branch rewrites it to
+  `computing` before attempt 2 reads it. The result is a loud failure, not a silent one. The fix
+  is a bridge migration, routed to Phase 164.5.2. ⚠️ The runbook's W-3 correction names Phase
+  164.5.2.1 BRIDGERESIDUE as the owner. That split exists only on the unmerged 164.5.2 branch,
+  and on `main` `TODOS.md` and the ROADMAP still route to 164.5.2.
+- **Security residual R-1 (low, non-blocking).** `scrub_freeform_string` redacts a `key=value`
+  pair but not a credential-keyed value whose key is quoted before the colon, as in a Python
+  `repr` or JSON. The malformed-flags ERROR line can therefore carry one unredacted. The Sentry
+  message itself carries only the type name. The limit is older than this phase and applies
+  wherever the scrubber sees a dict-shaped repr. The suggested fix is in `services/redact.py`.
+- **Static-scan blind spots.** The scan cannot see a method call, a function defined outside
+  `services/`, or I/O reached only through a passed callable (such as the write in
+  `upsert_or_drop_provenance`). The discovery test cannot see off-thread calls.
+- **From review rounds 5 to 7.** A programming-error class raised in a stamp call is filed
+  `unknown`, and the curated cause then appears only on the ERROR line (SFH-R5-06). The executor
+  thread behind a cancelled stamp write keeps running, so that write can land after the job is
+  filed transient. `services/analytics_runner.py`'s `_read_existing_flags` still uses
+  `dict(... or {})`. That fails loud, not silent. `_refresh_marker_still_on_row` now only logs a
+  programming error. The runbook's alert bound assumes the 3-attempt budget
+  (`max_attempts DEFAULT 3`).
+
+### Deploy-time human items
+
+- On the worker's DEPLOYED commit, confirm that both stamp closures read the live marker through
+  `_stamp_io(lambda: _read_refresh_marker_state(...), op=_STAMP_OP_MARKER_READ)`, and that a
+  failed read raises `StampIOUnavailable` (founder or operator, at scheduling time).
+- Count the live composite `strategy_analytics` rows with `computation_warned = TRUE` (research
+  A1; founder, before scheduling). This needs a PROD read, which this phase did not run.
+- Re-count the Sentry event bound on the deployed commit (operator). Single-key, or a composite
+  with object flags: at most 10 per job (13 with a provenance refusal). A composite with non-object
+  flags: at most 15 (18).
+
 ## [0.96.0.1] - 2026-09-26 — the unstarted phases split into one-topic phases, and the backlog re-routed to them
 
 ### Notes
