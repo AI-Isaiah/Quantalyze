@@ -14,6 +14,7 @@ import {
 import { computeStyleDrift } from "./style-drift";
 import { computePeerPercentile } from "./peer-cohort";
 import { annualizationPeriods } from "@/lib/closed-sets";
+import { pearson } from "@/lib/return-stats";
 import { blend, buildAllocatorMetrics } from "./allocator";
 import { streakLengths, streakHistogram } from "./streak";
 import { calmarByYear } from "./calmar-by-year";
@@ -620,27 +621,9 @@ export function buildFactsheetPayload(
 }
 
 function pearsonCorr(a: number[], b: number[]): number {
-  const n = Math.min(a.length, b.length);
-  if (n < 2) return NaN;
-  let sa = 0;
-  let sb = 0;
-  for (let i = 0; i < n; i++) {
-    sa += a[i];
-    sb += b[i];
-  }
-  const ma = sa / n;
-  const mb = sb / n;
-  let cov = 0;
-  let va = 0;
-  let vb = 0;
-  for (let i = 0; i < n; i++) {
-    const da = a[i] - ma;
-    const db = b[i] - mb;
-    cov += da * db;
-    va += da * da;
-    vb += db * db;
-  }
-  const denom = Math.sqrt(va * vb);
-  return denom > 0 ? cov / denom : NaN;
+  // The correlation is computed by `@/lib/return-stats` (Phase 166.2 D-17). An
+  // undefined correlation (fewer than 2 points, or a leg whose only dispersion
+  // is float residue) reads NaN, as an all-zero leg always has here (D-07).
+  return pearson(a, b) ?? NaN;
 }
 

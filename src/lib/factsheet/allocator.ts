@@ -1,4 +1,5 @@
 import { compute, cumEq, drawdowns } from "./compute";
+import { dispersion, pearson } from "@/lib/return-stats";
 
 /**
  * Demo allocator portfolios composed from REAL benchmark return series.
@@ -67,32 +68,14 @@ export function buildAllocatorMetrics(
   const n = rets.length;
   const eq = cumEq(rets);
   const dd = drawdowns(eq);
-  let mSum = 0;
-  let mmSum = 0;
-  for (let i = 0; i < n; i++) {
-    mSum += rets[i];
-    mmSum += mmRets[i];
-  }
-  const m = mSum / n;
-  const mm = mmSum / n;
-  let var_ = 0;
-  let mmVar = 0;
-  let cov = 0;
-  for (let i = 0; i < n; i++) {
-    const dr = rets[i] - m;
-    const dmm = mmRets[i] - mm;
-    var_ += dr * dr;
-    mmVar += dmm * dmm;
-    cov += dr * dmm;
-  }
-  var_ /= n;
-  mmVar /= n;
-  cov /= n;
-  const s = Math.sqrt(var_);
-  const mmS = Math.sqrt(mmVar);
+  // Vols and correlation are computed by `@/lib/return-stats` (Phase 166.2
+  // D-17), population sd. A leg whose only dispersion is float residue has an sd
+  // of exactly 0 and a correlation of 0, as an all-zero leg does (D-07).
+  const s = dispersion(rets, 0).sd;
+  const mmS = dispersion(mmRets.length === n ? mmRets : mmRets.slice(0, n), 0).sd;
   const annVol = s * Math.sqrt(periodsPerYear);
   const mmAnnVol = mmS * Math.sqrt(periodsPerYear);
-  const corr = s > 0 && mmS > 0 ? cov / (s * mmS) : 0;
+  const corr = pearson(rets, mmRets) ?? 0;
   const cumRet = eq[n - 1] - 1;
   const maxDd = Math.min(...dd);
 
