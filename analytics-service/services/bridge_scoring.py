@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from typing import Any, Optional
 from services.metrics import _safe_float
-from services.portfolio_optimizer import _compute_sharpe, _avg_corr, _max_drawdown
+from services.portfolio_optimizer import _compute_sharpe, _avg_corr, _leg_is_flat, _max_drawdown
 
 # H-1066: per-axis "excellent" reference magnitudes for a single-strategy swap.
 # Normalizing each delta by its scale (and clamping to [-1, 1]) puts the composite
@@ -143,7 +143,15 @@ def find_replacement_candidates(
         # composite below still ranks, with an EXPLICIT 0 contribution for a
         # missing axis (`_axis`), uniform across candidates.
         sharpe_delta = _delta(new_sharpe, current_sharpe)
-        corr_delta = _delta(current_corr, new_corr)  # positive = corr reduced (good)
+        # Round-1 WR-03: `_avg_corr` skips a flat column's pairs, so when the
+        # swapped-out incumbent or the swapped-in candidate is flat the two
+        # averages no longer describe the same swap. That leg's correlation
+        # does not exist, so the delta is None.
+        corr_delta = (
+            None
+            if _leg_is_flat(port_df_aligned, incumbent_strategy_id) or _leg_is_flat(all_returns, cid)
+            else _delta(current_corr, new_corr)
+        )  # positive = corr reduced (good)
         # H-1065: _max_drawdown returns <= 0, so a shallower (better) new drawdown
         # means new_dd > current_dd. Use (new_dd - current_dd) so positive = improvement,
         # consistent with sharpe_delta and corr_delta. The old (current_dd - new_dd)

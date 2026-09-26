@@ -61,11 +61,27 @@ def compute_rolling_correlation(strategy_returns: dict[str, pd.Series], window: 
 
 
 def compute_avg_pairwise_correlation(corr_matrix: dict[str, Any]) -> Optional[float]:
+    return compute_avg_pairwise_correlation_with_pairs(corr_matrix)[0]
+
+
+def compute_avg_pairwise_correlation_with_pairs(
+    corr_matrix: dict[str, Any],
+) -> tuple[Optional[float], int, int]:
+    """``(mean, pairs_used, pairs_total)`` over the matrix's DEFINED pairs.
+
+    Phase 166.1 round-1 WR-03 / SFH MEDIUM-1: the same rule as
+    ``dispersion.average_pairwise_correlation`` (the scorers' ``_avg_corr``).
+    C1 masks a non-dispersing leg's row and column to None, and every None
+    pair is skipped, so the mean covers a subset of the book whenever a leg is
+    masked. ``pairs_used`` of ``pairs_total`` says how large that subset is;
+    the router records both in ``data_quality`` beside the average.
+    """
     ids = list(corr_matrix.keys())
     n = len(ids)
+    pairs_total = n * (n - 1) // 2
     if n < 2:
-        return None
-    total = 0
+        return None, 0, pairs_total
+    total = 0.0
     count = 0
     for i, s1 in enumerate(ids):
         for s2 in ids[i + 1:]:
@@ -73,7 +89,7 @@ def compute_avg_pairwise_correlation(corr_matrix: dict[str, Any]) -> Optional[fl
             if val is not None:
                 total += val
                 count += 1
-    return _safe_float(total / count) if count > 0 else None
+    return (_safe_float(total / count) if count > 0 else None), count, pairs_total
 
 
 def compute_risk_decomposition(weights: list[float], covariance_matrix: np.ndarray[Any, Any]) -> list[dict[str, Any]]:

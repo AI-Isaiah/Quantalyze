@@ -3,7 +3,12 @@ import numpy as np
 import pandas as pd
 from datetime import date as _date
 from typing import Any, Optional
-from services.dispersion import dispersion_is_real, dispersion_is_residue, pairwise_correlation_or_none
+from services.dispersion import (
+    average_pairwise_correlation,
+    dispersion_is_real,
+    dispersion_is_residue,
+    pairwise_correlation_or_none,
+)
 from services.metrics import _safe_float
 
 logger = logging.getLogger("quantalyze.analytics.portfolio_optimizer")
@@ -69,13 +74,14 @@ def find_improvement_candidates(
         # ~1e-16 std and was kept, then scored on a residue correlation.
         #
         # This keys on the CANDIDATE column only (candidate-specific). It does
-        # NOT gate on new_avg_corr: _avg_corr is computed over the WHOLE blended
-        # frame, so a single flat EXISTING strategy would poison it to None for
-        # every candidate and silently drop ALL suggestions. A None new_avg_corr
-        # from a flat existing strategy instead leaves the correlation term at 0
-        # below, uniform across candidates. (new_sharpe/new_max_dd None — a
-        # blend whose dispersion is residue, or an empty blend — is also
-        # excluded; since S1 a residue blend gives a None Sharpe rather than a
+        # NOT gate on new_avg_corr. Since round-1 WR-03 a flat EXISTING strategy
+        # no longer makes _avg_corr None (its pairs are skipped), and a None
+        # new_avg_corr (fewer than two dispersing columns) leaves the
+        # correlation term at 0 below, uniform across candidates. Because a
+        # residue candidate is dropped here, the corr_reduction below never
+        # compares two averages that differ only by a skipped candidate leg.
+        # (new_sharpe/new_max_dd None — a blend whose dispersion is residue,
+        # or an empty blend — is also excluded; since S1 a residue blend gives a None Sharpe rather than a
         # ~1e13 one.)
         if (
             dispersion_is_residue(float(aligned[cid].std()), float(aligned[cid].mean()))
@@ -286,14 +292,28 @@ def _avg_corr(df: pd.DataFrame) -> Optional[float]:
     if df.shape[1] < 2:
         return None
     # Phase 166.1 (C4, D-02): a column that does not disperse has no
-    # correlation, so the average is undefined: None, as an all-zero column's
-    # NaN row already makes it. pandas gives a residue column a noise value.
-    if not all(dispersion_is_real(float(df[c].std()), float(df[c].mean())) for c in df.columns):
-        return None
-    corr = df.corr()
-    n = len(corr)
-    total = (corr.values.sum() - n) / (n * (n - 1))
-    return _safe_float(float(total))
+    # correlation; pandas gives a residue column a noise value.
+    #
+    # Round-1 WR-03 (recorded in 166.1-CONTEXT): the average SKIPS the pairs a
+    # non-dispersing column is in and averages the defined pairs, the same rule
+    # the portfolio risk panel applies (`dispersion.average_pairwise_correlation`
+    # is the one implementation). It used to be None for the whole frame when
+    # any one column was flat, so one constant-yield sleeve voided the
+    # diversification axis for every candidate while the risk panel still showed
+    # an average. A scorer whose ADDED or SWAPPED leg is flat must therefore
+    # null its correlation delta itself (`_leg_is_flat`): with that leg skipped,
+    # the two averages cover the same pairs and their difference is a
+    # fabricated 0.
+    return _safe_float(average_pairwise_correlation(df)[0])
+
+
+def _leg_is_flat(df: pd.DataFrame, col: str) -> bool:
+    """True when ``df[col]`` does not disperse (residue, zero or NaN std).
+
+    Round-1 WR-03 / HIGH-2: a correlation delta whose added or swapped leg is
+    flat does not exist (166.1 D7), whatever the two averages say.
+    """
+    return not dispersion_is_real(float(df[col].std()), float(df[col].mean()))
 
 
 def _max_drawdown(returns: pd.Series) -> Optional[float]:

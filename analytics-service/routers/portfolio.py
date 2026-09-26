@@ -44,7 +44,7 @@ from services.portfolio_metrics import compute_mwr, compute_period_returns
 from services.portfolio_optimizer import find_improvement_candidates, generate_narrative
 from services.portfolio_risk import (
     compute_attribution,
-    compute_avg_pairwise_correlation,
+    compute_avg_pairwise_correlation_with_pairs,
     compute_correlation_matrix,
     compute_risk_decomposition,
     compute_rolling_correlation,
@@ -887,7 +887,12 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # Correlation matrix + rolling + avg pairwise
         corr_matrix = compute_correlation_matrix(dict(strategy_returns))
         rolling_corr = compute_rolling_correlation(dict(strategy_returns))
-        avg_pairwise_corr = compute_avg_pairwise_correlation(corr_matrix)
+        # Round-1 WR-03 / SFH MEDIUM-1: the average covers only the DEFINED
+        # pairs (a leg that does not disperse is masked by C1), so the count of
+        # pairs it used is recorded in data_quality beside it.
+        avg_pairwise_corr, avg_corr_pairs_used, avg_corr_pairs_total = (
+            compute_avg_pairwise_correlation_with_pairs(corr_matrix)
+        )
 
         # Risk decomposition + attribution
         ordered_sids = list(df.columns)
@@ -1138,6 +1143,8 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             "sharpe_status": sharpe_status,
             "cov_history_sufficient": cov_history_sufficient,
             "correlation_history_sufficient": correlation_history_sufficient,
+            "avg_pairwise_correlation_pairs_used": avg_corr_pairs_used,
+            "avg_pairwise_correlation_pairs_total": avg_corr_pairs_total,
             "benchmark_error": benchmark_error,
             "matching_status": None,  # populated only on verify_strategy
         }

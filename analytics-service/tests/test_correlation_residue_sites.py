@@ -266,10 +266,51 @@ def _c4_frame(first: pd.Series) -> pd.DataFrame:
 
 @pytest.mark.parametrize("yield_id", _YIELD_IDS)
 def test_c4_avg_corr_with_a_constant_yield_column_equals_the_all_zero_column(yield_id: str) -> None:
+    """Round-1 WR-03 (the rule recorded in 166.1-CONTEXT): a flat column's pairs
+    are SKIPPED and the defined pairs averaged, as the risk panel does. So one
+    constant-yield or all-zero sleeve no longer voids the average for the whole
+    book; both read the same, and both equal the one defined pair (n, m). It was
+    None for the whole frame, which dropped the diversification axis from every
+    scorer while the risk panel still showed an average."""
     const = _residue_leg(yield_id)
-    with_zero = _avg_corr(_c4_frame(_zeros_like(const)))
-    assert with_zero is None, "D-07 reference: an all-zero column poisons the average to None today"
+    frame_zero = _c4_frame(_zeros_like(const))
+    with_zero = _avg_corr(frame_zero)
+    only_pair = float(frame_zero["n"].corr(frame_zero["m"]))
+    assert with_zero == pytest.approx(only_pair), "the flat column's pairs are skipped"
     assert _avg_corr(_c4_frame(const)) == with_zero
+
+
+@pytest.mark.parametrize("flat", ["constant_yield", "all_zero"])
+def test_wr03_both_average_rules_skip_the_flat_pairs_and_count_them(flat: str) -> None:
+    """The scorers' average and the risk panel's average are one rule: skip the
+    undefined pairs, and state how many pairs were used (1 of 3 here)."""
+    from services.dispersion import average_pairwise_correlation
+    from services.portfolio_risk import compute_avg_pairwise_correlation_with_pairs
+
+    const = _residue_leg("daily_1e-4")
+    frame = _c4_frame(const if flat == "constant_yield" else _zeros_like(const))
+    scorer = average_pairwise_correlation(frame)
+    panel = compute_avg_pairwise_correlation_with_pairs(
+        compute_correlation_matrix({c: frame[c] for c in frame.columns})
+    )
+    assert scorer[1:] == (1, 3) and panel[1:] == (1, 3)
+    assert scorer[0] == pytest.approx(panel[0])
+
+
+def test_wr03_match_engine_flat_candidate_has_no_correlation_reduction() -> None:
+    """With the flat candidate's pairs skipped, the current and proposed averages
+    cover the same pairs; without the leg guard the reduction is a fabricated
+    0.0. It was None before WR-03 (the whole average was None) and stays None."""
+    from services.match_engine import _compute_portfolio_fit_components
+
+    const = _residue_leg("daily_1e-4")
+    idx = const.index
+    book = {"a": _noise(idx, seed=121), "b": _noise(idx, seed=122)}
+    weights = {"a": 0.5, "b": 0.5}
+    port = (pd.DataFrame(book) * pd.Series(weights)).sum(axis=1)
+    out = _compute_portfolio_fit_components(port, weights, book, const, 0.10)
+    assert out["sharpe_lift"] is not None, "the blend is scored, so the guard is what nulls corr"
+    assert out["corr_reduction"] is None
 
 
 def test_c4_avg_corr_of_noisy_columns_is_finite() -> None:

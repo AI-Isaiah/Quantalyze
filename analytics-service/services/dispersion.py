@@ -142,3 +142,33 @@ def dispersing_corrwith(frame: pd.DataFrame, target: pd.Series) -> pd.Series:
     if not kept:
         return pd.Series(dtype=float)
     return frame[kept].corrwith(target).astype(float)
+
+
+def average_pairwise_correlation(frame: pd.DataFrame) -> tuple[Optional[float], int, int]:
+    """Mean Pearson correlation over the DEFINED pairs of ``frame``'s columns.
+
+    Returns ``(mean, pairs_used, pairs_total)``. Phase 166.1 round-1 WR-03 /
+    SFH MEDIUM-1: the ONE rule for "average pairwise correlation", shared by
+    the scorers (``portfolio_optimizer._avg_corr``) and the portfolio risk
+    panel (``portfolio_risk.compute_avg_pairwise_correlation_with_pairs``). A
+    column that does not disperse defines no correlation with anything, so
+    every pair it is in is SKIPPED, as is a pair whose correlation is not
+    finite. The mean is over the pairs that remain, and ``pairs_used`` states
+    how many that is out of ``pairs_total = n(n-1)/2``, so a caller can say
+    the average covers a subset. ``mean`` is None when no pair is defined.
+
+    The frame is taken as already aligned (every caller passes a ``dropna``'d
+    frame), so a column's own dispersion is the dispersion on the rows each
+    of its pairs uses.
+    """
+    n = frame.shape[1]
+    pairs_total = n * (n - 1) // 2
+    moving = [c for c in frame.columns if _leg_disperses(frame[c])]
+    if len(moving) < 2:
+        return None, 0, pairs_total
+    corr = frame[moving].corr().to_numpy()
+    upper = corr[np.triu_indices(len(moving), k=1)]
+    defined = upper[np.isfinite(upper)]
+    if defined.size == 0:
+        return None, 0, pairs_total
+    return float(defined.mean()), int(defined.size), pairs_total

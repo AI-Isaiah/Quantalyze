@@ -37,6 +37,7 @@ from services.match_defaults import merge_with_defaults
 from services.portfolio_optimizer import (
     _avg_corr,
     _compute_sharpe,
+    _leg_is_flat,
     _max_drawdown,
 )
 
@@ -707,9 +708,14 @@ def _compute_portfolio_fit_components(
         if current_sharpe is not None and new_sharpe is not None
         else None
     )
+    # Round-1 WR-03 (166.1): `_avg_corr` skips a flat column's pairs, so a flat
+    # candidate would leave the two averages equal and report a fabricated 0.0
+    # reduction. Its correlation with the book does not exist (166.1 D7).
     corr_reduction = (
         current_avg_corr - new_avg_corr
-        if current_avg_corr is not None and new_avg_corr is not None
+        if current_avg_corr is not None
+        and new_avg_corr is not None
+        and not _leg_is_flat(aligned, "__cand__")
         else None
     )
     dd_improvement = (
