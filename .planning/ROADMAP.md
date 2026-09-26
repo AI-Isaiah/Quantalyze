@@ -3194,6 +3194,8 @@ Plans:
 
 - [x] 166.2-07-PLAN.md — whole-phase gate sweep at one SHA containing `origin/main` (anchor check in CI's `--pending` form, D-20 B2) and the single TS release commit (VERSION, package.json, CHANGELOG)
 
+**⭐ D-27 (2026-09-26, under founder decision D7):** T13's "skew and kurtosis stay 0 with no dispersion" is superseded, and they now read "—". Profit Factor, Calmar by Year, Avg Loss and Avg Win likewise show "—" where they do not exist. Recorded in `166.2-CONTEXT.md` D-27.
+
 ### Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path (founder production steps) (INSERTED)
 
 **Goal:** Every persisted `strategy_analytics` row that Phase 166 changes, and that was computed before the Phase 166 worker deploy, is recomputed on PROD through the normal compute-job path, one strategy at a time, each checked against its before row, so stored numbers match what the fixed code produces. Every PROD statement is a founder step.
