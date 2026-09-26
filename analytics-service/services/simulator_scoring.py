@@ -184,16 +184,18 @@ def simulate_add_candidate(
     dd_delta = _delta(current_max_dd, proposed_max_dd)
     # NEW-C11-02 (audit-2026-05-26): a single-strategy "current" portfolio has
     # NO existing correlation pair, so _avg_corr(port_aligned) is None. Routing
-    # that through _delta coerces None -> 0.0, which the panel renders as a
+    # that through the old _delta coerced None -> 0.0, which the panel renders as a
     # confident "Correlation unchanged (±0.000)" — telling the allocator that
     # adding the FIRST correlated pair is diversification-neutral. The baseline
     # is *undefined*, not zero. Emit None (the schema + panel already render it
     # as "—" / "Correlation not computable") instead of a fabricated 0.0.
-    corr_delta = (
-        None
-        if current_avg_corr is None
-        else _delta(current_avg_corr, proposed_avg_corr)
-    )
+    #
+    # 166.1 D7 (founder 2026-09-26, round-1 SFH HIGH-2): the same holds for
+    # EITHER side and for every chip. A constant-yield or all-zero leg makes
+    # the proposed correlation, or the current Sharpe, None, and `_delta` now
+    # returns None for a None operand instead of the 0.0 the panel read as
+    # "unchanged". The NEW-C11-02 current-side case is one instance of that.
+    corr_delta = _delta(current_avg_corr, proposed_avg_corr)
     concentration_delta = _delta(current_concentration, proposed_concentration)
 
     partial_history = overlap_days < PARTIAL_HISTORY_THRESHOLD
@@ -232,14 +234,19 @@ def simulate_add_candidate(
 # ---------------------------------------------------------------------------
 
 
-def _delta(new_val: Optional[float], old_val: Optional[float]) -> float:
-    """Return new-old, coercing None to 0 so the caller always gets a float.
+def _delta(new_val: Optional[float], old_val: Optional[float]) -> Optional[float]:
+    """Return new-old, or None when either side is None.
+
+    166.1 D7 (founder 2026-09-26): a delta against a metric that does not
+    exist does not exist either. This used to coerce None to 0.0, which the
+    panel rendered as a confident "unchanged" (round-1 SFH HIGH-2). The schema
+    and the panel already render None as "—".
 
     The sign convention is the caller's responsibility (see docstring on
     simulate_add_candidate).
     """
     if new_val is None or old_val is None:
-        return 0.0
+        return None
     return new_val - old_val
 
 

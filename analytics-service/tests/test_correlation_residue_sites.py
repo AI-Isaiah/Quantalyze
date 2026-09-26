@@ -578,3 +578,97 @@ def test_c8_a_real_failure_still_logs_matching_failed(caplog: pytest.LogCaptureF
     idx = nav_constant_yield(1e-4).index
     assert find_matched_strategy(_noise(idx, seed=86), _Broken()) is None
     assert len(_matching_failed_lines(caplog)) == 1
+
+
+# ---------------------------------------------------------------------------
+# HIGH-2 / WR-02 (round 1) - the simulator and bridge deltas over a flat leg
+#
+# 166.1 D7 (founder 2026-09-26): a delta whose either side does not exist is
+# None, never a 0.0 that the simulator panel and ReplacementCard read as
+# "unchanged". A constant-yield leg and an all-zero leg must read the same.
+# ---------------------------------------------------------------------------
+
+_FLAT_KINDS = ["constant_yield", "all_zero"]
+
+
+def _flat_leg(kind: str) -> pd.Series:
+    const = _residue_leg("daily_1e-4")
+    return const if kind == "constant_yield" else _zeros_like(const)
+
+
+def _simulate(book: dict[str, pd.Series], candidate: pd.Series) -> dict:
+    from services.simulator_scoring import simulate_add_candidate
+
+    weights = {sid: 1.0 / len(book) for sid in book}
+    out = simulate_add_candidate(book, "cand", candidate, weights)
+    assert out["status"] == "ok"
+    return out
+
+
+@pytest.mark.parametrize("kind", _FLAT_KINDS)
+def test_high2_simulator_flat_candidate_has_no_correlation_delta(kind: str) -> None:
+    """The SFH reproduction: a noisy two-strategy book plus a flat candidate gave
+    corr_delta 0.0, "Correlation unchanged (±0.000)"."""
+    flat = _flat_leg(kind)
+    book = {"a": _noise(flat.index, seed=91), "b": _noise(flat.index, seed=92)}
+    out = _simulate(book, flat)
+    assert out["deltas"]["corr_delta"] is None
+
+
+@pytest.mark.parametrize("kind", _FLAT_KINDS)
+def test_high2_simulator_flat_book_has_no_sharpe_delta(kind: str) -> None:
+    """A book with no Sharpe gave sharpe_delta 0.0 beside current.sharpe None."""
+    flat = _flat_leg(kind)
+    out = _simulate({"f": flat}, _noise(flat.index, seed=93))
+    assert out["current"]["sharpe"] is None
+    assert out["deltas"]["sharpe_delta"] is None
+
+
+def test_high2_simulator_noisy_legs_keep_every_delta() -> None:
+    idx = nav_constant_yield(1e-4).index
+    book = {"a": _noise(idx, seed=94), "b": _noise(idx, seed=95)}
+    deltas = _simulate(book, _noise(idx, seed=96))["deltas"]
+    for key in ("sharpe_delta", "dd_delta", "corr_delta", "concentration_delta"):
+        assert isinstance(deltas[key], float) and math.isfinite(deltas[key]), key
+
+
+def _replace(book: dict[str, pd.Series], candidate: pd.Series) -> dict:
+    from services.bridge_scoring import find_replacement_candidates
+
+    weights = {sid: 1.0 / len(book) for sid in book}
+    out = find_replacement_candidates(book, {"cand": candidate}, weights, "inc")
+    assert [r["strategy_id"] for r in out] == ["cand"], "the candidate must still be ranked"
+    row = out[0]
+    assert isinstance(row["composite_score"], float) and math.isfinite(row["composite_score"])
+    return row
+
+
+@pytest.mark.parametrize("kind", _FLAT_KINDS)
+def test_high2_bridge_flat_candidate_has_no_correlation_delta(kind: str) -> None:
+    flat = _flat_leg(kind)
+    idx = flat.index
+    book = {"a": _noise(idx, seed=101), "b": _noise(idx, seed=102), "inc": _noise(idx, seed=103)}
+    assert _replace(book, flat)["corr_delta"] is None
+
+
+@pytest.mark.parametrize("kind", _FLAT_KINDS)
+def test_high2_bridge_flat_incumbent_has_no_correlation_delta(kind: str) -> None:
+    flat = _flat_leg(kind)
+    idx = flat.index
+    book = {"a": _noise(idx, seed=104), "b": _noise(idx, seed=105), "inc": flat}
+    assert _replace(book, _noise(idx, seed=106))["corr_delta"] is None
+
+
+@pytest.mark.parametrize("kind", _FLAT_KINDS)
+def test_high2_bridge_flat_book_has_no_sharpe_delta(kind: str) -> None:
+    flat = _flat_leg(kind)
+    book = {"a": flat.rename("a"), "inc": flat.rename("inc")}
+    assert _replace(book, _noise(flat.index, seed=107))["sharpe_delta"] is None
+
+
+def test_high2_bridge_noisy_legs_keep_every_delta() -> None:
+    idx = nav_constant_yield(1e-4).index
+    book = {"a": _noise(idx, seed=108), "b": _noise(idx, seed=109), "inc": _noise(idx, seed=110)}
+    row = _replace(book, _noise(idx, seed=111))
+    for key in ("sharpe_delta", "dd_delta", "corr_delta"):
+        assert isinstance(row[key], float) and math.isfinite(row[key]), key

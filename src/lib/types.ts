@@ -1531,10 +1531,14 @@ export interface BridgeCandidate {
    * corr_delta (correlation reduced), and dd_delta (shallower drawdown) are
    * each >= 0 when the candidate improves that axis. Use
    * `asImprovement(raw, "higher-better")` before rendering.
+   *
+   * null = the delta does not exist: one side's metric is undefined because a
+   * leg's returns do not vary. Rendered as "—", never as 0 (166.1 D7, founder
+   * 2026-09-26).
    */
-  sharpe_delta: number;
-  dd_delta: number;
-  corr_delta: number;
+  sharpe_delta: number | null;
+  dd_delta: number | null;
+  corr_delta: number | null;
   composite_score: number;
   fit_label: BridgeFitLabel;
 }

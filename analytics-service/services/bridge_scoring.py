@@ -137,6 +137,11 @@ def find_replacement_candidates(
         new_corr = _avg_corr(all_returns)
         new_dd = _max_drawdown(new_port_returns)
 
+        # 166.1 D7 (founder 2026-09-26, round-1 SFH HIGH-2): a delta whose
+        # either side is None is None in the returned row, and ReplacementCard
+        # renders it as "—". It was a 0.0 that read as "unchanged". The
+        # composite below still ranks, with an EXPLICIT 0 contribution for a
+        # missing axis (`_axis`), uniform across candidates.
         sharpe_delta = _delta(new_sharpe, current_sharpe)
         corr_delta = _delta(current_corr, new_corr)  # positive = corr reduced (good)
         # H-1065: _max_drawdown returns <= 0, so a shallower (better) new drawdown
@@ -149,9 +154,9 @@ def find_replacement_candidates(
         # H-1066: normalize each axis to [-1, 1] before weighting so the composite is
         # scale-stable and the fit-label thresholds are reachable for realistic deltas.
         composite = (
-            w1 * _normalize(sharpe_delta, SHARPE_SCALE)
-            + w2 * _normalize(corr_delta, CORR_SCALE)
-            + w3 * _normalize(dd_delta, DD_SCALE)
+            w1 * _axis(sharpe_delta, SHARPE_SCALE)
+            + w2 * _axis(corr_delta, CORR_SCALE)
+            + w3 * _axis(dd_delta, DD_SCALE)
         )
         fit_label = _fit_label(composite)
 
@@ -167,10 +172,17 @@ def find_replacement_candidates(
     return sorted(results, key=lambda x: x["composite_score"], reverse=True)[:5]
 
 
-def _delta(new_val: Optional[float], old_val: Optional[float]) -> float:
+def _delta(new_val: Optional[float], old_val: Optional[float]) -> Optional[float]:
+    """new - old, or None when either side is None (166.1 D7: never a fabricated 0.0)."""
     if new_val is None or old_val is None:
-        return 0.0
+        return None
     return new_val - old_val
+
+
+def _axis(delta: Optional[float], scale: float) -> float:
+    """A delta's contribution to the composite: 0 for a missing axis, stated here
+    rather than smuggled in through the rendered delta."""
+    return 0.0 if delta is None else _normalize(delta, scale)
 
 
 def _normalize(value: float, scale: float) -> float:
