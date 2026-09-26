@@ -5,7 +5,7 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "166.1"
 current_phase_name: ENGINEFLOOR
 status: executing
-stopped_at: Completed 166.1-01b-PLAN.md
+stopped_at: Completed 166.1-03-PLAN.md
 last_updated: "2026-09-24T21:30:00.000Z"
 last_activity: 2026-09-24
 last_activity_desc: "2026-09-24: 164.6 (v0.90.0.0), 167.1, 167.2 shipped; 166 executed 10/10 (v0.91.0.0) and in review; PROD baseline re-dumped after the 164.6 apply (v0.90.0.1). Census by VERIFICATION status==passed across all worktrees: 35/54 phases."
@@ -180,7 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 166.1 (ENGINEFLOOR) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Phase: 166 (QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given) — READY TO EXECUTE
 Plan: Not started
 Phase: 164.6 (gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers) — EXECUTING
@@ -502,7 +502,7 @@ Status: Executing Phase 166.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-26 — Phase 166.1 plan 01b executed (SQN block S8 reads the dispersion floor: 21 identical 7.7 losses give None instead of -4.03e16; no production caller since Phase 106, so no stored SQN moves)
+Last activity: 2026-09-26 — Phase 166.1 plan 03 executed (correlation sites C1-C8 on two shared helpers in services/dispersion.py: two strategies with the same compounding constant yield no longer match at 1.0, and every site emits what an all-zero leg already gets)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
