@@ -2901,7 +2901,7 @@ Plans:
 **Goal:** A shared-TEST restore rebuilds its reference rows in the state PROD holds them. The reference-data replay also replays a migration's top-level `UPDATE` when it targets a `public` table the replay has just filled. Those tables are empty after `DROP SCHEMA public CASCADE`, so such an UPDATE can reach only rows the replay itself wrote, never anyone's live data.
 **Requirements**: TODOS `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` (owned here); unblocks Phase 164.9 criterion 8 (`[164.9-CRIT8-RESTORE-DISPATCH-RECORD]`).
 **Depends on:** Phase 164.9
-**Plans:** 0 plans
+**Plans:** 5 plans
 
 ⭐ **Founder decision, 2026-09-24 (AskUserQuestion): "Yes, new phase".**
 
