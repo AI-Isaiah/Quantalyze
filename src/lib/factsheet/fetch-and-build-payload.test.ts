@@ -21,6 +21,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 vi.mock("server-only", () => ({}));
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
 type Row = Record<string, unknown>;
 
@@ -78,6 +79,7 @@ import {
 } from "./fetch-and-build-payload";
 import type { NotBuildableReason } from "./fetch-and-build-payload";
 import { buildFactsheetPayload } from "./build-payload";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { withPublishedOrOwner } from "@/lib/visibility";
 
 // Synthetic, UUID-shaped ids: `withPublishedOrOwner` fails closed on a non-UUID.
@@ -146,6 +148,7 @@ beforeEach(() => {
   fake.csvRows = [];
   fake.tablesSeen = [];
   fake.orFilters = [];
+  vi.mocked(captureToSentry).mockClear();
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -325,6 +328,27 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
       expect(lines().some((l) => l.includes("resolve(build)")), f.name).toBe(true);
       expect(lines().some((l) => l.includes("resolve(probe)")), f.name).toBe(false);
     }
+  });
+
+  it("SFH M-2 READ-ERROR CAPTURE: a failed admin read is captured once per resolve, with its code, on the build and the probe alike", async () => {
+    const outage = PARITY.find((f) => f.reason === "read_error")!;
+    for (const [caller, run] of [
+      ["build", () => fetchAndBuildPayload(STRATEGY_ID, ownerVisibility)],
+      ["probe", () => probeFactsheetBuildable(STRATEGY_ID, ownerVisibility)],
+    ] as const) {
+      seed(outage.row, [], outage.error);
+      vi.mocked(captureToSentry).mockClear();
+      await run();
+      expect(vi.mocked(captureToSentry), caller).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
+        tags: { stage: "factsheet-resolve", caller, reason: "read_error", code: "XX000" },
+      });
+    }
+    // A row that is simply not visible is not an outage, and is not captured.
+    seed(null);
+    vi.mocked(captureToSentry).mockClear();
+    await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
   });
 
   it("NO-NULL-AFTER-RESOLVE: every fixture the probe calls buildable builds a payload", async () => {

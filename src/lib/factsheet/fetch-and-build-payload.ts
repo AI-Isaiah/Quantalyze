@@ -32,6 +32,7 @@
  * the SL-1 argument, which rests on both lanes producing the same bytes.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
@@ -117,15 +118,32 @@ async function resolveFactsheetInputs(
       .eq("id", id),
   )
     .maybeSingle();
-  if (error || !strategy) {
+  if (error) {
+    // 167.2.1-REVIEW-SFH M-2: a failed admin read is an outage, not a data
+    // fact. `console.*` does not reach Sentry in this repo (no console
+    // integration in `instrumentation.ts`), so it is captured HERE, once, with
+    // its PostgREST / SQLSTATE code as a tag (a code is not identifying). That
+    // covers every lane: the public and token builders used to render the
+    // placeholder for it with no event at all, and the probe callers captured
+    // a fixed message with no code.
+    const code = error.code || "none";
+    console.error(`[factsheet] resolve(${caller}) — admin strategy read failed`, {
+      id,
+      caller,
+      errorMessage: error.message,
+      errorCode: code,
+    });
+    captureToSentry(new Error(`factsheet resolve: admin strategy read failed (${code})`), {
+      tags: { stage: "factsheet-resolve", caller, reason: "read_error", code },
+    });
+    return notBuildable("read_error");
+  }
+  if (!strategy) {
     console.warn(`[factsheet] resolve(${caller}) — admin read returned no strategy`, {
       id,
       caller,
-      hasError: !!error,
-      errorMessage: error?.message,
-      errorCode: error?.code,
     });
-    return notBuildable(error ? "read_error" : "not_visible");
+    return notBuildable("not_visible");
   }
 
   const analytics = Array.isArray(strategy.strategy_analytics)

@@ -790,18 +790,21 @@ async function readOwnerPendingStatus(
  * arms (`buildable: true` on a null payload, SFH M-5) cannot occur.
  * `too_few_points` and `composite_unbuildable` give their D-02 kind;
  * `not_computed` keeps today's arm-derived note. `read_error` and
- * `not_visible` are unreadable, exactly as on /strategies (D-05), logged with
- * the id and captured with tags only: this lane passed the owner signature
- * gate, so an admin read that fails or finds no row under the same predicate
- * is an outage, a race or a predicate mismatch. A builder THROW is outside
+ * `not_visible` are unreadable, exactly as on /strategies (D-05). The resolve
+ * stage itself logs and captures a `read_error`, once, with its code
+ * (167.2.1-REVIEW-SFH M-2), so it is not captured a second time here.
+ * `not_visible` is logged with the id and captured with tags only: this lane
+ * passed the owner signature gate, so an admin read finding no row under the
+ * same predicate is a race or a predicate mismatch. A builder THROW is outside
  * this function's domain: the page's error handling owns it.
  */
 function ownerBuildabilityOf(
   id: string,
   reason: NotBuildableReason,
 ): { unreadable: boolean; kind: UnbuildableNoteKind | null } {
-  if (reason === "read_error" || reason === "not_visible") {
-    console.error("[factsheet/v2/page] owner build could not read the row", {
+  if (reason === "read_error") return { unreadable: true, kind: null };
+  if (reason === "not_visible") {
+    console.error("[factsheet/v2/page] owner build found no row under the owner predicate", {
       id,
       reason,
     });

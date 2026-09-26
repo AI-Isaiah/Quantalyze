@@ -157,6 +157,8 @@ const STATE = {
   publishedRow: null as unknown,
   ownerRow: null as unknown,
   adminRow: null as unknown,
+  /** The error the service-role `strategies` read answers with, if any. */
+  adminError: null as unknown,
   /** The queued answer of the request client's `rpc`. */
   rpcResult: { data: [] as unknown, error: null as unknown },
   /** When true the request client carries NO `rpc` member (a throw). */
@@ -240,7 +242,7 @@ function mockAdmin(): SupabaseClient {
       maybeSingle: () =>
         Promise.resolve(
           table === "strategies"
-            ? { data: STATE.adminRow, error: null }
+            ? { data: STATE.adminError ? null : STATE.adminRow, error: STATE.adminError }
             : { data: null, error: null },
         ),
     };
@@ -336,6 +338,7 @@ beforeEach(() => {
   STATE.publishedRow = null;
   STATE.ownerRow = null;
   STATE.adminRow = null;
+  STATE.adminError = null;
   STATE.rpcResult = { data: [], error: null };
   STATE.rpcMissing = false;
   STATE.memberCountResult = { count: 0, error: null };
@@ -1082,6 +1085,27 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
         tags: { route: "factsheet/v2/page", stage: "factsheet-owner-build" },
       });
       expect(STATE.observed.adminTables.filter((t) => t === "strategies")).toHaveLength(1);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("S7-OWNER-BUILD-READ-ERROR: the owner build's admin read fails -> KCS12-UNREADABLE, captured ONCE by the resolve stage with its code (SFH M-2)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft();
+      STATE.adminError = { message: "synthetic outage", code: "57014" };
+      givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+
+      const { container } = await renderOwnerPending();
+      const last = panelOf(container).lastElementChild as HTMLElement;
+
+      expect(last.textContent).toBe(MINT_UNREADABLE);
+      // One event, from the stage that saw the error, carrying the code.
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
+        tags: { stage: "factsheet-resolve", caller: "build", reason: "read_error", code: "57014" },
+      });
     } finally {
       errSpy.mockRestore();
     }
