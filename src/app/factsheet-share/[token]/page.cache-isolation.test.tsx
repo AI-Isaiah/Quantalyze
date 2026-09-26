@@ -152,7 +152,7 @@ const GENERATION = 1;
 
 /** The shape-versioned key prefix, typed HERE by hand. Never imported from the
  *  page: an oracle read out of the module under test cannot fail. */
-const EXPECTED_KEY_PREFIX = "factsheet-v2-payload-v6";
+const EXPECTED_KEY_PREFIX = "factsheet-v2-payload-v7";
 
 const CASH_DAILY = [
   { date: "2025-08-01", value: 0.01 },

@@ -264,6 +264,6 @@ describe("WR-02 — the public factsheet cache is keyed by the analytics run it 
 
   it("KEY SHAPE: the key is the shape version, the id and computed_at, and nothing viewer-dependent", async () => {
     await request({ computed_at: T0, computation_status: "complete", daily_returns: CASH_DAILY });
-    expect(cacheKeys).toEqual([["factsheet-v2-payload-v6", STRATEGY_ID, T0]]);
+    expect(cacheKeys).toEqual([["factsheet-v2-payload-v7", STRATEGY_ID, T0]]);
   });
 });
