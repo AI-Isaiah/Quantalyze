@@ -3453,6 +3453,104 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       script that takes a shared-TEST lock.
       **Owner:** Phase 164.9 TESTISOLATION.
 
+- [ ] **`[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` the discovery detail page assembles the
+      factsheet builder a second time, beside `fetchAndBuildPayload` (booked 2026-09-25, Phase
+      167.2.1 D-03; routed to Phase 169 PAGETRUTH)** — `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx` calls the
+      builder's steps itself: `resolveDailyReturnSeries`, `readCompositeFactsheet`,
+      `readSingleKeyBasisOpts` and `buildFactsheetPayload`, instead of calling
+      `fetchAndBuildPayload`. Measured at HEAD on 2026-09-25 with
+      `grep -nE "resolveDailyReturnSeries\(|readCompositeFactsheet\(|readSingleKeyBasisOpts\(|buildFactsheetPayload\(|fetchAndBuildPayload" "src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx"`:
+      one call to each of the four steps and no reference to `fetchAndBuildPayload`. Regenerate
+      rather than trust that count.
+      **Why it is a drift risk and not a false claim today:** the page serves published rows only
+      and, when it cannot build, falls back to the KCS-10 sentence, which is true in every state.
+      But a gate added to the canonical builder does not reach this copy, so the two surfaces can
+      disagree on whether, and from which series, a factsheet's numbers are built.
+      **Shape of the fix:** Phase 167.2.1 split the builder into one shared resolve stage (gates
+      G0 to G4, including `hasBuildableSeries`) that `fetchAndBuildPayload` and
+      `probeFactsheetBuildable` both run (its D-04). The natural fix is for this page to call
+      `fetchAndBuildPayload`, or that resolve stage, rather than its own assembly.
+      **Severity:** a drift risk on a user-facing number surface. Nothing is broken today.
+      **Routing:** Phase 169 PAGETRUTH, which owns factsheet KPI sourcing (its SC4). The ROADMAP
+      carries the matching dated note under `### Phase 169`, "Routed in, 2026-09-25 (Phase 167.2.1
+      D-03)", written at planning time.
+
+- [ ] **`[167.2.1-CLIENT-SENTRY-NOOP]` every `captureToSentry` call in browser code is a silent
+      no-op, because there is no client `Sentry.init` (booked 2026-09-26, Phase 167.2.1
+      FACTSHEETBUILDABLE, 167.2.1-REVIEW-R2 IN-04 and 167.2.1-REVIEW-SFH M-6)** — Sentry is
+      initialised server-side only, in `src/instrumentation.ts`. There is no `sentry.client.config.*`
+      and no `instrumentation-client.ts` (checked 2026-09-26). So a `captureToSentry` or `@sentry/*`
+      call in a `"use client"` module reports nothing, and the author has no way to see that.
+      **The class, measured 2026-09-26:** **12** non-test files carry a real `"use client"` directive
+      and call `captureToSentry` or import `@sentry/*`. The count comes from
+      `grep -rlE "['\"]use client['\"]" src | grep -v '\.test\.' | xargs grep -lE 'captureToSentry|@sentry/'`,
+      keeping only files whose directive is on its own line. That grep matches 18 files. Six only
+      mention "use client" in prose: a server route, a contracts registry, and four `src/lib`
+      modules. Shared helpers such as `src/lib/resilient-fetch.ts` may also be bundled into client
+      code, so 12 is a floor. The round-2 reviewer counted 16 by another method. Regenerate the
+      count; do not trust either number.
+      **Why this is not fixed in place:** adding a browser `Sentry.init` is a security decision.
+      `scrubSentryEvent` in `src/instrumentation.ts` states that a client init re-opens the browser
+      channel (breadcrumbs record `location.href`, Replay records the URL bar, so a share token
+      leaks). Any client init MUST use `scrubSentryEvent` as `beforeSend`, and Replay URL masking,
+      before the channel opens. This is observability, not data integrity, so it gets a booking and
+      not a phase.
+      **Two candidate fixes:** (a) a client `Sentry.init` whose `beforeSend` and
+      `beforeSendTransaction` are `scrubSentryEvent`, with Replay off or URL-masked; or (b) the
+      alternative, a tags-only, rate-limited server endpoint that client code posts `{ route,
+      stage, code }` to and that captures server-side. (b) never opens a browser channel.
+      **Interim rule:** do not add a client `captureToSentry` call on the belief that it reports.
+      Put the capture on the server side of the request, as the key memberships route does
+      (167.2.1 round-1 fixer C).
+      **Trigger:** the next phase that needs a client-side failure to reach Sentry, or any proposal
+      to add Session Replay or a browser `Sentry.init`.
+      **Owner:** the founder decides between (a) and (b), because (a) is a security decision.
+      Unrouted until then.
+
+- [ ] **`[167.2.1-LOCAL-STACK-NO-CROSS-WORKTREE-LOCK]` two worktrees running the local-stack lane at
+      once collide on the same containers (booked 2026-09-26, Phase 167.2.1 FACTSHEETBUILDABLE)** —
+      `scripts/local-stack/run.sh` reads `PROJECT_ID` from the committed `config.toml`, so every
+      checkout on one Docker daemon gets the same `supabase_db_${PROJECT_ID}` container names.
+      Nothing in `run.sh` serialises across checkouts. It has a `teardown()` EXIT trap but no lock.
+      During Phase 167.2.1, parallel worktree agents collided on it (reported by the orchestrator).
+      The failure it allows: one agent's `up` or `down` reuses or tears down a stack another agent is
+      still using. CI is not affected, because each CI job has its own runner.
+      **Interim convention:** before `up`, take a lock by creating a lock directory with `mkdir`
+      (atomic, so it fails if another agent holds it). Wait and retry while it exists. Remove it
+      with `rmdir` after `down`. Put the directory at a location every worktree resolves the same
+      way, such as the shared Docker host's temp area, and never under a single worktree's
+      `STACK_DIR`. A holder that dies leaves the directory behind. A stale lock is cleared by hand,
+      and only after checking that no `supabase_db_${PROJECT_ID}` container is running.
+      **Fix shape:** move that lock into `run.sh` itself. Take it before `up`, release it in
+      `teardown()`, and fail loud with the holder's pid when the lock is held.
+      **Trigger:** the next plan or review that dispatches more than one agent to the local-stack
+      lane at the same time, or the next collision.
+      **Owner:** the owner of the local-stack lane (Phase 164.4.2 SUBSETSPLIT built `run.sh`). Until
+      a phase takes it, the orchestrator applies the interim convention when it dispatches.
+
+- [ ] **`[167.2.1-STRATEGIES-PROBE-COST]` `/strategies` runs one heavy buildability probe per
+      computed row on every load (booked 2026-09-26, Phase 167.2.1 FACTSHEETBUILDABLE,
+      167.2.1-REVIEW WR-01)** — `StrategiesPage` in `src/app/(dashboard)/strategies/page.tsx` calls
+      `probeFactsheetBuildable` for each computed row, uncached (D-08). Each probe is the builder's
+      resolve stage: a service-role read of the strategy row with its largest JSON columns, plus a
+      composite's `csv_daily_returns` read. The list is unpaginated.
+      **Bound today:** at most `PROBE_CONCURRENCY` probes run at once (`concurrencyLimiter`), and
+      round 2 bounds each probe with a deadline (167.2.1-REVIEW-SFH-R2 N-3). Read both values from
+      that file by symbol; they are not restated here.
+      **Cost ceiling:** with N computed rows the page does N heavy reads per load. The probe phase
+      takes about ceil(N / `PROBE_CONCURRENCY`) probe durations, and at worst ceil(N /
+      `PROBE_CONCURRENCY`) times the per-probe deadline. That grows linearly with the owner's
+      computed strategies, and it sits on the dashboard landing page.
+      **Upgrade path:** read a persisted buildable flag instead of probing. The analytics writer
+      would store the resolve stage's verdict next to `computed_at` when a run finishes, and the list
+      would read it with its existing embed. That is a migration plus a writer-side change in the
+      Python worker, and it must keep D-04's parity (the verdict is the builder's own resolve stage,
+      not a second implementation). A column-light resolve is the cheaper intermediate step.
+      **Trigger:** a `/strategies` load measured slow, or an owner with more than a few multiples of
+      `PROBE_CONCURRENCY` computed strategies, or a pooler-saturation event traced to this page.
+      **Owner:** unrouted. The next phase that touches the analytics writer's completion path takes
+      it.
+
 ## Phase 164.9 (TESTISOLATION) — ids booked at planning time (logged 2026-09-21)
 
 - [x] **`[164.9-SHARED-TEST-TRANSPORT-FLAKE]` a shared-TEST run needed THREE attempts to go
@@ -7453,7 +7551,23 @@ is closed there. Two adjacent findings were surfaced by the audit and are booked
    **Fix shape:** make the mock's `maybeSingle`/embed resolution project to the columns named in the
    recorded select string, mirroring the returns-route harness.
 
-### Phase 148 (OWN) — factsheet v2 payload cache is id-only-keyed (added 2026-08-05)
+### Phase 148 (OWN) — factsheet v2 payload cache is id-only-keyed (added 2026-08-05) — ✅ CLOSED 2026-09-26 by Phase 167.2.1 FACTSHEETBUILDABLE
+
+✅ **CLOSED 2026-09-26 by Phase 167.2.1 FACTSHEETBUILDABLE, commit `bea5fd373`
+(167.2.1-REVIEW WR-02, round-1 fixer B).** The fix is the shape this entry prescribed:
+`buildFactsheetPayloadCached` in `src/app/factsheet/[id]/v2/page.tsx` now passes `computed_at`
+as a real `keyParts` member, `["factsheet-v2-payload-v6", id, computedAt]`, so a fresh analytics
+run gets a fresh cache entry instead of draining on the 3600 s TTL. The `cacheKey`-string
+mechanism is gone. `src/app/factsheet/[id]/v2/page.public-cache-key.test.tsx` pins the key.
+Phase 167.2.1 needed it because its own present-tense share notes were false while the public
+page served a payload older than the probe's answer (its D-11 revision).
+⚠️ **What the closure does NOT cover:** a `null` cached from a transient admin read error under
+the CURRENT `computed_at` (167.2.1-REVIEW-R2 WR-02). That residual is handled, or not, by the
+167.2.1 round-2 fix and is recorded in the phase's own artifacts, not here.
+⛔ **The load-bearing corollary at the end of this entry still holds**, with "id-only" read as
+"carries no viewer": the key is the id and `computed_at`, neither of which is about the viewer,
+so lane separation must still never go through this wrapper. The original entry stays below as
+lineage.
 
 **`DEF-148-A` — a fresh `strategy_analytics.computed_at` does NOT bust the factsheet v2
 payload cache, so the factsheet can serve metrics up to 3600s stale.** The page's header

@@ -1,6 +1,8 @@
 # Changelog
 
-## [0.94.0.0] - 2026-09-26 — MT5VALIDATEWEDGE: the gateway can restart a wedged MT5 terminal on its own (not yet seen live), and the wizard stops promising a retry that cannot work
+## [0.96.0.0] - 2026-09-26 — MT5VALIDATEWEDGE: the gateway can restart a wedged MT5 terminal on its own (not yet seen live), and the wizard stops promising a retry that cannot work
+
+_PR #866 (167.2.1 FACTSHEETBUILDABLE) landed first as 0.95.0.0, so this entry, first written as 0.94.0.0, re-bumped to 0.96.0.0._
 
 ⭐ **What changed for whoever reads this next.** Phase 164.6.5 answers a production incident from
 2026-09-21. One shared MetaTrader terminal serves every client's MT5 key check. A key check
@@ -208,6 +210,159 @@ Review round 2 (`e42d1f551` silent-failure review, `7cc7e4eb9` code review):
   5/7) is `38647f8b5`. The security audit is `96ba93be7`; its 5 open threats were this release's
   own. The per-criterion ledger close is `196dea9a1`. The `tdd-red-evidence` tool misreads vitest
   output, which is logged as WINDOWS entry 67 (`2fa71d3e2`).
+
+## [0.95.0.0] - 2026-09-26 — FACTSHEETBUILDABLE: a strategy is called computed only when its factsheet can actually build
+
+⭐ **What changed for whoever reads this next.** Phase 167.2.1 makes the owner's `/strategies`
+list and the owner factsheet agree with what a share-link recipient actually sees. Before it, a
+strategy whose analytics row was computed but whose factsheet the builder refuses (for example a
+one-point single-key series, or a composite the builder cannot assemble) showed no share note,
+which implied a working factsheet, while its link rendered "not available". Both owner surfaces
+now ask the builder's OWN resolve stage and name the stored-results reason. The key card's Delete
+confirm now reads a key's composite memberships on the server, so an RLS-filtered empty read can
+no longer silence the composite warning (ROADMAP criterion 5).
+
+⚠️ **Why a minor bump.** Owners see new share-note lines, a new owner-factsheet state line, a new
+Delete-confirm read path and a changed public factsheet cache key. There is no migration and no
+`analytics-service/` change: criterion 5's "(a migration)" was superseded by a server route
+(CONTEXT D-01, dated ROADMAP note), so criterion 4 (three reviewers on a migration) is vacuous.
+0.93.0.1 is the base on `main`; 0.93.0.2, 0.93.0.3 and 0.94.0.0 are held by open PRs.
+
+### Added
+
+- **`probeFactsheetBuildable`: "can this factsheet build?" with a typed reason, from the builder's
+  own code** (`5e83cd3b9`). `fetchAndBuildPayload` in `src/lib/factsheet/fetch-and-build-payload.ts`
+  is split into one shared resolve stage (`resolveFactsheetInputs`, gates G0 to G4) and the build.
+  G4 is `hasBuildableSeries`, the predicate `buildFactsheetPayload` itself uses, now exported from
+  `build-payload.ts` with `MIN_FACTSHEET_SERIES_POINTS`. The probe runs the resolve stage and
+  nothing else, and answers one of `NotBuildableReason`: `read_error`, `not_visible`,
+  `not_computed`, `composite_unbuildable`, `too_few_points`, `malformed_series`. Parity
+  (`probe.buildable === (fetchAndBuildPayload(...) !== null)` for a builder that does not throw) holds
+  by construction and is sampled by a PARITY table (D-04).
+- **`GET /api/keys/[id]/memberships`** (`087bbd3c1`). It checks ownership with an explicit
+  `api_keys.user_id` equality, then reads `strategy_keys` joined to `strategies` on the service
+  role. A non-array answer is a 500, never `[]`. The route is no-store and rate-limited, and it
+  joins the no-store and limiter-ordering gates (`ad00e9ba5`).
+- **The `/strategies` share note probes every computed row** (`59728f481`). A computed row the
+  builder refuses gets a precise D-02 line (`MINT_UNBUILDABLE_NOTES`, `PUBLIC_UNBUILDABLE_NOTES`,
+  `MINT_UNBUILDABLE_UNREADABLE_NOTES` in `src/lib/status-surface-copy.ts`, picked by
+  `recipientShareNoteFor` and `unbuildableNoteKindOf`), never KCS12-MINT-B with its false tail. The
+  "2 days" in the copy is pinned to `MIN_FACTSHEET_SERIES_POINTS` by a DRIFT test, and the support
+  address comes from `SUPPORT_EMAIL`.
+- **The owner factsheet's S7 pending panel names an unbuildable factsheet like the list**
+  (`f068b0030`, D-06). A new state line, KCS09-FINISHED-UNREADABLE, says the last computation
+  finished but its results could not be read to build the factsheet (`7e184c79c`).
+
+### Changed
+
+- **The owner lane takes its share-note reason from its own build** (`b8ec66c93`, WR-03 / IN-04).
+  `fetchAndBuildPayloadWithReason` serves the payload and the reason from ONE resolve, so the owner
+  factsheet no longer runs a second probe that could disagree with the build it rendered.
+- **No null can leave the resolve stage and reach the build** (`3e1723cb7`, WR-04). A branded
+  `BuildableSeries` type makes `buildFromResolved` non-null by construction; an unchecked series
+  does not compile.
+- **The unbuildable note states the reason from the stored results, in the active voice**
+  (`ca87ab09b`, CR-01 / IN-02; `fdfce3c3b`, N-5). The too-short line speaks of the results the
+  factsheet is built from.
+- **`unbuildableNoteKindOf` is exhaustive over `NotBuildableReason`** (`46e17081c`, L-1), and an
+  exhaustiveness throw now fails only that row's check, as its "could not check" line, not the
+  whole `/strategies` list (`5d515a623`, N-7).
+- **`/strategies` probes are bounded** (`d58cfbafd`, WR-01; `8fb9eadb5`, N-3). At most
+  `PROBE_CONCURRENCY` probes run at once through `concurrencyLimiter`, and each probe has a
+  deadline (`FACTSHEET_PROBE_DEADLINE_MS`) that aborts its read and raises
+  `FactsheetProbeTimeoutError`. Uncomputed rows are never probed, and probes are uncached (D-08).
+- **Sentry capture follows one rule per stage** (`20df828a7`, M-2; `e167f1f36`; `73b902ac5`, H-1;
+  `244b80ac8`, WR-01; `5d7d5e38e`, N-2; `c77f4c3b0`, IN-02; `2fcbb5340`, M-5; `a1a39b8fe`,
+  IN-01). The resolve stage captures only when the caller is the build, once, with the error code,
+  and every composite refusal the unbuildable note sends to support is captured. `/strategies`
+  sends one aggregated event per load (`captureProbeOutcomes`) and at most
+  `MAX_PROBE_THROW_EVENTS` events grouped by distinct throw cause (`captureProbeThrows`). Build-caller
+  captures carry `strategy_id` as a tag, not `extra` (D-13, `199eb302e`). The `not_computed` race arm
+  and a row deleted before its probe log at warn. Every resolve log line is labelled with its caller
+  (`71d869a48`, M-1).
+- **The public factsheet cache is keyed by the analytics run it was built from** (`bea5fd373`,
+  WR-02). `buildFactsheetPayloadCached` in `src/app/factsheet/[id]/v2/page.tsx` now passes
+  `computed_at` as a real `keyParts` member, so a fresh run gets a fresh entry instead of draining on
+  the TTL. This closes `DEF-148-A` in `TODOS.md` (`a053c83e5`).
+- **The key card's Delete confirm reads memberships from the route, not through RLS**
+  (`087bbd3c1`). Any non-2xx, non-JSON, non-array or timed-out answer renders
+  KCS-DELETE-UNCHECKED instead of an empty list, and the fetch is aborted when the bound wins
+  (`4a23ca769`, L-2).
+
+### Fixed
+
+- **A failed buildability check says the check failed, never "not available"** (`f0b654b93`, H-2).
+  A throw, a `read_error`, a `not_visible` or a timeout renders `probeUnreadableShareNote`.
+- **`malformed_series` is answered when stored entries were dropped, not `too_few_points`**
+  (`0b6fcb6e3`, M-3), and the stored count reads the series column the builder actually reads
+  (`55bc6f0a3`, N-5).
+- **A transient read error is never cached on the public factsheet** (`d7cd45e56`, WR-02 round 2).
+  A `read_error` throws `FactsheetReadError` inside the `unstable_cache` callback, so nothing is
+  stored and the page renders the placeholder uncached.
+- **The owner page makes no build claim when the build could not read** (`7e184c79c`, WR-03).
+- **The membership route is heard when it fails** (`d3b4557e1`, L-3; `46c9c9b37`, M-4;
+  `8fa8e8cfa`, M-6). Its Sentry events carry the error code, the owner-coherence tripwire (a
+  membership whose strategy is not the key owner's, or a dangling embed) captures, and a limiter
+  deny is logged.
+
+### Tests
+
+- **The WR-02 mismatch was reproduced before any fix** (`a961cdd43`). Unit REPRO arms against the
+  unchanged builder, plus `src/__tests__/factsheet-buildable-live-db.test.ts` on real rows in the
+  local-stack lane (REPRO-SINGLE-ONE-POINT, REPRO-COMPOSITE-PRE86, CONTROL-BUILDABLE, the three
+  PROBE arms and WITH-REASON). `CORPUS_FLOOR` in `scripts/live-db-lane-corpus.mjs` moves by one.
+  `PROBE-COMPOSITE` expects the headline gate the probe now returns (`de34ff19f`).
+- **The reason-carrying build agrees with the probe on real rows** (`301432989`, WR-03).
+- **Every `/strategies` probe outcome and the D-02 copy rows are pinned** (`fc9a27238`,
+  `99daacab2`). COMPUTED-UNBUILDABLE was observed RED against the pre-change page, and the verifier
+  re-observed the SC3 cases RED under a neuter.
+- **Public cache key tests** in `src/app/factsheet/[id]/v2/page.public-cache-key.test.tsx`
+  (CACHED-NULL-THEN-COMPUTED, CACHED-PAYLOAD-THEN-UNBUILDABLE, READ-ERROR-NOT-CACHED, KEY SHAPE), and
+  the share page and Phase 148 cache-isolation tests re-pinned to the new key shape.
+- **Route and client tests for criterion 5**: RLS-REGRESSION, MEMBERS-NOT-ARRAY-500,
+  R2-WR02-VIA-ROUTE, R2-WR02-UNREADABLE, UNCHECKED-TIMEOUT.
+- The Phase 147 series-resolution guard now accepts either exported builder on the v2 page. The page calls `fetchAndBuildPayloadWithReason`, which runs the same `resolveAndBuild` as `fetchAndBuildPayload`, and the old literal match failed CI shard 1 once the page moved.
+
+### Notes
+
+- **Research, plans and plan-completion records** (`07c30f0fc`, `8d9480e1f`, `6bb5a43f6`,
+  `a45b6ad13`, `0eb52c8c5`, `4be53ffdd`, `40c4b043c`).
+- **Two review rounds, each fixed by topic-split fixers and re-reviewed** (`fa06a379e`,
+  `0f6741450`, `2c06496fb`, `4354705b3`, `d61eeb440`, `d2e1583e8`, `0779ce56b`, `f662adab2`,
+  `d95460ef1`, `8cb7abee0`, `57d7d5e6b`, `24183042b`). Comment-only fixes: the IN-03 note that a
+  builder throw is outside the share note's domain (`6f1a4e51c`, `ec5829857`) and the IN-01
+  cache-key comments saying when `computed_at` really moves (`5bd1a29ef`, `0ada43731`). The latest
+  round has no high or critical finding open.
+- **Security and verification** (`b5d3b3f82`, `31d2d2347`, `187d2d9a3`). SECURITY is SECURED,
+  `threats_open: 0`, 26 of 26 threats closed. VERIFICATION is `human_needed`, 11/12; the open truth
+  is SC1's lane run, below. The duplicate D-12 was renumbered D-13 (`187d2d9a3`).
+- ⚠️ **Routed: the composite csv-outage residual goes to Phase 169** (`187d2d9a3`, CONTEXT D-07).
+  A composite whose `csv_daily_returns` read fails transiently is still cached as a null payload on
+  the public factsheet until the TTL, because `readCompositeFactsheet` cannot tell a read error from
+  an empty composite. The single-key half is fixed above. A dated note under `### Phase 169` in the
+  ROADMAP names it.
+- ⚠️ **Routed: the discovery detail page assembles the builder a second time**
+  (`76637077f`, D-03). `[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` in `TODOS.md`, owned by
+  Phase 169. A drift risk, not a false claim today.
+- ⚠️ **Booked in `TODOS.md`** (`9e12e006d`):
+  `[167.2.1-CLIENT-SENTRY-NOOP]` (every browser `captureToSentry` is a silent no-op because there is
+  no client `Sentry.init`; a client init is a security decision, so the founder chooses the fix),
+  `[167.2.1-LOCAL-STACK-NO-CROSS-WORKTREE-LOCK]` (two worktrees on the local-stack lane collide on
+  the same containers; interim `mkdir` lock convention), and `[167.2.1-STRATEGIES-PROBE-COST]`
+  (`/strategies` runs one heavy probe per computed row per load, bounded but linear in the owner's
+  computed strategies; upgrade path is a persisted buildable flag).
+- ⚠️ **Accepted: the Delete TOCTOU window** (D-10, founder "warn, never block"). A membership added
+  between the read and the delete is not caught.
+- ⚠️ **Post-deploy checks, owned by the orchestrator/founder:** (1) the `frontend-live-db-lane` job
+  green on the PR head, 7 of 7 for the FACTSHEETBUILDABLE spec, bound by head SHA (the verifier's own
+  lane boot failed, so the lane evidence is otherwise narration); (2) a visual check at 320px and
+  200% zoom in the logged-in browser of the `/strategies` unbuildable and "could not check" notes,
+  the owner S7 panel with KCS09-FINISHED-UNREADABLE, and the Delete confirm's composite warning and
+  KCS-DELETE-UNCHECKED; (3) a live PROD read that the list note, the owner S7 note and a signed-out
+  share page agree for a computed-but-unbuildable row, and that a buildable row shows no note.
+  Record counts and verdicts only.
+- ⚠️ **D-09 merge order:** if Phase 169 merges first, this phase re-runs the parity table and the
+  SC1 lane reproduction after its rebase.
 
 ## [0.93.0.3] - 2026-09-26 — REFDATAUPDATES: the shared-TEST restore also replays the literal UPDATEs a migration made to the reference rows it just rebuilt
 
