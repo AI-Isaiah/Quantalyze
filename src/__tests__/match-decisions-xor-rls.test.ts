@@ -1,6 +1,7 @@
 /**
  * Live-DB integration test — Migration 072 match_decisions XOR CHECK +
- * bridge_outcomes widened UNIQUE (finding f4).
+ * the CURRENT bridge_outcomes uniqueness invariant (finding f4, then
+ * migrations 081 and 083).
  *
  * Verifies:
  *   XOR CHECK (match_decisions_original_xor):
@@ -10,11 +11,41 @@
  *   4. Accepts INSERT with ONLY original_holding_ref = 'holding:binance:BTC:spot' (Phase 09)
  *   5. Admin client can SELECT match_decisions with new original_holding_ref column
  *
- *   bridge_outcomes widened UNIQUE (bridge_outcomes_unique_per_strategy_holding):
+ *   bridge_outcomes uniqueness (Phase 164.9.1, D-13 / D-14):
  *   6. Two different holdings (same allocator+strategy) BOTH succeed
- *   7. Same (allocator+strategy+holding_ref) second INSERT fails with 23505
- *   8. Strategy-sourced rows preserve the (allocator+strategy) 1-per-pair guarantee
- *      via COALESCE('') — second strategy-only row still rejected with 23505
+ *   7. (b) A second outcome for the SAME match_decision_id fails with 23505 AND
+ *      the error names bridge_outcomes_allocator_match_decision_unique
+ *   8. (a) Two strategy-sourced outcomes for the same (allocator, strategy)
+ *      under two DIFFERENT decisions BOTH succeed
+ *   9. (c) Two outcomes with match_decision_id NULL and the same (allocator,
+ *      strategy) — the second fails with 23505 AND the error names
+ *      bridge_outcomes_legacy_per_strategy_holding_when_md_null
+ *
+ * THE WRITTEN ANSWER (D-13, recorded verbatim here, in the phase plan and in
+ * migration 20260925071300_bridge_outcomes_invariant_comments.sql):
+ *   the CURRENT bridge_outcomes uniqueness invariant is two-part —
+ *   (i) bridge_outcomes_allocator_match_decision_unique
+ *       UNIQUE (allocator_id, match_decision_id), one outcome per decision
+ *       (migration 081);
+ *   (ii) bridge_outcomes_legacy_per_strategy_holding_when_md_null, a PARTIAL
+ *       unique on (allocator_id, strategy_id, COALESCE(original_holding_ref, ''))
+ *       WHERE match_decision_id IS NULL (migration 083), restoring 072's
+ *       per-strategy guarantee only for rows whose decision was nulled out.
+ *   Two strategy-sourced outcomes for the same (allocator, strategy) under two
+ *   DIFFERENT decisions are ALLOWED by design; the old arm's 23505 expectation
+ *   described migration 072's world.
+ *
+ * AUTHORITY: these arms assert DOCUMENTED design, never "whatever the database
+ * did". 081 = 20260426131719_bridge_outcomes_relax_for_voluntary.sql (drops
+ * 072's index, adds the per-decision constraint); 083 =
+ * 20260426131721_commit_scenario_batch_race_fix.sql (the md-NULL partial
+ * index). HISTORY: until Phase 164.9.1 this file asserted 072's
+ * bridge_outcomes_unique_per_strategy_holding index, which 081 dropped. Its
+ * "1-per-pair" arm was RED on the live lane for that reason, and its other
+ * 23505 arm passed only because it OR-ed the SQLSTATE check with the name
+ * check, which made the retired-name check decorative. Every constraint
+ * assertion below is now a CONJUNCTION: the SQLSTATE AND the constraint name,
+ * as two expects.
  *
  * Pattern E from 09-PATTERNS.md: admin client for all inserts (match_decisions
  * has admin + service_role RLS only; no allocator-self-write policy).
@@ -41,7 +72,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 const STRATEGY_XOR_A = "00000000-0000-0000-0000-000000000720";
 const STRATEGY_XOR_B = "00000000-0000-0000-0000-000000000721";
 
-describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)", () => {
+describe("match_decisions XOR CHECK + bridge_outcomes uniqueness (live-DB)", () => {
   advertiseLiveDbSkipReason("match-decisions-xor-rls");
 
   let admin: SupabaseClient;
@@ -240,11 +271,12 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
   );
 
   // ---------------------------------------------------------------------------
-  // bridge_outcomes widened UNIQUE tests (3 cases)
+  // bridge_outcomes uniqueness tests (4 cases). The invariant and its authority
+  // (migrations 081 and 083) are in the file header, D-13.
   // ---------------------------------------------------------------------------
 
   it.skipIf(!HAS_LIVE_DB)(
-    "bridge_outcomes widened UNIQUE: two different holdings (same allocator+strategy) BOTH succeed",
+    "bridge_outcomes uniqueness: two different holdings (same allocator+strategy) BOTH succeed",
     async () => {
       // Create two holding-sourced match_decisions sharing the same strategy_id
       // but with DIFFERENT original_holding_ref values.
@@ -325,7 +357,7 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
   );
 
   it.skipIf(!HAS_LIVE_DB)(
-    "bridge_outcomes widened UNIQUE: same (allocator+strategy+holding_ref) second INSERT fails with 23505",
+    "bridge_outcomes uniqueness (b): a second outcome for the SAME match_decision_id fails 23505 on bridge_outcomes_allocator_match_decision_unique",
     async () => {
       // Create one holding-sourced match_decision for holding:okx:SOL:spot.
       // audit-2026-05-07 H-0960: kind set explicitly (bridge_recommended).
@@ -363,40 +395,45 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
       expect(boErr1).toBeNull();
       if (bo1?.id) createdBridgeOutcomeIds.push(bo1.id as string);
 
-      // Second bridge_outcomes insert re-using the SAME match_decision (md1)
-      // → trigger denormalizes same holding_ref → same (allocator, strategy,
-      //   COALESCE(original_holding_ref, '')) triple → 23505
-      // NOTE: Migration 074 also correctly prevents two match_decisions with the
-      // same (allocator, strategy, holding_ref, decision) from being created —
-      // so we demonstrate the bridge_outcomes dedup using the existing md1.
-      const { error: boErr2 } = await admin.from("bridge_outcomes").insert({
-        allocator_id: allocatorId,
-        strategy_id: STRATEGY_XOR_A,
-        match_decision_id: md1!.id,
-        kind: "allocated",
-        percent_allocated: 20,
-        allocated_at: today,
-      });
+      // Second bridge_outcomes insert re-using the SAME match_decision (md1).
+      // One outcome per decision is migration 081's key, so the constraint
+      // that fires is bridge_outcomes_allocator_match_decision_unique. The
+      // md-NULL partial index cannot fire: match_decision_id is set.
+      const { data: bo2, error: boErr2 } = await admin
+        .from("bridge_outcomes")
+        .insert({
+          allocator_id: allocatorId,
+          strategy_id: STRATEGY_XOR_A,
+          match_decision_id: md1!.id,
+          kind: "allocated",
+          percent_allocated: 20,
+          allocated_at: today,
+        })
+        .select("id")
+        .single();
+      // Track before asserting, so a wrongly-accepted row is still cleaned up.
+      if (bo2?.id) createdBridgeOutcomeIds.push(bo2.id as string);
 
       expect(boErr2).not.toBeNull();
-      expect(
-        boErr2?.code === "23505" ||
-          boErr2?.message?.includes(
-            "bridge_outcomes_unique_per_strategy_holding",
-          ),
-      ).toBe(true);
+      expect(boErr2?.code).toBe("23505");
+      expect(boErr2?.message).toContain(
+        "bridge_outcomes_allocator_match_decision_unique",
+      );
     },
     30_000,
   );
 
   it.skipIf(!HAS_LIVE_DB)(
-    "bridge_outcomes widened UNIQUE: strategy-sourced rows preserve (allocator+strategy) 1-per-pair guarantee via COALESCE('')",
+    "bridge_outcomes uniqueness (a): two strategy-sourced outcomes for the same (allocator, strategy) under two DIFFERENT decisions BOTH succeed",
     async () => {
-      // Two strategy-sourced match_decisions with same (allocator, strategy).
+      // Two strategy-sourced match_decisions with same (allocator, strategy),
+      // different decision values. Migration 074 keys match_decisions per
+      // decision value, so both decisions exist legitimately; migration 081
+      // keys bridge_outcomes per decision, so each gets its own outcome.
       // audit-2026-05-07 H-0960: kind set explicitly (bridge_recommended:
       // strategy_id NOT NULL + exactly one of original_* NOT NULL, here
       // original_strategy_id).
-      const { data: mdS1 } = await admin
+      const { data: mdS1, error: errMdS1 } = await admin
         .from("match_decisions")
         .insert({
           allocator_id: allocatorId,
@@ -409,29 +446,10 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
         })
         .select("id")
         .single();
+      expect(errMdS1).toBeNull();
       if (mdS1?.id) createdMatchDecisionIds.push(mdS1.id as string);
 
-      // First strategy-sourced bridge_outcomes row → triggers populate NULL
-      // → COALESCE(NULL, '') = '' → unique slot (allocator, strategy, '')
-      const { data: boS1, error: boErrS1 } = await admin
-        .from("bridge_outcomes")
-        .insert({
-          allocator_id: allocatorId,
-          strategy_id: STRATEGY_XOR_B,
-          match_decision_id: mdS1!.id,
-          kind: "rejected",
-          rejection_reason: "mandate_conflict",
-        })
-        .select("id, original_holding_ref")
-        .single();
-      expect(boErrS1).toBeNull();
-      // Strategy-sourced row: trigger sees original_holding_ref IS NULL on match_decision
-      expect(boS1?.original_holding_ref).toBeNull();
-      if (boS1?.id) createdBridgeOutcomeIds.push(boS1.id as string);
-
-      // Second strategy-sourced match_decision for same (allocator, strategy).
-      // audit-2026-05-07 H-0960: kind set explicitly (bridge_recommended).
-      const { data: mdS2 } = await admin
+      const { data: mdS2, error: errMdS2 } = await admin
         .from("match_decisions")
         .insert({
           allocator_id: allocatorId,
@@ -444,25 +462,100 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
         })
         .select("id")
         .single();
+      expect(errMdS2).toBeNull();
       if (mdS2?.id) createdMatchDecisionIds.push(mdS2.id as string);
 
-      // Second bridge_outcomes row with same strategy, no holding_ref
-      // → COALESCE(NULL, '') = '' → collides with first → 23505
-      const { error: boErrS2 } = await admin.from("bridge_outcomes").insert({
-        allocator_id: allocatorId,
-        strategy_id: STRATEGY_XOR_B,
-        match_decision_id: mdS2!.id,
-        kind: "rejected",
-        rejection_reason: "timing_wrong",
-      });
+      // First outcome: strategy-sourced, so the trigger copies a NULL holding.
+      const { data: boS1, error: boErrS1 } = await admin
+        .from("bridge_outcomes")
+        .insert({
+          allocator_id: allocatorId,
+          strategy_id: STRATEGY_XOR_B,
+          match_decision_id: mdS1!.id,
+          kind: "rejected",
+          rejection_reason: "mandate_conflict",
+        })
+        .select("id, original_holding_ref")
+        .single();
+      if (boS1?.id) createdBridgeOutcomeIds.push(boS1.id as string);
+      expect(boErrS1).toBeNull();
+      expect(boS1?.original_holding_ref).toBeNull();
 
-      expect(boErrS2).not.toBeNull();
-      expect(
-        boErrS2?.code === "23505" ||
-          boErrS2?.message?.includes(
-            "bridge_outcomes_unique_per_strategy_holding",
-          ),
-      ).toBe(true);
+      // Second outcome, same (allocator, strategy, NULL holding), DIFFERENT
+      // decision. Under 072's retired index this collided; under 081's
+      // per-decision key it is allowed by design (D-13).
+      const { data: boS2, error: boErrS2 } = await admin
+        .from("bridge_outcomes")
+        .insert({
+          allocator_id: allocatorId,
+          strategy_id: STRATEGY_XOR_B,
+          match_decision_id: mdS2!.id,
+          kind: "rejected",
+          rejection_reason: "timing_wrong",
+        })
+        .select("id, original_holding_ref")
+        .single();
+      if (boS2?.id) createdBridgeOutcomeIds.push(boS2.id as string);
+      expect(boErrS2).toBeNull();
+      expect(boS2?.original_holding_ref).toBeNull();
+
+      // Both rows are really there: read them back by this arm's own ids.
+      const { data: rows, error: readErr } = await admin
+        .from("bridge_outcomes")
+        .select("id, match_decision_id")
+        .in("id", [boS1!.id, boS2!.id]);
+      expect(readErr).toBeNull();
+      expect(rows).toHaveLength(2);
+      expect(new Set(rows!.map((r) => r.match_decision_id))).toEqual(
+        new Set([mdS1!.id, mdS2!.id]),
+      );
+    },
+    30_000,
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "bridge_outcomes uniqueness (c): two outcomes with match_decision_id NULL for the same (allocator, strategy) fail 23505 on bridge_outcomes_legacy_per_strategy_holding_when_md_null",
+    async () => {
+      // The md-NULL shape is what a row becomes when its decision is deleted
+      // (ON DELETE SET NULL). The kind CHECKs require strategy_id when
+      // match_decision_id is NULL, and the sync trigger writes a NULL holding
+      // for these rows, so both rows land on the same
+      // (allocator, strategy, COALESCE(NULL, '')) slot of migration 083's
+      // partial index. STRATEGY_XOR_A carries no md-NULL row from any other arm.
+      const { data: boN1, error: boErrN1 } = await admin
+        .from("bridge_outcomes")
+        .insert({
+          allocator_id: allocatorId,
+          strategy_id: STRATEGY_XOR_A,
+          match_decision_id: null,
+          kind: "rejected",
+          rejection_reason: "other",
+        })
+        .select("id, original_holding_ref")
+        .single();
+      if (boN1?.id) createdBridgeOutcomeIds.push(boN1.id as string);
+      expect(boErrN1).toBeNull();
+      expect(boN1?.original_holding_ref).toBeNull();
+
+      const { data: boN2, error: boErrN2 } = await admin
+        .from("bridge_outcomes")
+        .insert({
+          allocator_id: allocatorId,
+          strategy_id: STRATEGY_XOR_A,
+          match_decision_id: null,
+          kind: "rejected",
+          rejection_reason: "timing_wrong",
+        })
+        .select("id")
+        .single();
+      // Track before asserting, so a wrongly-accepted row is still cleaned up.
+      if (boN2?.id) createdBridgeOutcomeIds.push(boN2.id as string);
+
+      expect(boErrN2).not.toBeNull();
+      expect(boErrN2?.code).toBe("23505");
+      expect(boErrN2?.message).toContain(
+        "bridge_outcomes_legacy_per_strategy_holding_when_md_null",
+      );
     },
     30_000,
   );

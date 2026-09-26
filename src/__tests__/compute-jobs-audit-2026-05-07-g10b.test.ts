@@ -705,22 +705,24 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
         // (mig 109 P12) New row with parents starts as done_pending_children
         // so the fan-in machinery is reachable.
         //
-        // ⛔ THIS ARM IS RED ON PURPOSE AND IS LEFT RED (Phase 164.9 fix round).
-        // The retired-kind repair above stopped the enqueue bouncing off an
-        // RPC-level reject, and what it uncovered is a REAL CATALOGUE DEFECT,
-        // not fixture drift: `enqueue_compute_job` routes every mode to the
+        // ✅ FIXED BY MIGRATION 20260924230827_fanin_initial_status_10param
+        // (Phase 164.9.1, [164.9-FANIN-STATUS-NEVER-SET]). This arm was RED ON
+        // PURPOSE from the Phase 164.9 fix round until that migration: the
+        // retired-kind repair above had stopped the enqueue bouncing off an
+        // RPC-level reject, and what it uncovered was a REAL CATALOGUE DEFECT,
+        // not fixture drift. `enqueue_compute_job` routes every mode to the
         // TEN-ARG `_enqueue_compute_job_internal`, and that overload's INSERT
-        // omits `status` entirely, so the row takes the column DEFAULT
-        // ('pending'). Only the older SEVEN-ARG overload still carries mig 109's
+        // omitted `status`, so the row took the column DEFAULT ('pending').
+        // Only the SEVEN-ARG overload carried mig 109's
         // `v_initial_status := 'done_pending_children'` branch, and nothing
-        // reaches it. Consequence: a job enqueued through the public wrapper
-        // WITH parents never enters the fan-in state, so
-        // `mark_compute_job_done`'s fan-in advance can never see it.
+        // reaches it (a seven-argument call cannot resolve: 42725). A job
+        // enqueued through the public wrapper WITH parents therefore never
+        // entered the fan-in state, so `mark_compute_job_done`'s fan-in advance
+        // could never see it. The migration makes the TEN-ARG overload compute
+        // and INSERT the initial status exactly as the seven-arg does.
         //
-        // ⛔ Closing this needs a MIGRATION against a production catalogue,
-        // which this phase's gate work is ordered ahead of. Weakening the
-        // assertion to accept 'pending' would encode the defect as the contract.
-        // Booked under [164.9-LIVEDB-LANE-EXECUTION-CENSUS].
+        // ⛔ This assertion is the regression gate (D-08). Weakening it to
+        // accept 'pending' would encode the defect as the contract.
         expect(child.status).toBe("done_pending_children");
       } finally {
         await cleanupLiveDbRow(admin, {
@@ -798,6 +800,268 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
         await cleanupLiveDbRow(admin, {
           userIds: [userId],
           strategyIds: [strategyA, strategyB],
+        });
+      }
+    },
+  );
+
+  // ⭐ Phase 164.9.1 plan 01 (D-01, D-02, D-03, D-26) — THE HARM PROBE.
+  //
+  // Arm P12 above proves the child LANDS in the wrong status. This arm proves
+  // what that costs, end to end through the real mechanism: the public wrapper,
+  // the claim RPC a worker calls, and the parent's mark-done that is meant to
+  // release the child. It records a verdict line FIRST and asserts AFTER, so the
+  // pre-fix run still prints what the lane actually did.
+  //
+  // WHY A RUNNING PARENT (D-01's "not done" condition): `mark_compute_job_done`
+  // is fenced on a `running` row and its claim token, so a `pending` parent
+  // could only reach step (iii) by being claimed through the very RPC under
+  // test. Seeding it running with a minted token (arm P15's shape) keeps step
+  // (ii) about the child alone and makes step (iii) executable.
+  //
+  // ⚠️ D-02: no production caller passes a non-empty `p_parent_job_ids`, so a
+  // RED here demonstrates a MECHANISM; the production harm stays latent.
+  //
+  // The assertions encode the POST-fix contract (mig 109 P12's intent): the
+  // child is held in `done_pending_children`, is NOT handed to a worker while
+  // its parent runs, and is released to `pending` — and claimable — by the
+  // parent's mark-done. Each one fails if the fan-in state is skipped again.
+  it.skipIf(!HAS_LIVE_DB)(
+    "P12-harm: a parented child is not claimable before its parent is done and is released by the parent's mark-done",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const userId = await createTestUser(
+        admin,
+        `g10b-harm-probe-${ts}@test.sec`,
+      );
+      const strategyId = await seedStrategy(admin, userId, "harm-probe");
+      const probeWorker = `g10b-harm-probe-${ts}`;
+      const childKind = "reconcile_strategy";
+      // The RPC's own cap (claim_kind_filter raises above 1000): the largest
+      // batch the probe may ask for, so the child cannot be crowded out.
+      const claimCap = 1000;
+
+      // D-26: all five args by name. PROD also carries a two-arg overload, so a
+      // two-named-arg call would be ambiguous (42725).
+      const claimOnce = async () => {
+        // Crowd-out fence: every row the claim could consider for this kind.
+        // A count at or above the cap would let the child be skipped for room
+        // rather than for its parent, and read as a false `false`.
+        const { count, error: countErr } = await admin
+          .from("compute_jobs")
+          .select("id", { count: "exact", head: true })
+          .eq("kind", childKind)
+          .in("status", ["pending", "failed_retry"]);
+        expect(countErr).toBeNull();
+        expect(count ?? Number.POSITIVE_INFINITY).toBeLessThan(claimCap);
+
+        const { data, error } = await admin.rpc(
+          "claim_compute_jobs_with_priority",
+          {
+            p_batch_size: claimCap,
+            p_worker_id: probeWorker,
+            p_unified_backbone_active: null,
+            p_kind_include: [childKind],
+            p_kind_exclude: null,
+          } as never,
+        );
+        expect(error).toBeNull();
+        return ((data as Array<{ id: string }>) ?? []).map((r) => r.id);
+      };
+
+      try {
+        const tokenParent = mintClaimToken();
+        const parentId = await insertComputeJob(admin, {
+          strategy_id: strategyId,
+          kind: "sync_trades",
+          status: "running",
+          attempts: 1,
+          max_attempts: 3,
+          claimed_at: new Date().toISOString(),
+          claimed_by: `${probeWorker}-parent`,
+          claim_token: tokenParent,
+        });
+
+        // The PUBLIC wrapper, exactly as arm P12 calls it. A different kind
+        // from the parent keeps the optimistic look-up from collapsing the
+        // child onto the parent.
+        const { data: childIdRaw, error: enqErr } = await admin.rpc(
+          "enqueue_compute_job",
+          {
+            p_strategy_id: strategyId,
+            p_kind: childKind,
+            p_idempotency_key: null,
+            p_parent_job_ids: [parentId],
+          } as never,
+        );
+        expect(enqErr).toBeNull();
+        expect(typeof childIdRaw).toBe("string");
+        const childId = childIdRaw as unknown as string;
+        const ownIds = new Set([parentId, childId]);
+
+        // (i) where the child landed.
+        const childStatusAtEnqueue = (await fetchJob(admin, childId)).status;
+
+        // (ii) does a worker get the child while its parent is still running?
+        const firstClaim = await claimOnce();
+        const claimedWhileParentRunning = firstClaim.includes(childId);
+        // Foreign rows are COUNTED, never printed and never reset: the probe
+        // writes no row it did not seed.
+        let foreignRowsClaimed = firstClaim.filter(
+          (id) => !ownIds.has(id),
+        ).length;
+
+        // (iii) ALWAYS, whatever (ii) showed: the parent finishes.
+        const { error: doneErr } = await admin.rpc("mark_compute_job_done", {
+          p_job_id: parentId,
+          p_claim_token: tokenParent,
+        } as never);
+        const parentMarkDoneOk = doneErr === null;
+        const childStatusAfterParentDone = (await fetchJob(admin, childId))
+          .status;
+
+        // Only the SECOND claim is conditional: re-claiming a row that is
+        // already running measures nothing.
+        let claimedAfterParentDone: boolean | "not-reached" = "not-reached";
+        if (!claimedWhileParentRunning) {
+          const secondClaim = await claimOnce();
+          claimedAfterParentDone = secondClaim.includes(childId);
+          foreignRowsClaimed += secondClaim.filter(
+            (id) => !ownIds.has(id),
+          ).length;
+        }
+
+        // Statuses, booleans and one count. No id, no DSN, no email.
+        console.log(
+          "HARM-PROBE verdict: " +
+            [
+              `child_status_at_enqueue=${childStatusAtEnqueue}`,
+              `claimed_while_parent_running=${claimedWhileParentRunning}`,
+              `parent_mark_done_ok=${parentMarkDoneOk}`,
+              `child_status_after_parent_done=${childStatusAfterParentDone}`,
+              `claimed_after_parent_done=${claimedAfterParentDone}`,
+              `foreign_rows_claimed=${foreignRowsClaimed}`,
+            ].join(" "),
+        );
+
+        // The POST-fix contract (RED on a lane without the fan-in status fix).
+        expect(childStatusAtEnqueue).toBe("done_pending_children");
+        expect(claimedWhileParentRunning).toBe(false);
+        expect(parentMarkDoneOk).toBe(true);
+        expect(childStatusAfterParentDone).toBe("pending");
+        expect(claimedAfterParentDone).toBe(true);
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyId],
+        });
+      }
+    },
+  );
+
+  // ⭐ Phase 164.9.1 round-1 review (silent-failure-hunter HIGH-2) — NO ENQUEUE
+  // CREATES A CHILD THAT NOTHING CAN RELEASE.
+  //
+  // `mark_compute_job_done` releases a done_pending_children row only when a
+  // parent is marked done AND every listed parent is 'done'. Once the ten-arg
+  // overload (the one every enqueue_compute_job mode reaches) starts parented
+  // children in done_pending_children, three parent lists would leave a child
+  // there for good, holding its (target, kind) in-flight slot so every later
+  // enqueue for that target and kind is handed the dead row's id:
+  //   (a) a parent id with no row, (b) a parent already failed_final, and
+  //   (c) parents that are ALL already done (no mark-done is left to run).
+  // (a) and (b) must be REFUSED loudly (22023) with no row written; (c) must
+  // start the child `pending`, because nothing needs to hold it. Each leg fails
+  // if the ten-arg goes back to "any parent list means done_pending_children".
+  it.skipIf(!HAS_LIVE_DB)(
+    "P12-dead-end: a missing or failed_final parent is refused, and a child of all-done parents starts pending",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const userId = await createTestUser(
+        admin,
+        `g10b-dead-end-${ts}@test.sec`,
+      );
+      // One strategy per leg, so the (strategy, kind) in-flight index cannot
+      // make one leg's child the answer to another leg's enqueue.
+      const strategyMissing = await seedStrategy(admin, userId, "dead-missing");
+      const strategyFailed = await seedStrategy(admin, userId, "dead-failed");
+      const strategyDone = await seedStrategy(admin, userId, "dead-done");
+      const childKind = "reconcile_strategy";
+      const childRowCount = async (strategyId: string): Promise<number> => {
+        const { data, error } = await admin
+          .from("compute_jobs")
+          .select("id")
+          .eq("strategy_id", strategyId)
+          .eq("kind", childKind);
+        expect(error).toBeNull();
+        return (data ?? []).length;
+      };
+      try {
+        // (a) a parent id with no compute_jobs row.
+        const { data: missingId, error: missingErr } = await admin.rpc(
+          "enqueue_compute_job",
+          {
+            p_strategy_id: strategyMissing,
+            p_kind: childKind,
+            p_idempotency_key: null,
+            p_parent_job_ids: [crypto.randomUUID()],
+          } as never,
+        );
+        expect(missingId).toBeNull();
+        expect(missingErr?.code).toBe("22023");
+        expect(missingErr?.message ?? "").toContain("with no compute_jobs row");
+        expect(await childRowCount(strategyMissing)).toBe(0);
+
+        // (b) a parent that already ended failed_final.
+        const failedParent = await insertComputeJob(admin, {
+          strategy_id: strategyFailed,
+          kind: "sync_trades",
+          status: "failed_final",
+          attempts: 3,
+          max_attempts: 3,
+        });
+        const { data: failedId, error: failedErr } = await admin.rpc(
+          "enqueue_compute_job",
+          {
+            p_strategy_id: strategyFailed,
+            p_kind: childKind,
+            p_idempotency_key: null,
+            p_parent_job_ids: [failedParent],
+          } as never,
+        );
+        expect(failedId).toBeNull();
+        expect(failedErr?.code).toBe("22023");
+        expect(failedErr?.message ?? "").toContain("already ended failed_final");
+        expect(await childRowCount(strategyFailed)).toBe(0);
+
+        // (c) every parent already done: the child starts pending.
+        const doneParent = await insertComputeJob(admin, {
+          strategy_id: strategyDone,
+          kind: "sync_trades",
+          status: "done",
+          attempts: 1,
+          max_attempts: 3,
+        });
+        const { data: doneChild, error: doneErr } = await admin.rpc(
+          "enqueue_compute_job",
+          {
+            p_strategy_id: strategyDone,
+            p_kind: childKind,
+            p_idempotency_key: null,
+            p_parent_job_ids: [doneParent],
+          } as never,
+        );
+        expect(doneErr).toBeNull();
+        expect(typeof doneChild).toBe("string");
+        expect((await fetchJob(admin, doneChild as unknown as string)).status).toBe(
+          "pending",
+        );
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyMissing, strategyFailed, strategyDone],
         });
       }
     },
