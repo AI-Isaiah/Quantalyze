@@ -32,7 +32,7 @@
  * so this writer and CI's co-edit gate read the provenance row with ONE regex.
  * `scripts/check-version-bump.mjs` is NOT imported: it calls
  * `process.exit(main())` at module scope. Its three defects are MIRRORED in
- * `versionDefects()` below instead.
+ * `judgeVersionBump()` below instead.
  *
  * The frozen CLI (plan 04 wires exactly these; later plans add behaviour behind
  * them without renaming anything):
@@ -292,52 +292,79 @@ export function markerBasenames(markerText) {
     .filter((l) => l !== "" && !l.startsWith("#") && !l.startsWith("baseline-sha256:"));
 }
 
+/*
+ * ── The writers (D-15, D-16) ──
+ * Each returns `{text, defects}`: `defects` is a list of `{kind, detail}` whose
+ * details carry counts, versions and row names only, and `text` is null whenever
+ * a defect is present. A regex replace that matched nothing is the defect class
+ * these exist to refuse: a writer that silently produced no edit would hand CI
+ * a tree it rejects, or a BASELINE.md whose provenance row was never moved.
+ */
+const refused = (kind, detail) => ({ text: null, defects: [{ kind, detail }] });
+const written = (text) => ({ text, defects: [] });
+
 /** 4th-digit bump (D-15). Any other shape is refused, never guessed. */
 export function nextVersion(v) {
   const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(String(v));
-  if (!m) throw new Error(`VERSION '${String(v).slice(0, 40)}' is not a 4-digit X.Y.Z.B string`);
-  return `${m[1]}.${m[2]}.${m[3]}.${Number(m[4]) + 1}`;
+  if (!m) return refused("version-shape", `VERSION '${String(v).slice(0, 40).replace(/\n/g, "\\n")}' is not a 4-digit X.Y.Z.B string`);
+  return written(`${m[1]}.${m[2]}.${m[3]}.${Number(m[4]) + 1}`);
 }
 
 /**
  * A single regex replace of `"version": "<old>"`. It never re-serialises the file
- * (that would reformat it), and it re-parses the result to confirm the version
- * reads back as `newV`. Never `npm version`, which rewrites the lockfile.
+ * (that would reformat it), and it re-parses the result to confirm the TOP-LEVEL
+ * version reads back as `newV`. Never `npm version`, which rewrites the lockfile.
  */
 export function bumpPackageJson(text, oldV, newV) {
   const esc = oldV.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`"version": "${esc}"`, "g");
   const hits = (text.match(re) ?? []).length;
-  if (hits !== 1) throw new Error(`package.json carries ${hits} '"version": "${oldV}"' occurrence(s); exactly 1 is required`);
+  if (hits !== 1) {
+    return refused("package-version-count", `package.json carries ${hits} '"version": "${oldV}"' occurrence(s); exactly 1 is required`);
+  }
   const out = text.replace(re, `"version": "${newV}"`);
-  const back = JSON.parse(out).version;
-  if (back !== newV) throw new Error(`package.json version reads back as '${back}', not '${newV}'`);
-  return out;
+  let back;
+  try {
+    back = JSON.parse(out).version;
+  } catch {
+    return refused("package-json-unparseable", "package.json is not JSON after the version replace");
+  }
+  if (back !== newV) return refused("package-version-readback", `package.json's top-level version reads back as '${back}', not '${newV}'`);
+  return written(out);
 }
 
-/** Insert the entry before the first `\n## [` after the `# Changelog` title. */
+/**
+ * Insert the entry before the first `\n## [` after the `# Changelog` title, and
+ * confirm afterwards that the new heading IS the first `## [` — the heading
+ * `check-version-bump.mjs` and the release notes read.
+ */
 export function insertChangelogEntry(text, entry) {
-  if (!text.startsWith("# Changelog")) throw new Error("CHANGELOG.md does not start with the '# Changelog' title");
+  if (!text.startsWith("# Changelog")) return refused("changelog-no-title", "CHANGELOG.md does not start with the '# Changelog' title");
   const at = text.indexOf("\n## [");
-  if (at === -1) throw new Error("CHANGELOG.md carries no '## [' entry heading to insert before");
-  const heading = entry.split("\n")[0];
-  const version = /^## \[([^\]]+)\]/.exec(heading)?.[1];
-  if (!version) throw new Error("the composed entry does not start with a '## [X.Y.Z.B]' heading");
-  if (text.includes(`\n## [${version}]`)) throw new Error(`CHANGELOG.md already carries a '## [${version}]' heading`);
-  return text.slice(0, at + 1) + entry.replace(/\n*$/, "\n\n") + text.slice(at + 1);
+  if (at === -1) return refused("changelog-no-entry-heading", "CHANGELOG.md carries no '## [' entry heading to insert before");
+  const version = /^## \[([^\]]+)\]/.exec(entry.split("\n")[0])?.[1];
+  if (!version) return refused("changelog-entry-heading", "the composed entry does not start with a '## [X.Y.Z.B]' heading");
+  if (text.includes(`\n## [${version}]`)) {
+    return refused("changelog-duplicate-heading", `CHANGELOG.md already carries a '## [${version}]' heading`);
+  }
+  const out = text.slice(0, at + 1) + entry.replace(/\n*$/, "\n\n") + text.slice(at + 1);
+  const first = /\n## \[([^\]]+)\]/.exec(out)?.[1];
+  if (first !== version) return refused("changelog-not-first", `the first '## [' heading after insertion is '${first}', not '${version}'`);
+  return written(out);
 }
 
 /**
  * The `[start, end)` line range of the `## Provenance` capture table: from the
  * line after the `## Provenance` heading to the first following heading at ANY
- * level (`^#{1,6} `). ⚠️ The first `### Regenerated` heading sits INSIDE
- * `## Provenance`, and the file carries four `| Shape |` and five `| sha256 |`
- * rows file-wide (measured at plan time) — stopping at the next `## ` would sweep
- * in every regenerated section's rows.
+ * level (`^#{1,6} `), or null when there is no `## Provenance` heading.
+ * ⚠️ The first `### Regenerated` heading sits INSIDE `## Provenance`, and the
+ * file carries four `| Shape |` and five `| sha256 |` rows file-wide (measured at
+ * plan time) — stopping at the next `## ` would sweep in every regenerated
+ * section's rows.
  */
 export function provenanceSpan(lines) {
   const head = lines.findIndex((l) => /^## Provenance\s*$/.test(l));
-  if (head === -1) throw new Error("BASELINE.md carries no '## Provenance' heading");
+  if (head === -1) return null;
   let end = lines.length;
   for (let i = head + 1; i < lines.length; i++) {
     if (/^#{1,6} /.test(lines[i])) {
@@ -348,33 +375,76 @@ export function provenanceSpan(lines) {
   return [head + 1, end];
 }
 
+const REGENERATED_HEADING_RE = /^### Regenerated /;
+
 /**
  * Replace the four capture rows (`Taken`, `Supabase CLI`, `sha256` — the ONLY
- * full-64-hex row, `Shape`) inside `provenanceSpan` ONLY (D-16). A line outside
- * the span is never read for a match and never written. A row that is not found
- * exactly once in the span is refused: the writer does not guess which row is
- * the capture table's.
+ * full-64-hex row, `Shape`) inside `provenanceSpan` ONLY (D-16), then insert
+ * `values.section` (composeRegeneratedSection) immediately above the FIRST
+ * `### Regenerated` heading, which must be the heading that ends the span.
+ *
+ * ⛔ The count is exactly-once INSIDE the span, never file-wide. File-wide the
+ * real file carries four `| Shape |` and five `| sha256 |` rows, and every bot
+ * run adds one more of each under its own `### Regenerated`: a file-wide count
+ * would pass a first run and refuse every run after it. A line outside the span
+ * is never read for a match and never written.
+ *
+ * Refuses, by name, on: no `## Provenance`; any capture row found 0 or 2+ times
+ * in the span; no `### Regenerated` heading; a span that does not end at it; and
+ * an output whose provenance does not read back as ONE full-sha row equal to
+ * `values.sha` with the span ending at the inserted heading (so the NEXT run's
+ * count is scoped too).
  */
 export function rewriteBaselineMd(text, values) {
   const lines = text.split("\n");
-  const [start, end] = provenanceSpan(lines);
+  const span = provenanceSpan(lines);
+  if (span === null) return refused("provenance-missing", "BASELINE.md carries no '## Provenance' heading");
+  const [start, end] = span;
   const rows = {
     Taken: `| Taken | ${values.date} |`,
     "Supabase CLI": `| Supabase CLI | ${values.cliVersion} (the \`redump-dump\` job, Supabase Migrate run \`${values.runId}\`) |`,
     sha256: `| sha256 | \`${values.sha}\` |`,
     Shape: `| Shape | ${shapeProse(values.shapes)} |`,
   };
+  const defects = [];
   for (const [key, row] of Object.entries(rows)) {
     const esc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const re = new RegExp(`^\\|\\s*${esc}\\s*\\|`);
     const hits = [];
     for (let i = start; i < end; i++) if (re.test(lines[i])) hits.push(i);
     if (hits.length !== 1) {
-      throw new Error(`the '## Provenance' capture table carries ${hits.length} '| ${key} |' row(s); exactly 1 is required`);
+      defects.push({
+        kind: "capture-row-count",
+        detail: `the '## Provenance' capture table carries ${hits.length} '| ${key} |' row(s); exactly 1 is required`,
+      });
+    } else {
+      lines[hits[0]] = row;
     }
-    lines[hits[0]] = row;
   }
-  return lines.join("\n");
+  const firstRegen = lines.findIndex((l, i) => i >= start && REGENERATED_HEADING_RE.test(l));
+  if (firstRegen === -1) {
+    defects.push({ kind: "regenerated-missing", detail: "BASELINE.md carries no '### Regenerated' heading under '## Provenance' to insert above" });
+  } else if (firstRegen !== end) {
+    defects.push({
+      kind: "regenerated-not-span-end",
+      detail: `the '## Provenance' span ends at line ${end + 1}, not at the first '### Regenerated' heading (line ${firstRegen + 1})`,
+    });
+  }
+  if (defects.length > 0) return { text: null, defects };
+
+  const section = String(values.section ?? "").replace(/\n*$/, "").split("\n");
+  const out = [...lines.slice(0, end), ...section, "", ...lines.slice(end)];
+  const outText = out.join("\n");
+  const outSpan = provenanceSpan(out);
+  if (outSpan === null || outSpan[1] !== end || !REGENERATED_HEADING_RE.test(out[end] ?? "")) {
+    return refused("section-not-span-end", "the inserted section does not start with a '### Regenerated' heading that ends the '## Provenance' span");
+  }
+  // A `g` regex: `match` resets `lastIndex`; `test`/`exec` would carry it over.
+  const shaRows = outText.match(RECORDED_SHA_RE_ALL) ?? [];
+  if (shaRows.length !== 1 || !shaRows[0].includes(values.sha)) {
+    return refused("sha-row-count", `the result carries ${shaRows.length} full-sha provenance row(s); exactly 1, equal to the new sha, is required`);
+  }
+  return written(outText);
 }
 
 function shapeProse(s) {
@@ -401,6 +471,19 @@ export function composeChangelogEntry(m) {
   ].join("\n");
 }
 
+/**
+ * The dated `### Regenerated` section `rewriteBaselineMd` inserts above the newest
+ * one (D-16). Plan 07 Task 2 carries every measured value here.
+ */
+export function composeRegeneratedSection(m) {
+  return [
+    `### Regenerated ${m.date} — automated re-dump after Supabase Migrate run ${m.runId}`,
+    "",
+    `Taken read-only by the \`redump-dump\` job of Supabase Migrate run \`${m.runId}\` after the PROD apply of merge ` +
+      `\`${short(m.merge)}\`, and composed onto \`main\` by the \`redump-pr\` job.`,
+  ].join("\n");
+}
+
 export function composePrTitle(m) {
   return `chore(release): v${m.newVersion} — baseline re-dump after the PROD apply of ${short(m.merge)}`;
 }
@@ -421,11 +504,15 @@ export function composeCommitMessage(m) {
 }
 
 /**
- * MIRROR of `scripts/check-version-bump.mjs` `judge()`'s three defects, so the bot
- * cannot compose a tree CI's `version-gate` would reject. Mirrored, not imported:
- * that module exits the process at import.
+ * MIRROR of `scripts/check-version-bump.mjs` `judge()` and its `DEFECTS`
+ * (`version-not-bumped`, `version-package-mismatch`, `changelog-missing-entry`),
+ * by name and meaning, so the bot cannot compose a tree CI's `version-gate` would
+ * reject (D-15). Mirrored, NOT imported: that module calls `process.exit(main())`
+ * at module scope, so importing it would end this process. `judge()`'s
+ * planning-only exemption is omitted because the bot's six paths are never under
+ * `.planning/`. Change one and you must change the other.
  */
-export function versionDefects({ baseVersion, headVersion, packageVersion, changelog }) {
+export function judgeVersionBump({ baseVersion, headVersion, packageVersion, changelog }) {
   const d = [];
   if (headVersion === baseVersion) d.push({ kind: "version-not-bumped", detail: `VERSION is still ${headVersion}` });
   if (headVersion !== packageVersion) {
@@ -638,6 +725,16 @@ function runGate(runner, repoRoot, cmd, args) {
   return r.stdout;
 }
 
+/**
+ * One `::error::` per writer or version-gate defect, naming its kind and detail
+ * (counts, versions and row names only), then a refusal. Called before anything
+ * is written to the four composed files and before anything is staged.
+ */
+function refuseWriterDefects(defects) {
+  for (const d of defects) console.error(`::error::baseline-redump: ${d.kind}: ${d.detail}`);
+  throw new Error(`refusing to compose: ${defects.length} defect(s) (${defects.map((d) => d.kind).join(", ")}); nothing was staged`);
+}
+
 /** The single stdout line starting with `prefix`; refused when absent or repeated. */
 function captureLine(stdout, prefix, gateName) {
   const hits = stdout.split("\n").filter((l) => l.startsWith(prefix));
@@ -690,7 +787,9 @@ export function compose({ repoRoot, inDir, out, runner, emit, date }) {
   const driftComparedLine = captureLine(driftOut, "baseline-content-drift: functions compared", "the content-drift gate");
 
   const oldVersion = readFileSync(join(repoRoot, "VERSION"), "utf8").replace(/\n$/, "");
-  const newVersion = nextVersion(oldVersion);
+  const next = nextVersion(oldVersion);
+  if (next.defects.length > 0) refuseWriterDefects(next.defects);
+  const newVersion = next.text;
   const m = {
     ...measured,
     runId: String(measured.run_id),
@@ -702,36 +801,43 @@ export function compose({ repoRoot, inDir, out, runner, emit, date }) {
     shapes: measured.shapes,
     oldVersion,
     newVersion,
+    cliVersion: measured.cli_version,
     newlyCarried,
     currencyLine,
     driftFindingsLine,
     driftComparedLine,
   };
 
-  writeFileSync(join(repoRoot, "VERSION"), newVersion); // no trailing newline (RESEARCH F7)
+  // Every writer's text is computed FIRST and nothing is written until all of
+  // them, and the version-gate mirror, report no defect: a refusal leaves the
+  // four files exactly as `main` has them and the index empty.
   const pkgPath = join(repoRoot, "package.json");
-  writeFileSync(pkgPath, bumpPackageJson(readFileSync(pkgPath, "utf8"), oldVersion, newVersion));
   const clPath = join(repoRoot, "CHANGELOG.md");
-  const changelog = insertChangelogEntry(readFileSync(clPath, "utf8"), composeChangelogEntry(m));
-  writeFileSync(clPath, changelog);
   const mdPath = join(repoRoot, BASELINE_MD_REL);
-  writeFileSync(
-    mdPath,
-    rewriteBaselineMd(readFileSync(mdPath, "utf8"), {
-      date,
-      cliVersion: measured.cli_version,
-      runId: m.runId,
-      sha: m.newSha,
-      shapes: m.shapes,
-    }),
-  );
-  const vd = versionDefects({
-    baseVersion: oldVersion,
-    headVersion: readFileSync(join(repoRoot, "VERSION"), "utf8"),
-    packageVersion: JSON.parse(readFileSync(pkgPath, "utf8")).version,
-    changelog,
+  const pkg = bumpPackageJson(readFileSync(pkgPath, "utf8"), oldVersion, newVersion);
+  const cl = insertChangelogEntry(readFileSync(clPath, "utf8"), composeChangelogEntry(m));
+  const md = rewriteBaselineMd(readFileSync(mdPath, "utf8"), {
+    date,
+    cliVersion: m.cliVersion,
+    runId: m.runId,
+    sha: m.newSha,
+    shapes: m.shapes,
+    section: composeRegeneratedSection(m),
   });
-  if (vd.length > 0) throw new Error(`the composed tree would fail version-gate: ${vd.map((d) => d.kind).join(", ")}`);
+  const writerDefects = [...pkg.defects, ...cl.defects, ...md.defects];
+  if (writerDefects.length > 0) refuseWriterDefects(writerDefects);
+  const vd = judgeVersionBump({
+    baseVersion: oldVersion,
+    headVersion: newVersion,
+    packageVersion: JSON.parse(pkg.text).version,
+    changelog: cl.text,
+  });
+  if (vd.length > 0) refuseWriterDefects(vd);
+
+  writeFileSync(join(repoRoot, "VERSION"), newVersion); // no trailing newline (RESEARCH F7)
+  writeFileSync(pkgPath, pkg.text);
+  writeFileSync(clPath, cl.text);
+  writeFileSync(mdPath, md.text);
 
   runGate(runner, repoRoot, "node", ["scripts/check-baseline-staleness.mjs"]);
 
@@ -989,11 +1095,11 @@ function selfTest({ withGitleaks = false } = {}) {
   );
   const dupShape = w(() => rewriteBaselineMd(mdFixture.replace("| Shape | 0 tables |", "| Shape | 0 tables |\n| Shape | 0 tables again |"), fxValues));
   ok(
-    dupShape.text === null && hasDefect(dupShape, "capture-row-count", /Shape.*\b2\b/),
+    dupShape.text === null && hasDefect(dupShape, "capture-row-count", /carries 2 .\| Shape \|. row/),
     "rewriteBaselineMd refuses a DUPLICATE '| Shape |' row inside the table, naming the row and the count 2 (calibration)",
   );
   const noTaken = w(() => rewriteBaselineMd(mdFixture.replace("| Taken | 2026-01-01 |\n", ""), fxValues));
-  ok(noTaken.text === null && hasDefect(noTaken, "capture-row-count", /Taken.*\b0\b/), "rewriteBaselineMd refuses a capture row that matches 0 times, naming the row and the count 0");
+  ok(noTaken.text === null && hasDefect(noTaken, "capture-row-count", /carries 0 .\| Taken \|. row/), "rewriteBaselineMd refuses a capture row that matches 0 times, naming the row and the count 0");
   const noProv = w(() => rewriteBaselineMd(mdFixture.replace("## Provenance", "## Origin"), fxValues));
   ok(noProv.text === null && hasDefect(noProv, "provenance-missing"), "rewriteBaselineMd refuses a file with no '## Provenance' heading");
   const noRegen = w(() => rewriteBaselineMd(mdFixture.replace("### Regenerated 2026-01-01 — historical", "### Earlier capture"), fxValues));
