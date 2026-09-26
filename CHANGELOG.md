@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.97.0.1] - 2026-09-26 — Phase 169.3 plan 01: `/admin` Compute Jobs loads again, and a failed load no longer claims the queue is empty
+
+⭐ **What changed for whoever reads this next.** The `/admin` Compute Jobs tab was broken. Its list
+request returned HTTP 500 on every call, and the table then said "No compute jobs found" while the
+header counted a job in progress. The route called the `get_admin_compute_jobs` database function.
+That function fails on every call: its `id` OUT column collides with `profiles.id` in its own admin
+check ("column reference id is ambiguous"). Behind that, the check reads `auth.uid()`, which is NULL
+under the service-role client, so even a repaired body would return no rows. The route now reads
+the `compute_jobs_admin` view instead, and the table shows its empty-queue row only after a load
+that succeeded.
+
+⚠️ **A patch bump: a bug fix that ships alone by founder decision D11.** It is plan 01 of Phase
+169.3 SMALLFIXES. Plans 02–05 stay on `feat/169.3` until 167.1.2 PR C lands. This release carries
+no migration and touches no `supabase/` path. The dead function stays in the catalogue, unused.
+
+### Fixed
+- **`GET /api/admin/compute-jobs` reads the `compute_jobs_admin` view** (plan 01, SC1). The read
+  runs with the service-role client and only AFTER the existing `isAdminUser` gate. It selects an
+  explicit list of the 21 columns the client row type consumes: never a star select, never
+  `claim_token`, and not the view's `strategy_user_id` / `portfolio_user_id`. Each present
+  `status`, `kind` or `exchange` filter adds one `.eq`, and an absent or empty one adds none, as the
+  old `|| null` handling did. Rows come newest first and are ranged by the existing limit/offset. A
+  view read error is still the generic 500, now logged as `compute_jobs_admin view read failed`.
+- **`ComputeJobsTable` never shows "No compute jobs found." after a failed load** (plan 01, SC1).
+  The empty-queue row now also requires `!error`, so an HTTP 500 or a rejected fetch shows the
+  error alert alone.
+
+### Tests
+- **The route test pins the view read** (plan 01). A chainable, awaitable query-builder mock
+  records every call, `rpc` included, so going back to the function fails on an assertion rather
+  than a missing-method `TypeError`. A non-admin gets 403, and the test proves no service-role
+  client is built and nothing is read.
+- **Four `ComputeJobsTable` cases: a failed load is not an empty queue** (plan 01). HTTP 500 and a
+  rejected fetch each show the alert and NOT the empty-queue row. OK with `[]` shows the empty row
+  and no alert, and OK with rows shows neither.
+
+### Notes
+- **Planning slice for the D11 split.** The branch carries `169.3-CONTEXT`, `169.3-01-PLAN` and
+  `169.3-01-SUMMARY`, byte-identical to `feat/169.3`. It also adds a minimal `### Phase 169.3`
+  ROADMAP section with the dated D11 note, and the `[169-DEAD-ADMIN-JOBS-RPC]` TODOS entry that the
+  route's comment cites. That entry was booked on `feat/169.3` and had not reached `main`.
+  Dropping the function is a migration, and the entry routes it to the next migration-carrying
+  phase.
+- **Known limit.** The phase's post-deploy browser re-check (SC9, plan 169.3-05) ships with plans
+  02–05. It is not part of this release.
+
 ## [0.97.0.0] - 2026-09-26 — DRBOPTIONS: a Deribit options account with an `assignment` row can be ingested, and every shape the census did not see still refuses
 
 ⭐ **What changed for whoever reads this next.** On 2026-09-23 a Deribit options account inside a

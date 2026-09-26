@@ -140,6 +140,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed
 - [ ] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: human_needed
 - [ ] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified
+- [ ] **Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers** (INSERTED) — not yet verified (plan 01 shipped in #868)
 - [ ] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — not yet verified
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
 
@@ -3604,6 +3605,21 @@ Plans:
 - [ ] TBD (run /gsd-plan-phase 169 to break down)
 
 **⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found by the 166.1 round-2 silent-failure review, pre-existing, outside that diff):** risk attribution renders a share in percent twice. The producer sends `marginal_risk_pct` and `weight_pct` already in percent (the `complete.json` fixture carries 28.0 and 40.0), and `RiskAttribution` passes them to `formatPercent`, which multiplies by 100 again, so a 28% share renders as "+2800.00%". `RiskAttribution.test.tsx` feeds fractions the producer never sends, so the test suite encodes the wrong unit. Success: the page shows the producer's number once, and a test built from the producer's real shape fails on the double scale. ⚠️ Added after 169's plans were checked; the plan set must take this item before execution.
+### Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers (INSERTED)
+
+**Goal:** Four self-contained page fixes: the `/admin` compute-jobs list loads and a failed load says so; `/recommendations` states the mandate truthfully and never recommends a viewer's own strategy; `/profile` Exchanges counts only live keys and never repeats a balance; `/recommendations` and `/allocations` use one mandate rule.
+**Shipped separately, 2026-09-26 (founder decision D11):** plan 01 shipped separately by founder decision D11; 02–05 follow once 167.1.2 PR C lands. This section is the minimal slice plan 01 needs; the full phase section, split note and remaining plans arrive with plans 02–05.
+**Depends on:** none in code for plan 01. 167.1.2 PR C on `origin/main` gates plans 169.3-03 and 169.3-04.
+
+## Success Criteria
+
+1. `/admin` Compute Jobs: the list request no longer returns HTTP 500, and the tab never says "No compute jobs found" while the header counts a job in progress. A failed load says it failed.
+
+**Plans:** 5 plans; plan 01 shipped here (D11), 02–05 follow once 167.1.2 PR C lands. Decisions carried in `169.3-CONTEXT.md`; no migration.
+
+Plans:
+
+- [x] 169.3-01-PLAN.md — /admin compute jobs list reads the admin view; a failed load says so (SC1) (was 169-01)
 
 ### Phase 170: LAYOUT — page layout reads clean and holds on every page
 
