@@ -307,6 +307,26 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
     }
   });
 
+  it("SFH M-1 LOG LABEL: a probe's resolve logs as a probe, never as a factsheet build, and a build logs as a build", async () => {
+    const warn = vi.mocked(console.warn);
+    const lines = () => warn.mock.calls.map((c) => String(c[0]));
+    for (const f of PARITY.filter((x) => x.reason === "not_computed" || x.reason === "too_few_points")) {
+      seed(f.row, f.csv ?? [], f.error ?? null);
+      warn.mockClear();
+      await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
+      expect(lines().length, f.name).toBeGreaterThan(0);
+      for (const line of lines()) {
+        expect(line, f.name).toContain("resolve(probe)");
+        expect(line, f.name).not.toContain("fetchAndBuildPayload");
+      }
+      seed(f.row, f.csv ?? [], f.error ?? null);
+      warn.mockClear();
+      await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+      expect(lines().some((l) => l.includes("resolve(build)")), f.name).toBe(true);
+      expect(lines().some((l) => l.includes("resolve(probe)")), f.name).toBe(false);
+    }
+  });
+
   it("NO-NULL-AFTER-RESOLVE: every fixture the probe calls buildable builds a payload", async () => {
     let okResolves = 0;
     for (const f of PARITY) {

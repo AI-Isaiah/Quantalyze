@@ -75,6 +75,13 @@ export type FactsheetBuildability =
   | { buildable: true }
   | { buildable: false; reason: NotBuildableReason };
 
+/**
+ * 167.2.1-REVIEW-SFH M-1 — who ran the resolve stage. Every resolve log line
+ * carries it, in its prefix and its payload, so a probe on /strategies never
+ * reads in the logs as a factsheet build that did not happen.
+ */
+type ResolveCaller = "build" | "probe";
+
 /** A failed resolve: the builder returns null, the probe returns this reason. */
 function notBuildable(reason: NotBuildableReason): { ok: false; reason: NotBuildableReason } {
   return { ok: false, reason };
@@ -87,13 +94,15 @@ function notBuildable(reason: NotBuildableReason): { ok: false; reason: NotBuild
  * the terminal-success gate (G1), the series resolution and the composite read
  * (G2), the empty-series gate (G3) and the point-count gate (G4,
  * `hasBuildableSeries`, the same predicate `buildFactsheetPayload` calls). The
- * steps are the builder's own, moved here verbatim with their comments and log
- * lines. Module-private: a reader asks through the probe.
+ * steps are the builder's own, moved here verbatim with their comments.
+ * Module-private: a reader asks through the probe. `caller` labels every log
+ * line (SFH M-1): `[factsheet] resolve(build)` or `resolve(probe)`.
  */
 async function resolveFactsheetInputs(
   supabase: ReturnType<typeof createAdminClient>,
   id: string,
   visibility: StrategyVisibility,
+  caller: ResolveCaller,
 ) {
   const { data: strategy, error } = await visibility(
     supabase
@@ -109,8 +118,9 @@ async function resolveFactsheetInputs(
   )
     .maybeSingle();
   if (error || !strategy) {
-    console.warn("[factsheet] fetchAndBuildPayload — admin probe returned no strategy", {
+    console.warn(`[factsheet] resolve(${caller}) — admin read returned no strategy`, {
       id,
+      caller,
       hasError: !!error,
       errorMessage: error?.message,
       errorCode: error?.code,
@@ -149,8 +159,8 @@ async function resolveFactsheetInputs(
   // there is no honest date to show the previous run's numbers under.
   if (!isComputedAnalytics(analytics?.computation_status)) {
     console.warn(
-      "[factsheet] fetchAndBuildPayload — analytics row is not a terminal success; withholding the payload",
-      { id, computationStatus: analytics?.computation_status ?? null },
+      `[factsheet] resolve(${caller}) — analytics row is not a terminal success; withholding the payload`,
+      { id, caller, computationStatus: analytics?.computation_status ?? null },
     );
     return notBuildable("not_computed");
   }
@@ -209,13 +219,14 @@ async function resolveFactsheetInputs(
     Object.keys(analytics.returns_series as object).length > 0
   ) {
     console.warn(
-      "[factsheet] fetchAndBuildPayload — both daily_returns and returns_series populated; ingestSource='csv' applied conservatively",
-      { id },
+      `[factsheet] resolve(${caller}) — both daily_returns and returns_series populated; ingestSource='csv' applied conservatively`,
+      { id, caller },
     );
   }
   if (dailyReturns.length === 0) {
-    console.warn("[factsheet] fetchAndBuildPayload — no usable return series after normalization + equity-curve fallback", {
+    console.warn(`[factsheet] resolve(${caller}) — no usable return series after normalization + equity-curve fallback`, {
       id,
+      caller,
       hasAnalytics: !!analytics,
       dailyType: typeof dailyRaw,
       isArray: Array.isArray(dailyRaw),
@@ -230,8 +241,8 @@ async function resolveFactsheetInputs(
   // same gate for its other caller.
   if (!hasBuildableSeries(dailyReturns)) {
     console.warn(
-      "[factsheet] fetchAndBuildPayload — return series has fewer than the minimum distinct dated observations; withholding the payload",
-      { id, isComposite, rawCount: dailyReturns.length, minimum: MIN_FACTSHEET_SERIES_POINTS },
+      `[factsheet] resolve(${caller}) — return series has fewer than the minimum distinct dated observations; withholding the payload`,
+      { id, caller, isComposite, rawCount: dailyReturns.length, minimum: MIN_FACTSHEET_SERIES_POINTS },
     );
     return notBuildable(isComposite ? "composite_unbuildable" : "too_few_points");
   }
@@ -328,7 +339,7 @@ async function resolveAndBuild(
   visibility: StrategyVisibility,
 ): Promise<FactsheetBuildResult> {
   const supabase = createAdminClient();
-  const resolved = await resolveFactsheetInputs(supabase, id, visibility);
+  const resolved = await resolveFactsheetInputs(supabase, id, visibility, "build");
   if (!resolved.ok) return { payload: null, reason: resolved.reason };
   return { payload: await buildFromResolved(supabase, id, resolved), reason: null };
 }
@@ -488,7 +499,7 @@ export async function probeFactsheetBuildable(
   visibility: StrategyVisibility,
 ): Promise<FactsheetBuildability> {
   const supabase = createAdminClient();
-  const resolved = await resolveFactsheetInputs(supabase, id, visibility);
+  const resolved = await resolveFactsheetInputs(supabase, id, visibility, "probe");
   if (!resolved.ok) return { buildable: false, reason: resolved.reason };
   return { buildable: true };
 }
