@@ -1,18 +1,20 @@
 /**
  * Portfolio statistics calculation library.
  *
- * 15 quantitative functions for portfolio analytics: monthly/annual
- * returns, rolling metrics, VaR, expected shortfall, distribution,
+ * Quantitative functions for portfolio analytics: monthly/annual
+ * returns, VaR, expected shortfall, distribution,
  * win rate, best/worst periods, alpha/beta, tracking error, risk
  * decomposition, concentration, regime detection, weight drift, and
  * rebalance suggestions.
  *
- * All functions operate on plain arrays and DailyPoint — no external
- * dependencies beyond portfolio-math-utils.
+ * All functions operate on plain arrays and DailyPoint. The beta and the
+ * risk-share floor come from `@/lib/return-stats`, the one TS home of every
+ * dispersion-based ratio (Phase 166.1 D-17); nothing here keeps its own copy.
  */
 
 import type { DailyPoint } from "./portfolio-math-utils";
 import { mean, stdDev, compound } from "./portfolio-math-utils";
+import { beta as sharedBeta, dispersionIsReal } from "@/lib/return-stats";
 
 // ── Non-finite drop diagnostic ──────────────────────────────────────
 // computeReturnDistribution, findMinMax, and detectRegimeChanges all
@@ -99,44 +101,6 @@ export function computeAnnualReturns(daily: DailyPoint[]): DailyPoint[] {
     result.push({ date: key, value: compound(returns) });
   }
   return result.sort((a, b) => a.date.localeCompare(b.date));
-}
-
-// ── 3. computeRollingMetric ─────────────────────────────────────────
-/**
- * Compute a sliding-window metric over daily returns.
- * - "sharpe": mean * sqrt(N) / std  (annualized, rf=0)
- * - "volatility": std * sqrt(N)  (annualized)
- *
- * `periodsPerYear` (N) is the annualization basis — 252 (traditional, default)
- * or 365 (crypto) per #597. Returns (n - window + 1) points, each dated at the
- * window's last day.
- */
-export function computeRollingMetric(
-  daily: DailyPoint[],
-  window: number,
-  metric: "sharpe" | "volatility",
-  periodsPerYear = 252,
-): DailyPoint[] {
-  if (daily.length < window) return [];
-  const result: DailyPoint[] = [];
-  // #597 — annualization basis (default 252 keeps existing callers
-  // byte-identical; pass 365 via annualizationPeriods() for crypto).
-  const sqrtN = Math.sqrt(periodsPerYear);
-
-  for (let i = window - 1; i < daily.length; i++) {
-    const slice = daily.slice(i - window + 1, i + 1).map((d) => d.value);
-    const m = mean(slice);
-    const s = stdDev(slice, true);
-
-    let value: number;
-    if (metric === "sharpe") {
-      value = s > 0 ? (m * sqrtN) / s : 0;
-    } else {
-      value = s * sqrtN;
-    }
-    result.push({ date: daily[i].date, value });
-  }
-  return result;
 }
 
 // ── 4. computeVaR ───────────────────────────────────────────────────
@@ -411,8 +375,16 @@ export interface AlphaBetaResult {
 
 /**
  * CAPM alpha and beta.
- * beta = cov(r, b) / var(b)
+ * beta = cov(r, b) / var(b), the shared `beta` of `@/lib/return-stats`
  * alpha = annualized excess return (mean(r) - beta * mean(b)) * periodsPerYear
+ *
+ * The beta is the ONE shared beta (Phase 166.1 D-17), not a local cov/var. That
+ * module treats a benchmark whose dispersion is float residue as constant, so a
+ * compounding-NAV constant-yield benchmark (sample sd about 1.3e-16, not 0)
+ * reads beta 0 and alpha mean(r) * N, exactly what an all-zero benchmark gives
+ * (D-07). A local `> 0` variance guard passed that residue and divided by it,
+ * which reported betas of about 1e12. A shared null (constant or NaN benchmark)
+ * is answered as 0, the value this function already returned for both.
  *
  * `periodsPerYear` (N) is the annualization basis — 252 (traditional, default,
  * byte-identical to pre-#597) or 365 (crypto) per #597. Only alpha rides the
@@ -429,20 +401,8 @@ export function computeAlphaBeta(
 
   const r = returns.slice(0, n);
   const b = benchmark.slice(0, n);
-  const meanR = mean(r);
-  const meanB = mean(b);
-
-  let cov = 0;
-  let varB = 0;
-  for (let i = 0; i < n; i++) {
-    const dr = r[i] - meanR;
-    const db = b[i] - meanB;
-    cov += dr * db;
-    varB += db * db;
-  }
-
-  const beta = varB > 0 ? cov / varB : 0;
-  const alpha = (meanR - beta * meanB) * periodsPerYear;
+  const beta = sharedBeta(r, b) ?? 0;
+  const alpha = (mean(r) - beta * mean(b)) * periodsPerYear;
   return { alpha, beta };
 }
 
@@ -500,9 +460,21 @@ export function computeRiskDecomposition(
   const contributions: number[] = weights.map((w, i) => w * cw[i]);
   const totalVariance = contributions.reduce((s, c) => s + c, 0);
 
+  // The percentages are 0 unless the portfolio variance is REAL dispersion on
+  // the shared floor (Phase 166.1 D-17; the TS twin of the Python absolute
+  // floor, no mean exists here so it is `1e-12` on the sd). A book of
+  // compounding-NAV constant yields leaves a variance of about 1e-32, which a
+  // `> 0` guard passed and split into fabricated shares; it now reads 0 per
+  // strategy, exactly as an all-zero covariance matrix does (D-07). A negative
+  // or NaN total also reads 0, as it always has: `dispersionIsReal` is false on
+  // NaN.
+  const portfolioVarianceIsReal = dispersionIsReal(
+    Math.sqrt(Math.max(totalVariance, 0)),
+    0,
+  );
   return contributions.map((c) => ({
     contribution: c,
-    percentage: totalVariance > 0 ? (c / totalVariance) * 100 : 0,
+    percentage: portfolioVarianceIsReal ? (c / totalVariance) * 100 : 0,
   }));
 }
 
