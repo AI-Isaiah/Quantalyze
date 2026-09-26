@@ -57,7 +57,7 @@
  * ═══ ANTI-VACUITY — DEMONSTRATED, NOT ASSERTED ═══
  *
  * NEUTER-D, RUN 2026-08-28. The token page's payload fetch was temporarily
- * rewired through a `unstable_cache(..., ["factsheet-v2-payload-v6", id])`
+ * rewired through a `unstable_cache(..., ["factsheet-v2-payload-vN", id])`
  * wrapper — the exact poisoning D-01's structural argument prevents — and TWO
  * INDEPENDENT DETECTORS went red on the same tree:
  *

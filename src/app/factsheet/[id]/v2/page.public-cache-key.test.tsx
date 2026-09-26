@@ -7,7 +7,7 @@
  * (the builder's own resolve stage): no note when the factsheet builds, a
  * PUBLIC-UNBUILDABLE line when it does not. The recipient of that link reads
  * `buildFactsheetPayloadCached`, whose effective key was the strategy id ONLY
- * (`["factsheet-v2-payload-v6", id]`; the `::computedAt` suffix the page
+ * (`["factsheet-v2-payload-vN", id]`; the `::computedAt` suffix the page
  * passed in was split off and discarded, DEF-148-A). `unstable_cache` also
  * stores a `null`. So for up to the 3600 s TTL:
  *   - a placeholder `null` cached before a compute finished kept being served
