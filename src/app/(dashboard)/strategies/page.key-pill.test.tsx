@@ -24,6 +24,13 @@ vi.mock("server-only", () => ({}));
 // 167.2 review-fix: the page captures its read failures to Sentry.
 const captureToSentryMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
+// 167.2.1-REVIEW-SFH-R2 N-7: the real copy module, with `unbuildableNoteKindOf`
+// wrapped in a spy so one case can drive its exhaustiveness throw.
+vi.mock("@/lib/status-surface-copy", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/status-surface-copy")>();
+  return { ...actual, unbuildableNoteKindOf: vi.fn(actual.unbuildableNoteKindOf) };
+});
+import { unbuildableNoteKindOf } from "@/lib/status-surface-copy";
 
 vi.mock("next/link", () => ({
   default: ({ children, href }: { children: React.ReactNode; href: string }) =>
@@ -133,6 +140,142 @@ const state = vi.hoisted(() => ({
   rpcCalls: [] as Array<{ fn: string; args: unknown }>,
   /** Every `.select(...)` / `.in(...)` the page issued, per table. */
   calls: [] as Array<{ table: string; op: string; args: unknown[] }>,
+  /**
+   * Phase 167.2.1 (D-08) — the service-role read behind `probeFactsheetBuildable`,
+   * per strategy id. An id with no entry answers a computed row with a 30-point
+   * series, so every other describe's computed rows stay buildable and render
+   * as they did before the list probed them.
+   */
+  adminRows: {} as Record<string, { data: unknown; error: { message: string; code?: string } | null }>,
+  /** 167.2.1 D-05: the admin factory itself throws. */
+  adminThrow: false,
+  /**
+   * 167.2.1-REVIEW-SFH-R2 N-2 — per strategy id, the error its probe's read
+   * throws (a different cause per row, unlike `adminThrow`).
+   */
+  adminReadThrows: {} as Record<string, Error>,
+  /**
+   * 167.2.1-REVIEW-SFH-R2 N-3 — ids whose strategies read never answers until
+   * its AbortSignal fires, and the ids whose read was aborted.
+   */
+  adminReadHangs: [] as string[],
+  adminAborted: [] as string[],
+  /** Every `from(table)` the admin client was asked for. */
+  adminTables: [] as string[],
+  /** The id of every strategies read the admin client answered. */
+  adminStrategyReads: [] as string[],
+  /** Every `.or(filter)` applied to an admin read (the visibility predicate). */
+  adminOrFilters: [] as string[],
+  /**
+   * 167.2.1-REVIEW WR-01 — a concurrency gauge on the probe's strategy read.
+   * With a delay set, each read stays open across a timer, so reads that run
+   * at once overlap and `adminMaxInFlight` records the peak. 0 = no delay (the
+   * read resolves in one tick, as every other case expects).
+   */
+  adminReadDelayMs: 0,
+  adminInFlight: 0,
+  adminMaxInFlight: 0,
+}));
+
+/** N consecutive synthetic calendar days from 2024-01-02, as {date, value}. */
+const points = vi.hoisted(() => (n: number) =>
+  Array.from({ length: n }, (_, i) => ({
+    date: new Date(Date.UTC(2024, 0, 2) + i * 86_400_000).toISOString().slice(0, 10),
+    value: ((i % 7) - 3) / 1000,
+  })),
+);
+
+/** A strategies row as the builder's admin select returns it (synthetic). */
+const adminStrategy = vi.hoisted(() => (id: string, analytics: Record<string, unknown>) => ({
+  id,
+  name: `Strategy ${id}`,
+  codename: null,
+  disclosure_tier: null,
+  status: "draft",
+  markets: [],
+  strategy_types: [],
+  description: null,
+  subtypes: [],
+  supported_exchanges: [],
+  leverage_range: null,
+  aum: null,
+  max_capacity: null,
+  avg_daily_turnover: null,
+  start_date: null,
+  benchmark: null,
+  asset_class: "crypto",
+  returns_denominator_config: null,
+  strategy_analytics: {
+    daily_returns: null,
+    returns_series: null,
+    computed_at: "2024-03-01T00:00:00Z",
+    data_quality_flags: null,
+    metrics_json_by_basis: null,
+    computation_status: "complete",
+    ...analytics,
+  },
+}));
+
+// Phase 167.2.1 (D-08) — the service-role client `probeFactsheetBuildable`
+// builds. A chainable double that records the tables, the id read and the
+// visibility filter; the probe itself (the builder's resolve stage) is REAL.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => {
+    if (state.adminThrow) throw new Error("synthetic admin client failure");
+    return {
+      from: (table: string) => {
+        state.adminTables.push(table);
+        let id = "";
+        let signal: AbortSignal | undefined;
+        const b: Record<string, unknown> = {};
+        b.abortSignal = (s: AbortSignal) => {
+          signal = s;
+          return b;
+        };
+        const self = () => b;
+        b.select = self;
+        b.order = self;
+        b.limit = self;
+        b.eq = (column: string, value: string) => {
+          if (column === "id") id = value;
+          return b;
+        };
+        b.or = (filter: string) => {
+          state.adminOrFilters.push(filter);
+          return b;
+        };
+        b.maybeSingle = async () => {
+          if (table !== "strategies") return { data: null, error: null };
+          state.adminStrategyReads.push(id);
+          if (state.adminReadThrows[id]) throw state.adminReadThrows[id];
+          if (state.adminReadHangs.includes(id)) {
+            // As supabase-js does: an aborted request RESOLVES with an error.
+            return new Promise((resolve) => {
+              signal?.addEventListener("abort", () => {
+                state.adminAborted.push(id);
+                resolve({ data: null, error: { message: "AbortError: The user aborted a request.", code: "" } });
+              });
+            });
+          }
+          state.adminInFlight += 1;
+          state.adminMaxInFlight = Math.max(state.adminMaxInFlight, state.adminInFlight);
+          if (state.adminReadDelayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, state.adminReadDelayMs));
+          }
+          state.adminInFlight -= 1;
+          return (
+            state.adminRows[id] ?? {
+              data: adminStrategy(id, { daily_returns: points(30) }),
+              error: null,
+            }
+          );
+        };
+        // The composite read awaits its csv builder directly.
+        b.then = (resolve: (v: unknown) => unknown) => resolve({ data: [], error: null });
+        return b;
+      },
+    };
+  },
 }));
 
 // Table-dispatch double. Each table the page reads is named; anything else
@@ -253,7 +396,10 @@ let consoleError: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   redirectMock.mockReset();
   pillProps.length = 0;
-  state.user = { id: "u-test" };
+  // Phase 167.2.1 (D-08): UUID-shaped, because the list now probes computed
+  // rows with `withPublishedOrOwner(q, user.id)`, which fails closed (and logs)
+  // on a non-UUID id. Synthetic.
+  state.user = { id: "00000000-0000-4000-8000-0000000000a1" };
   state.strategies = [];
   state.strategiesError = null;
   state.keys = [];
@@ -265,6 +411,17 @@ beforeEach(() => {
   state.jobsThrow = false;
   state.rpcCalls = [];
   state.calls = [];
+  state.adminRows = {};
+  state.adminThrow = false;
+  state.adminReadThrows = {};
+  state.adminReadHangs = [];
+  state.adminAborted = [];
+  state.adminTables = [];
+  state.adminStrategyReads = [];
+  state.adminOrFilters = [];
+  state.adminReadDelayMs = 0;
+  state.adminInFlight = 0;
+  state.adminMaxInFlight = 0;
   captureToSentryMock.mockClear();
   consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -480,6 +637,11 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
   const PUBLIC =
     "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.";
+  // Phase 167.2.1 (D-02) — typed out from 167.2.1-CONTEXT.md, never imported.
+  // Reworded by 167.2.1-REVIEW CR-01 and IN-02 (2026-09-26): the reason is
+  // stated from the stored results, in the active voice.
+  const UNBUILDABLE_SHORT =
+    "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
 
   function noteOf(container: HTMLElement, strategyName: string): string | null {
     const card = [...container.querySelectorAll("a")]
@@ -497,6 +659,10 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   const running = { kind: "process_key_long", status: "running", created_at: isoMinutesAgo(10) };
 
   it("COMPUTED-NO-NOTE: a row with a computed factsheet shows no note and asks the RPC nothing", async () => {
+    // Lineage, 167.2.1 D-08: "computed" here now means computed AND buildable.
+    // Both rows are probed and take the default admin row (a 30-point series),
+    // so the builder would build them; a computed row the builder refuses is
+    // COMPUTED-UNBUILDABLE below.
     state.strategies = [
       row("s-done", { strategy_analytics: { computation_status: "complete" } }),
       row("s-warn", { strategy_analytics: [{ computation_status: "complete_with_warnings" }] }),
@@ -509,6 +675,487 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     // A computed row has a factsheet; reading its jobs would be a wasted round
     // trip per row on the page every manager lands on.
     expect(state.rpcCalls).toEqual([]);
+    // 167.2.1 D-08: and it was asked, so "no note" is the builder's answer.
+    expect(state.adminStrategyReads).toEqual(["s-done", "s-warn"]);
+  });
+
+  // A finished factsheet-chain job: the share page's arm for it is
+  // `not_available`, so a null payload shows the "not available" card.
+  const finished = { kind: "process_key_long", status: "done", created_at: "2026-02-01T00:00:00.000Z" };
+
+  it("COMPUTED-UNBUILDABLE (167.2.1 SC3, WR-02): a computed single-key row with ONE dated return says the private link shows 'not available', and why", async () => {
+    // The owner's embed calls it computed; the builder refuses it (G4). Its
+    // share-link recipient lands on the "not available" card, so a silent row
+    // here would imply a working factsheet.
+    state.strategies = [row("s-short", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = {
+      "s-short": { data: adminStrategy("s-short", { daily_returns: points(1) }), error: null },
+    };
+    state.jobs = { "s-short": [finished] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-short")).toBe(UNBUILDABLE_SHORT);
+  });
+
+  // ── Phase 167.2.1 — every probe outcome and share mode (D-02, D-05, D-08) ──
+  const UNBUILDABLE_COMPOSITE =
+    "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
+  const PUBLIC_UNBUILDABLE_SHORT =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
+  const onePoint = (id: string) => ({
+    data: adminStrategy(id, { daily_returns: points(1) }),
+    error: null,
+  });
+  const PROBE_TAGS = { tags: { route: "strategies/page", stage: "factsheet-probe" } };
+  // 167.2.1-REVIEW-R2 WR-01: the page's one event for the returned failures.
+  const OUTCOME_TAGS = { route: "strategies/page", stage: "factsheet-probe-outcomes" };
+  // 167.2.1-REVIEW-SFH H-2 — typed out, never imported. The buildability
+  // check failed, so what a recipient sees is not known.
+  const PROBE_UNREADABLE =
+    "We could not check what a private link to this strategy shows right now. Reload this page to check again.";
+  const PUBLIC_PROBE_UNREADABLE =
+    "We could not check what this strategy's factsheet link shows right now. Reload this page to check again.";
+  const UNBUILDABLE_UNREADABLE_SHORT =
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
+
+  it("COMPOSITE-UNBUILDABLE: a computed composite with no persisted headline says its results cannot be built and names support", async () => {
+    state.strategies = [row("c-pre86", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = {
+      "c-pre86": {
+        data: adminStrategy("c-pre86", {
+          data_quality_flags: { composite: true },
+          metrics_json_by_basis: null,
+        }),
+        error: null,
+      },
+    };
+    state.jobs = {
+      "c-pre86": [{ kind: "stitch_composite", status: "done", created_at: "2026-02-01T00:00:00.000Z" }],
+    };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy c-pre86")).toBe(UNBUILDABLE_COMPOSITE);
+  });
+
+  it("PUBLIC-UNBUILDABLE: a published computed row with one point takes the public unbuildable line and reads no jobs", async () => {
+    state.strategies = [row("s-pub", { status: "published", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = { "s-pub": onePoint("s-pub") };
+    state.jobs = { "s-pub": [running] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_UNBUILDABLE_SHORT);
+    // 167.2 IN-04: the public line does not depend on the arm.
+    expect(state.rpcCalls).toEqual([]);
+  });
+
+  it("UNBUILDABLE-IN-PROGRESS: an unbuildable row with a running chain job keeps KCS12-MINT-A, because the recipient sees 'being prepared'", async () => {
+    state.strategies = [row("s-short", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = { "s-short": onePoint("s-short") };
+    state.jobs = { "s-short": [{ ...running, created_at: isoMinutesAgo(5) }] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-short")).toBe(MINT_A);
+  });
+
+  it("UNBUILDABLE-RPC-ERROR (SFH H-2): an unbuildable row whose job read fails says the link shows a placeholder, and why, never 'once a computation succeeds'", async () => {
+    // Lineage: this rendered KCS12-UNREADABLE, whose tail promised numbers
+    // once a computation succeeds, for a row whose computation had succeeded.
+    state.strategies = [row("s-short", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = { "s-short": onePoint("s-short") };
+    state.jobsError = { message: "synthetic rpc failure" };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-short")).toBe(UNBUILDABLE_UNREADABLE_SHORT);
+  });
+
+  it("PROBE-THROWS (D-05, SFH H-2): a probe that throws says the check failed, never 'no note', and is logged and captured with tags only", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminThrow = true;
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-1")).toBe(PROBE_UNREADABLE);
+    expect(consoleError).toHaveBeenCalledWith(
+      "[strategies/page] factsheet probe failed",
+      expect.objectContaining({ id: "s-1" }),
+    );
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    // WR-01, SFH-R2 N-2: one event per distinct cause, carrying the counts.
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { ...PROBE_TAGS.tags, probe_throws: "1", probe_throw_kinds: "1", group_throws: "1" },
+    });
+    // Tags only: the id stays in the server log, never in the capture.
+    const [err, ctx] = captureToSentryMock.mock.calls[0] as [Error, unknown];
+    expect(err.message).not.toContain("s-1");
+    expect(JSON.stringify(ctx)).not.toContain("s-1");
+  });
+
+  it("PROBE-READ-ERROR (D-05, SFH M-2, H-2): an admin read error says the check failed and is counted into the page's ONE event, with tags only", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = { "s-1": { data: null, error: { message: "synthetic admin read failure" } } };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-1")).toBe(PROBE_UNREADABLE);
+    // The stage that saw the error logs it, labelled as the probe's (SFH M-1).
+    expect(consoleError).toHaveBeenCalledWith(
+      "[factsheet] resolve(probe) — admin strategy read failed",
+      expect.objectContaining({ id: "s-1", caller: "probe" }),
+    );
+    // One event, the page's count (167.2.1-REVIEW-R2 WR-01): the stage no
+    // longer captures for a probe. The fixture error carries no code, so the
+    // stage reports "none".
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      level: "error",
+      tags: {
+        ...OUTCOME_TAGS,
+        counted_rows: "1",
+        read_error: "1",
+        composite_unbuildable: "0",
+        malformed_series: "0",
+        timeout: "0",
+        read_error_codes: "none:1",
+      },
+      extra: { gates: {}, malformedSources: {} },
+    });
+    const [err, ctx] = captureToSentryMock.mock.calls[0] as [Error, unknown];
+    expect(err.message).not.toContain("s-1");
+    expect(JSON.stringify(ctx)).not.toContain("s-1");
+  });
+
+  it("PROBE-NOT-VISIBLE (167.2.1-REVIEW IN-01): a row deleted between the list read and the probe is a warning, never a capture", async () => {
+    // The id came from the owner's own list read, and the probe runs under
+    // the owner predicate, so "no row" here is a delete race, not an outage.
+    // Capturing it would put it in the same event group as a real read error.
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+      state.adminRows = { "s-1": { data: null, error: null } };
+
+      const container = await renderPage();
+
+      expect(noteOf(container, "Strategy s-1")).toBe(PROBE_UNREADABLE);
+      expect(consoleWarn).toHaveBeenCalledWith(
+        "[strategies/page] factsheet probe found no row (deleted since the list read)",
+        expect.objectContaining({ id: "s-1", reason: "not_visible" }),
+      );
+      expect(captureToSentryMock).not.toHaveBeenCalled();
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  it("PUBLISHED-PROBE-FAILS (167.2.1-REVIEW-SFH H-2): a published computed row whose check fails says the check failed, never the public 'not available yet' line", async () => {
+    // The finding: the failed probe rendered KCS12-PUBLIC ("… shows that the
+    // factsheet is not available yet …") for a published row whose public
+    // factsheet most likely rendered fine. Both failure shapes are covered.
+    state.strategies = [
+      row("s-pub-err", { status: "published", strategy_analytics: { computation_status: "complete" } }),
+      row("s-pub-gone", { status: "published", strategy_analytics: { computation_status: "complete" } }),
+    ];
+    state.adminRows = {
+      "s-pub-err": { data: null, error: { message: "synthetic admin read failure" } },
+      "s-pub-gone": { data: null, error: null },
+    };
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const container = await renderPage();
+
+      for (const name of ["Strategy s-pub-err", "Strategy s-pub-gone"]) {
+        expect(noteOf(container, name)).toBe(PUBLIC_PROBE_UNREADABLE);
+        expect(noteOf(container, name)).not.toBe(PUBLIC);
+      }
+      // 167.2 IN-04 still holds: a published row reads no jobs.
+      expect(state.rpcCalls).toEqual([]);
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  it("PUBLISHED-PROBE-THROWS (167.2.1-REVIEW-SFH H-2): a published computed row whose probe throws says the check failed", async () => {
+    state.strategies = [row("s-pub", { status: "published", strategy_analytics: { computation_status: "complete" } })];
+    state.adminThrow = true;
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_PROBE_UNREADABLE);
+  });
+
+  it("PROBE-CONCURRENCY (167.2.1-REVIEW WR-01): at most 4 probe reads run at once, and every computed row is still probed, in list order", async () => {
+    // Each probe is a heavy service-role read. The list is unpaginated, so an
+    // unbounded fan-out fired one per computed row at once, and a saturated
+    // pool then failed the check on every row.
+    const ids = Array.from({ length: 10 }, (_, i) => `s-${i}`);
+    state.strategies = ids.map((id) => row(id, { strategy_analytics: { computation_status: "complete" } }));
+    state.adminReadDelayMs = 5;
+
+    const container = await renderPage();
+
+    expect(state.adminMaxInFlight).toBe(4);
+    expect(state.adminStrategyReads).toEqual(ids);
+    // All buildable: the cap changes the timing, never the answer.
+    expect(container.querySelector('[data-testid="strategy-row-share-note"]')).toBeNull();
+  });
+
+  it("PROBE-THROWS-ONE-EVENT (167.2.1-REVIEW WR-01): six probes that throw on one page load are one Sentry event carrying the count, and six notes", async () => {
+    const ids = Array.from({ length: 6 }, (_, i) => `s-${i}`);
+    state.strategies = ids.map((id) => row(id, { strategy_analytics: { computation_status: "complete" } }));
+    state.adminThrow = true;
+
+    const container = await renderPage();
+
+    for (const id of ids) expect(noteOf(container, `Strategy ${id}`)).toBe(PROBE_UNREADABLE);
+    // Every row is still in the server log, with its id...
+    expect(
+      consoleError.mock.calls.filter((call: unknown[]) => call[0] === "[strategies/page] factsheet probe failed"),
+    ).toHaveLength(6);
+    // ...and Sentry gets ONE event for the page load, sized by a tag.
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { ...PROBE_TAGS.tags, probe_throws: "6", probe_throw_kinds: "1", group_throws: "6" },
+    });
+  });
+
+  it("N2-THROW-GROUPS (167.2.1-REVIEW-SFH-R2 N-2): throws of different causes on one page load are one event per cause, largest first, capped at 3, each carrying the total", async () => {
+    // Only the FIRST throw used to reach Sentry, so a transient cause that
+    // finished first hid a code regression that threw on another row.
+    const causes: Array<[string, Error]> = [
+      ["t-0", new Error("fetch failed")],
+      ["t-1", new TypeError("Cannot read properties of null (reading 'x')")],
+      ["t-2", new Error("fetch failed")],
+      ["t-3", new TypeError("Cannot read properties of null (reading 'x')")],
+      ["t-4", new Error("fetch failed")],
+      ["t-5", new RangeError("synthetic range")],
+      ["t-6", new Error("synthetic other")],
+      ["t-7", new SyntaxError("synthetic syntax")],
+    ];
+    state.strategies = causes.map(([id]) => row(id, { strategy_analytics: { computation_status: "complete" } }));
+    state.adminReadThrows = Object.fromEntries(causes);
+
+    const container = await renderPage();
+
+    for (const [id] of causes) expect(noteOf(container, `Strategy ${id}`)).toBe(PROBE_UNREADABLE);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(3);
+    const sent = captureToSentryMock.mock.calls.map((call) => {
+      const [err, ctx] = call as [Error, { tags: Record<string, string> }];
+      return { name: err.name, message: err.message, group: ctx.tags.group_throws, ctx };
+    });
+    expect(sent.map(({ name, message, group }) => ({ name, message, group }))).toEqual([
+      { name: "Error", message: "fetch failed", group: "3" },
+      { name: "TypeError", message: "Cannot read properties of null (reading 'x')", group: "2" },
+      { name: "RangeError", message: "synthetic range", group: "1" },
+    ]);
+    for (const { ctx } of sent) {
+      expect(ctx).toEqual({
+        tags: { ...PROBE_TAGS.tags, probe_throws: "8", probe_throw_kinds: "5", group_throws: ctx.tags.group_throws },
+      });
+    }
+  });
+
+  it("WR01-OUTCOMES-ONE-EVENT (167.2.1-REVIEW-R2 WR-01, SFH-R2 N-1): six read errors and two unbuildable composites on one page load are ONE Sentry event carrying the counts and the codes", async () => {
+    // Pool saturation arrives as a RETURNED error, one per row, not a throw.
+    // The resolve stage used to capture each one (and each composite refusal)
+    // for the probe: eight events per load, on every navigation.
+    const errIds = Array.from({ length: 6 }, (_, i) => `e-${i}`);
+    const compIds = ["c-0", "c-1"];
+    state.strategies = [...errIds, ...compIds].map((id) =>
+      row(id, { status: "draft", strategy_analytics: { computation_status: "complete" } }),
+    );
+    state.adminRows = Object.fromEntries([
+      ...errIds.map((id, i) => [
+        id,
+        { data: null, error: i < 4 ? { message: "synthetic statement timeout", code: "57014" } : { message: "synthetic fetch failure" } },
+      ]),
+      ...compIds.map((id) => [
+        id,
+        { data: adminStrategy(id, { data_quality_flags: { composite: true }, metrics_json_by_basis: null }), error: null },
+      ]),
+    ]);
+    state.jobs = Object.fromEntries(
+      compIds.map((id) => [id, [{ kind: "stitch_composite", status: "done", created_at: "2026-02-01T00:00:00.000Z" }]]),
+    );
+
+    const container = await renderPage();
+
+    for (const id of errIds) expect(noteOf(container, `Strategy ${id}`)).toBe(PROBE_UNREADABLE);
+    for (const id of compIds) expect(noteOf(container, `Strategy ${id}`)).toBe(UNBUILDABLE_COMPOSITE);
+    // Every failed read is still in the server log, with its id.
+    expect(
+      consoleError.mock.calls.filter((call: unknown[]) => call[0] === "[factsheet] resolve(probe) — admin strategy read failed"),
+    ).toHaveLength(6);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      level: "error",
+      tags: {
+        ...OUTCOME_TAGS,
+        counted_rows: "8",
+        read_error: "6",
+        composite_unbuildable: "2",
+        malformed_series: "0",
+        timeout: "0",
+        read_error_codes: "57014:4,none:2",
+      },
+      extra: { gates: { "composite_unbuildable:headline": 2 }, malformedSources: {} },
+    });
+    // Tags only: no strategy id reaches the event.
+    const [err, ctx] = captureToSentryMock.mock.calls[0] as [Error, unknown];
+    for (const id of [...errIds, ...compIds]) {
+      expect(err.message).not.toContain(id);
+      expect(JSON.stringify(ctx)).not.toContain(id);
+    }
+  });
+
+  it("WR01-COMPOSITE-ONLY-WARNING: an unbuildable composite alone is one event at warning, as the build's own capture is", async () => {
+    state.strategies = [row("c-pre86", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = {
+      "c-pre86": {
+        data: adminStrategy("c-pre86", { data_quality_flags: { composite: true }, metrics_json_by_basis: null }),
+        error: null,
+      },
+    };
+
+    await renderPage();
+
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock.mock.calls[0][1]).toMatchObject({
+      level: "warning",
+      tags: { ...OUTCOME_TAGS, composite_unbuildable: "1", read_error: "0" },
+    });
+  });
+
+  it("N3-PROBE-DEADLINE (167.2.1-REVIEW-SFH-R2 N-3): a probe whose read hangs answers 'could not check' at its deadline, aborts the read, and is counted as a timeout in the page's one event", async () => {
+    // With no deadline, one hung read held its limiter slot and the whole
+    // page load forever, and the post-fan-out capture never ran.
+    const { FACTSHEET_PROBE_DEADLINE_MS } = await import("@/lib/factsheet/fetch-and-build-payload");
+    state.strategies = [
+      row("s-hung", { status: "draft", strategy_analytics: { computation_status: "complete" } }),
+      row("s-fine", { status: "draft", strategy_analytics: { computation_status: "complete" } }),
+    ];
+    state.adminReadHangs = ["s-hung"];
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      const pending = renderPage();
+      await vi.advanceTimersByTimeAsync(FACTSHEET_PROBE_DEADLINE_MS - 1);
+      // Just before the deadline the hung read is still open.
+      expect(state.adminAborted).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      const container = await pending;
+
+      expect(noteOf(container, "Strategy s-hung")).toBe(PROBE_UNREADABLE);
+      // The other row is unaffected: buildable, no note.
+      expect(noteOf(container, "Strategy s-fine")).toBeNull();
+      // The deadline reached the query as an AbortSignal.
+      expect(state.adminAborted).toEqual(["s-hung"]);
+      expect(consoleError).toHaveBeenCalledWith(
+        "[strategies/page] factsheet probe timed out",
+        expect.objectContaining({ id: "s-hung", deadlineMs: FACTSHEET_PROBE_DEADLINE_MS }),
+      );
+      // Its own reason in the ONE outcomes event, never a throw group.
+      expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+      expect(captureToSentryMock.mock.calls[0][1]).toMatchObject({
+        level: "error",
+        tags: { ...OUTCOME_TAGS, counted_rows: "1", timeout: "1", read_error: "0" },
+      });
+    } finally {
+      vi.useRealTimers();
+      consoleWarn.mockRestore();
+    }
+  });
+
+  it("N7-KIND-THROW-ONE-ROW (167.2.1-REVIEW-SFH-R2 N-7): an exhaustiveness throw from unbuildableNoteKindOf fails that row's check, never the whole list", async () => {
+    // Reachable only through a type lie (a widened reason from elsewhere).
+    // Outside the per-row try it rejected Promise.all, and the owner got the
+    // error boundary for the entire page.
+    vi.mocked(unbuildableNoteKindOf).mockImplementationOnce(() => {
+      throw new Error("unbuildableNoteKindOf: unhandled reason synthetic_reason");
+    });
+    state.strategies = [
+      row("s-lie", { status: "draft", strategy_analytics: { computation_status: "complete" } }),
+      row("s-fine", { status: "draft", strategy_analytics: { computation_status: "complete" } }),
+    ];
+    state.adminRows = { "s-lie": onePoint("s-lie") };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-lie")).toBe(PROBE_UNREADABLE);
+    expect(noteOf(container, "Strategy s-fine")).toBeNull();
+    expect(consoleError).toHaveBeenCalledWith(
+      "[strategies/page] factsheet probe failed",
+      expect.objectContaining({ id: "s-lie" }),
+    );
+    // Captured with the other throws, as its own cause.
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    const [err, ctx] = captureToSentryMock.mock.calls[0] as [Error, unknown];
+    expect(err.message).toBe("unbuildableNoteKindOf: unhandled reason synthetic_reason");
+    expect(ctx).toEqual({
+      tags: { ...PROBE_TAGS.tags, probe_throws: "1", probe_throw_kinds: "1", group_throws: "1" },
+    });
+  });
+
+  it("PROBE-NOT-COMPUTED (D-05, SFH M-5): the embed says complete but the builder's read says failed, so the row takes the uncomputed path, logged at warn", async () => {
+    state.strategies = [row("c-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = {
+      "c-1": { data: adminStrategy("c-1", { computation_status: "failed" }), error: null },
+    };
+    state.jobs = {
+      "c-1": [
+        {
+          kind: "stitch_composite",
+          status: "failed_final",
+          error_kind: "permanent",
+          created_at: "2026-02-01T00:00:00.000Z",
+        },
+      ],
+    };
+
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const container = await renderPage();
+
+      expect(noteOf(container, "Strategy c-1")).toBe(MINT_B);
+      // 167.2.1-REVIEW-SFH M-5: the race is logged, so its rate is
+      // measurable, and never captured.
+      expect(consoleWarn).toHaveBeenCalledWith(
+        "[strategies/page] factsheet probe found the analytics row not computed (the list embed said computed)",
+        expect.objectContaining({ id: "c-1", reason: "not_computed" }),
+      );
+      expect(captureToSentryMock).not.toHaveBeenCalled();
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  it("NOT-PROBED-UNCOMPUTED (D-08): only the row the embed calls computed is probed", async () => {
+    state.strategies = [
+      row("s-a", { strategy_analytics: { computation_status: "failed" } }),
+      row("s-done", { strategy_analytics: { computation_status: "complete" } }),
+      row("s-b", { strategy_analytics: null }),
+    ];
+
+    await renderPage();
+
+    expect(state.adminStrategyReads).toEqual(["s-done"]);
+    // The uncomputed rows keep today's path: one RPC each, and no probe.
+    expect(state.rpcCalls.map((c) => (c.args as { p_strategy_id: string }).p_strategy_id)).toEqual([
+      "s-a",
+      "s-b",
+    ]);
+  });
+
+  it("OWNER-PREDICATE (T-167.2.1-14): the probe runs under withPublishedOrOwner with the session user id", async () => {
+    state.strategies = [row("s-done", { strategy_analytics: { computation_status: "complete" } })];
+
+    await renderPage();
+
+    expect(state.adminOrFilters).toHaveLength(1);
+    expect(state.adminOrFilters[0]).toContain(`user_id.eq.${state.user?.id}`);
   });
 
   it("MINT-A: an unpublished row whose computation is running says the private link shows it being prepared", async () => {

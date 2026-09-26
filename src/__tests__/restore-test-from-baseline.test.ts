@@ -448,23 +448,23 @@ describe("restore-test-from-baseline.sh — the header's cross-file pointers res
 });
 
 describe("restore-test-from-baseline.sh — the arm ratchet", () => {
-  it("EXPECTED_ARMS=32 is a live line, exactly once, with its MEASURED date beside it", () => {
+  it("EXPECTED_ARMS=41 is a live line, exactly once, with its MEASURED date beside it", () => {
     const region = selfTestRegion(SRC);
     expect(
-      liveCount(region, "EXPECTED_ARMS=32"),
-      "the arm ratchet is no longer a single live `EXPECTED_ARMS=32` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
+      liveCount(region, "EXPECTED_ARMS=41"),
+      "the arm ratchet is no longer a single live `EXPECTED_ARMS=41` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
     ).toBe(1);
 
     // SC-9 (`gate-family-meta.test.ts:18-30`): a threshold constant needs a
     // measurement token AND a date beside it, or nobody can tell a measured floor
     // from a guessed one.
     const lines = region.split("\n");
-    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=32"));
+    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=41"));
     const beside = `${lines[at - 1] ?? ""}\n${lines[at]}`;
     expect(
       beside,
-      "EXPECTED_ARMS=32 carries no MEASURED date on its own or the preceding line — SC-9",
-    ).toContain("MEASURED 2026-09-21");
+      "EXPECTED_ARMS=41 carries no MEASURED date on its own or the preceding line — SC-9",
+    ).toContain("MEASURED 2026-09-26");
 
     // The harness must ASSERT the count, not merely print it.
     expect(liveCount(region, 'if [ "$total" -ne "$EXPECTED_ARMS" ]; then')).toBe(1);
@@ -494,9 +494,9 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION for the pair above — move the constant and the prose must
     // disagree, or this assertion is measuring nothing.
-    const moved = SRC.replace("\nEXPECTED_ARMS=32\n", "\nEXPECTED_ARMS=33\n");
+    const moved = SRC.replace("\nEXPECTED_ARMS=41\n", "\nEXPECTED_ARMS=42\n");
     expect(moved).not.toBe(SRC);
-    const movedArms = 33;
+    const movedArms = 42;
     expect(
       SRC.split("\n").filter((l) => /prints \d+\/\d+/.test(l)).every((l) => l.includes(`prints ${movedArms}/${movedArms}`)),
       "the `prints N/N` prose still agrees with a MOVED constant, so the agreement check is vacuous.",
@@ -504,15 +504,15 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — comment the constant out; a whole-file `toContain` would
     // still pass, this pin must not.
-    const commented = SRC.replace("\nEXPECTED_ARMS=32\n", "\n# EXPECTED_ARMS=32\n");
+    const commented = SRC.replace("\nEXPECTED_ARMS=41\n", "\n# EXPECTED_ARMS=41\n");
     expect(commented).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=32")).toBe(0);
+    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=41")).toBe(0);
 
     // CALIBRATION — a second copy of the constant is a disagreement waiting to
     // happen, and must fail the "exactly once" leg.
-    const doubled = SRC.replace("\nEXPECTED_ARMS=32\n", "\nEXPECTED_ARMS=32\nEXPECTED_ARMS=32\n");
+    const doubled = SRC.replace("\nEXPECTED_ARMS=41\n", "\nEXPECTED_ARMS=41\nEXPECTED_ARMS=41\n");
     expect(doubled).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=32")).toBe(2);
+    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=41")).toBe(2);
   });
 
   it("plan 01's interim closing line is GONE — the word it used appears nowhere", () => {
@@ -531,8 +531,8 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — re-insert the interim line; the pin must flip.
     const restored = SRC.replace(
-      "\nEXPECTED_ARMS=32\n",
-      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=32\n`,
+      "\nEXPECTED_ARMS=41\n",
+      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=41\n`,
     );
     expect(restored).not.toBe(SRC);
     expect(restored.includes(interimWord)).toBe(true);
@@ -542,9 +542,11 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 describe("restore-test-from-baseline.sh — L-01: the reference-data replay's position", () => {
   it("the bracket, the replay, the path restore, the gate and the ledger DDL are emitted IN THAT ORDER", () => {
     // ⛔ THIS ORDERING IS THE WHOLE DESIGN, AND EVERY STEP OF IT IS SILENT WHEN
-    // WRONG. `SET LOCAL search_path = public, pg_catalog` must precede the replay
+    // WRONG. `SET LOCAL search_path = pg_catalog, public` must precede the replay
     // because the replayed statements are the migrations' ORIGINAL bytes and name
-    // their targets UNQUALIFIED; `pg_catalog` must be restored before the ledger
+    // their targets UNQUALIFIED (and `pg_catalog` is listed FIRST, 164.9.2 review
+    // round 2 WR-03, so a `public.now()` or `public.=` cannot shadow a built-in;
+    // self-test arm 40 measures that); `pg_catalog` must be restored before the ledger
     // DDL because everything below is written expecting it; and the GATE must sit
     // ABOVE the ledger seed, because a gate below it aborts a transaction whose
     // ledger rows were already written — same rollback, but the artifact a reader
@@ -562,10 +564,17 @@ describe("restore-test-from-baseline.sh — L-01: the reference-data replay's po
     ).toBeGreaterThan(3);
 
     const STEPS = [
-      ["the search_path bracket", "SET LOCAL search_path = public, pg_catalog;"],
+      ["the search_path bracket", "SET LOCAL search_path = pg_catalog, public;"],
       ["the replay concatenation", 'cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"'],
       ["the path restore", "TXN_REFDATA_TAIL"],
       ["the gate", "TXN_REFDATA_GATE"],
+      // Phase 164.9.1 plan 06, D-16a: the analytics_service_url normalisation is
+      // obtained from its one owner and appended AFTER the gate proved the row is
+      // there and BEFORE the ledger is written. Above the gate it would rewrite a
+      // row the replay has not finished restoring; below the ledger DDL the ledger
+      // would claim a completed restore before the destination was made safe.
+      ["the normalisation emitter call", 'bash "$REARM_EMITTER" --emit-restore-sql'],
+      ["the normalisation concatenation", `printf '%s\\n' "$rearm_sql" >> "$out"`],
       ["the ledger DDL", "TXN_LEDGER_DDL"],
     ] as const;
 
@@ -599,14 +608,178 @@ describe("restore-test-from-baseline.sh — L-01: the reference-data replay's po
 
     // CALIBRATION 2 — the bracket alone, demoted below the replay. This is the
     // reordering that costs nothing to make and breaks every unqualified target.
-    const bracket = "SET LOCAL search_path = public, pg_catalog;\n";
+    const bracket = "SET LOCAL search_path = pg_catalog, public;\n";
     const replay = '  cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"\n';
     const demoted = SRC.replace(bracket, "").replace(replay, () => `${replay}${bracket}`);
     expect(demoted).not.toBe(SRC);
     const dTxn = txnRegion(demoted);
-    expect(liveIndexOf(dTxn, "SET LOCAL search_path = public, pg_catalog;")).toBeGreaterThan(
+    expect(liveIndexOf(dTxn, "SET LOCAL search_path = pg_catalog, public;")).toBeGreaterThan(
       liveIndexOf(dTxn, 'cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"'),
     );
+
+    // ── D-16a: the normalisation fragment sits AFTER the gate's heredoc CLOSES ──
+    // `liveIndexOf(txn, "TXN_REFDATA_GATE")` binds to the heredoc's OPENING line,
+    // so the loop above would still pass if the emitter call were pasted INSIDE
+    // the gate heredoc — where it is SQL text, not a shell statement, and the
+    // fragment is never produced. Pin it against the terminator line itself.
+    const txnLines = txn.split("\n");
+    const gateClose = txnLines.findIndex((l) => l === "TXN_REFDATA_GATE");
+    expect(gateClose, "the gate heredoc's terminator is no longer a line of build_transaction").toBeGreaterThan(0);
+    const CONCAT = `printf '%s\\n' "$rearm_sql" >> "$out"`;
+    const EMIT = 'bash "$REARM_EMITTER" --emit-restore-sql';
+    expect(
+      liveIndexOf(txn, EMIT),
+      "the normalisation emitter is called before the gate heredoc closes — it is inside the heredoc, not a statement",
+    ).toBeGreaterThan(gateClose);
+    expect(liveCount(txn, CONCAT), "the normalisation fragment is no longer appended exactly once").toBe(1);
+
+    // The STEPS check as a predicate, so the calibrations below run THE assertion
+    // above over a mutant rather than a hand-picked pair of its needles.
+    const inOrder = (t: string): boolean => {
+      const idx = STEPS.map(([, needle]) => liveIndexOf(t, needle));
+      return idx.every((i) => i >= 0) && idx.every((v, k) => k === 0 || idx[k - 1] < v);
+    };
+    expect(inOrder(txn), "the order predicate disagrees with the loop above on the live script").toBe(true);
+
+    // CALIBRATION 3 — the concatenation relocated ABOVE the gate. Every needle is
+    // still present and live; only its position changed.
+    const concatLine = `  ${CONCAT}\n`;
+    expect(SRC.split(concatLine).length - 1, "the concatenation line moved or doubled").toBe(1);
+    const aboveGate = SRC.replace(concatLine, "").replace(
+      '  cat >> "$out" <<TXN_REFDATA_GATE\n',
+      (m) => `${concatLine}${m}`,
+    );
+    expect(aboveGate).not.toBe(SRC);
+    expect(liveCount(txnRegion(aboveGate), CONCAT)).toBe(1);
+    expect(inOrder(txnRegion(aboveGate)), "the order pin did not flip with the fragment ABOVE the gate").toBe(false);
+
+    // CALIBRATION 4 — the concatenation relocated BELOW the ledger DDL.
+    const belowLedger = SRC.replace(concatLine, "").replace(ledgerEnd, () => `${ledgerEnd}${concatLine}`);
+    expect(belowLedger).not.toBe(SRC);
+    expect(liveCount(txnRegion(belowLedger), CONCAT)).toBe(1);
+    expect(inOrder(txnRegion(belowLedger)), "the order pin did not flip with the fragment BELOW the ledger DDL").toBe(false);
+
+    // CALIBRATION 5 — the emitter call pasted INSIDE the gate heredoc, above its
+    // terminator. The STEPS loop cannot see this one; the terminator pin must.
+    const emitLine = SRC.split("\n").find((l) => isLive(l) && l.includes(EMIT));
+    expect(emitLine, "the emitter call line is not a live line of the script").toBeDefined();
+    const inHeredoc = SRC.replace(EMIT, "<the call was moved>").replace(
+      "\nTXN_REFDATA_GATE\n",
+      () => `\n${emitLine}\nTXN_REFDATA_GATE\n`,
+    );
+    expect(inHeredoc).not.toBe(SRC);
+    const hTxn = txnRegion(inHeredoc);
+    expect(liveIndexOf(hTxn, EMIT)).toBeGreaterThanOrEqual(0);
+    expect(liveIndexOf(hTxn, EMIT)).toBeLessThan(hTxn.split("\n").findIndex((l) => l === "TXN_REFDATA_GATE"));
+  });
+
+  it("D-16a — the normalisation fragment is emitted BYTE-IDENTICALLY in both modes: nothing between the gate and the terminator reads $mode", () => {
+    // ⛔ THE TWO MODES MUST DIFFER ONLY IN `COMMIT;` / `ROLLBACK;`. A preflight is
+    // evidence about the restore that follows only while it runs the same bytes;
+    // wrap the fragment in `if [ "$mode" = restore ]` and a green preflight says
+    // nothing about the one transaction that writes, while every self-test arm
+    // (each runs ONE mode) stays green. Arms 33 and 34 measure behaviour per mode;
+    // this measures that the source cannot branch on the mode around the fragment.
+    //
+    // The window opens at the gate heredoc's TERMINATOR, not at the emitter call:
+    // a wrapping `if` sits ABOVE the call, so a window starting at the call would
+    // miss exactly the edit it exists to catch. It closes at the terminator block,
+    // the one place a mode test belongs. Any live `$mode` reference counts, not
+    // only `if [ "$mode"` — `[ "$mode" = … ] &&`, `case "$mode"` and passing the
+    // mode to the emitter are the same divergence.
+    const MODE_REF = /\$mode\b|\$\{mode\b/;
+    const TERMINATOR_IF = 'if [ "$mode" = "restore" ]; then';
+    const modeRefsInWindow = (text: string): string[] => {
+      const lines = txnRegion(text).split("\n");
+      const open = lines.findIndex((l) => l === "TXN_REFDATA_GATE");
+      const close = lines.findIndex(
+        (l, i) => i > open && l.trim() === TERMINATOR_IF && (lines[i + 1] ?? "").includes('echo "COMMIT;"'),
+      );
+      expect(open, "the gate heredoc's terminator is gone — the window cannot be opened").toBeGreaterThan(0);
+      expect(close, "the COMMIT/ROLLBACK terminator block is gone — the window cannot be closed").toBeGreaterThan(open);
+      const emitAt = lines.findIndex((l) => isLive(l) && l.includes("--emit-restore-sql"));
+      expect(emitAt, "the emitter call is not inside the gate-to-terminator window").toBeGreaterThan(open);
+      expect(emitAt).toBeLessThan(close);
+      return lines.slice(open + 1, close).filter((l) => isLive(l) && MODE_REF.test(l));
+    };
+
+    expect(
+      modeRefsInWindow(SRC),
+      "build_transaction reads $mode between the reference-data gate and the terminator, so the normalisation fragment can differ between preflight and restore (D-16a)",
+    ).toEqual([]);
+
+    // CALIBRATION 1 — wrap the whole emitter block in a mode condition (the plan's
+    // named mutation). The `if` lands ABOVE the call.
+    const blockStart = "  local rearm_rc=0 rearm_sql\n";
+    const blockEnd = `  printf '%s\\n' "$rearm_sql" >> "$out"\n`;
+    expect(SRC.split(blockStart).length - 1, "the emitter block's first line moved").toBe(1);
+    expect(SRC.split(blockEnd).length - 1, "the emitter block's last line moved").toBe(1);
+    const wrapped = SRC.replace(blockStart, () => `  if [ "$mode" = "restore" ]; then\n${blockStart}`).replace(
+      blockEnd,
+      () => `${blockEnd}  fi\n`,
+    );
+    expect(wrapped).not.toBe(SRC);
+    expect(modeRefsInWindow(wrapped).length, "the byte-identity pin did not see a mode-wrapped emitter").toBeGreaterThan(0);
+
+    // CALIBRATION 2 — the literal `if [ "$mode"` form BETWEEN the call and the
+    // terminator, and `$mode` handed to the emitter: both must be detected.
+    const after = SRC.replace(blockEnd, () => `${blockEnd}  if [ "$mode" = "preflight" ]; then :; fi\n`);
+    expect(after).not.toBe(SRC);
+    expect(modeRefsInWindow(after).length).toBeGreaterThan(0);
+    const passed = SRC.replace("--emit-restore-sql) || rearm_rc=$?", '--emit-restore-sql --mode "$mode") || rearm_rc=$?');
+    expect(passed).not.toBe(SRC);
+    expect(modeRefsInWindow(passed).length).toBeGreaterThan(0);
+  });
+
+  it("round-1 review (M1/M2): the emitter's exit code, its output's SHAPE and the self-test-only seam are all live guards", () => {
+    // Self-test arms 35-37 measure these on a lane, but that self-test runs on
+    // dispatch and by hand. These pins run on every PR and fail if a guard is
+    // deleted or defanged in the source. Each one is calibrated below.
+    const txn = txnRegion(SRC);
+    const CONCAT = `printf '%s\\n' "$rearm_sql" >> "$out"`;
+    const concatAt = liveIndexOf(txn, CONCAT);
+    expect(concatAt, "the normalisation concatenation is gone").toBeGreaterThan(0);
+
+    const RC_CAPTURE = "--emit-restore-sql) || rearm_rc=$?";
+    const RC_CHECK = 'if [ "$rearm_rc" -ne 0 ]; then';
+    const SHAPE_OPEN = "awk -v x='DO $tonau_rearm$'";
+    const SHAPE_IF = 'if [ "$rearm_open" != 1 ] || [ "$rearm_close" != 1 ]';
+    const guards = (t: string) => {
+      const x = txnRegion(t);
+      const c = liveIndexOf(x, CONCAT);
+      return [RC_CAPTURE, RC_CHECK, SHAPE_OPEN, SHAPE_IF].every((g) => {
+        const i = liveIndexOf(x, g);
+        return liveCount(x, g) === 1 && i >= 0 && i < c;
+      });
+    };
+    expect(guards(SRC), "an emitter guard is missing, doubled, or sits after the concatenation").toBe(true);
+
+    // CALIBRATION: the reviewer's two named mutations, and the shape check deleted.
+    const swallowed = SRC.replace(RC_CAPTURE, "--emit-restore-sql) || true");
+    expect(swallowed).not.toBe(SRC);
+    expect(guards(swallowed)).toBe(false);
+    const noShape = SRC.replace(SHAPE_IF, "if false");
+    expect(noShape).not.toBe(SRC);
+    expect(guards(noShape)).toBe(false);
+
+    // The seam: REARM_EMITTER is admitted only when the self-test's own legs say
+    // so, and those legs are the only place the flag is set.
+    const SEAM_IF = 'if [ "${RESTORE_SELFTEST_EMITTER_SEAM:-0}" = 1 ]; then';
+    expect(liveCount(runRegion(SRC), SEAM_IF), "REARM_EMITTER is no longer gated by the self-test seam").toBe(1);
+    expect(
+      liveCount(runRegion(SRC), 'REARM_EMITTER="$REARM_EMITTER_DEFAULT"'),
+      "outside the seam, REARM_EMITTER is no longer forced back to the script beside this one",
+    ).toBe(1);
+    const setters = liveLines(SRC).filter(
+      ({ line }) => /RESTORE_SELFTEST_EMITTER_SEAM=/.test(line) && !line.includes(":-0"),
+    );
+    expect(
+      setters.map(({ line }) => line.trim()),
+      "RESTORE_SELFTEST_EMITTER_SEAM is set somewhere other than the self-test's run_leg",
+    ).toEqual(['RESTORE_SELFTEST_EMITTER_SEAM="$ARM_EMITTER_SEAM" \\']);
+    const ungated = SRC.replace(SEAM_IF, "if true; then");
+    expect(ungated).not.toBe(SRC);
+    expect(liveCount(runRegion(ungated), SEAM_IF)).toBe(0);
   });
 
   it("the reference-data refusal is CALLED before the census is written, and the census carries the rows", () => {
@@ -2575,5 +2748,76 @@ describe("restore-test-from-baseline.sh — F-R2-02: the marker predicates are r
       undecided.status,
       "CALIBRATION: the PRE-FIX bytes refused anyway — the defect this arm defends against was not reproduced",
     ).toBe(0);
+  });
+});
+
+describe("restore-test-from-baseline.sh — 164.9.2 W6: REFDATA_ENTRY_N counts INSERT-class lines only", () => {
+  // ⛔ WHY THIS MATTERS. `REFDATA_ENTRY_N` feeds two things: the restore note
+  // "… from N allowlist line(s) …, each with a pinned statement count", and the
+  // ZERO-entries refusal that stops a restore which would replay no row. A C5 line
+  // (`update:<n>` / `decline:<n>`) pins no row count. Counted as an entry, it makes
+  // the note false (the real allowlist would read 28, not 22) and lets an allowlist
+  // holding ONLY C5 lines pass the refusal while replaying nothing the count floor
+  // can measure: the Phase 164.8 empty-restore defect with a non-zero number on it.
+  // The arm is the shipped line's BYTES, executed, never a restatement of the awk.
+  const PREFIX = 'REFDATA_ENTRY_N=$(awk ';
+  const liveLine = (src: string): string => {
+    const hits = liveLines(src).filter(({ line }) => line.trim().startsWith(PREFIX));
+    expect(hits.length, "REFDATA_ENTRY_N is not assigned by exactly ONE live awk line").toBe(1);
+    return hits[0].line.trim();
+  };
+  const run = (line: string, allowlist: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), "refdata-entry-n-"));
+    try {
+      const p = join(dir, "allowlist.txt");
+      writeFileSync(p, allowlist);
+      const r = spawnSync("bash", ["-c", `${line}\nprintf '%s' "$REFDATA_ENTRY_N"`], {
+        encoding: "utf8",
+        env: { ...process.env, REFDATA_ALLOWLIST: p },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      return r.stdout;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const MIXED = [
+    "# header comment",
+    "",
+    "a.sql\tpublic.t\tupdate:1\t# C5 replay line, above its INSERT on purpose",
+    "a.sql\tpublic.t\t2\t# INSERT",
+    "b.sql\tpublic.u\t1\t# INSERT",
+    "c.sql\tpublic.t\tdecline:1\t# C5 decline",
+    "",
+  ].join("\n");
+  const ONLY_C5 = "a.sql\tpublic.t\tupdate:1\t# only a C5 line\nc.sql\tpublic.t\tdecline:1\t# and a decline\n";
+
+  it("the live line counts the two INSERT lines of a mixed allowlist, and ZERO for a C5-only one", () => {
+    const line = liveLine(SRC);
+    expect(run(line, MIXED)).toBe("2");
+    expect(run(line, ONLY_C5), "a C5-only allowlist must read 0 so the ZERO-entries refusal fires").toBe("0");
+  });
+
+  it("the real allowlist reads 22 INSERT entries and the fixture 2, although they hold C5 lines", () => {
+    const line = liveLine(SRC);
+    expect(run(line, read("scripts/restore-test-refdata-allowlist.txt"))).toBe("22");
+    // 2, not 1, since the merge of Phase 164.9.1 (2026-09-26): its plan 05 added
+    // the fixture's public.system_settings INSERT entry. The fixture's update:1
+    // and decline:1 lines are still not counted; with them the count reads 4.
+    expect(run(line, read(`${FIXTURES}/refdata-allowlist.txt`))).toBe("2");
+  });
+
+  it("CALIBRATION — with the field-3 filter removed, the same line counts C5 lines and the pin goes RED", () => {
+    const line = liveLine(SRC);
+    const filter = " && $3 ~ /^[1-9][0-9]*$/";
+    expect(line.includes(filter), "the field-3 filter is not in the live line, so this calibration cannot remove it").toBe(true);
+    const neutered = line.replace(filter, "");
+    expect(neutered).not.toBe(line);
+    expect(run(neutered, MIXED)).toBe("4");
+    expect(run(neutered, ONLY_C5)).toBe("2");
+    // …and the mutated SCRIPT fails the live-line pin above in the same way.
+    const mutatedSrc = SRC.replace(line, neutered);
+    expect(mutatedSrc).not.toBe(SRC);
+    expect(run(liveLine(mutatedSrc), ONLY_C5)).not.toBe("0");
   });
 });

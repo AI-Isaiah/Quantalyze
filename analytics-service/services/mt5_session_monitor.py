@@ -125,9 +125,19 @@ MT5_SESSION_POLL_INTERVAL_ENV: Final[str] = "MT5_SESSION_POLL_INTERVAL_S"
 #     both bounds in full expires at t0+e+330 while the outer deadline expires
 #     at t0+330, and the outer one pre-empts the heal's own `budget_abandoned`
 #     arm. That is BOUNDARY-ONLY: it needs all three knobs at their own extremes
-#     simultaneously, and the shipped defaults (600 / 2 / ~35) leave ~560 s of
-#     headroom. ⛔ Do not read the sentence above as "impossible"; read it as
-#     "true for the sum, with the preamble as the exception".
+#     simultaneously, and the shipped defaults leave the cadence minus
+#     (`_MT5_RELOGIN_LEASE_WAIT_DEFAULT_S` + the derived default budget
+#     `_MT5_RELOGIN_ROUND_TRIPS * MT5_REQUEST_TIMEOUT_S +
+#     _MT5_RELOGIN_CONNECT_SLACK_S`) of headroom. ⛔ Do not read the sentence
+#     above as "impossible"; read it as "true for the sum, with the preamble as
+#     the exception".
+#
+#     ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1, SFH-10 / IN-01): this
+#     sentence used to restate the defaults as "(600 / 2 / ~35) leave ~560 s of
+#     headroom". The budget default was already 160 s when that was written and
+#     164.6.5 raised it again, so the figure drifted twice. It is stated by
+#     SYMBOL now, because a restated number next to a derivation is the drift
+#     class this repo records; compute it from the symbols.
 #
 #   CEILING = 3600 s, the cadence of the independent hourly prod-prober. At or
 #     above it this loop measures nothing that instrument does not already
@@ -139,9 +149,11 @@ MT5_SESSION_POLL_INTERVAL_ENV: Final[str] = "MT5_SESSION_POLL_INTERVAL_S"
 #     exposure by about one and a half orders of magnitude, and the difference
 #     between 600 and 900 is immaterial to that — which is the point: the number
 #     is not load-bearing, so it is not a guess dressed as a measurement. Worst
-#     case duty cycle is the tick BUDGET over the cadence, about 27% in the
-#     pathological case where every tick both times out AND heals, and roughly one
-#     round-trip in the overwhelmingly common already-authorized case.
+#     case duty cycle is the tick BUDGET over the cadence (`_relogin_budget_s()`
+#     over `session_poll_interval_s()`) in the pathological case where every tick
+#     both times out AND heals, and roughly one round-trip in the overwhelmingly
+#     common already-authorized case. ⛔ It was stated as "about 27%" and drifted
+#     with the budget (SFH-10); compute it from the two readers.
 # --------------------------------------------------------------------------- #
 _MT5_SESSION_POLL_INTERVAL_FLOOR_S: Final[float] = (
     _MT5_RELOGIN_BUDGET_CEILING_S + _MT5_RELOGIN_LEASE_WAIT_CEILING_S
@@ -174,8 +186,12 @@ async def run_mt5_session_monitor_tick() -> None:
     already does, in order: kill switch -> credentials -> gateway endpoint ->
     BOUNDED lease by ``mt5_terminal_key`` -> ``to_thread`` under a budget ->
     CREDENTIAL-FREE probe -> branch on the code -> heal ONLY ``-6`` -> RE-PROBE ->
-    classified verdict; and its five-round-trip budget is already gated by
-    ``test_the_budget_covers_every_round_trip_the_worst_case_path_makes``.
+    classified verdict; and its budget (``_MT5_RELOGIN_ROUND_TRIPS`` rpyc
+    crossings, since 164.6.5 the ipc_fault escalation's unconditional path) is
+    already gated by ``test_the_budget_covers_the_ESCALATION_path_too`` and, for
+    the ``-6`` path, ``test_the_budget_covers_every_round_trip_the_worst_case_
+    path_makes``. ⛔ This said "five-round-trip budget" until 164.6.5 review
+    round 1 (SFH-10), a count that had drifted twice.
 
     ⛔ NO second detector, NO second lease acquisition, NO second budget and NO
     second verdict vocabulary. ⭐ Delegating adds ZERO entries to

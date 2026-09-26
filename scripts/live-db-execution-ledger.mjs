@@ -67,8 +67,9 @@
  *    re-dump will close this" is not a thing a test run can observe. `routeKind`
  *    below holds the routing rules, each with the evidence it turns on; two of
  *    the three rules ARE evidence-keyed, and the third is an explicit list of
- *    arms whose root causes were derived one at a time (three keyed by an arm
- *    token, and since 2026-09-23 one module keyed by its measured refusal).
+ *    arms whose root causes were derived one at a time (since 2026-09-25 one
+ *    module keyed by its measured refusal; the three arm-token keys it also held
+ *    were removed when Phase 164.9.1 closed those arms).
  *
  * ── USAGE ──────────────────────────────────────────────────────────────────
  *   bash scripts/local-stack/run.sh up           # the lane needs a booted stack
@@ -122,7 +123,12 @@ export const DESTINATION = "[164.9-LIVEDB-LANE-EXECUTION-CENSUS]";
 // SHRUNK 2026-09-23 (Phase 164.4.2 plan 08 checkpoint RED, CI run 35914559318
 // attempt 2): 18 -> 10, in the commit that deleted the eight entries the lane's
 // default-ACL reset and non-public objects stopped reproducing.
-export const ENTRY_CEILING = 10;
+// SHRUNK 2026-09-25 (Phase 164.9.1 plan 10): 10 -> 7, in the commit that deleted
+// the three K3 entries the phase fixed - g10b P12 (M1, the fan-in initial status),
+// request-allocator-holdings-sync-queued (M2, the in-flight look-up and the
+// disconnected-key refusal) and match-decisions-xor-rls (the D-14 rewrite of its
+// arms to the current uniqueness invariant, with M3's comments).
+export const ENTRY_CEILING = 7;
 
 /**
  * THE ARM-COUNT FLOOR. `counts.files` alone cannot detect a module that reported
@@ -198,24 +204,11 @@ export function classifySignature(failure) {
  * refusal (`evidence`).
  */
 const K3_ARMS = [
-  {
-    module: "src/__tests__/compute-jobs-audit-2026-05-07-g10b.test.ts",
-    token: "P12:",
-    why: "enqueue_compute_job routes to the ten-arg _enqueue_compute_job_internal, whose INSERT omits status; the fan-in state is never entered. A production defect, needs a migration.",
-  },
-  {
-    module: "src/__tests__/match-decisions-xor-rls.test.ts",
-    token: "widened UNIQUE:",
-    why: "asserts a unique index migration 081 REPLACED. Repair means deciding what the arm asserts under the CURRENT invariant — an intent question, not fixture drift.",
-  },
-  {
-    module: "src/__tests__/request-allocator-holdings-sync-queued.test.ts",
-    // ⚠️ NOT "Queued path returns": vitest joins suite and arm with ` > `, and
-    // this arm's name straddles that join. Measured 2026-09-21 — the longer
-    // token matched nothing and the arm fell silently into the K1 catch-all.
-    token: "Queued path",
-    why: "the Queued shape is returned only from an exception handler the RPC's optimistic look-up prevents from ever firing. Needs an RPC change or a decision that the shape is retired.",
-  },
+  // REMOVED 2026-09-25 (Phase 164.9.1 plan 10): the three arm-token keys "P12:"
+  // (g10b), "widened UNIQUE:" (match-decisions-xor-rls) and "Queued path"
+  // (request-allocator-holdings-sync-queued). Their arms pass on the lane with the
+  // phase's migrations replayed, and their ledger lines were deleted in the same
+  // commit. The token-keyed branch in `routeKind` stays for any future entry.
   {
     // ⭐ EVIDENCE-KEYED, not token-keyed: every arm in this module seeds through
     // the same call, so the measured refusal is the discriminator, scoped to the

@@ -4,11 +4,16 @@ import {
   KCS10_PUBLIC_SENTENCE,
   ownerRemedy,
   ownerStateLine,
+  probeUnreadableShareNote,
   recipientShareNote,
+  recipientShareNoteFor,
   SHARE_CARD_COPY,
+  unbuildableNoteKindOf,
   untrustedKeyCaption,
   type OwnerRemedy,
 } from "./status-surface-copy";
+import { MIN_FACTSHEET_SERIES_POINTS } from "./factsheet/build-payload";
+import type { NotBuildableReason } from "./factsheet/fetch-and-build-payload";
 
 /**
  * Phase 167.2 / KCS-13, KCS-14 — the S4-S9 copy, pinned character for
@@ -108,6 +113,45 @@ describe("S6 — KCS-09 fixed remedies", () => {
   });
 });
 
+describe("S6 — KCS09-FINISHED-UNREADABLE (167.2.1-REVIEW-R2 WR-03)", () => {
+  // The jobs finished, but the owner build could not read the row. Typed out,
+  // never imported.
+  const unreadable = { buildUnreadable: true };
+
+  it("KCS09-FINISHED-UNREADABLE: text and tone, and never KCS09-FINISHED's build claim", () => {
+    expect(ownerStateLine({ state: "finished" }, unreadable)).toEqual({
+      id: "KCS09-FINISHED-UNREADABLE",
+      text: "The last computation finished. We could not read its results to build the factsheet.",
+      tone: "muted",
+    });
+    expect(ownerStateLine({ state: "finished" }, unreadable).text).not.toContain(
+      "could not be built",
+    );
+  });
+
+  it("its remedy is to read again, never 'have it checked', for every shape", () => {
+    for (const shape of ["single", "unlinked", "composite", "csv", "unknown"] as const) {
+      const r = ownerRemedy({ state: "finished" }, shape, SID, unreadable);
+      expect(r.id).toBe("KCS09-UNREADABLE");
+      expect(rendered(r)).toBe("Reload this page to try again.");
+    }
+  });
+
+  it("a readable build keeps KCS09-FINISHED, and no other state line changes when the build is unreadable", () => {
+    expect(ownerStateLine({ state: "finished" }, { buildUnreadable: false }).id).toBe("KCS09-FINISHED");
+    const others: ComputeState[] = [
+      { state: "queued" },
+      { state: "failed", errorKind: "permanent" },
+      { state: "never_started" },
+      { state: "unreadable" },
+    ];
+    for (const s of others) {
+      expect(ownerStateLine(s, unreadable)).toEqual(ownerStateLine(s));
+      expect(ownerRemedy(s, "single", SID, unreadable)).toEqual(ownerRemedy(s, "single", SID));
+    }
+  });
+});
+
 describe("S6 — KCS-21 shape remedies", () => {
   const shapeStates: ComputeState[] = [
     { state: "stalled" },
@@ -192,6 +236,199 @@ describe("S5 / S7 — KCS-12 share notes", () => {
       expect(recipientShareNote("public-url", arm)).toBe(
         "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.",
       );
+    }
+  });
+});
+
+describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () => {
+  // A computed row whose factsheet cannot build. Typed out from
+  // 167.2.1-CONTEXT.md D-02, never imported. None of them says "yet": waiting
+  // does not change this row.
+  //
+  // 167.2.1-REVIEW CR-01 and IN-02 (2026-09-26): the reason is stated from the
+  // STORED RESULTS the probe read, not from "the last computation" (the owner
+  // page's job-derived state line owns that), in the active voice.
+  const UNBUILDABLE_SHORT =
+    "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
+  const UNBUILDABLE_COMPOSITE =
+    "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
+  const PUBLIC_UNBUILDABLE_SHORT =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
+  const PUBLIC_UNBUILDABLE_COMPOSITE =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
+  const ARMS = ["in_progress", "not_available", "unreadable"] as const;
+
+  it("KCS12-UNBUILDABLE-SHORT: private link, single-key series too short, arm not_available", () => {
+    expect(recipientShareNoteFor("mint-token", "not_available", "too_short")).toBe(UNBUILDABLE_SHORT);
+  });
+
+  it("KCS12-UNBUILDABLE-COMPOSITE: private link, composite cannot build, arm not_available", () => {
+    expect(recipientShareNoteFor("mint-token", "not_available", "cannot_build")).toBe(
+      UNBUILDABLE_COMPOSITE,
+    );
+  });
+
+  it("KCS12-PUBLIC-UNBUILDABLE-SHORT: public URL, single-key series too short, any arm", () => {
+    for (const arm of ARMS) {
+      expect(recipientShareNoteFor("public-url", arm, "too_short")).toBe(PUBLIC_UNBUILDABLE_SHORT);
+    }
+  });
+
+  it("KCS12-PUBLIC-UNBUILDABLE-COMPOSITE: public URL, composite cannot build, any arm", () => {
+    for (const arm of ARMS) {
+      expect(recipientShareNoteFor("public-url", arm, "cannot_build")).toBe(
+        PUBLIC_UNBUILDABLE_COMPOSITE,
+      );
+    }
+  });
+
+  it("SELECTION: no unbuildable kind is exactly recipientShareNote, for both modes and every arm", () => {
+    for (const mode of ["mint-token", "public-url"] as const) {
+      for (const arm of ARMS) {
+        expect(recipientShareNoteFor(mode, arm, null)).toBe(recipientShareNote(mode, arm));
+      }
+    }
+  });
+
+  it("SELECTION: a private link keeps KCS12-MINT-A while a recompute runs", () => {
+    // The recipient really does see "being prepared" while a recompute runs.
+    for (const kind of ["too_short", "cannot_build"] as const) {
+      expect(recipientShareNoteFor("mint-token", "in_progress", kind)).toBe(
+        "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.",
+      );
+    }
+  });
+
+  // 167.2.1-REVIEW-SFH H-2 (2026-09-26). Lineage: an unbuildable row whose
+  // job read failed used to keep KCS12-UNREADABLE, whose tail "They appear
+  // there once a computation succeeds" is false for a row whose computation
+  // already succeeded. The card is unknown; the placeholder and its reason
+  // are not.
+  const UNBUILDABLE_UNREADABLE_SHORT =
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
+  const UNBUILDABLE_UNREADABLE_COMPOSITE =
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
+
+  it("KCS12-UNBUILDABLE-UNREADABLE-SHORT: private link, series too short, job state unreadable", () => {
+    expect(recipientShareNoteFor("mint-token", "unreadable", "too_short")).toBe(
+      UNBUILDABLE_UNREADABLE_SHORT,
+    );
+  });
+
+  it("KCS12-UNBUILDABLE-UNREADABLE-COMPOSITE: private link, stored results cannot build, job state unreadable", () => {
+    expect(recipientShareNoteFor("mint-token", "unreadable", "cannot_build")).toBe(
+      UNBUILDABLE_UNREADABLE_COMPOSITE,
+    );
+  });
+
+  it("H-2 NO FALSE TAIL: no note chosen for an unbuildable row promises numbers once a computation succeeds", () => {
+    // The row's computation DID succeed; waiting for one changes nothing.
+    for (const mode of ["mint-token", "public-url"] as const) {
+      for (const arm of ARMS) {
+        for (const kind of ["too_short", "cannot_build"] as const) {
+          if (mode === "mint-token" && arm === "in_progress") continue; // MINT-A, D-02
+          expect(recipientShareNoteFor(mode, arm, kind)).not.toContain(
+            "once a computation succeeds",
+          );
+        }
+      }
+    }
+  });
+
+  it("unbuildableNoteKindOf maps every probe reason, and only the build-time refusals to a kind", () => {
+    const table: Array<[NotBuildableReason, ReturnType<typeof unbuildableNoteKindOf>]> = [
+      ["too_few_points", "too_short"],
+      ["composite_unbuildable", "cannot_build"],
+      // 167.2.1-REVIEW-SFH M-3: a malformed stored series is not "too short".
+      ["malformed_series", "cannot_build"],
+      ["read_error", null],
+      ["not_visible", null],
+      ["not_computed", null],
+    ];
+    for (const [reason, kind] of table) {
+      expect(unbuildableNoteKindOf(reason)).toBe(kind);
+    }
+  });
+
+  it("L-1 EXHAUSTIVE: a reason the switch does not list fails loud instead of reading as 'no kind'", () => {
+    // 167.2.1-REVIEW-SFH L-1: `default: return null` turned any future reason
+    // into uncomputed copy for a computed row. The compiler now refuses an
+    // unlisted reason; at runtime one that slips past a cast throws.
+    expect(() => unbuildableNoteKindOf("future_reason" as unknown as NotBuildableReason)).toThrow(
+      /unhandled reason future_reason/,
+    );
+  });
+
+  it("CR-01 COHERENCE: no unbuildable note makes a claim about a computation, so none can contradict the owner page's state line", () => {
+    // The owner page prints the note under a line derived from compute JOBS:
+    // "none is on record" (done jobs are purged after 30 days) or "stopped on a
+    // problem" while the analytics row still reads complete. A note claiming the
+    // last computation succeeded contradicted both (167.2.1-REVIEW CR-01).
+    for (const mode of ["mint-token", "public-url"] as const) {
+      for (const kind of ["too_short", "cannot_build"] as const) {
+        const note = recipientShareNoteFor(mode, "not_available", kind);
+        expect(note.toLowerCase()).not.toContain("computation");
+        expect(note).toContain("stored results");
+      }
+    }
+  });
+
+  it("N-5 SCOPE: every SHORT line claims fewer than 2 days only of the results the factsheet is built from, never of everything stored", () => {
+    // 167.2.1-REVIEW-SFH-R2 N-5: `too_few_points` counts the ONE column the
+    // builder reads (`countedSeriesColumn`). A row can hold one valid
+    // `daily_returns` entry and a 500-point `returns_series`; "its stored
+    // results hold fewer than 2 days" is false about that row. The sentence
+    // must bind the count to what the factsheet is built from.
+    for (const note of [
+      recipientShareNoteFor("mint-token", "not_available", "too_short"),
+      recipientShareNoteFor("public-url", "not_available", "too_short"),
+      recipientShareNoteFor("mint-token", "unreadable", "too_short"),
+    ]) {
+      expect(note).toContain("stored results we build its factsheet from hold fewer than");
+      expect(note).not.toContain("Its stored results hold");
+    }
+  });
+
+  it("DRIFT: the '2' in every SHORT line is MIN_FACTSHEET_SERIES_POINTS, the builder's own gate", () => {
+    // If the gate moves, these sentences would state a false threshold.
+    for (const note of [
+      recipientShareNoteFor("mint-token", "not_available", "too_short"),
+      recipientShareNoteFor("public-url", "not_available", "too_short"),
+      recipientShareNoteFor("mint-token", "unreadable", "too_short"),
+    ]) {
+      expect(note).toContain(`fewer than ${MIN_FACTSHEET_SERIES_POINTS} days`);
+      expect(note).toContain(`at least ${MIN_FACTSHEET_SERIES_POINTS}`);
+    }
+  });
+});
+
+describe("S5 / S7 — KCS-12 buildability check failed (167.2.1-REVIEW-SFH H-2)", () => {
+  // Typed out, never imported. A computed row whose buildability could not be
+  // checked: what the recipient sees is unknown, so neither line claims it.
+  it("KCS12-PROBE-UNREADABLE: private link, the check failed", () => {
+    expect(probeUnreadableShareNote("mint-token")).toBe(
+      "We could not check what a private link to this strategy shows right now. Reload this page to check again.",
+    );
+  });
+
+  it("KCS12-PUBLIC-PROBE-UNREADABLE: public URL, the check failed", () => {
+    expect(probeUnreadableShareNote("public-url")).toBe(
+      "We could not check what this strategy's factsheet link shows right now. Reload this page to check again.",
+    );
+  });
+
+  it("H-2: neither line is a recipient-view claim a failed check cannot back", () => {
+    // Lineage: a failed probe on a published row rendered KCS12-PUBLIC, "…
+    // shows that the factsheet is not available yet …", while the public
+    // factsheet most likely rendered fine.
+    for (const mode of ["mint-token", "public-url"] as const) {
+      const note = probeUnreadableShareNote(mode);
+      for (const arm of ["in_progress", "not_available", "unreadable"] as const) {
+        expect(note).not.toBe(recipientShareNote(mode, arm));
+      }
+      expect(note).not.toContain("not available");
+      expect(note).not.toContain("placeholder");
+      expect(note).not.toContain("once a computation succeeds");
     }
   });
 });

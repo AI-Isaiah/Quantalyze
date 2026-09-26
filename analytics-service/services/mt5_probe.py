@@ -105,20 +105,31 @@ MT5_GATEWAY_MISCONFIGURED_DETAIL: Final[str] = (
 #:
 #: The gateway's Expert-Advisors *"Allow algorithmic trading"* setting
 #: (``Enabled`` in the ``[Experts]`` block) is what governs the
-#: ``trade_allowed`` flag we read. The gateway re-sets it OFF on every account
-#: change (``Account=1`` / ``Profile=1``) and the worker logs in on every job,
-#: which is why this fault RECURS rather than staying fixed once an operator
-#: clears it. The external-Python-API option is an INDEPENDENT checkbox, read
-#: through ``tradeapi_disabled`` — see the arm below.
+#: ``trade_allowed`` flag we read. The external-Python-API option is an
+#: INDEPENDENT checkbox, read through ``tradeapi_disabled`` — see the arm below.
+#:
+#: ⛔ CORRECTED 2026-09-25 (164.6.5-06) — and the correction reached the SENTENCE,
+#: not just this comment. This block said, dated 2026-08-13, that the gateway
+#: re-sets the option OFF on every account change (``Account=1`` /
+#: ``Profile=1``), so the fault RECURS after an operator clears it, and the
+#: sentence told a user the gateway "switches it off again whenever it changes
+#: users". That re-clear is GATED by ``mt5_validation.ACCOUNT_CHANGE_ALGO_DISABLE_OPTION``,
+#: which the founder read UNCHECKED over VNC on 2026-09-24 (and a real login on
+#: 2026-09-16 left the options byte-identical — 164.6.4-UAT). So the recurrence
+#: claim was FALSE at HEAD and is gone. The sentence now names the landmine as
+#: what must stay unticked, because every key check is an account change: TRUE
+#: whichever way the box sits, and the thing an operator must check first when
+#: this fault appears.
 #:
 #: Held to the same two negative rules as the constant above, and pinned over
 #: the WHOLE family by
 #: ``tests/test_mt5_validate_parity.py::test_every_builder_emittable_constant_is_curated_and_credential_free``.
 MT5_GATEWAY_TRADE_PERMISSION_OFF_DETAIL: Final[str] = (
     "The MT5 gateway has 'Allow algorithmic trading' switched off, so read-only "
-    "capability cannot be proven. The gateway switches it off again whenever it "
-    "changes users, so turning it back on needs an operator, not a retry — see "
-    "docs/runbooks/mt5-go-live.md."
+    "capability cannot be proven. Turning it back on needs an operator, not a "
+    "retry, and the gateway's 'Disable algorithmic trading when the account has "
+    "been changed' option must stay unticked, because every key check changes "
+    "the account — see docs/runbooks/mt5-go-live.md."
 )
 
 #: 161-02 / WIZERR-01 arm 2 — the case the constant at the top of this block
@@ -155,9 +166,11 @@ class Mt5GatewayMisconfigured(Exception):
 
     ⚠️ 161-02 CORRECTION: TWO independent gateway settings produce this, and this
     type no longer presumes which. The measured live cause is the Expert-Advisors
-    *"Allow algorithmic trading"* option (``Enabled`` in ``[Experts]``), which the
-    gateway re-sets off on every account change while the worker logs in on every
-    job — hence the recurrence. MetaQuotes' default-ON *"Disable automatic
+    *"Allow algorithmic trading"* option (``Enabled`` in ``[Experts]``).
+    ⛔ CORRECTED 2026-09-25 (164.6.5-06): this said the gateway re-sets that option
+    off on every account change while the worker logs in on every job, "hence the
+    recurrence". It does so only while ``ACCOUNT_CHANGE_ALGO_DISABLE_OPTION`` is
+    ticked, and it was founder-read UNCHECKED on 2026-09-24. MetaQuotes' default-ON *"Disable automatic
     trading through the external Python API"* (``Api``, reported as
     ``tradeapi_disabled``) is the OTHER one. ``mt5_gateway_misconfigured_detail``
     picks the sentence the flags actually support.

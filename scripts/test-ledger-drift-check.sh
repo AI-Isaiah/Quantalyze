@@ -235,6 +235,13 @@ fail() {
 }
 
 # ── The default database access commands (used when nothing is injected) ─────
+# ⚠️ WHAT BOUNDS THESE psql CALLS, stated per phase of the call (Phase 164.4.2.1
+# round-2 review, IN-05). The CONNECT is bounded by `PGCONNECT_TIMEOUT`, which
+# the VAC-08 step in ci.yml sets in its `env:`. A running query is bounded by
+# the `SET statement_timeout` each call issues, and that is enforced by the
+# SERVER. Neither bounds a network loss AFTER connect: the client then blocks
+# on a read until TCP keepalive gives up, which by default is far longer than
+# the job. That case is bounded only by the job's own `timeout-minutes`.
 default_ledger_query() {
   local direction="$1"
   local names_csv="$2"
@@ -459,7 +466,7 @@ check() {
   # fallback never fires.
   missing_err_lines="$( { wc -l < "$missing_err" 2>/dev/null || echo '?'; } | tr -d '[:space:]' )"
   if [ "$missing_rc" -ne 0 ]; then
-    fail "the ledger presence query failed (exited ${missing_rc}; ${missing_err_lines} line(s) of stderr captured and WITHHELD — it can carry connection detail)."
+    fail "the ledger presence query failed (exited ${missing_rc}; ${missing_err_lines} line(s) of stderr captured and WITHHELD — it can carry connection detail). A possible cause other than a connection fault: a TEST writer (apply-test or a restore) was running concurrently. A restore's TRUNCATE of the ledger can hold this query past its statement timeout on every attempt, if the restore's post-TRUNCATE tail outlasts the retry budget. This job has held no shared-TEST key since Phase 164.4.2.1, and on a pull_request run it has no ordering wait either, so re-run once supabase-migrate.yml and test-restore-from-baseline.yml are idle before hunting for a credential or network fault."
   fi
 
   # ⛔ SP-M01. This read
@@ -772,7 +779,7 @@ check() {
   # the file's single verdict (`if [ "$bad" = 1 ]`) decides the exit code — the
   # same shape as the `stale_count` and `new_count` blocks below it.
   if [ "$exempt_count" -gt "$FRONTIER_EXEMPT_CEILING" ]; then
-    echo "::error::${GATE}: FRONTIER_EXEMPT_CEILING exceeded: ${exempt_count} migration(s) above the ledger frontier (tip ${frontier_tip}) > ceiling ${FRONTIER_EXEMPT_CEILING}. That is a stalled apply, not an apply-on-merge window — supabase-migrate.yml's apply-test has stopped applying to TEST. Fix the apply; do NOT raise the ceiling (a reviewed edit to FRONTIER_EXEMPT_CEILING in scripts/test-ledger-drift-check.sh, never a side effect of a green run)."
+    echo "::error::${GATE}: FRONTIER_EXEMPT_CEILING exceeded: ${exempt_count} migration(s) above the ledger frontier (tip ${frontier_tip}) > ceiling ${FRONTIER_EXEMPT_CEILING}. That is a stalled apply, not an apply-on-merge window — supabase-migrate.yml's apply-test has stopped applying to TEST — UNLESS a TEST writer (apply-test or a restore) was running concurrently: this job has held no shared-TEST key since Phase 164.4.2.1, and on a pull_request run it has no ordering wait, so an apply still in flight can leave several migrations above the tip for a moment. Check supabase-migrate.yml first and re-run once it is idle; if the breach persists, fix the apply; do NOT raise the ceiling (a reviewed edit to FRONTIER_EXEMPT_CEILING in scripts/test-ledger-drift-check.sh, never a side effect of a green run)."
     # NAMED, not counted. A ceiling that reports only a number tells a reader that
     # something is wrong and nothing about what; the versions are the evidence.
     sed 's/^/::error::  exempt (above tip): /' "$exempt_file"

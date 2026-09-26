@@ -786,8 +786,14 @@ ROLLBACK;
 -- ⛔ AND IT IS NOT CLOSED ONCE. The reference-data replay reseeds that row
 -- FAITHFULLY, by an explicit founder decision (scripts/restore-test-refdata-
 -- allowlist.txt — read it; ⛔ do NOT edit it to make the restore silently
--- normalise the hazard). So a future restore RE-ARMS it, and the durable
--- deliverable is therefore this MEASUREMENT rather than the one-off write.
+-- normalise the hazard). Since 2026-09-25 (Phase 164.9.1) the restore instead
+-- re-normalises the row INSIDE ITS OWN TRANSACTION: it appends the fragment
+-- `test-only-normalize-analytics-url.sh --emit-restore-sql` prints, after the
+-- reference-data gate, so the sink commits only with the restore, and a
+-- preflight runs the same fragment and rolls it back, writing nothing. A hand
+-- run of docs/runbooks/test-analytics-url.md is STILL the remedy when a
+-- MIGRATION re-seeds the row or the restore refuses. So the durable deliverable
+-- is still this MEASUREMENT rather than any one write.
 --
 -- ⛔ NEITHER BRANCH IS A SKIP, AND A RUN THAT TOOK NO BRANCH REDDENS. A
 -- marker-conditional part that can fall through every branch and still pass is

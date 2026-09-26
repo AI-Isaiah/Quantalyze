@@ -46,13 +46,17 @@ Regression gates — WHY each case matters (Rule 9):
 """
 from __future__ import annotations
 
+import ast
 import asyncio
+import io
 import json
 import logging
 import pathlib
+import re
 import sys
 import threading
 import time
+import tokenize
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -73,6 +77,7 @@ from services.mt5_client import (
     Mt5LoginRefusedError,
 )
 from services import mt5_concurrency
+from services.mt5_validation import _IPC_TRANSPORT_CODES
 from tests.limiter_stub import evict_module, patch_shared_limiter
 
 
@@ -444,6 +449,15 @@ _LOGIN_STAGE_CODES_THAT_ARE_NOT_A_REFUSAL = [
     pytest.param(-10003, "internal fail init", id="-10003-init"),
     pytest.param(-10004, "No IPC connection", id="-10004-connect"),
     pytest.param(1, "Success", id="1-res-s-ok"),
+]
+
+# MERGE 2026-09-23 (164.6.5 integrated with 167) — the subset of the list above
+# that 164.6.5's IPC arm does NOT claim. Derived from the SHIPPED tuple, never
+# re-typed, so a change to `_IPC_TRANSPORT_CODES` moves this split with it.
+_LOGIN_STAGE_CODES_NOT_A_REFUSAL_AND_NOT_IPC_TRANSPORT = [
+    p
+    for p in _LOGIN_STAGE_CODES_THAT_ARE_NOT_A_REFUSAL
+    if p.values[0] not in _IPC_TRANSPORT_CODES
 ]
 
 # -10005 is the modal login dialog D-08 measured for a wrong MT5 password; 0 and
@@ -1009,8 +1023,10 @@ async def test_mt5_capability_refusal_logs_carry_no_credentials(
             rendered = repr(call)
             for secret in secrets:
                 assert secret not in rendered
-    # At least one WARNING was emitted, so the sweep above is not vacuous.
-    assert mock_logger.warning.call_args_list
+    # At least one line was emitted, so the sweep above is not vacuous. ⚠️
+    # 164.6.5-06: this fixture is the OPERATOR arm, which now logs at ERROR (D-15),
+    # so the non-vacuity check reads that level rather than WARNING.
+    assert mock_logger.error.call_args_list
 
     # The SECOND egress: every structured event emitted during this request.
     events = [e for e in captured if e.get("event") == "mt5.stage"]
@@ -1155,15 +1171,11 @@ async def test_mt5_transient_maps_to_sign_in_failed_detail_not_credentials(
             True,
             id="post-login-order_check-code-0",
         ),
-        pytest.param(
-            {
-                "account": _INVESTOR_ACCOUNT,
-                "terminal": {"connected": True, "trade_allowed": True},
-                "order_check_raises": Mt5ClientError(-10005, "IPC timeout"),
-            },
-            True,
-            id="post-login-order_check-ipc-10005",
-        ),
+        # ⚠️ MERGE 2026-09-23 (164.6.5 integrated) — the post-login IPC -10005
+        # param that stood here moved to
+        # `test_mt5_post_login_ipc_fault_answers_terminal_unresponsive` below:
+        # an IPC-coded fault that is not a login-stage refusal now answers
+        # 164.6.5's MT5_TERMINAL_UNRESPONSIVE, still never SIGN_IN_FAILED.
         # The login-stage IPC-infrastructure codes and the success code are
         # driven by `test_mt5_login_stage_ipc_or_success_code_keeps_the_network_detail`
         # below; a login-stage -10005 is a refusal (D-17) and is driven by
@@ -1196,7 +1208,9 @@ async def test_mt5_post_login_or_ipc_transient_keeps_the_network_detail(
     client.release.assert_called_once()
 
 
-@pytest.mark.parametrize(("code", "detail"), _LOGIN_STAGE_CODES_THAT_ARE_NOT_A_REFUSAL)
+@pytest.mark.parametrize(
+    ("code", "detail"), _LOGIN_STAGE_CODES_NOT_A_REFUSAL_AND_NOT_IPC_TRANSPORT
+)
 async def test_mt5_login_stage_ipc_or_success_code_keeps_the_network_detail(
     exchange_router, code, detail
 ):
@@ -1204,7 +1218,12 @@ async def test_mt5_login_stage_ipc_or_success_code_keeps_the_network_detail(
     login-stage answer carrying -10000…-10004 or 1 is our bridge failing to
     carry the call, not a sign-in verdict. It keeps the pre-167 answer:
     `NETWORK_UNAVAILABLE`, the shared network detail and `recoverable=True`, so
-    the Retry survives and the user is not told a sign-in failed."""
+    the Retry survives and the user is not told a sign-in failed.
+
+    ⚠️ MERGE 2026-09-23 (164.6.5 integrated) — -10004 is driven by
+    `test_mt5_login_stage_ipc_transport_code_answers_terminal_unresponsive`
+    instead: it is in `_IPC_TRANSPORT_CODES`, so 164.6.5's arm answers it
+    MT5_TERMINAL_UNRESPONSIVE. Still never SIGN_IN_FAILED (D-17 holds)."""
     router = exchange_router
     client = _make_client(login_raises=Mt5LoginRefusedError(code, detail))
     _install_mt5_client(router, client)
@@ -1253,6 +1272,226 @@ async def test_mt5_login_stage_refusal_code_answers_sign_in_failed(
     client.login.assert_called_once()
     client.order_check.assert_not_called()
     client.release.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# MERGE 2026-09-23 — 164.6.5 (MT5VALIDATEWEDGE) integrated with 167 (CREDTRUST).
+# The router consults 167's `is_mt5_login_refusal` FIRST and 164.6.5's
+# `is_ipc_transport_fault` SECOND. These two cases pin the IPC-coded faults that
+# are NOT a login-stage refusal: 167 D-17 decides they are not a sign-in failure,
+# and 164.6.5 D-12/D-13 decides they answer MT5_TERMINAL_UNRESPONSIVE rather
+# than a Retry against a wedged terminal. The login-stage -10005 overlap stays
+# 167's SIGN_IN_FAILED (`test_mt5_login_stage_refusal_code_answers_sign_in_failed`).
+# --------------------------------------------------------------------------- #
+
+
+async def test_mt5_post_login_ipc_fault_answers_terminal_unresponsive(
+    exchange_router,
+):
+    """A post-login read (`order_check`) timing out on IPC arrives AFTER the
+    credential was accepted, so it is never a sign-in failure (167 WR-01). Its
+    code is in `_IPC_TRANSPORT_CODES`, so it answers 164.6.5's honest,
+    non-retryable 500 — not the Retry the pre-merge transport answer offered."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        terminal={"connected": True, "trade_allowed": True},
+        order_check_raises=Mt5ClientError(-10005, "IPC timeout"),
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 500
+    body = ei.value.detail
+    assert body["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    assert body["retryable"] is False
+    assert body["detail"] != SIGN_IN_FAILED_DETAIL, (
+        "a post-login fault was answered as a refused sign-in"
+    )
+    client.login.assert_called_once()
+    assert client.order_check.called is True
+    client.release.assert_called_once()
+
+
+async def test_mt5_login_stage_ipc_transport_code_answers_terminal_unresponsive(
+    exchange_router,
+):
+    """A login-stage -10004 is NOT a refusal (167 D-17: our bridge failed to
+    carry the call) and IS an IPC transport code (164.6.5), so it answers
+    MT5_TERMINAL_UNRESPONSIVE — never SIGN_IN_FAILED, never a Retry."""
+    router = exchange_router
+    client = _make_client(
+        login_raises=Mt5LoginRefusedError(-10004, "No IPC connection")
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 500
+    body = ei.value.detail
+    assert body["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    assert body["retryable"] is False
+    assert body["detail"] != SIGN_IN_FAILED_DETAIL
+    client.order_check.assert_not_called()
+    client.release.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.5 / criterion 5 (D-12/D-13) — the IPC-transport arm: OUR terminal, not
+# the user's key, and never a retry instruction that cannot work
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        (-10004, "No IPC connection"),
+        (-10005, "IPC timeout"),
+    ],
+)
+async def test_mt5_ipc_transport_fault_maps_to_terminal_unresponsive(
+    exchange_router, code, detail
+):
+    """164.6.5 / criterion 5 — BOTH IPC transport codes now raise a distinct,
+    honest, non-retryable 500 instead of falling through to the generic "try
+    again in a moment" transient copy. MEASURED 2026-09-21: -10005 stayed
+    wedged 1h39m across two retries, one with CORRECT credentials, and no
+    retry from the wizard could ever have cleared it — the same instruction
+    the 424/transient tail below still gives for every OTHER unrecognised
+    login error, honestly, because those really can clear on a retry.
+
+    release() runs — the session is torn down like every other arm. Raising
+    (never returning {"valid": true}) is this function's fail-CLOSED posture;
+    nothing is persisted on any arm of it, this one included."""
+    router = exchange_router
+    err = Mt5ClientError(code, detail)
+    client = _make_client(login_raises=err)
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 500
+    assert ei.value.status_code != 424, (
+        "an IPC transport fault must not fall through to the generic "
+        "transient/424 tail — that copy asks the user to retry a terminal "
+        "that will not answer again"
+    )
+    body = ei.value.detail
+    assert body["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    assert body["dependency"] == "mt5-gateway"
+    assert body["retryable"] is False
+    # R-1: a permanent fault never advertises a wait.
+    assert not (ei.value.headers or {}).get("Retry-After")
+    # Never the dishonest transient copy, and never a credential-blame copy.
+    assert body["detail"] != NETWORK_ERROR_DETAIL
+    assert body["detail"] != AUTH_FAILED_DETAIL
+    assert body["detail"] != MT5_WRONG_SERVER_DETAIL
+    assert "read_only" not in repr(body)
+    # 164.6.5 review round 1 / WR-05 — not now, but not never. The detail used
+    # to say "This needs an operator, not a retry", a permanence claim that is
+    # false for -10004 (a redeploy clears it) and for the heal's own relaunch
+    # window, which answers both codes.
+    assert "a later attempt can succeed" in body["detail"]
+    assert "needs an operator" not in body["detail"]
+    client.release.assert_called_once()
+
+
+async def test_mt5_non_ipc_client_error_is_unchanged_the_d12_fence(exchange_router):
+    """⭐ D-12 as an EXECUTING assertion — the honest transport arm must be
+    PROVEN intact, not merely left alone. A login error carrying a code
+    OUTSIDE `_IPC_TRANSPORT_CODES` must still classify exactly as it did
+    before this plan: the generic 424/transient tail, never the new 500.
+    `KEY_NETWORK_TIMEOUT` (the TypeScript sibling of this Python-side copy)
+    is neither deleted nor widened."""
+    router = exchange_router
+    err = Mt5ClientError(0, "timeout waiting for response")
+    client = _make_client(login_raises=err)
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.status_code != 500, (
+        "D-12: the honest transport arm must not be widened into the new "
+        "IPC-specific 500 — a non-IPC code stays on its EXISTING disposition"
+    )
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    client.release.assert_called_once()
+
+
+async def test_mt5_ipc_transport_fault_emits_its_own_outcome_category(
+    exchange_router,
+):
+    """The stage event's recorded outcome is a NEW category, distinct from the
+    existing "transient" bucket — the parity histogram this field feeds
+    groups by it, and folding this operator-actionable state into the
+    transient bucket would corrupt the counts."""
+    router = exchange_router
+    err = Mt5ClientError(-10005, "IPC timeout")
+    client = _make_client(login_raises=err)
+    _install_mt5_client(router, client)
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req())
+
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1
+    assert validate[0]["outcome"] == "terminal_unresponsive"
+    assert validate[0]["outcome"] != "transient", (
+        "folding this into the existing transient category would corrupt "
+        "the parity histogram this field is built from"
+    )
+    assert validate[0]["ok"] is False
+
+
+async def test_mt5_ipc_transport_fault_logs_scrubbed_code_no_credentials(
+    exchange_router, monkeypatch
+):
+    """The line for this arm carries the SCRUBBED code only — never the
+    interpolated remote text, never a login, password, or broker server
+    value. Asserted as a PROPERTY of what was logged (secrets absent), never
+    by constructing a credential-shaped literal as the thing searched for
+    (this repo's own dated proof-of-absence rule)."""
+    router = exchange_router
+    err = Mt5ClientError(-10005, "IPC timeout")
+    client = _make_client(login_raises=err)
+    _install_mt5_client(router, client)
+    mock_logger = MagicMock()
+    monkeypatch.setattr(router, "logger", mock_logger)
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException):
+            await _call(
+                router,
+                _make_req(
+                    api_key="123456", api_secret="s3cr3t-pw", passphrase="MyBroker-Live"
+                ),
+            )
+
+    secrets = ("123456", "s3cr3t-pw", "MyBroker-Live")
+    for meth in ("exception", "error", "warning", "info", "debug"):
+        for call in getattr(mock_logger, meth).call_args_list:
+            rendered = repr(call)
+            for secret in secrets:
+                assert secret not in rendered
+    # 164.6.5 review round 1 / SFH-08 — the arm now logs at ERROR, so the
+    # non-vacuity check reads the ERROR calls (the level itself is pinned by
+    # `test_ipc_transport_fault_logs_at_error_like_the_d15_arm`).
+    assert mock_logger.error.call_args_list, (
+        "the sweep above is vacuous unless at least one ERROR was captured"
+    )
+
+    events = [e for e in captured if e.get("event") == "mt5.stage"]
+    assert events, "the structlog half of the sweep is vacuous"
+    rendered_events = repr(events)
+    for secret in secrets:
+        assert secret not in rendered_events
 
 
 async def test_mt5_probe_timeout_maps_to_network_detail_and_releases(
@@ -2636,3 +2875,296 @@ async def test_a_connect_stage_abandon_is_transient_and_never_the_counting_503(
     assert validate[0]["outcome"] == "transient"
     assert validate[0]["outcome"] != "gateway_unreachable"
     assert validate[0]["ok"] is False
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.5 / criterion 7 / D-15 — THE SETTINGS LANDMINE IS PINNED, NOT TICKED.
+#
+# The gateway terminal's Expert-Advisors tab carries "Disable algorithmic trading
+# when the account has been changed". Validation LOGS THE SHARED TERMINAL IN, so
+# every validation is an account change: ticking that box would silently disable
+# algo trading for every client. The box itself cannot be read (it reaches disk
+# only on a clean terminal exit), so the CONSEQUENCE is the check — a connected
+# terminal reporting its own trade permission off — and it must be LOUD. These
+# gates keep it loud, keep it from false-alarming, and keep this repo from ever
+# gaining a path that writes a terminal option.
+#
+# ⛔ The label below is HAND-TYPED from the on-screen label the founder read over
+# VNC on 2026-09-24, never imported from the module under test.
+# --------------------------------------------------------------------------- #
+
+_ACCOUNT_CHANGE_OPTION_LABEL = (
+    "Disable algorithmic trading when the account has been changed"
+)
+_ANALYTICS_LOGGER = "quantalyze.analytics"
+
+
+def _landmine_client():
+    """A connected terminal whose OWN trade permission is off — the observable
+    consequence of the landmine, and the only one."""
+    return _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal={"connected": True, "trade_allowed": False},
+    )
+
+
+def _operator_arm_records(caplog):
+    return [
+        r
+        for r in caplog.records
+        if r.name == _ANALYTICS_LOGGER and "capability undetermined" in r.getMessage()
+    ]
+
+
+async def test_d15_lost_terminal_permission_logs_above_an_ordinary_verdict(
+    exchange_router, caplog, monkeypatch
+):
+    """The shared terminal serving EVERY client has lost algo permission. Logged at
+    WARNING it sat below a merely-unset `MT5_GATEWAY_HOST`, which this same router
+    logs at ERROR — a severity inversion that hides the one outage that takes every
+    MT5 client down at once. It must be ABOVE an ordinary verdict and NEVER below
+    the unset-env arm."""
+    router = exchange_router
+    _install_mt5_client(router, _landmine_client())
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req())
+    records = _operator_arm_records(caplog)
+    assert len(records) == 1, f"expected ONE operator-arm line, got {records!r}"
+    level = records[0].levelno
+    assert level > logging.WARNING, (
+        f"the lost-terminal-permission line logged at {records[0].levelname}: a "
+        "shared terminal refusing algo trading for EVERY client reads like one "
+        "user's routine refusal, and nobody is paged until clients report it"
+    )
+
+    # ...and never below the unset-env arm, measured from the SAME router.
+    caplog.clear()
+    monkeypatch.delenv("MT5_GATEWAY_HOST", raising=False)
+    monkeypatch.delenv("MT5_GATEWAY_PORT", raising=False)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req())
+    env_levels = [
+        r.levelno
+        for r in caplog.records
+        if r.name == _ANALYTICS_LOGGER and "not configured" in r.getMessage()
+    ]
+    assert env_levels, "the unset-env comparison is vacuous — its line was not seen"
+    assert level >= max(env_levels), (
+        "the lost-terminal-permission line logs BELOW an unset env var — the "
+        "severity inversion mt5_relogin's WR-01 already corrected for its own verdicts"
+    )
+
+
+async def test_d15_the_line_names_the_setting_and_why_validation_trips_it(
+    exchange_router, caplog
+):
+    """One line must tell an operator BOTH the what and the why: which setting,
+    and that validation is itself an account change. Asserted on what the line
+    SAYS — a gate that only checked a word was absent would pass a reword that
+    dropped the cause."""
+    router = exchange_router
+    _install_mt5_client(router, _landmine_client())
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req())
+    records = _operator_arm_records(caplog)
+    assert len(records) == 1, f"expected ONE operator-arm line, got {records!r}"
+    line = records[0].getMessage()
+    assert _ACCOUNT_CHANGE_OPTION_LABEL in line, (
+        f"the line does not name the landmine setting: {line!r}"
+    )
+    assert "Validation is an account change" in line, (
+        f"the line does not say why a validation trips the setting: {line!r}"
+    )
+    assert "Allow algorithmic trading" in line, (
+        f"the line does not name the permission that is off: {line!r}"
+    )
+    assert "every" in line and "client" in line, (
+        f"the line does not say the terminal is SHARED by every client: {line!r}"
+    )
+
+
+@pytest.mark.parametrize("code", sorted(_IPC_TRANSPORT_CODES))
+async def test_ipc_transport_fault_logs_at_error_like_the_d15_arm(
+    exchange_router, caplog, code
+):
+    """164.6.5 review round 1 / SFH-08 + WR-06. An IPC-wedged gateway terminal is
+    the SAME reach as the D-15 arm above: the one shared terminal serving every
+    MT5 client. The card tells the user "tell us", so the fault must reach an
+    operator. At WARNING it never became a Sentry event, and the validate path
+    does not trigger the heal, so a user hitting it produced log lines only.
+
+    Asserted on level AND content: the line must carry the scrubbed code, and
+    nothing else from the error (no credential, no broker server)."""
+    router = exchange_router
+    client = _make_client(login_raises=Mt5ClientError(code, "IPC fault"))
+    _install_mt5_client(router, client)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.detail["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    records = [
+        r
+        for r in caplog.records
+        if r.name == _ANALYTICS_LOGGER and "IPC transport fault" in r.getMessage()
+    ]
+    assert len(records) == 1, f"expected ONE IPC-arm line, got {records!r}"
+    assert records[0].levelno >= logging.ERROR, (
+        f"the wedged-terminal line logged at {records[0].levelname}: below ERROR it "
+        "is no Sentry event, and the user's card promised that someone was told"
+    )
+    assert f"code={code}" in records[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    "terminal, why",
+    [
+        (None, "unreadable — terminal_info() raised"),
+        ({"connected": False, "trade_allowed": False}, "disconnected AND permission off"),
+        ({"connected": False, "trade_allowed": True}, "disconnected"),
+        ({"trade_allowed": False}, "malformed — no connected field"),
+        ({"connected": True}, "malformed — no trade_allowed field"),
+    ],
+)
+async def test_d15_the_loud_check_never_false_alarms_on_a_bridge_blip(
+    exchange_router, caplog, terminal, why
+):
+    """⭐ The assertion that stops the loud check becoming a false-alarm generator.
+    An unreadable, malformed or disconnected terminal proves NOTHING about the
+    landmine — it is our bridge blipping and it clears on retry. It must route
+    TRANSIENT and emit NOTHING above WARNING; paging an operator about a setting
+    for a network blip is how a real alarm gets ignored."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK, terminal=terminal
+    )
+    _install_mt5_client(router, client)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.status_code == 424, f"{why}: not the transient arm"
+    assert ei.value.detail == NETWORK_ERROR_DETAIL, f"{why}: not the transient arm"
+    loud = [
+        r for r in caplog.records
+        if r.name == _ANALYTICS_LOGGER and r.levelno > logging.WARNING
+    ]
+    assert not loud, f"{why}: a bridge blip raised a loud line {loud!r}"
+    assert all(
+        _ACCOUNT_CHANGE_OPTION_LABEL not in r.getMessage() for r in caplog.records
+    ), f"{why}: a bridge blip blamed the account-change setting"
+
+
+async def test_d15_the_raised_fault_is_unchanged_only_the_log_got_louder(
+    exchange_router,
+):
+    """The change is how LOUDLY the condition is reported, never what the caller
+    is told. Status, machine code, dependency and retryable flag are typed here as
+    the literals they were before 164.6.5-06 — a drift in any one changes the
+    wizard's rendering and the breaker's accounting."""
+    router = exchange_router
+    _install_mt5_client(router, _landmine_client())
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+    assert ei.value.status_code == 500
+    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["dependency"] == "mt5-gateway"
+    assert ei.value.detail["retryable"] is False
+    assert set(ei.value.detail) == {"code", "dependency", "retryable", "detail"}
+    assert not (ei.value.headers or {}).get("Retry-After")
+
+
+# The markers a terminal-option WRITE would have to carry in code: the terminal's
+# config files, the `[Experts]` section (as a header or as a configparser key),
+# or one of its option keys assigned a value.
+_TERMINAL_OPTION_WRITE_MARKERS = re.compile(
+    r"(?i)\b(?:terminal|common|origin)\.ini\b"
+    r"|\[Experts\]"
+    r"|^['\"]Experts['\"]$"
+    r"|\b(?:Account|Profile|Enabled|Api|AllowLiveTrading|AllowDllImport)\s*=\s*[01]\b"
+)
+
+
+def _code_tokens_without_comments_or_docstrings(src: str):
+    """Yield (line, token text) for every token that is CODE — comments and
+    docstrings are dropped, so prose describing the landmine can neither satisfy
+    nor defeat the scan."""
+    tree = ast.parse(src)
+    docstring_lines = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        ):
+            docstring_lines.add(node.body[0].lineno)
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type == tokenize.COMMENT:
+            continue
+        if tok.type == tokenize.STRING and tok.start[0] in docstring_lines:
+            continue
+        yield tok.start[0], tok.string
+
+
+def _analytics_service_source_files():
+    root = pathlib.Path(__file__).resolve().parent.parent
+    return sorted(
+        p
+        for p in root.rglob("*.py")
+        if not ({".venv", "tests", "__pycache__"} & set(p.relative_to(root).parts))
+    )
+
+
+def test_d15_no_analytics_service_path_writes_a_terminal_option():
+    """⛔ D-15 is one-way in the dangerous direction: nothing in this service may
+    ever write a terminal option — not to "fix" algo trading, not to tick the box.
+    Scanned over CODE only, and the failure names the offending file and line."""
+    files = _analytics_service_source_files()
+    # Not vacuous: the service's own source tree, not an empty glob.
+    assert len(files) > 50, f"scan found only {len(files)} files — wrong root?"
+    offenders = []
+    for path in files:
+        for line, text in _code_tokens_without_comments_or_docstrings(
+            path.read_text(encoding="utf-8")
+        ):
+            if _TERMINAL_OPTION_WRITE_MARKERS.search(text):
+                offenders.append(f"{path.name}:{line}: {text[:80]}")
+    assert not offenders, (
+        "a code path names a terminal option store — D-15 forbids any write to the "
+        "gateway terminal's options (ticking the account-change box silently "
+        f"disables algo trading for every client): {offenders}"
+    )
+
+
+def test_d15_the_write_scan_ignores_prose_and_catches_code():
+    """The scan's two halves, proven on synthetic source: a COMMENT or DOCSTRING
+    naming the landmine is ignored (prose must not make the gate self-invalidating),
+    and a CODE line naming a terminal option store is caught."""
+    prose = (
+        '"""Mentions [Experts] Account=1 in terminal.ini."""\n'
+        "# [Experts] Account=1 lives in terminal.ini\n"
+        "x = 1\n"
+    )
+    assert not [
+        t for _, t in _code_tokens_without_comments_or_docstrings(prose)
+        if _TERMINAL_OPTION_WRITE_MARKERS.search(t)
+    ]
+    for code in (
+        'path = "Config/terminal.ini"\n',
+        'cfg["Experts"]["Account"] = "0"\n',
+        'line = "Account=0"\n',
+    ):
+        assert [
+            t for _, t in _code_tokens_without_comments_or_docstrings(code)
+            if _TERMINAL_OPTION_WRITE_MARKERS.search(t)
+        ], f"the scan missed a code-shaped option write: {code!r}"
+    # And the real corpus DOES carry the landmine in prose, so the stripping above
+    # is load-bearing rather than decorative.
+    raw = "".join(
+        p.read_text(encoding="utf-8") for p in _analytics_service_source_files()
+    )
+    assert "[Experts]" in raw

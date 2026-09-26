@@ -409,57 +409,74 @@ export function CsvSubmitStep({
     // whatever that attempt comes back with.
     setSessionRestarted(false);
     setSubmitting(true);
+    // 164.6.5-07 / D-14 — the id of THIS attempt, captured off the
+    // csv-finalize wizardFetch call itself (task 1's `onCorrelationId`).
+    // A LOCAL variable, deliberately NOT React state: `surfacedId` below
+    // reads it synchronously, later in this SAME async function — a state
+    // setter's update is not visible to this closure until the next render,
+    // so reading a `useState` value here would silently see the STALE
+    // (null) value from render time, not what `onCorrelationId` just wrote.
+    let requestCorrelationId: string | null = null;
 
     try {
-      const res = await wizardFetch("/api/strategies/csv-finalize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          wizard_session_id: wizardSessionId,
-          fmt,
-          strategy_name: strategyName, // Cross-AI revision 2026-04-30
-          // Phase 110 / CONTRIB-02 — routing hint the csv-finalize RPC branches
-          // on: "contribution" finalizes status='private' (owner-only),
-          // "manager" finalizes status='pending_review'. HINT only — the RPC
-          // terminal-status guard (plan 110-01) is the real enforcement.
-          entry_context: entryContext,
-          // Phase 19.1 — REQUIRED for fmt=daily_returns/daily_nav. The
-          // csv-finalize route rejects with CSV_INVALID_FORMAT if this is
-          // absent — see `parseDailyReturnsSeries` in that route. Omitted when
-          // the wizard never received the field from csv-validate (legacy
-          // pre-19.1 envelopes; fmt=trades). 140.5-05: the bare `file:line`
-          // citation that stood here is described in the `dailyReturnsSeries`
-          // prop docblock above and was replaced for the reason recorded there.
-          ...(dailyReturnsSeries !== undefined
-            ? { daily_returns_series: dailyReturnsSeries }
-            : {}),
-          // QA report 2026-05-21 ISSUE-010 — classification metadata.
-          // The route persists these via an authenticated UPDATE on
-          // strategies AFTER the SECURITY DEFINER finalize RPC returns
-          // the new id; RLS gates the write to the row's owner.
-          metadata: {
-            description: metadata.description,
-            category_id: metadata.categoryId,
-            strategy_types: metadata.strategyTypes,
-            subtypes: metadata.subtypes,
-            markets: metadata.markets,
-            supported_exchanges: metadata.supportedExchanges,
-            leverage_range: metadata.leverageRange,
-            aum: metadata.aum,
-            max_capacity: metadata.maxCapacity,
-            // #597 part 2 — the deferred upload-picker persistence. The CSV
-            // branch captures an asset_class picker value (MetadataStep →
-            // MetadataDraft.assetClass) with a FREE choice (no exchange lock),
-            // but this body used to drop it, so every CSV strategy landed with
-            // asset_class null. Forward it verbatim (snake_case wire key,
-            // matching every sibling field); csv-finalize validates the closed
-            // set ('crypto' | 'traditional') at the route boundary. Unlike the
-            // API-key path there is NO force-derive to 'crypto' — a legitimately
-            // traditional CSV track record must keep the user's choice.
-            asset_class: metadata.assetClass,
+      const res = await wizardFetch(
+        "/api/strategies/csv-finalize",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            wizard_session_id: wizardSessionId,
+            fmt,
+            strategy_name: strategyName, // Cross-AI revision 2026-04-30
+            // Phase 110 / CONTRIB-02 — routing hint the csv-finalize RPC branches
+            // on: "contribution" finalizes status='private' (owner-only),
+            // "manager" finalizes status='pending_review'. HINT only — the RPC
+            // terminal-status guard (plan 110-01) is the real enforcement.
+            entry_context: entryContext,
+            // Phase 19.1 — REQUIRED for fmt=daily_returns/daily_nav. The
+            // csv-finalize route rejects with CSV_INVALID_FORMAT if this is
+            // absent — see `parseDailyReturnsSeries` in that route. Omitted when
+            // the wizard never received the field from csv-validate (legacy
+            // pre-19.1 envelopes; fmt=trades). 140.5-05: the bare `file:line`
+            // citation that stood here is described in the `dailyReturnsSeries`
+            // prop docblock above and was replaced for the reason recorded there.
+            ...(dailyReturnsSeries !== undefined
+              ? { daily_returns_series: dailyReturnsSeries }
+              : {}),
+            // QA report 2026-05-21 ISSUE-010 — classification metadata.
+            // The route persists these via an authenticated UPDATE on
+            // strategies AFTER the SECURITY DEFINER finalize RPC returns
+            // the new id; RLS gates the write to the row's owner.
+            metadata: {
+              description: metadata.description,
+              category_id: metadata.categoryId,
+              strategy_types: metadata.strategyTypes,
+              subtypes: metadata.subtypes,
+              markets: metadata.markets,
+              supported_exchanges: metadata.supportedExchanges,
+              leverage_range: metadata.leverageRange,
+              aum: metadata.aum,
+              max_capacity: metadata.maxCapacity,
+              // #597 part 2 — the deferred upload-picker persistence. The CSV
+              // branch captures an asset_class picker value (MetadataStep →
+              // MetadataDraft.assetClass) with a FREE choice (no exchange lock),
+              // but this body used to drop it, so every CSV strategy landed with
+              // asset_class null. Forward it verbatim (snake_case wire key,
+              // matching every sibling field); csv-finalize validates the closed
+              // set ('crypto' | 'traditional') at the route boundary. Unlike the
+              // API-key path there is NO force-derive to 'crypto' — a legitimately
+              // traditional CSV track record must keep the user's choice.
+              asset_class: metadata.assetClass,
+            },
+          }),
+        },
+        {
+          // 164.6.5-07 / D-14 — capture the id THIS request put on the wire.
+          onCorrelationId: (id) => {
+            requestCorrelationId = id;
           },
-        }),
-      });
+        },
+      );
 
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
@@ -540,8 +557,15 @@ export function CsvSubmitStep({
         const translated = recogniseSeamErrorCode(seamErrorCode(data));
         const code: WizardErrorCode =
           translated !== "UNKNOWN" ? translated : "CSV_UPSTREAM_FAIL";
+        // 164.6.5-07 / D-14 — a server-supplied id still wins (either shape);
+        // `requestCorrelationId` (this request's own captured id) now sits
+        // BEFORE the page-load fallback, so a wire that names no id at all
+        // still identifies the attempt that failed, not the page load.
         const surfacedId =
-          seamCorrelationId(data) ?? data.correlation_id ?? correlationId;
+          seamCorrelationId(data) ??
+          data.correlation_id ??
+          requestCorrelationId ??
+          correlationId;
         // Through the ONE parser (`quantalyze/no-raw-retry-after-parse` is a
         // repo-wide lint error), off the SAME response as the code, and
         // `?? undefined` because absence is not zero.

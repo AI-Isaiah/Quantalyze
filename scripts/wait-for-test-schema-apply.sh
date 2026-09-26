@@ -5,6 +5,17 @@
 # criterion 3). Invoked bare from the three DB-touching READER jobs in
 # .github/workflows/ci.yml (`sql-tests`, `python`, `e2e-seeded`), immediately
 # BEFORE each job's `Acquire shared-test-db mutex` step.
+# ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1): the sentence above is lineage. The
+# invokers are now `python` and `e2e-seeded` (immediately before their acquire
+# step) and `test-db-drift` (before VAC-08). `test-db-drift` has had no acquire
+# step since Phase 164.4.2.1, so for it this wait is the ONLY ordering control
+# against `apply-test`. `sql-tests` stopped invoking it in Phase 164.4.2.
+# ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1 round-1 review, SFH-01 / WR-01):
+# "the ONLY ordering control" holds on a merge push only, and the sentence
+# above is kept as lineage. On a pull_request run this wait does not run (the
+# step's `if:` is merge-push only), so `test-db-drift`'s VAC-08 has NO ordering
+# against `apply-test` or a dispatched restore. See the note in `wait_for_apply`
+# and section 0 of docs/runbooks/shared-test-db-mutex.md.
 #
 # ⭐ WHY A WAIT AND NOT A LOCK. A mutex guarantees that no two holders overlap;
 # it never guarantees WHICH GOES FIRST. On a merge push, ci.yml's reader jobs
@@ -233,6 +244,17 @@ probe_apply_state() {
 # ── THE WAIT ───────────────────────────────────────────────────────────────
 wait_for_apply() {
   local waited=0 flag apply outcome="" polls=0
+  # ⛔ A MISSING psql MUST NAME ITSELF (Phase 164.4.2.1 round-2 review,
+  # SFH-R2-10). Without this check the flag probe answers `unknown` on every
+  # poll, which is correctly "not clear", so the step burns its whole
+  # WAIT_BUDGET_SECONDS and then blames an in-flight flag for what is a missing
+  # binary. Nothing pins `Install psql client` ahead of this step in ci.yml, so
+  # the check lives here. It is skipped only when the flag probe is injected,
+  # because then psql is never called.
+  if [ -z "${TEST_INFLIGHT_PROBE_CMD:-}" ] && ! command -v psql >/dev/null 2>&1; then
+    echo "::error::wait-outcome: psql-missing — psql is not on PATH, so the in-flight flag cannot be read. Install the psql client before this step. This is a missing binary, not an apply still running."
+    return 1
+  fi
   echo "ordering wait: budget ${WAIT_BUDGET_SECONDS}s, appearance grace ${APPEAR_GRACE_SECONDS}s, poll ${WAIT_POLL_SECONDS}s."
   while [ -z "${outcome}" ]; do
     flag="$(probe_inflight_flag)"
@@ -250,6 +272,37 @@ wait_for_apply() {
       # still prevents the two from actually overlapping. What this closes is the
       # ORDERING hole — proceeding to queue for a lock behind a restore that is
       # replacing the schema this job is about to assert against.
+      # ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1): the mutex still keeps
+      # `python` and `e2e-seeded` from overlapping a writer, but it no longer
+      # covers `test-db-drift`, which holds no key. Its VAC-08 reads are
+      # read-only, and an overlap makes them fail loudly, never pass falsely.
+      # A restore's lock blocks them until COMMIT or their statement timeout.
+      # A later commit's apply can only produce a loud false red.
+      # ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1 round-1 review, SFH-01 /
+      # WR-01): the note above is written from a merge push, and is kept as
+      # lineage. On a pull_request run this wait does not run (the step's
+      # `if:` is merge-push only), so VAC-08 has NO ordering against
+      # `apply-test` or a dispatched restore. An overlap can red a PR (a
+      # ledger lock wait past the retry budget, or a body-fetch race on the
+      # restore's COMMIT) that the key used to prevent. It cannot turn a real
+      # drift green: the restore is one transaction, and the frontier tip is
+      # computed from the checkout's own migrations. Re-run the PR check after
+      # the restore or apply. Do NOT widen the step's `if:` to PR events: this
+      # wait keys on GITHUB_SHA's own supabase-migrate.yml run, which never
+      # exists on a PR. On a merge push a seconds-wide window also remains
+      # between this wait's exit and VAC-08's first read.
+      # ⛔ CORRECTED 2026-09-25 (Phase 164.4.2.1 round-1 review, SFH-05): the
+      # first note's "an overlap makes them fail loudly, never pass falsely" and
+      # "A restore's lock blocks them until COMMIT" overstate it, and are kept
+      # as lineage. The restore takes ACCESS EXCLUSIVE on the ledger only at its
+      # TRUNCATE, late in its one transaction. Before that point, through the
+      # whole DROP SCHEMA public CASCADE and replay, VAC-08's reads go through
+      # against the pre-restore COMMITTED state and can PASS. An overlap with an
+      # apply can also PASS, through the frontier exemption. The real outcomes:
+      # an overlap either reads a committed state that really existed (and
+      # passes or fails on its merits), or fails loudly (the TRUNCATE holding a
+      # read past its statement timeout on every retry, or a body fetch racing
+      # a COMMIT). It cannot pass on a state that never committed.
       # `unknown` is deliberately NOT treated as clear: an unreadable probe
       # cannot rule an apply IN, which is the same reading the exhaustion
       # message already states.
@@ -374,6 +427,48 @@ self_test() {
   seam_arm "flag seam PRINTS NOTHING answers unknown"  1 "in-flight flag 'unknown'"  "true"  "printf %s absent"
   seam_arm "apply seam EXITS NON-ZERO answers unreadable" 1 "apply state 'unreadable'" "printf %s clear" "false"
   seam_arm "apply seam PRINTS NOTHING answers unreadable" 1 "apply state 'unreadable'" "printf %s clear" "true"
+
+  # ── A MISSING psql (SFH-R2-10) ──────────────────────────────────────────
+  # ⭐ THE REAL flag probe with no psql on PATH must name the binary and fail
+  # AT ONCE, never exhaust the budget and blame the flag. PATH is cut down to a
+  # directory holding only `dirname` (the one external the script needs before
+  # the check), so the check cannot find psql wherever this runs. The budget is
+  # 0, so a guard that stopped firing reaches `wait-exhausted` at once and the
+  # arm fails on the missing `psql-missing` name, not on a hang. The second leg
+  # proves the check is skipped when the flag probe is injected, which is what
+  # keeps every arm above independent of the host's psql.
+  local nopsql_dir="" nopsql_dirname=""
+  nopsql_dirname="$(command -v dirname)"
+  nopsql_dir="$(mktemp -d)"
+  ln -s "${nopsql_dirname}" "${nopsql_dir}/dirname"
+  rc=0
+  out="$(PATH="${nopsql_dir}" TEST_INFLIGHT_PROBE_CMD="" \
+         TEST_APPLY_STATE_CMD="printf %s absent" \
+         WAIT_BUDGET_SECONDS=0 APPEAR_GRACE_SECONDS=0 WAIT_POLL_SECONDS=1 \
+         "${BASH}" "${BASH_SOURCE[0]}" 2>&1)" || rc=$?
+  checks=$((checks + 1))
+  case "${rc}:${out}" in
+    1:*"wait-outcome: psql-missing"*"psql is not on PATH"*) : ;;
+    *)
+      rm -f "${nopsql_dir}/dirname"; rmdir "${nopsql_dir}"
+      echo "SELF-TEST FAIL: with no psql on PATH the wait must exit 1 naming 'psql-missing' and 'psql is not on PATH'. It exited ${rc}. A missing binary would read as a flag problem after the full budget. Output: ${out}" >&2
+      exit 1
+      ;;
+  esac
+  rc=0
+  out="$(PATH="${nopsql_dir}" TEST_INFLIGHT_PROBE_CMD="printf %s clear" \
+         TEST_APPLY_STATE_CMD="printf %s absent" \
+         WAIT_BUDGET_SECONDS=0 APPEAR_GRACE_SECONDS=0 WAIT_POLL_SECONDS=1 \
+         "${BASH}" "${BASH_SOURCE[0]}" 2>&1)" || rc=$?
+  rm -f "${nopsql_dir}/dirname"; rmdir "${nopsql_dir}"
+  checks=$((checks + 1))
+  case "${rc}:${out}" in
+    0:*"wait-outcome: no-apply-run"*) : ;;
+    *)
+      echo "SELF-TEST FAIL: with the flag probe INJECTED the psql check must be skipped (psql is never called then). It exited ${rc}. Output: ${out}" >&2
+      exit 1
+      ;;
+  esac
 
   # ══ THE READS THEMSELVES ═══════════════════════════════════════════════
   # ⛔ EVERY ARM ABOVE INJECTS BOTH SEAMS, SO NOT ONE OF THEM EXECUTES A LINE

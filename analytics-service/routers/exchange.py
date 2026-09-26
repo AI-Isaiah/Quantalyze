@@ -39,9 +39,11 @@ from services.mt5_concurrency import (
     mt5_terminal_lease,
 )
 from services.mt5_validation import (
+    ACCOUNT_CHANGE_ALGO_DISABLE_OPTION,
     Mt5ValidationError,
     classify_mt5_login_error,
     classify_trade_capability,
+    is_ipc_transport_fault,
     is_mt5_login_refusal,
     parse_mt5_credentials,
     terminal_trade_permission_off,
@@ -776,10 +778,83 @@ async def _validate_mt5_key_probe(
             # it. The marker is raised only after `initialize()` attached, so a
             # terminal that is already wedged fails at `initialize()` as a plain
             # `Mt5ClientError` and keeps NETWORK_UNAVAILABLE.
+            # ⚠️ MERGE NOTE 2026-09-23 (164.6.5 MT5VALIDATEWEDGE integrated): that
+            # already-wedged terminal now answers MT5_TERMINAL_UNRESPONSIVE (500,
+            # not retryable) when its code is -10004/-10005, via the 164.6.5 arm
+            # inside the not-a-refusal branch below. It is still NOT a sign-in
+            # failure, which is what D-17 decides; and it no longer offers the
+            # Retry that D-08 names as the harmful action against a wedged
+            # terminal. Every non-IPC transient keeps NETWORK_UNAVAILABLE.
             #
             # WARNING with the scrubbed code only.
             trace.outcome = "transient"
             if not is_mt5_login_refusal(e):
+                # 164.6.5 / criterion 5 (D-12/D-13) — an IPC transport fault: OUR OWN
+                # terminal bridge, never the caller's key. `classify_mt5_login_error`
+                # code-gates -10004/-10005 into its "transient" bucket (164.5.4 /
+                # D-02: its three-way contract is pinned and must not grow a fourth
+                # class), so this arm asks the narrower question directly, on the
+                # SAME code tuple, BEFORE the generic transient tail below.
+                #
+                # MEASURED 2026-09-21: a wedged gateway terminal answered -10005
+                # across two retries 45s and 55s apart — one with CORRECT
+                # credentials — and stayed wedged 1h39m. The generic transient copy
+                # below says "try again in a moment", which was false both times: no
+                # retry from the wizard could ever have cleared this. 500,
+                # retryable=False, dependency named — an operator, not a retry,
+                # clears it, following the gateway-unconfigured arm's shape above.
+                # Fails CLOSED and reaches no persistence, like every other arm of
+                # this function.
+                #
+                # ⚠️ MERGE NOTE 2026-09-23 — 164.6.5 integrated with Phase 167
+                # CREDTRUST (shipped first, live in PROD). This arm now sits INSIDE
+                # 167's not-a-login-refusal branch, so a login-stage refusal —
+                # including a login-stage -10005, which 167 D-17 routes to
+                # SIGN_IN_FAILED — never reaches it. It decides only the IPC-coded
+                # faults 167 left on the transport answer: an `initialize()`
+                # failure (where an already-wedged terminal answers, which is what
+                # the measured retries above hit), a login-stage -10004, and a
+                # post-login read timing out. The login-stage -10005 overlap is
+                # recorded in the merge commit body for a founder decision.
+                if is_ipc_transport_fault(e):
+                    # 164.6.5 review round 1 / SFH-08 + WR-06 — LOGGED AT ERROR,
+                    # on the D-15 arm's reasoning below: this is THE SHARED
+                    # TERMINAL SERVING EVERY CLIENT, not one user's refusal, and
+                    # the user's card says "tell us". At WARNING it was no Sentry
+                    # event, and this path does not trigger the heal, so nothing
+                    # reached an operator. The Next-side key routes also page it
+                    # (`OUR_DEFECT_KEY_ERROR_CODES`). Codes only, as before.
+                    # ⛔ CORRECTED 2026-09-25 (164.6.5 review round 2 / R2-SFH-10):
+                    # the sentence above was true for two of the three routes —
+                    # `keys/[id]/rotate-secret` only logged it — and is true for
+                    # all three now that that route captures the same set. So one
+                    # wedged validate is TWO Sentry events (this line and the Next
+                    # capture). Recorded as noise and kept: this one carries the
+                    # IPC code, the Next one the key route the user was on.
+                    logger.error(
+                        "validate_key: MT5 terminal IPC transport fault (code=%s)",
+                        e.code,
+                    )
+                    trace.outcome = "terminal_unresponsive"
+                    # ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1 / WR-05): the
+                    # detail said "This needs an operator, not a retry", which
+                    # asserted permanence. -10004 (bridge not attached) clears on a
+                    # gateway redeploy, -10005 is what this phase's heal recycles,
+                    # and the recycle's own relaunch window answers both. The detail
+                    # now matches the wizard copy: NOT NOW and OURS, and a later
+                    # attempt can succeed. `retryable=False` stands — it describes
+                    # an IMMEDIATE retry, which is the harmful action (167 D-08).
+                    raise service_error(
+                        500,
+                        "MT5_TERMINAL_UNRESPONSIVE",
+                        dependency="mt5-gateway",
+                        retryable=False,
+                        detail=(
+                            "The MetaTrader terminal we use to check this key "
+                            "stopped answering. This is ours to fix: an immediate "
+                            "retry will not help, but a later attempt can succeed."
+                        ),
+                    )
                 logger.warning(
                     "validate_key: MT5 transient upstream failure, not a "
                     "login-stage refusal (code=%s)",
@@ -912,15 +987,39 @@ async def _validate_mt5_key_probe(
                         # ⚠️ 161-02: WHICH setting is derived from the terminal
                         # flags, not assumed. Founder-measured live 2026-08-13, the
                         # cause is the Expert-Advisors "Allow algorithmic trading"
-                        # option (`Enabled` in [Experts]), which the gateway re-sets
-                        # off on every account change; MetaQuotes' separate
+                        # option (`Enabled` in [Experts]); MetaQuotes' separate
                         # default-ON "Disable automatic trading through the external
                         # Python API" (`Api`, reported as `tradeapi_disabled`) was
                         # measured OFF at the same moment, and the old copy named it
                         # to the operator regardless.
-                        logger.warning(
-                            "validate_key: MT5 capability undetermined (terminal trade "
-                            "permission off) — refusing rather than stamping read-only"
+                        # ⛔ CORRECTED 2026-09-25 (164.6.5-06): this comment said
+                        # the gateway re-sets that option off on every account
+                        # change. Only while ACCOUNT_CHANGE_ALGO_DISABLE_OPTION is
+                        # ticked — founder-read UNCHECKED 2026-09-24.
+                        #
+                        # ⭐ 164.6.5 / D-15 — LOGGED AT ERROR, above an ordinary
+                        # verdict (WARNING) and level with the unset-env-var arms
+                        # above. This line means THE SHARED TERMINAL SERVING EVERY
+                        # CLIENT HAS LOST ALGO PERMISSION, and one likely cause is
+                        # validation itself: every validate is an account change,
+                        # so a ticked ACCOUNT_CHANGE_ALGO_DISABLE_OPTION is tripped
+                        # by the very call that observed it. Logging that below a
+                        # missing env var is the severity inversion mt5_relogin's
+                        # WR-01 already corrected for its own verdicts. The setting
+                        # cannot be read directly (it reaches disk only on a clean
+                        # exit), so this consequence IS the check — and it is
+                        # one-way: nothing here writes a terminal option.
+                        # Only the LEVEL and the line changed; the raised fault
+                        # below is byte-for-byte what it was.
+                        logger.error(
+                            "validate_key: MT5 capability undetermined — the shared "
+                            "gateway terminal reports its own trade permission OFF "
+                            "('Allow algorithmic trading' is not in force) for every "
+                            "client. Validation is an account change: if '%s' is "
+                            "ticked, every validate switches algo trading off again. "
+                            "Refusing rather than stamping read-only; needs an "
+                            "operator (docs/runbooks/mt5-go-live.md)",
+                            ACCOUNT_CHANGE_ALGO_DISABLE_OPTION,
                         )
                         # Distinct from the env-gap `gateway_unconfigured` above even
                         # though both answer the same code: this one means the terminal

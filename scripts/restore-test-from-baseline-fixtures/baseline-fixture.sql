@@ -28,8 +28,24 @@
 --     needs the dump to RE-CREATE the default ACL, or its round-trip would be
 --     a claim about a shape the fixture does not have.
 --
--- Its measured shape — 2 CREATE TABLE lines, 1 CREATE POLICY line, 2 distinct
+-- Its measured shape — 3 CREATE TABLE lines, 1 CREATE POLICY line, 2 distinct
 -- function names — is what the self-test's exact summary line pins.
+-- (2 CREATE TABLE lines until Phase 164.9.1 plan 05 added `public.system_settings`
+-- below; the summary-line pins moved from `tables=2` to `tables=3` in the same
+-- commit.)
+--
+-- ⭐ `public.system_settings` IS THE FIXTURE ANALOG OF THE ANALYTICS DESTINATION
+-- ROW (Phase 164.9.1 plan 05, [164.9-TEST-ANALYTICS-URL-REARM], D-16). On real
+-- TEST the reference-data replay re-seeds `analytics_service_url` with a
+-- PROD-shaped host, and the restore transaction now rewrites it to the loopback
+-- sink before it commits. Without this table and its seeded row, the fragment
+-- the restore concatenates would refuse on every GREEN arm ("there is no
+-- analytics_service_url row"). The CHECK below keeps the real constraint's
+-- SHAPE: a Railway-shaped host OR the loopback discard address. The loopback
+-- half is written as a PORT PATTERN, not as the sink itself, because the sink
+-- has exactly one copy, in scripts/test-only-normalize-analytics-url.sh (D-17).
+-- The seeded value is the normalize self-test's synthetic stand-in host, never a
+-- real one.
 --
 -- ⭐ `fx_keep_kind_check` IS THE FIXTURE ANALOG OF `compute_jobs_kind_check`
 -- (Phase 164.8.1, W1). The restore's in-transaction gate carries a second leg
@@ -77,7 +93,8 @@ CREATE TABLE IF NOT EXISTS "public"."fx_keep" (
     "label" "text",
     -- 164.9-07: the fixture analog of `profiles.manager_status DEFAULT
     -- 'newbie'` (supabase/schema/baseline.sql:10169) — this column, NOT a new
-    -- table, so arms 9/12/18's exact `tables=2` pin is unaffected. Row id=1's
+    -- table, so arms 9/12/18's exact `tables=2` pin was unaffected (it reads
+    -- `tables=3` since 164.9.1-05 added `system_settings`). Row id=1's
     -- allowlisted INSERT (20260103000000_fixture_c.sql) sets this to
     -- 'verified' explicitly; every other row is left at this DEFAULT, the
     -- fixture's stand-in for a row an UPDATE-only-scoped replay never revisits.
@@ -93,6 +110,14 @@ CREATE TABLE IF NOT EXISTS "public"."fx_other" (
 );
 
 ALTER TABLE "public"."fx_other" OWNER TO "postgres";
+
+CREATE TABLE IF NOT EXISTS "public"."system_settings" (
+    "key" "text" NOT NULL,
+    "value" "text" NOT NULL,
+    CONSTRAINT "system_settings_analytics_service_url_allowed" CHECK ((("key" <> 'analytics_service_url'::"text") OR ("value" ~ '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:[0-9]+)$'::"text")))
+);
+
+ALTER TABLE "public"."system_settings" OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."fx_survivor"() RETURNS "trigger"
     LANGUAGE "plpgsql"
@@ -117,6 +142,9 @@ ALTER TABLE ONLY "public"."fx_keep"
 
 ALTER TABLE ONLY "public"."fx_other"
     ADD CONSTRAINT "fx_other_pkey" PRIMARY KEY ("id");
+
+ALTER TABLE ONLY "public"."system_settings"
+    ADD CONSTRAINT "system_settings_pkey" PRIMARY KEY ("key");
 
 ALTER TABLE "public"."fx_keep" ENABLE ROW LEVEL SECURITY;
 

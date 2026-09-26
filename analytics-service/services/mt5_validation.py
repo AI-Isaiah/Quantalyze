@@ -31,10 +31,13 @@ The capability rule (``classify_trade_capability``) is TRI-state, not boolean:
 
     ⚠️ 161-02: TWO independent settings can put it off — the Expert-Advisors
     *"Allow algorithmic trading"* option (``Enabled`` in ``[Experts]``, which is
-    what ``trade_allowed`` actually reports and which the gateway re-sets off on
-    every account change) and MetaQuotes' separate *"Disable automatic trading
-    through the external Python API"* checkbox (``Api``, reported as
-    ``tradeapi_disabled``). The VERDICT is the same either way; only the operator
+    what ``trade_allowed`` actually reports) and MetaQuotes' separate *"Disable
+    automatic trading through the external Python API"* checkbox (``Api``,
+    reported as ``tradeapi_disabled``). ⛔ CORRECTED 2026-09-25 (164.6.5-06): this
+    paragraph said the gateway re-sets the first option off on EVERY account
+    change. It does so only while *"Disable algorithmic trading when the account
+    has been changed"* is ticked, and that box was founder-read UNCHECKED on
+    2026-09-24 — see ``ACCOUNT_CHANGE_ALGO_DISABLE_OPTION`` below. The VERDICT is the same either way; only the operator
     copy differs, which is why the cause is chosen at ONE seam
     (``mt5_probe.mt5_gateway_misconfigured_detail``) rather than assumed.
 
@@ -45,7 +48,7 @@ this module names that method only in prose, without call parentheses.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from services.mt5_client import Mt5ClientError, Mt5LoginRefusedError
 
@@ -295,6 +298,37 @@ def classify_trade_capability(
     return "read_only"
 
 
+#: 164.6.5 / D-15 — THE SETTINGS LANDMINE, by its exact on-screen label.
+#:
+#: WHAT IT IS. An option on the gateway terminal's Tools -> Options -> Expert
+#: Advisors tab. When it is ticked, MT5 switches *"Allow algorithmic trading"*
+#: off every time the terminal's logged-in account changes.
+#:
+#: WHY VALIDATION TRIPS IT. Validating an MT5 key LOGS THE SHARED TERMINAL IN as
+#: that key's account, so every validation is an account change. With this box
+#: ticked, one validation silently disables algo trading on the terminal serving
+#: EVERY client. ⛔ It must stay UNTICKED, and nothing in this repo may write a
+#: terminal option to "fix" it — D-15 pins it, it does not tick it.
+#:
+#: WHY IT IS NOT READ DIRECTLY. The option lives in the terminal's own config
+#: (``[Experts] Account=1`` when ticked), which reaches disk only on a CLEAN
+#: terminal exit, so a file read can disagree with the running terminal. Only its
+#: CONSEQUENCE is observable: ``terminal_info()['trade_allowed']`` false on a
+#: connected terminal, which :func:`terminal_trade_permission_off` already judges.
+#: This name exists so the call sites can NAME that cause — it adds no second
+#: judge.
+#:
+#: MEASURED. Founder-read over VNC 2026-09-24: this box UNCHECKED, *"Allow
+#: algorithmic trading"* CHECKED, every other "Disable ..." option on the tab
+#: UNCHECKED. ⚠️ A point-in-time reading, not a guarantee: the bridge has since
+#: relaunched the terminal with ``/portable`` (164.6.5-02), whose settings live
+#: in the install folder, so the LIVE state is only what ``terminal_info()``
+#: reports.
+ACCOUNT_CHANGE_ALGO_DISABLE_OPTION: Final[str] = (
+    "Disable algorithmic trading when the account has been changed"
+)
+
+
 def terminal_trade_permission_off(terminal_info: dict[str, Any] | None) -> bool:
     """True iff the terminal WAS read, IS connected, and its OWN trade permission
     is off — i.e. branch 5 of ``classify_trade_capability`` produced the
@@ -313,9 +347,16 @@ def terminal_trade_permission_off(terminal_info: dict[str, Any] | None) -> bool:
         setting is not decided here — this predicate answers "is it ours?", and
         ``mt5_probe.mt5_gateway_misconfigured_detail`` answers "which one?" from
         the same dict. The measured default cause is the Expert-Advisors "Allow
-        algorithmic trading" option, which the gateway re-sets off on every
-        account change (``Account=1``/``Profile=1``) while the worker logs in on
-        every job — which is why this fault RECURS after an operator clears it.
+        algorithmic trading" option being off. ⭐ 164.6.5 / D-15: a ``True`` here
+        is ALSO the only observable symptom of ``ACCOUNT_CHANGE_ALGO_DISABLE_OPTION``
+        being ticked, because every validation is an account change — which is
+        why the router's operator arm logs above an ordinary verdict.
+        ⛔ CORRECTED 2026-09-25 (164.6.5-06): this bullet said the gateway re-sets
+        the option off on EVERY account change, so the fault RECURS after an
+        operator clears it (dated 2026-08-13). That holds only while
+        ``ACCOUNT_CHANGE_ALGO_DISABLE_OPTION`` is ticked; it was founder-read
+        UNCHECKED on 2026-09-24, and a real login on 2026-09-16 left the options
+        byte-identical (164.6.4-UAT). The old sentence is kept here as lineage.
       * ``False`` -> the terminal was unreadable, malformed, or detached from the
         trade server. That is our bridge blipping and it clears on retry. Route
         to the TRANSIENT arm.
@@ -379,6 +420,50 @@ def classify_mt5_login_error(
     # ⭐ THE REFUSAL. Unrecognised == transient, NEVER a permanent user-blame
     # stamp. ⛔ Do not "improve" this into a best-guess arm.
     return "transient"
+
+
+def is_ipc_transport_fault(err: Mt5ClientError) -> bool:
+    """True iff ``err`` is one of MT5's IPC-transport failure codes.
+
+    164.6.5 / criterion 5 (D-12/D-13). A narrow, single-purpose predicate
+    answering ONE question from the CODE alone — REUSES ``_IPC_TRANSPORT_CODES``
+    above, the same tuple ``classify_mt5_login_error`` code-gates on, rather than
+    re-spelling or duplicating it (a shape test copied twice drifts, and the
+    drift is silent — this module's own comment on that tuple says so).
+
+    ⛔ DELIBERATELY NOT a fourth class of ``classify_mt5_login_error``. That
+    function's three-way ``auth`` / ``wrong_server`` / ``transient`` contract is
+    pinned by executing tests at two call sites (the FastAPI router and the
+    worker adapter), and its own REFUSAL RULE docstring is explicit that exactly
+    two of the three classes become a permanent, user-attributed verdict.
+    Widening it to carry a disposition only ONE caller needs is how a shared
+    classifier acquires that caller's concerns — the initial-validate router is
+    currently the only site that must distinguish "our own terminal bridge
+    stopped answering" from the rest of the ``"transient"`` bucket, so the
+    distinction lives here, beside the classifier, never inside it.
+
+    MEASURED 2026-09-21: a wedged gateway terminal answered -10005 ("IPC
+    timeout") across two retries 45s and 55s apart, one with CORRECT
+    credentials, and stayed wedged for 1h39m. The wizard told the user this was
+    "a temporary exchange issue" and to try again — false, because the fault was
+    ours and no retry from the wizard could ever have cleared it. The caller
+    (``routers/exchange.py``) uses this predicate to raise a distinct, honest,
+    non-retryable verdict for exactly that case, while every other
+    ``"transient"`` cause classify_mt5_login_error returns keeps its existing
+    disposition untouched.
+
+    ⚠️ MERGE NOTE 2026-09-23 (164.6.5 integrated with Phase 167 CREDTRUST, which
+    shipped first). This predicate is code-only and does NOT see the stage, so
+    it also answers True for a login-stage ``-10005`` — the one input Phase
+    167's ``is_mt5_login_refusal`` (below) claims as a refused sign-in (167
+    D-17). The router therefore consults ``is_mt5_login_refusal`` FIRST and
+    this predicate SECOND, so 167's shipped ``SIGN_IN_FAILED`` answer wins that
+    overlap. What this predicate still decides is every IPC-coded fault that is
+    NOT a login-stage refusal: an ``initialize()`` failure (where an
+    already-wedged terminal answers), a login-stage ``-10004``, and a post-login
+    read that times out. The overlap is recorded, for a founder decision, in the
+    body of the merge commit that integrated the two phases."""
+    return err.code in _IPC_TRANSPORT_CODES
 
 
 # Phase 167 D-17 — the login-stage codes that are NOT a sign-in refusal. This is

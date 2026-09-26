@@ -1114,6 +1114,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // memoized per PAGE LOAD, so a reload — the single most likely way a user
   // double-submits — mints a new one and would key the dedupe on a value that
   // changes per request, which is worse than sending nothing.
+  // ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1 / IN-02): since plan
+  // 164.6.5-07, `wizardFetch` mints `X-Correlation-Id` per REQUEST, not per
+  // page load, so the sentence above is false about the header. The
+  // conclusion is stronger for it: a double-click now changes the value too,
+  // not only a reload. Never key the dedupe on it. The sentence is kept as
+  // lineage.
   const { data: strategyRow, error: strategyErr } = await supabase
     .from("strategies")
     .select("api_key_id, wizard_session_id")
