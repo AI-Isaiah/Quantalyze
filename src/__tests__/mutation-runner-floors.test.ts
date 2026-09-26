@@ -665,7 +665,11 @@ describe("corpus re-derivation", () => {
     // test_api_keys_venue_identity_uniq.sql (7 -> 8). MEASURED: this test read
     // `expected 474 to be 449` at the old pin, and one full lane run printed
     // `coverage: files 51/78`, `arms: 474/474/0`, `biting: 474`.
-    expect(totalAnchored).toBe(474);
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B pre-merge review fixes): 474 -> 483.
+    // NINE new arms in the already-annotated test_api_keys_account_identity.sql
+    // (24 -> 33). MEASURED: this test read `expected 483 to be 474` at the old
+    // pin, and one full lane run printed `arms: 483/483/0`, `biting: 483`.
+    expect(totalAnchored).toBe(483);
   });
 });
 
@@ -1852,9 +1856,12 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // 50. The THREE DELIBERATE MISMATCHES keep their gap of one:
     // lane-invocations 450 against 449, biting 450 against executed 449, and
     // rows summing to 448 against an aggregate of 449.
-    "arms: 474/474/0   (executed/annotated/waived)",
-    "biting: 474   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 474   (arm lanes actually spawned — tallied inside runLane, independent of the 474 the verdict loop counted; plus 51 baseline / 51 restore leg(s))",
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B pre-merge review fixes): 474 -> 483 in
+    // arms/biting/lane-invocations, the per-file row 24 -> 33 and the lane-time
+    // line below, copied from one full measured run.
+    "arms: 483/483/0   (executed/annotated/waived)",
+    "biting: 483   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 483   (arm lanes actually spawned — tallied inside runLane, independent of the 483 the verdict loop counted; plus 51 baseline / 51 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -1894,7 +1901,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_allocator_equity_derived_rls.sql: sections 6 / judged 6 / annotated 6 / waived 0 / biting 6",
     "  file test_allocator_equity_pre_terminus_flag.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
     "  file test_analytics_service_settings_and_vault_tick.sql: sections 14 / judged 14 / annotated 14 / waived 0 / biting 14",
-    "  file test_api_keys_account_identity.sql: sections 24 / judged 24 / annotated 24 / waived 0 / biting 24",
+    "  file test_api_keys_account_identity.sql: sections 33 / judged 33 / annotated 33 / waived 0 / biting 33",
     "  file test_api_keys_exchange_not_user_writable.sql: sections 4 / judged 4 / annotated 4 / waived 0 / biting 4",
     "  file test_api_keys_insert_not_client_writable.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
     // ⭐ ADDED 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2) — the D-11
@@ -1952,7 +1959,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_wizard_composite_fence.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_wizard_composite_members.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_wizard_session_idempotency.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
-    "per-arm lane time: mean 2.0s over 474 arm run(s)",
+    "per-arm lane time: mean 1.1s over 483 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -1967,7 +1974,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428.
     // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 428 -> 445.
     // ⭐ CURRENCY 2026-09-25 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 449 -> 474.
-    expect(r.out).toContain("474 arm lane(s) spawned");
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B pre-merge review fixes): 474 -> 483.
+    expect(r.out).toContain("483 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2192,8 +2200,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // 448/449, both halves together, so the gap stays exactly one.
     // ⭐ CURRENCY 2026-09-25 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 448/449 ->
     // 473/474, both halves together, so the gap stays exactly one.
-    expect(r.out).toContain("rows sum to 473 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 474");
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B pre-merge review fixes): 473/474 ->
+    // 482/483, both halves together, so the gap stays exactly one.
+    expect(r.out).toContain("rows sum to 482 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 483");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2217,12 +2227,12 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // the NEEDLE and in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 428 -> 445 in the
     // NEEDLE and in `executed`/`biting`; the severed value stays 0.
-    const severed = GREEN_LOG.replace(/^lane-invocations: 474 /m, "lane-invocations: 0 ");
+    const severed = GREEN_LOG.replace(/^lane-invocations: 483 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("GATE failing, not the corpus");
-    expect(r.out).toContain("executed=474 lane-invocations=0 biting=474");
+    expect(r.out).toContain("executed=483 lane-invocations=0 biting=483");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2240,17 +2250,17 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // and DELIBERATE MISMATCH 429 -> 446, both halves, gap of one kept.
     // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 2): NEEDLE 445 -> 449
     // and DELIBERATE MISMATCH 446 -> 450, both halves, gap of one kept.
-    const extra = GREEN_LOG.replace(/^lane-invocations: 474 /m, "lane-invocations: 475 ");
+    const extra = GREEN_LOG.replace(/^lane-invocations: 483 /m, "lane-invocations: 484 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("executed=474 lane-invocations=475 biting=474");
+    expect(r.out).toContain("executed=483 lane-invocations=484 biting=483");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
     // ⭐ CURRENCY 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix): 425 -> 426.
     // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428.
     // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 428 -> 445.
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 474 /m, "lane-invocations: abc ");
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 483 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -2280,7 +2290,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // BOTH the needle and the replacement; only the W field differs.
     // ⭐ CURRENCY 2026-09-25 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 449 -> 474 in
     // BOTH the needle and the replacement; only the W field differs.
-    const waived = GREEN_LOG.replace(/^arms: 474\/474\/0 /m, `arms: 474/474/${WAIVED_CEILING + 1} `);
+    const waived = GREEN_LOG.replace(/^arms: 483\/483\/0 /m, `arms: 483/483/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -2314,14 +2324,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-09-25 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 449 -> 474,
     // moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the
     // biting-above-executed arm's NEEDLE 449 -> 474 and MISMATCH 450 -> 475.
-    const zero = GREEN_LOG.replace(/^arms: 474\/474\/0 /m, "arms: 0/474/0 ");
+    const zero = GREEN_LOG.replace(/^arms: 483\/483\/0 /m, "arms: 0/483/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
-    const spliced = GREEN_LOG.replace(/^biting: 474 /m, "biting: 475 ");
+    const spliced = GREEN_LOG.replace(/^biting: 483 /m, "biting: 484 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
-    expect(s.out).toContain("biting (475) exceeds executed (474)");
+    expect(s.out).toContain("biting (484) exceeds executed (483)");
   });
 
   // ── 164.4.2-09, DECISION D: the step judges WHAT THE RUN COVERED ─────────
@@ -2382,7 +2392,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // The right-hand side is ARMS_FLOOR as the step re-reads it from run.mjs.
       // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 428 -> 445.
       // ⭐ CURRENCY 2026-09-25 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 449 -> 474.
-      expect(r.out).toContain("biting arms 474 >= 474");
+      // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 PR B pre-merge review fixes): 474 -> 483.
+      expect(r.out).toContain("biting arms 483 >= 483");
     }
   });
 

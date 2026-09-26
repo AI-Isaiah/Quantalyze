@@ -2347,7 +2347,29 @@ export const FILES_FLOOR = 51;
 //    474: `scope: FULL 51/51`, `coverage: files 51/78`, `arms: 474/474/0`,
 //    `biting: 474`, `lane-invocations: 474 … plus 51 baseline / 51 restore
 //    leg(s)`, `✅ No defects.`, exit 0.
-export const ARMS_FLOOR = 474;
+//
+// ⭐ RE-DERIVED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03, PR B pre-merge
+//    review fixes): 474 -> 483. NINE new arms, all in the ALREADY-ANNOTATED
+//    supabase/tests/test_api_keys_account_identity.sql (24 -> 33): ACCT-l
+//    (missing holder 23503), ACCT-m (marked holder, chain and 2-cycle), ACCT-n
+//    (a key that already holds another), ACCT-o (departed holder), ACCT-p
+//    (contradictory holder clear), HIST-running (a toggle while the recompose
+//    runs is refused), RECON-hist (reconnect resets history_inclusion),
+//    RECON-tenant and RECON-other-exchange (the refusal's user and exchange
+//    conjuncts), against migration 20260925120000 edited in place. No file
+//    joined the annotated set, so FILES_FLOOR stays 51; WAIVED_CEILING stays 0.
+//    MEASURED first on a narrowed `--file` run: `arms: 33/33/0`, `biting: 33`,
+//    every arm `RED (identity ok)`, `No defects in the narrowed scope.` Then ONE
+//    full lane run with no file edited during it and this constant still at
+//    474, `node scripts/mutation-runner/run.mjs`: `scope: FULL 51/51 annotated
+//    files`, `coverage: files 51/78`, `arms: 483/483/0`, `biting: 483`,
+//    `lane-invocations: 483` (the two independent tallies AGREE, plus 51
+//    baseline / 51 restore legs), `lane-blocked: 0 file(s)`, `lane-probe:
+//    pg_cron AVAILABLE`, `unreachable: 27 file(s)`, `per-arm lane time: mean
+//    1.1s over 483 arm run(s)`, `✅ No defects. Every annotated arm bit its own
+//    arm first.`, exit 0. Per-file line: `test_api_keys_account_identity.sql:
+//    sections 33 / judged 33 / annotated 33 / waived 0 / biting 33`.
+export const ARMS_FLOOR = 483;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

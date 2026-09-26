@@ -999,8 +999,15 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // the two pins move by DIFFERENT amounts. MEASURED: this file's own run
     // read `expected 474 to be 449` and `expected 477 to be 464` at the
     // pre-move pins.
-    expect(armsSeen).toBe(474);
-    expect(stepsSeen).toBe(477);
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, PR B pre-merge review
+    // fixes): `armsSeen` 474 -> 483 and `stepsSeen` 477 -> 487. NINE new
+    // arms in test_api_keys_account_identity.sql, all `edit` steps with a
+    // `find`, plus a SECOND edit step on the existing HIST-owner twin (it now
+    // removes both ownership layers). MEASURED: this file's run read
+    // `expected 483 to be 474` and then `expected 487 to be 477` at the pre-move
+    // pins.
+    expect(armsSeen).toBe(483);
+    expect(stepsSeen).toBe(487);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1881,7 +1888,11 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // moving WITH `stepsSeen`: thirteen new `edit` steps with a `find` (the
     // twins of test_api_keys_account_identity.sql listed at `stepsSeen`), one
     // needle each. RUN SEPARATELY: `expected 477 to be 464` at the pre-move pin.
-    expect(needles.length).toBe(477);
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, PR B pre-merge review
+    // fixes): 477 -> 487, moving WITH `stepsSeen`: ten new `edit` steps with a
+    // `find` (nine new twins and HIST-owner's second step), one needle each.
+    // RUN SEPARATELY: `expected 487 to be 477` at the pre-move pin.
+    expect(needles.length).toBe(487);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
