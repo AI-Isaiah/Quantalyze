@@ -35,15 +35,23 @@
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { GITLEAKS_VERSION } from "../../scripts/baseline-redump.mjs";
+import {
+  BOT_BRANCH,
+  GITLEAKS_VERSION,
+  SECRET_SCAN_PATTERN,
+} from "../../scripts/baseline-redump.mjs";
 
 const ROOT = process.cwd();
 const WF_PATH = ".github/workflows/supabase-migrate.yml";
 const CI_PATH = ".github/workflows/ci.yml";
+const BASELINE_MD_PATH = "supabase/schema/BASELINE.md";
+const SCRIPT = "scripts/baseline-redump.mjs";
 const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
 const WF = read(WF_PATH);
 const CI = read(CI_PATH);
+const BASELINE_MD = read(BASELINE_MD_PATH);
 
 const DIVERGENCE_JOB = "prod-credential-divergence-verdict";
 const DUMP_JOB = "redump-dump";
@@ -848,4 +856,207 @@ describe("164.9.5-09 — the two redump jobs keep their credential split and the
       checkoutsHold,
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// Task 2 — file-wide absences, the one push, the documented scan pattern, the self-test.
+// ---------------------------------------------------------------------------
+
+/**
+ * Command-shaped merge / auto-merge / approval tokens, ASSEMBLED FROM FRAGMENTS so this
+ * file never spells one: a grep for the command over the repo must stay a grep for a
+ * real use. The bare word is not a token — live `echo` lines say "MERGED" and
+ * "REVERT THE MERGE", and those are prose, not a merge.
+ */
+const MERGE = "mer" + "ge";
+const MERGE_TOKENS: RegExp[] = [
+  new RegExp(`gh\\s+pr\\s+${MERGE}\\b`),
+  new RegExp("gh\\s+pr\\s+" + "rev" + "iew\\b"),
+  new RegExp("-" + "-auto" + "\\b"),
+  new RegExp("-" + "-appr" + "ove\\b"),
+  new RegExp("auto" + "-?" + MERGE, "i"),
+  new RegExp("auto" + "-?" + "approve", "i"),
+  new RegExp(`pulls/[^\\s/]+/${MERGE}\\b`),
+  new RegExp(MERGE + "Pull" + "Request", "i"),
+];
+
+/** Live lines of the WHOLE workflow carrying a merge-shaped token (D-13). */
+function mergeTokenOffenders(text: string): string[] {
+  if (jobKeys(text).length === 0) return ["the workflow has no jobs: the scan proved nothing"];
+  const out: string[] = [];
+  for (const l of liveLines(text)) {
+    for (const re of MERGE_TOKENS) {
+      if (re.test(l)) out.push(`${re.source}: ${l.trim()}`);
+    }
+  }
+  return out;
+}
+
+/** A live line that runs `git … push`, whatever options sit between the two words. */
+const GIT_PUSH_RE = /\bgit\b.*\spush(\s|$)/;
+
+/**
+ * The file's push lines must be exactly ONE, ending in `origin HEAD:refs/heads/<BOT_BRANCH>`,
+ * and every `refs/heads/X` on it (the lease names the ref too) must be the bot branch
+ * (D-25). Branch protection is off, so this refspec is the whole bound on `contents: write`.
+ */
+function pushOffenders(text: string): string[] {
+  const pushes = liveLines(text).filter((l) => GIT_PUSH_RE.test(l));
+  if (pushes.length !== 1) {
+    return [`expected exactly one git push line, found ${pushes.length}: ${JSON.stringify(pushes.map((l) => l.trim()))}`];
+  }
+  const line = pushes[0].trim();
+  const out: string[] = [];
+  if (!line.endsWith(` origin HEAD:refs/heads/${BOT_BRANCH}`)) {
+    out.push(`the push does not end in origin HEAD:refs/heads/${BOT_BRANCH}: ${line}`);
+  }
+  for (const m of line.matchAll(/refs\/heads\/([^\s:"']+)/g)) {
+    if (m[1] !== BOT_BRANCH) out.push(`the push names refs/heads/${m[1]}: ${line}`);
+  }
+  return out;
+}
+
+/**
+ * The single-quoted argument of the `grep -anE` line in the FIRST fenced block of
+ * BASELINE.md's `## Regenerating` section, or null when there is not exactly one.
+ */
+function documentedScanPattern(md: string): string | null {
+  const at = md.indexOf("\n## Regenerating\n");
+  if (at < 0) return null;
+  const rest = md.slice(at + 1);
+  const next = rest.indexOf("\n## ");
+  const section = next < 0 ? rest : rest.slice(0, next);
+  const fence = section.match(/\n```[^\n]*\n([\s\S]*?)\n```/);
+  if (!fence) return null;
+  const greps = fence[1].split("\n").filter((l) => l.startsWith("grep -anE '"));
+  if (greps.length !== 1) return null;
+  return greps[0].match(/^grep -anE '([^']*)' /)?.[1] ?? null;
+}
+
+const scanPatternAgrees = (md: string) => documentedScanPattern(md) === SECRET_SCAN_PATTERN;
+
+/** The self-test's own OK line. The count is NOT pinned: plans 02, 07, 03 and 08 move it. */
+const SELF_TEST_OK_RE = /^baseline-redump self-test OK: \d+ assertion/m;
+const SELF_TEST_SPAWN_TIMEOUT_MS = 110_000;
+const SELF_TEST_IT_TIMEOUT_MS = 120_000;
+
+function spawnScript(args: string[]) {
+  return spawnSync(process.execPath, [SCRIPT, ...args], {
+    cwd: ROOT,
+    encoding: "utf8",
+    timeout: SELF_TEST_SPAWN_TIMEOUT_MS,
+  });
+}
+
+function selfTestPassed(r: ReturnType<typeof spawnScript>): boolean {
+  return r.error === undefined && r.status === 0 && SELF_TEST_OK_RE.test(r.stdout ?? "");
+}
+
+describe("164.9.5-09 — no merge path, one push, one scan pattern, and a self-test that runs", () => {
+  it("the workflow carries no PR merge, auto-merge or approval token on any live line (D-13)", () => {
+    expect(
+      mergeTokenOffenders(WF),
+      `Nothing in ${WF_PATH} may merge, enable auto-merge on, or approve the re-dump PR. ` +
+        "A human reviews and merges every re-dump; remove the line rather than widening this test.",
+    ).toEqual([]);
+    const ok = (s: string) => mergeTokenOffenders(s).length === 0;
+    const PUSH_BODY_TAIL = '--body-file "${RUNNER_TEMP}/redump-pr/pr-body.md"\n';
+    calibrate(
+      "a PR merge command seeded into redump-pr",
+      (s) =>
+        mutateInJob(s, PR_JOB, PUSH_BODY_TAIL, `${PUSH_BODY_TAIL}          gh pr ${MERGE} -` + `-squash "${BOT_BRANCH}"\n`),
+      ok,
+    );
+    calibrate(
+      "an auto-merge flag seeded into redump-pr",
+      (s) => mutateInJob(s, PR_JOB, PUSH_BODY_TAIL, `${PUSH_BODY_TAIL}          gh pr edit -` + `-auto "${BOT_BRANCH}"\n`),
+      ok,
+    );
+    calibrate(
+      "a review approval seeded into redump-pr",
+      (s) =>
+        mutateInJob(s, PR_JOB, PUSH_BODY_TAIL, `${PUSH_BODY_TAIL}          gh pr review -` + `-approve "${BOT_BRANCH}"\n`),
+      ok,
+    );
+    calibrate(
+      "an auto-merge action seeded as a step",
+      (s) =>
+        mutateInJob(
+          s,
+          PR_JOB,
+          PUSH_BODY_TAIL,
+          `${PUSH_BODY_TAIL}      - uses: example/enable-pull-request-auto${MERGE}@v3\n`,
+        ),
+      ok,
+    );
+  });
+
+  it(`exactly one live git push in the file, to HEAD:refs/heads/${BOT_BRANCH} (D-25)`, () => {
+    expect(
+      pushOffenders(WF),
+      `The only push ${WF_PATH} may make is the bot branch ${BOT_BRANCH}. Branch protection is off, ` +
+        "so a second push target is a write to main with no human in front of it.",
+    ).toEqual([]);
+    const ok = (s: string) => pushOffenders(s).length === 0;
+    calibrate(
+      "the bot push retargeted to main",
+      (s) => mutateInJob(s, PR_JOB, `origin HEAD:refs/heads/${BOT_BRANCH}`, "origin HEAD:refs/heads/main"),
+      ok,
+    );
+    calibrate(
+      "a second push to main seeded into redump-pr",
+      (s) =>
+        mutateInJob(
+          s,
+          PR_JOB,
+          '--body-file "${RUNNER_TEMP}/redump-pr/pr-body.md"\n',
+          '--body-file "${RUNNER_TEMP}/redump-pr/pr-body.md"\n          git push origin HEAD:refs/heads/main\n',
+        ),
+      ok,
+    );
+    calibrate(
+      "a push seeded into another job (the scan is file-wide)",
+      (s) => `${s}          git push origin HEAD:main\n`,
+      ok,
+    );
+  });
+
+  it("SECRET_SCAN_PATTERN equals the grep -anE pattern BASELINE.md documents (D-06)", () => {
+    expect(documentedScanPattern(BASELINE_MD), `no single grep -anE line in ${BASELINE_MD_PATH} ## Regenerating`).not.toBeNull();
+    expect(
+      documentedScanPattern(BASELINE_MD),
+      `The script's SECRET_SCAN_PATTERN and ${BASELINE_MD_PATH}'s documented grep must be byte-equal: ` +
+        "the automated re-dump and a hand re-dump must refuse the same text. Change both together.",
+    ).toBe(SECRET_SCAN_PATTERN);
+    calibrate(
+      "a one-character edit to the documented pattern",
+      (s) => s.replace("{10,}", "{11,}"),
+      scanPatternAgrees,
+      BASELINE_MD,
+    );
+  });
+
+  it(
+    "node scripts/baseline-redump.mjs --self-test exits 0 and prints its OK line (D-18)",
+    () => {
+      const r = spawnScript(["--self-test"]);
+      const tail = (r.stderr ?? "").split("\n").slice(-30).join("\n");
+      expect(
+        r.error?.message,
+        `the self-test spawn failed (${SELF_TEST_SPAWN_TIMEOUT_MS} ms spawn timeout; ETIMEDOUT means it hung):\n${tail}`,
+      ).toBeUndefined();
+      expect(r.status, `the self-test exited ${r.status}. stderr tail:\n${tail}`).toBe(0);
+      expect(
+        SELF_TEST_OK_RE.test(r.stdout ?? ""),
+        `no \`baseline-redump self-test OK: N assertion(s)\` line. stdout:\n${r.stdout}\nstderr tail:\n${tail}`,
+      ).toBe(true);
+      // The verdict can fail: a flag the script refuses must not read as a pass.
+      expect(
+        selfTestPassed(spawnScript(["--no-such-mode"])),
+        "CALIBRATION: a refused flag read as a passing self-test — the verdict cannot fail",
+      ).toBe(false);
+      expect(selfTestPassed(r)).toBe(true);
+    },
+    SELF_TEST_IT_TIMEOUT_MS,
+  );
 });
