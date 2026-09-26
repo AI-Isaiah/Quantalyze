@@ -246,10 +246,17 @@ def _check_sharpe_sentinel(df: pd.DataFrame, fmt: str) -> list[dict[str, Any]]:
             # above the risk-free rate, so it still gets no error. A NaN std
             # (non-finite rows) is not residue and its Sharpe comparison is
             # False, so it still gets no error either.
+            #
+            # Round-1 WR-01 / SFH MEDIUM-3 (amends D-04, recorded in
+            # 166.1-CONTEXT): this branch emits its OWN rule key,
+            # `daily_returns_constant`. It shared `daily_sharpe_sentinel`, whose
+            # label "Daily Sharpe > 10 looks unrealistic" states a comparison
+            # that is never made here: with no dispersion there is no Sharpe.
+            # The Sharpe-number branch below keeps its key and label.
             if dispersion_is_residue(float(sd), float(r.mean())):
                 if r.mean() - DEFAULT_RISK_FREE_DAILY > 0:
                     errors.append({
-                        "rule": "daily_sharpe_sentinel",
+                        "rule": "daily_returns_constant",
                         "row": 0,
                         "message": (
                             "Daily returns do not vary, so the Sharpe is unbounded; "

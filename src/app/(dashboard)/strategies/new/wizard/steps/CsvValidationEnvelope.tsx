@@ -2,8 +2,10 @@
 
 import { type ReactNode } from "react";
 import {
+  CSV_FILE_LEVEL_HEADLINE,
   CSV_RULE_LABELS,
   WIZARD_ERROR_COPY,
+  formatCsvRuleCauseFileLevel,
   formatCsvRuleCauseSingle,
 } from "@/lib/wizardErrors";
 
@@ -126,6 +128,12 @@ export function CsvValidationEnvelope({
   }, {});
   const ruleKeys = Object.keys(byRule);
   const ruleCount = ruleKeys.length;
+  // 166.1 round-1 WR-01: `row` is 1-based and 0 is the absent-row sentinel of
+  // a file-level rule (see the `<li>` note below). Only a REAL row is counted:
+  // "1 row failed validation" for a rule that names no row was a row count
+  // with nothing behind it. A non-numeric `row` is not a real row either.
+  const isRealRow = (e: { row: number }) => e.row >= 1;
+  const realRowCount = errors.filter(isRealRow).length;
 
   // ⚠️ 140.4-16 / CR-02 — THE SECOND LINE MUST SAY SOMETHING THE FIRST DOES
   // NOT. Until this, the final `else` below was `envelope.human_message` — the
@@ -163,7 +171,10 @@ export function CsvValidationEnvelope({
   } else if (ruleCount === 1 && errors.length > 0) {
     const onlyRule = ruleKeys[0];
     const human = CSV_RULE_LABELS[onlyRule] ?? onlyRule;
-    causeText = formatCsvRuleCauseSingle(human);
+    causeText =
+      realRowCount > 0
+        ? formatCsvRuleCauseSingle(human)
+        : formatCsvRuleCauseFileLevel(human);
   } else {
     causeText = authoredCause ?? null;
   }
@@ -176,9 +187,11 @@ export function CsvValidationEnvelope({
       data-error-code={envelope.code}
     >
       <p className="text-body font-semibold text-negative">
-        {errors.length > 0
-          ? `${errors.length} ${errors.length === 1 ? "row" : "rows"} failed validation`
-          : envelope.human_message}
+        {realRowCount > 0
+          ? `${realRowCount} ${realRowCount === 1 ? "row" : "rows"} failed validation`
+          : errors.length > 0
+            ? CSV_FILE_LEVEL_HEADLINE
+            : envelope.human_message}
       </p>
       {causeText !== null && (
         <p className="mt-1 text-caption text-text-secondary">{causeText}</p>
@@ -191,7 +204,9 @@ export function CsvValidationEnvelope({
       {Object.entries(byRule).map(([rule, list]) => (
         <details key={rule} className="mt-2 text-caption">
           <summary className="cursor-pointer text-text-secondary">
-            {CSV_RULE_LABELS[rule] ?? rule} ({list.length} rows)
+            {CSV_RULE_LABELS[rule] ?? rule}
+            {/* 166.1 WR-01: a row count only when this rule failed on real rows. */}
+            {list.some(isRealRow) ? ` (${list.filter(isRealRow).length} rows)` : ""}
           </summary>
           <ul className="mt-1 list-disc space-y-0.5 pl-5 text-text-muted">
             {/*

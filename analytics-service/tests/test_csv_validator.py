@@ -3,9 +3,10 @@ Phase 15 / CSV-01..CSV-02: tests for the pandera-backed CSV validator.
 
 11 tests covering:
 - 6 CSV-02 rules (monotonic_dates, nav_non_zero, daily_return_lower_bound,
-  daily_sharpe_sentinel — the D-24 tests below (`test_d24_*`: a constant
-  positive series rejected at every length and from a compounding-NAV yield,
-  one message, the constant-zero control); currency_usd_or_blank,
+  daily_sharpe_sentinel, daily_returns_constant — the D-24 tests below
+  (`test_d24_*`: a constant positive series rejected at every length and from
+  a compounding-NAV yield under its own rule key since round-1 WR-01, one
+  message, the constant-zero control); currency_usd_or_blank,
   qty_price_positive)
 - empty bytes early-return
 - happy-path daily_returns success envelope
@@ -121,7 +122,10 @@ _D24_LENGTHS = [2, 3, 5, 20, 120, 365]
 
 
 def _sentinel_errors(result: dict) -> list[dict]:
-    return [e for e in result["errors"] if e["rule"] == "daily_sharpe_sentinel"]
+    """The constant-series rejection. Since round-1 WR-01 it has its own rule
+    key, `daily_returns_constant`: the Sharpe sentinel's label claims a Sharpe
+    was measured, and a series that never changes has none."""
+    return [e for e in result["errors"] if e["rule"] == "daily_returns_constant"]
 
 
 def _d24_compounding_nav_yield_df() -> pd.DataFrame:
@@ -153,7 +157,8 @@ def test_d24_pinned_five_row_constant_fixture_is_rejected():
     df = _daily_returns_df(n=5, daily_return=0.001)
     result = validate_csv(_csv_bytes(df), "daily_returns")
     assert result["ok"] is False
-    assert [e["rule"] for e in result["errors"]] == ["daily_sharpe_sentinel"]
+    assert [e["rule"] for e in result["errors"]] == ["daily_returns_constant"]
+    assert result["errors"][0]["row"] == 0, "a dataset-level rule has no row"
 
 
 def test_d24_one_message_for_every_constant_positive_series_names_no_number():

@@ -142,7 +142,19 @@ def _returns_csv(values: pd.Series) -> bytes:
 
 
 def _sentinel_errors(result: dict) -> list[dict]:
-    return [e for e in result["errors"] if e["rule"] == "daily_sharpe_sentinel"]
+    """Errors from EITHER branch of `_check_sharpe_sentinel`."""
+    return [
+        e for e in result["errors"]
+        if e["rule"] in ("daily_sharpe_sentinel", "daily_returns_constant")
+    ]
+
+
+def _constant_errors(result: dict) -> list[dict]:
+    """The residue branch. Round-1 WR-01 gave it its own rule key: the Sharpe
+    sentinel's label claims a Sharpe above 10, and a residue series has none."""
+    errors = _sentinel_errors(result)
+    assert all(e["rule"] == "daily_returns_constant" for e in errors), errors
+    return errors
 
 
 def _assert_residue(values: pd.Series) -> None:
@@ -163,7 +175,7 @@ def test_s3_repeated_positive_return_rejected_without_a_fabricated_number():
     message used to print 'Daily Sharpe 2296215230173376.50'."""
     values = pd.Series([0.001] * 120)
     _assert_residue(values)
-    errors = _sentinel_errors(validate_csv(_returns_csv(values), "daily_returns"))
+    errors = _constant_errors(validate_csv(_returns_csv(values), "daily_returns"))
     assert len(errors) == 1
     _assert_names_no_fabricated_number(errors[0]["message"])
 
@@ -172,7 +184,7 @@ def test_s3_repeated_positive_return_rejected_without_a_fabricated_number():
 def test_s3_nav_constant_yield_rejected_without_a_fabricated_number(daily_yield):
     values = nav_constant_yield(daily_yield)
     _assert_residue(values)
-    errors = _sentinel_errors(validate_csv(_returns_csv(values), "daily_returns"))
+    errors = _constant_errors(validate_csv(_returns_csv(values), "daily_returns"))
     assert len(errors) == 1
     _assert_names_no_fabricated_number(errors[0]["message"])
 
@@ -197,6 +209,7 @@ def test_s3_real_quantisation_dispersion_still_reports_a_finite_sharpe():
     values = _cent_rounded_1pct_apy()
     errors = _sentinel_errors(validate_csv(_returns_csv(values), "daily_returns"))
     assert len(errors) == 1
+    assert errors[0]["rule"] == "daily_sharpe_sentinel", "real dispersion keeps the Sharpe rule"
     m = re.search(r"Daily Sharpe (\S+) exceeds", errors[0]["message"])
     assert m is not None, errors[0]["message"]
     assert math.isfinite(float(m.group(1)))
