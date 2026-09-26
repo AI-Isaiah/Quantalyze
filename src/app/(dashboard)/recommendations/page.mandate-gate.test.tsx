@@ -81,12 +81,22 @@ vi.mock("@/lib/supabase/server", () => ({
             ? { data: { attested_at: "2026-01-01T00:00:00Z" }, error: null }
             : { data: seeded.prefs, error: null },
         );
-      chain.then = (onFulfilled: (v: { data: unknown; error: unknown }) => unknown) =>
-        Promise.resolve(
+      // Like PostgREST, a column comes back only if the select projected it:
+      // a row's `series_end` is dropped unless the alias was selected, so a
+      // regression that stops projecting it fails AGE1, not only AGE4.
+      chain.then = (onFulfilled: (v: { data: unknown; error: unknown }) => unknown) => {
+        const projected = (seeded.analyticsSelect.at(-1) ?? "").includes("series_end:");
+        const rows = (seeded.statusRows as Array<Record<string, unknown>>).map((r) => {
+          if (projected) return r;
+          const { series_end: _dropped, ...rest } = r;
+          return rest;
+        });
+        return Promise.resolve(
           table === "strategy_analytics"
-            ? { data: seeded.statusRows, error: seeded.statusError }
+            ? { data: rows, error: seeded.statusError }
             : { data: [], error: null },
         ).then(onFulfilled);
+      };
       return chain;
     },
     rpc: async (name: string) =>

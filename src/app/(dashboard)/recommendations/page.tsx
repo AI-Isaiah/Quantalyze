@@ -7,6 +7,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
+import { SyncBadge } from "@/components/strategy/SyncBadge";
 import { AccreditedInvestorGate } from "@/components/legal/AccreditedInvestorGate";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
@@ -159,11 +160,21 @@ export default async function RecommendationsPage() {
   // status on their own client. Fail-CLOSED: a read error leaves the map empty
   // and every card degrades to em-dashes rather than showing unverified
   // figures — the safer direction for a number we cannot vouch for.
+  //
+  // Phase 169.3 / SC8 — the same read also answers "where does each track
+  // record end", through the ONE-DATE alias the discovery list projects
+  // (`series_end:returns_series->-1->>date`; see the rationale and the
+  // date-ascending precondition on CATEGORY_RANKING_ANALYTICS_COLUMNS in
+  // lib/queries.ts). The array itself is never projected. Without it a
+  // recommended record whose series ended months ago read as current.
   const computedById = new Map<string, boolean>();
+  const seriesEndById = new Map<string, string | null>();
   if (recRows.length > 0) {
     const { data: statusRows, error: statusError } = await supabase
       .from("strategy_analytics")
-      .select("strategy_id, computation_status")
+      .select(
+        "strategy_id, computation_status, series_end:returns_series->-1->>date",
+      )
       .in(
         "strategy_id",
         recRows.map((r) => r.strategy_id),
@@ -176,11 +187,16 @@ export default async function RecommendationsPage() {
         statusError.message,
       );
     }
-    for (const r of (statusRows ?? []) as Array<{
+    // The cast covers one postgrest-js TYPE-LEVEL limitation: its select
+    // parser cannot read a negative JSONB index (the same cast, and the same
+    // measured server behaviour, as `getStrategiesByCategory`).
+    for (const r of (statusRows ?? []) as unknown as Array<{
       strategy_id: string;
       computation_status: string | null;
+      series_end: string | null;
     }>) {
       computedById.set(r.strategy_id, isRankableAnalyticsRow(r));
+      seriesEndById.set(r.strategy_id, r.series_end ?? null);
     }
   }
 
@@ -199,6 +215,7 @@ export default async function RecommendationsPage() {
       sharpe: number | null;
       max_drawdown: number | null;
       computed_at: string | null;
+      series_end: string | null;
     };
   }> = recRows.map((row) => {
     const computed = computedById.get(row.strategy_id) === true;
@@ -221,6 +238,8 @@ export default async function RecommendationsPage() {
         sharpe: computed ? row.sharpe : null,
         max_drawdown: computed ? row.max_drawdown : null,
         computed_at: computed ? (row.analytics_computed_at ?? null) : null,
+        // Gated like the figures: an unverified run makes no age claim either.
+        series_end: computed ? (seriesEndById.get(row.strategy_id) ?? null) : null,
       },
     };
   });
@@ -345,6 +364,7 @@ function RecommendationCard({
       sharpe: number | null;
       max_drawdown: number | null;
       computed_at: string | null;
+      series_end: string | null;
     };
   };
 }) {
@@ -373,6 +393,10 @@ function RecommendationCard({
                 {categoryName}
               </span>
             )}
+            <SyncBadge
+              computedAt={strategy.computed_at}
+              seriesEnd={strategy.series_end}
+            />
           </div>
           <p className="mt-2 text-sm text-text-secondary leading-relaxed">
             {primaryReason}
