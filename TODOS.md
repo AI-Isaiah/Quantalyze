@@ -1376,7 +1376,7 @@ true for 146 and half of 142–145, and **false for 141**.
       `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
       evidence.
 
-- [ ] **`[164.9.5-MANUAL-BASELINE-REDUMP]` Every PROD migration apply leaves `main` red on
+- [x] **`[164.9.5-MANUAL-BASELINE-REDUMP]` Every PROD migration apply leaves `main` red on
       baseline-content-drift until someone runs a manual schema dump (booked 2026-09-26, founder
       decision).**
       **Measured 2026-09-26.** PR #864 needed a founder-run `supabase db dump --linked`. `main` was
@@ -1387,6 +1387,23 @@ true for 146 and half of 142–145, and **false for 141**.
       ✅ **Destination: Phase 164.9.5 AUTOREDUMP** — routed there 2026-09-26 via
       `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
       evidence.
+      ✅ **CLOSED 2026-09-26 by Phase 164.9.5 AUTOREDUMP.** The text above is kept as lineage.
+      `scripts/baseline-redump.mjs` reproduces the manual procedure mechanically in two halves:
+      `--gate-dump` (hash, shape counts, secret scan, gitleaks, integrity, the marker regenerated
+      from the applied merge's tree, and a no-op when nothing changed) and `--compose` (copy the
+      gated pair onto `main`, re-run the currency, content-drift and staleness gates, write the six
+      paths PR #864 changed, refuse the skip trailer), plus `--check-bot-branch` and
+      `--open-or-edit-pr`. Its self-tests are `node scripts/baseline-redump.mjs --self-test`
+      (prints `baseline-redump self-test OK: <n> assertion(s)`) and
+      `node scripts/baseline-redump.mjs --self-test --with-gitleaks` (the same line followed by
+      `... (with gitleaks)`); regenerate the count by running the command. The `redump-dump` and
+      `redump-pr` jobs in `.github/workflows/supabase-migrate.yml` run it after every successful
+      PROD `apply` on `main`, the PROD credential and the write token never sharing a job, and
+      the one bot PR is never merged by the bot. `src/__tests__/baseline-redump-wiring.test.ts`
+      pins the wiring, and `supabase/schema/BASELINE.md` "## Regenerating" documents the
+      automation beside the manual procedure, which stays the fallback. Live proof is post-merge
+      and human-run: dispatch `supabase-migrate.yml` on main and expect a no-op or one bot PR,
+      and approve the workflows on the first bot PR.
 
 - [ ] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
       same (kind, allocator) makes every claim entry point raise `23505` (booked 2026-09-26, found
