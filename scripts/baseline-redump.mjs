@@ -1294,6 +1294,29 @@ export function checkBotBranch({ repoRoot, remote, emit, repo = DEFAULT_REPO, ls
         "the lease must be the sha whose commits were judged, so re-dispatch supabase-migrate.yml on main",
     );
   }
+  // R2-06: "Re-run failed jobs" on an older run's redump-pr composes that run's
+  // artifact onto main, and while a newer proposal is still open and unmerged,
+  // main's committed marker has not moved, so compose's subset check passes. The
+  // bot branch's own marker is what says the open proposal is newer: it carries a
+  // migration this composed commit (HEAD) lacks and main's checkout still holds.
+  // A name main's checkout lacks is a rename or deletion on main (WR-07), not newer.
+  const shown = (rev, what) => {
+    const r = anonGit(repoRoot, rev);
+    if (r.status !== 0) throw new Error(`MEASURE_FAIL: git ${rev[0]} of ${what} exit ${r.status}; whether the open proposal is newer was not measured`);
+    return r.stdout;
+  };
+  const headCarried = new Set(markerBasenames(shown(["show", `HEAD:${MARKER_REL}`], "this commit's marker")));
+  const headTree = new Set(migrationBasenames(shown(["ls-tree", "--name-only", "HEAD", MIGRATIONS_REL], "this commit's migrations")));
+  const newer = markerBasenames(shown(["show", `${trackBot}:${MARKER_REL}`], "the bot branch's marker")).filter(
+    (b) => !headCarried.has(b) && headTree.has(b),
+  ).length;
+  if (newer > 0) {
+    throw new Error(
+      `the proposal on ${BOT_BRANCH} (tip ${short(tip)}) carries ${newer} migration(s) this composed commit does not, and main's checkout holds ` +
+        "them: it is newer than this run's dump (a re-run of an older run), so it is not replaced and nothing is pushed. " +
+        "Review the open proposal; to re-dump PROD now, dispatch a fresh run: gh workflow run supabase-migrate.yml --ref main",
+    );
+  }
   const log = anonGit(repoRoot, ["log", "--format=%H%x09%an%x09%ae", `${trackMain}..${trackBot}`]);
   if (log.status !== 0) throw new Error(`MEASURE_FAIL: git log exit ${log.status}; the bot branch's authors were not measured`);
   const judged = judgeForeignCommits(log.stdout);
@@ -1841,7 +1864,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 224;
+export const EXPECTED_ASSERTIONS = 226;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -3234,7 +3257,7 @@ function selfTest({ withGitleaks = false } = {}) {
     // mode runs in a clone of `repo` whose `origin` is that bare repository.
     const foreignMessage = ["self-test", "distinctive", "foreign", "message", randomBytes(4).toString("hex")].join("-");
     let bareN = 0;
-    const botRemote = ({ branch = true, foreign = false, pull7 = false } = {}) => {
+    const botRemote = ({ branch = true, foreign = false, pull7 = false, markerAdd = [] } = {}) => {
       bareN += 1;
       const bare = join(dir, `bot-remote-${bareN}.git`);
       const work = join(dir, `bot-work-${bareN}`);
@@ -3244,6 +3267,12 @@ function selfTest({ withGitleaks = false } = {}) {
       g(["push", "-q", bare, "HEAD:refs/heads/main"], { cwd: work });
       let tip = null;
       if (branch) {
+        if (markerAdd.length > 0) {
+          // R2-06: the bot's proposal carries migrations the checkout's marker lacks.
+          const mk = join(work, MARKER_REL);
+          writeFileSync(mk, readFileSync(mk, "utf8") + markerAdd.map((b) => `${b}\n`).join(""));
+          g(["add", "--", MARKER_REL], { cwd: work });
+        }
         g(["commit", "-q", "--allow-empty", "--author", `${BOT_NAME} <${BOT_EMAIL}>`, "-m", "bot re-dump"], { cwd: work });
         if (foreign) g(["commit", "-q", "--allow-empty", "-m", foreignMessage], { cwd: work });
         tip = g(["rev-parse", "HEAD"], { cwd: work }).trim();
@@ -3339,6 +3368,26 @@ function selfTest({ withGitleaks = false } = {}) {
     ok(
       lookupFail.threw !== null && /MEASURE_FAIL: .*HTTP 403/.test(lookupFail.threw.message) && lookupFail.outputs.length === 0,
       "an open-PR lookup that fails (HTTP 403, the shared anonymous budget) refuses as MEASURE_FAIL and emits no lease: unmeasured is never 'no open PR'",
+    );
+    // R2-06: a re-run of an older run's redump-pr. The bot branch's proposal carries a
+    // migration main's checkout holds and this composed commit's marker lacks, so it
+    // is newer: refused before any lease, the open-PR lookup never runs.
+    const repoHeadMarker = g(["show", `HEAD:${MARKER_REL}`]);
+    const repoHeadTree = migrationBasenames(g(["ls-tree", "--name-only", "HEAD", MIGRATIONS_REL]));
+    const NEWER = repoHeadTree.find((b) => !markerBasenames(repoHeadMarker).includes(b));
+    const newerScenario = botRemote({ markerAdd: [NEWER] });
+    const newerRun = botRun(newerScenario);
+    ok(
+      NEWER !== undefined && newerRun.threw !== null &&
+        newerRun.threw.message.startsWith(`the proposal on ${BOT_BRANCH} (tip ${short(newerScenario.tip)}) carries 1 migration(s) this composed commit does not`) &&
+        newerRun.outputs.length === 0 && newerRun.lookups === 0,
+      "a bot-branch proposal whose marker carries a migration main's checkout holds and this commit's marker lacks is NEWER: refused, no lease, no lookup (R2-06)",
+    );
+    const staleNameScenario = botRemote({ markerAdd: ["20251230000000_renamed_on_main.sql"] });
+    const staleNameRun = botRun(staleNameScenario);
+    ok(
+      staleNameRun.threw === null && staleNameRun.outputs.join(",") === `lease=${staleNameScenario.tip}`,
+      "a bot-branch marker naming a migration main's checkout no longer holds (renamed or deleted on main) is not 'newer': the lease is emitted (R2-06, WR-07)",
     );
     const pr = (o) => ({ number: 7, state: "open", head: { ref: BOT_BRANCH }, ...o });
     const jo = (v) => {

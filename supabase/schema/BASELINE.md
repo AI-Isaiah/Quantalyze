@@ -495,7 +495,9 @@ applied merge; an artifact whose merge is not an ancestor
 of `main`, or whose marker omits a migration `main`'s marker carries and `main`'s checkout still
 holds (a migration renamed or deleted on `main` is exempted and named in a `::notice::`); a red currency, content-drift
 or staleness gate on the composed tree; the skip trailer in the commit message or the PR text;
-and a commit on the bot branch that the bot did not author, while an open pull request has that
+a proposal already on the bot branch whose marker carries a migration the composed commit lacks
+and `main`'s checkout holds (a re-run of an older run's `redump-pr` never replaces a newer open
+proposal); and a commit on the bot branch that the bot did not author, while an open pull request has that
 branch as its head (once that pull request is merged or closed, the next run resets the branch). It writes only the six paths PR #864
 changed (the dump, the marker, this file, `CHANGELOG.md`, `VERSION`, `package.json`), with
 measured values only. It never writes the "what it adds" column; the PR body asks the reviewer
