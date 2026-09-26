@@ -227,8 +227,16 @@ _FORBIDDEN_KEY_FRAGMENTS = (
     "user_id",
     "api_key",
 )
-# An option instrument (BASE-DDMMMYY-STRIKE-C/P) or any expiry-shaped date token.
-_INSTRUMENT_RE = re.compile(r"[A-Z]{2,}[-_][0-9]{1,2}[A-Z]{3}[0-9]{2}|[0-9]{1,2}[A-Z]{3}[0-9]{2}")
+# An option instrument (BASE-DDMMMYY-STRIKE-C/P) or any expiry-shaped date token,
+# in any case (IN-02: an upper-case-only pattern passed a lower-cased name).
+_INSTRUMENT_RE = re.compile(
+    r"[A-Z]{2,}[-_][0-9]{1,2}[A-Z]{3}[0-9]{2}|[0-9]{1,2}[A-Z]{3}[0-9]{2}",
+    re.IGNORECASE,
+)
+# IN-02: an expiry can also be written as an ISO date, which the pattern above
+# cannot see. The file's own ISO dates are its generation and record dates, so
+# every ISO date in any string must be one of those two values.
+_ISO_DATE_RE = re.compile(r"\b[0-9]{4}-[0-9]{2}-[0-9]{2}\b")
 
 
 def _walk(node: Any, path: str = "$") -> list[tuple[str, str | None, Any]]:
@@ -267,7 +275,14 @@ def test_census_evidence_file_carries_counts_and_nothing_identifying() -> None:
                 "deribit_docs_corroboration", "classification_licence", "limits"):
         assert key in data, key
 
+    allowed_iso_dates = {data["_generated"], data["_recorded"]}
     for where, key, value in _walk(data):
+        if isinstance(value, str):
+            stray = set(_ISO_DATE_RE.findall(value)) - allowed_iso_dates
+            assert not stray, (
+                f"ISO date(s) {sorted(stray)} at {where} are neither _generated nor "
+                "_recorded — an expiry written as an ISO date identifies an instrument"
+            )
         if key is not None:
             assert key not in _FORBIDDEN_EXACT_KEYS, f"forbidden key at {where}"
             lowered = key.lower()
