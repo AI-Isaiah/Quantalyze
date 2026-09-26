@@ -3198,11 +3198,18 @@ Plans:
 
 **Requirements**: TODOS entry `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` — read it before planning; it carries the dated measurements and the forbidden remedies. Do not re-derive them. ⭐ **THE WAITING DEPENDENCY IS MET — MEASURED 2026-09-23 (founder-approved edit), read-only from the production analytics log.** A three-account Deribit composite created 2026-09-23 failed its first stitch job (`run_stitch_composite_job`) permanently at 06:50 UTC on exactly this refusal: one `assignment` row, currency BTC, change `-1.5e-5`, instrument a BTC put expiring 28 Aug 2026, side `close buy`. The refusal's own same-instrument census for that batch read **`delivery=0 settlement=0 trade=1`**. For this occurrence that answers the deciding question: Deribit emitted NO separate `delivery` or `settlement` row for the assigned instrument, so there is no second cash row the `assignment` change could be double-counted against. ⚠️ One occurrence, one instrument — the plan decides whether n=1 is enough to classify, and must say so. **Consequence:** the strategy's analytics were stamped terminal (composite member reconstruction failed structurally), and its owner factsheet and share link still read "still computing" (that copy defect is Phase 167.2's). Phase 159 UAT #2 (render a composite on the public factsheet) now has a real composite waiting on THIS phase.
 **Depends on:** PR #783 merged (the evidence channel), and ONE observed occurrence carrying the census. ⚠️ The second is a WAITING dependency, not a code one — nothing in the repo produces it; a deribit options account must hit the refusal again.
-**Plans:** 0 plans
+**Plans:** 3 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 168 to break down)
+**Wave 1**
+- [ ] 168-01-PLAN.md — `assignment` classified cash-bearing on both twins in the census shape; co-occurring `delivery`/`settlement` and unnamed-instrument shapes refuse; windowed-crawl backstop; one option-book event constant across the six literal sites in the same commit; evidence file (counts only); evidence tests re-pointed
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 168-02-PLAN.md — per-site pins for every option-book reader (incl. mark_to_market and smoothed_mtm end to end, and the acceptance script's eligibility check), refusal whitelist gains `commission`/`position`, prose sweep, full suite
+
+**Wave 3** *(post-land; founder-owned, non-autonomous)*
+- [ ] 168-03-PLAN.md — after deploy the founder retries the options strategy that failed on 2026-09-23 and reports terminal status, return-point count and any refusal class, by type only
 
 ### Phase 169: PAGETRUTH — every number agrees across pages and with its own record length
 

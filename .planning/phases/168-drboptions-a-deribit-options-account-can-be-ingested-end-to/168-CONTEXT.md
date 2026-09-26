@@ -163,7 +163,10 @@ These amendments supersede the clauses they name. Evidence: `168-RESEARCH.md` Q1
   these plans.
 
 **Phase-size rule (founder, 2026-09-26), relayed by the orchestrator.** A phase is one logical
-topic that fits one reviewable PR, with about 5 plans at most. This phase's topic is the
+topic that fits one reviewable PR. ⛔ CORRECTED the same day by the founder: there is NO plan
+cap, and the earlier "about 5 plans at most" is withdrawn. A cap only makes each plan bigger.
+Plans are sized naturally to the smart-zone budget and are never merged to hit a count. This
+phase's topic is the
 `assignment` census and its classification. A founder-owned live census read and any follow-on
 for the NAV reconciliation breach stay OUT of this phase. A second topic gets its own phase via
 `/gsd-phase --insert`. If more than 3 plan-check rounds are needed, stop and propose a split.
