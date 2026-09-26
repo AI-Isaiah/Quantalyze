@@ -1386,17 +1386,13 @@ export function gateDump({
   const head = git(repoRoot, ["rev-parse", "HEAD"]).trim();
   // D-09. A refusal names the flag and the rule, never a value: argv is runner text.
   if (head !== merge) throw new Error("--merge is not this checkout's HEAD; the marker must come from the MERGE tree");
-  // WR-02 (defence in depth beside the main-listing check below). "Re-run failed
-  // jobs" keeps the old run's github.sha but dumps PROD as it is NOW; D-01(ii)'s
-  // concurrency argument holds for the first attempt only.
-  if (runAttempt !== "1") {
-    const shown = runAttempt === undefined || runAttempt === "" ? "unset" : /^[0-9]{1,6}$/.test(String(runAttempt)) ? runAttempt : "unreadable";
-    throw new Error(
-      `GITHUB_RUN_ATTEMPT is ${shown}, and only attempt 1 may dump: a re-run keeps this run's merge sha but dumps PROD as it is now, ` +
-        "so its marker could disagree with its dump. Dispatch a fresh run instead: gh workflow run supabase-migrate.yml --ref main " +
-        "(a local run sets GITHUB_RUN_ATTEMPT=1)",
-    );
-  }
+  // CR-03 / D-32: a re-run is NOT refused. "Re-run failed jobs" keeps the old run's
+  // github.sha but dumps PROD as it is now, and the main-listing verdict below is
+  // what guards that: a stale re-run lands on "ahead" (skipped, D-31) or on "equal"
+  // (PROD holds exactly the merge's migrations, so the dump is valid). The attempt
+  // is printed so a re-run's log says which one it was.
+  const attemptShown = runAttempt === undefined || runAttempt === "" ? "unset" : /^[0-9]{1,6}$/.test(String(runAttempt)) ? runAttempt : "unreadable";
+  console.log(`baseline-redump attempt: ${attemptShown} (the main-listing verdict decides a re-run)`);
 
   // Every section-C gate runs BEFORE the out dir is written, and on the D-10
   // no-op path too: a run that writes nothing still proves the dump is clean.
@@ -1821,8 +1817,8 @@ function selfTest({ withGitleaks = false } = {}) {
   const cleanGl = () => fakeGitleaks({ rc: 0, reportText: "[]", version: "self-test-fake" });
   /**
    * gateDump as the arms that test something else call it: attempt 1, and `main`
-   * standing exactly at the checkout's HEAD. The attempt refusal and the real
-   * anonymous main fetch have their own arms in 4b (SFH-01, WR-02).
+   * standing exactly at the checkout's HEAD. A re-run attempt and the real
+   * anonymous main fetch have their own arms in 4b2 (SFH-01, CR-03).
    */
   const mainAtHead = ({ repoRoot }) => migrationBasenames(git(repoRoot, ["ls-tree", "--name-only", "HEAD", MIGRATIONS_REL]));
   const gateDumpT = (o) => gateDump({ runAttempt: "1", mainListing: mainAtHead, ...o });
@@ -2935,7 +2931,7 @@ function selfTest({ withGitleaks = false } = {}) {
       "an unchanged dump with a NEW committed migration at the merge is changed=true, and the marker carries it",
     );
 
-    console.log("=== SELF-TEST 4b2/4: only attempt 1 may dump, and only while main carries exactly the merge's migrations (WR-02, SFH-01)");
+    console.log("=== SELF-TEST 4b2/4: a dump proceeds only while main carries exactly the merge's migrations, on any run attempt (SFH-01, CR-03)");
     // A clone detached at head2 (the committed dump is a no-op there), whose `origin`
     // is a bare repository whose `main` this arm moves. gateDump runs with the REAL
     // anonymous fetch here: no mainListing is injected.
@@ -2956,14 +2952,6 @@ function selfTest({ withGitleaks = false } = {}) {
       );
       return { ...r, wroteNothing: !existsSync(outDir) && outputs.length === 0 };
     };
-    for (const [attempt, shown] of [["2", "2"], [undefined, "unset"]]) {
-      const r = realMain({ runAttempt: attempt });
-      ok(
-        r.threw !== null && r.threw.message.includes(`GITHUB_RUN_ATTEMPT is ${shown}, and only attempt 1 may dump`) &&
-          r.threw.message.includes("gh workflow run supabase-migrate.yml --ref main") && r.wroteNothing,
-        `a GITHUB_RUN_ATTEMPT of ${shown} refuses before any gate, naming the attempt and the fresh-dispatch remedy, and writes nothing (WR-02)`,
-      );
-    }
     g(["push", "-q", mainBare, `${head3}:refs/heads/main`]);
     // D-31: a CHANGED dump, so a gate that fell through past the main-ahead skip
     // would write an out dir and emit changed=true, and this arm would go red.
@@ -2982,11 +2970,36 @@ function selfTest({ withGitleaks = false } = {}) {
         outputs.join(",") === "changed=false" && !existsSync(aheadOut),
       "a CHANGED dump whose main (fetched anonymously) carries one more migration is skipped: a ::notice:: by count, never the name, changed=false, no out dir (D-31)",
     );
+    // CR-03 / D-32: a re-run (attempt 2) with main ahead is the stale-re-run hazard
+    // the removed attempt refusal was for; the main-listing verdict skips it.
+    const ahead2Out = join(dir, `main-ahead2-out-${randomBytes(4).toString("hex")}`);
+    outputs.length = 0;
+    const ahead2 = capture(() =>
+      gateDump({
+        repoRoot: atHead2, dump: dumpPath, merge: head2, runId: "1", runAttempt: "2", cliVersion: "2.98.2", out: ahead2Out, emit,
+        gitleaks: cleanGl(),
+      }),
+    );
+    ok(
+      ahead2.threw === null && ahead2.text.includes("baseline-redump attempt: 2 (the main-listing verdict decides a re-run)") &&
+        /^::notice::baseline-redump: main carries 1 migration\(s\) this merge does not: .*\(D-31\)/m.test(ahead2.text) &&
+        outputs.join(",") === "changed=false" && !existsSync(ahead2Out),
+      "attempt 2 of a CHANGED dump whose main is ahead is skipped exactly as attempt 1 is: a ::notice::, changed=false, no out dir (CR-03, D-32)",
+    );
     g(["push", "-q", "--force", mainBare, `${head2}:refs/heads/main`]);
     const equal = realMain();
     ok(
       equal.threw === null && equal.text.includes("baseline-redump main-listing: equal to the merge's") && outputs.join(",") === "changed=false",
       "the same merge passes once main carries exactly its migrations: the real anonymous fetch reads main and the no-op proceeds",
+    );
+    // CR-03 / D-32: a re-run (attempt 2) while main carries exactly the merge's
+    // migrations is a valid dump: PROD is the merge tree. A CHANGED dump, so the arm
+    // proves the gate went all the way to writing the out dir.
+    const equal2 = realMain({ runAttempt: "2", dump: dumpPath });
+    ok(
+      equal2.threw === null && equal2.text.includes("baseline-redump attempt: 2 (the main-listing verdict decides a re-run)") &&
+        equal2.text.includes("baseline-redump main-listing: equal to the merge's") && outputs.join(",") === "changed=true" && !equal2.wroteNothing,
+      "attempt 2 of a CHANGED dump while main carries exactly the merge's migrations proceeds: changed=true and an out dir is written (CR-03, D-32)",
     );
     const lacks = realMain({ mainListing: () => [M1] });
     ok(
@@ -3460,7 +3473,7 @@ function main(argv) {
         dump: resolve(f["--dump"]),
         merge: f["--merge"],
         runId: f["--run-id"],
-        // WR-02: Actions always sets it; it reaches the script through the runner's environment, never an expression.
+        // CR-03: logged only (a re-run is judged by the main listing). It reaches the script through the runner's environment, never an expression.
         runAttempt: process.env.GITHUB_RUN_ATTEMPT,
         cliVersion: f["--cli-version"],
         out: resolve(f["--out"]),

@@ -1061,23 +1061,33 @@ describe("164.9.5-09 — no merge path, one push, one scan pattern, and a self-t
     SELF_TEST_IT_TIMEOUT_MS,
   );
 
-  it("--gate-dump reads GITHUB_RUN_ATTEMPT from the runner's environment and refuses a re-run (WR-02)", () => {
-    // The gate step must not override the variable Actions sets: the script is the
-    // only reader, and an `env:` entry here could pin it to 1 on every attempt.
+  it("--gate-dump lets a re-run attempt reach the dump gates; the main listing, not the attempt number, judges a re-run (CR-03, D-32)", () => {
+    // The gate step must not override the variable Actions sets: an `env:` entry
+    // here could pin it on every attempt, and the log line would then lie.
     const gate = jobBlock(WF, DUMP_JOB);
     expect(gate, `${DUMP_JOB} is absent`).not.toBe("");
     expect(gate.includes("GITHUB_RUN_ATTEMPT"), `${DUMP_JOB} must not set or pass GITHUB_RUN_ATTEMPT itself`).toBe(false);
     const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf8" }).stdout.trim();
-    const out = join(tmpdir(), `baseline-redump-attempt-${process.pid}-${Date.now()}`);
-    const run = (attempt: string) =>
-      spawnSync(
-        process.execPath,
-        [SCRIPT, "--gate-dump", "--dump", "supabase/schema/baseline.sql", "--merge", head, "--run-id", "1", "--cli-version", "2.98.2", "--out", out],
-        { cwd: ROOT, encoding: "utf8", timeout: 30_000, env: { ...process.env, GITHUB_RUN_ATTEMPT: attempt, GITHUB_OUTPUT: "" } },
-      );
-    const second = run("2");
-    expect(second.status, `a second attempt must exit 1. stderr:\n${second.stderr}`).toBe(1);
-    expect(second.stderr).toContain("GITHUB_RUN_ATTEMPT is 2, and only attempt 1 may dump");
-    expect(existsSync(out), "a refused attempt wrote its out dir").toBe(false);
+    const stamp = `${process.pid}-${Date.now()}`;
+    // A dump path that does not exist: the scan-target assertion is the FIRST dump
+    // gate and runs before gitleaks is spawned or main is fetched, so this arm needs
+    // neither the binary nor the network. A refusal of the attempt itself would
+    // fire earlier and name GITHUB_RUN_ATTEMPT instead.
+    const missingDump = join(tmpdir(), `baseline-redump-attempt-missing-${stamp}.sql`);
+    const out = join(tmpdir(), `baseline-redump-attempt-${stamp}`);
+    const second = spawnSync(
+      process.execPath,
+      [SCRIPT, "--gate-dump", "--dump", missingDump, "--merge", head, "--run-id", "1", "--cli-version", "2.98.2", "--out", out],
+      { cwd: ROOT, encoding: "utf8", timeout: 30_000, env: { ...process.env, GITHUB_RUN_ATTEMPT: "2", GITHUB_OUTPUT: "" } },
+    );
+    expect(second.stdout, `attempt 2 must be logged. stderr:\n${second.stderr}`).toContain(
+      "baseline-redump attempt: 2 (the main-listing verdict decides a re-run)",
+    );
+    expect(second.stderr, "attempt 2 was refused for its attempt number: a correct re-run could never go green").not.toContain(
+      "GITHUB_RUN_ATTEMPT is",
+    );
+    expect(second.stderr, `attempt 2 must reach the scan-target gate. stderr:\n${second.stderr}`).toContain("does not exist");
+    expect(second.status).toBe(1);
+    expect(existsSync(out), "a refused dump wrote its out dir").toBe(false);
   });
 });

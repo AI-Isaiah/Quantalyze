@@ -482,8 +482,9 @@ line); a gitleaks finding over the dump (explicit `.gitleaks.toml`, redacted, in
 comments ignored, a missing or empty dump refused rather than read as clean); a NUL byte, a
 `SET client_encoding` count other than one, or a home-directory path; zero tables or any data
 statement; a dump that lost a `CREATE EXTENSION` or `CREATE SCHEMA` name the committed dump carries;
-a run attempt other than the first, or a `main` that lacks a migration the merge carries (either
-would pair PROD with a marker that disagrees with it); a marker not taken from the tree of the
+a `main` that lacks a migration the merge carries (it would pair PROD with a marker that
+disagrees with it; a re-run attempt is NOT refused by its number, because this listing check
+already judges it, D-32); a marker not taken from the tree of the
 applied merge; an artifact whose merge is not an ancestor
 of `main`, or whose marker omits a migration `main`'s marker carries; a red currency, content-drift
 or staleness gate on the composed tree; the skip trailer in the commit message or the PR text;
