@@ -161,10 +161,14 @@ class TestBridgeScoringEdges:
 # ---------------------------------------------------------------------------
 
 class TestSimulatorScoringHelpers:
-    def test_delta_treats_none_as_zero(self) -> None:
-        """_delta coerces None to 0.0 (line 193)."""
-        assert _delta(None, 0.5) == 0.0
-        assert _delta(0.5, None) == 0.0
+    def test_delta_with_a_none_side_is_none(self) -> None:
+        """_delta returns None when either side is None.
+
+        Phase 166.1 D7 (founder 2026-09-26) reverses the old coercion to 0.0,
+        which the simulator panel rendered as "unchanged" (round-1 SFH HIGH-2).
+        """
+        assert _delta(None, 0.5) is None
+        assert _delta(0.5, None) is None
         assert _delta(1.0, 0.4) == pytest.approx(0.6)
 
     def test_herfindahl_empty_returns_none(self) -> None:

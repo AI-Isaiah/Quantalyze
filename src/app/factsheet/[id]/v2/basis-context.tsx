@@ -567,6 +567,13 @@ export function mtmDisabledReasonCopy(reason?: string): string {
       // "mtm_anchor_race" string literal is the cross-language contract — both
       // plans pin the same literal.
       return "Mark-to-market temporarily unavailable: the account changed during reconstruction; it will be recomputed on the next data refresh.";
+    case "mtm_option_row_field_missing":
+      // Phase 168 (SFH-04): stamped by the single-key MTM second pass when an
+      // options ledger row lacks its commission or position
+      // (`OptionRowFieldMissingError`; the constant is `MTM_REASON_OPTION_ROW_FIELD`
+      // in stitch_composite.py, the vocabulary owner). Steady tone: a missing
+      // field does not heal on the next refresh.
+      return "Mark-to-market unavailable: an options entry in the venue ledger is missing its fee or position, so a mark-to-market series cannot be reconstructed.";
     default:
       return "Mark-to-market unavailable for this strategy.";
   }
