@@ -53,6 +53,7 @@ from services.allocated_capital import (
     metrics_day_basis,
     parse_returns_denominator_config,
 )
+from services.dispersion import dispersion_is_residue
 from services.equity.fallback import merge_dq_flags
 from services.position_reconstruction import _normalize_side
 from services.nav_twr import NAV_TWR_GUARD_KEYS
@@ -851,7 +852,11 @@ def _compute_derived_trade_metrics(
                 len(r_multiples) - 1
             )
             std_r = math.sqrt(var_r) if var_r > 0 else 0.0
-            if std_r > 0:
+            # Phase 166.1 D-16: residue std (21 identical 7.7 losses) gave SQN -4.03e16.
+            # Round-1 IN-01: `std_r > 0` stays as the structural divide guard.
+            # The floor alone has a NaN hole: a NaN mean_r gives a NaN floor,
+            # `0.0 <= NaN` is False, and `mean_r / 0.0` raises.
+            if std_r > 0 and not dispersion_is_residue(std_r, mean_r):
                 out["sqn"] = (mean_r / std_r) * math.sqrt(
                     min(len(r_multiples), SQN_TRADE_COUNT_CAP)
                 )

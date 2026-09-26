@@ -34,7 +34,7 @@ type CorrelationPoint = { date: string; value: number };
  *      `metrics_json.btc_rolling_correlation_90d` (authoritative, true daily
  *      aligned returns).
  *   2. Client fallback: cumulative -> daily reconstruction with 6-decimal
- *      rounding loss, then `rollingCorrelation` in JS.
+ *      rounding loss, then a rolling correlation computed in JS.
  *
  * The two pipelines disagreed by ±0.02-0.05 in low-correlation regions —
  * a senior allocator visually comparing chart vs. PDF would lose trust.

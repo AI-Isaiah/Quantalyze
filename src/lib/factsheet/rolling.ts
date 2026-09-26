@@ -7,9 +7,17 @@
  * for indices before the window fills (i < window-1). Consumers paint a
  * warmup overlay over the leading null region so the user knows those
  * samples are statistically noisy.
+ *
+ * A window whose ratio does not exist (a flat or constant-yield window, or one
+ * holding a non-finite value) is `null` as well, so the chart shows a GAP and
+ * the rolling summary skips it (founder decision D7, 2026-09-26). It used to be
+ * 0, which drew a flat "Sharpe 0" / "beta 0" regime the data cannot support and
+ * pulled the panel's average toward 0.
  */
 
 import type { RollWindowPick } from "./types";
+import { mean } from "@/lib/portfolio-math-utils";
+import { beta, dispersion, sharpe } from "@/lib/return-stats";
 
 export const ROLL_WINDOW_6MO = 126;
 export const ROLL_WINDOW_90D = 90;
@@ -56,25 +64,10 @@ export function rollingBeta(
   const n = Math.min(strat.length, bench.length);
   const out: Array<number | null> = new Array(n).fill(null);
   for (let i = window - 1; i < n; i++) {
-    let sumS = 0;
-    let sumB = 0;
-    for (let k = i - window + 1; k <= i; k++) {
-      sumS += strat[k];
-      sumB += bench[k];
-    }
-    const ms = sumS / window;
-    const mb = sumB / window;
-    let cov = 0;
-    let varB = 0;
-    for (let k = i - window + 1; k <= i; k++) {
-      const ds = strat[k] - ms;
-      const db = bench[k] - mb;
-      cov += ds * db;
-      varB += db * db;
-    }
-    cov /= window;
-    varB /= window;
-    out[i] = varB !== 0 ? cov / varB : 0;
+    // Each window's beta comes from `@/lib/return-stats` (Phase 166.2 D-17): a
+    // bench window whose only dispersion is float residue answers exactly as an
+    // all-zero window does (D-07), and both are a gap, null (D7).
+    out[i] = beta(strat.slice(i - window + 1, i + 1), bench.slice(i - window + 1, i + 1));
   }
   return out;
 }
@@ -91,7 +84,10 @@ export function rollingVol(
   const sqrtN = Math.sqrt(periodsPerYear);
   for (let i = window - 1; i < rets.length; i++) {
     const w = rets.slice(i - window + 1, i + 1);
-    out[i] = pstdev(w) * sqrtN;
+    // The shared population sd (SFH-M7): bitwise `stdDev(w, false)` except that
+    // a float-residue window reads exactly 0, as `compute`'s ann_vol does, not
+    // about 1e-15.
+    out[i] = dispersion(w, 0).sd * sqrtN;
   }
   return out;
 }
@@ -102,12 +98,11 @@ export function rollingSharpe(
   periodsPerYear = 252,
 ): Array<number | null> {
   const out: Array<number | null> = new Array(rets.length).fill(null);
-  const sqrtN = Math.sqrt(periodsPerYear);
   for (let i = window - 1; i < rets.length; i++) {
-    const w = rets.slice(i - window + 1, i + 1);
-    const m = mean(w);
-    const s = pstdev(w);
-    out[i] = s > 0 ? (m * periodsPerYear) / (s * sqrtN) : 0;
+    // The window's Sharpe comes from `@/lib/return-stats` (Phase 166.2 D-17),
+    // population sd: a residue window answers as an all-zero window does (D-07),
+    // and both are a gap, null (D7).
+    out[i] = sharpe(rets.slice(i - window + 1, i + 1), { periodsPerYear, ddof: 0 });
   }
   return out;
 }
@@ -131,20 +126,10 @@ export function rollingSortino(
       }
     }
     const dd = hasNeg ? Math.sqrt(downSq / window) * sqrtN : 0;
-    out[i] = dd > 0 ? (m * periodsPerYear) / dd : 0;
+    // A window with no losing day has no Sortino: a gap (null), as a window
+    // with no Sharpe is, never a drawn 0 that the Rolling panel's "Now" would
+    // print as "0.00" (founder decision D7; review round 2, HI-02 class).
+    out[i] = dd > 0 ? (m * periodsPerYear) / dd : null;
   }
   return out;
-}
-
-function mean(xs: number[]): number {
-  let s = 0;
-  for (const x of xs) s += x;
-  return s / xs.length;
-}
-
-function pstdev(xs: number[]): number {
-  const m = mean(xs);
-  let s = 0;
-  for (const x of xs) s += (x - m) * (x - m);
-  return Math.sqrt(s / xs.length);
 }

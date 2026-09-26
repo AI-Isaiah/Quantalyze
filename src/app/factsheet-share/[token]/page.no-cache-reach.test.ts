@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
  * the behavioural ordered spec (`page.cache-isolation.test.tsx`) and the
  * phase-148 structural guard. MEASURED 2026-08-28 under NEUTER-D — the token
  * page's payload fetch rewired through
- * `unstable_cache(..., ["factsheet-v2-payload-v6", id])`:
+ * `unstable_cache(..., ["factsheet-v2-payload-vN", id])`:
  *
  *   behavioural  -> Tests 3 failed | 1 passed (4)   ✅ caught it
  *   phase-148    -> Tests 12 passed (12)            ❌ did NOT catch it

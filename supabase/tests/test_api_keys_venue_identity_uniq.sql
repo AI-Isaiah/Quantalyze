@@ -576,6 +576,9 @@ END $$;
 --        CHECK is dropped, letting two DIFFERENT accounts collide onto one row.
 --   (6e) a DIFFERENT user, the SAME identity     → ADMITTED. The C-08 guarantee:
 --        user_id leads, so uniqueness is strictly per-tenant.
+--   (6f CCXT) a second LIVE okx row, one account id → 23505, and ADMITTED once
+--        the first is disconnected. Fails if the index ever stops governing
+--        ccxt venues (Phase 167.1.2 D-01 reuses this index for them).
 --
 -- ⚠️ SHARED-DB HYGIENE. The TEST project is shared and CI runs concurrently, so
 -- the fixture email is made UNIQUE PER RUN rather than fixed — a fixed email
@@ -598,6 +601,9 @@ DECLARE
   k_live      UUID := gen_random_uuid();  -- user A, live, identity LOGIN
   k_second    UUID := gen_random_uuid();  -- user A, live, identity LOGIN, after A is disconnected
   c_login     CONSTANT TEXT := '5551234';
+  k_okx       UUID := gen_random_uuid();  -- user A, live okx, identity OKX_ACCT (6f)
+  c_okx_acct  CONSTANT TEXT := 'okx-acct-7001';
+  v_refused   BOOLEAN;
   v_stamped   TEXT;
 BEGIN
   email_a := 'test-wizcont02-venue-a-' || v_run || '@quantalyze.test';
@@ -724,10 +730,56 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (6e): a DIFFERENT user was REFUSED the same venue_account_id — uniqueness is not tenant-scoped. That is the C-08 cross-tenant leak: one owner''s INSERT colliding with another owner''s row leaks its existence and denies service. user_id MUST lead the index';
   END;
 
+  -- ----- 6f CCXT. a ccxt venue's account id is fenced exactly like an MT5 login
+  -- Phase 167.1.2 (D-01, D-10): OKX, Bybit, Binance and Deribit keys now carry
+  -- the venue's account id, and the refusal of a second live key on one
+  -- account reuses THIS index — no second index is created. So the index must
+  -- govern every venue, not only mt5: a second live okx row with the same
+  -- (user, exchange, venue_account_id) is refused, and once the first is
+  -- disconnected the slot is free again.
+  -- RED-UNDER: rebuild the LIVE api_keys_user_exchange_venue_account_uniq with an
+  --            extra `exchange = 'mt5'` conjunct — the "only MT5 has an account
+  --            id" assumption this phase retires. Sections 1-5 still read as
+  --            intended (same name, UNIQUE, partial, same columns, both
+  --            predicate conjuncts present) and 6a-6e are all mt5, so only this
+  --            arm can see it.
+  -- RED-UNDER-M: {"arm":"6f CCXT","apply":[{"kind":"sql","stmt":"DROP INDEX public.api_keys_user_exchange_venue_account_uniq; CREATE UNIQUE INDEX api_keys_user_exchange_venue_account_uniq ON public.api_keys (user_id, exchange, venue_account_id) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL AND exchange = 'mt5'"}]}
+  BEGIN
+    INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, venue_account_id)
+    VALUES (k_okx, uid_a, 'okx', 'wizcont02 okx live', 'enc', true, c_okx_acct);
+  EXCEPTION WHEN unique_violation THEN
+    RAISE EXCEPTION 'TEST FAILED (6f CCXT): the FIRST live okx row for an account id was refused 23505 — nothing else holds that (user, exchange, venue_account_id)';
+  WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (6f CCXT): the FIRST live okx row for an account id was refused with SQLSTATE % (%), not admitted', SQLSTATE, SQLERRM;
+  END;
+
+  v_refused := FALSE;
+  BEGIN
+    INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, venue_account_id)
+    VALUES (uid_a, 'okx', 'wizcont02 okx dup', 'enc', true, c_okx_acct);
+  EXCEPTION WHEN unique_violation THEN
+    v_refused := TRUE;
+  WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (6f CCXT): a SECOND live okx row on one account id was refused with SQLSTATE % (%), not the 23505 of api_keys_user_exchange_venue_account_uniq', SQLSTATE, SQLERRM;
+  END;
+  IF NOT v_refused THEN
+    RAISE EXCEPTION 'TEST FAILED (6f CCXT): a SECOND LIVE okx api_keys row with the same (user_id, exchange, venue_account_id) was ADMITTED — api_keys_user_exchange_venue_account_uniq does not govern ccxt venues, so one exchange account behind two keys is counted twice (Phase 167.1.2 D-01)';
+  END IF;
+
+  UPDATE api_keys SET disconnected_at = now() WHERE id = k_okx;
+  BEGIN
+    INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, venue_account_id)
+    VALUES (uid_a, 'okx', 'wizcont02 okx reconnected', 'enc', true, c_okx_acct);
+  EXCEPTION WHEN unique_violation THEN
+    RAISE EXCEPTION 'TEST FAILED (6f CCXT): a SOFT-DISCONNECTED okx row still occupies the (user_id, exchange, venue_account_id) slot — the live-rows predicate does not hold for ccxt venues';
+  WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (6f CCXT): a new live okx row after the first was disconnected was refused with SQLSTATE % (%), not admitted', SQLSTATE, SQLERRM;
+  END;
+
   -- ----- cleanup ------------------------------------------------------------
   -- Explicit, in FK order, rather than relying on the profiles→api_keys cascade.
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
   DELETE FROM auth.users WHERE id IN (uid_a, uid_b);
 
-  RAISE NOTICE 'PASS (behavioural): duplicate LIVE identity refused (23505); a soft-disconnected row does NOT squat the slot; reconnecting into an occupied slot refused (23505); '''' and ''   '' refused (23514); a different tenant admitted the same identity.';
+  RAISE NOTICE 'PASS (behavioural): duplicate LIVE identity refused (23505); a soft-disconnected row does NOT squat the slot; reconnecting into an occupied slot refused (23505); '''' and ''   '' refused (23514); a different tenant admitted the same identity; a second live okx row on one account refused and admitted once the first is disconnected (6f CCXT).';
 END $behavioural$;

@@ -1,5 +1,795 @@
 # Changelog
 
+## [0.103.0.0] - 2026-09-26 — ACCOUNTTRUTH PR B: the account-identity migration ships alone, ahead of every reader
+
+⭐ **What changed for whoever reads this next.** Phase 167.1.2 (ACCOUNTTRUTH) makes one exchange
+account count once in the allocator's history, even when more than one key reads it. D-12 splits the
+phase into three PRs. PR A (0.92.0.0) hid the history. This PR B is the one migration,
+`20260925120000_api_keys_account_identity.sql`. It carries every DDL change the phase needs and
+ships ALONE, before any TypeScript reads a new column. If a key-list SELECT named a column PROD
+lacked, the Exchanges page would break for every allocator (RESEARCH Pitfall 1). PR C ships every
+reader, the stamper and the recompose that honours the new flag.
+
+⚠️ **This is a minor bump because the database contract changes on purpose.** It adds three
+`api_keys` columns, a same-owner trigger, an owner-callable SECURITY DEFINER RPC, and a new named
+refusal on `reconnect_allocator_api_key`. The only TypeScript change is the regenerated
+`src/lib/database.types.ts`, which reads nothing at runtime. JOBRPCTRUTH (0.93.0.0) took a minor
+for a migration-carrying contract change too. It was first numbered 0.99.0.0. It became 0.103.0.0 when
+main reached 0.102.0.0 (Phases 166.1 and 166.2) before it landed, and it takes the next minor above main.
+
+⛔ **Merging this applies the migration to shared TEST and then to PROD, with no human gate.**
+`supabase-migrate.yml`'s `apply-test` runs first, and PROD's `apply` follows once it succeeds. The
+`Production` reviewer gate was removed on 2026-09-23, so all review happened before the merge.
+migration-reviewer, rls-policy-auditor and silent-failure-hunter all passed at `39772766a` with
+0 CRITICAL and 0 HIGH, over five review rounds in total.
+
+⛔ **DEPLOY ORDER (D-12).** PR C starts only after this PR's PROD `apply` job has concluded success
+on its merge commit. Plan 03 Task 4 checks that and prints `D12_ORDER_OK`. Until PR C lands, a
+successful call to `set_departed_key_history_inclusion` stores the choice and enqueues a
+`derive_allocator_equity` recompose, but the recompose IGNORES `history_inclusion`. No reader of
+the column exists yet. No UI calls the RPC, so only a direct PostgREST call by the key's owner can
+reach it today.
+
+### Added
+- **The account-share marker on `api_keys` (D-11)** (`ffc0d7f4d`, then `27e149fc7` M1 and L2/L3).
+  `account_shared_with_api_key_id` and `account_share_kind` are both-or-neither and never point at
+  their own row. The FK is `ON DELETE SET NULL`. A same-owner trigger,
+  `enforce_api_keys_account_share_same_owner`, applies these rules when a marker is written:
+  - the holder must exist (23503 `ACCOUNT_SHARE_HOLDER_NOT_FOUND`);
+  - it must belong to the same owner (42501);
+  - it must be live (55000 `ACCOUNT_SHARE_HOLDER_NOT_LIVE`);
+  - it must not be marked itself, so no chains and no 2-cycles (23000
+    `ACCOUNT_SHARE_HOLDER_IS_MARKED`);
+  - a key that already holds another cannot be marked (23000 `ACCOUNT_SHARE_KEY_IS_A_HOLDER`).
+
+  The holder row is read `FOR SHARE`, so racing writers serialise. A holder cleared to NULL takes
+  its kind with it only when the writer left the kind unchanged, so a contradictory write still
+  reaches the CHECK. Nothing is ever auto-disconnected or deleted (D-01).
+- **`api_keys.history_inclusion` and the owner RPC `set_departed_key_history_inclusion(uuid, text)`
+  (D-05, D-09)** (`ffc0d7f4d`). The key's owner can choose `include` or `exclude` for a DEPARTED
+  key's history. The RPC answers 22023 `HISTORY_INCLUSION_INVALID` on a bad value and 55000
+  `KEY_NOT_DEPARTED` on a live key (`27e149fc7` L6). Only `authenticated` holds EXECUTE on it. Its
+  `search_path` is `public, pg_catalog` and it schema-qualifies its relations (`06b9afa52`).
+- **Column SELECT on the three new columns goes to `authenticated` only** (`ffc0d7f4d`). Every DO
+  block in the migration is catalogue-only. Shared TEST holds PROD's catalogue and none of its
+  data, and a data-reading DO block could refuse there and block the PROD apply.
+- **The rollback `supabase/migrations/down/20260925120000-rollback.sql`** (`168114b2a`, then
+  `c30b5d627` M4 and `178881008`). It drops the RPC, the trigger, the holder index and the three
+  columns. It restores `reconnect_allocator_api_key` and both COMMENTs, which were measured
+  byte-identical to `baseline.sql` after an up, down, up round trip. A precondition refuses a
+  database that never had the migration, where every `IF EXISTS` DROP would otherwise report a
+  hollow success. A post-verify refuses if anything the migration added survives. It also checks
+  that the restored reconnect body, its COMMENT, both column and index COMMENTs and the EXECUTE
+  grants (`authenticated` and `service_role`, never `anon`) all match. Its header says the
+  `schema_migrations` row stays, so `db push` will not re-apply the migration until that row is
+  handled.
+- **Database types for the new columns and RPC** (`3a27db675`). They were measured against
+  `supabase gen types` over the loopback local-stack lane, never a linked project.
+
+### Changed
+- **`reconnect_allocator_api_key` refuses a live twin by name** (`ffc0d7f4d`, then `27e149fc7` M3
+  and L4). It is re-based on `20260422101911`. It answers 23505 `KEY_VENUE_ALREADY_CONNECTED` when
+  a live key of the same user already holds the same exchange and `venue_account_id`, so the
+  database no longer surfaces an anonymous unique-index violation (Pitfall 5). Another tenant's key,
+  or the same account id on another exchange, does not block. A reconnect also resets
+  `history_inclusion` to NULL. The refusal ships now because PR C's plan 02 stamps ccxt account ids,
+  which makes the collision reachable beyond MT5. The VAC-04 acknowledgement is recorded.
+- **The `venue_account_id` column COMMENT and the `api_keys_user_exchange_venue_account_uniq` index
+  COMMENT now say what is true (D-10)** (`ffc0d7f4d`, `168114b2a`). ccxt venues carry an account
+  id, and sFOX stays NULL because its account id cannot be known, not because it is pending. PROD's
+  index COMMENT was MEASURED to be a shorter text that no migration produces. The new COMMENT keeps
+  every PROD sentence and drops "venue-confirmed". The rollback restores PROD's text.
+- **The column COMMENTs carry the reader contract** (`90c587336`, `9bacdde33`). A marked key is
+  counted through its holder only while the holder is working (`disconnected_at IS NULL` and
+  `sync_status <> 'revoked'`). Otherwise it counts on its own. That working-holder definition is
+  marked PROVISIONAL. It moves together with the RPC's `KEY_NOT_DEPARTED` test, and PR C plan 04
+  decides it with the founder. The `history_inclusion` COMMENT says the "never carries over" rule
+  binds every path that returns a departed key to live, including the rotate-secret route.
+
+### Fixed
+- **The history toggle cannot report success over a stale curve** (`27e149fc7` M2, `06b9afa52`,
+  `5991c08ac`, `9255dc600`, `20a366853`). Five review-round fixes, all in the RPC:
+  - it locks every in-flight or retry `derive_allocator_equity` row of the caller;
+  - it refuses 55006 `HISTORY_RECOMPOSE_IN_PROGRESS`, writing nothing, while a recompose is
+    running;
+  - it re-checks the job it hands back, and passes only a pending or `done_pending_children` job;
+  - a job that finished in between gets one more pass, and a second finished job answers 55006
+    `HISTORY_RECOMPOSE_RACED`;
+  - a lost enqueue race (40001 from `_enqueue_compute_job_internal`) is re-raised as the same
+    `RACED`, so no raw 40001 reaches the client;
+  - a NULL job id answers XX000 `HISTORY_RECOMPOSE_NOT_QUEUED`.
+
+  The function COMMENT tells clients to branch on MESSAGE_TEXT within 55006: `IN_PROGRESS` means
+  wait, `REQUEUED` and `RACED` mean retry now. No client reads any of these names yet.
+- **The toggle reuses a `failed_retry` recompose and never queues its pending twin** (`061be6526`,
+  `5991c08ac`, `9255dc600`, `e7b467d3b`). MEASURED on the pg-lane: a due `failed_retry` row beside
+  a pending row for the same allocator makes every claim entry point raise 23505 on
+  `compute_jobs_one_inflight_per_kind_allocator`, the worker-spin class of 2026-04-28. The reuse
+  now does all of this:
+  - it puts the row back to `pending`, due now, with `attempts` untouched;
+  - it clears `claimed_at`, `claimed_by` and `claim_token`, as `reset_stalled_compute_jobs` does;
+  - it re-checks `status = 'failed_retry'` in the flip, so a row a claimer took is never put back;
+  - it skips the flip when a pending, `done_pending_children` or running sibling exists;
+  - it re-raises a 23505 on the flip as 55006 `HISTORY_RECOMPOSE_REQUEUED`.
+
+### Tests
+- **New gate `supabase/tests/test_api_keys_account_identity.sql`, 37 arms, each `RED-UNDER-M`
+  annotated and observed RED (identity ok)** (`ffc0d7f4d`, `27e149fc7`, `a6b39abc6`,
+  `061be6526`, `1c366e115`, `fa01ab33f`):
+  - the ACCT arms cover the marker rules;
+  - the HIST arms include `HIST-lock` (the returned job is locked), `HIST-retry` (the reuse, then
+    the cleared claim), `HIST-tenant` (the reuse never touches another tenant's row) and
+    `HIST-requeued` (a test-local trigger measures the flip's 23505 handler in one session);
+  - the RECON arms cover the reconnect refusal, including the tenant and other-exchange twins and
+    the reset.
+
+  Follow-ups: `d01399b02` pins heap-order scans in `ACCT-s`, `77618abe7` narrows `HIST-lock`'s
+  RED-UNDER claim to what it proves, and `39772766a` moves the 23505 handler from the RPC's
+  REASONED list to the gated list.
+- **`test_api_keys_venue_identity_uniq.sql` gains arm 6f CCXT** (`168114b2a`, `d01399b02`). A second
+  live okx row on one account id is refused 23505 and admitted once the first disconnects. Any
+  other SQLSTATE now fails as `TEST FAILED (6f CCXT)`, not as an anonymous abort.
+- **New pg-lane fixture `36-fixture-compute-jobs-claim-token.sql`** (`e7b467d3b`). It stands in for
+  `compute_jobs.claim_token` so the reuse's claim clear runs on the lane without re-basing five
+  claim functions.
+- **Census pins moved by measurement, each observed RED at its old value** (`a25012815`,
+  `82beb2ea1`, `a6b39abc6`, `061be6526`, `1c366e115`, `fa01ab33f`). `FILES_FLOOR` 50 → 51,
+  `ARMS_FLOOR` 449 → 487, and `WAIVED_CEILING` stays 0. The `gate-family-meta` registry, the
+  annotation-parser pins, the floors `GREEN_LOG` fixture (with its three deliberate mismatches kept
+  one apart) and `COMPARED_FLOOR` 123 → 125 all moved too. The full lane run at `39772766a` printed
+  arms 487/487/0 with no defects.
+- **Function snapshots regenerated** under `supabase/schema/functions/`
+  (`enforce_api_keys_account_share_same_owner`, `set_departed_key_history_inclusion`,
+  `reconnect_allocator_api_key`), with two dated snapshot-only `NAME_SET_RATCHET` rows in
+  `scripts/dump-sql-functions.ts`. `COMPARED_FLOOR` lives in
+  `scripts/baseline-content-drift-check.mjs`.
+
+### Notes
+- **Known limit (round 5, M-1, recorded rather than fixed by founder rule): the reuse lookup's
+  `running` narrowing is not gated.** No arm reddens if the `NOT EXISTS` stops covering a running
+  sibling (`9255dc600`). The shape needs a second backend, and the SQL corpus runs one session.
+- **Known limit (round 5, M-2, recorded rather than fixed): the `serialization_failure` wrapper
+  around the enqueue is not gated** (`20a366853`). It is reasoned, not measured, for the same
+  reason. The round-5 INFO items are recorded and were not fixed.
+- **Known limit: until PR C, the recompose ignores `history_inclusion`.** See DEPLOY ORDER above.
+- **Known limit: the Exchanges page shows its generic reconnect-failure copy for
+  `KEY_VENUE_ALREADY_CONNECTED`.** `AllocatorExchangeManager` logs the RPC error but does not map
+  the name. Before this PR the same collision would have surfaced as the index's raw 23505
+  (reasoned, not measured on the reconnect path).
+- **Known limit: the rotate-secret route does not yet reset `history_inclusion` when a revoked key
+  returns to live.** The column COMMENT says so, and PR C owns the fix.
+- **Routed in `TODOS.md`** (`7fdd1fe02`): `[167.1.2-REUSED-RETRY-ENDS-FAILED-FINAL]` goes to PR C
+  plan 04, and `[167.1.2-SECOND-FAILED-RETRY-ROW-STAYS]` goes to Phase 164.9.3 CLAIMPAIR.
+- **The committed baseline needs a re-dump after the PROD apply.** Phase 164.9.5 AUTOREDUMP is not
+  merged yet, so this is manual. Until it happens, `supabase/schema/baseline.sql` lacks this
+  migration. The local-stack lane replays it on top of the dump
+  (`baseline-replay: 1 migration(s) newer than the dump: 20260925120000_api_keys_account_identity.sql`,
+  measured after merging `main`). Until then the drift check reports the two new functions as
+  `SNAPSHOT_MISSING` and the re-based `reconnect_allocator_api_key` as `DRIFT`. The two
+  `NAME_SET_RATCHET` rows clear at that refresh.
+- **Merged `origin/main` twice** (`bf1a25bb6`, and the ship merge `035be2ae4`, which brings in `main` at `3b923498e`, v0.97.0.0). Both
+  merged with no conflicts. Main added no migration in between, so the replay set names only this
+  branch's migration.
+## [0.102.0.0] - 2026-09-26 — COMPUTEONCE: each TypeScript Sharpe, correlation and beta is computed once, in one floored module, and a statistic that does not exist reads "—" on every page
+
+⭐ **What changed for whoever reads this next.** Phase 166.2 is the TypeScript half of the
+dispersion-residue fix. About twenty TS sites each carried their own copy of a Sharpe, correlation
+or beta formula behind a `> 0` guard. On a compounding-NAV constant yield the standard deviation
+is about 1e-16, never exactly 0, so every copy passed its guard and printed a Sharpe in the
+trillions or a correlation computed from rounding noise. The founder's direction (D-17, verbatim:
+"Why don't you calculate Sharpe once and the 20 places all read it from there?") replaced the
+twenty copies with ONE module, `src/lib/return-stats.ts`, and every site now calls it.
+
+⚠️ **This is a minor bump because values a user can see change, on purpose.** For a series with no
+real dispersion, the Sharpe, correlation, beta, information ratio and related cells on `/compare`,
+in the scenario composer and its benchmark and stress panels, on the Risk tab, on the factsheet and
+on the OG card no longer show a residue number. ⭐ **Founder decision D7 (2026-09-26, "Show —
+everywhere"), taken in the review round:** a statistic that does not exist stays empty end to end
+and reads "—" or a gap on EVERY page, never 0.00 and never "unchanged", and every page agrees. The
+plans first mapped it to whatever each site showed for an exact constant (D-07), which was 0.00 at
+eight sites; D7 reversed that for display. Review rounds 2 and 3 carried D7 to the statistics that
+still printed a 0 for "does not exist": Sortino, Calmar, Profit Factor, Calmar by Year, skew,
+kurtosis, Avg Loss, Avg Win, the rolling Sortino and the empty scenario body. Series with real
+dispersion are unchanged: every shared function keeps the arithmetic order the factsheet already
+used, and the factsheet snapshot moved only by six additive resample counts (D-28, below), with no
+number changed.
+
+⛔ **This entry claims the TypeScript half only.** Since the 2026-09-26 split (D-23), the Python
+floor sites shipped as Phase 166.1 (`[0.100.0.0]`, below) and the PROD recompute of rows computed
+before Phase 166 ships as Phase 166.3. Neither is in this release. This release carries no
+migration and no `analytics-service/` or `supabase/` path of its own.
+
+**Version.** `origin/main` read `0.100.0.0` at ship time and open PR #873 claims `0.101.0.0`, so this
+release takes `0.102.0.0`. It replaces the `0.97.0.0` that this branch carried through two earlier
+release commits (`bd42a740c`, then `be37c440e` folding review round 1); main has since used
+`0.97.0.0` for DRBOPTIONS, and that entry below is main's and is untouched.
+
+### Added
+
+- **`src/lib/return-stats.ts`, the one TypeScript home of dispersion, Sharpe, Pearson and beta**
+  (plan 01, `ff613e350`). It holds Phase 166's floor (`DISPERSION_RESIDUE_REL`, `residueFloor`,
+  `dispersionIsResidue`, `dispersionIsReal`, the Python rule verbatim) and the four ratio functions
+  `dispersion`, `sharpe`, `pearson` and `beta`. `dispersion` returns an sd of exactly 0 when the
+  dispersion is residue, so "no dispersion" answers what an exact constant answers, stated once.
+  It builds on the existing `mean` and `stdDev` in `src/lib/portfolio-math-utils.ts`, so there is
+  one mean and one sd, not a third copy. `/compare`'s holding Sharpe (T1) is its first reader.
+- **The bootstrap panel names how many resamples a ratio rests on** (SFH-R2-M2 / IN-01,
+  `9769f8dfa`). `bootstrapCI` carries `n_valid` on its Sharpe and Sortino entries (optional on
+  `BootstrapCISummary` and `BootstrapCIPayload`; a payload cached before it reads as all
+  resamples). The caption appends "Sharpe from k of n resamples (the rest have no Sharpe)" when
+  k < n, and says "no resample has a Sharpe" when none has one (IN3-01, `5cf32da75`). `BootHist`'s
+  no-variance line says "all resamples produced X" only when every resample has the metric.
+- **The KPI strip's Avg |ρ| states its pair coverage** (SFH-R2-M3, `0c6f0ba98`). It counts the
+  measured off-diagonal cells behind the value it shows, with the same `pairCoverage` count the
+  heatmap uses, and appends "· k of n pairs measured" when k < n.
+
+### Fixed
+
+- **T2-T5: the composer and the what-if blend** (plan 01, `c2cddfb4a`). `sampleBasisRatios`,
+  `computeScenario`'s Sharpe and correlation matrix, and `diversificationRatio` compute through the
+  shared module.
+- **T6, T7: one TS Pearson** (plan 02, `ac1946d31`, `90476b60b`). `/compare`'s correlation matrix
+  and the Risk tab's `CorrelationMatrix` widget both call the shared `pearson`; the widget's local
+  copy is gone.
+- **T8-T12: portfolio stats and the scenario libraries** (plan 03, `dc0e63d19`, `839fff99b`).
+  `computeAlphaBeta`'s beta and `computeRiskDecomposition` use the shared functions, and
+  `scenario-benchmark.ts` and `scenario-stress.ts` replace their hand-written relative floors with
+  the shared predicate and the shared `pearson`.
+- **T13-T15, T18: the factsheet headline** (plan 04, `8b0577585`, `22bfcdca0`). `compute`'s Sharpe,
+  skewness, kurtosis and `ann_vol`, `bootstrapCI`'s resampled Sharpe, and the Sharpe arm of
+  `computeOgHeadline` that still computes go through the shared module. T18 is fixed at its
+  source: `compute`'s snapped `ann_vol` is 0 on residue, so `comparator-block.ts`'s existing
+  `ann_vol > 0` guard is right with no edit to that file.
+- **T16, T17, T19, T20: the factsheet's joint, rolling and correlation sites** (plan 05,
+  `7b8053e98`, `32ceb7236`). `jointMetrics`' beta, correlation and information ratio (now
+  `sharpe` over the active series), `rollingBeta`, `rollingSharpe`, `build-payload.ts`'s
+  `pearsonCorr` body and `buildAllocatorMetrics`' correlation all call the shared module, and
+  their local `mean` / `pstdev` helpers are gone.
+
+### Fixed (review round 1, founder decision D7: an absent statistic reads "—" everywhere)
+
+- **The factsheet Sharpe that does not exist reads "—", as the OG card does** (CR-01 / SFH-H1,
+  `9670242ae`). `compute`'s Sharpe was 0 ("0.00") where the OG card and tearsheet said "—" for the
+  same series; it is NaN now, which also reaches the levered browser re-derive, the benchmark
+  column and the style-drift halves. The peer rank of a strategy with no Sharpe is "—", not the
+  0th percentile. The bootstrap drops resamples with no Sharpe instead of counting them as 0, and
+  its CI reads "—" below 40 resamples that have one (`MIN_SHARPE_RESAMPLES`).
+- **`jointMetrics` reads "—" for every ratio that does not exist** (WR-01 / SFH-M3, `9d07bbec0`):
+  beta, correlation, R², information ratio, Treynor and alpha, and the up / down capture against a
+  benchmark with no dispersion or no up / down days. The page used to say "Correlation 0.00" in
+  one panel and "—" in the next for one pair; a constant-yield benchmark's up capture read -0.012
+  to -4.47.
+- **The Risk tab's correlation matrix renders an unmeasurable pair "—"** titled "Insufficient
+  data", as `/compare` does, instead of "0.00" on the neutral colour; a missing precomputed cell is
+  the same absence (WR-02 / SFH-H2, `2b32a15f3`).
+- **"Avg |ρ|" no longer counts an undefined pair as ρ = 0** (WR-03 / SFH-M2, `c772b173b`). The
+  pair leaves the matrix and the average's sum and count, and the heatmap caption says how many
+  pairs it averages when some are missing. One all-zero member used to pull a three-member
+  fixture's average from 0.654 to 0.218, a "better diversified" book by construction.
+- **Rolling Sharpe and beta leave a gap, the allocator correlation reads "—", and alpha / beta
+  can be absent** (WR-04 / SFH-M1 / SFH-M4 / SFH-M5 / IN-04, `339d1c9e7`, `9a36a749b`). A window
+  with no ratio is null (a gap, not a drawn 0); `buildAllocatorMetrics` refuses legs of unequal
+  length and drops the grid scan's cross term when the correlation is undefined (it is 0 there by
+  construction); `computeAlphaBeta` returns `{ alpha: null, beta: null }` for an undefined beta and
+  `AlphaBetaDecomposition` shows "—"; the shared `beta()` returns null for a non-finite value in
+  EITHER leg (a NaN in `y` used to come back as NaN).
+- **One σ_p floor, and every local sd reads the shared module** (WR-06 / SFH-M6 / SFH-M7,
+  `d8c98e54c`, with the `rollingVol` and scenario-volatility moves in `339d1c9e7` and
+  `c772b173b`). `percentContributionToRisk` uses the same floor as `diversificationRatio`, so the
+  panel can no longer show a DR beside "—" for PCR and ENB. `computeTrackingError`, `rollingVol`,
+  the scenario's volatility and the benchmark / stress degeneracy tests use the shared
+  `dispersion`; scenario-benchmark's own local test is gone, because `computeAlphaBeta` now answers
+  a constant benchmark with null itself.
+
+### Fixed (review round 2)
+
+- **Beta is exactly 0 for a strategy leg with no dispersion** (HI-01, `1afe06ea6`). `beta` floored
+  only the benchmark leg, so a constant-yield strategy against a real benchmark gave a beta of
+  about ±1e-15, and `jointMetrics`' Treynor guard (`beta !== 0`) divided by it: the public
+  factsheet's default BTC panel read a Treynor of ±1e10 to 1e15 and a Beta of "-0.00". Beta now
+  answers 0, what an all-zero strategy gives, so Treynor is "—" through the existing guard and
+  `rollingBeta` and `computeAlphaBeta` read 0.
+- **Sortino and Calmar that do not exist are NaN, not 0** (HI-02, `0dd022822`). A series with no
+  losing day read "Sortino 0.00", one with no drawdown "Calmar 0.00", beside "Sharpe —", and the
+  peer bar ranked the fabricated 0 at the 5th percentile. `compute`'s Sortino and Calmar arms and
+  `headlineStats`' Sortino are NaN; `bootstrapCI` drops resamples with no Sortino as it drops those
+  with no Sharpe; `computePeerPercentile` gives a non-finite Sortino no rank. Every renderer shows
+  NaN and its JSON-cache null as "—".
+- **`rollingSortino` leaves a window with no losing day as a gap, not 0** (`fd97c010a`), as
+  `rollingSharpe` already did for a window with no dispersion.
+- **The Rolling Metrics "Now" column is the current window** (SFH-R2-H1, `bb61e178a`). It walked
+  back to the most recent non-null value, so a strategy flat over its last window showed a
+  months-old Sharpe as current beside a 0.0% current volatility. "Now" is the last element of each
+  rolling series and reads "—" when that window has no value.
+- **The v2 factsheet payload cache key moves to v7** (IN-03, `89521ac23`), so an entry cached
+  before this release cannot keep serving a fabricated 0 for up to the 3600 s revalidate.
+- **The empty scenario body shows "—", not zeros** (SFH-R2-M1 / WR-01, `2a50833ae`). With no
+  usable daily returns the composer's body read "Sharpe 0.00 · Sortino 0.00 · Calmar 0.00" under a
+  KPI strip showing "—". `emptyComputeSummary` (renamed from `zeroedComputeSummary`, which
+  described the defect) carries NaN for every statistic; only the counts and spans (`n`, `years`,
+  `longest_dd`) stay 0. `emptyBootstrapCI` carries NaN points and bounds.
+- **`AlphaBetaDecomposition` names the benchmark only when it is flat** (IN-02, `dbcef5337`). An
+  undefined beta can also come from a non-finite return, so that case now reads "Alpha and beta
+  cannot be measured over this window" instead of blaming the benchmark.
+
+### Fixed (review round 3)
+
+- **Profit Factor is "—" for a book with no losing day** (HI3-01, `7edee5002`). It printed "Profit
+  Factor 0.00", the worst reading for the best record, directly above "Omega (θ=0) —", the same
+  number. The analytics service already persists None for this case.
+- **Calmar by Year is "—" for a year with no drawdown** (HI3-02, `18671b090`), matching the
+  headline Calmar in the same column; the composer builds its rows through the same function.
+- **Skew and kurtosis are "—" for a series with no dispersion** (WR3-01, `a85060a43`). They printed
+  "Skew +0.00" and "Kurtosis 0.00" under "Sharpe —". This supersedes T13's "stay 0" answer (D-27).
+- **Avg Loss (and Avg Win) are "—" when there is no such day** (SFH-R3 MEDIUM-2, `b9d7c7590`). The
+  Max Drawdown panel printed "Avg Loss +0.00%" for a book that never lost.
+
+### Changed
+
+- **What a user sees for a constant-yield series.** The TS-computed Sharpe, correlation, beta,
+  information-ratio and ratio cells listed above read "—" (or leave a gap on a rolling chart)
+  instead of a residue value, on `/compare`, the scenario composer and benchmark panel, the Risk
+  tab, the factsheet and the OG card's computed Sharpe (`ff613e350`, `c2cddfb4a`, `ac1946d31`,
+  `90476b60b`, `839fff99b`, `8b0577585`, `22bfcdca0`, `7b8053e98`, `32ceb7236`, and the review-round
+  commits above). Beta for a flat STRATEGY leg is 0, not "—" (HI-01).
+- **Two `og-metrics.test.ts` assertions now say the constant series has no Sharpe** (plan 04,
+  `22bfcdca0`). Both `expect(Number.isFinite(sharpe))` side assertions became
+  `expect(Number.isNaN(sharpe))`, each with a one-line D-07 comment. They were in "CAGR hidden
+  (NaN) for a dense sub-year series" (300 days at 0.001, sd about 6.5e-19, a Sharpe of about
+  2.9e16) and "single / duplicate / unsorted dates never produce Infinity" (40 days at 0.002). The
+  finite value they asserted was the defect itself. The owner of the D-07 fix owns the assertions
+  that pinned the defect (the D-19 amendment, below).
+- **Four test-file comments name the cache key as `-vN`, not the stale v6** (IN3-03, `252211514`),
+  and `zipDrop`'s comment says it drops every null, not only the warm-up prefix, naming the
+  line-join as a recorded limit (SFH-R3 LOW-1, `a3592327a`). Both are comment-only.
+
+### Removed
+
+- **`src/lib/correlation-math.ts` and its test** (plan 02, `ac1946d31`). `pearson` moved into
+  `return-stats.ts`; `rollingCorrelation` had no production caller, since `CorrelationWithBenchmark`
+  already reads the persisted rolling correlation.
+- **`computeRollingMetric`**, dead (0 production callers), deleted with its describe block
+  (plan 03, `dc0e63d19`).
+- **Every private copy of the Sharpe, Pearson, beta, mean and pstdev formulas** the sites carried
+  (plans 01-05, the commits under Fixed), and two comments that still named the retired
+  correlation module and `rollingCorrelation` (plan 06, `eef6a8319`).
+
+### Root cause
+
+- **A standard deviation derived from a compounding NAV is about 1e-16, never exactly 0**, so a
+  `> 0` guard never catches "no dispersion". Phase 166 fixed the Python side with a relative floor;
+  the TS side had twenty private copies of the same ratio formula, each with the same guard. That
+  is why D-17 computes each figure once: a floor pasted into twenty copies still leaves twenty
+  formulas to drift.
+- **A 0 answer for "does not exist" survived the floor.** Once the floor made residue exactly 0,
+  every ratio whose denominator can be 0 (a Sortino with no losing day, a Calmar with no drawdown,
+  a Profit Factor with no loss, a standardised moment with no dispersion) still had a `: 0` arm,
+  and 0.00 reads as a measured value. D7 is the rule that closes that class; rounds 2 and 3 swept
+  the `: 0` fallbacks on displayed ratios.
+- **The full suite, not a plan's own verify list, is where an unclassified env read shows up**
+  (`4c50d206b`). Plan 06's gate reads `QZ_166_2_06_SCAN_ROOT` to point its merge-base scan at an
+  archived tree; the release sweep caught that the env-manifest contract test did not classify
+  the read. It is now in `TEST_ONLY_KEYS` with a dated comment, and `.env.example` is untouched
+  because this is test wiring.
+
+### Tests
+
+- **A red test first for every site, on a compounding-NAV constant yield** (`1b518ebf6`,
+  `e4ee8e31c`, `02b522b47`, `22478ef83`, and the site and residue test files landed with
+  `ff613e350`, `ac1946d31`, `dc0e63d19`, `8b0577585`, `22bfcdca0`, `7b8053e98`). The deleted
+  module's `pearson` cases carry over as `src/lib/return-stats.pearson-contract.test.ts`. Each
+  site test asserts the D-07 invariant: the constant yield produces exactly what an all-zero
+  series of the same length produces at that site, with a cent-rounded NAV as the control on the
+  other side of the floor, so widening the floor goes red. The shared fixture is
+  `src/__tests__/fixtures/dispersion-nav.ts`.
+- **A cross-language pin** in `src/lib/return-stats.test.ts`: exactly one numeric-literal
+  definition of `DISPERSION_RESIDUE_REL` exists across the Python service's `dispersion.py` and
+  `metrics.py`, and it equals the TS constant (`ff613e350`). Re-run on the tree merged with 166.1:
+  the one literal is now in `dispersion.py`, and the pin passes.
+- **The compute-once gate** (plan 06, `35704c641`),
+  `src/lib/return-stats.single-source.test.ts`: every Tier-2 site file imports
+  `@/lib/return-stats`, the retired local formulas and dead functions are absent from live code, a
+  whole-tree shape matcher finds any Sharpe, Pearson or beta shape outside the module against a
+  count-pinned allowlist, and liveness fixtures prove the matcher fires. A second copy of a formula
+  now fails CI instead of waiting for a reviewer.
+- **The env-key registration above** (`4c50d206b`).
+- **The review-round tests** (every one seen RED under a neuter of its fix first, then GREEN after a
+  byte-verified restore). Round 1: one test renders the factsheet page AND the OG card from one
+  constant series and asserts "—" on both, plus no literal "NaN" on the page (`9670242ae`); the site
+  tests that pinned 0 now pin the absence; T16 covers every field that divides by the benchmark's
+  dispersion (`9d07bbec0`); the Risk-tab residue test asserts "—" where it pinned "0.00"
+  (`2b32a15f3`); a leverage test that held as 0 = 2 * 0 now runs on a real beta (`9d07bbec0`).
+  Rounds 2 and 3: a flat-strategy twin for T16 and T17 (`1afe06ea6`), rolling "Now" on a real
+  300-active-then-200-flat payload (`bb61e178a`), pair coverage through the real `computeScenario`
+  (`0c6f0ba98`), an overflowing-benchmark attribution case (`dbcef5337`), the resample-count
+  captions (`9769f8dfa`, `5cf32da75`), the cache-key shape pins (`89521ac23`), and per-arm tests
+  for Profit Factor, Calmar by Year, skew / kurtosis and Avg Win / Avg Loss (`7edee5002`,
+  `18671b090`, `a85060a43`, `b9d7c7590`).
+- **The compute-once gate, hardened** (WR-05 / IN-01 / IN-02, `4ae579ca2`). Five new shapes and
+  two widened ones catch the spellings the review measured at 0 hits (the textbook
+  `(m - rf) / sd * Math.sqrt(N)`, `m * periodsPerYear / sd`, `annRet / annVol`, `sxy / sxx`,
+  `cov / sx / sy` and more), each with its own fixture; the live tree gained 0 hits and no
+  allowlist entry. The seven known-unmatched forms are pinned at 0. The 26-hit merge-base pin
+  runs in CI: the test archives the diff base with `git archive` and fails loudly if the commit is
+  unreachable. On the merged tree it reads `shape-scan-base: hits=26 unallowlisted=20
+  allowlisted=6`, unchanged.
+- **Two `og-metrics.test.ts` Sharpe arms test what they claim again** (IN-03, `a05d06851`): the
+  sub-year CAGR case asserts a finite Sharpe on a dispersing fixture, the below-30 case bites on
+  the observation gate alone, and the constant-series "—" has its own named case.
+- **Gates on the merged tree** (sweep SHA `a5e4e710b`, `origin/main` at `d9c173346` merged in):
+  `tsc --noEmit` exit 0; vitest over `src/lib`, `src/app/factsheet`, the allocations dashboard,
+  `src/app/api/og`, `src/app/factsheet-share`, `src/components` and `critical-regressions` 542
+  files, 9458 passed, 9 skipped (pre-existing skips; this branch adds none); the compute-once gate
+  34 of 34; `eslint` over the 64 changed `src/` files exit 0.
+
+### Security
+
+- **No new trust boundary.** The phase changes pure computation and rendering; the audit
+  (`166.2-SECURITY.md`) closed with 0 open threats at or above the block level. The three
+  repudiation threats it left for the ship (T-166.2-14 the unified entry, T-166.2-34 the re-run on
+  the merged tree, T-166.2-36 the version above main's) are closed by this release.
+
+### Notes
+
+- **One TS home, pinned to the Python constant.** `src/lib/return-stats.ts` is where a new TS
+  Sharpe, correlation or beta goes.
+- **The D-17 / D-19 split with Phase 169 PAGETRUTH.** T14 has two arms. Its persisted read (the
+  rankable strategy's stored Sharpe) is Phase 169 plan 04's; its computed arm is this phase's.
+  Phase 169 plan 14's zoom-window KPIs go through `compute()` and `jointMetrics` and inherit the
+  floored versions with no further edit here. `comparator-block.ts` needs no edit (T18 is fixed at
+  its source), so 169's list can drop it. Recorded for the orchestrator and not acted on here: the
+  strategy arm's factsheet skewness and kurtosis could read the persisted values, and its rolling
+  Sharpe could read the persisted rolling metrics (a different day basis); both readers are on
+  169-owned paths, so that is 169's call.
+- **The D-19 amendment** (`c19e0f9e4`): because phases still in planning (169 included) may not
+  start execution, 166.2 plan 04 owns the two `og-metrics.test.ts` assertions that pinned the D-07
+  defect. Not taken: keeping `s > 0`, mapping null to a finite number, or widening a floor.
+- **D7, D-24** (`c03c991c7`): founder decision D7 is recorded in `166.2-CONTEXT.md` as an amendment
+  to D-07, with D-24 listing the sites it moved, and in the ROADMAP. ⚠️ D-24 also records a
+  deviation: the round-1 IN-03 fix (`a05d06851`) edits Phase 169's `og-metrics.test.ts` beyond the
+  two lines D-19 admitted.
+- **D-26** (`20b0b6821`): PAYLOAD-05's "never NaN/Inf" for the scenario payload is narrowed by D7.
+  It still holds for the chart ARRAYS; the empty-blend summary and bootstrap CI carry NaN for a
+  statistic that does not exist, and every renderer shows "—".
+- **D-27** (`cd2349d42`): T13's "skew and kurtosis stay 0 with no dispersion" is superseded by D7;
+  Profit Factor, Calmar by Year, Avg Loss and Avg Win moved the same way.
+- **D-28** (`c4dccafcb`): the additive `n_valid` snapshot change is accepted. Measured against
+  `origin/main`, `build-payload.test.ts.snap` gains exactly six `"n_valid":2000` insertions and no
+  number moves. Any snapshot change that moves a number still needs its own decision.
+- **D-29, and a rebase note for Phase 169** (`83dea7b82`): a recorded deviation from D-17. The D7
+  fix rounds edited two Phase-169-owned files, `src/app/factsheet/[id]/v2/types.ts` (NaN / null
+  statistic fields, the optional `n_valid`) and `fetch-and-build-payload.ts` (the v7 cache-key
+  note). ⚠️ **Phase 169 must rebase its planned edits to those two files over this release**, and
+  its executor re-reads both at HEAD before editing. The ROADMAP's Phase 169 section carries the
+  same note.
+- **Known limits, recorded rather than fixed** (review round 4 found 0 CRITICAL and 0 HIGH; the
+  founder rule books MEDIUM-or-lower without a fix round):
+  - **WR4-01 (pre-existing):** `compute`'s drawdown starts its peak at the first equity point, so a
+    loss on the first day of a window is never counted. A year that opens with a loss and then only
+    gains reads "Max DD 0.00% · Calmar —", and the headline max drawdown shares the defect. The fix
+    (seed the peak at 1.0) needs a parity decision with the analytics service's drawdown series and
+    belongs to a separate phase.
+  - **SFH-R4 MEDIUM-1 / IN4-02 (pre-existing):** `computeRiskDecomposition` reads 0% per strategy
+    when the book has no variance, and the widget's covariance matrix is all-zero with fewer than 2
+    common dates, so "no overlap" shows as "zero risk" (authenticated allocations dashboard only).
+  - **SFH-R4 MEDIUM-2 (pre-existing):** the KPI strip's Avg |ρ| delta against the live baseline can
+    compare averages over two different pair sets. The coverage qualifier shows the count, not the
+    mismatch.
+  - **D-26 limits:** the empty scenario body still reports 0 observations for a 1-9-day blend; the
+    scenario-share page's own Avg |ρ| cell carries no pair-coverage qualifier; `emptyQuantiles`
+    stays 0 because the box plot does arithmetic on it.
+  - **Rolling charts join across a gap in the composer:** `zipDrop` drops a null window, so the
+    blend's rolling line is drawn across an interior gap. It never draws a 0. The factsheet rolling
+    charts do break.
+  - **IN4-01:** the payload cache key stays `factsheet-v2-payload-v7` although `compute`'s outputs
+    changed again in round 3. v7 never shipped, so production has no v7 entry; a preview entry
+    filled before round 3 can serve pre-pass values for up to 3600 s.
+- **Six post-deploy browser checks** (open; `166.2-VERIFICATION.md` human items, run in the
+  logged-in browser):
+  1. The factsheet of a constant-yield strategy and its OG card: KPI and Main Metrics Sharpe, Beta,
+     Correlation, R², Information Ratio, Treynor, Up / Down Capture, Skew, Kurtosis, Profit Factor,
+     Avg Loss, the headline Calmar and the peer Sharpe bar read "—", matching the OG card. Avg Win
+     reads a positive number. Nothing reads 0.00.
+  2. The allocations Risk tab with a flat leg: the leg's CorrelationMatrix cells read "—" on the
+     neutral background, titled "Insufficient data"; the noisy pair keeps its coloured value.
+  3. A scenario with one flat member: the heatmap caption reads "Avg |ρ| … · k of n pairs
+     measured", the undefined cell reads "—", and the KPI strip's Avg |ρ| states its coverage.
+  4. AlphaBetaDecomposition: a flat benchmark gives "—" and names the benchmark as flat; a flat
+     strategy leg gives beta 0, not "—".
+  5. The Bootstrap CI panel: a constant yield reads "no resample has a Sharpe"; partial survival
+     states the resample count, with "—" below 40.
+  6. Calmar by Year and the rolling panels: a no-drawdown year reads "—", the rolling Sharpe and
+     Beta charts break at a flat window (never a drop to 0), and "Now" shows the current window.
+- **Planning, review and release records on this branch**: execution start, per-plan SUMMARYs and
+  tracking (`f2ad38a02`, `78d521b94`, `df75f6a77`, `0b1028968`, `bcd5b2d42`, `dc9f3a174`,
+  `2e1070bd2`, `ba6cd782c`, `160e13a05`, `ea5db9cae`, `520b34a93`, `20784b5a7`, `e9a19682d`,
+  `92bcaf85a`, `0fdca6ed1`); the plan-07 setup (`d04945785`); the review reports for four rounds
+  (`9382856a1`, `66db2b143`, `10f16f1eb`, `ceb73b631`, `4a94bdde8`) and the round-1 fix report and
+  its addendum (`7cb2d0f4f`, `a86ea1601`); the security audit (`c4dccafcb`) and the phase
+  verification (`83dea7b82`); and the two earlier release commits this entry replaces
+  (`bd42a740c`, `be37c440e`).
+- **The pre-split planning lineage rides on this branch.** The phase was planned as 166.1 and
+  split on 2026-09-26 (D-23); 166.1 landed on `main` by squash (#872), so these planning commits
+  are ancestors here but not on `main`: research, plans and five plan-check revisions (`1f6b2213e`,
+  `3f26b01e5`, `a7240515d`, `d1bd9f50f`, `df4d9921d`, `de4f44277`, `7f7518231`), the split and its
+  revisions (`40f683fee`, `44151866e`, `a78ca118a`, `ae543bf92`). They carry no code.
+- **Merges.** `origin/main` was merged in three times: before wave 1 (`7bfce8490`), before the
+  release sweep at `ea4167a3f` (`39ea421d8`), and at ship time (`a5e4e710b`, bringing 166.1
+  ENGINEFLOOR `0.100.0.0` and its siblings). The plan branches came in as `31ef14268`,
+  `7703e190e`, `63bddd450`, `0aadc910c`, with `f2d8adc38` bringing wave 2 into plan 04 before its
+  Task 2. The other phases' work those merges bring is covered by their own entries.
+- **The 2026-09-26 split**: the Python floor sites shipped as Phase 166.1 and the PROD recompute is
+  Phase 166.3; this entry claims neither. **No migration.**
+
+## [0.100.0.0] - 2026-09-26 — ENGINEFLOOR: every Python ratio site reads the one dispersion floor, so a constant yield never produces a fabricated ratio
+
+⭐ **What changed for whoever reads this next.** Phase 166 put a relative dispersion floor into
+`services/metrics.py`: a standard deviation at or below `1e-12 * max(1, |mean|)` is float residue,
+not dispersion. Phase 166.1 is the Python half of carrying that floor to every other place the
+analytics service divides by a standard deviation or takes a correlation. Before this release,
+seven of the eight variance sites and all eight correlation sites outside `metrics.py` still
+tested `== 0` or `> 0`, or did not test at all. The eighth variance site, S6, already used an
+absolute 1e-12, which is correct for `|mean| <= 1`, and is re-pointed to the shared floor as a pin
+(D-06). So a constant yield taken from a compounding NAV (standard
+deviation about 1e-16, never exactly 0) could give an optimizer Sharpe of 1.28e13, a CSV error
+reading "Daily Sharpe 2296215230173376.50", a 48.6% / 51.4% split of zero risk, and a 1.0
+correlation that made two same-yield strategies "match" each other. Each site now gives exactly
+what an all-zero series already gives there (D-07). ⭐ **Founder decision D7 (2026-09-26), taken
+in the round-1 review:** where that all-zero output was itself a 0 or "unchanged" one layer out,
+the statistic now stays empty end to end and renders "—" (see Changed).
+
+⚠️ **This is a minor bump because values users see change, on purpose.** Optimizer suggestions,
+the risk decomposition, correlation cells and match status can all change for a constant-yield
+strategy. And an upload that passed before can now be refused (D-24, below). Precedent:
+MT5VALIDATEWEDGE (0.96.0.0) and JOBRPCTRUTH (0.93.0.0) each took a minor bump for a visible
+behaviour change. This release carries **no migration** (D-13). ⛔ **CORRECTED in the round-1
+review fix:** it said "no TypeScript change". Under D7 it now changes the direct TypeScript
+consumers of its own Python outputs, and nothing else under `src/` (the rest is Phase 166.2's).
+
+⚠️ **Why the number is 0.100.0.0 (T-166.1-35).** This entry was first committed as 0.97.0.0
+(`46fcca88e`). Phase 168 DRBOPTIONS then took 0.97.0.0 on `main`, and the open PRs #868, #869 and
+#870 already claim 0.97.0.1, 0.98.0.0 and 0.99.0.0. A minor bump past all of them is 0.100.0.0. The
+release commit moves this heading only; exactly one `[0.97.0.0]` heading remains, Phase 168's.
+
+### Root cause
+
+- A standard deviation derived from a compounding NAV is about 1e-16 in absolute terms whatever
+  the yield, because `pct_change` rounds relative to `1 + r`, not to `r`. It is never exactly 0.
+  So a guard of the form `std == 0` or `std > 0` lets a ratio of about 1e15 through, and a Pearson
+  correlation over such a leg comes back as a residue value (measured 1.0 between two strategies
+  with the same yield) instead of NaN.
+
+### Fixed
+
+- **The floor has one home, `services/dispersion.py`** (plan 01, `6484229f6`). It holds
+  `DISPERSION_RESIDUE_REL`, `residue_floor`, `dispersion_is_residue` and `dispersion_is_real`,
+  moved verbatim from `metrics.py`. It is a leaf module (numpy and pandas only, no `services`
+  import), so the optimizer, the CSV validator and the allocated-capital code can read the floor
+  without pulling in quantstats. `metrics.py` re-binds the three functions under their old private
+  names and does not bind the constant (D-03, D-23 revision), so its values and its tests are
+  byte-identical and the qstats-gate census is unchanged.
+- **The variance sites S1-S8 read the floor** (plan 01, `6484229f6`, `614d7d8de`; plan 01b,
+  `8dae1306a`):
+  - S1 `portfolio_optimizer._compute_sharpe` returns None on residue;
+  - S2 the M-0701 exclusion in `find_improvement_candidates` tests residue on the candidate;
+  - S3 `csv_validator._check_sharpe_sentinel` keeps its verdict and drops the fabricated number
+    (D-04), and with D-24 now judges every constant positive series the same way, under its own
+    rule key since the round-1 review (see Changed);
+  - S4 `allocated_capital._annualised_sharpe` returns NaN on residue;
+  - S5 `EquityCurveBuilder.compute_sharpe` returns None on residue;
+  - S6 the constant-column gate in `optimizer.optimize_weights` uses `residue_floor` elementwise.
+    This is an honest pin, not a fix: the behaviour is identical for `|mean| <= 1` (D-06);
+  - S7 `portfolio_risk.compute_risk_decomposition` sends a residue portfolio volatility to its
+    existing zero branch (D-05), which since the round-1 review reports the undefined shares as
+    None (see Changed);
+  - S8 the SQN block in `analytics_runner._compute_derived_trade_metrics` publishes a value only
+    over real R-multiple dispersion (D-16). Identical losses of 7.7 gave -4.03e16 and now give
+    None, the answer identical losses of 1.0 always gave. The `std_r > 0` divide guard stays in
+    front of the floor, which has a NaN hole of its own (round-1 IN-01, `a3fd59304`).
+- **The correlation sites C1-C8 read the floor** (plan 03, `64af22b25`, `89cc5f0b2`,
+  `d44fb8598`), through two new helpers in `services/dispersion.py`,
+  `pairwise_correlation_or_none` and `dispersing_corrwith` (D-02):
+  - C1 `compute_correlation_matrix` masks a non-dispersing leg's row, column and diagonal;
+  - C2 `compute_rolling_correlation` applies the `both_move` mask before `dropna`;
+  - C3 `corr_with_portfolio` in `find_improvement_candidates` answers None over a residue leg, and
+    its dead `else 0` arm is gone (round-1 IN-02, `d9341680f`). C4 `_avg_corr` skips a residue
+    leg's pairs; see Changed for the one average rule;
+  - C5 `match_engine._compute_corr_with_portfolio` and C6 the BTC `benchmark_comparison` block in
+    `routers/portfolio.py` use `pairwise_correlation_or_none`;
+  - C7 the `verify_strategy` matching block and C8 `strategy_matching.find_matched_strategy` (the
+    two `corrwith` matching sites) use `dispersing_corrwith`, and C8 returns an explicit no-match
+    on an empty candidate set before `idxmax`.
+
+### Changed
+
+- **Optimizer suggestions no longer rank a constant-yield candidate on a fabricated ratio**, and
+  the risk decomposition no longer splits a zero risk into shares.
+- **Correlation cells and match status for a constant-yield strategy show the existing honest
+  absence** (an empty cell, no match) instead of a residue correlation.
+- **The CSV Sharpe sentinel rejects an exactly constant POSITIVE daily-returns CSV at EVERY
+  length** (D-24, founder decision 2026-09-26; `a6007b3d4`, `d1b91d5d0`). Before this release the
+  verdict was decided by float summation: a short constant series has a standard deviation of
+  exactly 0 and skipped the sentinel, so it was ACCEPTED, while a longer one left float residue
+  and was REJECTED. A flat series carries no real returns data, so its length no longer decides.
+  ⚠️ **An upload that used to pass can now be refused.** Exact 0 and residue get one message,
+  which names no number (D-04). A constant ZERO series keeps its verdict (accepted), and a series
+  that really varies is judged by the Sharpe over its standard deviation exactly as before.
+  ⛔ **CORRECTED in the round-1 review fix:** this bullet said the rule name and its label were
+  unchanged. See the next bullet.
+- **A constant-returns rejection has its own rule and reads as a file-level failure** (round-1
+  WR-01 / SFH MEDIUM-3, amends D-04, `95c577929`). It shared `daily_sharpe_sentinel`, so a 2-row
+  constant upload read "1 row failed validation" and "Rule violated: Daily Sharpe > 10 looks
+  unrealistic. Expand below for the row-level breakdown." No row failed, no Sharpe was measured,
+  and there is no row-level breakdown. The rule is now `daily_returns_constant`, labelled "Daily
+  returns never change". The wizard's error panel counts only real rows (`row >= 1`). With none,
+  it says "Your file failed validation" and gives a cause sentence with no row pointer. The
+  Sharpe-number rule keeps its key and label.
+- ⭐ **A statistic that does not exist now shows "—" everywhere, never 0 or "unchanged"** (founder
+  decision D7, 2026-09-26). A constant-yield series and an all-zero series read the same:
+  - **"What we'd do" optimizer card** (round-1 SFH HIGH-1, `a7616d7e8`). A constant-yield book
+    gave `corr_with_portfolio` None, the adapter's `?? 0` turned it into 0, and the card said
+    "reduce average correlation toward 0.00". The adapter now carries null, and the card drops the
+    sentence. `sharpe_lift` over a book with no Sharpe is now None rather than 0.0. It hides only
+    the Sharpe sentence, not the card, and the score still ranks on an explicit 0.
+  - **Portfolio impact simulator and replacement cards** (round-1 SFH HIGH-2 / WR-02,
+    `c30c5d99d`, `b9a542407`). Both `_delta` helpers coerced a None side to 0.0, which read
+    "Correlation unchanged" or a green "+0.00 Sharpe". A delta with either side missing is now
+    None. The simulator shows "—" and "not computable", and ReplacementCard shows a colorless
+    "— Sharpe". The bridge schema and type accept null. The bridge composite still ranks every
+    candidate, with an explicit 0 for a missing axis.
+  - **Risk attribution** (round-1 SFH MEDIUM-2, `e61e9152a`). A portfolio that carries no risk
+    reported every share as 0, which read "+0.00%" and "Balanced". The share and the assessment
+    are now "—", and the row is left out of the stacked bar.
+- **One rule for "average pairwise correlation", with the pair count stated** (round-1 WR-03 /
+  SFH MEDIUM-1, `ae8619c8f`). The risk panel averaged the defined pairs, while the scorers'
+  `_avg_corr` went None for the whole book when any one leg was flat. So one constant-yield sleeve
+  dropped the diversification axis from every optimizer, match, simulator and replacement score.
+  Both now skip the undefined pairs and average the rest, through
+  `dispersion.average_pairwise_correlation`. The portfolio row's `data_quality` records
+  `avg_pairwise_correlation_pairs_used` and `avg_pairwise_correlation_pairs_total` beside the KPI.
+  A scorer whose added or swapped leg is flat reports its correlation delta as None, never as the
+  0.0 that two averages over the same pairs would give.
+
+### Tests
+
+- `tests/test_dispersion_floor_sites.py` (the variance sites) and
+  `tests/test_correlation_residue_sites.py` (the correlation sites), with the shared fixture module
+  `tests/dispersion_fixtures.py` (`6484229f6`, `614d7d8de`, `9d007cff6`, `8dae1306a`,
+  `64af22b25`, `aea667ad8`, `89cc5f0b2`, `ebbcfb239`, `d44fb8598`). Each site has a red test from
+  a compounding-NAV constant yield with a cent-rounded control on the other side of the floor, and
+  each was observed RED on the unedited site before its fix. Every fix has a neuter, RED, restore
+  drill restored from a byte backup. S6 is an honest pin, not a red test (D-06).
+- **The D-24 tests in `tests/test_csv_validator.py`** (`a6007b3d4`, `d1b91d5d0`): a constant
+  0.001 series at 2, 3, 5, 20, 120 and 365 rows, a compounding-NAV yield, one message across all of
+  them, and a constant-zero control. On the unedited sentinel they ran `5 failed, 33 passed`, with
+  the 2, 3 and 5 row cases red. Two drills prove each half can fail: restoring the old exact-zero
+  gate turns the short lengths red, and a `>= 0` positive test turns the zero control red. The
+  pinned 5-row constant fixture now asserts REJECTED, and the fixtures that relied on a constant
+  CSV being accepted moved to varied series.
+- **The round-1 review fixes** each carry a test first seen RED under a neuter, restored from a
+  byte backup and compared with `cmp`:
+  - Python: the flat-book Sharpe lift and the narrative; ten simulator and bridge flat-leg deltas;
+    the one average rule and its 1-of-3 pair count, end to end through the router; the
+    match_engine flat candidate; S7's None shares; the `daily_returns_constant` key; S8's divide
+    guard.
+  - TypeScript: the adapter, the optimizer card, the bridge schema and card, the simulator
+    panel's null chips, a new `RiskAttribution.test.tsx`, and the CSV panel's file-level headline.
+  - Four older tests pinned a behaviour D7 reverses (a `_delta` of 0.0, zero-vol shares of 0, and
+    the all-or-nothing C4 average), and each now pins the new rule (`b9a542407`, `e61e9152a`,
+    `ae8619c8f`).
+  - C7 now runs through the real `verify_strategy` rather than a hand copy of its block (IN-04 /
+    SFH LOW-2, `6bb5108ba`).
+  - Every S-site constant-yield test asserts its residue precondition (SFH LOW-3, `b70ed1e0c`).
+  - The C6 helper restores the module's compute semaphore (IN-06, `8b03ce40c`).
+
+### Notes
+
+- **D-24 supersedes plan 01's reason for the exact-zero skip.** Plan 01 kept the length-decided
+  boundary on purpose (D-04 verdict preservation); the founder's D-24 replaced that reason.
+- **D-11:** `strategy_verifications.metrics_snapshot` rows are point-in-time records and are not
+  recomputed.
+- ⚠️ **Accepted loss (round-1 IN-05): two exactly identical constant-yield series can no longer
+  match each other** at the `verify_strategy` block (C7) or `find_matched_strategy` (C8). Before
+  this release they correlated at 1.0 because they were the same bytes. Matching is best-effort
+  enrichment, and a flat leg has no correlation (D-02, D7), so no equality fallback was added.
+- **Round-1 review (2026-09-26).** Two reports: `166.1-REVIEW.md` (3 Warnings, 6 Info,
+  `dc815328e`) and `166.1-REVIEW-SFH.md` (2 HIGH, 3 MEDIUM, 3 LOW, 2 INFO, `29152a912`). The fixes are the commits cited above,
+  plus the decision record `d4f5df0fd` (CONTEXT and ROADMAP). The per-finding outcomes are in
+  `166.1-REVIEW-FIX.md`. The two review reports and the fix report are planning commits and change
+  no shipped file.
+- ⚠️ **STORED `portfolio_analytics` values computed before this release keep any residue value
+  until that portfolio's next analytics compute.** That is the correlation matrix, the risk
+  decomposition and the average pairwise correlation. The recompute touches `strategy_analytics`
+  only.
+- **Phase 166.3 RECOMPUTE's state at release time: founder-gated, pending** (D-14). Its plan 01
+  SUMMARY does not exist yet, so no before/after counts are carried here.
+- ⚠️ **The SQN residual (D-21 W1).** S8 floors the SQN formula, but that function has had no
+  production caller since Phase 106 (`b196de6c8`), and both current success writers store
+  `trade_metrics` as NULL. So this fix changes no displayed SQN by itself. A STORED residue SQN
+  (absolute value above 1e10) stays on its row until that row is rewritten, and a ledger venue
+  never recomputes on its own. A Phase 166.3 recompute clears it by NULLing the row's whole
+  `trade_metrics`, which also empties that row's trade panel. The Q6 counts before and after,
+  split published / not published, are founder-gated, pending.
+- **The 2026-09-26 split (D-23).** This release is the Python half. The TypeScript half ships as
+  Phase 166.2 COMPUTEONCE, and the production recompute runs as Phase 166.3 RECOMPUTE. This entry
+  claims neither. The planning commits for the phase, the split and the 166.2 / 166.3 plans are
+  recorded here and change no shipped file.
+- **Three merges of `origin/main`** bring other phases' work, which their own entries cover:
+  `7bfce8490` (PR #859, before wave 1), `3a8f8ad01` (main at `ea4167a3f`, before the release
+  sweep, no conflicted path) and `1664bd800` (main at `3b923498e`, Phase 168, at ship). The last
+  conflicted in `CHANGELOG.md` and `.planning/STATE.md` only, and no code path: this entry sits
+  above main's, and STATE takes main's version plus this branch's three split lines.
+- **Round-1 review records** (planning commits, no shipped file): the fix report `84d252bfc`, its
+  frontmatter counting the 17 actionable findings `dc690c802`, and the CHANGELOG commit that
+  folded the round-1 fixes into this entry `1c2fff365`.
+- **Round-2 confirmation review (2026-09-26, `09fc1649f`):** `166.1-REVIEW.md` round 2 and
+  `166.1-REVIEW-SFH-R2.md`. **0 CRITICAL, 0 HIGH**; both round-1 HIGHs are closed at HEAD and the
+  fix pass added no new HIGH. Under the review policy MEDIUM-or-lower earns no fix round, so the
+  findings below ship as recorded limits.
+- ⚠️ **Known limits carried by this release (none fixed here):**
+  - **MEDIUM-A: the pair counts are stored but not shown.** `data_quality` records
+    `avg_pairwise_correlation_pairs_used` and `avg_pairwise_correlation_pairs_total`, but no page
+    reads them yet. The average-correlation KPI and `generate_narrative`'s sentence still present
+    an average over the defined pairs as the whole book's. On the TypeScript side, Phase 166.2's
+    KpiStrip is planned to show "k of n pairs measured".
+  - **MEDIUM-B: the replacement fit label is computed from the axes that exist.** In
+    `bridge_scoring.find_replacement_candidates`, a flat book's candidate shows "— Sharpe" and
+    "— Corr" beside a fit badge judged from the drawdown axis alone, with 0 standing in for the
+    two missing axes, and the badge does not say so.
+  - **SFH MEDIUM-1: the file-level cause line on a parse error.** A single-rule payload whose
+    errors all carry `row: 0` now reads "We checked the whole file, so no single row is at fault".
+    That is false for `parse_error`, whose parser message names a line; the line number is still
+    on the page, inside the collapsed details, and the upload is still refused. `parse_error` also
+    has no `CSV_RULE_LABELS` entry, so the raw key is shown.
+  - **LOW-A:** `WhatWedDoCard` falls back to "diversify the portfolio" when the lift and the
+    correlation are both null and no drawdown win exists. Pre-existing phrase; before this release
+    the same row read "toward 0.00".
+  - **LOW-B:** `simulator_scoring._zero_deltas` still sends 0.0 deltas on the insufficient-data
+    branch. Nothing renders them today (the panel gates on `status === "ok"`).
+  - **IN-05:** two exactly identical constant-yield series no longer match (see the accepted-loss
+    bullet above).
+- ⭐ **D-25 (founder, 2026-09-26, "Keep the rule"; `0365d4f13`).** The average pairwise
+  correlation averages only the defined pairs and records the pair counts, and a flat added or
+  swapped leg shows "—" for its correlation change. The stricter "—"-when-any-pair-is-undefined
+  rule was declined. This closes verification human item 3.
+- **Verification (`c8218585f`): `human_needed`, 10/10 must-haves verified.** The human items:
+  (1) re-derive the version on the merged tree, closed by this release; (2) the Phase 166.3 PROD
+  recompute, founder-gated and pending; (3) the WR-03 product call, closed by D-25; (4) the
+  post-deploy browser check, pending: the wizard's constant-CSV copy and the D7 "—" on the
+  optimizer, replacement, simulator and risk-attribution surfaces, in the logged-in browser.
+- **Security (`7777438db`): secured, no threat at or above the blocking threshold open.** The two
+  medium ship-time threats close here: T-166.1-34 (green sweep on the wrong tree) by merging
+  `origin/main` at `3b923498e` and re-running the gates on the merged tree `1664bd800`, and
+  T-166.1-35 (duplicated version) by the 0.100.0.0 re-derivation above.
+- ⚠️ **Pending after merge:** the Phase 166.3 RECOMPUTE of PROD rows (founder, PROD access) and the
+  post-deploy browser check above. Neither has run.
+- **Routed out, pre-existing and outside this diff** (both routed in PR #871, open at ship time):
+  - the drawdown-delta sign is inverted in `simulator_scoring.simulate_add_candidate`,
+    `portfolio_optimizer.find_improvement_candidates` and
+    `match_engine._compute_portfolio_fit_components`, so a shallower drawdown reads as worse. It
+    goes to **Phase 166.1.1 DDSIGN**;
+  - `RiskAttribution` formats `marginal_risk_pct` and `weight_pct`, which are already percent, as
+    percent a second time. It goes to **Phase 169**.
+- **Gates at the sweep SHA `3a8f8ad01`:** the full analytics-service suite `6737 passed, 90
+  skipped`; `qstats-gate census: 13 quantstats node(s) in services/metrics.py, 11 mirror(s), 0
+  violation(s)`; strict mypy `Success: no issues found in 101 source files`; ruff with no new
+  finding over the phase's Python files; `verify-plan-anchors --pending` `OK: 12 plan file(s), no
+  stale claims.`
+- **Gates after the round-1 review fixes, at `d4f5df0fd`, all run in the phase worktree:**
+  - the full analytics-service suite: `6760 passed, 90 skipped`;
+  - `qstats-gate census: 13 quantstats node(s) in services/metrics.py, 11 mirror(s), 0
+    violation(s)`;
+  - strict mypy over `services/ routers/ models/`: `Success: no issues found in 97 source files`;
+  - ruff over the 15 changed Python files: the same 6 findings before and after, so no new
+    finding;
+  - vitest over every test file that reads a changed field: `25 passed (25)` files, `806 passed
+    (806)` tests;
+  - `tsc --noEmit` and eslint on the 16 changed TypeScript files: both clean.
+- **Gates at ship, on the merged tree `1664bd800` (the SWEEP_SHA that closes T-166.1-34):**
+  - the full analytics-service suite: `6847 passed, 90 skipped`;
+  - strict mypy over `services/ routers/ models/`: `Success: no issues found in 97 source files`;
+  - `tsc --noEmit`: exit 0;
+  - `src/__tests__/critical-regressions.test.ts`: `169 passed (169)`.
 ## [0.97.0.1] - 2026-09-26 — Phase 169.3 plan 01: `/admin` Compute Jobs loads again, and a failed load no longer claims the queue is empty
 
 ⭐ **What changed for whoever reads this next.** The `/admin` Compute Jobs tab was broken. Its list

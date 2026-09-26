@@ -1,4 +1,5 @@
 import { compute, cumEq, drawdowns } from "./compute";
+import { dispersion, pearson } from "@/lib/return-stats";
 
 /**
  * Demo allocator portfolios composed from REAL benchmark return series.
@@ -65,34 +66,28 @@ export function buildAllocatorMetrics(
   periodsPerYear = 252,
 ): AllocatorMetrics {
   const n = rets.length;
+  // Every figure below is over ONE window, so the legs must be the same length
+  // (SFH-M4 / IN-04), as jointMetrics requires. Before, vol used n, the
+  // strategy vol a slice and the correlation min(n, m): three windows, silently.
+  if (mmRets.length !== n) {
+    throw new Error("buildAllocatorMetrics(): rets and mmRets must be the same length");
+  }
   const eq = cumEq(rets);
   const dd = drawdowns(eq);
-  let mSum = 0;
-  let mmSum = 0;
-  for (let i = 0; i < n; i++) {
-    mSum += rets[i];
-    mmSum += mmRets[i];
-  }
-  const m = mSum / n;
-  const mm = mmSum / n;
-  let var_ = 0;
-  let mmVar = 0;
-  let cov = 0;
-  for (let i = 0; i < n; i++) {
-    const dr = rets[i] - m;
-    const dmm = mmRets[i] - mm;
-    var_ += dr * dr;
-    mmVar += dmm * dmm;
-    cov += dr * dmm;
-  }
-  var_ /= n;
-  mmVar /= n;
-  cov /= n;
-  const s = Math.sqrt(var_);
-  const mmS = Math.sqrt(mmVar);
+  // Vols and correlation are computed by `@/lib/return-stats` (Phase 166.2
+  // D-17), population sd. A leg whose only dispersion is float residue has an sd
+  // of exactly 0, as an all-zero leg does (D-07), and no correlation: NaN,
+  // rendered "—" (founder decision D7, 2026-09-26), never "+0.00".
+  const s = dispersion(rets, 0).sd;
+  const mmS = dispersion(mmRets, 0).sd;
   const annVol = s * Math.sqrt(periodsPerYear);
   const mmAnnVol = mmS * Math.sqrt(periodsPerYear);
-  const corr = s > 0 && mmS > 0 ? cov / (s * mmS) : 0;
+  const corr = pearson(rets, mmRets) ?? NaN;
+  // The blend's cross term is 2(1-w)w * corr * annVol * mmAnnVol. When corr is
+  // undefined one leg has no dispersion (its annualised vol is exactly 0), or a
+  // leg is non-finite, so the term is 0 by construction; it is dropped rather
+  // than multiplied by NaN, and the scan stays exact.
+  const crossCorr = Number.isFinite(corr) ? corr : 0;
   const cumRet = eq[n - 1] - 1;
   const maxDd = Math.min(...dd);
 
@@ -103,7 +98,7 @@ export function buildAllocatorMetrics(
   for (let wInt = 0; wInt <= 100; wInt++) {
     const w = wInt / 100;
     const blendVar =
-      (1 - w) ** 2 * annVol ** 2 + w ** 2 * mmAnnVol ** 2 + 2 * (1 - w) * w * corr * annVol * mmAnnVol;
+      (1 - w) ** 2 * annVol ** 2 + w ** 2 * mmAnnVol ** 2 + 2 * (1 - w) * w * crossCorr * annVol * mmAnnVol;
     const v = Math.sqrt(Math.max(0, blendVar));
     if (Math.abs(v - VOL_TARGET) < bestDiff) {
       bestDiff = Math.abs(v - VOL_TARGET);

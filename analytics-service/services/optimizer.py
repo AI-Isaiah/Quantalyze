@@ -38,6 +38,8 @@ import numpy as np
 import numpy.typing as npt
 from scipy.optimize import minimize
 
+from services.dispersion import residue_floor
+
 logger = logging.getLogger("quantalyze.analytics.optimizer")
 
 TRADING_DAYS = 252
@@ -158,8 +160,11 @@ def optimize_weights(
 
     # 5. A column with zero variance (a constant strategy) makes the problem
     #    degenerate; surface null rather than a misleading "park everything here".
+    #    Phase 166.1 (S6, D-06): the floor is Phase 166's shared residue floor,
+    #    elementwise over the column means. This single-sources the constant and
+    #    is behaviour-identical to the old absolute 1e-12 for any |mean| <= 1.
     col_std = returns.std(axis=0)
-    if np.any(col_std <= 1e-12):
+    if np.any(col_std <= residue_floor(returns.mean(axis=0))):
         return OptimizerResult(ok=False, objective=objective, n=n, k=k, weights=None, reason="constant-series")
 
     # 6. Ledoit-Wolf shrunk DAILY covariance, annualized to 252.

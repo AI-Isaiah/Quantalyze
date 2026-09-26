@@ -24,8 +24,9 @@
  * engine `correlation_matrix` to 3 decimals.
  *
  * This lib NEVER recomputes ρ for display — the matrix comes from the engine,
- * read-only. `correlation-math.ts::pearson` is used only as a defensive cross-
- * check inside the test, never in production output.
+ * read-only. Neither this lib nor its test calls a Pearson: the consistency
+ * test rebuilds ρ from this lib's own covariance and σ and compares it with the
+ * engine matrix. The one TS Pearson is `return-stats.ts` `pearson`.
  *
  * Pattern precedent: src/lib/scenario-blend-adapter.ts (pure-TS engine-output
  * adapter, MIN_USABLE floor, degenerate→empty, golden-tested). This file is the
@@ -33,6 +34,7 @@
  * never called from this lib.
  */
 import { mean, stdDev } from "@/lib/portfolio-math-utils";
+import { dispersionIsReal } from "@/lib/return-stats";
 import {
   type DailyPoint,
   type ScenarioState,
@@ -349,15 +351,19 @@ export function portfolioVarianceFromCov(
  *     exposures rather than a spurious scale factor.
  *
  * σ_levᵢ and σ_p are both daily (un-annualized) — the √252 cancels in the ratio.
- * Returns null when σ_p ≤ 0 (all-flat blend) so the UI renders "—" instead of
- * dividing by zero.
+ * Returns null when σ_p is not real dispersion — 0 (an all-flat blend), the
+ * float residue of a book of compounding constant yields (about 1e-16, which
+ * used to yield a residue ratio), or NaN — so the UI renders "—" instead of
+ * dividing by zero or by residue. σ_p is judged by `return-stats`
+ * `dispersionIsReal` against the absolute floor (no portfolio mean exists here,
+ * as in the Python S7 site; Phase 166.1 D-17).
  */
 export function diversificationRatio(
   weights: Record<string, number>,
   vols: Record<string, number>,
   sigmaP: number,
 ): number | null {
-  if (!(sigmaP > 0)) return null; // σ_p=0 → "—" (never divide by 0)
+  if (!dispersionIsReal(sigmaP, 0)) return null; // σ_p 0 / residue / NaN → "—"
   let weightedSigma = 0;
   for (const id of Object.keys(weights)) {
     weightedSigma += weights[id] * (vols[id] ?? 0); // ŵᵢ·σ_levᵢ
@@ -391,7 +397,8 @@ export function diversificationRatio(
  * ── DEGENERATE PORTFOLIO VARIANCE (Pitfall 3) ───────────────────────────────
  * wᵀΣw is exactly the portfolio variance. If it is ≤ 0 (all-flat or perfectly-
  * offsetting blend, or a tiny negative from float error) the contributions are
- * UNDEFINED — return null (UI "—"), NOT 0/0 = NaN. Guarded with an epsilon.
+ * UNDEFINED — return null (UI "—"), NOT 0/0 = NaN. Guarded by the shared
+ * `dispersionIsReal` floor on σ_p = √(wᵀΣw), as `diversificationRatio` is.
  */
 export function percentContributionToRisk(
   ids: string[],
@@ -403,7 +410,13 @@ export function percentContributionToRisk(
     w.reduce((acc, wj, j) => acc + cov[i][j] * wj, 0),
   );
   const portVar = w.reduce((acc, wi, i) => acc + wi * sigmaW[i], 0); // wᵀΣw
-  if (!(portVar > 1e-15)) return null; // degenerate variance → "—" (no NaN/Inf)
+  // σ_p is judged by the SAME shared floor `diversificationRatio` uses on the
+  // same quantity (Phase 166.2 review round 1, WR-06 / SFH-M6). A local
+  // variance floor of 1e-15 (σ_p ≈ 3.2e-8) used to sit beside it, so for σ_p in
+  // (1e-12, 3.2e-8] one panel showed a DR and "—" for PCR and ENB. A tiny
+  // negative variance (float error) is clamped to 0 before the root; NaN fails
+  // the floor. Degenerate → "—" (no NaN/Inf).
+  if (!dispersionIsReal(Math.sqrt(Math.max(portVar, 0)), 0)) return null;
   const out: Record<string, number> = {};
   ids.forEach((id, i) => {
     out[id] = (w[i] * sigmaW[i]) / portVar; // signed; Σ = 1

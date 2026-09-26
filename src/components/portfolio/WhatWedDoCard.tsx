@@ -22,10 +22,18 @@ export function WhatWedDoCard({ suggestions, className }: WhatWedDoCardProps) {
   // negative sharpe_lift OR a non-finite score means the optimizer has
   // nothing useful to say — hide the entire card rather than render a
   // contradictory sentence.
+  //
+  // 166.1 D7 (founder 2026-09-26): a null sharpe_lift or corr_with_portfolio
+  // means the statistic does not exist (the portfolio or the candidate does
+  // not disperse). It is not a negative lift, so it does not hide the card; it
+  // only drops the sentence that would have quoted it. A null correlation
+  // printed "reduce average correlation toward 0.00" before, when the adapter
+  // coerced it to 0.
+  const lift = top.sharpe_lift;
+  const corr = top.corr_with_portfolio;
   if (
     !Number.isFinite(top.score) ||
-    !Number.isFinite(top.sharpe_lift) ||
-    top.sharpe_lift < 0
+    (lift !== null && (!Number.isFinite(lift) || lift < 0))
   ) {
     return null;
   }
@@ -33,12 +41,12 @@ export function WhatWedDoCard({ suggestions, className }: WhatWedDoCardProps) {
   // Order of operations: Sharpe lift is the primary win; corr reduction is
   // the diversification framing; dd improvement is the safety framing.
   const sharpeLine =
-    top.sharpe_lift > 0
-      ? `lift Sharpe by ${formatPercent(top.sharpe_lift)}`
+    lift !== null && lift > 0
+      ? `lift Sharpe by ${formatPercent(lift)}`
       : null;
   const corrLine =
-    top.corr_with_portfolio < 0.3
-      ? `reduce average correlation toward ${top.corr_with_portfolio.toFixed(2)}`
+    corr !== null && Number.isFinite(corr) && corr < 0.3
+      ? `reduce average correlation toward ${corr.toFixed(2)}`
       : null;
   const ddLine =
     top.dd_improvement > 0

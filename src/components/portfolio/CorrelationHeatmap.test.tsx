@@ -336,6 +336,42 @@ describe("<CorrelationHeatmap>", () => {
     expect(screen.getByText("0.37")).toBeInTheDocument();
   });
 
+  // Phase 166.2 review round 1 (WR-03 / SFH-M2), founder decision D7: a pair
+  // whose correlation is undefined has no cell and is not in the host's
+  // average, so the caption says how many pairs the average covers.
+  it("D7: states the measured pair count when a pair is undefined, and renders its cell as '—'", () => {
+    const { container } = render(
+      <CorrelationHeatmap
+        correlationMatrix={{
+          a: { a: 1, b: 0.4 },
+          b: { a: 0.4, b: 1 },
+          c: { c: 1 },
+        }}
+        strategyNames={{ a: "A", b: "B", c: "C" }}
+        avgAbsCorrelation={0.4}
+      />,
+    );
+    const caption = screen.getByText(/Avg \|ρ\|/);
+    expect(caption.textContent).toBe("Avg |ρ| 0.40 · 1 of 3 pairs measured");
+    // The four cells of the undefined pairs (a-c, b-c and mirrors) read "—".
+    const dashes = Array.from(container.querySelectorAll('[role="img"]')).filter((el) => el.textContent === "—");
+    expect(dashes).toHaveLength(4);
+  });
+
+  it("D7: a fully measured matrix keeps the bare caption (no pair count)", () => {
+    render(
+      <CorrelationHeatmap
+        correlationMatrix={{
+          "a-1": { "a-1": 1, "a-2": 0.3 },
+          "a-2": { "a-1": 0.3, "a-2": 1 },
+        }}
+        strategyNames={{ "a-1": "Alpha", "a-2": "Beta" }}
+        avgAbsCorrelation={0.3}
+      />,
+    );
+    expect(screen.getByText(/Avg \|ρ\|/).textContent).toBe("Avg |ρ| 0.30");
+  });
+
   it("CORR-03: hides the Avg |ρ| caption when the host passes no value", () => {
     render(
       <CorrelationHeatmap

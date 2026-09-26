@@ -161,6 +161,24 @@ describe("PeerPercentilePanel — scenario-path disclosure (PEER-02)", () => {
     expect(queryByText(DISCLOSURE)).toBeNull();
   });
 
+  // Phase 166.2 review round 1 (SFH-H1), founder decision D7: a strategy with no
+  // Sharpe has no Sharpe rank. NaN (the uncached payload) and null (after the
+  // factsheet's JSON cache) must both render "—" over an empty track, never
+  // "0th" (percentileRank(NaN) counted no peer) and never "NaNth".
+  it.each([
+    ["NaN", Number.NaN],
+    ["null (JSON round-trip)", null],
+  ])("api path: a Sharpe rank of %s renders a dash and no bar fill", (_label, sharpe) => {
+    const peer = { cohortSize: 20, sharpe, sortino: 55, max_dd: 48 } as unknown as PeerPercentilePayload;
+    const { getByText, container } = renderPanel(apiPayload(peer));
+    const row = getByText("Sharpe").parentElement!;
+    expect(row.lastElementChild!.textContent).toBe("—");
+    expect(row.querySelector(".bg-accent")).toBeNull();
+    // The other two ranks still render as ranks.
+    expect(container.textContent).toContain("55th");
+    expect(container.textContent).not.toMatch(/NaN|0th/);
+  });
+
   it("csv with a null scenarioPeer: the panel renders nothing (sample-floor / min-N suppression)", () => {
     const { container, queryByText } = renderPanel(csvPayload(undefined));
     // No header, no bars, no disclosure — honest absence.
