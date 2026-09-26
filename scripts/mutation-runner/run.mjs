@@ -975,7 +975,30 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //                own arm first.`, exit 0. Per-file line:
 //                `test_cron_runs_rls.sql: sections 3 / judged 3 / annotated 3 /
 //                waived 0 / biting 3`. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 50;
+//
+// ⭐ RE-DERIVED 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03) — the arrival
+//                of supabase/tests/test_mark_rpc_bridge_advisory_lock.sql (the
+//                LANE-ONLY two-backend dblink gate over the per-strategy
+//                bridge lock in both terminal mark RPCs, arms L1-L4), moving
+//                FILES_FLOOR 50 -> 51 and the denominator 77 -> 78. The paired
+//                ARMS_FLOOR move (449 -> 453) is in the block below.
+//                MEASURED via full lane runs, `node scripts/mutation-runner/
+//                run.mjs`: `scope: FULL 51/51 annotated files`, `coverage:
+//                files 51/78`, `arms: 453/453/0`, `biting: 453`,
+//                `lane-invocations: 453 … plus 51 baseline / 51 restore
+//                leg(s)` (the two independent tallies AGREE), `lane-blocked:
+//                0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`,
+//                `pending: 0`. Per-file line: `test_mark_rpc_bridge_advisory_
+//                lock.sql: sections 4 / judged 4 / annotated 4 / waived 0 /
+//                biting 4`. The final run, at this constant, printed `✅ No
+//                defects. Every annotated arm bit its own arm first.`, exit 0.
+//                SEPARATED on `src/__tests__/mutation-runner-floors.test.ts`,
+//                run with the pre-edit value 50 (the stale-low direction):
+//                `RATCHET STALE: 51 of 78 gate files are now annotated but
+//                FILES_FLOOR is still 50. Raise FILES_FLOOR in
+//                scripts/mutation-runner/run.mjs to 51.` FAILS; 51 PASSES.
+//                WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 51;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2301,7 +2324,33 @@ export const FILES_FLOOR = 50;
 //    sections 32 / judged 32 / annotated 32 / waived 0 / biting 32`,
 //    `test_cron_runs_rls.sql: sections 5 / judged 5 / annotated 5 / waived 0 /
 //    biting 5`.
-export const ARMS_FLOOR = 449;
+//
+// ⭐ RE-DERIVED 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): 449 -> 453,
+//    FOUR new arms, L1-L4, all in the NEW file
+//    supabase/tests/test_mark_rpc_bridge_advisory_lock.sql (which also moves
+//    FILES_FLOOR above). Each arm has one layered RED-UNDER-M twin against
+//    migration 20260926120000; D-16 measured that no existing twin targets the
+//    two re-based migrations (20260603120000, 20260529180000), so none is
+//    shadowed.
+//    SEPARATED in BOTH directions on full lane runs, each with no file edited
+//    during it:
+//    - stale-low, the constant at 449: the runner's own verdict names no floor
+//      (it cannot see a floor below the corpus, by construction), and
+//      src/__tests__/mutation-runner-floors.test.ts FAILS with `The corpus
+//      declares 453 twin(s) of which 0 are waivers, so a green run bites 453.
+//      ARMS_FLOOR is 449.`;
+//    - too high, the constant at 454: exit 1 with exactly one defect,
+//      `ARMS_FLOOR regression: 453 biting arm(s) < floor 454`;
+//    - measured, the constant at 453: `scope: FULL 51/51 annotated files`,
+//      `coverage: files 51/78`, `arms: 453/453/0`, `biting: 453`,
+//      `lane-invocations: 453` (the two independent tallies AGREE, plus 51
+//      baseline / 51 restore legs), `lane-blocked: 0 file(s)`, `lane-probe:
+//      pg_cron AVAILABLE`, `unreachable: 27 file(s)`, `✅ No defects. Every
+//      annotated arm bit its own arm first.`, exit 0. Per-file line:
+//      `test_mark_rpc_bridge_advisory_lock.sql: sections 4 / judged 4 /
+//      annotated 4 / waived 0 / biting 4`.
+//    WAIVED_CEILING stays 0 — no waiver was added.
+export const ARMS_FLOOR = 453;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
