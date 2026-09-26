@@ -529,8 +529,9 @@ def deribit_equity_to_usd(
 #   assignment           -> option expiry cash on the assigned (short) side.
 #                           Licensed ONLY for the census shape recorded in
 #                           docs/evidence/drb-assignment-census-2026-09.json: no
-#                           same-instrument `delivery` or `settlement` row in the
-#                           batch (``assert_assignment_uncontested`` refuses the
+#                           same-instrument `delivery`, `settlement` or second
+#                           `assignment` row in the batch
+#                           (``assert_assignment_uncontested`` refuses the
 #                           co-occurring shape and an unnamed instrument, in both
 #                           twins). The reading that it is Deribit's newer label
 #                           for the short in-the-money expiry formerly logged as
@@ -946,14 +947,20 @@ def assert_correction_classifiable(row: Mapping[str, Any]) -> None:
 # books option expiry cash, so summing an `assignment` beside one of them may
 # double-count the expiry. That shape was never observed (the census in
 # docs/evidence/drb-assignment-census-2026-09.json has delivery=0 settlement=0).
-_ASSIGNMENT_CONTESTING_TYPES: frozenset[str] = frozenset({"delivery", "settlement"})
+# SFH-02 (Phase 168 review): a SECOND same-instrument `assignment` contests too.
+# The census is n=1, so two assignments on one instrument (a partial-lot split, a
+# replayed row) is just as unobserved, and summing both double-counts the expiry.
+# The identity self-skip keeps a row from contesting itself.
+_ASSIGNMENT_CONTESTING_TYPES: frozenset[str] = frozenset(
+    {"delivery", "settlement", "assignment"}
+)
 # The discriminator phrase of the contested refusal. It appears in NO other
 # message in this module — not in the unknown-type refusal (whose wording already
 # carries "double-count", so that word cannot tell the two refusals apart) — and
 # the tests import this constant rather than restating it, so a presence check
 # and an absence check can never drift onto a string nothing emits.
 _ASSIGNMENT_CONTESTED_PHRASE: str = (
-    "shares instrument_name with a delivery/settlement row"
+    "shares instrument_name with a delivery/settlement/assignment row"
 )
 # The unnamed-instrument refusal's own phrase, likewise unique to that branch, so
 # a test matching it cannot pass on an unrelated refusal (the native twin's
@@ -969,7 +976,8 @@ def assert_assignment_uncontested(
 ) -> None:
     """Fail loud unless an ``assignment`` row is in the ONE shape its
     classification is licensed for: a named instrument with NO same-instrument
-    ``delivery`` or ``settlement`` row in ``rows`` (the census recorded in
+    ``delivery``, ``settlement`` or second ``assignment`` row in ``rows`` (the
+    census recorded in
     docs/evidence/drb-assignment-census-2026-09.json). Returns None on that shape;
     raises ``LedgerValuationError`` otherwise — it neither sums nor skips.
 
@@ -1009,7 +1017,7 @@ def assert_assignment_uncontested(
                 f"Deribit assignment row id={row.get('id')!r} "
                 f"{_ASSIGNMENT_CONTESTED_PHRASE} in this batch — an UNOBSERVED "
                 "shape (the census licensing the assignment classification found "
-                "neither); summing both may double-count realized expiry cash, so "
+                "none); summing both may double-count realized expiry cash, so "
                 "this refuses to sum or skip it. "
                 + describe_unclassified_row(row, rows)
             )

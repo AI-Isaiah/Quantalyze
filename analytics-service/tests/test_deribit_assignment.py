@@ -854,3 +854,21 @@ def test_sfh05_a_non_string_instrument_is_unnamed(
     with pytest.raises(LedgerValuationError) as exc:
         twin(rows)
     assert _ASSIGNMENT_UNNAMED_PHRASE in str(exc.value), f"{twin_name}: {exc.value}"
+
+
+@pytest.mark.parametrize("twin_name,twin", TWINS, ids=[t[0] for t in TWINS])
+def test_sfh02_a_second_same_instrument_assignment_contests(
+    twin_name: str, twin: Callable[[list[dict[str, Any]]], Any]
+) -> None:
+    """SFH-02: the census is n=1. Two assignments on one instrument (a partial
+    lot split, or a replayed row) is as unobserved as an assignment beside a
+    delivery, and summing both double-counts the expiry cash. It must refuse on
+    both twins. The self-skip is by identity, so a lone assignment still passes
+    (`test_a_lone_census_shape_assignment_is_summed_on_both_twins`)."""
+    opening, assigned = _indexed(_census_rows())
+    second = dict(assigned, id=5)
+    with pytest.raises(LedgerValuationError) as exc:
+        twin([opening, assigned, second])
+    msg = str(exc.value)
+    assert _ASSIGNMENT_CONTESTED_PHRASE in msg, f"{twin_name}: {msg}"
+    assert "assignment=1" in msg, msg
