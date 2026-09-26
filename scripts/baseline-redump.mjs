@@ -1153,7 +1153,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 158;
+export const EXPECTED_ASSERTIONS = 172;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -1525,6 +1525,59 @@ function selfTest({ withGitleaks = false } = {}) {
         .some((t) => guardRe.test(t)),
     ),
     "the fixed templates (entry, commit message, PR title, regenerated section, PR body) carry no CI skip token (D-14)",
+  );
+
+  console.log("=== SELF-TEST 1e/4: the staged-set (D-17) and skip-token (D-14) refusals");
+  /** A judge that is missing or throws reads back as null, so its arm is a FAIL rather than a crash. */
+  const list = (fn) => {
+    try {
+      const r = fn();
+      return Array.isArray(r) ? r : null;
+    } catch {
+      return null;
+    }
+  };
+  const tempRef = "supabase/.temp/project-ref";
+  ok(
+    list(() => judgeStagedSet([...STAGED_PATHS]))?.length === 0 && list(() => judgeStagedSet([...STAGED_PATHS].reverse()))?.length === 0,
+    "judgeStagedSet passes exactly STAGED_PATHS, in any order",
+  );
+  ok(
+    list(() => judgeStagedSet([...STAGED_PATHS, tempRef]))?.some((d) => d.kind === "staged-extra" && d.detail.includes(tempRef)),
+    "judgeStagedSet refuses one extra path (supabase/.temp/project-ref), naming it",
+  );
+  ok(
+    list(() => judgeStagedSet(STAGED_PATHS.slice(1)))?.some((d) => d.kind === "staged-missing" && d.detail.includes(STAGED_PATHS[0])),
+    "judgeStagedSet refuses one missing path, naming it",
+  );
+  ok(list(() => judgeStagedSet([...STAGED_PATHS, "VERSION"]))?.some((d) => d.kind === "staged-duplicate"), "judgeStagedSet refuses a duplicated path");
+  // Every token below is assembled from fragments at runtime; this file spells none of them.
+  const bracketed = (a, b) => `[${a} ${b}]`;
+  const tokenClasses = [
+    [1, bracketed("skip", "ci")],
+    [2, bracketed("ci", "skip")],
+    [3, bracketed("no", "ci")],
+    [4, bracketed("skip", "actions")],
+    [5, bracketed("actions", "skip")],
+  ];
+  for (const [cls, tok] of tokenClasses) {
+    ok(
+      list(() => judgeSkipTokens(`subject\n\nbody ${tok} tail`))?.join() === String(cls) &&
+        list(() => judgeSkipTokens(tok.toUpperCase()))?.join() === String(cls),
+      `judgeSkipTokens refuses token class ${cls} of 6, in lower and upper case, reporting the class index only`,
+    );
+  }
+  const trailerKey = ["skip", "checks"].join("-");
+  ok(
+    ["", " "].every((sp) => list(() => judgeSkipTokens(`body\n\n${trailerKey}:${sp}true`))?.join() === "6") &&
+      list(() => judgeSkipTokens(`${trailerKey.toUpperCase()}: TRUE`))?.join() === "6",
+    "judgeSkipTokens refuses token class 6 of 6 (the trailer) with and without the space after the colon, and in upper case",
+  );
+  ok(
+    [M, M0].every((x) =>
+      [composeCommitMessage(x), composePrTitle(x), safe(() => composePrBody(x))].every((t) => t !== "" && list(() => judgeSkipTokens(t))?.length === 0),
+    ),
+    "judgeSkipTokens passes the commit message, PR title and PR body composed from the fixed templates",
   );
 
   console.log("=== SELF-TEST 1d/4: each child gate is judged by its VERDICT line's content, not only its exit code (D-09)");
@@ -2040,8 +2093,9 @@ function selfTest({ withGitleaks = false } = {}) {
       return p;
     };
     /** Compose in a fresh clone; report the refusal text and whether the clone was left exactly as `main` has it. */
-    const composeIn = (inDir, runner = fakeRunner, extra = {}) => {
+    const composeIn = (inDir, runner = fakeRunner, extra = {}, prep = () => {}) => {
       const c = freshClone();
+      prep(c);
       const headBefore = g(["rev-parse", "HEAD"], { cwd: c }).trim();
       const prOut = `${c}-pr`;
       const r = capture(() => compose({ repoRoot: c, inDir, out: prOut, runner, emit, date: "2026-02-03", ...extra }));
@@ -2100,6 +2154,36 @@ function selfTest({ withGitleaks = false } = {}) {
     ok(
       driftSilent.threw !== null && /MEASURE_FAIL/.test(driftSilent.threw.message) && driftSilent.noCommit && driftSilent.nothingStaged && driftSilent.noPr,
       "a content-drift gate that exits 0 and prints nothing is MEASURE_FAIL: a gate that printed nothing is not a green gate",
+    );
+
+    console.log("=== SELF-TEST 4a2/4: --compose stages exactly the six paths and refuses a skip token before committing (D-14, D-17)");
+    // What `supabase link` leaves in a runner checkout.
+    const withRef = (c) => {
+      mkdirSync(join(c, "supabase/.temp"), { recursive: true });
+      writeFileSync(join(c, tempRef), "fixture-ref\n");
+    };
+    const untrackedRef = composeIn(join(dir, "art2"), fakeRunner, {}, withRef);
+    ok(
+      untrackedRef.threw === null && !untrackedRef.noCommit &&
+        g(["diff", "--name-only", untrackedRef.headBefore, "HEAD"], { cwd: untrackedRef.clone }).split("\n").filter(Boolean).sort().join(",") ===
+          STAGED_PATHS.join(",") &&
+        g(["status", "--porcelain", "--", tempRef], { cwd: untrackedRef.clone }).trim() === `?? ${tempRef}`,
+      "an untracked supabase/.temp/project-ref is never staged: the bot commit is exactly the six paths and the file stays untracked",
+    );
+    const stagedRef = composeIn(join(dir, "art2"), fakeRunner, {}, (c) => {
+      withRef(c);
+      g(["add", "--", tempRef], { cwd: c });
+    });
+    ok(
+      stagedRef.threw !== null && /^::error::.*staged-extra/m.test(stagedRef.text) && stagedRef.noCommit && stagedRef.noPr,
+      "a path already in the index beyond the six refuses at judgeStagedSet as 'staged-extra', and no commit is made",
+    );
+    const tokenDate = ["2026-02-03 ", "[", "skip", " ", "ci", "]"].join("");
+    const tokenRun = composeIn(join(dir, "art2"), fakeRunner, { date: tokenDate });
+    ok(
+      tokenRun.threw !== null && /skip-token class 1 of 6/.test(tokenRun.threw.message) && !tokenRun.text.includes(tokenDate.slice(11)) &&
+        tokenRun.noCommit && tokenRun.noPr,
+      "a skip token reaching the composed PR body refuses before the commit, naming the class index and never the token",
     );
 
     console.log("=== SELF-TEST 4b/4: the MERGE-tree marker, the argument validators and D-10 idempotency");
