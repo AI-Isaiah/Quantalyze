@@ -276,6 +276,15 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     }
   });
 
+  it("L-1 EXHAUSTIVE: a reason the switch does not list fails loud instead of reading as 'no kind'", () => {
+    // 167.2.1-REVIEW-SFH L-1: `default: return null` turned any future reason
+    // into uncomputed copy for a computed row. The compiler now refuses an
+    // unlisted reason; at runtime one that slips past a cast throws.
+    expect(() => unbuildableNoteKindOf("future_reason" as unknown as NotBuildableReason)).toThrow(
+      /unhandled reason future_reason/,
+    );
+  });
+
   it("CR-01 COHERENCE: no unbuildable note makes a claim about a computation, so none can contradict the owner page's state line", () => {
     // The owner page prints the note under a line derived from compute JOBS:
     // "none is on record" (done jobs are purged after 30 days) or "stopped on a

@@ -364,6 +364,11 @@ export type UnbuildableNoteKind = "too_short" | "cannot_build";
  * The note kind for a probe reason, or null when the reason is not a
  * build-time refusal of a computed row (`read_error`, `not_visible` and
  * `not_computed` are decided by the caller, D-05).
+ *
+ * 167.2.1-REVIEW-SFH L-1: every reason is listed and the switch ends in a
+ * `never` check, so a new `NotBuildableReason` is a compile error here instead
+ * of silently answering "no kind" (which renders uncomputed copy for a
+ * computed row).
  */
 export function unbuildableNoteKindOf(
   reason: NotBuildableReason,
@@ -373,8 +378,14 @@ export function unbuildableNoteKindOf(
       return "too_short";
     case "composite_unbuildable":
       return "cannot_build";
-    default:
+    case "read_error":
+    case "not_visible":
+    case "not_computed":
       return null;
+    default: {
+      const unhandled: never = reason;
+      throw new Error(`unbuildableNoteKindOf: unhandled reason ${String(unhandled)}`);
+    }
   }
 }
 
