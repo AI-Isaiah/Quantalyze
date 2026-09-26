@@ -936,6 +936,10 @@ export function ApiKeyManager({
   ): Promise<{ name: string | null; status: string | null }[] | "unreadable"> {
     let boundTimer: ReturnType<typeof setTimeout> | undefined;
     let failure: string | null = null;
+    // 167.2.1-REVIEW-SFH L-2: aborted in the `finally`, so a request (or a
+    // body read) the bound has already given up on stops instead of running
+    // on with its answer discarded. Aborting a settled request is a no-op.
+    const abort = new AbortController();
     try {
       const bound = new Promise<"timed_out">((resolve) => {
         boundTimer = setTimeout(() => resolve("timed_out"), BASELINE_READ_BOUND_MS);
@@ -945,6 +949,7 @@ export function ApiKeyManager({
       const read = (async (): Promise<{ failure: string } | { body: unknown }> => {
         const res = await fetch(`/api/keys/${encodeURIComponent(keyId)}/memberships`, {
           cache: "no-store",
+          signal: abort.signal,
         });
         if (!res.ok) return { failure: `the membership read answered HTTP ${res.status}` };
         return { body: (await res.json()) as unknown };
@@ -975,6 +980,7 @@ export function ApiKeyManager({
       failure = err instanceof Error ? err.message : String(err);
     } finally {
       clearTimeout(boundTimer);
+      abort.abort();
     }
     console.error(
       "[ApiKeyManager] composite membership read before a delete failed; the confirm warns instead:",

@@ -3221,7 +3221,10 @@ describe("[167-06] the persisted credential state renders on the manager's key c
         await waitFor(() => {
           expect(within(confirmDialog()).getByTestId("delete-composite-warning")).toHaveTextContent(WARN_ONE_ORACLE);
         });
-        expect(fetchMock).toHaveBeenCalledWith("/api/keys/key-a/memberships", { cache: "no-store" });
+        expect(fetchMock).toHaveBeenCalledWith("/api/keys/key-a/memberships", {
+          cache: "no-store",
+          signal: expect.any(AbortSignal),
+        });
         const warning = within(confirmDialog()).getByTestId("delete-composite-warning");
         // DESIGN.md: a recoverable consequence is amber, never red.
         expect(warning.className).toContain("text-warning");
@@ -3429,7 +3432,7 @@ describe("[167-06] the persisted credential state renders on the manager's key c
     it("UNCHECKED-TIMEOUT: no answer inside the 15 s bound holds the confirm's Delete, then warns it could not check and lets the owner choose", async () => {
       const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
       const keyA = row({ id: "key-a", exchange: "binance", label: "Key A", sync_status: null, venue_account_id: null });
-      routeFetch({ memberships: () => new Promise<Response>(() => {}) });
+      const fetchMock = routeFetch({ memberships: () => new Promise<Response>(() => {}) });
       await renderRows([keyA]);
       captureToSentryMock.mockClear();
       vi.useFakeTimers();
@@ -3450,6 +3453,15 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       }
       try {
         await expectUncheckedWarning();
+        // 167.2.1-REVIEW-SFH L-2: the request the bound gave up on is
+        // aborted, not left running with its answer discarded.
+        const membershipCall = fetchMock.mock.calls.find(([url]) =>
+          /\/memberships$/.test(String(url)),
+        );
+        expect(membershipCall).toBeDefined();
+        const signal = (membershipCall![1] as RequestInit | undefined)?.signal;
+        expect(signal).toBeInstanceOf(AbortSignal);
+        expect(signal!.aborted).toBe(true);
       } finally {
         consoleError.mockRestore();
       }
