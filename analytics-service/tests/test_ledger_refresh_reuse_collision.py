@@ -877,6 +877,160 @@ class TestLiveStateNamesItsReason:
             bool(_jw.MarkerLiveState.NO_ROW)
 
 
+def _entry_read_ctx(entry_answers: list[Any]) -> tuple[MagicMock, dict[str, Any]]:
+    """A derive context whose ``strategy_analytics`` select answers
+    ``entry_answers`` in order (a value or an exception each), and whose
+    ``compute_jobs`` select answers the live marker. Only the ENTRY
+    publish-state read selects from ``strategy_analytics`` on these paths."""
+    ctx, capture = _build_ctx(
+        key_row={"id": "key-1", "exchange": "binance", "user_id": "user-1"},
+        strategy_row={"id": _STRATEGY_ID, "user_id": "user-1"},
+    )
+    original = ctx.supabase.table.side_effect
+    capture["entry_reads"] = 0
+
+    def _table(name: str) -> MagicMock:
+        tbl: MagicMock = original(name)
+
+        def _select(_columns: str, **_kw: object) -> MagicMock:
+            chain = MagicMock()
+            chain.eq.return_value = chain
+            chain.maybe_single.return_value = chain
+
+            def _execute() -> Any:
+                if name == "compute_jobs":
+                    return MagicMock(data={"metadata": {"source": _MARKER}})
+                capture["entry_reads"] += 1
+                answer = entry_answers.pop(0) if entry_answers else None
+                if isinstance(answer, BaseException):
+                    raise answer
+                return answer
+
+            chain.execute.side_effect = _execute
+            return chain
+
+        tbl.select.side_effect = _select
+        return tbl
+
+    ctx.supabase.table.side_effect = _table
+    return ctx, capture
+
+
+class TestEntryPublishStateReadFailsTransient:
+    """D-09, extended 2026-09-26 to the ENTRY publish-state read (round 2,
+    SFH-R2-02). That read is the oracle both hops' D-15 guards use. When it
+    raised, the handler logged a WARNING and carried on with no snapshot, so a
+    marked refresh that then failed stamped ``failed`` over a live factsheet: a
+    failed READ became a destructive stamp, one screen above the site D-09 had
+    already fixed. It now fails the job TRANSIENT before any crawl.
+
+    Neuter to redden: restore the ``_entry_row = {}`` fallback in the except
+    arm. ``test_a_failed_entry_read_fails_transient_before_the_crawl`` goes RED
+    on the error kind (the insufficient-history stamp returns ``permanent``) and
+    on the destructive ``failed`` write. Read through ``db_execute`` again and
+    ``test_a_gateway_504_on_the_entry_read_is_retried`` goes RED."""
+
+    @pytest.mark.asyncio
+    async def test_a_failed_entry_read_fails_transient_before_the_crawl(self) -> None:
+        ctx, capture = _entry_read_ctx([RuntimeError("simulated entry read failure")])
+        combine = _insufficient_combine()
+        patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
+        with patches[0], patches[1], patches[2] as aclose, patches[3], patches[4], \
+             patches[5], patches[6], \
+             patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            result = await _jw.dispatch(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "transient", (
+            "a failed entry publish-state read did not fail the job TRANSIENT "
+            f"({result.error_kind!r}: {result.error_message!r}). Without it the "
+            "refresh runs with no snapshot and its failure un-publishes."
+        )
+        payloads = _analytics_payloads(capture)
+        assert not payloads, (
+            "a failed entry read still reached a strategy_analytics write "
+            f"({payloads!r}); nothing is known about the publish state yet."
+        )
+        assert combine.call_count == 0, (
+            "the venue crawl ran after the entry read failed; the retry must "
+            "cost one queue round trip, not a crawl"
+        )
+        assert not capture["rpc_calls"], (
+            f"a follow-on was enqueued after a failed entry read: {capture['rpc_calls']!r}"
+        )
+        assert aclose.await_count == 1, (
+            "the exchange the preflight opened was not closed on the early raise"
+        )
+        assert sentry.capture_exception.call_count == 1
+        assert any(
+            c.args and "pre-refresh publish" in str(c.args[0])
+            for c in log.error.call_args_list
+        ), f"the failed entry read did not go out at ERROR: {log.error.call_args_list!r}"
+
+    @pytest.mark.asyncio
+    async def test_a_gateway_504_on_the_entry_read_is_retried(self) -> None:
+        """The entry read goes through ``db_read_with_retry``: two gateway
+        timeouts then a published row, and the refresh stays protected."""
+        ctx, capture = _entry_read_ctx(
+            [
+                _Gateway504(),
+                _Gateway504(),
+                MagicMock(data={"computation_status": "complete_with_warnings"}),
+            ]
+        )
+        patches = _patches_with_combine(
+            ctx, key_mode=False, combine_mock=_insufficient_combine()
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6], \
+             patch("services.db.DB_READ_BACKOFF_BASE_S", 0.0), \
+             patch("services.db.DB_READ_JITTER_MAX_S", 0.0):
+            result = await run_derive_broker_dailies_job(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+        assert result.error_kind == "permanent", result
+        assert capture["entry_reads"] == 3
+        stamp = _terminal_stamp(capture)
+        assert not any(k in stamp for k in ("computation_status", "computation_warned")), (
+            "the entry read answered on its third attempt with a published row, "
+            f"so the failure must be recorded error-only: {stamp!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_control_no_row_is_a_definitive_answer_and_stays_loud(self) -> None:
+        """CONTROL: zero rows is an ANSWER (nothing published), not a failed
+        read. It must keep the loud path and must not retry."""
+        ctx, capture = _entry_read_ctx([None])
+        patches = _patches_with_combine(
+            ctx, key_mode=False, combine_mock=_insufficient_combine()
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+        assert result.error_kind == "permanent", result
+        assert _terminal_stamp(capture).get("computation_status") == "failed"
+
+
 def _log_lines(log: MagicMock) -> list[str]:
     return [
         str(c.args[0])

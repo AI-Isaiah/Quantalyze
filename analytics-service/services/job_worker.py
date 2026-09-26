@@ -697,11 +697,12 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     if isinstance(exc, asyncio.TimeoutError):
         return ("transient", f"Handler exceeded timeout: {str(exc)[:200]}")
 
-    # Phase 164.6.7 / D-09. The live re-read of a refresh marker failed, so the
-    # handler (the composite stitch, or since 2026-09-26 the single-key derive
-    # stamp) could not tell whether its failure may be stamped without
-    # un-publishing a funded account, and wrote nothing. TRANSIENT: the queue
-    # retries the whole job and the next attempt re-reads the row.
+    # Phase 164.6.7 / D-09. A read a marked refresh's D-15 decision rests on
+    # failed: the live marker re-read at a terminal stamp (the composite stitch,
+    # or since 2026-09-26 the single-key derive stamp), or the single-key ENTRY
+    # publish-state read (round 2). The handler could not tell whether a failure
+    # may be recorded without un-publishing a funded account, and wrote nothing.
+    # TRANSIENT: the queue retries the whole job and the next attempt reads again.
     if isinstance(exc, RefreshMarkerRereadUnavailable):
         return ("transient", str(exc)[:500])
 
@@ -2649,8 +2650,12 @@ class MarkerLiveState(Enum):
 
 
 class RefreshMarkerRereadUnavailable(Exception):
-    """The live re-read of a refresh marker failed, so a terminal stamp (the
-    composite one, or the single-key derive one) could not be chosen. ``classify_exception`` maps it to TRANSIENT."""
+    """A read that a marked refresh's D-15 decision rests on FAILED, so the
+    handler wrote nothing and stops. Raised by the live marker re-read at a
+    terminal stamp (the composite one, or the single-key derive one) and, since
+    round 2 (SFH-R2-02), by the single-key ENTRY publish-state read. The text
+    names the handler's real cause where one exists. ``classify_exception`` maps
+    it to TRANSIENT."""
 
 
 async def _refresh_marker_still_on_row(
@@ -2825,9 +2830,18 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # below is hop 1's oracle, and it rides the chain edge on the follow-on job's
     # metadata to become hop 2's. Neither is a column the bridge can write.
     #
-    # ⛔ FAIL-SAFE DIRECTION, unchanged: an unreadable row, no row, or a row that
-    # is not terminal-success all leave this None, and None takes the LOUD
-    # destructive path everywhere it is consulted. Never fail toward suppression.
+    # ⛔ FAIL-SAFE DIRECTION, unchanged: no row, or a row that is not
+    # terminal-success, leaves this None, and None takes the LOUD destructive
+    # path everywhere it is consulted. Never fail toward suppression.
+    #
+    # ⛔ D-09, extended 2026-09-26 (round 2, SFH-R2-02): a read that FAILED is not
+    # an answer, here exactly as at the marker re-reads. Until then a failed
+    # entry read left this None too, so one gateway blip before the crawl sent a
+    # funded account down the destructive path at both hops, logged only at
+    # WARNING. The read now goes through ``db_read_with_retry``. If it still
+    # fails, the job fails TRANSIENT (``RefreshMarkerRereadUnavailable``) BEFORE
+    # any crawl or write, so the retry costs one queue round trip and no work.
+    # A DEFINITIVE answer (no row) keeps its meaning above.
     #
     # ⚠️ RESIDUAL WINDOW, stated rather than hidden: the fan-out enqueues this
     # job in SQL, so the earliest oracle Python can take is here — a sibling
@@ -2859,15 +2873,28 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 return dict(row) if isinstance(row, dict) else {}
 
             try:
-                _entry_row = await db_execute(_read_entry_publish_state)
-            except Exception as _entry_exc:  # noqa: BLE001
-                logger.warning(
+                _entry_row = await db_read_with_retry(_read_entry_publish_state)
+            except Exception as _entry_exc:  # noqa: BLE001 — reported, then re-raised as transient
+                logger.error(
                     "derive_broker_dailies: could not read the pre-refresh publish "
-                    "state for strategy %s (%s) — this refresh takes the LOUD "
-                    "terminal-failure path at BOTH hops.",
-                    strategy_id, _entry_exc,
+                    "state for strategy %s on marked compute_job %s (%s: %s). No "
+                    "crawl ran and nothing was written; failing the job "
+                    "TRANSIENT so the queue can retry it.",
+                    strategy_id, job.get("id"), type(_entry_exc).__name__, _entry_exc,
                 )
-                _entry_row = {}
+                sentry_sdk.capture_exception(_entry_exc)
+                # The preflight opened the exchange and the handler's
+                # ``finally: aclose_exchange`` owns only the crawl's ``try`` below,
+                # which this raise never reaches. Close it here, the same way.
+                try:
+                    await aclose_exchange(ctx.exchange)
+                except Exception:  # noqa: BLE001  # pragma: no cover
+                    pass
+                raise RefreshMarkerRereadUnavailable(
+                    "derive_broker_dailies: the pre-refresh publish-state read "
+                    "failed for a marked refresh, so the job stopped before any "
+                    "crawl and wrote nothing"
+                ) from _entry_exc
             _entry_status = _entry_row.get("computation_status")
             if isinstance(_entry_status, str):
                 _refresh_publish_status = _entry_status
