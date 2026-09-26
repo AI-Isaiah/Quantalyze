@@ -113,6 +113,13 @@
 #                             not exist on the throwaway lane, so the self-test
 #                             points this at public.fx_keep's `status` column
 #                             (arms 31/32).
+#                             ⛔ CORRECTED 2026-09-25 (Phase 164.9.2 C5): the
+#                             INSERT-only sentence above is LINEAGE. Literal
+#                             top-level UPDATEs on replayed public tables now
+#                             replay in migration filename order, so a row still
+#                             in the wrong state means an UPDATE it needs was
+#                             declined, left unlisted, or replayed out of order
+#                             (arms 38/39). The leg itself is unchanged.
 #   REFDATA_WRONGSTATE_ID     default 00000000-0000-0000-0000-000000000000 (the
 #                             teaser sentinel row's id); compared as ::text so
 #                             both a uuid and the fixture's integer id resolve
@@ -122,6 +129,9 @@
 #                             20260521150000_universal_signup_approval_gate.sql
 #                             :28-31 sets and the INSERT-only replay never
 #                             re-applies.
+#                             ⛔ CORRECTED 2026-09-25 (Phase 164.9.2 C5): that
+#                             UPDATE is now replayed by an update: allowlist
+#                             line; the sentence above is lineage.
 #                             ⛔ ALL FOUR REACH SQL — TABLE and COL as bare
 #                             identifiers, ID and EXPECTED inside a string
 #                             literal — so each is CHARSET-REFUSED before any
@@ -409,6 +419,13 @@ REFDATA_KIND_CHECK="${REFDATA_KIND_CHECK:-compute_jobs_kind_check}"
 # default the leg would be a permanent no-op there; the self-test points it at
 # `public.fx_keep`'s new `status` column, which baseline-fixture.sql and its
 # allowlisted replay carry for exactly this reason (arms 31/32).
+# ⛔ CORRECTED 2026-09-25 (Phase 164.9.2 C5): the INSERT-only and "never
+# reapplies" sentences above are LINEAGE. Literal top-level UPDATEs on replayed
+# public tables now replay in migration filename order, 20260521150000's
+# sentinel UPDATE among them, so a row still in the wrong state means an UPDATE
+# it needs was declined, left unlisted, or replayed out of order. See the
+# allowlist's C5 and SCOPE BOUNDARY blocks. The seams and defaults below are
+# unchanged (criterion 3); arms 38/39 prove the leg against a replayed UPDATE.
 REFDATA_WRONGSTATE_TABLE="${REFDATA_WRONGSTATE_TABLE:-public.profiles}"
 REFDATA_WRONGSTATE_ID="${REFDATA_WRONGSTATE_ID:-00000000-0000-0000-0000-000000000000}"
 REFDATA_WRONGSTATE_COL="${REFDATA_WRONGSTATE_COL:-manager_status}"
@@ -909,9 +926,16 @@ refuse_bad_refdata_allowlist() {
   # EMPTY IS AN ERROR, and it is checked HERE rather than left to the extractor:
   # the extractor's own empty-allowlist refusal is a second reading of the same
   # fact, and a guard whose only arm reaches the OTHER layer is unmeasured.
-  REFDATA_ENTRY_N=$(awk '!/^[[:space:]]*(#|$)/ { c++ } END { print c+0 }' "$REFDATA_ALLOWLIST")
+  #
+  # ⛔ 164.9.2 (plan-checker W6): ONLY INSERT-class lines count — field 3 a bare
+  # positive integer. A C5 line (`update:<n>` / `decline:<n>`) pins no row
+  # count, so counting it would make the note below call it "a pinned statement
+  # count", and would let an allowlist holding ONLY C5 lines pass this refusal
+  # while replaying no row the count floor can measure. Arm 39 leg (b) feeds
+  # exactly that allowlist.
+  REFDATA_ENTRY_N=$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && $3 ~ /^[1-9][0-9]*$/ { c++ } END { print c+0 }' "$REFDATA_ALLOWLIST")
   if [ "$REFDATA_ENTRY_N" -eq 0 ]; then
-    fail "the reference-data allowlist ${REFDATA_ALLOWLIST} carries ZERO entries. An empty allowlist replays NOTHING, so this restore would commit a database whose ledger swears every seed migration applied while every table those migrations seeded is EMPTY — that is the Phase 164.8 defect, not a clean run."
+    fail "the reference-data allowlist ${REFDATA_ALLOWLIST} carries ZERO entries. An empty allowlist replays NOTHING, so this restore would commit a database whose ledger swears every seed migration applied while every table those migrations seeded is EMPTY — that is the Phase 164.8 defect, not a clean run. C5 lines (update: or decline:) alone do not count: they replay no row the count floor can measure."
   fi
 
   local tmp rc=0
@@ -943,7 +967,27 @@ refuse_bad_refdata_allowlist() {
     REFDATA_TABLES+=("$tbl")
     REFDATA_EXPECT+=("$expect")
   done < <(awk '/^-- refdata-expect: /' "$tmp")
+
+  # ⛔ 164.9.2 review SFH-05 — THE C5 SIDE GETS TWO READINGS TOO. The INSERT side
+  # is read twice, independently: the allowlist's bytes (REFDATA_ENTRY_N) and the
+  # extractor's `-- refdata-expect:` trailers. C5 was read once: the restore
+  # counted `-- refdata-update:` trailers into a NOTE and compared them to
+  # nothing, so an extractor on the REFDATA_EXTRACTOR seam that replays UPDATE SQL
+  # under a drifted trailer spelling (or none) logged "0 C5 update statement(s)
+  # replayed" and went on. The SQL still ran, so no row was wrong — but the log
+  # stopped being evidence that C5 ran. Both C5 kinds are now summed from the
+  # allowlist's own pins, the same awk shape REFDATA_ENTRY_N uses, and must equal
+  # the trailers the extractor emitted. Arm 24 legs (d) and (e) drive each way.
+  local update_pinned decline_pinned update_emitted decline_emitted
+  update_pinned=$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && $3 ~ /^update:[1-9][0-9]*$/ { sub(/^update:/, "", $3); s += $3 } END { print s+0 }' "$REFDATA_ALLOWLIST")
+  decline_pinned=$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && $3 ~ /^decline:[1-9][0-9]*$/ { sub(/^decline:/, "", $3); s += $3 } END { print s+0 }' "$REFDATA_ALLOWLIST")
+  update_emitted=$(awk '/^-- refdata-update: /{ c++ } END { print c+0 }' "$tmp")
+  decline_emitted=$(awk '/^-- refdata-decline: /{ c++ } END { print c+0 }' "$tmp")
   rm -f "$tmp" "${tmp}.err"
+  # 164.9.2 review round 2 (SFH R2-06): kept in scope for `build_transaction`,
+  # which compares the REPLAYED emission with the same pins.
+  REFDATA_UPDATE_PINNED="$update_pinned"
+  REFDATA_DECLINE_PINNED="$decline_pinned"
 
   # A SECOND, INDEPENDENT EMPTINESS READING, of the extractor's OUTPUT rather than
   # the allowlist's bytes. A stubbed or half-working extractor that exits 0 and
@@ -952,6 +996,14 @@ refuse_bad_refdata_allowlist() {
   # 24 leg (c) drives exactly that through the REFDATA_EXTRACTOR seam.
   if [ "${#REFDATA_TABLES[@]}" -eq 0 ]; then
     fail "the reference-data extractor exited 0 but emitted NO \`-- refdata-expect:\` trailer for ${REFDATA_ALLOWLIST}. With no table list the in-transaction gate has nothing to count and would pass vacuously; refusing rather than restoring unguarded."
+  fi
+  # The C5 pin comparison (SFH-05) runs AFTER the zero-trailer refusal above, so
+  # an extractor that emitted nothing at all is named as exactly that (arm 24 c).
+  if [ "$update_emitted" -ne "$update_pinned" ]; then
+    fail "the reference-data extractor emitted ${update_emitted} \`-- refdata-update:\` trailer(s) but the update: lines of ${REFDATA_ALLOWLIST} pin ${update_pinned} C5 statement(s). The two are independent readings of one fact; when they disagree the restore log cannot say what C5 replayed, so this restore is refused rather than run on an unmeasured replay."
+  fi
+  if [ "$decline_emitted" -ne "$decline_pinned" ]; then
+    fail "the reference-data extractor named ${decline_emitted} declined write(s) on \`-- refdata-decline:\` lines but the decline: lines of ${REFDATA_ALLOWLIST} pin ${decline_pinned}. When they disagree the restore log cannot say what it deliberately left out, so this restore is refused."
   fi
   note "refdata: ${#REFDATA_TABLES[@]} table(s) from ${REFDATA_ENTRY_N} allowlist line(s) under ${REFDATA_ALLOWLIST}, each with a pinned statement count"
 }
@@ -1462,7 +1514,7 @@ TXN_MID
   # `refuse_bad_refdata_allowlist` made: that one is deleted with its mktemp, and
   # a `refdata.sql` that lives beside `restore.sql` is what arm 23 mutates and
   # what a human reads after a failed run.
-  local refdata_rc=0 refdata_n
+  local refdata_rc=0 refdata_n refdata_update_n refdata_decline_n decl
   node "$REFDATA_EXTRACTOR" --allowlist "$REFDATA_ALLOWLIST" --migrations "$MIGRATIONS_DIR" \
     > "$RESTORE_OUT_DIR/refdata.sql" 2> "$RESTORE_OUT_DIR/refdata.err" || refdata_rc=$?
   if [ "$refdata_rc" -ne 0 ]; then
@@ -1470,6 +1522,31 @@ TXN_MID
     fail "reference-data extraction refused (exit ${refdata_rc}); nothing was replayed and no transaction was assembled."
   fi
   refdata_n=$(awk '/^-- refdata: /{ c++ } END { print c+0 }' "$RESTORE_OUT_DIR/refdata.sql")
+  # 164.9.2 C5: the replayed literal UPDATEs carry their OWN trailer, so they
+  # never move `refdata_n` (the INSERT count the note below reports) or the
+  # count floor. Counted separately so a restore log is evidence that C5 ran.
+  refdata_update_n=$(awk '/^-- refdata-update: /{ c++ } END { print c+0 }' "$RESTORE_OUT_DIR/refdata.sql")
+  # 164.9.2 review SFH-06: a DECLINED C5 write is one this restore deliberately
+  # does NOT replay, so the row commits without it (D-02). The extractor names
+  # each on a `-- refdata-decline: <file>:<line> <table>` comment line, and the
+  # note below prints every one, so a SUCCESSFUL restore log records what it left
+  # out. Before this, only refdata.err said so, and it is printed on failure only.
+  refdata_decline_n=$(awk '/^-- refdata-decline: /{ c++ } END { print c+0 }' "$RESTORE_OUT_DIR/refdata.sql")
+
+  # ⛔ 164.9.2 review round 2 (SFH R2-06) — THE REPLAYED EMISSION IS COMPARED
+  # WITH THE PINS TOO. `refuse_bad_refdata_allowlist` compared ITS emission, the
+  # preflight run, with the allowlist's update:/decline: sums. This run is a
+  # second one, and it is the one psql executes. Two runs of the shipped
+  # extractor over the same inputs agree, but a nondeterministic extractor on the
+  # REFDATA_EXTRACTOR seam could emit different C5 trailers here, and the notes
+  # below would report them as fact. This is still before `run_transaction`, so a
+  # disagreement writes nothing. Arm 41 drives both kinds.
+  if [ "$refdata_update_n" -ne "$REFDATA_UPDATE_PINNED" ]; then
+    fail "the REPLAYED reference-data emission carries ${refdata_update_n} \`-- refdata-update:\` trailer(s) but the update: lines of ${REFDATA_ALLOWLIST} pin ${REFDATA_UPDATE_PINNED} C5 statement(s). The extractor's two runs disagree, so the restore log cannot say what C5 replayed; refused before the transaction runs."
+  fi
+  if [ "$refdata_decline_n" -ne "$REFDATA_DECLINE_PINNED" ]; then
+    fail "the REPLAYED reference-data emission names ${refdata_decline_n} declined write(s) on \`-- refdata-decline:\` lines but the decline: lines of ${REFDATA_ALLOWLIST} pin ${REFDATA_DECLINE_PINNED}. The extractor's two runs disagree, so the restore log cannot say what it left out; refused before the transaction runs."
+  fi
 
   # ⛔ PITFALL 1 — THE SEARCH_PATH BRACKET IS LOAD-BEARING, NOT HYGIENE. At this
   # point in the stream the session's path is `pg_catalog` (the TXN_MID line
@@ -1480,6 +1557,20 @@ TXN_MID
   # with "relation does not exist" and the whole restore would roll back.
   # `pg_catalog` is restored immediately after, BEFORE the ledger DDL, because
   # everything below is written expecting it.
+  #
+  # ⛔ AND `pg_catalog` COMES FIRST IN THE BRACKET (164.9.2 review round 2,
+  # WR-03 / SFH R2-02). The bracket read `public, pg_catalog` until 2026-09-25. A
+  # `pg_catalog` named explicitly is searched at its LISTED position, so under that
+  # order a `public.now()`, or an exact-match `public.=`, won over the built-in
+  # inside the transaction that COMMITs on shared TEST. The migrations ran in PROD
+  # under the default path, where `pg_catalog` is searched implicitly FIRST, so the
+  # replay could resolve a name differently from the run it reproduces.
+  # `pg_catalog, public` is PROD's effective order: built-in functions and
+  # operators always win, and the unqualified TABLES still resolve to `public`,
+  # because `pg_catalog` holds none of them — MEASURED 2026-09-25 on a throwaway
+  # cluster: all 140 `pg_catalog` tables and views are named `pg_*`, and none is
+  # named like an allowlisted table. Arm 40 plants a public `now()` and `=` and
+  # measures both orders.
   #
   # ⛔ PITFALL 2 — THE REPLAY RELIES ON THE CONNECTING ROLE BYPASSING RLS, AND
   # THAT RELIANCE IS ASSERTED RATHER THAN ASSUMED. `public.compute_job_kinds` is
@@ -1504,7 +1595,7 @@ BEGIN
   END IF;
 END
 $rlsguard$;
-SET LOCAL search_path = public, pg_catalog;
+SET LOCAL search_path = pg_catalog, public;
 TXN_REFDATA_HEAD
   cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"
   cat >> "$out" <<'TXN_REFDATA_TAIL'
@@ -1610,6 +1701,10 @@ BEGIN
   -- stay the two legs above's job. A scalar subquery, not a JOIN, so an ABSENT
   -- row is LOUD (actual is NULL, the CASE below names it) rather than
   -- vanishing out of the comparison the way a JOIN would silently drop it.
+  -- CORRECTED 2026-09-25 (Phase 164.9.2 C5): the INSERT-only sentence above is
+  -- LINEAGE. Literal top-level UPDATEs on replayed public tables now replay in
+  -- migration filename order, so this leg now catches an UPDATE that was
+  -- declined, left unlisted, or replayed out of order. The leg is unchanged.
   SELECT CASE
            WHEN w.actual IS NULL THEN
              format('%s.%s for id=%s: the row is ABSENT after the replay',
@@ -1641,7 +1736,13 @@ BEGIN
     RAISE EXCEPTION 'restore aborted: reference table(s) are SHORT after the replay — %, and each allowlisted statement inserts at least one row into a table the DROP had just emptied, so at least one statement did not land. A PARTIAL replay commits a ledger that swears its seed migration applied; fix the allowlist line or the extractor, never hand-seed shared TEST (Phase 164.8.1)', v_short;
   END IF;
   IF v_wrong_state IS NOT NULL THEN
-    RAISE EXCEPTION 'restore aborted: reference row(s) came back in the WRONG STATE after the replay — %. The replay reproduces INSERT effects only; a later migration that UPDATEd this row was never re-applied, so the row is present at the right count but not the value a real restore should carry ([164.8.1-REPLAY-INSERT-ONLY-SCOPE]). Not closable by editing the allowlist — an UPDATE is not a literal INSERT (C2) — see the allowlist''s own SCOPE BOUNDARY block', v_wrong_state;
+    -- LINEAGE, the explanatory clause this RAISE carried until 2026-09-25: The
+    -- replay reproduces INSERT effects only; a later migration that UPDATEd this
+    -- row was never re-applied ... Not closable by editing the allowlist, an
+    -- UPDATE is not a literal INSERT (C2). CORRECTED 2026-09-25 (Phase 164.9.2
+    -- C5, D-01): only that clause changed. The prefix, the argument, the
+    -- predicate and the seams are byte-identical.
+    RAISE EXCEPTION 'restore aborted: reference row(s) came back in the WRONG STATE after the replay — %. CORRECTED 2026-09-25 (Phase 164.9.2 C5): literal top-level UPDATEs on replayed public tables now replay in migration filename order, so a row still in the wrong state means an UPDATE it needs was declined, left unlisted, or replayed out of order; the row is present at the right count but not the value a real restore should carry ([164.8.1-REPLAY-INSERT-ONLY-SCOPE]). See the allowlist''s C5 and SCOPE BOUNDARY blocks', v_wrong_state;
   END IF;
 
   -- The SECOND partial-replay leg, and it is INDEPENDENT of the count floor
@@ -1682,6 +1783,16 @@ END
 TXN_REFDATA_GATE
 
   note "refdata: ${refdata_n} statement(s) replayed into ${#REFDATA_TABLES[@]} table(s), gated inside the transaction against each table's pinned statement count (count(*) >= expected, not merely non-empty) and against ${REFDATA_KIND_CHECK} over ${REFDATA_KIND_REGISTRY}"
+  note "refdata: ${refdata_update_n} C5 update statement(s) replayed in migration filename order inside the same transaction"
+  note "refdata: ${refdata_decline_n} C5 write(s) DECLINED — accounted for by a decline: line and deliberately NOT replayed, so their rows commit without them (D-02):"
+  while IFS= read -r decl; do
+    # File names, line numbers and table names only — never statement text. The
+    # same charset refusal the table names get, before anything is printed.
+    case "$decl" in
+      ''|*[!A-Za-z0-9_.:\ -]*) fail "the reference-data extractor named a declined write as '${decl}' — this script refuses to print that." ;;
+    esac
+    note "refdata:   declined, not replayed: ${decl}"
+  done < <(awk '/^-- refdata-decline: /{ sub(/^-- refdata-decline: /, ""); print }' "$RESTORE_OUT_DIR/refdata.sql")
 
   # ── the analytics destination: re-normalised INSIDE the transaction ──────
   # Phase 164.9.1 plan 05, [164.9-TEST-ANALYTICS-URL-REARM], D-16 / D-16a / D-17.
@@ -2252,6 +2363,8 @@ main() {
 #                                                30  GREEN extension guard: public unchanged
 #                                                31  RED  value-pinning leg: WRONG STATE
 #                                                32  GREEN value-pinning leg: pinned value holds
+#                                                33  GREEN C5 UPDATE replayed after its INSERT
+#                                                34  RED  C5 update: line absent -> WRONG STATE
 #
 # Several arms carry more than one LEG, because one guard can be false in more than
 # one way and an arm that measures the easy way is not measuring the guard:
@@ -2266,7 +2379,7 @@ main() {
 #            (c) an ABSENT migrations dir.
 #   arm 23 — three SCRATCH COPIES, one per link of the reference-data chain:
 #            (a) the replay concatenation deleted -> the emptiness leg names the
-#            table; (b) the `SET LOCAL search_path = public, pg_catalog` bracket
+#            table; (b) the `SET LOCAL search_path = pg_catalog, public` bracket
 #            deleted -> the migrations' unqualified targets stop resolving
 #            (RESEARCH Pitfall 1); (c) one registry row DELETEd inside the
 #            transaction after the replay -> the table is NOT empty, the count
@@ -2290,6 +2403,15 @@ main() {
 #            structural line moved -> it MUST; (d) the normalisation actually
 #            rewrote something, so (a) cannot pass vacuously. No lane: the
 #            function under test is pure text.
+#   arm 39 — (a) the fixture's C5 update: line removed -> the row stays at
+#            its DEFAULT and the unchanged value-pinning leg aborts, rolled back;
+#            (b) an allowlist holding ONLY that C5 line -> refused as EMPTY
+#            before any read, because REFDATA_ENTRY_N counts INSERT lines only.
+#   arm 40 — (a) the real bracket with a public `now()` and `=` planted -> the
+#            replay is quiet; (b) the old `public, pg_catalog` order reaches the
+#            `=` shadow; (c) the old order reaches the `now()` shadow.
+#   arm 41 — the REPLAYED emission (a) drops every update trailer, (b) names an
+#            extra declined write -> each refused before the transaction runs.
 #
 # ── REDACTION IS A CHECK WITH A SUBJECT (T-164.8-05) ────────────────────────
 # Every arm's combined output is captured, and after EVERY arm the harness greps
@@ -2346,8 +2468,25 @@ main() {
 # either way, and REARM_EMITTER is IGNORED outside the self-test seam (37). Each
 # falsifier (the rc check, the shape check, the seam) was observed RED and is
 # recorded in 164.9.1-11-SUMMARY.md.
-# MEASURED 2026-09-25 — `--self-test` prints 37/37 and exits 0 on a throwaway cluster.
-EXPECTED_ARMS=37
+#
+# Arms 38-39 are Phase 164.9.2's (C5, plan 03): a literal top-level UPDATE on a
+# replayed table replays after its INSERT inside the same transaction (38), and
+# without its `update:` line the unchanged value-pinning leg aborts (39). Their
+# falsifiers (arm 38 RED before the fixture UPDATE existed, and RED again through
+# a neutered-sort COPY of the extractor) were observed and are recorded verbatim
+# in 164.9.2-03-SUMMARY.md.
+#
+# Arms 40-41 are Phase 164.9.2's review round 2: a public `now()` or `=` cannot
+# shadow the built-in inside the replay, and the old bracket order reaches both
+# (40, WR-03 / SFH R2-02); the REPLAYED refdata.sql's C5 trailers are compared
+# with the pins before the transaction runs (41, SFH R2-06). Both were observed
+# RED against the unfixed script and are recorded in 164.9.2-REVIEW-FIX.md.
+# ⭐ RENUMBERED 2026-09-26 (164.9.2 plan 05, merging main after Phase 164.9.1): this
+# branch's C5 and round-2 arms were 33-36 and are 38-41, after 164.9.1's 33-37.
+# Every citation of them in this repo moved with them; 164.9.2's planning records
+# written before the merge keep the old numbers as lineage.
+# MEASURED 2026-09-26 — `--self-test` prints 41/41 and exits 0 on a throwaway cluster.
+EXPECTED_ARMS=41
 
 SELFTEST_MUTEX_HOLDER_PID=""
 SELFTEST_TMPD=""
@@ -3315,11 +3454,11 @@ FRESHSTUB
     #     to resolve. Without this leg the bracket is an assertion nobody has seen
     #     matter — it would look like hygiene and be deleted by the next reader.
     copy="$SELFTEST_TMPD/refdata-no-searchpath.sh"
-    awk '!d && $0 == "SET LOCAL search_path = public, pg_catalog;" { d = 1; next }
+    awk '!d && $0 == "SET LOCAL search_path = pg_catalog, public;" { d = 1; next }
          { print }
          END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$copy" \
       || { echo "MEASURE_FAIL (b): could not build the no-search_path scratch copy — the bracket anchor moved."; return 1; }
-    if grep -aqxF 'SET LOCAL search_path = public, pg_catalog;' "$copy"; then
+    if grep -aqxF 'SET LOCAL search_path = pg_catalog, public;' "$copy"; then
       echo "MEASURE_FAIL (b): the scratch copy STILL carries the search_path bracket."
       return 1
     fi
@@ -3425,6 +3564,8 @@ FRESHSTUB
   # at least one arm asserting a NAMED message — not that every branch is armed.
   #
   # All three driven branches are pure filesystem, so they fire before the first
+  # (164.9.2 review SFH-05 added legs (d) and (e), the C5 trailer-vs-pin drift,
+  # which are pure filesystem too and carry the same no-write check)
   # connection: the arm asserts the pre-census banner NEVER PRINTED, which is what
   # makes "before any write" a measurement rather than a claim about ordering in
   # the source. ⚠️ That is a NEGATIVE assertion and cannot stand alone — arm 8
@@ -3500,6 +3641,42 @@ FRESHSTUB
     grep -aq 'would pass vacuously' "$out" \
       || { echo "MEASURE_FAIL (c): the refusal does not say WHY an empty table list is unacceptable"; return 1; }
     no_write_check "$out" c || return 1
+
+    # (d)/(e) 164.9.2 review SFH-05 — THE C5 TRAILERS DISAGREE WITH THE PINS. A
+    #     wrapper around the REAL extractor rewrites only its stdout: (d) drops
+    #     every `-- refdata-update:` trailer while the UPDATE SQL still runs, (e)
+    #     adds one `-- refdata-decline:` line the allowlist does not pin. Each is
+    #     one independent reading drifting from the other; each must be refused
+    #     before the first read, by name.
+    printf '%s\n' \
+      '#!/usr/bin/env node' \
+      'import { spawnSync } from "node:child_process";' \
+      'const r = spawnSync(process.execPath, [process.env.ARM24_REAL_EXTRACTOR, ...process.argv.slice(2)], { encoding: "utf8" });' \
+      'process.stderr.write(r.stderr ?? "");' \
+      'const drop = process.env.ARM24_DROP ?? "";' \
+      'let out = (r.stdout ?? "").split("\n").filter((l) => !(drop && l.startsWith(drop))).join("\n");' \
+      'if (process.env.ARM24_EXTRA) out += process.env.ARM24_EXTRA + "\n";' \
+      'process.stdout.write(out);' \
+      'process.exitCode = r.status ?? 1;' \
+      > "$scratch/c5-drift-extractor.mjs"
+    ARM_REFDATA_EXTRACTOR="$scratch/c5-drift-extractor.mjs"
+    out="$SELFTEST_TMPD/a24d.out"; rc=0
+    ARM24_REAL_EXTRACTOR="$SCRIPT_DIR/extract-reference-inserts.mjs" ARM24_DROP="-- refdata-update: " \
+      arm_env preflight a24d > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (d): an extractor that replays the C5 UPDATE with no \`-- refdata-update:\` trailer was ACCEPTED (exit ${rc}); the restore log would read 0 C5 updates replayed"; return 1; }
+    grep -aq 'emitted 0 `-- refdata-update:` trailer(s) but the update: lines of' "$out" \
+      || { echo "MEASURE_FAIL (d): the refusal is not the C5 update-pin one"; return 1; }
+    no_write_check "$out" d || return 1
+
+    out="$SELFTEST_TMPD/a24e.out"; rc=0
+    ARM24_REAL_EXTRACTOR="$SCRIPT_DIR/extract-reference-inserts.mjs" ARM24_EXTRA="-- refdata-decline: 20260103000000_fixture_c.sql:1 public.fx_keep" \
+      arm_env preflight a24e > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (e): an extractor naming a declined write the allowlist does not pin was ACCEPTED (exit ${rc})"; return 1; }
+    grep -aq 'named 2 declined write(s) on `-- refdata-decline:` lines but the decline: lines of' "$out" \
+      || { echo "MEASURE_FAIL (e): the refusal is not the C5 decline-pin one"; return 1; }
+    no_write_check "$out" e || return 1
     return 0
   }
 
@@ -4094,6 +4271,288 @@ FRESHSTUB
     return 0
   }
 
+  # ═══ ARM 38 (164.9.2 C5) — a replayed UPDATE lands AFTER its INSERT, inside ═══
+  # the restore transaction. Row id=3 is INSERTed without `status`, so it starts
+  # at the fixture's schema DEFAULT; the SAME migration then UPDATEs it to the
+  # pinned value (20260103000000_fixture_c.sql), and the fixture allowlist names
+  # the `update:1` line ABOVE the INSERT line, so only a (basename, offset) sort
+  # puts the UPDATE after the row it needs. The UNCHANGED wrong-state leg,
+  # pointed at id=3, is the oracle: quiet here, loud in arm 39.
+  # ⛔ CORRECTED 2026-09-25 (164.9.2 review round 1, WR-04): "only a (basename,
+  # offset) sort" above is false, and was measured false by plan 03 (SUMMARY
+  # deviation 1). modeEmit pushes every INSERT block before every C5 block, so
+  # with the sort line deleted this fixture still emits INSERT, INSERT, UPDATE
+  # and this arm stays green. Arm 38 goes RED if blocks are emitted in
+  # allowlist-line order; sort removal alone is caught by the extractor self-test's `c5-update-count-drift.green` ORDER leg, not here (re-measured 2026-09-25: deleting the sort
+  # reddens that leg). The sentence above is kept as lineage.
+  arm_c5_update_green() {
+    setup_lane || return 1
+    local ARM_WRONGSTATE_ID="3"
+    local out="$SELFTEST_TMPD/a38.out" rc=0
+    arm_env restore a38 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL: a restore whose allowlisted UPDATE sets row id=3 to its pinned value exited ${rc}, expected 0"; return 1; }
+    if grep -aq 'WRONG STATE after the replay' "$out"; then
+      echo "MEASURE_FAIL: the wrong-state fault fired on a row the replayed C5 UPDATE should have set"
+      return 1
+    fi
+    local n
+    n=$(lane_q "SELECT status FROM public.fx_keep WHERE id = 3;")
+    [ "$n" = "verified" ] || { echo "MEASURE_FAIL: the premise is broken — public.fx_keep id=3 holds status='${n}', not 'verified', so the C5 UPDATE did not land after its INSERT"; return 1; }
+    # The C5 note is the restore log's evidence that C5 ran, and it reads the
+    # fixture's ONE update: line; the entry note still reads 1 although the
+    # fixture allowlist now holds two lines, because REFDATA_ENTRY_N counts
+    # INSERT-class lines only (164.9.2, plan-checker W6).
+    # ⛔ CORRECTED 2026-09-26 (164.9.2 plan 05, merging main): Phase 164.9.1 added
+    # a second INSERT-class entry (public.system_settings), so the entry note now
+    # reads 2 tables from 2 lines. It still excludes the update: and decline:
+    # lines, which is what this assertion guards; with them counted the line count reads 4.
+    grep -aqF 'refdata: 1 C5 update statement(s) replayed in migration filename order inside the same transaction' "$out" \
+      || { echo "MEASURE_FAIL: the restore log does not carry the C5 note with count 1, so a green run is no evidence that the UPDATE replayed"; return 1; }
+    grep -aqF 'refdata: 2 table(s) from 2 allowlist line(s)' "$out" \
+      || { echo "MEASURE_FAIL: the entry note does not read 2 allowlist line(s) — a C5 update: or decline: line was counted as a pinned-statement entry"; return 1; }
+    # 164.9.2 review SFH-06: the fixture's decline:1 line (a joined UPDATE of
+    # fx_keep) is NAMED in a successful restore's log — the evidence of what the
+    # restore deliberately did not replay.
+    grep -aqF 'refdata: 1 C5 write(s) DECLINED' "$out" \
+      || { echo "MEASURE_FAIL: the restore log does not count the fixture's one declined C5 write, so a green run says nothing about what it left out"; return 1; }
+    grep -aqE 'refdata:   declined, not replayed: 20260103000000_fixture_c\.sql:[0-9]+ public\.fx_keep$' "$out" \
+      || { echo "MEASURE_FAIL: the restore log does not NAME the declined write by file, line and table"; return 1; }
+    return 0
+  }
+
+  # ═══ ARM 39 (164.9.2 C5) — the same restore WITHOUT the fixture's update: ═══
+  # line, on a scratch copy of the fixture allowlist (arm 24's idiom): the UPDATE
+  # is not replayed, row id=3 stays at its DEFAULT, and the unchanged wrong-state
+  # leg must abort and roll back. Without this RED, arm 38 alone would not rule
+  # out a leg that is quiet on id=3 whatever the replay did.
+  # Leg (b) feeds an allowlist holding ONLY the C5 line and must be refused as
+  # empty (plan-checker W6).
+  arm_c5_update_red() {
+    setup_lane || return 1
+    local scratch="$SELFTEST_TMPD/refdata-arm39"
+    rm -rf "$scratch"
+    mkdir -p "$scratch"
+    # 164.9.2 review SFH-06: the fixture now also carries a decline:1 line (arm
+    # 38 reads its note). It goes too: a decline: line over a pair whose literal
+    # UPDATE lost its update: line is refused by the extractor ("a literal UPDATE
+    # is replayed, not declined"), which would abort this leg for the wrong reason.
+    awk -F '\t' '$3 != "update:1" && $3 != "decline:1"' "$FIXTURES/refdata-allowlist.txt" > "$scratch/no-update.txt"
+    if cmp -s "$scratch/no-update.txt" "$FIXTURES/refdata-allowlist.txt"; then
+      echo "MEASURE_FAIL: the scratch copy is identical to the fixture allowlist — there was no update:1 line to remove, so this RED would prove nothing"
+      return 1
+    fi
+    local ARM_REFDATA_ALLOWLIST="$scratch/no-update.txt"
+    local ARM_WRONGSTATE_ID="3"
+    local out="$SELFTEST_TMPD/a39.out" rc=0
+    arm_env restore a39 > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL: a restore whose C5 UPDATE was not replayed exited ${rc}, expected 1"; return 1; }
+    grep -aq 'WRONG STATE after the replay' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not name the wrong-state fault"; return 1; }
+    grep -aq 'public.fx_keep.status for id=3' "$out" \
+      || { echo "MEASURE_FAIL: the abort does not name the row and column that disagreed"; return 1; }
+    if grep -aqE "'newbie'|'verified'" "$out"; then
+      echo "MEASURE_FAIL: the abort printed a raw row VALUE — the message must describe SHAPES, never values"
+      return 1
+    fi
+    local n
+    n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+    [ "$n" = "1" ] || { echo "MEASURE_FAIL: the stray table is gone (count=${n}) — a WRONG-STATE row COMMITTED instead of rolling back."; return 1; }
+
+    # (b) AN ALLOWLIST HOLDING ONLY THE C5 LINE (plan-checker W6). It replays no
+    #     row the count floor can measure, so it is the empty-allowlist defect
+    #     and must be refused before any read, exactly as arm 24 leg (b) is.
+    awk -F '\t' '!/^[[:space:]]*(#|$)/ && $3 == "update:1"' "$FIXTURES/refdata-allowlist.txt" > "$scratch/only-c5.txt"
+    [ "$(wc -l < "$scratch/only-c5.txt" | tr -d ' ')" = "1" ] \
+      || { echo "MEASURE_FAIL (b): the only-C5 scratch allowlist does not hold exactly the one update:1 line, so this leg would prove nothing"; return 1; }
+    ARM_REFDATA_ALLOWLIST="$scratch/only-c5.txt"
+    out="$SELFTEST_TMPD/a39b.out"; rc=0
+    arm_env preflight a39b > "$out" 2>&1 || rc=$?
+    cat "$out"
+    [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (b): an allowlist holding only a C5 line exited ${rc}, expected 1"; return 1; }
+    grep -aq 'carries ZERO entries' "$out" \
+      || { echo "MEASURE_FAIL (b): the refusal is not this script's empty-allowlist one — a C5 line was counted as an entry"; return 1; }
+    grep -aq 'that is the Phase 164.8 defect, not a clean run' "$out" \
+      || { echo "MEASURE_FAIL (b): the refusal does not say what emptiness would silently produce"; return 1; }
+    if grep -aq 'pre-census (read-only)' "$out"; then
+      echo "MEASURE_FAIL (b): the pre-census RAN. The refusal did not fire before the first read of the database."
+      return 1
+    fi
+    return 0
+  }
+
+  # ═══ ARM 40 (164.9.2 review round 2, WR-03 / SFH R2-02) — a public built-in ═══
+  # SHADOW cannot reach the replay. The replay runs the migrations' ORIGINAL
+  # bytes, which call `now()` and compare with `=` UNQUALIFIED. PROD ran them
+  # under the default path, where `pg_catalog` is searched implicitly FIRST. The
+  # bracket used to read `public, pg_catalog`, and a `pg_catalog` listed
+  # explicitly is searched at its LISTED position, so a `public.now()` or an
+  # exact-match `public.=` won over the built-in inside the transaction that
+  # COMMITs on shared TEST. The bracket now reads `pg_catalog, public`.
+  #
+  # The shadows are planted INSIDE the transaction, after the dump has re-created
+  # `public` and before the bracket, on a SCRATCH COPY of this script (arm 23's
+  # idiom): a shadow planted in the lane before the restore would die with the
+  # DROP SCHEMA. They are dropped again right after the replay, so nothing
+  # downstream of it (the gate, the shape assertions) sees them. The fixture's
+  # replayed UPDATE is given a `now()` call on a scratch copy of the migrations,
+  # which the extractor admits (C5 allows `now()`).
+  #
+  #   (a) the REAL bracket with both shadows planted -> the replay is QUIET and
+  #       the preflight completes: `now()` and `=` resolved to pg_catalog's.
+  #   (b) the OLD bracket (`public, pg_catalog`) with the `=` shadow planted ->
+  #       the shadow runs and aborts by name, rolled back.
+  #   (c) the OLD bracket with the `now()` shadow planted -> the same, by name.
+  # (b) and (c) are what make (a) mean anything: the SAME statements, under the
+  # order this script used to ship, reach each shadow. Delete them and (a) could
+  # be quiet because the replay never called `now()` or `=` at all.
+  arm_refdata_builtin_shadow() {
+    local scratch="$SELFTEST_TMPD/refdata-arm40" out rc n
+    rm -rf "$scratch"
+    mkdir -p "$scratch/mig"
+    cp "$FIXTURES"/migrations/*.sql "$scratch/mig/"
+    awk '!d && sub(/ WHERE id = 3;$/, " WHERE id = 3 AND now() IS NOT NULL;") { d = 1 }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' \
+      "$FIXTURES/migrations/20260103000000_fixture_c.sql" > "$scratch/mig/20260103000000_fixture_c.sql" \
+      || { echo "MEASURE_FAIL: could not give the fixture's replayed UPDATE a now() call — its anchor moved."; return 1; }
+
+    cat > "$scratch/shadow-op.sql" <<'ARM40_SHADOW_OP'
+CREATE FUNCTION public.arm40_shadow_int4eq(integer, integer) RETURNS boolean
+  LANGUAGE plpgsql AS $arm40$ BEGIN RAISE EXCEPTION 'arm40 SHADOWED: public.=(integer,integer) ran in the replay, not pg_catalog.='; END $arm40$;
+CREATE OPERATOR public.= (LEFTARG = integer, RIGHTARG = integer, FUNCTION = public.arm40_shadow_int4eq);
+ARM40_SHADOW_OP
+    cat > "$scratch/shadow-now.sql" <<'ARM40_SHADOW_NOW'
+CREATE FUNCTION public.now() RETURNS timestamptz
+  LANGUAGE plpgsql AS $arm40$ BEGIN RAISE EXCEPTION 'arm40 SHADOWED: public.now() ran in the replay, not pg_catalog.now()'; END $arm40$;
+ARM40_SHADOW_NOW
+    cat "$scratch/shadow-op.sql" "$scratch/shadow-now.sql" > "$scratch/shadow-both.sql"
+    cat > "$scratch/unshadow.sql" <<'ARM40_UNSHADOW'
+DROP OPERATOR IF EXISTS public.= (integer, integer);
+DROP FUNCTION IF EXISTS public.arm40_shadow_int4eq(integer, integer);
+DROP FUNCTION IF EXISTS public.now();
+ARM40_UNSHADOW
+
+    # $1 source script, $2 shadow SQL, $3 the copy. Plants before the bracket's
+    # heredoc, unplants after the replay concatenation.
+    arm40_copy() {
+      awk -v shadow="$2" -v unshadow="$scratch/unshadow.sql" '
+        index($0, "cat >> \"$out\" <<\047TXN_REFDATA_HEAD\047") > 0 {
+          print "  cat \"" shadow "\" >> \"$out\"  # arm 40: a public built-in shadow, scratch copy only"; p++ }
+        { print }
+        index($0, "cat \"$RESTORE_OUT_DIR/refdata.sql\" >> \"$out\"") > 0 {
+          print "  cat \"" unshadow "\" >> \"$out\"  # arm 40: the shadow dropped after the replay, scratch copy only"; u++ }
+        END { if (p != 1 || u != 1) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$1" > "$3"
+    }
+    local ARM_MIGRATIONS_DIR="$scratch/mig"
+
+    # (a) the real bracket, both shadows planted.
+    arm40_copy "$0" "$scratch/shadow-both.sql" "$scratch/real.sh" \
+      || { echo "MEASURE_FAIL (a): could not build the shadowed scratch copy — an anchor moved."; return 1; }
+    setup_lane || return 1
+    out="$SELFTEST_TMPD/a40a.out"; rc=0
+    run_leg "$scratch/real.sh" preflight a40a > "$out" 2>&1 || rc=$?
+    cat "$out"
+    grep -aqF 'WHERE id = 3 AND now() IS NOT NULL;' "$SELFTEST_TMPD/out-a40a/refdata.sql" \
+      || { echo "MEASURE_FAIL (a): the replayed refdata.sql does not carry the now() call, so a quiet replay would prove nothing about now()"; return 1; }
+    [ "$rc" -eq 0 ] || { echo "MEASURE_FAIL (a): with a public now() and a public = planted, the replay exited ${rc}, expected 0 — a public object shadowed a built-in inside the replay (WR-03 / R2-02)"; return 1; }
+    if grep -aq 'arm40 SHADOWED' "$out"; then
+      echo "MEASURE_FAIL (a): a planted public shadow RAN inside the replay"
+      return 1
+    fi
+
+    # (b) and (c): the bracket reverted to the order this script used to ship.
+    awk '!d && $0 == "SET LOCAL search_path = pg_catalog, public;" { print "SET LOCAL search_path = public, pg_catalog;"; d = 1; next }
+         { print }
+         END { if (!d) { print "ANCHOR-NOT-FOUND" > "/dev/stderr"; exit 1 } }' "$0" > "$scratch/old-order.sh" \
+      || { echo "MEASURE_FAIL (b): could not build the old-order scratch copy — the bracket anchor moved."; return 1; }
+    local leg sql needle
+    for leg in b c; do
+      if [ "$leg" = b ]; then sql="$scratch/shadow-op.sql"; needle='arm40 SHADOWED: public.=(integer,integer) ran in the replay'
+      else sql="$scratch/shadow-now.sql"; needle='arm40 SHADOWED: public.now() ran in the replay'; fi
+      arm40_copy "$scratch/old-order.sh" "$sql" "$scratch/old-${leg}.sh" \
+        || { echo "MEASURE_FAIL (${leg}): could not build the old-order shadowed copy — an anchor moved."; return 1; }
+      setup_lane || return 1
+      out="$SELFTEST_TMPD/a40${leg}.out"; rc=0
+      run_leg "$scratch/old-${leg}.sh" preflight "a40${leg}" > "$out" 2>&1 || rc=$?
+      cat "$out"
+      [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (${leg}): under the OLD bracket the planted shadow did not abort the replay (exit ${rc}), so leg (a) being quiet proves nothing"; return 1; }
+      grep -aqF "$needle" "$out" \
+        || { echo "MEASURE_FAIL (${leg}): the abort is not the planted shadow's — the old bracket did not reach it, and leg (a) is unmeasured"; return 1; }
+      n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+      [ "$n" = "1" ] || { echo "MEASURE_FAIL (${leg}): the stray table is gone (count=${n}) — the aborted replay did not roll back."; return 1; }
+    done
+    return 0
+  }
+
+  # ═══ ARM 41 (164.9.2 review round 2, SFH R2-06) — the REPLAYED emission's C5 ═══
+  # trailers are compared with the allowlist's pins, not only the preflight's.
+  # The extractor runs twice: `refuse_bad_refdata_allowlist` reads one emission
+  # and compares it with the pins, and `build_transaction` writes the SECOND into
+  # refdata.sql, which is what psql executes. The second was noted and compared
+  # with nothing. A wrapper on the REFDATA_EXTRACTOR seam passes the first run
+  # through untouched and rewrites only the second: (a) drops every
+  # `-- refdata-update:` trailer, (b) adds a `-- refdata-decline:` line. Each must
+  # be refused by name AFTER the pre-census read and BEFORE the transaction runs,
+  # with the database untouched.
+  arm_refdata_replayed_c5_pins() {
+    local scratch="$SELFTEST_TMPD/refdata-arm41" out rc n leg
+    rm -rf "$scratch"
+    mkdir -p "$scratch"
+    printf '%s\n' \
+      '#!/usr/bin/env node' \
+      'import { spawnSync } from "node:child_process";' \
+      'import { readFileSync, writeFileSync, existsSync } from "node:fs";' \
+      'const st = process.env.ARM41_STATE;' \
+      'const call = (existsSync(st) ? Number(readFileSync(st, "utf8")) : 0) + 1;' \
+      'writeFileSync(st, String(call));' \
+      'const r = spawnSync(process.execPath, [process.env.ARM41_REAL_EXTRACTOR, ...process.argv.slice(2)], { encoding: "utf8" });' \
+      'process.stderr.write(r.stderr ?? "");' \
+      'let out = r.stdout ?? "";' \
+      'if (call === 2) {' \
+      '  const drop = process.env.ARM41_DROP ?? "";' \
+      '  out = out.split("\n").filter((l) => !(drop && l.startsWith(drop))).join("\n");' \
+      '  if (process.env.ARM41_EXTRA) out += process.env.ARM41_EXTRA + "\n";' \
+      '}' \
+      'process.stdout.write(out);' \
+      'process.exitCode = r.status ?? 1;' \
+      > "$scratch/second-run-drift.mjs"
+    local ARM_REFDATA_EXTRACTOR="$scratch/second-run-drift.mjs"
+    for leg in a b; do
+      setup_lane || return 1
+      rm -f "$scratch/state-${leg}"
+      out="$SELFTEST_TMPD/a41${leg}.out"; rc=0
+      if [ "$leg" = a ]; then
+        ARM41_STATE="$scratch/state-${leg}" ARM41_REAL_EXTRACTOR="$SCRIPT_DIR/extract-reference-inserts.mjs" ARM41_DROP="-- refdata-update: " \
+          arm_env restore "a41${leg}" > "$out" 2>&1 || rc=$?
+      else
+        ARM41_STATE="$scratch/state-${leg}" ARM41_REAL_EXTRACTOR="$SCRIPT_DIR/extract-reference-inserts.mjs" ARM41_EXTRA="-- refdata-decline: 20260103000000_fixture_c.sql:1 public.fx_keep" \
+          arm_env restore "a41${leg}" > "$out" 2>&1 || rc=$?
+      fi
+      cat "$out"
+      [ "$(cat "$scratch/state-${leg}" 2>/dev/null)" = "2" ] \
+        || { echo "MEASURE_FAIL (${leg}): the extractor ran $(cat "$scratch/state-${leg}" 2>/dev/null || echo 0) time(s), not 2 — the drift never reached the replayed emission, so this leg measures nothing"; return 1; }
+      [ "$rc" -eq 1 ] || { echo "MEASURE_FAIL (${leg}): a replayed emission whose C5 trailers disagree with the pins was ACCEPTED (exit ${rc}); only the preflight emission was compared"; return 1; }
+      if [ "$leg" = a ]; then
+        grep -aq 'the REPLAYED reference-data emission carries 0 `-- refdata-update:` trailer(s) but the update: lines of' "$out" \
+          || { echo "MEASURE_FAIL (a): the refusal is not the replayed-emission C5 update-pin one"; return 1; }
+      else
+        grep -aq 'the REPLAYED reference-data emission names 2 declined write(s) on `-- refdata-decline:` lines but the decline: lines of' "$out" \
+          || { echo "MEASURE_FAIL (b): the refusal is not the replayed-emission C5 decline-pin one"; return 1; }
+      fi
+      grep -aq 'pre-census (read-only)' "$out" \
+        || { echo "MEASURE_FAIL (${leg}): the pre-census never ran, so the refusal fired at the FIRST reading and the second is still unmeasured"; return 1; }
+      if grep -aq '── transaction (mode=' "$out"; then
+        echo "MEASURE_FAIL (${leg}): the transaction banner printed — the refusal did not fire before the write"
+        return 1
+      fi
+      n=$(lane_q "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='e2e_leftover';")
+      [ "$n" = "1" ] || { echo "MEASURE_FAIL (${leg}): the stray table is gone (count=${n}) — the database was written."; return 1; }
+    done
+    return 0
+  }
+
   run_arm "1  RED   credential absent — a missing DSN is a hard failure, never a skip" 0 arm_credential_absent
   run_arm "2  RED   identity marker NULL — refused before any write" 0 arm_marker_null
   run_arm "3  RED   identity marker names PROD — refused, loudly" 0 arm_marker_prod
@@ -4118,7 +4577,7 @@ FRESHSTUB
   run_arm "21 RED   migration corpus: bad charset, empty, absent (A3)" 0 arm_bad_migration_corpus
   run_arm "22 GREEN reference data replayed, gated and censused — the transaction commits" 0 arm_g_refdata_replay
   run_arm "23 RED   the reference-data gate BITES: no replay, no search_path, partial replay" 0 arm_refdata_gate_bites
-  run_arm "24 RED   reference-data allowlist: count drift, empty, silent extractor" 0 arm_bad_refdata_allowlist
+  run_arm "24 RED   reference-data allowlist: count drift, empty, silent extractor, C5 trailers vs pins (164.9.2 SFH-05)" 0 arm_bad_refdata_allowlist
   run_arm "25 GREEN the preflight rollback view normalises mutable reference counts and NOTHING else (CR-01)" 0 arm_census_rollback_view
   run_arm "26 RED   a backtick inside ANY unquoted heredoc is refused — SEVEN evasions closed — and THIS script is clean" 0 arm_backtick_in_txn_heredoc
   run_arm "27 RED   a credential in a PUBLISHED .sql file, a file the scan could not find, and the refdata.sql ALTER DATABASE exemption in BOTH directions" 0 arm_published_sql_credential_scan
@@ -4132,6 +4591,10 @@ FRESHSTUB
   run_arm "35 RED   the normalisation emitter exits non-zero — the restore is refused and commits nothing (164.9.1-11)" 0 arm_rearm_emitter_rc
   run_arm "36 RED   the normalisation emitter exits 0 printing only a comment — refused by the shape check, commits nothing (164.9.1-11)" 0 arm_rearm_emitter_shape
   run_arm "37 GREEN REARM_EMITTER outside the self-test seam is IGNORED — the real fragment commits the sink (164.9.1-11)" 0 arm_rearm_emitter_seam
+  run_arm "38 GREEN a replayed C5 UPDATE lands after its INSERT inside the transaction, and the value-pinning leg is QUIET (164.9.2 C5)" 0 arm_c5_update_green
+  run_arm "39 RED   without the C5 update: line the row stays at its DEFAULT and the value-pinning leg aborts (164.9.2 C5)" 0 arm_c5_update_red
+  run_arm "40 RED   a public now() or = cannot shadow the built-in inside the replay; the old bracket order reaches both (164.9.2 WR-03)" 0 arm_refdata_builtin_shadow
+  run_arm "41 RED   the REPLAYED refdata.sql's C5 trailers are compared with the pins, before the transaction runs (164.9.2 SFH R2-06)" 0 arm_refdata_replayed_c5_pins
 
   release_mutex
 
