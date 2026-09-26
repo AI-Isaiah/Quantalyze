@@ -871,6 +871,8 @@ Plans:
 
 ⭐ **Founder decision, 2026-09-24 (AskUserQuestion): "Book the phase if it holds."** It held.
 
+⭐ **Founder decision, 2026-09-26 (AskUserQuestion): "Accept it."** On `pull_request` runs, VAC-08 in `test-db-drift` is no longer ordered against a concurrent `apply-test` or a dispatched restore (round-1 finding SFH-01 / WR-01; accepted risk AR-164.4.2.1-01 in SECURITY.md). An overlap can only produce a loud RED on a PR, never a false GREEN on real drift; merge pushes keep the schema-apply wait. Ratified as asked by the verifier's human item 2.
+
 ⭐ **Founder decision, 2026-09-25 (AskUserQuestion, Q1): "Judge by the goal."** SC-3's clause (a) is graded as a non-degenerate run-total inside or below 16m18s–18m50s; the strict below-16m18s reading is recorded per run as evidence for Phase 164.9, not as this phase's pass/fail (`164.4.2.1-CONTEXT.md` D-01).
 
 **Evidence.** `164.4.2-MEASUREMENT.md` `## AFTER`, merge-push runs 1–5 (CI `35939061930`, `35943402509`, `35943407413`, `35957479474`, `35958026743`):
