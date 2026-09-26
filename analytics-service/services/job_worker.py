@@ -2743,7 +2743,19 @@ def _log_marker_not_confirmed(
     cause ``state`` actually records. ``consequence`` is the site's own sentence
     about what it does next. ``subject`` names the job the invariant is about:
     the job this handler CLAIMED, or (at the tail mirror) the follow-on it just
-    ENQUEUED. Never called with ``PRESENT``."""
+    ENQUEUED.
+
+    ``PRESENT`` is refused with ``ValueError`` (SFH-R2-06). It is the one state
+    that DID confirm the marker, and the last arm below would otherwise log it
+    as "no live row", a false invariant breach. Every caller checks for
+    ``PRESENT`` first, so this raise fires only on a caller bug, and it is loud
+    on purpose."""
+    if state is MarkerLiveState.PRESENT:
+        raise ValueError(
+            f"{site}: _log_marker_not_confirmed was called with "
+            "MarkerLiveState.PRESENT, which confirms the marker; the caller "
+            "must handle PRESENT before asking why the marker is not confirmed"
+        )
     if state is MarkerLiveState.RETRACTED:
         logger.warning(
             "%s: the refresh marker on compute_job %s has been RETRACTED — a "

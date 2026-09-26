@@ -962,6 +962,31 @@ class TestLiveStateNamesItsReason:
         with pytest.raises(TypeError):
             bool(_jw.MarkerLiveState.NO_ROW)
 
+    def test_the_not_confirmed_logger_refuses_present(self) -> None:
+        """SFH-R2-06: ``_log_marker_not_confirmed`` explains why a marker was
+        NOT confirmed. Its last arm is the invariant-breach sentence ("no live
+        row"), so a caller that handed it ``PRESENT`` used to get a false ERROR
+        saying the row was missing while the marker was in fact confirmed. It
+        now raises, and logs nothing.
+
+        Neuter to redden: delete the ``PRESENT`` guard at the top of the
+        function. The call then returns normally after one ERROR line naming
+        "no live row", and both assertions below fail."""
+        with patch.object(_jw, "logger") as log:
+            with pytest.raises(ValueError, match="PRESENT"):
+                _jw._log_marker_not_confirmed(
+                    _jw.MarkerLiveState.PRESENT,
+                    site="test-site",
+                    job_id="job-1",
+                    strategy_id=_STRATEGY_ID,
+                    consequence="Taking the LOUD terminal path",
+                )
+        assert log.error.call_count == 0 and log.warning.call_count == 0, (
+            "a PRESENT state was reported as a not-confirmed marker: "
+            f"errors={log.error.call_args_list!r} "
+            f"warnings={log.warning.call_args_list!r}"
+        )
+
 
 def _entry_read_ctx(entry_answers: list[Any]) -> tuple[MagicMock, dict[str, Any]]:
     """A derive context whose ``strategy_analytics`` select answers
