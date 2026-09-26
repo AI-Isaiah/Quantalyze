@@ -122,8 +122,10 @@ BEGIN
   -- one makes claim_compute_jobs and both claim_compute_jobs_with_priority
   -- overloads raise 23505 on that index (the worker-spin class of 2026-04-28).
   -- So when a failed_retry row is the caller's ONLY recompose row, it is
-  -- REUSED: it goes back to status 'pending' with next_attempt_at = now(), the
-  -- state reset_stalled_compute_jobs already writes for a reclaimed job. A
+  -- REUSED: it goes back to status 'pending' with next_attempt_at = now() and
+  -- claimed_at, claimed_by and claim_token all NULL, the claim state
+  -- reset_stalled_compute_jobs writes for a reclaimed job (its claim_token =
+  -- NULL is the mig-117 fence invalidation). A
   -- pending row sits inside that unique index and inside the enqueue's dedup,
   -- so a later enqueue for the caller (a derive_broker_dailies epilogue among
   -- them) folds onto it instead of inserting a twin, which merely moving
@@ -131,9 +133,13 @@ BEGIN
   -- first in its claim partition beside the epilogue's pending row, the same
   -- 23505. attempts is left alone, so the toggle grants no retry budget: a row
   -- one attempt short of max_attempts ends failed_final if it fails again, and
-  -- the next toggle then enqueues a fresh job. The claim functions clear
-  -- last_error and error_kind themselves. The job reads history_inclusion when
-  -- it runs, so it picks up the new value.
+  -- the next toggle then enqueues a fresh job. last_error and error_kind are
+  -- left alone, unlike the watchdog, which writes last_error =
+  -- 'worker_stalled': the failed attempt's own error stays visible until the
+  -- next claim, and both claim functions (claim_compute_jobs and
+  -- claim_compute_jobs_with_priority) set last_error and error_kind to NULL
+  -- when they take the row. The job reads history_inclusion when it runs, so
+  -- it picks up the new value.
   -- The NOT EXISTS narrowing is still needed. The flip is a write into that
   -- unique index, so beside a visible pending or done_pending_children row it
   -- would raise 23505 every time and refuse a toggle that can succeed: without
@@ -204,7 +210,10 @@ BEGIN
       BEGIN
         UPDATE public.compute_jobs
            SET status = 'pending',
-               next_attempt_at = now()
+               next_attempt_at = now(),
+               claimed_at = NULL,
+               claimed_by = NULL,
+               claim_token = NULL
          WHERE id = v_job
            AND status = 'failed_retry'
         RETURNING id INTO v_job;

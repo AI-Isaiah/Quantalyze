@@ -51,7 +51,7 @@
 -- Usage:
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/test_api_keys_account_identity.sql
 --
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql"]}
 
 -- Reap fixtures orphaned by a crashed earlier run. Age-scoped so it can never
 -- touch a concurrent run's users.
@@ -699,9 +699,11 @@ BEGIN
   --            20260925120000. The toggle is then stored and silently folded
   --            into the job that already read the old value.
   -- RED-UNDER-M: {"arm":"HIST-running","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_job_status = 'running' THEN","replace":"  IF FALSE THEN","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_job_status = 'running' THEN","replace":"  IF FALSE THEN","occurrences":1}]}
-  -- A worker claims the caller's pending recompose (the claim's own transition).
+  -- A worker claims the caller's pending recompose (the claim's own transition,
+  -- claim_token included).
   UPDATE compute_jobs
-     SET status = 'running', claimed_at = now(), claimed_by = 'acct-identity-test'
+     SET status = 'running', claimed_at = now(), claimed_by = 'acct-identity-test',
+         claim_token = gen_random_uuid()
    WHERE allocator_id = uid_a AND kind = 'derive_allocator_equity' AND status = 'pending';
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
@@ -732,14 +734,20 @@ BEGIN
   -- inside that unique index and the enqueue's dedup, so a later epilogue
   -- enqueue folds onto it instead of building the same 23505 pairing. The id
   -- leg proves the ORIGINAL row was reused, not a fresh insert; the
-  -- next_attempt_at leg proves it was moved.
+  -- next_attempt_at leg proves it was moved. The claim leg proves the reused
+  -- row carries no claim of the failed attempt: mark_compute_job_failed leaves
+  -- claimed_at, claimed_by and claim_token as the claim wrote them, and the
+  -- reuse must clear all three, as reset_stalled_compute_jobs does.
   -- RED-UNDER: make the RPC's failed_retry lookup find nothing (AND FALSE) in
   --            migration 20260925120000. The enqueue then queues a pending
   --            twin beside the failed_retry row.
   -- RED-UNDER-M: {"arm":"HIST-retry","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"     AND cj.status = 'failed_retry'","replace":"     AND FALSE","occurrences":1}]}
-  -- The worker's attempt failed and backed off (mark_compute_job_failed's move).
+  -- The worker's attempt failed and backed off (mark_compute_job_failed's move:
+  -- status, last_error, error_kind and next_attempt_at; the claim columns are
+  -- left as the claim wrote them).
   UPDATE compute_jobs
-     SET status = 'failed_retry', claimed_at = NULL, claimed_by = NULL,
+     SET status = 'failed_retry', last_error = 'acct-identity-test failure',
+         error_kind = 'transient',
          attempts = 1, next_attempt_at = now() + interval '10 minutes'
    WHERE allocator_id = uid_a AND kind = 'derive_allocator_equity' AND status = 'running'
   RETURNING id INTO v_retry_id;
@@ -792,8 +800,10 @@ BEGIN
                    AND status = 'failed_retry')
      OR NOT EXISTS (SELECT 1 FROM compute_jobs
                      WHERE id = v_retry_id
-                       AND status = 'pending' AND next_attempt_at <= now()) THEN
-    RAISE EXCEPTION 'TEST FAILED (HIST-retry): a toggle beside the caller''s failed_retry recompose did not reuse it (SQLSTATE %, %; stored %, in-flight-or-retry rows %, expected exactly 1: the original row %, back to pending and due now, with no failed_retry row and no twin).', v_err, v_msg, v_val, v_jobs, v_retry_id;
+                       AND status = 'pending' AND next_attempt_at <= now()
+                       AND claimed_at IS NULL AND claimed_by IS NULL
+                       AND claim_token IS NULL) THEN
+    RAISE EXCEPTION 'TEST FAILED (HIST-retry): a toggle beside the caller''s failed_retry recompose did not reuse it (SQLSTATE %, %; stored %, in-flight-or-retry rows %, expected exactly 1: the original row %, back to pending and due now with claimed_at, claimed_by and claim_token NULL, with no failed_retry row and no twin).', v_err, v_msg, v_val, v_jobs, v_retry_id;
   END IF;
 
   RAISE NOTICE 'PASS (HIST behavioural): bad value refused by CHECK; exclude stored on a disconnected key with exactly one recompose job; NULL resets; revoked key accepted; live key refused 55000 KEY_NOT_DEPARTED; bad value refused 22023; cross-tenant refused 42501 with nothing written; a toggle while the recompose runs refused 55006 with nothing written or queued; a toggle beside a failed_retry recompose puts that same row back to pending, due now, with no twin; another tenant''s failed_retry row is left untouched.';
