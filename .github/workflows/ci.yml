@@ -2377,7 +2377,7 @@ jobs:
         # ⚠️ THIS STEP'S FIRST PR RUN IS THE MEASUREMENT. 164.5.2-RESEARCH
         # assumption A1 ("ubuntu's PostgreSQL server package carries contrib,
         # so dblink is loadable on this runner") was INSPECTED, never executed:
-        # the lane was only ever run on the authoring box. The LANE-ONLY gate
+        # dblink on the lane was only ever exercised on the authoring box. The LANE-ONLY gate
         # supabase/tests/test_mark_rpc_bridge_advisory_lock.sql opens a second
         # backend through dblink, so without it that gate's baseline dies at
         # `CREATE EXTENSION IF NOT EXISTS dblink` and the runner reports an
