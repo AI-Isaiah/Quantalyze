@@ -174,9 +174,12 @@ describe.skipIf(!HAS_LIVE_DB)("FACTSHEETBUILDABLE SC1 — computed to the owner,
   });
 
   it("PROBE-COMPOSITE: the probe names the pre-Phase-86 composite composite_unbuildable", async () => {
+    // 167.2.1-REVIEW-R2 WR-01: a probe carries the refusing gate out, so the
+    // /strategies page can count it. This composite has no persisted headline.
     expect(await probeFactsheetBuildable(compositeId, ownerVisibility)).toEqual({
       buildable: false,
       reason: "composite_unbuildable",
+      gate: "headline",
     });
   });
 
