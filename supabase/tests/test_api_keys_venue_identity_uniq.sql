@@ -749,6 +749,8 @@ BEGIN
     VALUES (k_okx, uid_a, 'okx', 'wizcont02 okx live', 'enc', true, c_okx_acct);
   EXCEPTION WHEN unique_violation THEN
     RAISE EXCEPTION 'TEST FAILED (6f CCXT): the FIRST live okx row for an account id was refused 23505 — nothing else holds that (user, exchange, venue_account_id)';
+  WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (6f CCXT): the FIRST live okx row for an account id was refused with SQLSTATE % (%), not admitted', SQLSTATE, SQLERRM;
   END;
 
   v_refused := FALSE;
@@ -757,6 +759,8 @@ BEGIN
     VALUES (uid_a, 'okx', 'wizcont02 okx dup', 'enc', true, c_okx_acct);
   EXCEPTION WHEN unique_violation THEN
     v_refused := TRUE;
+  WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (6f CCXT): a SECOND live okx row on one account id was refused with SQLSTATE % (%), not the 23505 of api_keys_user_exchange_venue_account_uniq', SQLSTATE, SQLERRM;
   END;
   IF NOT v_refused THEN
     RAISE EXCEPTION 'TEST FAILED (6f CCXT): a SECOND LIVE okx api_keys row with the same (user_id, exchange, venue_account_id) was ADMITTED — api_keys_user_exchange_venue_account_uniq does not govern ccxt venues, so one exchange account behind two keys is counted twice (Phase 167.1.2 D-01)';
@@ -768,6 +772,8 @@ BEGIN
     VALUES (uid_a, 'okx', 'wizcont02 okx reconnected', 'enc', true, c_okx_acct);
   EXCEPTION WHEN unique_violation THEN
     RAISE EXCEPTION 'TEST FAILED (6f CCXT): a SOFT-DISCONNECTED okx row still occupies the (user_id, exchange, venue_account_id) slot — the live-rows predicate does not hold for ccxt venues';
+  WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (6f CCXT): a new live okx row after the first was disconnected was refused with SQLSTATE % (%), not admitted', SQLSTATE, SQLERRM;
   END;
 
   -- ----- cleanup ------------------------------------------------------------

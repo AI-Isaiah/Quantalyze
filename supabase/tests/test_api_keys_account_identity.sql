@@ -395,6 +395,14 @@ BEGIN
       AND (SELECT ctid FROM api_keys WHERE id = k_s1) < (SELECT ctid FROM api_keys WHERE id = k_s3)) THEN
     RAISE EXCEPTION 'TEST FAILED (ACCT-s): precondition — the sanitiser-shape holder does not sit before both dependents in heap order, so this arm could not tell the rejected design from the shipped one.';
   END IF;
+  -- Pin the scan to heap order: a seq or bitmap scan visits rows by ctid, so
+  -- the precondition above is the visit order. A future (user_id, <col>) index
+  -- the planner picked would otherwise visit rows in <col> order, and with
+  -- `label` the dependents sort before the holder, which would make this arm
+  -- vacuous with every check still green. SET LOCAL ends with this DO block's
+  -- transaction; only this arm's cleanup follows it.
+  SET LOCAL enable_indexscan = off;
+  SET LOCAL enable_indexonlyscan = off;
   v_err := NULL;
   BEGIN
     DELETE FROM api_keys WHERE user_id = uid_a;
