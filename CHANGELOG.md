@@ -1,5 +1,200 @@
 # Changelog
 
+## [0.106.0.0] - 2026-09-26 — AUTOREDUMP: after a PROD migration apply, the committed baseline is re-dumped, gated and proposed as one bot PR that is never auto-merged
+
+⭐ **What changed for whoever reads this next.** Until now every PROD migration apply left `main`
+red on baseline-content-drift until someone ran `supabase db dump --linked` by hand (PR #864 was
+the measured case, booked as `[164.9.5-MANUAL-BASELINE-REDUMP]`). Phase 164.9.5 AUTOREDUMP makes
+that mechanical. Two new jobs in `.github/workflows/supabase-migrate.yml` run after `apply`
+succeeds on `main`. `redump-dump` takes a read-only dump of PROD and gates it. `redump-pr` composes
+the six-path change and opens or edits ONE bot PR on `automation/baseline-redump`. Nothing in the
+automation can merge, auto-merge or approve that PR. The manual procedure in
+`supabase/schema/BASELINE.md` `## Regenerating` stays as the fallback.
+
+⚠️ **Why a minor bump.** This adds a CI capability: two jobs, a 3727-line repo script and a new
+write path to the repository. The number was taken after two open PRs: #873 claims 0.104.0.0 and
+#869 claims 0.105.0.0. If they land in a different order, the number is re-taken at merge time
+as the next minor above `main`.
+
+⛔ **FOUNDER ITEM BEFORE MERGE (D-30).** Turn on Settings > Actions > General > "Allow GitHub
+Actions to create and approve pull requests", then re-read it with
+`gh api repos/{owner}/{repo}/actions/permissions/workflow -q .can_approve_pull_request_reviews`.
+It must print `true`. The verifier measured it as `false` on 2026-09-26. While it is off, the next
+merge that touches `supabase/migrations/**` turns `redump-pr` red on `main` at `gh pr create`, and
+Railway skips the analytics deploy while `main` is red. This PR touches no migration, so its own
+merge does not fire the path.
+
+⛔ **FOUNDER ITEMS AFTER MERGE.**
+- **D-18, a post-merge dry run.** Run `gh workflow run supabase-migrate.yml --ref main`, bind the
+  reading to the run's head sha, and read every job's conclusion. Expect zero migrations applied
+  and `redump-dump` green. Then either the D-10 no-op notice (`changed=false`, `redump-pr`
+  skipped) or a diff that becomes the first bot PR and is read hunk by hunk. Only this run may
+  justify narrowing the BASELINE.md version-skew caveat.
+- **D-23, the first bot PR.** A PR created or updated by `GITHUB_TOKEN` gets its `pull_request`
+  runs in an approval-required state. Click "Approve workflows to run", then list the head-sha
+  runs with name, status and conclusion. Every run must be `completed` / `success` before merge. Branch protection is off,
+  so a merge with zero completed checks is possible and must not happen.
+
+### Added
+- **`scripts/baseline-redump.mjs`, the re-dump logic in one repo script** (`ce6adfe47` tracer,
+  then plans 02, 03, 07 and 08). It has five CLI modes, and an unknown flag exits 1:
+  - `--gate-dump` judges one dump. It checks the hash and shape counts, runs the five-class
+    secret scan (line numbers only, never the text), runs gitleaks, and checks integrity. It
+    regenerates the carried-migrations marker from the applied merge's tree, and prints the D-10
+    no-op notice with `changed=false` when nothing changed (`5a8aa5293`, `4f2d81a74`,
+    `f4ed15955`).
+  - `--compose` copies the gated pair onto `main` and runs `run.sh --check-currency`,
+    baseline-content-drift (after its `--self-test`) and the staleness gate. It judges each by its
+    verdict line and re-scans the artifact (`9dd69e65c`). It stages exactly `STAGED_PATHS` (six
+    paths), refuses any other staged path and any CI skip token, and commits as
+    `github-actions[bot]` (`566419f42`).
+  - The CHANGELOG entry, the BASELINE.md `### Regenerated` section and the PR body carry every
+    measured value. That covers the run id, merge sha, sha256 prefixes, shape counts and the gate
+    lines verbatim (`dda2ec29a`). The writers refuse by name and stay inside the Provenance span
+    (`7dbf1d3d7`).
+  - `--check-bot-branch` refuses a human commit on the bot branch and names its PR. The no-op
+    notice reports the bot PR's status (`ab459c89d`).
+  - `--open-or-edit-pr` creates or edits the one bot PR. `buildPrArgv` can return only
+    `pr create` or `pr edit` (`51e2bd6f0`).
+  - `--self-test` runs `EXPECTED_ASSERTIONS` assertions, plus `EXPECTED_GITLEAKS_ASSERTIONS`
+    more with `--with-gitleaks`. Read the counts by running the command.
+- **Two jobs in `supabase-migrate.yml`, placed before `apply:`, with the credential split between
+  them (D-21)** (`1692f0f6f`, `b7f4e3f60`).
+  - `redump-dump` has `needs: [apply]` and a `main`-only `if:`. It runs in the `Production`
+    environment with permissions `{contents: read, packages: read}`. The PROD values it uses
+    appear in step `env:` only. It logs in to ghcr, then dumps into `$RUNNER_TEMP`. An artifact
+    of exactly three files is uploaded, only when `changed == 'true'`, and kept for 1 day.
+  - `redump-pr` has permissions `{contents: write, pull-requests: write}` and holds no PROD
+    credential. It re-hashes the artifact against `measured.json` before any write. It makes one
+    leased push to a hard-coded `automation/baseline-redump` refspec.
+  - Neither job has a `${{ }}` expression in a `run:` body, and both checkouts use
+    `persist-credentials: false`.
+- **Two gitleaks rules in `.gitleaks.toml` (WR-03)** (`16f768c3d`, tightened by `330613421` and
+  `74be4b607`). `supabase-secret-key` matches Supabase's current secret-key format.
+  `baseline-dump-password` is the gitleaks copy of the script's password class, scoped to a file
+  named `baseline.sql`. Both are rules. Neither widens an allowlist.
+
+### Changed
+- **`supabase/schema/BASELINE.md` `## Regenerating` documents the automated re-dump** (`77e549b7c`,
+  `dbd8a3509`). A paragraph dated 2026-09-26 names both jobs, every dump-side refusal, the bot PR
+  that is never merged by automation, the "Approve workflows to run" step, and the manual
+  fallback.
+- **`TODOS.md` `[164.9.5-MANUAL-BASELINE-REDUMP]` is closed with evidence** (`72aa0342b`). The
+  booking text is kept as lineage.
+
+### Fixed
+These came from four code-review rounds and four silent-failure hunts. Round 4 reported 0 CRITICAL
+and 0 HIGH.
+- **SFH-01 / WR-02: a dump whose marker could disagree with it is refused** (`6aa17d6e1`). The
+  merge's `supabase/migrations/` listing is compared with current `main`'s, fetched anonymously.
+- **SFH-03: a dump that lost an extension or a schema is refused** (`8b986c18d`), by the
+  `judgeCompleteness` floor.
+- **SFH-02: compose refuses an older dump over a newer baseline** (`fe342d062`).
+- **D-31: a dump whose `main` is already ahead is skipped with a notice, not refused**
+  (`385b5de23`). A later migration merge landed after this run's apply, so its own run re-dumps.
+  `redump-dump` stays green and `redump-pr` skips.
+- **CR-03 / D-32: a re-run attempt is judged by the `main` listing, not refused by its number**
+  (`e8e7df262`). Refusing every attempt other than 1 made "Re-run failed jobs" red on `main` for
+  good.
+- **R3-01: the main-listing verdict runs before the completeness floor** (`a63a5edea`). A D-31
+  skip is decided first.
+- **CR-02: a human commit blocks the bot branch only while its PR is open** (`b1bb7f89e`). This
+  NARROWS D-24's unconditional refusal (see Notes).
+- **WR-07: the marker-subset check exempts a migration that `main`'s checkout no longer holds**
+  (`11f52b2fc`).
+- **R2-06: a re-run of an older `redump-pr` never replaces a newer open proposal** (`b447da0fa`).
+- **WR-08 / WR-10: the password class matches credential forms only, in any case, and again
+  matches the doubled-quote form pg_dump writes inside a literal** (`330613421`, `74be4b607`).
+  Ordinary SQL such as a `WHERE` comparison is not a hit.
+
+### Removed
+- **D-33: the round-2 tail-count floor is reverted** (`535205415` added it for WR-06, and
+  `33d147993` reverts it). The round-3 review found it caused a HIGH (CR-04): `ALTER TABLE … DROP
+  COLUMN` drops column-level GRANT lines without a REVOKE. That meant a correct dump was refused
+  and `main` went red, and 2 of the 277 past migrations would have triggered it. The founder
+  chose to revert it rather than patch it again. Truncation is a recorded limit again (see Notes).
+
+### Tests
+- **`src/__tests__/baseline-redump-wiring.test.ts` (new) pins the redump jobs with calibrated
+  predicates** (`ac57193f5`, `4fbcd6598`). It pins job order, `needs:`/`if:`/`environment:`/
+  `permissions:` and step-`env:`-only secrets. It also pins that no live line merges,
+  auto-merges or approves, that there is exactly one bot push, and that `SECRET_SCAN_PATTERN` is
+  byte-equal to BASELINE.md's pattern. The gitleaks pin must equal ci.yml's `GITLEAKS_VERSION`,
+  and the self-test must run.
+- **`src/__tests__/supabase-migrate-test-first.test.ts`: `SCANNED_JOBS` widens from four jobs to
+  six.** A softened redump job would report green on a refusal.
+- **`src/__tests__/contracts/ghcr-login-before-image-pull.contract.test.ts`:
+  `supabase-migrate.yml:redump-dump` joins `PULLING_JOBS`.** `supabase db dump --linked` pulls
+  the remote's postgres image.
+- **`src/__tests__/critical-regressions.test.ts`: a dated correction in the `apply`-block
+  comment.** The workflow now has 13 two-space keys above `apply`, which is still the last job.
+- Every behaviour plan was written test-first: a failing arm, then the feature (`7f445eca2`,
+  `18f7d5db7`, `51e06e6c5`, `8c7d4b4c6`, `da84965e5`, `7bea53761`, `c6ee4f99f`, `7ad41c1bb`,
+  `f92e121df`). Each round's fix was observed RED against a neutered copy before it was kept.
+
+### Security
+- **SECURED, 37/37 threats closed** (36 mitigated, 1 accepted). Accepted: T-164.9.5-23 (D-25).
+  `contents: write` in `redump-pr` could reach `main` while branch protection is off. It is
+  bounded by the one hard-coded leased refspec.
+- **D-30 accepted side effect.** With the setting ON, any workflow holding `pull-requests: write`
+  can also approve a PR. That adds little while branch protection is off, and no workflow carries
+  an approve line.
+- **zizmor was skipped by founder decision.** D-28 makes it optional, and the skip is recorded in
+  `164.9.5-06-SUMMARY.md` `## zizmor (skipped)`. actionlint is clean, and the eight-item
+  injection checklist is recorded (`543784001`).
+
+### Notes
+- **Recorded limits (D9), carried so nobody reads them as fixed:**
+  - **WR-11 (MEDIUM, wording).** The truncation limit names the wrong cut line, because a cut
+    before the first `CREATE TABLE` is refused by `judgeShapeCounts`. It also overstates the
+    reviewer's signal: a cut in the `GRANT` tail changes no shape count in the PR body.
+  - **Truncation (R2-02 / WR-06, MEDIUM), recorded again by D-33.** A dump that exits 0 but is
+    cut off after its `CREATE EXTENSION` lines passes every `gateDump` refusal. It reaches only
+    the human-reviewed bot PR, never `main`.
+  - **An out-of-band PROD extension or schema drop (MEDIUM, loud).** The completeness floor
+    refuses every later re-dump until a hand re-dump, so `redump-dump` stays red on `main` until
+    then.
+  - **A compact empty password assignment is a secret-scan hit (LOW).** This is WR-10's accepted
+    cost. The committed dump and `supabase/migrations/` have 0 hits.
+  - **WR-01 (MEDIUM).** Composing onto CURRENT `main` can give a false red when two migration PRs
+    merge close together.
+  - **WR-04 (LOW).** The concurrency group is held up to about 35 minutes longer, which widens the
+    existing pending-run cancellation window.
+  - **WR-05 (MEDIUM).** The anonymous open-PR lookup runs on the normal path. A shared-IP rate
+    limit turns it red, and it fails loud.
+  - **IN-01.** The read-only ghcr token stays in the docker config for the rest of `redump-dump`.
+  - **IN-02.** `setup-node` in the write-token job gets the job token through its default input.
+    The action is SHA-pinned and GitHub-owned.
+  - **IN-03.** On the no-op path, `botPrStatus` turns a failed lookup into a warning, by design.
+  - **IN-04.** No IN-04 finding is recorded in the phase reviews.
+  - **IN-05.** The reset releases a closed-unmerged human commit. A PR reopened between the
+    check and the push is force-updated.
+  - **IN-06.** gitleaks and the script can disagree across a line end.
+  - **IN-07.** The newer-proposal guard also blocks a re-run when the newer proposal was closed
+    unmerged.
+  - **IN-08.** The `judgeCompleteness` docstring contradicts itself about truncation.
+  - **IN-09.** The `A RED HERE IS DELIBERATE` comment above `redump-dump:` still lists "a
+    truncated dump" among the refusals.
+  - **IN-10.** The spaced password negatives are script-only. The gitleaks rule is paired with the
+    script by behaviour, not by bytes.
+- **The CR-02 narrowing.** D-24 declared an unconditional refusal on a foreign commit on the bot
+  branch. The shipped behaviour refuses only while an OPEN PR heads the bot branch. Otherwise it
+  resets under the lease with a `::notice::` that names the short shas. After a squash merge, the
+  reviewer's own commit would otherwise block every later run.
+- **Verification is `human_needed`, 4/6.** Criteria 2, 3, 4 and 6 are verified. Criteria 1 (the
+  live PROD dump on a runner) and 5 (the live `gh pr create`) are present and wired, but they run
+  only after merge. The phase is not marked complete.
+- **Planning and ledger commits on this branch:** context, research, pattern map and plan
+  (`47a2f09d5`, `b349b1b7f`, `c942458ff`, `e14079e5e`). There are also STATE and wave-tracking
+  updates (`346c73371`, `e965d7e25`, `f35fcd533`, `a9d216d0a`, `e0b620ef4`, `12ed2ffd9`,
+  `0a391b03a`) and the plan summaries (`433f34f2a`, `993d4f2d3`, `7b8f1c64a`, `d89f9d87d`,
+  `468a305bc`, `b2afb2870`, `973a50371`, `fc71a4d5a`, `7299d52d8`, `61a88a187`). Next come the
+  review reports and decision records (`d9f179572`, `21aeff837`, `730971dc0`, `a27219a74`,
+  `548c5e9d7`, `d1b55774a`, `c505c2030`), and the verification and security audit (`4c4c6b3b2`).
+- **Already shipped, and only branch ancestry here.** `1599aceee`, `2e440003b`, `76ace261a` and
+  `9d763de02` (the roadmap splits and the 164.9.3/164.9.4/164.9.5 insertions) reached `main`
+  squashed in 0.96.0.1 (#865).
+
 ## [0.103.0.0] - 2026-09-26 — ACCOUNTTRUTH PR B: the account-identity migration ships alone, ahead of every reader
 
 ⭐ **What changed for whoever reads this next.** Phase 167.1.2 (ACCOUNTTRUTH) makes one exchange
