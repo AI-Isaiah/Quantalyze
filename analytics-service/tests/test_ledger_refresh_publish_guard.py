@@ -449,8 +449,9 @@ class TestCR02OneChokePoint:
             # _heal_delete_basis_series().`, so deleting the closure's real
             # terminating call left the gate satisfied by PROSE. The sibling
             # file's `_assert_region` already pinned the awaited form for this
-            # exact reason; this one did not.
-            "await _heal_delete_basis_series()",
+            # exact reason; this one did not. Round 6 (R6-01): the call
+            # passes the stamp's cause, which the heal's ERROR line carries.
+            "await _heal_delete_basis_series(cause=_cause)",
         )
         assert fn_start < guard_start and guard_end <= fn_end, (
             "the choke point is no longer nested inside the handler; the "

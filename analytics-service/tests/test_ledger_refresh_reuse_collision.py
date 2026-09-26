@@ -73,6 +73,7 @@ from services.job_worker import (
     DispatchOutcome,
     run_derive_broker_dailies_job,
 )
+from services.nav_twr import NavReconstructionError
 from tests.test_derive_broker_dailies_dualmode import (
     _CCXT_VERDICT,
     _build_ctx,
@@ -425,6 +426,77 @@ class TestUserResyncInheritsAMarkedRefresh:
             "the failure must stay VISIBLE in computation_error."
         )
 
+    @pytest.mark.asyncio
+    async def test_the_protected_path_emits_no_error_and_no_capture(self) -> None:
+        """WR-01 (round 3): a failure D-15 protects is logged at WARNING only.
+        Every ``logger.error`` is a Sentry event under ``init_sentry``'s default
+        ``LoggingIntegration``, and a venue wedge fails the whole marked cohort
+        each refresh tick, so an ERROR here pages once per strategy per tick
+        for a path that needs no one.
+
+        Neuter to redden: put back an unconditional ERROR cause line before the
+        marker re-read in ``_stamp_strategy_analytics_failed`` (round 2's
+        shape). This goes RED on the error count."""
+        with patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            _result, capture = await _drive_derive(
+                claimed_metadata={"source": _MARKER},
+                live_job_row={"metadata": {"source": _MARKER}},
+            )
+        payload = _terminal_stamp(capture)
+        assert not any(k in payload for k in _PUBLISH_STATE_KEYS), payload
+        assert log.error.call_count == 0, (
+            "a failure D-15 protected went out at ERROR, which is a Sentry "
+            f"event: {log.error.call_args_list!r}"
+        )
+        assert sentry.capture_exception.call_count == 0
+        assert any(
+            c.args and "D-15" in str(c.args[0]) for c in log.warning.call_args_list
+        ), f"the protected outcome was not logged at WARNING: {log.warning.call_args_list!r}"
+
+    @pytest.mark.asyncio
+    async def test_the_loud_stamp_over_a_live_row_logs_its_cause_at_error(
+        self,
+    ) -> None:
+        """The other half of WR-01: a marked refresh whose live row no longer
+        protects it is stamped ``failed`` over a live factsheet, and that goes
+        out at ERROR with its cause. Neuter: delete that ``logger.error``."""
+        with patch.object(_jw, "logger") as log:
+            _result, capture = await _drive_derive(
+                claimed_metadata={"source": _MARKER},
+                live_job_row={"metadata": {"refresh_marker_retracted": _MARKER}},
+            )
+        assert _terminal_stamp(capture).get("computation_status") == "failed"
+        assert any(
+            c.args
+            and "no longer protects it" in str(c.args[0])
+            and any("Insufficient broker history" in str(a) for a in c.args)
+            for c in log.error.call_args_list
+        ), (
+            "the loud stamp over a live row did not log its cause at ERROR: "
+            f"{log.error.call_args_list!r}"
+        )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list
+
+    @pytest.mark.asyncio
+    async def test_the_loud_stamp_over_another_source_logs_one_error(self) -> None:
+        """IN-01 (round 4): the OTHER_SOURCE half of the runbook's
+        "RETRACTED / OTHER_SOURCE → loud stamp" row, which only RETRACTED
+        pinned. OTHER_SOURCE is logged at WARNING; the one ERROR is the
+        landed-stamp cause line. Neuter: log OTHER_SOURCE at ERROR in
+        ``_log_marker_not_confirmed``; this goes RED on the count."""
+        with patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            _result, capture = await _drive_derive(
+                claimed_metadata={"source": _MARKER},
+                live_job_row={"metadata": {"source": "some-other-writer"}},
+            )
+        assert _terminal_stamp(capture).get("computation_status") == "failed"
+        assert log.error.call_count == 1, log.error.call_args_list
+        assert "no longer protects it" in str(log.error.call_args.args[0])
+        assert sentry.capture_exception.call_count == 0
+
 
 # ---------------------------------------------------------------------------
 # 2 — the chain edge, forward direction
@@ -469,6 +541,232 @@ class TestChainEdgeDoesNotForwardARetractedMarker:
             "CR-03/F1 regression: hop 2 must still receive the pre-refresh "
             "publish state minted by hop 1."
         )
+
+
+class TestChainEdgeReadErrorFailsTransient:
+    """Orchestrator decision 2026-09-26 (round 2 WR-02 / SFH-R2-04): a chain-edge
+    re-read that RAISED is not an answer. Before it, the edge dropped the marker
+    and enqueued hop 2 with no protection, so a read blip followed by a hop-2
+    failure (correlated: same database) un-published a funded account. Now the
+    job fails TRANSIENT BEFORE ``_enqueue_csv_analytics`` (a retry never enqueues
+    twice) and the marker stays on the claimed row.
+
+    Neuter to redden: delete the ``READ_ERROR`` arm at the chain edge (the read
+    error falls through to the marker drop). The test goes RED on the error kind
+    (``DONE`` instead of ``FAILED``/``transient``) and on the enqueue count."""
+
+    @pytest.mark.asyncio
+    async def test_a_raising_chain_edge_reread_enqueues_nothing_and_fails_transient(
+        self,
+    ) -> None:
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-1", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": _STRATEGY_ID, "user_id": "user-1"},
+        )
+        original = ctx.supabase.table.side_effect
+        job_updates: list[Any] = []
+
+        def _table(name: str) -> MagicMock:
+            tbl: MagicMock = original(name)
+
+            def _select(_columns: str, **_kw: object) -> MagicMock:
+                chain = MagicMock()
+                chain.eq.return_value = chain
+                chain.maybe_single.return_value = chain
+                if name == "compute_jobs":
+                    chain.execute.side_effect = RuntimeError("simulated read failure")
+                else:
+                    chain.execute.return_value = MagicMock(
+                        data={"computation_status": "complete_with_warnings"}
+                    )
+                return chain
+
+            def _update(payload: Any, **_kw: object) -> MagicMock:
+                if name == "compute_jobs":
+                    job_updates.append(payload)
+                return MagicMock()
+
+            tbl.select.side_effect = _select
+            tbl.update.side_effect = _update
+            return tbl
+
+        ctx.supabase.table.side_effect = _table
+        patches = _patches_with_combine(
+            ctx, key_mode=False, combine_mock=_success_combine()
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6], \
+             patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            result = await _jw.dispatch(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+
+        assert result.outcome == DispatchOutcome.FAILED, result
+        assert result.error_kind == "transient", (
+            "a chain-edge re-read that RAISED did not fail the job TRANSIENT "
+            f"({result.error_kind!r}: {result.error_message!r})"
+        )
+        enqueues = [p for (n, p) in capture["rpc_calls"] if n == "enqueue_compute_job"]
+        assert not enqueues, (
+            "the chain edge enqueued hop 2 after its re-read failed "
+            f"({enqueues!r}). That hop 2 carries no marker, so the bridge can "
+            "never protect it; and a retry would enqueue a second one."
+        )
+        assert not job_updates, (
+            "the handler wrote the claimed compute_jobs row; the marker must stay "
+            f"on it for the retry and the bridge: {job_updates!r}"
+        )
+        assert _CSV_KIND in (result.error_message or "")
+        # SFH-R3-02: last_error names the failed read, not only "read failed".
+        # Neuter: drop ``_read_failure_out`` from the chain-edge raise.
+        assert "RuntimeError: simulated read failure" in (result.error_message or ""), (
+            f"last_error does not name the failed read: {result.error_message!r}"
+        )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 2, log.error.call_args_list
+        assert sentry.capture_exception.call_count == 1
+        sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+            "compute_job_id", "job-1"
+        )
+        assert any(
+            c.args and "FAILED" in str(c.args[0]) for c in log.error.call_args_list
+        ), f"no READ_ERROR line at the chain edge: {log.error.call_args_list!r}"
+
+
+class TestMarkerReReadProgrammingErrorsPropagate:
+    """SFH-R4-02 (round 4): ``_refresh_marker_live_state`` now splits
+    ``_READ_PROGRAMMING_ERRORS`` off the way every other classifying site does.
+    A bug in the read (a renamed client method, a bad call shape) is logged at
+    ERROR, captured once with the job tag, and re-raised UNCHANGED, so the job
+    is filed ``unknown`` rather than ``READ_ERROR``'s "the database was busy".
+    ⛔ Round 5 (R5 IN-02 / LOW-2): the TAIL MIRROR is the exception. It logs and
+    captures the same way but answers ``READ_ERROR`` and the job is DONE,
+    because it runs after the hop-2 enqueue (see ``raise_programming_errors``).
+
+    Neuter to redden: delete the ``isinstance(exc, _READ_PROGRAMMING_ERRORS)``
+    branch in ``_refresh_marker_live_state``. The chain-edge case then files
+    ``transient`` (RED on the kind) and the tail-mirror case loses its
+    programming-error line (RED on the first ERROR's text)."""
+
+    @staticmethod
+    def _ctx(job_read_answers: list[Any]) -> tuple[MagicMock, dict[str, Any]]:
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-1", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": _STRATEGY_ID, "user_id": "user-1"},
+        )
+        original = ctx.supabase.table.side_effect
+        answers = list(job_read_answers)
+
+        def _table(name: str) -> MagicMock:
+            tbl: MagicMock = original(name)
+
+            def _select(_columns: str, **_kw: object) -> MagicMock:
+                chain = MagicMock()
+                chain.eq.return_value = chain
+                chain.maybe_single.return_value = chain
+                if name == "compute_jobs":
+                    answer = answers.pop(0)
+                    if isinstance(answer, BaseException):
+                        chain.execute.side_effect = answer
+                    else:
+                        chain.execute.return_value = answer
+                else:
+                    chain.execute.return_value = MagicMock(
+                        data={"computation_status": "complete_with_warnings"}
+                    )
+                return chain
+
+            tbl.select.side_effect = _select
+            return tbl
+
+        ctx.supabase.table.side_effect = _table
+        return ctx, capture
+
+    async def _dispatch(self, ctx: MagicMock) -> tuple[Any, MagicMock, MagicMock]:
+        patches = _patches_with_combine(
+            ctx, key_mode=False, combine_mock=_success_combine()
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6], \
+             patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            result = await _jw.dispatch(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+        return result, log, sentry
+
+    @pytest.mark.asyncio
+    async def test_at_the_chain_edge_it_is_unknown_and_enqueues_nothing(self) -> None:
+        ctx, capture = self._ctx([AttributeError("simulated renamed client method")])
+        result, log, sentry = await self._dispatch(ctx)
+        assert result.error_kind == "unknown", result
+        assert "simulated renamed client method" in (result.error_message or "")
+        assert not [p for (n, p) in capture["rpc_calls"] if n == "enqueue_compute_job"]
+        assert log.error.call_count == 1, log.error.call_args_list
+        assert "programming error" in str(log.error.call_args.args[0])
+        assert sentry.capture_exception.call_count == 1
+        sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+            "compute_job_id", "job-1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_at_the_tail_mirror_it_is_logged_and_the_job_is_done(self) -> None:
+        """Round 5 (R5 IN-02 / LOW-2): the tail mirror runs AFTER the hop-2
+        enqueue on a job whose work already landed. A programming error in its
+        re-read is logged at ERROR and captured once, then answered
+        ``READ_ERROR``, and the job is DONE. Filing it ``unknown`` (round 4)
+        re-crawled the venue on every retry, and a derive that ended
+        ``failed_final`` is one the status bridge reads as a live failure over
+        the row hop 2 just published.
+
+        Neuter to redden: pass ``raise_programming_errors=True`` from
+        ``_refresh_marker_still_on_row``. The job is filed ``unknown``."""
+        ctx, capture = self._ctx(
+            [
+                MagicMock(data={"metadata": {"source": _MARKER}}),
+                TypeError("simulated bad call shape"),
+            ]
+        )
+        result, log, sentry = await self._dispatch(ctx)
+        assert result.outcome == DispatchOutcome.DONE, result
+        enqueues = [p for (n, p) in capture["rpc_calls"] if n == "enqueue_compute_job"]
+        assert len(enqueues) == 1, enqueues
+        # The helper's programming-error line, then the READ_ERROR line.
+        assert log.error.call_count == 2, log.error.call_args_list
+        first = log.error.call_args_list[0].args
+        assert "programming error" in str(first[0]), first
+        assert "simulated bad call shape" in str(first), first
+        assert sentry.capture_exception.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_tail_mirror_read_logs_and_the_job_is_done(self) -> None:
+        """Control, and the runbook's tail-mirror ``READ_ERROR`` row, which had
+        no driver before round 4: a DATABASE failure at the tail mirror is
+        still only logged (helper line + ``READ_ERROR`` line + one capture),
+        and the job is DONE."""
+        ctx, capture = self._ctx(
+            [
+                MagicMock(data={"metadata": {"source": _MARKER}}),
+                RuntimeError("simulated tail read failure"),
+            ]
+        )
+        result, log, sentry = await self._dispatch(ctx)
+        assert result.outcome == DispatchOutcome.DONE, result
+        assert len([p for (n, p) in capture["rpc_calls"] if n == "enqueue_compute_job"]) == 1
+        # Pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 2, log.error.call_args_list
+        assert sentry.capture_exception.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -639,11 +937,56 @@ class TestMirrorDirection:
 # 5 — fail-safe direction of the re-read itself
 # ---------------------------------------------------------------------------
 class TestReReadFailsSafe:
-    """Neuter to redden: change ``_refresh_marker_still_on_row``'s except-arm to
-    ``return True``, or make the no-id / no-row arms return True."""
+    """Neither direction of a failed or missing re-read may SUPPRESS a failure.
+
+    CONTEXT D-09, amended 2026-09-26: a re-read that RAISES is not an answer, so
+    the single-key stamp closure now does what the composite site does. It writes
+    nothing at all (neither the error-only write that preserves the publish state
+    nor the destructive stamp), and the job fails TRANSIENT so the queue retries
+    it. A DEFINITIVE answer (no id, no row, another source, a retraction) still
+    takes the LOUD path.
+
+    📜 Lineage: until 2026-09-26 this class pinned the opposite for a raising read
+    (``test_an_unreadable_row_takes_the_loud_path``: the single-key site stamped
+    ``failed``, un-publishing a funded account on one gateway blip). D-09 was
+    first decided for the composite site only; its amendment extended it here.
+
+    📜 Neuters recorded through round 3 named a ``READ_ERROR`` arm in
+    ``_stamp_strategy_analytics_failed``. Round 4 (SFH-R4-01) removed it: the
+    closure reads the marker through ``_stamp_io``, which raises
+    ``StampIOUnavailable`` on the failed read itself. Neuter to redden now: make
+    ``_stamp_io`` re-raise the call's exception unchanged (no ERROR, no capture,
+    no ``StampIOUnavailable``). Both cases go RED on the error kind (``unknown``
+    where ``transient`` is required). Drop ``scrubbed`` from its raise and both
+    go RED on ``last_error``; drop ``cause`` from its ERROR line and both go RED
+    on the log assertion. The exhaustive per-call version of this pin is
+    ``tests/test_stamp_io_exhaustive.py``.
+
+    WR-03 / SFH-R2-01 (round 2): the transient result must still NAME the
+    handler's real cause, because ``error_message`` becomes
+    ``compute_jobs.last_error``."""
 
     @pytest.mark.asyncio
-    async def test_an_unreadable_row_takes_the_loud_path(self) -> None:
+    @pytest.mark.parametrize(
+        ("combine", "cause"),
+        [
+            pytest.param(
+                _insufficient_combine,
+                "Insufficient broker history",
+                id="insufficient-history-caller",
+            ),
+            pytest.param(
+                lambda: MagicMock(
+                    side_effect=NavReconstructionError("simulated structural refusal")
+                ),
+                "Broker return reconstruction failed on a structural input",
+                id="nav-error-caller-inside-an-except-arm",
+            ),
+        ],
+    )
+    async def test_an_unreadable_row_writes_nothing_and_fails_transient(
+        self, combine: Any, cause: str
+    ) -> None:
         ctx, capture = _build_ctx(
             key_row={"id": "key-1", "exchange": "binance", "user_id": "user-1"},
             strategy_row={"id": _STRATEGY_ID, "user_id": "user-1"},
@@ -670,11 +1013,15 @@ class TestReReadFailsSafe:
 
         ctx.supabase.table.side_effect = _table
 
-        patches = _patches_with_combine(
-            ctx, key_mode=False, combine_mock=_insufficient_combine()
-        )
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
-            await run_derive_broker_dailies_job(
+        patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine())
+        # Driven through ``dispatch``, the production entry: the retry is an
+        # EXCEPTION leaving the handler, and only ``dispatch`` turns it into the
+        # job's error kind. A caller that swallowed the raise would turn this
+        # back into the permanent FAILED the arm returns after its stamp.
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], \
+             patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            result = await _jw.dispatch(
                 {
                     "id": "job-1",
                     "kind": _DERIVE_KIND,
@@ -683,19 +1030,602 @@ class TestReReadFailsSafe:
                 }
             )
 
-        payload = _terminal_stamp(capture)
-        assert payload.get("computation_status") == "failed", (
-            "an unreadable compute_jobs row resolved toward SUPPRESSION. Every "
-            "unknown in D-15 resolves toward the LOUD path; inverting this one "
-            "means a transient PostgREST blip silently protects a failure nobody "
-            "decided to protect."
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "transient", (
+            "a re-read that RAISED did not fail the job TRANSIENT "
+            f"({result.error_kind!r}: {result.error_message!r}). Without the "
+            "retry the failure is final, and the next marked refresh is the "
+            "earliest anything re-decides it."
+        )
+        payloads = _analytics_payloads(capture)
+        assert not payloads, (
+            "a transient re-read failure wrote to strategy_analytics "
+            f"({payloads!r}). Nothing is known about the row yet: a destructive "
+            "stamp un-publishes a funded account on one gateway blip, and an "
+            "error-only write suppresses a failure nobody decided to protect. "
+            "The retry decides."
+        )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume
+        # table. Round 4: ONE ERROR, ``_stamp_io``'s, where round 3 logged two
+        # (the helper's line plus the site's ``READ_ERROR`` line).
+        assert log.error.call_count == 1, log.error.call_args_list
+        assert sentry.capture_exception.call_count == 1
+        assert any(
+            c.args
+            and "could not" in str(c.args[0])
+            and _jw._STAMP_OP_MARKER_READ in c.args
+            and "re-read the refresh marker" in _jw._STAMP_OP_MARKER_READ
+            for c in log.error.call_args_list
+        ), f"no ERROR-level re-read line: {log.error.call_args_list!r}"
+        assert not any(
+            c.args and "RETRACTED" in str(c.args[0])
+            for c in log.warning.call_args_list
+        ), "a read failure was logged as a RETRACTION; nothing was retracted."
+        # WR-03 / SFH-R2-01: the retry must not ERASE the failure it postponed.
+        # ``error_message`` is what ``compute_jobs.last_error`` records, and it is
+        # the operator's first read. Before the fix it named only the read
+        # failure (and said "retrying" even on the final attempt).
+        assert cause in (result.error_message or ""), (
+            "the job's last_error lost the handler's real failure cause "
+            f"{cause!r}: {result.error_message!r}"
+        )
+        assert "retrying" not in (result.error_message or ""), (
+            "last_error claims the job is retrying, which is false on the final "
+            f"attempt: {result.error_message!r}"
+        )
+        assert any(
+            any(cause in str(a) for a in c.args) for c in log.error.call_args_list
+        ), (
+            "the curated cause was not logged at ERROR on the failed re-read, "
+            f"so a stamp with no detail left no record of it: {log.error.call_args_list!r}"
         )
 
     @pytest.mark.asyncio
     async def test_a_missing_job_id_takes_the_loud_path(self) -> None:
         assert (
             await _jw._refresh_marker_still_on_row(MagicMock(), None, _MARKER)
-        ) is False
+        ) is _jw.MarkerLiveState.NO_ID
+
+
+# ---------------------------------------------------------------------------
+# 5b — the re-read says WHY the marker is not confirmed (SFH-02 / WR-02)
+# ---------------------------------------------------------------------------
+class _Gateway504(Exception):
+    """A PostgREST gateway timeout, in the structured shape
+    ``services.db._is_gateway_timeout`` keys on."""
+
+    code = "504"
+
+
+def _job_read_client(execute: Any) -> MagicMock:
+    """A client whose ``compute_jobs`` maybe_single read answers ``execute``
+    (a value, or a side_effect list / exception)."""
+    sb = MagicMock()
+    chain = sb.table.return_value.select.return_value.eq.return_value
+    chain = chain.maybe_single.return_value
+    if isinstance(execute, (list, BaseException)):
+        chain.execute.side_effect = execute
+    else:
+        chain.execute.return_value = execute
+    return sb
+
+
+class TestLiveStateNamesItsReason:
+    """Every answer the live re-read can give is a DIFFERENT fact, and four call
+    sites log from it. A bare bool made them all say "RETRACTED … a
+    user-initiated request was served", including when nothing was retracted.
+
+    Neuter to redden: collapse any two states (e.g. return ``RETRACTED`` for
+    every non-``PRESENT`` row), and the parametrised case for the other goes RED.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("answer", "expected"),
+        [
+            (MagicMock(data={"metadata": {"source": _MARKER}}), "PRESENT"),
+            (
+                MagicMock(data={"metadata": {"refresh_marker_retracted": _MARKER}}),
+                "RETRACTED",
+            ),
+            (MagicMock(data={"metadata": {"source": _COMPOSITE_MARKER}}), "OTHER_SOURCE"),
+            (MagicMock(data={"metadata": {}}), "OTHER_SOURCE"),
+            (MagicMock(data={"metadata": "not-a-dict"}), "OTHER_SOURCE"),
+            (MagicMock(data=None), "NO_ROW"),
+            # postgrest 2.31: maybe_single().execute() returns None for 0 rows.
+            (None, "NO_ROW"),
+        ],
+        ids=[
+            "present", "retracted", "other-marker", "no-source",
+            "non-dict-metadata", "data-none", "response-none",
+        ],
+    )
+    async def test_each_row_shape_maps_to_its_own_state(
+        self, answer: Any, expected: str
+    ) -> None:
+        state = await _jw._refresh_marker_still_on_row(
+            _job_read_client(answer), "job-1", _MARKER
+        )
+        assert state is _jw.MarkerLiveState[expected]
+
+    @pytest.mark.asyncio
+    async def test_a_raising_read_is_read_error_and_reaches_sentry(self) -> None:
+        with patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            state = await _jw._refresh_marker_still_on_row(
+                _job_read_client(RuntimeError("boom")), "job-1", _MARKER
+            )
+        assert state is _jw.MarkerLiveState.READ_ERROR
+        assert log.error.call_count == 1, (
+            "a failed re-read must be logged at ERROR: a WARNING is only a "
+            "Sentry breadcrumb, and this read decides whether a live factsheet "
+            "is un-published."
+        )
+        assert sentry.capture_exception.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_gateway_504_is_retried_before_it_counts(self) -> None:
+        """WR-03: the read goes through ``db_read_with_retry``, so a gateway
+        timeout is retried inside its budget instead of deciding the job on the
+        first blip. Neuter: read through ``db_execute`` again → READ_ERROR."""
+        answer = MagicMock(data={"metadata": {"source": _MARKER}})
+        sb = _job_read_client([_Gateway504(), _Gateway504(), answer])
+        with patch("services.db.DB_READ_BACKOFF_BASE_S", 0.0), \
+             patch("services.db.DB_READ_JITTER_MAX_S", 0.0):
+            state = await _jw._refresh_marker_still_on_row(sb, "job-1", _MARKER)
+        assert state is _jw.MarkerLiveState.PRESENT
+
+    def test_a_state_cannot_be_used_as_a_bool(self) -> None:
+        """Every member would be truthy, so ``not await …`` would read as
+        "still marked" for EVERY state — failing toward suppression. A caller
+        must compare against ``PRESENT`` explicitly."""
+        with pytest.raises(TypeError):
+            bool(_jw.MarkerLiveState.NO_ROW)
+
+    def test_the_not_confirmed_logger_refuses_present(self) -> None:
+        """SFH-R2-06: ``_log_marker_not_confirmed`` explains why a marker was
+        NOT confirmed. Its last arm is the invariant-breach sentence ("no live
+        row"), so a caller that handed it ``PRESENT`` used to get a false ERROR
+        saying the row was missing while the marker was in fact confirmed. It
+        now raises, and logs nothing.
+
+        Neuter to redden: delete the ``PRESENT`` guard at the top of the
+        function. The call then returns normally after one ERROR line naming
+        "no live row", and both assertions below fail."""
+        with patch.object(_jw, "logger") as log:
+            with pytest.raises(_jw.MarkerStateNotLoggable, match="PRESENT"):
+                _jw._log_marker_not_confirmed(
+                    _jw.MarkerLiveState.PRESENT,
+                    site="test-site",
+                    job_id="job-1",
+                    strategy_id=_STRATEGY_ID,
+                    consequence="Taking the LOUD terminal path",
+                )
+        assert log.error.call_count == 0 and log.warning.call_count == 0, (
+            "a PRESENT state was reported as a not-confirmed marker: "
+            f"errors={log.error.call_args_list!r} "
+            f"warnings={log.warning.call_args_list!r}"
+        )
+
+    def test_the_not_confirmed_logger_refuses_a_state_it_has_no_arm_for(
+        self,
+    ) -> None:
+        """I-R3-1 (round 3): the last arm used to be a bare ``else`` that
+        labelled ANY state it did not name as "no live row". A member added to
+        ``MarkerLiveState`` later would then be misreported as an invariant
+        breach. The arm is now ``elif`` on ``NO_ID`` / ``NO_ROW``, and anything
+        else raises. A stand-in object plays the future member here, because an
+        Enum cannot be extended in a test.
+
+        Neuter to redden: turn the ``elif`` back into ``else``. The call then
+        logs "no live row" and returns, and both assertions fail."""
+        future_state: Any = object()
+        with patch.object(_jw, "logger") as log:
+            with pytest.raises(_jw.MarkerStateNotLoggable, match="no arm"):
+                _jw._log_marker_not_confirmed(
+                    future_state,
+                    site="test-site",
+                    job_id="job-1",
+                    strategy_id=_STRATEGY_ID,
+                    consequence="Taking the LOUD terminal path",
+                )
+        assert log.error.call_count == 0, log.error.call_args_list
+
+    @pytest.mark.parametrize("state", ["NO_ID", "NO_ROW"])
+    def test_the_breach_arm_still_covers_no_id_and_no_row(self, state: str) -> None:
+        """Control for the test above: narrowing the arm must not drop either
+        of the two states it exists for."""
+        with patch.object(_jw, "logger") as log:
+            _jw._log_marker_not_confirmed(
+                _jw.MarkerLiveState[state],
+                site="test-site",
+                job_id="job-1",
+                strategy_id=_STRATEGY_ID,
+                consequence="Taking the LOUD terminal path",
+            )
+        assert log.error.call_count == 1
+        assert "invariant breach" in str(log.error.call_args.args[0])
+
+
+def _entry_read_ctx(entry_answers: list[Any]) -> tuple[MagicMock, dict[str, Any]]:
+    """A derive context whose ``strategy_analytics`` select answers
+    ``entry_answers`` in order (a value or an exception each), and whose
+    ``compute_jobs`` select answers the live marker. Only the ENTRY
+    publish-state read selects from ``strategy_analytics`` on these paths."""
+    ctx, capture = _build_ctx(
+        key_row={"id": "key-1", "exchange": "binance", "user_id": "user-1"},
+        strategy_row={"id": _STRATEGY_ID, "user_id": "user-1"},
+    )
+    original = ctx.supabase.table.side_effect
+    capture["entry_reads"] = 0
+
+    def _table(name: str) -> MagicMock:
+        tbl: MagicMock = original(name)
+
+        def _select(_columns: str, **_kw: object) -> MagicMock:
+            chain = MagicMock()
+            chain.eq.return_value = chain
+            chain.maybe_single.return_value = chain
+
+            def _execute() -> Any:
+                if name == "compute_jobs":
+                    return MagicMock(data={"metadata": {"source": _MARKER}})
+                capture["entry_reads"] += 1
+                answer = entry_answers.pop(0) if entry_answers else None
+                if isinstance(answer, BaseException):
+                    raise answer
+                return answer
+
+            chain.execute.side_effect = _execute
+            return chain
+
+        tbl.select.side_effect = _select
+        return tbl
+
+    ctx.supabase.table.side_effect = _table
+    return ctx, capture
+
+
+class TestEntryPublishStateReadFailsTransient:
+    """D-09, extended 2026-09-26 to the ENTRY publish-state read (round 2,
+    SFH-R2-02). That read is the oracle both hops' D-15 guards use. When it
+    raised, the handler logged a WARNING and carried on with no snapshot, so a
+    marked refresh that then failed stamped ``failed`` over a live factsheet: a
+    failed READ became a destructive stamp, one screen above the site D-09 had
+    already fixed. It now fails the job TRANSIENT before any crawl.
+
+    Neuter to redden: restore the ``_entry_row = {}`` fallback in the except
+    arm. ``test_a_failed_entry_read_fails_transient_before_the_crawl`` goes RED
+    on the error kind (the insufficient-history stamp returns ``permanent``) and
+    on the destructive ``failed`` write. Read through ``db_execute`` again and
+    ``test_a_gateway_504_on_the_entry_read_is_retried`` goes RED."""
+
+    @pytest.mark.asyncio
+    async def test_a_failed_entry_read_fails_transient_before_the_crawl(self) -> None:
+        ctx, capture = _entry_read_ctx([RuntimeError("simulated entry read failure")])
+        combine = _insufficient_combine()
+        patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
+        with patches[0], patches[1], patches[2] as aclose, patches[3], patches[4], \
+             patches[5], patches[6], \
+             patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            result = await _jw.dispatch(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "transient", (
+            "a failed entry publish-state read did not fail the job TRANSIENT "
+            f"({result.error_kind!r}: {result.error_message!r}). Without it the "
+            "refresh runs with no snapshot and its failure un-publishes."
+        )
+        payloads = _analytics_payloads(capture)
+        assert not payloads, (
+            "a failed entry read still reached a strategy_analytics write "
+            f"({payloads!r}); nothing is known about the publish state yet."
+        )
+        assert combine.call_count == 0, (
+            "the venue crawl ran after the entry read failed; the retry must "
+            "cost one queue round trip, not a crawl"
+        )
+        assert not capture["rpc_calls"], (
+            f"a follow-on was enqueued after a failed entry read: {capture['rpc_calls']!r}"
+        )
+        assert aclose.await_count == 1, (
+            "the exchange the preflight opened was not closed on the early raise"
+        )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list
+        assert sentry.capture_exception.call_count == 1
+        assert any(
+            c.args and "pre-refresh publish" in str(c.args[0])
+            for c in log.error.call_args_list
+        ), f"the failed entry read did not go out at ERROR: {log.error.call_args_list!r}"
+        # SFH-R3-02 / IN-01: ``last_error`` names WHAT failed, not only that
+        # the read failed. ``str()`` of the transient never includes
+        # ``__cause__``, so the kind has to be in the text itself.
+        assert "RuntimeError: simulated entry read failure" in (
+            result.error_message or ""
+        ), f"last_error does not name the failed read: {result.error_message!r}"
+        # IN-02: the capture is the only event with the traceback; it is
+        # tagged with the job it belongs to.
+        sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+            "compute_job_id", "job-1"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bug",
+        [
+            AttributeError("'SyncQueryRequestBuilder' object has no attribute 'x'"),
+            TypeError("execute() got an unexpected keyword argument 'y'"),
+            KeyError("computation_status"),
+            NameError("name '_undefined' is not defined"),
+        ],
+        ids=["attribute-error", "type-error", "key-error", "name-error"],
+    )
+    async def test_a_programming_error_is_not_relabelled_transient(
+        self, bug: BaseException
+    ) -> None:
+        """SFH-R3-02: a programming error in the entry read is a bug in this
+        code. It propagates as itself, so ``classify_exception`` files it
+        ``unknown`` (the "needs a human look" kind) with its own class and text,
+        exactly as it does anywhere else in the worker. It must not be reported
+        as a busy database. Nothing is crawled or written, and the exchange the
+        preflight opened is still closed.
+
+        It is still REPORTED (one ERROR line naming it, one tagged capture):
+        ``dispatch`` does not log a handler's exception and the worker loop logs
+        a failed job at WARNING, so an unreported code defect here would reach
+        Sentry as no event at all.
+
+        Neuter to redden: delete the ``_READ_PROGRAMMING_ERRORS`` re-raise in
+        the entry arm. Every case then comes back ``transient``. Delete its
+        ``logger.error`` / ``_capture_read_failure`` pair and every case goes
+        RED on the report."""
+        ctx, capture = _entry_read_ctx([bug])
+        combine = _insufficient_combine()
+        patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
+        with patches[0], patches[1], patches[2] as aclose, patches[3], patches[4], \
+             patches[5], patches[6], \
+             patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            result = await _jw.dispatch(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "unknown", (
+            f"a {type(bug).__name__} in the entry read was filed "
+            f"{result.error_kind!r}: {result.error_message!r}. A code defect is "
+            "not a transient database condition."
+        )
+        assert result.error_message == _jw.classify_exception(bug)[1], (
+            "the programming error did not reach dispatch as itself: "
+            f"{result.error_message!r}"
+        )
+        assert combine.call_count == 0, "the crawl ran after the entry read failed"
+        assert not _analytics_payloads(capture)
+        assert not capture["rpc_calls"]
+        assert aclose.await_count == 1, (
+            "the exchange the preflight opened was not closed on the "
+            "programming-error exit"
+        )
+        assert any(
+            c.args
+            and "programming error" in str(c.args[0])
+            and any(type(bug).__name__ in str(a) for a in c.args)
+            for c in log.error.call_args_list
+        ), f"the programming error was not reported at ERROR: {log.error.call_args_list!r}"
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list
+        assert sentry.capture_exception.call_count == 1
+        sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+            "compute_job_id", "job-1"
+        )
+
+    def test_classify_exception_files_programming_errors_unknown(self) -> None:
+        """The disposition the test above relies on, pinned at its source."""
+        for bug in (
+            AttributeError("a"), TypeError("t"), KeyError("k"), NameError("n"),
+        ):
+            assert _jw.classify_exception(bug)[0] == "unknown", bug
+
+    @pytest.mark.asyncio
+    async def test_a_gateway_504_on_the_entry_read_is_retried(self) -> None:
+        """The entry read goes through ``db_read_with_retry``: two gateway
+        timeouts then a published row, and the refresh stays protected."""
+        ctx, capture = _entry_read_ctx(
+            [
+                _Gateway504(),
+                _Gateway504(),
+                MagicMock(data={"computation_status": "complete_with_warnings"}),
+            ]
+        )
+        patches = _patches_with_combine(
+            ctx, key_mode=False, combine_mock=_insufficient_combine()
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6], \
+             patch("services.db.DB_READ_BACKOFF_BASE_S", 0.0), \
+             patch("services.db.DB_READ_JITTER_MAX_S", 0.0):
+            result = await run_derive_broker_dailies_job(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+        assert result.error_kind == "permanent", result
+        assert capture["entry_reads"] == 3
+        stamp = _terminal_stamp(capture)
+        assert not any(k in stamp for k in ("computation_status", "computation_warned")), (
+            "the entry read answered on its third attempt with a published row, "
+            f"so the failure must be recorded error-only: {stamp!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_control_no_row_is_a_definitive_answer_and_stays_loud(self) -> None:
+        """CONTROL: zero rows is an ANSWER (nothing published), not a failed
+        read. It must keep the loud path and must not retry."""
+        ctx, capture = _entry_read_ctx([None])
+        patches = _patches_with_combine(
+            ctx, key_mode=False, combine_mock=_insufficient_combine()
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+        assert result.error_kind == "permanent", result
+        assert _terminal_stamp(capture).get("computation_status") == "failed"
+
+
+def _log_lines(log: MagicMock) -> list[str]:
+    return [
+        str(c.args[0])
+        for method in (log.warning, log.error)
+        for c in method.call_args_list
+        if c.args
+    ]
+
+
+class TestSingleKeySitesNameTheRealCause:
+    """SFH-02, closed across the class: the stamp closure and the chain edge say
+    "RETRACTED" only for a recorded retraction, and a missing live row goes out
+    at ERROR.
+
+    Neuter to redden: log the RETRACTED sentence for every non-``PRESENT``
+    state at either site."""
+
+    @pytest.mark.asyncio
+    async def test_stamp_closure_says_retracted_for_a_retraction(self) -> None:
+        with patch.object(_jw, "logger") as log:
+            await _drive_derive(
+                claimed_metadata={"source": _MARKER},
+                live_job_row={"metadata": {"refresh_marker_retracted": _MARKER}},
+            )
+        assert any("RETRACTED" in m for m in _log_lines(log)), _log_lines(log)
+
+    @pytest.mark.asyncio
+    async def test_stamp_closure_calls_a_missing_row_an_error(self) -> None:
+        with patch.object(_jw, "logger") as log:
+            _result, capture = await _drive_derive(
+                claimed_metadata={"source": _MARKER}, live_job_row=None
+            )
+        assert _terminal_stamp(capture).get("computation_status") == "failed"
+        assert not any("RETRACTED" in m for m in _log_lines(log)), (
+            f"a missing job row was reported as a retraction: {_log_lines(log)!r}"
+        )
+        assert any("no live" in str(c.args[0]) for c in log.error.call_args_list), (
+            "a claimed job whose row has vanished is an invariant breach; it must "
+            f"go out at ERROR. errors: {log.error.call_args_list!r}"
+        )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 2, log.error.call_args_list
+
+    @pytest.mark.asyncio
+    async def test_chain_edge_calls_a_missing_row_an_error(self) -> None:
+        with patch.object(_jw, "logger") as log:
+            _result, capture = await _drive_derive(
+                claimed_metadata={"source": _MARKER},
+                live_job_row=None,
+                combine=_success_combine(),
+            )
+        assert "p_metadata" not in _tail_enqueue(capture)
+        assert not any("RETRACTED" in m for m in _log_lines(log)), _log_lines(log)
+        assert any("no live" in str(c.args[0]) for c in log.error.call_args_list), (
+            log.error.call_args_list
+        )
+        # Round 4: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list
+
+    @pytest.mark.asyncio
+    async def test_mirror_does_not_call_a_missing_tail_row_a_dedup(self) -> None:
+        """The mirror check reads the TAIL job. "DEDUPED onto an unmarked job" is
+        a claim about that row; with no row there is nothing to claim it about,
+        and the loss must still be loud — at ERROR."""
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-1", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": _STRATEGY_ID, "user_id": "user-1"},
+        )
+        rows_by_id: dict[Any, Any] = {"job-1": {"metadata": {"source": _MARKER}}}
+        original = ctx.supabase.table.side_effect
+
+        def _table(name: str) -> MagicMock:
+            tbl: MagicMock = original(name)
+
+            def _select(_columns: str, **_kw: object) -> MagicMock:
+                chain = MagicMock()
+                seen: dict[str, Any] = {}
+
+                def _eq(col: str, val: object) -> MagicMock:
+                    seen[col] = val
+                    return chain
+
+                def _execute() -> Any:
+                    if name != "compute_jobs":
+                        return MagicMock(data={"computation_status": "complete_with_warnings"})
+                    return MagicMock(data=copy.deepcopy(rows_by_id.get(seen.get("id"))))
+
+                chain.eq.side_effect = _eq
+                chain.maybe_single.return_value = chain
+                chain.execute.side_effect = _execute
+                return chain
+
+            tbl.select.side_effect = _select
+            return tbl
+
+        ctx.supabase.table.side_effect = _table
+        patches = _patches_with_combine(
+            ctx, key_mode=False, combine_mock=_success_combine()
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], \
+             patch.object(_jw, "logger") as log:
+            result = await run_derive_broker_dailies_job(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+        assert result.outcome == DispatchOutcome.DONE
+        assert _tail_enqueue(capture)["p_metadata"]["source"] == _MARKER
+        lines = _log_lines(log)
+        assert not any("DEDUPED onto" in m for m in lines), (
+            f"a missing tail row was reported as a dedup collision: {lines!r}"
+        )
+        assert log.error.call_args_list, (
+            "hop 2 may be running unprotected and nothing was logged at ERROR"
+        )
+        # IN-03 (round 2): the tail job was just ENQUEUED, not claimed. Naming
+        # it a "claimed job" sends an operator to the wrong invariant.
+        breach = [
+            c for c in log.error.call_args_list
+            if c.args and "invariant breach" in str(c.args[0])
+        ]
+        assert breach, log.error.call_args_list
+        assert "enqueued job" in breach[0].args, breach[0]
+        assert "claimed job" not in breach[0].args, breach[0]
+        # Round 4: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list
 
 
 def test_the_handler_and_the_resync_agree_on_one_marker_spelling() -> None:
