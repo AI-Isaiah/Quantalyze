@@ -36,10 +36,11 @@ export type BootstrapCISummary = {
  * produces the same CI on every render.
  */
 /**
- * The fewest resamples with a Sharpe that still make a 95% interval. At 40,
+ * The fewest resamples with a Sharpe (or, for the Sortino CI, with a Sortino)
+ * that still make a 95% interval. At 40,
  * `ci95`'s 2.5% and 97.5% order statistics (indices 1 and 39) each leave at
  * least one resample outside the interval, so the bounds are not simply the
- * smallest and largest draw. Below it the Sharpe CI renders "—".
+ * smallest and largest draw. Below it the CI renders "—".
  */
 export const MIN_SHARPE_RESAMPLES = 40;
 
@@ -48,9 +49,10 @@ export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, s
   // Only resamples that HAVE a Sharpe (founder decision D7, 2026-09-26). A
   // resample with no dispersion (a sparse-trading series can draw all zeros)
   // has no Sharpe; counting it as 0 put a fabricated spike at 0 in the
-  // histogram and pulled the interval toward it.
+  // histogram and pulled the interval toward it. The same holds for a
+  // resample with no losing day, which has no Sortino (review round 2 HI-02).
   const sharpes: number[] = [];
-  const sortinos: number[] = new Array(n_resamples);
+  const sortinos: number[] = [];
   const maxDds: number[] = new Array(n_resamples);
   const rand = mulberry32(seed);
 
@@ -67,7 +69,7 @@ export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, s
     }
     const stats = headlineStats(resampled, periodsPerYear);
     if (Number.isFinite(stats.sharpe)) sharpes.push(stats.sharpe);
-    sortinos[k] = stats.sortino;
+    if (Number.isFinite(stats.sortino)) sortinos.push(stats.sortino);
     maxDds[k] = stats.max_dd;
   }
 
@@ -78,7 +80,11 @@ export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, s
       ...(sharpes.length >= MIN_SHARPE_RESAMPLES ? ci95(sharpes) : { lo: NaN, hi: NaN }),
       hist: histogram(sharpes, 40),
     },
-    sortino: { point: point.sortino, ...ci95(sortinos), hist: histogram(sortinos, 40) },
+    sortino: {
+      point: point.sortino,
+      ...(sortinos.length >= MIN_SHARPE_RESAMPLES ? ci95(sortinos) : { lo: NaN, hi: NaN }),
+      hist: histogram(sortinos, 40),
+    },
     max_dd: { point: point.max_dd, ...ci95(maxDds), hist: histogram(maxDds, 40) },
     n_resamples,
     block_len,
@@ -118,7 +124,7 @@ function histogram(xs: number[], bins: number): BootstrapHistogram {
 
 function headlineStats(rets: number[], periodsPerYear = 252): { sharpe: number; sortino: number; max_dd: number } {
   const n = rets.length;
-  if (n === 0) return { sharpe: NaN, sortino: 0, max_dd: 0 };
+  if (n === 0) return { sharpe: NaN, sortino: NaN, max_dd: 0 };
   let sum = 0;
   for (const r of rets) sum += r;
   const m = sum / n;
@@ -135,7 +141,9 @@ function headlineStats(rets: number[], periodsPerYear = 252): { sharpe: number; 
   // series (D-07), and the missing Sharpe stays NaN, an absence (D7).
   const sharpe = sharpeRatio(rets, { periodsPerYear, ddof: 0 }) ?? NaN;
   const downDev = hasNeg ? Math.sqrt(downSqSum / n) * Math.sqrt(periodsPerYear) : 0;
-  const sortino = downDev > 0 ? (m * periodsPerYear) / downDev : 0;
+  // No losing day means no Sortino: NaN, an absence, as `compute` gives (D7,
+  // review round 2 HI-02), never a fabricated 0.
+  const sortino = downDev > 0 ? (m * periodsPerYear) / downDev : NaN;
   const eq = cumEq(rets);
   const dd = drawdowns(eq);
   let maxDd = 0;

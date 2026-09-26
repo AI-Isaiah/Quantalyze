@@ -110,7 +110,9 @@ export function computePeerPercentile(stratSharpe: number, stratSortino: number,
     // would count no peer as `<= NaN` and report the 0th percentile, a fabricated
     // worst-in-cohort; NaN renders "—" instead (founder decision D7, 2026-09-26).
     sharpe: Number.isFinite(stratSharpe) ? percentileRank(stratSharpe, cohort.map(p => p.sharpe)) : NaN,
-    sortino: percentileRank(stratSortino, cohort.map(p => p.sortino)),
+    // The same for a strategy with no Sortino (NaN: no losing day, review round 2
+    // HI-02): no rank, not the 5th percentile.
+    sortino: Number.isFinite(stratSortino) ? percentileRank(stratSortino, cohort.map(p => p.sortino)) : NaN,
     // For max_dd, less negative = better, so higher max_dd value → higher percentile.
     max_dd: percentileRank(stratMaxDd, cohort.map(p => p.max_dd)),
   };

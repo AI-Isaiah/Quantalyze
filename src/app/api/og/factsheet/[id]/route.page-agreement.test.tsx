@@ -127,8 +127,17 @@ async function renderOgCard(series: DailyPoint[]): Promise<string | undefined> {
   return ogSharpe(ogCalls[ogCalls.length - 1]);
 }
 
-/** The page's Sharpe: the KPI-strip tile and the Main Metrics row, plus the whole body text. */
-function renderPage(series: DailyPoint[]): { kpi: string; row: string; body: string } {
+/**
+ * The page's Sharpe (the KPI-strip tile and the Main Metrics row), the KPI
+ * strip's Sortino and Calmar tiles, and the whole body text.
+ */
+function renderPage(series: DailyPoint[]): {
+  kpi: string;
+  row: string;
+  sortino: string;
+  calmar: string;
+  body: string;
+} {
   const payload = buildScenarioFactsheetPayload({ portfolioDaily: series, benchmark: null });
   const { container, unmount } = render(
     <FactsheetProvider payload={payload} persist={false}>
@@ -139,11 +148,16 @@ function renderPage(series: DailyPoint[]): { kpi: string; row: string; body: str
     /@[\w[\]-]*:grid-cols-\d/.test(el.className),
   );
   expect(kpiGrid, "the KPI strip must render").toBeDefined();
-  const tile = Array.from(kpiGrid!.children).find(
-    (el) => el.querySelector("p")?.textContent?.trim() === "Sharpe",
-  );
-  expect(tile, "the KPI strip must carry a Sharpe tile").toBeDefined();
-  const kpi = (tile!.textContent ?? "").replace("Sharpe", "").trim();
+  const kpiTile = (label: string): string => {
+    const tile = Array.from(kpiGrid!.children).find(
+      (el) => el.querySelector("p")?.textContent?.trim() === label,
+    );
+    expect(tile, `the KPI strip must carry a ${label} tile`).toBeDefined();
+    return (tile!.textContent ?? "").replace(label, "").trim();
+  };
+  const kpi = kpiTile("Sharpe");
+  const sortino = kpiTile("Sortino");
+  const calmar = kpiTile("Calmar");
   const rowLabel = Array.from(container.querySelectorAll("td, span, div")).find(
     (el) => el.children.length === 0 && el.textContent === "Sharpe" && !kpiGrid!.contains(el),
   );
@@ -151,7 +165,7 @@ function renderPage(series: DailyPoint[]): { kpi: string; row: string; body: str
   const row = (rowLabel!.nextElementSibling?.textContent ?? "").trim();
   const body = container.textContent ?? "";
   unmount();
-  return { kpi, row, body };
+  return { kpi, row, sortino, calmar, body };
 }
 
 describe("the factsheet page and the OG card agree on a Sharpe that does not exist (D7)", () => {
@@ -161,6 +175,12 @@ describe("the factsheet page and the OG card agree on a Sharpe that does not exi
     expect(og).toBe("—");
     expect(page.kpi).toBe("—");
     expect(page.row).toBe("—");
+    // Review round 2 HI-02: a constant yield has no losing day and no drawdown,
+    // so it has no Sortino and no Calmar either. The tearsheet reads "—" for
+    // both (the analytics service persists None); the KPI strip beside the
+    // Sharpe "—" must not read "0.00".
+    expect(page.sortino).toBe("—");
+    expect(page.calmar).toBe("—");
     // No absent value leaks onto the page as a literal NaN (the bootstrap
     // histogram's point, interval and "all resamples produced" line included).
     expect(page.body).not.toContain("NaN");
@@ -172,5 +192,7 @@ describe("the factsheet page and the OG card agree on a Sharpe that does not exi
     expect(og).toMatch(/^-?\d+\.\d{2}$/);
     expect(page.kpi).toMatch(/^-?\d+\.\d{2}$/);
     expect(page.row).toMatch(/^-?\d+\.\d{2}$/);
+    expect(page.sortino).toMatch(/^-?\d+\.\d{2}$/);
+    expect(page.calmar).toMatch(/^-?\d+\.\d{2}$/);
   });
 });

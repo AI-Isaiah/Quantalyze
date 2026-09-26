@@ -376,10 +376,11 @@ describe("SMTM-01 useBasisSeriesView + leverageEligibleFor — smoothed leverage
     act(() => result.current.lev.setLeverage(0));
     const v = result.current.view;
     // At L=0 the returns are all-zeros → no Sharpe (NaN, rendered "—": an all-zero
-    // series has no dispersion, founder decision D7) and a derived Sortino 0, never
-    // the persisted 1.44/1.88 next to flat charts (the B-1 carve-out).
+    // series has no dispersion, founder decision D7) and no Sortino (NaN: no losing
+    // day, review round 2 HI-02), never the persisted 1.44/1.88 next to flat charts
+    // (the B-1 carve-out).
     expect(Number.isNaN(v.strategyMetrics.sharpe)).toBe(true);
-    expect(v.strategyMetrics.sortino).toBe(0);
+    expect(Number.isNaN(v.strategyMetrics.sortino)).toBe(true);
   });
 
   it("smoothed WITHOUT a bundle at L=2 returns base BY REFERENCE (no fabrication)", () => {

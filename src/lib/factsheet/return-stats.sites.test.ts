@@ -187,6 +187,109 @@ describe("peer percentile: a strategy with no Sharpe has no Sharpe rank (D7, SFH
   });
 });
 
+// Review round 2 HI-02 / SFH-R2-H2 (founder decision D7): a series with no
+// losing day has no Sortino and one with no drawdown has no Calmar. Both are
+// NaN ("—"), as the tearsheet shows for the same series, never a fabricated 0
+// that the peer bar then ranks near the bottom of the cohort.
+describe("HI-02 compute, bootstrapCI and computePeerPercentile: Sortino and Calmar that do not exist are NaN", () => {
+  /** Every return positive, and dispersing: a real Sharpe, no Sortino, no Calmar. */
+  const ALL_POSITIVE = NOISY_A.map((r) => Math.abs(r) + 0.0005);
+
+  it("compute: the all-zero series has no Sortino and no Calmar (NaN, not 0)", () => {
+    const got = compute(ZEROS, DATES, 0, 365);
+    expect(Number.isNaN(got.sortino)).toBe(true);
+    expect(Number.isNaN(got.calmar)).toBe(true);
+  });
+
+  it("compute: every constant yield's Sortino and Calmar equal the all-zero series' (NaN)", () => {
+    const zero = compute(ZEROS, DATES, 0, 365);
+    for (const id of YIELD_IDS) {
+      const got = compute(navConstantYield(CONSTANT_YIELDS[id], N), DATES, 0, 365);
+      expect(Object.is(got.sortino, zero.sortino), `${id} sortino=${got.sortino}`).toBe(true);
+      expect(Object.is(got.calmar, zero.calmar), `${id} calmar=${got.calmar}`).toBe(true);
+    }
+  });
+
+  it("compute: an all-positive dispersing series has a Sharpe but no Sortino and no Calmar", () => {
+    const got = compute(ALL_POSITIVE, DATES, 0, 365);
+    expect(Number.isFinite(got.sharpe)).toBe(true);
+    expect(Number.isNaN(got.sortino)).toBe(true);
+    expect(Number.isNaN(got.calmar)).toBe(true);
+  });
+
+  it("compute control: a series with losing days and a drawdown keeps a finite Sortino and Calmar", () => {
+    const got = compute(NOISY_A, DATES, 0, 365);
+    expect(Number.isFinite(got.sortino) && got.sortino !== 0).toBe(true);
+    expect(Number.isFinite(got.calmar) && got.calmar !== 0).toBe(true);
+  });
+
+  it("bootstrapCI: an all-zero, a constant-yield and an all-positive series have no Sortino point, CI or histogram", () => {
+    const series: Array<[string, number[]]> = [
+      ["zeros", ZEROS],
+      ["all-positive", ALL_POSITIVE],
+      ...YIELD_IDS.map((id): [string, number[]] => [id, navConstantYield(CONSTANT_YIELDS[id], N)]),
+    ];
+    for (const [id, xs] of series) {
+      const got = bootstrapCI(xs, 200, 5, 42, 365).sortino;
+      expect(Number.isNaN(got.point), `${id} point=${got.point}`).toBe(true);
+      expect(Number.isNaN(got.lo), `${id} lo=${got.lo}`).toBe(true);
+      expect(Number.isNaN(got.hi), `${id} hi=${got.hi}`).toBe(true);
+      expect(got.hist.bins, id).toEqual([]);
+    }
+  });
+
+  it("bootstrapCI: resamples with no losing day are dropped from the Sortino histogram, not counted as 0", () => {
+    // One losing day in 200: 40 blocks of 5 miss it about a third of the time.
+    const oneLoss = ALL_POSITIVE.slice(0, 200);
+    oneLoss[57] = -0.01;
+    const k = 500;
+    const got = bootstrapCI(oneLoss, k, 5, 42, 365).sortino;
+    const counted = got.hist.bins.reduce((a, c) => a + c, 0);
+    expect(counted).toBeGreaterThan(0);
+    expect(counted).toBeLessThan(k);
+    // Every resample that has a Sortino here is positive (a positive mean over
+    // one loss), so a 0 in the interval could only be a fabricated resample.
+    expect(got.lo).toBeGreaterThan(0);
+  });
+
+  it("bootstrapCI control: a series with losing days keeps every Sortino resample and a finite CI", () => {
+    const got = bootstrapCI(NOISY_A, 200, 5, 42, 365).sortino;
+    expect(Number.isFinite(got.point)).toBe(true);
+    expect(Number.isFinite(got.lo) && Number.isFinite(got.hi)).toBe(true);
+    expect(got.hist.bins.reduce((a, c) => a + c, 0)).toBe(200);
+  });
+
+  it("computePeerPercentile: a NaN Sortino ranks as NaN, never the 5th percentile; a finite one keeps its rank", () => {
+    const none = computePeerPercentile(1, Number.NaN, -0.1);
+    expect(Number.isNaN(none.sortino)).toBe(true);
+    expect(Number.isFinite(none.sharpe)).toBe(true);
+    expect(Number.isFinite(computePeerPercentile(1, 1, -0.1).sortino)).toBe(true);
+  });
+
+  it("the api factsheet payload of a constant yield carries no Sortino rank and no Sortino/Calmar", () => {
+    const daily = navConstantYield(CONSTANT_YIELDS["apy_5pct"], N).map((value, i) => ({ date: DATES[i], value }));
+    const p = buildFactsheetPayload(
+      {
+        id: "hi02-fixture",
+        name: "Constant Yield Fixture",
+        types: ["quant"],
+        markets: ["crypto"],
+        computedAt: "2025-01-01T00:00:00Z",
+        trustTier: null,
+        assetClass: "crypto",
+        benchmark: null,
+        ingestSource: "api",
+      },
+      daily,
+    )!;
+    expect(Number.isNaN(p.strategyMetrics.sortino)).toBe(true);
+    expect(Number.isNaN(p.strategyMetrics.calmar)).toBe(true);
+    const peer = (p as { peerPercentile?: { sortino: number } | null }).peerPercentile;
+    expect(peer).toBeTruthy();
+    expect(Number.isNaN(peer!.sortino)).toBe(true);
+  });
+});
+
 describe("T15 bootstrapCI: the Sharpe point, interval and histogram through return-stats", () => {
   for (const periodsPerYear of [252, 365]) {
     it(`T15 constant yield's Sharpe fields equal the all-zero series' (ppy ${periodsPerYear})`, () => {

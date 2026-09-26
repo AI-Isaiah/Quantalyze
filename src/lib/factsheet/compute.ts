@@ -52,11 +52,16 @@ export function compute(
 
   const neg = rets.filter(x => x < 0);
   const ddDev = neg.length > 0 ? Math.sqrt(neg.reduce((a, x) => a + x * x, 0) / n) * Math.sqrt(periodsPerYear) : 0;
-  const sortino = ddDev > 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / ddDev : 0;
+  // A series with no losing day has no Sortino, and one with no drawdown has no
+  // Calmar: the ratio would be infinite, which means "does not exist", not 0.
+  // Both stay NaN and render "—", as the tearsheet shows for the same series
+  // (the analytics service persists None for both) and as the Sharpe above
+  // does (founder decision D7, 2026-09-26; review round 2 HI-02).
+  const sortino = ddDev > 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / ddDev : NaN;
 
   let maxDd = 0;
   for (let i = 0; i < dd.length; i++) if (dd[i] < maxDd) maxDd = dd[i];
-  const calmar = maxDd !== 0 ? cagr / Math.abs(maxDd) : 0;
+  const calmar = maxDd !== 0 ? cagr / Math.abs(maxDd) : NaN;
 
   const skew = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 3), 0) / n : 0;
   const kurt = s > 0 ? rets.reduce((a, x) => a + Math.pow((x - m) / s, 4), 0) / n - 3 : 0;
