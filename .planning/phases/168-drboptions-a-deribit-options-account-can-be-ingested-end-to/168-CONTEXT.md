@@ -150,6 +150,25 @@ These amendments supersede the clauses they name. Evidence: `168-RESEARCH.md` Q1
   census read, and no census read is planned.
   — **Reversibility:** reversible.
 
+- **D-09 (founder decision D6, 2026-09-26, AskUserQuestion: "Fix inside 168") — an option
+  `expiry` closes the smoothed option book.** Scope amendment after the round-1 reviews. INFO-3
+  measured that `replay_option_positions` ignored `type=expiry`, so an out-of-the-money short
+  stayed open past its expiry, and any later option activity on another instrument raised the
+  daily-MTM hole and cost the account its smoothed basis. The founder chose to fix it inside this
+  phase rather than split a new one; that choice overrides the phase-size rule below for this one
+  item and is recorded here and in the ROADMAP per the deviation policy. What ships:
+  - the replay closes an option's position to 0 at a zero-cash `expiry` row (Deribit's
+    documented out-of-the-money expiry, quoted in the census evidence file);
+  - it REFUSES an `expiry` row carrying cash or a nonzero position, and any `exercise` row on an
+    option (the in-the-money long side), because those shapes are unmeasured. That refusal is the
+    chosen ITM variant: no census licenses a guess.
+  - `expiry` and `exercise` stay OUT of the cash-bearing set, so both twins are unchanged: a
+    zero-cash `expiry` adds nothing, and one carrying cash still hits the unknown-type refusal.
+  This narrows the informational bullet below for `expiry` in the smoothed book only; it does not
+  classify either type as cash. SFH-04's degrade reason also gets its own factsheet copy under the
+  same decision.
+  — **Reversibility:** reversible.
+
 - **[informational] `exercise` and `expiry` stay refused (not classified here).** Deribit's
   current `private/get_transaction_log` documentation lists `expiry`, `assignment` and
   `exercise`. `exercise` is the long-side counterpart of `assignment`. No captured census exists
