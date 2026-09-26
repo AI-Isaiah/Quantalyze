@@ -33,6 +33,7 @@
  * never called from this lib.
  */
 import { mean, stdDev } from "@/lib/portfolio-math-utils";
+import { dispersionIsReal } from "@/lib/return-stats";
 import {
   type DailyPoint,
   type ScenarioState,
@@ -349,15 +350,19 @@ export function portfolioVarianceFromCov(
  *     exposures rather than a spurious scale factor.
  *
  * σ_levᵢ and σ_p are both daily (un-annualized) — the √252 cancels in the ratio.
- * Returns null when σ_p ≤ 0 (all-flat blend) so the UI renders "—" instead of
- * dividing by zero.
+ * Returns null when σ_p is not real dispersion — 0 (an all-flat blend), the
+ * float residue of a book of compounding constant yields (about 1e-16, which
+ * used to yield a residue ratio), or NaN — so the UI renders "—" instead of
+ * dividing by zero or by residue. σ_p is judged by `return-stats`
+ * `dispersionIsReal` against the absolute floor (no portfolio mean exists here,
+ * as in the Python S7 site; Phase 166.1 D-17).
  */
 export function diversificationRatio(
   weights: Record<string, number>,
   vols: Record<string, number>,
   sigmaP: number,
 ): number | null {
-  if (!(sigmaP > 0)) return null; // σ_p=0 → "—" (never divide by 0)
+  if (!dispersionIsReal(sigmaP, 0)) return null; // σ_p 0 / residue / NaN → "—"
   let weightedSigma = 0;
   for (const id of Object.keys(weights)) {
     weightedSigma += weights[id] * (vols[id] ?? 0); // ŵᵢ·σ_levᵢ
