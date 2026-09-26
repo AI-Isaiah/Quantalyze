@@ -14,6 +14,8 @@ Phase 15 / CSV-01..CSV-02: tests for the pandera-backed CSV validator.
 """
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 import pytest
 
@@ -85,6 +87,82 @@ def test_valid_daily_returns_passes():
     assert result["preview"]["date_range"][0]
     assert result["preview"]["date_range"][1]
     assert result["correlation_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# D-24 (Phase 166.1, founder decision 2026-09-26) — an exactly constant
+# POSITIVE daily-returns CSV is REJECTED at every length, with ONE message.
+#
+# Before D-24 the verdict was decided by float summation: a short constant
+# series has a standard deviation of exactly 0 and skipped the Sharpe
+# sentinel (ACCEPTED), while a longer one leaves float residue, reached plan
+# 01's D-04 residue branch and was REJECTED. A flat series carries no real
+# returns data, so its length must not decide the verdict. The message names
+# no number (D-04). A constant ZERO series is out of D-24's scope and keeps
+# its accepted verdict.
+# ---------------------------------------------------------------------------
+
+_D24_LENGTHS = [2, 3, 5, 20, 120, 365]
+
+
+def _sentinel_errors(result: dict) -> list[dict]:
+    return [e for e in result["errors"] if e["rule"] == "daily_sharpe_sentinel"]
+
+
+def _d24_compounding_nav_yield_df() -> pd.DataFrame:
+    """A constant yield taken the way the platform takes returns: pct_change
+    over an exactly compounding NAV (residue std ~1e-16, never exactly 0)."""
+    nav = pd.Series([100 * 1.0001 ** i for i in range(121)])
+    returns = nav.pct_change().dropna().reset_index(drop=True)
+    return pd.DataFrame({
+        "date": pd.date_range("2024-01-02", periods=len(returns), freq="D").strftime(
+            "%Y-%m-%d",
+        ),
+        "daily_return": list(returns),
+    })
+
+
+@pytest.mark.parametrize("n", _D24_LENGTHS)
+def test_d24_constant_positive_daily_returns_rejected_at_every_length(n):
+    df = _daily_returns_df(n=n, daily_return=0.001)
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    assert result["ok"] is False, f"n={n}: a constant positive CSV was accepted"
+    assert len(_sentinel_errors(result)) == 1, result["errors"]
+
+
+def test_d24_pinned_five_row_constant_fixture_is_rejected():
+    """D-24 flipped this fixture. The 5-row constant 0.001 frame was the
+    happy-path fixture of `test_valid_daily_returns_passes` and was ACCEPTED
+    before D-24 (its std is exactly 0, so the sentinel never ran). It is now
+    REJECTED; the happy path moved to a varied series."""
+    df = _daily_returns_df(n=5, daily_return=0.001)
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    assert result["ok"] is False
+    assert [e["rule"] for e in result["errors"]] == ["daily_sharpe_sentinel"]
+
+
+def test_d24_one_message_for_every_constant_positive_series_names_no_number():
+    frames = [_daily_returns_df(n=n, daily_return=0.001) for n in _D24_LENGTHS]
+    frames.append(_d24_compounding_nav_yield_df())
+    messages = set()
+    for df in frames:
+        errors = _sentinel_errors(validate_csv(_csv_bytes(df), "daily_returns"))
+        assert len(errors) == 1, f"{len(df)} rows: {errors}"
+        messages.add(errors[0]["message"])
+    assert len(messages) == 1, messages
+    (message,) = messages
+    assert not re.search(r"\d{7,}", message), message
+    assert "e+" not in message.lower(), message
+
+
+@pytest.mark.parametrize("n", [5, 120])
+def test_d24_constant_zero_series_keeps_its_verdict(n):
+    """Control: a constant 0.0 has no excess over the risk-free rate, so D-24
+    leaves it out of scope and it stays ACCEPTED."""
+    df = _daily_returns_df(n=n, daily_return=0.0)
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    assert _sentinel_errors(result) == []
+    assert result["ok"] is True, result["errors"]
 
 
 # ---------------------------------------------------------------------------
