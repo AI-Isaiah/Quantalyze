@@ -1976,7 +1976,7 @@ true for 146 and half of 142–145, and **false for 141**.
       **Evidence:** `.planning/phases/164.8.1-refdata-.../164.8.1-04-RESTORE.log`,
       `164.8.1-04-SUMMARY.md`.
 
-- [ ] **`[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` The TEST restore's reference-data replay reproduces
+- [x] **`[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` The TEST restore's reference-data replay reproduces
       INSERT effects only, so post-seed UPDATEs from LATER migrations are never re-applied while
       the ledger swears they ran (booked 2026-09-09, found by review of Phase 164.8.1's PR).**
       C1-C4 in `scripts/restore-test-refdata-allowlist.txt` select `INSERT … VALUES` statements
@@ -2004,6 +2004,27 @@ true for 146 and half of 142–145, and **false for 141**.
       that may legitimately differ. The scope boundary is now STATED in the allowlist's own
       "SCOPE BOUNDARY" block; deleting that block to make this look resolved is the failure this
       entry exists to prevent.
+      ⭐ **Dated 2026-09-26: that paragraph no longer describes the code, and it is kept as
+      lineage.** C2 was not relaxed. Phase 164.9.2 added a NEW criterion, **C5** ("TOP-LEVEL LITERAL
+      UPDATE ON A REPLAYED PUBLIC TABLE"), with its own `update:<n>` / `decline:<n>` allowlist lines.
+      A literal UPDATE of a replayed table is replayed after its INSERT inside the same transaction.
+      A non-literal one is DECLINED by name and never replayed. C2 still refuses anything that is not
+      a literal INSERT. "Would replay a backfill against rows that may legitimately differ" is
+      answered by the decline class, which covers exactly that shape.
+      ✅ **CLOSED 2026-09-26 in Phase 164.9.2's PR.** The evidence:
+      - the census lines plan 01 added, which `--audit` prints every run beside the unchanged
+        `extract-reference-inserts audit OK:` line: `C5 lines:`, the per-table `replayed / declined`
+        rows, and `extract-reference-inserts audit C5 OK:`. At this commit that line reads 6 update
+        statements over 4 files and 2 tables replayed, 6 declined, 0 unaccounted;
+      - plan 03's restore self-test arms, **renumbered 38/39** when main's Phase 164.9.1 arms took
+        33-37 (they were 33/34 in the plan 03 records): `arm_c5_update_green` (the replayed UPDATE
+        lands after its INSERT and the unchanged value-pinning leg stays quiet) and
+        `arm_c5_update_red` (without the `update:` line the row stays at its DEFAULT and that leg
+        aborts and rolls back);
+      - plan 05's real-dump rehearsal on the local lane (`164.9.2-05-SUMMARY.md`), where the teaser
+        sentinel's `manager_status` read the verified label after the replay.
+      The shared-TEST evidence (criterion 4: a green preflight and restore, by run id) cannot exist
+      before merge. It is recorded under `[164.9-CRIT8-RESTORE-DISPATCH-RECORD]`, not here.
 
 - [ ] **`[164.5-STALE-GENERATED-TYPES]` `src/lib/database.types.ts` keeps a generated declaration
       for `create_allocator_connected_strategy` after PR #758 drops it (booked 2026-09-08).**
