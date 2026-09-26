@@ -1,5 +1,134 @@
 # Changelog
 
+## [0.97.0.0] - 2026-09-26 — ENGINEFLOOR: every Python ratio site reads the one dispersion floor, so a constant yield never produces a fabricated ratio
+
+⭐ **What changed for whoever reads this next.** Phase 166 put a relative dispersion floor into
+`services/metrics.py`: a standard deviation at or below `1e-12 * max(1, |mean|)` is float residue,
+not dispersion. Phase 166.1 is the Python half of carrying that floor to every other place the
+analytics service divides by a standard deviation or takes a correlation. Before this release,
+eight variance sites and eight correlation sites outside `metrics.py` still tested `== 0` or
+`> 0`, or did not test at all. So a constant yield taken from a compounding NAV (standard
+deviation about 1e-16, never exactly 0) could give an optimizer Sharpe of 1.28e13, a CSV error
+reading "Daily Sharpe 2296215230173376.50", a 48.6% / 51.4% split of zero risk, and a 1.0
+correlation that made two same-yield strategies "match" each other. Each site now gives exactly
+what an all-zero series already gives there (D-07).
+
+⚠️ **This is a minor bump because values users see change, on purpose.** Optimizer suggestions,
+the risk decomposition, correlation cells and match status can all change for a constant-yield
+strategy. And an upload that passed before can now be refused (D-24, below). Precedent:
+MT5VALIDATEWEDGE (0.96.0.0) and JOBRPCTRUTH (0.93.0.0) each took a minor bump for a visible
+behaviour change. This release carries **no migration** (D-13) and **no TypeScript change**.
+
+### Root cause
+
+- A standard deviation derived from a compounding NAV is about 1e-16 in absolute terms whatever
+  the yield, because `pct_change` rounds relative to `1 + r`, not to `r`. It is never exactly 0.
+  So a guard of the form `std == 0` or `std > 0` lets a ratio of about 1e15 through, and a Pearson
+  correlation over such a leg comes back as a residue value (measured 1.0 between two strategies
+  with the same yield) instead of NaN.
+
+### Fixed
+
+- **The floor has one home, `services/dispersion.py`** (plan 01, `6484229f6`). It holds
+  `DISPERSION_RESIDUE_REL`, `residue_floor`, `dispersion_is_residue` and `dispersion_is_real`,
+  moved verbatim from `metrics.py`. It is a leaf module (numpy and pandas only, no `services`
+  import), so the optimizer, the CSV validator and the allocated-capital code can read the floor
+  without pulling in quantstats. `metrics.py` re-binds the three functions under their old private
+  names and does not bind the constant (D-03, D-23 revision), so its values and its tests are
+  byte-identical and the qstats-gate census is unchanged.
+- **The variance sites S1-S8 read the floor** (plan 01, `6484229f6`, `614d7d8de`; plan 01b,
+  `8dae1306a`):
+  - S1 `portfolio_optimizer._compute_sharpe` returns None on residue;
+  - S2 the M-0701 exclusion in `find_improvement_candidates` tests residue on the candidate;
+  - S3 `csv_validator._check_sharpe_sentinel` keeps its verdict and drops the fabricated number
+    (D-04), and with D-24 now judges every constant positive series the same way (see Changed);
+  - S4 `allocated_capital._annualised_sharpe` returns NaN on residue;
+  - S5 `EquityCurveBuilder.compute_sharpe` returns None on residue;
+  - S6 the constant-column gate in `optimizer.optimize_weights` uses `residue_floor` elementwise.
+    This is an honest pin, not a fix: the behaviour is identical for `|mean| <= 1` (D-06);
+  - S7 `portfolio_risk.compute_risk_decomposition` sends a residue portfolio volatility to its
+    existing zero branch (D-05);
+  - S8 the SQN block in `analytics_runner._compute_derived_trade_metrics` publishes a value only
+    over real R-multiple dispersion (D-16). Identical losses of 7.7 gave -4.03e16 and now give
+    None, the answer identical losses of 1.0 always gave.
+- **The correlation sites C1-C8 read the floor** (plan 03, `64af22b25`, `89cc5f0b2`,
+  `d44fb8598`), through two new helpers in `services/dispersion.py`,
+  `pairwise_correlation_or_none` and `dispersing_corrwith` (D-02):
+  - C1 `compute_correlation_matrix` masks a non-dispersing leg's row, column and diagonal;
+  - C2 `compute_rolling_correlation` applies the `both_move` mask before `dropna`;
+  - C3 `corr_with_portfolio` in `find_improvement_candidates` and C4 `_avg_corr` answer None over
+    a residue leg;
+  - C5 `match_engine._compute_corr_with_portfolio` and C6 the BTC `benchmark_comparison` block in
+    `routers/portfolio.py` use `pairwise_correlation_or_none`;
+  - C7 the `verify_strategy` matching block and C8 `strategy_matching.find_matched_strategy` (the
+    two `corrwith` matching sites) use `dispersing_corrwith`, and C8 returns an explicit no-match
+    on an empty candidate set before `idxmax`.
+
+### Changed
+
+- **Optimizer suggestions no longer rank a constant-yield candidate on a fabricated ratio**, and
+  the risk decomposition no longer splits a zero risk into shares.
+- **Correlation cells and match status for a constant-yield strategy show the existing honest
+  absence** (an empty cell, no match) instead of a residue correlation.
+- **The CSV Sharpe sentinel rejects an exactly constant POSITIVE daily-returns CSV at EVERY
+  length** (D-24, founder decision 2026-09-26; `a6007b3d4`, `d1b91d5d0`). Before this release the
+  verdict was decided by float summation: a short constant series has a standard deviation of
+  exactly 0 and skipped the sentinel, so it was ACCEPTED, while a longer one left float residue
+  and was REJECTED. A flat series carries no real returns data, so its length no longer decides.
+  ⚠️ **An upload that used to pass can now be refused.** Exact 0 and residue get one message,
+  which names no number (D-04). The rule name `daily_sharpe_sentinel` and its label are
+  unchanged. A constant ZERO series keeps its verdict (accepted), and a series that really varies
+  is judged by the Sharpe over its standard deviation exactly as before.
+
+### Tests
+
+- `tests/test_dispersion_floor_sites.py` (the variance sites) and
+  `tests/test_correlation_residue_sites.py` (the correlation sites), with the shared fixture module
+  `tests/dispersion_fixtures.py` (`6484229f6`, `614d7d8de`, `9d007cff6`, `8dae1306a`,
+  `64af22b25`, `aea667ad8`, `89cc5f0b2`, `ebbcfb239`, `d44fb8598`). Each site has a red test from
+  a compounding-NAV constant yield with a cent-rounded control on the other side of the floor, and
+  each was observed RED on the unedited site before its fix. Every fix has a neuter, RED, restore
+  drill restored from a byte backup. S6 is an honest pin, not a red test (D-06).
+- **The D-24 tests in `tests/test_csv_validator.py`** (`a6007b3d4`, `d1b91d5d0`): a constant
+  0.001 series at 2, 3, 5, 20, 120 and 365 rows, a compounding-NAV yield, one message across all of
+  them, and a constant-zero control. On the unedited sentinel they ran `5 failed, 33 passed`, with
+  the 2, 3 and 5 row cases red. Two drills prove each half can fail: restoring the old exact-zero
+  gate turns the short lengths red, and a `>= 0` positive test turns the zero control red. The
+  pinned 5-row constant fixture now asserts REJECTED, and the fixtures that relied on a constant
+  CSV being accepted moved to varied series.
+
+### Notes
+
+- **D-24 supersedes plan 01's reason for the exact-zero skip.** Plan 01 kept the length-decided
+  boundary on purpose (D-04 verdict preservation); the founder's D-24 replaced that reason.
+- **D-11:** `strategy_verifications.metrics_snapshot` rows are point-in-time records and are not
+  recomputed.
+- ⚠️ **STORED `portfolio_analytics` values computed before this release keep any residue value
+  until that portfolio's next analytics compute.** That is the correlation matrix, the risk
+  decomposition and the average pairwise correlation. The recompute touches `strategy_analytics`
+  only.
+- **Phase 166.3 RECOMPUTE's state at release time: founder-gated, pending** (D-14). Its plan 01
+  SUMMARY does not exist yet, so no before/after counts are carried here.
+- ⚠️ **The SQN residual (D-21 W1).** S8 floors the SQN formula, but that function has had no
+  production caller since Phase 106 (`b196de6c8`), and both current success writers store
+  `trade_metrics` as NULL. So this fix changes no displayed SQN by itself. A STORED residue SQN
+  (absolute value above 1e10) stays on its row until that row is rewritten, and a ledger venue
+  never recomputes on its own. A Phase 166.3 recompute clears it by NULLing the row's whole
+  `trade_metrics`, which also empties that row's trade panel. The Q6 counts before and after,
+  split published / not published, are founder-gated, pending.
+- **The 2026-09-26 split (D-23).** This release is the Python half. The TypeScript half ships as
+  Phase 166.2 COMPUTEONCE, and the production recompute runs as Phase 166.3 RECOMPUTE. This entry
+  claims neither. The planning commits for the phase, the split and the 166.2 / 166.3 plans are
+  recorded here and change no shipped file.
+- **Two merges of `origin/main`** bring other phases' work, which their own entries cover:
+  `7bfce8490` (PR #859, before wave 1) and `3a8f8ad01` (main at `ea4167a3f`, before the release
+  sweep, no conflicted path).
+- **Gates at the sweep SHA `3a8f8ad01`:** the full analytics-service suite `6737 passed, 90
+  skipped`; `qstats-gate census: 13 quantstats node(s) in services/metrics.py, 11 mirror(s), 0
+  violation(s)`; strict mypy `Success: no issues found in 101 source files`; ruff with no new
+  finding over the phase's Python files; `verify-plan-anchors --pending` `OK: 12 plan file(s), no
+  stale claims.`
+
 ## [0.96.0.0] - 2026-09-26 — MT5VALIDATEWEDGE: the gateway can restart a wedged MT5 terminal on its own (not yet seen live), and the wizard stops promising a retry that cannot work
 
 _PR #866 (167.2.1 FACTSHEETBUILDABLE) landed first as 0.95.0.0, so this entry, first written as 0.94.0.0, re-bumped to 0.96.0.0._
