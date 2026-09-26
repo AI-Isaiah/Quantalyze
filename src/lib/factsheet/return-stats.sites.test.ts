@@ -489,3 +489,35 @@ describe("WR3-01 compute: a series with no dispersion has no skew and no kurtosi
     expect(Number.isFinite(got.kurt) && got.kurt !== 0).toBe(true);
   });
 });
+
+describe("SFH-R3 MEDIUM-2 compute: a book with no losing day has no Avg Loss, and one with no winning day no Avg Win (D7)", () => {
+  const ALL_POSITIVE = NOISY_A.map((r) => Math.abs(r) + 0.0005);
+  const ALL_NEGATIVE = ALL_POSITIVE.map((r) => -r / 10);
+
+  it("no losing day: Avg Loss is NaN, never 0, and Avg Win stays a real gain", () => {
+    const got = compute(ALL_POSITIVE, DATES, 0, 365);
+    expect(Number.isNaN(got.avg_loss), `avg_loss=${got.avg_loss}`).toBe(true);
+    expect(got.avg_win).toBeGreaterThan(0);
+  });
+
+  it("no winning day: Avg Win is NaN, never 0, and Avg Loss stays a real loss", () => {
+    const got = compute(ALL_NEGATIVE, DATES, 0, 365);
+    expect(Number.isNaN(got.avg_win), `avg_win=${got.avg_win}`).toBe(true);
+    expect(got.avg_loss).toBeLessThan(0);
+  });
+
+  it("every constant yield's Avg Loss equals the all-zero series' (NaN)", () => {
+    const zero = compute(ZEROS, DATES, 0, 365);
+    expect(Number.isNaN(zero.avg_loss) && Number.isNaN(zero.avg_win)).toBe(true);
+    for (const id of YIELD_IDS) {
+      const got = compute(navConstantYield(CONSTANT_YIELDS[id], N), DATES, 0, 365);
+      expect(Object.is(got.avg_loss, zero.avg_loss), `${id} avg_loss=${got.avg_loss}`).toBe(true);
+    }
+  });
+
+  it("control: a two-sided series keeps a finite Avg Win and Avg Loss", () => {
+    const got = compute(NOISY_A, DATES, 0, 365);
+    expect(got.avg_win).toBeGreaterThan(0);
+    expect(got.avg_loss).toBeLessThan(0);
+  });
+});

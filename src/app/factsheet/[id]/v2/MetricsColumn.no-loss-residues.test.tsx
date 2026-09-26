@@ -167,3 +167,34 @@ describe("WR3-01: Skew and Kurtosis read \"—\" for a series with no dispersion
     });
   }
 });
+
+describe("SFH-R3 MEDIUM-2: Avg Loss reads \"—\" for a book with no losing day (and Avg Win for one with no winning day)", () => {
+  /** Every day a small dispersing loss: no winning day. */
+  const NO_WIN = NO_LOSS.map(r => -r / 10);
+
+  for (const [name, wrap] of [
+    ["fresh payload", (p: FactsheetPayload) => p],
+    ["after the JSON cache round trip", viaCache],
+  ] as const) {
+    it(`no losing day: Avg Loss "—", Avg Win a gain (${name})`, () => {
+      const read = renderColumn(wrap(payloadFrom(NO_LOSS)));
+      expect(read("Max Drawdown", "Avg Loss")).toBe("—");
+      expect(read("Max Drawdown", "Avg Win")).toMatch(/^\+\d+\.\d{2}%$/);
+      expect(read("Extended Metrics", "Avg Win / Avg Loss")).toBe("—");
+    });
+
+    it(`no winning day: Avg Win "—", Avg Loss a loss (${name})`, () => {
+      const read = renderColumn(wrap(payloadFrom(NO_WIN)));
+      expect(read("Max Drawdown", "Avg Win")).toBe("—");
+      expect(read("Max Drawdown", "Avg Loss")).toMatch(/^-\d+\.\d{2}%$/);
+      expect(read("Extended Metrics", "Avg Win / Avg Loss")).toBe("—");
+    });
+
+    it(`control: a two-sided book keeps both averages and their ratio (${name})`, () => {
+      const read = renderColumn(wrap(payloadFrom(TWO_SIDED)));
+      expect(read("Max Drawdown", "Avg Win")).toMatch(/^\+\d+\.\d{2}%$/);
+      expect(read("Max Drawdown", "Avg Loss")).toMatch(/^-\d+\.\d{2}%$/);
+      expect(read("Extended Metrics", "Avg Win / Avg Loss")).toMatch(/^\d+\.\d{2}×$/);
+    });
+  }
+});

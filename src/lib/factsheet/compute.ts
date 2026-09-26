@@ -100,8 +100,11 @@ export function compute(
     if (r < worstDay) worstDay = r;
   }
   const winRate = n > 0 ? winCount / n : 0;
-  const avgWin = winCount > 0 ? winSum / winCount : 0;
-  const avgLoss = lossCount > 0 ? lossSum / lossCount : 0;
+  // No winning (losing) day means no average win (loss): NaN, rendered "—",
+  // never a measured-looking 0.00% (founder decision D7; review round 3
+  // SFH-R3 MEDIUM-2 for Avg Loss, and the symmetric Avg Win arm).
+  const avgWin = winCount > 0 ? winSum / winCount : NaN;
+  const avgLoss = lossCount > 0 ? lossSum / lossCount : NaN;
   // A book with no losing day has no profit factor: gross gain over a gross
   // loss of 0 is infinite, which means "does not exist", not 0. NaN renders
   // "—", as omega_ratio below (the same number) and the analytics service's
