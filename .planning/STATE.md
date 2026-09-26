@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 168
 current_phase_name: DRBOPTIONS
 status: executing
-stopped_at: Completed 168-01-PLAN.md
-last_updated: "2026-09-26T09:58:54.329Z"
+stopped_at: Completed 168-02-PLAN.md
+last_updated: "2026-09-26T10:53:17.000Z"
 last_activity: 2026-09-26
-last_activity_desc: "2026-09-26: Phase 168 plan 01 executed (assignment classified in the census shape, co-occurrence guard, windowed-crawl backstop); plan 02 next"
-state_head: 22bbfcf30ddbdc61b6702c44773ebadcaaff11a8
+last_activity_desc: "2026-09-26: Phase 168 plan 02 executed (per-site pins for every option-book reader, acceptance eligibility reads the vocabulary, refusal evidence gains assignment/commission/position, prose sweep); plan 03 (founder post-deploy checkpoint) next"
+state_head: d448599c5c37885d7fefd3e548f3520df1e5973d
 progress:
   total_phases: 54
   completed_phases: 35
@@ -182,7 +182,7 @@ is decided by verification status, never by plan counts.**
 Phase: 166 (QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given) — READY TO EXECUTE
 Plan: Not started
 Phase: 168 (DRBOPTIONS — a Deribit options account ingests end to end) — EXECUTING 2026-09-26, 3 plans; plan 03 is a founder post-deploy checkpoint
-Plan: 1 of 3 DONE (`168-01-SUMMARY.md`: `assignment` cash-bearing in the census shape only, `assert_assignment_uncontested` in both twins, `_OPTION_BOOK_EVENT_TYPES` at the six literal sites in one commit, windowed-crawl backstop in `_crawl_deribit_ledger`, counts-only evidence file). Next is plan 02.
+Plan: 2 of 3 DONE (`168-01-SUMMARY.md`: `assignment` cash-bearing in the census shape only, `assert_assignment_uncontested` in both twins, `_OPTION_BOOK_EVENT_TYPES` at the six literal sites in one commit, windowed-crawl backstop in `_crawl_deribit_ledger`, counts-only evidence file; `168-02-SUMMARY.md`: one pin per option-book site, each seen RED under a one-site revert, mark_to_market and smoothed_mtm end to end, `check_perp_only_eligibility` reads `_OPTION_BOOK_EVENT_TYPES`, `_SIBLING_TYPES` + assignment, `_SHAPE_FIELDS` + commission/position, prose sweep, full suite green). Next is plan 03, a founder post-deploy checkpoint.
 Phase: 164.6 (gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers) — EXECUTING
 Plan: 5 of 5 DONE (`164.6-01-SUMMARY.md`, OPS-08-TS: a 40001 is retried once at csv-finalize and holdings sync; `164.6-02-SUMMARY.md`, 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker; `164.6-03-SUMMARY.md`, OPS-08-F2 SQL layer: migration 20260924120000 makes both fan-outs write one counted cron_runs row naming failed candidates, arm N in both ledger gates, 36 twins re-pointed; `164.6-04-SUMMARY.md`, OPS-08-F2 pins: ARMS_FLOOR 428 from a full lane run with no defects, parser/floors/registry censuses at 428 arms and 443 steps/needles, ci.yml sentinel rows 16/19 and ARMS_FLOOR 215; `164.6-05-SUMMARY.md`, runbooks read the candidate_enqueue_failed row counts-only and carry the BLOCKING precondition [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT] owned by Phase 164.6.7, phase-level vitest/typecheck/lint/anchors green)
       ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
@@ -502,7 +502,7 @@ Status: Executing Phase 168
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-26 — Phase 168 plan 01 executed; plan 02 next
+Last activity: 2026-09-26 — Phase 168 plan 02 executed; plan 03 (founder post-deploy checkpoint) next
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1304,6 +1304,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
      every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
      The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
      FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 168 DRBOPTIONS — plan 02, 2026-09-26)*
+
+- **D-168-02-A — `assignment` is APPENDED to `_SIBLING_TYPES`** (after delivery/settlement/trade), so the existing census rendering order is unchanged and the next unknown-type refusal (likely `exercise` or `expiry`) reports whether an assignment co-occurred. `_SHAPE_FIELDS` gains only `commission` and `position` (a fee and a signed size; no identifier). Both neutered RED.
+- **D-168-02-B — the historical Phase-82 section comment in `tests/test_deribit_txn.py` that describes PRE-FIX code as summing option `trade`/`delivery` premium is kept verbatim**: it describes code as it was, not today's option book, and rewriting it would falsify lineage.
 
 *(execution-time, Phase 168 DRBOPTIONS — plan 01, 2026-09-26)*
 
