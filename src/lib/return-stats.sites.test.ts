@@ -218,6 +218,25 @@ describe("T4 computeScenario correlation matrix", () => {
     expect(got.avg_pairwise_correlation).toBe(zero.avg_pairwise_correlation);
   });
 
+  // D7 (founder, 2026-09-26), WR-03 / SFH-M2: an undefined pair is not a
+  // measured 0. It has no cell, and it is out of the Avg |rho| sum AND count,
+  // so a flat member cannot make the book read as more diversified.
+  it("an all-zero member's pairs have no cell and are left out of the average", () => {
+    const zero = scenarioOf({ c: ZEROS, a: NOISY_A, b: NOISY_B });
+    const zm = zero.correlation_matrix!;
+    expect(zm.c).toEqual({ c: 1 });
+    expect("c" in zm.a).toBe(false);
+    expect("c" in zm.b).toBe(false);
+    // Only the a-b pair is measured, so the average is exactly its |rho|.
+    const ab = scenarioOf({ a: NOISY_A, b: NOISY_B });
+    expect(zero.avg_pairwise_correlation).toBe(ab.avg_pairwise_correlation);
+    expect(zero.avg_pairwise_correlation).toBe(Math.abs(zm.a.b));
+  });
+
+  it("no measured pair at all gives a null average, never 0", () => {
+    expect(scenarioOf({ c: ZEROS, d: ZEROS }).avg_pairwise_correlation).toBeNull();
+  });
+
   it("the cent-rounded 1% APY member keeps a finite, measured correlation", () => {
     const m = scenarioOf({ c: CENT_CONTROL, a: NOISY_A }).correlation_matrix!;
     expect(Number.isFinite(m.c.a)).toBe(true);

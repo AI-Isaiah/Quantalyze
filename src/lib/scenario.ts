@@ -56,7 +56,11 @@
  *
  *   3. Avg pairwise correlation is the average of ABSOLUTE correlations.
  *      A signed average would mask a book that's half strongly positive
- *      and half strongly negative as "diversified".
+ *      and half strongly negative as "diversified". A pair whose correlation
+ *      is undefined (a leg with no dispersion) is left out of the matrix AND
+ *      out of the average's sum and count (founder decision D7, 2026-09-26):
+ *      it is not a measured 0, and counting it as one made a book with a flat
+ *      leg read as more diversified. The heatmap renders the missing cell "—".
  *
  *   4. Sortino divides the downside RMS by TOTAL observations (n), not
  *      by the count of negative days. Dividing by downsides.length
@@ -74,7 +78,7 @@ import type { DailyPoint } from "./portfolio-math-utils";
 export type { DailyPoint } from "./portfolio-math-utils";
 import { coverageSpanOf, covers } from "./scenario-window";
 import { calendarYears } from "./closed-sets";
-import { pearson, sharpe as returnStatsSharpe } from "@/lib/return-stats";
+import { dispersion, pearson, sharpe as returnStatsSharpe } from "@/lib/return-stats";
 
 export interface StrategyForBuilder {
   id: string;
@@ -148,7 +152,9 @@ export interface ComputedMetrics {
   sortino: number | null;
   max_drawdown: number | null;
   max_dd_days: number | null;
+  /** A pair whose correlation is undefined has NO cell (rendered "—", D7). */
   correlation_matrix: Record<string, Record<string, number>> | null;
+  /** Mean |ρ| over the pairs that HAVE a correlation; null when none does. */
   avg_pairwise_correlation: number | null;
   /**
    * NEW-C18-09 (B1, audit-2026-05-07): cumulative **RETURN** form
@@ -530,11 +536,11 @@ export function computeScenario(
   const years = calendarYears(Date.parse(commonDates[0]), Date.parse(commonDates[n - 1]));
   const cagr = years > 0 ? Math.pow(1 + twr, 1 / years) - 1 : null;
 
-  // Vol (sample std), Sharpe (rf=0), Sortino (rf=0).
-  const meanR = portDaily.reduce((s, r) => s + r, 0) / n;
-  const variance =
-    portDaily.reduce((s, r) => s + (r - meanR) * (r - meanR), 0) / (n - 1);
-  const volDaily = Math.sqrt(variance);
+  // Vol (sample std), Sharpe (rf=0), Sortino (rf=0). The mean and sample sd
+  // are the shared `dispersion` (SFH-M7): the same arithmetic this block did by
+  // hand (sum / n, then sum of squared deviations / (n - 1)), except that a
+  // float-residue sd reads exactly 0, as the factsheet's ann_vol does.
+  const { mean: meanR, sd: volDaily } = dispersion(portDaily, 1);
   const volatility = volDaily * Math.sqrt(periodsPerYear);
   // The ONE TS Sharpe (Phase 166.1 D-17), sample basis: null when the blend has
   // no dispersion, including the float residue of a compounding constant yield.
@@ -580,7 +586,9 @@ export function computeScenario(
   // Correlation matrix (Pearson on daily returns) through the ONE TS Pearson
   // (Phase 166.1 D-17). Pearson is ddof-invariant, so it agrees with the sample
   // basis above. A pair with a leg that has no dispersion (0 or float residue)
-  // has no correlation: null, shown as 0 as before.
+  // has no correlation: the cell is left out (the heatmap renders a missing
+  // cell as "—", clusterOrder reads it as distance 1, tooSimilarPairs skips
+  // it) and the pair is left out of the average (D7, WR-03 / SFH-M2).
   const correlation_matrix: Record<string, Record<string, number>> = {};
   let absCorrSum = 0;
   let corrCount = 0;
@@ -593,7 +601,8 @@ export function computeScenario(
         correlation_matrix[idA][idB] = 1;
         continue;
       }
-      const corr = pearson(strategyReturns[idA], strategyReturns[idB]) ?? 0;
+      const corr = pearson(strategyReturns[idA], strategyReturns[idB]);
+      if (corr === null) continue;
       correlation_matrix[idA][idB] = Number(corr.toFixed(3));
       if (j > i) {
         // Absolute values to match the "Avg |corr|" label.
