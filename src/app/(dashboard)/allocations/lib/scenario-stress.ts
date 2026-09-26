@@ -17,7 +17,7 @@
  *          n<10 / constant / non-finite series) → var/cvar null.
  *       2. A numerically-CONSTANT series with n>=60 (float-residue variance
  *          ~1e-37 that an exact `=== 0` would miss) → var/cvar null, detected
- *          via the SAME relative-scale guard `scenario-benchmark.ts` uses.
+ *          via the SAME shared floor (`@/lib/return-stats`) `scenario-benchmark.ts` uses.
  *     VaR/CVaR are computed on `portfolioDaily.map(d => d.value)` with NO
  *     leverage multiplier — leverage is ALREADY baked into
  *     `portfolio_daily_returns` via `w·L·r` in `computeScenario` (re-applying
@@ -27,10 +27,10 @@
  *   - β-propagated shock (STRESS-01) — `projectedImpact = β_portfolio · shock`,
  *     where `β_portfolio = computeScenarioBenchmark(portfolioDaily, btcDaily).beta`
  *     over the BTC inner-join INTERSECTION (never a zero-filled union). We reuse
- *     `computeScenarioBenchmark` directly so we inherit its relative-scale
+ *     `computeScenarioBenchmark` directly so we inherit its shared-floor
  *     degeneracy guard — we do NOT call `computeAlphaBeta` directly (it
- *     fabricates a finite β ~2 on a numerically-constant benchmark via float
- *     residue passing its `varB > 0` branch). A null β ⇒ null impact ⇒ "—". A
+ *     answers a constant benchmark with β = 0, a number where the honest
+ *     answer is an absence). A null β ⇒ null impact ⇒ "—". A
  *     near-market-neutral book (cov ≈ 0 ⇒ β ≈ 0) ⇒ |impact| ≈ 0, NOT the full
  *     shock — the load-bearing success-criterion behavior.
  *
@@ -46,6 +46,7 @@
 
 import { computeVaR, computeExpectedShortfall } from "@/lib/portfolio-stats";
 import { mean, type DailyPoint } from "@/lib/portfolio-math-utils";
+import { dispersionIsResidue } from "@/lib/return-stats";
 import { computeScenarioBenchmark } from "./scenario-benchmark";
 
 export interface ScenarioStress {
@@ -114,7 +115,7 @@ export function computeScenarioStress(
   // ── β-shock path (STRESS-01) — REUSE the β source, never re-derive ──
   // computeScenarioBenchmark already inner-joins, computes cov/var via the
   // golden-tested computeAlphaBeta, AND null-guards the constant-benchmark
-  // degeneracy via its relative-scale test. Call it ONCE and read both fields
+  // degeneracy via its shared-floor test. Call it ONCE and read both fields
   // off the single result: `.n` IS the inner-join overlap (the BTC-overlap N =
   // betaN) and `.beta` is the CAPM β. (Previously this also called
   // innerJoinByDate separately just to count the overlap — a second, redundant
@@ -124,10 +125,10 @@ export function computeScenarioStress(
   const betaN = bench.n;
   // Finite-aware short-circuit on the β path — mirror computeVarPath's guard for
   // the SECOND (factor) axis. A NaN/Infinity injected through btcDaily defeats
-  // computeScenarioBenchmark's relative-scale degeneracy test (the float-residue
+  // computeScenarioBenchmark's shared-floor degeneracy test (the float-residue
   // guard short-circuits on a tiny std, not on NaN: Math.sqrt(NaN) <= x is
-  // false), so it falls through to computeAlphaBeta, whose `varB > 0 ? : 0`
-  // branch returns a FABRICATED finite β = 0 (not NaN, not null) for a
+  // false), so it falls through to computeAlphaBeta, which answers the shared
+  // beta's null with a FABRICATED finite β = 0 (not NaN, not null) for a
   // contaminated factor series → a fabricated projectedImpact = 0, the exact
   // false-confidence the "fully null-safe" contract forbids. A non-finite
   // contaminant anywhere in the factor feed makes it untrustworthy, so surface
@@ -159,23 +160,28 @@ function computeVarPath(
   // 1b. Finite-aware short-circuit — honor the "fully null-safe" contract for a
   // NaN/Infinity injected DIRECTLY through this public signature, independent of
   // the upstream `computeScenario` producer. A non-finite contaminant defeats the
-  // relative-scale guard below (NaN <= NaN is false, so it would NOT short-circuit)
+  // shared-floor guard below (NaN <= NaN is false, so it would NOT short-circuit)
   // and reaches `computeVaR`, whose `sort((a,b) => a - b)` returns NaN for any pair
   // involving the contaminant → an undefined ordering / corrupted (possibly
   // non-NaN-but-wrong) quantile that the section would render as a confident,
   // fabricated number. Surface null instead so no fabricated value can escape.
   if (!values.every(Number.isFinite)) return NULL_VAR;
 
-  // 2. Relative-scale degeneracy guard (the relative-scale degeneracy guard in scenario-benchmark.ts).
-  // A numerically-constant n>=60 window leaves a float-residue variance (~1e-37)
-  // that an exact `=== 0` would miss, letting computeVaR return a meaningless
-  // (constant) quantile that the section would render as a fabricated number.
-  // The honest test is: the series' own spread (std) is negligible relative to
-  // its level → surface null so the UI renders "—".
+  // 2. Degeneracy guard: the shared floor of `@/lib/return-stats` (Phase 166.1
+  // D-17), the same one scenario-benchmark.ts uses.
+  // A numerically-constant n>=60 window leaves a float-residue variance (~1e-37),
+  // and a compounding-NAV constant yield a spread of about 1e-16, that an exact
+  // `=== 0` would miss, letting computeVaR return a meaningless (constant)
+  // quantile that the section would render as a fabricated number. The honest
+  // test is: the series' own spread (std) is float residue,
+  // `std <= 1e-12 * max(1, |mean|)` → surface null so the UI renders "—".
+  // `max(1, |mean|)` matters: the residue of a compounding NAV is about 1e-16
+  // ABSOLUTE whatever the yield, and the floor this file carried before scaled
+  // with `|mean|` alone, so it missed daily 1e-5, daily 1e-4 and APYs up to 3%
+  // (measured 2026-09-26).
   const meanSeries = mean(values);
   const varSeries = mean(values.map((x) => (x - meanSeries) ** 2));
-  const seriesIsDegenerate =
-    Math.sqrt(varSeries) <= 1e-12 * (Math.abs(meanSeries) + 1e-12);
+  const seriesIsDegenerate = dispersionIsResidue(Math.sqrt(varSeries), meanSeries);
   if (seriesIsDegenerate) return NULL_VAR;
 
   // 3. Non-empty, non-constant series → the floor-quantile VaR + tail-mean CVaR.

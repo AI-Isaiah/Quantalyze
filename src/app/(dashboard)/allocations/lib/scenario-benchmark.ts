@@ -30,16 +30,20 @@
  * Honesty invariants (tested):
  *   - A degenerate window (n<2) yields `null` for every field — never a
  *     fabricated 0 — so the UI renders an em-dash.
- *   - A CONSTANT benchmark yields `null` for beta/alpha. `computeAlphaBeta` is
- *     NOT a safe net here: it returns {alpha:0, beta:0} only for n<2, but for a
- *     numerically-constant benchmark with n>=2 its `varB>0?:0` branch does not
- *     fire (float residue leaves varB ~1e-37, not exactly 0), so it returns a
- *     meaningless finite beta (~2) and alpha = meanR*periodsPerYear — a
- *     fabricated number, not 0. So the constant-benchmark case MUST be detected
- *     HERE (varB computed first) via the relative-scale guard and surfaced as
- *     null.
- *   - te=0 (p≡b) yields a `null` information ratio (guard via relative-scale
- *     degeneracy on the excess series, not exact te>0).
+ *   - A CONSTANT benchmark yields `null` for beta/alpha. `computeAlphaBeta`
+ *     answers a constant benchmark with {beta: 0, alpha: meanR*periodsPerYear},
+ *     a number, not an absence, so the constant-benchmark case MUST be detected
+ *     HERE (varB computed first) and surfaced as null.
+ *   - te=0 (p≡b), or an excess series that is constant, yields a `null`
+ *     information ratio.
+ *   - Every degeneracy test, the correlation and the information ratio come
+ *     from `@/lib/return-stats`, the one TS home of dispersion-based ratios
+ *     (Phase 166.1 D-17): its floor is `1e-12 * max(1, |mean|)`. The floor this
+ *     file carried before scaled with `|mean|` alone, so a compounding-NAV
+ *     constant yield, whose returns carry about 1e-16 of ABSOLUTE rounding
+ *     residue whatever the yield, passed it at daily 1e-5, daily 1e-4 and APYs
+ *     up to 3% (measured 2026-09-26) and reported a residue beta, correlation
+ *     and information ratio. `max(1, |mean|)` catches that absolute residue.
  *   - RISK-metric annualization rides `periodsPerYear` (×N / ×√N) via the reused
  *     helpers — 252 by default (byte-identical to pre-#597), 365 for a crypto
  *     blend (#597 part 2). beta and correlation are basis-invariant ratios.
@@ -47,19 +51,20 @@
 
 import { computeAlphaBeta, computeTrackingError } from "@/lib/portfolio-stats";
 import { mean, type DailyPoint } from "@/lib/portfolio-math-utils";
+import { dispersionIsResidue, pearson, sharpe } from "@/lib/return-stats";
 
 export interface ScenarioBenchmark {
   /** Aligned (intersection) overlap count — the {N} the UI heading reports. */
   n: number;
   /** Annualized std of (p−b). `null` for n<2. */
   trackingError: number | null;
-  /** mean(p−b)·periodsPerYear / te. `null` for n<2 or te=0. */
+  /** mean(p−b)·periodsPerYear / te (the shared Sharpe of p−b). `null` for n<2 or an excess with no dispersion. */
   informationRatio: number | null;
   /** CAPM alpha (mean(p) − β·mean(b))·periodsPerYear. `null` for n<2 or var(b)=0. */
   alpha: number | null;
   /** CAPM beta cov(p,b)/var(b). `null` for n<2 or var(b)=0. */
   beta: number | null;
-  /** Pearson sample correlation. `null` for n<2 or zero variance on either side. */
+  /** Pearson correlation (the shared `pearson`). `null` for n<2 or no dispersion on either side. */
   correlation: number | null;
 }
 
@@ -113,49 +118,43 @@ export function computeScenarioBenchmark(
   const n = p.length;
   if (n < 2) return NULL_RESULT(n);
 
-  // Tracking error + information ratio always come from the reused helper.
-  // `periodsPerYear` is the annualization basis (252 traditional default,
-  // byte-identical to pre-#597; 365 for a crypto-legged blend) threaded to
-  // EVERY risk-metric annualization below (te √N, IR ×N, stdExcess √N, alpha ×N).
+  // Tracking error comes from the reused helper; the information ratio is the
+  // shared Sharpe of the excess series. `periodsPerYear` is the annualization
+  // basis (252 traditional default, byte-identical to pre-#597; 365 for a
+  // crypto-legged blend) threaded to EVERY risk-metric annualization below
+  // (te √N, IR ×N/√N, alpha ×N).
   const te = computeTrackingError(p, b, periodsPerYear); // std(p−b)·√periodsPerYear
+  // IR = mean(p−b)·N / (sampleStd(p−b)·√N), which is exactly the shared
+  // `sharpe` of the excess series with rf 0 and ddof 1 (the same mean, the same
+  // sd and the same operation order, so it is bitwise the value this file
+  // computed by hand before; `trackingError` keeps reporting te). Degeneracy is
+  // the shared floor, not an exact `te > 0`: a numerically-constant-but-NONZERO
+  // excess (e.g. steady +0.003/day outperformance, or a constant yield on top of
+  // the benchmark) leaves std(excess) ≈ 1e-16 of mean-subtraction residue, which
+  // passes `> 0` and fabricates IR ≈ 1e13 to 1e15, a finite number formatNumber
+  // would render. The shared Sharpe answers null there, so the UI renders "—".
+  // The floor is a test on the daily sd → basis-invariant (fires identically at
+  // 252 and 365).
   const diff = p.map((v, i) => v - b[i]);
-  const excessMean = mean(diff);
-  // IR degeneracy is detected by RELATIVE scale, NOT an exact `te > 0` — the
-  // SAME float-residue trap beta/alpha/correlation already guard. A
-  // numerically-constant-but-NONZERO excess (e.g. steady +0.003/day
-  // outperformance) leaves te = std(excess)·√periodsPerYear ≈ 1e-16 (mean-
-  // subtraction residue), which passes `> 0` and fabricates IR ≈
-  // excessMean·periodsPerYear/1e-16 ≈ 2.5e15, a finite number formatNumber
-  // would render. Test instead whether the excess series' own dispersion
-  // (std = te/√periodsPerYear) is negligible relative to its level → surface
-  // null so the UI renders "—". The guard is a ratio test → basis-invariant
-  // (fires identically at 252 and 365).
-  const stdExcess = te / Math.sqrt(periodsPerYear);
-  const teIsDegenerate = stdExcess <= 1e-12 * (Math.abs(excessMean) + 1e-12);
-  const informationRatio = teIsDegenerate
-    ? null
-    : (excessMean * periodsPerYear) / te;
+  const informationRatio = sharpe(diff, { periodsPerYear, ddof: 1 });
 
   // var(b): POPULATION variance of the aligned benchmark. Computed FIRST so
   // the constant-benchmark degenerate case is detected here. computeAlphaBeta
-  // is NOT a safe net: it returns {alpha:0, beta:0} only for n<2, but for a
-  // numerically-constant benchmark with n>=2 its `varB>0?:0` branch does not
-  // fire (float residue leaves varB ~1e-37, not exactly 0), so it returns a
-  // meaningless finite beta (~2) and alpha = meanR*periodsPerYear — a
-  // fabricated number, not 0. A constant benchmark must surface "—", not a 0.
+  // is NOT a safe net: it answers a constant benchmark with beta 0 and
+  // alpha = meanR*periodsPerYear, a number where the honest answer is an
+  // absence. A constant benchmark must surface "—", not a 0.
   //
-  // Degeneracy is detected by RELATIVE scale, not exact `varB === 0`: a
-  // genuinely constant series (e.g. every value 0.003) does NOT yield an exact
-  // zero variance once it passes through floating-point mean subtraction
-  // (mean([0.003×6]) === 0.0029999999999999996, leaving ~1e-37 residual var,
-  // which computeAlphaBeta then divides into a meaningless beta of ~2). The
-  // honest test is: the benchmark's spread (std) is negligible relative to its
-  // own level. This treats any numerically-constant benchmark as degenerate
-  // while never mis-flagging a real BTC series.
+  // Degeneracy is the shared floor, not exact `varB === 0`: a genuinely
+  // constant series (e.g. every value 0.003) does NOT yield an exact zero
+  // variance once it passes through floating-point mean subtraction
+  // (mean([0.003×6]) === 0.0029999999999999996, leaving ~1e-37 residual var),
+  // and a compounding-NAV constant yield leaves a spread of about 1e-16. The
+  // honest test is: the benchmark's spread (std) is float residue at its own
+  // level, `std <= 1e-12 * max(1, |mean|)`. This treats any numerically-constant
+  // benchmark as degenerate while never mis-flagging a real BTC series.
   const meanB = mean(b);
   const varB = mean(b.map((x) => (x - meanB) ** 2));
-  const benchmarkIsDegenerate =
-    Math.sqrt(varB) <= 1e-12 * (Math.abs(meanB) + 1e-12);
+  const benchmarkIsDegenerate = dispersionIsResidue(Math.sqrt(varB), meanB);
   let alpha: number | null;
   let beta: number | null;
   if (benchmarkIsDegenerate) {
@@ -167,30 +166,13 @@ export function computeScenarioBenchmark(
     beta = ab.beta;
   }
 
-  // Pearson sample correlation (mirror the correlation_matrix loop in
-  // scenario.ts — sample cov / std·std).
-  // Null (not 0) when either side has effectively zero variance: an undefined
-  // correlation is an absence, rendered as an em-dash, not a fabricated 0. The
-  // degeneracy test is the SAME relative-scale check used for beta/alpha, so a
-  // numerically-constant series (whose float residue leaves a ~1e-18 nonzero
-  // std) is consistently treated as having no variance.
-  const meanP = mean(p);
-  let sampCov = 0;
-  let varPsum = 0;
-  let varBsum = 0;
-  for (let i = 0; i < n; i++) {
-    const dp = p[i] - meanP;
-    const db = b[i] - meanB;
-    sampCov += dp * db;
-    varPsum += dp * dp;
-    varBsum += db * db;
-  }
-  sampCov /= n - 1;
-  const stdP = Math.sqrt(varPsum / (n - 1));
-  const stdB = Math.sqrt(varBsum / (n - 1));
-  const pIsDegenerate = stdP <= 1e-12 * (Math.abs(meanP) + 1e-12);
-  const correlation =
-    !pIsDegenerate && !benchmarkIsDegenerate ? sampCov / (stdP * stdB) : null;
+  // Pearson correlation: the shared `pearson` (the sums form, equal to the
+  // sample form this file carried before to the display precision). Null (not
+  // 0) when either side has no dispersion on the shared floor: an undefined
+  // correlation is an absence, rendered as an em-dash, not a fabricated 0. A
+  // numerically-constant series (whose float residue leaves a ~1e-16 nonzero
+  // std) is consistently treated as having no variance, on either leg.
+  const correlation = pearson(p, b);
 
   return {
     n,
