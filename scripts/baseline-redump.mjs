@@ -45,6 +45,7 @@
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -540,7 +541,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date }) {
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 30;
+export const EXPECTED_ASSERTIONS = 46;
 
 function selfTest() {
   let pass = true;
@@ -558,6 +559,28 @@ function selfTest() {
     } catch {
       return true;
     }
+  };
+  /**
+   * Run `fn` with console.log/console.error captured, and render a throw the way
+   * `main` does (`::error::baseline-redump: …`), so an arm can assert on EVERYTHING
+   * a run would put in the public Actions log. `threw` is the Error or null.
+   */
+  const capture = (fn) => {
+    const lines = [];
+    const [log, err] = [console.log, console.error];
+    console.log = (...a) => lines.push(a.join(" "));
+    console.error = (...a) => lines.push(a.join(" "));
+    let threw = null;
+    try {
+      fn();
+    } catch (e) {
+      threw = e;
+      lines.push(`::error::baseline-redump: ${e.message}`);
+    } finally {
+      console.log = log;
+      console.error = err;
+    }
+    return { threw, text: lines.join("\n") };
   };
 
   console.log("=== SELF-TEST 1/4: pure functions");
@@ -703,6 +726,99 @@ function selfTest() {
     ok(
       throws(() => gateDump({ repoRoot: repo, dump: dumpPath, merge: "d".repeat(40), runId: "1", cliVersion: "2.98.2", out: join(dir, "x"), emit })),
       "a --merge that is not HEAD is refused",
+    );
+
+    console.log("=== SELF-TEST 2b/4: every section-C refusal fires on a red fixture built at runtime");
+    // ⛔ Every secret-shaped value below is JOINED FROM FRAGMENTS at runtime, so this
+    // file never carries a DSN-, host-, ref- or JWT-shaped literal (RESEARCH F13);
+    // `ci.yml`'s secret-scan scans the push-to-main range. The macOS home prefix is
+    // built from char codes for the same reason (check-planning-hygiene Rule 2).
+    const dumpText = realDump.toString("latin1");
+    if (!dumpText.endsWith("\n")) throw new Error("self-test premise: the committed dump ends with a newline");
+    const appendedLine = dumpText.split("\n").length; // 1-based number of a line appended after the last "\n"
+    const withLine = (line) => Buffer.concat([realDump, Buffer.from(line + "\n", "latin1")]);
+    let redN = 0;
+    const redGate = (bytes) => {
+      redN += 1;
+      const p = join(dir, `red-${redN}.sql`);
+      const outDir = join(dir, `red-out-${redN}`);
+      writeFileSync(p, bytes);
+      outputs.length = 0;
+      const r = capture(() =>
+        gateDump({ repoRoot: repo, dump: p, merge: base, runId: "1", cliVersion: "2.98.2", out: outDir, emit }),
+      );
+      return { ...r, wroteNothing: !existsSync(outDir) && outputs.length === 0 };
+    };
+    const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+    const jwtValue = [b64({ alg: "HS256", typ: "JWT" }), b64({ iss: "self-test", role: "fixture" }), "s".repeat(12) + "x".repeat(12)].join(".");
+    const secretClasses = [
+      ["a DSN scheme", ["postgres", "ql", ":/", "/self-test", ":x", "@db", ".example.invalid/postgres"].join("")],
+      ["a Supabase host", ["@db.fixture", ".supa", "base", ".co"].join("")],
+      ["a 20-letter ref subdomain", ["q".repeat(20), ".supa", "base"].join("")],
+      ["the psql connect meta-command", ["\\", "con", "nect", " fixture"].join("")],
+      ["ALTER DATABASE", ["ALTER", " DATA", "BASE", " fixture SET x = 1;"].join("")],
+      ["a JWT-shaped token", jwtValue],
+    ];
+    for (const [label, value] of secretClasses) {
+      const r = redGate(withLine(`-- ${value}`));
+      ok(
+        r.threw !== null && r.text.includes(`baseline-redump secret-scan: 1 hit(s) at line(s) ${appendedLine}`) &&
+          !r.text.includes(value) && r.wroteNothing,
+        `secret class '${label}' refuses at line ${appendedLine}, prints only the count and line, and writes nothing`,
+      );
+    }
+    const homeRunner = ["/ho", "me/", "runner/work/x"].join("");
+    const homeMac = String.fromCharCode(47, 85, 115, 101, 114, 115, 47) + "fixture/x";
+    const integrityCases = [
+      ["an appended NUL byte", Buffer.concat([realDump, Buffer.from([0])]), /integrity refused: .*1 NUL byte/, null],
+      ["a second SET client_encoding", withLine("SET client_encoding = 'UTF8';"), /integrity refused: .*2 'SET client_encoding' line/, null],
+      ["no SET client_encoding", Buffer.from(dumpText.replace(/^SET client_encoding[^\n]*\n/m, ""), "latin1"), /integrity refused: .*0 'SET client_encoding' line/, null],
+      ["a runner home path", withLine(`-- ${homeRunner}`), new RegExp(`integrity refused: .*home-directory path.*line\\(s\\) ${appendedLine}`), homeRunner],
+      ["a macOS home path", withLine(`-- ${homeMac}`), new RegExp(`integrity refused: .*home-directory path.*line\\(s\\) ${appendedLine}`), homeMac],
+    ];
+    for (const [label, bytes, re, secret] of integrityCases) {
+      const r = redGate(bytes);
+      ok(
+        r.threw !== null && re.test(r.threw.message) && (secret === null || !r.text.includes(secret)) && r.wroteNothing,
+        `integrity refuses ${label}${secret ? ", naming the line and never the path" : ""}`,
+      );
+    }
+    const noTables = redGate(Buffer.from(dumpText.replace(/^CREATE TABLE/gm, "-- CREATE TABLE"), "latin1"));
+    ok(
+      noTables.threw !== null && /creates nothing is not a baseline/.test(noTables.threw.message) && noTables.wroteNothing,
+      "a dump with zero CREATE TABLE lines refuses (a dump that creates nothing is not a baseline)",
+    );
+    const withData = redGate(withLine('INSERT INTO "public"."t" VALUES (1);'));
+    ok(
+      withData.threw !== null && /carrying data/.test(withData.threw.message) && withData.wroteNothing,
+      "a dump with one INSERT INTO line refuses (a schema-only dump carrying data)",
+    );
+    // A merge tree holding a basename outside the strict 14-digit shape (D-27).
+    const repo2 = join(dir, "repo2");
+    g(["clone", "-q", repo, repo2], { cwd: dir });
+    writeFileSync(join(repo2, "supabase/migrations/2026_bad.sql"), "SELECT 0;\n");
+    g(["add", "--", "supabase/migrations/2026_bad.sql"], { cwd: repo2 });
+    g(["commit", "-q", "-m", "bad basename"], { cwd: repo2 });
+    outputs.length = 0;
+    const badName = capture(() =>
+      gateDump({
+        repoRoot: repo2, dump: join(repo2, BASELINE_SQL_REL), merge: g(["rev-parse", "HEAD"], { cwd: repo2 }).trim(),
+        runId: "1", cliVersion: "2.98.2", out: join(dir, "bad-out"), emit,
+      }),
+    );
+    ok(
+      badName.threw !== null && /1 migration basename\(s\) at the merge \(position\(s\) 1\)/.test(badName.threw.message) &&
+        !badName.text.includes("2026_bad") && !existsSync(join(dir, "bad-out")),
+      "a merge tree holding supabase/migrations/2026_bad.sql refuses by count and position, never echoing the name",
+    );
+    const corpus = git(REPO_ROOT, ["ls-tree", "--name-only", "HEAD", MIGRATIONS_REL]).split("\n").filter((p) => p.endsWith(".sql"));
+    ok(
+      corpus.length > 0 && corpus.every((p) => MIGRATION_BASENAME_STRICT_RE.test(p.replace(/^.*\//, ""))),
+      `every committed migration basename (${corpus.length}) passes the strict rule`,
+    );
+    ok(
+      mj.secret_scan_hits === 0 && JSON.stringify(mj.integrity) === JSON.stringify({ nul: 0, client_encoding: 1, home_path: 0 }),
+      "measured.json records secret_scan_hits 0 and integrity {nul 0, client_encoding 1, home_path 0}",
     );
 
     console.log("=== SELF-TEST 3/4: --compose in the same scratch repo, with the child gates injected");
