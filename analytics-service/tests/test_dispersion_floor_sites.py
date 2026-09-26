@@ -39,6 +39,22 @@ _YIELD_PARAMS = pytest.mark.parametrize(
 )
 
 
+def _residue_yield(daily_yield: float) -> pd.Series:
+    """A compounding-NAV constant yield, with its precondition asserted.
+
+    Round-1 SFH LOW-3: every S-site test that feeds a constant yield must
+    exercise the RESIDUE branch, ``0 < std <= residue_floor(mean)``. If a numpy
+    or platform change ever returned an exact 0.0 std, the old ``== 0`` guards
+    would pass these tests too, and they would stop proving the floor.
+    """
+    r = nav_constant_yield(daily_yield)
+    sd, mean = float(r.std()), float(r.mean())
+    assert 0.0 < sd <= residue_floor(mean), (
+        f"fixture precondition: {daily_yield} must be residue, not exact zero (sd={sd})"
+    )
+    return r
+
+
 def _exact_constant_like(r: pd.Series) -> pd.Series:
     """An exactly constant (all-zero) series of the same length and index: the
     D-07 reference input, whose std is exactly 0.0."""
@@ -59,7 +75,7 @@ def _cent_rounded_1pct_apy() -> pd.Series:
 def test_s1_compute_sharpe_constant_yield_is_undefined(daily_yield):
     """A constant yield has no dispersion, so its Sharpe does not exist. Today's
     ``== 0`` guard lets the ~1e-16 residue through and returns ~1e13."""
-    r = nav_constant_yield(daily_yield)
+    r = _residue_yield(daily_yield)
     assert _compute_sharpe(r) is None
 
 
@@ -67,7 +83,7 @@ def test_s1_compute_sharpe_constant_yield_is_undefined(daily_yield):
 def test_s1_compute_sharpe_constant_yield_matches_exact_constant(daily_yield):
     """D-07: the constant yield answers exactly what an exactly constant series
     of the same length answers."""
-    r = nav_constant_yield(daily_yield)
+    r = _residue_yield(daily_yield)
     control = _exact_constant_like(r)
     assert _compute_sharpe(control) is None
     assert _compute_sharpe(r) == _compute_sharpe(control)
@@ -107,7 +123,7 @@ def test_s2_constant_yield_candidate_is_dropped_noisy_candidate_kept(daily_yield
     candidate, whether its std is exactly 0 or the ~1e-16 residue of a
     compounding NAV. Today the residue passes the ``== 0.0`` test and the
     candidate is scored on a residue correlation."""
-    const = nav_constant_yield(daily_yield)
+    const = _residue_yield(daily_yield)
     index = const.index
     candidates = {"const": const, "noisy": _noisy(index, 1663)}
     ids = [c["strategy_id"] for c in find_improvement_candidates(
@@ -182,7 +198,7 @@ def test_s3_repeated_positive_return_rejected_without_a_fabricated_number():
 
 @_YIELD_PARAMS
 def test_s3_nav_constant_yield_rejected_without_a_fabricated_number(daily_yield):
-    values = nav_constant_yield(daily_yield)
+    values = _residue_yield(daily_yield)
     _assert_residue(values)
     errors = _constant_errors(validate_csv(_returns_csv(values), "daily_returns"))
     assert len(errors) == 1
@@ -223,7 +239,7 @@ def test_s3_real_quantisation_dispersion_still_reports_a_finite_sharpe():
 
 @_YIELD_PARAMS
 def test_s4_annualised_sharpe_constant_yield_is_nan(daily_yield):
-    r = nav_constant_yield(daily_yield)
+    r = _residue_yield(daily_yield)
     assert math.isnan(_annualised_sharpe(_exact_constant_like(r)))
     assert math.isnan(_annualised_sharpe(r))
 
@@ -248,7 +264,7 @@ def _builder_over(daily_return: pd.Series) -> EquityCurveBuilder:
 
 @_YIELD_PARAMS
 def test_s5_equity_curve_sharpe_constant_yield_is_none(daily_yield):
-    r = nav_constant_yield(daily_yield)
+    r = _residue_yield(daily_yield)
     assert _builder_over(_exact_constant_like(r)).compute_sharpe() is None
     assert _builder_over(r).compute_sharpe() is None
 
@@ -271,7 +287,7 @@ def _as_pairs(s: pd.Series) -> list[tuple[str, float]]:
 
 @_YIELD_PARAMS
 def test_s6_optimizer_constant_yield_column_is_constant_series(daily_yield):
-    const = nav_constant_yield(daily_yield)
+    const = _residue_yield(daily_yield)
     series = {"const": _as_pairs(const), "noisy": _as_pairs(_noisy(const.index, 1664))}
     out = optimize_weights(series)
     assert out.ok is False
@@ -291,7 +307,7 @@ def test_s7_risk_decomposition_of_constant_yields_splits_no_risk(daily_yield):
     51.4%. The share is undefined, so it is None (round-1 SFH MEDIUM-2, founder
     decision D7 2026-09-26), not the 0 that made the rows sum to 0%. The
     all-zero book reads the same (D7)."""
-    a = nav_constant_yield(daily_yield)
+    a = _residue_yield(daily_yield)
     b = nav_constant_yield(daily_yield / 2)
     for sd, mean in ((float(a.std()), float(a.mean())), (float(b.std()), float(b.mean()))):
         assert 0.0 < sd <= residue_floor(mean), "precondition: residue, not an exact zero"
