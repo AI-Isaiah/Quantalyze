@@ -18,8 +18,15 @@
  * the all-zero input and asserts the constant-yield output identical to it.
  */
 import { describe, it, expect } from "vitest";
-import { computeAlphaBeta, computeRiskDecomposition } from "@/lib/portfolio-stats";
-import { beta as sharedBeta } from "@/lib/return-stats";
+import {
+  computeAlphaBeta,
+  computeRiskDecomposition,
+  computeTrackingError,
+} from "@/lib/portfolio-stats";
+import { mean, type DailyPoint } from "@/lib/portfolio-math-utils";
+import { beta as sharedBeta, pearson, sharpe } from "@/lib/return-stats";
+import { computeScenarioBenchmark } from "@/app/(dashboard)/allocations/lib/scenario-benchmark";
+import { computeScenarioStress } from "@/app/(dashboard)/allocations/lib/scenario-stress";
 import {
   CONSTANT_YIELDS,
   apyToDaily,
@@ -36,6 +43,24 @@ function noisy(n: number, phase: number, drift = 0.001): number[] {
     out.push(drift + 0.02 * Math.sin(i * 1.7 + phase) + 0.005 * Math.cos(i * 0.31 + 2 * phase));
   }
   return out;
+}
+
+/** Daily ISO dates from 2024-01-01, deterministic. */
+function isoDates(n: number): string[] {
+  const out: string[] = [];
+  const d = new Date("2024-01-01T00:00:00Z");
+  for (let i = 0; i < n; i++) {
+    out.push(d.toISOString().slice(0, 10));
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return out;
+}
+
+const DATES = isoDates(366);
+
+/** Dated points on the shared daily axis. */
+function dated(values: number[]): DailyPoint[] {
+  return values.map((value, i) => ({ date: DATES[i], value }));
 }
 
 /** Sample covariance matrix of the given return series (ddof 1). */
@@ -126,5 +151,114 @@ describe("T10 computeRiskDecomposition: two constant-yield strategies give what 
       [0, 0.01],
     ]).map((c) => c.percentage);
     pct.forEach((p) => expect(p).toBe(0));
+  });
+});
+
+// ── T11: computeScenarioBenchmark on the shared floor, pearson and sharpe ──
+describe("T11 computeScenarioBenchmark: constant-yield legs give what all-zero legs give", () => {
+  const port = dated(NOISY_A);
+  const zeroBench = computeScenarioBenchmark(port, dated(ZEROS));
+
+  it.each(YIELD_IDS)("%s benchmark: beta and alpha null, as for an all-zero benchmark", (id) => {
+    const r = computeScenarioBenchmark(port, dated(navConstantYield(CONSTANT_YIELDS[id], N)));
+    expect(Object.is(r.beta, zeroBench.beta)).toBe(true);
+    expect(Object.is(r.alpha, zeroBench.alpha)).toBe(true);
+    expect(r.beta).toBeNull();
+    expect(r.alpha).toBeNull();
+  });
+
+  it.each(YIELD_IDS)("%s benchmark: correlation null, as for an all-zero benchmark", (id) => {
+    const r = computeScenarioBenchmark(port, dated(navConstantYield(CONSTANT_YIELDS[id], N)));
+    expect(Object.is(r.correlation, zeroBench.correlation)).toBe(true);
+    expect(r.correlation).toBeNull();
+  });
+
+  it.each(YIELD_IDS)("%s portfolio: correlation null, as for an all-zero portfolio", (id) => {
+    const bench = dated(NOISY_B);
+    const r = computeScenarioBenchmark(dated(navConstantYield(CONSTANT_YIELDS[id], N)), bench);
+    const zeroPort = computeScenarioBenchmark(dated(ZEROS), bench);
+    expect(Object.is(r.correlation, zeroPort.correlation)).toBe(true);
+    expect(r.correlation).toBeNull();
+  });
+
+  it.each(YIELD_IDS)(
+    "%s excess (portfolio = benchmark + a constant yield): information ratio null, as for a zero excess",
+    (id) => {
+      const y = navConstantYield(CONSTANT_YIELDS[id], N);
+      const bench = dated(NOISY_B);
+      const r = computeScenarioBenchmark(dated(NOISY_B.map((v, i) => v + y[i])), bench);
+      const zeroExcess = computeScenarioBenchmark(dated(NOISY_B), bench);
+      expect(Object.is(r.informationRatio, zeroExcess.informationRatio)).toBe(true);
+      expect(r.informationRatio).toBeNull();
+    },
+  );
+
+  it("control: cent-rounded 1% APY legs disperse, so beta, correlation and IR stay finite", () => {
+    const withCentBench = computeScenarioBenchmark(
+      dated(CENT_CONTROL.map((v, i) => v + 0.5 * NOISY_A[i])),
+      dated(CENT_CONTROL),
+    );
+    expect(Number.isFinite(withCentBench.beta)).toBe(true);
+    expect(Number.isFinite(withCentBench.alpha)).toBe(true);
+    expect(Number.isFinite(withCentBench.correlation)).toBe(true);
+
+    const withCentPort = computeScenarioBenchmark(dated(CENT_CONTROL), dated(NOISY_B));
+    expect(Number.isFinite(withCentPort.correlation)).toBe(true);
+
+    const withCentExcess = computeScenarioBenchmark(
+      dated(NOISY_B.map((v, i) => v + CENT_CONTROL[i])),
+      dated(NOISY_B),
+    );
+    expect(Number.isFinite(withCentExcess.informationRatio)).toBe(true);
+  });
+
+  it("noisy legs: correlation is today's to display precision and exactly the shared pearson", () => {
+    const r = computeScenarioBenchmark(dated(NOISY_A), dated(NOISY_B));
+    // Today's sample correlation, written out: sample cov over sample sd * sample sd.
+    const mA = mean(NOISY_A);
+    const mB = mean(NOISY_B);
+    let cov = 0;
+    let vA = 0;
+    let vB = 0;
+    for (let i = 0; i < N; i++) {
+      cov += (NOISY_A[i] - mA) * (NOISY_B[i] - mB);
+      vA += (NOISY_A[i] - mA) ** 2;
+      vB += (NOISY_B[i] - mB) ** 2;
+    }
+    const sampleCorr = cov / (N - 1) / (Math.sqrt(vA / (N - 1)) * Math.sqrt(vB / (N - 1)));
+    expect(r.correlation).toBeCloseTo(sampleCorr, 3);
+    expect(Object.is(r.correlation, pearson(NOISY_A, NOISY_B))).toBe(true);
+  });
+
+  it.each([252, 365])(
+    "noisy legs at %i: the IR is bitwise today's value and exactly the shared sharpe of the excess",
+    (periodsPerYear) => {
+      const r = computeScenarioBenchmark(dated(NOISY_A), dated(NOISY_B), periodsPerYear);
+      const diff = NOISY_A.map((v, i) => v - NOISY_B[i]);
+      const te = computeTrackingError(NOISY_A, NOISY_B, periodsPerYear);
+      expect(Object.is(r.informationRatio, (mean(diff) * periodsPerYear) / te)).toBe(true);
+      expect(Object.is(r.informationRatio, sharpe(diff, { periodsPerYear, ddof: 1 }))).toBe(true);
+      expect(Object.is(r.trackingError, te)).toBe(true);
+    },
+  );
+});
+
+// ── T12: computeScenarioStress on the shared floor ──────────────────
+describe("T12 computeScenarioStress: a constant-yield series takes the all-zero series' degenerate branch", () => {
+  const btc = dated(NOISY_B);
+  const zeroStress = computeScenarioStress(dated(ZEROS), btc);
+
+  it.each(YIELD_IDS)("%s series: var and cvar null, as for an all-zero series", (id) => {
+    const r = computeScenarioStress(dated(navConstantYield(CONSTANT_YIELDS[id], N)), btc);
+    expect(Object.is(r.var, zeroStress.var)).toBe(true);
+    expect(Object.is(r.cvar, zeroStress.cvar)).toBe(true);
+    expect(r.var).toBeNull();
+    expect(r.cvar).toBeNull();
+  });
+
+  it("control: a cent-rounded 1% APY series disperses, so var and cvar are finite", () => {
+    const r = computeScenarioStress(dated(CENT_CONTROL), btc);
+    expect(Number.isFinite(r.var)).toBe(true);
+    expect(Number.isFinite(r.cvar)).toBe(true);
   });
 });
