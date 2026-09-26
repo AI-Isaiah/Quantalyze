@@ -24,6 +24,13 @@ vi.mock("server-only", () => ({}));
 // 167.2 review-fix: the page captures its read failures to Sentry.
 const captureToSentryMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
+// 167.2.1-REVIEW-SFH-R2 N-7: the real copy module, with `unbuildableNoteKindOf`
+// wrapped in a spy so one case can drive its exhaustiveness throw.
+vi.mock("@/lib/status-surface-copy", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/status-surface-copy")>();
+  return { ...actual, unbuildableNoteKindOf: vi.fn(actual.unbuildableNoteKindOf) };
+});
+import { unbuildableNoteKindOf } from "@/lib/status-surface-copy";
 
 vi.mock("next/link", () => ({
   default: ({ children, href }: { children: React.ReactNode; href: string }) =>
@@ -1060,6 +1067,36 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       vi.useRealTimers();
       consoleWarn.mockRestore();
     }
+  });
+
+  it("N7-KIND-THROW-ONE-ROW (167.2.1-REVIEW-SFH-R2 N-7): an exhaustiveness throw from unbuildableNoteKindOf fails that row's check, never the whole list", async () => {
+    // Reachable only through a type lie (a widened reason from elsewhere).
+    // Outside the per-row try it rejected Promise.all, and the owner got the
+    // error boundary for the entire page.
+    vi.mocked(unbuildableNoteKindOf).mockImplementationOnce(() => {
+      throw new Error("unbuildableNoteKindOf: unhandled reason synthetic_reason");
+    });
+    state.strategies = [
+      row("s-lie", { status: "draft", strategy_analytics: { computation_status: "complete" } }),
+      row("s-fine", { status: "draft", strategy_analytics: { computation_status: "complete" } }),
+    ];
+    state.adminRows = { "s-lie": onePoint("s-lie") };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-lie")).toBe(PROBE_UNREADABLE);
+    expect(noteOf(container, "Strategy s-fine")).toBeNull();
+    expect(consoleError).toHaveBeenCalledWith(
+      "[strategies/page] factsheet probe failed",
+      expect.objectContaining({ id: "s-lie" }),
+    );
+    // Captured with the other throws, as its own cause.
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    const [err, ctx] = captureToSentryMock.mock.calls[0] as [Error, unknown];
+    expect(err.message).toBe("unbuildableNoteKindOf: unhandled reason synthetic_reason");
+    expect(ctx).toEqual({
+      tags: { ...PROBE_TAGS.tags, probe_throws: "1", probe_throw_kinds: "1", group_throws: "1" },
+    });
   });
 
   it("PROBE-NOT-COMPUTED (D-05, SFH M-5): the embed says complete but the builder's read says failed, so the row takes the uncomputed path, logged at warn", async () => {

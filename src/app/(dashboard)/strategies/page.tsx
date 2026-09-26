@@ -569,10 +569,17 @@ export default async function StrategiesPage() {
           // answer is a writer-side verdict or a column-light resolve, not a
           // shortcut here.
           let probe: Awaited<ReturnType<typeof probeFactsheetBuildable>>;
+          let kind: ReturnType<typeof unbuildableNoteKindOf>;
           try {
             probe = await runProbe(() =>
               probeFactsheetBuildable(s.id, (q) => withPublishedOrOwner(q, user.id)),
             );
+            // 167.2.1-REVIEW-SFH-R2 N-7: inside the per-row try. Its `never`
+            // arm throws on a reason it does not know (reachable only through
+            // a type lie). Out here, that throw rejected `Promise.all` and put
+            // the whole list behind the error boundary; in here it fails this
+            // row's check, and is captured with the other throws.
+            kind = probe.buildable ? null : unbuildableNoteKindOf(probe.reason);
           } catch (err) {
             if (err instanceof FactsheetProbeTimeoutError) {
               // 167.2.1-REVIEW-SFH-R2 N-3: no answer within the probe's
@@ -645,8 +652,7 @@ export default async function StrategiesPage() {
             });
             return [s.id, await uncomputedNote(s, mode)] as const;
           }
-          // D-02: computed, but the builder refuses it.
-          const kind = unbuildableNoteKindOf(probe.reason);
+          // D-02: computed, but the builder refuses it (`kind`, above).
           return [s.id, recipientShareNoteFor(mode, await armOf(s, mode), kind)] as const;
         }),
       )
