@@ -52,6 +52,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 import ccxt
+import sentry_sdk
 from cryptography.fernet import InvalidToken
 from fastapi import HTTPException
 # APIResponse is the documented return type of a PostgREST builder's
@@ -93,7 +94,7 @@ from services.closed_sets import (  # B8b: single-sourced closed sets, re-export
     mt5_enabled_server,
     sfox_enabled_server,
 )
-from services.db import db_execute, get_supabase, one, rows
+from services.db import db_execute, db_read_with_retry, get_supabase, one, rows
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
     aclose_exchange,
@@ -695,6 +696,13 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     # exceeds its per-kind timeout. Transient — we want to retry.
     if isinstance(exc, asyncio.TimeoutError):
         return ("transient", f"Handler exceeded timeout: {str(exc)[:200]}")
+
+    # Phase 164.6.7 / D-09. The live re-read of a refresh marker failed, so the
+    # composite handler could not tell whether its failure may be stamped without
+    # un-publishing a funded account, and wrote nothing. TRANSIENT: the queue
+    # retries the whole job and the next attempt re-reads the row.
+    if isinstance(exc, RefreshMarkerRereadUnavailable):
+        return ("transient", str(exc)[:500])
 
     # Fernet InvalidToken means the DEK cannot be unwrapped with the
     # current KEK — either a key rotation mismatch or a corrupted row.
@@ -2585,19 +2593,73 @@ async def _resolve_ccxt_flow_price_index(
 # is precisely the green-against-the-bug shape.
 #
 # ⛔ FAIL-SAFE DIRECTION, non-negotiable and identical to every other D-15
-# decision: a missing id, an unreadable row, no row, a non-dict metadata and any
-# raised exception all answer FALSE — no protection, LOUD path. Never fail
-# toward suppression.
+# decision: only ``MarkerLiveState.PRESENT`` keeps a protection. A missing id, no
+# row, a non-dict metadata, a different source and a failed read all answer
+# something else, and no caller may read any of them as "still marked".
+#
+# ⭐ The answer is a STATE, not a bool (Phase 164.6.7, SFH-02 / WR-02). Four call
+# sites log from it, and while it was a bool each of them said "RETRACTED — a
+# user-initiated request was served" for all five non-present causes, including a
+# read that merely failed. An operator triaging a darkened factsheet then went
+# looking for a resync that never happened. Each state now names its own cause.
+#
+# ⛔ ``READ_ERROR`` is the one state that is NOT an answer about the row, and the
+# composite site treats it differently from the rest (CONTEXT D-09, 2026-09-25):
+# it stamps nothing and raises ``RefreshMarkerRereadUnavailable`` so the job
+# fails TRANSIENT and retries. Every other state is a DEFINITIVE answer and still
+# takes the loud path. The single-key sites still take the loud path on
+# ``READ_ERROR``; D-09 was decided for the composite site only.
+#
+# ⚠️ The read goes through ``db_read_with_retry``, so a gateway 504 is retried
+# inside that helper's bounded budget before it counts as a failure (WR-03). The
+# cost is a slightly longer window between this read and the stamp, on exactly
+# the path where the gateway was already slow.
+class MarkerLiveState(Enum):
+    """What the live ``compute_jobs`` row says about a refresh marker."""
+
+    PRESENT = "present"
+    """``metadata->>'source'`` still equals the marker. The only protecting state."""
+    RETRACTED = "retracted"
+    """The source is gone and ``refresh_marker_retracted`` names the marker: a
+    user's resync inherited this job through the enqueue dedup (the write shape of
+    ``_retract_refresh_marker_on_reuse`` and ``src/lib/ledger-refresh-marker.ts``)."""
+    NO_ID = "no_id"
+    """The caller had no job id to read. An invariant breach for a claimed job."""
+    NO_ROW = "no_row"
+    """The read succeeded and found no row. An invariant breach for a claimed job."""
+    OTHER_SOURCE = "other_source"
+    """The row exists but carries another source, no source, or non-dict metadata,
+    with no recorded retraction of this marker."""
+    READ_ERROR = "read_error"
+    """The read raised (after ``db_read_with_retry``'s 504 retries). Nothing is
+    known about the row."""
+
+    def __bool__(self) -> bool:
+        # Every Enum member is truthy by default, so a caller written against the
+        # old bool (``not await _refresh_marker_still_on_row(...)``) would read
+        # EVERY state as "still marked" and suppress every failure. Refuse loudly.
+        raise TypeError(
+            "MarkerLiveState has no truth value; compare against "
+            "MarkerLiveState.PRESENT explicitly"
+        )
+
+
+class RefreshMarkerRereadUnavailable(Exception):
+    """The live re-read of a refresh marker failed, so the composite terminal
+    stamp could not be chosen. ``classify_exception`` maps it to TRANSIENT."""
+
+
 async def _refresh_marker_still_on_row(
     supabase: Any, job_id: Any, expected: str
-) -> bool:
-    """True only if ``compute_jobs.metadata->>'source'`` for ``job_id`` STILL
-    equals ``expected``. See the block comment above for why a live re-read and
-    not the claim-time snapshot."""
+) -> MarkerLiveState:
+    """What ``compute_jobs.metadata`` for ``job_id`` says NOW about the marker
+    ``expected``. Only ``PRESENT`` keeps a protection. See the block comment above
+    for why a live re-read and not the claim-time snapshot, and for why the answer
+    is a state."""
     if not job_id:
-        return False
+        return MarkerLiveState.NO_ID
 
-    def _read_live_source() -> Any:
+    def _read_live_row() -> Any:
         res = (
             supabase.table("compute_jobs")
             .select("metadata")
@@ -2605,21 +2667,73 @@ async def _refresh_marker_still_on_row(
             .maybe_single()
             .execute()
         )
-        row = getattr(res, "data", None)
-        metadata = row.get("metadata") if isinstance(row, dict) else None
-        return metadata.get("source") if isinstance(metadata, dict) else None
+        # postgrest's maybe_single returns None ITSELF for zero rows.
+        return getattr(res, "data", None)
 
     try:
-        live_source = await db_execute(_read_live_source)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
+        row = await db_read_with_retry(_read_live_row)
+    except Exception as exc:  # noqa: BLE001 — every failure is reported, then answered
+        logger.error(
             "ledger-refresh: could not re-read the refresh marker on compute_job "
-            "%s (%s) — treating the marker as RETRACTED, which takes the LOUD "
-            "terminal-failure path.",
-            job_id, exc,
+            "%s (%s: %s) — its live state is UNKNOWN. The caller decides: the "
+            "composite stitch fails the job TRANSIENT and retries; a single-key "
+            "site takes the LOUD terminal path.",
+            job_id, type(exc).__name__, exc,
         )
-        return False
-    return bool(live_source == expected)
+        sentry_sdk.capture_exception(exc)
+        return MarkerLiveState.READ_ERROR
+    if not isinstance(row, dict):
+        return MarkerLiveState.NO_ROW
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict):
+        if metadata.get("source") == expected:
+            return MarkerLiveState.PRESENT
+        if metadata.get("refresh_marker_retracted") == expected:
+            return MarkerLiveState.RETRACTED
+    return MarkerLiveState.OTHER_SOURCE
+
+
+def _log_marker_not_confirmed(
+    state: MarkerLiveState,
+    *,
+    site: str,
+    job_id: Any,
+    strategy_id: Any,
+    consequence: str,
+) -> None:
+    """Log why a refresh marker was NOT confirmed on the live row, naming the
+    cause ``state`` actually records. ``consequence`` is the site's own sentence
+    about what it does next. Never called with ``PRESENT``."""
+    if state is MarkerLiveState.RETRACTED:
+        logger.warning(
+            "%s: the refresh marker on compute_job %s has been RETRACTED — a "
+            "user-initiated request was served by this job through the enqueue "
+            "dedup, so nobody unwatched owns it. %s (strategy %s).",
+            site, job_id, consequence, strategy_id,
+        )
+    elif state is MarkerLiveState.OTHER_SOURCE:
+        logger.warning(
+            "%s: the live compute_job %s no longer carries the refresh marker and "
+            "records no retraction of it (another source, no source, or non-dict "
+            "metadata). %s (strategy %s).",
+            site, job_id, consequence, strategy_id,
+        )
+    elif state is MarkerLiveState.READ_ERROR:
+        # The read's own ERROR line (with the exception) precedes this one.
+        logger.error(
+            "%s: the refresh marker on compute_job %s could not be confirmed "
+            "because the live re-read FAILED. %s (strategy %s).",
+            site, job_id, consequence, strategy_id,
+        )
+    else:  # NO_ID / NO_ROW — a claimed job must have both.
+        logger.error(
+            "%s: cannot confirm the refresh marker on compute_job %s — %s. A "
+            "claimed job with no id or no live row is an invariant breach. %s "
+            "(strategy %s).",
+            site, job_id,
+            "no job id" if state is MarkerLiveState.NO_ID else "no live row",
+            consequence, strategy_id,
+        )
 
 
 async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
@@ -3037,18 +3151,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # GRANTED, so an ordinary marked refresh pays one read on a path
                 # it was about to suppress anyway, and an unmarked derive pays
                 # nothing at all.
-                if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES and not await _refresh_marker_still_on_row(
-                    ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
-                ):
-                    logger.warning(
-                        "derive_broker_dailies: the refresh marker on compute_job "
-                        "%s has been RETRACTED — a user-initiated request was "
-                        "served by this job through the enqueue dedup, so nobody "
-                        "unwatched owns this failure. Taking the LOUD terminal "
-                        "path for strategy %s.",
-                        job.get("id"), strategy_id,
+                if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+                    _live_state = await _refresh_marker_still_on_row(
+                        ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
                     )
-                    existing_status = None
+                    if _live_state is not MarkerLiveState.PRESENT:
+                        _log_marker_not_confirmed(
+                            _live_state,
+                            site="derive_broker_dailies",
+                            job_id=job.get("id"),
+                            strategy_id=strategy_id,
+                            consequence="Taking the LOUD terminal path",
+                        )
+                        existing_status = None
 
                 if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
 
@@ -5849,17 +5964,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # hop 2 — the hop that COMPILES THE FACTSHEET — a protection that no longer
     # describes anything, and hop 2 has no other way to learn the truth: it reads
     # this metadata and nothing else.
-    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE and not await _refresh_marker_still_on_row(
-        ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
-    ):
-        logger.warning(
-            "derive_broker_dailies: the refresh marker on compute_job %s has been "
-            "RETRACTED (a user-initiated request inherited this job through the "
-            "enqueue dedup) — the chain edge to %s carries NO marker and no "
-            "publish state, so hop 2 fails LOUDLY for strategy %s.",
-            job.get("id"), _csv_analytics_kind, strategy_id,
+    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
+        _live_state_out = await _refresh_marker_still_on_row(
+            ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
         )
-        _refresh_source_out = None
+        if _live_state_out is not MarkerLiveState.PRESENT:
+            _log_marker_not_confirmed(
+                _live_state_out,
+                site="derive_broker_dailies",
+                job_id=job.get("id"),
+                strategy_id=strategy_id,
+                consequence=(
+                    f"The chain edge to {_csv_analytics_kind} carries NO marker "
+                    "and no publish state, so hop 2 fails LOUDLY"
+                ),
+            )
+            _refresh_source_out = None
 
     def _enqueue_csv_analytics() -> Any:
         _payload: dict[str, Any] = {
@@ -5913,18 +6033,36 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # property must never be silent — that silence is the whole reason REUSE-01
     # survived review. Pinned by
     # tests/test_ledger_refresh_reuse_collision.py::TestMirrorDirection.
-    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE and not await _refresh_marker_still_on_row(
-        ctx.supabase, _tail_job_id, LEDGER_REFRESH_SINGLE_KEY_SOURCE
-    ):
-        logger.warning(
-            "derive_broker_dailies: the %s chain edge for strategy %s DEDUPED onto "
-            "an already-in-flight unmarked job (%s) — the refresh marker and "
-            "publish state were DISCARDED by enqueue_compute_job, so hop 2 runs "
-            "UNPROTECTED and a failure there un-publishes this strategy. The "
-            "protection is deliberately not laundered onto a job this refresh did "
-            "not create.",
-            _csv_analytics_kind, strategy_id, _tail_job_id,
+    #
+    # ⚠️ "DEDUPED onto an unmarked job" is a claim about a row that was READ. It
+    # is logged for OTHER_SOURCE only; every other non-present state names its
+    # own cause (SFH-02), and the loss is loud either way.
+    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
+        _tail_state = await _refresh_marker_still_on_row(
+            ctx.supabase, _tail_job_id, LEDGER_REFRESH_SINGLE_KEY_SOURCE
         )
+        if _tail_state is MarkerLiveState.OTHER_SOURCE:
+            logger.warning(
+                "derive_broker_dailies: the %s chain edge for strategy %s DEDUPED "
+                "onto an already-in-flight unmarked job (%s) — the refresh marker "
+                "and publish state were DISCARDED by enqueue_compute_job, so hop 2 "
+                "runs UNPROTECTED and a failure there un-publishes this strategy. "
+                "The protection is deliberately not laundered onto a job this "
+                "refresh did not create.",
+                _csv_analytics_kind, strategy_id, _tail_job_id,
+            )
+        elif _tail_state is not MarkerLiveState.PRESENT:
+            _log_marker_not_confirmed(
+                _tail_state,
+                site="derive_broker_dailies",
+                job_id=_tail_job_id,
+                strategy_id=strategy_id,
+                consequence=(
+                    f"The {_csv_analytics_kind} chain edge cannot be confirmed "
+                    "to carry the marker, so hop 2 may run UNPROTECTED and a "
+                    "failure there would un-publish this strategy"
+                ),
+            )
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
@@ -6247,19 +6385,43 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # the same job as unprotected.
         #
         # ⚠️ It can only NARROW: the read runs only when protection would be
-        # granted, and every failure of the read (no id, no row, an exception)
-        # answers "not marked", which takes the LOUD path.
-        if _honour_marker and not await _refresh_marker_still_on_row(
-            supabase, job.get("id"), LEDGER_REFRESH_COMPOSITE_SOURCE
-        ):
-            logger.warning(
-                "stitch_composite: the refresh marker on compute_job %s has been "
-                "RETRACTED since the claim — a user-initiated request was served "
-                "by this job through the enqueue dedup, so nobody unwatched owns "
-                "this failure. Taking the LOUD terminal path for strategy %s.",
-                job.get("id"), strategy_id,
+        # granted, and every DEFINITIVE answer other than "still marked" (a
+        # retraction, another source, no row, no id) takes the LOUD path.
+        #
+        # ⛔ D-09 (orchestrator decision 2026-09-25): a read that FAILED is not an
+        # answer. Stamping loud on it turned one gateway blip into a funded
+        # composite going dark on a refresh nobody watches. So nothing is written
+        # and the job fails TRANSIENT: the queue retries it, and the retry
+        # re-reads the row. The read already logged at ERROR and reported to
+        # Sentry. Nothing is suppressed either — no error-only write happens.
+        if _honour_marker:
+            _live_state = await _refresh_marker_still_on_row(
+                supabase, job.get("id"), LEDGER_REFRESH_COMPOSITE_SOURCE
             )
-            _honour_marker = False
+            if _live_state is MarkerLiveState.READ_ERROR:
+                _log_marker_not_confirmed(
+                    _live_state,
+                    site="stitch_composite",
+                    job_id=job.get("id"),
+                    strategy_id=strategy_id,
+                    consequence=(
+                        "Writing NO terminal stamp; failing the job TRANSIENT so "
+                        "it retries"
+                    ),
+                )
+                raise RefreshMarkerRereadUnavailable(
+                    "stitch_composite: the live re-read of the refresh marker "
+                    "failed, so no terminal stamp was written; retrying the job"
+                )
+            if _live_state is not MarkerLiveState.PRESENT:
+                _log_marker_not_confirmed(
+                    _live_state,
+                    site="stitch_composite",
+                    job_id=job.get("id"),
+                    strategy_id=strategy_id,
+                    consequence="Taking the LOUD terminal path",
+                )
+                _honour_marker = False
 
         if _honour_marker:
 

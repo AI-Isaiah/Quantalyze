@@ -924,14 +924,23 @@ here, but this precondition sits here because this is where a reader would go to
    `ledger-refresh-composite` marker, the same helper the single-key honour sites use. The
    claim-time snapshot is still the first filter, and the live read can only narrow it: a marker
    retracted after the claim, a missing row, or a re-read that fails all take the loud path.
-   ⚠️ **Being changed as of 2026-09-25 (round-1 silent-failure review SFH-01, orchestrator
-   decision):** a re-read that fails TRANSIENTLY, because the read itself raised, is to fail the
-   job as TRANSIENT so it retries, instead of taking the loud path and un-publishing a live
-   factsheet over one network blip. A retracted marker or a missing row still takes the loud
-   path. ⛔ At scheduling time, read the failure arm of `_refresh_marker_still_on_row` and the
-   composite honour site in `_stamp_failed` on the DEPLOYED commit. Until that change is in the
-   commit the worker runs, "a re-read that fails" above still means the loud path, which is an
-   un-publish.
+   ⚠️ **Changed 2026-09-25 (round-1 silent-failure review SFH-01, orchestrator decision, CONTEXT
+   D-09), and it narrows the sentence above.** The line is drawn between a read that FAILED and a
+   read that ANSWERED. `_refresh_marker_still_on_row` now returns a `MarkerLiveState`, and it
+   reads through `db_read_with_retry`, so a gateway 504 is retried inside that helper's budget
+   first. If the read still raises, the state is `READ_ERROR`. It is logged at ERROR and sent to
+   Sentry. The composite honour site in `_stamp_failed` then writes NOTHING to
+   `strategy_analytics` and raises `RefreshMarkerRereadUnavailable`, which `classify_exception`
+   maps to TRANSIENT, so the queue retries the whole job. If the retry budget runs out, the job
+   ends `failed_final` with no terminal stamp from this site. Every DEFINITIVE answer other than
+   `PRESENT` still takes the loud path, and that loud path is an un-publish: `RETRACTED`,
+   `OTHER_SOURCE` (another source, no source, or non-dict metadata), `NO_ROW` and `NO_ID`. Only
+   `RETRACTED` is logged as a user-initiated retraction. `NO_ROW` and `NO_ID` go out at ERROR as
+   invariant breaches. ⚠️ This is the COMPOSITE site only. The single-key stamp closure in
+   `run_derive_broker_dailies_job` still takes the loud path on `READ_ERROR`. ⛔ At scheduling
+   time, read the `READ_ERROR` arm of the composite honour site on the DEPLOYED commit. On a
+   commit older than this change, "a re-read that fails" above still means the loud path, which
+   is an un-publish.
    📜 *Lineage, superseded 2026-09-25:* "⛔ **BLOCKING.** No schedule naming
    `public.enqueue_ledger_composite_refresh()` may be registered until `run_stitch_composite_job`
    in `analytics-service/services/job_worker.py` re-reads the LIVE `compute_jobs` row's

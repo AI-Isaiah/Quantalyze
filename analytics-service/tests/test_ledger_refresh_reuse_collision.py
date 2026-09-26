@@ -640,7 +640,12 @@ class TestMirrorDirection:
 # ---------------------------------------------------------------------------
 class TestReReadFailsSafe:
     """Neuter to redden: change ``_refresh_marker_still_on_row``'s except-arm to
-    ``return True``, or make the no-id / no-row arms return True."""
+    return ``MarkerLiveState.PRESENT``, or make the no-id / no-row arms return
+    it.
+
+    ⚠️ The single-key sites still take the LOUD path on a read error. The
+    2026-09-25 transient-retry decision (CONTEXT D-09) was taken for the
+    composite site; this test pins the single-key behaviour as it stands."""
 
     @pytest.mark.asyncio
     async def test_an_unreadable_row_takes_the_loud_path(self) -> None:
@@ -695,7 +700,219 @@ class TestReReadFailsSafe:
     async def test_a_missing_job_id_takes_the_loud_path(self) -> None:
         assert (
             await _jw._refresh_marker_still_on_row(MagicMock(), None, _MARKER)
-        ) is False
+        ) is _jw.MarkerLiveState.NO_ID
+
+
+# ---------------------------------------------------------------------------
+# 5b — the re-read says WHY the marker is not confirmed (SFH-02 / WR-02)
+# ---------------------------------------------------------------------------
+class _Gateway504(Exception):
+    """A PostgREST gateway timeout, in the structured shape
+    ``services.db._is_gateway_timeout`` keys on."""
+
+    code = "504"
+
+
+def _job_read_client(execute: Any) -> MagicMock:
+    """A client whose ``compute_jobs`` maybe_single read answers ``execute``
+    (a value, or a side_effect list / exception)."""
+    sb = MagicMock()
+    chain = sb.table.return_value.select.return_value.eq.return_value
+    chain = chain.maybe_single.return_value
+    if isinstance(execute, (list, BaseException)):
+        chain.execute.side_effect = execute
+    else:
+        chain.execute.return_value = execute
+    return sb
+
+
+class TestLiveStateNamesItsReason:
+    """Every answer the live re-read can give is a DIFFERENT fact, and four call
+    sites log from it. A bare bool made them all say "RETRACTED … a
+    user-initiated request was served", including when nothing was retracted.
+
+    Neuter to redden: collapse any two states (e.g. return ``RETRACTED`` for
+    every non-``PRESENT`` row), and the parametrised case for the other goes RED.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("answer", "expected"),
+        [
+            (MagicMock(data={"metadata": {"source": _MARKER}}), "PRESENT"),
+            (
+                MagicMock(data={"metadata": {"refresh_marker_retracted": _MARKER}}),
+                "RETRACTED",
+            ),
+            (MagicMock(data={"metadata": {"source": _COMPOSITE_MARKER}}), "OTHER_SOURCE"),
+            (MagicMock(data={"metadata": {}}), "OTHER_SOURCE"),
+            (MagicMock(data={"metadata": "not-a-dict"}), "OTHER_SOURCE"),
+            (MagicMock(data=None), "NO_ROW"),
+            # postgrest 2.31: maybe_single().execute() returns None for 0 rows.
+            (None, "NO_ROW"),
+        ],
+        ids=[
+            "present", "retracted", "other-marker", "no-source",
+            "non-dict-metadata", "data-none", "response-none",
+        ],
+    )
+    async def test_each_row_shape_maps_to_its_own_state(
+        self, answer: Any, expected: str
+    ) -> None:
+        state = await _jw._refresh_marker_still_on_row(
+            _job_read_client(answer), "job-1", _MARKER
+        )
+        assert state is _jw.MarkerLiveState[expected]
+
+    @pytest.mark.asyncio
+    async def test_a_raising_read_is_read_error_and_reaches_sentry(self) -> None:
+        with patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            state = await _jw._refresh_marker_still_on_row(
+                _job_read_client(RuntimeError("boom")), "job-1", _MARKER
+            )
+        assert state is _jw.MarkerLiveState.READ_ERROR
+        assert log.error.call_count == 1, (
+            "a failed re-read must be logged at ERROR: a WARNING is only a "
+            "Sentry breadcrumb, and this read decides whether a live factsheet "
+            "is un-published."
+        )
+        assert sentry.capture_exception.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_gateway_504_is_retried_before_it_counts(self) -> None:
+        """WR-03: the read goes through ``db_read_with_retry``, so a gateway
+        timeout is retried inside its budget instead of deciding the job on the
+        first blip. Neuter: read through ``db_execute`` again → READ_ERROR."""
+        answer = MagicMock(data={"metadata": {"source": _MARKER}})
+        sb = _job_read_client([_Gateway504(), _Gateway504(), answer])
+        with patch("services.db.DB_READ_BACKOFF_BASE_S", 0.0), \
+             patch("services.db.DB_READ_JITTER_MAX_S", 0.0):
+            state = await _jw._refresh_marker_still_on_row(sb, "job-1", _MARKER)
+        assert state is _jw.MarkerLiveState.PRESENT
+
+    def test_a_state_cannot_be_used_as_a_bool(self) -> None:
+        """Every member would be truthy, so ``not await …`` would read as
+        "still marked" for EVERY state — failing toward suppression. A caller
+        must compare against ``PRESENT`` explicitly."""
+        with pytest.raises(TypeError):
+            bool(_jw.MarkerLiveState.NO_ROW)
+
+
+def _log_lines(log: MagicMock) -> list[str]:
+    return [
+        str(c.args[0])
+        for method in (log.warning, log.error)
+        for c in method.call_args_list
+        if c.args
+    ]
+
+
+class TestSingleKeySitesNameTheRealCause:
+    """SFH-02, closed across the class: the stamp closure and the chain edge say
+    "RETRACTED" only for a recorded retraction, and a missing live row goes out
+    at ERROR.
+
+    Neuter to redden: log the RETRACTED sentence for every non-``PRESENT``
+    state at either site."""
+
+    @pytest.mark.asyncio
+    async def test_stamp_closure_says_retracted_for_a_retraction(self) -> None:
+        with patch.object(_jw, "logger") as log:
+            await _drive_derive(
+                claimed_metadata={"source": _MARKER},
+                live_job_row={"metadata": {"refresh_marker_retracted": _MARKER}},
+            )
+        assert any("RETRACTED" in m for m in _log_lines(log)), _log_lines(log)
+
+    @pytest.mark.asyncio
+    async def test_stamp_closure_calls_a_missing_row_an_error(self) -> None:
+        with patch.object(_jw, "logger") as log:
+            _result, capture = await _drive_derive(
+                claimed_metadata={"source": _MARKER}, live_job_row=None
+            )
+        assert _terminal_stamp(capture).get("computation_status") == "failed"
+        assert not any("RETRACTED" in m for m in _log_lines(log)), (
+            f"a missing job row was reported as a retraction: {_log_lines(log)!r}"
+        )
+        assert any("no live" in str(c.args[0]) for c in log.error.call_args_list), (
+            "a claimed job whose row has vanished is an invariant breach; it must "
+            f"go out at ERROR. errors: {log.error.call_args_list!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_chain_edge_calls_a_missing_row_an_error(self) -> None:
+        with patch.object(_jw, "logger") as log:
+            _result, capture = await _drive_derive(
+                claimed_metadata={"source": _MARKER},
+                live_job_row=None,
+                combine=_success_combine(),
+            )
+        assert "p_metadata" not in _tail_enqueue(capture)
+        assert not any("RETRACTED" in m for m in _log_lines(log)), _log_lines(log)
+        assert any("no live" in str(c.args[0]) for c in log.error.call_args_list), (
+            log.error.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_mirror_does_not_call_a_missing_tail_row_a_dedup(self) -> None:
+        """The mirror check reads the TAIL job. "DEDUPED onto an unmarked job" is
+        a claim about that row; with no row there is nothing to claim it about,
+        and the loss must still be loud — at ERROR."""
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-1", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": _STRATEGY_ID, "user_id": "user-1"},
+        )
+        rows_by_id: dict[Any, Any] = {"job-1": {"metadata": {"source": _MARKER}}}
+        original = ctx.supabase.table.side_effect
+
+        def _table(name: str) -> MagicMock:
+            tbl: MagicMock = original(name)
+
+            def _select(_columns: str, **_kw: object) -> MagicMock:
+                chain = MagicMock()
+                seen: dict[str, Any] = {}
+
+                def _eq(col: str, val: object) -> MagicMock:
+                    seen[col] = val
+                    return chain
+
+                def _execute() -> Any:
+                    if name != "compute_jobs":
+                        return MagicMock(data={"computation_status": "complete_with_warnings"})
+                    return MagicMock(data=copy.deepcopy(rows_by_id.get(seen.get("id"))))
+
+                chain.eq.side_effect = _eq
+                chain.maybe_single.return_value = chain
+                chain.execute.side_effect = _execute
+                return chain
+
+            tbl.select.side_effect = _select
+            return tbl
+
+        ctx.supabase.table.side_effect = _table
+        patches = _patches_with_combine(
+            ctx, key_mode=False, combine_mock=_success_combine()
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], \
+             patch.object(_jw, "logger") as log:
+            result = await run_derive_broker_dailies_job(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+        assert result.outcome == DispatchOutcome.DONE
+        assert _tail_enqueue(capture)["p_metadata"]["source"] == _MARKER
+        lines = _log_lines(log)
+        assert not any("DEDUPED onto" in m for m in lines), (
+            f"a missing tail row was reported as a dedup collision: {lines!r}"
+        )
+        assert log.error.call_args_list, (
+            "hop 2 may be running unprotected and nothing was logged at ERROR"
+        )
 
 
 def test_the_handler_and_the_resync_agree_on_one_marker_spelling() -> None:

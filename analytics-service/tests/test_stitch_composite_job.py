@@ -161,7 +161,7 @@ class _FakeQuery:
         self._conflict = on_conflict
         return self
 
-    def execute(self) -> SimpleNamespace:
+    def execute(self) -> SimpleNamespace | None:
         if self._op == "upsert":
             self.fake.upserts.append((self.table, self._payload, self._conflict))
             self.fake.call_order.append(("upsert", self.table, self._payload))
@@ -186,6 +186,10 @@ class _FakeQuery:
                     "computation_status": self.fake.existing_status,
                 }
             )
+        if self.table == "compute_jobs":
+            # Counted so a test can prove the live re-read never ran (IN-05: the
+            # read may only NARROW a protection the snapshot already granted).
+            self.fake.compute_jobs_reads += 1
         if self.table == "compute_jobs" and self.fake.live_job_read_raises:
             # D-05 fail-safe arm: the live re-read itself errors.
             raise RuntimeError("simulated compute_jobs read failure")
@@ -197,9 +201,14 @@ class _FakeQuery:
         ):
             # Phase 164.6.7 / D-05: the LIVE job row, as `_stamp_failed` re-reads
             # it before honouring a refresh marker. Served only for the seeded
-            # id, so a fix that re-reads the wrong row gets `data=None` and takes
+            # id, so a fix that re-reads the wrong row gets no row and takes
             # the loud path, which the post-claim tests then catch.
             return SimpleNamespace(data={"metadata": self.fake.live_job_metadata})
+        if self.table == "compute_jobs" and self._maybe:
+            # postgrest 2.31's `maybe_single().execute()` returns None ITSELF for
+            # zero rows, not a response carrying `data=None`. Served in that real
+            # shape so a helper that reads `res.data` directly fails here too.
+            return None
         return SimpleNamespace(data=None)
 
 
@@ -227,15 +236,18 @@ class _FakeSupabase:
         # Phase 164.6.7 / D-05: the live `compute_jobs.metadata` for
         # `live_job_id`, which `_stamp_failed` re-reads before it honours a
         # refresh marker (the claim-time snapshot cannot see a retraction that
-        # lands after the claim). The default is ABSENT: a `compute_jobs` select
-        # then answers `data=None` exactly as it did before this seam existed, so
-        # every construction that does not pass it behaves byte-identically.
+        # lands after the claim). The default is ABSENT: a `compute_jobs`
+        # `maybe_single` select then answers "no row", in postgrest's own shape
+        # (None), so every construction that does not pass it takes the no-row
+        # arm.
         self.live_job_metadata = live_job_metadata
         self.live_job_id = live_job_id
         # When True, the `compute_jobs` select raises instead of answering, so a
         # test can prove an unreadable live row fails toward the LOUD path.
         # Default False keeps every other construction unchanged.
         self.live_job_read_raises = live_job_read_raises
+        # How many `compute_jobs` selects the handler issued.
+        self.compute_jobs_reads = 0
         # The strategy_analytics row's CURRENT computation_status, as
         # `_stamp_failed`'s non-destructive guard reads it. Defaults to None —
         # i.e. no prior row — which routes to the LOUD destructive stamp, so
