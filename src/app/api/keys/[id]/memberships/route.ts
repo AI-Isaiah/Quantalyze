@@ -34,7 +34,9 @@ import type { User } from "@supabase/supabase-js";
  * defence in depth the embed also carries the strategy's `user_id`, and a row
  * whose strategy is not the caller's is still LISTED (never dropped, so the
  * warning still fires) but with a null name and status. Only `name` and
- * `status` ever leave this route.
+ * `status` ever leave this route. Such a row, or one whose strategy embed is
+ * missing, is a data-integrity event: it is logged and captured (stage
+ * `coherence`, counts only), so the tripwire is heard.
  *
  * ⚠️ Residual, accepted (D-10): a membership added between this read and the
  * Delete is not named. The founder decision is "warn, never block", and the
@@ -130,13 +132,25 @@ export const GET = withAuth(
       );
     }
 
+    // The defence-in-depth tripwire (167.2.1-REVIEW-SFH M-4). A row whose
+    // strategy is not the caller's means `enforce_strategy_keys_owner_coherence`
+    // regressed; a row with no strategy embed means the embed is dangling. Both
+    // are data-integrity events, so they are COUNTED and made loud, not just
+    // redacted. The row is still listed either way, so the warning still fires.
+    let ownerMismatches = 0;
+    let danglingEmbeds = 0;
     const memberships: Membership[] = rows.map((row: unknown) => {
       const strategy = unwrapEmbed(
         row !== null && typeof row === "object"
           ? (row as { strategies?: unknown }).strategies
           : null,
       );
-      if (!strategy || strategy.user_id !== user.id) {
+      if (!strategy) {
+        danglingEmbeds += 1;
+        return { name: null, status: null };
+      }
+      if (strategy.user_id !== user.id) {
+        ownerMismatches += 1;
         return { name: null, status: null };
       }
       return {
@@ -144,6 +158,20 @@ export const GET = withAuth(
         status: typeof strategy.status === "string" ? strategy.status : null,
       };
     });
+    if (ownerMismatches > 0 || danglingEmbeds > 0) {
+      // Counts only: no key id, no user id, no strategy id or name.
+      console.error(
+        "[keys/memberships] owner-coherence tripwire fired: a membership's strategy is not the key owner's, or its embed is dangling",
+        { ownerMismatches, danglingEmbeds },
+      );
+      captureToSentry(
+        new Error("key memberships: strategy owner mismatch or dangling embed"),
+        {
+          tags: { route: ROUTE_TAG, stage: "coherence" },
+          extra: { ownerMismatches, danglingEmbeds },
+        },
+      );
+    }
 
     return NextResponse.json({ memberships }, { status: 200, headers: NO_STORE_HEADERS });
   },

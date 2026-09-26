@@ -308,4 +308,59 @@ describe("GET /api/keys/[id]/memberships", () => {
     expect(body).not.toContain("Foreign Composite");
     expect(JSON.parse(body)).toEqual({ memberships: [{ name: null, status: null }] });
   });
+
+  // 167.2.1-REVIEW-SFH M-4: a tripwire nobody hears is not defence in depth.
+  // A foreign-owned strategy means the owner-coherence trigger regressed; a
+  // missing embed means the row is dangling. Either one is captured, with the
+  // counts and nothing identifying, and the answer is unchanged.
+  it("COHERENCE-TRIPWIRE-LOUD: a foreign-owned strategy and a dangling embed are counted, logged and captured (stage coherence), with no id or name", async () => {
+    STATE.adminMembers = {
+      data: [
+        strategyRow("Synthetic Composite A", "draft"),
+        strategyRow("Foreign Composite", "published", OTHER_USER_ID),
+        { strategy_id: "s-dangling", strategies: null },
+        { strategy_id: "s-dangling-2", strategies: [] },
+      ],
+      error: null,
+    };
+    const consoleError = vi.mocked(console.error);
+    consoleError.mockClear();
+    const res = await GET(request(KEY_ID));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      memberships: [
+        { name: "Synthetic Composite A", status: "draft" },
+        { name: null, status: null },
+        { name: null, status: null },
+        { name: null, status: null },
+      ],
+    });
+    expect(STATE.captured).toHaveLength(1);
+    expect(String(STATE.captured[0].err)).toContain("strategy owner mismatch or dangling embed");
+    expect(STATE.captured[0].options).toEqual({
+      tags: { route: "api/keys/[id]/memberships", stage: "coherence" },
+      extra: { ownerMismatches: 1, danglingEmbeds: 2 },
+    });
+    const serialized = JSON.stringify(STATE.captured.map((c) => [String(c.err), c.options]));
+    for (const leak of [KEY_ID, USER_ID, OTHER_USER_ID, "Foreign Composite", "s-dangling"]) {
+      expect(serialized).not.toContain(leak);
+    }
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining("owner-coherence tripwire fired"),
+      { ownerMismatches: 1, danglingEmbeds: 2 },
+    );
+  });
+
+  it("COHERENCE-QUIET: a membership list whose every strategy is the caller's captures nothing", async () => {
+    STATE.adminMembers = {
+      data: [strategyRow("Synthetic Composite A", "draft"), strategyRow("Synthetic Composite P", "published")],
+      error: null,
+    };
+    const consoleError = vi.mocked(console.error);
+    consoleError.mockClear();
+    const res = await GET(request(KEY_ID));
+    expect(res.status).toBe(200);
+    expect(STATE.captured).toEqual([]);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
 });
