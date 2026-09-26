@@ -55,6 +55,7 @@ from services.deribit_txn import (
     _OPTION_EXPIRY_TYPES,
     CASH_BEARING_TYPES,
     LedgerValuationError,
+    OptionRowFieldMissingError,
     _assert_smoothed_summary_cross_check,
     _option_activity_after_coverage,
     _pre_coverage_option_days,
@@ -997,3 +998,31 @@ async def test_wr02_the_same_pair_in_one_subaccount_still_refuses_on_both_twins(
     with pytest.raises(LedgerValuationError) as exc:
         txn_rows_to_daily_records(stamped)
     assert _ASSIGNMENT_CONTESTED_PHRASE in str(exc.value)
+
+
+@pytest.mark.parametrize("case", sorted(_MISSING_FIELD_CASES))
+def test_sfh04_a_missing_commission_raises_the_distinct_class(case: str) -> None:
+    """SFH-04: a missing commission on an in-coverage assignment raises the
+    OptionRowFieldMissingError subclass, so the job worker can stamp it under
+    its own degrade reason instead of `mtm_summary_coverage_incomplete`. The
+    wording pinned by `test_site5_missing_commission_refuses` is unchanged."""
+    rows = _mtm_rows()
+    rows[2] = _MISSING_FIELD_CASES[case](rows[2], "commission")
+    with pytest.raises(OptionRowFieldMissingError, match="absent/null commission"):
+        txn_rows_to_native_daily(rows, pnl_basis="mark_to_market")
+
+
+@pytest.mark.parametrize("case", sorted(_MISSING_FIELD_CASES) + ["non_numeric"])
+def test_sfh04_a_missing_position_raises_the_distinct_class(case: str) -> None:
+    """SFH-04: likewise for the replay's `position`, including a non-numeric
+    one (the replay's second raise site)."""
+    opening, assigned = _census_rows()
+    bad = (
+        dict(assigned, position="not-a-number")
+        if case == "non_numeric"
+        else _MISSING_FIELD_CASES[case](assigned, "position")
+    )
+    with pytest.raises(
+        OptionRowFieldMissingError, match="absent/null/blank/non-numeric position"
+    ):
+        replay_option_positions([opening, bad])

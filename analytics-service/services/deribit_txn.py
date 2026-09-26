@@ -84,6 +84,17 @@ class LedgerValuationError(ValueError):
     permanent, never a transient network condition."""
 
 
+class OptionRowFieldMissingError(LedgerValuationError):
+    """An option book row (``trade``/``delivery``/``assignment``) lacks the
+    ``commission`` the mark_to_market fee arm needs, or the ``position`` the
+    smoothed replay needs. SFH-04 (Phase 168 review): the census left open
+    whether an ``assignment`` carries these two fields, so this is the likeliest
+    first assignment failure under mark_to_market. A subclass, so every existing
+    ``except LedgerValuationError`` still catches it, and the job worker's MTM
+    degrade can stamp it under its own reason rather than the summary-coverage
+    one."""
+
+
 def _coerce_float(value: Any, *, field: str, row: Mapping[str, Any]) -> float:
     """Coerce an untrusted transaction-log numeric field to ``float``, raising
     ``LedgerValuationError`` (permanent, structural) — NOT a bare
@@ -2195,7 +2206,7 @@ def _option_commission(row: Mapping[str, Any]) -> float:
     if raw is _MISSING or raw is None or (
         isinstance(raw, str) and not raw.strip()
     ):
-        raise LedgerValuationError(
+        raise OptionRowFieldMissingError(
             f"option Deribit row id={row.get('id')!r} type={row.get('type')!r} "
             "INSIDE coverage has absent/null commission — the premium cash is "
             "carried by the summary channel so the fee (−commission) is the only "
@@ -2283,7 +2294,7 @@ def replay_option_positions(
             if raw_pos is _MISSING or raw_pos is None or (
                 isinstance(raw_pos, str) and not raw_pos.strip()
             ):
-                raise LedgerValuationError(
+                raise OptionRowFieldMissingError(
                     f"option Deribit row id={r.get('id')!r} type={r.get('type')!r} "
                     "has an absent/null/blank/non-numeric position — the signed "
                     "post-trade position is the ONLY option-book source; refusing "
@@ -2292,7 +2303,7 @@ def replay_option_positions(
             try:
                 pos = float(raw_pos)
             except (TypeError, ValueError):
-                raise LedgerValuationError(
+                raise OptionRowFieldMissingError(
                     f"option Deribit row id={r.get('id')!r} type={r.get('type')!r} "
                     "has an absent/null/blank/non-numeric position — the signed "
                     "post-trade position is the ONLY option-book source; refusing "

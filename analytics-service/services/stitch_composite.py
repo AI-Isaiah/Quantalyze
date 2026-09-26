@@ -148,6 +148,16 @@ MTM_REASON_SECOND_PASS_TIMEOUT = "mtm_second_pass_timeout"
 # only re-computation, never recovery. Same vocabulary owner (this module) so the
 # single-key and composite reasons never fork.
 MTM_REASON_ANCHOR_RACE = "mtm_anchor_race"
+# Phase 168 (SFH-04, round-1 review): the mark_to_market second pass degraded
+# because an option book row lacks its `commission` (or `position`) —
+# ``OptionRowFieldMissingError`` in deribit_txn. Most likely an option
+# `assignment`, whose carriage of those two fields the census left unobserved.
+# Before this reason it was stamped MTM_REASON_SUMMARY_COVERAGE, which points a
+# reader at settlement-summary coverage instead of the row's missing field. It
+# still DEGRADES (cash ships). The UI's reason union is open, so it renders the
+# honest basis-agnostic default copy in the steady tone: a missing field does
+# not heal on the next refresh.
+MTM_REASON_OPTION_ROW_FIELD = "mtm_option_row_field_missing"
 
 
 def windows_overlap(a: MemberWindow, b: MemberWindow) -> bool:
