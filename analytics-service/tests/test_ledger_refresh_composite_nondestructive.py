@@ -524,9 +524,9 @@ class TestTransientReReadFailureRetries:
             "retry decides."
         )
         assert sentry.capture_exception.call_count == 1, (
-            "the re-read failure did not reach Sentry. A WARNING is a breadcrumb, "
-            "not an event, so without this nobody is told the refresh is retrying "
-            "on an unreadable job row."
+            "the re-read failure was not captured as an exception. The ERROR "
+            "lines already reach Sentry as message events, but only this "
+            "capture carries the failed read's traceback."
         )
         assert any("could not re-read" in m for m in _messages(log.error)), (
             f"no ERROR-level re-read line. errors seen: {_messages(log.error)!r}"

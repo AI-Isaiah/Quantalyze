@@ -1231,6 +1231,15 @@ class TestSingleKeySitesNameTheRealCause:
         assert log.error.call_args_list, (
             "hop 2 may be running unprotected and nothing was logged at ERROR"
         )
+        # IN-03 (round 2): the tail job was just ENQUEUED, not claimed. Naming
+        # it a "claimed job" sends an operator to the wrong invariant.
+        breach = [
+            c for c in log.error.call_args_list
+            if c.args and "invariant breach" in str(c.args[0])
+        ]
+        assert breach, log.error.call_args_list
+        assert "enqueued job" in breach[0].args, breach[0]
+        assert "claimed job" not in breach[0].args, breach[0]
 
 
 def test_the_handler_and_the_resync_agree_on_one_marker_spelling() -> None:

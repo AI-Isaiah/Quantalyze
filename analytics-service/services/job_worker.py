@@ -2641,8 +2641,10 @@ async def _resolve_ccxt_flow_price_index(
 #
 # ⚠️ The read goes through ``db_read_with_retry``, so a gateway 504 is retried
 # inside that helper's bounded budget before it counts as a failure (WR-03). The
-# cost is a slightly longer window between this read and the stamp, on exactly
-# the path where the gateway was already slow.
+# cost is up to about 3-4 s more wall time on a gateway-timeout path. The helper
+# sleeps BEFORE the attempt that answers, so the window between the answering
+# read and the stamp (``[164.6.7-COMPOSITE-REREAD-RESIDUE]``) is unchanged
+# (round 2, IN-02).
 class MarkerLiveState(Enum):
     """What the live ``compute_jobs`` row says about a refresh marker."""
 
@@ -2735,10 +2737,13 @@ def _log_marker_not_confirmed(
     job_id: Any,
     strategy_id: Any,
     consequence: str,
+    subject: str = "claimed job",
 ) -> None:
     """Log why a refresh marker was NOT confirmed on the live row, naming the
     cause ``state`` actually records. ``consequence`` is the site's own sentence
-    about what it does next. Never called with ``PRESENT``."""
+    about what it does next. ``subject`` names the job the invariant is about:
+    the job this handler CLAIMED, or (at the tail mirror) the follow-on it just
+    ENQUEUED. Never called with ``PRESENT``."""
     if state is MarkerLiveState.RETRACTED:
         logger.warning(
             "%s: the refresh marker on compute_job %s has been RETRACTED — a "
@@ -2760,14 +2765,14 @@ def _log_marker_not_confirmed(
             "because the live re-read FAILED. %s (strategy %s).",
             site, job_id, consequence, strategy_id,
         )
-    else:  # NO_ID / NO_ROW — a claimed job must have both.
+    else:  # NO_ID / NO_ROW — a claimed or just-enqueued job must have both.
         logger.error(
             "%s: cannot confirm the refresh marker on compute_job %s — %s. A "
-            "claimed job with no id or no live row is an invariant breach. %s "
+            "%s with no id or no live row is an invariant breach. %s "
             "(strategy %s).",
             site, job_id,
             "no job id" if state is MarkerLiveState.NO_ID else "no live row",
-            consequence, strategy_id,
+            subject, consequence, strategy_id,
         )
 
 
@@ -6200,6 +6205,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 site="derive_broker_dailies",
                 job_id=_tail_job_id,
                 strategy_id=strategy_id,
+                subject="enqueued job",
                 consequence=(
                     f"The {_csv_analytics_kind} chain edge cannot be confirmed "
                     "to carry the marker, so hop 2 may run UNPROTECTED and a "
