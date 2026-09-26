@@ -698,7 +698,8 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
         return ("transient", f"Handler exceeded timeout: {str(exc)[:200]}")
 
     # Phase 164.6.7 / D-09. The live re-read of a refresh marker failed, so the
-    # composite handler could not tell whether its failure may be stamped without
+    # handler (the composite stitch, or since 2026-09-26 the single-key derive
+    # stamp) could not tell whether its failure may be stamped without
     # un-publishing a funded account, and wrote nothing. TRANSIENT: the queue
     # retries the whole job and the next attempt re-reads the row.
     if isinstance(exc, RefreshMarkerRereadUnavailable):
@@ -2603,12 +2604,15 @@ async def _resolve_ccxt_flow_price_index(
 # read that merely failed. An operator triaging a darkened factsheet then went
 # looking for a resync that never happened. Each state now names its own cause.
 #
-# ⛔ ``READ_ERROR`` is the one state that is NOT an answer about the row, and the
-# composite site treats it differently from the rest (CONTEXT D-09, 2026-09-25):
-# it stamps nothing and raises ``RefreshMarkerRereadUnavailable`` so the job
-# fails TRANSIENT and retries. Every other state is a DEFINITIVE answer and still
-# takes the loud path. The single-key sites still take the loud path on
-# ``READ_ERROR``; D-09 was decided for the composite site only.
+# ⛔ ``READ_ERROR`` is the one state that is NOT an answer about the row, and both
+# TERMINAL-STAMP sites treat it differently from the rest (CONTEXT D-09): they
+# stamp nothing and raise ``RefreshMarkerRereadUnavailable`` so the job fails
+# TRANSIENT and retries. D-09 (2026-09-25) decided this for the composite stamp;
+# its 2026-09-26 amendment extended it to the single-key derive stamp closure.
+# Every other state is a DEFINITIVE answer and still takes the loud path.
+# ⚠️ The two non-stamp single-key sites are unchanged: on ``READ_ERROR`` the
+# chain-edge forward still drops the marker (hop 2 would fail loud) and the tail
+# mirror only logs.
 #
 # ⚠️ The read goes through ``db_read_with_retry``, so a gateway 504 is retried
 # inside that helper's bounded budget before it counts as a failure (WR-03). The
@@ -2645,8 +2649,8 @@ class MarkerLiveState(Enum):
 
 
 class RefreshMarkerRereadUnavailable(Exception):
-    """The live re-read of a refresh marker failed, so the composite terminal
-    stamp could not be chosen. ``classify_exception`` maps it to TRANSIENT."""
+    """The live re-read of a refresh marker failed, so a terminal stamp (the
+    composite one, or the single-key derive one) could not be chosen. ``classify_exception`` maps it to TRANSIENT."""
 
 
 async def _refresh_marker_still_on_row(
@@ -2675,9 +2679,10 @@ async def _refresh_marker_still_on_row(
     except Exception as exc:  # noqa: BLE001 — every failure is reported, then answered
         logger.error(
             "ledger-refresh: could not re-read the refresh marker on compute_job "
-            "%s (%s: %s) — its live state is UNKNOWN. The caller decides: the "
-            "composite stitch fails the job TRANSIENT and retries; a single-key "
-            "site takes the LOUD terminal path.",
+            "%s (%s: %s) — its live state is UNKNOWN. The caller decides: a "
+            "terminal stamp (composite or single-key) writes nothing and fails "
+            "the job TRANSIENT so it retries; the single-key chain edge forwards "
+            "no marker.",
             job_id, type(exc).__name__, exc,
         )
         sentry_sdk.capture_exception(exc)
@@ -3151,10 +3156,37 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # GRANTED, so an ordinary marked refresh pays one read on a path
                 # it was about to suppress anyway, and an unmarked derive pays
                 # nothing at all.
+                #
+                # ⛔ D-09, amended 2026-09-26 (orchestrator decision): a read that
+                # FAILED is not an answer, here exactly as at the composite site.
+                # Stamping loud on it turned one gateway blip into a funded
+                # account going dark on a refresh nobody watches. So nothing is
+                # written and the job fails TRANSIENT: the queue retries it and
+                # the retry re-reads the row. The read already logged at ERROR
+                # and reported to Sentry. Every caller of this closure awaits it
+                # directly, and no handler between here and ``dispatch`` catches
+                # ``RefreshMarkerRereadUnavailable`` (traced in the 164.6.7
+                # REVIEW-FIX, "Round 1 — single-key completion").
                 if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
                     _live_state = await _refresh_marker_still_on_row(
                         ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
                     )
+                    if _live_state is MarkerLiveState.READ_ERROR:
+                        _log_marker_not_confirmed(
+                            _live_state,
+                            site="derive_broker_dailies",
+                            job_id=job.get("id"),
+                            strategy_id=strategy_id,
+                            consequence=(
+                                "Writing NO terminal stamp; failing the job "
+                                "TRANSIENT so it retries"
+                            ),
+                        )
+                        raise RefreshMarkerRereadUnavailable(
+                            "derive_broker_dailies: the live re-read of the "
+                            "refresh marker failed, so no terminal stamp was "
+                            "written; retrying the job"
+                        )
                     if _live_state is not MarkerLiveState.PRESENT:
                         _log_marker_not_confirmed(
                             _live_state,

@@ -73,6 +73,7 @@ from services.job_worker import (
     DispatchOutcome,
     run_derive_broker_dailies_job,
 )
+from services.nav_twr import NavReconstructionError
 from tests.test_derive_broker_dailies_dualmode import (
     _CCXT_VERDICT,
     _build_ctx,
@@ -639,16 +640,43 @@ class TestMirrorDirection:
 # 5 — fail-safe direction of the re-read itself
 # ---------------------------------------------------------------------------
 class TestReReadFailsSafe:
-    """Neuter to redden: change ``_refresh_marker_still_on_row``'s except-arm to
-    return ``MarkerLiveState.PRESENT``, or make the no-id / no-row arms return
-    it.
+    """Neither direction of a failed or missing re-read may SUPPRESS a failure.
 
-    ⚠️ The single-key sites still take the LOUD path on a read error. The
-    2026-09-25 transient-retry decision (CONTEXT D-09) was taken for the
-    composite site; this test pins the single-key behaviour as it stands."""
+    CONTEXT D-09, amended 2026-09-26: a re-read that RAISES is not an answer, so
+    the single-key stamp closure now does what the composite site does. It writes
+    nothing at all (neither the error-only write that preserves the publish state
+    nor the destructive stamp), and the job fails TRANSIENT so the queue retries
+    it. A DEFINITIVE answer (no id, no row, another source, a retraction) still
+    takes the LOUD path.
+
+    📜 Lineage: until 2026-09-26 this class pinned the opposite for a raising read
+    (``test_an_unreadable_row_takes_the_loud_path``: the single-key site stamped
+    ``failed``, un-publishing a funded account on one gateway blip). D-09 was
+    first decided for the composite site only; its amendment extended it here.
+
+    Neuter to redden: delete the ``READ_ERROR`` arm in
+    ``_stamp_strategy_analytics_failed`` (the read error falls through to the
+    loud stamp) and both parametrised cases go RED. Change the helper's
+    except-arm to return ``PRESENT`` (the suppression direction) and both go RED
+    too. Measured 2026-09-26: under either neuter the first assertion to fire is
+    the error kind, ``'permanent'`` where ``'transient'`` is required."""
 
     @pytest.mark.asyncio
-    async def test_an_unreadable_row_takes_the_loud_path(self) -> None:
+    @pytest.mark.parametrize(
+        "combine",
+        [
+            pytest.param(_insufficient_combine, id="insufficient-history-caller"),
+            pytest.param(
+                lambda: MagicMock(
+                    side_effect=NavReconstructionError("simulated structural refusal")
+                ),
+                id="nav-error-caller-inside-an-except-arm",
+            ),
+        ],
+    )
+    async def test_an_unreadable_row_writes_nothing_and_fails_transient(
+        self, combine: Any
+    ) -> None:
         ctx, capture = _build_ctx(
             key_row={"id": "key-1", "exchange": "binance", "user_id": "user-1"},
             strategy_row={"id": _STRATEGY_ID, "user_id": "user-1"},
@@ -675,11 +703,15 @@ class TestReReadFailsSafe:
 
         ctx.supabase.table.side_effect = _table
 
-        patches = _patches_with_combine(
-            ctx, key_mode=False, combine_mock=_insufficient_combine()
-        )
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
-            await run_derive_broker_dailies_job(
+        patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine())
+        # Driven through ``dispatch``, the production entry: the retry is an
+        # EXCEPTION leaving the handler, and only ``dispatch`` turns it into the
+        # job's error kind. A caller that swallowed the raise would turn this
+        # back into the permanent FAILED the arm returns after its stamp.
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], \
+             patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            result = await _jw.dispatch(
                 {
                     "id": "job-1",
                     "kind": _DERIVE_KIND,
@@ -688,13 +720,30 @@ class TestReReadFailsSafe:
                 }
             )
 
-        payload = _terminal_stamp(capture)
-        assert payload.get("computation_status") == "failed", (
-            "an unreadable compute_jobs row resolved toward SUPPRESSION. Every "
-            "unknown in D-15 resolves toward the LOUD path; inverting this one "
-            "means a transient PostgREST blip silently protects a failure nobody "
-            "decided to protect."
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "transient", (
+            "a re-read that RAISED did not fail the job TRANSIENT "
+            f"({result.error_kind!r}: {result.error_message!r}). Without the "
+            "retry the failure is final, and the next marked refresh is the "
+            "earliest anything re-decides it."
         )
+        payloads = _analytics_payloads(capture)
+        assert not payloads, (
+            "a transient re-read failure wrote to strategy_analytics "
+            f"({payloads!r}). Nothing is known about the row yet: a destructive "
+            "stamp un-publishes a funded account on one gateway blip, and an "
+            "error-only write suppresses a failure nobody decided to protect. "
+            "The retry decides."
+        )
+        assert sentry.capture_exception.call_count == 1
+        assert any(
+            c.args and "could not re-read" in str(c.args[0])
+            for c in log.error.call_args_list
+        ), f"no ERROR-level re-read line: {log.error.call_args_list!r}"
+        assert not any(
+            c.args and "RETRACTED" in str(c.args[0])
+            for c in log.warning.call_args_list
+        ), "a read failure was logged as a RETRACTION; nothing was retracted."
 
     @pytest.mark.asyncio
     async def test_a_missing_job_id_takes_the_loud_path(self) -> None:

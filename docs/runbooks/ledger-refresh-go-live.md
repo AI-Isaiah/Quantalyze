@@ -941,6 +941,17 @@ here, but this precondition sits here because this is where a reader would go to
    time, read the `READ_ERROR` arm of the composite honour site on the DEPLOYED commit. On a
    commit older than this change, "a re-read that fails" above still means the loud path, which
    is an un-publish.
+   ⛔ **CORRECTED 2026-09-26 (orchestrator decision, CONTEXT D-09 amendment), the scope sentence
+   above ("This is the COMPOSITE site only …") kept as lineage.** The single-key stamp closure
+   `_stamp_strategy_analytics_failed` in `run_derive_broker_dailies_job` now does the same: on
+   `READ_ERROR` it writes nothing to `strategy_analytics` (neither the error-only write nor the
+   destructive stamp) and raises `RefreshMarkerRereadUnavailable`, so that job retries too. Every
+   caller of the closure was traced to `dispatch` with no handler that catches the raise (164.6.7
+   REVIEW-FIX, "Round 1 — single-key completion"). The two single-key sites that do not stamp are
+   unchanged: on `READ_ERROR` the chain-edge forward still sends hop 2 no marker, and the tail
+   mirror only logs. The deploy-time instruction above now covers both stamps: on the DEPLOYED
+   commit, find the `READ_ERROR` arm in `_stamp_failed` AND in
+   `_stamp_strategy_analytics_failed`.
    📜 *Lineage, superseded 2026-09-25:* "⛔ **BLOCKING.** No schedule naming
    `public.enqueue_ledger_composite_refresh()` may be registered until `run_stitch_composite_job`
    in `analytics-service/services/job_worker.py` re-reads the LIVE `compute_jobs` row's
@@ -998,6 +1009,14 @@ here, but this precondition sits here because this is where a reader would go to
    carries the live re-read: read `run_stitch_composite_job` at that commit and find the
    `_refresh_marker_still_on_row` call inside `_stamp_failed` before the marker is honoured. A code
    comment promising it does not count.
+   ⛔ **CORRECTED 2026-09-26, the "failing-re-read" clause above kept as lineage.** That test
+   (`test_live_reread_that_raises_takes_the_loud_path`) no longer exists. Round 1 of the 164.6.7
+   review (SFH-01, CONTEXT D-09) reversed what a raising re-read does, so the raising case now
+   lives in `TestTransientReReadFailureRetries` in the same file. It asserts the opposite
+   outcome: no write to `strategy_analytics` and a TRANSIENT job failure. It was observed RED
+   with the composite `READ_ERROR` arm neutered (the read error falling through to the loud
+   stamp) and GREEN restored. The retraction and no-row tests in
+   `TestPostClaimRetractionTakesTheLoudPath` still pin the loud path for a DEFINITIVE answer.
    📜 *Lineage, superseded 2026-09-25:* "**How to check it is met.** Read
    `run_stitch_composite_job`: a live re-read of the row (through `_refresh_marker_still_on_row` or
    an equivalent) must sit before its composite-marker comparison. A test must go RED when that
