@@ -219,6 +219,44 @@ export function judgeShapeCounts(shapes) {
 }
 
 /**
+ * SFH-03: the extension and schema NAMES a dump creates, from its
+ * `CREATE EXTENSION` / `CREATE SCHEMA` lines (optionally `IF NOT EXISTS`, the name
+ * optionally double-quoted). Names, not counts, so a refusal can say what vanished.
+ */
+export function schemaObjectNames(text) {
+  const names = (re) => new Set([...String(text).matchAll(re)].map((m) => m[1]));
+  return {
+    extensions: names(/^CREATE EXTENSION (?:IF NOT EXISTS )?"?([^"\s;]+)"?/gm),
+    schemas: names(/^CREATE SCHEMA (?:IF NOT EXISTS )?"?([^"\s;]+)"?/gm),
+  };
+}
+
+/**
+ * SFH-03: a completeness floor against the committed dump. A dump that exits 0 but
+ * is truncated, or a CLI change that narrows what it dumps, loses `CREATE EXTENSION`
+ * or `CREATE SCHEMA` lines, and no other gate reads them. Any extension or schema
+ * the committed dump creates and the new one does not refuses, by name (a name that
+ * is not plain identifier text is counted, never printed). A migration that really
+ * drops one needs a hand re-dump through the `## Regenerating` procedure.
+ */
+export function judgeCompleteness(committedText, newText) {
+  const was = schemaObjectNames(committedText);
+  const now = schemaObjectNames(newText);
+  const defects = [];
+  for (const kind of ["extensions", "schemas"]) {
+    const lost = [...was[kind]].filter((n) => !now[kind].has(n)).sort();
+    if (lost.length === 0) continue;
+    const shown = lost.filter((n) => /^[A-Za-z0-9_.-]{1,63}$/.test(n));
+    const hidden = lost.length - shown.length;
+    defects.push(
+      `${lost.length} ${kind === "extensions" ? "extension" : "schema"}(s) the committed dump creates are missing: ` +
+        `${shown.join(", ")}${hidden > 0 ? `${shown.length > 0 ? ", " : ""}${hidden} with an unprintable name` : ""}`,
+    );
+  }
+  return { was, now, defects };
+}
+
+/**
  * The ONE gitleaks invocation (D-07 as amended by D-26; RESEARCH F4, measured on
  * 8.30.1). `dir` scans one file without git. `--config .gitleaks.toml` is always
  * EXPLICIT (gitleaks auto-loads a config from the cwd, so omitting it tests
@@ -1287,6 +1325,15 @@ export function gateDump({
   const shapes = countShapes(bytes.toString("utf8"));
   const shapeDefects = judgeShapeCounts(shapes);
   if (shapeDefects.length > 0) throw new Error(`shape counts refused: ${shapeDefects.join("; ")}`);
+  const committedDumpBytes = committedBytes(repoRoot, merge, BASELINE_SQL_REL);
+  const complete = judgeCompleteness(committedDumpBytes.toString("utf8"), bytes.toString("utf8"));
+  console.log(
+    `baseline-redump completeness: extensions=${complete.now.extensions.size} (committed ${complete.was.extensions.size}) ` +
+      `schemas=${complete.now.schemas.size} (committed ${complete.was.schemas.size})`,
+  );
+  if (complete.defects.length > 0) {
+    throw new Error(`completeness refused: ${complete.defects.join("; ")}; a dump that lost them is truncated or narrowed, not a baseline`);
+  }
 
   // D-09: the MERGE tree, never the working tree — an uncommitted migration in
   // the checkout is not one PRODUCTION received.
@@ -1306,7 +1353,7 @@ export function gateDump({
   if (mainDefect !== null) throw new Error(mainDefect);
 
   const committedMarker = committedBytes(repoRoot, merge, MARKER_REL).toString("utf8");
-  const committedDumpSha = sha256(committedBytes(repoRoot, merge, BASELINE_SQL_REL));
+  const committedDumpSha = sha256(committedDumpBytes);
   const marker = buildMarker({ headerLines: markerHeaderLines(committedMarker), sha: dumpSha, basenames: listed });
   const changed = !(dumpSha === committedDumpSha && marker === committedMarker);
 
@@ -1569,7 +1616,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 204;
+export const EXPECTED_ASSERTIONS = 206;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -2307,6 +2354,23 @@ function selfTest({ withGitleaks = false } = {}) {
     ok(
       withData.threw !== null && /carrying data/.test(withData.threw.message) && withData.wroteNothing,
       "a dump with one INSERT INTO line refuses (a schema-only dump carrying data)",
+    );
+    // SFH-03: the committed dump creates pg_cron and pg_net; a dump that lost one is refused by name.
+    const noCron = redGate(Buffer.from(dumpText.replace(/^CREATE EXTENSION IF NOT EXISTS "pg_cron"[^\n]*\n/m, ""), "latin1"));
+    ok(
+      noCron.threw !== null && /completeness refused: 1 extension\(s\) the committed dump creates are missing: pg_cron;/.test(noCron.threw.message) &&
+        noCron.wroteNothing,
+      "a dump that lost the pg_cron CREATE EXTENSION line refuses, naming pg_cron, and writes nothing (SFH-03)",
+    );
+    const schemaJudge = judgeCompleteness(
+      'CREATE SCHEMA IF NOT EXISTS "kept";\nCREATE SCHEMA "lost_one";\nCREATE EXTENSION IF NOT EXISTS "pg_net" WITH SCHEMA "extensions";\n',
+      'CREATE SCHEMA IF NOT EXISTS "kept";\nCREATE EXTENSION IF NOT EXISTS "pg_net" WITH SCHEMA "extensions";\nCREATE EXTENSION "added";\n',
+    );
+    ok(
+      schemaJudge.defects.length === 1 && schemaJudge.defects[0] === "1 schema(s) the committed dump creates are missing: lost_one" &&
+        judgeCompleteness(realDump.toString("utf8"), realDump.toString("utf8")).defects.length === 0 &&
+        schemaObjectNames(realDump.toString("utf8")).extensions.has("pg_net"),
+      "judgeCompleteness names a lost schema, accepts an added extension, and passes the committed dump against itself (pg_net read)",
     );
     // A merge tree holding a basename outside the strict 14-digit shape (D-27).
     const repo2 = join(dir, "repo2");
