@@ -1292,6 +1292,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.9.2 REFDATAUPDATES inserted after Phase 164.9 on 2026-09-24 (via `/gsd-phase --insert`, founder-approved by AskUserQuestion): the shared-TEST restore replay also replays migration UPDATEs on public tables it just filled. Found by preflight run `36003106273`, which aborted on the 164.9 plan-07 wrong-state check. It owns `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` and unblocks 164.9 criterion 8.
 - Phase 164.4.2.1 DRIFTOFFMUTEX inserted after Phase 164.4.2 on 2026-09-24 (hand-inserted; founder rule "book the phase if it holds", AskUserQuestion; runs 2–5 confirmed the slowdown)
 - Phase 167.1.2 ACCOUNTTRUTH inserted after Phase 167.1.1 on 2026-09-24 (hand-inserted; founder UAT on the allocator book; founder decisions "Refuse a second key" and "Hide it until correct", AskUserQuestion)
+- Phase 166.1 SPLIT into three on 2026-09-26 (founder decision: too large to review as one PR after five plan-check rounds; 166.1-CONTEXT D-23). Phase 166.1 edited (via `/gsd-phase --edit 166.1`) to ENGINEFLOOR, the Python half: plans 01, 01b, 03 and a new release plan 09.
+- Phase 166.2 COMPUTEONCE inserted after Phase 166.1 on 2026-09-26 (via `/gsd-phase --insert`, `--sibling` allocation): the TypeScript half, old 166.1 plans 04-08 moved as 166.2-01..07; does not depend on 166.1.
+- Phase 166.3 RECOMPUTE inserted after Phase 166.2 on 2026-09-26 (via `/gsd-phase --insert`, `--sibling` allocation): the founder PROD recompute, old 166.1 plan 02 moved as 166.3-01; depends only on the Phase 166 deploy.
 
 ### Decisions
 
