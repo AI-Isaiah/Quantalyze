@@ -47,11 +47,17 @@ official OpenAPI schema + practitioner sources + ccxt source + a 3-account live 
   `negative_balance_fee`, `assignment`. (Settlement/delivery carry the realized PnL + funding — MUST
   include. `negative_balance_fee` is a genuine cost, live-confirmed cash-bearing.)
   `assignment` (Phase 168) is option expiry cash on the assigned (short) side, licensed ONLY for the
-  census shape recorded counts-only in `docs/evidence/drb-assignment-census-2026-09.json` (D-03): no
-  same-instrument `delivery` or `settlement` row in the batch. Any other shape refuses on both twins
-  (D-02, `assert_assignment_uncontested`): an assignment beside a same-instrument `delivery` or
-  `settlement` (a possible double count), an assignment naming no instrument, and any assignment on a
-  `since_ms`-windowed crawl (the census is only sound over full history). Like `delivery` it is an
+  census shape recorded counts-only in `docs/evidence/drb-assignment-census-2026-09.json` (D-03): an
+  OPTION instrument with no same-instrument `delivery`, `settlement` or second `assignment` row in the
+  same subaccount. Any other shape refuses on both twins (D-02, `assert_assignment_uncontested`): an
+  assignment beside a same-instrument `delivery`, `settlement` or second `assignment` (a possible
+  double count), an assignment naming no instrument (absent, blank or not a string), and an
+  assignment naming a non-option instrument (a perpetual, a dated future, a spot pair or an
+  unclassifiable name). The sibling census is per subaccount: the crawl stamps each row with its
+  scope, so a same-instrument `delivery` in a sibling subaccount does not contest. Separately,
+  `_crawl_deribit_ledger` refuses any assignment on a `since_ms`-windowed crawl, before either twin
+  runs (the census is only sound over full history; the twins themselves trust their batch to be
+  full history). Like `delivery` it is an
   option book event (`_OPTION_EXPIRY_TYPES`), so every basis treats it as `delivery` is treated below.
   `exercise` and `expiry`, which Deribit's transaction-log documentation also lists, remain
   unclassified and keep the unknown-type refusal (no census exists for either).
@@ -170,7 +176,9 @@ NAV; the 2025-07-13 option-trade day summed to +2.736 BTC ≈ +65%). The real op
   no summaries has no window.
 - **Inside coverage:** option `trade`/`delivery`/`assignment` contribute `−commission` (fee kept;
   premium/payout cash EXCLUDED — carried by the summary channel; an expiry event, `delivery` or
-  `assignment`, is fee-only too, so it is never counted both in the ledger and in the summary), and
+  `assignment`, is fee-only too. For `assignment` that ASSUMES the summary carries its payout: no
+  summary co-occurrence was observed, and the census file's `classification_licence` calls the
+  assignment-as-delivery reading an assumption, not a measurement), and
   `options_settlement_summary` contributes
   `realized_pl + unrealized_pl`. `unrealized_pl` is a per-session **DELTA** (not a level) and is
   **LOAD-BEARING** — dropping it breaks closure. Summary `change` is always 0.0 (nonzero → fail loud);

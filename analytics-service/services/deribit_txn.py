@@ -36,7 +36,10 @@ LOCKED design pins (analytics-service/docs/deribit-ingestion-design.md):
   MARK_TO_MARKET amendment: inside a currency's summary coverage window
   `[first_summary−24h, last_summary]` an option `trade`/`delivery`/`assignment`
   contributes `−commission` (NOT its premium or payout `change` — an expiry event,
-  `delivery` or `assignment`, is fee-only there too), and `options_settlement_summary`
+  `delivery` or `assignment`, is fee-only there too; for `assignment` that
+  ASSUMES the summary carries its payout, which no census has measured — see the
+  `classification_licence` in docs/evidence/drb-assignment-census-2026-09.json),
+  and `options_settlement_summary`
   contributes `realized_pl + unrealized_pl` (a session DELTA — load-bearing).
   This REDEFINES option native_pnl from a "cash-balance delta" to an "MTM
   (settled-equity) delta" for covered option rows: the premium/payout cash is
@@ -543,9 +546,10 @@ def deribit_equity_to_usd(
 #                           same-instrument `delivery`, `settlement` or second
 #                           `assignment` row in the batch
 #                           (``assert_assignment_uncontested`` refuses the
-#                           co-occurring shape and an unnamed instrument, in both
-#                           twins). The reading that it is Deribit's newer label
-#                           for the short in-the-money expiry formerly logged as
+#                           co-occurring shape, an unnamed instrument and a
+#                           non-option instrument, in both twins). The reading
+#                           that it is Deribit's newer label for the short
+#                           in-the-money expiry formerly logged as
 #                           `delivery` is an ASSUMPTION, not a measurement. Like
 #                           `delivery`, under mark_to_market inside summary
 #                           coverage it contributes only −commission (it is an
@@ -1002,9 +1006,9 @@ def assert_assignment_uncontested(
     row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
 ) -> None:
     """Fail loud unless an ``assignment`` row is in the ONE shape its
-    classification is licensed for: a named instrument with NO same-instrument
-    ``delivery``, ``settlement`` or second ``assignment`` row in ``rows`` (the
-    census recorded in
+    classification is licensed for: a named OPTION instrument with NO
+    same-instrument ``delivery``, ``settlement`` or second ``assignment`` row in
+    ``rows`` (the census recorded in
     docs/evidence/drb-assignment-census-2026-09.json). Returns None on that shape;
     raises ``LedgerValuationError`` otherwise — it neither sums nor skips.
 
@@ -1549,6 +1553,11 @@ def txn_rows_to_daily_records(
     """Sum return-bearing transaction-log ``change`` deltas by UTC day into a
     SINGLE list of ``daily_pnl``-shaped records (mirrors
     ``broker_dailies.funding_rows_to_daily_pnl_records``).
+
+    INFO-1 (Phase 168 review): this twin trusts ``rows`` to be a FULL-history
+    batch. The refusal of an ``assignment`` on a ``since_ms``-windowed crawl lives
+    in ``_crawl_deribit_ledger`` (deribit_ingest), not here; a new windowed caller
+    feeding this function directly bypasses it.
 
     Per row:
       * ``type`` in ``INFORMATIONAL_TYPES`` -> skipped (external flow / reward /
@@ -2424,7 +2433,9 @@ def txn_rows_to_native_daily(
     exclude_spot_extraction: bool = False,
 ) -> dict[str, dict[str, float]]:
     """The ``(day, currency)``-keyed NATIVE-UNIT sibling of
-    ``txn_rows_to_daily_records`` (§9.1): sum each return-bearing row's raw
+    ``txn_rows_to_daily_records`` (§9.1) — and, like it, trusts ``rows`` to be a
+    FULL-history batch (INFO-1: the windowed-crawl ``assignment`` refusal lives in
+    ``_crawl_deribit_ledger``, not here). Sum each return-bearing row's raw
     ``change`` by ``(UTC-day, currency)`` in NATIVE units — NO index multiply,
     NO ``supplemental_index``. Returns ``UPPERCASE-currency -> {utc_day_iso: Σ
     native change}`` (days ascending within each currency).
@@ -2656,10 +2667,12 @@ def txn_rows_to_native_daily(
             # summary coverage window an option trade/delivery/assignment
             # (``_OPTION_BOOK_EVENT_TYPES``) contributes ONLY the fee (−commission);
             # the premium/payout cash is carried by the summary channel — an expiry
-            # event (delivery or assignment) is fee-only too, so it is never counted
-            # both in the ledger and in the summary. Outside the window (pre-rollout
-            # or trailing-edge) it keeps the full `change` (cash fallback, flagged
-            # by _pre_coverage_option_days).
+            # event (delivery or assignment) is fee-only too. For an assignment
+            # that ASSUMES the summary carries its payout (unmeasured: the census
+            # file's `classification_licence` calls the delivery reading an
+            # assumption), so "counted once" holds only under that assumption.
+            # Outside the window (pre-rollout or trailing-edge) it keeps the full
+            # `change` (cash fallback, flagged by _pre_coverage_option_days).
             contribution = change
             if row_type in _OPTION_BOOK_EVENT_TYPES:
                 cls = classify_instrument(str(row.get("instrument_name", "")))
