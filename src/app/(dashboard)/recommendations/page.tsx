@@ -229,7 +229,11 @@ export default async function RecommendationsPage() {
     <>
       <PageHeader
         title="Recommendations"
-        description="Top 3 strategies that fit your mandate. Updated daily."
+        description={
+          mandateSet
+            ? "Top 3 strategies that fit your mandate. Updated daily."
+            : "Strategies matched to your mandate, updated daily. No mandate is set yet."
+        }
         breadcrumb={[{ label: "My Allocation", href: "/allocations" }, { label: "Recommendations" }]}
         meta={
           batch?.computed_at ? (
@@ -242,13 +246,18 @@ export default async function RecommendationsPage() {
         }
       />
 
-      {!mandateSet ? <NoMandateState /> : null}
-      {mandateSet && !batch ? <NoBatchState /> : null}
-      {mandateSet && batch && candidates.length === 0 ? (
-        <NoCandidatesState />
-      ) : null}
-
-      {candidates.length > 0 && (
+      {/* Phase 169.3 / SC8 — ONE branch decides both the header copy above
+          and what renders here. The engine scores an allocator with no
+          mandate on its default preferences, so a batch can exist without a
+          mandate; rendering it beside "Set your mandate" under a header that
+          says the list fits the mandate made two contradicting statements.
+          Without a mandate the list is WITHHELD, not relabelled: the card
+          copy (engine reasons, the fallback reason) speaks in mandate terms
+          too, and the call to action already says a mandate is what shows
+          recommendations. */}
+      {!mandateSet ? (
+        <NoMandateState />
+      ) : candidates.length > 0 ? (
         <ol className="space-y-4">
           {candidates.map((c) => (
             <li key={c.id}>
@@ -256,6 +265,10 @@ export default async function RecommendationsPage() {
             </li>
           ))}
         </ol>
+      ) : !batch ? (
+        <NoBatchState />
+      ) : (
+        <NoCandidatesState />
       )}
 
       <Disclaimer variant="footer" />
