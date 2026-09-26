@@ -1100,47 +1100,82 @@ here, but this precondition sits here because this is where a reader would go to
      | path, per attempt | ERROR lines | captures | events | attempt ends | pinned by |
      |---|---|---|---|---|---|
      | D-15 protects (`PRESENT`), both stamp calls succeed | 0 (D-15 line is WARNING) | 0 | **0** | permanent, terminal | `test_the_protected_path_emits_no_error_and_no_capture` (both files), `test_the_protected_path_with_nothing_failing_pages_nobody` |
-     | any `_stamp_io` call fails (composite status read, marker re-read, D-15 error-only write, loud write after `PRESENT` / `RETRACTED` / `OTHER_SOURCE` / an unmarked stamp) | 1 (`_stamp_io`, carries the cause) | 1 | **2** | transient | `test_a_failing_stamp_call_keeps_the_cause_and_files_transient` (every discovered call), `TestTransientReReadFailureRetries`, `TestAFailedStampReadKeepsTheCause`, `TestReReadFailsSafe` |
+     | any `_stamp_io` call fails (composite status read, marker re-read, D-15 error-only write, loud write after `RETRACTED` / `OTHER_SOURCE` / an unmarked stamp) | 1 (`_stamp_io`, carries the cause) | 1 | **2** | transient | `test_a_failing_stamp_call_keeps_the_cause_and_files_transient` (every discovered call), `test_every_io_call_in_a_stamp_closure_is_inside_stamp_io`, `TestTransientReReadFailureRetries`, `TestAFailedStampReadKeepsTheCause`, `TestReReadFailsSafe` |
      | loud write fails after `NO_ID` / `NO_ROW` | 2 (breach line + `_stamp_io`) | 1 | **3** | transient | `test_a_failing_stamp_call_keeps_the_cause_and_files_transient`, the `loud-over-missing-row` upsert cases |
      | any `_stamp_io` call raises a programming error | 1, or 2 after a `NO_ROW` breach line | 1 | **2** / **3** | `unknown` | `test_a_programming_error_in_a_stamp_call_is_unknown_and_captured` |
+     | a `_stamp_io` call is CANCELLED (the handler deadline, or a shutdown) | 1 (`_stamp_io`'s CANCELLED line, carries the cause), or 2 after a `NO_ROW` breach line | 0 | **1** / **2** | transient, `last_error` "Handler exceeded timeout" | `test_a_stamp_call_cut_off_by_the_handler_deadline_logs_the_cause` |
      | marked row, `RETRACTED` / `OTHER_SOURCE` → loud stamp lands | 1 (the landed "no longer protects it" line; the state line is WARNING) | 0 | **1** | permanent, terminal | `test_the_loud_stamp_over_a_live_row_logs_its_cause_at_error` (both files), `test_a_different_live_source_is_not_called_a_retraction`, `test_the_loud_stamp_over_another_source_logs_one_error` |
      | marked row, `NO_ID` / `NO_ROW` → loud stamp lands | 2 (breach line + landed line) | 0 | **2** | permanent, terminal | `test_a_missing_row_or_id_is_an_error_not_a_retraction`, `test_stamp_closure_calls_a_missing_row_an_error` |
-     | single-key series heal fails after a landed loud stamp | +0 (the heal logs WARNING) | 0 | **+0** | permanent, terminal | `test_a_failing_post_stamp_call_keeps_the_landed_stamp` |
+     | single-key series heal fails after a landed loud stamp | +1 (the heal's ERROR, scrubbed failure text) | +1 | **+2** | permanent, terminal | `test_a_failing_post_stamp_call_keeps_the_landed_stamp` |
+     | single-key series heal raises a programming error after a landed loud stamp | +1 | +1 | **+2** | `unknown` (retried) | `test_a_programming_error_in_a_post_stamp_call_is_unknown` |
      | entry publish-state read fails | 1 | 1 | **2** | transient | `test_a_failed_entry_read_fails_transient_before_the_crawl` |
      | entry read raises a programming error | 1 | 1 | **2** | `unknown` | `test_a_programming_error_is_not_relabelled_transient` |
      | chain edge `READ_ERROR` | 2 (`_refresh_marker_live_state`, `_log_marker_not_confirmed`) | 1 | **3** | transient | `test_a_raising_chain_edge_reread_enqueues_nothing_and_fails_transient` |
      | chain edge re-read raises a programming error | 1 | 1 | **2** | `unknown`, nothing enqueued | `test_at_the_chain_edge_it_is_unknown_and_enqueues_nothing` |
      | chain edge `NO_ID` / `NO_ROW` (marker dropped, hop 2 enqueued unmarked) | 1 (breach line) | 0 | **1** | job DONE | `test_chain_edge_calls_a_missing_row_an_error` |
      | tail mirror `READ_ERROR` (after hop 2 is enqueued) | 2 (helper, `_log_marker_not_confirmed`) | 1 | **3** | job DONE | `test_a_failed_tail_mirror_read_logs_and_the_job_is_done` |
-     | tail mirror re-read raises a programming error | 1 | 1 | **2** | `unknown` after the one enqueue | `test_at_the_tail_mirror_it_is_unknown_after_the_one_enqueue` |
+     | tail mirror re-read raises a programming error | 2 (the helper's programming-error line, `_log_marker_not_confirmed`) | 1 | **3** | job DONE | `test_at_the_tail_mirror_it_is_logged_and_the_job_is_done` |
      | tail mirror `NO_ID` / `NO_ROW` | 1 (breach line, "enqueued job") | 0 | **1** | job DONE | `test_mirror_does_not_call_a_missing_tail_row_a_dedup` |
 
-     **Derivation of the bound, round 4.** Four rules decide it:
+     **Derivation of the bound, round 4, re-derived in round 5.** Five rules decide it:
      - A stamp ends its attempt, whether it returns permanent or `_stamp_io` raises. No stamp
        follows the chain edge.
+     - The single-key series heal is the one step that can follow a LANDED loud stamp in the
+       same attempt, and it adds at most one ERROR and one capture.
      - The entry read precedes the crawl, and every failure of it raises.
      - The chain edge raises on `READ_ERROR` and on a programming error. On a definitive
        non-`PRESENT` answer it drops the marker, so the tail mirror does not run.
-     - The tail mirror runs only after a clean chain edge.
+     - The tail mirror runs only after a clean chain edge, and it never raises.
 
-     So one attempt reaches at most one row, and the largest row is **3 events**: a failed
-     loud write after a `NO_ROW` breach line, a chain-edge `READ_ERROR`, or a tail-mirror
-     `READ_ERROR`. With the default `max_attempts` of 3 one job produces **at most 9**. A
-     protected failure whose calls all succeed produces **none**.
-     ⚠️ **One pre-existing addition, outside this phase's code.** `upsert_or_drop_provenance`
-     (Phase 164.2) logs one ERROR when the database refuses the provenance marker pair (a
-     23514 on a marker CHECK, or a `PGRST204` in the deploy window), then re-issues the write
-     without the markers. If that re-issue also fails, a failed-write row above (D-15 error-only
-     or loud) gains 1. The
-     worst case is **4 events in one attempt** (breach line, the provenance line, `_stamp_io`'s
-     ERROR, the capture), so the per-job ceiling in that case is 12. It needs a marker refusal
-     AND a second failure on the same write.
+     So one attempt reaches at most one row, plus the heal row after a landed single-key loud
+     stamp. The largest is **4 events**: a loud stamp that lands after a `NO_ROW` breach line (2)
+     followed by a failed heal (2). Every other row is at most 3. An infrastructure heal failure
+     ends the job permanent, so it can only be the LAST attempt. A heal programming error is
+     filed `unknown` and retried, so with the default `max_attempts` of 3 one job produces
+     **at most 12** (it was 9 before round 5). A protected failure whose calls all succeed
+     produces **none**.
+     ⚠️ **One pre-existing addition, outside this phase's code** (reworded in round 5, R5
+     IN-05; the round-4 wording said the line was added only when the re-issue also failed,
+     which understated it). `upsert_or_drop_provenance` (Phase 164.2) logs one ERROR when the
+     database refuses the provenance marker pair (a 23514 on a marker CHECK, or a `PGRST204` in
+     the deploy window). It logs BEFORE it re-issues the write without the markers, so it adds 1
+     to any row whose write meets a marker refusal, whether or not the re-issue lands. So in
+     the deploy window "D-15 protects → 0" reads 1, and every landed-stamp row gains 1. The worst
+     case is **5 events in one attempt**: breach line, the provenance line, the landed "no longer
+     protects it" line, then the heal's ERROR and capture. It needs a marker refusal on the loud
+     write AND a heal failure. A heal programming error retries it, so the per-job ceiling in
+     that case is 15. A failed re-issue instead (breach line, provenance line, `_stamp_io`'s
+     ERROR, its capture) is still 4.
      Each row's count is pinned by the named test with an exact `log.error.call_count` (and,
      where a capture is expected, `capture_exception.call_count`). No row is counted from the
-     code only any more. The exhaustive stamp test
-     (`analytics-service/tests/test_stamp_io_exhaustive.py`) derives its cases from the fake
-     client's call log, so a database call added to either stamp closure later is held to the
-     2-event row without editing the test.
+     code only any more.
+     ⛔ **CORRECTED 2026-09-26 (round 5, R5 IN-01 / SFH-R5-02).** This sentence used to say that
+     the exhaustive stamp test "derives its cases from the fake client's call log, so a database
+     call added to either stamp closure later is held to the 2-event row without editing the
+     test". That was false in two ways. The call log covers only the scenario paths, and a call
+     on the composite `OTHER_SOURCE` branch passed every case. It also misses a call issued off
+     the closure's thread (`asyncio.to_thread`, `run_in_executor`, `create_task`). What holds
+     now in `analytics-service/tests/test_stamp_io_exhaustive.py`:
+     - Discovery covers the calls on its 12 scenario paths, including `OTHER_SOURCE` and a marked
+       job over an unpublished row in each closure.
+     - A static scan, `test_every_io_call_in_a_stamp_closure_is_inside_stamp_io`, reads every
+       line of both closures. It fails on any database call outside `_stamp_io`, on any branch,
+       on or off the thread. `_heal_delete_basis_series` is the one named exemption.
+     ⭐ **Round 5 changes to the table, with their round-4 values as lineage:**
+     - The heal row went from **+0** (WARNING only, raw exception) to **+2**, and a heal
+       programming error went from permanent to `unknown` (SFH-R5-03).
+     - The tail-mirror programming-error row went from **2** events, filed `unknown` after the
+       enqueue, to **3** events with the job DONE (R5 IN-02 / LOW-2). A job whose work already
+       landed and whose hop 2 is enqueued is no longer failed. A retry would re-crawl the venue,
+       and a `failed_final` derive is one `sync_strategy_analytics_status` reads as a live
+       failure over the row hop 2 just published.
+     - The cancelled-call row is new (SFH-R5-01). Before round 5 a cancelled stamp call logged
+       NOTHING carrying the cause.
+     - The first failed-call row no longer lists "loud write after `PRESENT`". `PRESENT` always
+       takes the D-15 error-only write and returns (R5 IN-04).
+     - A composite row whose `data_quality_flags` is not a JSON object now lands its failed
+       stamp once, with a WARNING, and ends permanent (SFH-R5-05). Before, `dict()` raised: F-5
+       re-stamped it under the chain-break cause, and the job was filed `unknown` with no stamp.
    📜 *Lineage, superseded 2026-09-25:* "⛔ **BLOCKING.** No schedule naming
    `public.enqueue_ledger_composite_refresh()` may be registered until `run_stitch_composite_job`
    in `analytics-service/services/job_worker.py` re-reads the LIVE `compute_jobs` row's
