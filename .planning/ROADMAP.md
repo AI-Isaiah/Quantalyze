@@ -3196,6 +3196,8 @@ Plans:
 
 **⭐ D-27 (2026-09-26, under founder decision D7):** T13's "skew and kurtosis stay 0 with no dispersion" is superseded, and they now read "—". Profit Factor, Calmar by Year, Avg Loss and Avg Win likewise show "—" where they do not exist. Recorded in `166.2-CONTEXT.md` D-27.
 
+**⭐ D-29 (recorded 2026-09-26):** a deviation from D-17. The D7 fix rounds edited Phase 169's `types.ts` (NaN/null fields, `n_valid`) and `fetch-and-build-payload.ts` (the v7 cache-key note). Phase 169 must rebase over them. Recorded in `166.2-CONTEXT.md` D-29.
+
 ### Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path (founder production steps) (INSERTED)
 
 **Goal:** Every persisted `strategy_analytics` row that Phase 166 changes, and that was computed before the Phase 166 worker deploy, is recomputed on PROD through the normal compute-job path, one strategy at a time, each checked against its before row, so stored numbers match what the fixed code produces. Every PROD statement is a founder step.
@@ -3416,6 +3418,8 @@ Plans:
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 169 to break down)
+
+**⚠️ REBASE NOTE 2026-09-26 (from 166.2 D-29):** 166.2 edited `src/app/factsheet/[id]/v2/types.ts` and `fetch-and-build-payload.ts` (NaN/null statistic fields, the optional `n_valid`, the v7 payload cache key). 169's plans must re-read both at HEAD before editing.
 
 ### Phase 170: PAGECOPY — layout and copy read clean on every page
 
