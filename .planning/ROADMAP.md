@@ -3173,7 +3173,7 @@ Plans:
 **Goal:** After a migration applies to PROD, the committed baseline is re-dumped and proposed automatically, so main never sits red on baseline-content-drift waiting for a manual dump.
 **Requirements**: TODOS `[164.9.5-MANUAL-BASELINE-REDUMP]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 6/9 plans executed
+**Plans:** 7/9 plans executed
 
 ⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
 
@@ -3214,7 +3214,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 164.9.5-08-PLAN.md — wave 5: `--check-bot-branch` naming the open PR token-free (D-24), the D-10 no-op notice naming an open bot PR, `--open-or-edit-pr`
+- [x] 164.9.5-08-PLAN.md — wave 5: `--check-bot-branch` naming the open PR token-free (D-24), the D-10 no-op notice naming an open bot PR, `--open-or-edit-pr`
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
