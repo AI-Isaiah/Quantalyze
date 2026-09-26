@@ -2148,8 +2148,16 @@ Plans:
 
 Plans:
 
+**Wave 1**
+
 - [ ] 164.5.2-01-PLAN.md — wave 1: the two-key lock in both mark RPCs (one migration) + the LANE-ONLY dblink two-backend gate (arms L1-L4), observed RED then GREEN
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 164.5.2-02-PLAN.md — wave 2: regenerated function snapshots, the two earned VAC-04 acks, the CI `sql-mutation` dblink probe
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 164.5.2-03-PLAN.md — wave 3: mutation-runner floors and census pins from one measured run; DEC-4 / `161.1-D1` closeout in TODOS.md
 
 ### Phase 164.5.2.1: BRIDGERESIDUE — the two 164.6.7 bridge residues in sync_strategy_analytics_status (INSERTED)
