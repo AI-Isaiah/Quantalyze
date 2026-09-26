@@ -1,7 +1,9 @@
 // @vitest-environment node
-import { describe, it, expect } from "vitest";
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { describe, it, expect, afterAll } from "vitest";
+import { readFileSync, readdirSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { tmpdir } from "node:os";
+import { execFileSync, execSync } from "node:child_process";
 
 /**
  * Phase 166.2 (COMPUTEONCE): the permanent compute-once gate for dispersion ratios.
@@ -32,28 +34,39 @@ import { join, relative, sep } from "node:path";
  *   3. THE WHOLE-TREE SHAPE MATCHER. Over every .ts / .tsx under src/ except tests,
  *      __tests__/, fixtures/, __snapshots__/ and return-stats.ts itself, applied to
  *      the comment-stripped WHOLE text (so an expression split across lines still
- *      matches), nine shipped forms. ID is an identifier-start operand, so a
- *      numeric operand never matches:
- *        SHARPE S0  ( x * periodsPerYear | ppy | sqrtN | ANNUAL | N ) / d
- *        SHARPE S1  ( ... ) / ( d * Math.sqrt(   or   ( d * sqrtN
+ *      matches), fourteen forms (nine shipped by D-21, five added and two widened by
+ *      Phase 166.2 review round 1, WR-05). ID is an identifier-start operand, so a
+ *      numeric operand never matches. ANN is an annualiser: periodsPerYear, ppy,
+ *      sqrtN, ANNUAL, N, PERIODS_PER_YEAR or SQRT_N, optionally as a `this.` member.
+ *      COVN is a covariance-like name: one holding "cov", or a sums-form "xy".
+ *        SHARPE S0  ( x * ANN ) / d                            (ANN widened, WR-05)
+ *        SHARPE S1  ( ... ) / ( d * Math.sqrt(   or   ( d * sqrtN | SQRT_N
  *        SHARPE S2  ( m / s ) * Math.sqrt(
  *        SHARPE S3  ID / ID * Math.sqrt(                      (D-21)
  *        SHARPE S4  Math.sqrt(N) * ID / ID                    (D-21)
+ *        SHARPE S5  ( ... ) / ID * Math.sqrt(   the textbook (m - rf) / sd * √N (WR-05)
+ *        SHARPE S6  ID * ANN / ID               unparenthesised              (WR-05)
+ *        SHARPE S7  ID * Math.sqrt(N) / ID      the root in the numerator    (WR-05)
+ *        SHARPE S8  <..ret..> / <..vol..>       annRet / annVol, by name     (WR-05)
  *        PEARSON P0 cov / Math.sqrt(
  *        PEARSON P1 Math.sqrt( ID * ID ), which also catches the two-step
  *                   denom = Math.sqrt(va * vb); ... cov / denom       (D-21)
- *        PEARSON P2 cov / ( a * b )
- *        BETA       cov / var
+ *        PEARSON P2 COVN / ( a * b )            numerator widened to COVN   (WR-05)
+ *        PEARSON P3 COVN / ID / ID              the chained form             (WR-05)
+ *        BETA       COVN / <..var..|..xx..>     covar / bVar, sxy / sxx      (WR-05)
  *      Every match must be covered by a COUNT-PINNED allowlist entry; an entry whose
  *      live count differs from its pin fails as stale. Annualised volatility and
  *      tracking error are a dispersion TIMES Math.sqrt(N), not a ratio, so the
  *      shapes do not match them by design. By design P1 flags ANY future product of
  *      two identifiers under a root; a legitimate non-Pearson one earns an allowlist
  *      entry with its reason (the allowlist is the escape, never a narrower regex).
+ *      Each form has a positive fixture below yielding exactly one hit of its form.
  *
- * KNOWN UNMATCHED (D-22; measured, 0 hits each with the shipped regexes). The matcher
- * is not a whole-language guard. A copy in one of these seven forms is caught only
- * by layers 1 and 2, the import rule and the retired-expression table:
+ * KNOWN UNMATCHED (D-22, re-measured after WR-05: still 0 hits each, and pinned
+ * at 0 by the KNOWN_UNMATCHED fixtures so this list cannot drift from the
+ * matcher). The matcher is not a whole-language guard: it catches the fourteen
+ * forms above. A copy in one of these seven forms is caught only by layers 1 and
+ * 2, the import rule and the retired-expression table:
  *        mean(r) / stdDev(r) * Math.sqrt(N)
  *        mean(r) * Math.sqrt(N) / stdDev(r)
  *        (mu * Math.sqrt(N)) / sd
@@ -61,8 +74,15 @@ import { join, relative, sep } from "node:path";
  *        (m * 252) / s
  *        cov / (Math.sqrt(va) * Math.sqrt(vb))
  *        covariance(a,b) / variance(b)
- * The regexes were NOT widened in D-22: any widening moves the measured 26-hit pin
- * of the merge-base tree (20 in-class, 6 allowlisted) and needs a fresh measurement.
+ *
+ * THE MERGE-BASE PIN runs in every vitest run, CI included (IN-01). It archives
+ * the phase's diff base (BASE_SHA) from git into a temp dir and scans it with the
+ * committed matcher: 26 hits, 20 in-class and 6 allowlisted. D-22 expected any
+ * widening to move that pin; re-measured after WR-05 it did NOT (the new forms
+ * have no copy at the base), so the pin stands at 26 by measurement, not by
+ * assumption. `frontend-test` checks out full history, so the commit is
+ * reachable; an unreachable commit fails loudly. QZ_166_2_06_SCAN_ROOT still
+ * overrides the archive with a hand-made tree.
  *
  * Constraint on later phases (D-21): this gate constrains every later src/ edit,
  * including Phase 169's and 167.x's edits to the Tier-2 files. A new ratio copy fails
@@ -71,10 +91,12 @@ import { join, relative, sep } from "node:path";
  * Comment stripping. The template's stripComments drops any line whose trimmed start
  * is "*", which would also drop a continuation line starting with a multiplication and
  * hide a split Sharpe. So this gate strips block comments by span and line comments by
- * a "//" not preceded by ":" (a URL), in ONE left-to-right pass, and keeps every
- * newline so a hit reports its true line. The forbidden tokens below are built by
- * concatenation so this file cannot match itself; it is also a test file, which the
- * shape scan excludes.
+ * a "//" not right after ":" (a URL), in ONE left-to-right pass that steps over
+ * string, template and regex literals (IN-02; see stripComments), and keeps every
+ * newline so a hit reports its true line. The retired tokens are compared with all
+ * whitespace removed, and both walks carry a file-count floor. The forbidden tokens
+ * below are built by concatenation so this file cannot match itself; it is also a
+ * test file, which the shape scan excludes.
  */
 
 const SRC_ROOT = join(process.cwd(), "src");
@@ -85,9 +107,157 @@ const RETURN_STATS_REL = "src/lib/return-stats.ts";
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Blank out comments, keeping every newline so line numbers stay true. */
+/** Keywords after which a "/" starts a regex literal, not a division. */
+const REGEX_AFTER_WORD = new Set([
+  "return", "typeof", "case", "in", "of", "delete", "void", "throw", "new", "else", "do", "instanceof", "yield", "await",
+]);
+
+/**
+ * Blank out comments, keeping every newline so line numbers stay true.
+ *
+ * STRING-AWARE (IN-02, Phase 166.2 review round 1). One left-to-right pass that
+ * steps OVER string literals ('...', "..."), template literals (`...`, with each
+ * ${...} expression scanned as code, nested to any depth) and regex literals
+ * (/.../flags, character classes included) while it looks for comment starts,
+ * and copies their text through unchanged. The import rule and the whole-tree
+ * retired tokens match INSIDE import-specifier strings, so strings must survive.
+ * The regex-literal test is the usual one: a "/" is a regex after an operator,
+ * an opening bracket, a comma, the start of input, or a keyword such as
+ * `return`. The old stripper blanked everything after a "/*" or "//" inside a
+ * string (a glob "src/*" hid the rest of the file up to the next "* /").
+ *
+ * A "//" right after ":" is still not a comment (a URL in JSX text), and a "/"
+ * in a JSX closing tag "</" or a self-closing "/>" is not a regex.
+ *
+ * KNOWN LIMITS (recorded, not fixed): JSX TEXT is not parsed, so an apostrophe
+ * in it ("Don't") reads as a string to the end of its line, and a "//" or "/*"
+ * later on that line is copied as code rather than blanked. That can only ADD
+ * text to the shape scan (a comment scanned as code), never hide code.
+ */
 function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\/|(?<!:)\/\/[^\n]*/g, m => m.replace(/[^\n]/g, " "));
+  let out = "";
+  let i = 0;
+  const n = src.length;
+  // Non-whitespace code before the cursor: the last character, and the last word.
+  let prevChar = "";
+  let prevWord = "";
+  // One brace depth per open template-literal substitution, innermost last.
+  const templateBraces: number[] = [];
+  const blank = (text: string) => text.replace(/[^\n]/g, " ");
+
+  /** Copy a template literal's text from i (just after its opening backtick or
+   * a closing "}") to its end, or into a ${ substitution. */
+  const readTemplate = (): void => {
+    while (i < n) {
+      const c = src[i];
+      if (c === "\\") {
+        out += src.slice(i, i + 2);
+        i += 2;
+        continue;
+      }
+      if (c === "`") {
+        out += c;
+        i += 1;
+        prevChar = "`";
+        prevWord = "";
+        return;
+      }
+      if (c === "$" && src[i + 1] === "{") {
+        out += "${";
+        i += 2;
+        templateBraces.push(0);
+        prevChar = "{";
+        prevWord = "";
+        return;
+      }
+      out += c;
+      i += 1;
+    }
+  };
+
+  while (i < n) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === "/" && d === "/" && src[i - 1] !== ":") {
+      const j = src.indexOf("\n", i);
+      const end = j === -1 ? n : j;
+      out += blank(src.slice(i, end));
+      i = end;
+      continue;
+    }
+    if (c === "/" && d === "*") {
+      const j = src.indexOf("*/", i + 2);
+      const end = j === -1 ? n : j + 2;
+      out += blank(src.slice(i, end));
+      i = end;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < n && src[j] !== c && src[j] !== "\n") j += src[j] === "\\" ? 2 : 1;
+      out += src.slice(i, j + 1);
+      i = j + 1;
+      prevChar = c;
+      prevWord = "";
+      continue;
+    }
+    if (c === "`") {
+      out += c;
+      i += 1;
+      readTemplate();
+      continue;
+    }
+    if (c === "/") {
+      // Not a regex: a JSX closing tag "</" or a self-closing "/>".
+      const jsxSlash = prevChar === "<" || d === ">";
+      const regexAllowed =
+        !jsxSlash && (prevChar === "" || /[(,=:[!&|?{};+\-*%<>~^]/.test(prevChar) || REGEX_AFTER_WORD.has(prevWord));
+      if (regexAllowed) {
+        let j = i + 1;
+        let inClass = false;
+        while (j < n && src[j] !== "\n") {
+          const ch = src[j];
+          if (ch === "\\") {
+            j += 2;
+            continue;
+          }
+          if (ch === "[") inClass = true;
+          else if (ch === "]") inClass = false;
+          else if (ch === "/" && !inClass) break;
+          j += 1;
+        }
+        j += 1;
+        while (j < n && /[a-z]/i.test(src[j])) j += 1;
+        out += src.slice(i, j);
+        i = j;
+        prevChar = "/";
+        prevWord = "";
+        continue;
+      }
+    }
+    if (c === "{" && templateBraces.length > 0) {
+      templateBraces[templateBraces.length - 1] += 1;
+    } else if (c === "}" && templateBraces.length > 0) {
+      if (templateBraces[templateBraces.length - 1] === 0) {
+        templateBraces.pop();
+        out += c;
+        i += 1;
+        readTemplate();
+        continue;
+      }
+      templateBraces[templateBraces.length - 1] -= 1;
+    }
+    out += c;
+    i += 1;
+    if (/\s/.test(c)) continue;
+    if (/[\w$]/.test(c)) {
+      prevWord = /[\w$]/.test(prevChar) ? prevWord + c : c;
+    } else {
+      prevWord = "";
+    }
+    prevChar = c;
+  }
+  return out;
 }
 
 const count = (text: string, token: string): number => text.split(token).length - 1;
@@ -115,20 +285,42 @@ const relOf = (root: string, full: string): string =>
 // Layer 3: the whole-tree shape matcher
 // ---------------------------------------------------------------------------
 
-type Shape = "S0" | "S1" | "S2" | "S3" | "S4" | "P0" | "P1" | "P2" | "BETA";
+type Shape =
+  | "S0" | "S1" | "S2" | "S3" | "S4" | "S5" | "S6" | "S7" | "S8"
+  | "P0" | "P1" | "P2" | "P3" | "BETA";
 type Hit = { file: string; line: number; shape: Shape; text: string };
 
 const ID = "[A-Za-z_$][\\w.$]*";
+// An annualiser: the periods-per-year count or its root, as a bare identifier,
+// a `this.` member, or a SCREAMING_CASE constant (WR-05 widened this from the
+// five bare names S0 and S1 first shipped with).
+const ANN = "(?:this\\.)?(?:periodsPerYear|ppy|sqrtN|ANNUAL|N|PERIODS_PER_YEAR|SQRT_N)";
+// A covariance-like numerator: a name holding "cov", or a sums-form "xy".
+const COVN = "\\w*(?:cov|xy)\\w*";
 const SHAPES: ReadonlyArray<readonly [Shape, RegExp]> = [
-  ["S0", /\*\s*(?:periodsPerYear|ppy|sqrtN|ANNUAL|N)\s*\)\s*\/\s*[\w.]+/g],
-  ["S1", /\)\s*\/\s*\(\s*[\w.]+\s*\*\s*(?:Math\.sqrt\(|sqrtN\b)/g],
+  ["S0", new RegExp(`\\*\\s*${ANN}\\s*\\)\\s*\\/\\s*[\\w.]+`, "g")],
+  ["S1", /\)\s*\/\s*\(\s*[\w.]+\s*\*\s*(?:Math\.sqrt\(|sqrtN\b|SQRT_N\b)/g],
   ["S2", /(?<!Math\.sqrt)\(\s*[\w.]+\s*\/\s*[\w.]+\s*\)\s*\*\s*Math\.sqrt\(/g],
   ["S3", new RegExp(`(?<![\\w.$)])${ID}\\s*\\/\\s*${ID}\\s*\\*\\s*Math\\.sqrt\\(`, "g")],
   ["S4", new RegExp(`Math\\.sqrt\\([^()]*\\)\\s*\\*\\s*${ID}\\s*\\/\\s*${ID}(?![\\w.$(])`, "g")],
+  // WR-05: a parenthesised numerator over an sd, times a root (the textbook
+  // `(m - rf) / sd * Math.sqrt(N)`), which S3's lookbehind excludes.
+  ["S5", new RegExp(`\\)\\s*\\/\\s*${ID}\\s*\\*\\s*Math\\.sqrt\\(`, "g")],
+  // WR-05: an unparenthesised `m * periodsPerYear / sd`, which S0 misses (S0
+  // needs a ")" straight after the annualiser).
+  ["S6", new RegExp(`(?<![\\w.$)])${ID}\\s*\\*\\s*${ANN}\\s*\\/\\s*${ID}(?![\\w.$(])`, "g")],
+  // WR-05: `m * Math.sqrt(N) / sd`, the root in the numerator.
+  ["S7", new RegExp(`(?<![\\w.$)])${ID}\\s*\\*\\s*Math\\.sqrt\\([^()]*\\)\\s*\\/\\s*${ID}(?![\\w.$(])`, "g")],
+  // WR-05: an annualised return over an annualised vol, by name.
+  ["S8", /\b\w*ret(?:urn)?\w*\s*\/\s*\w*vol(?:atility)?\b/gi],
   ["P0", /\w*cov\w*\s*\/\s*Math\.sqrt\(/gi],
   ["P1", new RegExp(`Math\\.sqrt\\(\\s*${ID}\\s*\\*\\s*${ID}\\s*\\)`, "g")],
-  ["P2", /\w*cov\w*\s*\/\s*\(\s*[\w.]+\s*\*\s*[\w.]+\s*\)/gi],
-  ["BETA", /\w*cov\w*\s*\/\s*var\w*/gi],
+  // WR-05 widened the numerator from "cov" to COVN, so `sxy / (sx * sy)` trips.
+  ["P2", new RegExp(`${COVN}\\s*\\/\\s*\\(\\s*[\\w.]+\\s*\\*\\s*[\\w.]+\\s*\\)`, "gi")],
+  // WR-05: the chained Pearson `cov / sx / sy`.
+  ["P3", new RegExp(`${COVN}\\s*\\/\\s*${ID}\\s*\\/\\s*${ID}`, "gi")],
+  // WR-05 widened both sides: `covar / bVar` and the sums-form `sxy / sxx`.
+  ["BETA", new RegExp(`${COVN}\\s*\\/\\s*\\w*(?:var|xx)\\w*`, "gi")],
 ];
 
 /** Every shape hit in one file's text (comments stripped here). */
@@ -271,17 +463,31 @@ const WHOLE_TREE_RETIRED = [
   "computeRolling" + "Metric",
 ];
 
+/** Whitespace removed: a retired token matches however it is spaced (IN-02). */
+const squash = (text: string): string => text.replace(/\s+/g, "");
+
 function retiredOffenders(file: string, source: string, table = RETIRED): string[] {
-  const code = stripComments(source);
+  // Compared with ALL whitespace removed on both sides (IN-02): the table's
+  // tokens are written as the plans grepped them ("std > 0 ?"), and a
+  // re-introduced "std>0?" or a copy split across lines is the same expression.
+  const code = squash(stripComments(source));
   return table
-    .filter(r => r.file === file && count(code, r.token) > 0)
+    .filter(r => r.file === file && count(code, squash(r.token)) > 0)
     .map(r => `${r.file}: ${JSON.stringify(r.token)} is back (retired by plan ${r.plan})`);
 }
 
 function wholeTreeOffenders(file: string, source: string): string[] {
-  const code = stripComments(source);
-  return WHOLE_TREE_RETIRED.filter(t => code.includes(t)).map(t => `${file}: ${t}`);
+  const code = squash(stripComments(source));
+  return WHOLE_TREE_RETIRED.filter(t => code.includes(squash(t))).map(t => `${file}: ${t}`);
 }
+
+// Floors on the two walks (IN-02): a walk that finds nothing, or a fraction of
+// the tree (a wrong root, a renamed directory), must fail on its own rather than
+// pass because there was nothing to scan. Measured 2026-09-26 at this commit's
+// parent: 1611 .ts/.tsx files under src/ for the whole-tree walk, 732 for the
+// non-test shape walk. The floors are round numbers well under both.
+const WHOLE_TREE_FILES_FLOOR = 1000;
+const SHAPE_WALK_FILES_FLOOR = 500;
 
 const read = (rel: string): string => readFileSync(join(process.cwd(), rel), "utf8");
 
@@ -320,7 +526,11 @@ describe("Phase 166.2 compute-once gate (D-17)", () => {
   it("whole-tree retirements: the deleted correlation module and its tokens stay gone", () => {
     expect(existsSync(join(SRC_ROOT, "lib", "correlation-" + "math.ts"))).toBe(false);
     const offenders: string[] = [];
-    for (const full of walkSource(SRC_ROOT, false)) {
+    const files = walkSource(SRC_ROOT, false);
+    expect(files.length, "the whole-tree walk found too few files to mean anything").toBeGreaterThan(
+      WHOLE_TREE_FILES_FLOOR,
+    );
+    for (const full of files) {
       const file = relOf(SRC_ROOT, full);
       if (file === SELF_REL) continue;
       offenders.push(...wholeTreeOffenders(file, readFileSync(full, "utf8")));
@@ -329,6 +539,9 @@ describe("Phase 166.2 compute-once gate (D-17)", () => {
   });
 
   it("whole-tree shapes: every Sharpe / Pearson / beta shape outside return-stats is allowlisted, and no entry is stale", () => {
+    expect(walkSource(SRC_ROOT, true).length, "the shape walk found too few files to mean anything").toBeGreaterThan(
+      SHAPE_WALK_FILES_FLOOR,
+    );
     const { unallowlisted, stale } = classify(scanShapes(SRC_ROOT), ALLOWLIST);
     expect(
       unallowlisted.map(fmt),
@@ -342,6 +555,17 @@ describe("Phase 166.2 compute-once gate (D-17)", () => {
 // ---------------------------------------------------------------------------
 // Liveness, through the SAME matcher functions
 // ---------------------------------------------------------------------------
+
+/** The header's KNOWN UNMATCHED forms (D-22), measured at 0 hits each. */
+const KNOWN_UNMATCHED = [
+  "mean(r) / stdDev(r) * Math.sqrt(N)",
+  "mean(r) * Math.sqrt(N) / stdDev(r)",
+  "(mu * Math.sqrt(N)) / sd",
+  "Math.sqrt(N) * (m / s)",
+  "(m * 252) / s",
+  "cov / (Math.sqrt(va) * Math.sqrt(vb))",
+  "covariance(a,b) / variance(b)",
+];
 
 const shapesOf = (src: string, file = "src/lib/new-feature.ts"): Shape[] =>
   matchShapes(file, src).map(h => h.shape).sort();
@@ -367,6 +591,30 @@ describe("Phase 166.2 compute-once gate: liveness (D-20 B1, D-21 B1, D-22)", () 
     expect(shapesOf("const b = cov / varX;")).toEqual(["BETA"]);
   });
 
+  // WR-05 (Phase 166.2 review round 1): each spelling the review measured at 0
+  // hits now yields exactly one hit of its own form.
+  it.each([
+    ["(m - rf) / sd * Math.sqrt(N)", "S5"],
+    ["m * periodsPerYear / sd", "S6"],
+    ["m * Math.sqrt(periodsPerYear) / sd", "S7"],
+    ["(m * this.periodsPerYear) / sd", "S0"],
+    ["(m * PERIODS_PER_YEAR) / (sd * SQRT_N)", "S1"],
+    ["annRet / annVol", "S8"],
+    ["sxy / (sx * sy)", "P2"],
+    ["cov / sx / sy", "P3"],
+    ["sxy / sxx", "BETA"],
+    ["covar / bVar", "BETA"],
+  ])("WR-05 spelling %s is exactly one %s hit", (expr, shape) => {
+    expect(shapesOf(`const x = ${expr};`)).toEqual([shape]);
+  });
+
+  // The recorded limit, pinned so the header cannot drift from the matcher: each
+  // KNOWN UNMATCHED form is still 0 hits. A widening that catches one moves it
+  // out of this list and into the positive fixtures above, in the same commit.
+  it.each(KNOWN_UNMATCHED)("KNOWN UNMATCHED %s is still 0 hits", (expr) => {
+    expect(shapesOf(`const x = ${expr};`)).toEqual([]);
+  });
+
   it("a Sharpe split across lines, with a continuation line starting with '*', still trips", () => {
     const src = "const sharpe = (m\n  * periodsPerYear)\n  / (s * Math.sqrt(periodsPerYear));";
     expect(shapesOf(src)).toEqual(["S1"]);
@@ -389,6 +637,36 @@ describe("Phase 166.2 compute-once gate: liveness (D-20 B1, D-21 B1, D-22)", () 
     expect(stale).toHaveLength(1);
   });
 
+  // IN-02: the stripper steps over strings, templates and regex literals.
+  it("a formula after a string holding '/*' or '//' is still scanned", () => {
+    expect(shapesOf('const glob = "src/*";\nconst sharpe = mu / sd * Math.sqrt(periodsPerYear);')).toEqual(["S3"]);
+    expect(shapesOf("const url = 'a//b'; const sharpe = mu / sd * Math.sqrt(periodsPerYear);")).toEqual(["S3"]);
+  });
+
+  it("a formula after a regex literal holding '//' is still scanned", () => {
+    expect(shapesOf("const re = /https?:\\/\\//; const sharpe = mu / sd * Math.sqrt(periodsPerYear);")).toEqual(["S3"]);
+  });
+
+  it("template text after a substitution is text, a substitution is code, and a comment after a string is blanked", () => {
+    // The "//" is template TEXT between two substitutions, so the formula after
+    // the template on the same line must still be scanned.
+    expect(shapesOf("const t = `${a} // ${b}`; const sharpe = mu / sd * Math.sqrt(periodsPerYear);")).toEqual(["S3"]);
+    expect(shapesOf("const t = `x ${mu / sd * Math.sqrt(periodsPerYear)} y`;")).toEqual(["S3"]);
+    expect(shapesOf('const s = "a"; // const sharpe = mu / sd * Math.sqrt(periodsPerYear);')).toEqual([]);
+  });
+
+  it("string text survives stripping, so an import specifier is still read", () => {
+    const src = 'import { sharpe } from "@/lib/return-stats"; // src/* glob';
+    expect(IMPORTS_RETURN_STATS.test(stripComments(src))).toBe(true);
+  });
+
+  it("a retired token matches however it is spaced (IN-02)", () => {
+    const file = "src/app/(dashboard)/compare/lib/holding-compare-adapter.ts";
+    expect(retiredOffenders(file, "const s = std>0?m/std:0;")).toHaveLength(1);
+    expect(retiredOffenders(file, "const s = std  >\n  0 ? m / std : 0;")).toHaveLength(1);
+    expect(retiredOffenders(file, "const s = std >= 0 ? m / std : 0;")).toEqual([]);
+  });
+
   it("a live correlation-module import and a private pstdev trip the retired matchers; a comment-only mention does not", () => {
     const file = FS + "compute.ts";
     const live =
@@ -406,8 +684,9 @@ describe("Phase 166.2 compute-once gate: liveness (D-20 B1, D-21 B1, D-22)", () 
 // The merge-base measurement through the committed matcher (D-22)
 // ---------------------------------------------------------------------------
 
-// The 26 hits the shipped regexes find on the merge-base src/ tree, by file and form:
-// 20 in-class (SHARPE 10, PEARSON 7, BETA 3) and the 6 allowlisted Sortino / Treynor.
+// The 26 hits the committed regexes find on the merge-base src/ tree, by file and
+// form: 20 in-class (SHARPE 10, PEARSON 7, BETA 3) and the 6 allowlisted Sortino /
+// Treynor. Re-measured after the WR-05 widening (2026-09-26): unchanged.
 const BASE_EXPECTED = [
   "src/app/(dashboard)/allocations/lib/scenario-benchmark.ts S0",
   "src/app/(dashboard)/allocations/lib/scenario-benchmark.ts P2",
@@ -436,22 +715,57 @@ const BASE_EXPECTED = [
   "src/lib/scenario.ts S0",
   "src/lib/scenario.ts P2",
 ];
+const BASE_UNALLOWLISTED = 20;
+const BASE_ALLOWLISTED = 6;
 
-const SCAN_ROOT = process.env.QZ_166_2_06_SCAN_ROOT;
+// The diff base of Phase 166.2 (its merge-base with origin/main). It is on main,
+// so every full-history clone reaches it after this branch merges too.
+const BASE_SHA = "ea4167a3f82a03306f29dcd2a10cbdc38768117b";
 
-describe.runIf(SCAN_ROOT)("merge-base tree", () => {
-  it("the committed matcher reports 26 hits: 20 not allowlisted, 6 allowlisted", () => {
-    const hits = scanShapes(SCAN_ROOT as string);
+/**
+ * The base tree's src/ root. QZ_166_2_06_SCAN_ROOT still overrides it (a
+ * hand-archived tree). Otherwise the tree is materialised IN-TEST from git, so
+ * the pin runs in every vitest run, CI included (IN-01): `frontend-test` checks
+ * out with `fetch-depth: 0`, so the commit is reachable there. An unreachable
+ * commit (a shallow clone) FAILS the test loudly; it never skips.
+ */
+let baseTmp: string | null = null;
+function baseSrcRoot(): string {
+  const override = process.env.QZ_166_2_06_SCAN_ROOT;
+  if (override) return override;
+  if (baseTmp) return join(baseTmp, "src");
+  try {
+    execFileSync("git", ["cat-file", "-e", `${BASE_SHA}^{commit}`], { stdio: "pipe" });
+  } catch {
+    throw new Error(
+      `merge-base pin: commit ${BASE_SHA} is not reachable (a shallow clone?). ` +
+        "Fetch full history, or set QZ_166_2_06_SCAN_ROOT to an archived src/ tree.",
+    );
+  }
+  baseTmp = mkdtempSync(join(tmpdir(), "qz-166-2-base-"));
+  execSync(`git archive --format=tar ${BASE_SHA} src | tar -x -C "${baseTmp}"`, { stdio: "pipe" });
+  return join(baseTmp, "src");
+}
+afterAll(() => {
+  if (baseTmp) rmSync(baseTmp, { recursive: true, force: true });
+});
+
+describe("merge-base tree (runs in CI, IN-01)", () => {
+  it(`the committed matcher reports ${BASE_EXPECTED.length} hits on the base tree: ${BASE_UNALLOWLISTED} not allowlisted, ${BASE_ALLOWLISTED} allowlisted`, () => {
+    const root = baseSrcRoot();
+    expect(walkSource(root, true).length, "the base-tree walk found too few files").toBeGreaterThan(
+      SHAPE_WALK_FILES_FLOOR,
+    );
+    const hits = scanShapes(root);
     const { allowlisted, unallowlisted } = classify(hits, ALLOWLIST);
     // process.stdout.write, not console.log: vitest 4's agent reporter drops the
     // console output of a passing test, and this line is the measurement.
     for (const h of hits) process.stdout.write(`shape-scan-hit: ${fmt(h)}\n`);
-    expect(hits.map(h => `${h.file} ${h.shape}`).sort()).toEqual([...BASE_EXPECTED].sort());
-    expect(hits).toHaveLength(26);
-    expect(unallowlisted).toHaveLength(20);
-    expect(allowlisted).toHaveLength(6);
     process.stdout.write(
       `shape-scan-base: hits=${hits.length} unallowlisted=${unallowlisted.length} allowlisted=${allowlisted.length}\n`,
     );
+    expect(hits.map(h => `${h.file} ${h.shape}`).sort()).toEqual([...BASE_EXPECTED].sort());
+    expect(unallowlisted).toHaveLength(BASE_UNALLOWLISTED);
+    expect(allowlisted).toHaveLength(BASE_ALLOWLISTED);
   });
 });
