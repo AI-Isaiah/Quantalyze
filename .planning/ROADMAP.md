@@ -3091,7 +3091,7 @@ Plans:
 **Goal:** `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner.
 **Requirements**: TODOS `[164.9.4-CI-MUTEX-QUEUE]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 0 plans
+**Plans:** 12 plans (planned 2026-09-26; 4 waves: W1 01–06 · W2 07 · W3 08 · W4 09–12; plan-checked, 3 rounds)
 
 ⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
 
@@ -3125,7 +3125,25 @@ suite unable to catch a CSP edit that breaks login.
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.4 to break down)
+**Wave 1** *(six file-disjoint plans; 04, 05 and 06 share neuter targets, so they run in isolated worktrees or one after another)*
+- [ ] 164.9.4-01-PLAN.md — D-11: commit `164.9.4-MEASUREMENT.md` (BEFORE numbers, AFTER protocol) before any `ci.yml` edit
+- [ ] 164.9.4-02-PLAN.md — D-14: the CSP `connect-src` adds the configured Supabase origin only when no source matches it; contract test (reversible, pending founder ratification)
+- [ ] 164.9.4-03-PLAN.md — D-04: `scripts/local-stack/run.sh --assert-local-handoff` seam that reuses the lane's loopback guards
+- [ ] 164.9.4-04-PLAN.md — the dead-holder drill and the Test 3b verdict scan stop depending on `ci.yml`
+- [ ] 164.9.4-05-PLAN.md — the `critical-regressions.test.ts` protocol loops are re-pointed to `MUTEX_HOLDERS`, not retired
+- [ ] 164.9.4-06-PLAN.md — the six byte-identity `it`s are re-subjected to the two other workflows, each seen RED under a neuter
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 164.9.4-07-PLAN.md — `python` moves to the local-stack lane and off the key; its pins move in the same commit
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 164.9.4-08-PLAN.md — `e2e-seeded` moves to the lane and off the key, so `ci.yml` holds no key; D-09 build-guard retarget
+
+**Wave 4** *(blocked on Wave 3 completion; file-disjoint)*
+- [ ] 164.9.4-09-PLAN.md — new pins the topology allows: per-job "holds and names no key", seam-before-boot rows, D-04 handoff order
+- [ ] 164.9.4-10-PLAN.md — `ci.yml` prose outside the two moved jobs
+- [ ] 164.9.4-11-PLAN.md — dated doc addenda (runbook, `CLAUDE.md`, `CONTRIBUTING.md`) and the D-15 evidence-only TODOS entry
+- [ ] 164.9.4-12-PLAN.md — dated prose notes in script headers and the other two workflows, key counts pinned unchanged
 
 ### Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically (INSERTED)
 
