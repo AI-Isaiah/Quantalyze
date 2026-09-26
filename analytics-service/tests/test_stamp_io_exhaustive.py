@@ -33,10 +33,11 @@ held to the same assertions without editing this file.
 ⚠️ The one call with a DIFFERENT, asserted disposition is the single-key series
 heal. It is identified by its own property, not by name: it is closure I/O
 issued AFTER the closure's ``strategy_analytics`` write has landed. Its failure
-loses no cause (``computation_error`` already carries it), so it keeps its
-WARNING and the job stays ``permanent``. ``_stamp_io``'s docstring records why
-it is not wrapped. The post-stamp test pins that disposition for every such
-call.
+loses no cause (``computation_error`` already carries it), so the job stays
+``permanent``. Since round 5 (SFH-R5-03) it logs at ERROR with the scrubbed
+failure and makes one capture, and a programming error in it is re-raised
+(``unknown``). ``_stamp_io``'s docstring records why it is not wrapped. The two
+post-stamp tests pin that disposition for every such call.
 
 Neuter to redden: make ``_stamp_io`` return ``await call()`` with no ``try``.
 Every failing-call case goes RED on (a) (``unknown``). Measured 2026-09-26,
@@ -198,6 +199,12 @@ class _Scenario:
     # Whether the live answer is an invariant breach (``NO_ROW``), which
     # ``_log_marker_not_confirmed`` logs at ERROR before the loud stamp.
     breach_line: bool = False
+
+    @property
+    def lost_protection(self) -> bool:
+        """A marked job over a published row that the live re-read did not
+        confirm: the landed loud stamp adds its "no longer protects it" ERROR."""
+        return self.marked and self.published and not self.protected
 
 
 _SCENARIOS: tuple[_Scenario, ...] = (
@@ -554,25 +561,57 @@ async def test_a_failing_post_stamp_call_keeps_the_landed_stamp(
     scenario: _Scenario, post_stamp_case: int
 ) -> None:
     """The stamp has landed with the cause in ``computation_error``, so a
-    failure here loses nothing: the job stays ``permanent``, the stamp stays,
-    the heal's WARNING names the failure, and ``_stamp_io`` logs nothing."""
+    failure here loses nothing and is not retried: the job stays ``permanent``
+    and the stamp stays. SFH-R5-03 (round 5): the heal's failure is logged at
+    ERROR with the scrubbed failure text and captured ONCE, tagged with the job,
+    because a heal that never succeeds leaves stale series rows behind and a
+    WARNING reached no one. ``_stamp_io`` logs nothing.
+
+    Neuter to redden: put the round-4 WARNING back (no capture, no ERROR)."""
     recorder = _Recorder(fail_at=post_stamp_case, failure=RuntimeError)
     outcome = await _drive(scenario, recorder)
     cause = _cause_of(scenario)
     assert outcome.result.error_kind == "permanent", outcome.result
     assert len(outcome.analytics_writes) == 1
     assert cause in (outcome.analytics_writes[0].get("computation_error") or "")
-    assert outcome.sentry.capture_exception.call_count == 0
     assert not [line for line in _rendered_errors(outcome.log) if "could not" in line]
-    # The heal adds no ERROR: the count is the landed loud stamp's own row
-    # (the "no longer protects it" line when marked, plus the breach line).
-    assert outcome.log.error.call_count == int(scenario.marked) + int(
+    heal_lines = [
+        line for line in _rendered_errors(outcome.log) if "heal-delete failed" in line
+    ]
+    assert len(heal_lines) == 1, outcome.log.error.call_args_list
+    assert "RuntimeError: simulated failure of stamp call" in heal_lines[0], heal_lines
+    assert _JOB_ID in heal_lines[0], heal_lines
+    # The heal adds ONE ERROR to the landed loud stamp's own row (the "no
+    # longer protects it" line when protection was lost, plus the breach line).
+    assert outcome.log.error.call_count == 1 + int(scenario.lost_protection) + int(
         scenario.breach_line
     ), outcome.log.error.call_args_list
-    assert any(
-        c.args and "heal-delete failed" in str(c.args[0])
-        for c in outcome.log.warning.call_args_list
-    ), outcome.log.warning.call_args_list
+    assert outcome.sentry.capture_exception.call_count == 1
+    outcome.sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+        "compute_job_id", _JOB_ID
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_programming_error_in_a_post_stamp_call_is_unknown(
+    scenario: _Scenario, post_stamp_case: int
+) -> None:
+    """SFH-R5-03: a ``_READ_PROGRAMMING_ERRORS`` member in the heal is a bug in
+    this code, so it is re-raised unchanged (``unknown``) per the policy above
+    ``_READ_PROGRAMMING_ERRORS``, after the same ERROR line and ONE capture.
+    The stamp has already landed and stays.
+
+    Neuter to redden: drop the heal's ``raise`` (the job ends ``permanent``)."""
+    recorder = _Recorder(fail_at=post_stamp_case, failure=TypeError)
+    outcome = await _drive(scenario, recorder)
+    assert outcome.result.error_kind == "unknown", outcome.result
+    assert "simulated failure of stamp call" in (outcome.result.error_message or "")
+    assert len(outcome.analytics_writes) == 1
+    heal_lines = [
+        line for line in _rendered_errors(outcome.log) if "heal-delete failed" in line
+    ]
+    assert len(heal_lines) == 1 and "programming error" in heal_lines[0], heal_lines
+    assert outcome.sentry.capture_exception.call_count == 1
 
 
 def test_the_post_stamp_set_is_the_heal_and_only_on_the_single_key_loud_path() -> None:
