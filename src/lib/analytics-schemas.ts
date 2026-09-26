@@ -297,9 +297,11 @@ export type BridgeFitLabel = z.infer<typeof BridgeFitLabelSchema>;
 const BridgeCandidateSchema = z.object({
   strategy_id: z.string(),
   strategy_name: z.string(),
-  sharpe_delta: z.number(),
-  dd_delta: z.number(),
-  corr_delta: z.number(),
+  // 166.1 D7 (founder 2026-09-26): null = the delta does not exist (a leg
+  // whose returns do not vary has no Sharpe or correlation). Rendered "—".
+  sharpe_delta: z.number().nullable(),
+  dd_delta: z.number().nullable(),
+  corr_delta: z.number().nullable(),
   composite_score: z.number(),
   fit_label: BridgeFitLabelSchema,
 });

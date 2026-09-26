@@ -3,6 +3,12 @@ import numpy as np
 import pandas as pd
 from datetime import date as _date
 from typing import Any, Optional
+from services.dispersion import (
+    average_pairwise_correlation,
+    dispersion_is_real,
+    dispersion_is_residue,
+    pairwise_correlation_or_none,
+)
 from services.metrics import _safe_float
 
 logger = logging.getLogger("quantalyze.analytics.portfolio_optimizer")
@@ -58,24 +64,33 @@ def find_improvement_candidates(
         new_sharpe = _compute_sharpe(new_port)
         new_avg_corr = _avg_corr(aligned)
         new_max_dd = _max_drawdown(new_port)
-        # M-0701: exclude a degenerate candidate whose OWN aligned returns have
-        # zero variance (e.g. a paused/all-zero strategy). Its correlation and
-        # diversification signal are undefined (NaN), so it cannot be
+        # M-0701: exclude a degenerate candidate whose OWN aligned returns do
+        # not vary (e.g. a paused/all-zero strategy, or a constant yield). Its
+        # correlation and diversification signal are undefined, so it cannot be
         # meaningfully scored — dropping it is correct rather than ranking it on
         # a partial 0-collapsed score that looks like a real "no improvement".
+        # Phase 166.1 (S2): "does not vary" is Phase 166's residue floor, not
+        # ``== 0.0``: a constant yield derived from a compounding NAV has a
+        # ~1e-16 std and was kept, then scored on a residue correlation.
         #
         # This keys on the CANDIDATE column only (candidate-specific). It does
-        # NOT gate on new_avg_corr: _avg_corr is computed over the WHOLE blended
-        # frame, so a single flat EXISTING strategy would poison it to None for
-        # every candidate and silently drop ALL suggestions. A None new_avg_corr
-        # from a flat existing strategy instead leaves the correlation term at 0
-        # below, uniform across candidates. (new_sharpe/new_max_dd None — an
-        # exactly-zero-variance or empty blend — is also defensively excluded,
-        # though float noise makes new_sharpe None practically unreachable.)
-        if float(aligned[cid].std()) == 0.0 or new_sharpe is None or new_max_dd is None:
+        # NOT gate on new_avg_corr. Since round-1 WR-03 a flat EXISTING strategy
+        # no longer makes _avg_corr None (its pairs are skipped), and a None
+        # new_avg_corr (fewer than two dispersing columns) leaves the
+        # correlation term at 0 below, uniform across candidates. Because a
+        # residue candidate is dropped here, the corr_reduction below never
+        # compares two averages that differ only by a skipped candidate leg.
+        # (new_sharpe/new_max_dd None — a blend whose dispersion is residue,
+        # or an empty blend — is also excluded; since S1 a residue blend gives a None Sharpe rather than a
+        # ~1e13 one.)
+        if (
+            dispersion_is_residue(float(aligned[cid].std()), float(aligned[cid].mean()))
+            or new_sharpe is None
+            or new_max_dd is None
+        ):
             logger.debug(
                 "find_improvement_candidates: dropping degenerate candidate %s "
-                "(zero-variance returns or unscoreable blend)", cid,
+                "(residue-dispersion returns or unscoreable blend)", cid,
             )
             continue
         # Resliced incumbent baseline over THIS candidate's aligned window (the
@@ -90,17 +105,28 @@ def find_improvement_candidates(
         current_sharpe = _compute_sharpe(port_baseline)
         current_avg_corr = _avg_corr(port_cols_aligned)
         current_max_dd = _max_drawdown(port_baseline)
-        corr_with_portfolio = float(port_baseline.corr(aligned[cid])) if len(aligned) > 10 else 0
+        # Phase 166.1 (C3, D-02): None when the baseline does not disperse (a
+        # portfolio of one constant-yield strategy), as for an all-zero one.
+        # No length conditional: the `len(aligned) < 30` skip above already
+        # guarantees the overlap, and a fallback would state a correlation of 0.
+        corr_with_portfolio = pairwise_correlation_or_none(port_baseline, aligned[cid])
         # A None metric on EITHER side of a delta means that axis has no
-        # comparable baseline (uniform across candidates), so it contributes 0.
-        sharpe_lift = (new_sharpe - current_sharpe) if current_sharpe is not None else 0
+        # comparable baseline (uniform across candidates), so it contributes 0
+        # to the SCORE. The EMITTED lift stays None (166.1 D7, founder
+        # 2026-09-26): a lift over a portfolio with no Sharpe does not exist,
+        # and a 0.0 there was rendered as "no change" (round-1 SFH HIGH-1).
+        sharpe_lift = (new_sharpe - current_sharpe) if current_sharpe is not None else None
         corr_reduction = (
             (current_avg_corr - new_avg_corr)
             if current_avg_corr is not None and new_avg_corr is not None
             else 0
         )
         dd_improvement = (current_max_dd - new_max_dd) if current_max_dd is not None else 0
-        score = w1 * sharpe_lift + w2 * corr_reduction + w3 * dd_improvement
+        score = (
+            w1 * (sharpe_lift if sharpe_lift is not None else 0.0)
+            + w2 * corr_reduction
+            + w3 * dd_improvement
+        )
         results.append({
             "strategy_id": cid,
             "corr_with_portfolio": _safe_float(corr_with_portfolio),
@@ -175,9 +201,14 @@ def generate_narrative(analytics: dict[str, Any]) -> str:
     if avg_corr is not None:
         quality = "well-diversified" if avg_corr < 0.3 else "moderately correlated" if avg_corr < 0.6 else "highly correlated"
         parts.append(f"Average pairwise correlation is {avg_corr:.2f}, which is {quality}")
-    risk = analytics.get("risk_decomposition", [])
+    # 166.1 D7 (SFH MEDIUM-2): a portfolio that carries no risk has no risk
+    # share, so its rows carry None. Only rows with a share can be concentrated.
+    risk = [
+        r for r in analytics.get("risk_decomposition", [])
+        if r.get("marginal_risk_pct") is not None
+    ]
     if risk:
-        top_risk = max(risk, key=lambda r: r.get("marginal_risk_pct", 0))
+        top_risk = max(risk, key=lambda r: r["marginal_risk_pct"])
         if top_risk.get("marginal_risk_pct", 0) > top_risk.get("weight_pct", 0) * 1.2:
             parts.append(
                 f"Risk is concentrated in {top_risk.get('strategy_name', 'unknown')} "
@@ -218,8 +249,10 @@ def generate_narrative(analytics: dict[str, Any]) -> str:
     if suggestions and len(suggestions) > 0 and attr:
         worst_attr = min(attr, key=lambda a: a.get("contribution", 0))
         best_suggestion = suggestions[0]
-        sharpe_lift = best_suggestion.get("sharpe_lift", 0)
-        if sharpe_lift > 0 and worst_attr.get("strategy_name"):
+        # 166.1 D7: a None lift (no Sharpe on the baseline) is present as a key,
+        # so `.get(..., 0)` returns None; it states no recommendation.
+        sharpe_lift = best_suggestion.get("sharpe_lift")
+        if sharpe_lift is not None and sharpe_lift > 0 and worst_attr.get("strategy_name"):
             # The recommendation sentence requires both a non-empty risk
             # decomposition AND a portfolio-level Sharpe to quote the before/after.
             portfolio_sharpe = analytics.get("portfolio_sharpe")
@@ -248,18 +281,44 @@ def generate_narrative(analytics: dict[str, Any]) -> str:
 
 
 def _compute_sharpe(returns: pd.Series, rf: float = 0) -> Optional[float]:
-    if returns.empty or returns.std() == 0:
+    if returns.empty:
         return None
-    return _safe_float(float((returns.mean() - rf) / returns.std() * np.sqrt(252)))
+    # Phase 166.1 (S1): a constant yield derived from a compounding NAV has a
+    # ~1e-16 std, never exactly 0, so an ``== 0`` guard let a ~1e13 Sharpe
+    # through. Residue dispersion means no Sharpe. A NaN ``sd`` (one row) is
+    # not residue; it gives a NaN quotient, which ``_safe_float`` maps to None.
+    sd = float(returns.std())
+    if dispersion_is_residue(sd, float(returns.mean())):
+        return None
+    return _safe_float(float((returns.mean() - rf) / sd * np.sqrt(252)))
 
 
 def _avg_corr(df: pd.DataFrame) -> Optional[float]:
     if df.shape[1] < 2:
         return None
-    corr = df.corr()
-    n = len(corr)
-    total = (corr.values.sum() - n) / (n * (n - 1))
-    return _safe_float(float(total))
+    # Phase 166.1 (C4, D-02): a column that does not disperse has no
+    # correlation; pandas gives a residue column a noise value.
+    #
+    # Round-1 WR-03 (recorded in 166.1-CONTEXT): the average SKIPS the pairs a
+    # non-dispersing column is in and averages the defined pairs, the same rule
+    # the portfolio risk panel applies (`dispersion.average_pairwise_correlation`
+    # is the one implementation). It used to be None for the whole frame when
+    # any one column was flat, so one constant-yield sleeve voided the
+    # diversification axis for every candidate while the risk panel still showed
+    # an average. A scorer whose ADDED or SWAPPED leg is flat must therefore
+    # null its correlation delta itself (`_leg_is_flat`): with that leg skipped,
+    # the two averages cover the same pairs and their difference is a
+    # fabricated 0.
+    return _safe_float(average_pairwise_correlation(df)[0])
+
+
+def _leg_is_flat(df: pd.DataFrame, col: str) -> bool:
+    """True when ``df[col]`` does not disperse (residue, zero or NaN std).
+
+    Round-1 WR-03 / HIGH-2: a correlation delta whose added or swapped leg is
+    flat does not exist (166.1 D7), whatever the two averages say.
+    """
+    return not dispersion_is_real(float(df[col].std()), float(df[col].mean()))
 
 
 def _max_drawdown(returns: pd.Series) -> Optional[float]:

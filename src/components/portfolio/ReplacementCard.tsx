@@ -14,13 +14,19 @@ const FIT_STYLES: Record<BridgeFitLabel, string> = {
 
 // NEW-C21-02: color driven by Improvement brand — positive = improvement = green,
 // regardless of which field this is. No invertedBetter table needed.
-function deltaColor(improvement: Improvement): string {
+// 166.1 D7 (founder 2026-09-26): a null delta does not exist, so it carries no
+// semantic color (DESIGN.md: a "—" cell never carries a semantic color).
+function deltaColor(improvement: Improvement | null): string {
+  if (improvement === null) return "text-text-muted";
   return improvement >= 0 ? "text-positive" : "text-negative";
 }
 
 // Format for display using the RAW delta value (for correct magnitude/sign in label)
 // and label for unit formatting. The Improvement brand is for coloring only.
-function formatDelta(raw: number, label: string): string {
+// A null delta renders "— {label}", never "+0.00" (166.1 D7; round-1 SFH HIGH-2:
+// a flat leg's undefined delta used to arrive as 0.0 and read as "unchanged").
+function formatDelta(raw: number | null, label: string): string {
+  if (raw === null) return `— ${label}`;
   const sign = raw >= 0 ? "+" : "";
   if (label === "MaxDD" || label === "Corr") {
     return `${sign}${(raw * 100).toFixed(1)}% ${label}`;
@@ -103,10 +109,12 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
   // (sharpe_delta = new-old; corr_delta = current-new, i.e. correlation reduced;
   // dd_delta = new-old on <=0 drawdowns, i.e. shallower). So every axis is
   // "higher-better" — asImprovement keeps the sign and deltaColor greens positive.
-  const deltas: { label: string; raw: number; improvement: Improvement }[] = [
-    { label: "Sharpe", raw: candidate.sharpe_delta, improvement: asImprovement(candidate.sharpe_delta, "higher-better") },
-    { label: "MaxDD",  raw: candidate.dd_delta,     improvement: asImprovement(candidate.dd_delta, "higher-better") },
-    { label: "Corr",   raw: candidate.corr_delta,   improvement: asImprovement(candidate.corr_delta, "higher-better") },
+  const improvementOf = (raw: number | null): Improvement | null =>
+    raw === null ? null : asImprovement(raw, "higher-better");
+  const deltas: { label: string; raw: number | null; improvement: Improvement | null }[] = [
+    { label: "Sharpe", raw: candidate.sharpe_delta, improvement: improvementOf(candidate.sharpe_delta) },
+    { label: "MaxDD",  raw: candidate.dd_delta,     improvement: improvementOf(candidate.dd_delta) },
+    { label: "Corr",   raw: candidate.corr_delta,   improvement: improvementOf(candidate.corr_delta) },
   ];
 
   return (

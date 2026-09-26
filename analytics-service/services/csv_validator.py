@@ -31,6 +31,8 @@ import pandas as pd
 import pandera as pa
 from pandera.errors import SchemaErrors
 
+from services.dispersion import dispersion_is_residue
+
 logger = logging.getLogger("quantalyze.analytics")
 
 SHARPE_SENTINEL_DAILY = 10.0
@@ -225,8 +227,44 @@ def _check_sharpe_sentinel(df: pd.DataFrame, fmt: str) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
     if fmt == "daily_returns" and "daily_return" in df.columns and len(df) >= 2:
         r = df["daily_return"].dropna()
-        if len(r) >= 2 and r.std(ddof=1) > 0:
-            sharpe = (r.mean() - DEFAULT_RISK_FREE_DAILY) / r.std(ddof=1)
+        if len(r) >= 2:
+            sd = r.std(ddof=1)
+            # Phase 166.1 (S3, D-04): a std that is only float residue (a repeated
+            # float, or a constant yield taken from a compounding NAV) has no
+            # Sharpe to print; dividing by it printed a fabricated ~1e15. Keep the
+            # VERDICT (a constant return above the risk-free rate is an unbounded
+            # Sharpe, so it is rejected) and drop the number.
+            #
+            # D-24 (founder decision 2026-09-26): an EXACTLY zero std now takes
+            # this branch too, so a constant positive series is rejected at every
+            # length with the one message below. Before D-24 this block was gated
+            # on a strictly positive std, so a short constant series (whose std
+            # sums to exactly 0) was ACCEPTED and a longer one (float residue)
+            # was REJECTED: float summation decided the verdict. That gate was
+            # kept in plan 01 for D-04 verdict preservation; D-24 supersedes that
+            # reason. A constant ZERO series is out of scope: its mean is not
+            # above the risk-free rate, so it still gets no error. A NaN std
+            # (non-finite rows) is not residue and its Sharpe comparison is
+            # False, so it still gets no error either.
+            #
+            # Round-1 WR-01 / SFH MEDIUM-3 (amends D-04, recorded in
+            # 166.1-CONTEXT): this branch emits its OWN rule key,
+            # `daily_returns_constant`. It shared `daily_sharpe_sentinel`, whose
+            # label "Daily Sharpe > 10 looks unrealistic" states a comparison
+            # that is never made here: with no dispersion there is no Sharpe.
+            # The Sharpe-number branch below keeps its key and label.
+            if dispersion_is_residue(float(sd), float(r.mean())):
+                if r.mean() - DEFAULT_RISK_FREE_DAILY > 0:
+                    errors.append({
+                        "rule": "daily_returns_constant",
+                        "row": 0,
+                        "message": (
+                            "Daily returns do not vary, so the Sharpe is unbounded; "
+                            "a constant positive return is not a realistic track record"
+                        ),
+                    })
+                return errors
+            sharpe = (r.mean() - DEFAULT_RISK_FREE_DAILY) / sd
             if sharpe > SHARPE_SENTINEL_DAILY:
                 errors.append({
                     "rule": "daily_sharpe_sentinel",
