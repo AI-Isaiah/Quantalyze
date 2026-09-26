@@ -1562,6 +1562,21 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
     return { committed: false, staged: [], measured };
   }
 
+  // SFH-02: an older run's artifact must never replace a newer baseline. The dump's
+  // merge must be an ancestor of (or equal to) the main being composed onto.
+  const anc = spawnSync("git", ["merge-base", "--is-ancestor", measured.merge, "HEAD"], { cwd: repoRoot, encoding: "utf8" });
+  if (anc.error || (anc.status !== 0 && anc.status !== 1)) {
+    throw new Error(
+      `MEASURE_FAIL: git merge-base --is-ancestor exit ${anc.error ? -1 : anc.status}; whether the dump's merge is on main was not measured, so nothing is composed`,
+    );
+  }
+  if (anc.status === 1) {
+    throw new Error(
+      "the dump's merge is not an ancestor of this checkout's main: the artifact comes from a run main has moved past, " +
+        "and composing it could replace a newer baseline with an older one. Nothing was written; dispatch a fresh run on main",
+    );
+  }
+
   // ⛔ A pre-existing edit to one of the six paths would ride into the bot commit.
   const dirty = git(repoRoot, ["status", "--porcelain", "--", ...STAGED_PATHS]).trim();
   if (dirty !== "") throw new Error("one of the six paths is already modified in this checkout; refusing to compose on top of it");
@@ -1571,6 +1586,15 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
   const bad = newBasenames.filter((b) => !MIGRATION_BASENAME_STRICT_RE.test(b));
   if (bad.length > 0) throw new Error(`${bad.length} marker basename(s) do not match ${MIGRATION_BASENAME_STRICT_RE}`);
   const newlyCarried = newBasenames.filter((b) => !oldBasenames.has(b)).sort();
+  // SFH-02: the new marker must carry every migration main's committed marker carries.
+  const newSet = new Set(newBasenames);
+  const dropped = [...oldBasenames].filter((b) => !newSet.has(b)).length;
+  if (dropped > 0) {
+    throw new Error(
+      `the new marker omits ${dropped} migration(s) main's committed marker carries: an older dump must never replace a newer ` +
+        "baseline. Nothing was written; dispatch a fresh run on main",
+    );
+  }
 
   const oldShapes = countShapes(oldDumpBytes.toString("utf8"));
   writeFileSync(join(repoRoot, BASELINE_SQL_REL), newDump);
@@ -1706,7 +1730,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 213;
+export const EXPECTED_ASSERTIONS = 216;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -2745,6 +2769,37 @@ function selfTest({ withGitleaks = false } = {}) {
     ok(
       driftSilent.threw !== null && /MEASURE_FAIL/.test(driftSilent.threw.message) && driftSilent.noCommit && driftSilent.nothingStaged && driftSilent.noPr,
       "a content-drift gate that exits 0 and prints nothing is MEASURE_FAIL: a gate that printed nothing is not a green gate",
+    );
+    // SFH-02: a real commit in every clone that is NOT an ancestor of head2 (commit-tree
+    // moves nothing; the ref only makes the clone carry the object).
+    const sideMerge = g(["commit-tree", `${base}^{tree}`, "-p", base, "-m", "a side commit main never merged"]).trim();
+    g(["update-ref", "refs/heads/self-test-side-merge", sideMerge]);
+    const notAncestor = composeIn(artVariant("art-side-merge", { measuredPatch: { merge: sideMerge } }));
+    ok(
+      notAncestor.threw !== null && notAncestor.threw.message.startsWith("the dump's merge is not an ancestor of this checkout's main") &&
+        notAncestor.noCommit && notAncestor.untouched && notAncestor.noPr,
+      "compose refuses an artifact whose merge is a real commit that is not an ancestor of main, before any file is written (SFH-02)",
+    );
+    const absentMerge = composeIn(artVariant("art-absent-merge", { measuredPatch: { merge: "d".repeat(40) } }));
+    ok(
+      absentMerge.threw !== null && /^MEASURE_FAIL: git merge-base --is-ancestor exit 128/.test(absentMerge.threw.message) &&
+        absentMerge.noCommit && absentMerge.untouched && absentMerge.noPr,
+      "compose refuses as MEASURE_FAIL when the artifact's merge is not in the checkout at all (exit 128 is never 'is an ancestor')",
+    );
+    const droppedArt = artVariant("art-dropped-m1");
+    const droppedMarker = readFileSync(join(droppedArt, "baseline-carried-migrations.txt"), "utf8").replace(`${M1}\n`, "");
+    writeFileSync(join(droppedArt, "baseline-carried-migrations.txt"), droppedMarker);
+    const droppedMj = JSON.parse(readFileSync(join(droppedArt, "measured.json"), "utf8"));
+    writeFileSync(
+      join(droppedArt, "measured.json"),
+      JSON.stringify({ ...droppedMj, marker_sha256: sha256(Buffer.from(droppedMarker, "utf8")), carried_count: droppedMj.carried_count - 1 }, null, 2) + "\n",
+    );
+    const dropped = composeIn(droppedArt);
+    ok(
+      !droppedMarker.includes(M1) && dropped.threw !== null &&
+        dropped.threw.message.startsWith("the new marker omits 1 migration(s) main's committed marker carries") && !dropped.text.includes(M1) &&
+        dropped.noCommit && dropped.untouched && dropped.noPr,
+      "compose refuses a marker that omits a migration main's committed marker carries, by count only, before any file is written (SFH-02)",
     );
 
     console.log("=== SELF-TEST 4a2/4: --compose stages exactly the six paths and refuses a skip token before committing (D-14, D-17)");
