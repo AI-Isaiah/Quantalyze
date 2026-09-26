@@ -448,23 +448,23 @@ describe("restore-test-from-baseline.sh — the header's cross-file pointers res
 });
 
 describe("restore-test-from-baseline.sh — the arm ratchet", () => {
-  it("EXPECTED_ARMS=37 is a live line, exactly once, with its MEASURED date beside it", () => {
+  it("EXPECTED_ARMS=41 is a live line, exactly once, with its MEASURED date beside it", () => {
     const region = selfTestRegion(SRC);
     expect(
-      liveCount(region, "EXPECTED_ARMS=37"),
-      "the arm ratchet is no longer a single live `EXPECTED_ARMS=37` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
+      liveCount(region, "EXPECTED_ARMS=41"),
+      "the arm ratchet is no longer a single live `EXPECTED_ARMS=41` line in the self-test region. A commented-out ratchet is not a ratchet, and two of them can disagree.",
     ).toBe(1);
 
     // SC-9 (`gate-family-meta.test.ts:18-30`): a threshold constant needs a
     // measurement token AND a date beside it, or nobody can tell a measured floor
     // from a guessed one.
     const lines = region.split("\n");
-    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=37"));
+    const at = lines.findIndex((l) => isLive(l) && l.includes("EXPECTED_ARMS=41"));
     const beside = `${lines[at - 1] ?? ""}\n${lines[at]}`;
     expect(
       beside,
-      "EXPECTED_ARMS=37 carries no MEASURED date on its own or the preceding line — SC-9",
-    ).toContain("MEASURED 2026-09-25");
+      "EXPECTED_ARMS=41 carries no MEASURED date on its own or the preceding line — SC-9",
+    ).toContain("MEASURED 2026-09-26");
 
     // The harness must ASSERT the count, not merely print it.
     expect(liveCount(region, 'if [ "$total" -ne "$EXPECTED_ARMS" ]; then')).toBe(1);
@@ -494,9 +494,9 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION for the pair above — move the constant and the prose must
     // disagree, or this assertion is measuring nothing.
-    const moved = SRC.replace("\nEXPECTED_ARMS=37\n", "\nEXPECTED_ARMS=38\n");
+    const moved = SRC.replace("\nEXPECTED_ARMS=41\n", "\nEXPECTED_ARMS=42\n");
     expect(moved).not.toBe(SRC);
-    const movedArms = 38;
+    const movedArms = 42;
     expect(
       SRC.split("\n").filter((l) => /prints \d+\/\d+/.test(l)).every((l) => l.includes(`prints ${movedArms}/${movedArms}`)),
       "the `prints N/N` prose still agrees with a MOVED constant, so the agreement check is vacuous.",
@@ -504,15 +504,15 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — comment the constant out; a whole-file `toContain` would
     // still pass, this pin must not.
-    const commented = SRC.replace("\nEXPECTED_ARMS=37\n", "\n# EXPECTED_ARMS=37\n");
+    const commented = SRC.replace("\nEXPECTED_ARMS=41\n", "\n# EXPECTED_ARMS=41\n");
     expect(commented).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=37")).toBe(0);
+    expect(liveCount(selfTestRegion(commented), "EXPECTED_ARMS=41")).toBe(0);
 
     // CALIBRATION — a second copy of the constant is a disagreement waiting to
     // happen, and must fail the "exactly once" leg.
-    const doubled = SRC.replace("\nEXPECTED_ARMS=37\n", "\nEXPECTED_ARMS=37\nEXPECTED_ARMS=37\n");
+    const doubled = SRC.replace("\nEXPECTED_ARMS=41\n", "\nEXPECTED_ARMS=41\nEXPECTED_ARMS=41\n");
     expect(doubled).not.toBe(SRC);
-    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=37")).toBe(2);
+    expect(liveCount(selfTestRegion(doubled), "EXPECTED_ARMS=41")).toBe(2);
   });
 
   it("plan 01's interim closing line is GONE — the word it used appears nowhere", () => {
@@ -531,8 +531,8 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 
     // CALIBRATION — re-insert the interim line; the pin must flip.
     const restored = SRC.replace(
-      "\nEXPECTED_ARMS=37\n",
-      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=37\n`,
+      "\nEXPECTED_ARMS=41\n",
+      `\n# ⚠️ THIS IS THE ${interimWord} (Phase 164.8 plan 01)\nEXPECTED_ARMS=41\n`,
     );
     expect(restored).not.toBe(SRC);
     expect(restored.includes(interimWord)).toBe(true);
@@ -542,9 +542,11 @@ describe("restore-test-from-baseline.sh — the arm ratchet", () => {
 describe("restore-test-from-baseline.sh — L-01: the reference-data replay's position", () => {
   it("the bracket, the replay, the path restore, the gate and the ledger DDL are emitted IN THAT ORDER", () => {
     // ⛔ THIS ORDERING IS THE WHOLE DESIGN, AND EVERY STEP OF IT IS SILENT WHEN
-    // WRONG. `SET LOCAL search_path = public, pg_catalog` must precede the replay
+    // WRONG. `SET LOCAL search_path = pg_catalog, public` must precede the replay
     // because the replayed statements are the migrations' ORIGINAL bytes and name
-    // their targets UNQUALIFIED; `pg_catalog` must be restored before the ledger
+    // their targets UNQUALIFIED (and `pg_catalog` is listed FIRST, 164.9.2 review
+    // round 2 WR-03, so a `public.now()` or `public.=` cannot shadow a built-in;
+    // self-test arm 40 measures that); `pg_catalog` must be restored before the ledger
     // DDL because everything below is written expecting it; and the GATE must sit
     // ABOVE the ledger seed, because a gate below it aborts a transaction whose
     // ledger rows were already written — same rollback, but the artifact a reader
@@ -562,7 +564,7 @@ describe("restore-test-from-baseline.sh — L-01: the reference-data replay's po
     ).toBeGreaterThan(3);
 
     const STEPS = [
-      ["the search_path bracket", "SET LOCAL search_path = public, pg_catalog;"],
+      ["the search_path bracket", "SET LOCAL search_path = pg_catalog, public;"],
       ["the replay concatenation", 'cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"'],
       ["the path restore", "TXN_REFDATA_TAIL"],
       ["the gate", "TXN_REFDATA_GATE"],
@@ -606,12 +608,12 @@ describe("restore-test-from-baseline.sh — L-01: the reference-data replay's po
 
     // CALIBRATION 2 — the bracket alone, demoted below the replay. This is the
     // reordering that costs nothing to make and breaks every unqualified target.
-    const bracket = "SET LOCAL search_path = public, pg_catalog;\n";
+    const bracket = "SET LOCAL search_path = pg_catalog, public;\n";
     const replay = '  cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"\n';
     const demoted = SRC.replace(bracket, "").replace(replay, () => `${replay}${bracket}`);
     expect(demoted).not.toBe(SRC);
     const dTxn = txnRegion(demoted);
-    expect(liveIndexOf(dTxn, "SET LOCAL search_path = public, pg_catalog;")).toBeGreaterThan(
+    expect(liveIndexOf(dTxn, "SET LOCAL search_path = pg_catalog, public;")).toBeGreaterThan(
       liveIndexOf(dTxn, 'cat "$RESTORE_OUT_DIR/refdata.sql" >> "$out"'),
     );
 
@@ -2746,5 +2748,76 @@ describe("restore-test-from-baseline.sh — F-R2-02: the marker predicates are r
       undecided.status,
       "CALIBRATION: the PRE-FIX bytes refused anyway — the defect this arm defends against was not reproduced",
     ).toBe(0);
+  });
+});
+
+describe("restore-test-from-baseline.sh — 164.9.2 W6: REFDATA_ENTRY_N counts INSERT-class lines only", () => {
+  // ⛔ WHY THIS MATTERS. `REFDATA_ENTRY_N` feeds two things: the restore note
+  // "… from N allowlist line(s) …, each with a pinned statement count", and the
+  // ZERO-entries refusal that stops a restore which would replay no row. A C5 line
+  // (`update:<n>` / `decline:<n>`) pins no row count. Counted as an entry, it makes
+  // the note false (the real allowlist would read 28, not 22) and lets an allowlist
+  // holding ONLY C5 lines pass the refusal while replaying nothing the count floor
+  // can measure: the Phase 164.8 empty-restore defect with a non-zero number on it.
+  // The arm is the shipped line's BYTES, executed, never a restatement of the awk.
+  const PREFIX = 'REFDATA_ENTRY_N=$(awk ';
+  const liveLine = (src: string): string => {
+    const hits = liveLines(src).filter(({ line }) => line.trim().startsWith(PREFIX));
+    expect(hits.length, "REFDATA_ENTRY_N is not assigned by exactly ONE live awk line").toBe(1);
+    return hits[0].line.trim();
+  };
+  const run = (line: string, allowlist: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), "refdata-entry-n-"));
+    try {
+      const p = join(dir, "allowlist.txt");
+      writeFileSync(p, allowlist);
+      const r = spawnSync("bash", ["-c", `${line}\nprintf '%s' "$REFDATA_ENTRY_N"`], {
+        encoding: "utf8",
+        env: { ...process.env, REFDATA_ALLOWLIST: p },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      return r.stdout;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const MIXED = [
+    "# header comment",
+    "",
+    "a.sql\tpublic.t\tupdate:1\t# C5 replay line, above its INSERT on purpose",
+    "a.sql\tpublic.t\t2\t# INSERT",
+    "b.sql\tpublic.u\t1\t# INSERT",
+    "c.sql\tpublic.t\tdecline:1\t# C5 decline",
+    "",
+  ].join("\n");
+  const ONLY_C5 = "a.sql\tpublic.t\tupdate:1\t# only a C5 line\nc.sql\tpublic.t\tdecline:1\t# and a decline\n";
+
+  it("the live line counts the two INSERT lines of a mixed allowlist, and ZERO for a C5-only one", () => {
+    const line = liveLine(SRC);
+    expect(run(line, MIXED)).toBe("2");
+    expect(run(line, ONLY_C5), "a C5-only allowlist must read 0 so the ZERO-entries refusal fires").toBe("0");
+  });
+
+  it("the real allowlist reads 22 INSERT entries and the fixture 2, although they hold C5 lines", () => {
+    const line = liveLine(SRC);
+    expect(run(line, read("scripts/restore-test-refdata-allowlist.txt"))).toBe("22");
+    // 2, not 1, since the merge of Phase 164.9.1 (2026-09-26): its plan 05 added
+    // the fixture's public.system_settings INSERT entry. The fixture's update:1
+    // and decline:1 lines are still not counted; with them the count reads 4.
+    expect(run(line, read(`${FIXTURES}/refdata-allowlist.txt`))).toBe("2");
+  });
+
+  it("CALIBRATION — with the field-3 filter removed, the same line counts C5 lines and the pin goes RED", () => {
+    const line = liveLine(SRC);
+    const filter = " && $3 ~ /^[1-9][0-9]*$/";
+    expect(line.includes(filter), "the field-3 filter is not in the live line, so this calibration cannot remove it").toBe(true);
+    const neutered = line.replace(filter, "");
+    expect(neutered).not.toBe(line);
+    expect(run(neutered, MIXED)).toBe("4");
+    expect(run(neutered, ONLY_C5)).toBe("2");
+    // …and the mutated SCRIPT fails the live-line pin above in the same way.
+    const mutatedSrc = SRC.replace(line, neutered);
+    expect(mutatedSrc).not.toBe(SRC);
+    expect(run(liveLine(mutatedSrc), ONLY_C5)).not.toBe("0");
   });
 });

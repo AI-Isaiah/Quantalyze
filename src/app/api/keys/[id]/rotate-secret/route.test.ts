@@ -274,6 +274,7 @@ vi.mock("next/headers", () => ({
 }));
 
 import { PATCH, maxDuration } from "./route";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 function makeReq(body: unknown): NextRequest {
   return new NextRequest(`http://localhost:3000/api/keys/${KEY_ID}/rotate-secret`, {
@@ -704,6 +705,75 @@ describe("PATCH /api/keys/[id]/rotate-secret — WR-01: the seam's machine code 
 
     // D-04: a failed validation mutates nothing.
     expect(ADMIN_STATE.updates).toHaveLength(0);
+  });
+});
+
+/**
+ * 164.6.5 review round 2 / R2-SFH-10 — THE THIRD KEY ROUTE PAGES ITS OWN DEFECTS.
+ *
+ * `create-with-key` and `composite/add-key` capture every verdict in
+ * `OUR_DEFECT_KEY_ERROR_CODES` (their `[164.6.5 WR-06]` twins). This route
+ * classified the same verdicts and sent them only to `console.error`, while
+ * the comment beside `_validate_mt5_key_probe`'s `logger.error` in
+ * `analytics-service/routers/exchange.py` said "the Next-side key routes also
+ * page it". A wedged terminal reached through THIS route is the same shared
+ * terminal, and its card makes the same "ours to fix" promise.
+ *
+ * The negative case is the anti-vacuity half: a caller-fault verdict must NOT
+ * page, so a catch that captured everything would fail here.
+ */
+describe("PATCH /api/keys/[id]/rotate-secret — 164.6.5 R2-SFH-10: our-defect verdicts page Sentry, like the two sibling key routes", () => {
+  beforeEach(() => {
+    vi.mocked(captureToSentry).mockClear();
+  });
+
+  it("[164.6.5 R2-SFH-10] a wedged MT5 terminal answers KEY_MT5_TERMINAL_UNRESPONSIVE/500 AND IS captured — it is our terminal", async () => {
+    mockResilientFetch.mockResolvedValue(
+      // The real emitter's shape: `_validate_mt5_key_probe`'s
+      // `is_ipc_transport_fault` arm in analytics-service/routers/exchange.py.
+      seamResponse(false, 500, {
+        detail: {
+          code: "MT5_TERMINAL_UNRESPONSIVE",
+          detail:
+            "The MetaTrader terminal we use to check this key stopped answering. " +
+            "This is ours to fix: an immediate retry will not help, but a later " +
+            "attempt can succeed.",
+          retryable: false,
+          dependency: "mt5-gateway",
+        },
+      }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(500);
+    const envelope = (await res.json()) as Record<string, unknown>;
+    expect(envelope.code).toBe("KEY_MT5_TERMINAL_UNRESPONSIVE");
+    // D-04: a failed validation mutates nothing.
+    expect(ADMIN_STATE.updates).toHaveLength(0);
+
+    expect(
+      vi.mocked(captureToSentry),
+      "nothing was captured — this route classified our own terminal's wedge and told only console.error",
+    ).toHaveBeenCalledTimes(1);
+    const [err, options] = vi.mocked(captureToSentry).mock.calls[0];
+    expect(err).toBeInstanceOf(Error);
+    expect(options.tags.surface).toBe("keys-rotate-secret");
+    expect(options.tags.step).toBe("unclassified-key-error");
+    expect(options.extra?.exchange).toBe("mt5");
+    // The per-request secret is named, so the capture chokepoint can redact it.
+    expect(options.secrets).toContain(SYNTHETIC_NEW_SECRET);
+  });
+
+  it("a caller-fault verdict (KEY_AUTH_FAILED) is NOT captured — the predicate is the our-defect set, not every failure", async () => {
+    mockResilientFetch.mockResolvedValue(
+      seamResponse(false, 400, {
+        detail: "Authentication failed. Check your API key and secret.",
+      }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(400);
+    const envelope = (await res.json()) as Record<string, unknown>;
+    expect(envelope.code).toBe("KEY_AUTH_FAILED");
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
   });
 });
 

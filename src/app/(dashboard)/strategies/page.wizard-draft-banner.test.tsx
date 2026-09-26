@@ -56,6 +56,53 @@ vi.mock("@/components/strategy/PendingIntros", () => ({
   PendingIntros: () => null,
 }));
 
+// Phase 167.2.1 (D-08): the page now asks `probeFactsheetBuildable` about
+// every row the analytics embed calls computed, on the service-role client.
+// This double answers every strategies read with a computed row holding a
+// 30-point series, so a computed row is BUILDABLE and shows no note, exactly as
+// before the list probed; no assertion in this file depends on the probe.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    from: (table: string) => {
+      const b: Record<string, unknown> = {};
+      const self = () => b;
+      b.select = self;
+      b.eq = self;
+      b.or = self;
+      b.order = self;
+      b.limit = self;
+      b.maybeSingle = async () =>
+        table === "strategies"
+          ? {
+              data: {
+                id: "s-probe",
+                name: "Synthetic probe row",
+                status: "draft",
+                asset_class: "crypto",
+                returns_denominator_config: null,
+                strategy_analytics: {
+                  daily_returns: Array.from({ length: 30 }, (_, i) => ({
+                    date: new Date(Date.UTC(2024, 0, 2) + i * 86_400_000)
+                      .toISOString()
+                      .slice(0, 10),
+                    value: ((i % 7) - 3) / 1000,
+                  })),
+                  returns_series: null,
+                  computed_at: "2024-03-01T00:00:00Z",
+                  data_quality_flags: null,
+                  metrics_json_by_basis: null,
+                  computation_status: "complete",
+                },
+              },
+              error: null,
+            }
+          : { data: null, error: null };
+      b.then = (resolve: (v: unknown) => unknown) => resolve({ data: [], error: null });
+      return b;
+    },
+  }),
+}));
+
 const redirectMock = vi.hoisted(() => vi.fn());
 vi.mock("next/navigation", () => ({
   redirect: (path: string) => {
@@ -163,7 +210,10 @@ async function renderPage(): Promise<HTMLElement> {
 describe("StrategiesPage — wizard-draft Resume banner (2026-05-21 regression)", () => {
   beforeEach(() => {
     redirectMock.mockReset();
-    state.user = { id: "u-test" };
+    // Phase 167.2.1 (D-08): UUID-shaped, because the page's probe runs under
+    // `withPublishedOrOwner(q, user.id)`, which fails closed (and logs) on a
+    // non-UUID id. Synthetic.
+    state.user = { id: "00000000-0000-4000-8000-0000000000a1" };
     state.publishedStrategies = [];
     state.wizardDraft = null;
   });

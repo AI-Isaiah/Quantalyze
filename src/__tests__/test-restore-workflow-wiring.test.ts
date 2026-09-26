@@ -5015,6 +5015,7 @@ describe("164.8-03 A1 — the reference-data assertions' MEASURE_FAILs are reach
     "Assert the extractor self-test PRINTED its kind census and cleared the floor";
   const AUDIT_STEP =
     "Assert the allowlist audit PRINTED its census over a non-empty corpus";
+  const MIGDEP_STEP = "Assert the data-dependence scan PRINTED its corpus census";
 
   const workdir = mkdtempSync(join(tmpdir(), "a1-"));
   const bindir = join(workdir, "bin");
@@ -5028,6 +5029,7 @@ if [ "$1" = "-e" ]; then
   exit 0
 fi
 case "$*" in
+  *lint-migration-data-dependence.mjs*) printf '%s' "\${STUB_MIGDEP_OUT:-}"; exit "\${STUB_MIGDEP_RC:-0}" ;;
   *--self-test*) printf '%s' "\${STUB_SELFTEST_OUT:-}"; exit "\${STUB_SELFTEST_RC:-0}" ;;
   *--audit*)     printf '%s' "\${STUB_AUDIT_OUT:-}";    exit "\${STUB_AUDIT_RC:-0}" ;;
 esac
@@ -5036,6 +5038,24 @@ exit 64
 `,
   );
   chmodSync(join(bindir, "node"), 0o755);
+  // A pass-through `grep` that can be told to FAULT (exit 2) on one pattern, so each
+  // step's rc>1 branch is reached by name. Pointing the log at a directory cannot do
+  // it: the `node … > "$LOG"` redirection fails first and the step reports the tool,
+  // not the grep. With `STUB_GREP_FAIL_ON` unset it execs the real grep unchanged.
+  const REAL_GREP = spawnSync("bash", ["-c", "command -v grep"], {
+    encoding: "utf8",
+  }).stdout.trim();
+  expect(REAL_GREP, "no grep on PATH for the stub to delegate to").toMatch(/^\//);
+  writeFileSync(
+    join(bindir, "grep"),
+    `#!/bin/bash
+if [ -n "\${STUB_GREP_FAIL_ON:-}" ]; then
+  case "$*" in *"\${STUB_GREP_FAIL_ON}"*) echo "stub grep: simulated read fault" >&2; exit 2 ;; esac
+fi
+exec ${REAL_GREP} "$@"
+`,
+  );
+  chmodSync(join(bindir, "grep"), 0o755);
 
   afterAll(() => rmSync(workdir, { recursive: true, force: true }));
 
@@ -5056,6 +5076,7 @@ exit 64
         PATH: `${bindir}:${process.env.PATH ?? ""}`,
         REFDATA_SELFTEST_LOG: join(dir, "selftest.log"),
         REFDATA_AUDIT_LOG: join(dir, "audit.log"),
+        MIGDEP_SCAN_LOG: join(dir, "migdep.log"),
         ...stub,
       },
     });
@@ -5117,173 +5138,372 @@ exit 64
     ).toBe("ON");
   });
 
-  describe(SELFTEST_STEP, () => {
-    const script = extractRunScript(WF, SELFTEST_STEP);
-    const BOUNDS = [" || status=$?", " || ok_rc=$?", " || floor_rc=$?"];
-    const OK_LINE =
-      "extract-reference-inserts self-test OK: 9 kinds, red+green each.\n";
+  // Phase 164.9.2 plan 04 (plan-checker W1): ci.yml carries byte-for-byte twins of
+  // both steps, under the same names, so the SAME arms run against each copy. Until
+  // 2026-09-25 only the restore workflow's copy was executed here, and ci.yml's copy
+  // was unbounded: under `bash -e` its captures died before their MEASURE_FAILs.
+  for (const [path, text] of [
+    [WF_PATH, WF],
+    [CI_PATH, CI],
+  ] as const) {
+    describe(`${SELFTEST_STEP} — ${path}`, () => {
+      const script = extractRunScript(text, SELFTEST_STEP);
+      const BOUNDS = [" || status=$?", " || ok_rc=$?", " || floor_rc=$?"];
+      const OK_LINE =
+        "extract-reference-inserts self-test OK: 9 kinds, red+green each.\n";
 
-    it("GREEN — a printed census at or above the floor exits 0", () => {
-      const r = runStep(script, {
-        STUB_SELFTEST_OUT: OK_LINE,
-        STUB_FLOOR: "2",
+      it("GREEN — a printed census at or above the floor exits 0", () => {
+        const r = runStep(script, {
+          STUB_SELFTEST_OUT: OK_LINE,
+          STUB_FLOOR: "2",
+        });
+        expect(r.code, r.out).toBe(0);
+        expect(r.out).toContain("self-test census: 9 kind(s) against floor 2.");
       });
+
+      it("a SILENT ZERO reaches its own MEASURE_FAIL (pre-fix: bash's silence)", () => {
+        const r = runStep(script, { STUB_SELFTEST_OUT: "", STUB_FLOOR: "2" });
+        expect(r.code, r.out).toBe(1);
+        expect(
+          r.out,
+          "the silent-no-op MEASURE_FAIL did not print — the branch the author wrote is still unreachable",
+        ).toContain("printed NO 'extract-reference-inserts self-test OK");
+
+        const pre = runStep(unbind(script, BOUNDS), {
+          STUB_SELFTEST_OUT: "",
+          STUB_FLOOR: "2",
+        });
+        expect(
+          pre.out.includes("printed NO 'extract-reference-inserts self-test OK"),
+          "CALIBRATION: the UNBOUNDED script printed the MEASURE_FAIL too, so the bounding is not what makes it reachable and this arm is measuring nothing",
+        ).toBe(false);
+        expect(
+          pre.code,
+          "CALIBRATION: the unbounded script did not even go red",
+        ).not.toBe(0);
+      });
+
+      it("a NON-ZERO self-test reaches its named error AND its log (pre-fix: neither)", () => {
+        const stub = { STUB_SELFTEST_OUT: "boom\n", STUB_SELFTEST_RC: "3" };
+        const r = runStep(script, stub);
+        expect(r.code, r.out).toBe(3);
+        expect(r.out).toContain(
+          "the reference-data extractor self-test failed (exit 3).",
+        );
+        expect(
+          r.out,
+          "the captured log was never `cat`ted, so the operator gets a status with no output — the whole reason the log is captured rather than streamed",
+        ).toContain("boom");
+
+        const pre = runStep(unbind(script, BOUNDS), stub);
+        expect(
+          pre.out.includes("the reference-data extractor self-test failed"),
+          "CALIBRATION: the unbounded script named the failure too",
+        ).toBe(false);
+        expect(
+          pre.out.includes("boom"),
+          "CALIBRATION: the unbounded script still printed the log, so `cat` was reached and the abort this arm is about did not happen",
+        ).toBe(false);
+      });
+
+      it("an UNREADABLE floor is a MEASURE_FAIL, not a cleared floor (pre-fix: silence)", () => {
+        const stub = { STUB_SELFTEST_OUT: OK_LINE, STUB_FLOOR_RC: "7" };
+        const r = runStep(script, stub);
+        expect(r.code, r.out).toBe(1);
+        expect(r.out).toContain("the floor is UNKNOWN");
+
+        const pre = runStep(unbind(script, BOUNDS), stub);
+        expect(
+          pre.out.includes("the floor is UNKNOWN"),
+          "CALIBRATION: the unbounded script reported the unread floor too",
+        ).toBe(false);
+        expect(
+          pre.code,
+          "CALIBRATION: the unbounded script did not go red",
+        ).not.toBe(0);
+      });
+
+      it("a FAULTING grep for the OK line reaches its rc>1 branch by name", () => {
+        const stub = {
+          STUB_SELFTEST_OUT: OK_LINE,
+          STUB_FLOOR: "2",
+          STUB_GREP_FAIL_ON: "self-test OK: [0-9]",
+        };
+        const r = runStep(script, stub);
+        expect(r.code, r.out).toBe(1);
+        expect(r.out).toContain("grep exited 2 reading");
+
+        const pre = runStep(unbind(script, BOUNDS), stub);
+        expect(
+          pre.out.includes("grep exited 2"),
+          "CALIBRATION: the unbounded script named the grep fault too",
+        ).toBe(false);
+        expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
+      });
+
+      it("a floor ABOVE the printed census is still a named regression", () => {
+        const r = runStep(script, {
+          STUB_SELFTEST_OUT: OK_LINE,
+          STUB_FLOOR: "12",
+        });
+        expect(r.code, r.out).toBe(1);
+        expect(r.out).toContain("SELF_TEST_KINDS_FLOOR regression");
+      });
+    });
+
+    describe(`${AUDIT_STEP} — ${path}`, () => {
+      const script = extractRunScript(text, AUDIT_STEP);
+      const BOUNDS = [
+        " || status=$?",
+        " || census_rc=$?",
+        " || scanned_rc=$?",
+        " || c5_rc=$?",
+      ];
+      // The FIRST census line alone. Phase 164.9.2 (D-03) added a SECOND one, the C5
+      // census, which the real extractor prints directly after it; `CENSUS` carries
+      // both so every GREEN arm is green for the right reason, and `FIRST_CENSUS` is
+      // what the missing-C5 arm feeds.
+      const FIRST_CENSUS =
+        "extract-reference-inserts audit OK: 3 entr(ies), 4 file(s), 2 table(s), 9 statement(s); all listed.\n";
+      const C5_CENSUS =
+        "extract-reference-inserts audit C5 OK: 6 update statement(s) over 4 file(s) and 2 table(s) replayed; 2 declined over 2 file(s); 0 unaccounted.\n";
+      const CENSUS = `${FIRST_CENSUS}${C5_CENSUS}`;
+      const SCANNED = "  migrations scanned: 271\n";
+      const C5_REASON = "audit C5 OK: …' census line";
+
+      it("GREEN — a census over a non-empty corpus exits 0", () => {
+        const r = runStep(script, { STUB_AUDIT_OUT: `${CENSUS}${SCANNED}` });
+        expect(r.code, r.out).toBe(0);
+        expect(r.out).toContain("migrations scanned: 271");
+        expect(
+          r.out,
+          "the GREEN run did not echo the C5 census line it read",
+        ).toContain(C5_CENSUS.trim());
+      });
+
+      it("164.9.2 D-03 — a MISSING C5 census line is a named MEASURE_FAIL (pre-fix: green)", () => {
+        const stub = { STUB_AUDIT_OUT: `${FIRST_CENSUS}${SCANNED}` };
+        const r = runStep(script, stub);
+        expect(
+          r.code,
+          `the step passed with no C5 census line. A C5 class whose census nobody reads can vanish with every run green.\n${r.out}`,
+        ).toBe(1);
+        expect(r.out).toContain(C5_REASON);
+
+        // The unbounded twin: `grep` finds nothing, exits 1, and `bash -e` kills the
+        // step before the named MEASURE_FAIL can print.
+        const pre = runStep(unbind(script, BOUNDS), stub);
+        expect(
+          pre.out.includes(C5_REASON),
+          "CALIBRATION: the UNBOUNDED script printed the C5 MEASURE_FAIL too, so the bound is not what makes it reachable",
+        ).toBe(false);
+        expect(
+          pre.code,
+          "CALIBRATION: the unbounded script did not go red",
+        ).not.toBe(0);
+      });
+
+      it("164.9.2 D-03 — a C5 line reporting UNACCOUNTED statements is not the census line", () => {
+        const r = runStep(script, {
+          STUB_AUDIT_OUT: `${FIRST_CENSUS}${C5_CENSUS.replace("0 unaccounted", "1 unaccounted")}${SCANNED}`,
+        });
+        expect(r.code, r.out).toBe(1);
+        expect(r.out).toContain(C5_REASON);
+      });
+
+      it("a SILENT ZERO reaches its own MEASURE_FAIL (pre-fix: bash's silence)", () => {
+        const r = runStep(script, { STUB_AUDIT_OUT: "" });
+        expect(r.code, r.out).toBe(1);
+        expect(r.out).toContain("census line. An audit that measured nothing");
+
+        const pre = runStep(unbind(script, BOUNDS), { STUB_AUDIT_OUT: "" });
+        expect(
+          pre.out.includes("An audit that measured nothing"),
+          "CALIBRATION: the unbounded script printed the MEASURE_FAIL too",
+        ).toBe(false);
+        expect(
+          pre.code,
+          "CALIBRATION: the unbounded script did not go red",
+        ).not.toBe(0);
+      });
+
+      it("a NON-ZERO audit reaches its named error AND its log (pre-fix: neither)", () => {
+        const stub = { STUB_AUDIT_OUT: "kaboom\n", STUB_AUDIT_RC: "5" };
+        const r = runStep(script, stub);
+        expect(r.code, r.out).toBe(5);
+        expect(r.out).toContain(
+          "the reference-data allowlist audit failed (exit 5).",
+        );
+        expect(r.out).toContain("kaboom");
+
+        const pre = runStep(unbind(script, BOUNDS), stub);
+        expect(
+          pre.out.includes("the reference-data allowlist audit failed"),
+          "CALIBRATION: the unbounded script named the failure too",
+        ).toBe(false);
+        expect(
+          pre.out.includes("kaboom"),
+          "CALIBRATION: the unbounded script still printed the log",
+        ).toBe(false);
+      });
+
+      it("a census with NO 'migrations scanned' line is a MEASURE_FAIL (pre-fix: silence)", () => {
+        const stub = { STUB_AUDIT_OUT: CENSUS };
+        const r = runStep(script, stub);
+        expect(r.code, r.out).toBe(1);
+        expect(r.out).toContain("printed no 'migrations scanned: N' line");
+
+        const pre = runStep(unbind(script, BOUNDS), stub);
+        expect(
+          pre.out.includes("migrations scanned: N' line"),
+          "CALIBRATION: the unbounded script reported the missing coverage line too",
+        ).toBe(false);
+        expect(
+          pre.code,
+          "CALIBRATION: the unbounded script did not go red",
+        ).not.toBe(0);
+      });
+
+      it("a MISSING FIRST census line is its own named MEASURE_FAIL even beside a C5 line", () => {
+        const stub = { STUB_AUDIT_OUT: `${C5_CENSUS}${SCANNED}` };
+        const r = runStep(script, stub);
+        expect(r.code, r.out).toBe(1);
+        expect(r.out).toContain("census line. An audit that measured nothing");
+
+        const pre = runStep(unbind(script, BOUNDS), stub);
+        expect(
+          pre.out.includes("An audit that measured nothing"),
+          "CALIBRATION: the unbounded script printed the MEASURE_FAIL too",
+        ).toBe(false);
+        expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
+      });
+
+      for (const [pattern, reason] of [
+        ["audit OK: [0-9]", "grep exited 2 reading"],
+        ["migrations scanned", "grep exited 2 looking for the 'migrations scanned: N' line"],
+        ["audit C5 OK", "so the C5 census line was NOT looked for"],
+      ] as const) {
+        it(`a FAULTING grep for \`${pattern}\` reaches its rc>1 branch by name`, () => {
+          const stub = {
+            STUB_AUDIT_OUT: `${CENSUS}${SCANNED}`,
+            STUB_GREP_FAIL_ON: pattern,
+          };
+          const r = runStep(script, stub);
+          expect(r.code, r.out).toBe(1);
+          expect(r.out).toContain(reason);
+
+          const pre = runStep(unbind(script, BOUNDS), stub);
+          expect(
+            pre.out.includes("grep exited 2"),
+            "CALIBRATION: the unbounded script named the grep fault too",
+          ).toBe(false);
+          expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
+        });
+      }
+
+      it("a zero SCANNED count and a zero ENTRY count are each refused by name", () => {
+        const zeroScan = runStep(script, {
+          STUB_AUDIT_OUT: `${CENSUS}  migrations scanned: 0\n`,
+        });
+        expect(zeroScan.code, zeroScan.out).toBe(1);
+        expect(zeroScan.out).toContain(
+          "An empty corpus audits clean BY CONSTRUCTION",
+        );
+
+        const zeroEntries = runStep(script, {
+          STUB_AUDIT_OUT: `extract-reference-inserts audit OK: 0 entr(ies), 4 file(s), 2 table(s), 9 statement(s); all listed.\n${SCANNED}`,
+        });
+        expect(zeroEntries.code, zeroEntries.out).toBe(1);
+        expect(zeroEntries.out).toContain("the restore would replay nothing");
+      });
+    });
+  }
+
+  // Phase 164.9.2 plan 04 FOLLOW-UP (2026-09-25, founder: "Fix in this PR"). The
+  // THIRD sibling in ci.yml's `sql-gate-lint`, the Phase 164.9 criterion 5 census
+  // step, carried the same false "WITHOUT `-e`" comment and the same unbounded
+  // captures, and plan 04 recorded it in deferred-items.md rather than fixing it.
+  // It lives only in ci.yml (the restore workflow has no twin), so it runs once.
+  describe(`${MIGDEP_STEP} — ${CI_PATH}`, () => {
+    const script = extractRunScript(CI, MIGDEP_STEP);
+    const BOUNDS = [" || status=$?", " || census_rc=$?"];
+    const CENSUS =
+      "lint-migration-data-dependence: corpus 271 migration(s), 40 anonymous block(s); 3 refusal(s), 3 allowlisted, 0 NEW.\n";
+    const SILENT_REASON = "printed NO 'lint-migration-data-dependence: corpus";
+
+    it("GREEN — a census over a non-empty corpus with blocks exits 0 and echoes it", () => {
+      const r = runStep(script, { STUB_MIGDEP_OUT: CENSUS });
       expect(r.code, r.out).toBe(0);
-      expect(r.out).toContain("self-test census: 9 kind(s) against floor 2.");
+      expect(r.out).toContain(CENSUS.trim());
     });
 
     it("a SILENT ZERO reaches its own MEASURE_FAIL (pre-fix: bash's silence)", () => {
-      const r = runStep(script, { STUB_SELFTEST_OUT: "", STUB_FLOOR: "2" });
-      expect(r.code, r.out).toBe(1);
+      const r = runStep(script, { STUB_MIGDEP_OUT: "" });
       expect(
         r.out,
-        "the silent-no-op MEASURE_FAIL did not print — the branch the author wrote is still unreachable",
-      ).toContain("printed NO 'extract-reference-inserts self-test OK");
+        "the silent-no-op MEASURE_FAIL did not print — under `bash -e` the non-matching grep killed the step before its own diagnosis",
+      ).toContain(SILENT_REASON);
+      expect(r.code, r.out).toBe(1);
 
-      const pre = runStep(unbind(script, BOUNDS), {
-        STUB_SELFTEST_OUT: "",
-        STUB_FLOOR: "2",
-      });
+      const pre = runStep(unbind(script, BOUNDS), { STUB_MIGDEP_OUT: "" });
       expect(
-        pre.out.includes("printed NO 'extract-reference-inserts self-test OK"),
-        "CALIBRATION: the UNBOUNDED script printed the MEASURE_FAIL too, so the bounding is not what makes it reachable and this arm is measuring nothing",
+        pre.out.includes(SILENT_REASON),
+        "CALIBRATION: the UNBOUNDED script printed the MEASURE_FAIL too, so the bound is not what makes it reachable",
       ).toBe(false);
-      expect(
-        pre.code,
-        "CALIBRATION: the unbounded script did not even go red",
-      ).not.toBe(0);
+      expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
     });
 
-    it("a NON-ZERO self-test reaches its named error AND its log (pre-fix: neither)", () => {
-      const stub = { STUB_SELFTEST_OUT: "boom\n", STUB_SELFTEST_RC: "3" };
+    it("a NON-ZERO scan reaches its named error AND its log (pre-fix: neither)", () => {
+      const stub = { STUB_MIGDEP_OUT: "refused: some_migration.sql\n", STUB_MIGDEP_RC: "5" };
       const r = runStep(script, stub);
-      expect(r.code, r.out).toBe(3);
-      expect(r.out).toContain(
-        "the reference-data extractor self-test failed (exit 3).",
-      );
+      expect(r.out).toContain("the data-dependence corpus scan failed (exit 5).");
       expect(
         r.out,
-        "the captured log was never `cat`ted, so the operator gets a status with no output — the whole reason the log is captured rather than streamed",
-      ).toContain("boom");
+        "the captured log was never `cat`ted, so the operator gets a status with no refusal to read",
+      ).toContain("refused: some_migration.sql");
+      expect(r.code, r.out).toBe(5);
 
       const pre = runStep(unbind(script, BOUNDS), stub);
       expect(
-        pre.out.includes("the reference-data extractor self-test failed"),
+        pre.out.includes("the data-dependence corpus scan failed"),
         "CALIBRATION: the unbounded script named the failure too",
       ).toBe(false);
       expect(
-        pre.out.includes("boom"),
+        pre.out.includes("refused: some_migration.sql"),
         "CALIBRATION: the unbounded script still printed the log, so `cat` was reached and the abort this arm is about did not happen",
       ).toBe(false);
+      expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
     });
 
-    it("an UNREADABLE floor is a MEASURE_FAIL, not a cleared floor (pre-fix: silence)", () => {
-      const stub = { STUB_SELFTEST_OUT: OK_LINE, STUB_FLOOR_RC: "7" };
+    it("a FAULTING grep for the census reaches its rc>1 branch by name", () => {
+      const stub = {
+        STUB_MIGDEP_OUT: CENSUS,
+        STUB_GREP_FAIL_ON: "lint-migration-data-dependence: corpus",
+      };
       const r = runStep(script, stub);
+      expect(r.out).toContain("grep exited 2 reading");
       expect(r.code, r.out).toBe(1);
-      expect(r.out).toContain("the floor is UNKNOWN");
 
       const pre = runStep(unbind(script, BOUNDS), stub);
       expect(
-        pre.out.includes("the floor is UNKNOWN"),
-        "CALIBRATION: the unbounded script reported the unread floor too",
+        pre.out.includes("grep exited 2"),
+        "CALIBRATION: the unbounded script named the grep fault too",
       ).toBe(false);
-      expect(
-        pre.code,
-        "CALIBRATION: the unbounded script did not go red",
-      ).not.toBe(0);
+      expect(pre.code, "CALIBRATION: the unbounded script did not go red").not.toBe(0);
     });
 
-    it("a floor ABOVE the printed census is still a named regression", () => {
-      const r = runStep(script, {
-        STUB_SELFTEST_OUT: OK_LINE,
-        STUB_FLOOR: "12",
+    it("an EMPTY corpus and a corpus with NO blocks are each a named MEASURE_FAIL", () => {
+      const noMigrations = runStep(script, {
+        STUB_MIGDEP_OUT: CENSUS.replace("corpus 271 migration", "corpus 0 migration"),
       });
-      expect(r.code, r.out).toBe(1);
-      expect(r.out).toContain("SELF_TEST_KINDS_FLOOR regression");
-    });
-  });
+      expect(noMigrations.code, noMigrations.out).toBe(1);
+      expect(noMigrations.out).toContain("the scan read 0 migrations");
 
-  describe(AUDIT_STEP, () => {
-    const script = extractRunScript(WF, AUDIT_STEP);
-    const BOUNDS = [" || status=$?", " || census_rc=$?", " || scanned_rc=$?"];
-    const CENSUS =
-      "extract-reference-inserts audit OK: 3 entr(ies), 4 file(s), 2 table(s), 9 statement(s); all listed.\n";
-    const SCANNED = "  migrations scanned: 271\n";
-
-    it("GREEN — a census over a non-empty corpus exits 0", () => {
-      const r = runStep(script, { STUB_AUDIT_OUT: `${CENSUS}${SCANNED}` });
-      expect(r.code, r.out).toBe(0);
-      expect(r.out).toContain("migrations scanned: 271");
-    });
-
-    it("a SILENT ZERO reaches its own MEASURE_FAIL (pre-fix: bash's silence)", () => {
-      const r = runStep(script, { STUB_AUDIT_OUT: "" });
-      expect(r.code, r.out).toBe(1);
-      expect(r.out).toContain("census line. An audit that measured nothing");
-
-      const pre = runStep(unbind(script, BOUNDS), { STUB_AUDIT_OUT: "" });
-      expect(
-        pre.out.includes("An audit that measured nothing"),
-        "CALIBRATION: the unbounded script printed the MEASURE_FAIL too",
-      ).toBe(false);
-      expect(
-        pre.code,
-        "CALIBRATION: the unbounded script did not go red",
-      ).not.toBe(0);
-    });
-
-    it("a NON-ZERO audit reaches its named error AND its log (pre-fix: neither)", () => {
-      const stub = { STUB_AUDIT_OUT: "kaboom\n", STUB_AUDIT_RC: "5" };
-      const r = runStep(script, stub);
-      expect(r.code, r.out).toBe(5);
-      expect(r.out).toContain(
-        "the reference-data allowlist audit failed (exit 5).",
-      );
-      expect(r.out).toContain("kaboom");
-
-      const pre = runStep(unbind(script, BOUNDS), stub);
-      expect(
-        pre.out.includes("the reference-data allowlist audit failed"),
-        "CALIBRATION: the unbounded script named the failure too",
-      ).toBe(false);
-      expect(
-        pre.out.includes("kaboom"),
-        "CALIBRATION: the unbounded script still printed the log",
-      ).toBe(false);
-    });
-
-    it("a census with NO 'migrations scanned' line is a MEASURE_FAIL (pre-fix: silence)", () => {
-      const stub = { STUB_AUDIT_OUT: CENSUS };
-      const r = runStep(script, stub);
-      expect(r.code, r.out).toBe(1);
-      expect(r.out).toContain("printed no 'migrations scanned: N' line");
-
-      const pre = runStep(unbind(script, BOUNDS), stub);
-      expect(
-        pre.out.includes("migrations scanned: N' line"),
-        "CALIBRATION: the unbounded script reported the missing coverage line too",
-      ).toBe(false);
-      expect(
-        pre.code,
-        "CALIBRATION: the unbounded script did not go red",
-      ).not.toBe(0);
-    });
-
-    it("a zero SCANNED count and a zero ENTRY count are each refused by name", () => {
-      const zeroScan = runStep(script, {
-        STUB_AUDIT_OUT: `${CENSUS}  migrations scanned: 0\n`,
+      const noBlocks = runStep(script, {
+        STUB_MIGDEP_OUT: CENSUS.replace("40 anonymous block", "0 anonymous block"),
       });
-      expect(zeroScan.code, zeroScan.out).toBe(1);
-      expect(zeroScan.out).toContain(
-        "An empty corpus audits clean BY CONSTRUCTION",
-      );
-
-      const zeroEntries = runStep(script, {
-        STUB_AUDIT_OUT: `extract-reference-inserts audit OK: 0 entr(ies), 4 file(s), 2 table(s), 9 statement(s); all listed.\n${SCANNED}`,
-      });
-      expect(zeroEntries.code, zeroEntries.out).toBe(1);
-      expect(zeroEntries.out).toContain("the restore would replay nothing");
+      expect(noBlocks.code, noBlocks.out).toBe(1);
+      expect(noBlocks.out).toContain("found 0 anonymous blocks across 271 migrations");
     });
   });
 });

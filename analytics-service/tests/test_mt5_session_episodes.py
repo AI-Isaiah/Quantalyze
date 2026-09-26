@@ -534,6 +534,47 @@ _DECLARED_MUTABLE_MODULE_GLOBALS = {
         "the blind-run counter. It gates a LOG LEVEL and never a dataset value, "
         "so a redeploy resetting it costs a late escalation and nothing else."
     ),
+    "_IPC_FAULT_ESCALATION_ARMED": (
+        "164.6.5 plan 05 — the ipc_fault recycle's once-per-run debounce, a "
+        "BOOL. It gates an ACTION (whether the heal may recycle the terminal "
+        "now) and never a dataset value: no row reads it and no episode is "
+        "keyed on it. A redeploy re-arms it, which costs at most one extra "
+        "recycle attempt per deploy during a wedge that spans one."
+    ),
+    "_IPC_FAULT_RUN_ANSWERS": (
+        "164.6.5 review round 2 (WR-02 / R2-SFH-03; it replaces round 1's "
+        "`_IPC_FAULT_ESCALATION_CLAIMED_AT_ANSWER`) — an INT: the terminal's "
+        "answered-count when the current run of IPC faults STARTED, so a recovery "
+        "only the job path saw ends the run, gate and alarm together. It gates an "
+        "ACTION and a LOG LEVEL, never a dataset value; a redeploy resets it "
+        "together with the run it belongs to."
+    ),
+    "_IPC_FAULT_RUN_SINCE": (
+        "164.6.5 review round 1 (SFH-03) — a monotonic stamp of the FIRST reading "
+        "of a run of IPC faults, used only to state an elapsed time in an ERROR "
+        "log line. It names no row and no state; a redeploy resetting it restarts "
+        "the elapsed count and delays the next hourly alarm, nothing else."
+    ),
+    "_IPC_FAULT_RECYCLED_AT": (
+        "164.6.5 review round 2 (CR-01) — a monotonic stamp of the LAST terminal "
+        "recycle, half of the two-stamp rolling window the recycle cap counts "
+        "over. It gates an ACTION and a LOG LEVEL, never a dataset value; a "
+        "redeploy resetting it frees the cap early, at most once per deploy."
+    ),
+    "_IPC_FAULT_RECYCLED_BEFORE_AT": (
+        "164.6.5 review round 2 (CR-01) — the recycle before that one, the other "
+        "half of the same window. Same reasoning as the stamp above."
+    ),
+    "_IPC_FAULT_CAP_ALARM_AT": (
+        "164.6.5 review round 2 (CR-01) — a monotonic stamp of the last ERROR "
+        "about the recycle cap, which throttles it to hourly. A LOG CADENCE, "
+        "never a dataset value."
+    ),
+    "_IPC_FAULT_LAST_ALARM_AT": (
+        "164.6.5 review round 1 (SFH-03) — a monotonic stamp of the last ERROR "
+        "about that run, which throttles the alarm to hourly. A LOG CADENCE, "
+        "never a dataset value."
+    ),
 }
 
 
@@ -550,8 +591,8 @@ def test_the_module_holds_NO_EPISODE_STATE_AT_ALL_by_construction() -> None:
     """
     source = inspect.getsource(mt5_session_episodes)
     assert _module_globals_mutated(source) == set(_DECLARED_MUTABLE_MODULE_GLOBALS), (
-        "the recorder rebinds a module-level name that is not one of the two "
-        "declared counters. ⛔ If it is episode state, an analytics redeploy now "
+        "the recorder rebinds a module-level name that is not one of the "
+        "declared module globals. ⛔ If it is episode state, an analytics redeploy now "
         "truncates a session lifetime; if it is not, add it to "
         "`_DECLARED_MUTABLE_MODULE_GLOBALS` WITH the reason it cannot be."
     )
