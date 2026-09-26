@@ -57,14 +57,17 @@ import asyncio
 import logging
 import math
 import os
-from typing import Final
+import time
+from typing import Callable, Final
 
 from services.closed_sets import mt5_enabled_server
 from services.mt5_client import MT5_REQUEST_TIMEOUT_S as _MT5_REQUEST_TIMEOUT_S
 from services.mt5_client import (
     Mt5Client,
     Mt5ClientError,
+    Mt5SessionAbandoned,
     _redact_credential_values,
+    mt5_terminal_answer_count,
     mt5_terminal_key,
 )
 from services.mt5_concurrency import Mt5TerminalBusyError, mt5_terminal_lease
@@ -78,13 +81,39 @@ from services.mt5_session_episodes import (
     KIND_HEAL_SENT_IPC_FAULT_ON_REPROBE,
     KIND_HEALED,
     KIND_IPC_FAULT,
+    KIND_IPC_FAULT_RECYCLE_CAPPED,
+    KIND_IPC_FAULT_RECYCLE_FAILED,
+    KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
+    KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET,
+    KIND_IPC_FAULT_RECYCLED,
+    KIND_IPC_FAULT_RECYCLED_DEGRADED,
+    KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
+    KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
+    KIND_IPC_FAULT_RECYCLED_STILL_FAULTED,
+    KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
     KIND_NO_AUTHORIZED_ACCOUNT,
     KIND_STILL_UNAUTHORIZED,
+    IPC_FAULT_RECYCLE_CAP,
     HealOutcome,
+    claim_ipc_fault_escalation,
+    end_ipc_fault_run,
+    end_ipc_fault_run_if_answered,
+    ipc_fault_alarm_due,
+    ipc_fault_cap_alarm_due,
+    ipc_fault_escalation_armed,
+    ipc_fault_recycles_in_window,
+    mark_ipc_fault_alarm,
+    mark_ipc_fault_cap_alarm,
+    note_ipc_fault_reading,
+    restore_ipc_fault_attempt,
     record_mt5_heal_outcome,
     record_mt5_session_reading,
 )
-from services.mt5_validation import Mt5ValidationError, parse_mt5_credentials
+from services.mt5_validation import (
+    _IPC_TRANSPORT_CODES,
+    Mt5ValidationError,
+    parse_mt5_credentials,
+)
 from services.redact import scrub_freeform_string
 
 # ⛔ A STDLIB logger, bound at module scope under the `quantalyze.analytics.`
@@ -105,6 +134,40 @@ logger = logging.getLogger("quantalyze.analytics.mt5_relogin")
 # credential there heals nothing while re-collapsing exactly the distinction
 # Phase 164.1 built.
 _MT5_NO_AUTHORIZED_ACCOUNT_CODE: Final[int] = -6
+
+# --------------------------------------------------------------------------- #
+# ⭐ THE ESCALATION's CODE GATE (164.6.5 plan 05, D-08) — which IPC fault a
+# terminal-PROCESS recycle can actually reach.
+#
+# The two IPC-transport codes have DIFFERENT remedies, and the prod prober's arm
+# encodes the same split as two kinds:
+#
+#   * `-10004` "No IPC connection" — the bridge is DETACHED. The recycle verb has
+#     to travel THROUGH that bridge to end the terminal, so here it has nothing
+#     to talk to. The shipped remedy is a redeploy. NOT escalated.
+#   * `-10005` "IPC timeout" — the bridge ANSWERED and the terminal behind it did
+#     not. A credentialed `initialize()` has to go through the dead half; a
+#     process recycle does not. THIS is the class the escalation exists for.
+#
+# ⛔ DERIVED FROM THE SHIPPED TUPLE, never a re-spelled `-10005`: the gate is
+# "the IPC-transport codes, minus the detached one". The private import is the
+# same deliberate choice `_redact_credential_values` above records — the tuple
+# is the one place those codes are defined, and a second copy is drift. ⛔ If a
+# code is ever ADDED to `_IPC_TRANSPORT_CODES`, this set widens with it, and
+# `test_the_escalation_gate_is_exactly_the_ipc_timeout_code` reds so that
+# widening is a decision rather than an accident. `-10003` and the `0`
+# sentinel are not transport codes and never escalate.
+# --------------------------------------------------------------------------- #
+_MT5_IPC_BRIDGE_DETACHED_CODE: Final[int] = -10004
+
+#: The stage name `Mt5Client.recycle_terminal_process` passes to its OWN
+#: first-statement fence. An `Mt5SessionAbandoned` carrying it was refused before
+#: the recycle crossed the wire (WR-01).
+_RECYCLE_FENCE_STAGE: Final[str] = "terminal_recycle"
+
+_RECYCLE_REACHABLE_IPC_CODES: Final[frozenset[int]] = frozenset(
+    _IPC_TRANSPORT_CODES
+) - {_MT5_IPC_BRIDGE_DETACHED_CODE}
 
 # The three Railway variables the heal reads, in the order they are reported.
 # ⛔ NAMES ONLY ever reach a log line — never a value, never a length, never a
@@ -222,7 +285,181 @@ _MT5_RELOGIN_LEASE_WAIT_ENV: Final[str] = "MT5_RELOGIN_LEASE_WAIT_S"
 # the_worst_case_path_makes` drives the five-trip path against the double and
 # counts the remote calls it actually makes. A sixth round-trip added to the path
 # reds there rather than silently re-opening this window.
-_MT5_RELOGIN_ROUND_TRIPS: Final[int] = 5
+#
+# ⛔ 164.6.5 plan 05 — IT WAS 5, AND THE WORST PATH IS NOW THE ESCALATION's. Plan
+# 05 re-derived it to 8, counting "terminal-touching calls" and treating the
+# recycle's bridge-served rpyc requests as free.
+#
+# ⛔ 164.6.5 review round 1 (WR-04) — THAT COUNT WAS INCONSISTENT, AND HONESTLY
+# COUNTED THE PATH OVERRAN THE 300 s CEILING. The same table counts `last_error()`
+# — a BRIDGE-LOCAL read of the package's stored error — at a full 30 s, because
+# D-32's EVIDENCE §1b measured a failed attempt paying a SECOND 30 s there. The
+# unit is therefore the RPYC CROSSING, each bounded only by `sync_request_timeout`,
+# and `recycle_terminal_process._remote_call` makes THREE of them
+# (`conn.execute(SRC)`, the `conn.namespace[FN]` netref lookup, the call), not one.
+# Counted that way plan 05's path was 10 crossings = 310 s, over the ceiling: the
+# `wait_for` would fire mid-recycle (the WR-03 class, and the SFH-06 abandonment).
+#
+# THE FIX IS NOT A BIGGER NUMBER. The budget now covers exactly the crossings the
+# escalation makes UNCONDITIONALLY, and every OPTIONAL read is taken only when the
+# time left still covers it AND everything the path must still do
+# (`_affordable`). The unconditional worst path:
+#
+#   | the first probe: `initialize()` + `last_error()`                 | 2 |
+#   | the capture: `terminal_info()` + its `last_error()`              | 2 |
+#   | the recycle: execute + namespace lookup + call                   | 3 |
+#   | the verb's relaunch probe: `initialize()` + `last_error()`        | 2 |
+#
+# 9 x 30 + 10 = 280 s, under the 300 s ceiling, which is unchanged. The capture's
+# `account_info()` read, the relaunch POLLS that let a slow relaunch be seen
+# answering, and the post-relaunch reads are all budget-gated, so none of them
+# can push the path past the `wait_for`. ⛔ It is the MINIMUM that covers the
+# unconditional path: `test_the_budget_covers_the_ESCALATION_path_too` drives the
+# worst path with every crossing at its ceiling and asserts EQUALITY, so an
+# over-provision (which lengthens the unbounded lease wait batch jobs pay, IN-04)
+# reds as surely as an under-count.
+#
+# ⛔ 164.6.5 review round 2 (WR-03, 2026-09-25) — THE CAPTURE ROW WAS AN
+# UNDER-COUNT, AND THE PATH IS NOW 7. `terminal_info()` was charged 2 crossings,
+# which is its FAILING shape (the read, then `_raise_last`'s `last_error()`). Its
+# ANSWERING shape is a netref namedtuple that `mt5_client._materialize` walks
+# once per field (29 crossings at the documented field count), so "unconditional"
+# was never true of it at the ceiling. Charged honestly, no budget under the 300 s
+# ceiling can cover an answering read beside the recycle and its relaunch, so the
+# capture is now budget-gated like every other optional read, and the
+# unconditional path is:
+#
+#   | the first probe: `initialize()` + `last_error()`                 | 2 |
+#   | the recycle: execute + namespace lookup + call                   | 3 |
+#   | the verb's relaunch probe: `initialize()` + `last_error()`        | 2 |
+#
+# 7 x 30 + 10 = 220 s. ⚠️ THE CONSEQUENCE, STATED: at every budget the window
+# admits, the in-process capture (`terminal_info` / `account_info`) and the
+# SFH-07 post-relaunch check are SKIPPED, and their lines say so. They become
+# affordable only if these reads stop costing one crossing per field, i.e. are
+# materialized bridge-side the way `Mt5Client._materialize_rows` already does
+# deals (the review's other option, and `mt5_client`'s to take).
+#
+# ⭐ SUPERSEDED THE SAME DAY (164.6.5 review round 2, WR-03 ROOT CAUSE,
+# 2026-09-25; the paragraph above is kept as lineage). The option above was
+# taken: `Mt5Client.session_snapshot` reads the heal's fields of BOTH
+# `terminal_info()` and `account_info()` on the far side of the wire in ONE
+# `conn.eval` of a committed literal (`mt5_client._REMOTE_SESSION_SNAPSHOT_SRC`),
+# returning a tuple of scalars rpyc copies by value. A read that does not answer
+# reads its `last_error()` code in the SAME crossing. So the capture and the
+# SFH-07 post-relaunch check cost ONE crossing each, whatever the terminal
+# answers, and both are back on the unconditional path:
+#
+#   | the first probe: `initialize()` + `last_error()`                 | 2 |
+#   | the capture: `session_snapshot()`                                | 1 |
+#   | the recycle: execute + namespace lookup + call                   | 3 |
+#   | the relaunch reading, ONE of:                                    | 2 |
+#   |   the verb's probe does not answer: `initialize()` + `last_error()` |   |
+#   |   it answers: `initialize()` + the post-relaunch `session_snapshot()` | |
+#
+# 8 x 30 + 10 = 250 s (it was 220 s with both reads skipped, 280 s before
+# that), under the unchanged 300 s ceiling. The last row is why the check costs
+# the path nothing extra: it runs only after the probe ANSWERED, and an
+# answering probe is one crossing, so the probe and the check together are never
+# more than the failing probe's two. The same arithmetic means the recycle's own
+# reserve (`_ESCALATION_RESERVE_CROSSINGS`) already covers the check.
+# ⚠️ The two reads are ONE crossing, not one each, on purpose: one crossing per
+# read would make the path 2 + 2 + 3 + 3 = 10 crossings = 310 s, over the
+# ceiling. The relaunch POLLS stay budget-gated, and each poll reserves a whole
+# detector reading, so a poll that sees the relaunch answer also leaves the
+# check its crossing.
+_DETECTOR_READING_CROSSINGS: Final[int] = 2
+_RECYCLE_CROSSINGS: Final[int] = 3
+#: `Mt5Client.session_snapshot`: one `conn.eval`, whatever it answers.
+#: `test_R2_WR03_RC_a_session_snapshot_is_ONE_crossing_on_every_shape` drives the
+#: REAL client against a netref-shaped double and requires this charge to equal
+#: what it crossed.
+_SESSION_SNAPSHOT_CROSSINGS: Final[int] = 1
+_MT5_RELOGIN_ROUND_TRIPS: Final[int] = (
+    _DETECTOR_READING_CROSSINGS  # the first probe
+    + _SESSION_SNAPSHOT_CROSSINGS  # the pre-recycle evidence capture
+    + _RECYCLE_CROSSINGS
+    + _DETECTOR_READING_CROSSINGS  # the relaunch reading (see the table)
+)
+
+#: The crossings the escalation must still make once the capture is done: the
+#: recycle and its relaunch reading, which covers the post-relaunch check (see
+#: the table). The recycle, and the capture before it, are taken only if the
+#: time left covers this (WR-04).
+_ESCALATION_RESERVE_CROSSINGS: Final[int] = (
+    _RECYCLE_CROSSINGS + _DETECTOR_READING_CROSSINGS
+)
+
+#: The heal's clock. ⛔ A module attribute, not a bare `time.monotonic` call, only
+#: so the budget-gated paths can be driven against a clock whose every crossing
+#: costs its full ceiling — the one condition the budget exists for.
+_clock: Callable[[], float] = time.monotonic
+
+#: The heal's sleep, a module attribute for the same reason as `_clock`.
+_sleep: Callable[[float], None] = time.sleep
+
+# ⭐ WR-02 / SFH-02 (164.6.5 review round 1) — THE RELAUNCH IS WATCHED, NOT READ
+# ONCE. The verb's own relaunch probe is ONE bare `initialize()` bounded by
+# `MT5_INITIALIZE_TIMEOUT_MS` (20 s), while plan 02's live spike MEASURED a cold
+# relaunch reaching authorized 86 s after the kill (run 1; the terminal reappeared
+# about 25 s in). So on the only evidence held, a WORKING recycle usually read an
+# IPC code on that one probe and was logged `recycled_still_faulted` at ERROR,
+# "a human is needed" — minutes before the next tick found it healthy. That trains
+# the operator to ignore the one loud line this phase adds.
+#
+# SETTLE: the escalation keeps probing until the terminal answers, or until this
+# long has passed since the verb RETURNED. The verb returns only after the remote
+# terminate AND its own relaunch probe, so this clock starts no earlier than the
+# kill: 90 s from here is always more than the measured 86 s kill-to-authorized.
+# Only a relaunch still not answering after the whole window is `still_faulted`.
+_RELAUNCH_SETTLE_S: Final[float] = 90.0
+
+# The pause between relaunch polls. A not-yet-answering `initialize()` usually
+# spends its own 20 s IPC timeout, so this mostly matters when it fails FAST
+# (a terminal not yet listening), where it stops a tight loop against the bridge.
+_RELAUNCH_POLL_INTERVAL_S: Final[float] = 10.0
+
+# ⭐ SFH-03 (164.6.5 review round 1) — how often a PERSISTING IPC fault is
+# re-raised at ERROR. One hour, the cadence of the independent hourly prod-prober
+# (`mt5_session_monitor._MT5_SESSION_POLL_INTERVAL_CEILING_S`, not imported: that
+# module imports this one). Alarm cadence only: it never re-opens the
+# one-recycle-per-run decision.
+_IPC_FAULT_ALARM_INTERVAL_S: Final[float] = 3600.0
+
+# ⭐ CR-01 (164.6.5 review round 2) — THE ROLLING WINDOW the recycle cap
+# (`mt5_session_episodes.IPC_FAULT_RECYCLE_CAP`, 2) is counted over. ORCHESTRATOR
+# DECISION 2026-09-25, recorded in the phase CONTEXT.md: one hour, the same hour
+# as the persistence alarm, so a recurring wedge is raised at ERROR about hourly
+# and the shared terminal is recycled at most twice an hour. Without it, a wedge
+# that returned every tick after a WORKING recycle was recycled every tick,
+# unbounded, and never reached ERROR (round 1's CR-01 re-arm composed with the
+# alarm's reset).
+_IPC_FAULT_RECYCLE_WINDOW_S: Final[float] = _IPC_FAULT_ALARM_INTERVAL_S
+
+#: `_raise_last`'s sentinel for "last_error() itself failed or answered
+#: malformed" — it measured NOTHING about the terminal.
+_MT5_UNATTRIBUTED_CODE: Final[int] = 0
+
+#: ⛔ R2-SFH-02 (164.6.5 review round 2) — THE ALARM IS A DENYLIST, NOT AN
+#: ALLOWLIST. It was the transport codes plus `-10003`, so every OTHER code
+#: `_heal_blocking` labels `ipc_fault` — `-10001` / `-10002` (the IPC-internal
+#: send/receive failures `services/mt5_validation.py` already lists), `-1`, any
+#: terminal-internal code — read `not_healed:ipc_fault:code=N` at WARNING forever
+#: (measured by the reviewer: 48 ticks, 0 ERROR). Now every first-probe code's
+#: persistence is alarmed EXCEPT the two that are not a fault of the terminal's
+#: IPC: `-6` (ours to heal, never reaches here) and the `0` sentinel (measured
+#: nothing). ⛔ The ACTION's gate stays narrow and separate:
+#: `_RECYCLE_REACHABLE_IPC_CODES`.
+_IPC_FAULT_ALARM_EXEMPT_CODES: Final[frozenset[int]] = frozenset(
+    {_MT5_NO_AUTHORIZED_ACCOUNT_CODE, _MT5_UNATTRIBUTED_CODE}
+)
+
+
+def _affordable(deadline: float, crossings: int) -> bool:
+    """Whether ``crossings`` rpyc crossings, each at its full ceiling, still fit
+    before ``deadline``. The guard every OPTIONAL read takes (WR-04)."""
+    return deadline - _clock() >= crossings * _MT5_REQUEST_TIMEOUT_S
+
 
 # The slack over the round-trips, covering the unbounded `rpyc.classic.connect`.
 _MT5_RELOGIN_CONNECT_SLACK_S: Final[float] = 10.0
@@ -456,14 +693,51 @@ def _env_float(name: str, default: float, *, floor: float, ceiling: float) -> fl
 
 def _relogin_budget_s() -> float:
     """The WHOLE heal's wall-clock budget — the rpyc connect plus the bounded
-    round-trips the `-6` path actually makes (see the derivation above)."""
-    return _env_float(
-        _MT5_RELOGIN_BUDGET_ENV,
+    round-trips the worst path actually makes (see the derivation above).
+
+    ⛔ R2-SFH-01 (164.6.5 review round 2) — A VALUE BELOW THE DERIVED DEFAULT IS
+    ACCEPTED AND NAMED. The window above admits anything from one round-trip
+    up, and every value below the derived default is one the ipc_fault
+    escalation can NEVER afford: its recycle is skipped on every wedge, forever.
+    It stays accepted (a shorter heal is a legitimate trade for the ``-6`` path,
+    and rejecting it would silently LENGTHEN an operator's deliberate choice),
+    but it is logged ONCE per process at WARNING, by NAME, never by value
+    (T-164.6.2-12). The escalation's own skip then reaches the persistence alarm
+    (WR-01). MEASURED 2026-09-25 by the orchestrator (read-only): the variable is
+    NOT set on the production analytics service, so the derived default applies
+    there today.
+
+    ⚠️ WR-03 ROOT CAUSE (2026-09-25) — "NEVER afford" above is now true only of
+    the lower part of that range. The default covers the pre-recycle evidence
+    capture as well, so a value somewhat below it drops the capture first, and
+    only a value further below it loses the recycle itself. (The post-relaunch
+    check is never the one dropped: whenever the recycle starts, its reserve
+    leaves the check its crossing.) The warning says both.
+    """
+    default = (
         _MT5_RELOGIN_ROUND_TRIPS * _MT5_REQUEST_TIMEOUT_S
-        + _MT5_RELOGIN_CONNECT_SLACK_S,
+        + _MT5_RELOGIN_CONNECT_SLACK_S
+    )
+    budget = _env_float(
+        _MT5_RELOGIN_BUDGET_ENV,
+        default,
         floor=_MT5_RELOGIN_BUDGET_FLOOR_S,
         ceiling=_MT5_RELOGIN_BUDGET_CEILING_S,
     )
+    if budget < default:
+        _log_configuration_fault_once(
+            f"{_MT5_RELOGIN_BUDGET_ENV}_below_derived_default",
+            "mt5 session path: %s is set below its derived default of %s seconds. "
+            "The value is accepted, but the ipc_fault escalation cannot afford "
+            "every step at it: the pre-recycle evidence capture is dropped "
+            "first, and further below the default the terminal-process recycle "
+            "itself, so a -10005 wedge is never recycled automatically and the "
+            "persistence alarm raises it at ERROR instead. This is a SERVER "
+            "misconfiguration, never a credential failure (D-02).",
+            _MT5_RELOGIN_BUDGET_ENV,
+            default,
+        )
+    return budget
 
 
 def _relogin_lease_wait_s() -> float:
@@ -629,8 +903,758 @@ def _describe_exception_for_log(
     return _redact_credential_values(text, login, password, server)
 
 
+def _describe_capture_failure(exc: Exception) -> str:
+    """The CLASS and the typed code of a failed capture read — never ``str(exc)``,
+    which for a raw transport raise is remote text."""
+    code = exc.code if isinstance(exc, Mt5ClientError) else None
+    return f"exc_class={type(exc).__name__} code={code}"
+
+
+def _capture_wedge_evidence(
+    client: Mt5Client, env_server: str, deadline: float
+) -> str:
+    """Read what the recycle is about to ERASE, and return it as a log fragment.
+
+    ⭐ WHY (``TODOS.md`` ``MT5-SWITCH-WEDGE-CAUSE-01``). The wedge is PROCESS state,
+    so the recycle that heals it also destroys the only evidence for its cause:
+    the terminal build (the self-update hypothesis, D-03a) and which broker server
+    the session was on (the same-server-vs-different-server hypothesis). Unless
+    this runs FIRST, every automatically healed wedge heals with no evidence and
+    that item can never close by waiting.
+
+    ⛔ CREDENTIAL-FREE. ``terminal_info()`` and ``account_info()`` read the
+    CURRENT session; neither logs in, and nothing here ever calls a login. If the
+    terminal cannot answer them, the fields are recorded ``not_captured`` WITH
+    THE REASON — never filled in by logging in.
+
+    ⚠️ SFH-04 (164.6.5 review round 1) — ON A TRUE ``-10005`` THIS IS EXPECTED
+    TO CAPTURE NOTHING. Both reads cross the SAME terminal IPC the fault says is
+    dead (the MetaTrader5 package does not serve them for a session whose
+    ``initialize()`` just failed), so the realistic line is ``not_captured``
+    with the reason. It is kept because a partial wedge may still answer, and
+    the line says so honestly either way. The build evidence that does NOT need
+    that IPC — the terminal executable's file version — is read bridge-side by
+    the recycle's own remote source and logged as ``file_versions`` on the
+    recycle's lines. The broker server on each side of a switch is recorded by
+    nothing automatic (``TODOS.md`` ``MT5-SWITCH-WEDGE-CAUSE-01``).
+
+    ⛔ THE BROKER SERVER IS RECORDED AS A COMPARISON, NEVER AS A NAME. This
+    module's rule is that a value never reaches a log line (T-164.6.2-12), and
+    ``MT5_SERVER`` is one of the three values ``_not_healed`` redacts BY VALUE, so
+    logging the session's server name would log that value whenever the terminal
+    is on the environment account. ``TODOS.md`` says the same of the repo: keep
+    server names private and bring only the verdicts in. So the line says whether
+    the session's server EQUALS the environment's — the verdict, not the name.
+    No account number is read into the line at all.
+
+    ⛔ IT CANNOT RAISE, except ``Mt5SessionAbandoned``, which is re-raised for the
+    same reason ``_escalate_ipc_fault`` re-raises it. ⚠️ A terminal that does not
+    answer ``terminal_info()`` is not asked ``account_info()``: a terminal that
+    cannot answer one cannot answer the other. ⛔ And the capture is BUDGET-GATED
+    (WR-04): it is read only when the time left covers it AND the recycle and its
+    relaunch reading, which leaves the post-relaunch check its crossing
+    (``_ESCALATION_RESERVE_CROSSINGS``).
+    Evidence is never bought with the recovery it exists to precede.
+
+    ⛔ WR-03 (164.6.5 review round 2) — the two reads were charged their ANSWERING
+    cost, one rpyc crossing per field, and at that cost this capture was skipped
+    at every budget the window admits. ⭐ WR-03 ROOT CAUSE (same day): they are
+    now ONE bridge-side crossing (``Mt5Client.session_snapshot``), so at the
+    derived default the capture RUNS on every escalation.
+    """
+    if not _affordable(
+        deadline, _SESSION_SNAPSHOT_CROSSINGS + _ESCALATION_RESERVE_CROSSINGS
+    ):
+        return (
+            "build=not_captured connected=not_captured "
+            "session_server_matches_env=not_captured (terminal_info and "
+            "account_info skipped: the heal budget left is reserved for the "
+            "recycle and its relaunch; the bridge-side file version is on the "
+            "recycle's own line)"
+        )
+    try:
+        snapshot = client.session_snapshot(
+            expected_login=None, expected_server=env_server
+        )
+    except Mt5SessionAbandoned:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a capture must never block the recycle
+        return (
+            "build=not_captured connected=not_captured "
+            "session_server_matches_env=not_captured "
+            f"(the session read failed: {_describe_capture_failure(exc)}; the "
+            "bridge-side file version is on the recycle's own line)"
+        )
+    if snapshot.terminal_code is not None:
+        return (
+            "build=not_captured connected=not_captured "
+            "session_server_matches_env=not_captured "
+            f"(terminal_info failed: code={snapshot.terminal_code}; account_info "
+            "skipped; the bridge-side file version is on the recycle's own line)"
+        )
+    build_part = (
+        f"build={snapshot.build}"
+        if snapshot.build is not None
+        else "build=not_captured (terminal_info carried no integer build)"
+    )
+    connected_part = (
+        f"connected={snapshot.connected}"
+        if snapshot.connected is not None
+        else "connected=not_captured (terminal_info carried no boolean)"
+    )
+    if snapshot.account_code is not None:
+        server_part = (
+            "session_server_matches_env=not_captured "
+            f"(account_info failed: code={snapshot.account_code})"
+        )
+    elif snapshot.server_matches is not None:
+        server_part = f"session_server_matches_env={snapshot.server_matches}"
+    else:
+        server_part = (
+            "session_server_matches_env=not_captured "
+            "(account_info carried no server)"
+        )
+    return f"{build_part} {connected_part} {server_part}"
+
+
+def _count(verdict: dict[str, object], key: str) -> int | None:
+    """One of the verb's integer counts, or ``None`` when it is not an int."""
+    value = verdict.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _recycle_landed(verdict: dict[str, object]) -> bool:
+    """Whether the recycle ended EVERY terminal process it matched, and matched
+    at least one. ⛔ The counts are the ONLY evidence the terminate landed
+    (``deploy/mt5-gateway/railway-gateway.md``, D-05 caveats): the Wine-side
+    ``TerminateProcess`` path has never run live."""
+    matched = _count(verdict, "matched")
+    terminated = _count(verdict, "terminated")
+    return (
+        matched is not None
+        and terminated is not None
+        and matched >= 1
+        and terminated == matched
+    )
+
+
+def _watch_relaunch(
+    client: Mt5Client, verdict: dict[str, object], deadline: float
+) -> bool:
+    """Poll the credential-free detector until the relaunched terminal answers,
+    the settle window has passed, or the heal budget can no longer cover another
+    poll. Updates ``verdict``'s ``authorized`` / ``relaunch_code`` IN PLACE with
+    the LAST reading, records ``relaunch_polls``, and returns whether the WHOLE
+    settle window was watched (WR-02).
+
+    ⛔ BUDGET-GATED, like every optional read (WR-04): a poll is started only if
+    the pause and one full detector reading still fit before ``deadline``. So
+    this loop can never push the heal past its ``wait_for``; when the budget
+    runs out first the answer is "not yet known", and the caller says so.
+
+    ⛔ Credential-free: it is the same bare ``initialize()`` the detector uses.
+    ``Mt5SessionAbandoned`` propagates — the terminate has already crossed, so
+    the attempt stands (WR-01).
+    """
+    started = _clock()
+    polls = 0
+    try:
+        while not (
+            verdict.get("authorized") is True
+            or verdict.get("relaunch_code") == _MT5_NO_AUTHORIZED_ACCOUNT_CODE
+        ):
+            if _clock() - started >= _RELAUNCH_SETTLE_S:
+                return True
+            if not _affordable(
+                deadline - _RELAUNCH_POLL_INTERVAL_S, _DETECTOR_READING_CROSSINGS
+            ):
+                return False
+            _sleep(_RELAUNCH_POLL_INTERVAL_S)
+            polls += 1
+            try:
+                client.assert_session_authorized()
+            except Mt5ClientError as exc:
+                verdict["authorized"] = False
+                verdict["relaunch_code"] = exc.code
+            else:
+                verdict["authorized"] = True
+                verdict["relaunch_code"] = None
+        return True
+    finally:
+        verdict["relaunch_polls"] = polls
+
+
+#: What the post-relaunch check came to (SFH-07 / SFH-08). ⛔ The order is the
+#: precedence: a definite mismatch outranks a check that could not complete.
+_POST_RELAUNCH_VERIFIED: Final[str] = "verified"
+_POST_RELAUNCH_UNVERIFIED: Final[str] = "unverified"
+_POST_RELAUNCH_DEGRADED: Final[str] = "degraded"
+
+
+def _read_post_relaunch_state(
+    client: Mt5Client, env_login: int, env_server: str, deadline: float
+) -> tuple[str, str]:
+    """After a relaunch the detector called AUTHORIZED, read what "authorized"
+    did not say. Returns ``(log fragment, status)``, the status one of
+    ``_POST_RELAUNCH_VERIFIED`` / ``_UNVERIFIED`` / ``_DEGRADED``.
+
+    ⛔ SFH-07 (164.6.5 review round 1). A bare ``initialize()`` returning True
+    says a session exists — not WHICH account it is on, nor whether the terminal
+    is connected to the trade server. The D-05 record MEASURED a relaunched
+    terminal coming back on "whichever account the last service call had logged
+    in to" (a different account in run 2), and the four-day incident's Journal
+    showed a terminal `disconnected` with no reconnect. Either way the heal's
+    purpose — the house account's session — is not restored, the monitor's next
+    probe reads `already_authorized`, and nothing said so.
+
+    ⛔ SFH-08 (164.6.5 review round 2) — "degraded" used to be set only by a
+    definite ``connected=False`` or login mismatch, so a check that could not
+    complete (``not_read``, a failed ``terminal_info()``, a field not captured)
+    left the recovery at INFO, "nothing for anyone to do". Now:
+
+      * ``degraded`` — MEASURED not the house session: disconnected, another
+        login, or another broker server (a login is only unique per server).
+      * ``unverified`` — the check could not complete, whatever the reason.
+      * ``verified`` — connected, on the environment's login and server.
+
+    ⛔ CREDENTIAL-FREE and VALUE-FREE: one read of the CURRENT session, no login.
+    The account and server are recorded as EQUALITY VERDICTS against the
+    environment's, never as values — the same rule the pre-recycle capture
+    follows (T-164.6.2-12); no account number reaches the line, and none reaches
+    this module (``Mt5Client.session_snapshot`` compares inside the client).
+
+    ⛔ BUDGET-GATED, like every optional read (WR-04): it is taken only if it
+    still fits before ``deadline``, else recorded ``not_read`` with the reason.
+    ⭐ WR-03 ROOT CAUSE (164.6.5 review round 2, 2026-09-25): it is ONE crossing
+    and it is on the derived default's path, so at that default a relaunch the
+    verb's own probe saw answer is always checked. It cannot raise except
+    ``Mt5SessionAbandoned``.
+    """
+    if not _affordable(deadline, _SESSION_SNAPSHOT_CROSSINGS):
+        return (
+            "post_relaunch=not_read (the heal budget left cannot cover it)",
+            _POST_RELAUNCH_UNVERIFIED,
+        )
+    try:
+        snapshot = client.session_snapshot(
+            expected_login=env_login, expected_server=env_server
+        )
+    except Mt5SessionAbandoned:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a read must never undo the verdict
+        why = _describe_capture_failure(exc)
+        return (
+            f"post_relaunch: connected=not_captured (the session read failed: {why}) "
+            "session_account_matches_env=not_captured "
+            "session_server_matches_env=not_captured",
+            _POST_RELAUNCH_UNVERIFIED,
+        )
+    if snapshot.terminal_code is not None:
+        return (
+            "post_relaunch: connected=not_captured (terminal_info failed: "
+            f"code={snapshot.terminal_code}) session_account_matches_env="
+            "not_captured (account_info not read: the terminal did not answer)",
+            _POST_RELAUNCH_UNVERIFIED,
+        )
+    degraded = False
+    complete = True
+    if snapshot.connected is not None:
+        connected_part = f"connected={snapshot.connected}"
+        degraded = not snapshot.connected
+    else:
+        complete = False
+        connected_part = "connected=not_captured (no boolean)"
+    if snapshot.account_code is not None:
+        complete = False
+        account_part = (
+            "session_account_matches_env=not_captured (account_info failed: "
+            f"code={snapshot.account_code})"
+        )
+    else:
+        if snapshot.login_matches is not None:
+            account_part = f"session_account_matches_env={snapshot.login_matches}"
+            degraded = degraded or not snapshot.login_matches
+        else:
+            complete = False
+            account_part = "session_account_matches_env=not_captured (no login)"
+        if snapshot.server_matches is not None:
+            account_part += (
+                f" session_server_matches_env={snapshot.server_matches}"
+            )
+            degraded = degraded or not snapshot.server_matches
+        else:
+            complete = False
+            account_part += " session_server_matches_env=not_captured (no server)"
+    if degraded:
+        status = _POST_RELAUNCH_DEGRADED
+    elif complete:
+        status = _POST_RELAUNCH_VERIFIED
+    else:
+        status = _POST_RELAUNCH_UNVERIFIED
+    return f"post_relaunch: {connected_part} {account_part}", status
+
+
+def _classify_recycle_verdict(
+    verdict: dict[str, object], *, settled: bool = True
+) -> str:
+    """Map the plan-02 recycle verb's verdict to one escalation kind.
+
+    Read from the verb's STRUCTURED keys, never from any text.
+
+    ⛔ WR-03 / SFH-01 (164.6.5 review round 1) — THE COUNTS DECIDE FIRST. This
+    read only ``authorized`` / ``relaunch_code``, so a recycle that ENDED NOTHING
+    (``matched=0``: an image-name or case difference under Wine; or ``matched=1
+    terminated=0``: ``OpenProcess`` / ``TerminateProcess`` refused) was labelled
+    ``recycled`` at INFO whenever the relaunch probe happened to attach to the
+    same, still-running terminal and it answered — and ``still_faulted`` ("the
+    recycle ran and did not help") when it did not. Both claim a recycle that
+    never happened, and the second points the operator at the VNC console for a
+    broken VERB. ``terminated < matched`` is ``recycle_not_landed``, whatever the
+    relaunch said.
+
+    ``relaunch_code == -6`` is the terminal back up and answering with no account
+    signed in yet: the ordinary heal owns that on the next reading, because the
+    escalation never sends a credential (D-08).
+
+    ``settled`` is whether the whole relaunch settle window was watched
+    (``_watch_relaunch``). A relaunch still not answering is ``still_faulted``
+    only then, and ``relaunch_pending`` otherwise (WR-02).
+    """
+    if not _recycle_landed(verdict):
+        return KIND_IPC_FAULT_RECYCLE_NOT_LANDED
+    if verdict.get("authorized") is True:
+        return KIND_IPC_FAULT_RECYCLED
+    if verdict.get("relaunch_code") == _MT5_NO_AUTHORIZED_ACCOUNT_CODE:
+        return KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT
+    if not settled:
+        # ⛔ WR-02 — the budget ran out before the settle window did. The relaunch
+        # has NOT been shown to fail, so this is never `still_faulted`.
+        return KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING
+    return KIND_IPC_FAULT_RECYCLED_STILL_FAULTED
+
+
+def _escalate_ipc_fault(
+    client: Mt5Client,
+    code: int,
+    env_server: str,
+    deadline: float | None = None,
+    env_login: int | None = None,
+) -> str | None:
+    """ACT on an ``ipc_fault`` reading by recycling the terminal PROCESS (D-08),
+    once per run, and return the escalation kind — or ``None`` when it did not run.
+
+    ⛔ ESCALATING MEANS RECYCLING THE PROCESS, NEVER ANOTHER LOGIN. Phase 164.6.2's
+    heal read ``not_healed:ipc_fault`` five consecutive times on 2026-09-21
+    because it cannot drive a terminal whose IPC is dead; re-sending a credential
+    goes through exactly the half that is not answering. The recycle verb takes NO
+    credential and structurally cannot (plan 02), and nothing here passes one.
+
+    ⭐ WHY IT IS CALLED FROM INSIDE ``_heal_blocking`` AND NOT FROM THE ASYNC
+    CALLER. The caller's verdict log and episode record run AFTER its
+    ``async with`` has released the terminal lease, so an escalation there would
+    recycle the terminal out from under whoever acquired it next — and fixing
+    that with a second acquisition is the "second lease acquisition, second
+    budget" this module's docstring refuses. Here it inherits the ONE lease and
+    the ONE whole-heal budget. ⚠️ That budget was re-derived for this path —
+    first probe, the evidence capture, the recycle, its relaunch and the
+    post-relaunch check — at the ``_MT5_RELOGIN_ROUND_TRIPS`` definition, and a
+    test counts it.
+
+    ⛔ THE CODE GATE: ``_RECYCLE_REACHABLE_IPC_CODES`` only. A DETACHED bridge
+    (``-10004``) gives the recycle nothing to talk to, and ``-10003`` and the
+    ``0`` sentinel are not the wedge. ⛔ Those readings are NEUTRAL to the
+    once-per-run gate (WR-08): they measured no answer from the terminal, so they
+    neither end the run nor start one. Only the terminal MEASURED answering
+    re-arms it — see the gate's comment in ``mt5_session_episodes``.
+
+    ⛔ THE DEBOUNCE: without it, a ten-minute cadence recycles a shared terminal
+    every ten minutes forever when the recycle does not help — a self-inflicted
+    outage wearing a recovery's name. Five readings of one wedge, one attempt.
+    ⛔ AND THE CAP (CR-01, review round 2; CONTEXT D-18): the debounce is per
+    RUN, and a run ends whenever the terminal answers, so a wedge that returns
+    after every working recycle is capped separately at
+    ``IPC_FAULT_RECYCLE_CAP`` recycles per rolling ``_IPC_FAULT_RECYCLE_WINDOW_S``.
+
+    ⛔ IT CANNOT RAISE OUT OF THE HEAL, and that is the highest-severity property
+    in this module: a raise here unwinds the heal and, from inside the entry's
+    handler, would reach ``_crash_handler`` — a SILENT ANALYTICS outage caused by
+    an MT5 fault. Every ``Exception`` the recycle can raise becomes
+    ``KIND_IPC_FAULT_RECYCLE_FAILED``. ⛔ EXCEPT ``Mt5SessionAbandoned``, which is
+    re-raised untouched: it is a plain exception ON PURPOSE (D-42) so an
+    our-infrastructure refusal is never re-classified, and the entry's catch-all
+    already logs its class. Widening this guard to swallow it would hide exactly
+    the zombie-thread refusal the fence exists to surface.
+
+    ⭐ ITS OWN LOG LINE, at a severity that follows the outcome, so an operator
+    can see a recovery was attempted WITHOUT the verdict string moving — the
+    ``not_healed:`` prefix is a contract downstream keys off. The line carries
+    kinds, codes and counts only; never a credential, host, port or account.
+    """
+    if deadline is None:
+        deadline = _clock() + _relogin_budget_s()
+    now = _clock()
+    # ⭐ WR-02 / R2-SFH-03 (164.6.5 review round 2) — FOR EVERY CODE: if the
+    # terminal answered anyone since this run started (the job path's `login()`
+    # included), the run is over, gate AND alarm, before this reading is counted.
+    answers = mt5_terminal_answer_count(client.terminal_key)
+    # ⭐ SFH-03 / R2-SFH-02 — every fault reading extends the persistence run.
+    # The `0` sentinel measured nothing and neither starts nor extends one.
+    if code not in _IPC_FAULT_ALARM_EXEMPT_CODES:
+        since: float | None = note_ipc_fault_reading(now, answers)
+    else:
+        end_ipc_fault_run_if_answered(answers)
+        since = None
+    if code not in _RECYCLE_REACHABLE_IPC_CODES:
+        # ⛔ WR-08 — NO re-arm here. `0` measured nothing, and `-10003` / `-10004`
+        # are the terminal NOT answering either; re-arming on them let a flaky
+        # bridge (-10005, 0, -10005, 0 ...) recycle the shared terminal every
+        # other tick.
+        if since is not None and ipc_fault_alarm_due(
+            now, _IPC_FAULT_ALARM_INTERVAL_S, attempted=False
+        ):
+            # ⛔ SFH-03 — never escalated, so before this it never reached ERROR
+            # at all, however long it lasted.
+            mark_ipc_fault_alarm(now)
+            logger.error(
+                "mt5 session heal: ipc_fault code=%s has PERSISTED for %d min — the "
+                "terminal-process recycle cannot reach this code, so nothing "
+                "automatic will clear it; an OPERATOR is needed. Re-raised at "
+                "ERROR at most every %d min while it persists.",
+                code,
+                int((now - since) // 60),
+                int(_IPC_FAULT_ALARM_INTERVAL_S // 60),
+            )
+        return None
+    if not ipc_fault_escalation_armed():
+        if since is not None and ipc_fault_alarm_due(
+            now, _IPC_FAULT_ALARM_INTERVAL_S, attempted=True
+        ):
+            # ⛔ SFH-03 — THE DEBOUNCE IS ON THE ACTION, NOT ON THE ALARM. A wedge
+            # the recycle did not cure used to be ONE ERROR at hour 0 and then
+            # INFO lines for as long as it lasted (four days, on the record).
+            mark_ipc_fault_alarm(now)
+            logger.error(
+                "mt5 session heal: ipc_fault code=%s PERSISTS %d min into this run, "
+                "after its one terminal-process recycle — an OPERATOR is needed. "
+                "The recycle is NOT repeated (once per run; the terminal answering "
+                "re-arms it); this alarm is re-raised at ERROR at most every %d min "
+                "while it persists.",
+                code,
+                int((now - since) // 60),
+                int(_IPC_FAULT_ALARM_INTERVAL_S // 60),
+            )
+        else:
+            logger.info(
+                "mt5 session heal: ipc_fault code=%s persists — the terminal-process "
+                "recycle was already attempted in this run of consecutive faults, "
+                "so it is NOT repeated (once per run; the terminal answering "
+                "re-arms it).",
+                code,
+            )
+        return None
+    if (
+        ipc_fault_recycles_in_window(now, _IPC_FAULT_RECYCLE_WINDOW_S)
+        >= IPC_FAULT_RECYCLE_CAP
+    ):
+        # ⛔ CR-01 (164.6.5 review round 2) — CAPPED. The recycle already ran
+        # the cap's number of times inside the window, each after the terminal
+        # had answered, and the wedge came back. Recycling the ONE shared
+        # terminal again is not a recovery; it is the Cause B pattern, and a
+        # human is needed. Nothing is read or recycled until the oldest recycle
+        # leaves the window. ⭐ SFH-09 — its own kind.
+        if ipc_fault_cap_alarm_due(now, _IPC_FAULT_ALARM_INTERVAL_S):
+            mark_ipc_fault_cap_alarm(now)
+            log_capped = logger.error
+        else:
+            log_capped = logger.warning
+        log_capped(
+            "mt5 session heal: ipc_fault code=%s — REPEATED WEDGE, recycle CAPPED: "
+            "the terminal-process recycle already ran %d times in the last %d min, "
+            "each after the terminal had answered, and the wedge came back. That "
+            "recurrence is the Cause B signal (MT5-SWITCH-WEDGE-CAUSE-01: an "
+            "account switch on the shared terminal re-wedging it); an OPERATOR is "
+            "needed. NOT recycled now; the cap frees once the oldest recycle is "
+            "%d min old. Raised at ERROR at most every %d min while capped.",
+            code,
+            IPC_FAULT_RECYCLE_CAP,
+            int(_IPC_FAULT_RECYCLE_WINDOW_S // 60),
+            int(_IPC_FAULT_RECYCLE_WINDOW_S // 60),
+            int(_IPC_FAULT_ALARM_INTERVAL_S // 60),
+        )
+        return KIND_IPC_FAULT_RECYCLE_CAPPED
+    # ⭐ EVIDENCE FIRST (`MT5-SWITCH-WEDGE-CAUSE-01`): the recycle erases it.
+    # Logged on its own line BEFORE the recycle is attempted, so the evidence is
+    # on record even if the recycle then hangs past the budget.
+    try:
+        evidence = _capture_wedge_evidence(client, env_server, deadline)
+    except Mt5SessionAbandoned:
+        raise
+    except Exception as exc:  # noqa: BLE001 — belt and braces; see the docstring
+        evidence = (
+            "not_captured (the capture itself failed: "
+            f"{_describe_capture_failure(exc)})"
+        )
+    logger.warning(
+        "mt5 session heal: ipc_fault code=%s — pre-recycle wedge evidence "
+        "(MT5-SWITCH-WEDGE-CAUSE-01; read credential-free, no login made): %s",
+        code,
+        evidence,
+    )
+    # ⛔ WR-01 — CLAIMED HERE, immediately before the recycle, and NOT as the
+    # escalation's first act. An escalation abandoned during the capture used to
+    # have spent the run's one attempt already, with no process ended, so every
+    # later `-10005` was debounced until a redeploy.
+    if not _affordable(deadline, _ESCALATION_RESERVE_CROSSINGS):
+        # ⛔ WR-04 / SFH-06 — NEVER START A RECYCLE THE BUDGET CANNOT FINISH. Under
+        # the derived default this cannot happen (the unconditional path is what
+        # the default is derived from); it is reachable when `MT5_RELOGIN_BUDGET_S`
+        # is set below that default. Killing the shared terminal and then being
+        # abandoned before the relaunch probe is the worst outcome here, so the
+        # attempt is NOT spent and NOT made.
+        #
+        # ⛔ WR-01 / R2-SFH-01 (164.6.5 review round 2) — AND IT GOES THROUGH THE
+        # PERSISTENCE ALARM. The budget comes from the same variable every tick,
+        # so "the next reading will try again" never comes true: this exit used
+        # to be a WARNING per tick, forever, with no recycle and no ERROR — the
+        # four-day shape. It is a server misconfiguration preventing a recovery,
+        # so the first due reading is an ERROR that names the variable.
+        # ⭐ SFH-09 — the step ran and declined, so it returns its own kind.
+        if since is not None and ipc_fault_alarm_due(
+            now, _IPC_FAULT_ALARM_INTERVAL_S, attempted=False
+        ):
+            mark_ipc_fault_alarm(now)
+            logger.error(
+                "mt5 session heal: ipc_fault code=%s has PERSISTED for %d min and the "
+                "terminal-process recycle was NOT attempted on any reading of it: "
+                "the heal budget cannot cover the recycle and its relaunch probe, "
+                "because %s is set below its derived default. Nothing automatic "
+                "will clear it until that variable is corrected; an OPERATOR is "
+                "needed. Re-raised at ERROR at most every %d min while it persists.",
+                code,
+                int((now - since) // 60),
+                _MT5_RELOGIN_BUDGET_ENV,
+                int(_IPC_FAULT_ALARM_INTERVAL_S // 60),
+            )
+        else:
+            logger.warning(
+                "mt5 session heal: ipc_fault code=%s — the terminal-process recycle "
+                "was NOT attempted: the heal budget left cannot cover the recycle "
+                "and its relaunch probe (%s is set below its derived default?). The "
+                "attempt is not spent; a persisting fault is raised at ERROR once it "
+                "has lasted %d min.",
+                code,
+                _MT5_RELOGIN_BUDGET_ENV,
+                int(_IPC_FAULT_ALARM_INTERVAL_S // 60),
+            )
+        return KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET
+    recent_recycles = claim_ipc_fault_escalation(
+        _clock(), _IPC_FAULT_RECYCLE_WINDOW_S
+    )
+    verdict: dict[str, object] = {}
+    answered_after_failure = False
+    try:
+        verdict = client.recycle_terminal_process()
+        # ⭐ WR-02 — a recycle that landed is WATCHED until it answers or the
+        # settle window passes; one 20 s probe of a relaunch measured at 86 s is
+        # not a verdict. A recycle that did not land relaunched nothing.
+        settled = (
+            _watch_relaunch(client, verdict, deadline)
+            if _recycle_landed(verdict)
+            else True
+        )
+        kind = _classify_recycle_verdict(verdict, settled=settled)
+        post_relaunch = ""
+        if kind == KIND_IPC_FAULT_RECYCLED:
+            # ⭐ SFH-07 — "authorized" is not "the house account, connected".
+            # ⛔ WR-04 / SFH-08 (164.6.5 review round 2) — and what the check
+            # came to is the KIND, not only the level: every structured consumer
+            # of `escalation_kind` saw a clean recovery before. Only a VERIFIED
+            # house session stays `recycled`.
+            if env_login is None:
+                status = _POST_RELAUNCH_UNVERIFIED
+                post_relaunch = "post_relaunch=not_read (no environment login)"
+            else:
+                post_relaunch, status = _read_post_relaunch_state(
+                    client, env_login, env_server, deadline
+                )
+            if status == _POST_RELAUNCH_DEGRADED:
+                kind = KIND_IPC_FAULT_RECYCLED_DEGRADED
+            elif status == _POST_RELAUNCH_UNVERIFIED:
+                kind = KIND_IPC_FAULT_RECYCLED_UNVERIFIED
+        detail = (
+            f"matched={verdict.get('matched')} terminated={verdict.get('terminated')} "
+            f"exited={verdict.get('exited')} authorized={verdict.get('authorized')} "
+            f"relaunch_code={verdict.get('relaunch_code')} "
+            f"relaunch_polls={verdict.get('relaunch_polls', 0)} "
+            # ⭐ 164.6.5 review round 2, Topic B — the verb's diagnostic fields,
+            # each an int, a list of Win32 codes, four-int file versions or a
+            # bridge-local exception CLASS name (the client admits only a
+            # Python identifier there), or "unparsed". No remote free text.
+            f"attempted={verdict.get('attempted')} "
+            f"unprocessed={verdict.get('unprocessed')} "
+            f"enumerated={verdict.get('enumerated')} "
+            f"enumerate_error={verdict.get('enumerate_error')} "
+            f"open_errors={verdict.get('open_errors')} "
+            f"terminate_errors={verdict.get('terminate_errors')} "
+            f"pid_errors={verdict.get('pid_errors')} "
+            f"file_versions={verdict.get('file_versions')} "
+            f"file_version_errors={verdict.get('file_version_errors')} "
+            f"file_version_exc={verdict.get('file_version_exc')}"
+            + (f" {post_relaunch}" if post_relaunch else "")
+        )
+    except Mt5SessionAbandoned as exc:
+        # ⛔ WR-01 — `terminal_recycle` is the verb's OWN first-statement fence:
+        # it refused BEFORE anything crossed, so no process was ended and the
+        # attempt was not spent. Any other stage is the relaunch, i.e. AFTER the
+        # terminate crossed, and the attempt stands.
+        #
+        # ⛔ WR-02 (164.6.5 review round 2) — UNDO THE CLAIM, NOTHING MORE. This
+        # refusal runs in the zombie thread after the `wait_for` fired and
+        # measured nothing about the terminal, so the persistence alarm's run
+        # stays exactly as it was.
+        if exc.stage == _RECYCLE_FENCE_STAGE:
+            restore_ipc_fault_attempt()
+        raise
+    except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
+        kind = KIND_IPC_FAULT_RECYCLE_FAILED
+        # ⛔ The CLASS and the typed code only — never `str(exc)`, which for a
+        # raw transport raise is remote text.
+        detail = (
+            f"exc_class={type(exc).__name__} "
+            f"code={exc.code if isinstance(exc, Mt5ClientError) else None}"
+        )
+        # ⛔ R2-SFH-04 part 3 (164.6.5 review round 2) — ONE CREDENTIAL-FREE
+        # READING AFTER A FAILED RECYCLE. This arm is reached on a transport
+        # failure, a snapshot failure or unreadable counts, i.e. the remote call
+        # may already have ended the terminal while the verb's own relaunch probe
+        # never ran. Nothing relaunched it until some later caller's bare
+        # `initialize()` did (about 4m45s in the D-05 record). The detector's
+        # bare `initialize()` launches a terminal that is not running, so this
+        # reading relaunches one the failed call may have ended, and says
+        # whether it answered. Budget-gated like every optional read (WR-04);
+        # `Mt5SessionAbandoned` propagates, and the attempt stands.
+        if _affordable(deadline, _DETECTOR_READING_CROSSINGS):
+            try:
+                client.assert_session_authorized()
+            except Mt5SessionAbandoned:
+                raise
+            except Mt5ClientError as probe_exc:
+                answered_after_failure = (
+                    probe_exc.code == _MT5_NO_AUTHORIZED_ACCOUNT_CODE
+                )
+                probe_part = f"post_failure_probe=code={probe_exc.code}"
+            except Exception as probe_exc:  # noqa: BLE001 — see this arm's docstring
+                probe_part = (
+                    f"post_failure_probe=failed "
+                    f"({_describe_capture_failure(probe_exc)})"
+                )
+            else:
+                answered_after_failure = True
+                probe_part = "post_failure_probe=authorized"
+        else:
+            probe_part = (
+                "post_failure_probe=not_read (the heal budget left cannot cover it)"
+            )
+        detail = f"{detail} {probe_part}"
+    # ⛔ CR-01 (164.6.5 review round 1) — THE RELAUNCH PROBE IS A READING, AND
+    # WHEN IT MEASURED THE TERMINAL ANSWERING THE RUN IS OVER. The gate used to
+    # be re-armed only by a FIRST-probe reading of a later tick, so a recycle
+    # that WORKED left it disarmed: a client validation that re-wedged the
+    # terminal before the next tick saw it healthy was debounced forever, and
+    # the 1h39m manual outage came back with an INFO line per tick saying the
+    # recovery was withheld. `authorized` and `-6` are both the terminal
+    # answering (the ordinary heal owns `-6` on the next reading), so either
+    # one ends this run and the NEXT wedge earns its own attempt.
+    # ⚠️ Decided here and APPLIED after the level ladder (WR-02, round 2): a
+    # run that is over must not be stamped with this line's alarm afterwards,
+    # or the stale stamp pages the next, unrelated fault on its first reading.
+    answered = (
+        answered_after_failure
+        or verdict.get("authorized") is True
+        or verdict.get("relaunch_code") == _MT5_NO_AUTHORIZED_ACCOUNT_CODE
+    )
+    if kind == KIND_IPC_FAULT_RECYCLED:
+        level = logging.INFO
+    elif kind in (
+        KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
+        KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
+        # ⛔ SFH-07 / WR-04 / SFH-08 — back up, but disconnected, on another
+        # account or server, or not checked at all: the house session was NOT
+        # shown restored, and INFO would say it was.
+        KIND_IPC_FAULT_RECYCLED_DEGRADED,
+        KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
+    ):
+        # ⛔ WR-02 — PENDING is "not yet known", never "a human is needed": the
+        # next reading decides, and a persisting wedge is then re-raised at ERROR
+        # by the persistence alarm.
+        level = logging.WARNING
+    elif (
+        kind == KIND_IPC_FAULT_RECYCLE_NOT_LANDED
+        and _count(verdict, "matched") == 0
+        and answered
+    ):
+        # ⭐ IN-02 (164.6.5 review round 2) — `matched=0` with an ANSWERING
+        # relaunch is ambiguous, and one reading is a genuine heal: no
+        # `terminal64.exe` was running and the verb's relaunch `initialize()`
+        # LAUNCHED one. The other is an image name that did not match (SFH-01).
+        # WARNING, qualified on the line, until the first live run shows which.
+        level = logging.WARNING
+        detail = (
+            f"{detail} no_process_matched_relaunch_answered (either no terminal "
+            "was running and the relaunch launched one, or the process name did "
+            "not match; the first live run decides)"
+        )
+    else:
+        # Still faulted after a recycle, a recycle that did not land, or one
+        # whose effect is unknown: a human is needed.
+        level = logging.ERROR
+    exited = _count(verdict, "exited")
+    terminated = _count(verdict, "terminated")
+    if exited is not None and terminated is not None and exited < terminated:
+        # ⚠️ SFH-01 — a terminated process that did not confirm its exit inside
+        # the wait is a QUALIFIER, never an INFO: the terminal may still hold the
+        # pipe the relaunch attached to.
+        level = max(level, logging.WARNING)
+        detail = f"{detail} exit_unconfirmed={terminated - exited}"
+    if recent_recycles >= IPC_FAULT_RECYCLE_CAP:
+        # ⛔ CR-01 (164.6.5 review round 2) — THE RECURRENCE IS THE SIGNAL. This
+        # is the cap'th recycle inside the window: the last one "worked" and the
+        # wedge came back. Whatever this recycle's own outcome, that is an ERROR,
+        # and the next recycle is withheld until the oldest leaves the window.
+        level = logging.ERROR
+        mark_ipc_fault_cap_alarm(_clock())
+        detail = (
+            f"{detail} — REPEATED WEDGE: {recent_recycles} recycles in the last "
+            f"{int(_IPC_FAULT_RECYCLE_WINDOW_S // 60)} min. A wedge that returns "
+            "after a working recycle is the Cause B signal "
+            "(MT5-SWITCH-WEDGE-CAUSE-01); an OPERATOR is needed. The recycle is "
+            f"now CAPPED at {IPC_FAULT_RECYCLE_CAP} per rolling "
+            f"{int(_IPC_FAULT_RECYCLE_WINDOW_S // 60)} min"
+        )
+    if answered:
+        end_ipc_fault_run()
+    elif level >= logging.ERROR:
+        # SFH-03 — this line IS the run's alarm; the next is due an interval on.
+        mark_ipc_fault_alarm(_clock())
+    logger.log(
+        level,
+        "mt5 session heal: ipc_fault code=%s escalated to a terminal-process "
+        "recycle (no credential sent) — %s (%s)",
+        code,
+        kind,
+        detail,
+    )
+    return kind
+
+
 def _heal_blocking(
-    host: str, port: int, login: int, password: str, server: str
+    host: str,
+    port: int,
+    login: int,
+    password: str,
+    server: str,
+    *,
+    deadline: float | None = None,
 ) -> HealOutcome:
     """The BLOCKING body, run under ``to_thread``. Returns a ``HealOutcome``.
 
@@ -694,20 +1718,26 @@ def _heal_blocking(
     be re-classified as a user credential fault; it propagates to the entry's
     catch-all, which logs its CLASS.
     """
+    if deadline is None:
+        deadline = _clock() + _relogin_budget_s()
     client = Mt5Client(host, port)
     try:
         try:
             client.assert_session_authorized()
         except Mt5ClientError as err:
             if err.code != _MT5_NO_AUTHORIZED_ACCOUNT_CODE:
+                # ⛔ The verdict is COMPOSED FIRST and is byte-identical to the
+                # pre-escalation one: the escalation rides out on
+                # `escalation_kind` and its own log line, never in this string.
+                verdict = _not_healed(
+                    f"{KIND_IPC_FAULT}:code={err.code}",
+                    err,
+                    login,
+                    password,
+                    server,
+                )
                 return HealOutcome(
-                    verdict=_not_healed(
-                        f"{KIND_IPC_FAULT}:code={err.code}",
-                        err,
-                        login,
-                        password,
-                        server,
-                    ),
+                    verdict=verdict,
                     first_kind=KIND_IPC_FAULT,
                     first_code=err.code,
                     # ⛔ No credentialed call ran, so there is NO final reading —
@@ -715,13 +1745,21 @@ def _heal_blocking(
                     # at most one observation" structural rather than incidental.
                     final_kind=None,
                     final_code=None,
+                    # ⭐ D-08 — ACT, don't only report. Decided from the typed
+                    # `err.code`, never from `verdict`. See `_escalate_ipc_fault`.
+                    escalation_kind=_escalate_ipc_fault(
+                        client, err.code, server, deadline, env_login=login
+                    ),
                 )
             # ⭐ THE ONE READING THAT ESTABLISHES DARKNESS. `-6` means the bridge
             # ANSWERED and no account is authorized; every other code is an IPC
             # fault that measured nothing about the session.
             first_kind = KIND_NO_AUTHORIZED_ACCOUNT
             first_code = err.code
+            # A reading that is not the escalating class ends any run of them.
+            end_ipc_fault_run()
         else:
+            end_ipc_fault_run()
             return HealOutcome(
                 verdict=_VERDICT_ALREADY_AUTHORIZED,
                 first_kind=KIND_ALREADY_AUTHORIZED,
@@ -1011,7 +2049,15 @@ async def heal_mt5_terminal_session(
             ):
                 outcome = await asyncio.wait_for(
                     asyncio.to_thread(
-                        _heal_blocking, host, port, login, password, server
+                        _heal_blocking,
+                        host,
+                        port,
+                        login,
+                        password,
+                        server,
+                        # ⭐ WR-04 — the SAME instant the `wait_for` starts, so the
+                        # blocking body's optional reads can never outlive it.
+                        deadline=_clock() + budget_s,
                     ),
                     timeout=budget_s,
                 )

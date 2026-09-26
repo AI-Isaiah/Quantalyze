@@ -5027,6 +5027,108 @@ are recorded here so the next person does not repeat them.**
 The first came from reasoning about the error code instead of reading the call path. The second
 came from reading the call path but not looking at the screen. Both were needed.
 
+⭐ **REFINED 2026-09-25 (Phase 164.6.5 plan 01): `-10005` has AT LEAST TWO causes, with opposite
+remedies.** This entry is NOT reopened. Its modal-dialog mechanism was proven on 2026-09-01 and is
+still correct for its own cause, which the runbook now calls **Cause A**. A second cause, **Cause
+B, the account-switch wedge**, was measured on 2026-09-21. A validate switched the shared terminal
+to a client account, the Journal wrote `disconnected` and nothing after, and IPC answered `-10005`.
+There was no dialog: the VNC console was clean and the Alerts tab was empty. A process restart
+under the same Wine prefix reached `authorized` in 2.0 s with nobody at the console.
+⚠️ **This entry's claim that "a redeploy does NOT fix this, because the Wine prefix lives on the
+persistent volume" is TRUE for Cause A and FALSE for Cause B.** Cause B is process state, and a
+restart clears it. The shipped `mt5-ipc-timeout` remedy string asserted Cause A only, and Phase
+164.6.5 plan 03 rewrote it to name both. The differential procedure, and the remedy order that is
+safe under both causes (process restart first, then VNC), live in `docs/runbooks/mt5-go-live.md`
+§ "Step 2b — ⛔ `-10005` differential diagnosis". ➡️ **Phase 164.6.5 (MT5VALIDATEWEDGE) owns Cause
+B.** Its root cause is still EXPLICITLY OPEN, and the residual is `MT5-SWITCH-WEDGE-CAUSE-01`
+directly below.
+
+### MT5-SWITCH-WEDGE-CAUSE-01 — the mechanism behind the `-10005` account-switch wedge is not named (booked 2026-09-25)
+
+**Why it is open.** Phase 164.6.5 criterion 1 required a named mechanism that PREDICTS the
+asymmetry (D-01). On 2026-09-21 a switch at 04:08 completed cleanly in about one second, while
+the switches at 11:02 and ~12:52 wedged. The recorded verdicts are in the runbook's Step 2b:
+
+- **Same account vs a different account: REJECTED.** The 2026-09-21 Journal reading shows the
+  clean 04:08 event was ALSO a change to a different account. This rests on the 2026-09-21
+  reading only, because the 04:08 lines could not be re-read on 2026-09-25.
+- **Terminal self-update (D-03a): UNDECIDED.** The only build reading is 6182 (server 5830), taken
+  on 2026-09-25 after two restarts. No build reading from before the wedge exists.
+- **Same broker server vs a different broker server: UNDECIDED.** Surfaced on 2026-09-25, when
+  the window title named a different broker from the Journal's session. The server on each side
+  of each switch was never recorded.
+
+**What closes it.** At the next Cause B wedge, BEFORE the terminal restarts, record three things:
+the terminal build (and the build at the last clean switch), the broker server on each side of the
+wedged switch and of the last clean switch, and the Alerts and Journal state around the
+`disconnected`. Keep account numbers and broker server names somewhere private and bring only
+the verdicts into the repo. ⛔ Never write an account number or a broker server name here.
+⚠️ **The automatic recycle Phase 164.6.5 ships erases this evidence, because the wedge is process
+state.** Unless something records the build and the servers before the recycle, the next wedge
+heals with no evidence, and this item can never close by waiting.
+⛔ **CORRECTED 2026-09-25 (164.6.5 review round 1, SFH-04): what the heal records before the
+recycle is narrower than "the build and the servers", and this entry must not read as covered.**
+The sentence above is kept as lineage.
+- **In-process build and connection state: expected `not_captured` on a true `-10005`.** The
+  heal's pre-recycle `terminal_info()` crosses the same terminal IPC the fault names as dead, so
+  its evidence line records `not_captured` with the reason. It is kept only because a partial
+  wedge may still answer.
+- **Build, bridge-side: recorded, never run live.** The recycle's committed remote source reads
+  each `terminal64.exe` image's file version before ending it, and logs it as `file_versions` on
+  the recycle's lines. It is the file on disk at the running image's path. That equals the
+  running build unless a self-update replaced the file after launch, so it answers D-03a only
+  when no such replacement happened. This path has never run against the live terminal.
+- **Broker server on each side of the switch, and the Alerts and Journal state: recorded by
+  nothing automatic.** The pre-recycle `account_info()` needs the same dead IPC and is
+  budget-gated. The post-relaunch reads describe the NEW session, not the wedged one. Candidate
+  (c) still needs an operator reading taken before the heal's next monitor tick recycles the
+  terminal (`MT5_SESSION_POLL_INTERVAL_S`, 600 s by default).
+
+**Owner:** Phase 164.6.6 (MT5TERMINALISOLATION). It owns the shared-terminal ownership model that
+makes a switch happen at all, and the mechanism decides between its isolation options.
+**Trigger:** the next `-10005` that has Journal silence after a `disconnected` line, or the start of
+164.6.6 planning, whichever comes first.
+⛔ **Not a close:** a retry, a sleep, a serialisation or the automatic recycle making the symptom go
+away (D-02). Those are mitigations, not a mechanism.
+⚠️ **Also recorded, not reconciled:** on 2026-09-25 the Journal showed the terminal `disconnected`
+from 2026-09-21 12:52:04 with no reconnect line until the 2026-09-25 restarts. Read at face value,
+the second wedge was not recovered for about four days.
+
+
+### MT5-PROBER-WEDGE-CALIBRATION-01 — the prod-prober's `-10005` classification has never been calibrated against a REAL wedge (booked 2026-09-26, Phase 164.6.5 D-11)
+
+**Why it is open.** Phase 164.6.5 criterion 4 required the prober's MT5 arm to actually measure
+the terminal AND to be calibrated against a real wedge, "not only a fixture". The two halves
+came apart:
+
+- **D-10, measuring: ANSWERED in production.** Scheduled `prod-prober` run 36134914962
+  (2026-09-25T12:26Z, head `01dcf1cc`) is the first to print a terminal-measuring mt5 line,
+  `mt5: initialize=true last_error=1 connected=true trade_allowed=true`. Every scheduled run
+  since reads the same, through run 36212376262 (2026-09-26T02:39Z, head `ecf1ef4e`). The last
+  run before it, 36104820751 (2026-09-25T06:52Z), still read `mt5-ssh-transport`. Recorded in
+  the 164.6.5 plan 03 SUMMARY.
+- **D-11, calibrated against a real wedge: NOT DONE.** `mt5-ipc-timeout` has never fired in
+  production. Its red fixture, `scripts/prod-prober/fixtures/mt5/10005.txt`, was constructed, not
+  captured from a wedge, and is unchanged since Phase 164.8.3. So the arm's `-10005` branch is proven only against the shape
+  we believe a wedge prints, never against one.
+
+**Owner:** Phase 164.6.6 (MT5TERMINALISOLATION). It already owns `MT5-SWITCH-WEDGE-CAUSE-01`
+directly above, whose close needs the same next-wedge capture.
+**Trigger:** the next live `-10005` (Journal silent after `disconnected`), captured BEFORE the
+heal recycles the terminal. A founder-supervised induced wedge also qualifies.
+**Gate (what closes it):** a real-wedge transcript, scrubbed of every account-shaped digit run,
+broker server name, machine path and credential, committed under
+`scripts/prod-prober/fixtures/mt5/` and registered in the runner's fixture table for the kind
+it ACTUALLY produced. Then `node scripts/prod-prober/run.mjs --self-test` exits 0 and
+`npx vitest run src/__tests__/prod-prober-wiring.test.ts` passes. If the real transcript
+classifies as something other than `mt5-ipc-timeout`, that is a finding about the arm, not a
+reason to re-shape the transcript.
+⛔ **Not a close:** a hand-written or edited fixture, a renamed existing fixture, or a green
+self-test on the fixtures that exist today.
+⚠️ **Phase 164.6.5's own heal makes the trigger harder to meet.** The session monitor now
+recycles the terminal on `ipc_fault` (plan 05), so a wedge can heal before a scheduled prober
+run reads it. Capturing one may need a deliberate, founder-supervised window rather than
+waiting.
 
 ### ⛔ DRIFT-02 — a surgical in-place patch means the REPO no longer holds the true function body (booked 2026-08-27)
 
