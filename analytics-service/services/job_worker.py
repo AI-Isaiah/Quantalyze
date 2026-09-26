@@ -735,7 +735,12 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     # 2026-08-13, the actual blocker was the Expert-Advisors "Allow algorithmic
     # trading" option (`Enabled` in [Experts]) — which the gateway re-sets off on
     # every account change while THIS worker logs in on every job, so the fault
-    # recurs after every operator fix. MetaQuotes' default-ON "Disable automatic
+    # recurs after every operator fix.
+    # ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1): the re-set happens ONLY
+    # while "Disable algorithmic trading when the account has been changed"
+    # (`ACCOUNT_CHANGE_ALGO_DISABLE_OPTION`, services/mt5_validation.py) is
+    # ticked, and that box was founder-read UNCHECKED on 2026-09-24. The
+    # sentence above is kept as lineage. MetaQuotes' default-ON "Disable automatic
     # trading through the external Python API" (`Api`, reported as
     # `tradeapi_disabled`) was measured OFF at the same time, yet the message this
     # arm returned named it — a sentence that was false about the operator's own

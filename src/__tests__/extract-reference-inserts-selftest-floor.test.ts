@@ -46,6 +46,10 @@ const SCRIPT = join(REPO_ROOT, "scripts", "extract-reference-inserts.mjs");
  * `node scripts/extract-reference-inserts.mjs --self-test` → `OK: 19 kinds`.
  * Each entry is a distinct way the extractor refuses; losing any of them means
  * a shape it used to refuse becomes replayable into shared TEST silently.
+ *
+ * MEASURED 2026-09-25 (Phase 164.9.2 plan 02) → `OK: 39 kinds`. The twenty `c5-*`
+ * ids appended below are the C5 class (top-level literal UPDATE on a replayed
+ * public table), one kind per C5 refusal reason: emit-mode first, `--audit` after.
  */
 const REQUIRED_KINDS = [
   "audit-count-drift",
@@ -54,6 +58,11 @@ const REQUIRED_KINDS = [
   "c1-dollar-body",
   "c2-insert-select",
   "c2-nonliteral-tuple",
+  // C2's character allowlist (164.9.2 plan 05, the round-1 observation carried
+  // unfixed until then), MEASURED 2026-09-25 → `OK: 67 kinds`: psql acts on a
+  // backslash or a lone colon outside a string at replay.
+  "c2-psql-metachar",
+  "c2-psql-variable",
   "count-mismatch-high",
   "count-mismatch-low",
   "dollar-tag-in-span",
@@ -64,6 +73,71 @@ const REQUIRED_KINDS = [
   "unterminated-quote",
   "unterminated-statement",
   "zero-span",
+  // C5, emit mode
+  "c5-update-nonliteral",
+  "c5-update-function-call",
+  "c5-update-positional-param",
+  "c5-update-dollar-tag",
+  "c5-update-dollar-body",
+  "c5-update-auth-target",
+  "c5-cte-prefixed-update",
+  "c5-update-off-shape",
+  "c5-update-unterminated",
+  "c5-update-count-drift",
+  "c5-duplicate-line",
+  "c5-no-insert-line",
+  // C5's token allowlist (164.9.2 review round 1: CR-01, SFH-01, WR-01), MEASURED
+  // 2026-09-25 → `OK: 49 kinds`. One kind per refusal reason the allowlist added.
+  "c5-update-quoted-call",
+  "c5-update-qualified-now",
+  "c5-update-psql-metachar",
+  "c5-update-unknown-operator",
+  "c5-update-unreadable-cast",
+  "c5-update-table-subquery",
+  "c5-update-values-subquery",
+  "c5-update-niladic",
+  "c5-update-array-subquery",
+  "c5-update-reserved-word",
+  // Review round 2, CR-01, MEASURED 2026-09-25 → `OK: 57 kinds`: `set(` is a call
+  // everywhere but the UPDATE's head.
+  "c5-update-set-call",
+  // C5, --audit
+  "c5-decline-literal",
+  "c5-decline-count-drift",
+  "c5-audit-unlisted-update",
+  "c5-audit-unlisted-nonliteral-update",
+  "c5-audit-unlisted-delete",
+  "c5-audit-unfilled-table",
+  "c5-audit-auth-update",
+  "c5-audit-auth-nonliteral-update",
+  // What "0 unaccounted" could not see (review round 1, WR-02 / SFH-02), MEASURED
+  // 2026-09-25 → `OK: 53 kinds`.
+  "c5-audit-crlf-head",
+  "c5-audit-do-body-write",
+  "c5-audit-unlisted-upsert",
+  "c5-audit-unlisted-copy",
+  // matchOtherDml's other heads (review round 1, IN-04), MEASURED 2026-09-25 →
+  // `OK: 56 kinds`.
+  "c5-audit-unlisted-truncate",
+  "c5-audit-unlisted-merge",
+  "c5-audit-unlisted-cte-delete",
+  // A DO body does not launder a write (review round 2, WR-01 / SFH R2-01),
+  // MEASURED 2026-09-25 → `OK: 60 kinds`.
+  "c5-audit-do-body-literal-update",
+  "c5-audit-do-body-delete",
+  "c5-audit-do-body-truncate",
+  // One upsert rule, top level and DO body (review round 2, WR-02), MEASURED
+  // 2026-09-25 → `OK: 61 kinds`.
+  "c5-audit-upsert-decline",
+  // A BEGIN ATOMIC body is refused at lex, and the C5 scope line names every
+  // untraced shape (review round 2, IN-02 / SFH R2-03), MEASURED 2026-09-25 →
+  // `OK: 62 kinds`.
+  "begin-atomic-body",
+  // DEFAULT and non-built-in casts (review round 2, IN-05 / SFH R2-05), MEASURED
+  // 2026-09-25 → `OK: 65 kinds`.
+  "c2-nonbuiltin-cast",
+  "c5-update-default",
+  "c5-update-nonbuiltin-cast",
 ];
 
 describe("SELF_TEST_KINDS_FLOOR — the extractor's self-test corpus is ratcheted", () => {
@@ -105,7 +179,7 @@ describe("the load-bearing refusal kinds are present BY NAME", () => {
     expect(kind?.expect).toBe("inside a dollar-quoted body");
   });
 
-  it("every kind measured on 2026-09-09 is still declared — delete-one-add-one nets zero on the COUNT and fails here", () => {
+  it("every pinned kind (measured 2026-09-09, C5 added 2026-09-25) is still declared — delete-one-add-one nets zero on the COUNT and fails here", () => {
     const ids = SELF_TEST_KINDS.map((k) => k.id);
     const missing = REQUIRED_KINDS.filter((id) => !ids.includes(id));
     expect(

@@ -182,6 +182,69 @@ describe("POST /api/allocator/holdings/sync", () => {
     consoleSpy.mockRestore();
   });
 
+  // ── 5b. D-23 (Phase 164.9.1) — a disconnected key answers 409 ───
+  // Migration 20260924233749 restored 075's refusal: the RPC raises
+  // `api_key_disconnected` with SQLSTATE P0001 for a soft-disconnected key,
+  // before it looks for an in-flight job. The allocator must be told to
+  // reconnect the key, not shown "Could not start sync. Try again", which
+  // invites a retry that can never succeed.
+  it("returns 409 when RPC raises P0001 api_key_disconnected (key disconnected)", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: null,
+      error: { code: "P0001", message: "api_key_disconnected" },
+    });
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ api_key_id: TEST_API_KEY_ID }));
+
+    expect(res.status, "a disconnected key fell through to the generic 500").toBe(409);
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    const body = await res.json();
+    expect(body.error).toMatch(/disconnected/i);
+    expect(body.error).toMatch(/reconnect/i);
+    // The refusal is a user state, not a server fault: no error log, no
+    // audit of a sync that was never requested, and no retry.
+    expect(consoleSpy).not.toHaveBeenCalled();
+    expect(mockLogAuditEvent).not.toHaveBeenCalled();
+    expect(mockRpc).toHaveBeenCalledTimes(1);
+    // Round-1 review (silent-failure-hunter M4): the refusal leaves ONE info
+    // line, so it can be counted, and that line names no user and no key.
+    expect(
+      infoSpy,
+      "the 409 refusal left no trace at all — a user looping on a stale tab is invisible",
+    ).toHaveBeenCalledTimes(1);
+    const infoLine = infoSpy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
+    expect(infoLine).toContain("refused: api key disconnected");
+    expect(infoLine, "the info line leaked the key id").not.toContain(TEST_API_KEY_ID);
+    expect(infoLine, "the info line leaked the user id").not.toMatch(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+    );
+    consoleSpy.mockRestore();
+    infoSpy.mockRestore();
+  });
+
+  // ── 5c. D-23 guard — the mapping keys on the MESSAGE, not all of P0001
+  // P0001 is the generic `RAISE EXCEPTION` class, so any future raise in the
+  // RPC shares it. Mapping every P0001 to "disconnected" would tell a user to
+  // reconnect a key that is fine and hide the real fault from the logs.
+  it("returns 500, not 409, for a P0001 carrying any other message", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: null,
+      error: { code: "P0001", message: "something_else" },
+    });
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ api_key_id: TEST_API_KEY_ID }));
+
+    expect(res.status, "the 409 mapping was widened past api_key_disconnected").toBe(500);
+    expect((await res.json()).error).toContain("Could not start sync");
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("(code=P0001)"), expect.anything());
+    consoleSpy.mockRestore();
+  });
+
   // ── 6. RPC raises unexpected error → 500 ────────────────────────
   it("returns 500 when RPC raises an unexpected error", async () => {
     mockRpc.mockResolvedValueOnce({

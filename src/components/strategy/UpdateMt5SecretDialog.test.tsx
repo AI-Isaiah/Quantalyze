@@ -263,6 +263,25 @@ describe("UpdateMt5SecretDialog", () => {
     );
   });
 
+  // 164.6.5 review round 1 / CR-02 (CONTEXT D-17). `rotate_key_secret` runs
+  // `_validate_mt5_key_probe`, the same probe `POST /api/validate-key` calls,
+  // so a wedged gateway terminal reaches this dialog as wire
+  // `MT5_TERMINAL_UNRESPONSIVE`. Without its roster row the recogniser answers
+  // `UNKNOWN`, whose copy tells the owner to "Try the last action again" —
+  // the Retry that D-08 names as the harmful action against a terminal that
+  // will not answer. Expected text is typed here, not read from the table.
+  it("KEY_MT5_TERMINAL_UNRESPONSIVE is recognised, not UNKNOWN, and offers no retry", async () => {
+    const envelope = await submitAndFailWith("KEY_MT5_TERMINAL_UNRESPONSIVE");
+    expect(envelope.textContent).toContain(
+      "Our MetaTrader terminal stopped answering.",
+    );
+    expect(envelope.textContent).not.toContain("Try the last action again.");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    // 164.6.5 review round 1 / WR-05 — this dialog has no draft, so the card
+    // must not claim one is saved (the wizard's connect step alone earns it).
+    expect(envelope.textContent).not.toMatch(/draft/i);
+  });
+
   it("the submit button is disabled while the field is empty", () => {
     render(
       <UpdateMt5SecretDialog
