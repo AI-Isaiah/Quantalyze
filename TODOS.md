@@ -1365,6 +1365,21 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[169-DEAD-ADMIN-JOBS-RPC]` Drop the dead `get_admin_compute_jobs` database function
+      (booked 2026-09-25, Phase 169 D-01).**
+      It raises "column reference `id` is ambiguous" on every call (its `RETURNS TABLE` declares an
+      OUT column named `id`, which collides with the admin gate's `WHERE id = auth.uid()`), and
+      under the service-role client `auth.uid()` is NULL, so even a fixed body would return nothing.
+      Phase 169 plan 01 stops calling it: `/api/admin/compute-jobs` reads the `compute_jobs_admin`
+      view after its admin gate. After that it has no caller. Evidence: `169-RESEARCH.md` root
+      cause A (a local reproduction of the error on a throwaway cluster).
+      **Why not dropped in 169:** a DROP is a migration, and merging `supabase/migrations/**`
+      auto-applies to TEST then PROD with no human gate, needs the 3-reviewer pass, and moves
+      `database.types.ts` and the census pins. None of that was needed to fix the page.
+      **Owner:** the next migration-carrying phase. **Trigger:** that phase's planning.
+      **Closed when:** a migration drops the function, `database.types.ts` loses it, and
+      `grep -rn get_admin_compute_jobs src` finds only lineage comments.
+
 - [ ] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
       **Measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).** `python` took
