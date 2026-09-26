@@ -3032,6 +3032,8 @@ Plans:
 
 - [ ] 166.1-09-PLAN.md — the whole-phase Python gate sweep (pytest with the TEST database variables unset, strict mypy, the qstats-gate census, ruff no-new over the 01 + 01b + 03 union, anchor check in CI's `--pending` form) and the single release commit (VERSION, package.json, CHANGELOG), recording Phase 166.3's recompute state as counts only (D-14, D-23)
 
+⭐ **2026-09-26 (FOUNDER DECISION, 166.1-CONTEXT D-24):** an exactly constant positive daily-returns CSV is rejected at every length (today a short one is accepted and a longer one rejected, by float summation). The work is routed to 166.1-09, which must be amended and re-checked before it runs.
+
 ### Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it (founder D-17) (INSERTED)
 
 **Goal:** The TypeScript side computes Sharpe, Pearson and beta ONCE and every page reads it (founder direction, 166.1-CONTEXT D-17, verbatim: "Why don't you calculate Sharpe once and the 20 places all read it from there?"). One floored module, `src/lib/return-stats.ts`, pinned to the Python floor constant, serves every Tier-2 site T1-T20; dead copies are deleted; a source-scan gate fails CI when a private copy of the formula returns; one release commit ships it.
