@@ -408,6 +408,19 @@ def test_s8_sqn_residue_equals_the_exact_constant_answer():
     assert _s8_sqn(_s8_losses(21, 7.7)) == _s8_sqn(_s8_losses(21, 1.0))
 
 
+def test_s8_sqn_zero_std_never_divides_even_when_the_floor_answers_false(monkeypatch):
+    """Round-1 IN-01. The old ``std_r > 0`` guard made a zero divisor impossible.
+    The floor predicate alone does not: with a NaN ``mean_r`` the floor is NaN,
+    ``0.0 <= NaN`` is False, and ``mean_r / 0.0`` raises ZeroDivisionError. The
+    predicate is forced to answer False here, the way a NaN floor answers, on an
+    exactly zero std (21 losses of 1.0), so only the structural guard stands
+    between the block and the division."""
+    import services.analytics_runner as runner
+
+    monkeypatch.setattr(runner, "dispersion_is_residue", lambda sd, mean: False)
+    assert _s8_sqn(_s8_losses(21, 1.0)) is None
+
+
 def test_s8_sqn_real_dispersion_is_finite():
     """The other side of the floor: 7.7 / 7.71 is real dispersion, so SQN exists."""
     losses = _s8_alternating_losses()
