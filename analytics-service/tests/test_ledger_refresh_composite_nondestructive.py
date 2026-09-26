@@ -56,21 +56,39 @@ required and each was observed RED against the pre-guard code. The mandated
 neutering — replace the marker comparison with ``if False`` so the destructive
 stamp always fires — must redden tests 1 and 2 and leave 3-6 green.
 
+Phase 164.6.7 adds a second neuter, for the live re-read (D-05). The job dict the
+handler receives is the CLAIM-TIME snapshot, and a marker retracted after the
+claim is visible only on the live ``compute_jobs`` row. Replace the awaited
+``_refresh_marker_still_on_row(...)`` at the composite site with
+``MarkerLiveState.PRESENT`` and ``TestPostClaimRetractionTakesTheLoudPath``'s
+retracted and no-row tests go RED while its still-marked control and
+``TestGuardSuppressesTheUnpublish`` stay GREEN. ``_run`` seeds the live row EQUAL
+to the snapshot by default, so tests 1-8 mean exactly what they meant before: the
+live row still carries whatever the snapshot carried.
+
+A re-read that RAISES is no longer an answer (CONTEXT D-09, 2026-09-25): the
+composite site writes nothing and the job fails TRANSIENT, pinned by
+``TestTransientReReadFailureRetries``. It used to take the loud path, and that
+turned one PostgREST blip into a funded composite going dark.
+
 Driver: a composite with ZERO members. It is the earliest permanent failure in
 ``run_stitch_composite_job`` and it routes straight through the closure under
 test with no exchange I/O at all.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from services.job_worker import DispatchOutcome, run_stitch_composite_job
+from services.job_worker import DispatchOutcome, dispatch
 from tests.test_stitch_composite_job import (
     _STRATEGY_ID,
     _apply,
     _deribit_patches,
+    _LIVE_JOB_ABSENT,
     _FakeSupabase,
 )
 
@@ -103,28 +121,80 @@ def _analytics_upserts(fake: _FakeSupabase) -> list[dict[str, Any]]:
     ]
 
 
+# The id the claim returned. Not uuid-shaped on purpose: it never leaves the fake.
+_JOB_ID = "job-composite-refresh-1"
+
+
+class _FromSnapshot:
+    """Sentinel: the live ``compute_jobs`` row carries the snapshot's metadata."""
+
+
+_FROM_SNAPSHOT = _FromSnapshot()
+
+
 async def _run(
     *,
     metadata: object,
     existing_status: str | None,
     existing_flags: dict[str, Any] | None = None,
+    job_id: str = _JOB_ID,
+    live_metadata: object = _FROM_SNAPSHOT,
+    live_job_read_raises: bool = False,
+    analytics_read_raises: list[BaseException] | None = None,
+    expect_error_kind: str = "permanent",
+    log: MagicMock | None = None,
+    sentry: MagicMock | None = None,
+    results: list[Any] | None = None,
 ) -> _FakeSupabase:
-    """Drive the zero-member permanent failure through ``_stamp_failed``."""
+    """Drive the zero-member permanent failure through ``_stamp_failed``.
+
+    ``metadata`` is the claim-time snapshot on the job dict. ``live_metadata`` is
+    what the live ``compute_jobs`` row holds when the closure re-reads it; by
+    default it equals the snapshot (a dict) or is absent (anything else).
+
+    Driven through ``dispatch``, the production entry, because a transient
+    re-read failure leaves the handler as an EXCEPTION and only ``dispatch``
+    turns that into the job's error kind. ``log`` / ``sentry``, when given,
+    replace the worker's logger and ``sentry_sdk`` so a test can read what an
+    operator would see. ``results``, when given, receives the ``DispatchResult``
+    so a test can read the job's ``error_message`` (its ``last_error``)."""
+    if isinstance(live_metadata, _FromSnapshot):
+        live_metadata = metadata if isinstance(metadata, dict) else _LIVE_JOB_ABSENT
     fake = _FakeSupabase(
         members=[],
         existing_flags=existing_flags or {},
         existing_status=existing_status,
+        live_job_metadata=live_metadata,
+        live_job_id=job_id,
+        live_job_read_raises=live_job_read_raises,
+        analytics_read_raises=analytics_read_raises,
     )
-    job: dict[str, Any] = {"strategy_id": _STRATEGY_ID}
+    job: dict[str, Any] = {
+        "id": job_id,
+        "kind": "stitch_composite",
+        "strategy_id": _STRATEGY_ID,
+    }
     if metadata is not _UNSET:
         job["metadata"] = metadata
-    with _apply(_deribit_patches(fake, combine_returns=[], has_option_activity=False)):
-        result = await run_stitch_composite_job(job)
+    with ExitStack() as stack:
+        stack.enter_context(
+            _apply(_deribit_patches(fake, combine_returns=[], has_option_activity=False))
+        )
+        if log is not None:
+            stack.enter_context(patch("services.job_worker.logger", log))
+        if sentry is not None:
+            stack.enter_context(patch("services.job_worker.sentry_sdk", sentry))
+        result = await dispatch(job)
+    if results is not None:
+        results.append(result)
     # The job OUTCOME is unchanged by the guard in every case. The guard narrows
     # what is WRITTEN to strategy_analytics; it never converts a permanent failure
     # into a success, which would be the failure mode that hides a broken venue.
     assert result.outcome == DispatchOutcome.FAILED
-    assert result.error_kind == "permanent"
+    assert result.error_kind == expect_error_kind, (
+        f"expected a {expect_error_kind!r} failure, got {result.error_kind!r}: "
+        f"{result.error_message!r}"
+    )
     return fake
 
 
@@ -308,3 +378,561 @@ class TestGuardIsNotABlanketSuppression:
             "a marked refresh with NO prior analytics row did not stamp failed — "
             "this is a first compute and it must reach a terminal gate"
         )
+
+
+class TestPostClaimRetractionTakesTheLoudPath:
+    """Phase 164.6.7 / D-05: the composite run decides from the LIVE job row.
+
+    The enqueue dedup can hand a user's resync THIS job after it was claimed,
+    and the resync records that by retracting the marker on the row. The job
+    dict in the handler is the claim-time copy and never sees that write, so a
+    closure that trusts it keeps suppressing a failure somebody is now watching,
+    while the SQL bridge reads the same row as unprotected. Each test here keeps
+    the marker on the SNAPSHOT and varies only the live row: a test that removed
+    the marker before the run would be green against the bug."""
+
+    @pytest.mark.asyncio
+    async def test_marker_retracted_after_claim_takes_the_loud_path(self) -> None:
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            live_metadata={
+                "refresh_marker_retracted": _COMPOSITE_MARKER,
+                "correlation_id": "c",
+            },
+        )
+        payloads = _analytics_upserts(fake)
+        assert payloads, "the composite stamp wrote nothing to strategy_analytics"
+        last = payloads[-1]
+        assert last.get("computation_status") == "failed", (
+            "a marker RETRACTED from the live job row after the claim was still "
+            "honoured from the claim-time snapshot: the stamp wrote an error-only "
+            f"payload {sorted(last)} while the SQL bridge reads the same job as "
+            "unprotected. A user-initiated resync served by this job gets no "
+            "terminal gate."
+        )
+        assert last.get("computation_warned") is False, (
+            "the loud stamp must clear computation_warned, or a later bridge call "
+            "can restore complete_with_warnings over a failed run"
+        )
+
+    @pytest.mark.asyncio
+    async def test_marker_still_on_the_live_row_stays_error_only(self) -> None:
+        """The control. The live row still carries the marker, so protection
+        holds: no publish-state key is written and the error still lands. It
+        guards the driver: a seam that never served the live row would make the
+        loud tests pass for the wrong reason and turn this one RED."""
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            live_metadata={"source": _COMPOSITE_MARKER},
+        )
+        payloads = _analytics_upserts(fake)
+        assert payloads, "the composite stamp wrote nothing to strategy_analytics"
+        for payload in payloads:
+            leaked = sorted(key for key in _PUBLISH_STATE_KEYS if key in payload)
+            assert not leaked, (
+                f"a marked refresh whose LIVE row still carries the marker wrote "
+                f"{leaked}. The live re-read may only narrow the protection; it "
+                "must never withdraw it from a refresh nobody is watching."
+            )
+        assert any("computation_error" in payload for payload in payloads), (
+            "the protected branch must still record computation_error"
+        )
+
+    @pytest.mark.asyncio
+    async def test_marker_with_no_live_row_takes_the_loud_path(self) -> None:
+        """Fail-safe direction: no live row to read answers "not marked"."""
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            live_metadata=_LIVE_JOB_ABSENT,
+        )
+        payloads = _analytics_upserts(fake)
+        assert payloads, "the composite stamp wrote nothing to strategy_analytics"
+        last = payloads[-1]
+        assert last.get("computation_status") == "failed", (
+            "a marked snapshot with NO live job row was still honoured. A row "
+            "that cannot be read cannot vouch for the marker; take the loud path."
+        )
+        assert last.get("computation_warned") is False
+
+
+# The curated sentence the zero-member arm stamps (``run_stitch_composite_job``).
+_ZERO_MEMBER_CAUSE = "Composite strategy has no member keys."
+
+
+def _messages(mock_method: MagicMock) -> list[str]:
+    """The format strings a mocked logger method was called with."""
+    return [str(c.args[0]) for c in mock_method.call_args_list if c.args]
+
+
+def _rendered(mock_method: MagicMock) -> list[str]:
+    """The lines a mocked logger method would have EMITTED (format string with
+    its arguments interpolated). ``_stamp_io`` passes the operation kind as an
+    argument, so a phrase that names the operation lives only here."""
+    return [
+        str(c.args[0]) % tuple(c.args[1:]) if len(c.args) > 1 else str(c.args[0])
+        for c in mock_method.call_args_list
+        if c.args
+    ]
+
+
+# The fragment of the ERROR line ``_stamp_failed`` emits when a DEFINITIVE
+# "not marked" answer sends a marked refresh to the LOUD stamp (round 3). It
+# records the CAUSE of the stamp, not the marker's state, so an assertion about
+# "what went out at ERROR because of the READ'S answer" must exclude it, or it
+# passes on the cause line alone. (Round 2's pre-read cause line, which this
+# constant used to name, was removed in round 3: it paged on every protected
+# row.)
+_CAUSE_LINE_FRAGMENT = "no longer protects it"
+
+
+def _state_errors(log: MagicMock) -> list[str]:
+    """ERROR format strings other than the loud stamp's cause line."""
+    return [m for m in _messages(log.error) if _CAUSE_LINE_FRAGMENT not in m]
+
+
+class TestTransientReReadFailureRetries:
+    """Orchestrator decision 2026-09-25 (CONTEXT D-09): a TRANSIENT failure of
+    the live re-read must not take the destructive stamp.
+
+    Before it, a raised re-read answered "not marked" and stamped ``failed`` +
+    ``computation_warned = False`` over a live composite, on a background
+    refresh nobody watches: one PostgREST blip took a funded factsheet down. The
+    re-read now answers "I could not tell", the handler stamps NOTHING, and the
+    job fails TRANSIENT so the queue retries it. A DEFINITIVE answer (row present,
+    marker gone) still takes the loud path — see the class above.
+
+    Neuter to redden (round 4, where the re-read goes through ``_stamp_io``):
+    make ``_stamp_io`` re-raise the call's exception unchanged. This test goes
+    RED on the error kind (``unknown``), then on the error and capture counts.
+
+    WR-03 / SFH-R2-01 (round 2): the retry must carry the failure it postponed.
+    Neuter by dropping ``scrubbed`` from ``_stamp_io``'s ``StampIOUnavailable``
+    text, or ``cause`` from its ERROR line; each goes RED on its own assertion.
+    📜 Rounds 2-3 recorded these neuters against the site's ``READ_ERROR`` arm,
+    which round 4 removed. The exhaustive per-call pin is
+    ``tests/test_stamp_io_exhaustive.py``."""
+
+    @pytest.mark.asyncio
+    async def test_a_raising_reread_writes_nothing_and_fails_transient(self) -> None:
+        log = MagicMock()
+        sentry = MagicMock()
+        results: list[Any] = []
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            live_job_read_raises=True,
+            expect_error_kind="transient",
+            log=log,
+            sentry=sentry,
+            results=results,
+        )
+        payloads = _analytics_upserts(fake)
+        leaked = [p for p in payloads if any(k in p for k in _PUBLISH_STATE_KEYS)]
+        assert not leaked, (
+            "a live re-read that RAISED still wrote publish state "
+            f"{leaked!r}. A transient read failure is not an answer; the stamp "
+            "must wait for the retry, not un-publish a funded composite."
+        )
+        assert not payloads, (
+            "a transient re-read failure wrote to strategy_analytics at all "
+            f"({payloads!r}). Nothing is known yet, so nothing is written; the "
+            "retry decides."
+        )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume
+        # table. Round 4: ONE ERROR, ``_stamp_io``'s, where round 3 logged two
+        # (the helper's line plus the site's ``READ_ERROR`` line).
+        assert log.error.call_count == 1, log.error.call_args_list
+        assert sentry.capture_exception.call_count == 1, (
+            "the re-read failure was not captured as an exception. The ERROR "
+            "lines already reach Sentry as message events, but only this "
+            "capture carries the failed read's traceback."
+        )
+        assert any(
+            "could not" in m and "re-read the refresh marker" in m
+            for m in _rendered(log.error)
+        ), (
+            f"no ERROR-level re-read line. errors seen: {_rendered(log.error)!r}"
+        )
+        assert not any("RETRACTED" in m for m in _messages(log.warning)), (
+            "a read failure was logged as a RETRACTION. Nothing was retracted, and "
+            "an operator would go looking for a user resync that never happened."
+        )
+        # WR-03 / SFH-R2-01: the retry must not ERASE the failure it postponed.
+        # ``error_message`` is what ``compute_jobs.last_error`` records. Before
+        # the fix it named only the read failure, and said "retrying" even on
+        # the final attempt; the zero-member cause was recorded NOWHERE, because
+        # that stamp passes no ``detail`` and the cause was logged only with one.
+        (result,) = results
+        assert _ZERO_MEMBER_CAUSE in (result.error_message or ""), (
+            "the job's last_error lost the handler's real failure cause: "
+            f"{result.error_message!r}"
+        )
+        assert "retrying" not in (result.error_message or ""), (
+            "last_error claims the job is retrying, which is false on the final "
+            f"attempt: {result.error_message!r}"
+        )
+        assert any(
+            any(_ZERO_MEMBER_CAUSE in str(a) for a in c.args)
+            for c in log.error.call_args_list
+        ), (
+            "the curated cause was not logged at ERROR on the failed re-read: "
+            f"{log.error.call_args_list!r}"
+        )
+
+
+class TestTheReReadOnlyNarrows:
+    """IN-05 / D-05's other half: the live row can WITHDRAW a protection the
+    snapshot granted, and can never GRANT one the snapshot did not.
+
+    An implementation that honoured the LIVE marker alone would pass every
+    retraction test above. These tests seed the marker on the live row ONLY.
+
+    Neuter to redden: let the live row alone decide, by replacing the
+    snapshot's ``_job_source ==`` term in ``_honour_marker`` with ``True``. All
+    three cases go RED (measured 2026-09-25)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "snapshot",
+        [_UNSET, None, {"source": _SINGLE_KEY_MARKER}],
+        ids=["no-metadata-key", "metadata-none", "single-key-marker"],
+    )
+    async def test_an_unmarked_snapshot_is_not_protected_by_a_marked_live_row(
+        self, snapshot: object
+    ) -> None:
+        fake = await _run(
+            metadata=snapshot,
+            existing_status="complete_with_warnings",
+            live_metadata={"source": _COMPOSITE_MARKER},
+        )
+        payloads = _analytics_upserts(fake)
+        assert payloads and payloads[-1].get("computation_status") == "failed", (
+            "a job whose CLAIM-TIME snapshot carried no composite marker was "
+            "protected because the LIVE row did. The re-read may only narrow; a "
+            "marker that appears on the row after the claim describes a job this "
+            f"run was not claimed as. payloads={payloads!r}"
+        )
+        assert fake.compute_jobs_reads == 0, (
+            "the live compute_jobs row was read for a job the snapshot never "
+            "marked. The read runs only when the snapshot would GRANT protection."
+        )
+
+
+class TestEveryNotConfirmedStateNamesItsOwnCause:
+    """SFH-02 / WR-02 at the composite site: "RETRACTED … a user-initiated
+    request was served" is logged ONLY when the live row records a retraction.
+    A missing row or a missing job id is an invariant breach and goes out at
+    ERROR; neither may claim a user request that never happened.
+
+    Neuter to redden: log the RETRACTED sentence for every state that is not
+    ``PRESENT`` (the pre-fix shape)."""
+
+    @pytest.mark.asyncio
+    async def test_a_real_retraction_says_retracted(self) -> None:
+        log = MagicMock()
+        await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            live_metadata={"refresh_marker_retracted": _COMPOSITE_MARKER},
+            log=log,
+        )
+        assert any("RETRACTED" in m for m in _messages(log.warning)), (
+            f"a recorded retraction was not named. warnings: {_messages(log.warning)!r}"
+        )
+        assert not _state_errors(log), (
+            "a recorded retraction is the designed path, not an invariant breach; "
+            "nothing about the marker's state should go out at ERROR. errors: "
+            f"{_messages(log.error)!r}"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("job_id", "live_metadata"),
+        [
+            (_JOB_ID, _LIVE_JOB_ABSENT),
+            ("", {"source": _COMPOSITE_MARKER}),
+        ],
+        ids=["no-live-row", "no-job-id"],
+    )
+    async def test_a_missing_row_or_id_is_an_error_not_a_retraction(
+        self, job_id: str, live_metadata: object
+    ) -> None:
+        log = MagicMock()
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            job_id=job_id,
+            live_metadata=live_metadata,
+            log=log,
+        )
+        assert _analytics_upserts(fake)[-1].get("computation_status") == "failed", (
+            "a row that cannot be found cannot vouch for the marker: loud path"
+        )
+        everything = _messages(log.warning) + _messages(log.error)
+        assert not any("RETRACTED" in m for m in everything), (
+            "a missing row / missing id was reported as a RETRACTION by a "
+            f"user-initiated request. Lines: {everything!r}"
+        )
+        assert _state_errors(log), (
+            "a claimed job with no id or no live row is an invariant breach and "
+            "must go out at ERROR, which is what reaches Sentry. (The loud "
+            "stamp's cause line does not count: it records the stamp, not the "
+            "marker's state.)"
+        )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 2, log.error.call_args_list
+
+    @pytest.mark.asyncio
+    async def test_a_different_live_source_is_not_called_a_retraction(self) -> None:
+        log = MagicMock()
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            live_metadata={"source": "some-other-writer"},
+            log=log,
+        )
+        assert _analytics_upserts(fake)[-1].get("computation_status") == "failed"
+        everything = _messages(log.warning) + _messages(log.error)
+        assert not any("RETRACTED" in m for m in everything), (
+            "a live row carrying a DIFFERENT source records no retraction; naming "
+            f"one misattributes the cause. Lines: {everything!r}"
+        )
+        # IN-01 (round 4): pins the OTHER_SOURCE half of the runbook's
+        # "RETRACTED / OTHER_SOURCE → loud stamp" alert-volume row. The one
+        # ERROR is the landed-stamp cause line; OTHER_SOURCE itself is WARNING.
+        assert log.error.call_count == 1, log.error.call_args_list
+
+
+class _Gateway504(Exception):
+    """A PostgREST gateway timeout, in the structured shape
+    ``services.db._is_gateway_timeout`` keys on."""
+
+    code = "504"
+
+
+class TestStampReadRetriesAGateway504:
+    """SFH-R2-02 sibling: ``_stamp_failed`` reads ``data_quality_flags`` and
+    ``computation_status`` in one select before it decides anything. That read
+    went through a bare ``db_execute``, so one gateway 504 escaped the closure
+    and the job's real, permanent failure was recorded as the read's exception
+    instead, while the marker re-read one step later already went through
+    ``db_read_with_retry``. It now uses the same retried read.
+
+    Neuter to redden: read through ``db_execute`` again. The first test then
+    fails on the error kind (the 504 escapes), and the second on the read
+    count (one read, not the retry budget)."""
+
+    @pytest.mark.asyncio
+    async def test_one_gateway_504_is_retried_and_the_stamp_still_decides(
+        self,
+    ) -> None:
+        with patch("services.db.DB_READ_BACKOFF_BASE_S", 0.0), \
+             patch("services.db.DB_READ_JITTER_MAX_S", 0.0):
+            fake = await _run(
+                metadata={"source": _COMPOSITE_MARKER},
+                existing_status="complete_with_warnings",
+                analytics_read_raises=[_Gateway504("gateway timeout")],
+            )
+        assert fake.analytics_reads == 2, (
+            f"expected one failed and one answering read, saw {fake.analytics_reads}"
+        )
+        payloads = _analytics_upserts(fake)
+        assert payloads, (
+            "the retried read answered, so the stamp must still record the "
+            "failure (the error-only write)"
+        )
+        leaked = [p for p in payloads if any(k in p for k in _PUBLISH_STATE_KEYS)]
+        assert not leaked, (
+            "a marked refresh on a live row wrote publish state after a retried "
+            f"read: {leaked!r}"
+        )
+
+
+class TestAFailedStampReadKeepsTheCause:
+    """SFH-R3-01 / WR-03 (round 3): when ``_read_existing_failed_row`` still
+    fails, the handler's curated cause must survive.
+
+    📜 Lineage: round 2 pinned the opposite here
+    (``test_a_persistent_504_still_fails_and_suppresses_nothing``, error kind
+    ``unknown``). The read's exception left the closure as itself, so
+    ``last_error`` named only the read, the curated sentence was logged nowhere
+    (the only earlier line is gated on ``detail``, at WARNING), and on
+    exhaustion the bridge wrote generic copy over it. Measured at that commit.
+
+    Now the cause goes out at ERROR beside the read's failure, and the job fails
+    TRANSIENT with the cause in ``last_error``. Nothing is written either way:
+    no stamp of either kind, nothing suppressed.
+
+    Neuter to redden: make ``_stamp_io`` re-raise the call's exception
+    unchanged (round 4: the stamp read's ``try``/``except`` became that one
+    wrapper). Every case goes RED on the error kind. Drop ``scrubbed`` from its
+    raise and every case goes RED on ``last_error``; drop ``cause`` from its
+    ERROR line and every parametrised case goes RED on the log assertion.
+    Measured 2026-09-26 against the round-3 arm."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("metadata", "raises", "reads", "kind"),
+        [
+            pytest.param(
+                {"source": _COMPOSITE_MARKER},
+                "persistent-504",
+                "budget",
+                "_Gateway504",
+                id="marked-persistent-504",
+            ),
+            pytest.param(
+                {"source": _COMPOSITE_MARKER},
+                "non-504",
+                1,
+                "RuntimeError",
+                id="marked-non-504-first-failure",
+            ),
+            pytest.param(
+                _UNSET,
+                "non-504",
+                1,
+                "RuntimeError",
+                id="unmarked-user-stitch-non-504",
+            ),
+        ],
+    )
+    async def test_the_cause_reaches_last_error_and_the_error_log(
+        self, metadata: object, raises: str, reads: object, kind: str
+    ) -> None:
+        from services.db import DB_READ_MAX_RETRIES
+
+        failures: list[BaseException] = (
+            [_Gateway504("gateway timeout") for _ in range(DB_READ_MAX_RETRIES)]
+            if raises == "persistent-504"
+            else [RuntimeError("permission denied for table strategy_analytics")]
+        )
+        expected_reads = DB_READ_MAX_RETRIES if reads == "budget" else reads
+        log = MagicMock()
+        sentry = MagicMock()
+        results: list[Any] = []
+        with patch("services.db.DB_READ_BACKOFF_BASE_S", 0.0), \
+             patch("services.db.DB_READ_JITTER_MAX_S", 0.0):
+            fake = await _run(
+                metadata=metadata,
+                existing_status="complete_with_warnings",
+                analytics_read_raises=failures,
+                expect_error_kind="transient",
+                log=log,
+                sentry=sentry,
+                results=results,
+            )
+        assert fake.analytics_reads == expected_reads, (
+            f"expected {expected_reads} stamp read(s), saw {fake.analytics_reads}"
+        )
+        assert not _analytics_upserts(fake), (
+            "a stamp whose read never answered still wrote to strategy_analytics"
+        )
+        (result,) = results
+        assert _ZERO_MEMBER_CAUSE in (result.error_message or ""), (
+            "last_error lost the handler's curated cause behind the failed "
+            f"stamp read: {result.error_message!r}"
+        )
+        assert kind in (result.error_message or ""), (
+            f"last_error does not name the failed read's kind {kind!r}: "
+            f"{result.error_message!r}"
+        )
+        cause_errors = [
+            c for c in log.error.call_args_list
+            if any(_ZERO_MEMBER_CAUSE in str(a) for a in c.args)
+        ]
+        assert cause_errors, (
+            "the curated cause was not logged at ERROR when the stamp read "
+            f"failed: {log.error.call_args_list!r}"
+        )
+        assert sentry.capture_exception.call_count == 1, (
+            "the failed stamp read's traceback was not captured"
+        )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list
+        sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+            "compute_job_id", _JOB_ID
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_long_read_error_cannot_push_the_cause_out_of_last_error(
+        self,
+    ) -> None:
+        """``classify_exception`` keeps 500 characters. A PostgREST error body
+        can be longer, so the read's text is bounded and the cause survives."""
+        results: list[Any] = []
+        await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            analytics_read_raises=[RuntimeError("x" * 2000)],
+            expect_error_kind="transient",
+            results=results,
+        )
+        (result,) = results
+        assert _ZERO_MEMBER_CAUSE in (result.error_message or ""), (
+            f"the cause fell off the end of last_error: {result.error_message!r}"
+        )
+
+
+class TestAProtectedFailurePagesNobody:
+    """WR-01 (round 3): when D-15 protects the row (the live re-read answers
+    ``PRESENT``), the outcome is logged at WARNING only. Every ``logger.error``
+    is a Sentry event under ``init_sentry``'s default ``LoggingIntegration``, and
+    a venue wedge fails the whole marked cohort on each refresh tick, so an
+    ERROR here would page once per strategy per tick for a path that needs no
+    one.
+
+    Neuter to redden: put back an unconditional ERROR cause line before the
+    marker re-read (round 2's shape). The first test goes RED on the error
+    count. The second pins the other half: the LOUD stamp over a live row
+    still goes out at ERROR with its cause. Neuter: delete that line."""
+
+    @pytest.mark.asyncio
+    async def test_the_protected_path_emits_no_error_and_no_capture(self) -> None:
+        log = MagicMock()
+        sentry = MagicMock()
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            log=log,
+            sentry=sentry,
+        )
+        payloads = _analytics_upserts(fake)
+        assert payloads and not any(
+            k in p for p in payloads for k in _PUBLISH_STATE_KEYS
+        ), f"the control did not take the protected path: {payloads!r}"
+        assert log.error.call_count == 0, (
+            "a failure D-15 protected went out at ERROR, which is a Sentry event: "
+            f"{log.error.call_args_list!r}"
+        )
+        assert sentry.capture_exception.call_count == 0
+        assert any("D-15" in m for m in _messages(log.warning)), (
+            f"the protected outcome was not logged at WARNING: {_messages(log.warning)!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_loud_stamp_over_a_live_row_logs_its_cause_at_error(
+        self,
+    ) -> None:
+        log = MagicMock()
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            live_metadata={"refresh_marker_retracted": _COMPOSITE_MARKER},
+            log=log,
+        )
+        assert _analytics_upserts(fake)[-1].get("computation_status") == "failed"
+        assert any(
+            _CAUSE_LINE_FRAGMENT in str(c.args[0])
+            and any(_ZERO_MEMBER_CAUSE in str(a) for a in c.args)
+            for c in log.error.call_args_list
+            if c.args
+        ), (
+            "the loud stamp over a live row did not log its cause at ERROR: "
+            f"{log.error.call_args_list!r}"
+        )
+        # WR-02 / SFH-R3-03: pins this path's row of the runbook's alert-volume table.
+        assert log.error.call_count == 1, log.error.call_args_list

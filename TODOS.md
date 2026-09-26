@@ -1365,6 +1365,77 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[164.6.7-RETRY-PLAIN-COMPLETE]` The transient retry keeps a factsheet published only if
+      its row was `complete_with_warnings` or warned; a plain `complete` row is not protected across
+      the retry (booked 2026-09-26, Phase 164.6.7 round-2 review WR-01 / SFH-R2-03).**
+      - **What happens.** A marked refresh whose marker re-read fails now raises
+        `RefreshMarkerRereadUnavailable` (entry read, chain edge) or, at a terminal stamp since
+        round 4, `StampIOUnavailable` through `_stamp_io`, and retries. The move to `failed_retry` runs
+        `mark_compute_job_failed`, whose bridge `sync_strategy_analytics_status` branch (a) keeps
+        `complete_with_warnings` but rewrites a plain `complete` row to `computing`. On attempt 2
+        `_read_entry_publish_state` (single-key) or `_read_existing_failed_row` inside
+        `_stamp_failed` (composite) reads `computing`, so no protection is granted and a recurring
+        failure takes the loud, un-publishing path. Both readers carry the same exposure (named
+        for both 2026-09-26, round-3 review IN-04).
+      - **Why not fixed in 164.6.7.** Keeping the attempt-1 publish state in job metadata cannot
+        close it: branch (a) has already rewritten the row before attempt 2 reads anything, and on
+        the final attempt the bridge decides in SQL with no Python running. The root fix is a
+        bridge migration (the non-terminal branch keeps a healthy publish state for a job carrying
+        a refresh marker). Migrations auto-apply to PROD on merge, so it is not a ride-along.
+      - **Reachability (dated, not re-measured).** The code comment records the live ledger cohort
+        as 0 plain `complete` and 5 `complete_with_warnings` rows, so nothing is exposed today.
+        The condition is stated at `MarkerLiveState` in `job_worker.py`, in runbook item 2 and in
+        164.6.7 CONTEXT D-10.
+      - **Destination: Phase 164.5.2 BRIDGELOCK**, the phase that already changes the terminal
+        mark RPCs fanning into this bridge (same routing as
+        `[164.6.7-COMPOSITE-REREAD-RESIDUE]` below). Dated routing line under `### Phase 164.5.2`
+        in `.planning/ROADMAP.md`.
+
+- [ ] **`[164.6.7-COMPOSITE-REREAD-RESIDUE]` A marker retraction that lands between the Python live
+      re-read and `mark_compute_job_failed` still leaves the pre-fix outcome, over a window of
+      milliseconds (booked 2026-09-25, Phase 164.6.7 COMPOSITECLAIMSNAPSHOT, decision D-03).**
+      - **What remains.** Phase 164.6.7 made the `_stamp_failed` closure of
+        `run_stitch_composite_job` re-read the live `compute_jobs` row (since round 4 through
+        `_read_refresh_marker_state` inside `_stamp_io`) before it honours the
+        `ledger-refresh-composite` marker. A
+        retraction committing AFTER that re-read and BEFORE `mark_compute_job_failed` PERFORMs the
+        SQL bridge `sync_strategy_analytics_status` still yields an error-only Python write followed by a loud SQL status: the
+        `computation_warned` residue (research H2), so a warned composite can read
+        `complete_with_warnings` again at the next bridge call over a failed run.
+      - **Both honour arms share it.** The single-key derive honour site in
+        `run_derive_broker_dailies_job`, which makes the same `_read_refresh_marker_state` read,
+        carries the identical window. A fix is one change for both.
+      - **Fix shape.** In `sync_strategy_analytics_status`, either branch (b) clears
+        `computation_warned`, or the protect/loud decision moves inside the bridge's transaction.
+        Either is a migration to a bridge every job kind shares, and a merge touching
+        `supabase/migrations/**` auto-applies to PROD, so it is not a ride-along.
+      - **Owner:** whoever next changes `sync_strategy_analytics_status`. **Trigger:** any change
+        to that function.
+      - **Not data-integrity-reachable today (2026-09-25).** The composite fan-out is unscheduled
+        (runbook precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]`, item 6 still blocking), so no
+        composite job carries the marker. Re-read this line before the composite is scheduled.
+        ⚠️ This covers the COMPOSITE arm only. The single-key arm is reachable whenever the
+        single-key fan-out is scheduled, and whether it is was not measured here (no remote
+        database is read in Phase 164.6.7).
+      - ⛔ **CORRECTED 2026-09-25 (Phase 164.6.7 round-1 review WR-04 and IN-06); the bullets
+        above are kept as lineage.**
+        - **Routed, not event-owned.** This is a data-integrity deferral, and the repo rule is
+          that one must name a phase. "Whoever next changes the function" had no date and no
+          gate, and nothing forces that change before the composite is scheduled. **Destination:
+          Phase 164.5.2 BRIDGELOCK** (dated routing line under `### Phase 164.5.2` in
+          `.planning/ROADMAP.md`), the phase that already changes the terminal mark RPCs fanning
+          into this bridge. This overrides the owner line above, which followed CONTEXT D-03.
+        - **It blocks composite scheduling, in the runbook.** "Re-read this line before the
+          composite is scheduled" is superseded. The operator's instruction now lives where it
+          is read at scheduling time: item 7 of `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in
+          `docs/runbooks/ledger-refresh-go-live.md` is ⛔ BLOCKING until this entry is closed,
+          or the founder accepts the window there with a date and a reason.
+        - **"Milliseconds" was never measured.** The window's length is unmeasured, and several
+          contributors have no bound: the error-only upsert through `db_execute`; on the
+          member-ledger-error path, the `aclose_exchange` network close in the `finally` that
+          runs after `_stamp_failed` returns; the heartbeat cancel in `main_worker`; and
+          `_safe_mark` → `db_execute` for `mark_compute_job_failed`, which can queue behind a
+          saturated `_DB_EXECUTOR`. The harm probe's zero-member driver exercises none of them.
 - [ ] **`[169-DEAD-ADMIN-JOBS-RPC]` Drop the dead `get_admin_compute_jobs` database function
       (booked 2026-09-25, Phase 169 D-01).**
       It raises "column reference `id` is ambiguous" on every call (its `RETURNS TABLE` declares an
@@ -9655,6 +9726,20 @@ follows is what was deliberately left, with the reason.
     protection, and its failure is suppressed exactly as the single-key case was.
   - ⚠️ The composite fan-out ships DORMANT, so this is not reachable on production until the
     schedule is registered — but it must be closed BEFORE that founder-gated go-live op, not after.
+  - ✅ **CLOSED 2026-09-25, in two halves.** The retraction call at the two TypeScript
+    `stitch_composite` enqueue sites closed in **Phase 164.6 plan 02**. ⛔ The "*honouring* side is
+    covered" sentence above was WRONG for the composite until **Phase 164.6.7
+    COMPOSITECLAIMSNAPSHOT**: the composite honour site read the claim-time snapshot, so a
+    retraction landing after the claim was never seen by the Python stamp. Since Phase 164.6.7,
+    the `_stamp_failed` closure of `run_stitch_composite_job` re-reads the live `compute_jobs` row
+    through `_refresh_marker_still_on_row` before it honours the marker, and the regression is
+    `TestPostClaimRetractionTakesTheLoudPath`. The text above is kept as lineage. A residual window
+    of milliseconds remains and is booked as `[164.6.7-COMPOSITE-REREAD-RESIDUE]` (FIX MID-TERM).
+    ⛔ CORRECTED 2026-09-25 (round-1 review IN-06): the window's length is unmeasured, not
+    "milliseconds"; that entry lists its unbounded contributors and is routed to Phase 164.5.2.
+    The residue is also runbook item 7, which blocks the composite schedule alongside item 6.
+    The composite schedule itself is still blocked by item 6 of the runbook precondition
+    `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` (its own runs are not yet watched).
 
 161.1-D14. **The redact pre-push guard cries wolf on migration timestamps — INVESTIGATED, nothing
   to fix, do not re-investigate.** `gstack-redact` flags 14-digit migration timestamps as

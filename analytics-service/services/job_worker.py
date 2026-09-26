@@ -49,9 +49,11 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
 import ccxt
+import sentry_sdk
 from cryptography.fernet import InvalidToken
 from fastapi import HTTPException
 # APIResponse is the documented return type of a PostgREST builder's
@@ -93,7 +95,7 @@ from services.closed_sets import (  # B8b: single-sourced closed sets, re-export
     mt5_enabled_server,
     sfox_enabled_server,
 )
-from services.db import db_execute, get_supabase, one, rows
+from services.db import db_execute, db_read_with_retry, get_supabase, one, rows
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
     aclose_exchange,
@@ -695,6 +697,24 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     # exceeds its per-kind timeout. Transient — we want to retry.
     if isinstance(exc, asyncio.TimeoutError):
         return ("transient", f"Handler exceeded timeout: {str(exc)[:200]}")
+
+    # Phase 164.6.7 / D-09. ``HandlerIOUnavailable`` and both subclasses: a
+    # database read or write the handler needed before it could decide or
+    # record its outcome failed, and what was not yet written stays unwritten.
+    # Two reasons meet here, and each subclass carries one or both:
+    # - ``RefreshMarkerRereadUnavailable`` (the single-key ENTRY publish-state
+    #   read and the chain-edge re-read, round 2): the handler could not tell
+    #   whether a failure may be recorded without un-publishing a funded
+    #   account.
+    # - ``StampIOUnavailable`` (every read and write inside the two terminal
+    #   stamp closures, through ``_stamp_io``, round 4): the handler HAS a
+    #   curated cause to record and could not record it. That holds for an
+    #   unmarked user stitch too, where no publish state is at stake; its text
+    #   carries the cause so ``last_error`` keeps it.
+    # TRANSIENT: the queue retries the whole job and the next attempt reads and
+    # writes again.
+    if isinstance(exc, HandlerIOUnavailable):
+        return ("transient", str(exc)[:500])
 
     # Fernet InvalidToken means the DEK cannot be unwrapped with the
     # current KEK — either a key rotation mismatch or a corrupted row.
@@ -2590,19 +2610,313 @@ async def _resolve_ccxt_flow_price_index(
 # is precisely the green-against-the-bug shape.
 #
 # ⛔ FAIL-SAFE DIRECTION, non-negotiable and identical to every other D-15
-# decision: a missing id, an unreadable row, no row, a non-dict metadata and any
-# raised exception all answer FALSE — no protection, LOUD path. Never fail
-# toward suppression.
+# decision: only ``MarkerLiveState.PRESENT`` keeps a protection. A missing id, no
+# row, a non-dict metadata, a different source and a failed read all answer
+# something else, and no caller may read any of them as "still marked".
+#
+# ⭐ The answer is a STATE, not a bool (Phase 164.6.7, SFH-02 / WR-02). Four call
+# sites log from it, and while it was a bool each of them said "RETRACTED — a
+# user-initiated request was served" for all five non-present causes, including a
+# read that merely failed. An operator triaging a darkened factsheet then went
+# looking for a resync that never happened. Each state now names its own cause.
+#
+# ⛔ ``READ_ERROR`` is the one state that is NOT an answer about the row (CONTEXT
+# D-09): a failed read stamps nothing and fails the job TRANSIENT so it retries.
+# D-09 (2026-09-25) decided this for the composite stamp; its 2026-09-26
+# amendment extended it to the single-key derive stamp closure, and round 2
+# (2026-09-26) to the single-key CHAIN EDGE, which enqueues nothing and raises
+# ``RefreshMarkerRereadUnavailable`` before ``_enqueue_csv_analytics``. Since
+# round 4 the two TERMINAL STAMPS read through ``_stamp_io``, which raises
+# ``StampIOUnavailable`` on the failed read itself, so they never hold a
+# ``READ_ERROR``; only the chain edge and the tail mirror do.
+# Every other state is a DEFINITIVE answer and still takes the loud path.
+# ⚠️ The tail mirror is the one site that only logs on ``READ_ERROR``: the
+# follow-on is already enqueued, and nothing it could do would change hop 2.
+#
+# ⛔ WHAT THE TRANSIENT RETRY DOES AND DOES NOT PRESERVE (round 2, WR-01 /
+# SFH-R2-03). It holds ONLY while the strategy row is
+# ``complete_with_warnings`` or ``computation_warned``. The raise sends the job
+# to ``failed_retry``, and ``mark_compute_job_failed`` runs the SQL status bridge
+# on that transition too. With a non-terminal job present and no protect-hold,
+# the bridge's branch (a) KEEPS ``complete_with_warnings`` but REWRITES a plain
+# ``complete`` row to ``computing``. On the next attempt, the entry snapshot
+# (single-key) and the stamp-time status read (composite) therefore see
+# ``computing``, which is not terminal-success, so no protection arms and a
+# recurring failure stamps loudly. If the retries run out instead, the bridge
+# finds the row at ``computing``, which is not publish-healthy, and branch (b)
+# un-publishes it. So for a plain-``complete`` row the retry helps only when the
+# ORIGINAL failure clears on retry.
+# Python cannot close this, and the reason is the SQL bridge, not a missing
+# snapshot. A publish state kept in job metadata would still meet a row the
+# bridge has already moved to ``computing``, and on exhaustion no Python code
+# runs at all. The closure is a bridge migration: its non-terminal branch has to
+# keep a healthy publish state for a job carrying a refresh marker. That was not
+# written in this phase. The live-cohort figure (``complete`` 0 /
+# ``complete_with_warnings`` 5) is dated in the REUSE-01 comment above and was
+# not re-measured for this note.
+#
+# ⚠️ The read goes through ``db_read_with_retry``, so a gateway 504 is retried
+# inside that helper's bounded budget before it counts as a failure (WR-03). The
+# cost is up to about 3-4 s more wall time per read on a gateway-timeout path
+# (IN-03, round 3). The composite ``_stamp_failed`` makes TWO such reads before
+# any write (``_read_existing_failed_row``, then this one), so its worst case is
+# about 6-8 s of backoff plus the request timeouts. Both precede every write, so
+# a cancellation inside that time writes nothing. The helper
+# sleeps BEFORE the attempt that answers, so the window between the answering
+# read and the stamp (``[164.6.7-COMPOSITE-REREAD-RESIDUE]``) is unchanged
+# (round 2, IN-02).
+class MarkerLiveState(Enum):
+    """What the live ``compute_jobs`` row says about a refresh marker."""
+
+    PRESENT = "present"
+    """``metadata->>'source'`` still equals the marker. The only protecting state."""
+    RETRACTED = "retracted"
+    """The source is gone and ``refresh_marker_retracted`` names the marker: a
+    user's resync inherited this job through the enqueue dedup (the write shape of
+    ``_retract_refresh_marker_on_reuse`` and ``src/lib/ledger-refresh-marker.ts``)."""
+    NO_ID = "no_id"
+    """The caller had no job id to read. An invariant breach for a claimed job."""
+    NO_ROW = "no_row"
+    """The read succeeded and found no row. An invariant breach for a claimed job."""
+    OTHER_SOURCE = "other_source"
+    """The row exists but carries another source, no source, or non-dict metadata,
+    with no recorded retraction of this marker."""
+    READ_ERROR = "read_error"
+    """The read raised (after ``db_read_with_retry``'s 504 retries). Nothing is
+    known about the row."""
+
+    def __bool__(self) -> bool:
+        # Every Enum member is truthy by default, so a caller written against the
+        # old bool (``not await _refresh_marker_still_on_row(...)``) would read
+        # EVERY state as "still marked" and suppress every failure. Refuse loudly.
+        raise TypeError(
+            "MarkerLiveState has no truth value; compare against "
+            "MarkerLiveState.PRESENT explicitly"
+        )
+
+
+class HandlerIOUnavailable(Exception):
+    """A database read or write the handler needed before it could decide or
+    record its outcome FAILED. Whatever was not yet written stays unwritten, and
+    the text names the failed operation's kind plus, where one exists, the
+    handler's real cause. ``classify_exception`` maps every subclass to
+    TRANSIENT: the queue retries the job and the next attempt reads and writes
+    again (Phase 164.6.7 round 4)."""
+
+
+class RefreshMarkerRereadUnavailable(HandlerIOUnavailable):
+    """A read that a marked refresh's D-15 decision rests on FAILED OUTSIDE a
+    terminal stamp, so the handler wrote nothing and stops: the single-key ENTRY
+    publish-state read (round 2, SFH-R2-02) and the single-key chain edge before
+    it enqueues hop 2 (round 2, WR-02). The two terminal stamp closures raise
+    the sibling ``StampIOUnavailable`` instead (round 4)."""
+
+
+class StampIOUnavailable(HandlerIOUnavailable):
+    """A database read or write INSIDE a terminal-failure stamp closure failed:
+    the stamp's status read, the live refresh-marker re-read, the D-15
+    error-only write, or the loud stamp write (Phase 164.6.7 round 4,
+    SFH-R4-01). Raised only by ``_stamp_io``, the one wrapper every such call
+    goes through. The handler had a curated cause to record and could not
+    record it, so the cause rides this exception's text into
+    ``compute_jobs.last_error``."""
+
+
+class MarkerStateNotLoggable(Exception):
+    """``_log_marker_not_confirmed`` was handed a state it must not log: the
+    confirming ``PRESENT``, or a ``MarkerLiveState`` member it has no arm for.
+    Always a caller bug. ⛔ Deliberately NOT a ``ValueError`` (round 4, IN-04):
+    the composite MTM ``try`` has an ``except ValueError`` arm (F-5) that calls
+    ``_stamp_failed`` again under a different cause, and a refusal raised from
+    inside the first stamp must not be caught there and misattributed."""
+
+
+# Phase 164.6.7 round 3 (SFH-R3-02), extended in round 4 (SFH-R4-02 / IN-02): a
+# database call that raises one of these is a bug in THIS code (a renamed
+# client method, a bad call shape), not an answer from the database. EVERY site
+# that classifies a failed read or write handles them the same way: log at
+# ERROR, one tagged capture, then re-raise UNCHANGED, so ``classify_exception``
+# files them under ``unknown`` with their own text, which is the "needs a human
+# look" signal. The sites are the entry publish-state read, ``_stamp_io`` (every
+# read and write inside both terminal stamp closures) and
+# ``_refresh_marker_live_state`` at the chain edge. ⛔ TWO deliberate
+# exceptions log and capture the same way but do NOT raise, because each runs
+# after the job's outcome has already landed:
+# - the single-key TAIL MIRROR (round 5, R5 IN-02 / LOW-2) answers
+#   ``READ_ERROR`` and the job finishes DONE: it runs after the hop-2 enqueue on
+#   a job whose work already landed. See ``_refresh_marker_live_state``.
+# - the single-key SERIES HEAL (round 6, R6-01) runs after the loud stamp has
+#   landed, and the job stays ``permanent``. A raise there filed the job
+#   ``unknown`` and retried it, and ``mark_compute_job_failed`` moved it to
+#   ``failed_retry``, which ``sync_strategy_analytics_status`` branch (a) counts
+#   as non-terminal: it wrote ``computing`` and NULLed the landed stamp's
+#   cause for the whole backoff window, and a retry that took another path lost
+#   the cause for good. Ending ``permanent`` lets branch (b) keep the writer's
+#   cause. Round 5 re-raised here on the premise that "that job is failing
+#   anyway"; the attempt was, but the row stopped saying so.
+# Labelling them TRANSIENT would hide a code defect behind "the database was
+# busy" until the retry budget ran out. ``transient`` and ``unknown`` retry on
+# the same budget (``mark_compute_job_failed``) and render the same user
+# sentence (``computation_error_copy``), so the split changes only the label an
+# operator reads, and the curated cause of a stamp is still on the ERROR line.
+# ⚠️ ``ValueError`` is deliberately absent: ``json.JSONDecodeError`` subclasses
+# it, and a malformed PostgREST body is an infrastructure answer, not a bug.
+# ⚠️ The split is a heuristic (round 5, SFH-R5-06): a client library parsing an
+# unexpected gateway body can raise ``KeyError`` / ``TypeError`` /
+# ``IndexError`` too, and that infrastructure answer is then labelled a
+# programming error. Only the label moves; the budget and the sentence do not.
+_READ_PROGRAMMING_ERRORS: tuple[type[BaseException], ...] = (
+    AssertionError,
+    AttributeError,
+    ImportError,
+    IndexError,
+    KeyError,
+    NameError,
+    TypeError,
+    ZeroDivisionError,
+)
+
+
+def _read_failure_text(exc: BaseException) -> str:
+    """``ExceptionClass: scrubbed message``, bounded, for a ``last_error`` that
+    has to say WHAT failed without pushing the curated cause past
+    ``classify_exception``'s 500-character cut (SFH-R3-02 / IN-01)."""
+    from services.redact import scrub_freeform_string
+
+    return f"{type(exc).__name__}: {str(scrub_freeform_string(str(exc)))[:120]}"
+
+
+def _capture_read_failure(exc: BaseException, *, job_id: Any) -> None:
+    """``sentry_sdk.capture_exception`` tagged with the compute job it belongs
+    to (IN-02 / SFH-R2-05). The capture is the only event carrying the failed
+    read's traceback, and without the tag it could not be tied to a job. The
+    job id is an internal UUID. The tag is scoped to this one event."""
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("compute_job_id", str(job_id))
+        sentry_sdk.capture_exception(exc)
+
+
+def _flags_object_or_dropped(
+    raw: Any, *, site: str, strategy_id: Any, job_id: Any, consequence: str
+) -> dict[str, Any]:
+    """``strategy_analytics.data_quality_flags`` as a dict to merge into.
+
+    The column is ``jsonb``, so a non-object value is storable, and ``dict()``
+    on it raises. ``None`` (no row, or no flags) is ``{}``. Any other non-object
+    value is dropped: ONE ERROR line naming the job, the value's type and a
+    bounded, scrubbed ``repr``, and ONE capture tagged with the job. Such a value
+    means some writer elsewhere is broken, and the caller's write then replaces
+    it, so this line is the only trace of it (round 6, R6-02 / R6-05; round 5
+    logged it at WARNING, which is a breadcrumb that reaches no one, and without
+    the job). ``consequence`` is the caller's own sentence about what it writes
+    instead."""
+    if isinstance(raw, dict):
+        return dict(raw)
+    if raw is None:
+        return {}
+    from services.redact import scrub_freeform_string
+
+    kind = type(raw).__name__
+    logger.error(
+        "%s: strategy %s on compute_job %s has a non-object data_quality_flags "
+        "(%s: %s). It is dropped; %s",
+        site, strategy_id, job_id, kind,
+        str(scrub_freeform_string(repr(raw)))[:120], consequence,
+    )
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("compute_job_id", str(job_id))
+        sentry_sdk.capture_message(
+            f"{site}: non-object data_quality_flags ({kind}) dropped", level="error"
+        )
+    return {}
+
+
 async def _refresh_marker_still_on_row(
     supabase: Any, job_id: Any, expected: str
-) -> bool:
-    """True only if ``compute_jobs.metadata->>'source'`` for ``job_id`` STILL
-    equals ``expected``. See the block comment above for why a live re-read and
-    not the claim-time snapshot."""
-    if not job_id:
-        return False
+) -> MarkerLiveState:
+    """What ``compute_jobs.metadata`` for ``job_id`` says NOW about the marker
+    ``expected``. Only ``PRESENT`` keeps a protection. See the block comment above
+    for why a live re-read and not the claim-time snapshot, and for why the answer
+    is a state. A caller that must NAME a failed read uses
+    ``_refresh_marker_live_state``.
 
-    def _read_live_source() -> Any:
+    LOG-ONLY, and it never raises for a failed read: every failure, a
+    ``_READ_PROGRAMMING_ERRORS`` member included, is logged at ERROR, captured
+    once and answered ``READ_ERROR``. Its one handler caller is the single-key
+    TAIL MIRROR, which runs after the hop-2 enqueue (round 5, R5 IN-02 / LOW-2:
+    see ``raise_programming_errors`` on ``_refresh_marker_live_state``)."""
+    state, _failure = await _refresh_marker_live_state(
+        supabase, job_id, expected, raise_programming_errors=False
+    )
+    return state
+
+
+async def _refresh_marker_live_state(
+    supabase: Any, job_id: Any, expected: str, *, raise_programming_errors: bool
+) -> tuple[MarkerLiveState, str | None]:
+    """``_refresh_marker_still_on_row`` plus, for ``READ_ERROR`` only, the
+    failed read's ``_read_failure_text``. The chain edge carries that text into
+    ``compute_jobs.last_error`` (SFH-R3-02); every other state returns ``None``.
+
+    Used by the single-key CHAIN EDGE and TAIL MIRROR only. The two terminal
+    stamp closures call ``_read_refresh_marker_state`` through ``_stamp_io``
+    instead, so they never see ``READ_ERROR`` (round 4).
+
+    ``raise_programming_errors`` (keyword-only, no default, so every caller
+    chooses): ``True`` at the CHAIN EDGE, where a ``_READ_PROGRAMMING_ERRORS``
+    member is logged, captured and re-raised unchanged (``unknown``, SFH-R4-02)
+    before anything is enqueued. ``False`` at the TAIL MIRROR (round 5, R5
+    IN-02 / LOW-2): the member is logged and captured the same way, then
+    answered ``READ_ERROR`` and the job finishes DONE. Failing a job whose work
+    already landed and whose hop 2 is already enqueued changes nothing about hop
+    2 and costs a lot: each retry re-crawls the venue and re-writes the hop-1
+    rows, and a derive that ends ``failed_final`` is one
+    ``sync_strategy_analytics_status`` reads as a live failure, so it can write
+    the generic derive copy over a row hop 2 just published. The capture
+    already carries the "needs a human look" signal."""
+    try:
+        return await _read_refresh_marker_state(supabase, job_id, expected), None
+    except Exception as exc:  # noqa: BLE001 — every failure is reported, then answered
+        if isinstance(exc, _READ_PROGRAMMING_ERRORS):
+            # SFH-R4-02: a bug in this read, not a database answer. Reported
+            # like every site listed above ``_READ_PROGRAMMING_ERRORS``. At the
+            # chain edge it is then re-raised unchanged (filed ``unknown``); at
+            # the tail mirror it is answered ``READ_ERROR`` (see the docstring).
+            logger.error(
+                "ledger-refresh: re-reading the refresh marker on compute_job %s "
+                "raised a programming error (%s). %s",
+                job_id, _read_failure_text(exc),
+                "The error propagates unchanged."
+                if raise_programming_errors
+                else "Answering READ_ERROR: the tail mirror only logs.",
+            )
+            _capture_read_failure(exc, job_id=job_id)
+            if raise_programming_errors:
+                raise
+            return MarkerLiveState.READ_ERROR, _read_failure_text(exc)
+        logger.error(
+            "ledger-refresh: could not re-read the refresh marker on compute_job "
+            "%s (%s) — its live state is UNKNOWN. The caller decides: the "
+            "single-key chain edge enqueues nothing and fails the job "
+            "TRANSIENT; the tail mirror only logs.",
+            job_id, _read_failure_text(exc),
+        )
+        _capture_read_failure(exc, job_id=job_id)
+        return MarkerLiveState.READ_ERROR, _read_failure_text(exc)
+
+
+async def _read_refresh_marker_state(
+    supabase: Any, job_id: Any, expected: str
+) -> MarkerLiveState:
+    """The live marker read itself. It RAISES on a failed read (after
+    ``db_read_with_retry``'s 504 retries) and never answers ``READ_ERROR``: the
+    caller classifies the failure. ``_refresh_marker_live_state`` turns it into
+    ``READ_ERROR`` for the chain edge and the tail mirror, and ``_stamp_io``
+    turns it into ``StampIOUnavailable`` at both terminal stamps."""
+    if not job_id:
+        return MarkerLiveState.NO_ID
+
+    def _read_live_row() -> Any:
         res = (
             supabase.table("compute_jobs")
             .select("metadata")
@@ -2610,21 +2924,193 @@ async def _refresh_marker_still_on_row(
             .maybe_single()
             .execute()
         )
-        row = getattr(res, "data", None)
-        metadata = row.get("metadata") if isinstance(row, dict) else None
-        return metadata.get("source") if isinstance(metadata, dict) else None
+        # postgrest's maybe_single returns None ITSELF for zero rows.
+        return getattr(res, "data", None)
 
+    row = await db_read_with_retry(_read_live_row)
+    if not isinstance(row, dict):
+        return MarkerLiveState.NO_ROW
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict):
+        if metadata.get("source") == expected:
+            return MarkerLiveState.PRESENT
+        if metadata.get("refresh_marker_retracted") == expected:
+            return MarkerLiveState.RETRACTED
+    return MarkerLiveState.OTHER_SOURCE
+
+
+_StampT = TypeVar("_StampT")
+
+# The operation kinds ``_stamp_io`` names. Each is the object of "could not …"
+# in the ERROR line and in ``compute_jobs.last_error``. ⚠️ The marker one must
+# keep the words "re-read the refresh marker": the lane probe
+# (``scripts/probe_composite_claimtime.py``, ``_REREAD_FAILURE_FRAGMENT``) scans
+# the handler log for them to tell a failed re-read from a retraction.
+_STAMP_OP_STATUS_READ = "read strategy_analytics for the stamp"
+_STAMP_OP_MARKER_READ = "re-read the refresh marker"
+_STAMP_OP_ERROR_ONLY_WRITE = "write the D-15 error-only stamp"
+_STAMP_OP_LOUD_WRITE = "write the terminal failed stamp"
+
+
+async def _stamp_io(
+    call: Callable[[], Awaitable[_StampT]],
+    *,
+    op: str,
+    site: str,
+    strategy_id: Any,
+    job_id: Any,
+    cause: str,
+    scrubbed: str,
+) -> _StampT:
+    """Run ONE database read or write of a terminal-failure stamp closure.
+
+    ⛔ Phase 164.6.7 round 4 (SFH-R4-01), closing the CLASS rather than a
+    site. Rounds 2, 3 and 4 each found the same defect one database call further
+    into a stamp: a read or write fails, its exception leaves the closure as
+    itself, and the handler's curated cause is recorded nowhere
+    (``last_error`` names only the I/O, no ERROR line carries the cause, and on
+    exhaustion the bridge writes generic copy). So EVERY database call inside
+    ``_stamp_strategy_analytics_failed`` and the composite ``_stamp_failed`` goes
+    through this one wrapper: the stamp's status read, the live marker re-read,
+    the D-15 error-only write and the loud stamp write.
+
+    On a failure it logs ONE ERROR line carrying the operation kind, the
+    failure text and ``cause`` (the scrubbed curated message plus the scrubbed
+    detail), makes ONE ``_capture_read_failure`` capture tagged with the job,
+    and raises ``StampIOUnavailable`` (TRANSIENT) whose text carries the failure
+    BEFORE ``scrubbed``, so ``classify_exception``'s 500-character cut cannot
+    drop the cause. A ``_READ_PROGRAMMING_ERRORS`` member is logged and captured
+    the same way and then re-raised unchanged (``unknown``). A cancellation (a
+    deadline or a shutdown) logs ONE ERROR with the cause and is re-raised
+    unchanged, with no capture (round 5, SFH-R5-01).
+
+    ⚠️ Not wrapped, deliberately: the single-key series heal
+    (``_heal_delete_basis_series``). It runs only AFTER the loud stamp has
+    landed with the cause in ``computation_error``, so its failure loses no
+    cause. It logs at ERROR with the scrubbed failure and the cause, makes one
+    capture, and the job stays permanent (round 5, SFH-R5-03). Any raise there
+    would retry a job whose stamp already landed, so a programming error is not
+    re-raised either (round 6, R6-01): ``transient`` and ``unknown`` retry the
+    same way."""
     try:
-        live_source = await db_execute(_read_live_source)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "ledger-refresh: could not re-read the refresh marker on compute_job "
-            "%s (%s) — treating the marker as RETRACTED, which takes the LOUD "
-            "terminal-failure path.",
-            job_id, exc,
+        return await call()
+    except asyncio.CancelledError:
+        # SFH-R5-01 (round 5): a deadline (``dispatch``'s per-kind
+        # ``wait_for``, or an inner one) or a worker shutdown cancelled this
+        # call while it waited. ``CancelledError`` is a ``BaseException``, so
+        # the ``except Exception`` below never sees it, and without this arm
+        # the curated cause was logged nowhere: ``dispatch`` files the job
+        # ``transient`` with only "Handler exceeded timeout". Log the cause at
+        # ERROR and re-raise the cancel UNCHANGED; swallowing it would break
+        # cancellation. No capture: the cancel is not a fault of this call.
+        # ⚠️ The executor thread behind a cancelled write keeps running, so
+        # that write can still land after the job is filed.
+        logger.error(
+            "%s: %s for strategy %s on compute_job %s was CANCELLED (a deadline "
+            "or a worker shutdown). No terminal stamp is confirmed for: %s.",
+            site, op, strategy_id, job_id, cause,
         )
-        return False
-    return bool(live_source == expected)
+        raise
+    except Exception as exc:  # noqa: BLE001 — reported, then re-raised
+        failure = _read_failure_text(exc)
+        if isinstance(exc, _READ_PROGRAMMING_ERRORS):
+            logger.error(
+                "%s: could not %s for strategy %s on compute_job %s: a "
+                "programming error (%s). No terminal stamp is confirmed for: %s. "
+                "The error propagates unchanged.",
+                site, op, strategy_id, job_id, failure, cause,
+            )
+            _capture_read_failure(exc, job_id=job_id)
+            raise
+        logger.error(
+            "%s: could not %s for strategy %s on compute_job %s (%s). No "
+            "terminal stamp is confirmed for: %s. Failing the job TRANSIENT so "
+            "the queue can retry it.",
+            site, op, strategy_id, job_id, failure, cause,
+        )
+        _capture_read_failure(exc, job_id=job_id)
+        raise StampIOUnavailable(
+            f"{site}: could not {op} ({failure}), so no terminal stamp is "
+            f"confirmed for: {scrubbed}"
+        ) from exc
+
+
+def _log_marker_not_confirmed(
+    state: MarkerLiveState,
+    *,
+    site: str,
+    job_id: Any,
+    strategy_id: Any,
+    consequence: str,
+    subject: str = "claimed job",
+) -> None:
+    """Log why a refresh marker was NOT confirmed on the live row, naming the
+    cause ``state`` actually records. ``consequence`` is the site's own sentence
+    about what it does next. ``subject`` names the job the invariant is about:
+    the job this handler CLAIMED, or (at the tail mirror) the follow-on it just
+    ENQUEUED.
+
+    ``PRESENT`` is refused with ``MarkerStateNotLoggable`` (SFH-R2-06). It is
+    the one state that DID confirm the marker, and the last arm below would
+    otherwise log it as "no live row", a false invariant breach. Every caller
+    checks for ``PRESENT`` first, so this raise fires only on a caller bug, and
+    it is loud on purpose. Both refusals here are ``MarkerStateNotLoggable``, not
+    ``ValueError``, so no ``except ValueError`` around a stamp can catch them
+    (round 4, IN-04)."""
+    if state is MarkerLiveState.PRESENT:
+        raise MarkerStateNotLoggable(
+            f"{site}: _log_marker_not_confirmed was called with "
+            "MarkerLiveState.PRESENT, which confirms the marker; the caller "
+            "must handle PRESENT before asking why the marker is not confirmed"
+        )
+    if state is MarkerLiveState.RETRACTED:
+        logger.warning(
+            "%s: the refresh marker on compute_job %s has been RETRACTED — a "
+            "user-initiated request was served by this job through the enqueue "
+            "dedup, so nobody unwatched owns it. %s (strategy %s).",
+            site, job_id, consequence, strategy_id,
+        )
+    elif state is MarkerLiveState.OTHER_SOURCE:
+        logger.warning(
+            "%s: the live compute_job %s no longer carries the refresh marker and "
+            "records no retraction of it (another source, no source, or non-dict "
+            "metadata). %s (strategy %s).",
+            site, job_id, consequence, strategy_id,
+        )
+    elif state is MarkerLiveState.READ_ERROR:
+        # The read's own ERROR line (with the exception) precedes this one. Only
+        # the single-key chain edge and tail mirror reach this arm: the terminal
+        # stamps read through ``_stamp_io`` and never see ``READ_ERROR``.
+        logger.error(
+            "%s: the refresh marker on compute_job %s could not be confirmed "
+            "because the live re-read FAILED. %s (strategy %s).",
+            site, job_id, consequence, strategy_id,
+        )
+    elif state in (MarkerLiveState.NO_ID, MarkerLiveState.NO_ROW):
+        # A claimed or just-enqueued job must have both.
+        logger.error(
+            "%s: cannot confirm the refresh marker on compute_job %s — %s. A "
+            "%s with no id or no live row is an invariant breach. %s "
+            "(strategy %s).",
+            site, job_id,
+            "no job id" if state is MarkerLiveState.NO_ID else "no live row",
+            subject, consequence, strategy_id,
+        )
+    else:
+        # I-R3-1 (round 3): the arms above are exhaustive for today's enum. A
+        # state added later must say what it means; it is never silently
+        # reported as "no live row". The raise is filed ``unknown`` and retried.
+        # The stamp and chain-edge callers reach it before any write of their
+        # own. The tail mirror reaches it after its enqueue, so there a retry
+        # re-runs the derive and re-enqueues (the enqueue dedup serves an
+        # in-flight hop 2). Only a new enum member can reach this line.
+        # ⛔ IN-04 (round 4): not a ``ValueError``. The composite MTM ``try``'s
+        # F-5 ``except ValueError`` would otherwise catch this refusal from inside
+        # the first ``_stamp_failed`` and stamp again under a misattributed cause.
+        raise MarkerStateNotLoggable(
+            f"{site}: _log_marker_not_confirmed has no arm for {state!r}; add "
+            "one that names what the state records"
+        )
 
 
 async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
@@ -2711,9 +3197,23 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # below is hop 1's oracle, and it rides the chain edge on the follow-on job's
     # metadata to become hop 2's. Neither is a column the bridge can write.
     #
-    # ⛔ FAIL-SAFE DIRECTION, unchanged: an unreadable row, no row, or a row that
-    # is not terminal-success all leave this None, and None takes the LOUD
-    # destructive path everywhere it is consulted. Never fail toward suppression.
+    # ⛔ FAIL-SAFE DIRECTION, unchanged: no row, or a row that is not
+    # terminal-success, leaves this None, and None takes the LOUD destructive
+    # path everywhere it is consulted. Never fail toward suppression.
+    #
+    # ⛔ D-09, extended 2026-09-26 (round 2, SFH-R2-02): a read that FAILED is not
+    # an answer, here exactly as at the marker re-reads. Until then a failed
+    # entry read left this None too, so one gateway blip before the crawl sent a
+    # funded account down the destructive path at both hops, logged only at
+    # WARNING. The read now goes through ``db_read_with_retry``. If it still
+    # fails, the job fails TRANSIENT (``RefreshMarkerRereadUnavailable``) BEFORE
+    # any crawl or write, so the retry costs one queue round trip and no work.
+    # A DEFINITIVE answer (no row) keeps its meaning above.
+    # ⚠️ The retry reads a row the SQL bridge may already have moved. A plain
+    # ``complete`` row is rewritten to ``computing`` on the ``failed_retry``
+    # transition, so the retry's snapshot is not terminal-success and the
+    # refresh runs unprotected. This protects ``complete_with_warnings`` / warned
+    # rows only. See the WR-01 note above ``MarkerLiveState``.
     #
     # ⚠️ RESIDUAL WINDOW, stated rather than hidden: the fan-out enqueues this
     # job in SQL, so the earliest oracle Python can take is here — a sibling
@@ -2745,15 +3245,55 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 return dict(row) if isinstance(row, dict) else {}
 
             try:
-                _entry_row = await db_execute(_read_entry_publish_state)
-            except Exception as _entry_exc:  # noqa: BLE001
-                logger.warning(
+                _entry_row = await db_read_with_retry(_read_entry_publish_state)
+            except Exception as _entry_exc:  # noqa: BLE001 — reported, then re-raised
+                # The preflight opened the exchange and the handler's
+                # ``finally: aclose_exchange`` owns only the crawl's ``try`` below,
+                # which neither raise in this arm reaches. Close it here first,
+                # the same way, so BOTH exits release it.
+                try:
+                    await aclose_exchange(ctx.exchange)
+                except Exception:  # noqa: BLE001  # pragma: no cover
+                    pass
+                # ⛔ SFH-R3-02: a programming error is a bug in this read, not a
+                # database answer. It propagates as itself, so
+                # ``classify_exception`` files it ``unknown`` under its own
+                # class and text, exactly as it does anywhere else in the
+                # worker. Relabelling it TRANSIENT would report a code defect as
+                # "the database was busy" on every attempt.
+                # ⚠️ It is still reported here first. ``dispatch`` does not log
+                # a handler's exception and the worker loop logs a failed job at
+                # WARNING, so without this pair a code defect in the read would
+                # reach Sentry as no event at all.
+                if isinstance(_entry_exc, _READ_PROGRAMMING_ERRORS):
+                    logger.error(
+                        "derive_broker_dailies: the pre-refresh publish-state read "
+                        "for strategy %s on marked compute_job %s raised a "
+                        "programming error (%s). No crawl ran and nothing was "
+                        "written; the error propagates unchanged.",
+                        strategy_id, job.get("id"), _read_failure_text(_entry_exc),
+                    )
+                    _capture_read_failure(_entry_exc, job_id=job.get("id"))
+                    raise
+                logger.error(
                     "derive_broker_dailies: could not read the pre-refresh publish "
-                    "state for strategy %s (%s) — this refresh takes the LOUD "
-                    "terminal-failure path at BOTH hops.",
-                    strategy_id, _entry_exc,
+                    "state for strategy %s on marked compute_job %s (%s). No "
+                    "crawl ran and nothing was written; failing the job "
+                    "TRANSIENT so the queue can retry it.",
+                    # I-R4-4 (round 4): the scrubbed, bounded form, as every
+                    # newer line in this code uses.
+                    strategy_id, job.get("id"), _read_failure_text(_entry_exc),
                 )
-                _entry_row = {}
+                _capture_read_failure(_entry_exc, job_id=job.get("id"))
+                # SFH-R3-02 / IN-01: ``last_error`` is ``str()`` of this
+                # exception, which never includes ``__cause__``, so the failure
+                # kind is written into the text itself.
+                raise RefreshMarkerRereadUnavailable(
+                    "derive_broker_dailies: the pre-refresh publish-state read "
+                    "failed for a marked refresh, so the job stopped before any "
+                    "crawl and wrote nothing "
+                    f"({_read_failure_text(_entry_exc)})"
+                ) from _entry_exc
             _entry_status = _entry_row.get("computation_status")
             if isinstance(_entry_status, str):
                 _refresh_publish_status = _entry_status
@@ -2882,9 +3422,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # (cash_settlement + mtm_daily_returns) so a stale row never outlives an
         # authoritative-NULL terminal write — mirroring the MTM heal idiom. This is
         # DEFENSE-IN-DEPTH; the Plan-02 read gate is the primary guarantee. A heal
-        # failure must NEVER mask the terminal stamp that invoked it — swallow + warn.
+        # failure must NEVER mask the terminal stamp that invoked it — report it at
+        # ERROR and never raise (rounds 5 and 6, see below).
         # Strategy-mode only (key-mode owns no per-strategy series row).
-        async def _heal_delete_basis_series() -> None:
+        async def _heal_delete_basis_series(*, cause: str) -> None:
             if is_key_mode:
                 return
             from services.basis_series import persist_basis_series
@@ -2897,14 +3438,34 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     ctx.supabase, strategy_id, basis="mark_to_market", result=None,
                 )
 
+            # ⛔ SFH-R5-03 (round 5): the heal runs only AFTER the loud stamp
+            # has landed with the cause in ``computation_error``, so a failure
+            # here loses no cause and is NOT raised as transient: a retry would
+            # re-crawl a job whose stamp already landed. It is still logged at
+            # ERROR with the scrubbed failure and captured once, because a heal
+            # that never succeeds leaves stale series rows behind and a WARNING
+            # reached no one.
+            # ⛔ R6-01 (round 6): a ``_READ_PROGRAMMING_ERRORS`` member is NOT
+            # re-raised either. It was in round 5, and the ``unknown`` retry
+            # un-published the stamp that had just landed (see the block
+            # comment above ``_READ_PROGRAMMING_ERRORS``). It is labelled on the
+            # ERROR line instead, and the line carries the stamp's ``cause``,
+            # because the capture and ``last_error`` do not.
             try:
                 await db_execute(_delete_both)
-            except Exception as _heal_exc:  # noqa: BLE001
-                logger.warning(
+            except Exception as _heal_exc:  # noqa: BLE001 — reported, never raised
+                logger.error(
                     "derive_broker_dailies: series heal-delete failed for strategy "
-                    "%s (terminal stamp already applied): %s",
-                    strategy_id, _heal_exc,
+                    "%s on compute_job %s (terminal stamp already applied, the job "
+                    "stays permanent): %s%s. The stale series rows stay until a "
+                    "derive succeeds. The stamp's cause: %s",
+                    strategy_id, job.get("id"), _read_failure_text(_heal_exc),
+                    ", a programming error"
+                    if isinstance(_heal_exc, _READ_PROGRAMMING_ERRORS)
+                    else "",
+                    cause,
                 )
+                _capture_read_failure(_heal_exc, job_id=job.get("id"))
 
         # P72 — fail-loud analytics stamp, now VENUE-NEUTRAL (hoisted out of the deribit
         # arm + renamed; the arm keeps calling this SAME helper for its other permanent
@@ -2951,6 +3512,26 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             if is_key_mode:
                 return
             scrubbed = str(scrub_freeform_string(message))
+            # The handler's cause as every ERROR line below carries it:
+            # ``scrubbed`` plus the scrubbed detail. ``scrubbed`` alone is what
+            # ``last_error`` carries (round 4: hoisted so ``_stamp_io`` has it
+            # at every database call, not only on the marked path).
+            _cause = scrubbed + (
+                f" | detail: {scrub_freeform_string(detail)}" if detail else ""
+            )
+            # ⛔ SFH-R4-01 (round 4): EVERY database read and write below goes
+            # through ``_stamp_io`` with these arguments. See its docstring.
+            _stamp_io_args: dict[str, Any] = {
+                "site": "derive_broker_dailies",
+                "strategy_id": strategy_id,
+                "job_id": job.get("id"),
+                "cause": _cause,
+                "scrubbed": scrubbed,
+            }
+            # The publish status a marked refresh held when its live row stopped
+            # protecting it. Set only on that path, and read after the loud
+            # stamp lands.
+            _lost_protection_of: str | None = None
             # ---- HONEST-01 / D-162-4 (strict): the detail/message SPLIT ------
             # `message` is the CURATED sentence and it is the only thing that
             # reaches `computation_error`, which renders verbatim in the wizard
@@ -3042,18 +3623,54 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # GRANTED, so an ordinary marked refresh pays one read on a path
                 # it was about to suppress anyway, and an unmarked derive pays
                 # nothing at all.
-                if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES and not await _refresh_marker_still_on_row(
-                    ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
-                ):
-                    logger.warning(
-                        "derive_broker_dailies: the refresh marker on compute_job "
-                        "%s has been RETRACTED — a user-initiated request was "
-                        "served by this job through the enqueue dedup, so nobody "
-                        "unwatched owns this failure. Taking the LOUD terminal "
-                        "path for strategy %s.",
-                        job.get("id"), strategy_id,
+                #
+                # ⛔ D-09, amended 2026-09-26 (orchestrator decision): a read that
+                # FAILED is not an answer, here exactly as at the composite site.
+                # Stamping loud on it turned one gateway blip into a funded
+                # account going dark on a refresh nobody watches. So nothing is
+                # written and the job fails TRANSIENT: the queue retries it and
+                # the retry re-reads the row. ⚠️ That preserves the publish state
+                # only for a ``complete_with_warnings`` / warned row. The bridge
+                # rewrites a plain ``complete`` row to ``computing`` on the
+                # ``failed_retry`` transition, so the retry's entry snapshot no
+                # longer protects it. See the WR-01 note above
+                # ``MarkerLiveState``. ``_stamp_io`` already logged the failed
+                # read at ERROR with the cause and reported it to Sentry. Every
+                # caller of this closure awaits it directly, and no handler
+                # between here and ``dispatch`` catches ``StampIOUnavailable``
+                # (traced in the 164.6.7 REVIEW-FIX, "Round 1 — single-key
+                # completion"; ``StampIOUnavailable`` is no ``ValueError``).
+                #
+                # ⛔ The CAUSE is logged at ERROR exactly where it is at risk,
+                # and nowhere else (round 3, orchestrator decision reconciling
+                # WR-01 with SFH-R3-01; round 4 closed the class, SFH-R4-01):
+                # - ANY database read or write of this closure failing: its
+                #   ``_stamp_io`` line carries the cause at ERROR, and the
+                #   ``StampIOUnavailable`` text carries it into
+                #   ``compute_jobs.last_error``;
+                # - a definitive "not marked" answer: the LOUD stamp below
+                #   un-publishes a row that was published, and once it has
+                #   landed that goes out at ERROR with its cause;
+                # - ``PRESENT``: D-15 protects the row and logs at WARNING only,
+                #   below. Nothing about it needs a person, so no Sentry event.
+                if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+                    _live_state = await _stamp_io(
+                        lambda: _read_refresh_marker_state(
+                            ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
+                        ),
+                        op=_STAMP_OP_MARKER_READ,
+                        **_stamp_io_args,
                     )
-                    existing_status = None
+                    if _live_state is not MarkerLiveState.PRESENT:
+                        _log_marker_not_confirmed(
+                            _live_state,
+                            site="derive_broker_dailies",
+                            job_id=job.get("id"),
+                            strategy_id=strategy_id,
+                            consequence="Taking the LOUD terminal path",
+                        )
+                        _lost_protection_of = existing_status
+                        existing_status = None
 
                 if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
 
@@ -3088,7 +3705,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             where="job_worker.run_derive_broker_dailies_job._upsert_error_only",
                         )
 
-                    await db_execute(_upsert_error_only)
+                    await _stamp_io(
+                        lambda: db_execute(_upsert_error_only),
+                        op=_STAMP_OP_ERROR_ONLY_WRITE,
+                        **_stamp_io_args,
+                    )
                     # ⛔ And NO _heal_delete_basis_series(). This is the half that
                     # is easy to miss: that helper DELETEs both the cash_settlement
                     # and mark_to_market series rows, so leaving it in place would
@@ -3103,7 +3724,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         strategy_id,
                     )
                     return
-            # ---- end D-15; everything below is BYTE-UNCHANGED -----------------
+            # ---- end D-15; everything below is BYTE-UNCHANGED except the -------
+            # ``_stamp_io`` wrapper around the write and the landed-stamp ERROR
+            # line after it (Phase 164.6.7 round 4).
 
             def _upsert() -> None:
                 _derive_failed_payload: dict[str, Any] = {
@@ -3137,7 +3760,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     where="job_worker.run_derive_broker_dailies_job._upsert",
                 )
 
-            await db_execute(_upsert)
+            await _stamp_io(
+                lambda: db_execute(_upsert), op=_STAMP_OP_LOUD_WRITE, **_stamp_io_args
+            )
+            # Logged only once the stamp has LANDED (round 4), so a failed write
+            # carries its cause on one ERROR line, ``_stamp_io``'s, not two.
+            if _lost_protection_of is not None:
+                logger.error(
+                    "derive_broker_dailies: stamped strategy %s FAILED over its "
+                    "%s row, because compute_job %s no longer protects it — %s",
+                    strategy_id, _lost_protection_of, job.get("id"), _cause,
+                )
             # D3 SECONDARY: single choke point — every terminal-failure stamp that flows
             # through this helper (parse-malformed + the deribit arm's ledger/scope/
             # valuation failures) heals both series rows.
@@ -3162,7 +3795,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # dropped the heal from the deribit arm, which is CR-02 with the sign
             # flipped.
             if heal_series:
-                await _heal_delete_basis_series()
+                await _heal_delete_basis_series(cause=_cause)
 
         # Per-strategy returns-denominator override (Zavara-only allocated capital).
         # ABSENT on every normal strategy (and in key-mode) → None → the unchanged NAV
@@ -5863,17 +6496,72 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # hop 2 — the hop that COMPILES THE FACTSHEET — a protection that no longer
     # describes anything, and hop 2 has no other way to learn the truth: it reads
     # this metadata and nothing else.
-    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE and not await _refresh_marker_still_on_row(
-        ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
-    ):
-        logger.warning(
-            "derive_broker_dailies: the refresh marker on compute_job %s has been "
-            "RETRACTED (a user-initiated request inherited this job through the "
-            "enqueue dedup) — the chain edge to %s carries NO marker and no "
-            "publish state, so hop 2 fails LOUDLY for strategy %s.",
-            job.get("id"), _csv_analytics_kind, strategy_id,
+    #
+    # ⛔ D-09 at the chain edge (orchestrator decision 2026-09-26, round 2 WR-02 /
+    # SFH-R2-04): a read that FAILED is not an answer here either. Dropping the
+    # marker on it enqueued a hop 2 the bridge can never protect, and the read
+    # failing after ``db_read_with_retry`` is a database-health signal that hop 2,
+    # claimed against the same database moments later, shares. So the job fails
+    # TRANSIENT BEFORE ``_enqueue_csv_analytics`` (a retry therefore never
+    # enqueues twice) and the marker stays on this row. Forwarding it unverified
+    # is ruled out: if it had in fact been retracted, that would suppress a
+    # failure somebody is watching. The cost is a re-crawl on retry. The worker
+    # already pays that on a transient (``run_stitch_composite_job``'s
+    # degraded-set divergence), and the writes above are upserts. If every retry
+    # fails, the bridge's branch (b-prime) keeps the factsheet published but
+    # stale, because the marker is still on this job.
+    # ⚠️ SFH-R3-04, the END STATE of that exhaustion: "stale" means a
+    # MIXED-GENERATION row, not an untouched one. By this line hop 1 has already
+    # written ``_prestamp_dq_flags`` (``data_quality_flags`` replaced wholesale,
+    # ``series_completeness`` and ``metrics_json_by_basis``) and persisted or
+    # healed the MTM series. Hop 2 never runs, so the headline ``metrics_json``
+    # is still the PREVIOUS hop 2's. The row stays published with hop 1's
+    # flags, verdict and by-basis values beside the previous hop 2's headline
+    # metrics. That is the same class as a protected hop-2 failure, which D-15
+    # already accepts, so it is not new harm. The upserts make the RETRY safe;
+    # they do not make the terminal state consistent. ⚠️ That holds while the
+    # row is ``complete_with_warnings`` or ``computation_warned``. A plain
+    # ``complete`` row is rewritten to ``computing`` by the bridge's branch (a)
+    # on the first ``failed_retry``, and is then un-published on exhaustion (see
+    # the block comment above ``MarkerLiveState``).
+    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
+        # SFH-R3-02: the sibling that also hands back the failed read's
+        # ``ExceptionClass: message``, so ``last_error`` says what failed.
+        _live_state_out, _read_failure_out = await _refresh_marker_live_state(
+            ctx.supabase,
+            job.get("id"),
+            LEDGER_REFRESH_SINGLE_KEY_SOURCE,
+            raise_programming_errors=True,
         )
-        _refresh_source_out = None
+        if _live_state_out is MarkerLiveState.READ_ERROR:
+            _log_marker_not_confirmed(
+                _live_state_out,
+                site="derive_broker_dailies",
+                job_id=job.get("id"),
+                strategy_id=strategy_id,
+                consequence=(
+                    f"Enqueueing NO chain edge to {_csv_analytics_kind}; failing "
+                    "the job TRANSIENT so the queue can retry it with the marker "
+                    "still on the row"
+                ),
+            )
+            raise RefreshMarkerRereadUnavailable(
+                "derive_broker_dailies: the live re-read of the refresh marker "
+                f"failed at the chain edge, so no {_csv_analytics_kind} follow-on "
+                f"was enqueued ({_read_failure_out})"
+            )
+        if _live_state_out is not MarkerLiveState.PRESENT:
+            _log_marker_not_confirmed(
+                _live_state_out,
+                site="derive_broker_dailies",
+                job_id=job.get("id"),
+                strategy_id=strategy_id,
+                consequence=(
+                    f"The chain edge to {_csv_analytics_kind} carries NO marker "
+                    "and no publish state, so a hop-2 failure is LOUD"
+                ),
+            )
+            _refresh_source_out = None
 
     def _enqueue_csv_analytics() -> Any:
         _payload: dict[str, Any] = {
@@ -5927,18 +6615,37 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # property must never be silent — that silence is the whole reason REUSE-01
     # survived review. Pinned by
     # tests/test_ledger_refresh_reuse_collision.py::TestMirrorDirection.
-    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE and not await _refresh_marker_still_on_row(
-        ctx.supabase, _tail_job_id, LEDGER_REFRESH_SINGLE_KEY_SOURCE
-    ):
-        logger.warning(
-            "derive_broker_dailies: the %s chain edge for strategy %s DEDUPED onto "
-            "an already-in-flight unmarked job (%s) — the refresh marker and "
-            "publish state were DISCARDED by enqueue_compute_job, so hop 2 runs "
-            "UNPROTECTED and a failure there un-publishes this strategy. The "
-            "protection is deliberately not laundered onto a job this refresh did "
-            "not create.",
-            _csv_analytics_kind, strategy_id, _tail_job_id,
+    #
+    # ⚠️ "DEDUPED onto an unmarked job" is a claim about a row that was READ. It
+    # is logged for OTHER_SOURCE only; every other non-present state names its
+    # own cause (SFH-02), and the loss is loud either way.
+    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
+        _tail_state = await _refresh_marker_still_on_row(
+            ctx.supabase, _tail_job_id, LEDGER_REFRESH_SINGLE_KEY_SOURCE
         )
+        if _tail_state is MarkerLiveState.OTHER_SOURCE:
+            logger.warning(
+                "derive_broker_dailies: the %s chain edge for strategy %s DEDUPED "
+                "onto an already-in-flight unmarked job (%s) — the refresh marker "
+                "and publish state were DISCARDED by enqueue_compute_job, so hop 2 "
+                "runs UNPROTECTED and a failure there un-publishes this strategy. "
+                "The protection is deliberately not laundered onto a job this "
+                "refresh did not create.",
+                _csv_analytics_kind, strategy_id, _tail_job_id,
+            )
+        elif _tail_state is not MarkerLiveState.PRESENT:
+            _log_marker_not_confirmed(
+                _tail_state,
+                site="derive_broker_dailies",
+                job_id=_tail_job_id,
+                strategy_id=strategy_id,
+                subject="enqueued job",
+                consequence=(
+                    f"The {_csv_analytics_kind} chain edge cannot be confirmed "
+                    "to carry the marker, so hop 2 may run UNPROTECTED and a "
+                    "failure there would un-publish this strategy"
+                ),
+            )
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
@@ -6189,8 +6896,54 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             row = getattr(res, "data", None) or {}
             return dict(row) if isinstance(row, dict) else {}
 
-        existing_row = await db_execute(_read_existing_failed_row)
-        existing_flags = dict(existing_row.get("data_quality_flags") or {})
+        # The handler's cause, as it is logged on every arm below that logs it
+        # at ERROR. ``scrubbed`` alone is what ``last_error`` carries.
+        _cause = scrubbed + (
+            f" | detail: {scrub_freeform_string(detail)}" if detail else ""
+        )
+        # ⛔ SFH-R4-01 (round 4): EVERY database read and write below goes
+        # through ``_stamp_io`` with these arguments. See its docstring.
+        _stamp_io_args: dict[str, Any] = {
+            "site": "stitch_composite",
+            "strategy_id": strategy_id,
+            "job_id": job.get("id"),
+            "cause": _cause,
+            "scrubbed": scrubbed,
+        }
+
+        # SFH-R2-02 sibling: the same 504-retried read as the marker re-read
+        # below, so one gateway blip does not replace this job's real failure
+        # with the read's exception.
+        #
+        # ⛔ SFH-R3-01 / WR-03 (round 3), closed as a CLASS in round 4
+        # (SFH-R4-01): a read that still FAILS (a 504 that outlasts the budget,
+        # or any other error on the first attempt) used to leave this closure as
+        # the READ's exception, so ``last_error`` named only the read and the
+        # curated ``message`` was logged nowhere. This is the first I/O of EVERY
+        # composite terminal stamp, marked or not. ``_stamp_io`` logs the cause
+        # at ERROR with the read's failure and fails the job TRANSIENT with the
+        # cause in its text. Nothing is written and nothing suppressed: the
+        # retry decides.
+        existing_row = await _stamp_io(
+            lambda: db_read_with_retry(_read_existing_failed_row),
+            op=_STAMP_OP_STATUS_READ,
+            **_stamp_io_args,
+        )
+        # SFH-R5-05 (round 5): ``data_quality_flags`` is ``jsonb``, so a
+        # non-object value is storable. ``dict()`` on it raised AFTER the read
+        # and BEFORE any write: a ``ValueError`` from inside the composite MTM
+        # ``try`` was caught by F-5's ``except ValueError`` and stamped a second
+        # time under the chain-break cause. So only an object is merged; any
+        # other value is dropped and the stamp lands once. Round 6 (R6-02): the
+        # drop is logged at ERROR with the job and captured once, not at
+        # WARNING, because the stamp's write destroys the value.
+        existing_flags: dict[str, Any] = _flags_object_or_dropped(
+            existing_row.get("data_quality_flags"),
+            site="stitch_composite",
+            strategy_id=strategy_id,
+            job_id=job.get("id"),
+            consequence="the failed stamp writes the composite markers without it.",
+        )
         _existing_status = existing_row.get("computation_status")
         existing_status: str | None = (
             _existing_status if isinstance(_existing_status, str) else None
@@ -6248,10 +7001,66 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # failed refresh silently un-publishes a funded account. It is
         # deliberately a DIFFERENT string from the single-key arm's, so the two
         # guards cannot cross-fire.
-        if (
+        _honour_marker = (
             _job_source == "ledger-refresh-composite"
             and existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES
-        ):
+        )
+        # ⛔ Phase 164.6.7 / D-05: `job` is the CLAIM-TIME copy of the row. A
+        # user's resync that the enqueue dedup handed THIS job after the claim
+        # records that by retracting the marker on the LIVE row, and the live row
+        # is the only place that write is visible. So the row is re-asked here,
+        # exactly as the single-key honour sites do; without it this closure
+        # suppresses a failure somebody is watching while the SQL bridge reads
+        # the same job as unprotected.
+        #
+        # ⚠️ It can only NARROW: the read runs only when protection would be
+        # granted, and every DEFINITIVE answer other than "still marked" (a
+        # retraction, another source, no row, no id) takes the LOUD path.
+        #
+        # ⛔ D-09 (orchestrator decision 2026-09-25): a read that FAILED is not an
+        # answer. Stamping loud on it turned one gateway blip into a funded
+        # composite going dark on a refresh nobody watches. So nothing is written
+        # and the job fails TRANSIENT: the queue retries it, and the retry
+        # re-reads the row. ⚠️ That keeps the factsheet live only for a
+        # ``complete_with_warnings`` / warned row. The bridge rewrites a plain
+        # ``complete`` row to ``computing`` on the ``failed_retry`` transition,
+        # so the retry's ``_read_existing_failed_row`` answers ``computing`` and
+        # the guard does not arm. See the WR-01 note above ``MarkerLiveState``.
+        # ``_stamp_io`` already logged the failed read at ERROR with the cause
+        # and reported it to Sentry. Nothing is suppressed either — no
+        # error-only write happens.
+        #
+        # ⛔ The CAUSE is logged at ERROR exactly where it is at risk, and
+        # nowhere else (round 3, orchestrator decision reconciling WR-01 with
+        # SFH-R3-01; round 4 closed the class, SFH-R4-01):
+        # - ANY database read or write of this closure failing: its
+        #   ``_stamp_io`` line carries the cause at ERROR, and the
+        #   ``StampIOUnavailable`` text carries it into ``compute_jobs.last_error``;
+        # - a definitive "not marked" answer: the LOUD stamp below takes a live
+        #   row down, and once it has landed that goes out at ERROR with its cause;
+        # - ``PRESENT``: D-15 protects the row and logs at WARNING only, below.
+        #   Nothing about it needs a person, so no Sentry event.
+        _lost_protection_of: str | None = None
+        if _honour_marker:
+            _live_state = await _stamp_io(
+                lambda: _read_refresh_marker_state(
+                    supabase, job.get("id"), LEDGER_REFRESH_COMPOSITE_SOURCE
+                ),
+                op=_STAMP_OP_MARKER_READ,
+                **_stamp_io_args,
+            )
+            if _live_state is not MarkerLiveState.PRESENT:
+                _log_marker_not_confirmed(
+                    _live_state,
+                    site="stitch_composite",
+                    job_id=job.get("id"),
+                    strategy_id=strategy_id,
+                    consequence="Taking the LOUD terminal path",
+                )
+                _lost_protection_of = existing_status
+                _honour_marker = False
+
+        if _honour_marker:
 
             def _upsert_error_only() -> None:
                 _composite_error_only_payload: dict[str, Any] = {
@@ -6287,7 +7096,11 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     where="job_worker.run_stitch_composite_job._upsert_error_only",
                 )
 
-            await db_execute(_upsert_error_only)
+            await _stamp_io(
+                lambda: db_execute(_upsert_error_only),
+                op=_STAMP_OP_ERROR_ONLY_WRITE,
+                **_stamp_io_args,
+            )
             logger.warning(
                 "stitch_composite: a MARKED maintenance refresh failed for "
                 "strategy %s whose analytics row is %s — recording the error "
@@ -6324,7 +7137,17 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 where="job_worker.run_stitch_composite_job._upsert",
             )
 
-        await db_execute(_upsert)
+        await _stamp_io(
+            lambda: db_execute(_upsert), op=_STAMP_OP_LOUD_WRITE, **_stamp_io_args
+        )
+        # Logged only once the stamp has LANDED (round 4), so a failed write
+        # carries its cause on one ERROR line, ``_stamp_io``'s, not two.
+        if _lost_protection_of is not None:
+            logger.error(
+                "stitch_composite: stamped strategy %s FAILED over its %s row, "
+                "because compute_job %s no longer protects it — %s",
+                strategy_id, _lost_protection_of, job.get("id"), _cause,
+            )
 
     # 1. Members ORDER BY seq (Phase 85). owner_id in the row is advisory — the
     # authoritative owner is re-read from the api_keys row inside preflight, never
@@ -7763,7 +8586,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     if degraded_members:
         member_warned = True
 
-    def _read_existing_flags() -> dict[str, Any]:
+    def _read_existing_flags() -> Any:
         res = (
             supabase.table("strategy_analytics")
             .select("data_quality_flags")
@@ -7772,9 +8595,20 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             .execute()
         )
         row = getattr(res, "data", None) or {}
-        return dict(row.get("data_quality_flags") or {})
+        return row.get("data_quality_flags")
 
-    existing_flags = await db_execute(_read_existing_flags)
+    # R6-05 (round 6): the success path reads the same ``jsonb`` column as the
+    # failed stamp (R6-02), and ``dict()`` on a non-object value raised here at
+    # persist on EVERY re-stitch, so the job retried and ended ``failed_final``
+    # with no curated stamp. The same guard now drops the value loudly, and
+    # this write replaces it with the composite markers.
+    existing_flags = _flags_object_or_dropped(
+        await db_execute(_read_existing_flags),
+        site="stitch_composite",
+        strategy_id=strategy_id,
+        job_id=job.get("id"),
+        consequence="the composite persist writes its markers without it.",
+    )
     # MERGE (read-modify-write) — preserve every existing flag (e.g. a prior derive's
     # benchmark_unavailable), add the composite coverage-mask fields.
     merged_flags: dict[str, Any] = dict(existing_flags)

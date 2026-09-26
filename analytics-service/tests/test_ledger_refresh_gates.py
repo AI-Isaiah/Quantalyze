@@ -466,7 +466,8 @@ _FUNCTION_BODY_SENTINEL: Final[str] = "enqueue_compute_job("
 # act D-15 exists to withhold. Prefixed with `await ` deliberately: the bare
 # name also appears at offset 5480 in the closure's own reasoning, and the
 # prefixed call form occurs exactly once, at the tail.
-_GUARD_REGION_SENTINEL: Final[str] = "await _heal_delete_basis_series()"
+# Round 6 (R6-01): the call carries the stamp's cause since the heal logs it.
+_GUARD_REGION_SENTINEL: Final[str] = "await _heal_delete_basis_series(cause=_cause)"
 _COMPOSITE_PRELUDE_SENTINEL: Final[str] = "LANGUAGE plpgsql"
 _COMPOSITE_BODY_SENTINEL: Final[str] = "enqueue_compute_job("
 # The composite closure's merged-flags payload. Chosen over `on_conflict=` and

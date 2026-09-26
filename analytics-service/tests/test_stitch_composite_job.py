@@ -161,7 +161,7 @@ class _FakeQuery:
         self._conflict = on_conflict
         return self
 
-    def execute(self) -> SimpleNamespace:
+    def execute(self) -> SimpleNamespace | None:
         if self._op == "upsert":
             self.fake.upserts.append((self.table, self._payload, self._conflict))
             self.fake.call_order.append(("upsert", self.table, self._payload))
@@ -175,6 +175,12 @@ class _FakeQuery:
         if self.table == "strategies":
             return SimpleNamespace(data=dict(self.fake.strategy_row))
         if self.table == "strategy_analytics":
+            # Phase 164.6.7 (SFH-R2-02 sibling): each queued exception is raised
+            # by one select, in order, before the row is served, so a test can
+            # drive a gateway 504 through `_stamp_failed`'s flags/status read.
+            self.fake.analytics_reads += 1
+            if self.fake.analytics_read_raises:
+                raise self.fake.analytics_read_raises.pop(0)
             # `computation_status` is served alongside the flags because
             # `_stamp_failed` reads both columns in ONE select. It defaults to
             # None, which is NOT in the terminal-success set, so every
@@ -186,7 +192,37 @@ class _FakeQuery:
                     "computation_status": self.fake.existing_status,
                 }
             )
+        if self.table == "compute_jobs":
+            # Counted so a test can prove the live re-read never ran (IN-05: the
+            # read may only NARROW a protection the snapshot already granted).
+            self.fake.compute_jobs_reads += 1
+        if self.table == "compute_jobs" and self.fake.live_job_read_raises:
+            # D-05 fail-safe arm: the live re-read itself errors.
+            raise RuntimeError("simulated compute_jobs read failure")
+        if (
+            self.table == "compute_jobs"
+            and self.fake.live_job_metadata is not _LIVE_JOB_ABSENT
+            and self.fake.live_job_id is not None
+            and ("id", self.fake.live_job_id) in self._eqs
+        ):
+            # Phase 164.6.7 / D-05: the LIVE job row, as `_stamp_failed` re-reads
+            # it before honouring a refresh marker. Served only for the seeded
+            # id, so a fix that re-reads the wrong row gets no row and takes
+            # the loud path, which the post-claim tests then catch.
+            return SimpleNamespace(data={"metadata": self.fake.live_job_metadata})
+        if self.table == "compute_jobs" and self._maybe:
+            # postgrest 2.31's `maybe_single().execute()` returns None ITSELF for
+            # zero rows, not a response carrying `data=None`. Served in that real
+            # shape so a helper that reads `res.data` directly fails here too.
+            return None
         return SimpleNamespace(data=None)
+
+
+class _LiveJobAbsent:
+    """Sentinel: the fake has NO live ``compute_jobs`` row to serve."""
+
+
+_LIVE_JOB_ABSENT = _LiveJobAbsent()
 
 
 class _FakeSupabase:
@@ -198,8 +234,34 @@ class _FakeSupabase:
         existing_flags: dict[str, Any] | None = None,
         existing_status: str | None = None,
         raise_on_rpc: str | None = None,
+        live_job_metadata: object = _LIVE_JOB_ABSENT,
+        live_job_id: str | None = None,
+        live_job_read_raises: bool = False,
+        analytics_read_raises: list[BaseException] | None = None,
     ) -> None:
         self.members = members
+        # Exceptions the `strategy_analytics` select raises, one per read, before
+        # it answers. Default empty keeps every other construction unchanged.
+        self.analytics_read_raises: list[BaseException] = list(
+            analytics_read_raises or []
+        )
+        # How many `strategy_analytics` selects the handler issued.
+        self.analytics_reads = 0
+        # Phase 164.6.7 / D-05: the live `compute_jobs.metadata` for
+        # `live_job_id`, which `_stamp_failed` re-reads before it honours a
+        # refresh marker (the claim-time snapshot cannot see a retraction that
+        # lands after the claim). The default is ABSENT: a `compute_jobs`
+        # `maybe_single` select then answers "no row", in postgrest's own shape
+        # (None), so every construction that does not pass it takes the no-row
+        # arm.
+        self.live_job_metadata = live_job_metadata
+        self.live_job_id = live_job_id
+        # When True, the `compute_jobs` select raises instead of answering, so a
+        # test can prove an unreadable live row fails toward the LOUD path.
+        # Default False keeps every other construction unchanged.
+        self.live_job_read_raises = live_job_read_raises
+        # How many `compute_jobs` selects the handler issued.
+        self.compute_jobs_reads = 0
         # The strategy_analytics row's CURRENT computation_status, as
         # `_stamp_failed`'s non-destructive guard reads it. Defaults to None —
         # i.e. no prior row — which routes to the LOUD destructive stamp, so
