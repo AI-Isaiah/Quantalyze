@@ -469,6 +469,29 @@ set into the marker, so the set the lane replays shrinks back toward zero. Refre
 therefore periodic upkeep, **not** a per-migration founder action: between regenerations a new
 migration simply replays on the lane.
 
+⭐ **AUTOMATED 2026-09-26 (Phase 164.9.5 AUTOREDUMP).** The procedure above now runs by itself.
+After `supabase-migrate.yml`'s `apply` job succeeds on `main`, the `redump-dump` job re-dumps
+PRODUCTION read-only with the same credential set as `apply`, and the `redump-pr` job proposes
+the result as ONE pull request from the fixed branch `automation/baseline-redump`, reused across
+applies. The logic lives in `scripts/baseline-redump.mjs`: `--gate-dump` runs in the credentialed
+job, `--compose`, `--check-bot-branch` and `--open-or-edit-pr` in the write-token job, so the
+PROD credential and the write token never share a job. It REFUSES, and proposes nothing, on any
+of: a hit of the five-class scan above (only the count and line numbers are printed, never the
+line); a gitleaks finding over the dump (explicit `.gitleaks.toml`, redacted, inline allow
+comments ignored, a missing or empty dump refused rather than read as clean); a NUL byte, a
+`SET client_encoding` count other than one, or a home-directory path; zero tables or any data
+statement; a marker not taken from the tree of the applied merge; a red currency, content-drift
+or staleness gate on the composed tree; the skip trailer in the commit message or the PR text;
+and a commit on the bot branch that the bot did not author. It writes only the six paths PR #864
+changed (the dump, the marker, this file, `CHANGELOG.md`, `VERSION`, `package.json`), with
+measured values only. It never writes the "what it adds" column; the PR body asks the reviewer
+to add it. ⛔ **It never merges.** Its CI runs wait for a human to click
+**Approve workflows to run**, and because branch protection is off, a merge with zero completed
+checks is possible: read each head-SHA run's conclusion before merging. When the dump and marker
+are byte-identical to the committed pair, it opens nothing and prints a `::notice::` instead.
+The manual procedure above REMAINS the fallback, for a refusal that needs a human reading of the
+dump, or when the automation is unavailable.
+
 ⚠️ **SP-M03 — the CLAIM used to exceed the COMMAND.** The certification above names five
 classes (DSN, `\connect`, `ALTER DATABASE`, JWT, project ref); this grep matched only three
 of them. A future regeneration carrying a `\connect` line or a JWT would have passed the
