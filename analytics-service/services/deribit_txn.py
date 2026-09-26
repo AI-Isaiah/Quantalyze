@@ -679,10 +679,14 @@ def describe_unclassified_row(
         else:
             counts = []
             for sibling_type in _SIBLING_TYPES:
+                # SFH-06 (Phase 168 review): a non-Mapping entry is skipped PER
+                # ROW (the crawl hands the USD twin the unfiltered page), so one
+                # bad row cannot blank the whole census via the except below.
                 n = sum(
                     1
                     for other in rows
                     if other is not row
+                    and isinstance(other, Mapping)
                     and other.get("instrument_name") == instrument
                     and str(other.get("type", "")).strip().lower() == sibling_type
                 )

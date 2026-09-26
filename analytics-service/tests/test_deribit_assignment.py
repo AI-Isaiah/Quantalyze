@@ -794,3 +794,25 @@ def test_smoothed_e2e_short_put_assigned_ingests_flat(monkeypatch: Any) -> None:
         {"2026-01-15": -0.01, "2026-01-16": -0.01, "2026-01-17": 0.03}, abs=1e-9
     )
     assert sum(got.values()) == pytest.approx(0.04 - 0.03, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Round-1 review fixes (168-REVIEW.md, 168-REVIEW-SFH.md).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("twin_name,twin", TWINS, ids=[t[0] for t in TWINS])
+def test_sfh06_one_non_mapping_row_does_not_blank_the_refusal_evidence(
+    twin_name: str, twin: Callable[[list[dict[str, Any]]], Any]
+) -> None:
+    """SFH-06: the crawl hands the USD twin the unfiltered page, so a batch can
+    hold a non-Mapping entry. The refusal's evidence (the census this phase's
+    method relies on) must survive it: one bad row is skipped in the census, it
+    does not replace the whole shape with `<unrenderable: ...>`."""
+    rows: list[Any] = _indexed(_census_rows()) + [42, _sibling("delivery")]
+    with pytest.raises(LedgerValuationError) as exc:
+        twin(rows)
+    msg = str(exc.value)
+    assert _ASSIGNMENT_CONTESTED_PHRASE in msg, f"{twin_name}: {msg}"
+    assert "<unrenderable" not in msg, msg
+    assert "delivery=1" in msg, msg
