@@ -1297,6 +1297,20 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phases 169.1 ZOOMKPIS, 169.2 BENCHFRESH, 169.3 SMALLFIXES and 169.4 ALLOCTRUTH inserted after Phase 169 on 2026-09-26 (via `/gsd-phase --insert`; founder decision 2026-09-26: one logical topic per phase, one reviewable PR each). Phase 169 PAGETRUTH narrowed to 169 FACTSHEETTRUTH (`/gsd-phase --edit`). The already-checked plans were moved by hand, not re-planned (169 D-37). Execution order is 169.2 and 169.3, then 169, then 169.4, then 169.1, NOT the numeric order: 169 needs 169.2 (and 167.1.2 PR C and 167.2.1), 169.4 needs 169 and 169.2, and 169.1 needs 169 and 169.4.
 - Phase 169 edited: edited fields: title, goal, depends_on, success_criteria, plans (narrowed to FACTSHEETTRUTH at the 2026-09-26 split, 169 D-37)
 - Phase 169.4.1 OGSHARPE inserted after Phase 169.4 on 2026-09-26 (via `/gsd-phase --insert`; gsd-tools numbered it 169.4.1). Split from Phase 169 (founder decision 2026-09-26, Option A after 169 plan-check round 3): the OG share card's Sharpe edit, which needs Phase 166.2, moved out of 169-01 so Phase 169 no longer waits on 166.2. Depends on 166.2 and 169.
+- Phase 164.6.6 edited: edited fields: goal, success_criteria (criterion 3 split out to 164.6.8 OUTAGEALERT, founder decision 2026-09-26: one topic per phase)
+- Phase 164.6.8 inserted after Phase 164.6.6: OUTAGEALERT, split from 164.6.6 criterion 3 by founder decision 2026-09-26 (one topic per phase); owns MT5-PROBER-WEDGE-CALIBRATION-01 (routed by PR #863)
+- Phase 170 edited: edited fields: title (PAGECOPY → LAYOUT), goal, success_criteria (criteria 2, 3, 4, 6 split out to 170.1 COPY, founder decision 2026-09-26: one topic per phase)
+- Phase 170.1 inserted after Phase 170: COPY, split from 170 criteria 2, 3, 4, 6 (plus its own copy of criterion 7) by founder decision 2026-09-26 (one topic per phase)
+- Phase 165 edited: title (DEPS → ACTIONSDEPS), goal, success_criteria: three-way split by ecosystem in the verified order, founder decision 2026-09-26 (one topic per phase); replaces the declined PYDEPS/JSDEPS split
+- Phase 165.1 inserted after Phase 165: PIPDEPS, the pandas prerequisite commit + #685 (now #755), split from 165 by founder decision 2026-09-26
+- Phase 165.2 inserted after Phase 165.1: NPMDEPS, #686 (now #836), #645, #646, #614 and #606 closures, [165-NIGHTLY-AUDIT-RED], zero-open close criterion, split from 165 by founder decision 2026-09-26
+- Phase 164.6.8 edited: owns MT5-SWITCH-WEDGE-CAUSE-01 (moved from 164.6.6, same next-wedge capture as the calibration item); #863-side re-homing deferred until #863 merges
+- Phase 164.9.3 inserted after Phase 164.9.2: CLAIMPAIR, a due failed_retry job plus a pending twin of the same (kind, allocator) raises 23505 in every claim entry point (latent; measured on the pg-lane 2026-09-26); owns [164.9.3-CLAIM-PAIR-23505]; orchestrator decision
+- Phase 164.9.4 inserted after Phase 164.9.3: CIOFFMUTEX, python and e2e-seeded off the shared-TEST advisory lock (36 and 28 min of mutex wait on run 36229959820); owns [164.9.4-CI-MUTEX-QUEUE]; founder decision
+- Phase 164.9.5 inserted after Phase 164.9.4: AUTOREDUMP, the baseline is re-dumped and proposed automatically after a PROD migration apply; security-sensitive workflow; owns [164.9.5-MANUAL-BASELINE-REDUMP]; founder decision
+- Phase 164.9.3.1 inserted after Phase 164.9.3: FANINGRAPH, the stranded fan-in child, the match_decisions cascade 23505 and the 40P01 diamond deadlock (items 1-3 of 164.5.2's routed list); owns [164.9.3.1-FANIN-GRAPH-RESIDUALS]; founder decision 2026-09-26 ("Re-route, don't start"); booked under the new-phase freeze, NOT started
+- Phase 164.9.3 edited: scope widened to the (kind, api_key_id) claim wedge, item 4 of 164.5.2's routed list, and to all four claim partitions; founder decision 2026-09-26
+- Phase 164.9.2 criterion 4 recorded 2026-09-26: preflight 36235362126 success, restore 36242946174 success (attempt 36237060668 refused by the activity gate); closes Phase 164.9 criterion 8 and [164.9-CRIT8-RESTORE-DISPATCH-RECORD]
 
 ### Decisions
 
