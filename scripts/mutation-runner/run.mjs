@@ -975,7 +975,29 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //                own arm first.`, exit 0. Per-file line:
 //                `test_cron_runs_rls.sql: sections 3 / judged 3 / annotated 3 /
 //                waived 0 / biting 3`. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 50;
+//
+// ⭐ RE-DERIVED 2026-09-25 (Phase 167.1.2 ACCOUNTTRUTH, plan 03, PR B) — the
+//                arrival of supabase/tests/test_api_keys_account_identity.sql,
+//                the gate for migration 20260925120000 (the duplicate marker,
+//                the departed-history flag and its owner RPC, the reconnect
+//                named refusal; 24 arms), moving FILES_FLOOR 50 -> 51 and the
+//                denominator 77 -> 78. The paired ARMS_FLOOR move (449 -> 474)
+//                is in the block below.
+//                MEASURED via ONE full lane run with no file edited during it,
+//                constants still at 50 / 449 (the stale-low direction the
+//                runner cannot see), `node scripts/mutation-runner/run.mjs`:
+//                `scope: FULL 51/51 annotated files`, `coverage: files 51/78`,
+//                `arms: 474/474/0`, `biting: 474`, `lane-invocations: 474 …
+//                plus 51 baseline / 51 restore leg(s)` (the two independent
+//                tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron
+//                AVAILABLE`, `unreachable: 27`, `✅ No defects. Every annotated
+//                arm bit its own arm first.`, exit 0. Per-file line:
+//                `test_api_keys_account_identity.sql: sections 24 / judged 24 /
+//                annotated 24 / waived 0 / biting 24`. The stale-low direction
+//                was observed in src/__tests__/mutation-runner-floors.test.ts
+//                before this edit: `RATCHET STALE: 51 of 78 gate files are now
+//                annotated but FILES_FLOOR is still 50.` WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 51;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2301,7 +2323,31 @@ export const FILES_FLOOR = 50;
 //    sections 32 / judged 32 / annotated 32 / waived 0 / biting 32`,
 //    `test_cron_runs_rls.sql: sections 5 / judged 5 / annotated 5 / waived 0 /
 //    biting 5`.
-export const ARMS_FLOOR = 449;
+//
+// ⭐ RE-DERIVED 2026-09-25 (Phase 167.1.2 ACCOUNTTRUTH, plan 03, PR B): 449 ->
+//    474. TWENTY-FIVE new arms: all 24 of the NEW
+//    supabase/tests/test_api_keys_account_identity.sql (ACCT-a..j, ACCT-s,
+//    ACCT-f/f2/g, HIST-* and RECON-*, against migration 20260925120000), plus
+//    arm 6f CCXT in the already-annotated
+//    supabase/tests/test_api_keys_venue_identity_uniq.sql (7 -> 8: a second
+//    live okx row on one account id is refused, and admitted once the first is
+//    disconnected). FILES_FLOOR moves 50 -> 51 in the block above.
+//    MEASURED per file first, each a narrowed `--file` run with every arm
+//    `RED (identity ok)`: `arms: 24/24/0` and `arms: 8/8/0`, both `No defects
+//    in the narrowed scope.` Then ONE full lane run with no file edited during
+//    it and this constant still at 449, `node scripts/mutation-runner/run.mjs`:
+//    `scope: FULL 51/51 annotated files`, `coverage: files 51/78`, `arms:
+//    474/474/0`, `biting: 474`, `lane-invocations: 474` (the two independent
+//    tallies AGREE, plus 51 baseline / 51 restore legs), `lane-blocked: 0
+//    file(s)`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27 file(s)`,
+//    `per-arm lane time: mean 1.7s over 474 arm run(s)`, `✅ No defects. Every
+//    annotated arm bit its own arm first.`, exit 0. WAIVED_CEILING stays 0.
+//    RE-MEASURED 2026-09-26 after merging origin/main (Phase 164.9.1, PR #860,
+//    which moved no arm): one full lane run, tree frozen, constants at 51 /
+//    474: `scope: FULL 51/51`, `coverage: files 51/78`, `arms: 474/474/0`,
+//    `biting: 474`, `lane-invocations: 474 … plus 51 baseline / 51 restore
+//    leg(s)`, `✅ No defects.`, exit 0.
+export const ARMS_FLOOR = 474;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

@@ -990,8 +990,17 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // and `stepsSeen` 460 -> 464. FOUR new arms: W/deadlock in EACH ledger
     // gate, and ANON 2 and USER 2 in test_cron_runs_rls.sql. Each carries ONE
     // `edit` step with a `find`, so both pins move by four.
-    expect(armsSeen).toBe(449);
-    expect(stepsSeen).toBe(464);
+    // ⭐ CURRENCY 2026-09-25 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): `armsSeen`
+    // 449 -> 474 and `stepsSeen` 464 -> 477. TWENTY-FIVE new arms (the 24 of the
+    // new test_api_keys_account_identity.sql and 6f CCXT in
+    // test_api_keys_venue_identity_uniq.sql), but only THIRTEEN carry an `edit`
+    // step with a `find` (ACCT-h/e/i/j, HIST-writes/enqueues/reset/revoked/
+    // live/value/owner, RECON-twin/ok); the other twelve are `sql` steps. So
+    // the two pins move by DIFFERENT amounts. MEASURED: this file's own run
+    // read `expected 474 to be 449` and `expected 477 to be 464` at the
+    // pre-move pins.
+    expect(armsSeen).toBe(474);
+    expect(stepsSeen).toBe(477);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1868,7 +1877,11 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // RUN SEPARATELY: `expected 460 to be 443` at the pre-move pin.
     // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 2): 460 -> 464,
     // moving WITH `stepsSeen`: four new `edit` steps, one needle each.
-    expect(needles.length).toBe(464);
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 464 -> 477,
+    // moving WITH `stepsSeen`: thirteen new `edit` steps with a `find` (the
+    // twins of test_api_keys_account_identity.sql listed at `stepsSeen`), one
+    // needle each. RUN SEPARATELY: `expected 477 to be 464` at the pre-move pin.
+    expect(needles.length).toBe(477);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2429,7 +2442,11 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-09-24 (Phase 164.6 review fix round 1): 76 -> 77. The one
     // added is supabase/tests/test_cron_runs_rls.sql, a NEW file (the cron_runs
     // row-security gate, three arms), so the denominator moves with it.
-    expect(corpus.filesTotal).toBe(77);
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 77 -> 78. The
+    // one added is supabase/tests/test_api_keys_account_identity.sql, a NEW file
+    // (the gate for migration 20260925120000, 24 arms). RUN SEPARATELY:
+    // `expected 78 to be 77` at the pre-move pin.
+    expect(corpus.filesTotal).toBe(78);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2472,7 +2489,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // denominator and the by-name list below. The one added is
     // supabase/tests/test_cron_runs_rls.sql. MEASURED over `scanCorpus`:
     // `filesTotal 77`, `filesAnnotated 50`.
-    expect(corpus.filesAnnotated).toBe(50);
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 50 -> 51, with
+    // the denominator and the by-name list below. The one added is
+    // supabase/tests/test_api_keys_account_identity.sql.
+    expect(corpus.filesAnnotated).toBe(51);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2483,6 +2503,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       // arms. Two of its twins are not the ones its plan specified: both were
       // measured unfalsifiable on a real lane and replaced (164.7-02-NEUTER.log).
       "test_analytics_service_settings_and_vault_tick.sql",
+      // ⭐ ADDED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03) — the
+      // FIFTY-FIRST annotated file: the duplicate marker, the departed-history
+      // flag and its owner RPC, and the reconnect named refusal (24 arms).
+      "test_api_keys_account_identity.sql",
       "test_api_keys_exchange_not_user_writable.sql",
       "test_api_keys_insert_not_client_writable.sql",
       // ⛔ ADDED 2026-09-22 (Phase 167 CREDTRUST, plan 03 review fix) — the
@@ -2933,7 +2957,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // 49 -> 50. One ADDED gate file (supabase/tests/test_cron_runs_rls.sql),
     // both halves together. MEASURED off the full lane run: annotated 50 +
     // pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 77.
-    expect(corpus.filesTotal).toBe(77);
+    // ⭐ CURRENCY 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): 77 -> 78 and
+    // 50 -> 51. One ADDED gate file
+    // (supabase/tests/test_api_keys_account_identity.sql), both halves
+    // together. MEASURED off the full lane run: annotated 51 + pending 0 +
+    // unreachable 27 + inert 0 + lane-blocked 0 = 78.
+    expect(corpus.filesTotal).toBe(78);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -2943,7 +2972,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // `lane-blocked-gate.sql` and NOT its comment-only sibling), and the
     // set-for-set PARTITION check below is the second independent guard.
     // ⭐ 49 -> 50 (Phase 164.6 review fix round 1, test_cron_runs_rls.sql).
-    expect(corpus.annotatedFiles).toHaveLength(50);
+    // ⭐ 50 -> 51 (Phase 167.1.2 plan 03, test_api_keys_account_identity.sql).
+    expect(corpus.annotatedFiles).toHaveLength(51);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

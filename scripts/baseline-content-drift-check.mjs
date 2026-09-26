@@ -119,6 +119,16 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * (`[BASELINE-REGEN-164.1.1]`). Raising this floor records the function joining
  * the corpus; it does NOT suppress that finding, and must not be used to.
  *
+ * MOVED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH plan 03), 123 -> 125: two
+ * ADDITIONS, not removals. `public.enforce_api_keys_account_share_same_owner()`
+ * and `public.set_departed_key_history_inclusion(uuid, text)` enter the chain via
+ * forward migration 20260925120000. MEASURED on the real corpus: `functions
+ * compared 125 — MATCH 117, DRIFT 6, SNAPSHOT_MISSING 2`. ⚠️ Same shape as the
+ * 164.1.1 move above: both are SNAPSHOT_MISSING findings, and the migration's
+ * re-based `reconnect_allocator_api_key` is a DRIFT finding, until baseline.sql
+ * is regenerated from PROD after the apply. Raising this floor records the two
+ * functions joining the corpus; it does NOT suppress those findings.
+ *
  * MEASURED 2026-09-08 at this tree: 122. Same contract as `FILES_FLOOR` /
  * `ARMS_FLOOR` in scripts/mutation-runner/run.mjs — pinned AT the measured
  * value, so a drop is a hard failure and a legitimate removal is an EXPLICIT
@@ -126,7 +136,7 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * run green; a drop means either a real removal (say so, in the same commit) or
  * the parser blinding itself, which is the whole defect.
  */
-export const COMPARED_FLOOR = 123;
+export const COMPARED_FLOOR = 125;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */
