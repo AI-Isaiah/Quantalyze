@@ -524,6 +524,18 @@ def deribit_equity_to_usd(
 #   delivery             -> option/future expiry cash settlement
 #   liquidation          -> forced-close PnL/fees
 #   negative_balance_fee -> a genuine cost of carry (live-confirmed cash-bearing)
+#   assignment           -> option expiry cash on the assigned (short) side.
+#                           Licensed ONLY for the census shape recorded in
+#                           docs/evidence/drb-assignment-census-2026-09.json: no
+#                           same-instrument `delivery` or `settlement` row in the
+#                           batch (``assert_assignment_uncontested`` refuses the
+#                           co-occurring shape and an unnamed instrument, in both
+#                           twins). The reading that it is Deribit's newer label
+#                           for the short in-the-money expiry formerly logged as
+#                           `delivery` is an ASSUMPTION, not a measurement. Like
+#                           `delivery`, under mark_to_market inside summary
+#                           coverage it contributes only −commission (it is an
+#                           ``_OPTION_EXPIRY_TYPES`` member).
 #
 # NOTE: `correction` is DELIBERATELY NOT a static member of this set — a bare
 # set-membership cannot see `info.reason`, and the founder decision (Phase 128) is
@@ -531,7 +543,28 @@ def deribit_equity_to_usd(
 # correction is trading performance. See ``correction_is_trading`` /
 # ``assert_correction_classifiable`` below and the evidence block there.
 CASH_BEARING_TYPES: frozenset[str] = frozenset(
-    {"trade", "settlement", "delivery", "liquidation", "negative_balance_fee"}
+    {
+        "trade",
+        "settlement",
+        "delivery",
+        "liquidation",
+        "negative_balance_fee",
+        "assignment",
+    }
+)
+# The option BOOK vocabulary (Phase 168, D-07): the option events that change
+# the signed option position and carry option cash. Every site that asks "is this
+# an option book event?" reads these two sets, never a literal pair, so a new
+# expiry type cannot be summed as cash while the mark-to-market arm, the summary
+# cross-check or the option-book replay still treats it as invisible (a
+# mark_to_market double count against the options settlement summary, or a
+# smoothed replay that never zeroes the expired position).
+_OPTION_EXPIRY_TYPES: frozenset[str] = frozenset({"delivery", "assignment"})
+_OPTION_BOOK_EVENT_TYPES: frozenset[str] = frozenset({"trade"}) | _OPTION_EXPIRY_TYPES
+assert _OPTION_BOOK_EVENT_TYPES <= CASH_BEARING_TYPES, (
+    "every option book event type (trade and each expiry type) must also be a "
+    "CASH_BEARING type — a future expiry type added to the option book must be "
+    "classified cash-bearing too, or its cash is dropped by both twins"
 )
 # EXTERNAL / INFORMATIONAL = capital flows and rewards that are DEFINITIVELY not
 # trading PnL and are UNCONDITIONALLY skipped even when their `change` is nonzero
@@ -861,6 +894,78 @@ def assert_correction_classifiable(row: Mapping[str, Any]) -> None:
         "trading/PnL correction (reason matching one of "
         f"{list(_CORRECTION_TRADING_REASON_KEYWORDS)}) is realized cash."
     )
+
+
+# --- `assignment` co-occurrence guard (Phase 168, D-02) ------------------------
+# The types whose same-instrument presence CONTESTS an `assignment`: each already
+# books option expiry cash, so summing an `assignment` beside one of them may
+# double-count the expiry. That shape was never observed (the census in
+# docs/evidence/drb-assignment-census-2026-09.json has delivery=0 settlement=0).
+_ASSIGNMENT_CONTESTING_TYPES: frozenset[str] = frozenset({"delivery", "settlement"})
+# The discriminator phrase of the contested refusal. It appears in NO other
+# message in this module — not in the unknown-type refusal (whose wording already
+# carries "double-count", so that word cannot tell the two refusals apart) — and
+# the tests import this constant rather than restating it, so a presence check
+# and an absence check can never drift onto a string nothing emits.
+_ASSIGNMENT_CONTESTED_PHRASE: str = (
+    "shares instrument_name with a delivery/settlement row"
+)
+# The unnamed-instrument refusal's own phrase, likewise unique to that branch, so
+# a test matching it cannot pass on an unrelated refusal (the native twin's
+# non-derivative guard also raises on an assignment naming no option).
+_ASSIGNMENT_UNNAMED_PHRASE: str = (
+    "assignment row names no instrument, so its same-instrument sibling "
+    "census cannot be computed"
+)
+
+
+def assert_assignment_uncontested(
+    row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
+) -> None:
+    """Fail loud unless an ``assignment`` row is in the ONE shape its
+    classification is licensed for: a named instrument with NO same-instrument
+    ``delivery`` or ``settlement`` row in ``rows`` (the census recorded in
+    docs/evidence/drb-assignment-census-2026-09.json). Returns None on that shape;
+    raises ``LedgerValuationError`` otherwise — it neither sums nor skips.
+
+    Fires on EVERY assignment regardless of its ``change``: deciding by size would
+    be a magnitude rule, which the classification forbids.
+
+    Batch scope: every production caller crawls FULL history (``since_ms=None``;
+    ``_crawl_deribit_ledger`` refuses an assignment on a windowed crawl), so each
+    batch holds the instrument's whole history. A crawl racing the expiry instant
+    could see the assignment before a later-written sibling in one run; the next
+    recompute sees both and this guard refuses loudly — the first run's sum was
+    correct for the rows that existed. The native twin's batch spans every scope,
+    so two subaccounts holding the same instrument can refuse as a false positive:
+    accepted (loud, never silent; not keyed on ``user_id`` without evidence).
+
+    The self-skip is by IDENTITY (``other is row``), not equality: two
+    equal-but-distinct rows still contest each other. Non-Mapping entries are
+    skipped, as the twins skip them. Row detail reaches the message only through
+    the whitelist renderer ``describe_unclassified_row``."""
+    instrument = row.get("instrument_name")
+    if instrument is None or (isinstance(instrument, str) and not instrument.strip()):
+        raise LedgerValuationError(
+            f"Deribit {_ASSIGNMENT_UNNAMED_PHRASE} (row id={row.get('id')!r}) — "
+            "the assignment classification is licensed only for the census shape "
+            "in docs/evidence/drb-assignment-census-2026-09.json; refusing to sum "
+            "or skip it. " + describe_unclassified_row(row, rows)
+        )
+    for other in rows:
+        if other is row or not isinstance(other, Mapping):
+            continue
+        if other.get("instrument_name") != instrument:
+            continue
+        if str(other.get("type", "")).strip().lower() in _ASSIGNMENT_CONTESTING_TYPES:
+            raise LedgerValuationError(
+                f"Deribit assignment row id={row.get('id')!r} "
+                f"{_ASSIGNMENT_CONTESTED_PHRASE} in this batch — an UNOBSERVED "
+                "shape (the census licensing the assignment classification found "
+                "neither); summing both may double-count realized expiry cash, so "
+                "this refuses to sum or skip it. "
+                + describe_unclassified_row(row, rows)
+            )
 
 
 def _row_is_cash_bearing(row: Mapping[str, Any]) -> bool:
@@ -1404,6 +1509,13 @@ def txn_rows_to_daily_records(
             if change != 0.0:
                 assert_correction_classifiable(row)  # raises, naming the reason
             continue
+        # Phase 168 (D-02): an `assignment` is cash-bearing ONLY in the census
+        # shape (no same-instrument delivery/settlement, a named instrument); any
+        # other shape refuses here, before it can be summed or skipped. Checked on
+        # every assignment regardless of change. [TWIN-PARALLEL with
+        # txn_rows_to_native_daily — same helper, same position.]
+        if row_type == "assignment":
+            assert_assignment_uncontested(row, rows)
         if _row_is_cash_bearing(row):
             # H2: a cash-bearing row MUST carry a `change` field. Absent (not just
             # zero) means schema drift / a field rename — the entire premise of
@@ -1547,7 +1659,7 @@ def _pre_coverage_option_days(
     for row in rows:
         if not isinstance(row, Mapping):
             continue
-        if str(row.get("type", "")) not in ("trade", "delivery"):
+        if str(row.get("type", "")) not in _OPTION_BOOK_EVENT_TYPES:
             continue
         if classify_instrument(str(row.get("instrument_name", ""))) != "option":
             continue
@@ -1589,7 +1701,7 @@ def _option_activity_after_coverage(
     for row in rows:
         if not isinstance(row, Mapping):
             continue
-        if str(row.get("type", "")) not in ("trade", "delivery"):
+        if str(row.get("type", "")) not in _OPTION_BOOK_EVENT_TYPES:
             continue
         if classify_instrument(str(row.get("instrument_name", ""))) != "option":
             continue
@@ -1882,7 +1994,7 @@ def _assert_smoothed_summary_cross_check(
             continue
         if row_type in _NATIVE_OPTIONS_SUMMARY_TYPES:
             summary_sum[ccy] = summary_sum.get(ccy, 0.0) + _summary_contribution(row)
-        elif row_type in ("trade", "delivery") and classify_instrument(
+        elif row_type in _OPTION_BOOK_EVENT_TYPES and classify_instrument(
             str(row.get("instrument_name", ""))
         ) == "option":
             change = _coerce_float(
@@ -2031,7 +2143,7 @@ def replay_option_positions(
     per_instr: dict[str, list[Mapping[str, Any]]] = {}
     ccy_of: dict[str, str] = {}
     for row in rows:
-        if str(row.get("type", "")) not in ("trade", "delivery"):
+        if str(row.get("type", "")) not in _OPTION_BOOK_EVENT_TYPES:
             continue
         instrument = str(row.get("instrument_name", ""))
         if classify_instrument(instrument) != "option":
@@ -2376,6 +2488,14 @@ def txn_rows_to_native_daily(
             if change != 0.0:
                 assert_correction_classifiable(row)  # raises, naming the reason
             continue
+        # [VERBATIM from txn_rows_to_daily_records] Phase 168 (D-02): an
+        # `assignment` is cash-bearing ONLY in the census shape (no same-instrument
+        # delivery/settlement, a named instrument); any other shape refuses here,
+        # before it can be summed or skipped. Checked on every assignment
+        # regardless of change. This batch spans every scope and currency, so it
+        # re-checks what the USD twin checked per (scope, currency).
+        if row_type == "assignment":
+            assert_assignment_uncontested(row, rows)
         if _row_is_native_cash_bearing(row):
             # [VERBATIM from txn_rows_to_daily_records] absent-`change` guard: a
             # cash-bearing row MUST carry a `change` field. Coalescing absent→0.0
@@ -2417,7 +2537,7 @@ def txn_rows_to_native_daily(
             # channel. Outside the window (pre-rollout or trailing-edge) it keeps
             # the full `change` (cash fallback, flagged by _pre_coverage_option_days).
             contribution = change
-            if row_type == "trade" or row_type == "delivery":
+            if row_type in _OPTION_BOOK_EVENT_TYPES:
                 cls = classify_instrument(str(row.get("instrument_name", "")))
                 if cls == "option":
                     instant = _row_utc_instant(row.get("timestamp"))
@@ -2425,7 +2545,7 @@ def txn_rows_to_native_daily(
                         contribution = -_option_commission(row)
                     # else: cash fallback — contribution stays `change`.
                 elif (
-                    row_type == "delivery"
+                    row_type in _OPTION_EXPIRY_TYPES
                     and cls in ("unknown", "spot")
                     and change != 0.0
                 ):
@@ -2437,7 +2557,7 @@ def txn_rows_to_native_daily(
                     # underscore-named delivery row would be booked silently). Fail
                     # loud, never guess (D-08).
                     raise LedgerValuationError(
-                        f"Deribit delivery row id={row.get('id')!r} names an "
+                        f"Deribit {row_type} row id={row.get('id')!r} names an "
                         "unclassifiable or spot instrument yet carries nonzero cash — "
                         "refusing to guess an expiring instrument's P&L channel "
                         "(never silently mis-route delivery cash)"

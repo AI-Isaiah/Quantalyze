@@ -358,13 +358,17 @@ def test_classify_instrument_settlement_unknown_coin_fails_loud() -> None:
 
 def test_type_sets_pinned_to_evidence() -> None:
     # Return-bearing: trade (fees), settlement (PnL+funding), delivery (expiry),
-    # liquidation (forced-close), negative_balance_fee (cost of carry).
+    # liquidation (forced-close), negative_balance_fee (cost of carry), and
+    # assignment (Phase 168: option expiry cash on the assigned side, licensed ONLY
+    # for the census shape in docs/evidence/drb-assignment-census-2026-09.json —
+    # the co-occurring shape is refused by assert_assignment_uncontested).
     assert CASH_BEARING_TYPES == {
         "trade",
         "settlement",
         "delivery",
         "liquidation",
         "negative_balance_fee",
+        "assignment",
     }
     # External flows / rewards unconditionally skipped — excluded from returns.
     assert INFORMATIONAL_TYPES == {
@@ -388,6 +392,13 @@ def test_type_sets_pinned_to_evidence() -> None:
     for unknown in ("mystery_new_type", "rebate_v2"):
         assert unknown not in CASH_BEARING_TYPES
         assert unknown not in INFORMATIONAL_TYPES
+    # Phase 168: `exercise` (the long-side counterpart of `assignment`) and
+    # `expiry` (the OTM expiry entry) are named by Deribit's docs but have NO
+    # captured census, so they stay in NEITHER set — classifying them from the
+    # docs alone would be the guess the assignment census exists to refuse.
+    for uncensused in ("exercise", "expiry"):
+        assert uncensused not in CASH_BEARING_TYPES
+        assert uncensused not in INFORMATIONAL_TYPES
 
 
 def test_type_sets_disjoint() -> None:
