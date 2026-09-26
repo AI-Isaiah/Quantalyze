@@ -35,7 +35,7 @@
  * ARITHMETIC ORDER is the factsheet's, so adopting sites keep their numbers to
  * the last bit wherever their order already matched: the Sharpe is
  * `src/lib/factsheet/compute.ts`'s expression, the correlation is the SUMS form
- * of `build-payload.ts` `pearsonCorr` and `correlation-math.ts` `pearson`, and
+ * of `build-payload.ts` `pearsonCorr` and of the retired `/compare` Pearson, and
  * the beta is `factsheet/joint.ts`'s `cov / varX` with both sums divided by n.
  * The mean and sd are `portfolio-math-utils`' `mean` and `stdDev`, so there is
  * one mean and one sd, not a third copy.
