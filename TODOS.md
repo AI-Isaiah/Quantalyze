@@ -1329,6 +1329,9 @@ true for 146 and half of 142–145, and **false for 141**.
       check is the phase's FC-1. Residuals (a parent that later fails strands its child; a 40P01
       diamond deadlock on the parent lock) are latent, recorded in M1's header and routed to
       Phase 164.5.2 BRIDGELOCK.
+      ⛔ **CORRECTED 2026-09-26 (founder decision, "Re-route, don't start"):** both residuals
+      now belong to Phase 164.9.3.1 FANINGRAPH under `[164.9.3.1-FANIN-GRAPH-RESIDUALS]`, not
+      164.5.2. The sentence above is kept as lineage.
       **THE MECHANISM, named by SYMBOL because line numbers drift
       (`[164.7-CITATION-DRIFT-01]`):** `enqueue_compute_job` routes all three of its modes to the
       **TEN-ARG** `_enqueue_compute_job_internal`, whose `INSERT` column list OMITS `status`, so
@@ -1403,6 +1406,32 @@ true for 146 and half of 142–145, and **false for 141**.
       ✅ **Destination: Phase 164.9.3 CLAIMPAIR** — routed there 2026-09-26 via
       `/gsd-phase --insert` (orchestrator decision). The ROADMAP section holds the success
       criteria; this entry is the evidence.
+      ⭐ **WIDENED 2026-09-26 by founder decision ("Re-route, don't start"): this entry now also
+      carries the `(kind, api_key_id)` partition**, item (4) of the list Phase 164.5.2 held. It
+      was measured 2026-09-25 on the local-stack lane by the 164.9.1 pre-push silent-failure-hunter:
+      a `poll_allocator_positions` `failed_retry` plus a `pending` twin on one `api_key_id` make
+      both claim RPCs raise 23505 on `compute_jobs_one_inflight_per_kind_api_key`, and no job of
+      any kind is claimed until the pair clears. The full repro is kept verbatim in the Phase
+      164.5.2 ROADMAP section as lineage. **Owner: Phase 164.9.3 CLAIMPAIR**, whose criterion 4
+      now covers all four partitions (api_key_id, portfolio, strategy, allocator).
+
+- [ ] **`[164.9.3.1-FANIN-GRAPH-RESIDUALS]` Three latent or loud defects on the fan-in graph and
+      the bridge's decision cascade (booked 2026-09-26; routed 2026-09-25 from the Phase 164.9.1
+      review round 1 to Phase 164.5.2, re-routed 2026-09-26 by founder decision).**
+      (1) **Stranded child:** a fan-in child whose parent is still open at enqueue and later
+      ends `failed_final` stays in `done_pending_children` forever. Latent: no caller passes
+      parents today.
+      (2) **Cascade 23505:** a second `match_decisions` delete can raise 23505 through the
+      `ON DELETE SET NULL` cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null`.
+      Pre-existing and loud; the admin decisions route issues these deletes.
+      (3) **Diamond deadlock:** the fan-in parent lock `FOR SHARE ... ORDER BY id` can deadlock
+      (40P01) against `mark_compute_job_done` when a child's parents include another waiting
+      child. Latent. Whoever first passes parents must treat 40P01 as retryable on both the
+      enqueue and the worker's mark path.
+      (1) and (3) are recorded in the header of M1, `20260924230827_fanin_initial_status_10param.sql`.
+      ✅ **Destination: Phase 164.9.3.1 FANINGRAPH**, inserted 2026-09-26 via `/gsd-phase --insert`
+      and booked under the new-phase freeze, NOT started. The ROADMAP section holds one success
+      criterion per defect; this entry is the evidence.
 
 - [ ] **`[STRATTABLE-DESC-01]` The strategy list shows only the NAME, so two strategies
       with the same name are indistinguishable — the `description` that disambiguates them is
@@ -10236,9 +10265,25 @@ a prose id. The fourth is owned by the founder outright and needs no phase.
 deliberately NOT here — it is in `## 🔴 FIX NOW`**, because a live data-integrity defect filed in
 a tail residual section is the same disappearance this residue exists to prevent.
 
-- [ ] **`[164.9-CRIT8-RESTORE-DISPATCH-RECORD]` the ROADMAP criterion 8 restore dispatch is
+- [x] **`[164.9-CRIT8-RESTORE-DISPATCH-RECORD]` the ROADMAP criterion 8 restore dispatch is
       POST-MERGE BY CONSTRUCTION, and the act of RECORDING its result is what makes the founder's
       Option A honest (booked 2026-09-21, Phase 164.9 TESTISOLATION plan 11).**
+      ✅ **CLOSED 2026-09-26: the gate is met.** Its evidence arrived through Phase 164.9.2
+      REFDATAUPDATES criterion 4. Both committing dispatches were made by the founder with the
+      confirm token. The text below is kept as lineage.
+      - preflight run `36235362126` at `06cbe2030`: **success**, restore self-test 41/41 arms, marker names TEST.
+      - restore attempt run `36237060668`: **refused by the activity gate** (2 non-idle sessions besides the holder); nothing was written.
+      - restore run `36242946174` at `ea4167a3f`: **success**, marker names TEST, activity gate quiet (holder only, idle x16).
+      - The committing run's printed summary line, VERBATIM:
+        `restore: tables=63 policies=155 functions=121 ledger_rows=277 survivors=2/2 filtered=1 mode=restore`.
+      **The guards ran.** `restore_mode` prints that line only after `check_extension_guard` and
+      the ownership-list comparison pass. The value-pinning leg runs inside the transaction
+      that committed, and the same run printed its C5 replay: 6 UPDATEs in filename order. Both
+      guards are silent when clean, so per the reading rule below this is "the run reached the
+      point past it". The first criterion-8 preflight, `35662948549`, refused on a stale dump
+      and stays on the record. ⚠️ The limit below still holds: in `mode=restore` the extension
+      guard LABELS an outcome after COMMIT and does not PREVENT one. Recorded in the ROADMAP
+      criterion 8 block, `### Phase 164.9.2` criterion 4 and `164.9-11-SUMMARY.md`.
       Owner: **THE FOUNDER — the human who merges this phase.** Not a phase. Not an agent.
       ⭐ **AMENDED 2026-09-21 — THE FOUNDER EXPLICITLY DELEGATED BOTH ACTS TO THE AGENT**, in
       session, in these words: *"I authorize you to do this: the post-merge

@@ -2141,6 +2141,7 @@ Plans:
 **Requirements**: TODOS entries `161.1-D1`, DEC-4
 **Depends on:** Phase 164.4.1 (pg-lane with pg_cron). ⚠️ NOT Phase 164.5 — the plan is file-disjoint from it and was lifted whole.
 **Routed here 2026-09-25 (from 164.9.1 review round 1), both latent or loud, both on the terminal-mark / bridge surface this phase owns:** (1) a fan-in child whose parent is still open at enqueue and later ends `failed_final` stays in `done_pending_children` forever (no caller passes parents today); (2) a second `match_decisions` delete can raise 23505 through the ON DELETE SET NULL cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null` (pre-existing, fails loudly, the admin decisions route issues these deletes). (3) the fan-in parent lock `FOR SHARE ... ORDER BY id` can deadlock (40P01) against `mark_compute_job_done` in a diamond (a child whose parents include another waiting child); latent, recorded in M1's header — whoever passes parents must treat 40P01 as retryable on both the enqueue and the worker's mark path. (4) **Routed 2026-09-25 from the 164.9.1 pre-push silent-failure-hunter (MEDIUM, pre-existing, NOT introduced by 164.9.1): one `failed_retry` + `pending` pair on the same `(kind, api_key_id)` wedges the WHOLE claim.** `claim_compute_jobs` and `claim_compute_jobs_with_priority` rank `pending` and `failed_retry` candidates together, and their C39 / NEW-C39-01 `NOT EXISTS` guard excludes a partition only when it already holds a `running` or `done_pending_children` row — never a `pending` one. The enqueue look-up (`_enqueue_compute_job_internal`) treats only `pending`/`running`/`done_pending_children` as in-flight, so it inserts a fresh `pending` beside a `failed_retry`. When the `failed_retry` wins `rn_k` (earlier `next_attempt_at`, or the `pending` is not yet due), the batch `UPDATE ... SET status = 'running'` puts two rows into `compute_jobs_one_inflight_per_kind_api_key` and raises 23505 — and because it is ONE statement, no job of ANY kind is claimed until the pair clears. Loud, not silent: every claim call errors. The same guard shape exists for the portfolio, strategy and allocator partitions against their sibling indexes; audit all four. **Suggested fixes (not decided):** (a) add `'pending'` to each guard's `x.status` list with `x.id <> ranked.id`, in BOTH claim RPCs — a `pending` candidate can have no `pending` sibling under the index, so this only removes the colliding `failed_retry`; (b) and/or make the enqueue look-up fold into, or supersede, an existing `failed_retry` for the partition instead of inserting beside it; (c) whichever is chosen, a `RED-UNDER`-annotated SQL gate on the lane must pin it. **Measured repro, local-stack lane only (`scripts/local-stack/run.sh up`, loopback DSN from its `.stack-env`, then `down`):** in one transaction that ends in `ROLLBACK`, with `SET LOCAL session_replication_role = replica` so a synthetic `api_key_id` needs no FK rows, insert two `poll_allocator_positions` rows sharing one `api_key_id` — a `failed_retry` with `next_attempt_at = now() - 10 min` and a `pending` with `next_attempt_at = now() + 10 min` — reset the role to `origin`, then call `claim_compute_jobs(10, 'repro-worker')` (and, after a savepoint rollback, `claim_compute_jobs_with_priority(10, 'repro-worker', NULL::boolean, NULL::text[], NULL::text[])`; the two-arg call is ambiguous across its overloads). Both raised `duplicate key value violates unique constraint "compute_jobs_one_inflight_per_kind_api_key"` on 2026-09-25 at the 164.9.1 release head.
+⛔ **RE-ROUTED 2026-09-26 by founder decision (AskUserQuestion, "Re-route, don't start") — this phase owns NONE of the four items above any more.** The paragraph above is kept as lineage. Item (4), the claim wedge, went to Phase 164.9.3 CLAIMPAIR, which already owns C39 and the same 23505 class. Items (1) stranded fan-in child, (2) `match_decisions` delete 23505 and (3) 40P01 diamond deadlock went to the new Phase 164.9.3.1 FANINGRAPH, booked but NOT started under the new-phase freeze. This phase's scope is back to `161.1-D1` and DEC-4 only.
 **Plans:** 1 plan (lifted from Phase 164.5 plan 08, unmodified)
 
 Plans:
@@ -2823,6 +2824,7 @@ Plans:
 
    ⚠️ **STATUS: PENDING, NOT DISCHARGED — criterion 8 stays OPEN until that entry closes.** Plan 11 PREPARED the dispatch (preflight first, then the committing mode; the confirm token derived at dispatch time from the tracked baseline record at the dispatched ref, never copied out of a planning document; the exact strings to read) and deliberately did NOT run it: a committing restore drops and rebuilds the `public` schema of a database other people's CI uses, and that is a human act. The prepared recipe and its refusals live in `164.9-11-SUMMARY.md`.
    ⛔ **WHAT A GREEN RUN ID WILL NOT CLAIM — written now so a later reader cannot read it in.** The extension guard runs AFTER its transaction commits, so in `mode=restore` it LABELS an outcome and never PREVENTS one; no dispatch changes that. ⚠️ And MEASURED by plan 11 while preparing the recipe: **`check_extension_guard` is not reached in `mode=preflight` at all** — the preflight branch returns at its byte-for-byte rollback comparison, which covers the extension class incidentally and never names the guard. So a green preflight does NOT evidence that guard; only the committing run does. A run recorded as a discharge whose log does not show the guard would be a green that is not measuring what it claims — the family this whole phase exists to remove.
+   ✅ **DISCHARGED 2026-09-26 by Phase 164.9.2 criterion 4 — criterion 8 is MET.** The PENDING status above is kept as lineage. Preflight run `36235362126` at `06cbe2030`: **success**, restore self-test 41/41 arms, marker names TEST; restore attempt run `36237060668`: **refused by the activity gate** (2 non-idle sessions besides the holder); nothing was written; restore run `36242946174` at `ea4167a3f`: **success**, marker names TEST, activity gate quiet (holder only, idle x16), printing `restore: tables=63 policies=155 functions=121 ledger_rows=277 survivors=2/2 filtered=1 mode=restore`. Both committing dispatches were made by the founder with the confirm token. The committing run reached the summary line, which `restore_mode` prints only after `check_extension_guard` and the ownership comparison pass. That is the "reached the point past it" reading this block requires, since both guards are silent when clean.
 9. Every assertion this phase adds or changes is proven able to fail: neutered, observed RED, restored from a **byte backup** — ⛔ never `git checkout --`, which silently destroys concurrent uncommitted work.
 10. ⛔ Nothing here is closed by widening an exemption, relaxing a floor, or asserting a smaller scope. Where narrowing IS the honest answer, it is dated and reasoned in-code.
 
@@ -3059,6 +3061,11 @@ Plans:
 2. Replayed statements interleave in migration filename order, inside the same transaction as the INSERTs.
 3. ⛔ The wrong-state check and its `verified` default stay exactly as they are: no waiver, no relaxed default, no widened allowlist.
 4. A green `mode=preflight` run, then a green `mode=restore` run on shared TEST, both recorded by run id. That closes Phase 164.9 criterion 8.
+   ⭐ **RECORDED 2026-09-26 — criterion 4 MET on shared TEST.** Both committing dispatches were made by the founder with the confirm token.
+   - preflight run `36235362126` at `06cbe2030`: **success**, restore self-test 41/41 arms, marker names TEST.
+   - restore attempt run `36237060668`: **refused by the activity gate** (2 non-idle sessions besides the holder); nothing was written.
+   - restore run `36242946174` at `ea4167a3f`: **success**, marker names TEST, activity gate quiet (holder only, idle x16). It printed the C5 replay (6 UPDATE statements replayed in migration filename order inside the transaction), a post-census equal to the dump's expected shape, and `restore: tables=63 policies=155 functions=121 ledger_rows=277 survivors=2/2 filtered=1 mode=restore`.
+   The summary line is printed only after `check_extension_guard` and the ownership-list comparison pass (`restore_mode` in `scripts/restore-test-from-baseline.sh`), and the value-pinning leg runs inside the transaction that committed. Phase 164.9 criterion 8 and `TODOS.md` `[164.9-CRIT8-RESTORE-DISPATCH-RECORD]` are closed by this record.
 
 **Rejected:** hand-seeding the value after the replay (hand-seeding shared TEST is forbidden); editing the applied teaser migration (PROD's ledger stores the SQL that ran).
 
@@ -3090,10 +3097,42 @@ Plans:
 1. A red-first lane test reproduces the `23505` on the pre-fix tree and goes green after the fix.
 2. The claim never raises on that pairing. Either the enqueue refuses the pending twin or folds it into the `failed_retry` job, or the claim skips it. The planner decides which, with evidence.
 3. The fix ships as a migration, reviewed before merge by the three migration reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter), because merging a migration auto-applies it to PROD.
+4. *(added 2026-09-26 with the scope merge below)* The fix covers every partition the claim guard protects, not only the allocator one: `api_key_id`, portfolio, strategy and allocator, each against its sibling `compute_jobs_one_inflight_per_kind_*` index, in BOTH claim RPCs. Each partition gets its own red-first lane arm.
+
+⭐ **SCOPE MERGED 2026-09-26 by founder decision (AskUserQuestion, "Re-route, don't start"):** item (4) of Phase 164.5.2's routed list moves here. It is the same defect on a different partition, found independently on 2026-09-25 by the 164.9.1 pre-push silent-failure-hunter.
+- **The pairing:** one `failed_retry` plus one `pending` job for the same `(kind, api_key_id)`. A `poll_allocator_positions` `failed_retry` with `next_attempt_at` 10 minutes in the past, beside a `pending` twin due 10 minutes in the future.
+- **The result:** `claim_compute_jobs` and `claim_compute_jobs_with_priority` both raise 23505 on `compute_jobs_one_inflight_per_kind_api_key`. The batch `UPDATE ... SET status = 'running'` is ONE statement, so no job of ANY kind is claimed until the pair clears. Loud, not silent.
+- **Measured:** 2026-09-25 on the local-stack lane at the 164.9.1 release head, in one transaction ending in `ROLLBACK`. The full repro recipe is kept verbatim as lineage in Phase 164.5.2's section and in `TODOS.md` `[164.9.3-CLAIM-PAIR-23505]`.
+- **Fix options recorded there, not decided:** (a) add `'pending'` to each guard's `x.status` list with `x.id <> ranked.id`; (b) fold the enqueue into, or supersede, the outstanding `failed_retry`. Criterion 2 above already leaves that choice to the planner.
 
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.9.3 to break down)
+
+### Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock (INSERTED)
+
+**Goal:** The compute-job fan-in graph and the bridge's decision cascade never strand a job, raise a spurious 23505, or deadlock: a fan-in child whose parent fails reaches a terminal state, a `match_decisions` delete cascades without a unique violation, and a fan-in diamond cannot deadlock on the parent lock.
+**Requirements**: TODOS `[164.9.3.1-FANIN-GRAPH-RESIDUALS]` (owned here)
+**Depends on:** Phase 164.9.3 (the same compute-job RPC surface; CLAIMPAIR's migration re-bases `_enqueue_compute_job_internal` and the claim RPCs first, and this phase re-bases on it)
+**Plans:** 0 plans
+
+⛔ **BOOKED 2026-09-26 UNDER THE NEW-PHASE FREEZE — NOT STARTED.** Founder decision (AskUserQuestion, "Re-route, don't start"): items (1), (2) and (3) of Phase 164.5.2's routed list leave 164.5.2 and land here. This phase gets no discuss, plan or execute step until the founder lifts the freeze for it.
+
+**Evidence.** Routed on 2026-09-25 from the Phase 164.9.1 review round 1. Items (1) and (3) are recorded in the header of M1, `20260924230827_fanin_initial_status_10param.sql`. All three are latent or loud, none silent:
+- (1) and (3) are latent because no caller passes `parent_job_ids` today.
+- (2) is pre-existing and fails loudly. The admin decisions route issues these deletes.
+
+## Success Criteria
+
+1. **The stranded child.** A fan-in child whose parent is still open at enqueue and later ends `failed_final` no longer stays in `done_pending_children` forever. It reaches a terminal state that names the failed parent. A red-first lane test reproduces the strand on the pre-fix tree and goes green after the fix.
+2. **The cascade 23505.** A second `match_decisions` delete no longer raises 23505 through the `ON DELETE SET NULL` cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null`. A red-first lane test reproduces it on the pre-fix tree. ⛔ Dropping or narrowing the index to silence the error is not a fix unless the planner shows the invariant it enforces no longer holds.
+3. **The diamond deadlock.** A diamond, meaning a child whose parents include another waiting child, cannot deadlock (40P01) between the fan-in parent lock `FOR SHARE ... ORDER BY id` and `mark_compute_job_done`. The alternative, if the planner shows the deadlock is inherent, is that every caller passing parents retries 40P01 on both the enqueue and the worker's mark path. Proven with two genuinely separate sessions; ⛔ a single-client `Promise.all` cannot race.
+
+⛔ **Constraints:** every fix here is a migration, so the three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) review it before merge, because a merge auto-applies to PROD. Re-base each `CREATE OR REPLACE` on the LATEST definition, found by a grep of all `supabase/migrations/**`.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.9.3.1 to break down)
 
 ### Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner (INSERTED)
 
