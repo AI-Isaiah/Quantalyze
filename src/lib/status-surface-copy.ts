@@ -356,7 +356,9 @@ export function recipientShareNote(
 /**
  * Phase 167.2.1 (D-02) — why a computed row's factsheet cannot build, in the
  * two kinds the copy distinguishes: a single-key series too short to build
- * (`too_short`), or a composite whose results cannot be built (`cannot_build`).
+ * (`too_short`), or stored results we cannot build from (`cannot_build`): a
+ * composite, or since 167.2.1-REVIEW-SFH M-3 a single-key series whose stored
+ * entries are malformed.
  */
 export type UnbuildableNoteKind = "too_short" | "cannot_build";
 
@@ -377,6 +379,7 @@ export function unbuildableNoteKindOf(
     case "too_few_points":
       return "too_short";
     case "composite_unbuildable":
+    case "malformed_series":
       return "cannot_build";
     case "read_error":
     case "not_visible":

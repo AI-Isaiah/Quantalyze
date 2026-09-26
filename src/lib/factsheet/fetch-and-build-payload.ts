@@ -63,13 +63,19 @@ export type StrategyVisibility = <Q>(query: Q) => Q;
  * because `readCompositeFactsheet` folds a read error into an empty series and
  * the probe cannot tell them apart; `too_few_points` is a single-key series
  * below `MIN_FACTSHEET_SERIES_POINTS` distinct dated returns.
+ * `malformed_series` (167.2.1-REVIEW-SFH M-3) is a single-key row whose stored
+ * columns HOLD at least that many dated entries, but whose entries were
+ * dropped as malformed (a non-finite or string value, a non-string date, a
+ * non-positive wealth point) until fewer remained: a defect in what the
+ * analytics writer stored, never "too few days of returns".
  */
 export type NotBuildableReason =
   | "read_error"
   | "not_visible"
   | "not_computed"
   | "composite_unbuildable"
-  | "too_few_points";
+  | "too_few_points"
+  | "malformed_series";
 
 /** The probe's answer: buildable, or not buildable with a typed reason. */
 export type FactsheetBuildability =
@@ -86,6 +92,63 @@ type ResolveCaller = "build" | "probe";
 /** A failed resolve: the builder returns null, the probe returns this reason. */
 function notBuildable(reason: NotBuildableReason): { ok: false; reason: NotBuildableReason } {
   return { ok: false, reason };
+}
+
+/**
+ * 167.2.1-REVIEW-SFH M-3 — how many dated return entries a stored series
+ * column HOLDS, before any normalization drops a malformed one. An array
+ * counts its distinct string dates, plus each entry with no string date on its
+ * own (a malformed entry is still an entry the writer stored). A flat
+ * `{date: value}` dict counts its keys, and a nested `{year: {MM-DD: value}}`
+ * dict its inner keys. Anything else holds none.
+ */
+function storedEntryCount(raw: unknown): number {
+  if (raw === null || typeof raw !== "object") return 0;
+  if (Array.isArray(raw)) {
+    const keys = new Set<string>();
+    raw.forEach((entry, i) => {
+      const date =
+        entry !== null && typeof entry === "object" ? (entry as { date?: unknown }).date : undefined;
+      keys.add(typeof date === "string" ? `date:${date}` : `entry:${i}`);
+    });
+    return keys.size;
+  }
+  let count = 0;
+  for (const value of Object.values(raw)) {
+    count +=
+      value !== null && typeof value === "object" && !Array.isArray(value)
+        ? Object.keys(value).length
+        : 1;
+  }
+  return count;
+}
+
+/**
+ * 167.2.1-REVIEW-SFH M-3 — a single-key series the resolve stage refused.
+ * `too_few_points` only when the stored columns really hold fewer than
+ * `MIN_FACTSHEET_SERIES_POINTS` dated returns: `daily_returns` entries, or
+ * `returns_series` wealth points less one (N points make N-1 returns). When
+ * they hold enough and normalization left too few, the stored data is
+ * malformed: the owner is not told a false "fewer than 2 days", and the defect
+ * is captured, since it is the analytics writer's and nothing else records it.
+ */
+function singleKeyUnbuildable(
+  caller: ResolveCaller,
+  gate: "empty_series" | "short_series",
+  dailyRaw: unknown,
+  returnsSeriesRaw: unknown,
+  resolvedEntries: number,
+): { ok: false; reason: NotBuildableReason } {
+  const storedReturns = Math.max(
+    storedEntryCount(dailyRaw),
+    storedEntryCount(returnsSeriesRaw) - 1,
+  );
+  if (storedReturns < MIN_FACTSHEET_SERIES_POINTS) return notBuildable("too_few_points");
+  captureToSentry(new Error(`factsheet resolve: stored single-key series is malformed (${gate})`), {
+    tags: { stage: "factsheet-resolve-malformed", caller, gate },
+    extra: { storedReturns, resolvedEntries },
+  });
+  return notBuildable("malformed_series");
 }
 
 /**
@@ -271,7 +334,9 @@ async function resolveFactsheetInputs(
       isArray: Array.isArray(dailyRaw),
       returnsSeriesType: typeof analytics?.returns_series,
     });
-    return isComposite ? compositeUnbuildable(caller, "empty_series") : notBuildable("too_few_points");
+    return isComposite
+      ? compositeUnbuildable(caller, "empty_series")
+      : singleKeyUnbuildable(caller, "empty_series", dailyRaw, analytics?.returns_series, 0);
   }
 
   // G4 (Phase 167.2.1, D-04): the builder's own point-count predicate, asked
@@ -283,7 +348,9 @@ async function resolveFactsheetInputs(
       `[factsheet] resolve(${caller}) — return series has fewer than the minimum distinct dated observations; withholding the payload`,
       { id, caller, isComposite, rawCount: dailyReturns.length, minimum: MIN_FACTSHEET_SERIES_POINTS },
     );
-    return isComposite ? compositeUnbuildable(caller, "short_series") : notBuildable("too_few_points");
+    return isComposite
+      ? compositeUnbuildable(caller, "short_series")
+      : singleKeyUnbuildable(caller, "short_series", dailyRaw, analytics?.returns_series, dailyReturns.length);
   }
 
   return {

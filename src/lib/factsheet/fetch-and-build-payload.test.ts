@@ -255,8 +255,32 @@ const PARITY: Fixture[] = [
     reason: "too_few_points",
   },
   {
+    // 167.2.1-REVIEW-SFH M-3: two stored dated entries, one dropped as
+    // malformed. "Fewer than 2 days of returns" would be false; this was
+    // `too_few_points` until the review.
     name: "single-key, one finite point plus one NaN",
     row: single({ daily_returns: [{ date: "2024-01-02", value: 0.01 }, { date: "2024-01-03", value: NaN }] }),
+    reason: "malformed_series",
+  },
+  {
+    name: "single-key, three numeric-string values",
+    row: single({
+      daily_returns: [
+        { date: "2024-01-02", value: "0.01" },
+        { date: "2024-01-03", value: "0.02" },
+        { date: "2024-01-04", value: "-0.01" },
+      ],
+    }),
+    reason: "malformed_series",
+  },
+  {
+    name: "single-key, returns_series-only curve of non-positive wealth points",
+    row: single({ returns_series: points(5).map((p) => ({ date: p.date, value: 0 })) }),
+    reason: "malformed_series",
+  },
+  {
+    name: "single-key, returns_series-only curve of two wealth points (one return)",
+    row: single({ returns_series: wealthCurve(2) }),
     reason: "too_few_points",
   },
   {
@@ -393,6 +417,29 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
     vi.mocked(captureToSentry).mockClear();
     await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
     expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+  });
+
+  it("SFH M-3 MALFORMED CAPTURE: a malformed stored series is captured with its counts; a genuinely short one is not", async () => {
+    for (const f of PARITY.filter((x) => x.reason === "malformed_series")) {
+      seed(f.row);
+      vi.mocked(captureToSentry).mockClear();
+      await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
+      expect(vi.mocked(captureToSentry), f.name).toHaveBeenCalledTimes(1);
+      const ctx = vi.mocked(captureToSentry).mock.calls[0][1] as {
+        tags: Record<string, string>;
+        extra: { storedReturns: number; resolvedEntries: number };
+      };
+      expect(ctx.tags.stage, f.name).toBe("factsheet-resolve-malformed");
+      expect(ctx.tags.caller, f.name).toBe("probe");
+      expect(ctx.extra.storedReturns, f.name).toBeGreaterThanOrEqual(2);
+      expect(ctx.extra.resolvedEntries, f.name).toBeLessThan(2);
+    }
+    for (const f of PARITY.filter((x) => x.reason === "too_few_points")) {
+      seed(f.row);
+      vi.mocked(captureToSentry).mockClear();
+      await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
+      expect(vi.mocked(captureToSentry), f.name).not.toHaveBeenCalled();
+    }
   });
 
   it("NO-NULL-AFTER-RESOLVE: every fixture the probe calls buildable builds a payload", async () => {

@@ -1027,6 +1027,26 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     expect(container.textContent).not.toMatch(/last computation succeeded/i);
   });
 
+  it("S7-MALFORMED (SFH M-3): a computed single-key draft whose stored entries are malformed -> the cannot-build note, never 'fewer than 2 days'", async () => {
+    givenOwnerPendingDraft();
+    STATE.adminRow = adminRowWith({
+      computation_status: "complete",
+      daily_returns: [
+        { date: "2025-08-01", value: "0.01" },
+        { date: "2025-08-02", value: "0.02" },
+        { date: "2025-08-03", value: "-0.01" },
+      ],
+      returns_series: null,
+    });
+    givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+
+    const { container } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(UNBUILDABLE_COMPOSITE);
+    expect(container.textContent).not.toContain("fewer than 2 days");
+  });
+
   it("CR01-FAILED: a computed composite whose latest job failed permanently -> the note does not claim the last computation succeeded", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {

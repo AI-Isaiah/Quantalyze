@@ -263,10 +263,12 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     }
   });
 
-  it("unbuildableNoteKindOf maps every probe reason, and only the two build-time refusals to a kind", () => {
+  it("unbuildableNoteKindOf maps every probe reason, and only the build-time refusals to a kind", () => {
     const table: Array<[NotBuildableReason, ReturnType<typeof unbuildableNoteKindOf>]> = [
       ["too_few_points", "too_short"],
       ["composite_unbuildable", "cannot_build"],
+      // 167.2.1-REVIEW-SFH M-3: a malformed stored series is not "too short".
+      ["malformed_series", "cannot_build"],
       ["read_error", null],
       ["not_visible", null],
       ["not_computed", null],
