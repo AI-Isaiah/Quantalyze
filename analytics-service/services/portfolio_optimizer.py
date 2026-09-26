@@ -101,9 +101,9 @@ def find_improvement_candidates(
         current_max_dd = _max_drawdown(port_baseline)
         # Phase 166.1 (C3, D-02): None when the baseline does not disperse (a
         # portfolio of one constant-yield strategy), as for an all-zero one.
-        corr_with_portfolio = (
-            pairwise_correlation_or_none(port_baseline, aligned[cid]) if len(aligned) > 10 else 0
-        )
+        # No length conditional: the `len(aligned) < 30` skip above already
+        # guarantees the overlap, and a fallback would state a correlation of 0.
+        corr_with_portfolio = pairwise_correlation_or_none(port_baseline, aligned[cid])
         # A None metric on EITHER side of a delta means that axis has no
         # comparable baseline (uniform across candidates), so it contributes 0.
         sharpe_lift = (new_sharpe - current_sharpe) if current_sharpe is not None else 0
