@@ -432,7 +432,14 @@ export default async function StrategiesPage() {
           }
           // D-05: the embed and the admin read disagree (a race): the admin
           // read is the builder's, so the row takes the uncomputed path.
+          // 167.2.1-REVIEW-SFH M-5: logged at warn so the race rate is
+          // measurable. Not captured: a status flip between two reads is
+          // legitimate, and one event per occurrence would be noise.
           if (probe.reason === "not_computed") {
+            console.warn("[strategies/page] factsheet probe found the analytics row not computed (the list embed said computed)", {
+              id: s.id,
+              reason: probe.reason,
+            });
             return [s.id, await uncomputedNote(s, mode)] as const;
           }
           // D-02: computed, but the builder refuses it.

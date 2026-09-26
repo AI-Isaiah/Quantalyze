@@ -817,7 +817,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_PROBE_UNREADABLE);
   });
 
-  it("PROBE-NOT-COMPUTED (D-05): the embed says complete but the builder's read says failed, so the row takes the uncomputed path", async () => {
+  it("PROBE-NOT-COMPUTED (D-05, SFH M-5): the embed says complete but the builder's read says failed, so the row takes the uncomputed path, logged at warn", async () => {
     state.strategies = [row("c-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
     state.adminRows = {
       "c-1": { data: adminStrategy("c-1", { computation_status: "failed" }), error: null },
@@ -833,9 +833,21 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       ],
     };
 
-    const container = await renderPage();
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const container = await renderPage();
 
-    expect(noteOf(container, "Strategy c-1")).toBe(MINT_B);
+      expect(noteOf(container, "Strategy c-1")).toBe(MINT_B);
+      // 167.2.1-REVIEW-SFH M-5: the race is logged, so its rate is
+      // measurable, and never captured.
+      expect(consoleWarn).toHaveBeenCalledWith(
+        "[strategies/page] factsheet probe found the analytics row not computed (the list embed said computed)",
+        expect.objectContaining({ id: "c-1", reason: "not_computed" }),
+      );
+      expect(captureToSentryMock).not.toHaveBeenCalled();
+    } finally {
+      consoleWarn.mockRestore();
+    }
   });
 
   it("NOT-PROBED-UNCOMPUTED (D-08): only the row the embed calls computed is probed", async () => {
