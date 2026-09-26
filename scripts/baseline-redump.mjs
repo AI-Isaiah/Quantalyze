@@ -41,6 +41,12 @@
  *     node scripts/baseline-redump.mjs --gate-dump --dump <file> --merge <40-hex> \
  *          --run-id <digits> --cli-version <x.y.z> --out <dir>
  *     node scripts/baseline-redump.mjs --compose --in <dir> --out <dir>
+ *     node scripts/baseline-redump.mjs --check-bot-branch --remote <name>
+ *
+ *   --check-bot-branch  (write-token job, a step holding NO token) refuse to let the
+ *                 force-push discard a commit on the bot branch not authored by the
+ *                 bot, naming the pull request it sits on (D-24), and emit the
+ *                 observed tip as the push's lease (`lease=`, empty when absent).
  */
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -894,6 +900,181 @@ export function runGitleaksGate({ gitleaks, repoRoot, target }) {
   return version;
 }
 
+// ── the bot branch and the pull requests at its tip (D-11, D-13, D-24) ────────
+
+const BOT_REF = `refs/heads/${BOT_BRANCH}`;
+/** A remote NAME, never an option or a URL: it is the first positional of `git ls-remote`/`git fetch`. */
+const REMOTE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+/** A SHA-1 or SHA-256 object name, as `git ls-remote` and `git log %H` print it. */
+const OBJECT_SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const PULL_HEAD_LINE_RE = /^([0-9a-f]+)\trefs\/pull\/([0-9]+)\/head$/;
+
+function assertRemoteName(remote) {
+  if (!REMOTE_NAME_RE.test(String(remote))) {
+    throw new Error("--remote must be a plain git remote name (letters, digits, '.', '_', '-'; not an option or a URL)");
+  }
+}
+
+/**
+ * The pull requests whose `refs/pull/<n>/head` in `git ls-remote` output carries
+ * exactly `sha`, as ascending numbers. Only `/head` refs count: GitHub moves a PR's
+ * head ref with its branch while the PR is open and freezes it when the PR closes,
+ * so a tip match names the PR(s) that branch state belongs to. `/merge` refs are
+ * GitHub's trial merges and name nothing a human pushed.
+ */
+export function findPullRefsForSha(lsRemoteText, sha) {
+  const prs = new Set();
+  for (const line of String(lsRemoteText).split("\n")) {
+    const m = PULL_HEAD_LINE_RE.exec(line.replace(/\r$/, ""));
+    if (m && m[1] === sha) prs.add(Number(m[2]));
+  }
+  return [...prs].sort((a, b) => a - b);
+}
+
+/** The bot branch's tip in `git ls-remote` output; null when the branch is absent. An unreadable line is MEASURE_FAIL. */
+export function botBranchTip(lsRemoteText) {
+  const tips = String(lsRemoteText)
+    .split("\n")
+    .map((l) => l.replace(/\r$/, "").split("\t"))
+    .filter((cols) => cols[1] === BOT_REF)
+    .map((cols) => cols[0]);
+  if (tips.length > 1 || (tips.length === 1 && !OBJECT_SHA_RE.test(tips[0]))) {
+    throw new Error("MEASURE_FAIL: git ls-remote printed an unreadable line for the bot branch");
+  }
+  return tips.length === 1 ? tips[0] : null;
+}
+
+/**
+ * D-24 over `git log --format=%H%x09%an%x09%ae <main>..<bot branch>`: every commit
+ * must be authored by BOT_NAME with BOT_EMAIL. Returns the verdict, the commit count
+ * and the SHORT shas of the foreign commits; author names, emails and messages
+ * never leave this function. A line that does not parse is MEASURE_FAIL (a refusal).
+ */
+export function judgeForeignCommits(logText) {
+  const rows = String(logText).split("\n").filter(Boolean).map((l) => l.split("\t"));
+  if (rows.some((r) => r.length !== 3 || !OBJECT_SHA_RE.test(r[0]))) return { verdict: "measure_fail", total: rows.length, foreign: [] };
+  const foreign = rows.filter(([, name, email]) => name !== BOT_NAME || email !== BOT_EMAIL).map(([sha]) => short(sha));
+  return { verdict: foreign.length > 0 ? "refuse" : "pass", total: rows.length, foreign };
+}
+
+/**
+ * git with NO credential: the helper list is reset and the terminal prompt is off, so
+ * this can never pick up a token or hang waiting for one. The repository is public,
+ * so `ls-remote` and `fetch` of the bot branch and `refs/pull/*` need none, and the
+ * steps that run them hold none (plan 04). stderr is not passed through.
+ */
+function anonGit(repoRoot, args) {
+  const r = spawnSync("git", ["-c", "credential.helper=", ...args], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
+  return { status: r.error ? -1 : r.status, stdout: r.stdout ?? "" };
+}
+
+/** ONE anonymous `git ls-remote` for the bot branch and every `refs/pull/<n>/head` together. */
+function lsRemoteBotRefs(repoRoot, remote) {
+  return anonGit(repoRoot, ["ls-remote", remote, BOT_REF, "refs/pull/*/head"]);
+}
+
+/**
+ * The bot-PR status the D-10 no-op notice carries (RESEARCH Open Question 3). It
+ * never throws and never touches a PR (D-13): a lookup that fails yields a
+ * `::warning::` naming the exit code, because the dump gate already passed and a
+ * failed status lookup must not turn a legitimate no-op red (RESEARCH A7).
+ */
+export function botPrStatus(repoRoot, remote, lsRemote = lsRemoteBotRefs) {
+  const notMeasured = (why) => ({
+    warning: `::warning::baseline-redump: bot-PR status not measured (${why})`,
+    text: "bot branch status not measured (see the warning above)",
+  });
+  let ls;
+  try {
+    assertRemoteName(remote);
+    ls = lsRemote(repoRoot, remote);
+  } catch {
+    return notMeasured("git ls-remote exit -1");
+  }
+  if (ls.status !== 0) return notMeasured(`git ls-remote exit ${ls.status}`);
+  let tip;
+  try {
+    tip = botBranchTip(ls.stdout);
+  } catch {
+    return notMeasured("git ls-remote exit 0, unreadable output");
+  }
+  if (tip === null) return { warning: null, text: "bot branch absent" };
+  const prs = findPullRefsForSha(ls.stdout, tip);
+  return {
+    warning: null,
+    text:
+      prs.length > 0
+        ? `bot branch at ${short(tip)}; pull request(s) ${prs.map((n) => `#${n}`).join(", ")} point at it (not closed automatically)`
+        : `bot branch at ${short(tip)}; no pull request points at it`,
+  };
+}
+
+/**
+ * --check-bot-branch (D-24, D-11). Emits `lease` for the push, or refuses.
+ *
+ * ⛔ The lease closes the window between this check and the push: plan 04's push
+ * step passes `--force-with-lease=refs/heads/automation/baseline-redump:<lease>`,
+ * so the force-push succeeds only while the remote branch is still the exact sha
+ * whose commits were judged here. An EMPTY lease means "must not exist": if anyone
+ * creates the branch after this check, the push is rejected.
+ *
+ * The refusal always NAMES where the human commit sits: every PR whose head ref is
+ * the tip, or, when none is, the measured negative that no PR's head points at it.
+ * Both come from the same anonymous `ls-remote`, so there is no path that refuses
+ * without having determined which of the two it is.
+ */
+export function checkBotBranch({ repoRoot, remote, emit, lsRemote = lsRemoteBotRefs }) {
+  assertRemoteName(remote);
+  const ls = lsRemote(repoRoot, remote);
+  if (ls.status !== 0) {
+    throw new Error(`MEASURE_FAIL: git ls-remote exit ${ls.status}; the bot branch was not measured, so no lease is emitted and nothing may be pushed`);
+  }
+  const tip = botBranchTip(ls.stdout);
+  if (tip === null) {
+    console.log("baseline-redump bot-branch: absent");
+    emit("lease", "");
+    return { present: false, lease: "", prs: [] };
+  }
+
+  const trackBot = `refs/remotes/${remote}/${BOT_BRANCH}`;
+  const trackMain = `refs/remotes/${remote}/main`;
+  const fetched = anonGit(repoRoot, ["fetch", "--quiet", "--no-tags", remote, `+${BOT_REF}:${trackBot}`, `+refs/heads/main:${trackMain}`]);
+  if (fetched.status !== 0) throw new Error(`MEASURE_FAIL: git fetch exit ${fetched.status}; the bot branch's commits were not measured`);
+  const fetchedTip = anonGit(repoRoot, ["rev-parse", "--verify", "--quiet", `${trackBot}^{commit}`]).stdout.trim();
+  if (fetchedTip !== tip) {
+    throw new Error(
+      `MEASURE_FAIL: the bot branch moved between ls-remote (${short(tip)}) and fetch (${short(fetchedTip) || "nothing"}); ` +
+        "the lease must be the sha whose commits were judged, so re-dispatch supabase-migrate.yml on main",
+    );
+  }
+  const log = anonGit(repoRoot, ["log", "--format=%H%x09%an%x09%ae", `${trackMain}..${trackBot}`]);
+  if (log.status !== 0) throw new Error(`MEASURE_FAIL: git log exit ${log.status}; the bot branch's authors were not measured`);
+  const judged = judgeForeignCommits(log.stdout);
+  if (judged.verdict === "measure_fail") throw new Error("MEASURE_FAIL: git log printed a line this check cannot read; refusing to push");
+
+  const prs = findPullRefsForSha(ls.stdout, tip);
+  const prList = prs.map((n) => `#${n}`).join(", ");
+  if (judged.verdict === "pass") {
+    console.log(`baseline-redump bot-branch: present tip=${short(tip)} prs=${prs.length > 0 ? prs.map((n) => `#${n}`).join(",") : "none"}`);
+    emit("lease", tip);
+    return { present: true, lease: tip, prs };
+  }
+  const where =
+    prs.length > 0
+      ? `It sits on pull request(s) ${prList}, whose head points at tip ${short(tip)}. Merge or close that pull request, or move the commit to a branch of your own,`
+      : `No pull request's head points at tip ${short(tip)}, so the commit was pushed after the branch's pull requests closed. Move the commit to a branch of your own,`;
+  throw new Error(
+    `a human commit sits on ${BOT_BRANCH} and the redump will not overwrite it: ${judged.foreign.length} of ${judged.total} commit(s) over main ` +
+      `are not authored by ${BOT_NAME} (${judged.foreign.slice(0, MAX_LINES_PRINTED).join(", ")}). ${where} ` +
+      "then re-dispatch supabase-migrate.yml on main",
+  );
+}
+
 // ── modes ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -901,7 +1082,7 @@ export function runGitleaksGate({ gitleaks, repoRoot, target }) {
  * `{changed, measured}`. Throws on any refusal; the caller maps a throw to
  * `::error::` + exit 1.
  */
-export function gateDump({ repoRoot, dump, merge, runId, cliVersion, out, emit, gitleaks }) {
+export function gateDump({ repoRoot, dump, merge, runId, cliVersion, out, emit, gitleaks, remote = "origin" }) {
   if (typeof gitleaks !== "function") throw new Error("gateDump was given no gitleaks runner; the gate is never skipped");
   if (!/^[0-9a-f]{40}$/.test(merge)) throw new Error("--merge must be a full 40-hex commit sha");
   if (!/^[0-9]+$/.test(runId)) throw new Error("--run-id must be digits only");
@@ -983,7 +1164,11 @@ export function gateDump({ repoRoot, dump, merge, runId, cliVersion, out, emit, 
       `policies=${shapes.policies} carried=${listed.length} changed=${changed}`,
   );
   if (!changed) {
-    console.log("::notice::baseline-redump: dump and marker are byte-identical to the committed pair — no PR");
+    // Open Question 3: say whether a bot PR is still open, from the same token-free
+    // lookup --check-bot-branch uses. Nothing here closes, comments on or edits a PR (D-13).
+    const status = botPrStatus(repoRoot, remote);
+    if (status.warning) console.log(status.warning);
+    console.log(`::notice::baseline-redump: dump and marker are byte-identical to the committed pair — no PR; ${status.text}`);
     emit("changed", "false");
     return { changed, measured };
   }
@@ -2599,6 +2784,11 @@ function main(argv) {
       });
       return 0;
     }
+    if (argv[0] === "--check-bot-branch") {
+      const f = parseFlags(argv.slice(1), ["--remote"]);
+      checkBotBranch({ repoRoot: cwdRepoRoot(), remote: f["--remote"], emit: emitToGithubOutput });
+      return 0;
+    }
     if (argv[0] === "--compose") {
       const f = parseFlags(argv.slice(1), ["--in", "--out"]);
       compose({
@@ -2615,7 +2805,7 @@ function main(argv) {
     // ⛔ A typo'd flag must not silently fall through to a green run.
     console.error(
       `::error::unknown argument(s): ${argv.join(" ") || "(none)"} — this script takes --self-test [--with-gitleaks], ` +
-        `--gate-dump --dump --merge --run-id --cli-version --out, or --compose --in --out`,
+        `--gate-dump --dump --merge --run-id --cli-version --out, --compose --in --out, or --check-bot-branch --remote`,
     );
     return 1;
   } catch (e) {
