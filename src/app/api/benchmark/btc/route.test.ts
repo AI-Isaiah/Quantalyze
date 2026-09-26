@@ -12,25 +12,58 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  *   - NO tenant/user data — every object has exactly {date, value}.
  *
  * The supabase server client is mocked so the test is hermetic; the
- * `.from().select().eq().order()` chain resolves to a per-test fixture.
+ * `.from().select().eq().order()` chain (paged with `.range()` since Phase
+ * 169.2) resolves against a per-test table.
  */
 
-// The route awaits `.from("benchmark_prices").select("date, close_price")
-//   .eq("symbol","BTC").order("date",{ascending:true})` → { data, error }.
-// `orderResult` is what that terminal `.order(...)` resolves to; each test
-// sets it before invoking GET.
-const { orderResult, mockOrder, mockEq, mockFrom } = vi.hoisted(
-  () => {
-    const orderResult: { value: { data: unknown; error: unknown } } = {
-      value: { data: [], error: null },
+// The fake client mirrors PostgREST: `.from().select().eq()` then either an
+// UNRANGED terminal (`.order()` awaited directly) or a paged one
+// (`.order().range(a, b)`). EVERY read is capped at `table.cap` rows, the way
+// `max_rows` caps a real read, and answers 200 with a partial body. That cap is
+// what the pre-169.2 route fell to: an unranged ascending read of a table
+// larger than the cap returned the OLDEST rows and never the newest.
+const { table, mockOrder, mockEq, mockRange, mockFrom } = vi.hoisted(() => {
+  type Row = { date: string; close_price: unknown };
+  const table: {
+    rows: Row[] | null;
+    error: unknown;
+    cap: number;
+  } = { rows: [], error: null, cap: 1000 };
+
+  function answer(ascending: boolean, from: number, to: number) {
+    if (table.error) return { data: null, error: table.error };
+    if (table.rows === null) return { data: null, error: null };
+    const sorted = [...table.rows].sort((a, b) =>
+      ascending ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date),
+    );
+    const end = Math.min(to + 1, from + table.cap);
+    return { data: sorted.slice(from, end), error: null };
+  }
+
+  const mockRange = vi.fn();
+  const mockOrder = vi.fn((_col: string, o: { ascending: boolean }) => {
+    const ascending = o?.ascending !== false;
+    return {
+      range: (from: number, to: number) => {
+        mockRange(from, to);
+        return Promise.resolve(answer(ascending, from, to));
+      },
+      // Unranged terminal: awaiting `.order(...)` directly.
+      then: (
+        resolve: (v: unknown) => unknown,
+        reject?: (e: unknown) => unknown,
+      ) =>
+        Promise.resolve(answer(ascending, 0, Number.MAX_SAFE_INTEGER)).then(
+          resolve,
+          reject,
+        ),
     };
-    const mockOrder = vi.fn(async () => orderResult.value);
-    const mockEq = vi.fn(() => ({ order: mockOrder }));
-    const mockSelect = vi.fn(() => ({ eq: mockEq }));
-    const mockFrom = vi.fn(() => ({ select: mockSelect }));
-    return { orderResult, mockOrder, mockEq, mockSelect, mockFrom };
-  },
-);
+  });
+  const mockEq = vi.fn(() => ({ order: mockOrder }));
+  const mockSelect = vi.fn(() => ({ eq: mockEq }));
+  const mockFrom = vi.fn(() => ({ select: mockSelect }));
+  return { table, mockOrder, mockEq, mockRange, mockSelect, mockFrom };
+});
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({ from: mockFrom }),
@@ -54,20 +87,21 @@ vi.mock("@/lib/ratelimit", () => ({
 }));
 
 function setRows(rows: Array<{ date: string; close_price: number }>) {
-  orderResult.value = { data: rows, error: null };
+  table.rows = rows;
+  table.error = null;
 }
 
 function setError() {
-  orderResult.value = {
-    data: null,
-    error: { message: "boom", code: "PGRST500" },
-  };
+  table.rows = null;
+  table.error = { message: "boom", code: "PGRST500" };
 }
 
 describe("GET /api/benchmark/btc", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    orderResult.value = { data: [], error: null };
+    table.rows = [];
+    table.error = null;
+    table.cap = 1000;
     rlResult.value = { success: true };
   });
 
@@ -122,7 +156,11 @@ describe("GET /api/benchmark/btc", () => {
     expect(body.some((r) => r.date === "2024-01-01")).toBe(false);
   });
 
-  it("queries benchmark_prices for symbol BTC ordered by date ascending", async () => {
+  it("queries benchmark_prices for symbol BTC newest-first, in .range() pages", async () => {
+    // Phase 169.2 (D-08): this case used to pin `{ ascending: true }` on an
+    // unranged read, which was the defect itself — PostgREST caps that read at
+    // max_rows and returns the OLDEST rows. The read is now newest-first and
+    // paged; the reader hands the route an ascending series for the pct-change loop.
     setRows([
       { date: "2024-01-01", close_price: 100 },
       { date: "2024-01-02", close_price: 110 },
@@ -132,7 +170,30 @@ describe("GET /api/benchmark/btc", () => {
 
     expect(mockFrom).toHaveBeenCalledWith("benchmark_prices");
     expect(mockEq).toHaveBeenCalledWith("symbol", "BTC");
-    expect(mockOrder).toHaveBeenCalledWith("date", { ascending: true });
+    expect(mockOrder).toHaveBeenCalledWith("date", { ascending: false });
+    expect(mockRange).toHaveBeenCalledWith(0, 999);
+  });
+
+  it("returns the NEWEST stored BTC day when the table holds more rows than one capped read", async () => {
+    // 1500 stored days behind a 1000-row max_rows cap. The pre-169.2 route read
+    // unranged + ascending, so its last point was the 1000th-OLDEST day and the
+    // newest 500 days never reached the Scenario composer.
+    const rows = Array.from({ length: 1500 }, (_, i) => ({
+      date: new Date(Date.UTC(2021, 0, 1) + i * 86_400_000)
+        .toISOString()
+        .slice(0, 10),
+      close_price: 20_000 + i,
+    }));
+    setRows(rows);
+
+    const { GET } = await import("./route");
+    const res = await GET();
+    const body = (await res.json()) as Array<{ date: string; value: number }>;
+
+    expect(res.status).toBe(200);
+    expect(body[body.length - 1].date).toBe(rows[1499].date);
+    expect(body[0].date).toBe(rows[1].date);
+    expect(body).toHaveLength(1499);
   });
 
   it("sets a PUBLIC cacheable Cache-Control header (not no-store / private)", async () => {
@@ -173,7 +234,8 @@ describe("GET /api/benchmark/btc", () => {
   });
 
   it("returns [] for an empty / missing benchmark_prices result (200)", async () => {
-    orderResult.value = { data: null, error: null };
+    table.rows = null;
+    table.error = null;
     const { GET } = await import("./route");
     const res = await GET();
     expect(res.status).toBe(200);
@@ -248,10 +310,16 @@ describe("GET /api/benchmark/btc", () => {
     // A zero/negative `close` yields a finite return <= -1 (<= -100%/day) that
     // passes the Number.isFinite(value) check and would silently poison TE/IR/beta.
     // The numerator must be guarded for positivity, not only finiteness.
+    //
+    // Phase 169.2: the 0 close is now dropped by the shared reader
+    // (`readBenchmarkPrices`) before the pct-change loop, so it is treated
+    // exactly like a MISSING day — the same way the loop already bridges any
+    // gap in the stored dates. What this case protects is unchanged: no return
+    // built on a non-positive close reaches the response.
     setRows([
       { date: "2024-01-01", close_price: 100 },
-      { date: "2024-01-02", close_price: 0 }, // close <= 0 → point skipped
-      { date: "2024-01-03", close_price: 110 }, // prevClose=0 → also skipped
+      { date: "2024-01-02", close_price: 0 }, // close <= 0 → row dropped by the reader
+      { date: "2024-01-03", close_price: 110 }, // bridges the dropped day: 110/100 − 1
       { date: "2024-01-04", close_price: 121 },
     ]);
     const { GET } = await import("./route");
@@ -262,8 +330,9 @@ describe("GET /api/benchmark/btc", () => {
       expect(Number.isFinite(r.value)).toBe(true);
       expect(r.value).toBeGreaterThan(-1); // no <= -100%/day corruption leaks through
     }
-    // Only 2024-01-04 (121/110 − 1) survives; the 0-close point and its successor drop.
-    expect(body).toEqual([{ date: "2024-01-04", value: expect.any(Number) }]);
-    expect(body[0].value).toBeCloseTo(0.1, 10); // 121/110 − 1
+    // The 0-close day never appears, and no point is built on it.
+    expect(body.map((r) => r.date)).toEqual(["2024-01-03", "2024-01-04"]);
+    expect(body[0].value).toBeCloseTo(0.1, 10); // 110/100 − 1
+    expect(body[1].value).toBeCloseTo(0.1, 10); // 121/110 − 1
   });
 });

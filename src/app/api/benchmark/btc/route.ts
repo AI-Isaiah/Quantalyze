@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { readBenchmarkPrices } from "@/lib/factsheet/benchmark-source";
 import {
   publicIpLimiter,
   checkLimit,
@@ -14,6 +15,14 @@ import {
  * Exposes the BTC benchmark **daily-returns** series to the scenario composer:
  * read `benchmark_prices` (symbol='BTC') server-side, sort ascending, convert
  * close_price to daily returns via pct-change, and return `[{date, value}]`.
+ *
+ * Phase 169.2 (SC3, D-08): the read goes through `readBenchmarkPrices`, the ONE
+ * paged reader of the table. The route used to issue a single unranged,
+ * ascending select; PostgREST caps that at `max_rows` (1000) with a 200 and a
+ * partial body, so once the table held more than 1000 BTC days this route
+ * answered the OLDEST 1000 and never the newest. The reader pages newest-first
+ * until an empty page. This route serves the DB series only: it does NOT merge
+ * the bundled fixture.
  *
  * Why this is PUBLIC-cacheable (the deliberate contrast with the allocator
  * no-store routes):
@@ -48,7 +57,7 @@ import {
  * it now carries publicIpLimiter (10/min/IP) like the other public DB-touching
  * GETs (demo/match, portfolio-pdf). The CDN `s-maxage` only absorbs identical
  * URLs; an attacker can bust the cache with `?x=rand` (Vercel keys on the full
- * URL) and hit the unbounded SELECT on every request, so the per-IP limiter —
+ * URL) and hit the full paged read on every request, so the per-IP limiter —
  * not the cache — is the abuse defense. Cached hits never reach the function,
  * so the limiter does not throttle legitimate cached reads.
  */
@@ -100,24 +109,22 @@ export async function GET(req?: Request): Promise<NextResponse> {
   const supabase = await createClient();
 
   // RLS `SELECT USING(true)` lets the anon SSR client read; it CANNOT write
-  // (writes are service_role-only). Select ONLY date + close_price so no other
-  // column can ever reach the response (`symbol` is the fixed filter, not data).
-  const { data, error } = await supabase
-    .from("benchmark_prices")
-    .select("date, close_price")
-    .eq("symbol", "BTC")
-    .order("date", { ascending: true });
+  // (writes are service_role-only). The reader selects ONLY date + close_price,
+  // so no other column can ever reach the response, coerces PostgREST's
+  // numeric-as-string closes, and drops a non-finite or non-positive close.
+  const read = await readBenchmarkPrices(supabase, "BTC");
 
-  if (error) {
+  if (!read.ok) {
     // Degrade to the honest empty state — never a 500/red envelope. The raw
     // Postgres error (column names / SQLSTATE / schema detail) is logged +
-    // captured server-side only.
-    console.error("[api/benchmark/btc] select error:", error);
-    captureToSentry(error, { tags: { route: "api/benchmark/btc" } });
+    // captured server-side only. D-09: a read error is never replaced by the
+    // bundled fixture.
+    console.error("[api/benchmark/btc] select error:", read.error);
+    captureToSentry(read.error, { tags: { route: "api/benchmark/btc" } });
     return emptyResponse();
   }
 
-  const rows = (data ?? []) as Array<{ date: string; close_price: number }>;
+  const rows = read.prices.map((p) => ({ date: p.date, close_price: p.close }));
   if (rows.length < 2) {
     // 0 or 1 rows → no daily return can be derived (every return needs a prior
     // close). Honest empty series.
