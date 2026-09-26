@@ -1012,10 +1012,16 @@ def assert_assignment_uncontested(
             continue
         if _instrument_key(other.get("instrument_name")) != instrument:
             continue
-        if str(other.get("type", "")).strip().lower() in _ASSIGNMENT_CONTESTING_TYPES:
+        other_type = str(other.get("type", "")).strip().lower()
+        if other_type in _ASSIGNMENT_CONTESTING_TYPES:
+            # SFH-03 (Phase 168 review): name the CONTESTING row by venue row id
+            # and type, so a permanent refusal says which ledger row to inspect.
+            # Row ids are venue identifiers already printed for the assignment
+            # itself; no other field of the sibling is rendered.
             raise LedgerValuationError(
                 f"Deribit assignment row id={row.get('id')!r} "
-                f"{_ASSIGNMENT_CONTESTED_PHRASE} in this batch — an UNOBSERVED "
+                f"{_ASSIGNMENT_CONTESTED_PHRASE} in this batch (contesting row "
+                f"id={other.get('id')!r} type={other_type!r}) — an UNOBSERVED "
                 "shape (the census licensing the assignment classification found "
                 "none); summing both may double-count realized expiry cash, so "
                 "this refuses to sum or skip it. "

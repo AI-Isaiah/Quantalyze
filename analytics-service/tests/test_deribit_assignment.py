@@ -872,3 +872,22 @@ def test_sfh02_a_second_same_instrument_assignment_contests(
     msg = str(exc.value)
     assert _ASSIGNMENT_CONTESTED_PHRASE in msg, f"{twin_name}: {msg}"
     assert "assignment=1" in msg, msg
+
+
+@pytest.mark.parametrize("twin_name,twin", TWINS, ids=[t[0] for t in TWINS])
+@pytest.mark.parametrize("sibling_type", ["delivery", "settlement"])
+def test_sfh03_the_contested_refusal_names_the_contesting_row(
+    sibling_type: str, twin_name: str,
+    twin: Callable[[list[dict[str, Any]]], Any],
+) -> None:
+    """SFH-03: the refusal is permanent (every recompute re-raises it), so it
+    must name the row that contested the assignment, by venue row id and type.
+    Without it an operator cannot tell which ledger row to look at. Venue row
+    ids are not secret (the assignment's own id is already printed); the change
+    value is not echoed."""
+    rows = _indexed(_census_rows()) + [_sibling(sibling_type, id=77, change=0.0123)]
+    with pytest.raises(LedgerValuationError) as exc:
+        twin(rows)
+    msg = str(exc.value)
+    assert f"contesting row id=77 type={sibling_type!r}" in msg, f"{twin_name}: {msg}"
+    assert "0.0123" not in msg, msg
