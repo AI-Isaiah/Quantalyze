@@ -1,5 +1,123 @@
 # Changelog
 
+## [0.104.0.0] - 2026-09-26 — BRIDGELOCK: a second terminal mark on the same strategy waits on a per-strategy lock
+
+⭐ **What changed for whoever reads this next.** `mark_compute_job_done` and
+`mark_compute_job_failed` both call the strategy bridge (`sync_strategy_analytics_status`) at the
+end of a job. Until now neither serialized per strategy, so two terminal marks on one strategy
+could interleave their bridge reads and writes (`TODOS.md` `161.1-D1`). Phase 164.5.2 adds the SAME
+transaction-scoped advisory lock to BOTH RPCs, in ONE migration, so the half-applied lock
+discipline that entry warned about never exists. A second mark on the same strategy now waits for
+the first to commit. Marks on different strategies, and jobs with no strategy, do not wait.
+
+⚠️ **A minor bump: the database contract of two RPCs changes (they now serialize).** The migration
+`20260926120000_mark_compute_job_bridge_advisory_lock.sql` **auto-applies to TEST and then PROD on
+merge, with no human gate** (the `Production` reviewer was removed 2026-09-23). Every review had
+to happen before the merge, and it did (see `### Security`). It was first numbered 0.101.0.0. It
+became 0.104.0.0 when main reached 0.103.0.0 (Phases 166.1, 166.2 and PR #870) before it landed.
+
+⛔ **Merge ONLY after PR #870** (PR B, migration `20260925120000`). This migration sorts after it.
+PR #870 has merged and its migration has applied to TEST and PROD.
+Merging this one first would make PR B's migration backdated, and the backdated-migration policy
+would then block PR B. Do not allowlist around it.
+
+### Added
+- **The per-strategy bridge lock in `mark_compute_job_done`** (plan 01). The first statement
+  inside the existing `IF v_strategy_id IS NOT NULL` guard, directly before the bridge call, is
+  `pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text))`. It
+  uses the TWO-integer key form, in its own namespace, NOT the single-key `hashtext(strategy_id)`
+  the `161.1-D1` fix shape suggested, so a mark never queues behind a trade sync that takes the
+  single-key lock on the same strategy. The body is re-based byte-for-byte on its latest
+  definition (`20260603120000`) plus that one line.
+- **The same lock in `mark_compute_job_failed`, in the same migration** (plan 01). It is re-based
+  on `20260529180000` plus the one line. Both `REVOKE`s are re-issued word for word, SECURITY
+  DEFINER and the pinned `search_path` are kept, and no grant moves.
+- **An apply-time `DO $verify$` block that reads catalogs only** (plan 01). It pins guard, then
+  lock, then bridge as consecutive statements in both bodies. It re-checks the carried-forward
+  anchors, SECURITY DEFINER, the `search_path` value and the ACL, and it proves the namespace
+  differs from the only other two-key namespace (`admin_role_mutate`). Because it reads no table
+  data, it cannot refuse on TEST's empty tables.
+
+### Tests
+- **A LANE-ONLY two-backend concurrency gate, `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql`**
+  (plan 01). It opens two real backends over `dblink` on the pg-lane, with committed seeds and no
+  wrapping transaction, and observes WHICH lock the second backend waits on (`locktype =
+  'advisory'`, plus `classid`/`objsubid`), never merely WHETHER it waits. Four counted arms:
+  L1 (done lock removed) and L2 (failed lock removed) each went RED naming their own arm and GREEN
+  with the line restored byte-identically. L3 pins the namespace and key, and L4 pins the strategy
+  scope. A new lane fixture, `scripts/pg-lane/fixtures/36-fixture-dblink.sql`, installs `dblink`
+  for the lane only. The file is registered in `LANE_ONLY_SITES`, so `sql-tests` never runs it.
+- **Floors and every corpus census moved by measurement** (plan 03). `FILES_FLOOR` 50 → 51 and
+  `ARMS_FLOOR` 449 → 453, from a full local runner pass with no defects. `WAIVED_CEILING` stays 0.
+  The annotation-parser, floors, `lint-sql-gates`, `gate-family-meta` and `ci-anti-skip-gate`
+  census pins move with them, and the stale-low runner leg was re-run clean with no file edited
+  during it. Read the floors by symbol from `scripts/mutation-runner/run.mjs`, never from here.
+
+### Changed
+- **Both mark-RPC function snapshots regenerated, with two earned VAC-04 acks** (plan 02).
+  `supabase/schema/functions/mark_compute_job_done.sql` and `mark_compute_job_failed.sql` now name
+  `20260926120000` as their source and differ only by the lock line. The migration header carries
+  one `prod-body-ack` line per RPC, derived with `sql-body-normalize --diff-bodies` against
+  `origin/main`'s snapshot. That snapshot stands in for PROD, because no remote database command
+  was run.
+- **A loud `dblink` probe in the `sql-mutation` CI job** (plan 02). It reads the same
+  `--print-pgbin` answer and `pg_config` the lane boots, and fails with a named `::error::` if
+  `dblink.so` or `dblink.control` is missing. It has no `if:` and no `continue-on-error`. Nothing
+  is installed pre-emptively. The step's comment was then corrected to say that `dblink` on the
+  lane had run only on the authoring box, and the census attribution was measured and recorded.
+
+### Security
+- **Three pre-merge migration reviews, recorded in `164.5.2-MIGRATION-REVIEWS.md`.**
+  migration-reviewer APPROVE (0 CRITICAL, 0 HIGH, 1 MEDIUM: the merge order after PR #870).
+  rls-policy-auditor PASS (0 findings, no leak scope). silent-failure-hunter 0 CRITICAL/HIGH/MEDIUM
+  and 4 LOW. `/gsd-secure-phase`: `secured`, `threats_open: 0`. Anon and authenticated still
+  cannot call either RPC, and the lock key is derived from the job row only after the claim-token
+  fence.
+
+### Notes
+- **Pre-merge reads, all on the PR's CI bound to the head SHA.** (1) VAC-04 in
+  `migration-drift-check` must report, for each RPC, the same PROD hash as that RPC's
+  `prod-body-ack` line. On a mismatch, fold the PROD difference into the migration and re-derive
+  the ack. Never edit an ack to match the log. (2) In `sql-mutation`, the `dblink` probe must
+  pass on ubuntu. That is RESEARCH assumption A1, which has never run on the runner. L1 to L4 must
+  each print RED (identity ok), and the run must end at `arms: 453/453/0` with no defects and
+  exit 0.
+- **Expected red checks, none allowlisted.** `baseline-content-drift` (already red on `main`;
+  this PR adds the two mark-RPC rows) and VAC-08 in `test-db-drift` (red by construction until
+  apply-on-merge). VAC-04 is red only if read (1) above disagrees.
+- **Owed after the PROD apply: the baseline re-dump.** Both applies should print the
+  `mark-compute-job-bridge-lock:` NOTICE and raise nothing. The committed baseline must then be
+  re-dumped, which clears the two new `baseline-content-drift` rows.
+- **Known limits, recorded rather than fixed** (review round 1 was MEDIUM/LOW only, so no fix round
+  ran). **WR-01:** the gate never drives the FAILED RPC's key or namespace, and no arm pairs done
+  with failed on one strategy. The migration's shared lock anchor on both bodies catches that
+  instead, so it is a mutation-coverage gap and not a shipped-behaviour gap. **IN-02:** there is no
+  "all arms executed" completion sentinel; the arm count is guarded by `ARMS_FLOOR` and the parser
+  pins only. **SFH LOW 1–4:** no failed/failed twin of L3's key predicate; the gate's schema is
+  narrower than PROD's (VAC-04 and snapshot drift bind the PROD body); the namespace check does not
+  cover the CI mutex's key, which would need a zero hash; a stalled holder surfaces as a generic
+  statement timeout, which is not a new wait class.
+- **What stays OPEN.** The lock covers terminal mark against terminal mark only. The bridge's other
+  callers and the other writers of the rows it reads stay unserialized. A lock inside the bridge
+  itself is routed to Phase 164.5.2.1 BRIDGERESIDUE, and the bridge's read-order pins stay
+  load-bearing.
+- **Routed items.** **WR-02**, a pre-existing concurrent fan-in "lost release" in
+  `mark_compute_job_done` that can strand a two-parent child, goes to Phase 164.9.3.1 FANINGRAPH.
+  Its routing is carried in PR #871. This phase carried the body byte-for-byte and neither
+  introduced nor closed it. **IN-01**, the bridge's read-order comment that still says neither mark
+  RPC takes a per-strategy lock, goes to Phase 164.5.2.1, which re-bases that function. The
+  kind-scope drift pin found in research also goes to 164.5.2.1.
+- **`TODOS.md`:** `161.1-D1` is CLOSED on the RED-then-GREEN evidence and names what stays open.
+  Both DEC-4 lines now say TAKEN by Phase 164.5.2. No 164.6.7 entry was touched.
+- **Planning trail.** Context (derived autonomously), research (which split the two bridge residues
+  into 164.5.2.1), the validation strategy, the pattern map, and three plans in three waves, which
+  passed plan-check in round 3. Then the three plan SUMMARYs, the round-1 code review and
+  silent-failure review, the security verification, the phase verification (`human_needed`: the
+  pre-merge CI reads above, the post-merge apply, and the founder's closure decision), and
+  `STATE.md` recording the phase as executing. `origin/main` was merged in, with only
+  `.planning/STATE.md` and `.planning/ROADMAP.md` in conflict. Both kept `main`'s content, which
+  includes the founder re-route of this phase's four 164.9.1 items to 164.9.3 and 164.9.3.1.
+
 ## [0.103.0.0] - 2026-09-26 — ACCOUNTTRUTH PR B: the account-identity migration ships alone, ahead of every reader
 
 ⭐ **What changed for whoever reads this next.** Phase 167.1.2 (ACCOUNTTRUTH) makes one exchange

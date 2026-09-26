@@ -67,6 +67,9 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    - **DEC-4** — the advisory lock, in its own phase, with a REAL concurrency test. It touches two
      RPCs that run on every job transition for every strategy; a half-applied lock discipline reads
      as protection while providing none.
+     ⭐ **TAKEN 2026-09-26 by Phase 164.5.2 BRIDGELOCK** — migration
+     `20260926120000_mark_compute_job_bridge_advisory_lock.sql` (both RPCs in one file) and the
+     LANE-ONLY two-backend gate `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql`.
 
    **B. Detection gap found during the 2026-08-25 prod outage:**
    - **0.04 — PYAPI-06 cannot detect the outage it was built for.** The client omits `X-Service-Key`
@@ -9561,6 +9564,22 @@ follows is what was deliberately left, with the reason.
   - **Not done in 161.1:** both files are outside the phase's declared scope, and a half-applied
     lock discipline (one RPC locking, the other not) is worse than a documented window — it reads
     as protection while providing none. Wants its own phase and its own concurrency test.
+  - ✅ CLOSED 2026-09-26 by Phase 164.5.2 BRIDGELOCK. Migration
+    `20260926120000_mark_compute_job_bridge_advisory_lock.sql` makes BOTH `mark_compute_job_done`
+    and `mark_compute_job_failed` take `pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'),
+    hashtext(<strategy id>))` inside their strategy guard, before the bridge call, in ONE
+    migration, so the half-applied discipline this entry warned about never exists. Evidence, per
+    the plan 01 SUMMARY: the LANE-ONLY two-backend gate
+    `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql` went RED naming arm L1 with the done
+    lock line removed and RED naming arm L2 with the failed lock line removed, and GREEN with each
+    restored byte-identically. ⚠️ The key is the TWO-integer form, not the single-key
+    `hashtext(p_strategy_id::text)` the fix shape above suggested, so a mark never queues behind a
+    trade sync. ⚠️ **What stays OPEN:** the lock covers terminal-mark against terminal-mark only.
+    The bridge's non-mark callers and the other writers of the rows it reads (the Python deferred
+    bridge call, both claim RPCs, `reset_stalled_compute_jobs`, the orphan terminalizer, enqueue,
+    a cross-strategy fan-in release, the refresh-marker retraction) stay unserialized, and a lock
+    inside the bridge itself is routed to **Phase 164.5.2.1 BRIDGERESIDUE**. The bridge's
+    read-order pins stay load-bearing.
 
 161.1-D2. **⚠️ A systematic enqueue failure in either fan-out is indistinguishable from "nothing
   was stale".** Both `enqueue_ledger_refresh_for_strategies` and `enqueue_ledger_composite_refresh`
@@ -9759,6 +9778,10 @@ follows is what was deliberately left, with the reason.
   half-applied lock discipline reads as protection while providing none. 164.1 is otherwise guards
   and observability (low blast radius); this would dominate its risk profile. Needs a test that
   genuinely exercises concurrent bridge calls, not a unit test.
+  ⭐ **TAKEN 2026-09-26 by Phase 164.5.2 BRIDGELOCK** — its own phase, as decided: migration
+  `20260926120000_mark_compute_job_bridge_advisory_lock.sql` locks both RPCs in one file, and the
+  gate `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql` drives two real backends over
+  `dblink` on the lane (LANE-ONLY), which is the concurrent test this decision asked for.
 
 161.1-D4. **Prose/derivation nits, non-blocking.**
   - `analytics-service/tests/test_computing_started_at_stamp.py:649` — census docstring
