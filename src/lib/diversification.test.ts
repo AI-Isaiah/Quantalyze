@@ -561,6 +561,33 @@ describe("percentContributionToRisk (Euler decomposition)", () => {
     expect(pcr.A + pcr.D).toBeCloseTo(1, 9);
   });
 
+  // Phase 166.2 review round 1 (WR-06 / SFH-M6): PCR judges σ_p = √(wᵀΣw) by
+  // the SAME shared floor as diversificationRatio, so the two never disagree
+  // about whether one book has dispersion. σ_p = 1e-10 sits between the shared
+  // floor (1e-12) and the old local one (√1e-15 ≈ 3.2e-8): both now answer.
+  it("agrees with diversificationRatio on a σ_p between the shared floor and the old 1e-15 variance floor", () => {
+    const s = 1e-10;
+    const cov = [
+      [s * s, 0],
+      [0, s * s],
+    ];
+    const w = { X: 0.5, Y: 0.5 };
+    const sigmaP = Math.sqrt(0.25 * s * s + 0.25 * s * s);
+    const dr = diversificationRatio(w, { X: s, Y: s }, sigmaP);
+    const pcr = percentContributionToRisk(["X", "Y"], w, cov);
+    expect(dr).not.toBeNull();
+    expect(pcr).not.toBeNull();
+    expect(pcr!.X).toBeCloseTo(0.5, 9);
+    // Below the shared floor both are absent.
+    const t = 1e-13;
+    const covT = [
+      [t * t, 0],
+      [0, t * t],
+    ];
+    expect(diversificationRatio(w, { X: t, Y: t }, Math.sqrt(0.5) * t)).toBeNull();
+    expect(percentContributionToRisk(["X", "Y"], w, covT)).toBeNull();
+  });
+
   it("returns null when wᵀΣw ≤ 1e-15 (all-flat blend)", () => {
     // Flat constituents → zero covariance everywhere → portVar = 0.
     const flat = { X: [0, 0, 0, 0, 0], Y: [0, 0, 0, 0, 0] };

@@ -30,10 +30,8 @@
  * Honesty invariants (tested):
  *   - A degenerate window (n<2) yields `null` for every field — never a
  *     fabricated 0 — so the UI renders an em-dash.
- *   - A CONSTANT benchmark yields `null` for beta/alpha. `computeAlphaBeta`
- *     answers a constant benchmark with {beta: 0, alpha: meanR*periodsPerYear},
- *     a number, not an absence, so the constant-benchmark case MUST be detected
- *     HERE (varB computed first) and surfaced as null.
+ *   - A CONSTANT benchmark yields `null` for beta/alpha, the absence
+ *     `computeAlphaBeta` itself returns for an undefined beta (D7).
  *   - te=0 (p≡b), or an excess series that is constant, yields a `null`
  *     information ratio.
  *   - Every degeneracy test, the correlation and the information ratio come
@@ -50,8 +48,8 @@
  */
 
 import { computeAlphaBeta, computeTrackingError } from "@/lib/portfolio-stats";
-import { mean, type DailyPoint } from "@/lib/portfolio-math-utils";
-import { dispersionIsResidue, pearson, sharpe } from "@/lib/return-stats";
+import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { pearson, sharpe } from "@/lib/return-stats";
 
 export interface ScenarioBenchmark {
   /** Aligned (intersection) overlap count — the {N} the UI heading reports. */
@@ -138,33 +136,15 @@ export function computeScenarioBenchmark(
   const diff = p.map((v, i) => v - b[i]);
   const informationRatio = sharpe(diff, { periodsPerYear, ddof: 1 });
 
-  // var(b): POPULATION variance of the aligned benchmark. Computed FIRST so
-  // the constant-benchmark degenerate case is detected here. computeAlphaBeta
-  // is NOT a safe net: it answers a constant benchmark with beta 0 and
-  // alpha = meanR*periodsPerYear, a number where the honest answer is an
-  // absence. A constant benchmark must surface "—", not a 0.
-  //
-  // Degeneracy is the shared floor, not exact `varB === 0`: a genuinely
-  // constant series (e.g. every value 0.003) does NOT yield an exact zero
-  // variance once it passes through floating-point mean subtraction
-  // (mean([0.003×6]) === 0.0029999999999999996, leaving ~1e-37 residual var),
-  // and a compounding-NAV constant yield leaves a spread of about 1e-16. The
-  // honest test is: the benchmark's spread (std) is float residue at its own
-  // level, `std <= 1e-12 * max(1, |mean|)`. This treats any numerically-constant
-  // benchmark as degenerate while never mis-flagging a real BTC series.
-  const meanB = mean(b);
-  const varB = mean(b.map((x) => (x - meanB) ** 2));
-  const benchmarkIsDegenerate = dispersionIsResidue(Math.sqrt(varB), meanB);
-  let alpha: number | null;
-  let beta: number | null;
-  if (benchmarkIsDegenerate) {
-    alpha = null;
-    beta = null;
-  } else {
-    const ab = computeAlphaBeta(p, b, periodsPerYear); // beta=cov/var, alpha=(meanP−β·meanB)·periodsPerYear
-    alpha = ab.alpha;
-    beta = ab.beta;
-  }
+  // Alpha and beta come straight from computeAlphaBeta, which since Phase
+  // 166.2's review round 1 (founder decision D7, 2026-09-26) answers an
+  // undefined beta, including a constant benchmark (an exact constant, or the
+  // ~1e-16 float residue of a compounding constant yield, judged by the shared
+  // floor), with { alpha: null, beta: null }. This file used to detect the
+  // constant benchmark itself with a local variance, because computeAlphaBeta
+  // answered it with beta 0 and alpha meanR * periodsPerYear; that second
+  // degeneracy test (SFH-M7) is gone with the fabrication it guarded against.
+  const { alpha, beta } = computeAlphaBeta(p, b, periodsPerYear); // beta=cov/var, alpha=(meanP−β·meanB)·periodsPerYear
 
   // Pearson correlation: the shared `pearson` (the sums form, equal to the
   // sample form this file carried before to the display precision). Null (not

@@ -13,8 +13,8 @@
  */
 
 import type { DailyPoint } from "./portfolio-math-utils";
-import { mean, stdDev, compound } from "./portfolio-math-utils";
-import { beta as sharedBeta, dispersionIsReal } from "@/lib/return-stats";
+import { mean, compound } from "./portfolio-math-utils";
+import { beta as sharedBeta, dispersion, dispersionIsReal } from "@/lib/return-stats";
 
 // ── Non-finite drop diagnostic ──────────────────────────────────────
 // computeReturnDistribution, findMinMax, and detectRegimeChanges all
@@ -436,7 +436,10 @@ export function computeTrackingError(
   for (let i = 0; i < n; i++) {
     diff.push(returns[i] - benchmark[i]);
   }
-  return stdDev(diff, true) * Math.sqrt(periodsPerYear);
+  // The shared sample sd (SFH-M7): bitwise `stdDev(diff, true)` except that a
+  // float-residue excess (a constant outperformance) reads exactly 0, so the
+  // tracking error beside a null information ratio is 0, not about 1e-15.
+  return dispersion(diff, 1).sd * Math.sqrt(periodsPerYear);
 }
 
 // ── 11. computeRiskDecomposition ────────────────────────────────────

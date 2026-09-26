@@ -27,10 +27,10 @@
  *   - β-propagated shock (STRESS-01) — `projectedImpact = β_portfolio · shock`,
  *     where `β_portfolio = computeScenarioBenchmark(portfolioDaily, btcDaily).beta`
  *     over the BTC inner-join INTERSECTION (never a zero-filled union). We reuse
- *     `computeScenarioBenchmark` directly so we inherit its shared-floor
- *     degeneracy guard — we do NOT call `computeAlphaBeta` directly (it
- *     answers a constant benchmark with β = 0, a number where the honest
- *     answer is an absence). A null β ⇒ null impact ⇒ "—". A
+ *     `computeScenarioBenchmark` directly so the inner-join and the beta have
+ *     ONE site (its `computeAlphaBeta` answers a constant benchmark with a null
+ *     β since Phase 166.2's D7; it used to answer β = 0). A null β ⇒ null
+ *     impact ⇒ "—". A
  *     near-market-neutral book (cov ≈ 0 ⇒ β ≈ 0) ⇒ |impact| ≈ 0, NOT the full
  *     shock — the load-bearing success-criterion behavior.
  *
@@ -45,8 +45,8 @@
  */
 
 import { computeVaR, computeExpectedShortfall } from "@/lib/portfolio-stats";
-import { mean, type DailyPoint } from "@/lib/portfolio-math-utils";
-import { dispersionIsResidue } from "@/lib/return-stats";
+import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { dispersion } from "@/lib/return-stats";
 import { computeScenarioBenchmark } from "./scenario-benchmark";
 
 export interface ScenarioStress {
@@ -114,8 +114,8 @@ export function computeScenarioStress(
 
   // ── β-shock path (STRESS-01) — REUSE the β source, never re-derive ──
   // computeScenarioBenchmark already inner-joins, computes cov/var via the
-  // golden-tested computeAlphaBeta, AND null-guards the constant-benchmark
-  // degeneracy via its shared-floor test. Call it ONCE and read both fields
+  // golden-tested computeAlphaBeta, which answers the constant-benchmark
+  // degeneracy (the shared floor) with a null beta. Call it ONCE and read both fields
   // off the single result: `.n` IS the inner-join overlap (the BTC-overlap N =
   // betaN) and `.beta` is the CAPM β. (Previously this also called
   // innerJoinByDate separately just to count the overlap — a second, redundant
@@ -124,14 +124,13 @@ export function computeScenarioStress(
   const bench = computeScenarioBenchmark(portfolioDaily, btcDaily);
   const betaN = bench.n;
   // Finite-aware short-circuit on the β path — mirror computeVarPath's guard for
-  // the SECOND (factor) axis. A NaN/Infinity injected through btcDaily defeats
-  // computeScenarioBenchmark's shared-floor degeneracy test (the float-residue
-  // guard short-circuits on a tiny std, not on NaN: Math.sqrt(NaN) <= x is
-  // false), so it falls through to computeAlphaBeta, which answers the shared
-  // beta's null with a FABRICATED finite β = 0 (not NaN, not null) for a
-  // contaminated factor series → a fabricated projectedImpact = 0, the exact
-  // false-confidence the "fully null-safe" contract forbids. A non-finite
-  // contaminant anywhere in the factor feed makes it untrustworthy, so surface
+  // the SECOND (factor) axis. Before Phase 166.2's review round 1 (D7), a
+  // NaN/Infinity injected through btcDaily reached computeAlphaBeta, which
+  // answered the shared beta's null with a FABRICATED finite β = 0 → a
+  // fabricated projectedImpact = 0. The shared beta and computeAlphaBeta now
+  // answer a non-finite leg inside the overlap with null themselves; this check
+  // stays because it is broader: a non-finite contaminant ANYWHERE in the
+  // factor feed, inside the overlap or not, makes it untrustworthy, so surface
   // null β ⇒ null impact ("—"). Checked on the raw btcDaily values (no second
   // inner-join — the dedupe keeps computeScenarioBenchmark the sole join site).
   const btcIsFinite = btcDaily.every((d) => Number.isFinite(d.value));
@@ -179,9 +178,8 @@ function computeVarPath(
   // ABSOLUTE whatever the yield, and the floor this file carried before scaled
   // with `|mean|` alone, so it missed daily 1e-5, daily 1e-4 and APYs up to 3%
   // (measured 2026-09-26).
-  const meanSeries = mean(values);
-  const varSeries = mean(values.map((x) => (x - meanSeries) ** 2));
-  const seriesIsDegenerate = dispersionIsResidue(Math.sqrt(varSeries), meanSeries);
+  // The shared `dispersion` (SFH-M7) reports a residue sd as exactly 0.
+  const seriesIsDegenerate = dispersion(values, 0).sd === 0;
   if (seriesIsDegenerate) return NULL_VAR;
 
   // 3. Non-empty, non-constant series → the floor-quantile VaR + tail-mean CVaR.

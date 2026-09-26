@@ -124,6 +124,25 @@ describe("T9 computeAlphaBeta: a constant-yield benchmark gives what an all-zero
   });
 });
 
+// ── SFH-M7: computeTrackingError on the shared sample sd ────────────
+describe("SFH-M7 computeTrackingError: a constant excess has exactly the zero excess's tracking error", () => {
+  it.each(YIELD_IDS)("%s: constant outperformance over a noisy benchmark reads 0, not residue", (id) => {
+    const c = navConstantYield(CONSTANT_YIELDS[id], N);
+    const r = NOISY_B.map((b, i) => b + c[i]);
+    // Beside a null information ratio the tracking error was about 1e-15; the
+    // shared dispersion reports that residue as exactly 0, as for p = b.
+    expect(computeTrackingError(r, NOISY_B, 365)).toBe(computeTrackingError(NOISY_B, NOISY_B, 365));
+    expect(computeTrackingError(r, NOISY_B, 365)).toBe(0);
+  });
+
+  it("control: a noisy excess keeps its tracking error, bitwise the sample sd times sqrt(N)", () => {
+    const diff = NOISY_A.map((a, i) => a - NOISY_B[i]);
+    const m = diff.reduce((acc, v) => acc + v, 0) / N;
+    const sd = Math.sqrt(diff.reduce((acc, v) => acc + (v - m) * (v - m), 0) / (N - 1));
+    expect(computeTrackingError(NOISY_A, NOISY_B, 365)).toBe(sd * Math.sqrt(365));
+  });
+});
+
 // ── T10: computeRiskDecomposition on the shared floor ───────────────
 describe("T10 computeRiskDecomposition: two constant-yield strategies give what an all-zero matrix gives", () => {
   const weights = [0.6, 0.4];

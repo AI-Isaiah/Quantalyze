@@ -397,7 +397,8 @@ export function diversificationRatio(
  * ── DEGENERATE PORTFOLIO VARIANCE (Pitfall 3) ───────────────────────────────
  * wᵀΣw is exactly the portfolio variance. If it is ≤ 0 (all-flat or perfectly-
  * offsetting blend, or a tiny negative from float error) the contributions are
- * UNDEFINED — return null (UI "—"), NOT 0/0 = NaN. Guarded with an epsilon.
+ * UNDEFINED — return null (UI "—"), NOT 0/0 = NaN. Guarded by the shared
+ * `dispersionIsReal` floor on σ_p = √(wᵀΣw), as `diversificationRatio` is.
  */
 export function percentContributionToRisk(
   ids: string[],
@@ -409,7 +410,13 @@ export function percentContributionToRisk(
     w.reduce((acc, wj, j) => acc + cov[i][j] * wj, 0),
   );
   const portVar = w.reduce((acc, wi, i) => acc + wi * sigmaW[i], 0); // wᵀΣw
-  if (!(portVar > 1e-15)) return null; // degenerate variance → "—" (no NaN/Inf)
+  // σ_p is judged by the SAME shared floor `diversificationRatio` uses on the
+  // same quantity (Phase 166.2 review round 1, WR-06 / SFH-M6). A local
+  // variance floor of 1e-15 (σ_p ≈ 3.2e-8) used to sit beside it, so for σ_p in
+  // (1e-12, 3.2e-8] one panel showed a DR and "—" for PCR and ENB. A tiny
+  // negative variance (float error) is clamped to 0 before the root; NaN fails
+  // the floor. Degenerate → "—" (no NaN/Inf).
+  if (!dispersionIsReal(Math.sqrt(Math.max(portVar, 0)), 0)) return null;
   const out: Record<string, number> = {};
   ids.forEach((id, i) => {
     out[id] = (w[i] * sigmaW[i]) / portVar; // signed; Σ = 1
