@@ -95,7 +95,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.4.2.1: DRIFTOFFMUTEX — `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work, so a merge push's critical path falls back inside its BEFORE band** (INSERTED)
 - [x] **Phase 164.5: BASELINE-SNAPSHOT — the committed PROD schema baseline becomes the local stack's source and a gate, and the one production object no migration owns is dispositioned under review** (INSERTED)
 - [x] **Phase 164.5.1: CRONREPOINT — the live `match_engine_cron` row is repointed at the mechanism the repo actually describes, and the migration-vs-runbook rule is settled first** (INSERTED)
-- [ ] **Phase 164.5.1.1: FANOUTCOHORT — the ledger-refresh fan-out admits the `private` status, so it stops enqueuing nothing for every strategy that exists** (INSERTED) — verification: gaps_found
+- [x] **Phase 164.5.1.1: FANOUTCOHORT — the ledger-refresh fan-out admits the `private` status, so it stops enqueuing nothing for every strategy that exists** (INSERTED)
 - [x] **Phase 164.5.1.2: FANOUTSIBLINGS — the daily position poll never runs for a single real strategy, and the sync constant lets the cursor lie: measure, then decide** (INSERTED)
 - [x] **Phase 164.5.1.3: SYNCADMIT — admit the owner-only status to the trade-sync constant, or prove it must not be: 5 of 5 private keys are never synced and their trades are never stored** (INSERTED)
 - [x] **Phase 164.5.1.4: SYNCCURSOR — the sync cursor is per-KEY while stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies trade window** (INSERTED)
