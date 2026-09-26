@@ -726,19 +726,24 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(JSON.stringify(ctx)).not.toContain("s-1");
   });
 
-  it("PROBE-READ-ERROR (D-05): an admin read error renders KCS12-UNREADABLE and is logged and captured with tags only", async () => {
+  it("PROBE-READ-ERROR (D-05, SFH M-2): an admin read error renders KCS12-UNREADABLE and is captured ONCE, by the resolve stage, with tags only", async () => {
     state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
     state.adminRows = { "s-1": { data: null, error: { message: "synthetic admin read failure" } } };
 
     const container = await renderPage();
 
     expect(noteOf(container, "Strategy s-1")).toBe(UNREADABLE);
+    // The stage that saw the error logs it, labelled as the probe's (SFH M-1).
     expect(consoleError).toHaveBeenCalledWith(
-      "[strategies/page] factsheet probe could not read the row",
-      expect.objectContaining({ id: "s-1", reason: "read_error" }),
+      "[factsheet] resolve(probe) — admin strategy read failed",
+      expect.objectContaining({ id: "s-1", caller: "probe" }),
     );
+    // One event, from the stage; the page adds none of its own. The fixture
+    // error carries no code, so the stage tags "none".
     expect(captureToSentryMock).toHaveBeenCalledTimes(1);
-    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), PROBE_TAGS);
+    expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { stage: "factsheet-resolve", caller: "probe", reason: "read_error", code: "none" },
+    });
     const [err, ctx] = captureToSentryMock.mock.calls[0] as [Error, unknown];
     expect(err.message).not.toContain("s-1");
     expect(JSON.stringify(ctx)).not.toContain("s-1");

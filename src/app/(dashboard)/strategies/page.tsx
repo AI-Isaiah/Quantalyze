@@ -402,9 +402,17 @@ export default async function StrategiesPage() {
             return [s.id, recipientShareNote(mode, "unreadable")] as const;
           }
           if (probe.buildable) return [s.id, null] as const;
-          if (probe.reason === "read_error" || probe.reason === "not_visible") {
-            // D-05: the probe could not see the row, so what the recipient
-            // sees is not known. Logged and captured, tags only.
+          if (probe.reason === "read_error") {
+            // D-05: the probe could not read the row, so what the recipient
+            // sees is not known. 167.2.1-REVIEW-SFH M-2: the resolve stage
+            // already logged this read and captured it ONCE, with its code
+            // (`stage: "factsheet-resolve"`, `caller: "probe"`), so the page
+            // does not capture it a second time.
+            return [s.id, recipientShareNote(mode, "unreadable")] as const;
+          }
+          if (probe.reason === "not_visible") {
+            // D-05: the probe could not see the row. Logged and captured,
+            // tags only.
             console.error("[strategies/page] factsheet probe could not read the row", {
               id: s.id,
               reason: probe.reason,
