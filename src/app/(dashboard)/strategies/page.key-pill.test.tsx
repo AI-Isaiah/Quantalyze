@@ -584,8 +584,10 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   const PUBLIC =
     "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.";
   // Phase 167.2.1 (D-02) — typed out from 167.2.1-CONTEXT.md, never imported.
+  // Reworded by 167.2.1-REVIEW CR-01 and IN-02 (2026-09-26): the reason is
+  // stated from the stored results, in the active voice.
   const UNBUILDABLE_SHORT =
-    "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.";
+    "Right now, a private link to this strategy shows that its factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
 
   function noteOf(container: HTMLElement, strategyName: string): string | null {
     const card = [...container.querySelectorAll("a")]
@@ -644,9 +646,9 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
   // ── Phase 167.2.1 — every probe outcome and share mode (D-02, D-05, D-08) ──
   const UNBUILDABLE_COMPOSITE =
-    "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded, but its results cannot be built into a factsheet. Contact support@quantalyze.com to have this composite checked.";
+    "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
   const PUBLIC_UNBUILDABLE_SHORT =
-    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.";
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
   const onePoint = (id: string) => ({
     data: adminStrategy(id, { daily_returns: points(1) }),
     error: null,
