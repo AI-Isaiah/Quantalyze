@@ -1,5 +1,176 @@
 # Changelog
 
+## [0.99.0.0] - 2026-09-26 — ACCOUNTTRUTH PR B: the account-identity migration ships alone, ahead of every reader
+
+⭐ **What changed for whoever reads this next.** Phase 167.1.2 (ACCOUNTTRUTH) makes one exchange
+account count once in the allocator's history, even when more than one key reads it. D-12 splits the
+phase into three PRs. PR A (0.92.0.0) hid the history. This PR B is the one migration,
+`20260925120000_api_keys_account_identity.sql`. It carries every DDL change the phase needs and
+ships ALONE, before any TypeScript reads a new column. If a key-list SELECT named a column PROD
+lacked, the Exchanges page would break for every allocator (RESEARCH Pitfall 1). PR C ships every
+reader, the stamper and the recompose that honours the new flag.
+
+⚠️ **This is a minor bump because the database contract changes on purpose.** It adds three
+`api_keys` columns, a same-owner trigger, an owner-callable SECURITY DEFINER RPC, and a new named
+refusal on `reconnect_allocator_api_key`. The only TypeScript change is the regenerated
+`src/lib/database.types.ts`, which reads nothing at runtime. JOBRPCTRUTH (0.93.0.0) took a minor
+for a migration-carrying contract change too. `0.98.0.0` is claimed by Phase 164.6.7, which is
+shipping in parallel, so this takes the next free minor.
+
+⛔ **Merging this applies the migration to shared TEST and then to PROD, with no human gate.**
+`supabase-migrate.yml`'s `apply-test` runs first, and PROD's `apply` follows once it succeeds. The
+`Production` reviewer gate was removed on 2026-09-23, so all review happened before the merge.
+migration-reviewer, rls-policy-auditor and silent-failure-hunter all passed at `39772766a` with
+0 CRITICAL and 0 HIGH, over five review rounds in total.
+
+⛔ **DEPLOY ORDER (D-12).** PR C starts only after this PR's PROD `apply` job has concluded success
+on its merge commit. Plan 03 Task 4 checks that and prints `D12_ORDER_OK`. Until PR C lands, a
+successful call to `set_departed_key_history_inclusion` stores the choice and enqueues a
+`derive_allocator_equity` recompose, but the recompose IGNORES `history_inclusion`. No reader of
+the column exists yet. No UI calls the RPC, so only a direct PostgREST call by the key's owner can
+reach it today.
+
+### Added
+- **The account-share marker on `api_keys` (D-11)** (`ffc0d7f4d`, then `27e149fc7` M1 and L2/L3).
+  `account_shared_with_api_key_id` and `account_share_kind` are both-or-neither and never point at
+  their own row. The FK is `ON DELETE SET NULL`. A same-owner trigger,
+  `enforce_api_keys_account_share_same_owner`, applies these rules when a marker is written:
+  - the holder must exist (23503 `ACCOUNT_SHARE_HOLDER_NOT_FOUND`);
+  - it must belong to the same owner (42501);
+  - it must be live (55000 `ACCOUNT_SHARE_HOLDER_NOT_LIVE`);
+  - it must not be marked itself, so no chains and no 2-cycles (23000
+    `ACCOUNT_SHARE_HOLDER_IS_MARKED`);
+  - a key that already holds another cannot be marked (23000 `ACCOUNT_SHARE_KEY_IS_A_HOLDER`).
+
+  The holder row is read `FOR SHARE`, so racing writers serialise. A holder cleared to NULL takes
+  its kind with it only when the writer left the kind unchanged, so a contradictory write still
+  reaches the CHECK. Nothing is ever auto-disconnected or deleted (D-01).
+- **`api_keys.history_inclusion` and the owner RPC `set_departed_key_history_inclusion(uuid, text)`
+  (D-05, D-09)** (`ffc0d7f4d`). The key's owner can choose `include` or `exclude` for a DEPARTED
+  key's history. The RPC answers 22023 `HISTORY_INCLUSION_INVALID` on a bad value and 55000
+  `KEY_NOT_DEPARTED` on a live key (`27e149fc7` L6). Only `authenticated` holds EXECUTE on it. Its
+  `search_path` is `public, pg_catalog` and it schema-qualifies its relations (`06b9afa52`).
+- **Column SELECT on the three new columns goes to `authenticated` only** (`ffc0d7f4d`). Every DO
+  block in the migration is catalogue-only. Shared TEST holds PROD's catalogue and none of its
+  data, and a data-reading DO block could refuse there and block the PROD apply.
+- **The rollback `supabase/migrations/down/20260925120000-rollback.sql`** (`168114b2a`, then
+  `c30b5d627` M4 and `178881008`). It drops the RPC, the trigger, the holder index and the three
+  columns. It restores `reconnect_allocator_api_key` and both COMMENTs, which were measured
+  byte-identical to `baseline.sql` after an up, down, up round trip. A precondition refuses a
+  database that never had the migration, where every `IF EXISTS` DROP would otherwise report a
+  hollow success. A post-verify refuses if anything the migration added survives. It also checks
+  that the restored reconnect body, its COMMENT, both column and index COMMENTs and the EXECUTE
+  grants (`authenticated` and `service_role`, never `anon`) all match. Its header says the
+  `schema_migrations` row stays, so `db push` will not re-apply the migration until that row is
+  handled.
+- **Database types for the new columns and RPC** (`3a27db675`). They were measured against
+  `supabase gen types` over the loopback local-stack lane, never a linked project.
+
+### Changed
+- **`reconnect_allocator_api_key` refuses a live twin by name** (`ffc0d7f4d`, then `27e149fc7` M3
+  and L4). It is re-based on `20260422101911`. It answers 23505 `KEY_VENUE_ALREADY_CONNECTED` when
+  a live key of the same user already holds the same exchange and `venue_account_id`, so the
+  database no longer surfaces an anonymous unique-index violation (Pitfall 5). Another tenant's key,
+  or the same account id on another exchange, does not block. A reconnect also resets
+  `history_inclusion` to NULL. The refusal ships now because PR C's plan 02 stamps ccxt account ids,
+  which makes the collision reachable beyond MT5. The VAC-04 acknowledgement is recorded.
+- **The `venue_account_id` column COMMENT and the `api_keys_user_exchange_venue_account_uniq` index
+  COMMENT now say what is true (D-10)** (`ffc0d7f4d`, `168114b2a`). ccxt venues carry an account
+  id, and sFOX stays NULL because its account id cannot be known, not because it is pending. PROD's
+  index COMMENT was MEASURED to be a shorter text that no migration produces. The new COMMENT keeps
+  every PROD sentence and drops "venue-confirmed". The rollback restores PROD's text.
+- **The column COMMENTs carry the reader contract** (`90c587336`, `9bacdde33`). A marked key is
+  counted through its holder only while the holder is working (`disconnected_at IS NULL` and
+  `sync_status <> 'revoked'`). Otherwise it counts on its own. That working-holder definition is
+  marked PROVISIONAL. It moves together with the RPC's `KEY_NOT_DEPARTED` test, and PR C plan 04
+  decides it with the founder. The `history_inclusion` COMMENT says the "never carries over" rule
+  binds every path that returns a departed key to live, including the rotate-secret route.
+
+### Fixed
+- **The history toggle cannot report success over a stale curve** (`27e149fc7` M2, `06b9afa52`,
+  `5991c08ac`, `9255dc600`, `20a366853`). Five review-round fixes, all in the RPC:
+  - it locks every in-flight or retry `derive_allocator_equity` row of the caller;
+  - it refuses 55006 `HISTORY_RECOMPOSE_IN_PROGRESS`, writing nothing, while a recompose is
+    running;
+  - it re-checks the job it hands back, and passes only a pending or `done_pending_children` job;
+  - a job that finished in between gets one more pass, and a second finished job answers 55006
+    `HISTORY_RECOMPOSE_RACED`;
+  - a lost enqueue race (40001 from `_enqueue_compute_job_internal`) is re-raised as the same
+    `RACED`, so no raw 40001 reaches the client;
+  - a NULL job id answers XX000 `HISTORY_RECOMPOSE_NOT_QUEUED`.
+
+  The function COMMENT tells clients to branch on MESSAGE_TEXT within 55006: `IN_PROGRESS` means
+  wait, `REQUEUED` and `RACED` mean retry now. No client reads any of these names yet.
+- **The toggle reuses a `failed_retry` recompose and never queues its pending twin** (`061be6526`,
+  `5991c08ac`, `9255dc600`, `e7b467d3b`). MEASURED on the pg-lane: a due `failed_retry` row beside
+  a pending row for the same allocator makes every claim entry point raise 23505 on
+  `compute_jobs_one_inflight_per_kind_allocator`, the worker-spin class of 2026-04-28. The reuse
+  now does all of this:
+  - it puts the row back to `pending`, due now, with `attempts` untouched;
+  - it clears `claimed_at`, `claimed_by` and `claim_token`, as `reset_stalled_compute_jobs` does;
+  - it re-checks `status = 'failed_retry'` in the flip, so a row a claimer took is never put back;
+  - it skips the flip when a pending, `done_pending_children` or running sibling exists;
+  - it re-raises a 23505 on the flip as 55006 `HISTORY_RECOMPOSE_REQUEUED`.
+
+### Tests
+- **New gate `supabase/tests/test_api_keys_account_identity.sql`, 37 arms, each `RED-UNDER-M`
+  annotated and observed RED (identity ok)** (`ffc0d7f4d`, `27e149fc7`, `a6b39abc6`,
+  `061be6526`, `1c366e115`, `fa01ab33f`):
+  - the ACCT arms cover the marker rules;
+  - the HIST arms include `HIST-lock` (the returned job is locked), `HIST-retry` (the reuse, then
+    the cleared claim), `HIST-tenant` (the reuse never touches another tenant's row) and
+    `HIST-requeued` (a test-local trigger measures the flip's 23505 handler in one session);
+  - the RECON arms cover the reconnect refusal, including the tenant and other-exchange twins and
+    the reset.
+
+  Follow-ups: `d01399b02` pins heap-order scans in `ACCT-s`, `77618abe7` narrows `HIST-lock`'s
+  RED-UNDER claim to what it proves, and `39772766a` moves the 23505 handler from the RPC's
+  REASONED list to the gated list.
+- **`test_api_keys_venue_identity_uniq.sql` gains arm 6f CCXT** (`168114b2a`, `d01399b02`). A second
+  live okx row on one account id is refused 23505 and admitted once the first disconnects. Any
+  other SQLSTATE now fails as `TEST FAILED (6f CCXT)`, not as an anonymous abort.
+- **New pg-lane fixture `36-fixture-compute-jobs-claim-token.sql`** (`e7b467d3b`). It stands in for
+  `compute_jobs.claim_token` so the reuse's claim clear runs on the lane without re-basing five
+  claim functions.
+- **Census pins moved by measurement, each observed RED at its old value** (`a25012815`,
+  `82beb2ea1`, `a6b39abc6`, `061be6526`, `1c366e115`, `fa01ab33f`). `FILES_FLOOR` 50 → 51,
+  `ARMS_FLOOR` 449 → 487, and `WAIVED_CEILING` stays 0. The `gate-family-meta` registry, the
+  annotation-parser pins, the floors `GREEN_LOG` fixture (with its three deliberate mismatches kept
+  one apart) and `COMPARED_FLOOR` 123 → 125 all moved too. The full lane run at `39772766a` printed
+  arms 487/487/0 with no defects.
+- **Function snapshots regenerated** under `supabase/schema/functions/`
+  (`enforce_api_keys_account_share_same_owner`, `set_departed_key_history_inclusion`,
+  `reconnect_allocator_api_key`), with two dated snapshot-only `NAME_SET_RATCHET` rows in
+  `scripts/dump-sql-functions.ts`. `COMPARED_FLOOR` lives in
+  `scripts/baseline-content-drift-check.mjs`.
+
+### Notes
+- **Known limit (round 5, M-1, recorded rather than fixed by founder rule): the reuse lookup's
+  `running` narrowing is not gated.** No arm reddens if the `NOT EXISTS` stops covering a running
+  sibling (`9255dc600`). The shape needs a second backend, and the SQL corpus runs one session.
+- **Known limit (round 5, M-2, recorded rather than fixed): the `serialization_failure` wrapper
+  around the enqueue is not gated** (`20a366853`). It is reasoned, not measured, for the same
+  reason. The round-5 INFO items are recorded and were not fixed.
+- **Known limit: until PR C, the recompose ignores `history_inclusion`.** See DEPLOY ORDER above.
+- **Known limit: the Exchanges page shows its generic reconnect-failure copy for
+  `KEY_VENUE_ALREADY_CONNECTED`.** `AllocatorExchangeManager` logs the RPC error but does not map
+  the name. Before this PR the same collision would have surfaced as the index's raw 23505
+  (reasoned, not measured on the reconnect path).
+- **Known limit: the rotate-secret route does not yet reset `history_inclusion` when a revoked key
+  returns to live.** The column COMMENT says so, and PR C owns the fix.
+- **Routed in `TODOS.md`** (`7fdd1fe02`): `[167.1.2-REUSED-RETRY-ENDS-FAILED-FINAL]` goes to PR C
+  plan 04, and `[167.1.2-SECOND-FAILED-RETRY-ROW-STAYS]` goes to Phase 164.9.3 CLAIMPAIR.
+- **The committed baseline needs a re-dump after the PROD apply.** Phase 164.9.5 AUTOREDUMP is not
+  merged yet, so this is manual. Until it happens, `supabase/schema/baseline.sql` lacks this
+  migration. The local-stack lane replays it on top of the dump
+  (`baseline-replay: 1 migration(s) newer than the dump: 20260925120000_api_keys_account_identity.sql`,
+  measured after merging `main`). Until then the drift check reports the two new functions as
+  `SNAPSHOT_MISSING` and the re-based `reconnect_allocator_api_key` as `DRIFT`. The two
+  `NAME_SET_RATCHET` rows clear at that refresh.
+- **Merged `origin/main` twice** (`bf1a25bb6`, and the ship merge `035be2ae4`, which brings in `main` at `3b923498e`, v0.97.0.0). Both
+  merged with no conflicts. Main added no migration in between, so the replay set names only this
+  branch's migration.
+
 ## [0.97.0.0] - 2026-09-26 — DRBOPTIONS: a Deribit options account with an `assignment` row can be ingested, and every shape the census did not see still refuses
 
 ⭐ **What changed for whoever reads this next.** On 2026-09-23 a Deribit options account inside a
