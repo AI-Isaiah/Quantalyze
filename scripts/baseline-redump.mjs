@@ -886,7 +886,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date }) {
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 91;
+export const EXPECTED_ASSERTIONS = 133;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -1144,6 +1144,87 @@ function selfTest({ withGitleaks = false } = {}) {
     isClean(realPkg) && JSON.parse(realPkg.text).version === realNext.text,
     "[real package.json + VERSION, read-only] the bump has no defect and reads back as the next version",
   );
+
+  console.log("=== SELF-TEST 1c/4: every D-16 value in the entry and the section, every D-23 instruction in the PR body");
+  /** A composer that is missing or throws renders as "", so its presence arms read FAIL instead of crashing the run. */
+  const safe = (fn) => {
+    try {
+      return String(fn());
+    } catch {
+      return "";
+    }
+  };
+  // Every value distinctive, so a presence arm can only be satisfied by ITS value.
+  const M = {
+    newVersion: "4.5.6.8", oldVersion: "4.5.6.7", date: "2026-03-04", runId: "987654321",
+    merge: "0a1b2c3d" + "4".repeat(32), cliVersion: "2.98.2",
+    oldSha: "a1b2c3d4" + "5".repeat(56), newSha: "e6f7a8b9" + "6".repeat(56),
+    oldShapes: { tables: 61, policies: 151, function_statements: 117, distinct_functions: 113, data_statements: 2 },
+    shapes: { tables: 62, policies: 153, function_statements: 119, distinct_functions: 115, data_statements: 0 },
+    newlyCarried: ["20260301000000_first_fixture.sql", "20260302000000_second_fixture.sql"],
+    currencyLine: "baseline-currency: carried=279 replay=0 marker-sha=match defects=0",
+    driftComparedLine:
+      "baseline-content-drift: functions compared 119 — MATCH 116, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0",
+    driftFindingsLine: "baseline-content-drift: findings 0",
+    repo: "fixture-owner/fixture-repo", headSha: "f00dfeed" + "7".repeat(32),
+  };
+  const M0 = { ...M, newlyCarried: [] };
+  const entry = safe(() => composeChangelogEntry(M));
+  const section = safe(() => composeRegeneratedSection(M));
+  const shared = [
+    ["the applying run id", "987654321"],
+    ["the merge short sha", "`0a1b2c3d`"],
+    ["the old sha256 prefix", "`a1b2c3d4…`"],
+    ["the new sha256 prefix", "`e6f7a8b9…`"],
+    ["tables old and new", "tables 61 → 62"],
+    ["policies old and new", "policies 151 → 153"],
+    ["function statements old and new", "function statements 117 → 119"],
+    ["distinct function names old and new", "distinct function names 113 → 115"],
+    ["newly carried basename 1", "`20260301000000_first_fixture.sql`"],
+    ["newly carried basename 2", "`20260302000000_second_fixture.sql`"],
+    ["the baseline-currency line, verbatim", `\`${M.currencyLine}\``],
+    ["the functions-compared drift line, verbatim", `\`${M.driftComparedLine}\``],
+    ["the findings drift line, verbatim", `\`${M.driftFindingsLine}\``],
+  ];
+  const perTarget = {
+    "CHANGELOG entry": [entry, [...shared, ["data statements old and new", "data statements 2 → 0"]]],
+    "regenerated section": [section, [...shared, ["data statements old and new", "| Data statements | 2 → 0 |"]]],
+  };
+  for (const [target, [text, needles]] of Object.entries(perTarget)) {
+    for (const [label, needle] of needles) ok(text.includes(needle), `D-16 presence (${target}): ${label}`);
+  }
+  const noneNeedle = "none — the marker diff added no migration basename";
+  ok(safe(() => composeChangelogEntry(M0)).includes(noneNeedle), "D-16 presence (CHANGELOG entry): no newly carried migration is a measured 'none', not an omission");
+  ok(safe(() => composeRegeneratedSection(M0)).includes(noneNeedle), "D-16 presence (regenerated section): no newly carried migration is a measured 'none', not an omission");
+  const entryLines = entry.split("\n");
+  ok(
+    /^## \[4\.5\.6\.8\] - 2026-03-04 — \S/.test(entryLines[0]) &&
+      entryLines.filter((l) => l.startsWith("#")).slice(1).join("|") === "### Changed|### Notes",
+    "the entry's heading is '## [<new>] - <date> — …' and its sections are ### Changed then ### Notes",
+  );
+  ok(
+    section.startsWith(`### Regenerated 2026-03-04 — automated re-dump after Supabase Migrate run 987654321\n`) &&
+      !/what it adds/i.test(section) && !/[0-9a-f]{64}/.test(section) && section.includes("| sha256 | `a1b2c3d4…` → `e6f7a8b9…` |"),
+    "the section heading ends with the run id, it has no 'what it adds' column, zero full-64-hex values, and a prefix-form sha256 row",
+  );
+  const body = safe(() => composePrBody(M));
+  const prArms = [
+    ["the 'Approve workflows to run' instruction", body.includes("**Approve workflows to run**")],
+    ["reading each run's conclusion", /\bconclusion\b/i.test(body)],
+    ["branch protection is off, so a zero-check merge is possible", /branch protection is off/i.test(body) && /zero completed checks/i.test(body)],
+    [
+      "the SHA-bound gh api command with the real repo and head sha",
+      body.includes(`gh api "repos/fixture-owner/fixture-repo/actions/runs?head_sha=${M.headSha}"`),
+    ],
+    ["the invitation to add the 'what it adds' column", /add the "what it adds" column/i.test(body)],
+    [
+      "re-dispatching supabase-migrate.yml on main when main moved or VERSION collides",
+      body.includes("re-dispatch `supabase-migrate.yml` on `main`") && /`main` has moved/.test(body) && /VERSION `4\.5\.6\.8` collides/.test(body),
+    ],
+    ["close-and-reopen named only as a fallback", /fallback only[^\n]*close and reopen/i.test(body)],
+    ["the PR is never auto-merged", /never auto-merged/i.test(body)],
+  ];
+  for (const [label, cond] of prArms) ok(cond, `D-23 presence (PR body): ${label}`);
   const shapesFixture = [
     'CREATE TABLE IF NOT EXISTS "public"."a" (',
     '  x int); CREATE TABLE "not"."anchored" (',
@@ -1171,14 +1252,12 @@ function selfTest({ withGitleaks = false } = {}) {
   );
   ok(STAGED_PATHS.join(",") === [...STAGED_PATHS].sort().join(",") && STAGED_PATHS.length === 6, "STAGED_PATHS is the six paths, sorted");
   const guardRe = new RegExp(`\\[(${["skip", "ci"].join(" ")}|${["ci", "skip"].join(" ")}|${["no", "ci"].join(" ")}|${["skip", "actions"].join(" ")}|${["actions", "skip"].join(" ")})\\]|${["skip", "checks"].join("-")}\\s*:\\s*true`, "i");
-  const sampleM = {
-    newVersion: "1.2.3.5", oldVersion: "1.2.3.4", date: "2026-01-02", runId: "123", merge: "c".repeat(40),
-    oldSha: "a".repeat(64), newSha: "b".repeat(64), newlyCarried: ["20260101000000_a.sql"],
-    shapes: { tables: 1, policies: 2, function_statements: 3, distinct_functions: 3, data_statements: 0 },
-  };
   ok(
-    ![composeChangelogEntry(sampleM), composeCommitMessage(sampleM), composePrTitle(sampleM)].some((t) => guardRe.test(t)),
-    "the fixed templates carry no CI skip token (D-14)",
+    ![M, M0].some((x) =>
+      [safe(() => composeChangelogEntry(x)), composeCommitMessage(x), composePrTitle(x), safe(() => composeRegeneratedSection(x)), safe(() => composePrBody(x))]
+        .some((t) => guardRe.test(t)),
+    ),
+    "the fixed templates (entry, commit message, PR title, regenerated section, PR body) carry no CI skip token (D-14)",
   );
 
   ok(judgeGitleaksReport({ rc: 0, reportText: "[]" }).verdict === "clean", "judgeGitleaksReport: exit 0 with an empty array is the one clean");
@@ -1476,7 +1555,9 @@ function selfTest({ withGitleaks = false } = {}) {
     };
     let stagedBeforeCommit = null;
     outputs.length = 0;
-    const cp = compose({ repoRoot: repo, inDir: join(dir, "art"), out: join(dir, "pr"), runner: fakeRunner, emit, date: "2026-02-03" });
+    const cp = compose({
+      repoRoot: repo, inDir: join(dir, "art"), out: join(dir, "pr"), runner: fakeRunner, emit, date: "2026-02-03", repo: "fixture-owner/fixture-repo",
+    });
     stagedBeforeCommit = cp.staged;
     ok(cp.committed === true && outputs.join(",") === "committed=true", "compose emits committed=true");
     ok(stagedBeforeCommit.join(",") === STAGED_PATHS.join(","), "the cached set before commit equals STAGED_PATHS (D-17)");
@@ -1506,6 +1587,17 @@ function selfTest({ withGitleaks = false } = {}) {
       "the capture table's Taken and Shape rows carry the composed date and measured shapes",
     );
     ok(g(["log", "-1", "--format=%an|%ae|%cn|%ce"]).trim() === `${BOT_NAME}|${BOT_EMAIL}|${BOT_NAME}|${BOT_EMAIL}`, "author and committer are the bot");
+    const botHead = g(["rev-parse", "HEAD"]).trim();
+    const prBody = existsSync(join(dir, "pr/pr-body.md")) ? readFileSync(join(dir, "pr/pr-body.md"), "utf8") : "";
+    ok(
+      prBody.includes(`gh api "repos/fixture-owner/fixture-repo/actions/runs?head_sha=${botHead}"`) && !guardRe.test(prBody),
+      "--compose writes <out>/pr-body.md beside pr-title.txt, carrying the repo and the bot commit's own head sha, and no skip token",
+    );
+    const fakeCompared = "`baseline-content-drift: functions compared 1 — MATCH 1, DRIFT 0`";
+    ok(
+      cl.includes(fakeCompared) && md.includes(fakeCompared) && !cl.includes("SCOPE —") && !md.includes("SCOPE —"),
+      "the captured drift lines reach the entry and the section verbatim, and the SCOPE line the gate also printed reaches neither",
+    );
     ok(
       calls.join(" ; ") ===
         "bash scripts/local-stack/run.sh --check-currency ; node scripts/baseline-content-drift-check.mjs --self-test ; " +
