@@ -3171,6 +3171,8 @@ Plans:
 
 ⛔ **2026-09-26 AMENDMENT (orchestrator decision at plan 04's Task 2 checkpoint; deviation recorded here AND in 166.2-CONTEXT D-19):** plan 166.2-04 may change exactly two Sharpe side assertions in `src/lib/factsheet/og-metrics.test.ts` (Phase 169's file) from `Number.isFinite` to `Number.isNaN`, because they pin the D-07 defect the plan removes (residue-dispersion inputs whose old Sharpe was about 2.9e16); both tests keep their inputs, and the plan's diff gate admits only those lines. Waiting for Phase 169 was rejected: the founder ruled that phases still in planning must not start execution. Phase 169's plan files are not edited from this branch. Plan 06 also rewords two stale comments (`correlation-math`, `rollingCorrelation`) found in wave 2.
 
+⛔ **2026-09-26 FOUNDER DECISION D7 (AskUserQuestion, "Show — everywhere"; recorded here AND in 166.2-CONTEXT as a D-07 amendment and D-24):** a statistic that does not exist stays empty end to end and renders "—" or a gap on every page, never 0.00 or "unchanged". This REVERSES D-07 for display: D-07 mapped null to the value each site already emitted for an exact constant, which was 0 at eight sites, so the factsheet read "Sharpe 0.00" where the OG card for the same series read "—". The constant-yield-equals-all-zero invariant stands; both now read "—". Applied in the round-1 fix pass (every finding of `166.2-REVIEW.md` and `166.2-REVIEW-SFH.md`; see `166.2-REVIEW-FIX.md`). ⚠️ Deviation: that pass (IN-03) edits Phase 169's `src/lib/factsheet/og-metrics.test.ts` beyond the two lines the D-19 amendment above admitted, to put two Sharpe arms back on a dispersing fixture; Phase 169's plan files are not edited.
+
 Plans:
 
 **Wave 1**
