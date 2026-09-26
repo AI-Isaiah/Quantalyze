@@ -3522,6 +3522,22 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 169 to break down)
 
+### Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers (INSERTED)
+
+**Goal:** Four self-contained page fixes: the `/admin` compute-jobs list loads and a failed load says so; `/recommendations` states the mandate truthfully and never recommends a viewer's own strategy; `/profile` Exchanges counts only live keys and never repeats a balance; `/recommendations` and `/allocations` use one mandate rule.
+**Shipped separately, 2026-09-26 (founder decision D11):** plan 01 shipped separately by founder decision D11; 02–05 follow once 167.1.2 PR C lands. This section is the minimal slice plan 01 needs; the full phase section, split note and remaining plans arrive with plans 02–05.
+**Depends on:** none in code for plan 01. 167.1.2 PR C on `origin/main` gates plans 169.3-03 and 169.3-04.
+
+## Success Criteria
+
+1. `/admin` Compute Jobs: the list request no longer returns HTTP 500, and the tab never says "No compute jobs found" while the header counts a job in progress. A failed load says it failed.
+
+**Plans:** 5 plans; plan 01 shipped here (D11), 02–05 follow once 167.1.2 PR C lands. Decisions carried in `169.3-CONTEXT.md`; no migration.
+
+Plans:
+
+- [x] 169.3-01-PLAN.md — /admin compute jobs list reads the admin view; a failed load says so (SC1) (was 169-01)
+
 ### Phase 170: LAYOUT — page layout reads clean and holds on every page
 
 **Goal:** Pages read as a finished product: no stacked look-alike panels, and the layout holds at 320 px and 200% zoom.
