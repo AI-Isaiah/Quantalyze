@@ -39,6 +39,56 @@ deploy — the downstream damage this mutex prevents),
 ⭐ **`sql-tests` NO LONGER HOLDS THE KEY.** Everything below that names it as a holder
 is kept as dated lineage; the corrections sit beside each one.
 
+⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1 DRIFTOFFMUTEX): `test-db-drift` NO LONGER
+HOLDS THE KEY EITHER.** The bullets below that make it a holder are kept as dated
+lineage. Current state:
+
+- **The `ci.yml` holders are `python` and `e2e-seeded`.** With `apply-test` and
+  `restore` that makes **FOUR holders** in total.
+- **`test-db-drift` has no acquire, release or dead-holder-verdict step.** It still
+  runs the schema-apply wait, keeps `needs: python`, `timeout-minutes: 90` and the
+  secret, and is still in the `frontend` aggregator. For this job the wait is the only
+  ordering control against `apply-test`. `src/__tests__/critical-regressions.test.ts`
+  pins three things: the holder set as exactly `python` and `e2e-seeded`, that
+  `test-db-drift` names no key, and that its wait runs before VAC-08.
+- **The choice, and its reason.** Option A: drop the key from `test-db-drift`. What
+  orders VAC-08 after `apply-test` is the wait, not the key. The wait checks a fact:
+  the same-commit apply concluded, or none appeared, and the in-flight flag is clear.
+  VAC-08 only reads, and no interleaving with a later writer can turn a real drift
+  green. The worst case is a rare red that fails loudly. That red can already happen
+  today, whichever job gets the lock first. The key bought it nothing and cost it the
+  whole cross-run queue.
+  Rejected: **B**, holding the key only around the reads, which does not shorten the
+  queue ahead of the hold. **C**, taking the job off the aggregator or running it
+  later, which breaks the aggregator contract or still blocks the aggregator. **C′**,
+  dropping `needs: python`, which makes it queue behind `python` from the start and
+  weakens the wait's appearance-grace assumption. **D**, a read-fence re-probe, which
+  guards only against reds that already fail loudly.
+  ⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1 round-1 review, SFH-01 / WR-01): "That red
+  can already happen today … The key bought it nothing" is true for MERGE PUSHES ONLY,
+  and is kept above as lineage.** On a `pull_request` run the wait does not run (its
+  `if:` is merge-push only), so VAC-08 has **NO ordering against `apply-test` or a
+  dispatched restore**. Before this phase the key was the only thing keeping a PR-run
+  VAC-08 out of both, so on a PR the key did buy something, and three reds are new:
+  a restore's `TRUNCATE` of the ledger holds the presence query past its retry budget
+  (the "ledger presence query failed" MEASURE_FAIL); a body fetch races the restore's
+  COMMIT or a later apply's function replace ("could not read TEST's definition"); and
+  a multi-migration `apply-test` still in flight reads as a breach of
+  `FRONTIER_EXEMPT_CEILING`. On a merge push there is also a seconds-wide window
+  between the wait's exit and VAC-08's first read in which a later push's `apply-test`
+  or a restore can start. None of this turns a real drift green: the restore is one
+  transaction, and the frontier tip is computed from the checkout's own migrations.
+  It was accepted on that basis: every added outcome is loud, restores are rare
+  manual dispatches, and the key's cost was measured. **Triage:** a PR-run VAC-08 red
+  while `supabase-migrate.yml` or `test-restore-from-baseline.yml` was running is
+  this overlap. Re-run the PR check once both are idle. Do NOT widen the wait's `if:`
+  to PR events: it keys on `GITHUB_SHA`'s own `supabase-migrate.yml` run, which never
+  exists on a PR, so every PR run would sit out the appearance grace for nothing.
+- **The numbers live in
+  `.planning/phases/164.4.2.1-driftoffmutex/164.4.2.1-MEASUREMENT.md`**: the BEFORE,
+  the prediction, the verdict rule and the AFTER protocol. The AFTER is filled in from
+  merge-push runs after the merge. None of those numbers is restated here.
+
 - **One holder removed.** `sql-tests` runs the `supabase/tests/test_*.sql` corpus on
   a local Supabase stack private to its own runner, booted by
   `scripts/local-stack/run.sh up`. It uses no secret, no repository variable and no
@@ -74,7 +124,10 @@ is kept as dated lineage; the corrections sit beside each one.
 hold it for the rest of the job.
 ⛔ **CORRECTED 2026-09-23 (Phase 164.4.2):** the `ci.yml` jobs that acquire the key
 are **`python`, `e2e-seeded` and `test-db-drift`**. `sql-tests` no longer does (see
-section 0). The sentence above is kept as lineage. Waiters block inside `pg_advisory_lock`, so
+section 0). The sentence above is kept as lineage.
+⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1):** `test-db-drift` no longer acquires it
+either. The `ci.yml` jobs that acquire the key are **`python` and `e2e-seeded`** (section
+0). The 2026-09-23 note is kept as lineage. Waiters block inside `pg_advisory_lock`, so
 contending runs queue instead of racing. Every mutex session opens with **both
 session GUCs**: `SET statement_timeout = 0` — the TEST project's server-wide
 `statement_timeout=120000` would otherwise kill a contended lock wait *and*
@@ -116,6 +169,9 @@ queueing on) the lock as an immortal orphan ([158-MUTEX-02], resolved — see
   different name, `ci-mutex-probe`).
 
 ⭐ **THERE ARE FIVE HOLDERS, NOT THREE — added 2026-09-09 by Phase 164.8 TESTPREPROD.**
+⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1): there are now FOUR.** They are `python`,
+`e2e-seeded`, `apply-test` and `restore`. `test-db-drift` left the key (section 0). The
+heading and every "five" below are kept as lineage.
 Two jobs outside `ci.yml` now take key `61616158`, and both write to shared TEST:
 
 4. **`apply-test`** (`.github/workflows/supabase-migrate.yml`) — runs on every push to
@@ -136,7 +192,11 @@ choice.** ⛔ **CORRECTED 2026-09-23 (Phase 164.4.2):** read "from `sql-tests`" 
 the `ci.yml` holders (`python`, `e2e-seeded`, `test-db-drift`)". `sql-tests` no longer
 opens a session on shared TEST at all, so in an incident census it never appears. The
 five-holder argument below is unchanged. `test-db-drift`'s acquire step is the same
-byte-identical copy, which `critical-regressions.test.ts` asserts. Each sets the *same* `PGAPPNAME=ci-shared-test-db-mutex`, because each acquire
+byte-identical copy, which `critical-regressions.test.ts` asserts.
+⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1):** read the `ci.yml` holders as `python` and
+`e2e-seeded` only. `test-db-drift` has no acquire step any more, so it never appears in a
+census as a `ci-shared-test-db-mutex` session. The argument below holds unchanged for the
+four remaining holders. The 2026-09-23 note is kept as lineage. Each sets the *same* `PGAPPNAME=ci-shared-test-db-mutex`, because each acquire
 step is a byte-for-byte copy of `ci.yml`'s (the copy is deliberate and is pinned by
 `src/__tests__/critical-regressions.test.ts`, which asserts the acquire steps are pairwise
 identical). So in a census you can tell the five apart only by `query` and by timing, never
@@ -281,6 +341,9 @@ is what the 3600 s cap is sized from.
 **not** re-derived, and that is deliberate: a shorter per-run hold only makes the
 3600 s cap more conservative. The measured per-job holds are in
 `164.4.2-MEASUREMENT.md` (section 0).
+⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1):** `test-db-drift`'s share has left the key
+too. Each run now takes the lock twice, in `python` and `e2e-seeded`. The cap and TTLs
+were again not re-derived, for the same reason. The 2026-09-23 note is kept as lineage.
 
 ⭐ **THE FOURTH NUMBER WAS DELETED 2026-09-19. Do not re-derive it — do not
 change anything in `analytics-deploy-verify.yml` when you move the acquire cap.**
@@ -316,7 +379,12 @@ so it cannot exhaust the cap. The waiters that can are `python`, `e2e-seeded` an
 `test-db-drift`. `test-db-drift` is in the `frontend` aggregator's `needs:` and result
 loop. Its row tolerates only a SKIP on a fork PR or a `workflow_dispatch`, so a
 `failure` from an acquire timeout is a red required check on every event. The
-consequence above therefore still holds; only the job name changed. That is why the cap is sized for queue depth rather than left at a value
+consequence above therefore still holds; only the job name changed.
+⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1):** `test-db-drift` no longer waits on the key
+either. The waiters that can exhaust the cap are `python` and `e2e-seeded`. Both still
+gate the check-suite, so the consequence still holds. `test-db-drift` can still go red
+on its own schema-apply wait (`wait-outcome: wait-exhausted`, section 7.3). The
+2026-09-23 note is kept as lineage. That is why the cap is sized for queue depth rather than left at a value
 comparable to the work it has to absorb. The timeout message deliberately names
 **both** queue depth and a wedged holder, and prints a `pg_locks` census
 (granted/waiting counts) so triage starts from a measurement.
@@ -662,6 +730,13 @@ reading, kept as lineage.** Re-measured with `grep -c 61616158` on 2026-09-23:
 `test-restore-from-baseline.yml` 8, `supabase-migrate.yml` 7, `mutex-probe.yml`
 **5**, `analytics-deploy-verify.yml` 1. The rule above still applies: regenerate
 this reading, don't trust it.
+⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1): the 2026-09-23 reading above is kept as
+lineage.** Re-measured with `grep -c 61616158` after `test-db-drift` left the key:
+`ci.yml` **17** (`python` 9, `e2e-seeded` 8, `test-db-drift` 0, `sql-tests` 0),
+`test-restore-from-baseline.yml` 8, `supabase-migrate.yml` 7, `mutex-probe.yml` 5,
+`analytics-deploy-verify.yml` 1. The `ci.yml` jobs carrying
+`Acquire shared-test-db mutex` are `python` and `e2e-seeded`. Regenerate it; don't
+trust it.
 
 ### 7.3 The ordering wait, and its three outcomes
 
@@ -677,6 +752,17 @@ IMMEDIATELY BEFORE their acquire step, invoking
 **`python`, `e2e-seeded` and `test-db-drift`**. The wait moved out of `sql-tests`
 together with its acquire step. `sql-tests` reads no shared schema, so it has nothing
 to wait for.
+⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1):** the three jobs above still run the wait,
+but only `python` and `e2e-seeded` run it before an acquire step. `test-db-drift` has no
+acquire step any more. For it the wait runs before VAC-08, and it is the ONLY ordering
+control between VAC-08 and `apply-test`. `src/__tests__/critical-regressions.test.ts`
+pins that order. The two "before their acquire step" sentences in this section are
+kept as lineage and hold for `python` and `e2e-seeded`.
+⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1 round-1 review, SFH-01):** "the ONLY
+ordering control" holds on a merge push only. On a `pull_request` run the wait does
+not run, so `test-db-drift` has NO ordering control against `apply-test` or a
+restore at all (section 0 carries the consequence and the triage). The sentence
+above is kept as lineage.
 
 ⛔ **It waits BEFORE taking the key, never while holding it.** A job that waited
 while holding `61616158` would starve every other contender on a database other
