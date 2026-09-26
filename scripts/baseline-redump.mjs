@@ -635,6 +635,123 @@ export function judgeVersionBump({ baseVersion, headVersion, packageVersion, cha
   return d;
 }
 
+/*
+ * ── The compose-side judges (D-09, D-21) ──
+ * A child gate is judged by the CONTENT of its verdict line as well as its exit
+ * code. A judge that finds no verdict line returns MEASURE_FAIL, never a pass:
+ * a gate that printed nothing is not a green gate. Each returns
+ * `{verdict: "pass" | "refuse" | "measure_fail", line, detail}`; `line` is the
+ * verdict line (the gate's own summary, safe to print), null when absent.
+ */
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** A whitespace-delimited token, so `defects=0` never matches inside `defects=01`. */
+const hasToken = (line, token) => new RegExp(`(^|\\s)${escapeRe(token)}(\\s|$)`).test(line);
+
+/** `check-baseline-currency.mjs --replay-set` via `run.sh --check-currency`: one line, `marker-sha=match defects=0`. */
+export function judgeCurrencyLine(stdout) {
+  const hits = String(stdout).split(/\r?\n/).filter((l) => l.startsWith("baseline-currency:"));
+  if (hits.length !== 1) {
+    return { verdict: "measure_fail", line: null, detail: `the currency gate printed ${hits.length} 'baseline-currency:' line(s); exactly 1 is required` };
+  }
+  const [line] = hits;
+  if (!hasToken(line, "marker-sha=match") || !hasToken(line, "defects=0")) {
+    return { verdict: "refuse", line, detail: `the currency gate reads '${line}', not marker-sha=match defects=0` };
+  }
+  return { verdict: "pass", line, detail: "" };
+}
+
+/**
+ * `baseline-content-drift-check.mjs` prints FIVE `baseline-content-drift:` lines
+ * (chain files, functions compared, allowlisted rows, findings, and a SCOPE
+ * prose line). Only the line matching this regex carries the verdict; the first
+ * line, or any line merely mentioning findings, is not it.
+ */
+export const DRIFT_FINDINGS_RE = /^baseline-content-drift: findings (\d+)$/;
+
+export function judgeDriftLine(stdout) {
+  const hits = String(stdout).split(/\r?\n/).filter((l) => DRIFT_FINDINGS_RE.test(l));
+  if (hits.length !== 1) {
+    return {
+      verdict: "measure_fail",
+      line: null,
+      detail: `the content-drift gate printed ${hits.length} line(s) matching ${DRIFT_FINDINGS_RE}; exactly 1 is required`,
+    };
+  }
+  const [line] = hits;
+  const n = Number(DRIFT_FINDINGS_RE.exec(line)[1]);
+  if (n !== 0) {
+    return {
+      verdict: "refuse",
+      line,
+      detail:
+        `the content-drift gate reports ${n} finding(s). Likely cause: main holds a migration that has not applied to PROD yet; ` +
+        "the queued apply run will produce the right dump",
+    };
+  }
+  return { verdict: "pass", line, detail: "" };
+}
+
+const HEX64_RE = /^[0-9a-f]{64}$/;
+const isCount = (v) => Number.isInteger(v) && v >= 0;
+/**
+ * Schema 1 of `measured.json`, exactly the keys `gateDump` writes, each with the
+ * rule it must meet. `merge` and `run_id` are the plan-02 validators; the scan
+ * and integrity values are the only clean ones `gateDump` can record, so any
+ * other value is a tampered or foreign artifact.
+ */
+const MEASURED_SCHEMA = {
+  schema: (v) => v === 1,
+  run_id: (v) => typeof v === "string" && /^[0-9]+$/.test(v),
+  merge: (v) => typeof v === "string" && /^[0-9a-f]{40}$/.test(v),
+  cli_version: (v) => typeof v === "string" && /^\d+\.\d+\.\d+$/.test(v),
+  dump_sha256: (v) => typeof v === "string" && HEX64_RE.test(v),
+  dump_bytes: (v) => Number.isInteger(v) && v > 0,
+  "shapes.tables": (v) => Number.isInteger(v) && v > 0,
+  "shapes.policies": isCount,
+  "shapes.function_statements": isCount,
+  "shapes.distinct_functions": isCount,
+  "shapes.data_statements": (v) => v === 0,
+  marker_sha256: (v) => typeof v === "string" && HEX64_RE.test(v),
+  carried_count: isCount,
+  gitleaks: (v) => v === "clean",
+  gitleaks_version: (v) => typeof v === "string" && /^[0-9A-Za-z._-]{1,40}$/.test(v),
+  secret_scan_hits: (v) => v === 0,
+  "integrity.nul": (v) => v === 0,
+  "integrity.client_encoding": (v) => v === 1,
+  "integrity.home_path": (v) => v === 0,
+};
+
+/**
+ * The write job's check of the artifact's `measured.json` (D-21): refuses a
+ * partial (unparseable) file, a missing schema-1 key, or a value failing its
+ * rule. Returns `{measured, defects}`; `measured` is null whenever a defect is
+ * present. Details name the KEY, never the value: the value is artifact text.
+ */
+export function judgeMeasured(text) {
+  let m;
+  try {
+    m = JSON.parse(String(text));
+  } catch {
+    return { measured: null, defects: [{ kind: "measured-unparseable", detail: "measured.json is not JSON (a partial or truncated artifact)" }] };
+  }
+  const isObject = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
+  if (!isObject(m)) return { measured: null, defects: [{ kind: "measured-unparseable", detail: "measured.json is not a JSON object" }] };
+  const defects = [];
+  for (const parent of ["shapes", "integrity"]) {
+    if (!(parent in m)) defects.push({ kind: "measured-key", detail: `measured.json has no '${parent}' key` });
+    else if (!isObject(m[parent])) defects.push({ kind: "measured-value", detail: `measured.json '${parent}' is not an object` });
+  }
+  for (const [path, valid] of Object.entries(MEASURED_SCHEMA)) {
+    const [a, b] = path.split(".");
+    const holder = b === undefined ? m : m[a];
+    if (!isObject(holder)) continue; // the missing or malformed parent is already a defect
+    const key = b ?? a;
+    if (!(key in holder)) defects.push({ kind: "measured-key", detail: `measured.json has no '${path}' key` });
+    else if (!valid(holder[key])) defects.push({ kind: "measured-value", detail: `measured.json '${path}' fails its schema-1 rule` });
+  }
+  return defects.length > 0 ? { measured: null, defects } : { measured: m, defects };
+}
+
 // ── I/O helpers ───────────────────────────────────────────────────────────────
 
 function git(repoRoot, args, opts = {}) {
@@ -846,6 +963,13 @@ function refuseWriterDefects(defects) {
   throw new Error(`refusing to compose: ${defects.length} defect(s) (${defects.map((d) => d.kind).join(", ")}); nothing was staged`);
 }
 
+/** The verdict line of a passing judge; anything else refuses, MEASURE_FAIL named as such. */
+function passedLine(judged, gateName) {
+  if (judged.verdict === "pass") return judged.line;
+  const prefix = judged.verdict === "measure_fail" ? "MEASURE_FAIL: " : "";
+  throw new Error(`${prefix}${gateName}: ${judged.detail}; refusing to compose`);
+}
+
 /** The single stdout line starting with `prefix`; refused when absent or repeated. */
 function captureLine(stdout, prefix, gateName) {
   const hits = stdout.split("\n").filter((l) => l.startsWith(prefix));
@@ -859,13 +983,35 @@ function captureLine(stdout, prefix, gateName) {
  */
 export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAULT_REPO }) {
   if (!REPO_SLUG_RE.test(repo)) throw new Error("the repository slug is not <owner>/<name>; refusing to compose a PR body around it");
-  const measured = JSON.parse(readFileSync(join(inDir, "measured.json"), "utf8"));
-  if (measured.schema !== 1) throw new Error(`measured.json schema is ${measured.schema}, expected 1`);
-  if (!/^[0-9]+$/.test(String(measured.run_id))) throw new Error("measured.json run_id is not digits");
-  if (!/^[0-9a-f]{40}$/.test(String(measured.merge))) throw new Error("measured.json merge is not a 40-hex sha");
+  const judgedMeasured = judgeMeasured(readFileSync(join(inDir, "measured.json"), "utf8"));
+  if (judgedMeasured.defects.length > 0) refuseWriterDefects(judgedMeasured.defects);
+  const measured = judgedMeasured.measured;
   const newDump = readFileSync(join(inDir, "baseline.sql"));
   const newMarker = readFileSync(join(inDir, "baseline-carried-migrations.txt"), "utf8");
   if (sha256(newDump) !== measured.dump_sha256) throw new Error("the in-dir dump does not hash to measured.json's dump_sha256");
+  if (sha256(Buffer.from(newMarker, "utf8")) !== measured.marker_sha256) {
+    throw new Error("the in-dir marker does not hash to measured.json's marker_sha256");
+  }
+
+  // The compose-side re-scan (D-06, D-08, D-21), defence in depth: the credentialed
+  // job scanned this dump, but the write job trusts no verdict it has not measured
+  // itself. The node judges only — ⛔ no gitleaks binary and no `npm ci` here: this
+  // job holds the write token, so it runs no third-party code (RESEARCH F10).
+  const rescanHits = judgeSecretScan(newDump);
+  const rescanIntegrity = judgeIntegrity(newDump);
+  console.log(
+    `baseline-redump re-scan: ${rescanHits.length} hit(s)${rescanHits.length > 0 ? ` at line(s) ${lineList(rescanHits)}` : ""}; ` +
+      `integrity nul=${rescanIntegrity.nul} client_encoding=${rescanIntegrity.client_encoding} home_path=${rescanIntegrity.home_path}`,
+  );
+  if (rescanHits.length > 0) {
+    throw new Error(
+      `the compose-side re-scan found ${rescanHits.length} five-class hit(s) in the artifact dump that measured.json does not admit; ` +
+        "the line numbers are above and the text is never printed",
+    );
+  }
+  if (rescanIntegrity.defects.length > 0) {
+    throw new Error(`the compose-side re-scan refused the artifact dump's integrity: ${rescanIntegrity.defects.join("; ")}`);
+  }
 
   // Second D-10 check: main may have moved between the two jobs.
   const oldDumpBytes = committedBytes(repoRoot, "HEAD", BASELINE_SQL_REL);
@@ -891,11 +1037,18 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
   writeFileSync(join(repoRoot, BASELINE_SQL_REL), newDump);
   writeFileSync(join(repoRoot, MARKER_REL), newMarker);
 
-  const currencyOut = runGate(runner, repoRoot, "bash", ["scripts/local-stack/run.sh", "--check-currency"]);
-  const currencyLine = captureLine(currencyOut, "baseline-currency:", "the currency gate");
+  // D-09: each gate needs a zero exit (runGate) AND a green verdict line.
+  // ⛔ `scripts/dump-sql-functions.ts --check` is deliberately NOT run here
+  // (RESEARCH Open Question 4, resolved): it needs `npm ci`, which would put
+  // third-party code in the job holding the write token. CI runs it on the bot
+  // PR through `sql-function-snapshot.yml` once the PR's runs are approved.
+  const currencyLine = passedLine(
+    judgeCurrencyLine(runGate(runner, repoRoot, "bash", ["scripts/local-stack/run.sh", "--check-currency"])),
+    "the currency gate",
+  );
   runGate(runner, repoRoot, "node", ["scripts/baseline-content-drift-check.mjs", "--self-test"]);
   const driftOut = runGate(runner, repoRoot, "node", ["scripts/baseline-content-drift-check.mjs"]);
-  const driftFindingsLine = captureLine(driftOut, "baseline-content-drift: findings", "the content-drift gate");
+  const driftFindingsLine = passedLine(judgeDriftLine(driftOut), "the content-drift gate");
   const driftComparedLine = captureLine(driftOut, "baseline-content-drift: functions compared", "the content-drift gate");
 
   const oldVersion = readFileSync(join(repoRoot, "VERSION"), "utf8").replace(/\n$/, "");
