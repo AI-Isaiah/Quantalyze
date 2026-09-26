@@ -122,6 +122,85 @@ export function countShapes(text) {
   };
 }
 
+/** At most this many line numbers are printed per finding class; the count is always exact. */
+const MAX_LINES_PRINTED = 50;
+
+/** `n,n,…` capped at MAX_LINES_PRINTED, with the remainder counted, never listed. */
+function lineList(lines) {
+  const shown = lines.slice(0, MAX_LINES_PRINTED).join(",");
+  return lines.length > MAX_LINES_PRINTED ? `${shown} (+${lines.length - MAX_LINES_PRINTED} more)` : shown;
+}
+
+/**
+ * The five-class scan (D-06), the `grep -a` equivalent: the dump is read as
+ * `latin1`, so a NUL-bearing or non-UTF-8 file is scanned byte for byte and never
+ * skipped as "binary". Returns the 1-based line numbers of every hit. ⛔ The
+ * caller prints the COUNT and these NUMBERS only, never a line's text: this runs
+ * in a PUBLIC Actions log, and `BASELINE.md`'s own `grep -anE` would publish the
+ * secret it found.
+ */
+export function judgeSecretScan(buffer) {
+  const hits = [];
+  buffer
+    .toString("latin1")
+    .split("\n")
+    .forEach((line, i) => {
+      if (SECRET_SCAN_RE.test(line)) hits.push(i + 1);
+    });
+  return hits;
+}
+
+/**
+ * The home-path needles: a GitHub runner's `/home/`, and the macOS home prefix
+ * built from char codes exactly as `scripts/check-planning-hygiene.ts` builds its
+ * `HOME_PREFIX`, so no tracked file spells that prefix.
+ */
+const HOME_PATH_NEEDLES = ["/home/", String.fromCharCode(47, 85, 115, 101, 114, 115, 47)];
+
+/**
+ * Integrity (D-08, the #864 provenance table): zero NUL bytes, exactly ONE
+ * `SET client_encoding` line, zero home-directory paths. Every defect names a
+ * count or a line number, never the path.
+ *
+ * D-08's "no local home path / username" clause is delivered by the home-path
+ * check, and a separate bare-username scan is DELIBERATELY not added. In CI the
+ * dump is captured by the runner account, whose name is a common English word
+ * that occurs in legitimate catalogue text, so a username needle would refuse
+ * every run. The developer's own username cannot be written into this PUBLIC
+ * repository as a scan needle at all. A username reaches a dump through a
+ * home-directory path, which the two needles above catch.
+ */
+export function judgeIntegrity(buffer) {
+  let nul = 0;
+  for (let i = buffer.indexOf(0); i !== -1; i = buffer.indexOf(0, i + 1)) nul += 1;
+  let clientEncoding = 0;
+  const homeLines = [];
+  buffer
+    .toString("latin1")
+    .split("\n")
+    .forEach((line, i) => {
+      if (/^SET client_encoding/.test(line)) clientEncoding += 1;
+      if (HOME_PATH_NEEDLES.some((n) => line.includes(n))) homeLines.push(i + 1);
+    });
+  const defects = [];
+  if (nul !== 0) defects.push(`${nul} NUL byte(s); a text dump carries none`);
+  if (clientEncoding !== 1) defects.push(`${clientEncoding} 'SET client_encoding' line(s); exactly 1 is required`);
+  if (homeLines.length !== 0) {
+    defects.push(`${homeLines.length} home-directory path(s) at line(s) ${lineList(homeLines)}`);
+  }
+  return { nul, client_encoding: clientEncoding, home_path: homeLines.length, defects };
+}
+
+/** Shape refusals (D-27; the `restore-test-from-baseline.sh` zero-table refusal). */
+export function judgeShapeCounts(shapes) {
+  const defects = [];
+  if (shapes.tables === 0) defects.push("0 CREATE TABLE lines: a dump that creates nothing is not a baseline");
+  if (shapes.data_statements > 0) {
+    defects.push(`${shapes.data_statements} data statement(s): a schema-only dump carrying data is a leak class of its own`);
+  }
+  return defects;
+}
+
 /**
  * The marker exactly as the `## Regenerating` recipe builds it: the `#` header
  * lines in order (`sed -n '/^#/p'`), then `baseline-sha256: <sha>`, then the
@@ -341,10 +420,33 @@ export function gateDump({ repoRoot, dump, merge, runId, cliVersion, out, emit }
     throw new Error(`--merge ${short(merge, 12)} is not this checkout's HEAD (${short(head, 12)}); the marker must come from the MERGE tree`);
   }
 
-  const bytes = readFileSync(dump);
+  // Every section-C gate runs BEFORE the out dir is written, and on the D-10
+  // no-op path too: a run that writes nothing still proves the dump is clean.
+  let bytes;
+  try {
+    bytes = readFileSync(dump);
+  } catch (e) {
+    // D-06's grep exit >= 2: a scan that could not run is never clean.
+    throw new Error(`MEASURE_FAIL: the dump could not be read (${e.code ?? e.name}); a scan that could not run is never clean`);
+  }
   if (bytes.length === 0) throw new Error("the dump is EMPTY (0 bytes); an empty file measures nothing");
+
+  const hits = judgeSecretScan(bytes);
+  console.log(`baseline-redump secret-scan: ${hits.length} hit(s)${hits.length > 0 ? ` at line(s) ${lineList(hits)}` : ""}`);
+  if (hits.length > 0) {
+    throw new Error(`the five-class secret scan found ${hits.length} hit(s); the line numbers are above and the text is never printed`);
+  }
+
+  const integrity = judgeIntegrity(bytes);
+  console.log(
+    `baseline-redump integrity: nul=${integrity.nul} client_encoding=${integrity.client_encoding} home_path=${integrity.home_path}`,
+  );
+  if (integrity.defects.length > 0) throw new Error(`integrity refused: ${integrity.defects.join("; ")}`);
+
   const dumpSha = sha256(bytes);
   const shapes = countShapes(bytes.toString("utf8"));
+  const shapeDefects = judgeShapeCounts(shapes);
+  if (shapeDefects.length > 0) throw new Error(`shape counts refused: ${shapeDefects.join("; ")}`);
 
   // D-09: the MERGE tree, never the working tree — an uncommitted migration in
   // the checkout is not one PRODUCTION received.
@@ -352,9 +454,14 @@ export function gateDump({ repoRoot, dump, merge, runId, cliVersion, out, emit }
     .split("\n")
     .filter((p) => p.endsWith(".sql"))
     .map((p) => p.replace(/^.*\//, ""));
-  const bad = listed.filter((b) => !MIGRATION_BASENAME_STRICT_RE.test(b));
-  if (bad.length > 0) {
-    throw new Error(`${bad.length} migration basename(s) at the merge do not match ${MIGRATION_BASENAME_STRICT_RE}; refusing to write them anywhere`);
+  // D-27: refused by count and 1-based position, never by name — a basename
+  // that fails the rule is exactly the text that must not reach a log.
+  const badAt = listed.flatMap((b, i) => (MIGRATION_BASENAME_STRICT_RE.test(b) ? [] : [i + 1]));
+  if (badAt.length > 0) {
+    throw new Error(
+      `${badAt.length} migration basename(s) at the merge (position(s) ${lineList(badAt)}) do not match ` +
+        `${MIGRATION_BASENAME_STRICT_RE}; refusing to write them anywhere`,
+    );
   }
 
   const committedMarker = committedBytes(repoRoot, merge, MARKER_REL).toString("utf8");
@@ -372,6 +479,8 @@ export function gateDump({ repoRoot, dump, merge, runId, cliVersion, out, emit }
     shapes,
     marker_sha256: sha256(Buffer.from(marker, "utf8")),
     carried_count: listed.length,
+    secret_scan_hits: hits.length,
+    integrity: { nul: integrity.nul, client_encoding: integrity.client_encoding, home_path: integrity.home_path },
   };
 
   // Never let a clean run and a run that did nothing look alike.
@@ -541,7 +650,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date }) {
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 46;
+export const EXPECTED_ASSERTIONS = 47;
 
 function selfTest() {
   let pass = true;
@@ -806,8 +915,9 @@ function selfTest() {
         runId: "1", cliVersion: "2.98.2", out: join(dir, "bad-out"), emit,
       }),
     );
+    // Position 3: `git ls-tree` lists in byte order, and `_` (0x5f) sorts after every digit.
     ok(
-      badName.threw !== null && /1 migration basename\(s\) at the merge \(position\(s\) 1\)/.test(badName.threw.message) &&
+      badName.threw !== null && /1 migration basename\(s\) at the merge \(position\(s\) 3\)/.test(badName.threw.message) &&
         !badName.text.includes("2026_bad") && !existsSync(join(dir, "bad-out")),
       "a merge tree holding supabase/migrations/2026_bad.sql refuses by count and position, never echoing the name",
     );
@@ -819,6 +929,12 @@ function selfTest() {
     ok(
       mj.secret_scan_hits === 0 && JSON.stringify(mj.integrity) === JSON.stringify({ nul: 0, client_encoding: 1, home_path: 0 }),
       "measured.json records secret_scan_hits 0 and integrity {nul 0, client_encoding 1, home_path 0}",
+    );
+    const cleanIntegrity = judgeIntegrity(realDump);
+    ok(
+      judgeSecretScan(realDump).length === 0 && cleanIntegrity.defects.length === 0 && cleanIntegrity.client_encoding === 1 &&
+        judgeShapeCounts(countShapes(realDump.toString("utf8"))).length === 0,
+      "the committed dump passes the pure secret-scan, integrity and shape judges (the green fixture)",
     );
 
     console.log("=== SELF-TEST 3/4: --compose in the same scratch repo, with the child gates injected");
