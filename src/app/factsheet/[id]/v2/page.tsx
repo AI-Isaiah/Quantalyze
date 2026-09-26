@@ -101,9 +101,10 @@ function buildFactsheetPayloadCached(
   // built from for the full TTL. /strategies decides its "right now" share
   // notes with a FRESH probe, so for up to an hour it could say "no note" while
   // this lane served a cached placeholder, or "not available" while it served
-  // a cached payload. The analytics finalizer stamps `computed_at = now()` on
-  // every successful run, so each compute that can change what the builder
-  // answers now moves the key. Nothing else can revalidate on a compute: the
+  // a cached payload. `sync_strategy_analytics_status` stamps
+  // `computed_at = now()` on every status write, so the key moves when a
+  // compute starts AND when it completes, i.e. on every run that can change
+  // what the builder answers. Nothing else can revalidate on a compute: the
   // writer is the Python worker, which cannot reach Next's cache.
   // `computed_at` is a property of the ROW, never of the viewer, so the key
   // stays viewer-independent (the corollary below still holds).
