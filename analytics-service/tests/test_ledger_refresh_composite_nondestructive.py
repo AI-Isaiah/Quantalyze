@@ -467,15 +467,18 @@ def _messages(mock_method: MagicMock) -> list[str]:
     return [str(c.args[0]) for c in mock_method.call_args_list if c.args]
 
 
-# The fragment of the ERROR line ``_stamp_failed`` emits BEFORE the marker
-# re-read to record the failure CAUSE (WR-03 / SFH-R2-01). It precedes every
-# re-read, so an assertion about "what went out at ERROR because of the READ'S
-# answer" must exclude it, or it passes on the cause line alone.
-_CAUSE_LINE_FRAGMENT = "Re-reading the refresh marker before choosing the stamp"
+# The fragment of the ERROR line ``_stamp_failed`` emits when a DEFINITIVE
+# "not marked" answer sends a marked refresh to the LOUD stamp (round 3). It
+# records the CAUSE of the stamp, not the marker's state, so an assertion about
+# "what went out at ERROR because of the READ'S answer" must exclude it, or it
+# passes on the cause line alone. (Round 2's pre-read cause line, which this
+# constant used to name, was removed in round 3: it paged on every protected
+# row.)
+_CAUSE_LINE_FRAGMENT = "no longer protects it"
 
 
 def _state_errors(log: MagicMock) -> list[str]:
-    """ERROR format strings other than the pre-read cause line."""
+    """ERROR format strings other than the loud stamp's cause line."""
     return [m for m in _messages(log.error) if _CAUSE_LINE_FRAGMENT not in m]
 
 
@@ -496,8 +499,9 @@ class TestTransientReReadFailureRetries:
 
     WR-03 / SFH-R2-01 (round 2): the retry must carry the failure it postponed.
     Neuter by dropping ``scrubbed`` from the ``RefreshMarkerRereadUnavailable``
-    text, or by passing an empty cause to the pre-read ERROR line; measured
-    2026-09-26, each goes RED on its own assertion."""
+    text, or (round 3, where the cause moved from a pre-read line into the
+    ``READ_ERROR`` site line) by dropping ``_cause`` from that site's
+    ``consequence``; each goes RED on its own assertion."""
 
     @pytest.mark.asyncio
     async def test_a_raising_reread_writes_nothing_and_fails_transient(self) -> None:
@@ -555,7 +559,7 @@ class TestTransientReReadFailureRetries:
             any(_ZERO_MEMBER_CAUSE in str(a) for a in c.args)
             for c in log.error.call_args_list
         ), (
-            "the curated cause was not logged at ERROR before the re-read: "
+            "the curated cause was not logged at ERROR on the failed re-read: "
             f"{log.error.call_args_list!r}"
         )
 
@@ -655,8 +659,9 @@ class TestEveryNotConfirmedStateNamesItsOwnCause:
         )
         assert _state_errors(log), (
             "a claimed job with no id or no live row is an invariant breach and "
-            "must go out at ERROR, which is what reaches Sentry. (The pre-read "
-            "cause line does not count: it fires before the read answers.)"
+            "must go out at ERROR, which is what reaches Sentry. (The loud "
+            "stamp's cause line does not count: it records the stamp, not the "
+            "marker's state.)"
         )
 
     @pytest.mark.asyncio
@@ -720,31 +725,184 @@ class TestStampReadRetriesAGateway504:
             f"read: {leaked!r}"
         )
 
+
+class TestAFailedStampReadKeepsTheCause:
+    """SFH-R3-01 / WR-03 (round 3): when ``_read_existing_failed_row`` still
+    fails, the handler's curated cause must survive.
+
+    📜 Lineage: round 2 pinned the opposite here
+    (``test_a_persistent_504_still_fails_and_suppresses_nothing``, error kind
+    ``unknown``). The read's exception left the closure as itself, so
+    ``last_error`` named only the read, the curated sentence was logged nowhere
+    (the only earlier line is gated on ``detail``, at WARNING), and on
+    exhaustion the bridge wrote generic copy over it. Measured at that commit.
+
+    Now the cause goes out at ERROR beside the read's failure, and the job fails
+    TRANSIENT with the cause in ``last_error``. Nothing is written either way:
+    no stamp of either kind, nothing suppressed.
+
+    Neuter to redden: remove the ``try``/``except`` around the stamp read (the
+    read's exception leaves the closure as itself). Every case goes RED on the
+    error kind. Drop ``scrubbed`` from that arm's raise and every case goes RED
+    on ``last_error``; drop ``_cause`` from its ERROR line and every
+    parametrised case goes RED on the log assertion. Measured 2026-09-26."""
+
     @pytest.mark.asyncio
-    async def test_a_persistent_504_still_fails_and_suppresses_nothing(
-        self,
+    @pytest.mark.parametrize(
+        ("metadata", "raises", "reads", "kind"),
+        [
+            pytest.param(
+                {"source": _COMPOSITE_MARKER},
+                "persistent-504",
+                "budget",
+                "_Gateway504",
+                id="marked-persistent-504",
+            ),
+            pytest.param(
+                {"source": _COMPOSITE_MARKER},
+                "non-504",
+                1,
+                "RuntimeError",
+                id="marked-non-504-first-failure",
+            ),
+            pytest.param(
+                _UNSET,
+                "non-504",
+                1,
+                "RuntimeError",
+                id="unmarked-user-stitch-non-504",
+            ),
+        ],
+    )
+    async def test_the_cause_reaches_last_error_and_the_error_log(
+        self, metadata: object, raises: str, reads: object, kind: str
     ) -> None:
-        """Failure semantics unchanged: when the retry budget runs out, the
-        read's exception leaves the handler. No stamp of either kind is
-        written, and the job is not recorded as the handler's permanent
-        failure, so nothing is quietly suppressed."""
         from services.db import DB_READ_MAX_RETRIES
 
+        failures: list[BaseException] = (
+            [_Gateway504("gateway timeout") for _ in range(DB_READ_MAX_RETRIES)]
+            if raises == "persistent-504"
+            else [RuntimeError("permission denied for table strategy_analytics")]
+        )
+        expected_reads = DB_READ_MAX_RETRIES if reads == "budget" else reads
+        log = MagicMock()
+        sentry = MagicMock()
+        results: list[Any] = []
         with patch("services.db.DB_READ_BACKOFF_BASE_S", 0.0), \
              patch("services.db.DB_READ_JITTER_MAX_S", 0.0):
             fake = await _run(
-                metadata={"source": _COMPOSITE_MARKER},
+                metadata=metadata,
                 existing_status="complete_with_warnings",
-                analytics_read_raises=[
-                    _Gateway504("gateway timeout")
-                    for _ in range(DB_READ_MAX_RETRIES)
-                ],
-                expect_error_kind="unknown",
+                analytics_read_raises=failures,
+                expect_error_kind="transient",
+                log=log,
+                sentry=sentry,
+                results=results,
             )
-        assert fake.analytics_reads == DB_READ_MAX_RETRIES, (
-            "the stamp's read was not retried inside the gateway budget: "
-            f"{fake.analytics_reads} read(s)"
+        assert fake.analytics_reads == expected_reads, (
+            f"expected {expected_reads} stamp read(s), saw {fake.analytics_reads}"
         )
         assert not _analytics_upserts(fake), (
             "a stamp whose read never answered still wrote to strategy_analytics"
+        )
+        (result,) = results
+        assert _ZERO_MEMBER_CAUSE in (result.error_message or ""), (
+            "last_error lost the handler's curated cause behind the failed "
+            f"stamp read: {result.error_message!r}"
+        )
+        assert kind in (result.error_message or ""), (
+            f"last_error does not name the failed read's kind {kind!r}: "
+            f"{result.error_message!r}"
+        )
+        cause_errors = [
+            c for c in log.error.call_args_list
+            if any(_ZERO_MEMBER_CAUSE in str(a) for a in c.args)
+        ]
+        assert cause_errors, (
+            "the curated cause was not logged at ERROR when the stamp read "
+            f"failed: {log.error.call_args_list!r}"
+        )
+        assert sentry.capture_exception.call_count == 1, (
+            "the failed stamp read's traceback was not captured"
+        )
+        sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+            "compute_job_id", _JOB_ID
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_long_read_error_cannot_push_the_cause_out_of_last_error(
+        self,
+    ) -> None:
+        """``classify_exception`` keeps 500 characters. A PostgREST error body
+        can be longer, so the read's text is bounded and the cause survives."""
+        results: list[Any] = []
+        await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            analytics_read_raises=[RuntimeError("x" * 2000)],
+            expect_error_kind="transient",
+            results=results,
+        )
+        (result,) = results
+        assert _ZERO_MEMBER_CAUSE in (result.error_message or ""), (
+            f"the cause fell off the end of last_error: {result.error_message!r}"
+        )
+
+
+class TestAProtectedFailurePagesNobody:
+    """WR-01 (round 3): when D-15 protects the row (the live re-read answers
+    ``PRESENT``), the outcome is logged at WARNING only. Every ``logger.error``
+    is a Sentry event under ``init_sentry``'s default ``LoggingIntegration``, and
+    a venue wedge fails the whole marked cohort on each refresh tick, so an
+    ERROR here would page once per strategy per tick for a path that needs no
+    one.
+
+    Neuter to redden: put back an unconditional ERROR cause line before the
+    marker re-read (round 2's shape). The first test goes RED on the error
+    count. The second pins the other half: the LOUD stamp over a live row
+    still goes out at ERROR with its cause. Neuter: delete that line."""
+
+    @pytest.mark.asyncio
+    async def test_the_protected_path_emits_no_error_and_no_capture(self) -> None:
+        log = MagicMock()
+        sentry = MagicMock()
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            log=log,
+            sentry=sentry,
+        )
+        payloads = _analytics_upserts(fake)
+        assert payloads and not any(
+            k in p for p in payloads for k in _PUBLISH_STATE_KEYS
+        ), f"the control did not take the protected path: {payloads!r}"
+        assert log.error.call_count == 0, (
+            "a failure D-15 protected went out at ERROR, which is a Sentry event: "
+            f"{log.error.call_args_list!r}"
+        )
+        assert sentry.capture_exception.call_count == 0
+        assert any("D-15" in m for m in _messages(log.warning)), (
+            f"the protected outcome was not logged at WARNING: {_messages(log.warning)!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_loud_stamp_over_a_live_row_logs_its_cause_at_error(
+        self,
+    ) -> None:
+        log = MagicMock()
+        fake = await _run(
+            metadata={"source": _COMPOSITE_MARKER},
+            existing_status="complete_with_warnings",
+            live_metadata={"refresh_marker_retracted": _COMPOSITE_MARKER},
+            log=log,
+        )
+        assert _analytics_upserts(fake)[-1].get("computation_status") == "failed"
+        assert any(
+            _CAUSE_LINE_FRAGMENT in str(c.args[0])
+            and any(_ZERO_MEMBER_CAUSE in str(a) for a in c.args)
+            for c in log.error.call_args_list
+            if c.args
+        ), (
+            "the loud stamp over a live row did not log its cause at ERROR: "
+            f"{log.error.call_args_list!r}"
         )

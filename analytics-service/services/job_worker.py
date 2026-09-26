@@ -700,7 +700,8 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     # Phase 164.6.7 / D-09. A read a marked refresh's D-15 decision rests on
     # failed: the live marker re-read at a terminal stamp (the composite stitch,
     # or since 2026-09-26 the single-key derive stamp), the single-key ENTRY
-    # publish-state read, or the single-key chain edge's re-read (both round 2).
+    # publish-state read, or the single-key chain edge's re-read (both round 2),
+    # or the composite stamp's own status read (round 3, SFH-R3-01).
     # The handler could not tell whether a failure may be recorded without
     # un-publishing a funded account, and wrote nothing.
     # TRANSIENT: the queue retries the whole job and the next attempt reads again.
@@ -2680,9 +2681,51 @@ class RefreshMarkerRereadUnavailable(Exception):
     handler wrote nothing and stops. Raised by the live marker re-read at a
     terminal stamp (the composite one, or the single-key derive one) and, since
     round 2, by the single-key ENTRY publish-state read (SFH-R2-02) and by the
-    single-key chain edge before it enqueues hop 2 (WR-02). The text
-    names the handler's real cause where one exists. ``classify_exception`` maps
-    it to TRANSIENT."""
+    single-key chain edge before it enqueues hop 2 (WR-02). Since round 3
+    (SFH-R3-01) it is also raised when the composite stamp's own
+    ``strategy_analytics`` status read fails, marked job or not: the handler has
+    a cause to record and cannot record it. The text names the handler's real
+    cause where one exists, and the failed read's kind. ``classify_exception``
+    maps it to TRANSIENT."""
+
+
+# Phase 164.6.7 round 3 (SFH-R3-02): a read that raises one of these is a bug in
+# THIS code (a renamed client method, a bad call shape), not an answer from the
+# database. The entry publish-state read lets them propagate unchanged, so
+# ``classify_exception`` files them under ``unknown`` with their own text, which
+# is the "needs a human look" signal. Labelling them TRANSIENT would hide a code
+# defect behind "the database was busy" until the retry budget ran out.
+# ⚠️ ``ValueError`` is deliberately absent: ``json.JSONDecodeError`` subclasses
+# it, and a malformed PostgREST body is an infrastructure answer, not a bug.
+_READ_PROGRAMMING_ERRORS: tuple[type[BaseException], ...] = (
+    AssertionError,
+    AttributeError,
+    ImportError,
+    IndexError,
+    KeyError,
+    NameError,
+    TypeError,
+    ZeroDivisionError,
+)
+
+
+def _read_failure_text(exc: BaseException) -> str:
+    """``ExceptionClass: scrubbed message``, bounded, for a ``last_error`` that
+    has to say WHAT failed without pushing the curated cause past
+    ``classify_exception``'s 500-character cut (SFH-R3-02 / IN-01)."""
+    from services.redact import scrub_freeform_string
+
+    return f"{type(exc).__name__}: {str(scrub_freeform_string(str(exc)))[:120]}"
+
+
+def _capture_read_failure(exc: BaseException, *, job_id: Any) -> None:
+    """``sentry_sdk.capture_exception`` tagged with the compute job it belongs
+    to (IN-02 / SFH-R2-05). The capture is the only event carrying the failed
+    read's traceback, and without the tag it could not be tied to a job. The
+    job id is an internal UUID. The tag is scoped to this one event."""
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("compute_job_id", str(job_id))
+        sentry_sdk.capture_exception(exc)
 
 
 async def _refresh_marker_still_on_row(
@@ -2691,9 +2734,20 @@ async def _refresh_marker_still_on_row(
     """What ``compute_jobs.metadata`` for ``job_id`` says NOW about the marker
     ``expected``. Only ``PRESENT`` keeps a protection. See the block comment above
     for why a live re-read and not the claim-time snapshot, and for why the answer
-    is a state."""
+    is a state. A caller that must NAME a failed read uses
+    ``_refresh_marker_live_state``."""
+    state, _failure = await _refresh_marker_live_state(supabase, job_id, expected)
+    return state
+
+
+async def _refresh_marker_live_state(
+    supabase: Any, job_id: Any, expected: str
+) -> tuple[MarkerLiveState, str | None]:
+    """``_refresh_marker_still_on_row`` plus, for ``READ_ERROR`` only, the
+    failed read's ``_read_failure_text``. The chain edge carries that text into
+    ``compute_jobs.last_error`` (SFH-R3-02); every other state returns ``None``."""
     if not job_id:
-        return MarkerLiveState.NO_ID
+        return MarkerLiveState.NO_ID, None
 
     def _read_live_row() -> Any:
         res = (
@@ -2717,17 +2771,17 @@ async def _refresh_marker_still_on_row(
             "TRANSIENT. The tail mirror only logs.",
             job_id, type(exc).__name__, exc,
         )
-        sentry_sdk.capture_exception(exc)
-        return MarkerLiveState.READ_ERROR
+        _capture_read_failure(exc, job_id=job_id)
+        return MarkerLiveState.READ_ERROR, _read_failure_text(exc)
     if not isinstance(row, dict):
-        return MarkerLiveState.NO_ROW
+        return MarkerLiveState.NO_ROW, None
     metadata = row.get("metadata")
     if isinstance(metadata, dict):
         if metadata.get("source") == expected:
-            return MarkerLiveState.PRESENT
+            return MarkerLiveState.PRESENT, None
         if metadata.get("refresh_marker_retracted") == expected:
-            return MarkerLiveState.RETRACTED
-    return MarkerLiveState.OTHER_SOURCE
+            return MarkerLiveState.RETRACTED, None
+    return MarkerLiveState.OTHER_SOURCE, None
 
 
 def _log_marker_not_confirmed(
@@ -2921,7 +2975,23 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 
             try:
                 _entry_row = await db_read_with_retry(_read_entry_publish_state)
-            except Exception as _entry_exc:  # noqa: BLE001 — reported, then re-raised as transient
+            except Exception as _entry_exc:  # noqa: BLE001 — reported, then re-raised
+                # The preflight opened the exchange and the handler's
+                # ``finally: aclose_exchange`` owns only the crawl's ``try`` below,
+                # which neither raise in this arm reaches. Close it here first,
+                # the same way, so BOTH exits release it.
+                try:
+                    await aclose_exchange(ctx.exchange)
+                except Exception:  # noqa: BLE001  # pragma: no cover
+                    pass
+                # ⛔ SFH-R3-02: a programming error is a bug in this read, not a
+                # database answer. It propagates as itself, so
+                # ``classify_exception`` files it ``unknown`` under its own
+                # class and text, exactly as it does anywhere else in the
+                # worker. Relabelling it TRANSIENT would report a code defect as
+                # "the database was busy" on every attempt.
+                if isinstance(_entry_exc, _READ_PROGRAMMING_ERRORS):
+                    raise
                 logger.error(
                     "derive_broker_dailies: could not read the pre-refresh publish "
                     "state for strategy %s on marked compute_job %s (%s: %s). No "
@@ -2929,18 +2999,15 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     "TRANSIENT so the queue can retry it.",
                     strategy_id, job.get("id"), type(_entry_exc).__name__, _entry_exc,
                 )
-                sentry_sdk.capture_exception(_entry_exc)
-                # The preflight opened the exchange and the handler's
-                # ``finally: aclose_exchange`` owns only the crawl's ``try`` below,
-                # which this raise never reaches. Close it here, the same way.
-                try:
-                    await aclose_exchange(ctx.exchange)
-                except Exception:  # noqa: BLE001  # pragma: no cover
-                    pass
+                _capture_read_failure(_entry_exc, job_id=job.get("id"))
+                # SFH-R3-02 / IN-01: ``last_error`` is ``str()`` of this
+                # exception, which never includes ``__cause__``, so the failure
+                # kind is written into the text itself.
                 raise RefreshMarkerRereadUnavailable(
                     "derive_broker_dailies: the pre-refresh publish-state read "
                     "failed for a marked refresh, so the job stopped before any "
-                    "crawl and wrote nothing"
+                    "crawl and wrote nothing "
+                    f"({_read_failure_text(_entry_exc)})"
                 ) from _entry_exc
             _entry_status = _entry_row.get("computation_status")
             if isinstance(_entry_status, str):
@@ -3247,19 +3314,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # ``RefreshMarkerRereadUnavailable`` (traced in the 164.6.7
                 # REVIEW-FIX, "Round 1 — single-key completion").
                 #
-                # ⛔ WR-03 / SFH-R2-01: the CAUSE is recorded before the read
-                # that may postpone it. On ``READ_ERROR`` the raise below replaces
-                # this stamp and the caller's permanent return, so this ERROR line
-                # (and the cause carried in the exception text, which becomes
-                # ``compute_jobs.last_error``) is the only record of WHY a stamp
-                # was needed at all.
+                # ⛔ The CAUSE is logged at ERROR exactly where it is at risk,
+                # and nowhere else (round 3, orchestrator decision reconciling
+                # WR-01 with SFH-R3-01; round 2's WR-03 / SFH-R2-01 put it at
+                # ERROR before the read, which paged on every protected row):
+                # - ``READ_ERROR``: the raise below replaces this stamp and the
+                #   caller's permanent return, so the site line carries the cause
+                #   at ERROR, and the exception text carries it into
+                #   ``compute_jobs.last_error``;
+                # - a definitive "not marked" answer: the LOUD stamp below
+                #   un-publishes a row that was published, and that goes out at
+                #   ERROR with its cause;
+                # - ``PRESENT``: D-15 protects the row and logs at WARNING only,
+                #   below. Nothing about it needs a person, so no Sentry event.
                 if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
-                    logger.error(
-                        "derive_broker_dailies: terminal failure for strategy %s "
-                        "on marked compute_job %s — %s%s. Re-reading the refresh "
-                        "marker before choosing the stamp.",
-                        strategy_id, job.get("id"), scrubbed,
-                        f" | detail: {scrub_freeform_string(detail)}" if detail else "",
+                    _cause = scrubbed + (
+                        f" | detail: {scrub_freeform_string(detail)}" if detail else ""
                     )
                     _live_state = await _refresh_marker_still_on_row(
                         ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
@@ -3271,8 +3341,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             job_id=job.get("id"),
                             strategy_id=strategy_id,
                             consequence=(
-                                "Writing NO terminal stamp; failing the job "
-                                "TRANSIENT so the queue can retry it"
+                                f"Writing NO terminal stamp for: {_cause}; failing "
+                                "the job TRANSIENT so the queue can retry it"
                             ),
                         )
                         raise RefreshMarkerRereadUnavailable(
@@ -3287,6 +3357,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             job_id=job.get("id"),
                             strategy_id=strategy_id,
                             consequence="Taking the LOUD terminal path",
+                        )
+                        logger.error(
+                            "derive_broker_dailies: stamping strategy %s FAILED "
+                            "over its %s row, because compute_job %s no longer "
+                            "protects it — %s",
+                            strategy_id, existing_status, job.get("id"), _cause,
                         )
                         existing_status = None
 
@@ -6108,7 +6184,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # on the first ``failed_retry``, and is then un-published on exhaustion (see
     # the block comment above ``MarkerLiveState``).
     if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
-        _live_state_out = await _refresh_marker_still_on_row(
+        # SFH-R3-02: the sibling that also hands back the failed read's
+        # ``ExceptionClass: message``, so ``last_error`` says what failed.
+        _live_state_out, _read_failure_out = await _refresh_marker_live_state(
             ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
         )
         if _live_state_out is MarkerLiveState.READ_ERROR:
@@ -6126,7 +6204,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             raise RefreshMarkerRereadUnavailable(
                 "derive_broker_dailies: the live re-read of the refresh marker "
                 f"failed at the chain edge, so no {_csv_analytics_kind} follow-on "
-                "was enqueued"
+                f"was enqueued ({_read_failure_out})"
             )
         if _live_state_out is not MarkerLiveState.PRESENT:
             _log_marker_not_confirmed(
@@ -6474,11 +6552,44 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             row = getattr(res, "data", None) or {}
             return dict(row) if isinstance(row, dict) else {}
 
+        # The handler's cause, as it is logged on every arm below that logs it
+        # at ERROR. ``scrubbed`` alone is what ``last_error`` carries.
+        _cause = scrubbed + (
+            f" | detail: {scrub_freeform_string(detail)}" if detail else ""
+        )
+
         # SFH-R2-02 sibling: the same 504-retried read as the marker re-read
         # below, so one gateway blip does not replace this job's real failure
-        # with the read's exception. If the budget runs out the exception still
-        # leaves the closure: no stamp of either kind, nothing suppressed.
-        existing_row = await db_read_with_retry(_read_existing_failed_row)
+        # with the read's exception.
+        #
+        # ⛔ SFH-R3-01 / WR-03 (round 3): a read that still FAILS (a 504 that
+        # outlasts the budget, or any other error on the first attempt) used to
+        # leave this closure as the READ's exception. ``last_error`` then named
+        # the read, the curated ``message`` was logged nowhere (the only earlier
+        # line is gated on ``detail``, at WARNING), and on exhaustion the bridge
+        # wrote generic copy over it. This is the first I/O of EVERY composite
+        # terminal stamp, marked or not, so it covered a user's own stitch too.
+        # Now the cause goes out at ERROR with the read's failure, and the job
+        # fails TRANSIENT with the cause in its text, the same disposition as
+        # the marker re-read below. Nothing is written and nothing suppressed:
+        # the retry decides.
+        try:
+            existing_row = await db_read_with_retry(_read_existing_failed_row)
+        except Exception as _stamp_read_exc:  # noqa: BLE001 — reported, then re-raised as transient
+            logger.error(
+                "stitch_composite: could not read strategy_analytics to stamp "
+                "strategy %s on compute_job %s (%s). No terminal stamp was "
+                "written for: %s. Failing the job TRANSIENT so the queue can "
+                "retry it.",
+                strategy_id, job.get("id"),
+                _read_failure_text(_stamp_read_exc), _cause,
+            )
+            _capture_read_failure(_stamp_read_exc, job_id=job.get("id"))
+            raise RefreshMarkerRereadUnavailable(
+                "stitch_composite: the stamp's status read failed "
+                f"({_read_failure_text(_stamp_read_exc)}), so no terminal stamp "
+                f"was written for: {scrubbed}"
+            ) from _stamp_read_exc
         existing_flags = dict(existing_row.get("data_quality_flags") or {})
         _existing_status = existing_row.get("computation_status")
         existing_status: str | None = (
@@ -6565,19 +6676,19 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # and reported to Sentry. Nothing is suppressed either — no error-only
         # write happens.
         #
-        # ⛔ WR-03 / SFH-R2-01: the CAUSE is recorded before the read that may
-        # postpone it. On ``READ_ERROR`` the raise below replaces this stamp and
-        # the caller's permanent return, so this ERROR line (and the cause carried
-        # in the exception text, which becomes ``compute_jobs.last_error``) is the
-        # only record of WHY a stamp was needed at all.
+        # ⛔ The CAUSE is logged at ERROR exactly where it is at risk, and
+        # nowhere else (round 3, orchestrator decision reconciling WR-01 with
+        # SFH-R3-01; round 2's WR-03 / SFH-R2-01 put it at ERROR before this
+        # read, which paged on every protected row):
+        # - the status read above failing: its own arm, above;
+        # - ``READ_ERROR`` here: the raise replaces this stamp and the caller's
+        #   permanent return, so the site line carries the cause at ERROR and
+        #   the exception text carries it into ``compute_jobs.last_error``;
+        # - a definitive "not marked" answer: the LOUD stamp below takes a live
+        #   row down, and that goes out at ERROR with its cause;
+        # - ``PRESENT``: D-15 protects the row and logs at WARNING only, below.
+        #   Nothing about it needs a person, so no Sentry event.
         if _honour_marker:
-            logger.error(
-                "stitch_composite: terminal failure for strategy %s on marked "
-                "compute_job %s — %s%s. Re-reading the refresh marker before "
-                "choosing the stamp.",
-                strategy_id, job.get("id"), scrubbed,
-                f" | detail: {scrub_freeform_string(detail)}" if detail else "",
-            )
             _live_state = await _refresh_marker_still_on_row(
                 supabase, job.get("id"), LEDGER_REFRESH_COMPOSITE_SOURCE
             )
@@ -6588,8 +6699,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     job_id=job.get("id"),
                     strategy_id=strategy_id,
                     consequence=(
-                        "Writing NO terminal stamp; failing the job TRANSIENT so "
-                        "the queue can retry it"
+                        f"Writing NO terminal stamp for: {_cause}; failing the "
+                        "job TRANSIENT so the queue can retry it"
                     ),
                 )
                 raise RefreshMarkerRereadUnavailable(
@@ -6604,6 +6715,11 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     job_id=job.get("id"),
                     strategy_id=strategy_id,
                     consequence="Taking the LOUD terminal path",
+                )
+                logger.error(
+                    "stitch_composite: stamping strategy %s FAILED over its %s "
+                    "row, because compute_job %s no longer protects it — %s",
+                    strategy_id, existing_status, job.get("id"), _cause,
                 )
                 _honour_marker = False
 

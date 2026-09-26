@@ -426,6 +426,57 @@ class TestUserResyncInheritsAMarkedRefresh:
             "the failure must stay VISIBLE in computation_error."
         )
 
+    @pytest.mark.asyncio
+    async def test_the_protected_path_emits_no_error_and_no_capture(self) -> None:
+        """WR-01 (round 3): a failure D-15 protects is logged at WARNING only.
+        Every ``logger.error`` is a Sentry event under ``init_sentry``'s default
+        ``LoggingIntegration``, and a venue wedge fails the whole marked cohort
+        each refresh tick, so an ERROR here pages once per strategy per tick
+        for a path that needs no one.
+
+        Neuter to redden: put back an unconditional ERROR cause line before the
+        marker re-read in ``_stamp_strategy_analytics_failed`` (round 2's
+        shape). This goes RED on the error count."""
+        with patch.object(_jw, "logger") as log, \
+             patch("services.job_worker.sentry_sdk") as sentry:
+            _result, capture = await _drive_derive(
+                claimed_metadata={"source": _MARKER},
+                live_job_row={"metadata": {"source": _MARKER}},
+            )
+        payload = _terminal_stamp(capture)
+        assert not any(k in payload for k in _PUBLISH_STATE_KEYS), payload
+        assert log.error.call_count == 0, (
+            "a failure D-15 protected went out at ERROR, which is a Sentry "
+            f"event: {log.error.call_args_list!r}"
+        )
+        assert sentry.capture_exception.call_count == 0
+        assert any(
+            c.args and "D-15" in str(c.args[0]) for c in log.warning.call_args_list
+        ), f"the protected outcome was not logged at WARNING: {log.warning.call_args_list!r}"
+
+    @pytest.mark.asyncio
+    async def test_the_loud_stamp_over_a_live_row_logs_its_cause_at_error(
+        self,
+    ) -> None:
+        """The other half of WR-01: a marked refresh whose live row no longer
+        protects it is stamped ``failed`` over a live factsheet, and that goes
+        out at ERROR with its cause. Neuter: delete that ``logger.error``."""
+        with patch.object(_jw, "logger") as log:
+            _result, capture = await _drive_derive(
+                claimed_metadata={"source": _MARKER},
+                live_job_row={"metadata": {"refresh_marker_retracted": _MARKER}},
+            )
+        assert _terminal_stamp(capture).get("computation_status") == "failed"
+        assert any(
+            c.args
+            and "no longer protects it" in str(c.args[0])
+            and any("Insufficient broker history" in str(a) for a in c.args)
+            for c in log.error.call_args_list
+        ), (
+            "the loud stamp over a live row did not log its cause at ERROR: "
+            f"{log.error.call_args_list!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 2 — the chain edge, forward direction
@@ -552,7 +603,15 @@ class TestChainEdgeReadErrorFailsTransient:
             f"on it for the retry and the bridge: {job_updates!r}"
         )
         assert _CSV_KIND in (result.error_message or "")
+        # SFH-R3-02: last_error names the failed read, not only "read failed".
+        # Neuter: drop ``_read_failure_out`` from the chain-edge raise.
+        assert "RuntimeError: simulated read failure" in (result.error_message or ""), (
+            f"last_error does not name the failed read: {result.error_message!r}"
+        )
         assert sentry.capture_exception.call_count == 1
+        sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+            "compute_job_id", "job-1"
+        )
         assert any(
             c.args and "FAILED" in str(c.args[0]) for c in log.error.call_args_list
         ), f"no READ_ERROR line at the chain edge: {log.error.call_args_list!r}"
@@ -750,8 +809,9 @@ class TestReReadFailsSafe:
     WR-03 / SFH-R2-01 (round 2): the transient result must still NAME the
     handler's real cause, because ``error_message`` becomes
     ``compute_jobs.last_error``. Neuter by dropping ``scrubbed`` from the raise,
-    or by passing an empty cause to the pre-read ERROR line; measured
-    2026-09-26, both parametrised cases go RED on each."""
+    or (round 3, where the cause moved from a pre-read line into the
+    ``READ_ERROR`` site line) by dropping ``_cause`` from that site's
+    ``consequence``; both parametrised cases go RED on each."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -856,8 +916,8 @@ class TestReReadFailsSafe:
         assert any(
             any(cause in str(a) for a in c.args) for c in log.error.call_args_list
         ), (
-            "the curated cause was not logged at ERROR before the re-read, so "
-            f"a stamp with no detail left no record of it: {log.error.call_args_list!r}"
+            "the curated cause was not logged at ERROR on the failed re-read, "
+            f"so a stamp with no detail left no record of it: {log.error.call_args_list!r}"
         )
 
     @pytest.mark.asyncio
@@ -1085,6 +1145,80 @@ class TestEntryPublishStateReadFailsTransient:
             c.args and "pre-refresh publish" in str(c.args[0])
             for c in log.error.call_args_list
         ), f"the failed entry read did not go out at ERROR: {log.error.call_args_list!r}"
+        # SFH-R3-02 / IN-01: ``last_error`` names WHAT failed, not only that
+        # the read failed. ``str()`` of the transient never includes
+        # ``__cause__``, so the kind has to be in the text itself.
+        assert "RuntimeError: simulated entry read failure" in (
+            result.error_message or ""
+        ), f"last_error does not name the failed read: {result.error_message!r}"
+        # IN-02: the capture is the only event with the traceback; it is
+        # tagged with the job it belongs to.
+        sentry.new_scope.return_value.__enter__.return_value.set_tag.assert_any_call(
+            "compute_job_id", "job-1"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bug",
+        [
+            AttributeError("'SyncQueryRequestBuilder' object has no attribute 'x'"),
+            TypeError("execute() got an unexpected keyword argument 'y'"),
+            KeyError("computation_status"),
+            NameError("name '_undefined' is not defined"),
+        ],
+        ids=["attribute-error", "type-error", "key-error", "name-error"],
+    )
+    async def test_a_programming_error_is_not_relabelled_transient(
+        self, bug: BaseException
+    ) -> None:
+        """SFH-R3-02: a programming error in the entry read is a bug in this
+        code. It propagates as itself, so ``classify_exception`` files it
+        ``unknown`` (the "needs a human look" kind) with its own class and text,
+        exactly as it does anywhere else in the worker. It must not be reported
+        as a busy database. Nothing is crawled or written, and the exchange the
+        preflight opened is still closed.
+
+        Neuter to redden: delete the ``_READ_PROGRAMMING_ERRORS`` re-raise in
+        the entry arm. Every case then comes back ``transient``."""
+        ctx, capture = _entry_read_ctx([bug])
+        combine = _insufficient_combine()
+        patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
+        with patches[0], patches[1], patches[2] as aclose, patches[3], patches[4], \
+             patches[5], patches[6], \
+             patch("services.job_worker.sentry_sdk"):
+            result = await _jw.dispatch(
+                {
+                    "id": "job-1",
+                    "kind": _DERIVE_KIND,
+                    "strategy_id": _STRATEGY_ID,
+                    "metadata": {"source": _MARKER},
+                }
+            )
+
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "unknown", (
+            f"a {type(bug).__name__} in the entry read was filed "
+            f"{result.error_kind!r}: {result.error_message!r}. A code defect is "
+            "not a transient database condition."
+        )
+        assert result.error_message == _jw.classify_exception(bug)[1], (
+            "the programming error did not reach dispatch as itself: "
+            f"{result.error_message!r}"
+        )
+        assert combine.call_count == 0, "the crawl ran after the entry read failed"
+        assert not _analytics_payloads(capture)
+        assert not capture["rpc_calls"]
+        assert aclose.await_count == 1, (
+            "the exchange the preflight opened was not closed on the "
+            "programming-error exit"
+        )
+
+    def test_classify_exception_files_programming_errors_unknown(self) -> None:
+        """The disposition the test above relies on, pinned at its source."""
+        for bug in (
+            AttributeError("a"), TypeError("t"), KeyError("k"), NameError("n"),
+        ):
+            assert _jw.classify_exception(bug)[0] == "unknown", bug
 
     @pytest.mark.asyncio
     async def test_a_gateway_504_on_the_entry_read_is_retried(self) -> None:
