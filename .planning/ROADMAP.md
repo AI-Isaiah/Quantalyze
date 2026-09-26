@@ -3224,6 +3224,8 @@ Plans:
 
 - [x] 164.9.5-06-PLAN.md — wave 7: pre-merge security review (actionlint, injection checklist, threat map for `/gsd-secure-phase`, optional zizmor behind a human checkpoint)
 
+**⭐ D-30 (founder, 2026-09-26, "I'll enable the setting"):** the bot PR is opened with the workflow token, and the founder turns on the repository's "Allow GitHub Actions to create and approve pull requests" (measured OFF by the round-1 review, CR-01). The accepted side effect is that workflows with `pull-requests: write` can approve PRs. The setting being ON is a human-verification item. Recorded in `164.9.5-CONTEXT.md` D-30.
+
 ### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
 
 ⭐ **Founder answers, 2026-09-24:** D-15, D-16 and D-17 are APPROVED. OPEN-2: after merge, run plan 10's read-only census, then queue a recompute of the affected PROD rows.
