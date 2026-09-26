@@ -1,4 +1,5 @@
 import type { ComputeResult } from "./types";
+import { dispersion, sharpe as sharpeRatio } from "@/lib/return-stats";
 
 /**
  * Headline per-series metrics for the strategy and each benchmark. Mirrors the
@@ -28,8 +29,11 @@ export function compute(
 
   const eq = cumEq(rets);
   const dd = drawdowns(eq);
-  const m = mean(rets);
-  const s = pstdev(rets, m);
+  // Phase 166.2 (D-17, D-07): the mean and the population sd come from the
+  // shared return-stats module, which reports a float-residue sd (a
+  // compounding constant yield) as exactly 0, so ann_vol, skew and kurtosis
+  // below answer such a series exactly as they answer an all-zero one.
+  const { mean: m, sd: s } = dispersion(rets, 0);
   const startDate = new Date(dates[0]);
   const endDate = new Date(dates[n - 1]);
   const days = Math.max(1, (endDate.getTime() - startDate.getTime()) / 86_400_000);
@@ -38,7 +42,9 @@ export function compute(
   const cumRet = eq[n - 1] - 1;
   const cagr = years > 0 && eq[n - 1] > 0 ? Math.pow(eq[n - 1], 1 / years) - 1 : 0;
   const annVol = s * Math.sqrt(periodsPerYear);
-  const sharpe = s > 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / (s * Math.sqrt(periodsPerYear)) : 0;
+  // The Sharpe is the shared one; null (no dispersion, or a non-finite
+  // return) is answered as 0, the value compute has always given there.
+  const sharpe = sharpeRatio(rets, { periodsPerYear, ddof: 0, rf }) ?? 0;
 
   const neg = rets.filter(x => x < 0);
   const ddDev = neg.length > 0 ? Math.sqrt(neg.reduce((a, x) => a + x * x, 0) / n) * Math.sqrt(periodsPerYear) : 0;
@@ -338,17 +344,4 @@ export function findDrawdownPeriods(dd: number[]): DrawdownPeriod[] {
 /** Indices of the N deepest drawdowns. Used by the Worst-N DDs chart. */
 export function worstDrawdowns(dd: number[], n = 10): DrawdownPeriod[] {
   return [...findDrawdownPeriods(dd)].sort((a, b) => a.depth - b.depth).slice(0, n);
-}
-
-function mean(xs: number[]): number {
-  let s = 0;
-  for (const x of xs) s += x;
-  return s / xs.length;
-}
-
-/** Population stdev — matches Python's `statistics.pstdev`. */
-function pstdev(xs: number[], m: number): number {
-  let s = 0;
-  for (const x of xs) s += (x - m) * (x - m);
-  return Math.sqrt(s / xs.length);
 }

@@ -1,4 +1,5 @@
 import { cumEq, drawdowns } from "./compute";
+import { sharpe as sharpeRatio } from "@/lib/return-stats";
 
 /** Pre-aggregated histogram of the resample distribution — small payload
  *  (40 numbers per metric) instead of shipping 2000 raw resamples.
@@ -105,19 +106,18 @@ function headlineStats(rets: number[], periodsPerYear = 252): { sharpe: number; 
   let sum = 0;
   for (const r of rets) sum += r;
   const m = sum / n;
-  let varSum = 0;
   let downSqSum = 0;
   let hasNeg = false;
   for (const r of rets) {
-    const dr = r - m;
-    varSum += dr * dr;
     if (r < 0) {
       downSqSum += r * r;
       hasNeg = true;
     }
   }
-  const s = Math.sqrt(varSum / n);
-  const sharpe = s > 0 ? (m * periodsPerYear) / (s * Math.sqrt(periodsPerYear)) : 0;
+  // Population sd (divide by n), as the resamples always used. A residue sd
+  // (a compounding constant yield) is no dispersion, so the Sharpe is the 0 an
+  // exactly constant series gives (Phase 166.1 D-07); null is answered as 0.
+  const sharpe = sharpeRatio(rets, { periodsPerYear, ddof: 0 }) ?? 0;
   const downDev = hasNeg ? Math.sqrt(downSqSum / n) * Math.sqrt(periodsPerYear) : 0;
   const sortino = downDev > 0 ? (m * periodsPerYear) / downDev : 0;
   const eq = cumEq(rets);
