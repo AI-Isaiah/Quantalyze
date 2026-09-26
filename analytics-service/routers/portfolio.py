@@ -26,7 +26,7 @@ from models.schemas import (
 from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
 from services.db import chunked_in_query, get_supabase, one, rows
-from services.dispersion import pairwise_correlation_or_none
+from services.dispersion import dispersing_corrwith, pairwise_correlation_or_none
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
 # PYAPIFIX2-01 — the FLAT venue-transient shape. C7 (the verify-strategy verdict
@@ -2524,10 +2524,14 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
                     df = pd.DataFrame(existing)
                     aligned = pd.concat([returns.rename("_target"), df], axis=1).dropna()
                     if len(aligned) >= 30:
-                        corrs = aligned.drop(columns=["_target"]).corrwith(aligned["_target"])
-                        # Filter NaN before idxmax — corrwith returns all-NaN when
-                        # every candidate has zero variance over the aligned window,
-                        # and corrs[NaN] raises KeyError.
+                        # Phase 166.1 (C7, D-02): only legs that really disperse can
+                        # match; a raw corrwith gave two same-yield constant
+                        # strategies a 1.0 correlation, a false "matched".
+                        corrs = dispersing_corrwith(
+                            aligned.drop(columns=["_target"]), aligned["_target"]
+                        )
+                        # Filter NaN before idxmax — idxmax over an all-NaN Series
+                        # raises, and corrs[NaN] raises KeyError.
                         corrs_clean = corrs.dropna()
                         if not corrs_clean.empty:
                             best = corrs_clean.idxmax()

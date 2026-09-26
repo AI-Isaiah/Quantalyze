@@ -27,6 +27,8 @@ from typing import Any
 
 import pandas as pd
 
+from services.dispersion import dispersing_corrwith
+
 logger = logging.getLogger("quantalyze.analytics")
 
 # Correlation threshold above which a candidate published strategy is
@@ -117,9 +119,17 @@ def find_matched_strategy(
         if len(aligned) < _MIN_OVERLAP_DAYS:
             return None
 
-        corrs = aligned.drop(columns=["_target"]).corrwith(
-            aligned["_target"]
-        )
+        # Phase 166.1 (C8, D-02): only legs that really disperse can match. A
+        # raw corrwith gave two strategies with the same compounding constant
+        # yield a 1.0 correlation (a false match), and an all-flat candidate set
+        # an all-NaN Series whose idxmax raised into the except below, logging
+        # "matching failed" on ordinary data. No dispersing pair is an explicit
+        # no-match, so that warning keeps meaning a real failure.
+        corrs = dispersing_corrwith(
+            aligned.drop(columns=["_target"]), aligned["_target"]
+        ).dropna()
+        if corrs.empty:
+            return None
         best = corrs.idxmax()
         if corrs[best] > _MATCH_CORRELATION_THRESHOLD:
             # ``best`` is a DataFrame column label sourced from
