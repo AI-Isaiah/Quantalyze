@@ -3212,11 +3212,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 LedgerValuationError,
                 PNL_BASIS_MARK_TO_MARKET,
                 PNL_BASIS_SMOOTHED_MTM,
+                OptionRowFieldMissingError,
             )
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
             from services.native_nav import InceptionReconciliationError
             from services.stitch_composite import (
                 MTM_REASON_ANCHOR_RACE,
+                MTM_REASON_OPTION_ROW_FIELD,
                 MTM_REASON_SECOND_PASS_TIMEOUT,
                 MTM_REASON_SUMMARY_COVERAGE,
             )
@@ -3556,10 +3558,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             # PERSISTENT inception breach also lands here and STILL
                             # degrades (cash ships) — never propagate-to-retry, which
                             # would sink the healthy cash headline (deferred-items.md).
+                            #
+                            # Phase 168 (SFH-04): an option row missing its
+                            # commission/position (OptionRowFieldMissingError) gets
+                            # its OWN reason too, label-only like the anchor race —
+                            # the coverage stamp would name the wrong cause.
                             mtm_returns = None
                             mtm_gated_reason = (
                                 MTM_REASON_ANCHOR_RACE
                                 if isinstance(_mtm_exc, InceptionReconciliationError)
+                                else MTM_REASON_OPTION_ROW_FIELD
+                                if isinstance(_mtm_exc, OptionRowFieldMissingError)
                                 else MTM_REASON_SUMMARY_COVERAGE
                             )
                             logger.warning(

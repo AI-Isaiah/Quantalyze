@@ -60,6 +60,12 @@ const TEST_ONLY_KEYS = new Set([
   // no src/ runtime path reads it, which is why it belongs here and not in
   // .env.example.
   "MATCH_DECISIONS_BASE_URL",
+  // Added 2026-09-26 (Phase 166.2 plan 06, registered by plan 07's full-suite
+  // sweep). Read ONLY by src/lib/return-stats.single-source.test.ts, to point
+  // its D-22 "merge-base tree" block at an archived tree; unset, that block
+  // does not run. Test wiring, never app config — no src/ runtime path reads
+  // it, which is why it belongs here and not in .env.example.
+  "QZ_166_2_06_SCAN_ROOT",
   "E2E_ADMIN_EMAIL",
   "E2E_ADMIN_PASSWORD",
   "SCENARIO_COMMIT_BASE_URL",

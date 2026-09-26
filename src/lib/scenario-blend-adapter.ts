@@ -80,9 +80,12 @@ const EMPTY: Omit<BlendPanelSeries, "usableN"> = {
 /**
  * Zip a backbone primitive's index-parallel `Array<number | null>` against the
  * daily dates and drop null entries, reproducing the compacted `{ date, value }[]`
- * dated at each window's last day. The primitives emit ONLY a leading-warmup
- * null prefix, so this is a leading-warmup drop in practice; the `!== null`
- * filter is a defensive guard, robust regardless of where nulls sit.
+ * dated at each window's last day. It drops EVERY null, not only the leading
+ * warm-up prefix: since founder decision D7, `rollingSharpe` answers null for a
+ * window with no dispersion and `rollingSortino` for one with no losing day, so
+ * interior nulls occur. The chart then joins its line straight across such a
+ * gap rather than breaking it. That is a recorded limit (review round 3,
+ * IN3-02 / SFH-R3 LOW-1); it never draws a fabricated 0.
  */
 function zipDrop(
   values: Array<number | null>,
@@ -146,7 +149,7 @@ export function deriveBlendPanels(
   };
 
   // ── Rolling series — backbone POPULATION-std primitives at the EXPLICIT
-  //    window (toggle-preserving); zip + drop the leading warmup null prefix. ──
+  //    window (toggle-preserving); zip + drop every null (see zipDrop). ──
   return {
     histogramSeries,
     quantiles,

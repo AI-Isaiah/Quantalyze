@@ -75,13 +75,74 @@ phases below carry the corrections, not the bullets.
 ### Phases (v1.20)
 
 - [x] **Phase 158: OPS-CI — A merge means a deploy** - External FIFO mutex + `cancelled`-conclusion watcher close the shared-test-db eviction (#616); `sql-tests` gated by an aggregator; orphaned e2e specs run; TEST stale-`pending` drained; MultiKeyConnectStep flake root-caused (completed 2026-08-21)
-- [ ] **Phase 159: RANK — Public-ranking integrity** - Failed/stale-computation KPIs out of published percentiles on BOTH engines; anon `(*)` splats become explicit projections; quantstats sign-flip + blend-annualization default closed; FILL-arm CAS; uid shape validated
-- [ ] **Phase 160: PROVENANCE — The server's venue is the venue that annualizes** - `api_keys.exchange` server-authoritative at every INSERT; the `asset_class` √365/√252 stamp derives from the attested venue WITH the null-attestation guard; B-M1 PROD census first
+- [x] **Phase 159: RANK — Public-ranking integrity** - Failed/stale-computation KPIs out of published percentiles on BOTH engines; anon `(*)` splats become explicit projections; quantstats sign-flip + blend-annualization default closed; FILL-arm CAS; uid shape validated
+- [x] **Phase 160: PROVENANCE — The server's venue is the venue that annualizes** - `api_keys.exchange` server-authoritative at every INSERT; the `asset_class` √365/√252 stamp derives from the attested venue WITH the null-attestation guard; B-M1 PROD census first
 - [ ] **Phase 161: WIZERR — Honest error surfaces** - The recorded WIZFORM-02 class residue: thirteen surfaces stop rendering `UNKNOWN`, false sentences, or unwinnable "try again"
-- [ ] **Phase 162: HONEST — What the user sees is true** - No raw Python exceptions as copy, no FRESH badge on a dead series, real equity curves, metrics on drawer rows, the clicked key preselected
+- [x] **Phase 161.1: LEDGER-REFRESH — Recurring strategy refresh for ledger-backed venues, shipped dormant behind a founder-gated schedule** (INSERTED)
+- [x] **Phase 162: HONEST — What the user sees is true** - No raw Python exceptions as copy, no FRESH badge on a dead series, real equity curves, metrics on drawer rows, the clicked key preselected
 - [x] **Phase 163: HARDEN — Fail safe, closed, and loud** - structlog redaction closed at BOTH failure modes, post-commit `createAdminClient` 500 class, flag-monitor honesty, deterministic worker plumbing, password policy, `.planning` username scrub, RPC audit gate, `bridgeComputeLimiter`
-- [ ] **Phase 164: SHARE — Copy Link always works, and never discloses** - Revocable share-token lane on the factsheet; the id-keyed public cache is NEVER poisoned (ordered adversarial acceptance); revoke; the affordance class honest at all three sites
+- [x] **Phase 164: SHARE — Copy Link always works, and never discloses** - Revocable share-token lane on the factsheet; the id-keyed public cache is NEVER poisoned (ordered adversarial acceptance); revoke; the affordance class honest at all three sites
+- [x] **Phase 164.1: PROD-OBSERVABILITY — one periodic prober, four targets: the analytics service-key mismatch (PYAPI-06), the async cron HTTP result (CRON-OBS-01), PROD cron-job drift (CRON-DRIFT-01) and the MT5 round-trip (MT5-WEDGE-OBS-01) — every silent production failure in scope becomes loud** (INSERTED)
+- [x] **Phase 164.1.1: PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it** (INSERTED)
+- [x] **Phase 164.1.1.1: LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only fixture, and the exclusion must be impossible to grow silently. MEASURED DEFECT shipped in PR #815 and RED ON MAIN (run 35347643700, merge eec8a659): supabase/tests/test_prod_prober_cadence.sql fails under sql-tests with ERROR relation net._lane_posts does not exist at :645. That table is the pg-net stand-in from scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql, whose own header says NEVER APPLIED TO TEST OR PROD — it exists only inside the throwaway pg-lane cluster. But sql-tests globs supabase/tests/test_*.sql unconditionally, so the gate passes on the lane (sql-mutation SUCCESS, mutation-covered there) and CANNOT pass on shared TEST, permanently. NOT hygiene: sql-tests is BLOCKING in the frontend aggregator and ci.yml:2205 records that Railway SKIPS the analytics-service deploy while main CI is red, so this red is what prevents POST /api/prober-cadence-alert (shipped in #815) from reaching production. SAFETY, and it forbids the lazy fix: shared TEST carries the REAL pg_net, so a gate that worked there would make genuine outbound HTTP from shared infrastructure every run — it must be EXCLUDED from that lane, never accommodated into it. LOCKED: do NOT weaken WR-03. sql-tests is built on A PRINTED SKIP IS NOT A PASS and fails the step on a whole-file RAISE NOTICE SKIP bail-out, so the fix must be a FILE-LEVEL EXCLUSION (never executed by this job, coverage asserted by sql-mutation instead), NOT an in-file skip, and that distinction must be argued in the artifact rather than assumed. SCOPE: (1) a machine-readable LANE-ONLY declaration in the gate file naming the fixture it requires; (2) the sql-tests loop honouring it and PRINTING every exclusion on every run, since a silent exclusion is the same defect class as a gate reporting PASS having measured nothing; (3) the excluded SET pinned as SITES NOT A COUNT per the B3 convention in drift-check-scripts.test.ts, re-derived from the corpus by a contract test so a one-for-one swap or a new exclusion cannot land unseen; (4) evidence the excluded file is still mutation-covered. Check whether any OTHER gate references a scripts/pg-lane/fixtures/** object — the vault stand-in vault.decrypted_secrets is the near-miss: it EXISTS on both sides (stand-in table on the lane, real view on TEST) so it is explicitly NOT this class and must not be swept in.** (INSERTED)
+- [x] **Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user** (INSERTED)
+- [x] **Phase 164.2.1: SESSIONID-FENCE — the stale wizardSessionId root cause: a preselect for key B must never inherit an abandoned draft's idempotency token from key A** (INSERTED)
+- [x] **Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team** (INSERTED)
+- [x] **Phase 164.3.1: SOUND-PRIMITIVES — all FOUR cycling primitives closed by construction: neuter scan, mutation identity, VAC-04, self-referential oracle** (INSERTED)
+- [x] **Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites** (INSERTED)
+- [x] **Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral** (INSERTED)
+- [ ] **Phase 164.4.2: SUBSETSPLIT — `sql-mutation` runs only the CHANGED gate files on a PR, with a scheduled full-corpus run that still enforces the floors, because `timeout-minutes` has taken its ONE allowed raise and 20 is a declared CEILING. Owner of TODOS `[REDUNDER-SUBSET-SPLIT]`, booked 2026-09-05 by Phase 164.4.1 and unowned since. NOT hygiene: when `sql-mutation` times out the job dies and EVERY SQL gate stops being enforced — those gates pin RLS, tenant isolation and ledger correctness, so the failure mode is the controls silently stop firing, which is this milestone whole subject. MEASURED TREND moving the wrong way: run 33961609382 @ 1aa8bb70 = 363 arms / 451 legs / 567 s (9.45 min); run 33973362161 @ ab0d5644 = 361 arms / 449 legs / 646 s (10.8 min) — FEWER legs, SLOWER run, ~80 s of pure runner variance. Phase 164.1.1 then added arms twice more: plan 01 measured 491 legs / ~975 s and plan 02 measured 496 legs / ~1020 s locally, both flagged in ci.yml as closer to the ceiling than any prior reading. SCOPE: (1) a runner subset mode (--changed against a base ref) in scripts/mutation-runner/run.mjs; (2) the .github/workflows/ci.yml wiring that selects it on PRs; (3) a scheduled full-corpus job that still enforces FILES_FLOOR/ARMS_FLOOR, since the subset cannot. LOCKED (164.4-CONTEXT.md): 20 minutes is the CEILING — if a MEASURED ubuntu run reaches it, the answer is this phase, NEVER a third timeout-minutes value. The split MUST BE PRINTED on every run, never silent: a subset that does not say it is a subset is the same defect class as a gate reporting PASS having measured nothing.** (INSERTED) — verification: human_needed
+- [ ] **Phase 164.4.2.1: DRIFTOFFMUTEX — `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work, so a merge push's critical path falls back inside its BEFORE band** (INSERTED) — verification: human_needed
+- [x] **Phase 164.5: BASELINE-SNAPSHOT — the committed PROD schema baseline becomes the local stack's source and a gate, and the one production object no migration owns is dispositioned under review** (INSERTED)
+- [x] **Phase 164.5.1: CRONREPOINT — the live `match_engine_cron` row is repointed at the mechanism the repo actually describes, and the migration-vs-runbook rule is settled first** (INSERTED)
+- [ ] **Phase 164.5.1.1: FANOUTCOHORT — the ledger-refresh fan-out admits the `private` status, so it stops enqueuing nothing for every strategy that exists** (INSERTED) — verification: gaps_found
+- [x] **Phase 164.5.1.2: FANOUTSIBLINGS — the daily position poll never runs for a single real strategy, and the sync constant lets the cursor lie: measure, then decide** (INSERTED)
+- [x] **Phase 164.5.1.3: SYNCADMIT — admit the owner-only status to the trade-sync constant, or prove it must not be: 5 of 5 private keys are never synced and their trades are never stored** (INSERTED)
+- [x] **Phase 164.5.1.4: SYNCCURSOR — the sync cursor is per-KEY while stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies trade window** (INSERTED)
+- [ ] **Phase 164.5.2: BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required** (INSERTED) — not yet verified
+- [ ] **Phase 164.5.3: MT5CREDS — show the MT5 account number on the key card and add a credential-update path** (INSERTED) — verification: human_needed
+- [x] **Phase 164.5.4: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently** (INSERTED)
+- [x] **Phase 164.6: GATE-HYGIENE — every gate-hygiene item that left 164.1: the OPS-08 residue, the composite-stamp twin, the reviewer execution-status rule, the RED-UNDER convention's discoverability and the audit allowlist** (INSERTED)
+- [x] **Phase 164.6.1: MYPYSTRICT — the strict gate claims to cover all running-service code and does not cover the module that IS the service** (INSERTED)
+- [ ] **Phase 164.6.2: MT5RELOGIN — the MT5 gateway re-establishes its broker session without a human** (INSERTED) — verification: human_needed
+- [x] **Phase 164.6.3: CIDOCSPATH — a docs-only PR stops running the code gates, and a code PR is proven to still run every one of them** (INSERTED)
+- [x] **Phase 164.6.4: MT5KEEPALIVE — nothing TRIGGERS a recovery, so the terminal sits dark for hours while recovery itself takes minutes** (INSERTED)
+- [ ] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verification: human_needed
+- [ ] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — not yet verified
+- [ ] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — not yet verified
+- [ ] **Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button** (INSERTED) — not yet verified
+- [x] **Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here** (INSERTED)
+- [x] **Phase 164.8: TESTPREPROD — TEST becomes a real pre-prod: every migration is proven on a real Postgres before it reaches a customer** (INSERTED)
+- [x] **Phase 164.8.1: REFDATA — a schema-only restore destroys migration-seeded reference data while the ledger swears those migrations applied** (INSERTED)
+- [x] **Phase 164.8.2: GATEHARDENING — the five code-review warnings Phase 164.8 shipped: the VAC-08 frontier exemption gets a ceiling, the ledger drift-check gets an arms ratchet, the reverted-grep stops being NUL-blind, the destructive restore's artifact stops carrying unredacted policy text, and the softening-token scan reaches the workflow that can drop a schema** (INSERTED)
+- [x] **Phase 164.8.3: PROBERAUTH — the prod-prober names MT5 `-6` as what it is (the terminal has no authorized account) instead of collapsing it into the catch-all `mt5-terminal-error` whose remedy sends the operator to an error table** (INSERTED)
+- [x] **Phase 164.8.4: GATERESIDUE — every deferral Phase 164.8.2's four review rounds produced: the shared-TEST credential channels that still reach a public log, the artifact that publishes the file it refuses over, and the gate-integrity leftovers each below the bar that blocked the ship** (INSERTED)
+- [x] **Phase 164.8.5: PROBERPARSE — the prod-prober hygiene rules stop being dodgeable and its parser stops dropping rows silently: the ||-split service key and the dollar-quoted literal both go RED, an unreadable oracle no longer disables the live credential scan, a malformed cron.job record becomes a measure-fail instead of a continue, and the app-GUC linter successor check stops accepting any readable file** (INSERTED)
+- [x] **Phase 164.8.6: VAULTTICKFIX — the forward migration Phase 164.7 earned: the verification check that cannot fail is re-run correctly, the Vault read becomes single-row-safe, the whitespace-key guard learns btrim, and the SECURITY DEFINER grant set is asserted whole instead of two names deep** (INSERTED)
+- [x] **Phase 164.9: TESTISOLATION — a run's assertions against the shared TEST project stop being unreliable: per-run isolation replaces global truth** (INSERTED)
+- [ ] **Phase 164.9.1: JOBRPCTRUTH — the compute-job RPC surface does what its own comments say** (INSERTED) — verification: human_needed
+- [ ] **Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD** (INSERTED) — verification: human_needed
+- [ ] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — not yet verified
+- [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
+- [ ] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — not yet verified
+- [ ] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — not yet verified
 - [ ] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons
+- [ ] **Phase 165.1: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — not yet verified
+- [ ] **Phase 165.2: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — not yet verified
+- [ ] **Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given** — verification: human_needed
+- [ ] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — not yet verified
+- [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
+- [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
+- [ ] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed
+- [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
+- [ ] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — not yet verified
+- [ ] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed
+- [ ] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed
+- [ ] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: human_needed
+- [ ] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified
+- [ ] **Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers** (INSERTED) — not yet verified (plan 01 shipped in #868)
+- [ ] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — not yet verified
+- [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -3134,6 +3195,8 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.9.3.1 to break down)
 
+**⭐ ROUTED IN 2026-09-26 (founder, "164.9.3.1 FANINGRAPH"; found by the 164.5.2 round-1 code review, WR-02, pre-existing):** a fan-in lost release. When two parents of one `done_pending_children` child mark done at the same time, the fan-in UPDATE in `mark_compute_job_done` (carried unchanged from `20260603120000`) lets each parent see the other as still running, so neither releases the child, and no sweep recovers it. This is the concurrent-parents twin of this phase's parent-fails strand. The 164.5.2 advisory lock is taken after the fan-in by design and does not change this. Success: two parents marking done concurrently always release the child exactly once, proven by a two-backend lane arm that fails on today's body.
+
 ### Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner (INSERTED)
 
 **Goal:** `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner.
@@ -3333,21 +3396,127 @@ Plans:
 
 - the SUMMARY passed the planning-hygiene check while staged, before it was committed
 
-### Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go (INSERTED)
+### Phase 166.1: ENGINEFLOOR — every Python ratio site reads the one dispersion floor, so a constant yield never produces a fabricated ratio (INSERTED)
 
-**Goal:** Every persisted `strategy_analytics` row that Phase 166 changes is recomputed on PROD, so stored numbers match what the fixed code would produce. The same fabricated-ratio class is also closed outside quantstats: exact `== 0` / `> 0` standard-deviation guards.
-**Requirements**: Phase 166 OPEN-2 (founder answer 2026-09-24: "Recompute affected rows after merge", AskUserQuestion). The round-2 fixer measured the non-quantstats sites.
+**Goal:** Every Python site outside `services/metrics.py` that divides by a standard deviation (the exact-zero guards S1-S8) or correlates a leg (C1-C8) reads Phase 166's relative dispersion floor from ONE module, `services/dispersion.py`, so a compounding-NAV constant yield produces exactly what an all-zero series produces at that site, each proven by a red test; one release commit ships it.
+**Requirements**: success criterion 3 for the Python sites. Phase 166 OPEN-2 (founder answer 2026-09-24: "Recompute affected rows after merge", AskUserQuestion) is now Phase 166.3's. The round-2 fixer measured the non-quantstats sites.
 **Depends on:** Phase 166
-**Plans:** 0 plans
+**Plans:** 4 plans
+
+⭐ **2026-09-26 SPLIT (FOUNDER DECISION, 166.1-CONTEXT D-23: the phase was too large to review as one PR after five plan-check rounds).** Until the split this phase was **QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go**. It keeps the Python half: plans 01, 01b and 03, plus a NEW release plan 09 (the Python gate sweep and the release commit, modelled on the old plan 08). The TypeScript half (old plans 04, 05a, 05b, 06a, 06b, 07, 08) moved to **Phase 166.2 COMPUTEONCE** as 166.2-01..07; the PROD recompute (old plan 02) moved to **Phase 166.3 RECOMPUTE** as 166.3-01. Criterion numbers are kept, so every plan's `requirements:` tag still resolves. The dated notes under criterion 3 are kept as lineage, each tagged with where its part now lives.
+
+## Success Criteria
+1. ~~**Census first.**~~ Moved to Phase 166.3 at the 2026-09-26 split.
+2. ~~**Normal job path.**~~ Moved to Phase 166.3 at the 2026-09-26 split.
+3. **Exact-zero guards close.** They exist today in `portfolio_optimizer.py`, `csv_validator.py`, `allocated_capital.py`, `equity_reconstruction.py` and `optimizer.py`. They move to the relative dispersion floor (`_dispersion_is_residue` semantics), and each gets a red test built from a compounding-NAV constant yield.
+   ⭐ **2026-09-25 (166.1-CONTEXT D-02):** criterion 3 now also covers the unguarded correlation sites outside `metrics.py` (same root cause: a ratio over a residue standard deviation), and `portfolio_risk.compute_risk_decomposition` (D-05).
+   ⭐ **2026-09-25 (plan-check revision, 166.1-CONTEXT D-15, orchestrator decision under the founder rule "close the whole class, not point-fixes"):** criterion 3 also covers the TS sites that compute a Sharpe, correlation, beta or related ratio from daily returns behind a `> 0` / `!== 0` guard or a relative-only floor (RESEARCH A5, T1-T20). The earlier premise that TS only reads stored values was false. **D-16:** the `analytics_runner` SQN block is site S8 (measured SQN -4.03e16 on 21 identical losses). *[split 2026-09-26: the TS part is Phase 166.2's; the D-16 sentence (S8, plan 01b) stays here.]*
+   ⭐ **2026-09-25 (FOUNDER DIRECTION, 166.1-CONTEXT D-17, verbatim: "Why don't you calculate Sharpe once and the 20 places all read it from there?"):** the TS half is re-planned around computing each ratio ONCE. Every TS site is classified Tier 1 (a persisted value exists for the same series: delete and read it), Tier 2 (the series exists only in TS: call ONE shared module, `src/lib/return-stats.ts`, and remove the local formula) or Dead (no production caller: delete). The factsheet's single-key headline and the OG card's PERSISTED Sharpe read are Phase 169 plan 04's and are excluded here; the Sharpe the OG card still computes is 166.1-06's (D-19, matching 169 D-25). A source-scan gate pins the rule. *[split 2026-09-26: Phase 166.2's.]*
+   ⭐ **2026-09-26 (plan-check round 3, 166.1-CONTEXT D-20):** plans 05 and 06 are split into file-disjoint halves in the same wave (05a/05b, 06a/06b, so 169 D-25's "166.1 plan 05 / plan 06" citations still name the right families), and plan 07 into the gate plus the `origin/main` merge (07) and the sweep plus the release (08). The gate now also carries every retired expression the plans grep for and a whole-tree Sharpe / Pearson / beta shape matcher under `src/`. T_DEPLOY is the go-live of the FIRST fixed worker deployment, read from the deployment history. *[split 2026-09-26: the 05/06 split, the gate and the merge are Phase 166.2's (plans 166.2-02..06); the sweep and release now split into 166.1-09 (Python) and 166.2-07 (TS); T_DEPLOY is Phase 166.3's.]*
+   ⭐ **2026-09-26 (plan-check round 4, 166.1-CONTEXT D-21):** plan 01's SQN task moves to a new wave-2 plan 01b (budget, wave-neutral); the whole-tree matcher is widened and re-pinned from a measurement (26 hits: 20 in-class + 5 Sortino + 1 Treynor); plan 02 adds a counts-only stored-SQN read (Q6) and derives each enqueue's kind from the class. *[split 2026-09-26: plan 01b stays here; the matcher is Phase 166.2's; Q6 and the enqueue kind are Phase 166.3's.]*
+
+Plans:
+
+**Wave 1**
+
+- [x] 166.1-01-PLAN.md — the floor moves to `services/dispersion.py`; Python variance sites S1-S7 on it, red tests and drills
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 166.1-01b-PLAN.md — the SQN block S8 on the floor, red test and drill (D-16; split from plan 01 by D-21 W3)
+- [x] 166.1-03-PLAN.md — Python correlation sites C1-C8 on two shared helpers (D-02)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 166.1-09-PLAN.md — a leading D-24 tracer (a constant positive daily-returns CSV rejected at every length, red test first), then the whole-phase Python gate sweep (pytest with the TEST database variables unset, strict mypy, the qstats-gate census, ruff no-new over the 01 + 01b + 03 + 09 union, anchor check in CI's `--pending` form) and the single release commit (VERSION, package.json, CHANGELOG), recording Phase 166.3's recompute state as counts only (D-14, D-23)
+
+⭐ **2026-09-26 (FOUNDER DECISION, 166.1-CONTEXT D-24):** an exactly constant positive daily-returns CSV is rejected at every length (today a short one is accepted and a longer one rejected, by float summation). The work is routed to 166.1-09, which must be amended and re-checked before it runs. ✅ Amended 2026-09-26 as plan 09's leading Task 1.
+
+⭐ **2026-09-26 (FOUNDER DECISION D7, 166.1-CONTEXT "Round-1 review fixes", AskUserQuestion "Show — everywhere"):** a statistic that does not exist stays empty end to end and renders "—" or a gap on every page, never 0 or "unchanged", and a constant-yield series reads the same as an all-zero one. **This reverses D-07 for display, and amends D-23's Python-only scope**: 166.1's round-1 review fixes also edit the direct TypeScript consumers of 166.1's own Python outputs (the optimizer card and adapter, the bridge schema and card, the risk-attribution table, the CSV rule labels and error panel). Everything else under `src/` stays Phase 166.2's. The same round records ONE average-pairwise-correlation rule (skip undefined pairs, state the pair count; WR-03) and amends D-04 (a constant-returns rejection gets its own rule key, `daily_returns_constant`; WR-01). Per-finding outcomes: `166.1-REVIEW-FIX.md`.
+
+**⭐ D-25 (founder, 2026-09-26, "Keep the rule"):** the average pairwise correlation averages only the defined pairs and records the pair counts, and a flat leg's correlation change shows "—". The stricter "—"-when-any-pair-is-undefined rule was declined. Recorded in `166.1-CONTEXT.md` D-25.
+
+### Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it (founder D-17) (INSERTED)
+
+**Goal:** The TypeScript side computes Sharpe, Pearson and beta ONCE and every page reads it (founder direction, 166.1-CONTEXT D-17, verbatim: "Why don't you calculate Sharpe once and the 20 places all read it from there?"). One floored module, `src/lib/return-stats.ts`, pinned to the Python floor constant, serves every Tier-2 site T1-T20; dead copies are deleted; a source-scan gate fails CI when a private copy of the formula returns; one release commit ships it.
+**Requirements**: success criterion 3 as extended to TypeScript by 166.1-CONTEXT D-15 and D-17 (numbering carried from Phase 166.1 at the 2026-09-26 split)
+**Depends on:** Phase 166. NOT on Phase 166.1: plan 166.2-01's cross-language pin reads the Python constant as text and holds both before and after 166.1-01 lands (166.1-CONTEXT D-21 Info 4, D-23), so this phase may merge first or second.
+**Plans:** 7 plans
+
+⭐ **2026-09-26 SPLIT (FOUNDER DECISION, 166.1-CONTEXT D-23: the phase was too large to review as one PR after five plan-check rounds).** Split out of Phase 166.1 with its seven TypeScript plans MOVED, not re-planned: old 04, 05a, 05b, 06a, 06b, 07 and 08 are 166.2-01..07 in the same order. Old 07 (now 166.2-06) no longer depends on the Python plans; old 08 (now 166.2-07) is scoped to the TS half (its Python sweep and recompute / SQN CHANGELOG notes went to 166.1-09). Decisions carried verbatim in `166.2-CONTEXT.md`.
+
+## Success Criteria
+3. **Each TS ratio is computed once, from the floor.** Every TS site that computes a Sharpe, correlation, beta or related ratio from daily returns (166.1-RESEARCH A5, T1-T20) calls the ONE shared module `src/lib/return-stats.ts` or is deleted as dead; on a compounding-NAV constant yield each emits exactly what an all-zero series emits today at that field, proven by a red test; and a source-scan gate pins the rule. *(Criterion 3 of Phase 166.1 as extended by the two notes below, carried at the 2026-09-26 split.)*
+   ⭐ **2026-09-25 (plan-check revision, 166.1-CONTEXT D-15, orchestrator decision under the founder rule "close the whole class, not point-fixes"):** criterion 3 also covers the TS sites that compute a Sharpe, correlation, beta or related ratio from daily returns behind a `> 0` / `!== 0` guard or a relative-only floor (RESEARCH A5, T1-T20). The earlier premise that TS only reads stored values was false. **D-16:** the `analytics_runner` SQN block is site S8 (measured SQN -4.03e16 on 21 identical losses).
+   ⭐ **2026-09-25 (FOUNDER DIRECTION, 166.1-CONTEXT D-17, verbatim: "Why don't you calculate Sharpe once and the 20 places all read it from there?"):** the TS half is re-planned around computing each ratio ONCE. Every TS site is classified Tier 1 (a persisted value exists for the same series: delete and read it), Tier 2 (the series exists only in TS: call ONE shared module, `src/lib/return-stats.ts`, and remove the local formula) or Dead (no production caller: delete). The factsheet's single-key headline and the OG card's PERSISTED Sharpe read are Phase 169 plan 04's and are excluded here; the Sharpe the OG card still computes is 166.1-06's (D-19, matching 169 D-25). A source-scan gate pins the rule.
+
+⛔ **2026-09-26 AMENDMENT (orchestrator decision at plan 04's Task 2 checkpoint; deviation recorded here AND in 166.2-CONTEXT D-19):** plan 166.2-04 may change exactly two Sharpe side assertions in `src/lib/factsheet/og-metrics.test.ts` (Phase 169's file) from `Number.isFinite` to `Number.isNaN`, because they pin the D-07 defect the plan removes (residue-dispersion inputs whose old Sharpe was about 2.9e16); both tests keep their inputs, and the plan's diff gate admits only those lines. Waiting for Phase 169 was rejected: the founder ruled that phases still in planning must not start execution. Phase 169's plan files are not edited from this branch. Plan 06 also rewords two stale comments (`correlation-math`, `rollingCorrelation`) found in wave 2.
+
+⛔ **2026-09-26 FOUNDER DECISION D7 (AskUserQuestion, "Show — everywhere"; recorded here AND in 166.2-CONTEXT as a D-07 amendment and D-24):** a statistic that does not exist stays empty end to end and renders "—" or a gap on every page, never 0.00 or "unchanged". This REVERSES D-07 for display: D-07 mapped null to the value each site already emitted for an exact constant, which was 0 at eight sites, so the factsheet read "Sharpe 0.00" where the OG card for the same series read "—". The constant-yield-equals-all-zero invariant stands; both now read "—". Applied in the round-1 fix pass (every finding of `166.2-REVIEW.md` and `166.2-REVIEW-SFH.md`; see `166.2-REVIEW-FIX.md`). ⚠️ Deviation: that pass (IN-03) edits Phase 169's `src/lib/factsheet/og-metrics.test.ts` beyond the two lines the D-19 amendment above admitted, to put two Sharpe arms back on a dispersing fixture; Phase 169's plan files are not edited.
+
+Plans:
+
+**Wave 1**
+
+- [x] 166.2-01-PLAN.md — ONE TS module `src/lib/return-stats.ts` (floor pinned to Python, dispersion, Sharpe, Pearson, beta); T1-T5 (/compare, sampleBasisRatios, computeScenario, diversificationRatio) call it (D-15, D-17)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 166.2-02-PLAN.md — TS T6-T7 on `return-stats`: one Pearson (`correlation-math.ts` deleted with the dead `rollingCorrelation`), /compare's matrix and the Risk-tab widget (D-15, D-17, D-20)
+- [x] 166.2-03-PLAN.md — TS T8-T12 on `return-stats`: portfolio-stats beta and risk share, the scenario benchmark (its correlation and information ratio) and stress; dead `computeRollingMetric` deleted (D-15, D-17, D-20)
+- [x] 166.2-04-PLAN.md — TS T13, T15, T14's computed arm and T18: the factsheet headline family and the OG card's computed Sharpe (T14's persisted read is Phase 169's), T18 fixed at its source (D-15, D-17, D-19, D-20)
+- [x] 166.2-05-PLAN.md — TS T16, T17, T19, T20: the factsheet's beta, correlation, information ratio and rolling Sharpe (D-15, D-17, D-20)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 166.2-06-PLAN.md — the compute-once source-scan gate (import rule, retired-expression table, whole-tree shape matcher with a count-pinned allowlist; D-17, D-20), then merge `origin/main` and re-prove T1-T20 on the merged tree (D-20 W1)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 166.2-07-PLAN.md — whole-phase gate sweep at one SHA containing `origin/main` (anchor check in CI's `--pending` form, D-20 B2) and the single TS release commit (VERSION, package.json, CHANGELOG)
+
+**⭐ D-27 (2026-09-26, under founder decision D7):** T13's "skew and kurtosis stay 0 with no dispersion" is superseded, and they now read "—". Profit Factor, Calmar by Year, Avg Loss and Avg Win likewise show "—" where they do not exist. Recorded in `166.2-CONTEXT.md` D-27.
+
+**⭐ D-29 (recorded 2026-09-26):** a deviation from D-17. The D7 fix rounds edited Phase 169's `types.ts` (NaN/null fields, `n_valid`) and `fetch-and-build-payload.ts` (the v7 cache-key note). Phase 169 must rebase over them. Recorded in `166.2-CONTEXT.md` D-29.
+
+### Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path (founder production steps) (INSERTED)
+
+**Goal:** Every persisted `strategy_analytics` row that Phase 166 changes, and that was computed before the Phase 166 worker deploy, is recomputed on PROD through the normal compute-job path, one strategy at a time, each checked against its before row, so stored numbers match what the fixed code produces. Every PROD statement is a founder step.
+**Requirements**: success criteria 1 and 2 (numbering carried from Phase 166.1 at the 2026-09-26 split); Phase 166 OPEN-2 (founder answer 2026-09-24: "Recompute affected rows after merge", AskUserQuestion)
+**Depends on:** Phase 166, DEPLOYED: the worker runs a commit at or after the Phase 166 merge `bb31564f9` (166.1-CONTEXT D-10). Not on Phase 166.1 or 166.2: no file in their plans writes `strategy_analytics`.
+**Plans:** 1 plan
+
+⭐ **2026-09-26 SPLIT (FOUNDER DECISION, 166.1-CONTEXT D-23: the phase was too large to review as one PR after five plan-check rounds).** Split out of Phase 166.1 with its founder-gated plan MOVED, not re-planned: old plan 02 is 166.3-01, unchanged apart from ids and references. Decisions carried verbatim in `166.3-CONTEXT.md`.
 
 ## Success Criteria
 1. **Census first.** The five read-only census SELECTs in `166-09-SUMMARY.md` run on PROD. The founder runs them, or they run read-only and are recorded as counts only. The recompute set is derived from them.
 2. **Normal job path.** Affected rows are recomputed through the normal compute-job path, never by a hand-written UPDATE. Each is verified against the D-10 before/after rows, and the rendered rolling alpha/beta chart and greeks table show the new values.
-3. **Exact-zero guards close.** They exist today in `portfolio_optimizer.py`, `csv_validator.py`, `allocated_capital.py`, `equity_reconstruction.py` and `optimizer.py`. They move to the relative dispersion floor (`_dispersion_is_residue` semantics), and each gets a red test built from a compounding-NAV constant yield.
+   ⭐ **2026-09-26 (carried from 166.1 at the split):** T_DEPLOY is the go-live of the FIRST fixed worker deployment, read from the deployment history (166.1-CONTEXT D-20 B3); plan 166.3-01 adds a counts-only stored-SQN read (Q6) and derives each enqueue's kind from the class (D-21 W1, W2).
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 166.1 to break down)
+**Wave 1**
+
+- [ ] 166.3-01-PLAN.md — founder-gated PROD recompute: Q1-Q6 read-only pack (Q6: stored residue SQN, D-21 W1), tracer then one-at-a-time enqueues with the kind derived from the class (D-21 W2), blocking rendered check per published row (independent of the code plans)
+
+### Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine (INSERTED)
+
+**Goal:** Every "drawdown improvement" number means shallower-is-positive, and ranking rewards a shallower drawdown, never a deeper one.
+**Depends on:** Phase 166.1
+**Plans:** 0 plans
+**Status:** booked 2026-09-26 under the new-phase freeze — NOT started.
+
+**Origin:** the 166.1 round-2 code review (outside its diff; the same code is at the phase base, so it predates 166.1). Measured there: a book whose max drawdown improved from -0.464 to -0.236 shows `dd_delta -0.228` under a hint reading "Positive = shallower", and a constant-yield book whose drawdown got worse shows `dd_improvement +0.0087`, rendered as "improve drawdown by 0.87%". The match score therefore rewards a deeper drawdown. The bridge already carries the correct sign (H-1065).
+
+**Sites:** `simulate_add_candidate` `dd_delta`; `find_improvement_candidates` `dd_improvement`; `match_engine._compute_portfolio_fit_components` `dd_improvement`.
+
+**Success Criteria:**
+  1. All three sites report a shallower drawdown as a positive improvement, matching the bridge's convention, with a test per site that fails on the old sign.
+  2. The match score's drawdown component rewards the shallower book; a ranking test proves the order flips back.
+  3. Every renderer of these fields reads the corrected sign and its copy ("Positive = shallower", "improve drawdown by") stays true.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 166.1.1 to break down)
 
 ### Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error
 
@@ -3515,11 +3684,19 @@ Plans:
 
 **Requirements**: TODOS entry `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` — read it before planning; it carries the dated measurements and the forbidden remedies. Do not re-derive them. ⭐ **THE WAITING DEPENDENCY IS MET — MEASURED 2026-09-23 (founder-approved edit), read-only from the production analytics log.** A three-account Deribit composite created 2026-09-23 failed its first stitch job (`run_stitch_composite_job`) permanently at 06:50 UTC on exactly this refusal: one `assignment` row, currency BTC, change `-1.5e-5`, instrument a BTC put expiring 28 Aug 2026, side `close buy`. The refusal's own same-instrument census for that batch read **`delivery=0 settlement=0 trade=1`**. For this occurrence that answers the deciding question: Deribit emitted NO separate `delivery` or `settlement` row for the assigned instrument, so there is no second cash row the `assignment` change could be double-counted against. ⚠️ One occurrence, one instrument — the plan decides whether n=1 is enough to classify, and must say so. **Consequence:** the strategy's analytics were stamped terminal (composite member reconstruction failed structurally), and its owner factsheet and share link still read "still computing" (that copy defect is Phase 167.2's). Phase 159 UAT #2 (render a composite on the public factsheet) now has a real composite waiting on THIS phase.
 **Depends on:** PR #783 merged (the evidence channel), and ONE observed occurrence carrying the census. ⚠️ The second is a WAITING dependency, not a code one — nothing in the repo produces it; a deribit options account must hit the refusal again.
-**Plans:** 0 plans
+⭐ **SCOPE AMENDMENT 2026-09-26 — founder decision D6 (AskUserQuestion: "Fix inside 168"), recorded as D-09 in `168-CONTEXT.md`.** The round-1 review's INFO-3 measured that the smoothed option-book replay ignored Deribit's `type=expiry`, so an out-of-the-money short stayed open past expiry and any later option activity raised the daily-MTM hole, losing the smoothed basis for the account. It is fixed inside this phase, not split: the replay closes an option at a zero-cash `expiry` row and refuses an `expiry` carrying cash or a nonzero position, and any `exercise` row (unmeasured shapes). Neither type becomes cash-bearing, so both twins are unchanged. The same decision gives the new `mtm_option_row_field_missing` degrade reason its own factsheet copy. This overrides the phase-size rule for this one item.
+**Plans:** 3 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 168 to break down)
+**Wave 1**
+- [x] 168-01-PLAN.md — `assignment` classified cash-bearing on both twins in the census shape; co-occurring `delivery`/`settlement` and unnamed-instrument shapes refuse; windowed-crawl backstop; one option-book event constant across the six literal sites in the same commit; evidence file (counts only); evidence tests re-pointed
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 168-02-PLAN.md — per-site pins for every option-book reader (incl. mark_to_market and smoothed_mtm end to end, and the acceptance script's eligibility check), refusal whitelist gains `commission`/`position`, prose sweep, full suite
+
+**Wave 3** *(post-land; founder-owned, non-autonomous)*
+- [ ] 168-03-PLAN.md — after deploy the founder retries the options strategy that failed on 2026-09-23 and reports terminal status, return-point count and any refusal class, by type only. ⭐ D-09 note (2026-09-26): the retry also exercises the expiry close, but ONLY when the smoothed pass runs, which is gated on `SMOOTHED_MTM_ENABLED` (production value not measured here); a D-09 refusal reports as an `expiry`-shape or `exercise` class
 
 ### Phase 169: PAGETRUTH — every number agrees across pages and with its own record length
 
@@ -3550,6 +3727,26 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 169 to break down)
 
+**⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found by the 166.1 round-2 silent-failure review, pre-existing, outside that diff):** risk attribution renders a share in percent twice. The producer sends `marginal_risk_pct` and `weight_pct` already in percent (the `complete.json` fixture carries 28.0 and 40.0), and `RiskAttribution` passes them to `formatPercent`, which multiplies by 100 again, so a 28% share renders as "+2800.00%". `RiskAttribution.test.tsx` feeds fractions the producer never sends, so the test suite encodes the wrong unit. Success: the page shows the producer's number once, and a test built from the producer's real shape fails on the double scale. ⚠️ Added after 169's plans were checked; the plan set must take this item before execution.
+
+**⚠️ REBASE NOTE 2026-09-26 (from 166.2 D-29):** 166.2 edited `src/app/factsheet/[id]/v2/types.ts` and `fetch-and-build-payload.ts` (NaN/null statistic fields, the optional `n_valid`, the v7 payload cache key). 169's plans must re-read both at HEAD before editing.
+
+### Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers (INSERTED)
+
+**Goal:** Four self-contained page fixes: the `/admin` compute-jobs list loads and a failed load says so; `/recommendations` states the mandate truthfully and never recommends a viewer's own strategy; `/profile` Exchanges counts only live keys and never repeats a balance; `/recommendations` and `/allocations` use one mandate rule.
+**Shipped separately, 2026-09-26 (founder decision D11):** plan 01 shipped separately by founder decision D11; 02–05 follow once 167.1.2 PR C lands. This section is the minimal slice plan 01 needs; the full phase section, split note and remaining plans arrive with plans 02–05.
+**Depends on:** none in code for plan 01. 167.1.2 PR C on `origin/main` gates plans 169.3-03 and 169.3-04.
+
+## Success Criteria
+
+1. `/admin` Compute Jobs: the list request no longer returns HTTP 500, and the tab never says "No compute jobs found" while the header counts a job in progress. A failed load says it failed.
+
+**Plans:** 5 plans; plan 01 shipped here (D11), 02–05 follow once 167.1.2 PR C lands. Decisions carried in `169.3-CONTEXT.md`; no migration.
+
+Plans:
+
+- [x] 169.3-01-PLAN.md — /admin compute jobs list reads the admin view; a failed load says so (SC1) (was 169-01)
+
 ### Phase 170: LAYOUT — page layout reads clean and holds on every page
 
 **Goal:** Pages read as a finished product: no stacked look-alike panels, and the layout holds at 320 px and 200% zoom.
@@ -3570,6 +3767,9 @@ Plans:
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 170 to break down)
+
+**⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy 320px check of 167.2.1, measured in the logged-in browser):** on /strategies at 320px the "Get private link" button overlaps the strategy name in the row header and cuts it to two letters. At 640px (200% zoom) the row is clean. Success: at 320px the name, the button, the status pill and the date never overlap, and the name is readable or ellipsised.
+Same pass, same width: on /allocations the floating "Tweaks" button overlaps the bottom navigation's "Strategies" and "Profile" labels. Success: no floating control covers the bottom navigation at 320px. Evidence: `.planning/uat/2026-09-26-browser-pass.md`.
 
 ### Phase 170.1: COPY — page copy reads clean on every page (INSERTED)
 
@@ -3595,6 +3795,8 @@ Plans:
 - [ ] TBD (run /gsd-plan-phase 170.1 to break down)
 
 ---
+
+**⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy copy check of 167.2.1):** for a strategy whose last computation finished but whose factsheet cannot be built, the /strategies note and the owner factsheet's banner say the numbers "appear there once a computation succeeds" (wait), while the factsheet body says the computation finished and to contact support (act). Success: the list note, the owner banner and the body give the owner the same instruction for this state.
 
 ### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 
@@ -3699,7 +3901,7 @@ The three without one are named in their rows; none is unfinished work.
 | 164.10 BODYDRIFT (PROD runs an EARLIER revision of three function bodies) | 0/? | Queued (created 2026-09-11) | - |
 | 166. QSTATS-TRUTH | 0/? | Queued (re-ordered ahead of 165, 2026-09-05) | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 0/? | Queued | - |
-| 168. DRBOPTIONS (a Deribit options account ingests end to end) | 0/? | Queued — Alpha Centauri is blocked by a `native_nav` inception reconciliation breach (`breach_ratio=436`), NOT by `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` | - |
+| 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | In progress (plans 01 and 02 done 2026-09-26; plan 03 is the founder post-deploy checkpoint) — Alpha Centauri is blocked by a `native_nav` inception reconciliation breach (`breach_ratio=436`), NOT by `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` | - |
 | 165. DEPS dependabot campaign | 0/? | Queued LAST (after 166 — dependency churn lands last) | - |
 
 ### Requirement Coverage (v1.20)

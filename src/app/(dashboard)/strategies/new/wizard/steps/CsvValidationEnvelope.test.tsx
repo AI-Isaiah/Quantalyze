@@ -466,3 +466,64 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
     expect(text).toContain(LONG_MESSAGE);
   });
 });
+
+/**
+ * 166.1 round-1 WR-01 / SFH MEDIUM-3 (amends 166.1 D-04). Founder decision
+ * D-24 rejects every constant positive daily-returns series. That rejection is
+ * a FILE-level rule (`row: 0`, the absent-row sentinel) and now has its own
+ * key, `daily_returns_constant`. Before, it shared `daily_sharpe_sentinel`,
+ * so a 2-row constant upload read:
+ *
+ *     1 row failed validation
+ *     Rule violated: Daily Sharpe > 10 looks unrealistic. Expand below for the
+ *     row-level breakdown.
+ *
+ * Three false statements: no row failed, no Sharpe was measured, and there is
+ * no row-level breakdown. The measured wire shape from `validate_csv` on a
+ * 5-row constant 0.001 body is the fixture below.
+ */
+describe("[166.1 WR-01] CsvValidationEnvelope — a file-level rule names no row", () => {
+  const CONSTANT = {
+    rule: "daily_returns_constant",
+    row: 0,
+    message:
+      "Daily returns do not vary, so the Sharpe is unbounded; a constant positive return is not a realistic track record",
+  };
+
+  it("🔴 a constant-returns rejection reads as a file-level failure, with its own label", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [CONSTANT]);
+    const panel = screen.getByTestId("wizard-csv-error");
+    const text = panel.textContent ?? "";
+    expect(text).toContain("Your file failed validation");
+    expect(text).toContain("Daily returns never change");
+    expect(text).toContain(CONSTANT.message);
+    expect(text, "a row count for a rule that names no row").not.toMatch(/\d+ rows? failed validation/);
+    expect(text).not.toMatch(/\(\d+ rows\)/);
+    expect(text, "the Sharpe label claims a comparison that was never made").not.toContain(
+      "Daily Sharpe > 10",
+    );
+    expect(text, "points at a row-level breakdown that does not exist").not.toContain(
+      "row-level breakdown",
+    );
+  });
+
+  it("POSITIVE COUNTERPART: a real-row failure keeps its row count and pointer", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      { rule: "daily_return_lower_bound", row: 4, message: "Column 'daily_return' failed rule 'daily_return_lower_bound' at row 4." },
+    ]);
+    const text = screen.getByTestId("wizard-csv-error").textContent ?? "";
+    expect(text).toContain("1 row failed validation");
+    expect(text).toContain("row-level breakdown");
+    expect(text).toContain("(1 rows)");
+  });
+
+  it("a mixed payload counts only the real rows", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      CONSTANT,
+      { rule: "monotonic_dates", row: 5, message: "Column 'date' failed rule 'monotonic_dates' at row 5." },
+    ]);
+    const text = screen.getByTestId("wizard-csv-error").textContent ?? "";
+    expect(text).toContain("1 row failed validation");
+    expect(text).not.toContain("2 rows failed validation");
+  });
+});

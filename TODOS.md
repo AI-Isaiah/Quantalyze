@@ -1365,6 +1365,21 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[169-DEAD-ADMIN-JOBS-RPC]` Drop the dead `get_admin_compute_jobs` database function
+      (booked 2026-09-25, Phase 169 D-01).**
+      It raises "column reference `id` is ambiguous" on every call (its `RETURNS TABLE` declares an
+      OUT column named `id`, which collides with the admin gate's `WHERE id = auth.uid()`), and
+      under the service-role client `auth.uid()` is NULL, so even a fixed body would return nothing.
+      Phase 169 plan 01 stops calling it: `/api/admin/compute-jobs` reads the `compute_jobs_admin`
+      view after its admin gate. After that it has no caller. Evidence: `169-RESEARCH.md` root
+      cause A (a local reproduction of the error on a throwaway cluster).
+      **Why not dropped in 169:** a DROP is a migration, and merging `supabase/migrations/**`
+      auto-applies to TEST then PROD with no human gate, needs the 3-reviewer pass, and moves
+      `database.types.ts` and the census pins. None of that was needed to fix the page.
+      **Owner:** the next migration-carrying phase. **Trigger:** that phase's planning.
+      **Closed when:** a migration drops the function, `database.types.ts` loses it, and
+      `grep -rn get_admin_compute_jobs src` finds only lineage comments.
+
 - [ ] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
       **Measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).** `python` took
@@ -7991,6 +8006,45 @@ EXECUTED, §str/None follow-through, §Discovery observation).
           card, and the `KEY_SIGN_IN_FAILED` envelope.
       **Closed when:** each item's verdict is written into `167-UAT.md` (verdict and counts only —
       no key id, account number or server name).
+
+## Phase 167.1.2 (ACCOUNTTRUTH) — PR B review round 4, routed items (logged 2026-09-26)
+
+- [ ] **`[167.1.2-REUSED-RETRY-ENDS-FAILED-FINAL]` A toggle can report success while the recompose
+      it reused ends `failed_final` and the curve never shows the change (booked 2026-09-26, from
+      the PR B round-4 silent-failure-hunter, finding F-4, LOW).**
+      **What happens.** `set_departed_key_history_inclusion` reuses the caller's `failed_retry`
+      `derive_allocator_equity` row when it is the only recompose row: it goes back to `pending`,
+      due now, with `attempts` untouched, so the toggle grants no retry budget. A row one attempt
+      short of `max_attempts` that fails once more ends `failed_final`. The RPC has already
+      returned success by then, so the owner sees the toggle accepted and a curve that still
+      reads the old value. The next toggle enqueues a fresh job, but nothing tells the owner to
+      make one.
+      **Why not fixed in PR B.** It is not a database-side refusal the RPC can make: the outcome
+      is decided after commit, by the worker. What the owner sees about a failed recompose is a
+      client question (the departed-keys overview and its status line).
+      **Owner: Phase 167.1.2 PR C (plan 04)**, the client half that calls this RPC and renders the
+      departed-keys overview. It decides whether that surface shows a failed recompose, and how.
+      No earlier `TODOS.md` entry names PR C (grep `PR C`: 0 hits on 2026-09-26), so this entry
+      is its first.
+      **Trigger:** PR C's planning, or any client code that calls
+      `set_departed_key_history_inclusion`, whichever is first.
+
+- [ ] **`[167.1.2-SECOND-FAILED-RETRY-ROW-STAYS]` A second, older `failed_retry` recompose row
+      beside the caller's pending one is left in place by the toggle (booked 2026-09-26, from the
+      PR B round-4 migration-reviewer, INFO-3).**
+      **What happens.** The reuse only fires when a `failed_retry` row is the caller's ONLY
+      in-flight-or-retry recompose row. When a pre-existing `pending` or `done_pending_children`
+      row sits beside it, the RPC does not flip it (the flip would collide on
+      `compute_jobs_one_inflight_per_kind_allocator`) and folds into the in-flight row through the
+      enqueue's dedup. The `failed_retry` row stays. The RPC did not create that pairing, but it
+      does not clear it either, and once the row is due it is the claim-wedge pairing.
+      **Owner: Phase 164.9.3 CLAIMPAIR**, which owns the pairing class
+      (`[164.9.3-CLAIM-PAIR-23505]`: a due `failed_retry` row plus a `pending` twin of the same
+      (kind, allocator) makes every claim entry point raise 23505). This is one more way the pair
+      can already exist when a caller arrives; the class fix there covers it. ⚠️ At the time of
+      writing, the 164.9.3 ROADMAP section and its `TODOS.md` entry live on the unmerged docs
+      branch that inserted the phase, not on this branch.
+      **Trigger:** Phase 164.9.3 planning.
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 

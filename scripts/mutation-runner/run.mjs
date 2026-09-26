@@ -975,7 +975,29 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //                own arm first.`, exit 0. Per-file line:
 //                `test_cron_runs_rls.sql: sections 3 / judged 3 / annotated 3 /
 //                waived 0 / biting 3`. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 50;
+//
+// ⭐ RE-DERIVED 2026-09-25 (Phase 167.1.2 ACCOUNTTRUTH, plan 03, PR B) — the
+//                arrival of supabase/tests/test_api_keys_account_identity.sql,
+//                the gate for migration 20260925120000 (the duplicate marker,
+//                the departed-history flag and its owner RPC, the reconnect
+//                named refusal; 24 arms), moving FILES_FLOOR 50 -> 51 and the
+//                denominator 77 -> 78. The paired ARMS_FLOOR move (449 -> 474)
+//                is in the block below.
+//                MEASURED via ONE full lane run with no file edited during it,
+//                constants still at 50 / 449 (the stale-low direction the
+//                runner cannot see), `node scripts/mutation-runner/run.mjs`:
+//                `scope: FULL 51/51 annotated files`, `coverage: files 51/78`,
+//                `arms: 474/474/0`, `biting: 474`, `lane-invocations: 474 …
+//                plus 51 baseline / 51 restore leg(s)` (the two independent
+//                tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron
+//                AVAILABLE`, `unreachable: 27`, `✅ No defects. Every annotated
+//                arm bit its own arm first.`, exit 0. Per-file line:
+//                `test_api_keys_account_identity.sql: sections 24 / judged 24 /
+//                annotated 24 / waived 0 / biting 24`. The stale-low direction
+//                was observed in src/__tests__/mutation-runner-floors.test.ts
+//                before this edit: `RATCHET STALE: 51 of 78 gate files are now
+//                annotated but FILES_FLOOR is still 50.` WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 51;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2301,7 +2323,133 @@ export const FILES_FLOOR = 50;
 //    sections 32 / judged 32 / annotated 32 / waived 0 / biting 32`,
 //    `test_cron_runs_rls.sql: sections 5 / judged 5 / annotated 5 / waived 0 /
 //    biting 5`.
-export const ARMS_FLOOR = 449;
+//
+// ⭐ RE-DERIVED 2026-09-25 (Phase 167.1.2 ACCOUNTTRUTH, plan 03, PR B): 449 ->
+//    474. TWENTY-FIVE new arms: all 24 of the NEW
+//    supabase/tests/test_api_keys_account_identity.sql (ACCT-a..j, ACCT-s,
+//    ACCT-f/f2/g, HIST-* and RECON-*, against migration 20260925120000), plus
+//    arm 6f CCXT in the already-annotated
+//    supabase/tests/test_api_keys_venue_identity_uniq.sql (7 -> 8: a second
+//    live okx row on one account id is refused, and admitted once the first is
+//    disconnected). FILES_FLOOR moves 50 -> 51 in the block above.
+//    MEASURED per file first, each a narrowed `--file` run with every arm
+//    `RED (identity ok)`: `arms: 24/24/0` and `arms: 8/8/0`, both `No defects
+//    in the narrowed scope.` Then ONE full lane run with no file edited during
+//    it and this constant still at 449, `node scripts/mutation-runner/run.mjs`:
+//    `scope: FULL 51/51 annotated files`, `coverage: files 51/78`, `arms:
+//    474/474/0`, `biting: 474`, `lane-invocations: 474` (the two independent
+//    tallies AGREE, plus 51 baseline / 51 restore legs), `lane-blocked: 0
+//    file(s)`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27 file(s)`,
+//    `per-arm lane time: mean 1.7s over 474 arm run(s)`, `✅ No defects. Every
+//    annotated arm bit its own arm first.`, exit 0. WAIVED_CEILING stays 0.
+//    RE-MEASURED 2026-09-26 after merging origin/main (Phase 164.9.1, PR #860,
+//    which moved no arm): one full lane run, tree frozen, constants at 51 /
+//    474: `scope: FULL 51/51`, `coverage: files 51/78`, `arms: 474/474/0`,
+//    `biting: 474`, `lane-invocations: 474 … plus 51 baseline / 51 restore
+//    leg(s)`, `✅ No defects.`, exit 0.
+//
+// ⭐ RE-DERIVED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, plan 03, PR B pre-merge
+//    review fixes): 474 -> 483. NINE new arms, all in the ALREADY-ANNOTATED
+//    supabase/tests/test_api_keys_account_identity.sql (24 -> 33): ACCT-l
+//    (missing holder 23503), ACCT-m (marked holder, chain and 2-cycle), ACCT-n
+//    (a key that already holds another), ACCT-o (departed holder), ACCT-p
+//    (contradictory holder clear), HIST-running (a toggle while the recompose
+//    runs is refused), RECON-hist (reconnect resets history_inclusion),
+//    RECON-tenant and RECON-other-exchange (the refusal's user and exchange
+//    conjuncts), against migration 20260925120000 edited in place. No file
+//    joined the annotated set, so FILES_FLOOR stays 51; WAIVED_CEILING stays 0.
+//    MEASURED first on a narrowed `--file` run: `arms: 33/33/0`, `biting: 33`,
+//    every arm `RED (identity ok)`, `No defects in the narrowed scope.` Then ONE
+//    full lane run with no file edited during it and this constant still at
+//    474, `node scripts/mutation-runner/run.mjs`: `scope: FULL 51/51 annotated
+//    files`, `coverage: files 51/78`, `arms: 483/483/0`, `biting: 483`,
+//    `lane-invocations: 483` (the two independent tallies AGREE, plus 51
+//    baseline / 51 restore legs), `lane-blocked: 0 file(s)`, `lane-probe:
+//    pg_cron AVAILABLE`, `unreachable: 27 file(s)`, `per-arm lane time: mean
+//    1.1s over 483 arm run(s)`, `✅ No defects. Every annotated arm bit its own
+//    arm first.`, exit 0. Per-file line: `test_api_keys_account_identity.sql:
+//    sections 33 / judged 33 / annotated 33 / waived 0 / biting 33`.
+//
+// ⭐ RE-DERIVED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, PR B review round 2):
+//    483 -> 484. ONE new arm, HIST-lock, in the ALREADY-ANNOTATED
+//    supabase/tests/test_api_keys_account_identity.sql (33 -> 34): the recompose
+//    job set_departed_key_history_inclusion hands back is locked by it (xmax of
+//    the row it inserted is non-zero; its twin drops FOR UPDATE from the RPC's
+//    step 3 SELECT). HIST-running's twin also gained a second edit step (the RPC
+//    now tests for a running job twice), which moves steps, not arms. No file
+//    joined the annotated set, so FILES_FLOOR stays 51; WAIVED_CEILING stays 0.
+//    MEASURED first on a narrowed `--file` run: `arms: 34/34/0`, `biting: 34`,
+//    `No defects in the narrowed scope.` Then ONE full lane run with no file
+//    edited during it and this constant still at 483: `scope: FULL 51/51
+//    annotated files`, `coverage: files 51/78`, `arms: 484/484/0`, `biting:
+//    484`, `lane-invocations: 484` (plus 51 baseline / 51 restore legs),
+//    `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, `per-arm lane
+//    time: mean 1.2s over 484 arm run(s)`, `✅ No defects. Every annotated arm
+//    bit its own arm first.`, exit 0. Per-file line:
+//    `test_api_keys_account_identity.sql: sections 34 / judged 34 / annotated
+//    34 / waived 0 / biting 34`.
+//
+// ⭐ RE-DERIVED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, PR B review round 3):
+//    484 -> 485. ONE new arm, HIST-retry, in the ALREADY-ANNOTATED
+//    supabase/tests/test_api_keys_account_identity.sql (34 -> 35): a toggle
+//    beside the caller's failed_retry recompose REUSES that row (moved to
+//    now()) and never queues a pending twin of it; its twin makes the RPC's
+//    failed_retry lookup find nothing (AND FALSE). HIST-enqueues' twin find
+//    string moved with the enqueue call's new indentation, which moves no arm
+//    or step. No file joined the annotated set, so FILES_FLOOR stays 51;
+//    WAIVED_CEILING stays 0. MEASURED first on a narrowed `--file` run:
+//    `arms: 35/35/0`, `biting: 35`, `No defects in the narrowed scope.` Then
+//    ONE full lane run with no file edited during it and this constant still
+//    at 484: `scope: FULL 51/51 annotated files`, `coverage: files 51/78`,
+//    `arms: 485/485/0`, `biting: 485`, `lane-invocations: 485` (plus 51
+//    baseline / 51 restore legs), `lane-blocked: 0 file(s)`, `lane-probe:
+//    pg_cron AVAILABLE`, `per-arm lane time: mean 1.1s over 485 arm run(s)`,
+//    `✅ No defects. Every annotated arm bit its own arm first.`, exit 0.
+//    Per-file line: `test_api_keys_account_identity.sql: sections 35 / judged
+//    35 / annotated 35 / waived 0 / biting 35`.
+//
+// ⭐ RE-DERIVED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, PR B review round 4):
+//    485 -> 486. ONE new arm, HIST-tenant, in the ALREADY-ANNOTATED
+//    supabase/tests/test_api_keys_account_identity.sql (35 -> 36): user A's
+//    toggle leaves user B's failed_retry derive_allocator_equity row exactly as
+//    it was; its twin drops the allocator filter from the RPC's failed_retry
+//    lookup (WHERE TRUE), so A's toggle would reuse B's row. HIST-lock's and
+//    HIST-enqueues' find strings moved with step 3's new loop indentation,
+//    which moves no arm or step. No file joined the annotated set, so
+//    FILES_FLOOR stays 51; WAIVED_CEILING stays 0. MEASURED first on a
+//    narrowed `--file` run: `arms: 36/36/0`, `biting: 36`, `No defects in the
+//    narrowed scope.` Then ONE full lane run with no file edited and no git
+//    command run during it, and this constant still at 485: `scope: FULL
+//    51/51 annotated files`, `coverage: files 51/78`, `arms: 486/486/0`,
+//    `biting: 486`, `lane-invocations: 486` (plus 51 baseline / 51 restore
+//    legs), `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`,
+//    `per-arm lane time: mean 1.5s over 486 arm run(s)`, `✅ No defects. Every
+//    annotated arm bit its own arm first.`, exit 0. Per-file line:
+//    `test_api_keys_account_identity.sql: sections 36 / judged 36 / annotated
+//    36 / waived 0 / biting 36`.
+//
+// ⭐ RE-DERIVED 2026-09-26 (Phase 167.1.2 ACCOUNTTRUTH, PR B review round 4
+//    fixes): 486 -> 487. ONE new arm, HIST-requeued, in the ALREADY-ANNOTATED
+//    supabase/tests/test_api_keys_account_identity.sql (36 -> 37): a
+//    test-local BEFORE UPDATE trigger inserts a pending twin under the RPC's
+//    failed_retry reuse, so the flip collides on
+//    compute_jobs_one_inflight_per_kind_allocator; the RPC must answer 55006
+//    HISTORY_RECOMPOSE_REQUEUED with nothing written. Its twin makes the
+//    flip's handler catch division_by_zero instead of unique_violation, so the
+//    raw 23505 reaches the caller. HIST-enqueues' find string moved with the
+//    enqueue's new serialization_failure wrapper, which moves no arm or step.
+//    No file joined the annotated set, so FILES_FLOOR stays 51;
+//    WAIVED_CEILING stays 0. MEASURED first on a narrowed `--file` run:
+//    `arms: 37/37/0`, `biting: 37`, `No defects in the narrowed scope.` Then
+//    ONE full lane run with no file edited during it, and this constant still
+//    at 486: `scope: FULL 51/51 annotated files`, `coverage: files 51/78`,
+//    `arms: 487/487/0`, `biting: 487`, `lane-invocations: 487` (plus 51
+//    baseline / 51 restore legs), `lane-blocked: 0 file(s)`, `lane-probe:
+//    pg_cron AVAILABLE`, `per-arm lane time: mean 1.7s over 487 arm run(s)`,
+//    `✅ No defects. Every annotated arm bit its own arm first.`, exit 0.
+//    Per-file line: `test_api_keys_account_identity.sql: sections 37 / judged
+//    37 / annotated 37 / waived 0 / biting 37`.
+export const ARMS_FLOOR = 487;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
