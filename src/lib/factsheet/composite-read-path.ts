@@ -176,8 +176,10 @@ export async function readSmoothedSeries(
  *
  * Responsibilities (identical to the factsheet route's former inline block):
  *   - Read the honest SPARSE cash series from `csv_daily_returns` (gap days
- *     ABSENT, never zero-filled). A read failure logs at ERROR (→ Sentry) and
- *     degrades to the still-computing placeholder — never the api arm.
+ *     ABSENT, never zero-filled). A read failure logs at ERROR (console only:
+ *     `console.*` does not reach Sentry in this repo) and degrades to the
+ *     still-computing placeholder — never the api arm. The factsheet resolve
+ *     stage captures the resulting composite refusal (167.2.1-REVIEW-SFH H-1).
  *   - F1/H-1 gate: refuse to render when the persisted `cash_settlement` lacks a
  *     trustworthy headline (returns null → placeholder); a degenerate-but-valid
  *     composite renders (strict overlay shows null scalars as "—").
@@ -231,7 +233,9 @@ export async function readCompositeFactsheet(
   if (sparseErr) {
     // F3: a composite depends ENTIRELY on this sparse read — a real DB failure
     // hides the whole published factsheet behind the placeholder. Log at ERROR
-    // (→ Sentry). Fail-SAFE: below, an empty series returns null → placeholder,
+    // (console only; the resolve stage in `fetch-and-build-payload.ts` captures
+    // the composite refusal this becomes, 167.2.1-REVIEW-SFH H-1). Fail-SAFE:
+    // below, an empty series returns null → placeholder,
     // never the api arm / flat-zero line.
     console.error("[factsheet] readCompositeFactsheet — composite csv_daily_returns read failed", {
       strategyId,

@@ -89,6 +89,27 @@ function notBuildable(reason: NotBuildableReason): { ok: false; reason: NotBuild
 }
 
 /**
+ * 167.2.1-REVIEW-SFH H-1 — every `composite_unbuildable` answer is CAPTURED,
+ * at level warning, with tags only. D-07 folds a failed `csv_daily_returns`
+ * read into this reason (`readCompositeFactsheet` turns the error into an
+ * empty series and only console-logs it, which never reaches Sentry here), and
+ * the copy then sends the owner to support. The event is not proof of an
+ * outage; it is what makes "contact support" answerable. `gate` names which
+ * check refused: the helper (a missing or untrusted headline, `headline`), an
+ * empty series (`empty_series`) or a short one (`short_series`).
+ */
+function compositeUnbuildable(
+  caller: ResolveCaller,
+  gate: "headline" | "empty_series" | "short_series",
+): { ok: false; reason: NotBuildableReason } {
+  captureToSentry(new Error(`factsheet resolve: composite cannot build (${gate})`), {
+    level: "warning",
+    tags: { stage: "factsheet-resolve-composite", caller, gate },
+  });
+  return notBuildable("composite_unbuildable");
+}
+
+/**
  * Phase 167.2.1 (D-04) — THE RESOLVE STAGE, gates G0 to G4, shared by
  * `fetchAndBuildPayload` and `probeFactsheetBuildable`. It holds EVERY null exit
  * of the builder: the admin read under the injected visibility predicate (G0),
@@ -222,7 +243,7 @@ async function resolveFactsheetInputs(
       metricsJsonByBasis: analytics?.metrics_json_by_basis,
       returnsDenominatorConfig: strategy.returns_denominator_config,
     });
-    if (!composite) return notBuildable("composite_unbuildable");
+    if (!composite) return compositeUnbuildable(caller, "headline");
     dailyReturns = composite.dailyReturns;
     compositeBuildOpts = composite.buildOpts;
   }
@@ -250,7 +271,7 @@ async function resolveFactsheetInputs(
       isArray: Array.isArray(dailyRaw),
       returnsSeriesType: typeof analytics?.returns_series,
     });
-    return notBuildable(isComposite ? "composite_unbuildable" : "too_few_points");
+    return isComposite ? compositeUnbuildable(caller, "empty_series") : notBuildable("too_few_points");
   }
 
   // G4 (Phase 167.2.1, D-04): the builder's own point-count predicate, asked
@@ -262,7 +283,7 @@ async function resolveFactsheetInputs(
       `[factsheet] resolve(${caller}) — return series has fewer than the minimum distinct dated observations; withholding the payload`,
       { id, caller, isComposite, rawCount: dailyReturns.length, minimum: MIN_FACTSHEET_SERIES_POINTS },
     );
-    return notBuildable(isComposite ? "composite_unbuildable" : "too_few_points");
+    return isComposite ? compositeUnbuildable(caller, "short_series") : notBuildable("too_few_points");
   }
 
   return {

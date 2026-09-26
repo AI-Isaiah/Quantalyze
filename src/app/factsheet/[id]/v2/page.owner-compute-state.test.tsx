@@ -993,6 +993,13 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
       expect(last.textContent).toBe(UNBUILDABLE_COMPOSITE);
       // 167.2.1-REVIEW WR-03: one resolve, so ONE composite csv read, not two.
       expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
+      // 167.2.1-REVIEW-SFH H-1: the refusal the note sends to support is
+      // captured, once, at warning, with tags only.
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
+        level: "warning",
+        tags: { stage: "factsheet-resolve-composite", caller: "build", gate: "headline" },
+      });
       expect(STATE.observed.adminTables.filter((t) => t === "strategies")).toHaveLength(1);
       expect(STATE.observed.adminTables.filter((t) => t === "csv_daily_returns")).toHaveLength(1);
     } finally {

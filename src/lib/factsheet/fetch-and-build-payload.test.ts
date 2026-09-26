@@ -28,6 +28,7 @@ type Row = Record<string, unknown>;
 const fake = vi.hoisted(() => ({
   strategyResult: { data: null as unknown, error: null as unknown },
   csvRows: [] as { date: string; daily_return: number }[],
+  csvError: null as unknown,
   tablesSeen: [] as string[],
   orFilters: [] as string[],
 }));
@@ -52,7 +53,7 @@ vi.mock("@/lib/supabase/admin", () => {
     if (table === "csv_daily_returns") {
       // The composite read awaits the builder itself after `.limit(...)`.
       b.then = (resolve: (v: unknown) => unknown) =>
-        resolve({ data: fake.csvRows, error: null });
+        resolve(fake.csvError ? { data: null, error: fake.csvError } : { data: fake.csvRows, error: null });
     }
     return b;
   }
@@ -146,6 +147,7 @@ function seed(
 beforeEach(() => {
   fake.strategyResult = { data: null, error: null };
   fake.csvRows = [];
+  fake.csvError = null;
   fake.tablesSeen = [];
   fake.orFilters = [];
   vi.mocked(captureToSentry).mockClear();
@@ -348,6 +350,48 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
     seed(null);
     vi.mocked(captureToSentry).mockClear();
     await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+  });
+
+  it("SFH H-1 COMPOSITE CAPTURE: every composite refusal is captured once at warning, naming its gate; a short single-key series is not", async () => {
+    const expectCapture = (caller: string, gate: string) => {
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({
+        level: "warning",
+        tags: { stage: "factsheet-resolve-composite", caller, gate },
+      });
+    };
+    const cases: Array<[string, string]> = [
+      ["composite, metrics_json_by_basis null", "headline"],
+      ["composite, valid headline, empty csv read", "empty_series"],
+      ["composite, valid headline, one csv row", "short_series"],
+    ];
+    for (const [name, gate] of cases) {
+      const f = PARITY.find((x) => x.name === name)!;
+      seed(f.row, f.csv ?? []);
+      vi.mocked(captureToSentry).mockClear();
+      await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
+      expectCapture("probe", gate);
+      seed(f.row, f.csv ?? []);
+      vi.mocked(captureToSentry).mockClear();
+      await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+      expectCapture("build", gate);
+    }
+    // The case the finding is about: a csv read OUTAGE folds into an empty
+    // series, and support now has an event to look up.
+    seed(composite({ metrics_json_by_basis: { cash_settlement: FULL_CASH } }));
+    fake.csvError = { message: "synthetic csv outage", code: "57014" };
+    vi.mocked(captureToSentry).mockClear();
+    expect(await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility)).toEqual({
+      buildable: false,
+      reason: "composite_unbuildable",
+    });
+    expectCapture("probe", "empty_series");
+    // A single-key series that is genuinely short is a data fact: no event.
+    seed(single({ daily_returns: [{ date: "2024-01-02", value: 0.01 }] }));
+    fake.csvError = null;
+    vi.mocked(captureToSentry).mockClear();
+    await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
     expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
   });
 
