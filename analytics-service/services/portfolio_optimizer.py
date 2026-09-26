@@ -59,24 +59,32 @@ def find_improvement_candidates(
         new_sharpe = _compute_sharpe(new_port)
         new_avg_corr = _avg_corr(aligned)
         new_max_dd = _max_drawdown(new_port)
-        # M-0701: exclude a degenerate candidate whose OWN aligned returns have
-        # zero variance (e.g. a paused/all-zero strategy). Its correlation and
-        # diversification signal are undefined (NaN), so it cannot be
+        # M-0701: exclude a degenerate candidate whose OWN aligned returns do
+        # not vary (e.g. a paused/all-zero strategy, or a constant yield). Its
+        # correlation and diversification signal are undefined, so it cannot be
         # meaningfully scored — dropping it is correct rather than ranking it on
         # a partial 0-collapsed score that looks like a real "no improvement".
+        # Phase 166.1 (S2): "does not vary" is Phase 166's residue floor, not
+        # ``== 0.0``: a constant yield derived from a compounding NAV has a
+        # ~1e-16 std and was kept, then scored on a residue correlation.
         #
         # This keys on the CANDIDATE column only (candidate-specific). It does
         # NOT gate on new_avg_corr: _avg_corr is computed over the WHOLE blended
         # frame, so a single flat EXISTING strategy would poison it to None for
         # every candidate and silently drop ALL suggestions. A None new_avg_corr
         # from a flat existing strategy instead leaves the correlation term at 0
-        # below, uniform across candidates. (new_sharpe/new_max_dd None — an
-        # exactly-zero-variance or empty blend — is also defensively excluded,
-        # though float noise makes new_sharpe None practically unreachable.)
-        if float(aligned[cid].std()) == 0.0 or new_sharpe is None or new_max_dd is None:
+        # below, uniform across candidates. (new_sharpe/new_max_dd None — a
+        # blend whose dispersion is residue, or an empty blend — is also
+        # excluded; since S1 a residue blend gives a None Sharpe rather than a
+        # ~1e13 one.)
+        if (
+            dispersion_is_residue(float(aligned[cid].std()), float(aligned[cid].mean()))
+            or new_sharpe is None
+            or new_max_dd is None
+        ):
             logger.debug(
                 "find_improvement_candidates: dropping degenerate candidate %s "
-                "(zero-variance returns or unscoreable blend)", cid,
+                "(residue-dispersion returns or unscoreable blend)", cid,
             )
             continue
         # Resliced incumbent baseline over THIS candidate's aligned window (the

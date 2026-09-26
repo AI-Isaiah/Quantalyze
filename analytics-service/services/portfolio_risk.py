@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from typing import Any, Optional
+from services.dispersion import dispersion_is_residue
 from services.metrics import _safe_float
 
 # Rolling correlation is O(n²) in strategy count; skip beyond this threshold.
@@ -63,8 +64,12 @@ def compute_avg_pairwise_correlation(corr_matrix: dict[str, Any]) -> Optional[fl
 def compute_risk_decomposition(weights: list[float], covariance_matrix: np.ndarray[Any, Any]) -> list[dict[str, Any]]:
     w = np.array(weights)
     port_var = w @ covariance_matrix @ w
-    port_vol = np.sqrt(port_var) if port_var > 0 else 0
-    if port_vol == 0:
+    port_vol = float(np.sqrt(port_var)) if port_var > 0 else 0.0
+    # Phase 166.1 (S7, D-05): a residue portfolio vol (two constant yields give
+    # a ~1e-16 vol, never exactly 0) is no risk, so it takes the zero branch
+    # instead of a fabricated 48.6% / 51.4% split. There is no mean here, so the
+    # floor is the absolute one, residue_floor(0.0).
+    if dispersion_is_residue(port_vol, 0.0):
         # H-0803: marginal/component attribution is genuinely undefined when the
         # portfolio carries no risk (all-zero weights, or a non-PSD cov whose
         # port_var<0 collapsed to 0) — you cannot apportion a share of a zero

@@ -31,6 +31,8 @@ import pandas as pd
 import pandera as pa
 from pandera.errors import SchemaErrors
 
+from services.dispersion import dispersion_is_residue
+
 logger = logging.getLogger("quantalyze.analytics")
 
 SHARPE_SENTINEL_DAILY = 10.0
@@ -226,6 +228,23 @@ def _check_sharpe_sentinel(df: pd.DataFrame, fmt: str) -> list[dict[str, Any]]:
     if fmt == "daily_returns" and "daily_return" in df.columns and len(df) >= 2:
         r = df["daily_return"].dropna()
         if len(r) >= 2 and r.std(ddof=1) > 0:
+            # Phase 166.1 (S3, D-04): a std that is only float residue (a repeated
+            # float, or a constant yield taken from a compounding NAV) has no
+            # Sharpe to print; dividing by it printed a fabricated ~1e15. Keep the
+            # VERDICT (a constant return above the risk-free rate is an unbounded
+            # Sharpe, so it is still rejected) and drop the number. An exactly
+            # zero std never enters this block, as before, so no verdict moves.
+            if dispersion_is_residue(float(r.std(ddof=1)), float(r.mean())):
+                if r.mean() - DEFAULT_RISK_FREE_DAILY > 0:
+                    errors.append({
+                        "rule": "daily_sharpe_sentinel",
+                        "row": 0,
+                        "message": (
+                            "Daily returns do not vary, so the Sharpe is unbounded; "
+                            "a constant positive return is not a realistic track record"
+                        ),
+                    })
+                return errors
             sharpe = (r.mean() - DEFAULT_RISK_FREE_DAILY) / r.std(ddof=1)
             if sharpe > SHARPE_SENTINEL_DAILY:
                 errors.append({
