@@ -249,11 +249,11 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
   // STORED RESULTS the probe read, not from "the last computation" (the owner
   // page's job-derived state line owns that), in the active voice.
   const UNBUILDABLE_SHORT =
-    "Right now, a private link to this strategy shows that its factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
+    "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
   const UNBUILDABLE_COMPOSITE =
     "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
   const PUBLIC_UNBUILDABLE_SHORT =
-    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
   const PUBLIC_UNBUILDABLE_COMPOSITE =
     "Right now, this strategy's factsheet link shows that the factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
   const ARMS = ["in_progress", "not_available", "unreadable"] as const;
@@ -305,7 +305,7 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
   // already succeeded. The card is unknown; the placeholder and its reason
   // are not.
   const UNBUILDABLE_UNREADABLE_SHORT =
-    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
   const UNBUILDABLE_UNREADABLE_COMPOSITE =
     "Right now, a private link to this strategy shows a placeholder page instead of the numbers. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
 
@@ -370,6 +370,22 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
         expect(note.toLowerCase()).not.toContain("computation");
         expect(note).toContain("stored results");
       }
+    }
+  });
+
+  it("N-5 SCOPE: every SHORT line claims fewer than 2 days only of the results the factsheet is built from, never of everything stored", () => {
+    // 167.2.1-REVIEW-SFH-R2 N-5: `too_few_points` counts the ONE column the
+    // builder reads (`countedSeriesColumn`). A row can hold one valid
+    // `daily_returns` entry and a 500-point `returns_series`; "its stored
+    // results hold fewer than 2 days" is false about that row. The sentence
+    // must bind the count to what the factsheet is built from.
+    for (const note of [
+      recipientShareNoteFor("mint-token", "not_available", "too_short"),
+      recipientShareNoteFor("public-url", "not_available", "too_short"),
+      recipientShareNoteFor("mint-token", "unreadable", "too_short"),
+    ]) {
+      expect(note).toContain("stored results we build its factsheet from hold fewer than");
+      expect(note).not.toContain("Its stored results hold");
     }
   });
 

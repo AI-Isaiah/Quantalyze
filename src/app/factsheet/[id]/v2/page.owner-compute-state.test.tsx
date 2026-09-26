@@ -865,7 +865,7 @@ const PUBLIC_SENTENCE =
 // Phase 167.2.1 CONTEXT D-02, typed as literals. Reworded by 167.2.1-REVIEW
 // CR-01 and IN-02 (2026-09-26): the reason is stated from the stored results.
 const UNBUILDABLE_SHORT =
-  "Right now, a private link to this strategy shows that its factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
+  "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
 const UNBUILDABLE_COMPOSITE =
   "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
 // 167.2.1-REVIEW-SFH H-2, typed as a literal: the owner build could not read

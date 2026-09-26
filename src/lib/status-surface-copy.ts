@@ -437,15 +437,20 @@ export function unbuildableNoteKindOf(
 // problem" while the analytics row still reads complete. A sentence about the
 // stored results is true beside every one of those lines.
 // 167.2.1-REVIEW IN-02: active voice, and the address is SUPPORT_EMAIL.
+// 167.2.1-REVIEW-SFH-R2 N-5: the SHORT line is about the stored results the
+// builder READS ("we build its factsheet from"), not all of them. A short but
+// valid `daily_returns` beside a long `returns_series` is too short: the
+// builder reads `daily_returns` and never falls back, so "its stored results
+// hold fewer than 2 days" was false about that row's other column.
 const MINT_UNBUILDABLE_NOTES = {
   too_short:
-    "Right now, a private link to this strategy shows that its factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.",
+    "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.",
   cannot_build: `Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact ${SUPPORT_EMAIL} to have them checked.`,
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
 const PUBLIC_UNBUILDABLE_NOTES = {
   too_short:
-    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.",
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.",
   cannot_build: `Right now, this strategy's factsheet link shows that the factsheet is not available. We cannot build a factsheet from its stored results. Contact ${SUPPORT_EMAIL} to have them checked.`,
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
@@ -457,7 +462,7 @@ const PUBLIC_UNBUILDABLE_NOTES = {
 // which is false for a row whose computation already succeeded.
 const MINT_UNBUILDABLE_UNREADABLE_NOTES = {
   too_short:
-    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.",
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.",
   cannot_build: `Right now, a private link to this strategy shows a placeholder page instead of the numbers. We cannot build a factsheet from its stored results. Contact ${SUPPORT_EMAIL} to have them checked.`,
 } as const satisfies Record<UnbuildableNoteKind, string>;
 

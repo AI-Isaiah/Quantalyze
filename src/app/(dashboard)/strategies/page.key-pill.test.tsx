@@ -641,7 +641,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   // Reworded by 167.2.1-REVIEW CR-01 and IN-02 (2026-09-26): the reason is
   // stated from the stored results, in the active voice.
   const UNBUILDABLE_SHORT =
-    "Right now, a private link to this strategy shows that its factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
+    "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
 
   function noteOf(container: HTMLElement, strategyName: string): string | null {
     const card = [...container.querySelectorAll("a")]
@@ -702,7 +702,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   const UNBUILDABLE_COMPOSITE =
     "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
   const PUBLIC_UNBUILDABLE_SHORT =
-    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
   const onePoint = (id: string) => ({
     data: adminStrategy(id, { daily_returns: points(1) }),
     error: null,
@@ -717,7 +717,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   const PUBLIC_PROBE_UNREADABLE =
     "We could not check what this strategy's factsheet link shows right now. Reload this page to check again.";
   const UNBUILDABLE_UNREADABLE_SHORT =
-    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
 
   it("COMPOSITE-UNBUILDABLE: a computed composite with no persisted headline says its results cannot be built and names support", async () => {
     state.strategies = [row("c-pre86", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
