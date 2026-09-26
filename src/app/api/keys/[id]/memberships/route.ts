@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withAuth } from "@/lib/api/withAuth";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
+import {
+  userActionLimiter,
+  checkLimit,
+  rateLimitDenyJson,
+  isRateLimitMisconfigured,
+} from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { isUuid } from "@/lib/utils";
@@ -81,6 +86,14 @@ export const GET = withAuth(
 
     const rl = await checkLimit(userActionLimiter, `key-memberships:${user.id}`);
     if (!rl.success) {
+      // 167.2.1-REVIEW-SFH M-6: the card turns this deny into its "could not
+      // check" warning, and the card runs in the browser, where there is no
+      // Sentry. This line is the one server-side trace that a Delete confirm
+      // warned for this reason. No user id and no key id.
+      console.warn(
+        "[keys/memberships] membership read denied by the limiter; the Delete confirm warns it could not check",
+        { status: isRateLimitMisconfigured(rl) ? 503 : 429 },
+      );
       return rateLimitDenyJson(rl, { headers: NO_STORE_HEADERS });
     }
 

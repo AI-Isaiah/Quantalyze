@@ -922,8 +922,19 @@ export function ApiKeyManager({
    * Answers the memberships (a composite whose name could not be read is
    * listed with a null name, never dropped), or "unreadable": a non-2xx
    * answer, a body that is not JSON, a missing or non-array `memberships`, an
-   * element that is not an object, a rejected fetch or the bound (logged, and
-   * captured with tags only). Never throws.
+   * element that is not an object, a rejected fetch or the bound. Never throws.
+   *
+   * ⚠️ WHERE EACH FAILURE IS RECORDED (167.2.1-REVIEW-SFH M-6). This component
+   * is `"use client"` and Sentry is SERVER-ONLY in this repo (no client
+   * `Sentry.init`; see `src/instrumentation.ts`), so the `captureToSentry` call
+   * below is a browser no-op today. What IS recorded server-side: the route's
+   * own 500s (captured by `GET`, stage `ownership` / `memberships`, with the
+   * error code) and a limiter deny (a server `console.warn`). The bound, HTTP
+   * 401 and 404, a non-JSON body, a malformed `memberships` and a rejected
+   * fetch reach only this browser's console. The owner still sees the "could
+   * not check" warning for every one of them. The capture is kept so it starts
+   * reporting if a client init lands; that init must adopt `scrubSentryEvent`
+   * first, per `src/instrumentation.ts`.
    *
    * Lineage (167.2-REVIEW-SFH-R2 R2-L4 (b)): this used to read `strategy_keys`
    * in the browser through RLS, which FILTERS rather than errors, so a
@@ -987,7 +998,8 @@ export function ApiKeyManager({
       failure,
     );
     // SFH-R2 R2-L4 (a): captured like every other read on this card. Tags
-    // only: no key id and no strategy id.
+    // only: no key id and no strategy id. A browser no-op until a client
+    // Sentry init exists (167.2.1-REVIEW-SFH M-6, see the docstring above).
     captureToSentry(new Error("composite membership read before a delete failed"), {
       level: "warning",
       tags: { component: "ApiKeyManager", stage: "delete-membership-read" },

@@ -270,11 +270,26 @@ describe("GET /api/keys/[id]/memberships", () => {
 
   it("RATE-LIMITED: the limiter's deny answer, no-store, and no client read", async () => {
     STATE.rateLimitOk = false;
-    const res = await GET(request(KEY_ID));
-    expect(res.status).toBe(429);
-    expectNoStore(res);
-    expect(STATE.adminClientsCreated).toBe(0);
-    expect(STATE.reads.filter((r) => r.client === "admin")).toEqual([]);
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const res = await GET(request(KEY_ID));
+      expect(res.status).toBe(429);
+      expectNoStore(res);
+      expect(STATE.adminClientsCreated).toBe(0);
+      expect(STATE.reads.filter((r) => r.client === "admin")).toEqual([]);
+      // 167.2.1-REVIEW-SFH M-6: the card that receives this 429 runs in the
+      // browser, where Sentry is not initialised, so the server log is the only
+      // place the "could not check" cause is recorded. No user id, no key id.
+      const denyLines = consoleWarn.mock.calls.filter(([msg]) =>
+        String(msg).includes("membership read denied by the limiter"),
+      );
+      expect(denyLines).toEqual([[expect.any(String), { status: 429 }]]);
+      const serialized = JSON.stringify(consoleWarn.mock.calls);
+      expect(serialized).not.toContain(USER_ID);
+      expect(serialized).not.toContain(KEY_ID);
+    } finally {
+      consoleWarn.mockRestore();
+    }
   });
 
   it("EMBED-ARRAY: a one-element array embed is unwrapped, and a non-string name is null, never dropped", async () => {
