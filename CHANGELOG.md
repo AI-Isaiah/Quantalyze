@@ -1,5 +1,202 @@
 # Changelog
 
+## [0.94.0.0] - 2026-09-26 — MT5VALIDATEWEDGE: a wedged MT5 terminal heals without a human, and the wizard stops promising a retry that cannot work
+
+⭐ **What changed for whoever reads this next.** Phase 164.6.5 answers a production incident from
+2026-09-21. One shared MetaTrader terminal serves every client's MT5 key check. A key check
+switched it to a client account and it stopped answering (`-10005`). Every check after that failed
+for 1h39m, until a human restarted the process, which then logged back in by itself in 2.0 s.
+Four things change. (1) The analytics service can now end and relaunch that terminal process
+itself, over the bridge it already holds, with no credential. (2) The periodic session heal uses
+that verb when it reads `-10005`, instead of reporting `not_healed` forever. (3) A key check that
+hits a dead terminal tells the user it is ours and not now, instead of "try again in a moment". (4)
+Each wizard request carries its own correlation id, so two failures are no longer
+indistinguishable in support.
+
+⚠️ **This is a minor bump because behaviour a user and an operator can see changes, on purpose.**
+There is a new wizard error code and copy (`KEY_MT5_TERMINAL_UNRESPONSIVE`). An initial MT5
+validate that hits an IPC fault now answers a non-retryable 500 instead of a retryable 424. A
+production loop can now end the terminal process every client depends on. And the wizard's
+`X-Correlation-Id` changes from one value per page load to one per request. Precedent: JOBRPCTRUTH
+(0.93.0.0), GATEHYGIENE (0.90.0.0) and KEYCARDSYNC (0.88.0.0) each took a minor bump for a visible
+behaviour change.
+
+⛔ **Merging this deploys the self-healing loop to production.** Railway redeploys the analytics
+service once `main`'s CI is green. From then on, the session monitor can end `terminal64.exe` on
+the shared gateway. It is capped at two recycles per rolling hour, and the second is an ERROR
+naming the repeated wedge. This release carries no migration.
+
+⛔ **THIS PHASE DID NOT FIX THE EVICTION.** A key check that SUCCEEDS still switches the shared
+terminal away from whoever was on it. That is Phase 164.6.6. "MT5 is back" is not "the finding is
+closed": the outage was the symptom, the shared mutable terminal is the defect.
+
+### Added
+
+- **A credential-free terminal-process recycle verb** (plan 02, `b0a537b98`).
+  `Mt5Client.recycle_terminal_process` sends ONE committed, non-interpolated remote source,
+  `_REMOTE_TERMINAL_RECYCLE_SRC`, over the existing rpyc channel. That source walks the process
+  list and ends every `terminal64.exe`. The verb then relaunches the terminal through the
+  detector's own bare `initialize()`, which the 2026-09-25 founder spike proved logs back in
+  unattended. It takes no parameter and sits behind `_assert_live` and `_guarded_read`. The D-05
+  decision, and the fact that it makes the Phase-134 unauthenticated channel (`T-134-03`) a
+  load-bearing recovery path, are recorded beside the gateway constraint in
+  `deploy/mt5-gateway/railway-gateway.md` (`be67187cd`).
+- **The heal acts on `ipc_fault`** (plan 05, `7037055cf`, `87123dbfc`). When the credential-free
+  detector reads `-10005`, `_escalate_ipc_fault` logs the wedge evidence first, then recycles.
+  It recycles once per run of consecutive readings, inside the module's one lease and budget, and
+  nothing it raises escapes the heal. The `not_healed:ipc_fault:` verdict string is
+  byte-identical. The outcome is a new `escalation_kind` field drawn from a closed set of
+  `ipc_fault_recycle*` kinds in `mt5_session_episodes`.
+- **`KEY_MT5_TERMINAL_UNRESPONSIVE` / `MT5_TERMINAL_UNRESPONSIVE`** (plan 04, `3222bf83c`,
+  `81af07dce`). `_validate_mt5_key_probe` asks `is_ipc_transport_fault` before the generic
+  transient tail. It answers 500, `retryable=False`, dependency `mt5-gateway`, and logs at ERROR.
+  The wizard copy says the terminal is ours, that the key, password and broker server are not at
+  fault, that nothing was stored, and that a later attempt can succeed. It offers only
+  `request_call`. ⛔ `KEY_NETWORK_TIMEOUT` is neither deleted nor widened: it stays correct for a
+  genuine transport failure.
+- **A per-request correlation id** (plan 07, D-14, `de4c0720d`, `d21696fe4`, `34a1750be`).
+  `wizardFetch` mints `wizard:<uuid>` for every call on `X-Correlation-Id`, respects a caller's
+  value, and hands it back through `onCorrelationId`. All six wizard envelope surfaces render the
+  failed attempt's own id. The per-page-load id is kept, on its own `X-Wizard-Page-Load-Id`
+  header, for the telemetry that joins on it.
+- **A `-10005` differential diagnosis in the go-live runbook** (plan 01, `fec4397e4`,
+  `ee224d576`). `docs/runbooks/mt5-go-live.md` Step 2b names two causes: A, the modal login dialog
+  (2026-09-01), and B, the account-switch wedge (2026-09-21). It gives a numbered evidence
+  procedure and a remedy order that is safe under both: process restart first, then VNC. Each
+  candidate mechanism for Cause B has a dated verdict. `MT5-WEDGE-OBS-01` is refined and
+  cross-linked, not reopened.
+
+### Changed
+
+- **The prober's `-10005` remedy names both causes and asserts neither** (plan 03, D-09,
+  `3cb4f0624`). The classifier was not split. Both causes produce the same `initialize()` code,
+  the arm is pinned import-free, and a second kind would need a fabricated fixture. The three
+  reasons are recorded above `REMEDIES` in `scripts/prod-prober/arms/mt5.mjs`. Review round 1 made
+  it cite every measured recycle time, 2.0 s, 86 s and 4m45s, and say the recycle is automatic
+  (IN-04, `93fab8e3f`).
+- **The algo-trading landmine is pinned, not ticked** (plan 06, D-15, `7a7a310af`, `c6fb7d23a`).
+  Five places, one of them user-facing copy, said the gateway re-clears "Allow algorithmic
+  trading" on every account change. It does so only while "Disable algorithmic trading when the
+  account has been changed" is ticked, and the founder read it UNCHECKED on 2026-09-24. The
+  sentences are corrected with lineage in `mt5_validation`, `exchange.py`, `job_worker` and the
+  prober arm. The option now has a name, `ACCOUNT_CHANGE_ALGO_DISABLE_OPTION`. A shared terminal
+  that has lost trade permission logs at ERROR and names both the option and the fact that every
+  validate is an account change. Nothing writes a terminal option. The runbook and TODOS
+  corrections are in `40e7606fd`.
+- **Merge with Phase 167 CREDTRUST** (`7fb575d08`, D-16/D-17). 167's sign-in refusal check runs
+  before this phase's IPC check. So a `-10005` at the login stage still answers `SIGN_IN_FAILED`,
+  and only the other IPC faults move to `MT5_TERMINAL_UNRESPONSIVE`. The new code joins
+  `DASHBOARD_DIALOG_ROUTE_CODES` (recorded in `6406087ba`).
+
+### Fixed
+
+Review round 1 (`45aa1d5d8` code review, `b571e727b` silent-failure review):
+
+- **A recycle whose relaunch answered re-arms the escalation** (CR-01, `6a0823d6f`). Round 2
+  narrowed the re-arm to the terminal being SEEN answering (WR-08, SFH-05, `85cebe5d5`), and the
+  attempt is claimed only when the recycle is about to cross (WR-01, `49d26446b`).
+- **The rotate-secret dialog knows the wedged-terminal code** (CR-02, `fc77d3e8a`).
+- **A wedged shared terminal reaches an operator.** The validate arm logs at ERROR instead of
+  WARNING (WR-06, SFH-08, `f62a5ebec`).
+- **The copy says not now, not never** (WR-05, `61d4350c0`). The detail used to say "This needs
+  an operator, not a retry", which asserted permanence.
+- **A server reader for the page-load id, and a true docblock** (WR-07, `91640498c`). An empty
+  caller id mints like an absent one (IN-08, `0b591e9a1`). The finalize dedupe comment names the
+  per-request header (IN-02, `b7adc2cd4`).
+- **A recycle that did not end every terminal is never logged "recycled"** (WR-03, SFH-01,
+  `8393aa73b`). The remote source returns `GetLastError` for each refused open or terminate
+  (SFH-09, `dad768a48`). The terminate counts are logged before the relaunch, so an abandonment
+  cannot lose them (SFH-06, `0663229a4`).
+- **The budget counts every rpyc crossing** (WR-04, `3c0139e0e`). The path was really 10 crossings
+  against the 300 s ceiling, not 8. The optional reads are now gated on the time left.
+- **A working recycle is watched, not declared failed** (WR-02, SFH-02, `1a3541814`). The relaunch
+  is polled for 90 s, longer than the measured 86 s cold relaunch.
+- **A persisting fault re-raises at ERROR hourly; the debounce is on the action only** (SFH-03,
+  `8a7c35149`). Before this, a four-day wedge was one ERROR at hour 0 and then nothing.
+- **After an authorized relaunch the line says which account and whether it is connected**
+  (SFH-07, `23f44cc53`).
+- **The terminal build is read bridge-side before the terminate** (SFH-04, `35f80c0a0`). The line
+  also says what the capture cannot see.
+- **The monitor's cadence note cites the budget by symbol** (SFH-10, IN-01, `72bcea3d7`). The
+  restated figure had drifted twice.
+
+Review round 2 (`e42d1f551` silent-failure review, `7cc7e4eb9` code review):
+
+- **The recycle is capped at 2 per rolling hour, with an ERROR on recurrence** (R2 CR-01,
+  `6beb13ff6`, D-18). Round 1's re-arm could recycle the one shared terminal every tick, unbounded
+  and at INFO.
+- **"Undo the claim" and "the terminal answered" are two functions** (R2 WR-02, R2-SFH-03,
+  `9abd42fa7`). A fence refusal no longer ends the alarm's run, and a recovery clears both alarm
+  stamps.
+- **The remote recycle keeps its counts** (R2-SFH-04, WR-06, R2-SFH-06, R2-SFH-07, IN-01,
+  `dd2ceb0e3`). Each diagnostic field parses on its own. Each process is ended under its own catch.
+  The exit waits fit a total budget.
+- **Every fault code except `-6` and the 0 sentinel alarms on persistence** (R2-SFH-02,
+  `68ceee3cc`). The alarm set was an allowlist that left `-10001`, `-10002` and `-1` at WARNING
+  forever.
+- **A budget-skipped recycle reaches the alarm** (R2 WR-01, R2-SFH-01, SFH-09, `3d02f846e`). It
+  also gets its own kind, `ipc_fault_recycle_skipped_budget`.
+- **An answering info read is charged per field** (R2 WR-03, `7662d7d8b`). Then the root cause:
+  **the heal's session is read bridge-side in ONE crossing** through the new
+  `Mt5Client.session_snapshot` and the committed `_REMOTE_SESSION_SNAPSHOT_SRC` (`c23221cde`).
+  Without it, the evidence capture and the post-relaunch check fit no budget, and a working recycle
+  could only ever read `unverified`.
+- **A relaunch not shown to be the house session gets its own kind** (R2 WR-04, SFH-08, IN-02,
+  `a53275f0e`). `ipc_fault_recycled_degraded` is a measured mismatch;
+  `ipc_fault_recycled_unverified` is a check that could not complete.
+- **A failed recycle takes one gated reading, which relaunches a terminal the failed call may have
+  ended** (R2-SFH-04, `9b4041dc8`).
+- **The rotate-secret route pages our-defect key verdicts like its two sibling routes**
+  (R2-SFH-10, `3a8212c2f`), on the shared `OUR_DEFECT_KEY_ERROR_CODES` set.
+- **`onRequestError` takes Next's header type and tags a malformed page-load id as `<malformed>`**
+  (IN-03, R2-SFH-11, `9b1ea9825`).
+
+### Tests
+
+- **Plan gates.** The IPC-transport arm is gated on both halves, and the honest
+  `KEY_NETWORK_TIMEOUT` arm is proven untouched (`38c1ad007`). The mt5 arm's declared environment
+  is tied to the prober workflow's supplied environment by set equality (D-10, `93a2cd782`). The
+  D-15 landmine check has six gates that keep it loud, honest and write-free (`3b313a94e`). The
+  escalation is gated at five readings and one recycle (`a50569376`). RED-first tests preceded
+  the per-request id (`16fb1c655`) and the per-surface id (`2c347f7f4`).
+- **Merging `main` (0.93.0.0) into the branch** (`ef9d43681`, and earlier `7fb575d08`) moved the
+  wizard error table to 97 entries: `KEY_MT5_TERMINAL_UNRESPONSIVE`, `KEY_SIGN_IN_FAILED` and
+  `SUBMITTED_ANALYTICS_NOT_QUEUED` together. Both `EXPECTED_TABLE_SIZE` pins were read off the
+  guard's own failure message. `SyncPreviewStep` keeps main's `probeExistingChain` guard AND this
+  phase's correlation-id capture.
+
+### Notes
+
+- **Criterion outcomes** (the ROADMAP holds the full table): C3, C5, C6 and C7 MET. C1 (root
+  cause) OPEN by design (D-03): `MT5-SWITCH-WEDGE-CAUSE-01`, owned by Phase 164.6.6 (`2d176b924`).
+  C2 OPEN on its live half. C4 OPEN on its calibration half.
+- ⚠️ **Known limits, recorded rather than fixed:**
+  - **C4 / D-11.** The prober's `-10005` kind has never been calibrated against a real wedge.
+    Booked as `MT5-PROBER-WEDGE-CALIBRATION-01`, owned by Phase 164.6.6. Its trigger is the next
+    live `-10005`, captured before the heal recycles it. D-10, the measuring half, IS answered:
+    scheduled prober run 36134914962 (head `01dcf1cc`) is the first to read the terminal, and every
+    scheduled run since reads it.
+  - **`.planning/WINDOWS.md` entry 68.** Two remote paths have never run live over the bridge:
+    the recycle's TerminateProcess half and the first `Mt5Client.session_snapshot` read. The first
+    live recycle closes it, and only if both are read.
+  - **D-16 and D-17 need founder confirmation.** Under D-16, the FIRST, wedge-causing validate
+    still answers `SIGN_IN_FAILED`. Only retries against an already-wedged terminal get the new
+    code.
+  - **No Sentry alert rule exists yet** for the hourly ERROR re-raise and the capped-recycle ERROR
+    (R2-SFH-05). The runbook says so (`754a02152`, `4e22f73f2`). Also booked: a copy read-through
+    of the new code on the connect step and the rotate dialog.
+  - Inherited criteria 7 (Phase 161's live `undetermined` verdict) and 8 (Phase 164.5.3's live
+    credential update) stay open for the founder. `[MT5-VERDICT-SINK-01]` stays deferred under
+    its own owner.
+- **Process.** Context, research, patterns and plans: `337f2827f`, `42b296b8f`, `8288ad458`,
+  `3925a55e5`, `65b7b986f`. Plan SUMMARYs and wave notes: `47bb479d5`, `64c318cdd`, `d671e1eb9`,
+  `22e2fbb00`, `031891432`, `2e2033dad`, `20422b71f`, `29e010f1d`, `71a8b187f`. Worktree merges:
+  `6c515b5b0`, `a91675aa8`, `e50da1dd3`, `6e4a9aab3`. Review fix reports: `7400392f8`,
+  `0ecf94557`, `716b994c2`, `ebfe94dab`, `35e63761e`, `4c0c10feb`. Verification (`gaps_found`,
+  5/7) is `38647f8b5`. The security audit is `96ba93be7`; its 5 open threats were this release's
+  own. The per-criterion ledger close is `196dea9a1`. The `tdd-red-evidence` tool misreads vitest
+  output, which is logged as WINDOWS entry 67 (`2fa71d3e2`).
+
 ## [0.93.0.0] - 2026-09-25 — JOBRPCTRUTH: the compute-job RPC surface does what its own migrations say
 
 ⭐ **What changed for whoever reads this next.** Phase 164.9.1 fixes three places where a
