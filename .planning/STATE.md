@@ -1292,6 +1292,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.9.2 REFDATAUPDATES inserted after Phase 164.9 on 2026-09-24 (via `/gsd-phase --insert`, founder-approved by AskUserQuestion): the shared-TEST restore replay also replays migration UPDATEs on public tables it just filled. Found by preflight run `36003106273`, which aborted on the 164.9 plan-07 wrong-state check. It owns `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` and unblocks 164.9 criterion 8.
 - Phase 164.4.2.1 DRIFTOFFMUTEX inserted after Phase 164.4.2 on 2026-09-24 (hand-inserted; founder rule "book the phase if it holds", AskUserQuestion; runs 2–5 confirmed the slowdown)
 - Phase 167.1.2 ACCOUNTTRUTH inserted after Phase 167.1.1 on 2026-09-24 (hand-inserted; founder UAT on the allocator book; founder decisions "Refuse a second key" and "Hide it until correct", AskUserQuestion)
+- Phases 169.1 ZOOMKPIS, 169.2 BENCHFRESH, 169.3 SMALLFIXES and 169.4 ALLOCTRUTH inserted after Phase 169 on 2026-09-26 (via `/gsd-phase --insert`; founder decision 2026-09-26: one logical topic per phase, one reviewable PR each). Phase 169 PAGETRUTH narrowed to 169 FACTSHEETTRUTH (`/gsd-phase --edit`). The already-checked plans were moved by hand, not re-planned (169 D-37). Execution order is 169.2 and 169.3, then 169, then 169.4, then 169.1, NOT the numeric order: 169 needs 169.2 (and 167.1.2 PR C and 167.2.1), 169.4 needs 169 and 169.2, and 169.1 needs 169 and 169.4.
+- Phase 169 edited: edited fields: title, goal, depends_on, success_criteria, plans (narrowed to FACTSHEETTRUTH at the 2026-09-26 split, 169 D-37)
 
 ### Decisions
 

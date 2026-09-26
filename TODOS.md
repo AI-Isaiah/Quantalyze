@@ -1347,6 +1347,41 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[169-DEAD-ADMIN-JOBS-RPC]` Drop the dead `get_admin_compute_jobs` database function
+      (booked 2026-09-25, Phase 169 D-01).**
+      It raises "column reference `id` is ambiguous" on every call (its `RETURNS TABLE` declares an
+      OUT column named `id`, which collides with the admin gate's `WHERE id = auth.uid()`), and
+      under the service-role client `auth.uid()` is NULL, so even a fixed body would return nothing.
+      Phase 169 plan 01 stops calling it: `/api/admin/compute-jobs` reads the `compute_jobs_admin`
+      view after its admin gate. After that it has no caller. Evidence: `169-RESEARCH.md` root
+      cause A (a local reproduction of the error on a throwaway cluster).
+      **Why not dropped in 169:** a DROP is a migration, and merging `supabase/migrations/**`
+      auto-applies to TEST then PROD with no human gate, needs the 3-reviewer pass, and moves
+      `database.types.ts` and the census pins. None of that was needed to fix the page.
+      **Owner:** the next migration-carrying phase. **Trigger:** that phase's planning.
+      **Closed when:** a migration drops the function, `database.types.ts` loses it, and
+      `grep -rn get_admin_compute_jobs src` finds only lineage comments.
+
+- [ ] **`[169-SCENARIO-WINDOW-ANNUALIZATION]` A selected range on the `/allocations` Scenario tab
+      shows the withheld form, because the Scenario payload carries no `periodsPerYear`
+      (booked 2026-09-26, Phase 169 D-29).**
+      Phase 169 plan 14 makes the KPI strip and the rail follow the zoom window on every
+      `FactsheetBody` mount (founder decision D-27). `buildScenarioFactsheetPayload`
+      (`scenario-factsheet-payload.ts`) is the one builder that emits no `periodsPerYear`, so the
+      window arm refuses to annualize there and shows every window figure as the em-dash with one
+      sentence. That is fail-closed and correct, but the Scenario tab is the one mount where
+      zooming does not show figures.
+      **Why not fixed in 169:** giving the payload a `periodsPerYear` also switches on the leverage
+      control there (`leverageEligibleFor` reads the same field), a full-history behaviour change
+      on a surface whose full-history values Phase 167.1.2 owns (169 D-25 (ii)).
+      **Owner:** Phase 167.1.2 ACCOUNTTRUTH. **Trigger:** 169 PR 2 merged (the window arm exists),
+      or 167.1.2's next edit of `scenario-factsheet-payload.ts`, whichever is first.
+      **Closed when (gate):** the Scenario payload carries the book's `periodsPerYear` from the same
+      asset-class rule `buildFactsheetPayload` uses; a test renders a Scenario payload through
+      `FactsheetBody` under a sub-range and asserts figures (not the em-dash) that equal
+      `compute()` of the slice; and 167.1.2 records whether the leverage control should appear on
+      the Scenario tab.
+
 - [ ] **`[STRATTABLE-DESC-01]` The strategy list shows only the NAME, so two strategies
       with the same name are indistinguishable — the `description` that disambiguates them is
       already fetched and simply not rendered (founder-reported 2026-09-11 from the /browse
