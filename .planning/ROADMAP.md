@@ -131,6 +131,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 165.2: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — not yet verified
 - [ ] **Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given** — verification: human_needed
 - [ ] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — not yet verified
+- [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [ ] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed
 - [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
@@ -3372,6 +3373,25 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 166.1 to break down)
 
+### Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine (INSERTED)
+
+**Goal:** Every "drawdown improvement" number means shallower-is-positive, and ranking rewards a shallower drawdown, never a deeper one.
+**Depends on:** Phase 166.1
+**Plans:** 0 plans
+**Status:** booked 2026-09-26 under the new-phase freeze — NOT started.
+
+**Origin:** the 166.1 round-2 code review (outside its diff; the same code is at the phase base, so it predates 166.1). Measured there: a book whose max drawdown improved from -0.464 to -0.236 shows `dd_delta -0.228` under a hint reading "Positive = shallower", and a constant-yield book whose drawdown got worse shows `dd_improvement +0.0087`, rendered as "improve drawdown by 0.87%". The match score therefore rewards a deeper drawdown. The bridge already carries the correct sign (H-1065).
+
+**Sites:** `simulate_add_candidate` `dd_delta`; `find_improvement_candidates` `dd_improvement`; `match_engine._compute_portfolio_fit_components` `dd_improvement`.
+
+**Success Criteria:**
+  1. All three sites report a shallower drawdown as a positive improvement, matching the bridge's convention, with a test per site that fails on the old sign.
+  2. The match score's drawdown component rewards the shallower book; a ranking test proves the order flips back.
+  3. Every renderer of these fields reads the corrected sign and its copy ("Positive = shallower", "improve drawdown by") stays true.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 166.1.1 to break down)
+
 ### Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error
 
 **Goal:** A customer whose venue credentials stopped working is TOLD — in the product, on the surface where they notice the symptom — that the credential is the reason their factsheet stopped updating, and is nudged to reconnect. Key rotation is a NORMAL, recurring customer action, not an incident: the system must treat "your key no longer works" as an expected state it reports plainly, rather than a silent stall the customer discovers weeks later.
@@ -3581,6 +3601,8 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 169 to break down)
 
+**⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found by the 166.1 round-2 silent-failure review, pre-existing, outside that diff):** risk attribution renders a share in percent twice. The producer sends `marginal_risk_pct` and `weight_pct` already in percent (the `complete.json` fixture carries 28.0 and 40.0), and `RiskAttribution` passes them to `formatPercent`, which multiplies by 100 again, so a 28% share renders as "+2800.00%". `RiskAttribution.test.tsx` feeds fractions the producer never sends, so the test suite encodes the wrong unit. Success: the page shows the producer's number once, and a test built from the producer's real shape fails on the double scale. ⚠️ Added after 169's plans were checked; the plan set must take this item before execution.
+
 ### Phase 170: LAYOUT — page layout reads clean and holds on every page
 
 **Goal:** Pages read as a finished product: no stacked look-alike panels, and the layout holds at 320 px and 200% zoom.
@@ -3601,6 +3623,8 @@ Plans:
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 170 to break down)
+
+**⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy 320px check of 167.2.1, measured in the logged-in browser):** on /strategies at 320px the "Get private link" button overlaps the strategy name in the row header and cuts it to two letters. At 640px (200% zoom) the row is clean. Success: at 320px the name, the button, the status pill and the date never overlap, and the name is readable or ellipsised.
 
 ### Phase 170.1: COPY — page copy reads clean on every page (INSERTED)
 
@@ -3626,6 +3650,8 @@ Plans:
 - [ ] TBD (run /gsd-plan-phase 170.1 to break down)
 
 ---
+
+**⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy copy check of 167.2.1):** for a strategy whose last computation finished but whose factsheet cannot be built, the /strategies note and the owner factsheet's banner say the numbers "appear there once a computation succeeds" (wait), while the factsheet body says the computation finished and to contact support (act). Success: the list note, the owner banner and the body give the owner the same instruction for this state.
 
 ### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 

@@ -1310,6 +1310,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.9.3.1 inserted after Phase 164.9.3: FANINGRAPH, the stranded fan-in child, the match_decisions cascade 23505 and the 40P01 diamond deadlock (items 1-3 of 164.5.2's routed list); owns [164.9.3.1-FANIN-GRAPH-RESIDUALS]; founder decision 2026-09-26 ("Re-route, don't start"); booked under the new-phase freeze, NOT started
 - Phase 164.9.3 edited: scope widened to the (kind, api_key_id) claim wedge, item 4 of 164.5.2's routed list, and to all four claim partitions; founder decision 2026-09-26
 - Phase 164.9.2 criterion 4 recorded 2026-09-26: preflight 36235362126 success, restore 36242946174 success (attempt 36237060668 refused by the activity gate); closes Phase 164.9 criterion 8 and [164.9-CRIT8-RESTORE-DISPATCH-RECORD]
+- Phase 166.1.1 inserted after Phase 166.1: DDSIGN, the drawdown-delta sign in the simulator, the optimizer and the match engine (found by the 166.1 round-2 review, outside its diff, pre-existing); founder decision 2026-09-26 ("Route as proposed"); booked under the new-phase freeze, NOT started
 
 ### Decisions
 
