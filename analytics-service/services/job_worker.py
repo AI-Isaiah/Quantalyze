@@ -6474,7 +6474,11 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             row = getattr(res, "data", None) or {}
             return dict(row) if isinstance(row, dict) else {}
 
-        existing_row = await db_execute(_read_existing_failed_row)
+        # SFH-R2-02 sibling: the same 504-retried read as the marker re-read
+        # below, so one gateway blip does not replace this job's real failure
+        # with the read's exception. If the budget runs out the exception still
+        # leaves the closure: no stamp of either kind, nothing suppressed.
+        existing_row = await db_read_with_retry(_read_existing_failed_row)
         existing_flags = dict(existing_row.get("data_quality_flags") or {})
         _existing_status = existing_row.get("computation_status")
         existing_status: str | None = (

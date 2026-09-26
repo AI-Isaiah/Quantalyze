@@ -175,6 +175,12 @@ class _FakeQuery:
         if self.table == "strategies":
             return SimpleNamespace(data=dict(self.fake.strategy_row))
         if self.table == "strategy_analytics":
+            # Phase 164.6.7 (SFH-R2-02 sibling): each queued exception is raised
+            # by one select, in order, before the row is served, so a test can
+            # drive a gateway 504 through `_stamp_failed`'s flags/status read.
+            self.fake.analytics_reads += 1
+            if self.fake.analytics_read_raises:
+                raise self.fake.analytics_read_raises.pop(0)
             # `computation_status` is served alongside the flags because
             # `_stamp_failed` reads both columns in ONE select. It defaults to
             # None, which is NOT in the terminal-success set, so every
@@ -231,8 +237,16 @@ class _FakeSupabase:
         live_job_metadata: object = _LIVE_JOB_ABSENT,
         live_job_id: str | None = None,
         live_job_read_raises: bool = False,
+        analytics_read_raises: list[BaseException] | None = None,
     ) -> None:
         self.members = members
+        # Exceptions the `strategy_analytics` select raises, one per read, before
+        # it answers. Default empty keeps every other construction unchanged.
+        self.analytics_read_raises: list[BaseException] = list(
+            analytics_read_raises or []
+        )
+        # How many `strategy_analytics` selects the handler issued.
+        self.analytics_reads = 0
         # Phase 164.6.7 / D-05: the live `compute_jobs.metadata` for
         # `live_job_id`, which `_stamp_failed` re-reads before it honours a
         # refresh marker (the claim-time snapshot cannot see a retraction that

@@ -140,6 +140,7 @@ async def _run(
     job_id: str = _JOB_ID,
     live_metadata: object = _FROM_SNAPSHOT,
     live_job_read_raises: bool = False,
+    analytics_read_raises: list[BaseException] | None = None,
     expect_error_kind: str = "permanent",
     log: MagicMock | None = None,
     sentry: MagicMock | None = None,
@@ -166,6 +167,7 @@ async def _run(
         live_job_metadata=live_metadata,
         live_job_id=job_id,
         live_job_read_raises=live_job_read_raises,
+        analytics_read_raises=analytics_read_raises,
     )
     job: dict[str, Any] = {
         "id": job_id,
@@ -671,4 +673,78 @@ class TestEveryNotConfirmedStateNamesItsOwnCause:
         assert not any("RETRACTED" in m for m in everything), (
             "a live row carrying a DIFFERENT source records no retraction; naming "
             f"one misattributes the cause. Lines: {everything!r}"
+        )
+
+
+class _Gateway504(Exception):
+    """A PostgREST gateway timeout, in the structured shape
+    ``services.db._is_gateway_timeout`` keys on."""
+
+    code = "504"
+
+
+class TestStampReadRetriesAGateway504:
+    """SFH-R2-02 sibling: ``_stamp_failed`` reads ``data_quality_flags`` and
+    ``computation_status`` in one select before it decides anything. That read
+    went through a bare ``db_execute``, so one gateway 504 escaped the closure
+    and the job's real, permanent failure was recorded as the read's exception
+    instead, while the marker re-read one step later already went through
+    ``db_read_with_retry``. It now uses the same retried read.
+
+    Neuter to redden: read through ``db_execute`` again. The first test then
+    fails on the error kind (the 504 escapes), and the second on the read
+    count (one read, not the retry budget)."""
+
+    @pytest.mark.asyncio
+    async def test_one_gateway_504_is_retried_and_the_stamp_still_decides(
+        self,
+    ) -> None:
+        with patch("services.db.DB_READ_BACKOFF_BASE_S", 0.0), \
+             patch("services.db.DB_READ_JITTER_MAX_S", 0.0):
+            fake = await _run(
+                metadata={"source": _COMPOSITE_MARKER},
+                existing_status="complete_with_warnings",
+                analytics_read_raises=[_Gateway504("gateway timeout")],
+            )
+        assert fake.analytics_reads == 2, (
+            f"expected one failed and one answering read, saw {fake.analytics_reads}"
+        )
+        payloads = _analytics_upserts(fake)
+        assert payloads, (
+            "the retried read answered, so the stamp must still record the "
+            "failure (the error-only write)"
+        )
+        leaked = [p for p in payloads if any(k in p for k in _PUBLISH_STATE_KEYS)]
+        assert not leaked, (
+            "a marked refresh on a live row wrote publish state after a retried "
+            f"read: {leaked!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_persistent_504_still_fails_and_suppresses_nothing(
+        self,
+    ) -> None:
+        """Failure semantics unchanged: when the retry budget runs out, the
+        read's exception leaves the handler. No stamp of either kind is
+        written, and the job is not recorded as the handler's permanent
+        failure, so nothing is quietly suppressed."""
+        from services.db import DB_READ_MAX_RETRIES
+
+        with patch("services.db.DB_READ_BACKOFF_BASE_S", 0.0), \
+             patch("services.db.DB_READ_JITTER_MAX_S", 0.0):
+            fake = await _run(
+                metadata={"source": _COMPOSITE_MARKER},
+                existing_status="complete_with_warnings",
+                analytics_read_raises=[
+                    _Gateway504("gateway timeout")
+                    for _ in range(DB_READ_MAX_RETRIES)
+                ],
+                expect_error_kind="unknown",
+            )
+        assert fake.analytics_reads == DB_READ_MAX_RETRIES, (
+            "the stamp's read was not retried inside the gateway budget: "
+            f"{fake.analytics_reads} read(s)"
+        )
+        assert not _analytics_upserts(fake), (
+            "a stamp whose read never answered still wrote to strategy_analytics"
         )
