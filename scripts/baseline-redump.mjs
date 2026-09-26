@@ -1430,6 +1430,8 @@ export function gateDump({
   // Every section-C gate runs BEFORE the out dir is written, and on the D-10
   // no-op path too: a run that writes nothing still proves the dump is clean.
   // Order (D-26): the target assertion, gitleaks, then the five-class scan.
+  // The one exception is the completeness floor, which runs after the
+  // main-listing verdict, so a D-31 skip is decided first (R3-01).
   const gitleaksVersion = runGitleaksGate({ gitleaks, repoRoot, target: dump });
   let bytes;
   try {
@@ -1456,15 +1458,6 @@ export function gateDump({
   const shapes = countShapes(bytes.toString("utf8"));
   const shapeDefects = judgeShapeCounts(shapes);
   if (shapeDefects.length > 0) throw new Error(`shape counts refused: ${shapeDefects.join("; ")}`);
-  const committedDumpBytes = committedBytes(repoRoot, merge, BASELINE_SQL_REL);
-  const complete = judgeCompleteness(committedDumpBytes.toString("utf8"), bytes.toString("utf8"));
-  console.log(
-    `baseline-redump completeness: extensions=${complete.now.extensions.size} (committed ${complete.was.extensions.size}) ` +
-      `schemas=${complete.now.schemas.size} (committed ${complete.was.schemas.size})`,
-  );
-  if (complete.defects.length > 0) {
-    throw new Error(`completeness refused: ${complete.defects.join("; ")}; a dump that lost them is truncated or narrowed, not a baseline`);
-  }
 
   // D-09: the MERGE tree, never the working tree — an uncommitted migration in
   // the checkout is not one PRODUCTION received.
@@ -1488,6 +1481,20 @@ export function gateDump({
     console.log(`::notice::baseline-redump: ${mainJudged.text}`);
     emit("changed", "false");
     return { changed: false, measured: null };
+  }
+
+  // SFH-03, after the main-listing verdict (R3-01, D-33): the completeness floor
+  // judges only a dump whose main carries exactly the merge's migrations. A dump
+  // whose main is ahead was skipped above, so a later migration that dropped an
+  // extension cannot turn a superseded re-run into a false refusal.
+  const committedDumpBytes = committedBytes(repoRoot, merge, BASELINE_SQL_REL);
+  const complete = judgeCompleteness(committedDumpBytes.toString("utf8"), bytes.toString("utf8"));
+  console.log(
+    `baseline-redump completeness: extensions=${complete.now.extensions.size} (committed ${complete.was.extensions.size}) ` +
+      `schemas=${complete.now.schemas.size} (committed ${complete.was.schemas.size})`,
+  );
+  if (complete.defects.length > 0) {
+    throw new Error(`completeness refused: ${complete.defects.join("; ")}; a dump that lost them is truncated or narrowed, not a baseline`);
   }
 
   const committedMarker = committedBytes(repoRoot, merge, MARKER_REL).toString("utf8");
@@ -1794,7 +1801,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 223;
+export const EXPECTED_ASSERTIONS = 224;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -3080,6 +3087,29 @@ function selfTest({ withGitleaks = false } = {}) {
         /^::notice::baseline-redump: main carries 1 migration\(s\) this merge does not: .*\(D-31\)/m.test(ahead2.text) &&
         outputs.join(",") === "changed=false" && !existsSync(ahead2Out),
       "attempt 2 of a CHANGED dump whose main is ahead is skipped exactly as attempt 1 is: a ::notice::, changed=false, no out dir (CR-03, D-32)",
+    );
+    // R3-01: a stale re-run dumps PROD as it is now, so a later migration that dropped
+    // an extension leaves the dump one CREATE EXTENSION short. With main ahead, the
+    // main-listing verdict decides first: skipped with the D-31 notice, never refused
+    // by the completeness floor. The last clause proves the dump IS one the floor refuses.
+    const committedAtHead2 = g(["show", `${head2}:${BASELINE_SQL_REL}`]);
+    const noCronText = committedAtHead2.replace(/^CREATE EXTENSION IF NOT EXISTS "pg_cron"[^\n]*\n/m, "");
+    const noCronAtHead2 = join(dir, "no-cron-at-head2.sql");
+    writeFileSync(noCronAtHead2, noCronText);
+    const staleOut = join(dir, `main-ahead-stale-out-${randomBytes(4).toString("hex")}`);
+    outputs.length = 0;
+    const stale = capture(() =>
+      gateDump({
+        repoRoot: atHead2, dump: noCronAtHead2, merge: head2, runId: "1", runAttempt: "2", cliVersion: "2.98.2", out: staleOut, emit,
+        gitleaks: cleanGl(),
+      }),
+    );
+    ok(
+      stale.threw === null && !stale.text.includes("completeness") &&
+        /^::notice::baseline-redump: main carries 1 migration\(s\) this merge does not: .*\(D-31\)/m.test(stale.text) &&
+        outputs.join(",") === "changed=false" && !existsSync(staleOut) &&
+        judgeCompleteness(committedAtHead2, noCronText).defects.length === 1,
+      "attempt 2, main ahead, a dump one CREATE EXTENSION short: skipped with the D-31 notice (changed=false, no out dir), not refused by the completeness floor (R3-01)",
     );
     g(["push", "-q", "--force", mainBare, `${head2}:refs/heads/main`]);
     const equal = realMain();
