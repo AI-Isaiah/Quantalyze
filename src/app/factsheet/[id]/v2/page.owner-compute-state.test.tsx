@@ -848,11 +848,13 @@ const MINT_UNREADABLE =
   "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
 const PUBLIC_SENTENCE =
   "The detailed factsheet for this strategy is not available yet.";
-// Phase 167.2.1 CONTEXT D-02, typed as literals.
+// Phase 167.2.1 CONTEXT D-02, typed as literals. Reworded by 167.2.1-REVIEW
+// CR-01 and IN-02 (2026-09-26): the reason is stated from the stored results.
 const UNBUILDABLE_SHORT =
-  "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.";
+  "Right now, a private link to this strategy shows that its factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
 const UNBUILDABLE_COMPOSITE =
-  "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded, but its results cannot be built into a factsheet. Contact support@quantalyze.com to have this composite checked.";
+  "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
+const NEVER_LINE = "No computation is running for this strategy, and none is on record.";
 const SHARE_NOTE_CLASS = "mt-2 text-fixed-12 text-text-muted";
 
 /** The OwnerUnpublishedPanel root: the parent of its visibility notice. */
@@ -973,6 +975,49 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
 
       expect(last.textContent).toBe(UNBUILDABLE_COMPOSITE);
       expect(vi.mocked(probeFactsheetBuildable)).toHaveBeenCalledTimes(1);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  // 167.2.1-REVIEW CR-01: the note sits under a JOB-derived state line. The two
+  // arms below are the ones where "its last computation succeeded" contradicted
+  // that line on the same page.
+  it("CR01-NEVER-STARTED: a computed single-key draft whose done jobs were purged -> the note does not claim a computation the state line says is not on record", async () => {
+    givenOwnerPendingDraft();
+    STATE.adminRow = adminRowWith({
+      computation_status: "complete",
+      daily_returns: [{ date: "2025-08-01", value: 0.01 }],
+      returns_series: null,
+    });
+    givenJobs([]);
+
+    const { container, stateLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(stateLine!.textContent).toBe(NEVER_LINE);
+    expect(last.textContent).toBe(UNBUILDABLE_SHORT);
+    expect(container.textContent).not.toMatch(/last computation succeeded/i);
+  });
+
+  it("CR01-FAILED: a computed composite whose latest job failed permanently -> the note does not claim the last computation succeeded", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      givenOwnerPendingDraft();
+      STATE.memberCountResult = { count: 3, error: null };
+      STATE.adminRow = adminRowWith({
+        computation_status: "complete",
+        data_quality_flags: { composite: true },
+        metrics_json_by_basis: null,
+      });
+      givenJobs(TRIGGER_ROWS);
+
+      const { container, stateLine } = await renderOwnerPending();
+      const last = panelOf(container).lastElementChild as HTMLElement;
+
+      expect(stateLine!.textContent).toBe(FAIL_PERMANENT);
+      expect(last.textContent).toBe(UNBUILDABLE_COMPOSITE);
+      expect(container.textContent).not.toMatch(/last computation succeeded/i);
     } finally {
       errSpy.mockRestore();
     }

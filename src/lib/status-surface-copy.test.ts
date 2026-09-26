@@ -204,14 +204,18 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
   // A computed row whose factsheet cannot build. Typed out from
   // 167.2.1-CONTEXT.md D-02, never imported. None of them says "yet": waiting
   // does not change this row.
+  //
+  // 167.2.1-REVIEW CR-01 and IN-02 (2026-09-26): the reason is stated from the
+  // STORED RESULTS the probe read, not from "the last computation" (the owner
+  // page's job-derived state line owns that), in the active voice.
   const UNBUILDABLE_SHORT =
-    "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.";
+    "Right now, a private link to this strategy shows that its factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
   const UNBUILDABLE_COMPOSITE =
-    "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded, but its results cannot be built into a factsheet. Contact support@quantalyze.com to have this composite checked.";
+    "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
   const PUBLIC_UNBUILDABLE_SHORT =
-    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.";
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
   const PUBLIC_UNBUILDABLE_COMPOSITE =
-    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its last computation succeeded, but its results cannot be built into a factsheet. Contact support@quantalyze.com to have this composite checked.";
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
   const ARMS = ["in_progress", "not_available", "unreadable"] as const;
 
   it("KCS12-UNBUILDABLE-SHORT: private link, single-key series too short, arm not_available", () => {
@@ -269,6 +273,20 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     ];
     for (const [reason, kind] of table) {
       expect(unbuildableNoteKindOf(reason)).toBe(kind);
+    }
+  });
+
+  it("CR-01 COHERENCE: no unbuildable note makes a claim about a computation, so none can contradict the owner page's state line", () => {
+    // The owner page prints the note under a line derived from compute JOBS:
+    // "none is on record" (done jobs are purged after 30 days) or "stopped on a
+    // problem" while the analytics row still reads complete. A note claiming the
+    // last computation succeeded contradicted both (167.2.1-REVIEW CR-01).
+    for (const mode of ["mint-token", "public-url"] as const) {
+      for (const kind of ["too_short", "cannot_build"] as const) {
+        const note = recipientShareNoteFor(mode, "not_available", kind);
+        expect(note.toLowerCase()).not.toContain("computation");
+        expect(note).toContain("stored results");
+      }
     }
   });
 

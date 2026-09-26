@@ -381,18 +381,24 @@ export function unbuildableNoteKindOf(
 // The "2" is MIN_FACTSHEET_SERIES_POINTS; status-surface-copy.test.ts pins the
 // sentences to that constant, so the copy cannot drift from the gate. "yet" is
 // dropped on purpose: waiting does not change this row (D-02).
+//
+// 167.2.1-REVIEW CR-01: the reason is stated from what the probe measured, the
+// STORED RESULTS, and never from "the last computation". The owner page prints
+// this note under a state line derived from compute JOBS, and those can read
+// "none is on record" (done jobs are purged after 30 days) or "stopped on a
+// problem" while the analytics row still reads complete. A sentence about the
+// stored results is true beside every one of those lines.
+// 167.2.1-REVIEW IN-02: active voice, and the address is SUPPORT_EMAIL.
 const MINT_UNBUILDABLE_NOTES = {
   too_short:
-    "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.",
-  cannot_build:
-    "Right now, a private link to this strategy shows that its factsheet is not available. Its last computation succeeded, but its results cannot be built into a factsheet. Contact support@quantalyze.com to have this composite checked.",
+    "Right now, a private link to this strategy shows that its factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.",
+  cannot_build: `Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact ${SUPPORT_EMAIL} to have them checked.`,
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
 const PUBLIC_UNBUILDABLE_NOTES = {
   too_short:
-    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its last computation succeeded with fewer than 2 days of returns, and a factsheet needs at least 2.",
-  cannot_build:
-    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its last computation succeeded, but its results cannot be built into a factsheet. Contact support@quantalyze.com to have this composite checked.",
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.",
+  cannot_build: `Right now, this strategy's factsheet link shows that the factsheet is not available. We cannot build a factsheet from its stored results. Contact ${SUPPORT_EMAIL} to have them checked.`,
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
 /**
