@@ -46,6 +46,7 @@ from services.deribit_txn import (
     LedgerValuationError,
     PNL_BASIS_MARK_TO_MARKET,
     PNL_BASIS_SMOOTHED_MTM,
+    ROW_SCOPE_KEY,
     _day_ccy_own_index,
     _option_activity_after_coverage,
     _pre_coverage_option_days,
@@ -1212,6 +1213,30 @@ async def _crawl_deribit_ledger(
             # (returns [] → recorded complete-empty below); a -32602 AFTER rows
             # were fetched escapes here and fails loud (F-3: never drop real rows).
             #
+            # Phase 168 (D-02 amended): an `assignment` is cash-bearing only when
+            # no same-instrument delivery/settlement exists, and that census is
+            # only sound over the instrument's WHOLE history. A since_ms-cropped
+            # batch could hold the assignment and miss its sibling, so refuse it
+            # here — HERE and not in build_deribit_native_ledger, because the USD
+            # twin (txn_rows_to_daily_records) runs inside this loop, and before
+            # the index fetch below so no network I/O is spent on the batch.
+            # Inert on every production path: all of them crawl with
+            # since_ms=None. Fires on any assignment regardless of change (a
+            # size rule would be a magnitude rule). Names scope and currency
+            # only — no row fields.
+            if since_ms is not None and any(
+                isinstance(r, Mapping) and str(r.get("type", "")) == "assignment"
+                for r in rows
+            ):
+                raise LedgerValuationError(
+                    "assignment classification requires a full-history crawl "
+                    "(since_ms=None): an assignment is cash-bearing only when no "
+                    "same-instrument delivery/settlement row exists, and a "
+                    "since_ms-cropped crawl cannot see the instrument's whole "
+                    f"history (scope={scope.label!r} currency={currency!r}) — "
+                    "refusing to classify it on a partial window"
+                )
+            #
             # P72: an INVERSE (coin-margined) currency may carry a quiet-day cash
             # row (e.g. a negative_balance_fee) on a day with no OWN same-day
             # index — supply the SAME-DAY settlement index (public/get_delivery_
@@ -1295,7 +1320,15 @@ async def _crawl_deribit_ledger(
             # Retain the RAW rows (flat) for the native-unit adapter's
             # txn_rows_to_native_daily — a per-(day,ccy) sum that is order- and
             # batch-independent, so flat concatenation across scopes is lossless.
-            raw_rows_all.extend(r for r in rows if isinstance(r, Mapping))
+            # WR-02 (Phase 168 review): each retained row is a COPY stamped with
+            # its scope label under ROW_SCOPE_KEY, so the assignment guard can
+            # keep its same-instrument census inside one subaccount (the USD twin
+            # above already checks one scope at a time). The stamp is not in the
+            # refusal renderer's whitelist (_SHAPE_FIELDS), so it never reaches
+            # a message.
+            raw_rows_all.extend(
+                {**r, ROW_SCOPE_KEY: scope.label} for r in rows if isinstance(r, Mapping)
+            )
             # Accumulate the honest DATED external flows (for the core's F_t term)
             # and the return-bearing row count (for the C2 equity-vs-activity floor).
             # The SAME `supplemental` settlement-index map built for
@@ -2241,10 +2274,10 @@ async def build_deribit_native_ledger(
     # below). A ``since_ms``-cropped crawl would see positions only from the
     # first in-window row: earlier held days silently unmarked, the first
     # in-window day absorbing a book jump, and the option-activity gate (ANY
-    # option-evidence row) disagreeing with the replay (trade/delivery rows
-    # only) — terminal_book {} vs a nonzero venue anchor. Fail loud before
-    # crawling rather than misattribute; the other bases keep accepting
-    # ``since_ms`` (SC-4).
+    # option-evidence row) disagreeing with the replay (trade/delivery/assignment
+    # rows only, ``_OPTION_BOOK_EVENT_TYPES``) — terminal_book {} vs a nonzero
+    # venue anchor. Fail loud before crawling rather than misattribute; the other
+    # bases keep accepting ``since_ms`` (SC-4).
     if pnl_basis == PNL_BASIS_SMOOTHED_MTM and since_ms is not None:
         raise LedgerValuationError(
             "smoothed_mtm requires a full-history crawl (since_ms=None): the "
