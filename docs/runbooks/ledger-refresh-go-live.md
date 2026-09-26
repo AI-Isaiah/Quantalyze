@@ -1106,8 +1106,10 @@ here, but this precondition sits here because this is where a reader would go to
      | a `_stamp_io` call is CANCELLED (the handler deadline, or a shutdown) | 1 (`_stamp_io`'s CANCELLED line, carries the cause), or 2 after a `NO_ROW` breach line | 0 | **1** / **2** | transient, `last_error` "Handler exceeded timeout" | `test_a_stamp_call_cut_off_by_the_handler_deadline_logs_the_cause` |
      | marked row, `RETRACTED` / `OTHER_SOURCE` → loud stamp lands | 1 (the landed "no longer protects it" line; the state line is WARNING) | 0 | **1** | permanent, terminal | `test_the_loud_stamp_over_a_live_row_logs_its_cause_at_error` (both files), `test_a_different_live_source_is_not_called_a_retraction`, `test_the_loud_stamp_over_another_source_logs_one_error` |
      | marked row, `NO_ID` / `NO_ROW` → loud stamp lands | 2 (breach line + landed line) | 0 | **2** | permanent, terminal | `test_a_missing_row_or_id_is_an_error_not_a_retraction`, `test_stamp_closure_calls_a_missing_row_an_error` |
-     | single-key series heal fails after a landed loud stamp | +1 (the heal's ERROR, scrubbed failure text) | +1 | **+2** | permanent, terminal | `test_a_failing_post_stamp_call_keeps_the_landed_stamp` |
-     | single-key series heal raises a programming error after a landed loud stamp | +1 | +1 | **+2** | `unknown` (retried) | `test_a_programming_error_in_a_post_stamp_call_is_unknown` |
+     | single-key series heal fails after a landed loud stamp | +1 (the heal's ERROR: scrubbed failure text, job id, the stamp's cause) | +1 | **+2** | permanent, terminal | `test_a_failing_post_stamp_call_keeps_the_landed_stamp` |
+     | single-key series heal raises a programming error after a landed loud stamp | +1 (the same line, labelled "a programming error") | +1 | **+2** | permanent, terminal | `test_a_programming_error_in_a_post_stamp_call_keeps_the_landed_stamp` |
+     | composite stamp's status read answers a non-object `data_quality_flags` | +1 (job id, type, bounded scrubbed `repr`) | +1 (`capture_message`) | **+2**, added to whatever row the same attempt then reaches | that row's | `test_a_non_object_flags_value_is_stamped_once_not_restamped_by_f5` |
+     | composite SUCCESS-path persist reads a non-object `data_quality_flags` | 1 | 1 (`capture_message`) | **2** | the persist continues (job DONE) | `test_a_non_object_flags_value_on_the_composite_success_path_is_dropped_loudly` |
      | entry publish-state read fails | 1 | 1 | **2** | transient | `test_a_failed_entry_read_fails_transient_before_the_crawl` |
      | entry read raises a programming error | 1 | 1 | **2** | `unknown` | `test_a_programming_error_is_not_relabelled_transient` |
      | chain edge `READ_ERROR` | 2 (`_refresh_marker_live_state`, `_log_marker_not_confirmed`) | 1 | **3** | transient | `test_a_raising_chain_edge_reread_enqueues_nothing_and_fails_transient` |
@@ -1117,7 +1119,8 @@ here, but this precondition sits here because this is where a reader would go to
      | tail mirror re-read raises a programming error | 2 (the helper's programming-error line, `_log_marker_not_confirmed`) | 1 | **3** | job DONE | `test_at_the_tail_mirror_it_is_logged_and_the_job_is_done` |
      | tail mirror `NO_ID` / `NO_ROW` | 1 (breach line, "enqueued job") | 0 | **1** | job DONE | `test_mirror_does_not_call_a_missing_tail_row_a_dedup` |
 
-     **Derivation of the bound, round 4, re-derived in round 5.** Five rules decide it:
+     **Derivation of the bound, round 4, re-derived in round 5.** ⛔ Superseded by the round-6
+     derivation below; kept as lineage. Five rules decide it:
      - A stamp ends its attempt, whether it returns permanent or `_stamp_io` raises. No stamp
        follows the chain edge.
      - The single-key series heal is the one step that can follow a LANDED loud stamp in the
@@ -1162,6 +1165,17 @@ here, but this precondition sits here because this is where a reader would go to
      - A static scan, `test_every_io_call_in_a_stamp_closure_is_inside_stamp_io`, reads every
        line of both closures. It fails on any database call outside `_stamp_io`, on any branch,
        on or off the thread. `_heal_delete_basis_series` is the one named exemption.
+     - ⛔ **CORRECTED 2026-09-26 (round 6, R6-03), the bullet above kept as lineage.** "Any
+       database call" overstated it: the scan matched a hand-written name list, so a direct
+       `await` of `_refresh_marker_live_state`, `_refresh_marker_still_on_row` or
+       `sync_strategy_analytics_status` in a closure passed it. The names are now DERIVED
+       (`_derive_io_call_names`): the base names (`db_execute`, `db_read_with_retry`,
+       `.execute()`, `get_supabase`, `to_thread`, `run_in_executor`, `create_task`,
+       `ensure_future`) plus every module-level function in `analytics-service/services/` that
+       calls one of them, directly or through another such function. What the scan proves: no
+       call through a base or derived I/O name sits outside `_stamp_io` in either closure, on
+       any branch. What it cannot see: a method call (`self.x()`), a function defined outside
+       `services/`, and I/O reached only through a callable passed in.
      ⭐ **Round 5 changes to the table, with their round-4 values as lineage:**
      - The heal row went from **+0** (WARNING only, raw exception) to **+2**, and a heal
        programming error went from permanent to `unknown` (SFH-R5-03).
@@ -1177,6 +1191,57 @@ here, but this precondition sits here because this is where a reader would go to
      - A composite row whose `data_quality_flags` is not a JSON object now lands its failed
        stamp once, with a WARNING, and ends permanent (SFH-R5-05). Before, `dict()` raised: F-5
        re-stamped it under the chain-break cause, and the job was filed `unknown` with no stamp.
+
+     ⛔ **CORRECTED 2026-09-26 (round 6, R6-01 / R6-02 / R6-05), re-counted from the code by
+     symbol.** Round 5's heal programming-error row was wrong in its disposition, not its count.
+     The `unknown` raise retried the job, `mark_compute_job_failed` moved it to `failed_retry`,
+     and `sync_strategy_analytics_status` branch (a) counts that as non-terminal: it wrote
+     `computing` over the stamp that had just landed and NULLed its cause for the whole backoff
+     window. A retry that took another path lost the cause for good. ⭐ **Round 6 changes to the
+     table, with their round-5 values as lineage:**
+     - The heal programming-error row went from `unknown` (retried) to **permanent, terminal**.
+       Still +2 events. The heal never raises now, and its ERROR line carries the stamp's cause
+       and the job id (R6-01). Branch (b) keeps the writer's cause.
+     - The composite stamp's non-object `data_quality_flags` drop went from a WARNING (0 events)
+       to **+2**: one ERROR naming the job, one tagged `capture_message` (R6-02). It sits after
+       the status read and BEFORE the marker re-read and the write, so it adds to whichever row
+       that attempt then reaches.
+     - The composite success path's read of the same column is new: before round 6 `dict()`
+       raised there on every re-stitch and the job ended `failed_final` with no curated stamp.
+       Now it is **2** events and the persist lands (R6-05).
+
+     **Derivation of the bound, round 6.** The five rules above still hold, with one change:
+     - The single-key series heal NEVER raises, so a heal row always ends the job permanent. It
+       can only be on the LAST attempt.
+     - New: the composite flags drop is logged BEFORE the composite write. If that write then
+       fails, nothing has replaced the value, so the next attempt logs it again.
+
+     *Single-key job, or a composite whose flags are an object:*
+     - A retried attempt is at most **3** events: a loud write that fails after a `NO_ROW`
+       breach line, or a chain-edge `READ_ERROR`.
+     - The last attempt is at most **4**: a loud stamp that lands after a breach line (2), then
+       a failed heal (2).
+     - So one job produces **at most 10** (3 + 3 + 4). Round 5's figure was 12.
+     - With a provenance marker refusal (below), a retried attempt is at most **4** (breach
+       line, provenance line, `_stamp_io`'s ERROR, its capture) and the last at most **5**, so
+       **at most 13**. Round 5's figure was 15.
+
+     *Composite whose `data_quality_flags` is not an object:*
+     - Every attempt pays the +2 drop until a write lands. A retried attempt is at most **5**:
+       the drop (2), the breach line, `_stamp_io`'s ERROR and its capture.
+     - The last attempt is also at most 5. Either the write fails again, or it lands after a
+       breach line (drop 2, breach, landed line = 4).
+     - So one job produces **at most 15**, and with a provenance refusal on the write (6 per
+       attempt) **at most 18**. These are the new per-job ceilings.
+     - They need a malformed flags value AND a marked job whose row is gone AND the write
+       failing on every attempt. A write that lands overwrites the value, so the drop cannot
+       repeat after it.
+     - The success-path drop (2) precedes no stamp, so it adds nothing to the stamp rows.
+
+     Every row's count is still pinned by an exact `log.error.call_count` in the named test. The
+     two flags rows also pin `capture_message.call_count == 1`. 📜 The round-6 review computed
+     10 (13) and did not count the R6-02 capture it recommended; the composite 15 (18) is this
+     fix round's own count, from the code.
    📜 *Lineage, superseded 2026-09-25:* "⛔ **BLOCKING.** No schedule naming
    `public.enqueue_ledger_composite_refresh()` may be registered until `run_stitch_composite_job`
    in `analytics-service/services/job_worker.py` re-reads the LIVE `compute_jobs` row's
