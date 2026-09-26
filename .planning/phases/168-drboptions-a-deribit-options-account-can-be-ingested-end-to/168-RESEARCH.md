@@ -425,16 +425,19 @@ assert _OPTION_BOOK_EVENT_TYPES <= CASH_BEARING_TYPES
 | A4 | All rows of one instrument share one `currency` | Q1 | The USD-twin guard could miss a cross-currency sibling; the native twin's all-currency guard backstops it |
 | A5 | `SMOOTHED_MTM_ENABLED` state in PROD is unknown | Q2-C | Only affects whether a replay failure is exercised; it degrades either way |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Does `exercise` (or `expiry`) appear with nonzero change on the failing account?**
+1. **Does `exercise` (or `expiry`) appear with nonzero change on the failing account?** — RESOLVED (routed, not answered here)
    - Known: the docs name both, the repo has 0 observations, and only the first unknown row raises.
    - Recommendation: founder report (D-06) captures it. Do not classify here.
+   - RESOLVED: `168-03-PLAN.md` (D-08) — the founder's post-deploy report names any refusal class by type, and an `exercise`/`expiry` refusal is routed to its own phase; `168-01-PLAN.md` pins both as unclassified.
 2. **Does an `assignment` row carry `commission` / `position`?**
    - Known: `_SHAPE_FIELDS` never renders them, and there is no repo evidence.
    - Recommendation: fail-closed through the existing guards. **Discretion:** add `position` and `commission` to `_SHAPE_FIELDS` (sizes/fees, not identifiers) so any future refusal answers it. Update `test_identifiers_are_REDACTED_by_whitelist` expectations only if needed.
+   - RESOLVED: `168-02-PLAN.md` Task 2 adds `commission` and `position` to `_SHAPE_FIELDS`; `168-02-PLAN.md` Task 1 SITE4-MISSING-POSITION and SITE5-MISSING-COMMISSION pin the fail-closed raises (never defaulted).
 3. **Should the D-02 guard key on `user_id` to avoid cross-subaccount false positives?**
    - Recommendation: no. `user_id` presence on real rows is docs-only here, and a false positive is loud.
+   - RESOLVED: `168-01-PLAN.md` must_haves record the cross-subaccount false positive as an accepted backstop truth (loud, never silent; not keyed on `user_id`).
 
 ## Environment Availability
 
