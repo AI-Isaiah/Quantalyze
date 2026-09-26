@@ -409,14 +409,16 @@ description = "Supabase secret API key (sb_secret_ prefix)"
 regex = '''sb_secret_[A-Za-z0-9_-]{16,}'''
 keywords = ["sb_secret_"]
 
-# A password as a libpq keyword (`password=…`, e.g. CREATE SUBSCRIPTION … CONNECTION
-# or a COMMENT ON literal) or as an OPTIONS entry (`password '…'`, e.g. CREATE USER
-# MAPPING). PATH-SCOPED to a file named baseline.sql, the dump's name in redump-dump:
+# A password in a CREDENTIAL form, any case: a quoted string after it (`password '…'`
+# in CREATE USER MAPPING … OPTIONS, `password := '…'`, `PASSWORD E'…'`), a JSON member
+# (`"password": "…"`), or a libpq keyword with no space (`password=…` in a CREATE
+# SUBSCRIPTION … CONNECTION string). Ordinary SQL such as `WHERE password = x` or
+# `password = ANY(…)` is not a hit (WR-08). PATH-SCOPED to a file named baseline.sql, the dump's name in redump-dump:
 # repo-wide, the same text appears in prose and tests dozens of times. The regex is
 # the same alternation as the script's SECRET_SCAN_PATTERN class.
 [[rules]]
 id = "baseline-dump-password"
 description = "Password in a connection string or OPTIONS list inside a schema dump"
 path = '''(^|/)baseline\.sql$'''
-regex = '''(^|[^_A-Za-z])password( ?= ?[^ ,)]| [^ -&(-~])'''
+regex = '''(^|[^_A-Za-z])[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]("? *(:=|=| ) *[Ee]?[^ -&(-~][!-&(-~]|"? *: *"[!#-~]|=[!-&(-~])'''
 keywords = ["password"]

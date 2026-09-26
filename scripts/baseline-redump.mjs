@@ -80,16 +80,24 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
  *
  * D-06's five classes, then WR-03's two:
  * - `sb_secret_…`, Supabase's current secret-key format, which is not a JWT.
- * - `password` as a word (never `encrypted_password`, the committed dump's one
- *   hit), followed by `=` (libpq keyword form, as in `CREATE SUBSCRIPTION …
- *   CONNECTION` or a `COMMENT ON` literal) or by a space and a quote (`CREATE
- *   USER MAPPING … OPTIONS (password '…')`). The quote is written as `[^ -&(-~]`,
- *   "any byte but printable ASCII other than the quote", because the doc's grep
- *   sits inside single quotes and cannot spell one.
+ * - `password` as a word in any case (never `encrypted_password`, the committed
+ *   dump's one hit), in a CREDENTIAL form only (WR-08):
+ *   - a quoted string after it, past a space, `=` or `:=`, optionally as an
+ *     `E'…'` literal: `OPTIONS (password '…')`, `password := '…'`,
+ *     `PASSWORD '…'`. The quote is written as `[^ -&(-~]`, "any byte but
+ *     printable ASCII other than the quote", because the doc's grep sits inside
+ *     single quotes and cannot spell one. The byte after it must be printable
+ *     ASCII other than a space or a quote, so an empty `''` and the UTF-8 bytes
+ *     of an em-dash (house-style comment prose) are not a credential;
+ *   - a JSON member, `"password": "…"`;
+ *   - the libpq keyword form, `password=…` with no space (a connection string).
+ *   Ordinary SQL is NOT a hit: `WHERE password = x`, `password = ANY(…)`,
+ *   `IF password = '' THEN`, a quoted column `"password" "text"`, or a literal
+ *   that merely ends in the word.
  * Portable ERE only (no `\s`, `\b`, `(?:` or POSIX classes): the same text must
  * mean the same thing to JS `RegExp`, GNU grep and BSD grep.
  */
-export const SECRET_SCAN_PATTERN = String.raw`postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|ALTER DATABASE|eyJ[A-Za-z0-9_-]{10,}|sb_secret_[A-Za-z0-9_-]{16,}|(^|[^_A-Za-z])password( ?= ?[^ ,)]| [^ -&(-~])`;
+export const SECRET_SCAN_PATTERN = String.raw`postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|ALTER DATABASE|eyJ[A-Za-z0-9_-]{10,}|sb_secret_[A-Za-z0-9_-]{16,}|(^|[^_A-Za-z])[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]("? *(:=|=| ) *[Ee]?[^ -&(-~][!-&(-~]|"? *: *"[!#-~]|=[!-&(-~])`;
 export const SECRET_SCAN_RE = new RegExp(SECRET_SCAN_PATTERN);
 
 /**
@@ -1761,12 +1769,12 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 217;
+export const EXPECTED_ASSERTIONS = 221;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
  */
-export const EXPECTED_GITLEAKS_ASSERTIONS = 8;
+export const EXPECTED_GITLEAKS_ASSERTIONS = 9;
 
 function selfTest({ withGitleaks = false } = {}) {
   let pass = true;
@@ -1843,6 +1851,18 @@ function selfTest({ withGitleaks = false } = {}) {
   /** A JWT-shaped value joined at runtime; this file never carries one (RESEARCH F13). */
   const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
   const jwtValue = [b64({ alg: "HS256", typ: "JWT" }), b64({ iss: "self-test", role: "fixture" }), randomBytes(24).toString("base64url")].join(".");
+
+  /** WR-08: ordinary SQL naming a password column; the pure arm and the real-gitleaks arm both hold it. */
+  const pwNegatives = [
+    'CREATE TABLE "public"."accounts" ("id" "uuid", "password" "text" NOT NULL, "encrypted_password" "text");',
+    "    SELECT 1 FROM auth.users WHERE password = crypt(p_secret, password);",
+    "    IF password = '' THEN RAISE EXCEPTION 'empty'; END IF;",
+    "    RETURN password = ANY(p_list);",
+    "COMMENT ON COLUMN \"public\".\"accounts\".\"password\" IS 'reset the password';",
+    "-- password \u2014 hashed by the auth service, never stored in clear",
+    "    v_row.encrypted_password := crypt(p_new, gen_salt('bf'));",
+    'COMMENT ON TABLE "public"."t" IS \'{"password": ""}\';',
+  ];
 
   if (withGitleaks) {
     // A missing or wrong binary fails LOUD before any arm runs; it never skips.
@@ -2475,6 +2495,10 @@ function selfTest({ withGitleaks = false } = {}) {
         "a password in a USER MAPPING OPTIONS list",
         `CREATE USER MAPPING FOR "u" SERVER "s" OPTIONS ("user" 'u', ${["pass", "word"].join("")} '${randomBytes(12).toString("hex")}');`,
       ],
+      // WR-08: the credential forms the first password class missed.
+      ["a plpgsql password assignment", `  ${["pass", "word"].join("")} := '${randomBytes(12).toString("hex")}';`],
+      ["a JSON password member in a COMMENT ON literal", `COMMENT ON TABLE "public"."t" IS '{"${["pass", "word"].join("")}": "${randomBytes(12).toString("hex")}"}';`],
+      ["an upper-case PASSWORD with an E'' literal", `CREATE ROLE "r" ${["PASS", "WORD"].join("")} E'${randomBytes(12).toString("hex")}';`],
     ];
     for (const [label, value] of secretClasses) {
       const r = redGate(withLine(`-- ${value}`));
@@ -2484,6 +2508,14 @@ function selfTest({ withGitleaks = false } = {}) {
         `secret class '${label}' refuses at line ${appendedLine}, prints only the count and line, and writes nothing`,
       );
     }
+    // WR-08: ordinary SQL and prose naming a password column is NOT a credential. Read
+    // as latin1 bytes exactly as the gate reads a dump, so the em-dash's UTF-8 bytes
+    // are what the class sees (the lines are `pwNegatives`, above).
+    const pwNegHits = judgeSecretScan(Buffer.from(pwNegatives.join("\n") + "\n", "utf8"));
+    ok(
+      pwNegHits.length === 0,
+      `the password class does not match ordinary SQL (a comparison, = ANY, an empty literal, a quoted column, an em-dash comment) (WR-08; hits at ${pwNegHits.join(",") || "none"})`,
+    );
     const homeRunner = ["/ho", "me/", "runner/work/x"].join("");
     const homeMac = String.fromCharCode(47, 85, 115, 101, 114, 115, 47) + "fixture/x";
     const integrityCases = [
@@ -3429,16 +3461,29 @@ function selfTest({ withGitleaks = false } = {}) {
       const wr03File = join(gdir, "baseline.sql");
       const sbValue = ["sb", "_secret_"].join("") + randomBytes(24).toString("base64url");
       const pwValue = randomBytes(12).toString("hex");
+      const pwUpper = randomBytes(12).toString("hex");
       writeFileSync(
         wr03File,
         `SET client_encoding = 'UTF8';\nCOMMENT ON TABLE "t" IS '${sbValue}';\n` +
-          `CREATE SUBSCRIPTION "s" CONNECTION 'host=h ${["pass", "word="].join("")}${pwValue} dbname=d' PUBLICATION "p";\n`,
+          `CREATE SUBSCRIPTION "s" CONNECTION 'host=h ${["pass", "word="].join("")}${pwValue} dbname=d' PUBLICATION "p";\n` +
+          `CREATE ROLE "r" ${["PASS", "WORD"].join("")} E'${pwUpper}';\n`,
       );
       const wr03 = capture(() => runGitleaksGate({ gitleaks: counted, repoRoot: REPO_ROOT, target: wr03File }));
       ok(
         wr03.threw !== null && wr03.text.includes("RuleID=supabase-secret-key line=2") && wr03.text.includes("RuleID=baseline-dump-password line=3") &&
-          !wr03.text.includes(sbValue) && !wr03.text.includes(pwValue),
-        "[real gitleaks] a runtime sb_secret_ key and a connection-string password in baseline.sql both refuse by RuleID, printing neither value (WR-03)",
+          wr03.text.includes("RuleID=baseline-dump-password line=4") &&
+          !wr03.text.includes(sbValue) && !wr03.text.includes(pwValue) && !wr03.text.includes(pwUpper),
+        "[real gitleaks] a runtime sb_secret_ key, a connection-string password and an upper-case PASSWORD E'' literal in baseline.sql all refuse by RuleID, printing no value (WR-03, WR-08)",
+      );
+      // WR-08: the same ordinary-SQL lines the pure arm holds, in a file named
+      // baseline.sql so the path-scoped rule is live, are no finding at all.
+      mkdirSync(join(gdir, "neg"), { recursive: true });
+      const negFile = join(gdir, "neg", "baseline.sql");
+      writeFileSync(negFile, `SET client_encoding = 'UTF8';\n${pwNegatives.join("\n")}\n`);
+      const neg = capture(() => runGitleaksGate({ gitleaks: counted, repoRoot: REPO_ROOT, target: negFile }));
+      ok(
+        neg.threw === null && neg.text.includes("baseline-redump gitleaks: 0 finding(s)"),
+        "[real gitleaks] ordinary SQL naming a password column in baseline.sql is no finding: the baseline-dump-password rule has the script's narrowing (WR-08)",
       );
       const before = spawned;
       ok(
