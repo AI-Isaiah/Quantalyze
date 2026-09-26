@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { normalizeDailyReturns, type DailyPoint } from "@/lib/portfolio-math-utils";
-import { mean } from "@/lib/portfolio-math-utils";
+import { pearson } from "@/lib/return-stats";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
 import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 
@@ -15,26 +15,6 @@ import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 // HTML table with teal (positive) / red (negative) / white (neutral) cells
 // and a color legend gradient bar below.
 // ---------------------------------------------------------------------------
-
-/** Pearson correlation between two equal-length numeric arrays. */
-function pearson(a: number[], b: number[]): number {
-  const n = Math.min(a.length, b.length);
-  if (n < 2) return 0;
-  const ma = mean(a.slice(0, n));
-  const mb = mean(b.slice(0, n));
-  let cov = 0;
-  let varA = 0;
-  let varB = 0;
-  for (let i = 0; i < n; i++) {
-    const da = a[i] - ma;
-    const db = b[i] - mb;
-    cov += da * db;
-    varA += da * da;
-    varB += db * db;
-  }
-  const denom = Math.sqrt(varA * varB);
-  return denom > 0 ? cov / denom : 0;
-}
 
 /** Map correlation value [-1, 1] to a CSS color. */
 function correlationColor(v: number): string {
@@ -152,7 +132,10 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
       Array.from({ length: n }, (_, j) => {
         if (i === j) return 1;
         const [av, bv] = alignedPair(strategies[i], strategies[j]);
-        return pearson(av, bv);
+        // The shared pearson answers null when a leg has no real dispersion
+        // (an exact constant, or a compounding constant yield's float residue);
+        // the cell shows 0, what an exact-constant leg has always shown here.
+        return pearson(av, bv) ?? 0;
       }),
     );
     return { names: strategies.map((s) => s.name), matrix: m };
