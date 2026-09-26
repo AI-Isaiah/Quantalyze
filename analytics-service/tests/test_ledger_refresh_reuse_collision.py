@@ -659,23 +659,34 @@ class TestReReadFailsSafe:
     loud stamp) and both parametrised cases go RED. Change the helper's
     except-arm to return ``PRESENT`` (the suppression direction) and both go RED
     too. Measured 2026-09-26: under either neuter the first assertion to fire is
-    the error kind, ``'permanent'`` where ``'transient'`` is required."""
+    the error kind, ``'permanent'`` where ``'transient'`` is required.
+
+    WR-03 / SFH-R2-01 (round 2): the transient result must still NAME the
+    handler's real cause, because ``error_message`` becomes
+    ``compute_jobs.last_error``. Neuter by dropping ``scrubbed`` from the raise,
+    or by passing an empty cause to the pre-read ERROR line; measured
+    2026-09-26, both parametrised cases go RED on each."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "combine",
+        ("combine", "cause"),
         [
-            pytest.param(_insufficient_combine, id="insufficient-history-caller"),
+            pytest.param(
+                _insufficient_combine,
+                "Insufficient broker history",
+                id="insufficient-history-caller",
+            ),
             pytest.param(
                 lambda: MagicMock(
                     side_effect=NavReconstructionError("simulated structural refusal")
                 ),
+                "Broker return reconstruction failed on a structural input",
                 id="nav-error-caller-inside-an-except-arm",
             ),
         ],
     )
     async def test_an_unreadable_row_writes_nothing_and_fails_transient(
-        self, combine: Any
+        self, combine: Any, cause: str
     ) -> None:
         ctx, capture = _build_ctx(
             key_row={"id": "key-1", "exchange": "binance", "user_id": "user-1"},
@@ -744,6 +755,24 @@ class TestReReadFailsSafe:
             c.args and "RETRACTED" in str(c.args[0])
             for c in log.warning.call_args_list
         ), "a read failure was logged as a RETRACTION; nothing was retracted."
+        # WR-03 / SFH-R2-01: the retry must not ERASE the failure it postponed.
+        # ``error_message`` is what ``compute_jobs.last_error`` records, and it is
+        # the operator's first read. Before the fix it named only the read
+        # failure (and said "retrying" even on the final attempt).
+        assert cause in (result.error_message or ""), (
+            "the job's last_error lost the handler's real failure cause "
+            f"{cause!r}: {result.error_message!r}"
+        )
+        assert "retrying" not in (result.error_message or ""), (
+            "last_error claims the job is retrying, which is false on the final "
+            f"attempt: {result.error_message!r}"
+        )
+        assert any(
+            any(cause in str(a) for a in c.args) for c in log.error.call_args_list
+        ), (
+            "the curated cause was not logged at ERROR before the re-read, so "
+            f"a stamp with no detail left no record of it: {log.error.call_args_list!r}"
+        )
 
     @pytest.mark.asyncio
     async def test_a_missing_job_id_takes_the_loud_path(self) -> None:

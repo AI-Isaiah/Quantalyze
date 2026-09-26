@@ -3167,7 +3167,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # directly, and no handler between here and ``dispatch`` catches
                 # ``RefreshMarkerRereadUnavailable`` (traced in the 164.6.7
                 # REVIEW-FIX, "Round 1 — single-key completion").
+                #
+                # ⛔ WR-03 / SFH-R2-01: the CAUSE is recorded before the read
+                # that may postpone it. On ``READ_ERROR`` the raise below replaces
+                # this stamp and the caller's permanent return, so this ERROR line
+                # (and the cause carried in the exception text, which becomes
+                # ``compute_jobs.last_error``) is the only record of WHY a stamp
+                # was needed at all.
                 if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+                    logger.error(
+                        "derive_broker_dailies: terminal failure for strategy %s "
+                        "on marked compute_job %s — %s%s. Re-reading the refresh "
+                        "marker before choosing the stamp.",
+                        strategy_id, job.get("id"), scrubbed,
+                        f" | detail: {scrub_freeform_string(detail)}" if detail else "",
+                    )
                     _live_state = await _refresh_marker_still_on_row(
                         ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
                     )
@@ -3179,13 +3193,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             strategy_id=strategy_id,
                             consequence=(
                                 "Writing NO terminal stamp; failing the job "
-                                "TRANSIENT so it retries"
+                                "TRANSIENT so the queue can retry it"
                             ),
                         )
                         raise RefreshMarkerRereadUnavailable(
                             "derive_broker_dailies: the live re-read of the "
                             "refresh marker failed, so no terminal stamp was "
-                            "written; retrying the job"
+                            f"written for: {scrubbed}"
                         )
                     if _live_state is not MarkerLiveState.PRESENT:
                         _log_marker_not_confirmed(
@@ -6426,7 +6440,20 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # and the job fails TRANSIENT: the queue retries it, and the retry
         # re-reads the row. The read already logged at ERROR and reported to
         # Sentry. Nothing is suppressed either — no error-only write happens.
+        #
+        # ⛔ WR-03 / SFH-R2-01: the CAUSE is recorded before the read that may
+        # postpone it. On ``READ_ERROR`` the raise below replaces this stamp and
+        # the caller's permanent return, so this ERROR line (and the cause carried
+        # in the exception text, which becomes ``compute_jobs.last_error``) is the
+        # only record of WHY a stamp was needed at all.
         if _honour_marker:
+            logger.error(
+                "stitch_composite: terminal failure for strategy %s on marked "
+                "compute_job %s — %s%s. Re-reading the refresh marker before "
+                "choosing the stamp.",
+                strategy_id, job.get("id"), scrubbed,
+                f" | detail: {scrub_freeform_string(detail)}" if detail else "",
+            )
             _live_state = await _refresh_marker_still_on_row(
                 supabase, job.get("id"), LEDGER_REFRESH_COMPOSITE_SOURCE
             )
@@ -6438,12 +6465,13 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     strategy_id=strategy_id,
                     consequence=(
                         "Writing NO terminal stamp; failing the job TRANSIENT so "
-                        "it retries"
+                        "the queue can retry it"
                     ),
                 )
                 raise RefreshMarkerRereadUnavailable(
                     "stitch_composite: the live re-read of the refresh marker "
-                    "failed, so no terminal stamp was written; retrying the job"
+                    "failed, so no terminal stamp was written for: "
+                    f"{scrubbed}"
                 )
             if _live_state is not MarkerLiveState.PRESENT:
                 _log_marker_not_confirmed(

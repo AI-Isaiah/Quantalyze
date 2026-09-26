@@ -143,6 +143,7 @@ async def _run(
     expect_error_kind: str = "permanent",
     log: MagicMock | None = None,
     sentry: MagicMock | None = None,
+    results: list[Any] | None = None,
 ) -> _FakeSupabase:
     """Drive the zero-member permanent failure through ``_stamp_failed``.
 
@@ -154,7 +155,8 @@ async def _run(
     re-read failure leaves the handler as an EXCEPTION and only ``dispatch``
     turns that into the job's error kind. ``log`` / ``sentry``, when given,
     replace the worker's logger and ``sentry_sdk`` so a test can read what an
-    operator would see."""
+    operator would see. ``results``, when given, receives the ``DispatchResult``
+    so a test can read the job's ``error_message`` (its ``last_error``)."""
     if isinstance(live_metadata, _FromSnapshot):
         live_metadata = metadata if isinstance(metadata, dict) else _LIVE_JOB_ABSENT
     fake = _FakeSupabase(
@@ -181,6 +183,8 @@ async def _run(
         if sentry is not None:
             stack.enter_context(patch("services.job_worker.sentry_sdk", sentry))
         result = await dispatch(job)
+    if results is not None:
+        results.append(result)
     # The job OUTCOME is unchanged by the guard in every case. The guard narrows
     # what is WRITTEN to strategy_analytics; it never converts a permanent failure
     # into a success, which would be the failure mode that hides a broken venue.
@@ -452,9 +456,25 @@ class TestPostClaimRetractionTakesTheLoudPath:
         assert last.get("computation_warned") is False
 
 
+# The curated sentence the zero-member arm stamps (``run_stitch_composite_job``).
+_ZERO_MEMBER_CAUSE = "Composite strategy has no member keys."
+
+
 def _messages(mock_method: MagicMock) -> list[str]:
     """The format strings a mocked logger method was called with."""
     return [str(c.args[0]) for c in mock_method.call_args_list if c.args]
+
+
+# The fragment of the ERROR line ``_stamp_failed`` emits BEFORE the marker
+# re-read to record the failure CAUSE (WR-03 / SFH-R2-01). It precedes every
+# re-read, so an assertion about "what went out at ERROR because of the READ'S
+# answer" must exclude it, or it passes on the cause line alone.
+_CAUSE_LINE_FRAGMENT = "Re-reading the refresh marker before choosing the stamp"
+
+
+def _state_errors(log: MagicMock) -> list[str]:
+    """ERROR format strings other than the pre-read cause line."""
+    return [m for m in _messages(log.error) if _CAUSE_LINE_FRAGMENT not in m]
 
 
 class TestTransientReReadFailureRetries:
@@ -470,12 +490,18 @@ class TestTransientReReadFailureRetries:
 
     Neuter to redden: make the composite site treat the read-error state like a
     retraction (fall through to the loud stamp). This test goes RED on the error
-    kind and on the stamp."""
+    kind and on the stamp.
+
+    WR-03 / SFH-R2-01 (round 2): the retry must carry the failure it postponed.
+    Neuter by dropping ``scrubbed`` from the ``RefreshMarkerRereadUnavailable``
+    text, or by passing an empty cause to the pre-read ERROR line; measured
+    2026-09-26, each goes RED on its own assertion."""
 
     @pytest.mark.asyncio
     async def test_a_raising_reread_writes_nothing_and_fails_transient(self) -> None:
         log = MagicMock()
         sentry = MagicMock()
+        results: list[Any] = []
         fake = await _run(
             metadata={"source": _COMPOSITE_MARKER},
             existing_status="complete_with_warnings",
@@ -483,6 +509,7 @@ class TestTransientReReadFailureRetries:
             expect_error_kind="transient",
             log=log,
             sentry=sentry,
+            results=results,
         )
         payloads = _analytics_upserts(fake)
         leaked = [p for p in payloads if any(k in p for k in _PUBLISH_STATE_KEYS)]
@@ -507,6 +534,27 @@ class TestTransientReReadFailureRetries:
         assert not any("RETRACTED" in m for m in _messages(log.warning)), (
             "a read failure was logged as a RETRACTION. Nothing was retracted, and "
             "an operator would go looking for a user resync that never happened."
+        )
+        # WR-03 / SFH-R2-01: the retry must not ERASE the failure it postponed.
+        # ``error_message`` is what ``compute_jobs.last_error`` records. Before
+        # the fix it named only the read failure, and said "retrying" even on
+        # the final attempt; the zero-member cause was recorded NOWHERE, because
+        # that stamp passes no ``detail`` and the cause was logged only with one.
+        (result,) = results
+        assert _ZERO_MEMBER_CAUSE in (result.error_message or ""), (
+            "the job's last_error lost the handler's real failure cause: "
+            f"{result.error_message!r}"
+        )
+        assert "retrying" not in (result.error_message or ""), (
+            "last_error claims the job is retrying, which is false on the final "
+            f"attempt: {result.error_message!r}"
+        )
+        assert any(
+            any(_ZERO_MEMBER_CAUSE in str(a) for a in c.args)
+            for c in log.error.call_args_list
+        ), (
+            "the curated cause was not logged at ERROR before the re-read: "
+            f"{log.error.call_args_list!r}"
         )
 
 
@@ -569,9 +617,10 @@ class TestEveryNotConfirmedStateNamesItsOwnCause:
         assert any("RETRACTED" in m for m in _messages(log.warning)), (
             f"a recorded retraction was not named. warnings: {_messages(log.warning)!r}"
         )
-        assert not _messages(log.error), (
+        assert not _state_errors(log), (
             "a recorded retraction is the designed path, not an invariant breach; "
-            f"nothing should go out at ERROR. errors: {_messages(log.error)!r}"
+            "nothing about the marker's state should go out at ERROR. errors: "
+            f"{_messages(log.error)!r}"
         )
 
     @pytest.mark.asyncio
@@ -602,9 +651,10 @@ class TestEveryNotConfirmedStateNamesItsOwnCause:
             "a missing row / missing id was reported as a RETRACTION by a "
             f"user-initiated request. Lines: {everything!r}"
         )
-        assert _messages(log.error), (
+        assert _state_errors(log), (
             "a claimed job with no id or no live row is an invariant breach and "
-            "must go out at ERROR, which is what reaches Sentry."
+            "must go out at ERROR, which is what reaches Sentry. (The pre-read "
+            "cause line does not count: it fires before the read answers.)"
         )
 
     @pytest.mark.asyncio
