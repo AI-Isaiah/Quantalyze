@@ -482,7 +482,12 @@ or `password=` in a connection string, while `WHERE password = x` is not a hit; 
 line); a gitleaks finding over the dump (explicit `.gitleaks.toml`, redacted, inline allow
 comments ignored, a missing or empty dump refused rather than read as clean); a NUL byte, a
 `SET client_encoding` count other than one, or a home-directory path; zero tables or any data
-statement; a dump that lost a `CREATE EXTENSION` or `CREATE SCHEMA` name the committed dump carries;
+statement; a dump that lost a `CREATE EXTENSION` name the committed dump carries (the same check
+reads `CREATE SCHEMA` names too, but that half is forward-looking only: the committed dump has 0
+`CREATE SCHEMA` lines, so it covers nothing today); a dump whose `CREATE TABLE`, `CREATE POLICY`,
+`CREATE TRIGGER` or `GRANT` count falls below the committed dump's, which is what catches a dump
+cut off mid-stream (a class that a migration the dump newly carries can lower, through a `DROP`
+or `REVOKE`, is exempted and named in a `::notice::`);
 a `main` that lacks a migration the merge carries (it would pair PROD with a marker that
 disagrees with it; a re-run attempt is NOT refused by its number, because this listing check
 already judges it, D-32); a marker not taken from the tree of the
