@@ -867,6 +867,10 @@ const UNBUILDABLE_SHORT =
   "Right now, a private link to this strategy shows that its factsheet is not available. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
 const UNBUILDABLE_COMPOSITE =
   "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
+// 167.2.1-REVIEW-SFH H-2, typed as a literal: the owner build could not read
+// the row, so what a recipient sees is not known.
+const MINT_PROBE_UNREADABLE =
+  "We could not check what a private link to this strategy shows right now. Reload this page to check again.";
 const NEVER_LINE = "No computation is running for this strategy, and none is on record.";
 const SHARE_NOTE_CLASS = "mt-2 text-fixed-12 text-text-muted";
 
@@ -1089,7 +1093,7 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
   });
 
-  it("S7-OWNER-BUILD-NOT-VISIBLE: no admin row for the owner build -> KCS12-UNREADABLE (D-05), captured once with tags only", async () => {
+  it("S7-OWNER-BUILD-NOT-VISIBLE: no admin row for the owner build -> KCS12-PROBE-UNREADABLE (D-05, SFH H-2), captured once with tags only", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       givenOwnerPendingDraft();
@@ -1099,7 +1103,7 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
       const { container } = await renderOwnerPending();
       const last = panelOf(container).lastElementChild as HTMLElement;
 
-      expect(last.textContent).toBe(MINT_UNREADABLE);
+      expect(last.textContent).toBe(MINT_PROBE_UNREADABLE);
       const buildCaptures = vi
         .mocked(captureToSentry)
         .mock.calls.filter(
@@ -1117,7 +1121,7 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     }
   });
 
-  it("S7-OWNER-BUILD-READ-ERROR: the owner build's admin read fails -> KCS12-UNREADABLE, captured ONCE by the resolve stage with its code (SFH M-2)", async () => {
+  it("S7-OWNER-BUILD-READ-ERROR: the owner build's admin read fails -> KCS12-PROBE-UNREADABLE (SFH H-2), captured ONCE by the resolve stage with its code (SFH M-2)", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       givenOwnerPendingDraft();
@@ -1127,7 +1131,7 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
       const { container } = await renderOwnerPending();
       const last = panelOf(container).lastElementChild as HTMLElement;
 
-      expect(last.textContent).toBe(MINT_UNREADABLE);
+      expect(last.textContent).toBe(MINT_PROBE_UNREADABLE);
       // One event, from the stage that saw the error, carrying the code.
       expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(captureToSentry).mock.calls[0][1]).toEqual({

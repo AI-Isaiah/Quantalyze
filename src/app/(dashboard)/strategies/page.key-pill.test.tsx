@@ -654,6 +654,14 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     error: null,
   });
   const PROBE_TAGS = { tags: { route: "strategies/page", stage: "factsheet-probe" } };
+  // 167.2.1-REVIEW-SFH H-2 — typed out, never imported. The buildability
+  // check failed, so what a recipient sees is not known.
+  const PROBE_UNREADABLE =
+    "We could not check what a private link to this strategy shows right now. Reload this page to check again.";
+  const PUBLIC_PROBE_UNREADABLE =
+    "We could not check what this strategy's factsheet link shows right now. Reload this page to check again.";
+  const UNBUILDABLE_UNREADABLE_SHORT =
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.";
 
   it("COMPOSITE-UNBUILDABLE: a computed composite with no persisted headline says its results cannot be built and names support", async () => {
     state.strategies = [row("c-pre86", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
@@ -697,23 +705,25 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(noteOf(container, "Strategy s-short")).toBe(MINT_A);
   });
 
-  it("UNBUILDABLE-RPC-ERROR: an unbuildable row whose job read fails renders KCS12-UNREADABLE", async () => {
+  it("UNBUILDABLE-RPC-ERROR (SFH H-2): an unbuildable row whose job read fails says the link shows a placeholder, and why, never 'once a computation succeeds'", async () => {
+    // Lineage: this rendered KCS12-UNREADABLE, whose tail promised numbers
+    // once a computation succeeds, for a row whose computation had succeeded.
     state.strategies = [row("s-short", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
     state.adminRows = { "s-short": onePoint("s-short") };
     state.jobsError = { message: "synthetic rpc failure" };
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy s-short")).toBe(UNREADABLE);
+    expect(noteOf(container, "Strategy s-short")).toBe(UNBUILDABLE_UNREADABLE_SHORT);
   });
 
-  it("PROBE-THROWS (D-05): a probe that throws renders KCS12-UNREADABLE, never 'no note', and is logged and captured with tags only", async () => {
+  it("PROBE-THROWS (D-05, SFH H-2): a probe that throws says the check failed, never 'no note', and is logged and captured with tags only", async () => {
     state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
     state.adminThrow = true;
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy s-1")).toBe(UNREADABLE);
+    expect(noteOf(container, "Strategy s-1")).toBe(PROBE_UNREADABLE);
     expect(consoleError).toHaveBeenCalledWith(
       "[strategies/page] factsheet probe failed",
       expect.objectContaining({ id: "s-1" }),
@@ -726,13 +736,13 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(JSON.stringify(ctx)).not.toContain("s-1");
   });
 
-  it("PROBE-READ-ERROR (D-05, SFH M-2): an admin read error renders KCS12-UNREADABLE and is captured ONCE, by the resolve stage, with tags only", async () => {
+  it("PROBE-READ-ERROR (D-05, SFH M-2, H-2): an admin read error says the check failed and is captured ONCE, by the resolve stage, with tags only", async () => {
     state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
     state.adminRows = { "s-1": { data: null, error: { message: "synthetic admin read failure" } } };
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy s-1")).toBe(UNREADABLE);
+    expect(noteOf(container, "Strategy s-1")).toBe(PROBE_UNREADABLE);
     // The stage that saw the error logs it, labelled as the probe's (SFH M-1).
     expect(consoleError).toHaveBeenCalledWith(
       "[factsheet] resolve(probe) — admin strategy read failed",
@@ -760,7 +770,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
       const container = await renderPage();
 
-      expect(noteOf(container, "Strategy s-1")).toBe(UNREADABLE);
+      expect(noteOf(container, "Strategy s-1")).toBe(PROBE_UNREADABLE);
       expect(consoleWarn).toHaveBeenCalledWith(
         "[strategies/page] factsheet probe found no row (deleted since the list read)",
         expect.objectContaining({ id: "s-1", reason: "not_visible" }),
@@ -769,6 +779,42 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     } finally {
       consoleWarn.mockRestore();
     }
+  });
+
+  it("PUBLISHED-PROBE-FAILS (167.2.1-REVIEW-SFH H-2): a published computed row whose check fails says the check failed, never the public 'not available yet' line", async () => {
+    // The finding: the failed probe rendered KCS12-PUBLIC ("… shows that the
+    // factsheet is not available yet …") for a published row whose public
+    // factsheet most likely rendered fine. Both failure shapes are covered.
+    state.strategies = [
+      row("s-pub-err", { status: "published", strategy_analytics: { computation_status: "complete" } }),
+      row("s-pub-gone", { status: "published", strategy_analytics: { computation_status: "complete" } }),
+    ];
+    state.adminRows = {
+      "s-pub-err": { data: null, error: { message: "synthetic admin read failure" } },
+      "s-pub-gone": { data: null, error: null },
+    };
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const container = await renderPage();
+
+      for (const name of ["Strategy s-pub-err", "Strategy s-pub-gone"]) {
+        expect(noteOf(container, name)).toBe(PUBLIC_PROBE_UNREADABLE);
+        expect(noteOf(container, name)).not.toBe(PUBLIC);
+      }
+      // 167.2 IN-04 still holds: a published row reads no jobs.
+      expect(state.rpcCalls).toEqual([]);
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  it("PUBLISHED-PROBE-THROWS (167.2.1-REVIEW-SFH H-2): a published computed row whose probe throws says the check failed", async () => {
+    state.strategies = [row("s-pub", { status: "published", strategy_analytics: { computation_status: "complete" } })];
+    state.adminThrow = true;
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_PROBE_UNREADABLE);
   });
 
   it("PROBE-NOT-COMPUTED (D-05): the embed says complete but the builder's read says failed, so the row takes the uncomputed path", async () => {

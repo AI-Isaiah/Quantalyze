@@ -344,7 +344,10 @@ const PUBLIC_URL_NOTE =
  * computed but whose factsheet cannot build: KCS12-UNBUILDABLE-SHORT,
  * KCS12-UNBUILDABLE-COMPOSITE, KCS12-PUBLIC-UNBUILDABLE-SHORT and
  * KCS12-PUBLIC-UNBUILDABLE-COMPOSITE. They are chosen by
- * `recipientShareNoteFor`; this function never returns them.
+ * `recipientShareNoteFor`; this function never returns them. 167.2.1-REVIEW-SFH
+ * H-2 adds KCS12-UNBUILDABLE-UNREADABLE-SHORT and -COMPOSITE (also chosen by
+ * `recipientShareNoteFor`), and KCS12-PROBE-UNREADABLE and
+ * KCS12-PUBLIC-PROBE-UNREADABLE (`probeUnreadableShareNote`).
  */
 export function recipientShareNote(
   mode: ShareAffordanceMode,
@@ -415,6 +418,44 @@ const PUBLIC_UNBUILDABLE_NOTES = {
   cannot_build: `Right now, this strategy's factsheet link shows that the factsheet is not available. We cannot build a factsheet from its stored results. Contact ${SUPPORT_EMAIL} to have them checked.`,
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
+// 167.2.1-REVIEW-SFH H-2 — a private link to an unbuildable row whose job
+// read failed. The recipient's card is not known (being prepared, or not
+// available), but that it is a placeholder IS: the row cannot build. So the
+// line claims the placeholder and states the stored-results reason, and never
+// KCS12-UNREADABLE's tail "They appear there once a computation succeeds",
+// which is false for a row whose computation already succeeded.
+const MINT_UNBUILDABLE_UNREADABLE_NOTES = {
+  too_short:
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. Its stored results hold fewer than 2 days of returns, and a factsheet needs at least 2.",
+  cannot_build: `Right now, a private link to this strategy shows a placeholder page instead of the numbers. We cannot build a factsheet from its stored results. Contact ${SUPPORT_EMAIL} to have them checked.`,
+} as const satisfies Record<UnbuildableNoteKind, string>;
+
+// 167.2.1-REVIEW-SFH H-2 — the buildability check itself failed (the probe
+// threw, or its admin read errored or found no row), so what a recipient sees
+// is NOT KNOWN. KCS12-PUBLIC ("… not available yet …") and KCS12-UNREADABLE
+// ("… shows a placeholder page …") both assert a recipient view the page could
+// not check, and on a published computed row the public factsheet most likely
+// renders fine. These lines claim only the failed check, in the voice of
+// KCS-KEYSTATUS-UNREADABLE, and name the one remedy the owner has.
+const PROBE_UNREADABLE_NOTES = {
+  "mint-token":
+    "We could not check what a private link to this strategy shows right now. Reload this page to check again.",
+  "public-url":
+    "We could not check what this strategy's factsheet link shows right now. Reload this page to check again.",
+} as const satisfies Record<ShareAffordanceMode, string>;
+
+/**
+ * 167.2.1-REVIEW-SFH H-2 — KCS12-PROBE-UNREADABLE and
+ * KCS12-PUBLIC-PROBE-UNREADABLE: the note for a computed row whose
+ * buildability could not be checked. Deliberately NOT a `RecipientArm`: an
+ * arm is what the recipient sees, and here that is exactly what is unknown.
+ * `recipientShareNote` cannot express it (it ignores the arm for a public
+ * URL, 167.2 IN-04), which is why this is its own function.
+ */
+export function probeUnreadableShareNote(mode: ShareAffordanceMode): string {
+  return PROBE_UNREADABLE_NOTES[mode];
+}
+
 /**
  * Phase 167.2.1 (D-02) — the selection rule. With no unbuildable kind this is
  * `recipientShareNote(mode, arm)`. For an unbuildable row, a public URL takes
@@ -422,7 +463,10 @@ const PUBLIC_UNBUILDABLE_NOTES = {
  * private link takes its UNBUILDABLE line only on arm `not_available`, which is
  * exactly when the share page shows its "not available" card. Arm
  * `in_progress` keeps KCS12-MINT-A (a recompute is running and the recipient
- * sees "being prepared"), and `unreadable` keeps KCS12-UNREADABLE.
+ * sees "being prepared"). Arm `unreadable` takes
+ * KCS12-UNBUILDABLE-UNREADABLE-SHORT or -COMPOSITE (167.2.1-REVIEW-SFH H-2):
+ * the card is unknown, the placeholder and its reason are not, and
+ * KCS12-UNREADABLE's "once a computation succeeds" is false for this row.
  */
 export function recipientShareNoteFor(
   mode: ShareAffordanceMode,
@@ -432,6 +476,7 @@ export function recipientShareNoteFor(
   if (kind === null) return recipientShareNote(mode, arm);
   if (mode === "public-url") return PUBLIC_UNBUILDABLE_NOTES[kind];
   if (arm === "not_available") return MINT_UNBUILDABLE_NOTES[kind];
+  if (arm === "unreadable") return MINT_UNBUILDABLE_UNREADABLE_NOTES[kind];
   return recipientShareNote(mode, arm);
 }
 

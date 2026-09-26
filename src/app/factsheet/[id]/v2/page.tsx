@@ -37,6 +37,7 @@ import {
   KCS10_PUBLIC_SENTENCE,
   ownerRemedy,
   ownerStateLine,
+  probeUnreadableShareNote,
   recipientShareNoteFor,
   unbuildableNoteKindOf,
   type StateLineTone,
@@ -502,15 +503,19 @@ export default async function FactsheetV2Page({
             // KCS-12 (S7): what a recipient of the private link sees right
             // now. This lane is reachable only for an UNPUBLISHED strategy,
             // so the share mode is always mint-token.
+            // 167.2.1-REVIEW-SFH H-2 (D-06: the list's mapping): when the
+            // build could not read the row, what a recipient sees is not
+            // known, so the note says the check failed rather than claiming a
+            // placeholder, exactly as /strategies does for a failed probe.
             shareNote={
               ownerStatus
-                ? recipientShareNoteFor(
-                    "mint-token",
-                    ownerBuildability?.unreadable
-                      ? "unreadable"
-                      : recipientArm(ownerStatus.state),
-                    ownerBuildability?.kind ?? null,
-                  )
+                ? ownerBuildability?.unreadable
+                  ? probeUnreadableShareNote("mint-token")
+                  : recipientShareNoteFor(
+                      "mint-token",
+                      recipientArm(ownerStatus.state),
+                      ownerBuildability?.kind ?? null,
+                    )
                 : undefined
             }
           />
@@ -790,7 +795,9 @@ async function readOwnerPendingStatus(
  * arms (`buildable: true` on a null payload, SFH M-5) cannot occur.
  * `too_few_points` and `composite_unbuildable` give their D-02 kind;
  * `not_computed` keeps today's arm-derived note. `read_error` and
- * `not_visible` are unreadable, exactly as on /strategies (D-05). The resolve
+ * `not_visible` are unreadable, exactly as on /strategies (D-05), and since
+ * 167.2.1-REVIEW-SFH H-2 an unreadable answer renders the "could not check"
+ * line (`probeUnreadableShareNote`), never a recipient-view claim. The resolve
  * stage itself logs and captures a `read_error`, once, with its code
  * (167.2.1-REVIEW-SFH M-2), so it is not captured a second time here.
  * `not_visible` is logged with the id and captured with tags only: this lane

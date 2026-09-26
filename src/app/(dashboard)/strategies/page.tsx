@@ -26,6 +26,7 @@ import {
 import { captureToSentry } from "@/lib/sentry-capture";
 import {
   KEY_STATUS_UNREADABLE_NOTE,
+  probeUnreadableShareNote,
   recipientShareNote,
   recipientShareNoteFor,
   STRATEGIES_LIST_UNREADABLE,
@@ -392,6 +393,12 @@ export default async function StrategiesPage() {
             probe = await probeFactsheetBuildable(s.id, (q) => withPublishedOrOwner(q, user.id));
           } catch (err) {
             // D-05: a probe that throws is never read as "buildable".
+            // 167.2.1-REVIEW-SFH H-2: nor as "not available". Every failed
+            // check (this throw, and the read_error and not_visible arms
+            // below) renders the "could not check" line for its share mode.
+            // It used to render `recipientShareNote(mode, "unreadable")`,
+            // which for a PUBLISHED row is KCS12-PUBLIC, "… not available yet
+            // …", while the public factsheet most likely rendered fine.
             console.error("[strategies/page] factsheet probe failed", {
               id: s.id,
               message: err instanceof Error ? err.message : String(err),
@@ -399,7 +406,7 @@ export default async function StrategiesPage() {
             captureToSentry(err instanceof Error ? err : new Error(String(err)), {
               tags: { route: "strategies/page", stage: "factsheet-probe" },
             });
-            return [s.id, recipientShareNote(mode, "unreadable")] as const;
+            return [s.id, probeUnreadableShareNote(mode)] as const;
           }
           if (probe.buildable) return [s.id, null] as const;
           if (probe.reason === "read_error") {
@@ -408,7 +415,7 @@ export default async function StrategiesPage() {
             // already logged this read and captured it ONCE, with its code
             // (`stage: "factsheet-resolve"`, `caller: "probe"`), so the page
             // does not capture it a second time.
-            return [s.id, recipientShareNote(mode, "unreadable")] as const;
+            return [s.id, probeUnreadableShareNote(mode)] as const;
           }
           if (probe.reason === "not_visible") {
             // D-05: the probe found no row. 167.2.1-REVIEW IN-01: on THIS page
@@ -421,7 +428,7 @@ export default async function StrategiesPage() {
               id: s.id,
               reason: probe.reason,
             });
-            return [s.id, recipientShareNote(mode, "unreadable")] as const;
+            return [s.id, probeUnreadableShareNote(mode)] as const;
           }
           // D-05: the embed and the admin read disagree (a race): the admin
           // read is the builder's, so the row takes the uncomputed path.
