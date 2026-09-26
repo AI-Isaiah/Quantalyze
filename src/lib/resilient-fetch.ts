@@ -476,7 +476,8 @@ export type SeamBudgetKey =
   | "process-key-sync"
   | "keys-permissions"
   | "keys-rotate-secret"
-  | "process-key-unified-dormant";
+  | "process-key-unified-dormant"
+  | "benchmark-refresh";
 
 /**
  * Per-call-site wall-clock budgets.
@@ -808,6 +809,30 @@ export const SEAM_BUDGETS: Record<
     notes:
       "The DEAD fetch inside keys/validate-and-encrypt's _unifiedValidateAndEncryptHandler, which today has NO timeout at all. Routed through the core so any revival inherits a budget and a breaker rather than re-introducing an unbounded hang.",
   },
+  "benchmark-refresh": {
+    timeoutMs: 60_000,
+    // Phase 169.2 / plan 02 (D-08, W2) — the daily BTC benchmark refresh
+    // (POST /api/benchmark-refresh, reached only from the cron route
+    // src/app/api/cron/refresh-benchmark/route.ts). 60 000 ms is the
+    // `process-key-sync` budget: the closest call that also waits on an
+    // upstream price/data fetch INSIDE the service (get_benchmark_returns reads
+    // the cache and refetches from the upstream on a miss).
+    //
+    // `dependencies: []`, NARROWER than match-recompute's ["supabase"], and
+    // measured rather than copied: the endpoint (`cron.py` `benchmark_refresh`)
+    // answers exactly 500 on every failure and `services/benchmark.py` raises no
+    // `service_error` and no 503 anywhere, so no counting site exists for any
+    // dependency key. A 500 never records a breaker failure, which is the point
+    // of W2: a stale benchmark must not trip the breaker every analytics call
+    // reads. When in doubt, declare fewer (the tie-break above).
+    dependencies: [],
+    // 0, by design: a failed daily refresh answers non-2xx so Vercel Cron
+    // alarms, and tomorrow's scheduled run is the retry. Its NO verdict is in
+    // RETRY_AUDIT_NO_ANALYTICS in `seam-retry-registry.ts`.
+    retries: SEAM_RETRIES,
+    notes:
+      "Daily BTC benchmark refresh (Phase 169.2, D-08). One call per cron tick; the service reads the benchmark_prices cache and refetches from the upstream only on a miss. Failure is a 500 (never 503), so it pages through the cron's non-2xx without touching the breaker.",
+  },
 };
 
 /**
@@ -983,6 +1008,14 @@ export const SEAM_ROUTE_BUDGETS: Record<
   "src/app/api/keys/[id]/rotate-secret/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [{ key: "keys-rotate-secret", calls: 1 }],
+  },
+  // Phase 169.2 / plan 02 (D-08, D-20) — the daily BTC benchmark refresh cron.
+  // 120 s, not 300: one 60 000 ms leg plus its breaker-store round is well
+  // inside it, and a cron that hangs should be killed sooner than an
+  // interactive route.
+  "src/app/api/cron/refresh-benchmark/route.ts": {
+    expectedMaxDurationS: 120,
+    budgets: [{ key: "benchmark-refresh", calls: 1 }],
   },
 };
 
